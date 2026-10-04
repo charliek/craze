@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -89,17 +90,35 @@ func refreshApplied(t *testing.T, s *nativeSession, dir string) {
 }
 
 // everyOfferedSwitches holds A24's invariant on s: every model its list
-// offers is one SetModel switches to. It switches back to where it started.
+// offers is one SetModel switches to. The list is read again before each
+// switch — a switch away from a carry that shadowed the files' own entry
+// reloads it (plan 034 C4r4, r15 #3) — and each model is switched to once.
+// It switches back to where it started while the list still offers it; a
+// carry the files no longer have is not offered once left, and SetModel then
+// refuses it too.
 func everyOfferedSwitches(t *testing.T, s *nativeSession) {
 	t.Helper()
-	snap := s.Snapshot()
-	for _, m := range snap.Models {
-		if _, err := s.SetModel(context.Background(), "", m.ID); err != nil {
-			t.Fatalf("the list offers %s, and SetModel refuses it: %v", m.ID, err)
+	start := s.Snapshot().CurrentModel
+	tried := map[string]bool{}
+	for {
+		models := s.Snapshot().Models
+		i := slices.IndexFunc(models, func(m ModelInfo) bool { return !tried[m.ID] })
+		if i < 0 {
+			break
+		}
+		tried[models[i].ID] = true
+		if _, err := s.SetModel(context.Background(), "", models[i].ID); err != nil {
+			t.Fatalf("the list offers %s, and SetModel refuses it: %v", models[i].ID, err)
 		}
 	}
-	if _, err := s.SetModel(context.Background(), "", snap.CurrentModel); err != nil {
-		t.Fatalf("switching back to %s: %v", snap.CurrentModel, err)
+	if !slices.Contains(offeredIDs(s.Snapshot().Models), start) {
+		if _, err := s.SetModel(context.Background(), "", start); err == nil {
+			t.Fatalf("the list no longer offers %s, and SetModel took it", start)
+		}
+		return
+	}
+	if _, err := s.SetModel(context.Background(), "", start); err != nil {
+		t.Fatalf("switching back to %s: %v", start, err)
 	}
 }
 
@@ -775,6 +794,288 @@ func TestNativeTheUnfundedCarry(t *testing.T) {
 	everyOfferedSwitches(t, s)
 	if _, err := s.SetModel(context.Background(), "", "test/a"); err == nil {
 		t.Fatal("a switch back to the carry left behind was taken")
+	}
+}
+
+// writePlanListOf writes dir's model list as the account subject and client
+// name's own, fetched now with the pin, naming models, by a rename, as a
+// sign-in writes it.
+func writePlanListOf(t *testing.T, dir, subject, client string, models ...chatgptauth.Model) {
+	t.Helper()
+	b, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: subject, ClientID: client,
+		ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(), Models: models})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := chatgptauth.ModelsFile(dir) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, chatgptauth.ModelsFile(dir)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// awaitPlanFetch waits for the fetch of the plan's list a refresh started, if
+// it started one, so a case's requests are the ones it made.
+func awaitPlanFetch(t *testing.T, s *nativeSession) {
+	t.Helper()
+	s.mu.Lock()
+	ch := s.refreshed
+	s.mu.Unlock()
+	if ch != nil {
+		await(t, ch, "the plan list's fetch")
+	}
+}
+
+// offers reports whether models has a row for id.
+func offers(models []ModelInfo, id string) bool {
+	return slices.Contains(offeredIDs(models), id)
+}
+
+// TestNativeLeavingACarryOffersTheOtherAccountsModel (A17, A20, A24; plan 034
+// C4r4, r15 #3): a session on account A's chatgpt/gpt-5.6-sol keeps that
+// entry, bound to A, when account B signs in with a list naming the same
+// model — the same entry but for its account — and luna (the carry: its
+// client is A's). A switch to luna leaves the carry — which another
+// account's sign-in no longer funds, so the switch's own delta takes it off
+// the list (r9 #1) — and reads the files again, though no file changed since
+// the refresh: B's gpt-5.6-sol, which the carry stood over, is offered again
+// in a later delta, at a higher revision; the /model refresh that follows,
+// with nothing on disk changed, is current and keeps it; and a switch to it
+// builds B's model, whose turn goes to the API with B's token. The controls:
+// before the switch the carry resolves only on A's account, and luna is
+// offered. Negative controls: a switch away that does not read the files
+// again — or a carry that does not count another account as something else —
+// leaves gpt-5.6-sol off the list, and the switch back to it refused.
+func TestNativeLeavingACarryOffersTheOtherAccountsModel(t *testing.T) {
+	const sol, luna = "chatgpt/gpt-5.6-sol", "chatgpt/gpt-5.6-luna"
+	api, _ := noOpenAI(t)
+	api.queue(planAnswer("from B's sol"))
+	s, dir := planSession(t, t.TempDir())
+	if cur := s.Snapshot().CurrentModel; cur != sol {
+		t.Fatalf("premise: the session started on %q", cur)
+	}
+	// Start's own look at the list, done before B's files are written: one
+	// that read them between B's registration and B's list would find the
+	// list another account's and fetch it, taking the turn's queued answer.
+	awaitPlanFetch(t, s)
+
+	if err := signInOf(dir, otherSubject, otherClient, otherAccess, otherRefresh, "inc-b"); err != nil {
+		t.Fatal(err)
+	}
+	// B's list names gpt-5.6-sol exactly as A's did — the entries differ in
+	// the account they are bound to alone — and luna besides.
+	lunaModel := planSolModel()
+	lunaModel.Slug, lunaModel.DisplayName, lunaModel.Priority = "gpt-5.6-luna", "GPT-5.6 Luna", 1
+	writePlanListOf(t, dir, otherSubject, otherClient, planSolModel(), lunaModel)
+	refreshApplied(t, s, dir)
+	awaitPlanFetch(t, s)
+	snap := s.Snapshot()
+	if snap.CurrentModel != sol || !offers(snap.Models, sol) || !offers(snap.Models, luna) {
+		t.Fatalf("control: after B's sign-in the session runs on %s and offers %v; want %s carried and %s offered",
+			snap.CurrentModel, offeredIDs(snap.Models), sol, luna)
+	}
+	s.mu.Lock()
+	tbl := s.table
+	s.mu.Unlock()
+	if _, err := tbl.Resolve(sol, func(string) string { return "" }); !errors.Is(err, modeltable.ErrOtherAccount) {
+		t.Fatalf("control: the carried %s resolved on B's sign-in (%v); want it A's", sol, err)
+	}
+	rev := snap.CatalogRevision
+	_ = deltaSettled(t, s)
+
+	if _, err := s.SetModel(context.Background(), "", luna); err != nil {
+		t.Fatalf("a switch to %s: %v", luna, err)
+	}
+	snap = s.Snapshot()
+	if snap.CurrentModel != luna || !offers(snap.Models, sol) || snap.CatalogRevision <= rev {
+		t.Fatalf("after leaving the carry the session runs on %s and offers %v at revision %d; want B's %s offered, past %d",
+			snap.CurrentModel, offeredIDs(snap.Models), snap.CatalogRevision, sol, rev)
+	}
+	cats := catalogsOf(deltaSettled(t, s))
+	if len(cats) != 2 || offers(cats[0].Models, sol) || !offers(cats[1].Models, sol) ||
+		cats[0].Revision >= cats[1].Revision || cats[1].Revision != snap.CatalogRevision {
+		t.Fatalf("the switch published %+v; want the switch's list without the carry, then the files' with B's %s", cats, sol)
+	}
+	if r := refresh(t, s, dir); r.Status != ModelsCurrent || !offers(s.Snapshot().Models, sol) {
+		t.Fatalf("/model's refresh with nothing changed on disk = %+v, offering %v; want current, with %s", r, offeredIDs(s.Snapshot().Models), sol)
+	}
+	awaitPlanFetch(t, s)
+
+	if _, err := s.SetModel(context.Background(), "", sol); err != nil {
+		t.Fatalf("a switch to B's %s: %v", sol, err)
+	}
+	if res, err := s.Prompt(context.Background(), "hello B"); err != nil || res.StopReason != harness.StopEndTurn {
+		t.Fatalf("a turn on B's %s = %+v, %v", sol, res, err)
+	}
+	var turns []fakeRequest
+	for _, r := range api.requests() {
+		if r.path == "/v1/responses" {
+			turns = append(turns, r)
+		}
+	}
+	if len(turns) != 1 || turns[0].header.Get("Authorization") != "Bearer "+otherAccess || !strings.Contains(turns[0].body, `"gpt-5.6-sol"`) {
+		t.Fatalf("the API saw %d turn requests; want one for gpt-5.6-sol, with B's token", len(turns))
+	}
+	noBearerOf(t, api, planAccess)
+	everyOfferedSwitches(t, s)
+}
+
+// TestNativeLeavingACarryOffersTheFilesEntry (A20, A24; plan 034 C4r4, r15
+// #3): the running model's entry carried over one models.toml changed while
+// it ran is the files' again once the session switches away — read then,
+// though no stamp changed since the refresh that carried it:
+//
+//   - its efforts changed: the carry keeps the option the running client was
+//     built with; after a switch away and back the option is the files'
+//     (max), and the refresh in between is current;
+//   - its alias gone (and its provider still funded, so the switch's own
+//     delta keeps it, r9 #1): after the switch away it is no longer offered,
+//     and a switch back is refused;
+//   - a switch away while a turn holds the claim: the reload is owed, the
+//     list unchanged mid-turn, and taken up at the turn's end — read
+//     whatever the stamps say — after its EventDone.
+//
+// Negative controls: a switch away that does not read the files again keeps
+// the old efforts on the switch back, and keeps the gone alias offered; an
+// owed one that loses its unstamped reading answers current at the turn's
+// end and keeps the old efforts.
+func TestNativeLeavingACarryOffersTheFilesEntry(t *testing.T) {
+	maxEfforts := func() *modeltable.Table {
+		tb := nativeTestTable("http://127.0.0.1:9/v1")
+		m := tb.Models["test/a"]
+		m.Efforts, m.DefaultEffort = []string{"max"}, "max"
+		tb.Models["test/a"] = m
+		return tb
+	}
+	efforts := func(s *nativeSession) []string {
+		var out []string
+		if opt := EffortOption(s.Snapshot()); opt != nil {
+			for _, v := range opt.SelectValues {
+				out = append(out, v.Value)
+			}
+		}
+		return out
+	}
+	t.Run("its efforts changed", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		saveTable(t, f.dir, maxEfforts())
+		refreshApplied(t, s, "")
+		if got := efforts(s); !slices.Equal(got, []string{"low", "high"}) {
+			t.Fatalf("control: the running model's option offers %v; want the carry's low, high", got)
+		}
+		if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+			t.Fatal(err)
+		}
+		if r := refresh(t, s, ""); r.Status != ModelsCurrent {
+			t.Fatalf("a refresh after the switch away = %+v; want current: no file changed", r)
+		}
+		if _, err := s.SetModel(context.Background(), "", "test/a"); err != nil {
+			t.Fatalf("the switch back: %v", err)
+		}
+		if opt := EffortOption(s.Snapshot()); opt == nil || !slices.Equal(efforts(s), []string{"max"}) || opt.Current != "max" {
+			t.Fatalf("after a switch away and back the option is %+v; want the files' max", opt)
+		}
+		everyOfferedSwitches(t, s)
+	})
+	t.Run("its alias gone", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		gone := nativeTestTable("http://127.0.0.1:9/v1")
+		delete(gone.Models, "test/a")
+		gone.DefaultModel = "test/b"
+		saveTable(t, f.dir, gone)
+		refreshApplied(t, s, "")
+		if snap := s.Snapshot(); snap.CurrentModel != "test/a" || !offers(snap.Models, "test/a") {
+			t.Fatalf("control: the carry is not listed (%v on %s)", offeredIDs(snap.Models), snap.CurrentModel)
+		}
+		if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+			t.Fatal(err)
+		}
+		if got := offeredIDs(s.Snapshot().Models); slices.Contains(got, "test/a") {
+			t.Fatalf("after the switch away the list is %v; want test/a, which the files no longer have, gone", got)
+		}
+		if _, err := s.SetModel(context.Background(), "", "test/a"); err == nil {
+			t.Fatal("a switch back to an alias the files no longer have was taken")
+		}
+		everyOfferedSwitches(t, s)
+	})
+	t.Run("mid-turn", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		saveTable(t, f.dir, maxEfforts())
+		refreshApplied(t, s, "")
+		rev := s.Snapshot().CatalogRevision
+		_ = deltaSettled(t, s)
+		h := newHeld(t)
+		f.models["test/a"].push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+		out := startPrompt(s, "go")
+		await(t, h.reached, "the held step")
+		if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+			t.Fatalf("a switch away mid-turn: %v", err)
+		}
+		if snap := s.Snapshot(); snap.CatalogRevision != rev {
+			t.Fatalf("the switch away mid-turn published revision %d (was %d); want the reload owed to the turn's end", snap.CatalogRevision, rev)
+		}
+		close(h.release)
+		if o := await(t, out, "the turn"); o.err != nil {
+			t.Fatalf("the turn: %v", o.err)
+		}
+		if snap := s.Snapshot(); snap.CatalogRevision <= rev {
+			t.Fatalf("after the turn the list is at revision %d; want the owed reload's, past %d", snap.CatalogRevision, rev)
+		}
+		evs := deltaSettled(t, s)
+		done, cat := eventIndex(evs, func(ev Event) bool { return ev.Type == EventDone }), eventIndex(evs, hasCatalog)
+		if done < 0 || cat < done {
+			t.Fatalf("the catalog is event %d and the turn's ending %d; want the owed reload's catalog after the ending", cat, done)
+		}
+		if _, err := s.SetModel(context.Background(), "", "test/a"); err != nil {
+			t.Fatalf("the switch back: %v", err)
+		}
+		if got := efforts(s); !slices.Equal(got, []string{"max"}) {
+			t.Fatalf("after the turn and a switch back the option offers %v; want the files' max", got)
+		}
+	})
+}
+
+// TestNativeLeavingACarryThatShadowsNothingReadsNothing (plan 034 C4r4): a
+// carry that is the files' own entry — the running model's, carried by a
+// refresh that took up a key saved for another provider — stood over
+// nothing, so a switch away from it reads no file and publishes no list: the
+// switch's delta is the model's and its options alone. The control: the
+// refresh did carry it (a reload published). Negative control: a switch
+// away that reads the files again on leaving any carry reaches the reload's
+// "stamped" stage and publishes a catalog.
+func TestNativeLeavingACarryThatShadowsNothingReadsNothing(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	if err := modeltable.SetKey(f.dir, "nokey", "sk-nokey-saved-0345"); err != nil {
+		t.Fatal(err)
+	}
+	refreshApplied(t, s, "")
+	rev := s.Snapshot().CatalogRevision
+	_ = deltaSettled(t, s)
+	var read atomic.Bool
+	s.modelsMu.Lock()
+	s.reloadSeam = func(stage string) {
+		if stage == "stamped" {
+			read.Store(true)
+		}
+	}
+	s.modelsMu.Unlock()
+	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err != nil {
+		t.Fatal(err)
+	}
+	if read.Load() {
+		t.Fatal("the switch away from a carry that shadowed nothing read the files again")
+	}
+	if snap := s.Snapshot(); snap.CatalogRevision != rev {
+		t.Fatalf("the list moved to revision %d (was %d); want it as it was", snap.CatalogRevision, rev)
+	}
+	if cats := catalogsOf(deltaSettled(t, s)); len(cats) != 0 {
+		t.Fatalf("the switch published %+v; want no catalog", cats)
 	}
 }
 

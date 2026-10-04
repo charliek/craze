@@ -3,6 +3,7 @@ package modeltable
 import (
 	"maps"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 )
@@ -19,7 +20,10 @@ import (
 //     list was bound to — whether or not the new table still has its alias,
 //     funds its provider or means the same model by it (Carry): the running
 //     model is always listed (P7), and what the picker says of it is what its
-//     client was built from;
+//     client was built from — until the session switches away from it,
+//     when a carry that stood over another entry of the files' own
+//     (Shadowed) is what the session reads the files again for, so that
+//     entry is what it offers from then on;
 //   - the keys the session cannot take, being inside what it has already sent
 //     unredacted with every request — its frozen prompt, its tools, its plan
 //     path — whose providers it does not offer (WithholdFrozen, A22).
@@ -39,11 +43,16 @@ import (
 // picker offer efforts — or a window, or a price — that the running client was
 // not built with, and a switch to the alias the session is already on would
 // then be refused for what the list just showed. A person who switches away
-// and back takes the table's entry as it is then.
+// and back takes the files' entry as it is then: a carry that stood over an
+// entry t's own load read otherwise is marked (Shadowed), and the session
+// that leaves it reads the files again.
 func (t *Table) Carry(from *Table, alias string) bool {
 	m, ok := from.Models[alias]
 	if !ok {
 		return false
+	}
+	if t.differs(from, alias) {
+		put(&t.shadowed, alias, true)
 	}
 	acct, _ := from.boundAccount(alias)
 	put(&t.Models, alias, cloneModel(m))
@@ -63,6 +72,43 @@ func (t *Table) Carry(from *Table, alias string) bool {
 	}
 	put(&t.carried, alias, acct)
 	return true
+}
+
+// differs reports whether what t holds for alias says something else than
+// from's entry, which Carry is about to put over it — so that, carried, t
+// holds for alias what t's own load did not read (Shadowed): t has no such
+// model, or another entry under it (any field: profile, efforts, window,
+// cost, the model itself), or another origin — compared only when from
+// keeps origins, as Carry writes one only then — or binds it to another
+// account, or binds it where from does not or the other way about. A
+// carry into a table that already holds the carried entry — the harness's
+// own Carry after the adapter's, into the same table — differs in nothing.
+// Read before Carry writes anything.
+func (t *Table) differs(from *Table, alias string) bool {
+	own, ok := t.Models[alias]
+	if !ok || !reflect.DeepEqual(own, from.Models[alias]) {
+		return true
+	}
+	if from.modelOrigins != nil && t.ModelOrigin(alias) != from.ModelOrigin(alias) {
+		return true
+	}
+	ownAcct, ownBound := t.boundAccount(alias)
+	acct, bound := from.boundAccount(alias)
+	return ownAcct != acct || ownBound != bound
+}
+
+// Shadowed reports whether alias's entry in t is one Carry put over an entry
+// of t's own that said something else — another account's model under the
+// same name, the same model with other efforts or another price, or no entry
+// at all — rather than the one t's load read (plan 034 C4r4, r15 #3). It is
+// what a session that switches away from alias, the model it ran on, reads
+// its files again for: the carry was there only for the running client
+// (Q16), and the files' own entry — which no stamp says has changed, since
+// it was on disk all along — is what the list should offer from then on, and
+// what a switch back builds. A carry that differed in nothing is not
+// shadowed: leaving it, t already holds what the files say.
+func (t *Table) Shadowed(alias string) bool {
+	return t.shadowed[alias]
 }
 
 // put sets (*m)[k] to v, making the map first when it is nil.
@@ -139,6 +185,7 @@ func (t *Table) WithholdFrozen(getenv func(string) string, frozen func(string) b
 			delete(t.modelOrigins, alias)
 			delete(t.discovered, alias)
 			delete(t.carried, alias)
+			delete(t.shadowed, alias)
 		}
 		delete(t.Providers, id)
 		delete(t.providerOrigins, id)

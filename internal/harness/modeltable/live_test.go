@@ -127,6 +127,89 @@ func TestCarryKeepsTheAccountItWasBoundTo(t *testing.T) {
 	}
 }
 
+// TestCarryMarksWhatItShadows (plan 034 C4r4, r15 #3): a carry over an entry
+// of the next table's own that says something else — other efforts, another
+// price, another origin, another account's list, or no entry at all — is
+// Shadowed, so the session that leaves it reads its files again; one over
+// the very entry the next table loaded is not, whatever pointers its price
+// sits behind; and a second Carry into the same table (the harness's, after
+// the adapter's) changes neither answer. The controls: a model that was not
+// carried is not shadowed, and the same account's sign-in loaded again
+// shadows nothing. Negative controls: a Carry that never marks fails every
+// shadowed case; one that marks every carry fails the same entry and the
+// same account.
+func TestCarryMarksWhatItShadows(t *testing.T) {
+	const alias = "a/one"
+	for _, tc := range []struct {
+		name     string
+		edit     func(next *Table)
+		shadowed bool
+	}{
+		{"the same entry", func(*Table) {}, false},
+		{"other efforts", func(next *Table) {
+			m := next.Models[alias]
+			m.Efforts, m.DefaultEffort = []string{"max"}, "max"
+			next.Models[alias] = m
+		}, true},
+		{"another price", func(next *Table) {
+			in := 2.5
+			m := next.Models[alias]
+			m.Cost = &Cost{Input: &in}
+			next.Models[alias] = m
+		}, true},
+		{"another origin", func(next *Table) {
+			next.modelOrigins = map[string]Origin{alias: OriginOverridden}
+		}, true},
+		{"no entry", func(next *Table) { delete(next.Models, alias) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			from := liveTable()
+			from.modelOrigins = map[string]Origin{alias: OriginShipped}
+			next := liveTable()
+			next.modelOrigins = map[string]Origin{alias: OriginShipped}
+			tc.edit(next)
+			next.Carry(from, alias)
+			if got := next.Shadowed(alias); got != tc.shadowed {
+				t.Fatalf("Shadowed(%s) = %v, want %v", alias, got, tc.shadowed)
+			}
+			next.Carry(from, alias)
+			if got := next.Shadowed(alias); got != tc.shadowed {
+				t.Fatalf("after a second Carry Shadowed(%s) = %v, want %v still", alias, got, tc.shadowed)
+			}
+			if next.Shadowed("b/two") {
+				t.Fatal("control: a model that was not carried is shadowed")
+			}
+		})
+	}
+
+	t.Run("another account's list", func(t *testing.T) {
+		const plan = "chatgpt/gpt-5.6-sol"
+		dir := signedInDir(t)
+		from, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again.Carry(from, plan)
+		if again.Shadowed(plan) {
+			t.Fatal("control: the same account's list, loaded again, is shadowed by its own entry")
+		}
+		signInAs(t, dir, registration("user-subject-0002", "app_client-0002", true), true)
+		withPlanModels(t, dir, planModels("user-subject-0002", "app_client-0002"))
+		next, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Carry(from, plan)
+		if !next.Shadowed(plan) {
+			t.Fatal("A's entry carried over B's of the same name is not shadowed")
+		}
+	})
+}
+
 // TestWithholdFrozen (plan 034 §3.4, A22): a provider any of whose keys the
 // session cannot take — an env value, or an inline key, inside what it has
 // already sent — is dropped with its models; its variable reads as unset to

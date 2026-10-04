@@ -2655,9 +2655,22 @@ func (s *nativeSession) Close() error {
 // from a model the table no longer funds takes it off the list in the
 // switch's own delta, at a new revision (resolvesLocked, announce): the list
 // then offers only what a switch back would take.
+//
+// A switch away from a carry that stood over another entry of the files' own
+// (modeltable.Table.Shadowed) — another ChatGPT account's model under the
+// same alias, after a sign-in to it, or the alias's efforts or price changed
+// in models.toml — also reads the files again, in the same modelsMu section
+// (reloadLeft; plan 034 C4r4, r15 #3): the carry was there only for the
+// client the session ran on, and the files' entry it stood over, which no
+// stamp says is new, is what the list offers from then on, and what a switch
+// back builds. Under a turn's claim that reload is owed to the turn's end, as
+// any reload is.
 func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
 	s.modelsMu.Lock()
 	sw, err := s.setModelLocked(cause, modelID)
+	if err == nil && sw.left {
+		s.reloadLocked(reloadLeft)
+	}
 	s.modelsMu.Unlock()
 	if err != nil {
 		return SetOutcome{}, err
@@ -2675,6 +2688,9 @@ type switched struct {
 	hs            *harness.Session
 	table         *modeltable.Table
 	home          string
+	// left says the switch left a carry that shadowed the files' own entry
+	// (SetModel's comment): the files are read again (reloadLeft).
+	left bool
 }
 
 // setModelLocked is SetModel's switch, modelsMu held.
@@ -2711,6 +2727,7 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 		if alias != current && !s.resolvesLocked(sw.table, current) {
 			drop = current
 		}
+		sw.left = alias != current && sw.table.Shadowed(current)
 	}
 	// The confirmed model is the harness's own, captured where the snapshot
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a

@@ -212,6 +212,12 @@ type Table struct {
 	// §3.4, Q16). Resolve reads it before discovered. nil for a table nothing
 	// was carried into.
 	carried map[string]Account
+	// shadowed are the models Carry put in this table over an entry of the
+	// table's own that said something else — another entry, origin or
+	// account, or none at all — so that what this table's load read for the
+	// alias is not what it holds (Shadowed; plan 034 C4r4, r15 #3). nil for
+	// none.
+	shadowed map[string]bool
 	// unkeyed are the variables WithholdFrozen found holding a value a
 	// session cannot redact out of what it has already sent: each reads as
 	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's

@@ -1749,7 +1749,11 @@ while it is open adds the models to the open box with no reopening, the
 selection staying on the model it was on. The swap changes only what `/model`
 offers and can switch to: a conversation's compaction settings and a
 sub-agent's model menu stay as the session opened them, and a model already
-running stays listed. `/connect` is still refused while a turn runs.
+running stays listed, as its client was built. Once you switch away from it,
+`/model` offers what the files say of it now: after a sign-in to another
+ChatGPT account, that account's model of the same name; after an edit to
+`models.toml`, its new efforts; and nothing, if the files no longer have it.
+`/connect` is still refused while a turn runs.
 
 **Where it writes.** `/connect` writes to the `providers.toml` of *this* TUI's
 craze directory (`CRAZE_HOME`, or `~/.craze`), and the ChatGPT plan's sign-in

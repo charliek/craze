@@ -38,8 +38,8 @@ import (
 //     (auth/chatgpt-client.json), its model list (chatgpt-models.json) and its
 //     sign-in (auth/chatgpt.json, stat only — Resolve reads its state). If none
 //     changed since the last reload that was published — and the list was not
-//     just fetched, nor fetched while a reload was held back (forced) — the
-//     answer is ModelsCurrent.
+//     just fetched, nor a shadowing carry just left (reloadLeft), nor either
+//     while a reload was held back (forced) — the answer is ModelsCurrent.
 //  2. Outside every lock of the adapter's and the harness's: the table is
 //     loaded; the running model's entry is carried into it unchanged (Q16,
 //     modeltable.Table.Carry); every provider whose key the session cannot take
@@ -80,7 +80,17 @@ import (
 // switch to the model the session runs on builds it again while the table
 // resolves it, and changes nothing when it does not (the carry: its client is
 // kept); a switch away from a model the table no longer funds takes it off
-// the list, in the switch's own delta (r9 #1).
+// the list, in the switch's own delta (r9 #1). A switch away from a carry
+// that stood over another entry of the files' own (modeltable.Table.Shadowed:
+// another account's model under its alias, other efforts, no entry at all)
+// reloads, in the same modelsMu section, whatever the stamps say
+// (reloadLeft; plan 034 C4r4, r15 #3): nothing changed on disk — the files'
+// entry was there all along, under the carry — so no stamp would ever take it
+// up, and the list would go on without it (or with the carry's) until some
+// other file moved. Under a turn's claim that reload is owed, as any is, and
+// read regardless of the stamps when it is taken up (forced); the switch's
+// own delta has already taken an unfunded carry off the list meanwhile, so
+// the list never offers what a switch would refuse.
 //
 // # Triggers (Q14)
 //
@@ -92,6 +102,8 @@ import (
 //     plan's list (refreshModelsLocked);
 //   - that fetch's completion, which reloads through the same transaction and
 //     never swaps anything itself;
+//   - a switch away from a carry that shadowed the files' own entry
+//     (reloadLeft, above);
 //   - a turn's or a load's end, for a reload that was owed.
 
 // reloadReason is why reloadModels runs.
@@ -108,7 +120,22 @@ const (
 	reloadFetched
 	// reloadOwed takes up a reload a turn or a load held back (step 5).
 	reloadOwed
+	// reloadLeft follows a switch away from a model whose entry the table
+	// held as a carry over another of the files' own
+	// (modeltable.Table.Shadowed; plan 034 C4r4, r15 #3): it reloads even
+	// when the stamps match — they do, since the files' entry is not new —
+	// so the files' entry, no longer the running model's, replaces the
+	// carry in the list.
+	reloadLeft
 )
+
+// unstamped reports whether a reload for r reads the files whatever their
+// stamps say: one following a fetch of the plan's list (reloadFetched) or a
+// switch away from a shadowing carry (reloadLeft). Held back, it makes the
+// reload that takes it up do the same (forced, heldBack).
+func (r reloadReason) unstamped() bool {
+	return r == reloadFetched || r == reloadLeft
+}
 
 // diagModelsReload is the journal diag a reload whose table would not load is
 // noted as (step 1's failure): its one field, "error", is modeltable's error,
@@ -136,8 +163,9 @@ type modelsWatch struct {
 	// gen numbers the reloads that got as far as a table to publish: the
 	// revision of the list each would publish.
 	gen uint64
-	// forced says a fetched list's reload was held back (heldBack): the next
-	// reload reads the files whatever their stamps say, as reloadFetched does.
+	// forced says a reload that reads the files whatever their stamps say —
+	// a fetched list's, or one leaving a shadowing carry (unstamped) — was
+	// held back (heldBack): the next reload reads them so too.
 	forced bool
 	// problem is the last failure journaled, so one that stays is said once.
 	problem string
@@ -214,11 +242,12 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		return ModelsCurrent
 	}
 
-	// Step 1: the stamps, before anything is read. A fetched list a turn or
-	// a load held back is read whatever they say (forced), as its own reload
+	// Step 1: the stamps, before anything is read. A fetched list, or a
+	// shadowing carry left behind, is read whatever they say (unstamped), and
+	// so is either one a turn or a load held back (forced), as its own reload
 	// would have read it.
 	stamps := statModelInputs(home)
-	if s.models.read && stamps == s.models.stamps && reason != reloadFetched && !s.models.forced {
+	if s.models.read && stamps == s.models.stamps && !reason.unstamped() && !s.models.forced {
 		return ModelsCurrent
 	}
 	if seam := s.reloadSeam; seam != nil {
@@ -456,10 +485,11 @@ func (s *nativeSession) noteCatalogCut(hs *harness.Session, home string, cut cat
 // heldBack is a reload held back — by a load's replay or a turn's claim, and
 // marked owed (s.reloadOwed) in the section that read which, for the load's
 // end or the turn's to take up (steps 4, 5) — and says so: ModelsPending. A
-// fetched list's reload makes the one that takes it up read the files
-// whatever their stamps say (forced). modelsMu is held.
+// fetched list's reload, or one leaving a shadowing carry (unstamped), makes
+// the one that takes it up read the files whatever their stamps say
+// (forced). modelsMu is held.
 func (s *nativeSession) heldBack(reason reloadReason) ModelsStatus {
-	if reason == reloadFetched {
+	if reason.unstamped() {
 		s.models.forced = true
 	}
 	return ModelsPending

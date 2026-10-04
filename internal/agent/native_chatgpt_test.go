@@ -167,10 +167,19 @@ func signInOf(dir, subject, client, access, refresh, incarnation string) error {
 	return writePlanTokensOf(dir, subject, client, access, refresh, incarnation, 1)
 }
 
+// planSolModel is the one model writePlanAccount's list names, gpt-5.6-sol,
+// as chatgptauth writes it.
+func planSolModel() chatgptauth.Model {
+	parallel := true
+	return chatgptauth.Model{Slug: "gpt-5.6-sol", MinClientVersion: "0.144.0", DisplayName: "GPT-5.6 Sol", ContextWindow: 272000,
+		Efforts: []string{"low", "medium", "high", "ultra"}, DefaultEffort: "medium", InputModalities: []string{"text"},
+		Priority: 0, ParallelToolCalls: &parallel}
+}
+
 // writePlanAccount writes dir's registration, with plan usage, and its model
-// list bound to it, fetched now: one model, gpt-5.6-sol. The list is
-// chatgptauth's own type, so the shape the table reads is the one the sign-in
-// writes (plan 033 X120).
+// list bound to it, fetched now: one model, gpt-5.6-sol (planSolModel). The
+// list is chatgptauth's own type, so the shape the table reads is the one the
+// sign-in writes (plan 033 X120).
 func writePlanAccount(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(chatgptauth.AuthDir(dir), 0o700); err != nil {
@@ -183,11 +192,8 @@ func writePlanAccount(t *testing.T, dir string) {
 	if err := os.WriteFile(chatgptauth.ClientFile(dir), client, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	parallel := true
 	models, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(),
-		Models: []chatgptauth.Model{{Slug: "gpt-5.6-sol", MinClientVersion: "0.144.0", DisplayName: "GPT-5.6 Sol", ContextWindow: 272000,
-			Efforts: []string{"low", "medium", "high", "ultra"}, DefaultEffort: "medium", InputModalities: []string{"text"},
-			Priority: 0, ParallelToolCalls: &parallel}}})
+		Models: []chatgptauth.Model{planSolModel()}})
 	if err != nil {
 		t.Fatal(err)
 	}

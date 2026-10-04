@@ -929,7 +929,9 @@ session already running on one, or a sub-agent, sends nothing on another
 account's sign-in — its next request, a summary's or a wake's too, ends with
 `native: model "chatgpt/…" is from another ChatGPT account's model list; a
 new session offers the signed-in account's models` — and goes on once the
-first account is signed in again.
+first account is signed in again. Switching that session to another model
+lets go of the first account's: `/model` then offers the signed-in account's
+model of the same name, when its list has one.
 
 **Renewal.** An access token lasts about an hour. craze renews it itself when a
 request finds less than five minutes left, so the sign-in lasts until you sign
