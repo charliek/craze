@@ -120,7 +120,18 @@ func (m Model) preConnectOpen() bool { return m.dialog == dialogConnect && m.cdl
 // providers read off the Update as a plain command (connectCall). The picker
 // stays up under it (pickingProvider), and nothing is built; a list was
 // closed by the caller (connectOverSessions).
+//
+// Over the picker, the request for its states still out — the last way
+// back's (reaskProviderAvail), say, its answer not in yet — is given up: the
+// store may change under this dialog (a sign-in without plan usage removes
+// an earlier one's tokens), so an answer read before it opened must not land
+// while it is up, nor after it, and draw a native ready that can no longer
+// start (plan 036 r4). The picker keeps the states it opened this dialog on
+// (native needing setup) until this dialog's own way back asks again.
 func (m Model) openPreConnect(to connectReturn) (Model, tea.Cmd) {
+	if to == returnPicker {
+		m.availSeq, m.availNative = provAvailSeq.Add(1), 0
+	}
 	m.connSeq++
 	m.cdlg = connectDialog{gen: m.connSeq, pre: true, returnTo: to}
 	m.dialog = dialogConnect

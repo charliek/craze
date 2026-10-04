@@ -386,6 +386,7 @@ type signInRuns struct {
 	logErr    error         // the open's refusal
 	logTold   bool          // the one transcript note was written
 	logDone   chan struct{} // closed by closeLog: the log's wait (signInLogCmd) ends
+	logBy     signInStamp   // the run that took the log last (logFor): whose records it is writing
 }
 
 // signInRun is one run's: its context's cancel, once begun its attempt, and
@@ -630,8 +631,10 @@ var onAwaitEnds func()
 // Update (openSignInStep), under logMu: the open touches no file
 // (signinlog.Open), so nothing waits on it, and a second begin overlapping
 // the first — Esc and back while the first is still beginning — shares the
-// log the first opened (review r3 #8b).
-func (s *signInRuns) logFor(dir string) (*signinlog.Log, tea.Cmd) {
+// log the first opened (review r3 #8b). st is the run asking: the log is that
+// run's from now until another takes it (logBy), so a stop is told by the run
+// whose records it was writing (signInLogOffMsg.stamp).
+func (s *signInRuns) logFor(dir string, st signInStamp) (*signinlog.Log, tea.Cmd) {
 	if s == nil || dir == "" {
 		return nil, nil
 	}
@@ -641,18 +644,30 @@ func (s *signInRuns) logFor(dir string) (*signinlog.Log, tea.Cmd) {
 	case s.logClosed:
 		return nil, nil
 	case s.log != nil || s.logErr != nil:
+		s.logBy = st
 		return s.log, nil
 	}
 	s.log, s.logErr = openSignInLog(dir)
+	s.logBy = st
 	s.logDone = make(chan struct{})
-	return s.log, signInLogCmd(s.log, s.logErr, s.logDone)
+	return s.log, signInLogCmd(s.log, s.logErr, s.logDone, s.logOrigin)
+}
+
+// logOrigin is the run that took the log last (logFor).
+func (s *signInRuns) logOrigin() signInStamp {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	return s.logBy
 }
 
 // signInLogOffMsg is the sign-in log's stop (signInLogCmd): the transcript's
 // one note about it (signInRuns.mention). It is the TUI's, whichever session
 // it shows — the log is the TUI's for its life, as presenceCmd's count is —
-// so it carries no session stamp, and no switch drops it.
-type signInLogOffMsg struct{}
+// so it carries no session stamp, and no switch drops it. stamp is the run
+// whose records the log was writing as it stopped: one of the pre-session
+// dialog's (plan 036 §3.6) is said on no transcript, wherever the TUI is by
+// the time it lands (applySignIn).
+type signInLogOffMsg struct{ stamp signInStamp }
 
 func (signInLogOffMsg) connectAnswer() {}
 
@@ -661,15 +676,16 @@ func (signInLogOffMsg) connectAnswer() {}
 // answers signInLogOffMsg, so the note is written as it happens, not with
 // some later answer (review r3 #8c); at once when the open itself was
 // refused (err). It ends with no message once closeLog has run (done). Armed
-// once, with the log (logFor).
-func signInLogCmd(l *signinlog.Log, err error, done <-chan struct{}) tea.Cmd {
+// once, with the log (logFor). The answer is stamped as the log stops, by the
+// run that took it last (origin, signInRuns.logOrigin).
+func signInLogCmd(l *signinlog.Log, err error, done <-chan struct{}, origin func() signInStamp) tea.Cmd {
 	return func() tea.Msg {
 		if err != nil {
-			return signInLogOffMsg{}
+			return signInLogOffMsg{stamp: origin()}
 		}
 		select {
 		case <-l.Stopped():
-			return signInLogOffMsg{}
+			return signInLogOffMsg{stamp: origin()}
 		case <-done:
 			return nil
 		}
@@ -937,8 +953,9 @@ func (m Model) openSignInStep() (Model, tea.Cmd) {
 	m.signIns.add(m.connSeq, cancel)
 	m.cdlg.step, m.cdlg.field, m.cdlg.key, m.cdlg.keyErr = connectSignIn, m.connSeq, ti, ""
 	m.cdlg.signIn = signInState{runs: m.signIns, run: m.connSeq, cancel: cancel}
-	log, logWait := m.signIns.logFor(m.nativeDir)
-	return m, tea.Batch(beginSignInCmd(ctx, m.signIns, log, signInStamp{gen: m.cdlg.gen, run: m.connSeq, pre: m.cdlg.pre}, m.nativeDir), logWait)
+	st := signInStamp{gen: m.cdlg.gen, run: m.connSeq, pre: m.cdlg.pre}
+	log, logWait := m.signIns.logFor(m.nativeDir, st)
+	return m, tea.Batch(beginSignInCmd(ctx, m.signIns, log, st, m.nativeDir), logWait)
 }
 
 // errNoSignInDir is a sign-in with no native directory to sign in to.
@@ -1009,13 +1026,18 @@ func (m Model) signInOpen(gen, run uint64) bool {
 // The pre-session dialog's answers (plan 036 §3.6) write nothing to the
 // transcript: they go to the dialog's own steps (connect_pre.go), and the
 // way out says what came of them where the dialog goes back. Nor does the
-// log's note while that dialog, or a picker, is up — no session is there to
-// hold it: it is left unsaid, and finishRun prints it once the screen is
-// restored, as it prints a failure no Update applied (closeLog).
+// log's note when the log stopped writing a pre-session run's records —
+// whatever is on screen by the time it lands: the list that dialog went back
+// to, over a session, or a session the picker has started since (plan 036
+// r4) — nor while that dialog, or a picker, is up, with no session there to
+// hold it. It is left unsaid, and finishRun prints it once the screen is
+// restored, as it prints a failure no Update applied (closeLog): a line no
+// key clears, where a one-off line on the picker or the list would go with
+// the next key, and the log is the TUI's for its life, not the dialog's.
 func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case signInLogOffMsg:
-		if m.cdlg.pre || m.picking() {
+		if msg.stamp.pre || m.cdlg.pre || m.picking() {
 			return m, nil
 		}
 		if note := m.signIns.mention(); note != "" {

@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1118,18 +1120,44 @@ func TestPreConnectOverAWorkingSessionWithACard(t *testing.T) {
 }
 
 // TestPreConnectQuitClosesTheLogInOrder (§3.6's quit row, 034 X79): Ctrl+C
-// on the pre-session dialog's sign-in step quits — from the picker as the
-// picker quits, from the list as the list quits (every session left running:
-// nothing stopped or cancelled) — and ends the attempt at once, its listener
-// closed, for the shutdown; finishRun then writes its outcome before it
-// flushes and closes the sign-in log, which holds the begin and the
-// shutdown's cancel. The attempt is chatgptauth's own (a re-login of the
-// fixture's registration), which logs through the run's observer.
+// on the pre-session dialog's sign-in step, a pasted redirect's code being
+// exchanged, quits — from the picker as the picker quits, from the list as
+// the list quits (every session left running: nothing stopped or cancelled)
+// — and ends the attempt for the shutdown; finishRun then waits for its
+// outcome before it flushes and closes the sign-in log, which holds the
+// begin, the redirect and the shutdown's cancel. The attempt is chatgptauth's
+// own, against the fake issuer, whose exchange is held; its outcome is the
+// wait's to report, after the close (r3 #8a), and the report is held until
+// something asks for the attempt's end (endAsked) — which only finishRun's
+// wait does (awaitEnds): without that wait the log closes first, every time
+// (plan 036 r4). The control is the exchange under way when Ctrl+C is pressed.
 func TestPreConnectQuitClosesTheLogInOrder(t *testing.T) {
 	for _, o := range preOrigins {
 		t.Run(o.name, func(t *testing.T) {
-			newFakeIssuer(t)
-			dir, getenv := preFixture(t, true, true)
+			iss := newFakeIssuer(t)
+			hold, held := make(chan struct{}), make(chan struct{}, 1)
+			iss.mu.Lock()
+			iss.hold, iss.held = hold, held
+			iss.mu.Unlock()
+			t.Cleanup(func() { close(hold) })
+			gate := make(chan struct{})
+			var once sync.Once
+			let := func() { once.Do(func() { close(gate) }) }
+			begin := beginSignIn
+			beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
+				att, err := begin(ctx, dir, func(ev chatgptauth.Event) {
+					if ev.Kind == chatgptauth.EventCancelled {
+						<-gate
+					}
+					observe(ev)
+				})
+				if err != nil {
+					return nil, err
+				}
+				return endAsked{signInAttempt: att, asked: let}, nil
+			}
+			t.Cleanup(func() { beginSignIn = begin })
+			dir, getenv := preFixture(t, true, false)
 			var initial Model
 			var cb *countingBackend
 			if o.origin == returnPicker {
@@ -1143,17 +1171,21 @@ func TestPreConnectQuitClosesTheLogInOrder(t *testing.T) {
 			m, _ := preOpen(t, o.origin, initial)
 			m, wait := beginStep(t, preSelect(t, m, "chatgpt"))
 			done := runWait(t, m, wait)
-			s := m.cdlg.signIn
-			if s.att == nil || !s.listening {
-				t.Fatal("the control: the attempt is not listening before the quit")
+			t.Cleanup(let) // before the wait's join: a failed test holds no report
+			m, _ = press(m, pasteKey(iss.authorize(t, m.cdlg.signIn.url)))
+			m, _ = press(m, enter())
+			if !m.cdlg.signIn.handed {
+				t.Fatal("the pasted redirect was not handed over")
+			}
+			select {
+			case <-held:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the control: the exchange never began")
 			}
 			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
 			if !m.quitting || m.preConnectOpen() || m.sessList.open || cmd == nil {
 				t.Fatalf("Ctrl+C: quitting %v, dialog %v, list %v — want craze quitting, nothing reopened",
 					m.quitting, m.preConnectOpen(), m.sessList.open)
-			}
-			if _, ok := awaitMsg(t, done).(signInDoneMsg); !ok {
-				t.Fatal("the quit left the attempt's wait running")
 			}
 			if cb != nil {
 				if made := cb.seen(); len(made) != 0 {
@@ -1162,8 +1194,11 @@ func TestPreConnectQuitClosesTheLogInOrder(t *testing.T) {
 			}
 			_, _ = finishRun(io.Discard, nil, initial, nil)
 			recs, _ := tuiSignInLog(t, dir)
-			if got, want := recordKinds(recs), []string{"begin", "cancelled"}; !slices.Equal(got, want) || recs[1]["reason"] != "shutdown" {
-				t.Fatalf("the sign-in log holds %v (%v); want the begin and the shutdown's cancel", got, recs)
+			if got, want := recordKinds(recs), []string{"begin", "redirect_received", "cancelled"}; !slices.Equal(got, want) || recs[2]["reason"] != "shutdown" {
+				t.Fatalf("the sign-in log holds %v (%v); want the begin, the redirect and the shutdown's cancel", got, recs)
+			}
+			if msg, ok := awaitMsg(t, done).(signInDoneMsg); !ok || msg.err == nil {
+				t.Fatal("the wait did not end with the shutdown")
 			}
 		})
 	}
@@ -1376,5 +1411,128 @@ func TestPreConnectComposerPasteLandsInTheDraft(t *testing.T) {
 	m = applyMsg(t, m, pasteMsg{text: "pasted before the list", shownGen: m.shownGen})
 	if got := m.input.Value(); got != "pasted before the list" || m.cdlg.key.Value() != "" {
 		t.Fatalf("the composer's paste: draft %q, key field %d bytes — want it in the draft alone", got, len(m.cdlg.key.Value()))
+	}
+}
+
+// TestPreConnectLogNoteNeverReachesASession (plan 036 r4): the sign-in log
+// refused while a pre-session sign-in runs — its directory a symlink — whose
+// stop lands only once the dialog has gone is said on no transcript: not the
+// session's behind the list the dialog went back to, nor the session the
+// picker started since. The note is left to finishRun, which prints it once
+// the screen is gone. (An in-session sign-in's still is the transcript's one
+// note: TestConnectSignInLogsThroughItsObserver.)
+func TestPreConnectLogNoteNeverReachesASession(t *testing.T) {
+	for _, o := range preOrigins {
+		t.Run(o.name, func(t *testing.T) {
+			standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
+			m, dir, _, log := preModel(t, o.origin, true, nil)
+			initial := m
+			if err := os.Symlink(t.TempDir(), filepath.Join(dir, "logs")); err != nil {
+				t.Fatal(err)
+			}
+			m, shown := preOpen(t, o.origin, m)
+			m, _, logWait := beginStepLog(t, preSelect(t, m, "chatgpt"))
+			if logWait == nil {
+				t.Fatal("fixture: the first begin armed no wait for the log")
+			}
+			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m = preBack(t, "Esc", o.origin, m, cmd, connectBack{}, shown)
+			if o.origin == returnPicker {
+				// The picker starts a session before the stop lands.
+				m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+				m, _ = press(m, enter())
+				if m.pickingProvider || !slices.Equal(log.got(), []string{"grok"}) {
+					t.Fatalf("fixture: grok did not start (picking %v, built %v)", m.pickingProvider, log.got())
+				}
+			}
+			transcript, note := transcriptText(m), m.sessList.note
+			off, ok := runWatched(t, logWait).(signInLogOffMsg)
+			if !ok || !off.stamp.pre {
+				t.Fatalf("the log's wait answered %+v; want its refusal, stamped as the pre-session run's", off)
+			}
+			m = applyMsg(t, m, off)
+			if got := transcriptText(m); got != transcript || m.sessList.note != note {
+				t.Fatalf("the log's refusal reached a session: transcript\n%s\nwas\n%s\n(hint line %q, was %q)", got, transcript, m.sessList.note, note)
+			}
+			var out strings.Builder
+			_, _ = finishRun(&out, nil, initial, nil)
+			if !strings.Contains(out.String(), "craze: the sign-in log is off: ") {
+				t.Fatalf("finishRun did not say the log was off: %q", out.String())
+			}
+		})
+	}
+}
+
+// TestPreConnectAReopenedDialogTakesNoStaleAnswer (plan 036 r4): the picker's
+// states asked by one dialog's way back, answered from the store as it was
+// then, never land once the dialog has opened again. Dialog N signs in with
+// plan usage and goes back, asking; before the answer, Enter opens dialog N+1
+// (native still needing setup), and N's answer — native ready — lands under
+// it. N+1 signs in without plan usage, which takes the earlier sign-in's
+// tokens away, and goes back: until its own answer, native still needs setup,
+// and Enter on it opens the dialog again rather than starting a native that
+// cannot start.
+func TestPreConnectAReopenedDialogTakesNoStaleAnswer(t *testing.T) {
+	var funded atomic.Bool
+	var begins atomic.Int32
+	s := standInSignIn(t, func() *fakeSignIn {
+		return newFakeSignIn(false, chatgptauth.Result{Email: signInEmail, PlanUsage: begins.Add(1) == 1})
+	})
+	m, _, _, log := preModel(t, returnPicker, true, funded.Load)
+	// signIn runs dialog m's ChatGPT sign-in to its answer, applied.
+	signIn := func(t *testing.T, m Model) (Model, tea.Cmd) {
+		t.Helper()
+		m, wait := beginStep(t, preSelect(t, m, "chatgpt"))
+		done := runWait(t, m, wait)
+		m, _ = press(m, pasteKey(signInPasted))
+		m, _ = press(m, enter())
+		tm, cmd := m.Update(awaitMsg(t, done))
+		return tm.(Model), cmd
+	}
+	native := func(m Model) AvailState { return m.providerChoice(agent.NativeProvider()).a.State }
+
+	// Dialog N: signed in with plan usage, the models fetched, back — its
+	// states asked again, the answer read once the store funds native, and
+	// held.
+	m, _ = preOpen(t, returnPicker, m)
+	m, cmd := signIn(t, m)
+	tm, cmd := m.Update(runWatched(t, mustCmd(t, cmd, "finishSignInCmd")))
+	m = tm.(Model)
+	if m.preConnectOpen() || !m.pickingProvider {
+		t.Fatal("fixture: dialog N did not go back to the picker")
+	}
+	funded.Store(true)
+	stale, ok := runWatched(t, mustCmd(t, cmd, "providerAvailCmd")).(providerAvailMsg)
+	if !ok || native(m) != AvailNeedsSetup || m.providers[m.providerCursor].Name() != "native" {
+		t.Fatalf("fixture: N's answer %T held; native %q, cursor on %s", stale, native(m), m.providers[m.providerCursor].Name())
+	}
+	if !slices.Contains(stale.avail, ProviderAvail{ID: "native", State: AvailReady}) {
+		t.Fatalf("fixture: N's answer does not say native is ready: %+v", stale.avail)
+	}
+
+	// Dialog N+1, opened before N's answer; the answer lands under it.
+	m, _ = preOpen(t, returnPicker, m)
+	m = applyMsg(t, m, stale)
+	if native(m) != AvailNeedsSetup {
+		t.Fatalf("N's answer landed under dialog N+1: native %q", native(m))
+	}
+
+	// N+1 signs in without plan usage — the store no longer funds native —
+	// and goes back.
+	m, cmd = signIn(t, m)
+	funded.Store(false)
+	if m.preConnectOpen() || !m.pickingProvider || s.fetches.Load() != 1 {
+		t.Fatalf("fixture: N+1 did not go back (dialog %v) or fetched (%d)", m.preConnectOpen(), s.fetches.Load())
+	}
+	if native(m) != AvailNeedsSetup {
+		t.Fatalf("back from N+1, native is %q before its own answer; want needs_setup, as the store says", native(m))
+	}
+	next, _ := press(m, enter())
+	if !next.preConnectOpen() || len(log.got()) != 0 {
+		t.Fatalf("Enter on native: dialog %v, built %v — want the dialog again, nothing started", next.preConnectOpen(), log.got())
+	}
+	m = applyMsg(t, m, runWatched(t, mustCmd(t, cmd, "providerAvailCmd")))
+	if native(m) != AvailNeedsSetup {
+		t.Fatalf("N+1's own answer: native %q, want needs_setup", native(m))
 	}
 }
