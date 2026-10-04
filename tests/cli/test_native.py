@@ -1216,9 +1216,18 @@ def test_native_cancel_during_bash_reports_cancelled_and_leaves_nothing_running(
         child = wait_for_pid(child_file, proc)
         # The control for the `gone` calls: both are running now, so finding
         # nothing afterwards is finding killed processes and not pids this
-        # test never could see.
+        # test never could see. The child's pid is written as soon as the
+        # shell has forked it, so it is awaited as itself, bounded, rather
+        # than read once: a process can read as no command line at all for
+        # the instant of its exec (plan 036: CI's Linux push run of 69fb29b
+        # failed one such read, the shell already seen alive). A child that
+        # really died fails the wait just as it failed the read, and says
+        # whether craze was still running.
         assert alive(leader, CANCEL_LEADER_MARKER), f"the shell ({leader}) was not running"
-        assert alive(child, CANCEL_CHILD_MARKER), f"the child ({child}) was not running"
+        assert until_alive(child, CANCEL_CHILD_MARKER), (
+            f"the child ({child}) was not running; craze "
+            + ("still running" if proc.poll() is None else f"exited {proc.returncode}")
+        )
 
         proc.send_signal(signal.SIGINT)
         stdout, stderr = proc.communicate(timeout=60)
@@ -1341,6 +1350,17 @@ def alive(pid: int, marker: str) -> bool:
     if out.returncode != 0 or not fields:
         return False
     return not fields[0].startswith("Z") and marker in " ".join(fields[1:])
+
+
+def until_alive(pid: int, marker: str, timeout: float = 10) -> bool:
+    """Whether pid comes to run as marker within timeout: a process just
+    forked is awaited as the command it is about to become."""
+    deadline = time.monotonic() + timeout
+    while not alive(pid, marker):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 def gone(pid: int, marker: str, timeout: float = 10) -> None:
