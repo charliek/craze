@@ -707,15 +707,34 @@ func TestBashCloseSignal(t *testing.T) {
 		// The shell survives SIGTERM and says it got it, waiting in the wait
 		// builtin, which a trapped signal ends at once (bashWaitLoop); its
 		// child ignores SIGTERM.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; " + bashWaitLoop})
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; echo supervised; " + bashWaitLoop})
 		// The premise — the close comes inside the cancel's grace — needs the
 		// shell to run its handler before the SIGKILL: a starved CPU could
-		// spend the 3 s grace first (3 runs in 20 under a 2% quota), and the
-		// handler never ran. A minute's grace leaves it time to be scheduled,
-		// and makes the close's cut the stronger claim (plan 036 F2).
+		// spend the 3 s grace first, and the handler never ran. A minute's
+		// grace leaves it time to be scheduled, and makes the close's cut the
+		// stronger claim (plan 036 F2).
 		c.termGrace = time.Minute
+		// And the cancel must find the command under supervise, which
+		// signals with the grace: a stop that fires before launch has taken
+		// the start's result discards the command with SIGKILL at once
+		// (launched.discard), and the shell's file and pid say nothing of
+		// launch. The output does: it is copied only once launch has returned
+		// (attach), so the cancel waits for the marker in a progress snapshot
+		// — 3 runs in 20 under a 2% quota cancelled before (plan 036 F2).
+		attached := make(chan struct{})
+		var once sync.Once
+		env.Progress = func(s string) {
+			if strings.Contains(s, "supervised") {
+				once.Do(func() { close(attached) })
+			}
+		}
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
+		select {
+		case <-attached:
+		case <-time.After(15 * time.Second):
+			t.Fatal("control: the command's output never arrived (launch never returned)")
+		}
 		r.cancel(nil)
 		untilFile(t, env, "got", "the cancel's SIGTERM")
 		closed := time.Now()
