@@ -155,8 +155,8 @@ readiness). SF-129 and SF-131 are not used (`12`, Plan 035 PR 2).
 Rows Plan 036 found and did not do. SF-142 is the live verification's;
 SF-143–SF-147 are Plan 034's unplanned follow-ups, which Plan 036 §9 left for
 a row rather than fixing in passing (each checked still true at this branch's
-tip); SF-148–SF-150 are Plan 036's own future work. SF-142–SF-147 are phase
-`any`; SF-148–SF-150 are S3 or later. The relative-PATH limit of the hub's
+tip); SF-148–SF-150 are Plan 036's own future work; SF-151 is its post-merge V1's.
+SF-142–SF-147 and SF-151 are phase `any`; SF-148–SF-150 are S3 or later. The relative-PATH limit of the hub's
 availability check has no row (`12`, Plan 036, reviews: r1).
 
 | id | what | why it is open | where | size |
@@ -170,6 +170,7 @@ availability check has no row (`12`, Plan 036, reviews: r1).
 | SF-148 | **Per-provider cached model lists in `sessions.createOptions`.** SD-45 keeps the create sheet to provider, directory and first prompt, so the answer carries no model list; a client that wants to preselect a model before the session exists has nothing to show. | Plan 036 §4 and §9 (a non-goal there): needs a decision on what is cached, where (the hub's namespace) and how stale it may be; additive on the wire (the result's unknown members are ignored). | `internal/protocol` (`CreateOptionsResult`); `internal/hub`; `06` item on the create sheet | M |
 | SF-149 | **An account probe for cursor and grok.** A resolved binary on a logged-out account reads `ready` and fails at the first prompt. | Plan 036 §4 and §9 (a non-goal there): the probe would run a real agent command per check (cost, time, a login prompt), against `createOptions`' rule that availability is advisory and cheap. | `internal/cli/availability.go` | M |
 | SF-150 | **A dialog layer in `sessionsView`, if other dialogs ever need to open over the list.** The pre-session `/connect` closes the list and reopens it (Plan 036 decision 11, design (a)), restoring its input, selection and provider. | Plan 036 §4 and §9: not needed by the one dialog that exists; revisit when a second one has to open over the list. | `internal/tui` (`sessionsView`, `connect_pre.go`) | M |
+| SF-151 | **`TestBashNoControllingTerminal` fails 1 in 40 under its package's parallel load.** Its TTY helper is started with `Setsid` and `Setctty` on a freshly opened pty, and the fork/exec was refused with EPERM ("operation not permitted"): TIOCSCTTY refuses a pty that is already some session's controlling terminal, which only a concurrently running test can make so. 0 in 200 runs alone. | Plan 036's V1 (`-race -count=20` on `internal/harness/tool/opencode` at `69fb29b`: once in the first ×20, never in a second ×20). Pre-existing; not touched by the plan. To diagnose: capture the helper's stderr and `ps -o sid,tty` for the pty at the failure; candidates are a pty number reused while an earlier session still holds it, or a parallel test's session-leader child opening a pts device without `O_NOCTTY`. | `internal/harness/tool/opencode/bash_test.go` (`TestBashNoControllingTerminal`, `TestBashTTYHelper`) | S |
 
 ## Plan 025 — effort and speed per provider
 

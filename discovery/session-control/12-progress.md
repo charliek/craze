@@ -5176,7 +5176,7 @@ and a verified, documented hermetic recipe for shed's tests. One PR, gated per
 commit, as for Plan 035. The plan lives outside the repo; its execution amendments
 (X1–X42, in the plan folder's `progress.md`) are the truth.
 
-PR: #87, merged as TBD (TBD).
+PR: #87, merged as b035939 (2026-10-04).
 
 ### What shipped per commit
 
@@ -5241,6 +5241,8 @@ PR: #87, merged as TBD (TBD).
 - **C3r2 (`b3202a0`) — r11's P2.** An answer that names no known provider leaves
   the picker's default alone, judged as left out; a nil answer leaves the rows.
 - **C6 — this record.** Docs only.
+- **F3 (`89117ef`) — a flake on the PR's first push run.** The cancel test's
+  control awaits its child as the command it becomes (below).
 
 ### Execution decisions
 
@@ -5345,7 +5347,7 @@ needs, grouped.
 
 ### Flakes diagnosed
 
-Both were pre-existing and outside this plan's code; neither was retried.
+All three were pre-existing and outside this plan's code; none was retried.
 
 - **F1: `TestFrameNativeLiveKeySave` (Plan 034's).** Failed on the macOS leg of
   CI at `fbf9a16`: the second script ended on `<wait:text:hello from
@@ -5371,13 +5373,29 @@ Both were pre-existing and outside this plan's code; neither was retried.
   mechanisms, each proven by a forced delay; a forced-delay proof of a hypothesis
   is not proof it was the failing mechanism, and only the starve repro going
   green proved the third.
+- **F3: `test_native_cancel_during_bash_reports_cancelled_and_leaves_nothing_running`
+  (Plan 033's, `tests/cli`).** Failed on the Linux cli leg of the PR's push run at
+  `69fb29b` (the pull_request run of the same commit was green): its control read
+  the child's command line once, right after the shell had written `$!`, and found
+  no `sleep 9771`, the shell seen alive the line before. Before its exec the child
+  carries the shell's argv (the `-c` string holds the marker) and after it `sleep
+  9771`; only the instant of `execve` can read as no command line at all — the
+  likeliest cause, but a local probe (500 forks, idle and at a 5% quota) never
+  caught it, so it is not proven. The control now waits, bounded, for the child to
+  run as its command, and says whether craze was still running (`89117ef`); a
+  child that really died still fails it.
 
 ### Verification
 
 - **V1, V2.** V2, the normalized CLI outputs against the baseline: 103/103 the
   same at `ace8aa3` and again at `b3202a0`, the Go code's final tip. V1
-  (`-race -count=20` on the changed packages, the `tui` package in slices) ran
-  beside CI; its result is in the PR and the follow-up that records the merge.
+  (`-race -count=20` at `69fb29b`, after the merge, as Plan 035's X47 allows):
+  `cli`, `hub`, `protocol`, `fakehost`, `engine`, `control`, `rundir` ok ×20,
+  `internal/tui` in four slices of five, ok ×20, no data race anywhere;
+  `internal/harness/tool/opencode` failed once in its first ×20 —
+  `TestBashNoControllingTerminal`, its TTY helper's `Setsid`+`Setctty` fork refused
+  with EPERM under the package's parallel load — and passed a second ×20: 1 in 40,
+  pre-existing, a path this plan did not touch (SF-151).
 - **V3 (mac-mini, `ace8aa3`, real cursor and grok, a scratch environment).** Every
   leg passed. A smoke server: cursor ready. B, an ssh-born hub: `--hub` says
   cursor is `unavailable` with the not-GUI reason and `kill <pid> (no session
@@ -5404,7 +5422,10 @@ Both were pre-existing and outside this plan's code; neither was retried.
 - **macOS.** `mac-test.sh` at C4 and at the tip `09fd8f4`: exit 0, every package
   a real `ok` run. CI's own diagnostic found the macOS runner in the GUI session
   (X1), so production binaries in `tests/cli` see cursor ready there.
-- **V7, CI.** Both OSes, both runs (push and pull_request): see the PR.
+- **V7, CI.** Every run of the PR was checked: at `925be29` (pushed alone for
+  C1's diagnostic) green; at `fbf9a16` the macOS test leg failed (F1); at
+  `69fb29b` the pull_request run green and the push run's Linux cli leg failed
+  (F3); at `89117ef`, the merged tip, both runs green on both OSes.
 
 #### Handoff to S3b
 
