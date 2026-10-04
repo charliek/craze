@@ -496,7 +496,9 @@ const sessProvidersKey = "providers"
 // one new sessions run marked `current` — and one that is not ready (plan 036
 // §3.3) with its reason in place of its detail, its state for its note, dim,
 // and its refusal, which enter and tab draw as the popup's note instead of
-// taking it (sessCmdChosen). With a ProviderAvailabilitySource the
+// taking it (sessCmdChosen) — but for native needing setup, which carries
+// none: enter and tab open the pre-session connect dialog on it instead
+// (§3.6). With a ProviderAvailabilitySource the
 // providers' availability is read again as the values open — the popup's
 // load, off the Update — and the list's latest answer serves until it is
 // back.
@@ -676,6 +678,13 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 		if err != nil {
 			return m, nil, false
 		}
+		if c, ok := m.sessProviderChoice(p); ok && c.verdict() == availConnect {
+			// Native needing setup (plan 036 §3.6): nothing is taken — the
+			// pre-session connect dialog opens over the list, which comes
+			// back as it was, and native is chosen again once it is ready.
+			next, cmd := m.connectOverSessions()
+			return next, cmd, true
+		}
 		next, cmd := m.sessPickProvider(p)
 		return next, cmd, true
 	case kind == "model":
@@ -693,7 +702,8 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 // the provider named, by id or by name (one /provider offers,
 // sessProviderChoices — refused on the hint line, the input left as typed,
 // when the list's latest availability answer says it cannot start, plan 036
-// §3.3); the model id as typed, which the next start applies as --model
+// §3.3, and the pre-session connect dialog opened on native needing setup,
+// §3.6); the model id as typed, which the next start applies as --model
 // would; or one of /effort's or /fast's values, case folded, as /provider
 // takes only a provider it lists. ok false: not one of them.
 func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
@@ -712,6 +722,10 @@ func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 				if refusal := c.refusal(); refusal != "" {
 					m.sessNote(refusal, sessNoteErr)
 					return m, nil, true
+				}
+				if c.verdict() == availConnect {
+					next, cmd := m.connectOverSessions()
+					return next, cmd, true
 				}
 				next, cmd := m.sessPickProvider(p)
 				return next, cmd, true
@@ -784,6 +798,17 @@ func (m Model) sessProviderChoices() []provChoice {
 		}
 	}
 	return out
+}
+
+// sessProviderChoice is p as /provider offers it now (sessProviderChoices),
+// and whether it offers it at all.
+func (m Model) sessProviderChoice(p agent.Provider) (provChoice, bool) {
+	for _, c := range m.sessProviderChoices() {
+		if c.p.Name() == p.Name() {
+			return c, true
+		}
+	}
+	return provChoice{}, false
 }
 
 // sessPickProvider is /provider's choice (§3.14): new sessions from the list

@@ -57,15 +57,27 @@ row that cannot start:
   and the dialog stays open for another choice. Moving the cursor clears it.
   A refusal of the command line's (above) is checked first, and takes the
   first line alone.
+- `native` with no model provider that has a key (`needs setup`) is not
+  refused: picking it — `Enter` on its row, or `Esc` or a click outside the
+  box when it is the default — opens [`/connect`](#connect)'s dialog over the
+  picker, where a key is stored or the ChatGPT plan signed in to without
+  leaving craze (see [Before any session](#connect)). Its fix line says so:
+  `pick it to connect one, or run "craze auth login"`. Every way out of the
+  dialog comes back to the picker, with what came of it on the first line —
+  `connected <provider>: it can be picked now`, or why not — and the states
+  checked again; when native can start now the cursor moves onto it, and
+  `Enter` starts it. Nothing starts on its own.
 - With no row that can start, every choice is refused; `Ctrl+C` still quits.
 - The check reads only files, never the network, and runs as the dialog
   opens. Until it answers every row is ready and a choice is taken as it
   always was.
 
-The states are advice for the dialogs alone: `--provider`, `CRAZE_PROVIDER`
-and `--resume` start exactly as they always have, whatever the check says, so
-a provider it misjudges — cursor's keychain unlocked some other way — can
-still be started by name.
+The states are advice for the dialogs alone: `--provider <id>` and
+`--resume` start exactly as they always have, whatever the check says, so a
+provider it misjudges — cursor's keychain unlocked some other way — can still
+be started by name. `CRAZE_PROVIDER` (like config.toml's `provider`) only
+chooses the dialog's default, which the check gates like any other row:
+`--provider <id>` is the way past it.
 
 `--resume` shows a **resume** picker instead of that dialog, and `--continue`
 skips both and loads a session directly — see [Resuming a
@@ -1119,7 +1131,13 @@ nothing.
   `needs setup`) for its note. `Tab` or `Enter` on one does not choose it:
   the input and the provider new sessions run stay as they were, and the
   popup says `can't start <provider>: <reason> — <fix>` in red under the list
-  until the next key. Choosing one that can start **resets the model** to that
+  until the next key. `native` needing setup is the exception: `Tab`,
+  `Enter` or a typed `/provider native` opens [`/connect`](#connect)'s dialog
+  in place of the list ([Before any session](#connect)), and every way out of
+  it brings the list back as it was — what you had typed, the selected row,
+  the provider new sessions run — with what came of it on the hint line and
+  the states checked again; choose native again once it is ready. Choosing one
+  that can start **resets the model** to that
   provider's default: for cursor, grok and gx, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
@@ -1594,7 +1612,8 @@ signed in to instead, in the same box (below).
 It exists in native sessions only: in a cursor, grok or gx session it is not in
 the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
 what the last row of native's [`/model`](#model-dialog) opens, while some
-provider has no key.
+provider has no key, and what picking native opens before any session while
+no provider has one ([below](#connect)).
 
 - **Step one, `Connect a provider`**, lists every provider craze knows — the
   shipped ones and any in your own `providers.toml` — by name, a `✓` beside each
@@ -1824,8 +1843,34 @@ files](configuration.md#the-chatgpt-plan)). A session attached with `craze
 attach` from a shell with another `CRAZE_HOME` reads its host's directory, not
 this one — which is why step two names the file.
 
-It is no way in on a machine with no key at all: a native session with nothing
-funded does not start, and its error names `craze auth login`, which is.
+**Before any session.** A native session with nothing funded does not start,
+so `/connect` cannot be reached from inside one on a machine with no key at
+all. Picking `native` while it needs setup — in the startup [provider
+dialog](#provider-states), or with the [session list's
+`/provider`](#provider-and-model) — opens the same dialog before any session,
+with the same steps, masked fields, paste rules and sign-in. It differs where
+a session would be involved:
+
+- It belongs to no session. It makes no call to one, asks none to take up
+  models, writes nothing to any transcript, and is never refused because work
+  is running — even when the list it was opened from was opened from inside a
+  session.
+- It stays up until the outcome is in: `Saving the key…` until the key is
+  stored (or the store has not answered in 15 seconds), and after a sign-in
+  `Fetching the plan's models…` until the plan's model list is written.
+- The ChatGPT plan's one-time notice is a step of its own,
+  `You're using your ChatGPT plan.`: `Enter` goes on, and only that `Enter`
+  records it as shown; leaving any other way shows it again next time.
+- Every way out goes back to where it was opened — `Esc` on any step, a click
+  outside the box (which never starts the picker's default), the key stored,
+  the store refusing or not answering, the sign-in finished, declined or
+  failed — and says what came of it there: `connected <provider>: it can be
+  picked now`, `signed in to ChatGPT as <email>: it can be picked now`, or
+  why not. Native's state is then checked again from the files, never
+  assumed. An answer that arrives after the dialog has closed is dropped.
+- `Ctrl+C` or `Ctrl+D` quits craze, as it does from the picker or the list
+  (every session keeps running); a sign-in in progress is cancelled first and
+  its sign-in log closed after its outcome is written.
 
 ## Model dialog
 

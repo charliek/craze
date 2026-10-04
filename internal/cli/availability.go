@@ -217,6 +217,12 @@ const (
 	nativeUnreadFix   = `run "craze auth list" for the error`
 	nativeNoKeyReason = "no model provider has a key"
 	nativeNoKeyFix    = `craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan)`
+	// nativeNoKeyFixTUI is needs_setup's fix where the TUI shows it — its
+	// pickers' detail line and /provider (pickerAvailability) — leading with
+	// what the TUI offers: picking native opens the connect dialog (plan 036
+	// §3.6, X23). It fits the picker's box whole; craze providers and the
+	// hub keep nativeNoKeyFix.
+	nativeNoKeyFixTUI = `pick it to connect one, or run "craze auth login"`
 )
 
 // nativeAvailability is native's state from its directory dir and its

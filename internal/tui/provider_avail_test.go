@@ -30,7 +30,9 @@ const (
 	availCursorReason = "cursor-agent not found on PATH"
 	availCursorFix    = "install cursor-agent, or set [agents].cursor in ~/.craze/config.toml"
 	availNativeReason = "no model provider has a key"
-	availNativeFix    = `craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan)`
+	// availNativeFix is native's fix as the TUI's sources give it (the
+	// check's TUI column, X23): what picking it does, first.
+	availNativeFix = `pick it to connect one, or run "craze auth login"`
 )
 
 // availFixture is the plan's picker (§3.3's goldens): cursor unavailable,
@@ -290,8 +292,9 @@ func TestProviderPickerDropsDefaultFirst(t *testing.T) {
 // TestProviderPickerRefusesWhatCannotStart (A5): Enter on an unavailable row,
 // Esc to an unavailable default and a click outside the box to it are each
 // refused in place — the picker up, no session built, the refusal in the
-// error row — as is Enter on native needing setup (X11); a ready row then
-// starts.
+// error row; Enter on native needing setup is not refused but opens the
+// pre-session connect dialog (plan 036 §3.6, connect_pre_test.go has its
+// every way in and out); a ready row then starts.
 func TestProviderPickerRefusesWhatCannotStart(t *testing.T) {
 	log := &builtLog{}
 	m := availPicker(t, availPickerConfig(t, agent.CursorProvider(), availFixture, nil, log.build), 80, 24)
@@ -319,8 +322,11 @@ func TestProviderPickerRefusesWhatCannotStart(t *testing.T) {
 	tm, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
 	refused("a click outside the box", tm.(Model), cmd, availCursorRefusal)
 	onNative, _ := press(m, tea.KeyMsg{Type: tea.KeyUp})
-	next, cmd = press(onNative, enter())
-	refused("Enter on native", next, cmd, "can't start native: "+availNativeReason+" — "+availNativeFix)
+	next, _ = press(onNative, enter())
+	if !next.preConnectOpen() || !next.pickingProvider || next.providerErr != "" || len(log.got()) != 0 {
+		t.Fatalf("Enter on native: connect dialog %v, picking %v, error row %q, built %v — want the pre-session dialog over the picker",
+			next.preConnectOpen(), next.pickingProvider, next.providerErr, log.got())
+	}
 
 	// Moving off the refused row clears it, and Enter on grok starts grok.
 	next, _ = press(m, enter())
@@ -460,57 +466,108 @@ func TestProviderPickerAsksOffTheUpdate(t *testing.T) {
 	}
 }
 
-// TestProviderPickerTakesOnlyTheLatestAnswer (A5): an answer to an opening
-// the picker has since replaced — a spawn refused brings it back, and asks
-// again — changes nothing, before the latest lands or after.
+// TestProviderPickerTakesOnlyTheLatestAnswer (A5, X12, X25): an answer to an
+// opening the picker has since replaced — a spawn refused brings it back, and
+// asks again — changes nothing, before the latest lands or after; one that
+// lands while a choice has closed the picker (its spawn pending) is dropped
+// outright; and an opening starts with no answer, every row ready until its
+// own lands, even when the opening before it took one. The cases deliver the
+// first opening's answer before the confirmation (taken there, legitimately),
+// between the confirmation and the spawn's refusal (the picker closed), and
+// after the reopening (replaced).
 func TestProviderPickerTakesOnlyTheLatestAnswer(t *testing.T) {
-	log := &builtLog{}
-	var answer atomic.Pointer[[]ProviderAvail]
-	first := availFixture()
-	answer.Store(&first)
-	cfg := availPickerConfig(t, agent.CursorProvider(), func() []ProviderAvail { return *answer.Load() }, nil, log.build)
-	cfg.NewSession = nil
-	cfg.NewBackend = func(agent.Provider, bool) (backend.Backend, error) {
-		return nil, &Refusal{Err: errors.New("craze: grok refused by its host")}
-	}
-	m := New(cfg)
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	stale := runWatched(t, m.Init()).(providerAvailMsg)
-
-	// Before the opening's own answer lands: Enter on grok (ready either way)
-	// spawns, the spawn is refused, and the picker comes back asking afresh.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, cmd := press(m, enter())
-	if m.pickingProvider {
-		t.Fatal("fixture: Enter on grok did not spawn")
-	}
-	spawned := runWatched(t, mustCmd(t, cmd, "spawnCmd")).(spawnedMsg)
-	tm, cmd = m.Update(spawned)
-	m = tm.(Model)
-	if !m.pickingProvider || cmd == nil {
-		t.Fatalf("the refused spawn: picking %v, command %v — want the picker back, asking again", m.pickingProvider, cmd != nil)
-	}
 	second := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "native", State: AvailReady}}
-	answer.Store(&second)
-	latest := runWatched(t, mustCmd(t, cmd, "providerAvailCmd")).(providerAvailMsg)
-	if latest.seq == stale.seq {
-		t.Fatal("fixture: the second opening's request is the first's")
+	// picker is a launch picker whose every spawn its host refuses, the
+	// cursor on grok (ready either way), and the first opening's answer —
+	// cursor unavailable — run but not delivered.
+	picker := func(t *testing.T) (Model, providerAvailMsg, *atomic.Pointer[[]ProviderAvail]) {
+		t.Helper()
+		var answer atomic.Pointer[[]ProviderAvail]
+		first := availFixture()
+		answer.Store(&first)
+		cfg := availPickerConfig(t, agent.CursorProvider(), func() []ProviderAvail { return *answer.Load() }, nil, (&builtLog{}).build)
+		cfg.NewSession = nil
+		cfg.NewBackend = func(agent.Provider, bool) (backend.Backend, error) {
+			return nil, &Refusal{Err: errors.New("craze: grok refused by its host")}
+		}
+		m := New(cfg)
+		tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		m = tm.(Model)
+		stale := runWatched(t, m.Init()).(providerAvailMsg)
+		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+		return m, stale, &answer
+	}
+	// confirm is Enter on grok: the spawn's command, the picker closed.
+	confirm := func(t *testing.T, m Model) (Model, tea.Cmd) {
+		t.Helper()
+		m, cmd := press(m, enter())
+		if m.pickingProvider {
+			t.Fatal("fixture: Enter on grok did not spawn")
+		}
+		return m, cmd
+	}
+	// refuse runs the spawn, whose refusal brings the picker back asking
+	// afresh, and answers that request's command.
+	refuse := func(t *testing.T, m Model, cmd tea.Cmd) (Model, tea.Cmd) {
+		t.Helper()
+		spawned := runWatched(t, mustCmd(t, cmd, "spawnCmd")).(spawnedMsg)
+		tm, cmd := m.Update(spawned)
+		m = tm.(Model)
+		if !m.pickingProvider || cmd == nil {
+			t.Fatalf("the refused spawn: picking %v, command %v — want the picker back, asking again", m.pickingProvider, cmd != nil)
+		}
+		return m, cmd
+	}
+	allReady := func(t *testing.T, how string, m Model) {
+		t.Helper()
+		if m.provAvail != nil || m.providerAnyNotReady() || strings.Contains(plainView(m), "unavailable") {
+			t.Fatalf("%s: the reopened picker draws an earlier answer (%v):\n%s", how, m.provAvail, plainView(m))
+		}
 	}
 
-	// The first opening's answer, late: nothing changes.
-	tm, _ = m.Update(stale)
-	m = tm.(Model)
-	if m.provAvail != nil || m.providerAnyNotReady() {
-		t.Fatalf("a replaced opening's answer was taken: %v", m.provAvail)
-	}
-	tm, _ = m.Update(latest)
-	m = tm.(Model)
-	tm, _ = m.Update(stale)
-	m = tm.(Model)
-	if m.providerAnyNotReady() || m.provAvail["cursor"].State != AvailReady {
-		t.Fatalf("after the latest, the late answer of the first opening was taken: %v", m.provAvail)
-	}
+	t.Run("before the confirmation", func(t *testing.T) {
+		m, stale, _ := picker(t)
+		tm, _ := m.Update(stale)
+		m = tm.(Model)
+		if m.provAvail["cursor"].State != AvailUnavailable {
+			t.Fatal("the control: the open picker did not take its own answer")
+		}
+		m, cmd := confirm(t, m)
+		m, _ = refuse(t, m, cmd)
+		allReady(t, "an answer taken before the confirmation", m)
+	})
+	t.Run("between the confirmation and the refusal", func(t *testing.T) {
+		m, stale, _ := picker(t)
+		m, cmd := confirm(t, m)
+		tm, _ := m.Update(stale)
+		m = tm.(Model)
+		if m.provAvail != nil {
+			t.Fatalf("an answer landing while the picker was closed was taken: %v", m.provAvail)
+		}
+		m, _ = refuse(t, m, cmd)
+		allReady(t, "an answer landing while the spawn was pending", m)
+	})
+	t.Run("after the reopening", func(t *testing.T) {
+		m, stale, answer := picker(t)
+		m, cmd := confirm(t, m)
+		m, cmd = refuse(t, m, cmd)
+		answer.Store(&second)
+		latest := runWatched(t, mustCmd(t, cmd, "providerAvailCmd")).(providerAvailMsg)
+		if latest.seq == stale.seq {
+			t.Fatal("fixture: the second opening's request is the first's")
+		}
+		// The first opening's answer, late: nothing changes.
+		tm, _ := m.Update(stale)
+		m = tm.(Model)
+		allReady(t, "a replaced opening's answer", m)
+		tm, _ = m.Update(latest)
+		m = tm.(Model)
+		tm, _ = m.Update(stale)
+		m = tm.(Model)
+		if m.providerAnyNotReady() || m.provAvail["cursor"].State != AvailReady {
+			t.Fatalf("after the latest, the late answer of the first opening was taken: %v", m.provAvail)
+		}
+	})
 }
 
 // ------------------------------------------------------------ /provider
@@ -604,9 +661,10 @@ func providersLoaded(t *testing.T, m Model, text string) Model {
 // provider's state — the reason in place of its detail, the state word for
 // its note — and Enter or Tab on one that cannot start takes nothing: the
 // input and what new sessions run stay as they were, and the popup, still up,
-// says why until the next key. Native needing setup is refused the same way
-// (X11). A ready one is taken; a typed `/provider <id>` with the popup put
-// away is refused on the hint line, the line left as typed.
+// says why until the next key. Native needing setup carries no refusal: Enter
+// on it opens the pre-session connect dialog instead (plan 036 §3.6,
+// connect_pre_test.go). A ready one is taken; a typed `/provider <id>` with
+// the popup put away is refused on the hint line, the line left as typed.
 func TestSessProviderDimsAndRefuses(t *testing.T) {
 	m, as := availListModel(t, availFixture())
 	m, cmd := openAvailList(t, m, as)
@@ -619,7 +677,7 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 	if cur.Detail != availCursorReason || cur.Note != "unavailable" || cur.Tone != completeToneDim || cur.Refusal != availCursorRefusal {
 		t.Fatalf("cursor's item: %+v", cur)
 	}
-	if nat.Note != "needs setup" || nat.Refusal == "" {
+	if nat.Note != "needs setup" || nat.Tone != completeToneDim || nat.Refusal != "" {
 		t.Fatalf("native's item: %+v", nat)
 	}
 	if g := cmdItem(t, m, "grok"); g.Refusal != "" || g.Note == "unavailable" {
@@ -656,8 +714,9 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 	refused("Tab on cursor", next)
 	onNative, _ := press(m, tea.KeyMsg{Type: tea.KeyUp})
 	next, _ = press(onNative, enter())
-	if next.sessList.in.cmd.ans.Note != "can't start native: "+availNativeReason+" — "+availNativeFix || !reflect.DeepEqual(next.sessPick, pickBefore) {
-		t.Fatalf("Enter on native: note %q, pick %+v", next.sessList.in.cmd.ans.Note, next.sessPick)
+	if !next.preConnectOpen() || next.sessList.open || !reflect.DeepEqual(next.sessPick, pickBefore) {
+		t.Fatalf("Enter on native: connect dialog %v, list open %v, pick %+v — want the pre-session dialog, nothing taken",
+			next.preConnectOpen(), next.sessList.open, next.sessPick)
 	}
 
 	// A ready one is taken.

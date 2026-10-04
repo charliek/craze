@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"strings"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/chatgptauth"
 )
 
 const (
@@ -112,17 +114,29 @@ const (
 	// availRefuse: refuse it in place — the picker's error row, the
 	// popup's note — and start nothing.
 	availRefuse
+	// availConnect: open the pre-session connect dialog (plan 036 §3.6),
+	// which goes back to the picker it was chosen in, and start nothing:
+	// native with no model provider that has a key, which /connect is the
+	// way to give one.
+	availConnect
 )
 
 // availVerdictOf is the one place a picker decides what choosing a provider
 // in state a does: both pickers, every way of choosing (Enter, Esc to the
 // default, a click outside the box; Enter, Tab or a typed /provider), ask it.
-// unavailable refuses in place; native's needs_setup refuses in place too in
-// this build (plan 036 X11), the arm the pre-session connect dialog replaces
-// (§3.6) — so it is decided here once, never at the call sites.
+// unavailable refuses in place; native's needs_setup opens the pre-session
+// connect dialog (plan 036 §3.6, decision 4; X11's arm) — so it is decided
+// here once, never at the call sites. A needs_setup no connect dialog can
+// set up — any provider but native, which the check never answers — is
+// refused as unavailable is.
 func availVerdictOf(a ProviderAvail) availVerdict {
 	switch a.State {
-	case AvailUnavailable, AvailNeedsSetup:
+	case AvailUnavailable:
+		return availRefuse
+	case AvailNeedsSetup:
+		if a.ID == nativeProviderName {
+			return availConnect
+		}
 		return availRefuse
 	}
 	return availStart
@@ -135,10 +149,13 @@ type provChoice struct {
 	a ProviderAvail
 }
 
+// verdict is what choosing c comes to (availVerdictOf).
+func (c provChoice) verdict() availVerdict { return availVerdictOf(c.a) }
+
 // refusal is the words choosing c is refused with, "" when it is not
-// (availVerdictOf).
+// (availVerdictOf) — started, or the connect dialog opened.
 func (c provChoice) refusal() string {
-	if availVerdictOf(c.a) == availRefuse {
+	if c.verdict() == availRefuse {
 		return availRefusal(c.p, c.a)
 	}
 	return ""
@@ -173,7 +190,27 @@ func availByID(avail []ProviderAvail) map[string]ProviderAvail {
 // as the picker opens (plan 036 §3.3): a new request, the only one an answer
 // is taken for from now on, run off the Update since the check reads the
 // disk. nil with no callback: every row stays ready.
+//
+// An opening is a new one — New's, or a refused spawn's that brings the
+// picker back — so it starts with no answer at all: every row ready until its
+// own lands (X12), never the states an earlier opening was answered with
+// (X25: an answer taken while a spawn was pending, or before it, would
+// otherwise dim and refuse rows in the opening after).
 func (m *Model) askProviderAvail() tea.Cmd {
+	if m.availability == nil {
+		return nil
+	}
+	m.provAvail = nil
+	return m.reaskProviderAvail()
+}
+
+// reaskProviderAvail asks again within the opening that is up: the
+// pre-session connect dialog going back to the picker (plan 036 §3.6), which
+// stays open under it. The states it shows are kept until the new answer
+// lands — native's still needs setup until the store says otherwise, so an
+// Enter in between opens the dialog again rather than starting a native that
+// cannot start — and the request is the only one an answer is taken for.
+func (m *Model) reaskProviderAvail() tea.Cmd {
 	if m.availability == nil {
 		return nil
 	}
@@ -192,10 +229,26 @@ func (m Model) providerAvailCmd() tea.Cmd {
 }
 
 // providerAvailed takes an answer for the startup picker — only the latest
-// request's: an earlier one, from an opening since replaced, changes nothing.
+// request's, and only while the picker is up: an earlier one, from an opening
+// since replaced, changes nothing, nor does one that lands once a choice has
+// closed the picker (its spawn pending, say), which no later opening may be
+// drawn from (X25).
+//
+// The answer to the pre-session connect dialog's return (availNative) also
+// moves the cursor onto native when it says native is ready now (plan 036
+// decision 5, X21): Enter then starts it. Nothing starts on its own.
 func (m Model) providerAvailed(msg providerAvailMsg) Model {
-	if msg.seq == m.availSeq {
-		m.provAvail = availByID(msg.avail)
+	if msg.seq != m.availSeq || !m.pickingProvider {
+		return m
+	}
+	m.provAvail = availByID(msg.avail)
+	if m.availNative != 0 && m.availNative == msg.seq {
+		m.availNative = 0
+		for i, p := range m.providers {
+			if p.Name() == nativeProviderName && m.providerChoice(p).a.ready() {
+				m.providerCursor = i
+			}
+		}
 	}
 	return m
 }
@@ -295,26 +348,40 @@ func (m Model) providerIndex(p agent.Provider) int {
 // persisted on startedMsg either.
 //
 // Availability comes after it (plan 036 §3.3, decision 4), so the command
-// line's refusals keep their order: a provider that is not ready is refused
+// line's refusals keep their order: a provider that is unavailable is refused
 // the same way, in its own words (provChoice.refusal) — Enter on its row,
 // and Esc or a click outside the box when it is the default. With every row
 // refused every confirmation is; Ctrl+C still quits (handleKey's, ahead of
-// the dialog).
+// the dialog). Native needing setup is not refused: the same three open the
+// pre-session connect dialog over the picker (§3.6), which stays up under it
+// — pickingProvider holds, nothing is built — and comes back to it.
+//
+// A choice that starts takes the connect dialog's state down with the picker
+// (Plan 031's invariant: no /connect state outlives its dialog), its sign-in
+// ended, whatever left it.
 func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.Cmd) {
 	if p.Name() == "" {
 		p = agent.CursorProvider()
 	}
+	// Whatever the choice comes to, the detail lines' last word — a refusal,
+	// or what the connect dialog came back with — is replaced by it.
+	m.providerErr, m.providerBack = "", connectBack{}
 	if m.refuseLoad != nil {
 		if err := m.refuseLoad(p); err != nil {
 			m.providerErr = err.Error()
 			return m, nil
 		}
 	}
-	if refusal := m.providerChoice(p).refusal(); refusal != "" {
-		m.providerErr = refusal
+	switch c := m.providerChoice(p); c.verdict() {
+	case availRefuse:
+		m.providerErr = c.refusal()
 		return m, nil
+	case availConnect:
+		return m.openPreConnect(returnPicker)
 	}
-	m.providerErr = ""
+	m.availNative = 0
+	m.cdlg.signIn.end(chatgptauth.CloseDialog)
+	m.cdlg = connectDialog{}
 	m.pickingProvider = false
 	m.dialog = dialogNone
 	m.pickedExplicit = explicit
@@ -367,16 +434,22 @@ func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.confirmProvider(m.providerDefault, false)
 	case tea.KeyUp, tea.KeyShiftTab:
 		m.providerCursor = (m.providerCursor - 1 + n) % n
-		// A refusal is about the row it was for: once the cursor leaves it,
-		// the error row goes.
-		m.providerErr = ""
-		return m, nil
+		return m.providerMoved(), nil
 	case tea.KeyDown, tea.KeyTab:
 		m.providerCursor = (m.providerCursor + 1) % n
-		m.providerErr = ""
-		return m, nil
+		return m.providerMoved(), nil
 	}
 	return m, nil
+}
+
+// providerMoved is the cursor moved by the user, a key or a click: a refusal
+// is about the row it was for, and what the connect dialog came to about the
+// moment it came back, so both go with the move; and the answer the dialog's
+// return asked for no longer moves the cursor onto native (availNative) —
+// the user has put it where they want it.
+func (m Model) providerMoved() Model {
+	m.providerErr, m.providerBack, m.availNative = "", connectBack{}, 0
+	return m
 }
 
 // providerDialogPlan is the window onto the row list and whether the footer
@@ -425,15 +498,16 @@ func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
 // row, or the first detail line it shares with it — and fits the budget: the
 // title, one list row and itself.
 func (m Model) providerLineShown(budget int) bool {
-	return (m.providerErr != "" || m.providerAnyNotReady()) && budget >= 3
+	return (m.providerErr != "" || m.providerBack.text != "" || m.providerAnyNotReady()) && budget >= 3
 }
 
 // providerFixShown is whether the second detail line — the fix — is drawn:
-// with a row that is not ready, and only when the whole box fits beside it
-// (the title, every row, the first line and the footer), since it is the
-// first row a short box gives up (plan 036 X22).
+// with a row that is not ready, or what the connect dialog came to (it wraps
+// onto this line), and only when the whole box fits beside it (the title,
+// every row, the first line and the footer), since it is the first row a
+// short box gives up (plan 036 X22).
 func (m Model) providerFixShown(budget int) bool {
-	return m.providerAnyNotReady() && budget >= len(m.providers)+4
+	return (m.providerAnyNotReady() || m.providerBack.text != "") && budget >= len(m.providers)+4
 }
 
 // providerRefusalLines is the refusal as the detail lines draw it (X22): a
@@ -451,9 +525,12 @@ func (m Model) providerRefusalLines() (head, fix string) {
 }
 
 // providerLines are the rows under the list (providerDialogPlan): the
-// refusal in the error colour and the fix that goes with it, dim; else, on a
-// row that is not ready, its reason and its fix, dim; else nothing — the rows
-// are held for the next one.
+// refusal in the error colour and the fix that goes with it, dim; else what
+// the pre-session connect dialog came to as it came back (plan 036 §3.6) —
+// `connected …` in the ok colour, a failure in the error colour — wrapped
+// over both rows, the second cut short when it runs on; else, on a row that
+// is not ready, its reason and its fix, dim; else nothing — the rows are held
+// for the next one.
 func (m Model) providerLines(inner int) (first, fix string) {
 	dim := styleFG(m.theme.Dim)
 	if m.providerErr != "" {
@@ -462,6 +539,14 @@ func (m Model) providerLines(inner int) (first, fix string) {
 			fix = dim.Render(clampWidth(f, inner))
 		}
 		return styleFG(m.theme.Err).Render(clampWidth(head, inner)), fix
+	}
+	if b := m.providerBack; b.text != "" {
+		st := m.sessNoteStyle(b.kind)
+		lines := dialogWrap(b.text, inner)
+		if len(lines) > 1 {
+			fix = st.Render(clampWidth(strings.Join(lines[1:], " "), inner))
+		}
+		return st.Render(clampWidth(lines[0], inner)), fix
 	}
 	if n := len(m.providers); n > 0 && m.providerCursor >= 0 && m.providerCursor < n {
 		if c := m.providerChoice(m.providers[m.providerCursor]); !c.a.ready() {
@@ -531,7 +616,7 @@ func (m Model) providerDialogClick(i int) (tea.Model, tea.Cmd) {
 	if top+row != m.providerCursor {
 		// The click moves the cursor, as a key would, and the refusal was
 		// about the row it leaves.
-		m.providerErr = ""
+		m = m.providerMoved()
 	}
 	m.providerCursor = top + row
 	return m, nil

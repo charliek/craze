@@ -648,10 +648,11 @@ func pickerEntries(as []tui.ProviderAvail) []availEntry {
 // pickerProviders gives tui.New are exactly the providers that answer
 // names, less a default only the answer adds (tui.New adds it to the rows
 // itself), so the rows and their states cannot disagree about which
-// providers there are.
+// providers there are. Native needing setup carries the TUI's fix (X23),
+// while the check itself — craze providers', the hub's — keeps the CLI's.
 func TestPickerAvailability(t *testing.T) {
 	cursor, gx := agent.CursorProvider(), agent.GxProvider()
-	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}
+	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFixTUI}
 	gxMissing := availEntry{"gx", "unavailable", "gx not found", "install gx, or set [agents].gx"}
 	for _, tc := range []struct {
 		name   string
@@ -675,6 +676,11 @@ func TestPickerAvailability(t *testing.T) {
 			crazeHome(t)
 			t.Setenv(envAgentBin, "")
 			got := pickerEntries(pickerAvailability(tc.def, "", tc.def))
+			for _, a := range availability(processAvailInputs(tc.def, ""), agent.Providers()) {
+				if a.P.Name() == "native" && (a.State != availNeedsSetup || a.Fix != nativeNoKeyFix) {
+					t.Fatalf("the check's own native: %s %q, want needs_setup with the CLI's fix", a.State, a.Fix)
+				}
+			}
 			for i := range got {
 				if tc.want[i].ID == "cursor" && tc.want[i].Fix == "" {
 					got[i].Fix = "" // the config path, which the case does not pin

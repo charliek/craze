@@ -859,23 +859,36 @@ type signInCopiedMsg struct{ gen, run, n uint64 }
 
 // signInDoneMsg is a run's wait: the sign-in's result, or why it ended. It
 // carries the account's email, never a token, and the attempt's observer, for
-// the model fetch that follows a sign-in (Attempt.Observer).
+// the model fetch that follows a sign-in (Attempt.Observer). Its stamp names
+// the run; pre says the run is the pre-session dialog's (plan 036 §3.6),
+// whose step alone takes it (preSignInDone).
 type signInDoneMsg struct {
-	gen, run uint64
-	res      chatgptauth.Result
-	err      error
-	observe  func(chatgptauth.Event)
+	signInStamp
+	res     chatgptauth.Result
+	err     error
+	observe func(chatgptauth.Event)
 }
 
 // signInFinishedMsg is the work after a sign-in, off the Update: the plan's
 // models as aliases (or why they could not be fetched) and whether the notice
 // could be recorded as shown. shownGen is the shown-session generation it was
-// asked under, as a key's save's notice is (connectSavedMsg).
+// asked under, as a key's save's notice is (connectSavedMsg). Its stamp names
+// the dialog and the run it finishes, which only the pre-session dialog reads
+// (preSignInFinished): a session's sign-in is said whatever is on screen.
 type signInFinishedMsg struct {
+	signInStamp
 	shownGen  uint64
 	aliases   []string
 	modelsErr string
 	noticeErr string
+}
+
+// signInStamp names a sign-in's run for an answer that outlives its step: the
+// dialog numbered gen, the run numbered run, and whether that dialog is the
+// pre-session one (plan 036 §3.6).
+type signInStamp struct {
+	gen, run uint64
+	pre      bool
 }
 
 func (signInBegunMsg) connectAnswer()    {}
@@ -925,7 +938,7 @@ func (m Model) openSignInStep() (Model, tea.Cmd) {
 	m.cdlg.step, m.cdlg.field, m.cdlg.key, m.cdlg.keyErr = connectSignIn, m.connSeq, ti, ""
 	m.cdlg.signIn = signInState{runs: m.signIns, run: m.connSeq, cancel: cancel}
 	log, logWait := m.signIns.logFor(m.nativeDir)
-	return m, tea.Batch(beginSignInCmd(ctx, m.signIns, log, m.cdlg.gen, m.connSeq, m.nativeDir), logWait)
+	return m, tea.Batch(beginSignInCmd(ctx, m.signIns, log, signInStamp{gen: m.cdlg.gen, run: m.connSeq, pre: m.cdlg.pre}, m.nativeDir), logWait)
 }
 
 // errNoSignInDir is a sign-in with no native directory to sign in to.
@@ -942,9 +955,12 @@ var errNoSignInDir = errors.New("there is no craze directory to sign in to (set 
 // over log, the runs' sign-in log, and the run's shown events (signInShown):
 // its begin, read as Begin returns, and the delivery of the rest, made here
 // with ctx too. However it returns, it says so to runs (signInRuns.begun),
-// for finishRun's wait for the run's outcome.
-func beginSignInCmd(ctx context.Context, runs *signInRuns, log *signinlog.Log, gen, run uint64, dir string) tea.Cmd {
+// for finishRun's wait for the run's outcome. st names the run: its dialog,
+// its number, and whether the dialog is the pre-session one, which the wait's
+// answer carries (signInDoneMsg's stamp).
+func beginSignInCmd(ctx context.Context, runs *signInRuns, log *signinlog.Log, st signInStamp, dir string) tea.Cmd {
 	begin := beginSignIn
+	gen, run := st.gen, st.run
 	return func() tea.Msg {
 		defer runs.begun(run)
 		msg := signInBegunMsg{gen: gen, run: run}
@@ -964,7 +980,7 @@ func beginSignInCmd(ctx context.Context, runs *signInRuns, log *signinlog.Log, g
 			return msg
 		}
 		msg.att, msg.begin = att, shown.begun()
-		msg.wait, msg.events = waitSignInCmd(ctx, gen, run, att, shown), signInEventsCmd(ctx, gen, run, shown)
+		msg.wait, msg.events = waitSignInCmd(ctx, st, att, shown), signInEventsCmd(ctx, gen, run, shown)
 		return msg
 	}
 }
@@ -973,11 +989,11 @@ func beginSignInCmd(ctx context.Context, runs *signInRuns, log *signinlog.Log, g
 // and the sign-in it finishes (chatgptauth.Attempt.Wait), under ctx: the
 // step's end cancels it, which closes the listener. Its return ends the
 // delivery of the run's shown events (signInShown.waited).
-func waitSignInCmd(ctx context.Context, gen, run uint64, att signInAttempt, shown *signInShown) tea.Cmd {
+func waitSignInCmd(ctx context.Context, st signInStamp, att signInAttempt, shown *signInShown) tea.Cmd {
 	return func() tea.Msg {
 		res, err := att.Wait(ctx)
 		shown.waited()
-		return signInDoneMsg{gen: gen, run: run, res: res, err: err, observe: att.Observer()}
+		return signInDoneMsg{signInStamp: st, res: res, err: err, observe: att.Observer()}
 	}
 }
 
@@ -989,9 +1005,19 @@ func (m Model) signInOpen(gen, run uint64) bool {
 
 // applySignIn applies the step's answers (applyConnect), and the sign-in
 // log's stop: its one note, why it could not be kept (signInRuns.mention).
+//
+// The pre-session dialog's answers (plan 036 §3.6) write nothing to the
+// transcript: they go to the dialog's own steps (connect_pre.go), and the
+// way out says what came of them where the dialog goes back. Nor does the
+// log's note while that dialog, or a picker, is up — no session is there to
+// hold it: it is left unsaid, and finishRun prints it once the screen is
+// restored, as it prints a failure no Update applied (closeLog).
 func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case signInLogOffMsg:
+		if m.cdlg.pre || m.picking() {
+			return m, nil
+		}
 		if note := m.signIns.mention(); note != "" {
 			m.addNote(note)
 		}
@@ -1007,6 +1033,9 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			if m.cdlg.pre {
+				return m.preExit(connectBack{text: preSignInStartText + signInErrorText(msg.err), kind: sessNoteErr}), nil
+			}
 			m = m.closeDialog(false)
 			m.addError("/connect: the sign-in could not start: " + signInErrorText(msg.err))
 			return m, nil
@@ -1031,6 +1060,9 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 			s.copied = false
 		}
 	case signInDoneMsg:
+		if msg.pre {
+			return m.preSignInDone(msg)
+		}
 		open := m.signInOpen(msg.gen, msg.run)
 		if msg.err != nil {
 			// A run that has ended — the person left, or the box closed —
@@ -1054,17 +1086,13 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		}
 		return m.signedIn(msg.res, msg.observe)
 	case signInFinishedMsg:
+		if msg.pre {
+			return m.preSignInFinished(msg)
+		}
 		if msg.noticeErr != "" {
 			m.addNote("the notice above could not be recorded as shown, so it may be shown again: " + msg.noticeErr)
 		}
-		switch {
-		case msg.modelsErr != "":
-			m.addNote("the plan's model list could not be fetched (" + msg.modelsErr + "); a native session fetches it when it opens")
-		case len(msg.aliases) == 0:
-			m.addNote("ChatGPT plan models: none listed for this account.")
-		default:
-			m.addNote("ChatGPT plan models: " + sanitizeLine(strings.Join(msg.aliases, ", ")))
-		}
+		m.addNote(planModelsText(msg, "ChatGPT plan models: none listed for this account."))
 		// The plan's list is written (or could not be): the session is asked
 		// to take it up (plan 034 §3.4), and the last note says what came of
 		// it.
@@ -1076,6 +1104,31 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// planModelsText is what the work after a sign-in came to with the plan's
+// models (signInFinishedMsg) — the fetch's failure, or the models — in the
+// words the transcript and the pre-session dialog (plan 036 §3.6) share;
+// none is each one's own for an account with no models listed.
+func planModelsText(msg signInFinishedMsg, none string) string {
+	switch {
+	case msg.modelsErr != "":
+		return "the plan's model list could not be fetched (" + msg.modelsErr + "); a native session fetches it when it opens"
+	case len(msg.aliases) == 0:
+		return none
+	}
+	return "ChatGPT plan models: " + sanitizeLine(strings.Join(msg.aliases, ", "))
+}
+
+// signedInAs is a finished sign-in's head — the transcript's and the
+// pre-session dialog's step (signedInPrefix), or the words that dialog goes
+// back with (preSignedInHead, plan 036 §3.6) — and as whom, when the account
+// said.
+func signedInAs(head, email string) string {
+	if email != "" {
+		return head + " as " + email
+	}
+	return head
+}
+
 // signedIn writes a finished sign-in to the transcript (plan 033 §3.13): the
 // account, then — with plan usage, the first time this registration signs in
 // with it — the notice, then, off the Update, the notice recorded and the
@@ -1083,10 +1136,7 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 // attempt's observer. Without plan usage, the explanation and how to grant
 // it.
 func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event)) (Model, tea.Cmd) {
-	who := signedInPrefix
-	if e := sanitizeLine(res.Email); e != "" {
-		who += " as " + e
-	}
+	who := signedInAs(signedInPrefix, sanitizeLine(res.Email))
 	if !res.PlanUsage {
 		m.addNote(who + planUsageOffText)
 		m.addNote(planUsageOffHow)
@@ -1097,21 +1147,21 @@ func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event))
 		m.addNote(chatgptauth.NoticeTitle)
 		m.addNote(chatgptauth.Notice)
 	}
-	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, res.ShowNotice, observe)
+	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, res.ShowNotice, observe, signInStamp{})
 }
 
 // finishSignInCmd is the work after a sign-in, off the Update: the notice
 // recorded as shown when it was (noticeShown), then the plan's models fetched
 // into dir, as aliases, the fetch reporting to observe. A failure of either is
 // a note: the sign-in stands, and a native session fetches the list when it
-// opens.
+// opens. Its answer carries st, the run it finishes (signInFinishedMsg).
 //
 // It is recorded in runs while it runs (startFinish), so the program's end
 // cancels it and waits for it, bounded, before the sign-in log closes: the
 // fetch's outcome — fetched, empty or failed, cancelled by the end itself —
 // is the attempt's last record (review r6 #1). One that would start after
 // that end does nothing.
-func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event)) tea.Cmd {
+func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event), st signInStamp) tea.Cmd {
 	mark, fetch := markNoticeShown, fetchPlanModels
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), signInFinishTimeout)
@@ -1121,7 +1171,7 @@ func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown boo
 			return nil
 		}
 		defer done()
-		msg := signInFinishedMsg{shownGen: shown}
+		msg := signInFinishedMsg{signInStamp: st, shownGen: shown}
 		if noticeShown {
 			if err := mark(ctx, dir); err != nil {
 				msg.noticeErr = signInErrorText(err)
