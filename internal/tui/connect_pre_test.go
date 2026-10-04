@@ -24,6 +24,7 @@ import (
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/signinlog"
 )
 
 // The pre-session connect dialog (plan 036 §3.6, A7) as unit tests, every one
@@ -1535,4 +1536,192 @@ func TestPreConnectAReopenedDialogTakesNoStaleAnswer(t *testing.T) {
 	if native(m) != AvailNeedsSetup {
 		t.Fatalf("N+1's own answer: native %q, want needs_setup", native(m))
 	}
+}
+
+// mixedLog is a native session whose TUI has a session list that can start
+// sessions — native needing setup there — over preFixture's directory with
+// the ChatGPT plan, its logs directory a symlink: the shared sign-in log stops
+// as its writer sets up, and the writer is held until release
+// (signinlog.Options.Stall), so a test orders the failure, the watcher and
+// the sign-ins that take the log as it likes (plan 036 r6, X36).
+type mixedLog struct {
+	m       Model
+	release func()
+}
+
+func newMixedLog(t *testing.T) mixedLog {
+	t.Helper()
+	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
+	dir, getenv := preFixture(t, true, false)
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "logs")); err != nil {
+		t.Fatal(err)
+	}
+	stall := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(stall) }) }
+	prevOpen := openSignInLog
+	openSignInLog = func(d string) (*signinlog.Log, error) {
+		return signinlog.OpenWith(d, signinlog.Options{Stall: stall})
+	}
+	t.Cleanup(func() { openSignInLog = prevOpen })
+	fs := &startSessions{fakeSessions: &fakeSessions{}}
+	m := connectModelOf(t, Config{Session: nativeStub(), NativeDir: dir, Getenv: getenv,
+		Sessions: &preSessions{startSessions: fs, avail: preStates(dir, getenv, nil)}})
+	// Released before the log closes (connectModelOf's cleanup, registered
+	// first, runs after this one): a held writer would hold Close a second.
+	t.Cleanup(release)
+	return mixedLog{m: m, release: release}
+}
+
+// stop releases the writer and waits for the log to stop.
+func (x mixedLog) stop(t *testing.T, m Model) {
+	t.Helper()
+	x.release()
+	select {
+	case <-m.signIns.log.Stopped():
+	case <-time.After(pumpWatchdog):
+		t.Fatal("the sign-in log did not stop")
+	}
+}
+
+// inSessionSignIn begins the session's own /connect sign-in, answering the
+// command it armed beside its begin for the log: the watcher, for the first
+// sign-in of the TUI; its own notice, or nil, for a later one.
+func inSessionSignIn(t *testing.T, m Model) (Model, tea.Cmd) {
+	t.Helper()
+	m, _ = typeCommand(t, m, "/connect")
+	if m.dialog != dialogConnect || m.cdlg.pre {
+		t.Fatalf("fixture: /connect opened dialog %v (pre %v)", m.dialog, m.cdlg.pre)
+	}
+	m, _, logCmd := beginStepLog(t, preSelect(t, m, "chatgpt"))
+	return m, logCmd
+}
+
+// leaveInSession is Esc twice: off the sign-in, then out of the dialog.
+func leaveInSession(t *testing.T, m Model) Model {
+	t.Helper()
+	m = pressKey(t, pressKey(t, m, tea.KeyEsc), tea.KeyEsc)
+	if m.dialog != dialogNone {
+		t.Fatalf("fixture: Esc twice left dialog %v up", m.dialog)
+	}
+	return m
+}
+
+// preSessionSignIn opens the list (←), opens the pre-session dialog from its
+// /provider native, and begins its sign-in, answering the command the begin
+// armed for the log.
+func preSessionSignIn(t *testing.T, m Model) (Model, tea.Cmd) {
+	t.Helper()
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m = listSnap(t, m, roster.Snapshot{})
+	m = takeOpenRead(t, m, cmd)
+	m, _ = preOpen(t, returnList, m)
+	m, _, logCmd := beginStepLog(t, preSelect(t, m, "chatgpt"))
+	return m, logCmd
+}
+
+// leavePre is Esc on the pre-session dialog — the list back — and the list
+// left for the session behind it.
+func leavePre(t *testing.T, m Model) Model {
+	t.Helper()
+	m = pressKey(t, clearInput(t, pressKey(t, m, tea.KeyEsc)), tea.KeyEsc)
+	if m.sessList.open || m.dialog != dialogNone {
+		t.Fatalf("fixture: leaving the dialog and the list: list %v, dialog %v", m.sessList.open, m.dialog)
+	}
+	return m
+}
+
+// logNotes counts the transcript's notes about the sign-in log.
+func logNotes(m Model) int { return strings.Count(transcriptText(m), "the sign-in log is off: ") }
+
+// logOff runs cmd, a command armed for the sign-in log, to its answer.
+func logOff(t *testing.T, cmd tea.Cmd) signInLogOffMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("no command was armed for the sign-in log")
+	}
+	msg, ok := runWatched(t, cmd).(signInLogOffMsg)
+	if !ok {
+		t.Fatalf("the log's command answered %T", msg)
+	}
+	return msg
+}
+
+// TestTheSignInLogsStopIsToldByWhoHadIt (plan 036 r6, X36): the sign-in log
+// is the TUI's, shared by every sign-in — a session's /connect and the
+// pre-session dialog's alike — and its stop is told by the run that had it as
+// it stopped, frozen then: a later sign-in that takes it never relabels the
+// failure, however late the watcher resumes. A pre-session run's stop is said
+// on no transcript; a session's run's is the transcript's one note. In both
+// orders, a sign-in takes the log between its failure and the watcher's
+// resuming, or between the watcher's arming and the failure (the record then
+// counts as the later run's). A session's sign-in that takes a log a
+// pre-session failure stopped is told on its own.
+func TestTheSignInLogsStopIsToldByWhoHadIt(t *testing.T) {
+	t.Run("pre-session, then a session's sign-in after the failure", func(t *testing.T) {
+		x := newMixedLog(t)
+		m, watcher := preSessionSignIn(t, x.m)
+		x.stop(t, m)
+		m = leavePre(t, m)
+		m, told := inSessionSignIn(t, m)
+		if off := logOff(t, watcher); !off.stamp.pre {
+			t.Fatalf("the watcher told the stop as %+v; want the pre-session run that had the log", off.stamp)
+		} else if m = applyMsg(t, m, off); logNotes(m) != 0 {
+			t.Fatalf("a pre-session run's stop reached the transcript:\n%s", transcriptText(m))
+		}
+		if own := logOff(t, told); own.stamp.pre {
+			t.Fatalf("the session's sign-in was told as %+v", own.stamp)
+		} else if m = applyMsg(t, m, own); logNotes(m) != 1 {
+			t.Fatalf("the session's sign-in on a stopped log: %d notes, want its one:\n%s", logNotes(m), transcriptText(m))
+		}
+	})
+	t.Run("pre-session, then a session's sign-in before the failure", func(t *testing.T) {
+		x := newMixedLog(t)
+		m, watcher := preSessionSignIn(t, x.m)
+		m = leavePre(t, m)
+		m, told := inSessionSignIn(t, m)
+		if told != nil {
+			t.Fatal("a sign-in on a log still writing was told it stopped")
+		}
+		x.stop(t, m)
+		if off := logOff(t, watcher); off.stamp.pre {
+			t.Fatalf("the watcher told the stop as %+v; want the session's run that had the log", off.stamp)
+		} else if m = applyMsg(t, m, off); logNotes(m) != 1 {
+			t.Fatalf("the session's run's stop: %d notes, want one:\n%s", logNotes(m), transcriptText(m))
+		}
+	})
+	t.Run("a session's sign-in, then pre-session after the failure", func(t *testing.T) {
+		x := newMixedLog(t)
+		m, watcher := inSessionSignIn(t, x.m)
+		x.stop(t, m)
+		m = leaveInSession(t, m)
+		m, told := preSessionSignIn(t, m)
+		if told != nil {
+			t.Fatal("a pre-session run on a stopped log was told on its own")
+		}
+		if off := logOff(t, watcher); off.stamp.pre {
+			t.Fatalf("the watcher told the stop as %+v; want the session's run that had the log", off.stamp)
+		} else if m = applyMsg(t, m, off); logNotes(m) != 1 {
+			t.Fatalf("the session's run's stop, the pre-session dialog up: %d notes, want the session's one:\n%s",
+				logNotes(m), transcriptText(m))
+		}
+	})
+	t.Run("a session's sign-in, then pre-session before the failure", func(t *testing.T) {
+		x := newMixedLog(t)
+		initial := x.m
+		m, watcher := inSessionSignIn(t, x.m)
+		m = leaveInSession(t, m)
+		m, _ = preSessionSignIn(t, m)
+		x.stop(t, m)
+		if off := logOff(t, watcher); !off.stamp.pre {
+			t.Fatalf("the watcher told the stop as %+v; want the pre-session run that had the log", off.stamp)
+		} else if m = applyMsg(t, m, off); logNotes(m) != 0 {
+			t.Fatalf("a pre-session run's stop reached the transcript:\n%s", transcriptText(m))
+		}
+		var out strings.Builder
+		_, _ = finishRun(&out, nil, initial, nil)
+		if !strings.Contains(out.String(), "craze: the sign-in log is off: ") {
+			t.Fatalf("finishRun did not say the log was off: %q", out.String())
+		}
+	})
 }

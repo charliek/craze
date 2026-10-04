@@ -386,7 +386,17 @@ type signInRuns struct {
 	logErr    error         // the open's refusal
 	logTold   bool          // the one transcript note was written
 	logDone   chan struct{} // closed by closeLog: the log's wait (signInLogCmd) ends
-	logBy     signInStamp   // the run that took the log last (logFor): whose records it is writing
+	// logBy is the run that took the log last (logFor): whose records it is
+	// writing. logFailBy is the run that had it as it stopped, frozen the
+	// first time the stop is seen (logFailedByLocked) — by the watcher, or by
+	// an attachment, which freezes it before it relabels logBy — so no later
+	// attachment relabels a failure (plan 036 r6, X36). logRearmed says an
+	// in-session run that took a log a pre-session run's failure had stopped
+	// was told on its own (logFor).
+	logBy      signInStamp
+	logFailBy  signInStamp
+	logFailSet bool
+	logRearmed bool
 }
 
 // signInRun is one run's: its context's cancel, once begun its attempt, and
@@ -631,9 +641,19 @@ var onAwaitEnds func()
 // Update (openSignInStep), under logMu: the open touches no file
 // (signinlog.Open), so nothing waits on it, and a second begin overlapping
 // the first — Esc and back while the first is still beginning — shares the
-// log the first opened (review r3 #8b). st is the run asking: the log is that
-// run's from now until another takes it (logBy), so a stop is told by the run
-// whose records it was writing (signInLogOffMsg.stamp).
+// log the first opened (review r3 #8b).
+//
+// st is the run asking: the log is that run's from now until another takes
+// it (logBy), and a stop is told by the run that had it as it stopped
+// (signInLogOffMsg.stamp, plan 036 r6, X36). That is frozen the first time
+// the stop is seen, and an attachment sees it before it relabels, so a run
+// that takes a log already stopped never relabels the failure — which the
+// watcher, resuming later, tells as it was. A record an earlier run queued
+// that is written after a later run took the log counts as the later run's:
+// the failure concerns its records too. A run in a session that takes a log
+// stopped by a pre-session run's failure — said on no transcript — is told
+// on its own, once, with the command answered (logToldCmd); else the command
+// is nil.
 func (s *signInRuns) logFor(dir string, st signInStamp) (*signinlog.Log, tea.Cmd) {
 	if s == nil || dir == "" {
 		return nil, nil
@@ -644,29 +664,68 @@ func (s *signInRuns) logFor(dir string, st signInStamp) (*signinlog.Log, tea.Cmd
 	case s.logClosed:
 		return nil, nil
 	case s.log != nil || s.logErr != nil:
+		by, stopped := s.logFailedByLocked()
 		s.logBy = st
+		if stopped && by.pre && !st.pre && !s.logTold && !s.logRearmed {
+			s.logRearmed = true
+			return s.log, logToldCmd(st)
+		}
 		return s.log, nil
 	}
 	s.log, s.logErr = openSignInLog(dir)
 	s.logBy = st
 	s.logDone = make(chan struct{})
-	return s.log, signInLogCmd(s.log, s.logErr, s.logDone, s.logOrigin)
+	return s.log, signInLogCmd(s.log, s.logErr, s.logDone, s.logFailedBy)
 }
 
-// logOrigin is the run that took the log last (logFor).
-func (s *signInRuns) logOrigin() signInStamp {
+// logFailedByLocked is the run that had the log as it stopped, and whether it
+// has stopped — refused as it opened, or Stopped closed — freezing it from
+// logBy the first time the stop is seen: logBy changes only in logFor, which
+// asks this first, so what is frozen is the run that had the log the instant
+// it stopped. logMu is held.
+func (s *signInRuns) logFailedByLocked() (signInStamp, bool) {
+	if s.logFailSet {
+		return s.logFailBy, true
+	}
+	stopped := s.logErr != nil
+	if !stopped && s.log != nil {
+		select {
+		case <-s.log.Stopped():
+			stopped = true
+		default:
+		}
+	}
+	if !stopped {
+		return signInStamp{}, false
+	}
+	s.logFailBy, s.logFailSet = s.logBy, true
+	return s.logFailBy, true
+}
+
+// logFailedBy is the run that had the log as it stopped (logFailedByLocked):
+// the watcher's, once the log has stopped.
+func (s *signInRuns) logFailedBy() signInStamp {
 	s.logMu.Lock()
 	defer s.logMu.Unlock()
-	return s.logBy
+	by, _ := s.logFailedByLocked()
+	return by
+}
+
+// logToldCmd is the notice of a run in a session that took a log already
+// stopped by a pre-session run's failure (logFor): that run's own, at once.
+func logToldCmd(st signInStamp) tea.Cmd {
+	return func() tea.Msg { return signInLogOffMsg{stamp: st} }
 }
 
 // signInLogOffMsg is the sign-in log's stop (signInLogCmd): the transcript's
 // one note about it (signInRuns.mention). It is the TUI's, whichever session
 // it shows — the log is the TUI's for its life, as presenceCmd's count is —
 // so it carries no session stamp, and no switch drops it. stamp is the run
-// whose records the log was writing as it stopped: one of the pre-session
-// dialog's (plan 036 §3.6) is said on no transcript, wherever the TUI is by
-// the time it lands (applySignIn).
+// that had the log as it stopped (frozen then, logFailedByLocked), or the
+// session's run told of a log already stopped (logToldCmd): one of the
+// pre-session dialog's (plan 036 §3.6) is said on no transcript, wherever the
+// TUI is by the time it lands, and any other in the transcript the TUI shows
+// (applySignIn).
 type signInLogOffMsg struct{ stamp signInStamp }
 
 func (signInLogOffMsg) connectAnswer() {}
@@ -676,8 +735,9 @@ func (signInLogOffMsg) connectAnswer() {}
 // answers signInLogOffMsg, so the note is written as it happens, not with
 // some later answer (review r3 #8c); at once when the open itself was
 // refused (err). It ends with no message once closeLog has run (done). Armed
-// once, with the log (logFor). The answer is stamped as the log stops, by the
-// run that took it last (origin, signInRuns.logOrigin).
+// once, with the log (logFor). The answer is stamped with the run that had
+// the log as it stopped (origin, signInRuns.logFailedBy): frozen then, never
+// the run that has it as this resumes.
 func signInLogCmd(l *signinlog.Log, err error, done <-chan struct{}, origin func() signInStamp) tea.Cmd {
 	return func() tea.Msg {
 		if err != nil {
@@ -1026,18 +1086,22 @@ func (m Model) signInOpen(gen, run uint64) bool {
 // The pre-session dialog's answers (plan 036 §3.6) write nothing to the
 // transcript: they go to the dialog's own steps (connect_pre.go), and the
 // way out says what came of them where the dialog goes back. Nor does the
-// log's note when the log stopped writing a pre-session run's records —
-// whatever is on screen by the time it lands: the list that dialog went back
-// to, over a session, or a session the picker has started since (plan 036
-// r4) — nor while that dialog, or a picker, is up, with no session there to
-// hold it. It is left unsaid, and finishRun prints it once the screen is
-// restored, as it prints a failure no Update applied (closeLog): a line no
-// key clears, where a one-off line on the picker or the list would go with
-// the next key, and the log is the TUI's for its life, not the dialog's.
+// log's note when the log stopped writing a pre-session run's records
+// (signInLogOffMsg.stamp, frozen as it stopped) — whatever is on screen by
+// the time it lands: the list that dialog went back to, over a session, or a
+// session the picker has started since (plan 036 r4, r6) — nor while a picker
+// is up, with no session there to hold it. It is left unsaid, and finishRun
+// prints it once the screen is restored, as it prints a failure no Update
+// applied (closeLog): a line no key clears, where a one-off line on the
+// picker or the list would go with the next key, and the log is the TUI's for
+// its life, not the dialog's. A stop a session's run had is that session's
+// note, in the transcript the TUI shows, a pre-session dialog up over the
+// list or not; a session's run that takes a log a pre-session failure stopped
+// is told on its own (signInRuns.logFor).
 func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case signInLogOffMsg:
-		if msg.stamp.pre || m.cdlg.pre || m.picking() {
+		if msg.stamp.pre || m.picking() {
 			return m, nil
 		}
 		if note := m.signIns.mention(); note != "" {
