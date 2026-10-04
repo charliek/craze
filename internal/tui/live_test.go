@@ -20,6 +20,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/rundir"
 )
 
 func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
@@ -303,6 +304,14 @@ func TestMain(m *testing.M) {
 	// reaching OpenAI (common.md: fake servers only).
 	_ = os.Setenv(chatgptauth.IssuerEnv, chatgptFence)
 	_ = os.Setenv(chatgptauth.APIEnv, chatgptFence+"/v1")
+	// The macOS login session is pinned to the GUI's for the package and
+	// every child it starts, as internal/cli's is (plan 036): the provider
+	// availability check marks cursor unavailable outside it, so a Mac runner
+	// whose session is not the GUI one would otherwise see a fake cursor
+	// unavailable. Set before pristineEnv is captured, so frames built from
+	// it carry it too; a test about the session sets rundir.GUISessionEnv
+	// itself, over this.
+	_ = os.Setenv(rundir.GUISessionEnv, "1")
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
@@ -354,6 +363,16 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.RemoveAll(atFakeBin)
 	os.Exit(code)
+}
+
+// TestTheLoginSessionIsPinned (plan 036): TestMain pins the macOS login
+// session to the GUI's for the package, so the provider availability check
+// never marks a fake cursor unavailable for the machine's own session, on
+// either OS: known, and the GUI's, here too where it would not be known.
+func TestTheLoginSessionIsPinned(t *testing.T) {
+	if _, gui, known := rundir.GUISession(); !gui || !known {
+		t.Fatalf("the package's login session: gui %v, known %v; want the GUI's, pinned by TestMain (%s=1)", gui, known, rundir.GUISessionEnv)
+	}
 }
 
 // unsetCatalogEnv unsets every variable the shipped model catalog takes a key

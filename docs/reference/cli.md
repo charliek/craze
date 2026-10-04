@@ -11,6 +11,7 @@ craze serve [flags]
 craze auth login [provider] [--no-browser]
 craze auth logout <provider>
 craze auth list
+craze providers [--json]
 craze version
 ```
 
@@ -1204,6 +1205,79 @@ updates), the warnings a native session prints when it starts, and — when the
 model table does not load, a broken `models.toml` say — why. The rows need
 only `providers.toml` and the catalog, so they are listed either way. No key,
 nor any part of one, is ever printed.
+
+## craze providers
+
+```bash
+./bin/craze providers
+./bin/craze providers --json
+```
+
+Lists the agent providers craze can start a session of — cursor, grok, gx when
+it is installed, and native — with each one's state on this machine and, for a
+provider that is not ready, why and what to do about it. These are **agent**
+providers, what [`--provider`](#flags) picks; [`craze auth
+list`](#craze-auth-list) lists the native provider's **model** providers and
+their keys.
+
+```text
+PROVIDER  STATE        REASON                          FIX
+cursor    unavailable  cursor-agent not found on PATH  install cursor-agent, or set [agents].cursor in /home/you/.craze/config.toml
+grok      ready        -                               -
+native    needs setup  no model provider has a key     craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan)
+```
+
+| State | When |
+|-------|------|
+| `ready` | It can start here |
+| `needs setup` | Native, with no model whose provider has a key: none is stored or exported, or the ChatGPT plan is signed in with plan usage off. [`craze auth login`](#craze-auth-login) connects one |
+| `unavailable` | It cannot start here, and nothing in craze can fix that: the binary is missing, cursor is outside the Mac's login session, or native's model files cannot be read |
+
+How each is judged:
+
+- **cursor, grok and gx** are ready when their agent binary resolves the way a
+  session of theirs would find it ([Agent binaries](configuration.md#agent-binaries)):
+  `$CRAZE_AGENT_BIN` for the provider a plain `craze` would start
+  (`$CRAZE_PROVIDER`, else `provider` in `config.toml`, else cursor), then
+  `[agents].<provider>`, then the provider's own name on `PATH`. A binary that
+  is not found makes it unavailable, and the reason names where craze looked:
+  `cursor-agent not found on PATH`, or the override and its path,
+  `[agents].cursor /opt/x/cursor-agent not found` (the fix then says to point
+  that override at an existing binary). gx is a fork few machines have, so
+  when it is not found it is not listed at all.
+- **cursor, on macOS,** is also unavailable when this craze runs outside the
+  Mac's login session — started over `ssh` — where cursor may not reach the
+  login keychain (`this craze runs outside the macOS login session (over
+  ssh), …`; fix: `run craze from a terminal on the Mac`). A missing binary is
+  reported first. Elsewhere the session is not known, and nothing is marked
+  for it.
+- **native** is ready when its model table loads and a model's provider has a
+  key — what a native session would start on. With none it needs setup.
+  `providers.toml` or `models.toml` that cannot be read makes it unavailable;
+  the reason names the file and nothing from it, since the error can quote a
+  pasted key's name, and `craze auth list` shows the error. So does a machine
+  with no home directory (`no home directory for native's keys`).
+
+A reason and a fix are each one line of at most 200 cells. Nothing is cached:
+each run reads `config.toml`, looks the binaries up and reads native's files
+again, with no network request and no keychain access. The states only
+report: an explicit `--provider` or `$CRAZE_PROVIDER` starts a provider
+whatever its state, with the same start error as ever when it cannot start.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the providers on one line, as JSON, instead of the table |
+
+```json
+{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /home/you/.craze/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}]}
+```
+
+Each entry has the provider's `id` (what `--provider` takes), its `label` (what
+the TUI shows), its `state` — `ready`, `needs_setup` or `unavailable` — and a
+`reason` and a `fix`, present exactly when the state is not `ready`.
+
+`craze providers` exits 0 whenever it answered, whatever the states say; 1 on
+an error; and 2 for an argument or a flag it does not take.
 
 ## craze version
 

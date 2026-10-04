@@ -99,13 +99,13 @@ func TestRowLineIsOneBoundedLine(t *testing.T) {
 		{"one more is cut", strings.Repeat("x", 201), strings.Repeat("x", 199) + "…"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rowLine(tc.in); got != tc.want {
-				t.Fatalf("rowLine(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := RowLine(tc.in); got != tc.want {
+				t.Fatalf("RowLine(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 	t.Run("wide characters are cut by the cell", func(t *testing.T) {
-		got := rowLine(strings.Repeat("漢", 150))
+		got := RowLine(strings.Repeat("漢", 150))
 		if w := uniseg.StringWidth(got); w > RowTextCells || !strings.HasSuffix(got, "…") {
 			t.Fatalf("%d cells, %q: want at most %d, cut", w, got, RowTextCells)
 		}
@@ -225,7 +225,7 @@ func TestAskSummaryIsWhatTheAskIsAbout(t *testing.T) {
 		{"nothing", agent.AskBody{}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rowLine(askSummary(agent.AskRecord{Body: tc.body})); got != tc.want {
+			if got := RowLine(askSummary(agent.AskRecord{Body: tc.body})); got != tc.want {
 				t.Fatalf("summary %q, want %q", got, tc.want)
 			}
 		})

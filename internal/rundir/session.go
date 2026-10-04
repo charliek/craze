@@ -9,11 +9,14 @@ import (
 // audit (security) session from its parent, and the GUI login's keychain is
 // unlocked only inside the GUI login session. A hub first started over ssh,
 // and every host it creates, is outside it — and cursor cannot start there.
-// GUISession says which session this process is in, so the hub can log it and
-// a host whose agent exited can say what may be wrong. The flag only ever
-// decorates: it does not prove the keychain is locked (a GUI session's can be
-// locked by hand; an ssh session's unlocked with security unlock-keychain), so
-// it is never a reason to refuse.
+// GUISession says which session this process is in, so the hub can log it, a
+// host whose agent exited can say what may be wrong, and the provider
+// availability check can mark cursor unavailable outside it (plan 036 §3.1).
+// It does not prove the keychain is locked (a GUI session's can be locked by
+// hand; an ssh session's unlocked with security unlock-keychain), so the mark
+// refuses only a choice made in a TUI picker — never an explicit --provider
+// or $CRAZE_PROVIDER, and never a hub's session.create, which start as they
+// always have (plan 036 decision 3).
 
 // AuditFlagGraphicAccess is <bsm/audit_session.h>'s
 // AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS: the session has the GUI login's

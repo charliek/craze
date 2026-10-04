@@ -396,7 +396,9 @@ func (h *hub) run(ctx context.Context) error {
 // 035 P3, SF-126): every host it creates inherits it, and a hub first started
 // over ssh keeps that session — outside the GUI login's, whose keychain
 // cursor needs — for as long as it lives. Its raw audit flags go with it. Said
-// only where the session is known; never a reason to do anything else.
+// only where the session is known. The provider availability check reads the
+// same session to mark cursor unavailable in the hub's answer (plan 036
+// §3.1); it never refuses a session.create (decision 3).
 func (h *hub) logLoginSession() {
 	flags, gui, known := rundir.GUISession()
 	if !known {
