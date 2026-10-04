@@ -718,7 +718,8 @@ efforts        = ["low", "high"]
 default_effort = "high"
 ```
 
-A model's other optional keys are documented below:
+A model alias is at most 256 bytes: a `models.toml` with a longer one does not
+load, and says which entry. A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 [`vision`](#native-vision) and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
@@ -842,9 +843,11 @@ The redaction starts at the next turn, so there is a window: a key stored
 during a turn is learned when the next one starts. From then on a shell
 command still running — a background command's included — redacts it from the
 rest of its output and from its saved output file, but not from what it
-printed before. A sub-agent already running keeps the redaction it started
-with, though what it reports back is redacted of the key; one started after
-the key was learned redacts it.
+printed before. A sub-agent already running — a background one goes on while
+the conversation idles — redacts it at once from what its tools return next,
+so a file it reads afterwards reaches its model with the key redacted; what
+its tools returned before the key was learned is not rewritten. One started
+after the key was learned redacts it from the start.
 
 ### The ChatGPT plan
 

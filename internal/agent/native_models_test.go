@@ -1270,6 +1270,51 @@ func TestNativeCatalogBoundsAreSaidOnce(t *testing.T) {
 	}
 }
 
+// TestNativeCatalogCutNoteIsOneSafeLine (plan 034 C4r3, r14 #b): the note
+// that says what the catalog's bounds cut names the models.toml it most
+// likely came from, under the session's home — any directory CRAZE_HOME
+// names, which may hold a newline or a terminal escape. The note is one line
+// on the diagnostics all the same, the newline folded to a space and the
+// escape sequence gone, the rest of the path on the note's own line. Negative control:
+// a note that appends the path as it is writes the path's tail on a line of
+// its own, the escape with it.
+func TestNativeCatalogCutNoteIsOneSafeLine(t *testing.T) {
+	f := newNativeFixture(t)
+	table, err := modeltable.Load(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "craze\nhome-tail \x1b[31mred")
+	t.Setenv("CRAZE_HOME", home)
+	f.dir = filepath.Join(home, "native")
+	m := table.Models["test/b"]
+	m.Name = strings.Repeat("Long model name ", 16) // over catalogNameMax
+	table.Models["test/b"] = m
+	saveTable(t, f.dir, table)
+	var diag lockedDiag
+	f.started(Options{Diag: &diag})
+	var cutNotes []string
+	lines := strings.Split(diag.String(), "\n")
+	for _, n := range lines {
+		if strings.Contains(n, "held to its bounds") {
+			cutNotes = append(cutNotes, n)
+		}
+	}
+	if len(cutNotes) != 1 {
+		t.Fatalf("the diagnostics say %q; want one note of the cut", diag.String())
+	}
+	note := cutNotes[0]
+	if strings.ContainsAny(note, "\x1b\r") || !strings.Contains(note, "craze home-tail red") ||
+		!strings.HasSuffix(note, filepath.Join("native", modeltable.ModelsFile)) {
+		t.Fatalf("the cut note = %q; want one line naming the file, the home's newline folded and its escape gone", note)
+	}
+	for _, n := range lines {
+		if strings.HasPrefix(n, "home-tail") {
+			t.Fatalf("the home's tail is a line of its own on the diagnostics: %q", diag.String())
+		}
+	}
+}
+
 // TestNativeAFailedFetchBacksOff (plan 034 C5r, r12 #3b): a fetch of the
 // plan's model list that fails — the open's, here, against an API that
 // answers every request 503 — starts no other for planListRetryBackoff: a

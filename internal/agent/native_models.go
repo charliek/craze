@@ -337,7 +337,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	s.catalogQueued = true
 	s.mu.Unlock()
 	s.models.stamps, s.models.read, s.models.forced = stamps, true, false
-	s.noteCatalogCut(home, cut)
+	s.noteCatalogCut(hs, home, cut)
 	return ModelsApplied
 }
 
@@ -356,8 +356,12 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 //     the plan's display names to, and a sub-agent row's model to
 //     (subagentModelCap);
 //   - a model whose id is over catalogIDMax bytes is not offered at all,
-//     since an id cut short would be one no session.set could name; no real
-//     alias comes near it (the plan's slugs are at most 64 bytes);
+//     since an id cut short would be one no session.set could name. The model
+//     table refuses such an alias as it loads (modeltable.MaxAliasLen, plan
+//     034 C4r3, r14 #a) — a model left off its own catalog while it runs
+//     could not be reselected — so this is a defence for a table built
+//     otherwise; no real alias comes near it (the plan's slugs are at most
+//     64 bytes);
 //   - the list to its first catalogModelsMax models, in the picker's order,
 //     the running model kept among them (in the last place, when its own
 //     would be past the cut): a picker always has the current model's row to
@@ -371,7 +375,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 // once, value-free (noteCatalogCut).
 const (
 	catalogNameMax   = 128
-	catalogIDMax     = 256
+	catalogIDMax     = modeltable.MaxAliasLen
 	catalogModelsMax = 512
 )
 
@@ -415,9 +419,13 @@ func boundCatalog(infos []ModelInfo, current string) ([]ModelInfo, catalogCut) {
 // or Start — publishes, in one line on the session's diagnostics: counts and
 // bounds alone, never a name or an id (they are the very text that was too
 // long, and the owner's own) — and the file they most likely came from, in
-// home, the session's native directory. It is said once until what was cut
-// changes: a list within its bounds clears it. modelsMu is held.
-func (s *nativeSession) noteCatalogCut(home string, cut catalogCut) {
+// home, the session's native directory. The line goes through nativeSafe,
+// as every note that names a path does (plan 034 C4r3, r14 #b): a home is any
+// directory CRAZE_HOME names, and one holding a newline or a terminal escape
+// would otherwise write lines of its own, or controls, to the host's stderr.
+// It is said once until what was cut changes: a list within its bounds clears
+// it. modelsMu is held.
+func (s *nativeSession) noteCatalogCut(hs *harness.Session, home string, cut catalogCut) {
 	if cut == s.models.cut {
 		return
 	}
@@ -441,8 +449,8 @@ func (s *nativeSession) noteCatalogCut(home string, cut catalogCut) {
 	if cut.over > 0 {
 		parts = append(parts, fmt.Sprintf("%s past the first %d, not offered", models(cut.over), catalogModelsMax))
 	}
-	s.note("the model list this session offers is held to its bounds: " + strings.Join(parts, "; ") +
-		" — see " + filepath.Join(home, modeltable.ModelsFile))
+	s.note(nativeSafe{red: hs.Redact}.line("the model list this session offers is held to its bounds: " + strings.Join(parts, "; ") +
+		" — see " + filepath.Join(home, modeltable.ModelsFile)))
 }
 
 // heldBack is a reload held back — by a load's replay or a turn's claim, and

@@ -14,6 +14,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -650,5 +651,127 @@ func TestABackgroundChildsUsageIsPricedAtItsOwnTable(t *testing.T) {
 		if want := costAt(oneStep(1), r1) + costAt(oneStep(1), r2); session.CostPicoUSD != want {
 			t.Fatalf("the session cost %d; want %d: the background child's usage at its rates, the foreground child's at the new", session.CostPicoUSD, want)
 		}
+	})
+}
+
+// TestABackgroundChildsPriceFollowsItsRedactedRow (plan 034 C4r3, r13 #6): a
+// background child's result waits while the parent idles and learns a key —
+// one equal to the child's wire id, and in none of the parent's frozen
+// surfaces — and its delivery redacts that id from the subagent_usage row the
+// entry writes. The price the child carries is registered under the names
+// the entry wrote, so spend still finds the row's carried part and prices it
+// at the child's rates, though the cut wire id prices nothing in any table:
+// delivered by a wake, by a prompt's first step, and by an agent_output call
+// (its names redacted by Output, past the call's boundary). The parent's own
+// model is unpriced, so the session's cost is the child's alone. The premise:
+// each row's wire id is the marker. Negative control: a commit that registers
+// the price under the names the usage was observed with leaves the row
+// unpriced, the session's cost nothing.
+func TestABackgroundChildsPriceFollowsItsRedactedRow(t *testing.T) {
+	const wire = "wire-b-learned-as-a-key-0363"
+	open := func(t *testing.T) (*bg, modeltable.Rates) {
+		t.Helper()
+		var opened *modeltable.Table
+		b := openBG(t, func(o *Options) {
+			in, out := 2.0, 8.0
+			m := o.Table.Models["test/b"]
+			m.WireModel, m.Cost = wire, &modeltable.Cost{Input: &in, Output: &out}
+			o.Table.Models["test/b"] = m
+			opened = o.Table
+		})
+		r, ok := opened.Price("test", wire)
+		if _, own := opened.Price("test", "wire-a"); own || !ok {
+			t.Fatalf("premise: test/a priced %v, test/b %v; want test/a unpriced and test/b priced", own, ok)
+		}
+		if err := modeltable.KeyProblem(wire); err != nil {
+			t.Fatalf("premise: the wire id cannot be a key (%v)", err)
+		}
+		return b, r
+	}
+	// spawnOnB runs the first turn, which starts one background child on
+	// test/b, held by the worker it returns.
+	spawnOnB := func(t *testing.T, b *bg) (*worker, string) {
+		t.Helper()
+		w := newWorker()
+		b.routers["test/b"].route("child work", w.step(openText("did child work"), finishText()))
+		b.routers["test/a"].route("go", callStep(bgPart(t, "a1", "job", "child work", "model", "test/b")), answerWith("started"))
+		var ev events
+		if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("the spawning turn = %+v, %v; want end_turn", res, err)
+		}
+		st := startedWith(t, ev.list(), "child work")
+		if !st.Background || st.Model != "test/b" {
+			t.Fatalf("SubagentStarted = %+v; want a background child on test/b", st)
+		}
+		await(t, w.reached, "the child mid-step")
+		return w, st.ID
+	}
+	learn := func(t *testing.T, b *bg) {
+		t.Helper()
+		if _, err := b.s.LearnKeys([]modeltable.Secret{wire}); err != nil {
+			t.Fatalf("LearnKeys = %v; want the wire id learned, in none of the parent's frozen surfaces", err)
+		}
+	}
+	// priced checks the row the result's entry wrote and the session's cost.
+	priced := func(t *testing.T, b *bg, id string, r modeltable.Rates, role fantasy.MessageRole) {
+		t.Helper()
+		tr := transcript(t, b.s)
+		e := tr.Entries[entryIndex(tr, resultOf(t, b.s, id).entry)]
+		if e.Message.Role != role || !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: redact.Marker, Usage: oneStep(1)}}) {
+			t.Fatalf("premise: the result's entry (%s) carries %+v; want the child's one row, its wire id redacted", e.Message.Role, e.SubagentUsage)
+		}
+		_, session := b.s.spend(2)
+		u := oneStep(1)
+		if want := u.Input*r.Input + u.Output*r.Output + u.CacheRead*r.CacheRead + u.CacheCreation*r.CacheWrite; want == 0 || session.CostPicoUSD != want {
+			t.Fatalf("the session cost %d; want %d, the child's usage at the rates it was opened under", session.CostPicoUSD, want)
+		}
+	}
+
+	t.Run("delivered by a wake", func(t *testing.T) {
+		b, r := open(t)
+		w, id := spawnOnB(t, b)
+		b.finish(t, w)
+		learn(t, b)
+		b.routers["test/a"].route("go", answerWith("noted"))
+		if res, err := b.s.Wake(context.Background(), nil); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("Wake = %+v, %v", res, err)
+		}
+		priced(t, b, id, r, fantasy.MessageRoleUser)
+	})
+
+	t.Run("delivered by a prompt's first step", func(t *testing.T) {
+		b, r := open(t)
+		w, id := spawnOnB(t, b)
+		b.finish(t, w)
+		learn(t, b)
+		b.routers["test/a"].route("go", answerWith("noted"))
+		if res, err := b.s.Run(context.Background(), "next", nil); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v", res, err)
+		}
+		priced(t, b, id, r, fantasy.MessageRoleUser)
+	})
+
+	t.Run("read by agent_output", func(t *testing.T) {
+		b, r := open(t)
+		w, id := spawnOnB(t, b)
+		atStep, ready := make(chan struct{}), make(chan struct{})
+		b.routers["test/a"].route("go",
+			func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+				// Past the step's boundary: the result is taken by the call,
+				// not the boundary.
+				close(atStep)
+				<-ready
+				callStep(outputPart(t, "o1", id, 0))(ctx, yield)
+			},
+			answerWith("done"))
+		out := start(context.Background(), b.s, "next", nil)
+		await(t, atStep, "the step after its boundary")
+		b.finish(t, w)
+		learn(t, b)
+		close(ready)
+		if got := await(t, out, "the turn"); got.err != nil {
+			t.Fatal(got.err)
+		}
+		priced(t, b, id, r, fantasy.MessageRoleTool)
 	})
 }

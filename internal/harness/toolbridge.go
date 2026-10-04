@@ -498,7 +498,7 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		toolEntry)
 	if err == nil {
-		t.wrote(entries, lead, true, outputCalls(answered))
+		t.wrote(entries, lead, true, answered)
 		t.todosWritten(todos)
 	}
 	return true, err
@@ -521,6 +521,25 @@ func outputCalls(answered []*toolCall) []string {
 		}
 	}
 	return ids
+}
+
+// outputNames are, by harness id, the names each agent_output call among
+// answered that delivered a usage carries it under: its result's Child as
+// the tool entry's rows merged it (subagentUsage), after every redaction the
+// call's result went through (Output's, the dispatcher's). nil when there is
+// none. mu is held.
+func outputNames(answered []*toolCall) map[string]usageNames {
+	var names map[string]usageNames
+	for _, c := range answered {
+		if c.name != tool.AgentOutputTool || c.res == nil || c.res.Child == nil {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]usageNames)
+		}
+		names[c.id] = namesOf(c.res.Child)
+	}
+	return names
 }
 
 // subagentUsage is what the sub-agents of calls spent, one row per model —

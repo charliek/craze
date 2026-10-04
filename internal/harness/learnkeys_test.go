@@ -288,9 +288,10 @@ func TestRefusingSessionOwesNoPendingResult(t *testing.T) {
 // TestChildOpenedAfterLearningStartsWithTheKeys (r2-1): a sub-agent is opened
 // with the stored keys its parent had learned, before its prompt, its tools
 // and its transcript are built — so a role that quotes one reaches the
-// child's prompt redacted, as does a persona path in its header — and one
-// opened before keeps the keys it had (R1). The control is the same child
-// opened before the parent learned: the raw key in both places.
+// child's prompt redacted, as does a persona path in its header. The control
+// is the same child opened before the parent learned: the raw key in both
+// places. It is attached to no runner, so nothing teaches it the key later
+// (an attached one is taught at once: TestAKeyLearnedWhileASubagentRunsRedactsItsToolOutput).
 func TestChildOpenedAfterLearningStartsWithTheKeys(t *testing.T) {
 	const stored = "sk-stored-for-the-child-0010"
 	f := newRouted(t)
@@ -324,7 +325,7 @@ func TestChildOpenedAfterLearningStartsWithTheKeys(t *testing.T) {
 		t.Fatalf("the child's header records the persona path %q; want it redacted", h.PersonaPath)
 	}
 	if earlier.Redact(stored) != stored {
-		t.Fatal("the child opened before learning was taught the key: a running child keeps what it has (R1)")
+		t.Fatal("the child opened before learning, attached to no runner, was taught the key")
 	}
 }
 
@@ -807,6 +808,183 @@ func TestAKeyLearnedDuringASummarizerRequestStopsItsAttempts(t *testing.T) {
 	}
 }
 
+// TestAKeyLearnedDuringTheLastSummarizerAttemptRefusesTheCompaction (plan 034
+// C4r3, r13 #3): the attempts loop checks the refusal on its way into an
+// attempt, so a key inside the frozen prompt learned during an attempt that
+// no other follows — the last one, failing as the two before it did, or one
+// that fails fatally — would leave the loop as a summarizer failure. It
+// leaves it as the refusal instead, checked once the attempts have failed: a
+// manual /compact returns ErrStoredKeyFrozen, and a turn whose compaction it
+// was — before its first request, between two segments, or for an overflow —
+// ends with it, automatic compaction left as it was; no failure entry unless
+// an attempt was billed, and then one holding every billed attempt, the
+// refusal its error. The control: a key in no frozen surface learned at the
+// same moment, and the compaction fails as a summarizer failure does — its
+// failure entry written, automatic compaction switched off before and
+// mid-turn, the overflow the turn's end. Negative control: no check after the
+// loop, and the refused compaction ends as that failure.
+func TestAKeyLearnedDuringTheLastSummarizerAttemptRefusesTheCompaction(t *testing.T) {
+	retryable := func() []fantasy.StreamPart {
+		return errorPart(&fantasy.ProviderError{StatusCode: 500, Message: "boom"})
+	}
+	degenerate := func() []fantasy.StreamPart { return cat(textParts(shortSummary), finish(fantasy.FinishReasonStop)) }
+	fatal := func() []fantasy.StreamPart {
+		return errorPart(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"})
+	}
+	for _, c := range []struct {
+		name  string
+		kind  string // manual, pre-turn, mid-turn, overflow
+		fails func() []fantasy.StreamPart
+		// attempts are the summarizer's requests, the last one held; billed
+		// says each reports usage; before is the requests ahead of the
+		// first.
+		attempts int
+		billed   bool
+		before   int
+	}{
+		{"a manual compaction, its last attempt failing retryably", "manual", retryable, summarizerAttempts, false, 1},
+		{"a manual compaction, its last attempt degenerate", "manual", degenerate, summarizerAttempts, true, 1},
+		{"a manual compaction, its first attempt failing fatally", "manual", fatal, 1, false, 1},
+		{"a pre-turn compaction, its last attempt failing retryably", "pre-turn", retryable, summarizerAttempts, false, 1},
+		{"a pre-turn compaction, its first attempt failing fatally", "pre-turn", fatal, 1, false, 1},
+		{"a mid-turn compaction, its last attempt failing retryably", "mid-turn", retryable, summarizerAttempts, false, 1},
+		{"a mid-turn compaction, its first attempt failing fatally", "mid-turn", fatal, 1, false, 1},
+		{"an overflow compaction, its last attempt failing retryably", "overflow", retryable, summarizerAttempts, false, 2},
+		{"an overflow compaction, its first attempt failing fatally", "overflow", fatal, 1, false, 2},
+	} {
+		for _, frozen := range []bool{true, false} {
+			name := c.name + ", a key in no frozen surface"
+			if frozen {
+				name = c.name + ", a key in the prompt"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newFixture(t, "http://127.0.0.1:1/v1")
+				windowed(f, "test/a", testWindow, 0)
+				s := f.open(f.options())
+				s.sleep = func(context.Context, time.Duration) {}
+				a := f.models["test/a"]
+				key := "sk-not-in-what-is-sent-0362"
+				if frozen {
+					key = f.workspace
+				}
+				if strings.Contains(s.system, key) != frozen {
+					t.Fatalf("control: the key is in the system prompt: %v, want %v", !frozen, frozen)
+				}
+				g := newGate()
+				// The attempts before the last fail unheld; the last is held,
+				// and fails as they did once released.
+				attempts := make([]step, 0, c.attempts)
+				for range c.attempts - 1 {
+					attempts = append(attempts, reply(c.fails()))
+				}
+				attempts = append(attempts, g.hold(nil, c.fails()))
+				type ended struct {
+					res Result
+					err error
+				}
+				out := make(chan ended, 1)
+				switch c.kind {
+				case "manual":
+					a.push(answerWith("hi"))
+					run(t, s, "hello")
+					a.push(attempts...)
+					go func() {
+						res, err := s.Compact(context.Background(), "", "/compact", nil)
+						out <- ended{res, err}
+					}()
+				case "pre-turn":
+					a.push(answerSpending("hi", over))
+					run(t, s, "hello")
+					a.push(attempts...)
+					a.push(answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "again", nil)
+						out <- ended{res, err}
+					}()
+				case "mid-turn":
+					a.push(toolStep(1, over))
+					a.push(attempts...)
+					a.push(answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "go", nil)
+						out <- ended{res, err}
+					}()
+				case "overflow":
+					a.push(answerWith("hi"))
+					run(t, s, "hello")
+					a.push(overflowed())
+					a.push(attempts...)
+					a.push(answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "again", nil)
+						out <- ended{res, err}
+					}()
+				}
+				await(t, g.reached, "the summarizer's last attempt")
+				if n := len(a.requests()); n != c.before+c.attempts || summarizers(a.requests()) != c.attempts {
+					t.Fatalf("premise: %d requests, %d of them the summarizer's; want %d, the last the held attempt",
+						n, summarizers(a.requests()), c.before+c.attempts)
+				}
+				if _, err := s.LearnKeys([]modeltable.Secret{modeltable.Secret(key)}); frozen != errors.Is(err, ErrStoredKeyFrozen) {
+					t.Fatalf("LearnKeys during the attempt = %v; want the refusal state: %v", err, frozen)
+				}
+				close(g.release)
+				o := await(t, out, "the compaction's end")
+				reqs := a.requests()
+				s.mu.Lock()
+				off := s.autoOff.on
+				s.mu.Unlock()
+				entries := compactionEntries(t, s)
+				if !frozen {
+					// A summarizer failure: its entry, billed or not, and what
+					// each caller makes of one.
+					if errors.Is(o.err, ErrStoredKeyFrozen) || len(entries) != 1 || entries[0].Compaction.Succeeded() {
+						t.Fatalf("control: the end = %+v, %v, entries %+v; want the summarizer's failure, its entry written", o.res, o.err, entries)
+					}
+					switch c.kind {
+					case "manual":
+						if o.err == nil {
+							t.Fatal("control: the manual compaction returned no error")
+						}
+					case "pre-turn", "mid-turn":
+						if !off || o.err != nil {
+							t.Fatalf("control: the turn = %v, automatic compaction off: %v; want the turn ended well, compaction switched off", o.err, off)
+						}
+					case "overflow":
+						if !errors.Is(o.err, ErrContextTooLarge) {
+							t.Fatalf("control: the turn = %v; want the overflow", o.err)
+						}
+					}
+					return
+				}
+				if !errors.Is(o.err, ErrStoredKeyFrozen) || strings.Contains(o.err.Error(), key) {
+					t.Fatalf("the end = %+v, %v; want ErrStoredKeyFrozen, quoting no key", o.res, o.err)
+				}
+				if len(reqs) != c.before+c.attempts || summarizers(reqs) != c.attempts {
+					t.Fatalf("%d requests, %d of them the summarizer's; want none after the held attempt", len(reqs), summarizers(reqs))
+				}
+				if off {
+					t.Fatal("the refusal switched automatic compaction off, as a summarizer failure does")
+				}
+				if !c.billed {
+					if len(entries) != 0 {
+						t.Fatalf("compaction entries = %+v; want none: nothing was billed", entries)
+					}
+					return
+				}
+				var want store.Usage
+				for range c.attempts {
+					want = addUsage(want, *store.UsageOf(stepUsage))
+				}
+				if len(entries) != 1 || entries[0].Compaction.Succeeded() || entries[0].Usage == nil || *entries[0].Usage != want ||
+					entries[0].Compaction.Error != cleanErrorText(ErrStoredKeyFrozen) {
+					t.Fatalf("compaction entries = %+v; want one failure holding every billed attempt, the refusal its error", entries)
+				}
+			})
+		}
+	}
+}
+
 // TestAKeyLearnedWhileASubagentRunsStopsTheSubagent (plan 034 C4r2, r11 #2c):
 // a key learned while a sub-agent runs reaches it — every attached child
 // learns the parent's keys, as AddSecrets visits them — and is judged by the
@@ -887,5 +1065,72 @@ func TestAKeyLearnedWhileASubagentRunsStopsTheSubagent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAKeyLearnedWhileASubagentRunsRedactsItsToolOutput (plan 034 C4r3, r13
+// #4): a background child runs on while its parent idles, and an idle reload
+// learns a key then — one in none of the child's frozen surfaces, so the
+// child is not refused and goes on. The child's next tool reads a workspace
+// file holding the key, a .env beside the code: the child installs the key at
+// once, as AddSecrets does — it runs one turn, so a key left for its next one
+// would never be installed — and the read's result, and so the child's next
+// request, carries the marker and never the key. The control: the same child
+// with nothing learned, whose next request carries the key, so the read's
+// result does reach the request. Negative control: a LearnKeys that teaches
+// the child the key without installing it (toolset.learn, X64's "the next
+// turn") sends the key in the child's next request.
+func TestAKeyLearnedWhileASubagentRunsRedactsItsToolOutput(t *testing.T) {
+	for _, learned := range []bool{true, false} {
+		name := "nothing learned"
+		if learned {
+			name = "a key learned while the child runs"
+		}
+		t.Run(name, func(t *testing.T) {
+			const key = "sk-in-a-file-the-child-reads-0361"
+			b := openBG(t)
+			a := b.routers["test/a"]
+			b.put(".env", "API_KEY="+key+"\n")
+			w := newWorker()
+			// The child's first step holds before it streams anything; once
+			// released, it calls read on the file — after the key was learned
+			// — and its second step answers.
+			readIt := input(t, map[string]any{"filePath": ".env"})
+			a.route("child work", w.step(nil, cat(callParts("c1", "read", readIt), finish(fantasy.FinishReasonToolCalls))), answerWith("done"))
+			a.route("go", callStep(bgPart(t, "a1", "job", "child work")), answerWith("started"))
+			var ev events
+			if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+				t.Fatalf("the spawning turn = %+v, %v; want end_turn", res, err)
+			}
+			await(t, w.reached, "the child's first step")
+			id := startedWith(t, ev.list(), "child work").ID
+			if got := requestText(a.requests("child work")[0], true); strings.Contains(got, key) {
+				t.Fatal("premise: the child's first request already holds the key, so it is in a frozen surface")
+			}
+			if learned {
+				if _, err := b.s.LearnKeys([]modeltable.Secret{key}); err != nil {
+					t.Fatalf("LearnKeys = %v; want the key learned, in no frozen surface", err)
+				}
+			}
+			close(w.release)
+			await(t, b.pending, "the child's result")
+			reqs := a.requests("child work")
+			if len(reqs) != 2 {
+				t.Fatalf("the child sent %d requests; want its second, after the read, sent", len(reqs))
+			}
+			next := requestText(reqs[1], true)
+			if status := resultOf(t, b.s, id).status; status != SubagentCompleted {
+				t.Fatalf("the child ended %q; want completed: the key is in none of its frozen surfaces", status)
+			}
+			if !learned {
+				if !strings.Contains(next, key) {
+					t.Fatalf("control: the child's next request does not hold the file's key, so its redaction proves nothing:\n%s", next)
+				}
+				return
+			}
+			if strings.Contains(next, key) || !strings.Contains(next, "API_KEY="+redact.Marker) {
+				t.Fatalf("the child's next request carries the key it learned before its read, or not the marker:\n%s", next)
+			}
+		})
 	}
 }

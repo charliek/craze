@@ -536,11 +536,13 @@ funded a model — after it saves a key, after a sign-in has written the plan's
 model list — and when it is about to show the list. It also starts the plan's
 model-list fetch in the background when the list is due (by its age, or a
 list fetched for another `client_version`); a list that fetch brings is taken
-up by the session itself and published the same way. One fetch runs at a
-time — a call while one is in flight joins it — and none starts within 30
-seconds of one that failed, so a client calling in a loop costs the account
-at most one request per half minute; the call itself still reloads and
-answers.
+up by the session itself and published the same way. In each session one
+fetch runs at a time — a call while one is in flight joins it — and none
+starts within 30 seconds of one that failed, so a client calling one session
+in a loop costs the account at most one request per half minute. The backoff
+is the session's own, not the account's: each session keeps its own, so
+several sessions open at once can each make a request in the same half
+minute. The call itself still reloads and answers.
 
 It is served where the session capability `modelsRefresh` is `true`: every
 native session, whoever hosts it. Where it is absent — every ACP session, and

@@ -860,9 +860,18 @@ func (ts *toolset) learnLocked(vals []string) (frozen bool) {
 // this instant, by this process (the token source notifies before it writes
 // the file or uses the token), so no request of the session has carried it,
 // and a tool's output that would print it from here on — a cat of the token
-// file, an echo — must not wait for the next turn to be redacted. Every other
-// key still waits for begin: installed grows by vals alone. It reports
-// whether learning found one inside a frozen surface.
+// file, an echo — must not wait for the next turn to be redacted.
+//
+// A running sub-agent takes its parent's stored keys this way too (LearnKeys,
+// plan 034 C4r3, r13 #4), the exception's one other use: a child runs one
+// turn and closes, so a key left for its next turn would never be installed,
+// and a file one of its tools reads would hand the key to its next request.
+// Such a key may already be in the child's history — that is what R1 guards
+// — and the history goes on carrying it, as a parent's running turn carries
+// its frozen prompt (X50); installing only widens what the turn redacts from
+// here on, so nothing new carries it. Every other key still waits for begin:
+// installed grows by vals alone. It reports whether learning found one inside
+// a frozen surface.
 func (ts *toolset) addSecrets(vals []string) (frozen bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()

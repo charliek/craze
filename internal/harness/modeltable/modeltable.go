@@ -88,6 +88,17 @@ const (
 	// rule is not a key at all: Resolve and Keys skip it, and EnvWarnings says
 	// so (plan 031 §3.2).
 	MinKeyLen = 8
+
+	// MaxAliasLen is the longest model alias a table holds, in bytes (plan
+	// 034 C4r3, r14 #a): the bound a native session's published catalog
+	// holds a model's id to, since an id cut short would be one no
+	// session.set could name. A model over it would run and then be missing
+	// from its own catalog, so it cannot be reselected; Load refuses one in
+	// models.toml instead, naming the file and the table, as it refuses an
+	// empty alias, and a table built otherwise does not validate. No real
+	// alias comes near it: the catalog's are short, and a ChatGPT plan slug
+	// is at most 64 bytes.
+	MaxAliasLen = 256
 )
 
 // toolProfiles are the names a model's tool_profile may give, the default
@@ -965,12 +976,24 @@ func keyReason(err error) string {
 	return "overlaps craze's redaction marker, which would print the key back in its own place"
 }
 
+// aliasProblem is what is wrong with alias as a model's, "" when nothing is:
+// empty, or longer than MaxAliasLen.
+func aliasProblem(alias string) string {
+	switch {
+	case strings.TrimSpace(alias) == "":
+		return "a model alias must not be empty"
+	case len(alias) > MaxAliasLen:
+		return fmt.Sprintf("a model alias must be at most %d bytes; this one is %d", MaxAliasLen, len(alias))
+	}
+	return ""
+}
+
 func validateModel(file, alias string, m Model, providers map[string]Provider) error {
 	at := func(key, reason string) error {
 		return &FileError{File: file, Table: modelTable(alias), Key: key, Reason: reason}
 	}
-	if strings.TrimSpace(alias) == "" {
-		return at("", "a model alias must not be empty")
+	if r := aliasProblem(alias); r != "" {
+		return at("", r)
 	}
 	if m.Provider == "" {
 		return at("provider", "missing: name a provider in "+ProvidersFile)

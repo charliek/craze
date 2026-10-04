@@ -63,11 +63,13 @@ import (
 // was merged into. A row's carried usages are priced at their own rates, and
 // what is left of the row — a foreground child's usage in the same step, on
 // the same model — at the row's price at the time of use, as before. A row is
-// found by the names the child's usage carried; one whose names a later
-// redaction changed — a key equal to a provider's id, say — matches no carried
-// usage, and is priced as one, as before. Carried rates live in memory only,
-// as every recorded price does: a resumed session prices its transcript's
-// rows with the table it loaded (Replay).
+// found by the names the entry wrote it under, which commit registers the
+// carried usage by (usageNames, plan 034 C4r3, r13 #6): a key the session
+// learned while the result waited is redacted from those names — one equal to
+// a wire id, say — and the carried usage still finds its row, so it keeps its
+// child's rates though the cut wire id prices nothing. Carried rates live in
+// memory only, as every recorded price does: a resumed session prices its
+// transcript's rows with the table it loaded (Replay).
 
 // unsavedUsage is usage this incarnation was billed for that no entry holds
 // (§3.14): a step no append wrote — its save failed (DiagSaveFailed), it was

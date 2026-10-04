@@ -475,6 +475,44 @@ func TestLoadStrictDecodeNamesFileTableAndKey(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesAnAliasOverTheBound (plan 034 C4r3, r14 #a): a model alias
+// is at most MaxAliasLen bytes — the bound a native session's catalog holds a
+// model's id to, so a model over it would run and be missing from its own
+// catalog. Load refuses a models.toml that holds one, over the catalog and
+// without it, naming the file and the model's table; a table built in memory
+// does not validate. The control: an alias at the bound loads, a model of the
+// table. Negative control: an alias rule with no bound loads the longer one.
+func TestLoadRefusesAnAliasOverTheBound(t *testing.T) {
+	sized := func(n int) string { return "openrouter/" + strings.Repeat("q", n-len("openrouter/")) }
+	entry := func(alias string) string {
+		return "\n[models.\"" + alias + "\"]\nprovider = \"openrouter\"\nwire_model = \"some/model\"\n"
+	}
+	atBound, over := sized(MaxAliasLen), sized(MaxAliasLen+1)
+	for _, c := range []struct{ name, models string }{
+		{"over the catalog", "version = 1\n"},
+		{"without the catalog", validModels},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tbl, err := Load(writeFiles(t, validProviders, c.models+entry(atBound)))
+			if err != nil {
+				t.Fatalf("control: an alias of %d bytes: %v", len(atBound), err)
+			}
+			if _, ok := tbl.Models[atBound]; !ok {
+				t.Fatal("control: the alias at the bound is not a model of the table")
+			}
+			dir := writeFiles(t, validProviders, c.models+entry(over))
+			_, err = Load(dir)
+			fe := wantFileError(t, err, filepath.Join(dir, ModelsFile), modelTable(over), "")
+			if want := fmt.Sprintf("at most %d bytes", MaxAliasLen); !strings.Contains(fe.Reason, want) {
+				t.Fatalf("reason = %q; want it to say %q", fe.Reason, want)
+			}
+		})
+	}
+	tbl := validTable()
+	tbl.Models[over] = tbl.Models["openrouter/minimax-m3"]
+	wantFileError(t, tbl.Validate(), ModelsFile, modelTable(over), "")
+}
+
 func TestLoadVersion(t *testing.T) {
 	noVersion := func(s string) string { return strings.Replace(s, "version = 1\n", "", 1) }
 	v2 := func(s string) string { return strings.Replace(s, "version = 1", "version = 2", 1) }

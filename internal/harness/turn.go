@@ -274,6 +274,7 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	// resumed session's numbering continues from. A wake's is its results.
 	user := store.MessageEntry{Model: m.id(), Effort: m.effort, Turn: number}
 	var held []string
+	var heldNames map[string]usageNames
 	if wake {
 		// Taken under the runner's lock now the session is claimed, owned by
 		// the wake's first step (P47) before anything is sent; a prompt that
@@ -292,7 +293,7 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 		if b == nil {
 			return Result{}, ErrNothingPending
 		}
-		text, held = b.text, b.ids
+		text, held, heldNames = b.text, b.ids, b.names
 		user.SubagentUsage, user.SubagentResults = b.rows, true
 	}
 
@@ -343,18 +344,19 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	}
 
 	t := &turn{
-		ctx:     turnCtx,
-		store:   s.store,
-		model:   m,
-		sink:    sink,
-		number:  number,
-		calls:   calls{tools: s.tools},
-		steers:  &s.steers,
-		modes:   s.modes,
-		logMode: s.recordMode,
-		subs:    s.subs,
-		wake:    wake,
-		held:    held,
+		ctx:       turnCtx,
+		store:     s.store,
+		model:     m,
+		sink:      sink,
+		number:    number,
+		calls:     calls{tools: s.tools},
+		steers:    &s.steers,
+		modes:     s.modes,
+		logMode:   s.recordMode,
+		subs:      s.subs,
+		wake:      wake,
+		held:      held,
+		heldNames: heldNames,
 
 		turnFirstRequest:    true,
 		segmentFirstRequest: true,
@@ -794,12 +796,14 @@ type turn struct {
 	// wake says the turn is a wake, whose prompt is results; internal are the
 	// parts of results its steps took up, a collection of their own and never
 	// the steer box's; held are the results a wake was started with, which
-	// its user entry carries, and heldWritten says an append has written it.
-	// Under mu, but for the two fixed ones.
+	// its user entry carries, heldNames the names its rows give their usage
+	// (batch.names), and heldWritten says an append has written it. Under
+	// mu, but for the fixed ones.
 	subs        *subagents
 	wake        bool
 	internal    []internalPart
 	held        []string
+	heldNames   map[string]usageNames
 	heldWritten bool
 
 	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
@@ -1342,7 +1346,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		switch {
 		case err == nil:
 			t.written, t.remWritten = len(t.spliced), len(t.reminders)
-			t.wrote(ids, lead, toolEntry != nil, outputCalls(answered))
+			t.wrote(ids, lead, toolEntry != nil, answered)
 			t.todosWritten(todos)
 			done.Saved, done.Entries = true, ids
 			// The conversation now holds the step the model read the notice

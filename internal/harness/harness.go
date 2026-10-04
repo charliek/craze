@@ -1132,20 +1132,24 @@ func (s *Session) Redact(text string) string { return s.redactor().String(text) 
 // otherwise, including from a later call on a session already refusing.
 //
 // Every sub-agent already attached learns them too (plan 034 C4r2, r11 #2c),
-// each by its own toolset, as AddSecrets visits them: a background child runs
+// by its own AddSecrets, as AddSecrets visits them: a background child runs
 // on while its parent idles, and a reload learns keys then, so a key inside
 // the child's own frozen surfaces — the parent's prompt it inherited, its role
 // section, its tools, its plan path — puts that child in its refusal state,
 // judged by those surfaces, and its turn sends no request after its next
-// boundary. Like the parent's, the child's running turn keeps its redactor
-// (R1): nothing is installed, and what it reports through the runner is
-// redacted with the parent's keys anyway (union). A child still opening is
-// caught up from the parent's learned keys as it is attached
-// (attachCaughtUp): the parent learns before it reads the registry, and an
-// attachment reads the learned keys after it is recorded, so every child
-// meets every key one way or the other. The error is the parent's alone: a
-// child's refusal ends that child's turn, which its parent reads as a failed
-// sub-agent.
+// boundary. And, unlike the parent's, the child's running turn installs them
+// at once (plan 034 C4r3, r13 #4): a child runs one turn and closes, so
+// there is no next turn for them to wait for, and a tool of its that reads a
+// file holding one — a .env beside the code — must not hand it to the
+// child's next request. Installing only widens what the turn redacts, the
+// safe direction (toolset.addSecrets); what the child's history already
+// carried before the key was learned it carries on, as the parent's running
+// turn carries its frozen prompt (X50). A child still opening is caught up
+// from the parent's learned keys as it is attached (attachCaughtUp): the
+// parent learns before it reads the registry, and an attachment reads the
+// learned keys after it is recorded, so every child meets every key one way
+// or the other. The error is the parent's alone: a child's refusal ends that
+// child's turn, which its parent reads as a failed sub-agent.
 //
 // It is safe from any goroutine, a closed session included, and takes the
 // toolset's lock, a leaf — learning is serialized there — and, briefly, the
@@ -1172,7 +1176,7 @@ func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err erro
 		err = ErrStoredKeyFrozen
 	}
 	for _, child := range s.subs.liveChildren() {
-		child.tools.learn(vals)
+		child.AddSecrets(vals...)
 	}
 	return skipped, err
 }

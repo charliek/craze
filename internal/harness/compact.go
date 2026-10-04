@@ -158,7 +158,9 @@ var errTextFormOverflow = fmt.Errorf("%w: the compaction's text form does not fi
 // compact returns CompactResult{}, ctx.Err() either way — Session.Compact
 // turns that into a cancelled Result, as Run's finish does. A session found
 // in its refusal state before an attempt ends them the same way, with
-// ErrStoredKeyFrozen (compactRefused, plan 034 C4r2).
+// ErrStoredKeyFrozen (compactRefused, plan 034 C4r2), and so does one found
+// in it once the attempts have failed (C4r3): the key was learned during the
+// last attempt, or one that failed fatally.
 func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	return s.compactOn(ctx, m, m.r, reason == store.CompactionOverflow, 0, turn, reason, focus, command, emit)
 }
@@ -361,6 +363,19 @@ attempts:
 	}
 
 	if reply == "" {
+		// The loop's own check guards only the way into an attempt: a key
+		// learned while the last attempt's request was outstanding, or
+		// while one that then failed fatally — or overflowed the text
+		// form's budget — was, leaves the loop here without meeting it
+		// (plan 034 C4r3, r13 #3). The failure is the refusal's then, as it
+		// would have been had another attempt followed: no failure entry
+		// unless an attempt was billed, automatic compaction left as it
+		// was, and the caller stopping on ErrStoredKeyFrozen — an overflow
+		// recovery's turn included, which would otherwise end with the
+		// overflow.
+		if s.tools.refusing.Load() {
+			return s.compactRefused(m, turn, reason, command, usage, before, emit)
+		}
 		if lastErr == nil {
 			lastErr = errDegenerateSummary
 		}
@@ -393,7 +408,8 @@ func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reaso
 }
 
 // compactRefused is compact's return once the session is refusing before an
-// attempt (plan 034 C4r2, r11 #2b): no request is sent, and the compaction
+// attempt (plan 034 C4r2, r11 #2b), or after attempts that all failed (C4r3,
+// r13 #3): no further request is sent, and the compaction
 // ends as a cancelled one does (compactCancelled) — a failure entry only if
 // some attempt was billed, so what it spent is held by an entry, and
 // Compacted{ended} with the refusal's own text, which names no key. It

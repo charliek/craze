@@ -21,12 +21,14 @@ import (
 // internalPart is one part of background results a step took up: the user
 // message it is — the results' text, byte for byte what the store writes — the
 // index it is re-inserted at in every later step's input, the results it
-// holds, their usage, a row per model, and whether an append has written it.
+// holds, their usage, a row per model, the names each result's usage has
+// among those rows (batch.names), and whether an append has written it.
 type internalPart struct {
 	at      int
 	msg     fantasy.Message
 	ids     []string
 	usage   []store.ModelUsage
+	names   map[string]usageNames
 	written bool
 }
 
@@ -45,7 +47,7 @@ func (t *turn) takeResults(n int, base []fantasy.Message) {
 	if b == nil {
 		return
 	}
-	t.internal = append(t.internal, internalPart{at: len(base), msg: fantasy.NewUserMessage(b.text), ids: b.ids, usage: b.rows})
+	t.internal = append(t.internal, internalPart{at: len(base), msg: fantasy.NewUserMessage(b.text), ids: b.ids, usage: b.rows, names: b.names})
 }
 
 // entry is p as the store takes it: a user entry marked as results, carrying
@@ -124,13 +126,16 @@ func (t *turn) unwrittenParts() []*internalPart {
 // — the results the wake was started with — is the held user entry written
 // just ahead of them by the turn's first append (Run discards any other held
 // user first), and commits its results once. And an agent_output call commits its reservation only when
-// its own result is in the tool entry written — outputs are those calls'
-// harness ids (outputCalls) — by that entry's id. An append that failed, or
-// had nothing to write, commits nothing: it never gets here. Every append
-// writes the entries the store holds first, so the turn's own user entry is
-// written by whichever append of the turn comes first (userWritten). mu is
-// held.
-func (t *turn) wrote(ids []string, lead []*internalPart, withTool bool, outputs []string) {
+// its own result is in the tool entry written — answered are the calls whose
+// results it holds, and outputCalls picks those that commit — by that entry's
+// id. Each commit names the rows the entry wrote the results' usage into
+// (usageNames): a part's and a wake's by deliver's redaction, an
+// agent_output call's by its result's Child as the entry holds it. An append
+// that failed, or had nothing to write, commits nothing: it never gets here.
+// Every append writes the entries the store holds first, so the turn's own
+// user entry is written by whichever append of the turn comes first
+// (userWritten). mu is held.
+func (t *turn) wrote(ids []string, lead []*internalPart, withTool bool, answered []*toolCall) {
 	t.userWritten = true
 	tail := 1 // the answer
 	if withTool {
@@ -145,13 +150,13 @@ func (t *turn) wrote(ids []string, lead []*internalPart, withTool bool, outputs 
 			continue
 		}
 		p.written = true
-		t.subs.commitIDs(t.number, ids[first+i], p.ids)
+		t.subs.commitIDs(t.number, ids[first+i], p.ids, p.names)
 	}
 	if len(t.held) > 0 && !t.heldWritten && first >= 1 {
 		t.heldWritten = true
-		t.subs.commitIDs(t.number, ids[first-1], t.held)
+		t.subs.commitIDs(t.number, ids[first-1], t.held, t.heldNames)
 	}
-	if withTool && len(outputs) > 0 {
-		t.subs.commitCalls(t.number, ids[len(ids)-1], outputs)
+	if outputs := outputCalls(answered); withTool && len(outputs) > 0 {
+		t.subs.commitCalls(t.number, ids[len(ids)-1], outputs, outputNames(answered))
 	}
 }

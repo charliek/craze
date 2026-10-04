@@ -153,11 +153,31 @@ type taken struct {
 
 // batch is results one consumer took, as the model reads them: their ids, the
 // text of the one user part (or tool result) they make, and their usage, a
-// row per model.
+// row per model. names are, by result id, the names each result's usage was
+// merged into rows under — deliver's redaction of them — which is what commit
+// registers its price under (usageNames).
 type batch struct {
-	ids  []string
-	text string
-	rows []ModelUsage
+	ids   []string
+	text  string
+	rows  []ModelUsage
+	names map[string]usageNames
+}
+
+// usageNames are the names a subagent_usage row carries — provider, alias,
+// wire model — as the entry that delivers a background result writes them:
+// its usage's names redacted where the rows were made, by deliver for a part
+// of results or a wake's prompt, and by Output and the dispatcher for an
+// agent_output call's result (plan 034 C4r3, r13 #6). commit registers the
+// result's price under them, not the names the usage was observed with: a key
+// the session learned while the result waited may equal one of those — a wire
+// id, say — and spend finds a row's carried usages by the names the entry
+// holds, so a price registered under the others would match no row, and the
+// row, its wire id cut, would go unpriced.
+type usageNames struct{ provider, alias, wireModel string }
+
+// namesOf are u's names as a row merged from it carries them.
+func namesOf(u *tool.ChildUsage) usageNames {
+	return usageNames{provider: u.Provider, alias: u.Model, wireModel: u.WireModel}
 }
 
 // The texts a background call and an agent_output call answer with, craze's
@@ -585,7 +605,8 @@ func (r *subagents) reserveLocked(res *bgResult, own owner) taken {
 // more with a replacer built now (astra r14, major 3): a result was redacted
 // when it became deliverable, but a key the session learned while it waited
 // must not reach the model. Their usage is merged into a row per model, the
-// names redacted by the same replacer.
+// names redacted by the same replacer, and each result's names as redacted
+// are kept by its id (batch.names), for commit.
 func (r *subagents) deliver(got []taken) *batch {
 	if len(got) == 0 {
 		return nil
@@ -604,8 +625,13 @@ func (r *subagents) deliver(got []taken) *batch {
 			blocks[i] = resultBlock(t.id, t.typ, t.status, red.String(t.text))
 		}
 		if u := t.usage; u != nil {
-			usages = append(usages, &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-				WireModel: red.String(u.WireModel), Usage: u.Usage})
+			named := &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
+				WireModel: red.String(u.WireModel), Usage: u.Usage}
+			usages = append(usages, named)
+			if out.names == nil {
+				out.names = make(map[string]usageNames, len(got))
+			}
+			out.names[t.id] = namesOf(named)
 		}
 	}
 	out.text = red.String(strings.Join(blocks, "\n\n"))
@@ -639,10 +665,13 @@ var attrEscaper = strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", 
 // And each one's usage, with the rates its child was opened under, is handed
 // to the session's spend against the entry's row that holds it (Session.carry,
 // plan 034 C4r2, r11 #5) — once regMu is released, since the session's lock
-// is never taken under the registry's. The append that wrote the entry is the
-// turn's, and so is every Spent: the next one, which first counts the entry,
-// comes after this.
-func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool) {
+// is never taken under the registry's. The row is the one the entry wrote,
+// found by the names named says its usage was merged under there (usageNames,
+// C4r3, r13 #6); a result named has none for — no usage in what the entry
+// holds — hands nothing, and its row, if any, is priced as one. The append
+// that wrote the entry is the turn's, and so is every Spent: the next one,
+// which first counts the entry, comes after this.
+func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool, named func(*bgResult) (usageNames, bool)) {
 	if r == nil {
 		return
 	}
@@ -654,10 +683,12 @@ func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool) {
 			r.spendLocked(res.keys)
 			res.keys = nil
 			if u := res.usage; u != nil && u.Usage != (tool.Usage{}) {
-				rows = append(rows, carriedRow{
-					key:   rowKey{entry: entry, provider: u.Provider, alias: u.Model, wireModel: u.WireModel},
-					usage: carriedUsage{usage: storeUsage(u.Usage), price: res.price},
-				})
+				if n, ok := named(res); ok {
+					rows = append(rows, carriedRow{
+						key:   rowKey{entry: entry, provider: n.provider, alias: n.alias, wireModel: n.wireModel},
+						usage: carriedUsage{usage: storeUsage(u.Usage), price: res.price},
+					})
+				}
 			}
 		}
 	}
@@ -666,20 +697,25 @@ func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool) {
 }
 
 // commitIDs commits the results turn's steps reserved among ids (commit): the
-// ones a user part or a wake's prompt carried.
-func (r *subagents) commitIDs(turn int, entry string, ids []string) {
-	r.commit(turn, entry, func(res *bgResult) bool { return res.own.call == "" && slices.Contains(ids, res.id) })
+// ones a user part or a wake's prompt carried, whose usage that entry's rows
+// name as names says, by result id (batch.names).
+func (r *subagents) commitIDs(turn int, entry string, ids []string, names map[string]usageNames) {
+	r.commit(turn, entry, func(res *bgResult) bool { return res.own.call == "" && slices.Contains(ids, res.id) },
+		func(res *bgResult) (usageNames, bool) { n, ok := names[res.id]; return n, ok })
 }
 
 // commitCalls commits the results turn's agent_output calls among calls
 // reserved (commit): the calls whose own result part is in the tool entry the
 // append wrote, and no other — not merely because some tool entry was saved.
+// names are, by call id, the names each call's result's usage carries in that
+// entry (outputNames).
 //
 // The same calls' reads of a running job (bash_output, plan 033 §3.8) are
 // committed with them: each job's read cursor moves to the furthest a written
 // call read to.
-func (r *subagents) commitCalls(turn int, entry string, calls []string) {
-	r.commit(turn, entry, func(res *bgResult) bool { return res.own.call != "" && slices.Contains(calls, res.own.call) })
+func (r *subagents) commitCalls(turn int, entry string, calls []string, names map[string]usageNames) {
+	r.commit(turn, entry, func(res *bgResult) bool { return res.own.call != "" && slices.Contains(calls, res.own.call) },
+		func(res *bgResult) (usageNames, bool) { n, ok := names[res.own.call]; return n, ok })
 	if r == nil {
 		return
 	}

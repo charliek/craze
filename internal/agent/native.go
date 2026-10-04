@@ -602,7 +602,7 @@ func (s *nativeSession) start(context.Context) error {
 	current, _ := hs.Current()
 	infos, cut := choiceInfos(opened.choices, current)
 	s.modelsMu.Lock()
-	s.noteCatalogCut(opened.home, cut)
+	s.noteCatalogCut(hs, opened.home, cut)
 	s.modelsMu.Unlock()
 	// The scan and the instruction loader ran inside open(), before the
 	// harness was opened, because the prompt they feed is frozen there (§3.4)
@@ -1413,9 +1413,12 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact
 
 // planListRetryBackoff is how long after a failed fetch of the plan's model
 // list no other is started (refreshModelsLocked; plan 034 C5r, r12 #3b): long
-// enough that a client asking in a loop costs the account one request per
-// half minute, short enough that a person retrying after fixing what failed —
-// a network back, a sign-in finished — waits for no more than that.
+// enough that a client asking one session in a loop costs the account one
+// request per half minute, short enough that a person retrying after fixing
+// what failed — a network back, a sign-in finished — waits for no more than
+// that. It is per session, as fetchFailed is (plan 034 C4r3, r14 #c): several
+// sessions open at once each keep their own, and can each make a request in
+// the same half minute.
 const planListRetryBackoff = 30 * time.Second
 
 // fetchNow is fetchClock's reading, the wall clock's when it is nil.
