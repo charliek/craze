@@ -85,7 +85,15 @@ func TestFrameNativeLiveKeySave(t *testing.T) {
 		[]string{"Connected Gamma. Its models are in /model now.", "> Alpha One", "Gamma Big"},
 		[]string{connectRowText, "/exit and run craze -c"})
 
-	got = runLiveFrame(t, build, 100, 30, script+"/model<enter><wait:text:Gamma Big>Gamma<enter><wait:idle>hi<enter><wait:text:hello from gamma/big>", key)
+	// The dialog's Enter applies the switch on a command of its own
+	// (chainLock), not a gated call, so the frame after it is idle before the
+	// switch has answered; its note is written when the answer lands. The
+	// script waits for that note — the switch acknowledged — before it types,
+	// as a person reads it: typed sooner, the prompt's row lands above the
+	// note whenever the answer is slower than the keys (a socket's round trip,
+	// one CPU), in either transport.
+	got = runLiveFrame(t, build, 100, 30, script+"/model<enter><wait:text:Gamma Big>Gamma<enter><wait:text:model → gamma/big><wait:idle>"+
+		"hi<enter><wait:text:hello from gamma/big>", key)
 	if !strings.Contains(got, "hello from gamma/big") || !strings.Contains(got, "Gamma Big") {
 		t.Fatalf("a switch to the model the key funded, and a turn on it, did not work:\n%s", got)
 	}
@@ -139,11 +147,14 @@ func noOpenAIForLive(t *testing.T) {
 	t.Setenv(chatgptauth.IssuerEnv, "http://127.0.0.1:1")
 }
 
-// TestFrameNativeAnotherDirectoryKeepsTheOldNote (A26): a TUI whose native
-// directory is not the one its session's host reads says so, over the wire as
-// in process: the old note, and why. nativePickerSession's home is its own, as
-// a detached host's is another process's CRAZE_HOME.
-func TestFrameNativeAnotherDirectoryKeepsTheOldNote(t *testing.T) {
+// TestFrameNativeAnotherDirectorySaysSo (A26): a TUI whose native directory is
+// not the one its session's host reads says so, over the wire as in process —
+// and says that alone: the old note's "/exit and run craze -c" is wrong advice
+// for a TUI attached to that host, whose /exit ends the shared session and
+// whose craze -c finds nothing of it here (plan 034 C6r, from V2).
+// nativePickerSession's home is its own, as a detached host's is another
+// process's CRAZE_HOME.
+func TestFrameNativeAnotherDirectorySaysSo(t *testing.T) {
 	isolateSkillsHome(t)
 	const key = "sk-live-other-dir-dummy-key"
 	build := func() Config {
@@ -152,12 +163,15 @@ func TestFrameNativeAnotherDirectoryKeepsTheOldNote(t *testing.T) {
 		return Config{Session: nativePickerSession(t, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
 	}
 	got := runLiveFrame(t, build, 100, 30, "<wait:idle>/connect<enter><wait:text:Gamma><enter><wait:text:Gamma API key><paste:"+key+"><enter>"+
-		"<wait:text:Connected Gamma.>", key)
+		"<wait:text:Connected Gamma in this craze directory>", key)
 	flat := strings.Join(strings.Fields(got), " ")
-	for _, w := range []string{"Connected Gamma. New sessions offer its models; to use them in this conversation, /exit and run craze -c.",
-		"This session's host reads another craze directory, so it does not see them."} {
-		if !strings.Contains(flat, w) {
-			t.Fatalf("the frame is missing %q:\n%s", w, got)
+	const want = "Connected Gamma in this craze directory, but this session's host reads another one, so it does not see its models."
+	if !strings.Contains(flat, want) {
+		t.Fatalf("the frame is missing %q:\n%s", want, got)
+	}
+	for _, w := range []string{"/exit and run craze -c", "New sessions offer", "/model now"} {
+		if strings.Contains(flat, w) {
+			t.Fatalf("the frame says %q to a TUI whose session reads another directory:\n%s", w, got)
 		}
 	}
 }

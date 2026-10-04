@@ -86,7 +86,9 @@ func allNotes(m Model) string { return strings.Join(texts(m, entryNote), "\n") }
 // models — with the TUI's native directory, once — and the notice says what
 // came of it. applied: they are in /model now, and the picker lists them with
 // no /exit; pending (a turn runs): after this turn; a host reading another
-// craze directory: the old note, and why; current and failed: the old note.
+// craze directory: that, alone — not the old note's /exit and craze -c, which
+// would not reach that host's files either (plan 034 C6r); current and
+// failed: the old note.
 func TestAKeySaveSaysWhatItsRefreshCameTo(t *testing.T) {
 	const old = "Connected Gamma. New sessions offer its models; to use them in this conversation, /exit and run craze -c."
 	for _, tc := range []struct {
@@ -104,7 +106,7 @@ func TestAKeySaveSaysWhatItsRefreshCameTo(t *testing.T) {
 			s.mu.Unlock()
 		}, "Connected Gamma. Its models will be in /model after this turn.", false},
 		{"another directory", func(s *Stub) { s.StageModels(refreshStaged); s.SetNativeDir("/somewhere/else/native") },
-			old + otherHomeText, true},
+			"Connected Gamma in this craze directory, but this session's host reads another one, so it does not see its models.", true},
 		{"current", func(*Stub) {}, old, false},
 		{"failed", func(s *Stub) { s.StageModels(refreshStaged); s.FailNextRefresh() }, old, false},
 	} {
@@ -172,7 +174,7 @@ func TestASignInSaysWhatItsRefreshCameTo(t *testing.T) {
 			s.mu.Unlock()
 		}, "The plan's models will be in /model after this turn."},
 		{"another directory", func(s *Stub) { s.StageModels(refreshStaged); s.SetNativeDir("/somewhere/else/native") },
-			old + otherHomeText},
+			"The sign-in is saved in this craze directory, but this session's host reads another one, so it does not see the plan's models."},
 		{"current", func(*Stub) {}, old},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -309,6 +311,27 @@ func TestAConnectDuringATurnIsRefused(t *testing.T) {
 	}
 }
 
+// drainPublished is drainSessionEvents once the session's outbox is
+// committed. A reload's catalog delta is not published inline, as a turn's
+// events are (drainSessionEvents' premise): the native session enqueues it
+// (agent.EventLog's outbox, plan 021 §3.3), and the log's own goroutine puts
+// it on the stream a moment after RefreshModels has answered — on one CPU,
+// after a drain that found the channel empty. The engine's Sync is the barrier
+// that waits for it: everything enqueued before the call is on the stream when
+// it returns (the socket server's reply barrier, engine.SyncSeq). In the TUI
+// the gate applies a refresh's answer before any event held behind it, in
+// both transports, so the note is written first and the list follows: what
+// this test waits for is the fold, not a different order.
+func drainPublished(t *testing.T, m *Model, sess agent.Session) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := engineOf(t, *m).Sync(ctx); err != nil {
+		t.Fatalf("sync the session's outbox: %v", err)
+	}
+	drainSessionEvents(t, m, sess)
+}
+
 // signInResultFixture is a finished sign-in with plan usage, for the redirect.
 func signInResultFixture() chatgptauth.Result {
 	return chatgptauth.Result{Email: signInEmail, PlanUsage: true, Registered: true}
@@ -358,7 +381,7 @@ func TestLiveSignInAndSignOutThroughARealSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	m = applyMsg(t, m, signInFinishedMsg{shownGen: m.shownGen, aliases: []string{"chatgpt/gpt-5.6-sol", "chatgpt/gpt-6-astra"}})
-	drainSessionEvents(t, &m, sess)
+	drainPublished(t, &m, sess)
 	if notes := texts(m, entryNote); notes[len(notes)-1] != "The plan's models are in /model now." {
 		t.Fatalf("notes %q, want the plan's models in /model now", notes)
 	}
@@ -372,7 +395,7 @@ func TestLiveSignInAndSignOutThroughARealSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ = typeCommand(t, m, "/model")
-	drainSessionEvents(t, &m, sess)
+	drainPublished(t, &m, sess)
 	if planListed() {
 		t.Fatalf("the plan's models are still listed after the sign-out: %v", m.snap.Models)
 	}

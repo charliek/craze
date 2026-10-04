@@ -56,13 +56,13 @@ func (m Model) thenRefreshModels(cont func(Model, *agent.ModelsRefresh) Model) (
 	})
 }
 
-// otherHomeText is what a refresh that reached a session reading another
-// craze directory adds to the old note (A26): this TUI wrote the key or the
-// sign-in into its own CRAZE_HOME, which that session never reads.
-const otherHomeText = " This session's host reads another craze directory, so it does not see them."
-
 // sessionHomeDiffers reports whether the host said it reads another craze
-// directory than this TUI's.
+// directory than this TUI's (A26): this TUI wrote the key or the sign-in into
+// its own CRAZE_HOME, which that session's host never reads. Its note stands
+// alone, whatever else the answer said (plan 034 C6r, from V2): the old
+// note's "/exit and run craze -c" is wrong advice there — for a TUI attached
+// to that host, /exit ends the shared session, and craze -c from this home
+// finds nothing of it.
 func sessionHomeDiffers(r *agent.ModelsRefresh) bool {
 	return r != nil && r.SameDir != nil && !*r.SameDir
 }
@@ -71,9 +71,12 @@ func sessionHomeDiffers(r *agent.ModelsRefresh) bool {
 // and what the save means for this conversation. r is what the refresh that
 // followed came to, nil when none was asked or none answered:
 //
+//   - a host reading another craze directory, whatever else it said: the key
+//     is in this TUI's directory and not the session's, and nothing more —
+//     no /exit and craze -c, which would not reach it either
+//     (sessionHomeDiffers);
 //   - applied: the session offers the provider's models now;
 //   - pending: a turn is running, and the session takes them up as it ends;
-//   - a host reading another craze directory: the old note, and why it holds;
 //   - anything else (current, failed, unsupported, no refresh): the old note,
 //     plan 031's P8 — new sessions offer them, this one after /exit and
 //     craze -c.
@@ -82,7 +85,7 @@ func connectedNote(name string, r *agent.ModelsRefresh) string {
 	old := head + "New sessions offer its models; to use them in this conversation, /exit and run craze -c."
 	switch {
 	case sessionHomeDiffers(r):
-		return old + otherHomeText
+		return "Connected " + name + " in this craze directory, but this session's host reads another one, so it does not see its models."
 	case r != nil && r.Status == agent.ModelsApplied:
 		return head + "Its models are in /model now."
 	case r != nil && r.Status == agent.ModelsPending:
@@ -97,7 +100,7 @@ func signedInSessionNote(r *agent.ModelsRefresh) string {
 	old := "New sessions offer the ChatGPT plan's models; to use them in this conversation, /exit and run craze -c."
 	switch {
 	case sessionHomeDiffers(r):
-		return old + otherHomeText
+		return "The sign-in is saved in this craze directory, but this session's host reads another one, so it does not see the plan's models."
 	case r != nil && r.Status == agent.ModelsApplied:
 		return "The plan's models are in /model now."
 	case r != nil && r.Status == agent.ModelsPending:

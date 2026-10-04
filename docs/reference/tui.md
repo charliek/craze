@@ -1571,7 +1571,10 @@ provider has no key.
   is running (another client's, or the agent's own: `/connect` itself is refused
   while one runs). When the session could not take them up — see below — it
   says `Connected <Name>. New sessions offer its models; to use them in this
-  conversation, /exit and run craze -c.` Another provider's stored key that
+  conversation, /exit and run craze -c.`, and when its host reads another
+  craze directory, `Connected <Name> in this craze directory, but this
+  session's host reads another one, so it does not see its models.` Another
+  provider's stored key that
   cannot be used is kept as it was, and named in a note after it. A store that
   refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
   cannot be taken — is an error row naming the problem, never the key.
@@ -1666,7 +1669,9 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   models are in /model now.` (or `The plan's models will be in /model after
   this turn.`; when the session could not take them up, the older `New
   sessions offer the ChatGPT plan's models; to use them in this conversation,
-  /exit and run craze -c.`). An account that did not allow
+  /exit and run craze -c.`; when its host reads another craze directory, `The
+  sign-in is saved in this craze directory, but this session's host reads
+  another one, so it does not see the plan's models.`). An account that did not allow
   plan usage gets `Signed in to ChatGPT as <email>, but ChatGPT plan usage is
   off: …` and `To turn it on, sign in again with /connect and allow ChatGPT
   plan usage when ChatGPT asks.` A sign-in that fails — declined in the
@@ -1733,7 +1738,7 @@ notice says depends on the answer:
 |---|---|---|
 | it took them up | `Connected <Name>. Its models are in /model now.` | `The plan's models are in /model now.` |
 | a turn is running; it takes them up when the turn ends | `Connected <Name>. Its models will be in /model after this turn.` | `The plan's models will be in /model after this turn.` |
-| it reads another craze directory | the old note, then `This session's host reads another craze directory, so it does not see them.` | the same sentence after the old note |
+| it reads another craze directory (whatever else it says) | `Connected <Name> in this craze directory, but this session's host reads another one, so it does not see its models.` | `The sign-in is saved in this craze directory, but this session's host reads another one, so it does not see the plan's models.` |
 | nothing had changed, or the files could not be read | the old note | the old note |
 | it cannot take up models (an ACP session, or a host from before the method), or did not answer | the old note, and no call is made on a session that cannot | the old note |
 
@@ -1742,7 +1747,10 @@ conversation, /exit and run craze -c.` (`…the ChatGPT plan's models…` for a
 sign-in): the models are in the next session, or in this conversation after
 `/exit` and `craze -c`. The *another craze directory* case is a session
 attached with `craze attach` or a TUI under another `CRAZE_HOME`: this TUI
-wrote its own files, which that session never reads.
+wrote its own files, which that session never reads. Its note leaves the old
+advice out, since neither step would help there: `/exit` ends the session for
+every client attached to it, and `craze -c` from this craze directory does not
+find a session that another one holds.
 
 The model dialog reads the list the session publishes, so a refresh that lands
 while it is open adds the models to the open box with no reopening, the
