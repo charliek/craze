@@ -1379,6 +1379,11 @@ def test_tui_picker_refuses_native_under_agent_bin(
     Enter on native is the dialog's error row -- no agent spawned, no default
     persisted -- and Esc still starts the default, the fake agent --agent-bin
     names.
+
+    The default is grok ($CRAZE_PROVIDER), never cursor (plan 036 C3's audit):
+    a production craze outside the macOS login session marks cursor
+    unavailable, and the picker would refuse Esc to it. grok has no
+    login-session rule, and the refusal under test comes first either way.
     """
     config_path = tmp_path / ".craze" / "config.toml"
     argv_dump = tmp_path / "agent-argv"
@@ -1386,13 +1391,18 @@ def test_tui_picker_refuses_native_under_agent_bin(
         craze_bin,
         fake_agent_bin,
         tmp_path,
+        script="grok-echo",
         provider="",
-        env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
+        env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump), "CRAZE_PROVIDER": "grok"},
     ) as tui:
         tui.wait_contains("esc uses default")
         # The rows are cursor, grok and native -- gx too only where `gx` is on
-        # PATH, --agent-bin being the resolved cursor's alone (plan 032 P7) --
-        # with cursor preselected, so Up wraps onto native either way.
+        # PATH, --agent-bin being the resolved grok's alone (plan 032 P7) --
+        # with grok preselected, so Up reaches cursor and then wraps onto
+        # native either way.
+        mark = tui.mark()
+        tui.write(b"\x1b[A")
+        tui.wait_contains_since("> cursor", mark)
         mark = tui.mark()
         tui.write(b"\x1b[A")
         tui.wait_contains_since("> native", mark)
@@ -1415,4 +1425,4 @@ def test_tui_picker_refuses_native_under_agent_bin(
         tui.wait_contains("echo: hello")
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)
-    assert config_path.read_text(encoding="utf-8") == 'provider = "cursor"\n'
+    assert config_path.read_text(encoding="utf-8") == 'provider = "grok"\n'

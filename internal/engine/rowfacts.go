@@ -25,7 +25,7 @@ import (
 // which a list polled once a second tolerates.
 
 // RowFacts is one row's facts (protocol.SessionRow's, and HeadAsk.Summary).
-// Every string is one line (rowLine): the first non-blank one, tabs expanded,
+// Every string is one line (RowLine): the first non-blank one, tabs expanded,
 // control characters dropped, at most RowTextCells cells.
 type RowFacts struct {
 	// Doing is what a working session is doing: the title of the most
@@ -109,22 +109,22 @@ func RowStateOf(st State) RowState {
 func (e *Engine) RowFacts(st State) RowFacts {
 	var f RowFacts
 	if st.StartFailed {
-		f.StartErr = rowLine(st.Err)
+		f.StartErr = RowLine(st.Err)
 	}
 	var head agent.AskRecord
 	haveHead := false
 	if st.PendingAsks > 0 && st.HeadAsk.ID != "" {
 		head, haveHead = e.asks.Record(st.HeadAsk.ID)
 		if haveHead {
-			f.Summary = rowLine(askSummary(head))
+			f.Summary = RowLine(askSummary(head))
 		}
 	}
 	p := e.model.Progress()
-	f.LastReply = rowLine(p.LastReply)
+	f.LastReply = RowLine(p.LastReply)
 	if st.Activity == ActivityWorking || st.ForeignTurn {
 		switch {
 		case p.Tool != "":
-			f.Doing = rowLine(p.Tool)
+			f.Doing = RowLine(p.Tool)
 		case p.Responding:
 			f.Doing = DoingResponding
 		default:
@@ -247,7 +247,7 @@ func askWasOpen(u *agent.AskUpdate) bool {
 	return u.Body == nil && u.Outcome != agent.AskAutomatic
 }
 
-// askSummary is what an open ask is about (RowFacts.Summary), before rowLine:
+// askSummary is what an open ask is about (RowFacts.Summary), before RowLine:
 // a permission's tool title — which carries the command a shell permission
 // asks to run — a question's first question, else its title, and a plan's
 // name.
@@ -273,12 +273,14 @@ func askSummary(r agent.AskRecord) string {
 // plainLine), so a line keeps its indentation's shape.
 const rowTab = "    "
 
-// rowLine is s as a row fact's string (plan 030 §3.10): its first non-blank
+// RowLine is s as a row fact's string (plan 030 §3.10): its first non-blank
 // line, trimmed, tabs expanded, control characters dropped — the agent's text
 // is sanitised where it enters craze already, and this keeps a row to one
 // line whatever reached it — and cut to RowTextCells cells, an ellipsis
-// ending a line that was cut.
-func rowLine(s string) string {
+// ending a line that was cut. It is exported for the provider availability
+// check's reason and fix (internal/cli, plan 036 §3.1), which are held to the
+// same one bounded line.
+func RowLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = strings.TrimSpace(s[:i])

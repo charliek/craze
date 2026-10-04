@@ -1020,7 +1020,12 @@ func TestAHostThatCannotBindIsAStartFailure(t *testing.T) {
 				m, _ = m.Update(tea.WindowSizeMsg{Width: 400, Height: 30})
 				cmd := m.Init()
 				if from != "a known provider" {
+					// The provider picker's one command is the read of its
+					// rows' availability (plan 036 §3.3), taken here.
 					if cmd != nil {
+						m = feed(m, runCmd(t, cmd, serveStep))
+					}
+					if spawnErr != nil || cmds.count() != 0 {
 						t.Fatal("the premise: a picker is up, and Init spawns nothing")
 					}
 					m, cmd = m.Update(enterKey)

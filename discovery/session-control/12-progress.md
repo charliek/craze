@@ -5162,3 +5162,280 @@ bridge` through a GUI-session process such as `shed-host-agent` on macOS, so no
 bridge gives birth to an ssh-session hub (SF-126, `06` item 3); a client that
 half-closes and then drops over Tailscale SSH leaves its bridge and splice until
 the host's next write (SF-139); and SF-130 if the error proves not to be enough.
+
+## Plan 036 — S3a: provider availability and the hub's create options
+
+Plan 036 is craze's side of the shed lane (SD-46, with SD-40–SD-45 settled with
+the owner on 2026-10-03; the design is not reopened). It builds what shed and
+the TUI need before S3b, shed's run, starts: one provider availability check
+with three states (`ready`, `needs_setup`, `unavailable`), each but the first
+with a reason and a fix; the TUI's two pickers rendering it and refusing what
+cannot start, with native and no key leading into `/connect`; a hub method,
+`sessions.createOptions`, behind a connection capability; `craze providers`;
+and a verified, documented hermetic recipe for shed's tests. One PR, gated per
+commit, as for Plan 035. The plan lives outside the repo; its execution amendments
+(X1–X42, in the plan folder's `progress.md`) are the truth.
+
+PR: #87, merged as TBD (TBD).
+
+### What shipped per commit
+
+- **C1 (`925be29`) — the check and `craze providers`.** `internal/cli`'s
+  availability check: the TUI/CLI column resolves binaries as this process's
+  sessions would (naming the knob that failed, X2), the hub column as a
+  hub-created host does; native runs the pair its own start runs (an
+  unreadable table is `unavailable`, naming the file and never the error's text;
+  no funded model is `needs_setup`); cursor is `unavailable` outside the macOS
+  login session, checked only once its binary resolves. `craze providers
+  [--json]` prints it. Pushed alone so that CI's diagnostic step could record
+  the macOS runner's session: it is a GUI session, cursor `ready` (X1).
+- **C2 (`fbf9a16`) — `sessions.createOptions`.** The hub's method, its schema,
+  a seventh connection capability written only when true (so fixtures 01–25 and
+  every older hello are byte-identical), `hub.Find` (finds a running hub and
+  never starts one), `craze providers --hub [--json]`, fixture 26.
+- **C1r (`328f79f`) — r1's P3.** A native load error is named by its structure
+  (`FileError`, `PathError`, the leading `modeltable:` head), never by a
+  substring of its body.
+- **C2r (`51f251b`) — r2's P2.** `Find`'s live-hub test installs the start-token
+  seam so it can never signal its own test process.
+- **F1 (`32bb22e`) — Plan 034's live key-save flake.** The frame is taken after
+  `<wait:idle>`; see the flakes below.
+- **C3 (`cc6d6a9`) — the pickers.** The startup picker and `/provider` show
+  each provider's state, dim what is not ready, and refuse (in place) an Enter,
+  Esc or outside click that would start it; `tui.md` gains "Provider states".
+  Three new goldens, no existing golden moved.
+- **C4 (`968871f`) — the pre-session connect dialog.** Picking native with no
+  key opens `/connect` before any session exists, from the picker and from the
+  list, with no backend call and no transcript change; every exit returns to
+  where it came from with native recomputed. Also carries r3's two fixes (X25).
+- **C5 (`0a57b29`) — the hermetic recipe.** `tests/cli/test_client_recipe.py`
+  and protocol.md's "Testing a client against a real hub": the real hub over a
+  `craze-fake-host` entry, a create spawning `craze-fake-agent`, two bridges,
+  every wait bounded.
+- **C4r (`faff987`) — r4's two P2s.** A late sign-in log failure never writes
+  into a session's transcript; a return's stale availability answer never lands
+  under a reopened dialog.
+- **F2, F2r, F2r2 (`bd9198a`, `addbda7`, `b103bf6`) — Plan 033's
+  `TestBashCloseSignal` flake.** A per-call grace, then a quieter wait loop, then
+  the real cause: a cancel that could precede the launch's return. See the
+  flakes below.
+- **C5r (`dad8540`) — r5's findings.** The recipe's PATH is a private
+  directory of copies, the fake host is owned from its `Popen`, the bridges read
+  regular-file input with `tail -f`, the prose gets a bounded, idempotent
+  cleanup, and the echo is one rule in test and prose (X37, X38).
+- **F2r3 (`4de8ed4`) — r7's P3.** A failure before the bash subtest's close
+  still closes its session.
+- **C4r2 (`3c608df`) — r6's P2.** The sign-in log's failure is attributed to
+  the run that held the log when it stopped, frozen then (X36, X39).
+- **C4r3 (`ace8aa3`) — r8's residual.** Comment only: the provenance comment
+  states what X40 accepts.
+- **C5r2 (`09fd8f4`) — r7's two P2s and P3.** The private `path/` holds copies,
+  not links; `cleanup` picks processes by that path prefix and re-reads each
+  command line before each signal; relative overrides become absolute; polls
+  keep one absolute deadline (X41).
+- **C5r3 (`d6f8a7d`) — r10's P3.** The prose's cleanup reads whole command
+  lines (`ps -ww`; Linux `ps` truncates to `$COLUMNS`).
+- **C3r (`e050fcf`) — r9's P2 and P3.** The startup picker's rows follow each
+  availability answer (X42), and `CRAZE_PROVIDER` is worded as no bypass in the
+  docs and comments.
+- **C3r2 (`b3202a0`) — r11's P2.** An answer that names no known provider leaves
+  the picker's default alone, judged as left out; a nil answer leaves the rows.
+- **C6 — this record.** Docs only.
+
+### Execution decisions
+
+`progress.md` holds the full list (X1–X42); these are the ones a later reader
+needs, grouped.
+
+**UX.**
+- X2: the override reason names the knob, `<knob> <path> not found`, with the fix
+  `point <knob> at an existing binary` (` in <config path>` for `[agents]`,
+  `, or unset it` for the variable). `craze providers` prints `needs setup`;
+  `--json` the wire's `needs_setup`.
+- X11/X21/X23: native `needs_setup` refused in place in C3 and opens the connect
+  dialog in C4; after the dialog returns with native `ready`, the picker's cursor
+  sits on native and Enter starts it, in the list the provider is left as it was;
+  nothing starts on its own. The TUI's native fix leads with what the TUI offers:
+  `pick it to connect one, or run "craze auth login"`.
+- X12: before the first availability answer every row is ready and a
+  confirmation is accepted as today (availability is advisory); answers carry a
+  generation and a stale one never changes a later opening.
+- X22: the startup picker's detail is two reserved lines, the reason (or the
+  refusal) and then the fix, because one `<reason> — <fix>` line at the box's 52
+  cells lost the fix.
+- X24: a typed `/provider <id>` refusal with the popup dismissed shows on the hint
+  line in the error colour; the popup draws an error note under its candidates;
+  `CRAZE_PROVIDER` alone still opens the picker, so only `--provider` skips the
+  picker and the gate.
+- X25: C4 carries r3's C3 fixes, since it rewrote that code.
+- X32: while the pre-session dialog stands in for the list, an unstarted
+  session's first prompt failing or ending behind it is the session's.
+
+**Architecture.**
+- X16: `hub.Find` ends a wedged hub whose two hellos time out, as every other
+  client does, and reports no hub; it starts none. Ending a hub ends no session.
+- X14/X15: the hub writes `[]` for a nil provider list; a recent directory over
+  4096 bytes is dropped.
+- X27: a card never closes the pre-session dialog; reads and saves race a 15 s
+  `preConnectDeadline` (`preConnectLate`).
+- X33: the recipe's environment is built from nothing (`env -i`), stricter than
+  the plan's "parent minus `CRAZE_FAKE_*`".
+- X34/X35: step 10 stops the hub and checks, bounded, that nothing is left; the
+  prose uses a fixed `/tmp/craze-recipe` scratch directory; the fake host has no
+  SIGTERM handler (a SIGTERM leaves its entry), and docs say so.
+- X36, X39, X40: the sign-in log's failure is attributed to the run that held
+  the log the instant it stopped, frozen by the first observer of the stop.
+  **Accepted residuals** (r8's P2, below): a record of an earlier run written
+  after a later run attached, and a stop published while `logFor` is taking the
+  log, are frozen as the later run. The user is told either way; no secret is
+  involved; closing it needs a lock shared with `internal/signinlog`'s generic
+  writer.
+- X41: the recipe's `cleanup` residual is a pid freed and retaken in the instant
+  between a command-line check and the signal.
+
+**Verification.** X31: the plan's pathspec for V8 missed goldens directly in a
+`testdata/`; V8 uses `':(glob)internal/**/*.golden'`.
+
+### Review rounds
+
+- **r1 (sol, C1).** One P2: the hub's PATH check depends on the hub's cwd for a
+  relative PATH entry. **Accepted, not fixed:** a relative entry makes every
+  lookup cwd-dependent, today's session starts included, Go's `exec.LookPath`
+  refuses such a match, the hub cannot know a future create's cwd, and
+  availability never refuses a create. A known limit; no SF row. P3: the load
+  error named the wrong file; fixed in C1r.
+- **r2 (astra, C2).** Fixtures 01–25 and all 187 goldens byte-identical, the 36
+  schema copies match. One P2, the `Find` test signalling its own process;
+  C2r. Noted, not changed: an `Options` panic would end the hub (no production
+  path panics, and no other handler recovers either), and X16 cannot tell
+  starved from wedged.
+- **r3 (sol, C1r + F1 + C3).** C1r and F1 clean. P2: an availability answer
+  landing while the picker is closed leaks into its next opening; P3: `tui.md`
+  presented `CRAZE_PROVIDER` as a bypass. Both fixed in C4 (X25).
+- **r4 (astra, C4).** Two P2s: a late `signInLogOffMsg` writing into a
+  transcript, and a return's stale answer landing under a reopened dialog.
+  C4r.
+- **r5 (sol, C5).** Five P2s and a P3 on the recipe (PATH, the fake host's
+  cleanup, the FIFOs, the prose's cleanup, the echo check, the recent-dirs poll
+  budget); C5r.
+- **r6 (astra, C4r).** The stale-answer fix and the quit-order test hold. One P2:
+  the log's failure stamped when the watcher resumed, not when the writer
+  failed; C4r2.
+- **r7 (sol, F2 + F2r + F2r2 + C5r).** F2's production grace and r5's fixes hold.
+  Two P2s (the cleanup could signal a reused pid; a relative `CRAZE_BIN` made a
+  dangling link) and a P3 (the poll budget renewed after sending): C5r2. A P3,
+  the bash subtest leaving its shell on an early failure: F2r3.
+- **r8 (astra, C4r2).** Every other interleaving holds. One P2, a stop published
+  while `logFor` takes the log: **accepted as X40**, the comment fixed in C4r3.
+  The third astra round on that sub-issue.
+- **r9 (astra, the branch).** Byte comparisons: all 25 existing fixtures and 187
+  existing goldens unchanged, only fixture 26 and the three picker goldens new,
+  36 schema copies match; the three consumers agree. One P2, the startup picker's
+  rows frozen at construction (a gx removed while the dialog is open still read
+  ready); one P3, `CRAZE_PROVIDER` still presented as a bypass in `cli.md` and
+  three comments; both C3r (X42).
+- **r10 (sol, C5r2).** r7's fixes hold; one P3, Linux `ps` truncating arguments
+  to `$COLUMNS`; C5r3. Noted, accepted: a timely reply validated after the whole
+  poll's deadline is rejected (the budget is the poll's, by design), and the
+  path prefix is a location identity, not unforgeable (the prose says so).
+- **r11 (sol, C3r).** r9's scenario and the wording fixed; one P2, a non-nil
+  answer naming no provider left the old rows selectable (only a test's callback
+  gives one); C3r2.
+- **r12 (sol, C3r2).** No findings. C6 is docs only and was not reviewed.
+
+### Flakes diagnosed
+
+Both were pre-existing and outside this plan's code; neither was retried.
+
+- **F1: `TestFrameNativeLiveKeySave` (Plan 034's).** Failed on the macOS leg of
+  CI at `fbf9a16`: the second script ended on `<wait:text:hello from
+  gamma/big>`, which the reply's text satisfies before the turn has ended, so
+  the async run could capture mid-turn and the gateSync run after the end. A
+  starved repro (5% CPU, ×20) failed 3/20 with that signature; with a
+  `<wait:idle>` after the text wait it is 20/20 green (`32bb22e`).
+- **F2: `TestBashCloseSignal/after_a_cancel,_during_its_grace` (Plan 033's).**
+  Failed in gate-at c5, "the cancel's SIGTERM never happened", beside three other
+  loads; the starve repro (2%, ×20) failed 3/20 with the same signature. Three
+  fixes, each with a deterministic forced-delay proof, and only the last
+  accounted for the failure. A per-call grace (`bd9198a`, a minute's grace in the
+  subtest) was still 3/20, because the shared wait loop forked `sleep 0.05` 20
+  times a second, which alone can use up a 2% quota; sleeping 1 s (`addbda7`,
+  proven by a handler made 4 s late: with the fix 4.08 s, without it 15.05 s) was
+  still 3/20. The real cause was an ordering race in the premise: the test
+  cancelled on the shell's pid file, which bash writes whatever Go's scheduler
+  does, and a stop before `launch` has taken the start's result is discarded with
+  SIGKILL at once, by design. The command now echoes a marker and the test
+  cancels only once it shows in a progress snapshot (`b103bf6`: 20/20 green; a
+  forced launch hold fails the old order at 15.06 s and passes the new at
+  0.49 s). **Lesson:** the first two fixes addressed real but secondary
+  mechanisms, each proven by a forced delay; a forced-delay proof of a hypothesis
+  is not proof it was the failing mechanism, and only the starve repro going
+  green proved the third.
+
+### Verification
+
+- **V1, V2.** V2, the normalized CLI outputs against the baseline: 103/103 the
+  same at `ace8aa3` and again at `b3202a0`, the Go code's final tip. V1
+  (`-race -count=20` on the changed packages, the `tui` package in slices) ran
+  beside CI; its result is in the PR and the follow-up that records the merge.
+- **V3 (mac-mini, `ace8aa3`, real cursor and grok, a scratch environment).** Every
+  leg passed. A smoke server: cursor ready. B, an ssh-born hub: `--hub` says
+  cursor is `unavailable` with the not-GUI reason and `kill <pid> (no session
+  ends), then run "craze ps" in a terminal on the Mac`; in-process the same with
+  `run craze from a terminal on the Mac`; the raw bridge answer byte-identical to
+  `--hub --json`; `--hub` before any hub says `no hub is running`, exit 1, and
+  starts none. C, a GUI-born hub: cursor ready everywhere (and over ssh `--hub`
+  ready while in-process was unavailable: each its own view). D, the TUI over ssh:
+  the picker shows `unavailable · default` with its reason and fix, Enter is
+  refused, native's `pick it to connect one, …` opens the dialog, and a dummy
+  key turns native ready with the cursor on it; Ctrl+C, nothing started. One
+  finding, pre-existing: SF-142.
+- **V4 (Linux, missing binaries, `ace8aa3`).** All steps pass, no craze defect:
+  `craze providers` with the exact PATH-miss texts, gx absent, native
+  `needs_setup`; the picker's and `/provider`'s refusals, dim rows and connect
+  dialog; the hub's `--hub`, `--hub --json` and a raw bridge `sessions.createOptions`
+  match the in-process answer.
+- **V5 (a fresh reader, the recipe section alone, binaries built from `0a57b29`).**
+  Every block ran as written and every answer matched; one nit (the `hubs/<ns>.lock`
+  left after cleanup) went into C5r.
+- **V8 (fixture and golden diffs).** At C4 (`968871f`) the diff lists exactly
+  fixture 26 and the three new goldens (X31); r9 re-compared byte for byte at
+  `09fd8f4`.
+- **macOS.** `mac-test.sh` at C4 and at the tip `09fd8f4`: exit 0, every package
+  a real `ok` run. CI's own diagnostic found the macOS runner in the GUI session
+  (X1), so production binaries in `tests/cli` see cursor ready there.
+- **V7, CI.** Both OSes, both runs (push and pull_request): see the PR.
+
+#### Handoff to S3b
+
+Shed can use now: `sessions.createOptions` (a hub-only method, advertised by the
+connection capability `createOptions`, which a hub writes only when it serves
+the method; absent means not served) answering `providers` with their `state`
+and, when not `ready`, a one-line `reason` and `fix`, the `defaultProvider`, and
+up to 20 `recentDirs`, newest first; `craze providers [--hub] [--json]`, the
+same answer on the command line (`--hub` asks a running hub and never starts
+one); and the hermetic recipe, `docs/reference/protocol.md`'s "Testing a client
+against a real hub" with `tests/cli/test_client_recipe.py` as its executable
+form: the real hub over a `craze-fake-host` entry, a create spawning
+`craze-fake-agent`, no API key or machine state reaching it.
+
+What it must know:
+- **gx is omitted** from `providers` when its binary is missing, not listed
+  unavailable.
+- **`defaultProvider` may name a provider that is not ready or not listed.** It is
+  config.toml's `provider`, which the last session to start persists, and a
+  client that preselects it shows the last provider used on that machine. It is
+  absent when config.toml names none or an unknown one.
+- **Cursor on a Mac hub first started over ssh is `unavailable`**, with the
+  not-GUI reason and a fix that names the hub's pid (SF-126, SD-44); the rule marks
+  it only on macOS outside the GUI login session, and a missing binary is
+  reported ahead of it. A resolved cursor or grok
+  binary on a logged-out account still reads `ready` (SF-149).
+- **Availability is advisory.** A `session.create` is never refused by it, and
+  its failures keep carrying the agent's own words in `data.cause`; only the
+  TUI's two pickers refuse a choice, and `--provider` skips them.
+- The check is not cached and is computed per call from the hub's own view: the
+  hub's `[agents]` and PATH (never `CRAZE_AGENT_BIN`), its pid, its login
+  session. A relative PATH entry is read in the hub's cwd (r1, accepted).
+- No model at create and no per-provider model list in the answer (SD-45;
+  SF-148).

@@ -633,6 +633,9 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 		// — 4 runs in 20 under a 2% CPU quota, 1 in 10 with -race under 5%;
 		// none in 20 and 30 so since (plan 033 C11r3).
 		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; : > ready; " + bashWaitLoop, "timeout": longTimeout})
+		// The handler must run before the grace's SIGKILL, so the grace is
+		// long here, as in TestBashCloseSignal's case (plan 036 F2).
+		c.termGrace = time.Minute
 		expire := make(chan time.Time, 1)
 		c.ops.expire = expire
 		r := startBash(t, c, env)
@@ -663,8 +666,12 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 // handler never run: 1 run in 30 failed so under systemd-run -p CPUQuota=5%,
 // none in 30 with this loop (plan 033 C11r3, reported by plan 032). The shell
 // itself must still be scheduled within the grace: under a 2% quota, 2 runs
-// in 20 still miss it.
-const bashWaitLoop = "while :; do sleep 0.05 & wait $!; done"
+// in 20 still miss it — which the tests that need the handler now meet with a
+// longer grace (bashCall.termGrace, plan 036 F2). The sleep's length does not
+// delay the handler, since the signal ends the wait at once; a second, not
+// 50 ms, keeps the loop from forking 20 times a second, which alone could use
+// up a starved quota.
+const bashWaitLoop = "while :; do sleep 1 & wait $!; done"
 
 // withClosing gives env a session close signal, Env.Closing, and returns
 // the func that closes it.
@@ -697,19 +704,49 @@ func TestBashCloseSignal(t *testing.T) {
 	t.Run("after a cancel, during its grace", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
+		// A failure before the close below still closes the session first:
+		// the cancel has already fixed the call's cause, so startBash's
+		// cleanup cannot make it a close, and the shell would run on through
+		// its minute's grace (plan 036 r7).
+		defer closeSession()
 		// The shell survives SIGTERM and says it got it, waiting in the wait
 		// builtin, which a trapped signal ends at once (bashWaitLoop); its
 		// child ignores SIGTERM.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; " + bashWaitLoop})
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; echo supervised; " + bashWaitLoop})
+		// The premise — the close comes inside the cancel's grace — needs the
+		// shell to run its handler before the SIGKILL: a starved CPU could
+		// spend the 3 s grace first, and the handler never ran. A minute's
+		// grace leaves it time to be scheduled, and makes the close's cut the
+		// stronger claim (plan 036 F2).
+		c.termGrace = time.Minute
+		// And the cancel must find the command under supervise, which
+		// signals with the grace: a stop that fires before launch has taken
+		// the start's result discards the command with SIGKILL at once
+		// (launched.discard), and the shell's file and pid say nothing of
+		// launch. The output does: it is copied only once launch has returned
+		// (attach), so the cancel waits for the marker in a progress snapshot
+		// — 3 runs in 20 under a 2% quota cancelled before (plan 036 F2).
+		attached := make(chan struct{})
+		var once sync.Once
+		env.Progress = func(s string) {
+			if strings.Contains(s, "supervised") {
+				once.Do(func() { close(attached) })
+			}
+		}
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
+		select {
+		case <-attached:
+		case <-time.After(15 * time.Second):
+			t.Fatal("control: the command's output never arrived (launch never returned)")
+		}
 		r.cancel(nil)
 		untilFile(t, env, "got", "the cancel's SIGTERM")
 		closed := time.Now()
 		closeSession()
 		res := r.await(t, 30*time.Second)
 		if took := time.Since(closed); took > 1500*time.Millisecond {
-			t.Fatalf("Run took %v after a close in the grace; want the grace (%v) cut short", took, planGrace)
+			t.Fatalf("Run took %v after a close in the grace; want the grace (%v) cut short", took, c.termGrace)
 		}
 		if res.Class != tool.ClassAborted || !strings.HasPrefix(res.Text, tool.AbortedText) {
 			t.Fatalf("result = %+v, want the abort it was first", res)

@@ -126,6 +126,9 @@ def test_a_hub_serves_its_hello_and_stops_on_sigterm(craze_bin: Path, tmp_path: 
     assert result["endpoint"]["pid"] == proc.pid
     assert result["capabilities"]["rosterSubscribe"] is True
     assert result["capabilities"]["sessionCreate"] is True, result["capabilities"]
+    # The production hub answers sessions.createOptions (plan 036 §3.4), and
+    # says so: a capability omitted when false, so present means true.
+    assert result["capabilities"]["createOptions"] is True, result["capabilities"]
     assert "clientId" not in result
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=WAIT) == 0

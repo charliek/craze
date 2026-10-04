@@ -292,6 +292,11 @@ type completeItem struct {
 	// and the popup stays open on what is inside.
 	Openable bool
 	Descend  string
+	// Refusal, when set, is why the owner will not take the candidate when a
+	// key chooses it (plan 036 §3.3: /provider's provider that cannot
+	// start): enter and tab write nothing and apply nothing, and the owner
+	// draws it as the popup's note (refuse).
+	Refusal string
 }
 
 // id is the candidate's identity: its Value, else what it writes, else its
@@ -357,7 +362,9 @@ type completeAnswer struct {
 	// Note is drawn in place of the candidates when there are none — why
 	// there are none, as the source puts it (`no directory ~/x`); NoteErr
 	// draws it as an error. With no note, the popup says it is still
-	// searching while a load is out, and `nothing matches` after.
+	// searching while a load is out, and `nothing matches` after. The one
+	// note beside candidates is an owner's refusal of the one a key chose
+	// (refuse), drawn under them; a source never answers one.
 	Note    string
 	NoteErr bool
 	// More counts the candidates the source matched and left out of Items:
@@ -679,8 +686,7 @@ func (p *completePopup) cancelWait() {
 // another load, from another popup. The command is a further load the new
 // answer needs.
 func (p *completePopup) loaded(msg completeLoadedMsg) (tea.Cmd, bool) {
-	if !p.open || !p.waiting || msg.gen != p.gen || msg.seq != p.wait.seq || msg.key != p.wait.key ||
-		msg.source != p.src.completeID() || msg.workspace != p.env.Workspace || msg.shownGen != p.env.Shown {
+	if !p.awaits(msg) {
 		return nil, false
 	}
 	p.cancelWait()
@@ -692,6 +698,31 @@ func (p *completePopup) loaded(msg completeLoadedMsg) (tea.Cmd, bool) {
 	loads[msg.key] = msg.res
 	p.loads = loads
 	return p.ask(false), true
+}
+
+// awaits says msg is the load the popup awaits (loaded's test): this
+// opening's, from this source, in this workspace, for this session shown,
+// with the number it was started under. An owner that keeps something of a
+// load's result besides the popup (the session list's /provider, plan 036
+// §3.3) asks it first, so it keeps only what the popup takes.
+func (p completePopup) awaits(msg completeLoadedMsg) bool {
+	return p.open && p.waiting && msg.gen == p.gen && msg.seq == p.wait.seq && msg.key == p.wait.key &&
+		msg.source == p.src.completeID() && msg.workspace == p.env.Workspace && msg.shownGen == p.env.Shown
+}
+
+// refuse says why the owner did not act on the candidate a key just chose
+// (plan 036 §3.3: the session list's /provider refusing a provider that
+// cannot start): the answer's note becomes text, as an error, drawn under the
+// candidates — which stay, the input as it was — until the next key or the
+// next answer.
+func (p *completePopup) refuse(text string) {
+	p.ans.Note, p.ans.NoteErr = sanitizeLine(text), true
+}
+
+// refused says the answer carries a refusal (refuse): an error note beside
+// candidates, which no source answers — a source's note is why there are none.
+func (p completePopup) refused() bool {
+	return p.ans.NoteErr && p.ans.Note != "" && len(p.ans.Items) > 0
 }
 
 // close takes the popup down: whatever it was waiting for is cancelled, and
@@ -823,9 +854,15 @@ type completeChoice struct {
 //     the composer's newline.
 //   - esc hides the popup until the token under the cursor changes; the input
 //     is left as it is.
+//
+// A refusal the owner drew (refuse) lasts until this next key, whichever it
+// is.
 func (p *completePopup) key(msg tea.KeyMsg) (choice completeChoice, handled bool) {
 	if !p.open {
 		return completeChoice{}, false
+	}
+	if p.refused() {
+		p.ans.Note, p.ans.NoteErr = "", false
 	}
 	switch msg.Type {
 	case tea.KeyUp, tea.KeyCtrlP:
@@ -901,11 +938,13 @@ func (p completePopup) choose(verb completeVerb, it completeItem) completeChoice
 // -------------------------------------------------------------------- view
 
 // completeShape is how the popup fills the rows it is given: the title rule,
-// the candidate rows shown, and the line under them that counts the rest.
+// the candidate rows shown, the line under them that counts the rest, and a
+// refusal's line under everything (refuse).
 type completeShape struct {
 	title bool
 	shown int
 	more  bool
+	note  bool
 }
 
 // shape fits the popup into at most rows lines. Its natural shape is the title
@@ -913,7 +952,19 @@ type completeShape struct {
 // one line saying why there are none — and, when the candidates do not all
 // fit, the line that counts the rest. Short of room the title goes first,
 // then candidate rows, the count line kept while there are two lines to share.
+// A refusal (refuse) keeps its line while one candidate row is left beside
+// it: it is what the user just did.
 func (p completePopup) shape(rows int) completeShape {
+	if p.refused() && rows >= 2 {
+		s := p.listShape(rows - 1)
+		s.note = s.shown > 0
+		return s
+	}
+	return p.listShape(rows)
+}
+
+// listShape is shape without a refusal's line.
+func (p completePopup) listShape(rows int) completeShape {
 	if !p.open || rows <= 0 {
 		return completeShape{}
 	}
@@ -948,6 +999,9 @@ func (s completeShape) lines() int {
 		n++
 	}
 	if s.more {
+		n++
+	}
+	if s.note {
 		n++
 	}
 	return n
@@ -1008,6 +1062,10 @@ func (p completePopup) view(th Theme, width, rows int) string {
 			line = fmt.Sprintf("  ↓ %d more", below)
 		}
 		out = append(out, padRow(renderSegs(width, seg{line, styleFG(th.Dim)}), width))
+	}
+	if s.note {
+		// A refusal (refuse): under everything, in the error colour.
+		out = append(out, padRow(renderSegs(width, seg{"  " + p.ans.Note, styleFG(th.Err)}), width))
 	}
 	return strings.Join(out, "\n")
 }

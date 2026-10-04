@@ -1,0 +1,24 @@
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ╭────────────────────────────────────────────────────╮             
+             │provider                                            │             
+             │> cursor                       unavailable · default│             
+             │  grok                                              │             
+             │  native                                 needs setup│             
+             │can't start cursor: cursor-agent not found on PATH  │             
+             │install cursor-agent, or set [agents].cursor in ~/.…│             
+             │↑↓ · tab · enter starts · esc uses default          │             
+             ╰────────────────────────────────────────────────────╯             
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+──────────────────────────────────────────────────────────────────────── craze ─
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
+ws                                                                              
+▸▸ bypass permissions on                                                        

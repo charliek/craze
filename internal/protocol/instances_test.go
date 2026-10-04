@@ -221,6 +221,44 @@ func TestInstancesValidate(t *testing.T) {
 	record := protocol.AskRecord{ID: "perm-1", Kind: "permission", Status: protocol.AskResolved, Outcome: "answered", By: "client",
 		Answer: &protocol.Answer{OptionID: "allow-once-2"}, Body: permBody, OpenedAt: instanceTime, ResolvedAt: instanceTime.Add(time.Second)}
 	openRecord := protocol.AskRecord{ID: "perm-2", Kind: "permission", Status: protocol.AskOpen, Body: permBody, OpenedAt: instanceTime, Truncated: true}
+	// sessions.createOptions (plan 036 §3.4): §3.4's example, built from the
+	// Go types, and edited into each way it can be wrong.
+	options := protocol.CreateOptionsResult{
+		Providers: []protocol.ProviderOption{
+			{ID: "cursor", Label: "cursor", State: protocol.ProviderUnavailable,
+				Reason: "this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain",
+				Fix:    `kill 5150 (no session ends), then run "craze ps" in a terminal on the Mac`},
+			{ID: "grok", Label: "grok", State: protocol.ProviderReady},
+			{ID: "native", Label: "native", State: protocol.ProviderNeedsSetup, Reason: "no model provider has a key", Fix: "craze auth login"},
+		},
+		DefaultProvider: "grok",
+		RecentDirs:      []protocol.RecentDir{{Dir: "/home/me/projects/lumen", UsedAt: instanceTime}},
+	}
+	optionsWith := func(edit func(*protocol.CreateOptionsResult)) string {
+		o := options
+		o.Providers = append([]protocol.ProviderOption(nil), options.Providers...)
+		o.RecentDirs = append([]protocol.RecentDir(nil), options.RecentDirs...)
+		edit(&o)
+		return jsonOf(t, o)
+	}
+	optionsOfN := func(providers, dirs int) string {
+		return optionsWith(func(o *protocol.CreateOptionsResult) {
+			o.Providers, o.RecentDirs = make([]protocol.ProviderOption, providers), make([]protocol.RecentDir, dirs)
+			for i := range o.Providers {
+				o.Providers[i] = options.Providers[1]
+			}
+			for i := range o.RecentDirs {
+				o.RecentDirs[i] = options.RecentDirs[0]
+			}
+		})
+	}
+	// An older hub's hello: the six capabilities, no createOptions — what
+	// every hub before plan 036 writes, and every hub given no answer.
+	olderHub := `{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.0.1","pid":77},` +
+		`"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},` +
+		`"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}`
+	optionsHub := theHub
+	optionsHub.Capabilities.CreateOptions = true
 	errResp := func(code protocol.Code, reason protocol.Reason) string {
 		return jsonOf(t, protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`7`),
 			Error: &protocol.Error{Code: protocol.RPCRefused, Message: "refused", Data: protocol.ErrorData{Code: code, Reason: reason}}})
@@ -255,6 +293,13 @@ func TestInstancesValidate(t *testing.T) {
 		{"a host's hello with a field it does not define", "hello.json", "result", with(jsonOf(t, hello), "extra", "1"), false},
 		{"a hub's hello", "hello.json", "result", jsonOf(t, hub), true},
 		{"the hub's hello, its capabilities the hub's", "hello.json", "result", jsonOf(t, theHub), true},
+		// createOptions (plan 036 §3.4): omitted when false, so an older
+		// hub's hello is valid as it stands, and a hub that serves
+		// sessions.createOptions says so.
+		{"an older hub's hello, no createOptions", "hello.json", "result", olderHub, true},
+		{"a hub's hello serving sessions.createOptions", "hello.json", "result", jsonOf(t, optionsHub), true},
+		{"a hub's hello whose createOptions is no boolean", "hello.json", "result",
+			strings.Replace(jsonOf(t, optionsHub), `"createOptions":true`, `"createOptions":"yes"`, 1), false},
 		{"a hub's hello carrying clientId", "hello.json", "result", with(jsonOf(t, hub), "clientId", `"c-1"`), false},
 		{"a hub's hello carrying resumed", "hello.json", "result", with(jsonOf(t, hub), "resumed", "false"), false},
 		{"a hub's hello carrying retryHorizon", "hello.json", "result",
@@ -406,6 +451,58 @@ func TestInstancesValidate(t *testing.T) {
 			`{"session":` + jsonOf(t, reachable) + `,"prompt":"maybe"}`, false},
 		{"a create's answer with a host's row for its session", "session.create.json", "result",
 			`{"session":` + jsonOf(t, row) + `,"prompt":"none"}`, false},
+		// sessions.createOptions (plan 036 §3.4).
+		{"sessions.createOptions", "sessions.createOptions.json", "params", jsonOf(t, protocol.CreateOptionsParams{}), true},
+		{"sessions.createOptions naming a provider", "sessions.createOptions.json", "params", `{"provider":"grok"}`, false},
+		{"what the hub can create", "sessions.createOptions.json", "result", jsonOf(t, options), true},
+		{"what the hub can create, no default and nothing recent", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.DefaultProvider, o.RecentDirs = "", []protocol.RecentDir{} }), true},
+		{"what the hub can create, nothing at all", "sessions.createOptions.json", "result", `{"providers":[],"recentDirs":[]}`, true},
+		{"a non-ready provider without its reason", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[2].Reason = "" }), false},
+		{"a non-ready provider without its fix", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[0].Fix = "" }), false},
+		{"a non-ready provider with an empty reason", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `"reason":"no model provider has a key"`, `"reason":""`, 1), false},
+		{"a ready provider with a reason", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[1].Reason = "it is fine" }), false},
+		{"a ready provider with a fix", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[1].Fix = "nothing to do" }), false},
+		{"a provider in a state there is none of", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[0].State = "broken" }), false},
+		{"a provider with no label", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers[1].Label = "" }), false},
+		{"an extra member in the result", "sessions.createOptions.json", "result", with(jsonOf(t, options), "models", "[]"), false},
+		{"an extra member in a provider", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `{"id":"grok",`, `{"id":"grok","binary":"/usr/bin/grok",`, 1), false},
+		{"an extra member in a recent directory", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `{"dir":`, `{"title":"lumen","dir":`, 1), false},
+		{"sixteen providers", "sessions.createOptions.json", "result", optionsOfN(protocol.CreateOptionsProvidersMax, 1), true},
+		{"seventeen providers", "sessions.createOptions.json", "result", optionsOfN(protocol.CreateOptionsProvidersMax+1, 1), false},
+		{"twenty recent directories", "sessions.createOptions.json", "result", optionsOfN(1, protocol.CreateOptionsDirsMax), true},
+		{"twenty-one recent directories", "sessions.createOptions.json", "result", optionsOfN(1, protocol.CreateOptionsDirsMax+1), false},
+		{"the providers null", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.Providers = nil }), false},
+		{"the recent directories null", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.RecentDirs = nil }), false},
+		{"no providers member", "sessions.createOptions.json", "result", without(jsonOf(t, options), "providers"), false},
+		{"no recentDirs member", "sessions.createOptions.json", "result", without(jsonOf(t, options), "recentDirs"), false},
+		{"an empty default provider", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `"defaultProvider":"grok"`, `"defaultProvider":""`, 1), false},
+		{"a relative recent directory", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) { o.RecentDirs[0].Dir = "projects/lumen" }), false},
+		{"a recent directory at its bound", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) {
+				o.RecentDirs[0].Dir = "/" + strings.Repeat("d", protocol.RecentDirMax-1)
+			}), true},
+		{"a recent directory over its bound", "sessions.createOptions.json", "result",
+			optionsWith(func(o *protocol.CreateOptionsResult) {
+				o.RecentDirs[0].Dir = "/" + strings.Repeat("d", protocol.RecentDirMax)
+			}), false},
+		{"a recent directory with no time", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `,"usedAt":"2026-09-25T10:30:45.123456789Z"`, ``, 1), false},
+		{"a recent directory whose time is no string", "sessions.createOptions.json", "result",
+			strings.Replace(jsonOf(t, options), `"usedAt":"2026-09-25T10:30:45.123456789Z"`, `"usedAt":1790000000`, 1), false},
 
 		{"session.attach with a cursor, now, a budget", "session.attach.json", "params", jsonOf(t, protocol.AttachParams{SessionID: "s",
 			Cursor: &protocol.Cursor{Incarnation: "inc-1", Seq: 42}, When: protocol.WhenNow, Budget: &protocol.AttachBudget{MaxItems: 64}}), true},

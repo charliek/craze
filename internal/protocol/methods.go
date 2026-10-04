@@ -47,6 +47,16 @@ const MethodModelsRefresh = "session.models.refresh"
 // sessionCreate says a hub serves it.
 const MethodSessionCreate = "session.create"
 
+// MethodSessionsCreateOptions is the hub's (plan 036 §3.4, decision 1): what
+// a session.create can start on this machine — the agent providers with
+// their availability, the default provider, the recent directories — before
+// any session exists. It takes nothing, and it is neither session-scoped (an
+// endpoint-level sessions.* method) nor mutating: a read. A host answers it
+// unsupported, reason hub_only, as session.create; the connection capability
+// createOptions says a hub serves it, and a hub given no answer to it refuses
+// it unsupported, reason unsupported.
+const MethodSessionsCreateOptions = "sessions.createOptions"
+
 // The notifications (plan 027 §3.3; plan 032 §3.6). Each carries its
 // subscription id: an attachment's, from a host, or the roster subscription's,
 // from the hub.
@@ -100,11 +110,12 @@ type MethodInfo struct {
 	// HostUnsupported is the reason a host that does not serve the method
 	// answers it unsupported, whatever its params, and "" for a method every
 	// host serves. The method is the hub's (sessions.subscribe,
-	// roster_unsupported: rosterSubscribe is false; session.connect and
-	// session.create, hub_only, X6) — which no host serves — or one a host
-	// serves only where Capability says so (session.stop, stop_unsupported;
-	// session.models.refresh, models_refresh_unsupported). Such a method's
-	// schema is protocol 1's all the same.
+	// roster_unsupported: rosterSubscribe is false; session.connect,
+	// session.create and sessions.createOptions, hub_only, X6) — which no
+	// host serves — or one a host serves only where Capability says so
+	// (session.stop, stop_unsupported; session.models.refresh,
+	// models_refresh_unsupported). Such a method's schema is protocol 1's all
+	// the same.
 	HostUnsupported Reason
 	// Capability, when set, is the session capability (its wire name) whose
 	// true says a host serves the method (plan 030 §3.6a): a host whose
@@ -154,10 +165,11 @@ var methods = []MethodInfo{
 	{Name: MethodAsksGet, SessionScoped: true},
 	{Name: MethodAsksAnswer, SessionScoped: true, Mutating: true},
 	{Name: MethodSessionCreate, HostUnsupported: ReasonHubOnly},
+	{Name: MethodSessionsCreateOptions, HostUnsupported: ReasonHubOnly},
 }
 
 // Methods is every method protocol 1 names, in §3.3's order, the hub's
-// session.create last.
+// session.create and sessions.createOptions last.
 func Methods() []MethodInfo { return slices.Clone(methods) }
 
 // Method is name's place on the wire, and false for a name protocol 1 does

@@ -197,9 +197,26 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("CRAZE_HOME", filepath.Join(dir, "craze"))
 	_ = os.Setenv("CRAZE_RUNTIME_DIR", filepath.Join(dir, "run"))
 	_ = os.Unsetenv("XDG_RUNTIME_DIR")
+	// The macOS login session is pinned to the GUI's for the package and
+	// every hub or host child a test starts (plan 036): the provider
+	// availability check marks cursor unavailable outside it, so a Mac runner
+	// whose session is not the GUI one would otherwise see a fake cursor
+	// unavailable. A test about the session sets rundir.GUISessionEnv itself,
+	// over this.
+	_ = os.Setenv(rundir.GUISessionEnv, "1")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// TestTheLoginSessionIsPinned (plan 036): TestMain pins the macOS login
+// session to the GUI's for the package, so the provider availability check
+// never marks a fake cursor unavailable for the machine's own session, on
+// either OS: known, and the GUI's, here too where it would not be known.
+func TestTheLoginSessionIsPinned(t *testing.T) {
+	if _, gui, known := rundir.GUISession(); !gui || !known {
+		t.Fatalf("the package's login session: gui %v, known %v; want the GUI's, pinned by TestMain (%s=1)", gui, known, rundir.GUISessionEnv)
+	}
 }
 
 // shortDir is a fresh 0700 directory under the real /tmp, short enough for

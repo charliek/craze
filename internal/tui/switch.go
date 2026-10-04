@@ -148,6 +148,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		pickedExplicit:  m.pickedExplicit,
 		providerDefault: m.providerDefault,
 		providers:       m.providers,
+		availability:    m.availability,
 		newSession:      m.newSession,
 		spawnNew:        m.spawnNew,
 		spawnLoad:       m.spawnLoad,
@@ -160,6 +161,9 @@ func (m Model) withSession(seed sessionSeed) Model {
 		drafts:          m.drafts,
 		retired:         m.retired,
 		completeLoads:   m.completeLoads,
+		// What the pre-session connect dialog's way back left to run (plan
+		// 036 §3.6): the TUI's, as the list it reopens is.
+		backCmd: m.backCmd,
 		// The /connect sign-ins' set is the TUI's, for finishRun: the run a
 		// switch ends (above) is ended through it, and taken out of it.
 		signIns: m.signIns,
@@ -190,6 +194,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		gateSeq:       m.gateSeq,
 		resumeAttempt: m.resumeAttempt,
 		spawnSeq:      m.spawnSeq,
+		availSeq:      m.availSeq,
 		unstartedSeq:  m.unstartedSeq,
 		connSeq:       m.connSeq,
 		restores:      m.restores,

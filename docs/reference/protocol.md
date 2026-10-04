@@ -174,7 +174,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -190,6 +190,15 @@ reached through the splice; `multiplex` is `false` because one connection
 carries the roster or one spliced session, never several. `sessionCreate` is
 `true` only on a hub that serves `session.create` — `false` on a hub from
 before it existed: a client checks it, never the hub's version.
+
+`createOptions` says the hub serves
+[`sessions.createOptions`](#sessionscreateoptions), what a create can start.
+Unlike the six before it, it is **omitted when `false`**: written only by a
+hub that serves the method, so a host's `hello`, an older hub's and that of a
+hub given no answer to it are byte for byte what they were. Absent means an
+older hub (or one that cannot answer): a client makes no call. A client built
+before it reads this `hello` as it always has, because a client ignores a
+result member it does not know ([above](#tolerant-inbound-strict-outbound)).
 
 ### Client ids and resume
 
@@ -431,11 +440,12 @@ same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
 The hub serves `hello`, `sessions.list`, `sessions.subscribe`,
-`session.connect` and `session.create`; every other session-scoped method
-sent to it is refused `unsupported`, reason `host_only`. `session.create` is
-neither session-scoped (its session does not exist until it answers) nor
-mutating (the hub mints no client ids and keeps no command receipts: its
-idempotency is its own `requestId`).
+`session.connect`, `session.create` and `sessions.createOptions`; every other
+session-scoped method sent to it is refused `unsupported`, reason
+`host_only`. `session.create` is neither session-scoped (its session does not
+exist until it answers) nor mutating (the hub mints no client ids and keeps no
+command receipts: its idempotency is its own `requestId`).
+Nor is `sessions.createOptions`, an endpoint-level read.
 
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
@@ -464,6 +474,7 @@ idempotency is its own `requestId`).
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
 | `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?` (no `sessionId`, no `commandId`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
+| `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
@@ -612,7 +623,9 @@ session has started**.
 **Params.** `cwd` is an absolute path to an existing directory. `provider`
 is a provider id; absent, it is the hub's configured default — `provider` in
 the hub's `config.toml`, read at each create (the provider the last session
-to start persisted) — and with none configured the create is `bad_request`.
+to start persisted), which
+[`sessions.createOptions`](#sessionscreateoptions) reports as
+`defaultProvider` — and with none configured the create is `bad_request`.
 `model`, `effort` and `fast` are the session's start settings, each absent
 for the provider's own default: an absent `model` is the agent's own default
 model (craze keeps no default model of its own for an ACP provider, and a
@@ -715,6 +728,81 @@ pid> (no session ends) and run this again from a terminal in your Mac's login
 session (a Roost tab, Terminal.app)`. The host adds it only when its agent
 exited and its session lacks the GUI login's graphic access; a client should
 show the cause as it is, not parse it.
+
+### `sessions.createOptions`
+
+The hub's, where its `hello` says `createOptions: true`: what a
+[`session.create`](#sessioncreate) can start on this machine, before any
+session exists — the agent providers and whether each can start, the default
+provider, and the directories sessions last ran in. It is what a client's
+create sheet offers; `craze providers --hub` prints it.
+
+```json
+{"jsonrpc":"2.0","id":"3","method":"sessions.createOptions","params":{}}
+{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
+```
+
+**Params.** None: `{}`, or none at all. Any member is `bad_request`, reason
+`unknown_field`.
+
+**`providers`** is every agent provider this machine lists, in craze's own
+order — `cursor`, `grok`, `gx`, `native` — at most 16. `gx`, a fork few
+machines have, is listed only when its binary is found. Each has its `id`
+(what `session.create`'s `provider` takes), its `label` (what a client shows)
+and its `state`:
+
+| `state` | meaning |
+|---|---|
+| `ready` | it can start here |
+| `needs_setup` | it cannot start until something craze can lead a person through is set up: native with no model whose provider has a key (`craze auth login` funds one) |
+| `unavailable` | it cannot start, and nothing in craze can make it: its binary is not found, cursor runs outside the macOS login session, or native's model files cannot be read |
+
+`reason` (why) and `fix` (what to do) are present exactly when the state is
+not `ready`, each one line of at most 200 terminal cells, cut as a [row
+fact](#the-row-facts) is. The hub judges each provider as a host it creates
+would start it, in the hub's own process:
+
+- **cursor, grok and gx** are `ready` when their binary resolves as a created
+  host resolves it: `[agents].<provider>` in the hub's `config.toml`, else the
+  provider's own name on the hub's `PATH` — never `CRAZE_AGENT_BIN`, which the
+  hub hands no host. A binary not found is `unavailable`, and the reason names
+  where the hub looked: `cursor-agent not found on PATH`, or `[agents].cursor
+  /opt/x/cursor-agent not found`.
+- **cursor, on macOS,** is also `unavailable` when the hub runs outside the
+  Mac's login session — first started over `ssh` — where cursor may not reach
+  the login keychain; its hosts inherit that session. The fix names the hub's
+  pid: `kill <pid> (no session ends), then run "craze ps" in a terminal on the
+  Mac`. A missing binary is reported first. Where the session is not known
+  (Linux), nothing is marked for it.
+- **native** is `ready` when its model table — in the hub's craze directory,
+  with the hub's environment, both of which its hosts inherit — loads and a
+  model's provider has a key; `needs_setup` when none has; `unavailable` when
+  `providers.toml` or `models.toml` cannot be read. The reason then names the
+  file and nothing from it: an error there can quote a pasted key's name, and
+  `craze auth list` on the machine shows the detail.
+
+Nothing is cached: every call reads the config, looks the binaries up and
+reads native's files again — no network request, no keychain access. A state
+only marks: `session.create` starts a provider whatever its state, with the
+same start failure as ever when it cannot start.
+
+**`defaultProvider`** is the provider a `session.create` that names none
+starts: `provider` in the hub's `config.toml` (the provider the last session
+to start persisted). It is absent when none is set, or when it names no
+provider craze knows, and it may name one that is not listed (a missing gx)
+or not ready.
+
+**`recentDirs`** is the directories sessions ran in, from the hub's own
+session index (its `CRAZE_HOME`'s `sessions.jsonl`), newest first: each once
+(compared cleaned), its `usedAt` its newest session's last update, in UTC.
+Only absolute paths that are directories as the hub answers are listed, at
+most 20. It is always a list: `[]` for none, and for an index that cannot be
+read, which the hub's log then says.
+
+**Refusals.** A hub that cannot answer — one from before the method, or one
+given no answer — says no `createOptions` in its `hello` and answers the
+method `unsupported`, reason `unsupported`. A host answers it `unsupported`,
+reason `hub_only`.
 
 ## Notifications
 
@@ -1008,7 +1096,10 @@ what **this session** can do.
 alone — plus `snapshot` and `attachWhenNow`, both `true` on a host. On the
 hub, `rosterSubscribe` and `connect` are `true`, `sessionCreate` is `true`
 where it serves `session.create`, and the other three are `false` (see [the
-hub's result](#the-hubs-result)).
+hub's result](#the-hubs-result)). A seventh, `createOptions`, is the hub's
+and **omitted when `false`**: `true` where the hub serves
+[`sessions.createOptions`](#sessionscreateoptions), absent on a host, on an
+older hub and on one given no answer.
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
@@ -1093,7 +1184,9 @@ saying what it holds; a host with no `stop` keeps refusing
 reason set, each under a code a client already decides from, so one that does
 not know a reason decides by its code ([Errors and retry](#errors-and-retry));
 the reset reason `hub_closing` ends only a roster subscription, which no older
-client holds.
+client holds. A hub's `capabilities.createOptions` is absent on an older hub
+(and on one given no answer): a client makes no `sessions.createOptions` call
+there, and a client built before the method ignores the member.
 
 ## The foreign turn
 
@@ -1532,8 +1625,8 @@ Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
 schema does not describe, or vice versa, fails the build — the hub's
-`session.create` among them, which a host answers `unsupported`, reason
-`hub_only`, like `session.connect`. The event and snapshot codecs' own
+`session.create` and `sessions.createOptions` among them, which a host answers
+`unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
 hand-shaped wire structs get the same treatment in `internal/agent`
 (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
 (`TestSnapshotSchemaCoversTheCodec`), since this package cannot import
@@ -1560,7 +1653,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-five scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-six scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1598,7 +1691,11 @@ the delta reaching the three direct clients too (24); and, through the
 hub, the method sent to the hub itself (`host_only`) and, through a splice,
 an ACP-like session whose info document says no `modelsRefresh` — the
 document an older host sends too, to which a client makes no call — refusing
-it `models_refresh_unsupported` (25). Every line is
+it `models_refresh_unsupported` (25); and a hub that serves
+`sessions.createOptions`, its `hello` saying `createOptions: true`,
+answering it with its answer as it stands and refusing a stray params member
+`unknown_field`, beside the host, whose `hello` has no `createOptions` and
+which refuses the method `hub_only` (26). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
@@ -1610,7 +1707,7 @@ and, as a fixture's first line or not at all, `{"dir": "host", "host":
 `modelsRefresh` without one are, byte for byte, an older host to a newer
 client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
-above as it sends or reads it — except a c2s line fixture 10 marks
+above as it sends or reads it — except a c2s line fixtures 10 and 26 mark
 `"invalid": true`: deliberately not a well-formed request of a method
 protocol 1 defines with today's params (an unknown method, or a field no
 schema allows), sent as it stands and held to no request schema, since it is
@@ -1635,6 +1732,9 @@ the test binary run as a fake `craze serve`; a host a create started is
 named by placeholder too, from its registry entry: its id (which the hub
 minted) as `cccccccccccc`, its session's incarnation as
 `CREATED-INCARNATION`, and its pid, in the create's result, as `999999999`.
+A `host` line that also carries `createOptions` — a `sessions.createOptions`
+result, written out — has that hub answer the method with it, as it stands,
+at every call (it needs `hubCreates`).
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
@@ -1662,6 +1762,426 @@ registry while it keeps serving the connections it has). Its clock, ids, host id
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry
 carries its real pid, as every host's does).
+
+### Testing a client against a real hub
+
+A client of the hub, such as shed's create sheet, can be tested against the
+real hub with nothing real behind it. The hub lists a `craze-fake-host` as it
+lists any host, and the sessions it creates run `craze-fake-agent` in place
+of an agent. Nothing reaches the network or a keychain, and nothing of the
+machine's own craze is seen or touched. The recipe needs only the three
+binaries `make build` writes to `bin/`: `craze`, `craze-fake-agent` and
+`craze-fake-host`. `tests/cli/test_client_recipe.py` is its executable form,
+run in CI on Linux and macOS, with the same environment, the same lines and
+the same answers.
+
+**The environment.** Every craze process in the recipe runs under `env -i`
+with exactly six variables, through a wrapper, `clean`, that step 1 writes.
+Nothing is inherited, because the first bridge's environment becomes the
+hub's when the bridge starts it. The hub hands that environment on (less one
+launch's choices: see [`session.create`](#sessioncreate)) to every host it
+creates, and each host hands it to its agent. An exported API key would fund
+native, a stray `CRAZE_FAKE_*` variable would change the fake agent's
+script, and an installed `cursor-agent`, `agent`, `grok` or `gx` would answer
+in place of the fakes. The environment is fixed when the hub starts, so it is
+set before the first bridge runs.
+
+| variable | value | why |
+|---|---|---|
+| `HOME` | `/tmp/craze-recipe/home` | the registry, `$HOME/.cache/craze/`: where the hub lists hosts and keeps its record, and where `craze-fake-host --registry` lists itself. A scratch one, so no session or hub of the machine's is seen |
+| `CRAZE_HOME` | `/tmp/craze-recipe/craze-home` | `config.toml`, the session index that `recentDirs` reads, and native's keys (there are none). The hub and every host under it share its namespace |
+| `CRAZE_RUNTIME_DIR` | `/tmp/craze-recipe/run` | where the sockets are bound. It must be short, because craze refuses a socket path over 100 bytes ([above](#the-namespace-and-the-socket-path)) and a macOS `$TMPDIR` alone can crowd one out. It is mode `0700`, because craze refuses a runtime directory others can write |
+| `PATH` | `/tmp/craze-recipe/path` | a directory of the recipe's own, holding copies of the two programs it runs, `craze` and `craze-fake-host`, and nothing else. So `cursor-agent` and `agent` (cursor's two names), `grok` and `gx` are found nowhere, whatever a system directory or `BIN` holds. `cursor` is `unavailable`, "not found", on Linux and macOS alike: a missing binary is reported ahead of the macOS login-session rule, whose answer depends on how the machine was reached. `gx` is not listed |
+| `CRAZE_FAKE_SCRIPT` | `grok-echo` | the fake agent speaks grok's dialect and answers each prompt with `echo: <prompt>`. No other `CRAZE_FAKE_*` variable reaches it |
+| `CRAZE_FAKE_SESSION_ID` | `{dir}` | the fake agent names its session after its working directory (`work`), so each session's index row is its own |
+
+Nothing a craze process starts is looked up on `PATH` except the providers'
+binaries, which must not be found. craze runs itself again (its own
+executable, by its full path) as the hub and as each host; the one agent a
+host starts here, grok's, is `[agents].grok`, a full path; and neither fake
+starts anything. So the two programs are all the private `PATH` needs. The
+recipe's own shell commands — the scripts step 1 writes, and the `env`,
+`tail`, `grep`, `ps`, `date` and `sleep` they run — run under your `PATH`. Only what
+`clean` starts sees the private one, and everything craze starts inherits it
+from there: every bridge, the hub, each host, each agent, and the fake host.
+
+The two programs are copies, not links, and `clean` runs each by its full
+path. So the command line of every craze process of the recipe's starts with
+`/tmp/craze-recipe/path/`: each bridge and the fake host, as `clean` runs
+them, and the hub and each host, which craze runs again by its own path —
+on Linux the real path of the file it runs, which a link would leave in
+`BIN`. Nothing else runs a program from there, unless you do, and that is
+how `cleanup` tells the recipe's processes from any other. (The fake agent runs
+from `BIN`, as `config.toml` names it; its host ends it.)
+
+grok reaches the fake agent only through `config.toml`'s `[agents]`. That is
+the one route to the hub's hosts, because the hub strips `CRAZE_AGENT_BIN`
+and `CRAZE_PROVIDER` from what it hands on. grok, not cursor, is the ready
+provider because grok has no login-session rule, so its `ready` is the same
+on every machine.
+
+**Driving a bridge.** Besides `clean`, step 1 writes five small scripts
+beside the recipe's files:
+
+- `start NAME PROGRAM ARGS…` runs the recipe's `PROGRAM` under `clean`, in
+  the background. Its stdin is every line appended to `NAME.in`, which
+  `tail -n +1 -f` follows, and it writes `NAME.out` and `NAME.err`. A bridge,
+  like the fake host, ends when its stdin does, and its stdin ends when its
+  tail does.
+- `await NAME TEXT [SECONDS]` prints the lines of `NAME.out` that hold
+  `TEXT`, once there is one, waiting at most `SECONDS` (30 if not given).
+- `reply NAME ID [SECONDS]` prints `NAME`'s reply to request `ID` once it has
+  come: the line whose `id` is `ID`. A line with no `id` is a notification,
+  and a reply can come before or after one.
+- `poll NAME SECONDS TEXT METHOD PARAMS` sends `METHOD` with `PARAMS` to
+  `NAME` again and again, with the ids 100, 101 and so on, until a reply
+  holds `TEXT`, and prints that reply. `SECONDS` bounds the whole poll, to
+  the second: its end is fixed once, when it starts (`AWAIT_END`, which
+  `await` then waits until), and every send, reply and pause between two
+  requests comes out of it. A reply that comes after the end is not taken.
+- `cleanup` ends every process of the recipe's (below).
+
+A request is one line appended to `NAME.in` with `printf … >>`, which never
+blocks. A bridge that has died never reads it, and the wait for its reply
+times out. Run the blocks in order. Each block sets `R` again, so a shell
+that keeps no variables between blocks runs it the same. The processes that
+`start` starts keep running until `cleanup` ends them. **If any step fails,
+or you interrupt one, run `/tmp/craze-recipe/cleanup`**: it is the way out
+from anywhere, and running it again is harmless.
+
+**1 and 2. The environment and `config.toml`.** Set `BIN` to the absolute
+path of the directory that holds the three binaries. `mkdir` fails if
+`/tmp/craze-recipe` is left over from an earlier run: run its `cleanup`, if
+it has one, and remove it first.
+
+```sh
+BIN=/absolute/path/to/craze/bin
+R=/tmp/craze-recipe
+mkdir -m 700 "$R" "$R/home" "$R/craze-home" "$R/run" "$R/work" "$R/path"
+cp "$BIN/craze" "$BIN/craze-fake-host" "$R/path/"
+cat > "$R/clean" <<EOF
+#!/bin/sh
+# clean PROGRAM ARGS...: the recipe's own copy of PROGRAM, run by its full
+# path with the recipe's environment alone.
+p=\$1; shift
+exec env -i HOME='$R/home' CRAZE_HOME='$R/craze-home' CRAZE_RUNTIME_DIR='$R/run' PATH='$R/path' CRAZE_FAKE_SCRIPT=grok-echo CRAZE_FAKE_SESSION_ID='{dir}' "$R/path/\$p" "\$@"
+EOF
+cat > "$R/start" <<'EOF'
+#!/bin/sh
+# start NAME PROGRAM ARGS...: PROGRAM under clean, in the background, reading
+# each line appended to NAME.in and writing NAME.out and NAME.err.
+d=$(dirname "$0"); d=${d#/private}; n=$1; shift
+case $d in /*) ;; *) echo "start: run it by its full path" >&2; exit 2 ;; esac
+: > "$d/$n.in"; : > "$d/$n.err"
+tail -n +1 -f "$d/$n.in" 2>> "$d/$n.err" | "$d/clean" "$@" > "$d/$n.out" 2>> "$d/$n.err" &
+EOF
+cat > "$R/await" <<'EOF'
+#!/bin/sh
+# await NAME TEXT [SECONDS]: the lines of NAME.out holding TEXT, once there is
+# one, waiting at most SECONDS (30 if not given) -- or, when AWAIT_END is
+# set, until that time (date +%s).
+out="$(dirname "$0")/$1.out"
+end=${AWAIT_END:-$(( $(date +%s) + ${3:-30} ))}
+until grep -F -- "$2" "$out"; do
+  if [ "$(date +%s)" -ge "$end" ]; then echo "nothing in $out holds $2" >&2; exit 1; fi
+  sleep 0.1
+done
+EOF
+cat > "$R/reply" <<'EOF'
+#!/bin/sh
+# reply NAME ID [SECONDS]: NAME's reply to request ID, once it has come.
+exec "$(dirname "$0")/await" "$1" "{\"jsonrpc\":\"2.0\",\"id\":$2," "${3:-30}"
+EOF
+cat > "$R/poll" <<'EOF'
+#!/bin/sh
+# poll NAME SECONDS TEXT METHOD PARAMS: METHOD sent to NAME with ids 100, 101,
+# ... until a reply holds TEXT, which is printed. Its end is fixed once, here:
+# each reply is waited for until then, and one that comes later is not taken.
+d=$(dirname "$0"); id=100
+AWAIT_END=$(( $(date +%s) + $2 )); export AWAIT_END
+while [ "$(date +%s)" -lt "$AWAIT_END" ]; do
+  printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}\n' "$id" "$4" "$5" >> "$d/$1.in"
+  if r=$("$d/reply" "$1" "$id") && [ "$(date +%s)" -lt "$AWAIT_END" ] &&
+    printf '%s\n' "$r" | grep -F -- "$3"; then exit 0; fi
+  id=$((id + 1))
+  sleep 0.1
+done
+echo "no reply from $1 held $3 within $2 s" >&2; exit 1
+EOF
+cat > "$R/cleanup" <<'EOF'
+#!/bin/sh
+# cleanup: end every process of the recipe's, wait for them to go, and print
+# what is left, or "nothing left". Running it again is harmless.
+d=$(dirname "$0"); d=${d#/private}
+case $d in /*) ;; *) echo "cleanup: run it by its full path" >&2; exit 2 ;; esac
+# ours ARGS [fake]: ARGS, a command line, is a process of the recipe's -- a
+# program run from its own copy in path/, or a tail of one of its .in files.
+# The fake host counts only with "fake". (macOS can spell /tmp /private/tmp.)
+ours() {
+  case ${1#/private} in
+    "$d/path/craze-fake-host "*) [ "$2" = fake ] ;;
+    "$d/path/"* | "tail -n +1 -f $d/"*.in) true ;;
+    *) false ;;
+  esac
+}
+# pids [fake]: the pid of each process of the recipe's. (-ww: whole command
+# lines, which Linux ps cuts to $COLUMNS when that is set.)
+pids() { ps -A -ww -o pid= -o args= | while read -r p a; do ours "$a" "$1" && echo "$p"; done; }
+# term [fake]: SIGTERM each, its command line checked again just before.
+term() { for p in $(pids "$1"); do ours "$(ps -ww -p "$p" -o args=)" "$1" && kill "$p" 2>/dev/null; done; }
+# left: what is still here, one line each.
+left() {
+  ps -A -ww -o pid= -o args= | while read -r p a; do ours "$a" fake && echo "process $p: $a"; done
+  for f in "$d"/home/.cache/craze/hosts/*.json "$d"/home/.cache/craze/hubs/*.json; do
+    [ -f "$f" ] && echo "file $f"
+  done
+}
+# waitfor SECONDS COMMAND...: until COMMAND prints nothing, at most SECONDS.
+waitfor() {
+  end=$(( $(date +%s) + $1 )); shift
+  while [ -n "$("$@")" ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.1; done
+}
+# 1. SIGTERM each but the fake host: each tail (its end is a bridge's or the
+#    fake host's stdin's), each bridge, each host the hub created (its stop)
+#    and the hub (its teardown, which removes its record). The fake host goes
+#    at its stdin's end, and unlists itself.
+term
+waitfor 10 pids fake
+# 2. SIGTERM any of them still running, the fake host included.
+term fake
+waitfor 10 left
+rest=$(left)
+if [ -z "$rest" ]; then echo "nothing left"; else printf 'left:\n%s\n' "$rest"; exit 1; fi
+EOF
+chmod +x "$R/clean" "$R/start" "$R/await" "$R/reply" "$R/poll" "$R/cleanup"
+cat > "$R/craze-home/config.toml" <<EOF
+provider = "grok"
+host_idle_exit = "30s"
+
+[agents]
+grok = "$BIN/craze-fake-agent"
+EOF
+```
+
+`provider` is what a create that names none starts, and what
+`sessions.createOptions` reports as `defaultProvider`. `host_idle_exit`
+bounds a created host that something leaves running: it exits after 30 s
+unattended and idle, not the default hour.
+
+`tail -n +1 -f` is POSIX, and GNU `tail` (Linux) and BSD `tail` (macOS)
+follow a growing file alike. GNU `tail` waits for a change with inotify, or
+with a once-a-second poll where it has none, so there a reply can take up to
+a second longer to start.
+
+**3. A fake host.** `--registry` lists it as a craze host is listed: its
+entry under `HOME`'s registry, its socket under `CRAZE_RUNTIME_DIR`, in
+`CRAZE_HOME`'s namespace. That is exactly where the hub looks. Its stdin is
+how it is told to go: it exits at its stdin's end, as `cleanup` ends it, or
+at a `quit` op. It has no SIGTERM handler, so a SIGTERM kills it before it
+unlists itself, and its registry entry is left behind.
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" fake-host craze-fake-host --registry "$R/home" --host-id 0a0a0a0a0a0a --session-id recipe-fake
+"$R/await" fake-host '"hostId":"0a0a0a0a0a0a"'
+```
+
+The `await` prints the fake host's ready line, which the fake host prints
+once its registry entry is written. The socket's directory is the namespace
+(on macOS the path reads `/private/tmp/…`):
+
+```json
+{"socket":"/tmp/craze-recipe/run/<namespace>/0a0a0a0a0a0a.sock","sessionId":"recipe-fake","hostId":"0a0a0a0a0a0a"}
+```
+
+**4. Bridge A, and the hub's `hello`.** The bridge finds no hub in this
+namespace and starts one, which inherits the bridge's environment.
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" a craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/a.in"
+"$R/reply" a 1
+```
+
+The hub's result. `hostId`, `crazeVersion` and `pid` are this hub's own.
+`rosterSubscribe`, `sessionCreate`, `connect` and `createOptions` are what
+the recipe uses:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
+```
+
+**5. What a create can start.**
+
+```sh
+R=/tmp/craze-recipe
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"sessions.createOptions","params":{}}' >> "$R/a.in"
+"$R/reply" a 2
+```
+
+The answer, exactly, on Linux and macOS:
+
+```json
+{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
+```
+
+- cursor is `unavailable` because neither `cursor-agent` nor `agent` is on
+  `PATH`.
+- grok is `ready` because `[agents].grok` names a binary that exists.
+- gx is absent: it is listed only when its binary is found.
+- native is `needs_setup` because no API key is set and the native directory
+  is empty.
+- `defaultProvider` is `config.toml`'s `provider`.
+- `recentDirs` is `[]`, because no session has run yet.
+
+**6. The roster.**
+
+```sh
+R=/tmp/craze-recipe
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"sessions.subscribe","params":{}}' >> "$R/a.in"
+"$R/reply" a 3
+```
+
+Its `sessions` has one row, the fake host's, which begins
+`{"hostId":"0a0a0a0a0a0a","sessionId":"recipe-fake",`. From here on `a.out`
+also collects `roster` notifications.
+
+**7. Create a session.** No `provider` is named, so the hub starts the
+default, grok, in a host of its own, and sends the first prompt.
+
+```sh
+R=/tmp/craze-recipe
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"session.create","params":{"cwd":"/tmp/craze-recipe/work","prompt":"hello recipe","requestId":"recipe-1"}}' >> "$R/a.in"
+"$R/reply" a 4
+"$R/reply" a 4 | grep -o '"session":{"hostId":"[0-9a-f]*","sessionId":"[^"]*"' | cut -d'"' -f6 > "$R/host-id"
+"$R/reply" a 4 | grep -o '"session":{"hostId":"[0-9a-f]*","sessionId":"[^"]*"' | cut -d'"' -f10 > "$R/session-id"
+cat "$R/host-id" "$R/session-id"
+"$R/await" a '"method":"roster"'
+```
+
+The result's `session` is the new session's roster row, its
+`host.provider` `"grok"`, and `prompt` is `"accepted"`. `host-id` and
+`session-id` now hold its two ids for the next step. The last `await` prints
+the roster subscription's notifications once one has come, and their
+`upserts` name the new session. One can follow the create's reply by a
+second or so, because the hub reads the registry once a second.
+
+**8. Read it back through the hub.** Bridge B says `hello` to the hub, then
+`session.connect` to the new session's host. After the splice the client is
+talking to the host, which has not met it yet, so it says `hello` again
+before it attaches. Without that second `hello`, the attach is refused
+`bad_request`, reason `hello_required`. Then `session.snapshot` is polled,
+for at most 10 s, until the session's reply is whole.
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" b craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/b.in"
+"$R/reply" b 1
+printf '{"jsonrpc":"2.0","id":2,"method":"session.connect","params":{"sessionId":"%s"}}\n' "$(cat "$R/host-id")" >> "$R/b.in"
+"$R/reply" b 2
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/b.in"
+"$R/reply" b 3
+printf '{"jsonrpc":"2.0","id":4,"method":"session.attach","params":{"sessionId":"%s"}}\n' "$(cat "$R/session-id")" >> "$R/b.in"
+"$R/reply" b 4
+"$R/poll" b 10 '"kind":"assistant","text":"echo: hello recipe"' session.snapshot "{\"sessionId\":\"$(cat "$R/session-id")\"}"
+```
+
+The replies, in order:
+
+1. The hub's `hello`, as in step 4.
+2. `{"jsonrpc":"2.0","id":2,"result":{}}`, the hub's last line on this
+   connection.
+3. The host's `hello`: `"endpoint":{"kind":"host","hostId":"<host-id>",…}`,
+   with the `clientId` and `token` the host minted.
+4. The attach reply, with the session's snapshot. The `synchronized` and
+   `presence` notifications follow.
+5. The `poll`'s answer: a `session.snapshot` reply (`"id":100`, or a later
+   id) whose main entries are the prompt and the echo,
+   `{…,"kind":"user","text":"hello recipe",…}` and
+   `{"id":…,"kind":"assistant","text":"echo: hello recipe",…}`.
+
+The echo comes in two chunks, `echo: ` and `hello recipe`, and the host
+folds them into the one assistant entry. A snapshot taken mid-turn holds
+only part of it, as can the attach's own, so the `poll` asks again until the
+entry's text is exactly `echo: hello recipe`: the closing `"` is part of what
+it matches.
+
+**9. Recent directories.** The host writes the session's index row just
+after its start, so right after the create this can still be `[]`. The
+`poll` asks again for at most 5 s.
+
+```sh
+R=/tmp/craze-recipe
+"$R/poll" a 5 '/tmp/craze-recipe/work","usedAt":"' sessions.createOptions '{}'
+```
+
+`providers` and `defaultProvider` are as in step 5, and `recentDirs` is now
+`[{"dir":"/tmp/craze-recipe/work","usedAt":"<when>"}]`: the work directory,
+which on macOS can read as its resolved spelling,
+`/private/tmp/craze-recipe/work` (the text polled for matches both).
+
+**10. Cleanup.** `session.stop` is mutating, so it carries a `commandId`,
+this client's first: `"1"`.
+
+```sh
+R=/tmp/craze-recipe
+printf '{"jsonrpc":"2.0","id":5,"method":"session.stop","params":{"sessionId":"%s","commandId":"1"}}\n' "$(cat "$R/session-id")" >> "$R/b.in"
+"$R/reply" b 5
+"$R/await" b '"reason":"session_closed"'
+"$R/cleanup"
+```
+
+- The stop's reply is `{"jsonrpc":"2.0","id":5,"result":{}}`. The session
+  then ends, and the `await` prints its last line on bridge B,
+  `{"jsonrpc":"2.0","method":"reset","params":{"subscription":"s-1","reason":"session_closed"}}`.
+  Its host exits and closes the connection. Wait for that reset before the
+  cleanup: the cleanup stops the hub, and a hub's SIGTERM ends every splice
+  through it, so a session's end that has not yet reached the client is
+  lost to it.
+- `cleanup` finds the recipe's processes by their command lines: each one
+  that starts with `/tmp/craze-recipe/path/` (or `/private/tmp/…`, as macOS
+  can spell it), and each `tail -n +1 -f` of one of its `.in` files. It
+  sends SIGTERM to each but the fake host. A tail's end is a bridge's stdin's
+  or the fake host's. A host the hub created whose session is still running
+  (a run that failed before step 10) stops, which ends its session. The
+  hub's SIGTERM is its clean teardown, which removes its record; left alone,
+  a hub exits 60 s after its last client and host have gone. The fake host
+  goes at its stdin's end, and unlists itself. The cleanup waits, for at
+  most 10 s, for all of them to go.
+- It then sends SIGTERM to any of them still running, the fake host
+  included (a SIGTERM leaves its registry entry behind), and waits, for at
+  most 10 s more, until none of them runs, no registry entry is left in
+  `home/.cache/craze/hosts`, and no hub record (`.json`) in
+  `home/.cache/craze/hubs`.
+- Each process's command line is read again just before its signal. So
+  `cleanup` signals no process but the recipe's, save in two cases it
+  cannot rule out: a process that ends in the instant between that read
+  and its signal, its pid taken by another process in that same instant;
+  and a program you run from `/tmp/craze-recipe/path` yourself.
+
+It prints `nothing left`, or `left:` and a line for each process or file
+still there, and exits 1. Run it again to retry; it ends only what is still
+there. A file left with no process is the record of one that died without
+removing it (a fake host killed by a signal, say), and removing
+`/tmp/craze-recipe` removes it. The hubs directory keeps one file,
+`<namespace>.lock`: the hub's lock, which is never removed, and which is
+harmless, since the lock's flock, not the file, is what a running hub holds.
+`rm -rf /tmp/craze-recipe` removes the rest.
+
+In the test, `conftest.py`'s isolation supplies `HOME`, `CRAZE_HOME` and a
+short `CRAZE_RUNTIME_DIR` in place of `/tmp/craze-recipe`, and its private
+`PATH` holds the same two copies, of the binaries under test, each run by
+its full path. The test checks that the hub and the host it creates run the
+copy of craze — the premise of `cleanup`'s rule — and checks the hub's
+again just before it signals it. Each bridge's and the fake host's stdin is
+a pipe the test holds, so closing it is what ending the tail does here. The test files each process the moment it
+starts, before it waits for anything from it, and a fixture that names
+`host_cleanup` as its own dependency closes every stdin first, so even a
+fake host whose ready line never came is ended, and a fake host always
+unlists itself before the cleanup looks. `host_cleanup` is the backstop: it
+stops a hub or host a failed run leaves.
 
 ## Reaching a host
 

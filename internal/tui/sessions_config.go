@@ -91,6 +91,24 @@ type SessionStarter interface {
 	ModelCatalog(provider string) (ModelCatalog, bool)
 }
 
+// ProviderAvailabilitySource is what a Sessions has when it can say which
+// providers a session started from the list could run (plan 036 §3.3): the
+// list's /provider then offers its answer's providers — a gx installed since
+// the last opening appears, one gone goes — dimming one that is not ready,
+// with its reason, and refusing it when it is chosen (Enter, Tab, or typed
+// in full). It is an interface of its own, not a SessionStarter method, so
+// a Sessions without it — every fake the list's frames were made against —
+// is still a SessionStarter, and its /provider offers the startup picker's
+// rows, every one ready, as it always has. Production's has it
+// (internal/cli's sessionList).
+//
+// ProviderAvailability reads the disk and is called from a tea.Cmd, never
+// from Update: as the list opens, and again at each opening of /provider's
+// values.
+type ProviderAvailabilitySource interface {
+	ProviderAvailability() []ProviderAvail
+}
+
 // ModelCatalog is a provider's cached model catalog: its models in the
 // agent's own order, and when a host saw them — the `last seen` /model
 // shows beside them, since a catalog can have changed since.

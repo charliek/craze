@@ -99,6 +99,19 @@ type Config struct {
 	// agent.DefaultProviders(), every provider that is not optional — which keeps
 	// every test that builds a Config by hand hermetic.
 	Providers []agent.Provider
+	// Availability answers the picker's providers' states (plan 036 §3.3):
+	// internal/cli's availability check over the picker's rows — every listed
+	// provider, and the configured default even when it is a missing gx,
+	// then unavailable. A row it does not name is ready. It reads the disk,
+	// so the picker calls it from a tea.Cmd as it opens, never from Update;
+	// until it answers every row is ready and a choice is taken as ever. A
+	// provider that is not ready is dimmed with its state in the tag, its
+	// reason and fix on the detail line, and refused when chosen — Enter on
+	// it, or Esc and a click outside when it is the default — after
+	// RefuseLoad's refusal. nil is every row ready — every test Config, every
+	// golden but the availability ones, and the frame runner — so they draw
+	// what they always drew.
+	Availability func() []ProviderAvail
 	// ProviderLocked skips the picker: an explicit --provider, or the frame
 	// runner. The session is constructed immediately.
 	ProviderLocked bool
@@ -686,14 +699,39 @@ type Model struct {
 	providerCursor  int
 	// providerErr is the provider picker's last refusal (refuseLoad), drawn as
 	// its error row until the cursor moves: resumeErr's twin.
-	providerErr     string
+	providerErr string
+	// providerBack is what the pre-session connect dialog came to as it came
+	// back to the picker (plan 036 §3.6) — `connected …`, or why not — drawn
+	// on the detail lines until the cursor moves.
+	providerBack    connectBack
 	providerDefault agent.Provider
-	// providers is the picker's rows, settled once in New: the caller's
-	// availability-filtered list unioned with providerDefault (§3.4). Nothing
-	// after the constructor recomputes it, so the rows the user sees are the
-	// rows Esc and Enter act on.
+	// providers is the picker's rows, settled in New — the caller's
+	// availability-filtered list unioned with providerDefault (§3.4) — and
+	// again by each availability answer the picker takes (plan 036 X42,
+	// reconcileProviderRows), the default always among them. Nothing else
+	// recomputes it, so the rows the user sees are the rows Esc and Enter act
+	// on.
 	providers  []agent.Provider
 	newSession func(agent.Provider) agent.Session
+	// availability is Config.Availability. availSeq is the startup picker's
+	// latest request of it, the only one whose answer is taken
+	// (askProviderAvail), and provAvail that answer by provider id: nil
+	// before one arrives, when every row is ready (plan 036 §3.3, X12).
+	availability func() []ProviderAvail
+	availSeq     uint64
+	provAvail    map[string]ProviderAvail
+	// availNative is the request the pre-session connect dialog's return to
+	// the picker made (reaskProviderAvail), whose answer puts the cursor on
+	// native when it says native is ready (plan 036 X21); 0 for none, and
+	// once the user has moved the cursor themselves.
+	availNative uint64
+
+	// backCmd is the command the pre-session connect dialog's way back left
+	// to run (connectReturned): the list's reopening, the picker's states
+	// asked again. The way back is taken where the dialog closes, which
+	// returns no command (closeDialog), so the Update wrapper hands it on
+	// (finish), and it never outlives the Update that made it.
+	backCmd tea.Cmd
 
 	// The launch flow (plan 030 §3.5, launch.go): spawnNew and spawnLoad are
 	// Config.NewBackend and Config.LoadBackend, and cont is Config.Continue.
@@ -1681,6 +1719,7 @@ func New(cfg Config) Model {
 		fallbackDefault: cfg.FallbackDefault,
 		providerDefault: prov,
 		providers:       pickerRows(cfg.Providers, prov),
+		availability:    cfg.Availability,
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
 		spawnNew:        cfg.NewBackend,
@@ -1737,6 +1776,10 @@ func New(cfg Config) Model {
 		m.pickingProvider = true
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
+		// The picker's states are asked for as it opens — by Init, which
+		// cannot record the request, so New does, and Init makes the call
+		// (providerAvailCmd).
+		m.askProviderAvail()
 	case m.launch():
 		// The launch flow with its session known: nothing is built here, and
 		// Init spawns it (plan 030 §3.5). New records the attempt Init's call
@@ -2034,7 +2077,9 @@ func (m Model) Init() tea.Cmd {
 	// session's (presenceCmd; nil off the in-process path).
 	presence := presenceCmd(m.localPresence)
 	if m.picking() {
-		return presence
+		// The provider picker's states, asked for off the Update (plan 036
+		// §3.3): nil with no Config.Availability, and for the resume picker.
+		return tea.Batch(presence, m.providerAvailCmd())
 	}
 	if m.spawnWaiting != 0 {
 		// The launch flow's session is not here yet: Init spawns it, and its
@@ -2091,6 +2136,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // keeps the single tick chain alive.
 func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	next := m
+	// The pre-session connect dialog's way back (connectReturned) is taken
+	// wherever the dialog closes — closeDialog, which returns no command — so
+	// what it left to run is handed on here, where every transition passes.
+	if back := next.backCmd; back != nil {
+		next.backCmd = nil
+		cmd = tea.Batch(cmd, back)
+	}
 	// Mutation only marks the transcript dirty. Paint the drawn one here so a
 	// background transcript (U3b) never moves m.vp — and, while a replay
 	// runs, only on its cadence (paintDue).
@@ -2270,17 +2322,31 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// session it was opened in, its key field emptied, whichever way
 		// this goes (plan 031 §3.9, dropConnect): the list covers the box,
 		// and nothing would reach it or its field again.
+		//
+		// The pre-session connect dialog standing in for the list (plan 036
+		// §3.6) goes the same way, and its way back opens the list again as
+		// it was; the end is then the list's to take, as the arm above takes
+		// an end behind the open list (endedToList finds it open). Whether
+		// the list was up is asked before the dialog goes.
+		listUp := m.sessListUp()
 		m = m.dropConnect()
 		// Nobody is attached through a stream that has ended.
 		m.attached = 0
 		if f := m.first; f != nil && !m.quitting {
-			// The session an unstarted session's first prompt spawned ended
-			// before it came up: the same as its start failing (§3.13).
-			err := msg.err
-			if err == nil {
-				err = errors.New("the session ended before it started")
+			if listUp {
+				// The first prompt of a session that ended behind the list
+				// is dropped, as the arm above drops it (X154).
+				m.first = nil
+			} else {
+				// The session an unstarted session's first prompt spawned
+				// ended before it came up: the same as its start failing
+				// (§3.13).
+				err := msg.err
+				if err == nil {
+					err = errors.New("the session ended before it started")
+				}
+				return m.backToUnstarted(*f, err)
 			}
-			return m.backToUnstarted(*f, err)
 		}
 		m.ended, m.endErr = true, msg.err
 		if m.sessions != nil && !m.quitting {
@@ -2320,6 +2386,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spawnedMsg:
 		return m.spawned(msg)
+
+	case providerAvailMsg:
+		return m.providerAvailed(msg), nil
 
 	case unstartedSpawnedMsg:
 		return m.unstartedSpawned(msg)
@@ -2381,9 +2450,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// session's start failure: nothing of it was up, and craze goes
 			// on. With the list up over it (its composer emptied and ← pressed
 			// meanwhile) the failure is the session's, as any start's is, and
-			// its prompt is dropped.
+			// its prompt is dropped — the pre-session connect dialog standing
+			// in for the list included (sessListUp, plan 036 §3.6): the dialog
+			// stays, and its way out opens the list again over the session
+			// that failed.
 			m.first = nil
-			if !m.sessList.open {
+			if !m.sessListUp() {
 				return m.backToUnstarted(*f, msg.err)
 			}
 		}
@@ -2530,7 +2602,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// no chip may be made — the clipboard's text after all.
 			return m.pasteClipboardImage(msg)
 		}
-		if msg.text == "" || msg.listGen != 0 || m.composerCovered() {
+		// A composer covered by a card, a dialog or the sub-agent view takes
+		// none — but the pre-session connect dialog standing in for the list
+		// (sessListUp, plan 036 §3.6) covers it as the list does, and a paste
+		// asked for in the composer before the list opened lands in its
+		// draft, where the user finds it on going back (the list arm's rule).
+		if msg.text == "" || msg.listGen != 0 || (m.composerCovered() && !m.sessListUp()) {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -2643,7 +2720,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // mouse message that reached craze another way (the frame runner injects them)
 // is ignored too.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if !m.mouseEnabled || m.cardOpen() {
+	// A card behind the pre-session connect dialog — the session the list
+	// it was opened from covered — does not own the mouse while the dialog is
+	// up (plan 036 §3.6): the dialog does, as it owns the keyboard.
+	if !m.mouseEnabled || (m.cardOpen() && !m.preConnectOpen()) {
 		// A card owns the mouse as well as the keyboard, wheel included. It
 		// arrived while the button was down, so the drag goes with it.
 		return m, nil
@@ -2880,6 +2960,13 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if r.Contains(x, y) {
 			return m.dialogClick(y - r.Y)
 		}
+		if m.preConnectOpen() {
+			// The pre-session connect dialog (plan 036 §3.6): the click
+			// closes it alone, back to the picker under it or the list it
+			// came from, and starts nothing — never the picker's default,
+			// which a click outside the picker itself starts.
+			return m.closeDialog(true), nil
+		}
 		if m.pickingResume {
 			// Swallowed, and nothing else: a click outside a pre-start
 			// picker that closed it would leave the model with no session
@@ -2992,6 +3079,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// sub-agent view, none of which may take a key from it.
 	if m.sessList.open {
 		return m.handleSessionsKey(msg)
+	}
+	// The pre-session connect dialog is the next (plan 036 §3.6): it belongs
+	// to no session, so nothing of one — its Ctrl+C ladder, a card it left
+	// open behind the list the dialog was opened from — takes a key from it.
+	if m.preConnectOpen() {
+		return m.handlePreConnectKey(msg)
 	}
 	// The highlight is a mouse gesture: any key but the one that copies it
 	// means the user has moved on.
@@ -4244,7 +4337,9 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	// /connect's key field does not outlive the quit, local or served: the
 	// model it is in waits out the stop and is the program's last (plan 031
-	// §3.9, dropConnect).
+	// §3.9, dropConnect). A pre-session dialog has no way back on a quit
+	// (plan 036 §3.6): nothing is reopened for a program that is ending.
+	m.cdlg.returnTo = 0
 	m = m.dropConnect()
 	if m.remote && m.eng != nil {
 		return m.stopQuit()

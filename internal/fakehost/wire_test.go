@@ -76,7 +76,8 @@ type fixtureLine struct {
 // its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
 // plan 031's model catalog (Options.Models), plan 032's presence
 // (Options.Presence) and plan 034's models refresh (Options.ModelsRefresh,
-// NativeDir).
+// NativeDir) — and, in a two-socket fixture, what its hub serves (hubCreates,
+// plan 036's createOptions).
 type fixtureHost struct {
 	// HubCreates is the hub's, in a two-socket fixture: one that serves
 	// session.create (hub.Options.Creates), its hosts this test binary run
@@ -95,6 +96,11 @@ type fixtureHost struct {
 	// Options.NativeDir): a session that takes up models while it runs.
 	ModelsRefresh bool   `json:"modelsRefresh,omitempty"`
 	NativeDir     string `json:"nativeDir,omitempty"`
+	// CreateOptions is the hub's, in a two-socket fixture whose hub creates
+	// (hubCreates): the answer it serves to sessions.createOptions (plan 036
+	// §3.4; hub.Creates.Options), as it stands, at every call. nil is a hub
+	// with no answer, whose hello omits createOptions.
+	CreateOptions *protocol.CreateOptionsResult `json:"createOptions,omitempty"`
 }
 
 // options is the Options a host line asks for; nil is the zero value.
@@ -570,9 +576,11 @@ type fixtureRunner struct {
 // the registry the fixture's Host is listed in (rundir.Env, a HOME-like root
 // and a runtime tree of the fixture's own), it starts a hub that finds the
 // Host there — one that creates sessions when creates says so (the host
-// line's hubCreates) — cleans it up through t, and returns the hub's socket
-// and its id (hubToWire's HUB-ID; "" to name none).
-type hubStarter func(t *testing.T, env rundir.Env, creates bool) (socket, hubID string)
+// line's hubCreates), and answers sessions.createOptions with options when
+// it is not nil (the host line's createOptions, plan 036 §3.4) — cleans it
+// up through t, and returns the hub's socket and its id (hubToWire's HUB-ID;
+// "" to name none).
+type hubStarter func(t *testing.T, env rundir.Env, creates bool, options *protocol.CreateOptionsResult) (socket, hubID string)
 
 // fixtureHub is the hub every two-socket fixture runs against: the real one,
 // internal/hub's Run in this process (hub_fixture_test.go installs it); nil,
@@ -757,7 +765,7 @@ func newHookedFixtureRunner(t *testing.T, o Options, hooks hostHooks) *fixtureRu
 // exactly where a hub looks for hosts, and start serves the hub that finds it
 // there. A connection dials the Host's socket or the hub's, as its lines say
 // (fixtureLine.Sock).
-func newTwoSocketRunner(t *testing.T, o Options, creates bool, start hubStarter) *fixtureRunner {
+func newTwoSocketRunner(t *testing.T, o Options, creates bool, options *protocol.CreateOptionsResult, start hubStarter) *fixtureRunner {
 	t.Helper()
 	h, err := newHost(o, hostHooks{})
 	if err != nil {
@@ -770,7 +778,7 @@ func newTwoSocketRunner(t *testing.T, o Options, creates bool, start hubStarter)
 		t.Fatal(err)
 	}
 	serveFixtureHost(t, h, reg.Listener(), reg)
-	sock, id := start(t, env, creates)
+	sock, id := start(t, env, creates, options)
 	r := newRunnerFor(t, h, map[string]string{sockHost: reg.Socket(), sockHub: sock})
 	r.hubID, r.env = id, env
 	return r
@@ -948,9 +956,14 @@ func (r *fixtureRunner) runOp(raw json.RawMessage) {
 func fixturePath(name string) string { return filepath.Join("testdata", "wire", name+".ndjson") }
 
 // fixtureHubCreates is whether a fixture's host line asks for a hub that
-// creates sessions.
-func fixtureHubCreates(lines []rawFixtureLine) bool {
-	return len(lines) > 0 && lines[0].parsed.Dir == "host" && lines[0].parsed.Host != nil && lines[0].parsed.Host.HubCreates
+// creates sessions, and the answer it asks that hub to serve to
+// sessions.createOptions (nil for none).
+func fixtureHubCreates(lines []rawFixtureLine) (bool, *protocol.CreateOptionsResult) {
+	if len(lines) == 0 || lines[0].parsed.Dir != "host" || lines[0].parsed.Host == nil {
+		return false, nil
+	}
+	h := lines[0].parsed.Host
+	return h.HubCreates, h.CreateOptions
 }
 
 // fixtureOptions is the Options a fixture's host line asks for (Options{}
@@ -976,7 +989,8 @@ func runFixture(t *testing.T, name string) {
 	}
 	var r *fixtureRunner
 	if hub != nil {
-		r = newTwoSocketRunner(t, fixtureOptions(lines), fixtureHubCreates(lines), hub)
+		creates, options := fixtureHubCreates(lines)
+		r = newTwoSocketRunner(t, fixtureOptions(lines), creates, options, hub)
 	} else {
 		r = newFixtureRunner(t, fixtureOptions(lines))
 	}

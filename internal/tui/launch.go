@@ -157,6 +157,12 @@ func (m Model) spawned(msg spawnedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		var refused *Refusal
 		if errors.As(msg.err, &refused) && m.repick(msg.from, refused) {
+			if msg.from == dialogProvider {
+				// The provider picker opens again: its states are asked for
+				// afresh, and an answer to the opening before is not taken
+				// (plan 036 §3.3).
+				return m, m.askProviderAvail()
+			}
 			return m, nil
 		}
 		return m.spawnFailed(msg.err), nil

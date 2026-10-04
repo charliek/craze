@@ -137,6 +137,13 @@ type Creates struct {
 	DefaultProvider func() string
 	// KnownProvider says a provider id names one this build can start.
 	KnownProvider func(string) bool
+	// Options is sessions.createOptions' answer (options.go; plan 036 §3.4):
+	// the providers with their availability, the default provider and the
+	// recent directories, computed afresh at each call, its trouble said
+	// through logf — the hub's own log. nil is a hub that does not serve the
+	// method: its hello omits createOptions, and the method is refused
+	// unsupported.
+	Options func(logf func(string, ...any)) protocol.CreateOptionsResult
 }
 
 // HostCommand builds a created session's host command, `craze serve …`, from

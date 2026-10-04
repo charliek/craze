@@ -153,6 +153,53 @@ type sessListState struct {
 	// only when Config.Sessions can start sessions (SessionStarter); in.on
 	// false is PR 2's list, which has none.
 	in sessInput
+	// avail is the latest ProviderAvailabilitySource answer this opening of
+	// the list took (plan 036 §3.3): what /provider offers and refuses, and
+	// a typed `/provider <id>` is checked against. availN is its number
+	// (provAvailSeq), so an answer from an older call — the list's own read
+	// landing after /provider's — never replaces a newer one; availHave says
+	// there is one: before it, /provider offers the startup picker's rows,
+	// every one ready.
+	avail     []ProviderAvail
+	availN    uint64
+	availHave bool
+}
+
+// sessAvailAnswer is one ProviderAvailabilitySource answer, numbered as its
+// call started (provAvailSeq).
+type sessAvailAnswer struct {
+	n     uint64
+	avail []ProviderAvail
+}
+
+// sessAvailMsg is the list's own read of the providers' availability as it
+// opens, for its opening gen.
+type sessAvailMsg struct {
+	gen    uint64
+	answer sessAvailAnswer
+}
+
+// askSessAvail is one ProviderAvailabilitySource call, numbered as it starts:
+// off the Update, since it reads the disk.
+func askSessAvail(src ProviderAvailabilitySource) sessAvailAnswer {
+	n := provAvailSeq.Add(1)
+	return sessAvailAnswer{n: n, avail: src.ProviderAvailability()}
+}
+
+// readSessAvail reads the providers' availability off the Update, for the
+// list's opening gen: what a typed `/provider <id>` is checked against before
+// /provider's values have ever been opened.
+func readSessAvail(src ProviderAvailabilitySource, gen uint64) tea.Cmd {
+	return func() tea.Msg { return sessAvailMsg{gen: gen, answer: askSessAvail(src)} }
+}
+
+// takeSessAvail keeps ans as the list's latest availability, unless a newer
+// call's answer is already kept.
+func (l *sessListState) takeSessAvail(ans sessAvailAnswer) {
+	if l.availHave && ans.n <= l.availN {
+		return
+	}
+	l.avail, l.availN, l.availHave = ans.avail, ans.n, true
 }
 
 // sessKey is a line's identity: a running session by its craze id and
@@ -174,6 +221,19 @@ const (
 	// sessNoteOK: something asked for happened (a session started).
 	sessNoteOK
 )
+
+// sessNoteStyle is a note's colour: the hint line's, and the startup
+// picker's detail lines' for what the pre-session connect dialog came back
+// with (plan 036 §3.6, connectBack).
+func (m Model) sessNoteStyle(k sessNoteKind) lipgloss.Style {
+	switch k {
+	case sessNoteErr:
+		return styleFG(m.theme.Err)
+	case sessNoteOK:
+		return styleFG(m.theme.OK)
+	}
+	return styleFG(m.theme.Warn)
+}
 
 // sessState is a row's state (plan 030 §3.10's table), in the order the
 // groups are drawn.
@@ -329,10 +389,16 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		return m, read
 	}
 	// The input under the rows, and the recent directories its `@` offers
-	// (plan 030 §3.13, §3.15), read once for this opening.
+	// (plan 030 §3.13, §3.15), read once for this opening — and the
+	// providers' availability its /provider offers and checks (plan 036
+	// §3.3), read again at each opening of /provider's values.
 	m.sessList.in = newSessInput(m.completeLoads)
 	sync := m.syncSessInput()
-	return m, tea.Batch(read, readRecents(st, m.sessList.gen), sync)
+	var avail tea.Cmd
+	if src, ok := m.sessions.(ProviderAvailabilitySource); ok {
+		avail = readSessAvail(src, m.sessList.gen)
+	}
+	return m, tea.Batch(read, readRecents(st, m.sessList.gen), avail, sync)
 }
 
 // hereKey is the session the model holds, as its row is keyed: zero with
@@ -366,6 +432,14 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 		m.sessNote(sessNothingNote, sessNoteWarn)
 		return m, nil
 	}
+	return m.closeSessList()
+}
+
+// closeSessList takes the list down, as a leave does and as the pre-session
+// connect dialog does opening over it (connectOverSessions): its state goes
+// but for its opening's number and its grouping, a pending Ctrl+C with it,
+// and its roster is closed by the command it answers.
+func (m Model) closeSessList() (Model, tea.Cmd) {
 	r := m.sessList.roster
 	// The input's popup is dropped with the list: a load it is waiting for
 	// is cancelled, and its answer would find nothing to take it.
@@ -373,6 +447,103 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	m.ctrlCDeadline = time.Time{}
 	return m, m.sessRosters.closeCmd(r)
+}
+
+// sessBackState is the list as the pre-session connect dialog found it (plan
+// 036 §3.6, decision 11): its input — the line, its cursor and the leading
+// token's binding — its selection and the saved group's state, what it knew
+// of the session behind it (none, here and its ending), and its last
+// listing, so the list that opens again looks as it did until its new roster
+// answers. Its providers' states are not kept: the opening reads them afresh,
+// as any opening does, so native's is recomputed from the store, never
+// assumed.
+type sessBackState struct {
+	value          string
+	cursor         int
+	bound, boundTo string
+	sel            sessKey
+	selIdx         int
+	savedOpen      bool
+	none           bool
+	here           sessKey
+	hereEnded      bool
+	hereEndedAt    time.Time
+	hereRow        *roster.Row
+	hereLost       bool
+	snap           roster.Snapshot
+	have           bool
+}
+
+// connectOverSessions is native needing setup chosen in the list's
+// /provider — Enter or Tab on it, or a typed `/provider native` (plan 036
+// §3.6, decision 11): the list closes, as a leave closes it (closeSessList)
+// — its popups, its roster — with what it showed recorded on the dialog
+// (connectDialog.list) but none of a leave's refusals, since nothing is gone
+// back to; and the connect dialog opens in the modal layer, which already
+// routes keys, the mouse, pastes and masking to it, over whatever is behind
+// the list. Every way out of the dialog opens the list again as it was
+// (reopenSessions); what new sessions run is the TUI's (sessPick) and is not
+// touched.
+func (m Model) connectOverSessions() (Model, tea.Cmd) {
+	l := m.sessList
+	v, cur := l.in.ti.Value(), sessByteCursor(l.in.ti.Value(), l.in.ti.Position())
+	list := &sessBackState{
+		value: v, cursor: cur, bound: l.in.bound, boundTo: l.in.boundTok,
+		sel: l.sel, selIdx: l.selIdx, savedOpen: l.savedOpen,
+		none: l.none, here: l.here, hereEnded: l.hereEnded, hereEndedAt: l.hereEndedAt, hereRow: l.hereRow, hereLost: l.hereLost,
+		snap: l.snap, have: l.have,
+	}
+	m, closeRoster := m.closeSessList()
+	next, cmd := m.openPreConnect(returnList)
+	next.cdlg.list = list
+	return next, tea.Batch(closeRoster, cmd)
+}
+
+// reopenSessions is the pre-session connect dialog's way back to the list
+// (connectReturned): the list opens again (openSessions) — a roster of its
+// own, its providers' states and its recent directories read afresh — and
+// then gets back what it showed when the dialog closed it (list): its input,
+// put back as it was, which opens /provider's values again over a
+// `/provider ` line, with native's state read anew; its selection; the
+// session behind it, as it knew it. back is said on its hint line. The
+// commands the opening returned are the Update wrapper's to hand on
+// (backCmd). With no roster to open the list with, the model stays where the
+// dialog left it.
+func (m Model) reopenSessions(back connectBack, list *sessBackState) Model {
+	tm, open := m.openSessions()
+	m = tm.(Model)
+	if !m.sessList.open {
+		return m
+	}
+	l := &m.sessList
+	if b := list; b != nil {
+		l.sel, l.selIdx, l.savedOpen = b.sel, b.selIdx, b.savedOpen
+		l.none, l.here, l.hereEnded, l.hereEndedAt, l.hereRow, l.hereLost = b.none, b.here, b.hereEnded, b.hereEndedAt, b.hereRow, b.hereLost
+		l.snap, l.have = b.snap, b.have
+		if l.in.on {
+			l.in.set(b.value, b.cursor)
+			l.in.bound, l.in.boundTok = b.bound, b.boundTo
+		}
+	}
+	m.syncSessList()
+	sync := m.syncSessInput()
+	if back.text != "" {
+		m.sessNote(back.text, back.kind)
+	}
+	m.backCmd = tea.Batch(m.backCmd, open, sync)
+	return m
+}
+
+// sessListUp says the session list is over the session the model holds: open,
+// or closed for the pre-session connect dialog standing in for it (plan 036
+// §3.6, decision 11), whose every way out opens it again. What the list being
+// up decides about the session behind it — an unstarted session's first
+// prompt dropped when the session it spawned fails to come up or ends there
+// (X154), a composer paste landing in the draft the list covers — the dialog
+// standing in for it decides the same way. Routing (keys, the mouse, the
+// frame) is not this: the dialog has the modal layer's.
+func (m Model) sessListUp() bool {
+	return m.sessList.open || (m.preConnectOpen() && m.cdlg.returnTo == returnList)
 }
 
 // endedToList is the stream of the session the model shows ending while the
@@ -521,6 +692,16 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		l.in.recents = msg.dirs
 		sync := m.syncSessInput()
 		return m, sync, true
+	case sessAvailMsg:
+		// The list's own read of the providers' availability (plan 036
+		// §3.3): this opening's alone, and only while no newer call's answer
+		// is kept. An open /provider popup is answered again from it.
+		if !l.open || msg.gen != l.gen || !l.in.on {
+			return m, nil, true
+		}
+		l.takeSessAvail(msg.answer)
+		sync := m.syncSessInput()
+		return m, sync, true
 	case completeLoadedMsg:
 		// The `@` popup's listing of a directory, or the `/` popup's models
 		// (C16): the popup takes it only if it still awaits it
@@ -534,6 +715,13 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		if msg.source == sessCmdSourceID {
+			// /provider's read of the providers' availability (plan 036
+			// §3.3) is the list's latest too — but only the read this
+			// opening of the popup awaits: one it has stopped awaiting
+			// changes nothing.
+			if ans, ok := msg.res.Data.(sessAvailAnswer); ok && l.in.cmd.awaits(msg) {
+				l.takeSessAvail(ans)
+			}
 			l.in.cmd.setSource(m.sessCmdSourceNow())
 			cmd, _ := l.in.cmd.loaded(msg)
 			return m, cmd, true
@@ -1647,14 +1835,7 @@ func (m Model) sessHintRow(lines []sessLine) string {
 		return renderSegs(m.width, lead, seg{"ctrl+x", styleFG(th.Err).Bold(true)},
 			seg{" again closes it; the transcript stays resumable", styleFG(th.Err)})
 	case l.note != "":
-		st := styleFG(th.Warn)
-		switch l.noteKind {
-		case sessNoteErr:
-			st = styleFG(th.Err)
-		case sessNoteOK:
-			st = styleFG(th.OK)
-		}
-		return renderSegs(m.width, lead, seg{l.note, st})
+		return renderSegs(m.width, lead, seg{l.note, m.sessNoteStyle(l.noteKind)})
 	case l.dialing != 0 && l.dialSaved:
 		return renderSegs(m.width, lead, txt("resuming "+l.dialTitle+"…"))
 	case l.dialing != 0:

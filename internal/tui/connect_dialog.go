@@ -27,7 +27,10 @@ import (
 //
 //   - Native only. The builtin is listed (slashCatalog) and dispatched
 //     (handleEnter, then runBuiltin) on a native session alone; anywhere else a typed /connect
-//     is the text it is, sent to the agent as it always was (CR 9).
+//     is the text it is, sent to the agent as it always was (CR 9). Before
+//     any session the same dialog opens in a mode of its own when a picker
+//     chooses native while no provider has a key (plan 036 §3.6,
+//     connect_pre.go).
 //   - Refused while work runs — a turn, the agent's own, or a background
 //     sub-agent (connectBusy): a key stored then would be one a running shell
 //     or child cannot redact, since a session learns stored keys only when a
@@ -116,7 +119,16 @@ func (m Model) connectOffered() bool { return m.snap.Provider.Name == nativeProv
 // sub-agent still running, a background one's included. A background bash
 // job is not one (plan 033 §3.8, anySubagentRunning): a server left running
 // would refuse /connect for its whole life.
+//
+// The pre-session dialog is never busy (plan 036 §3.6): the rule guards the
+// shown session, whose running work could not redact a key stored now, and
+// that dialog is no session's — opened from a picker before any, or from the
+// list rather than the session behind it — as craze auth login in another
+// terminal is no session's.
 func (m Model) connectBusy() bool {
+	if m.cdlg.pre {
+		return false
+	}
 	return m.status == statusWorking || m.snap.ForeignTurn || m.anySubagentRunning()
 }
 
@@ -147,6 +159,12 @@ const (
 	connectPick connectStep = iota
 	connectKey
 	connectSignIn
+	// The pre-session dialog's own steps (plan 036 §3.6, connect_pre.go):
+	// a key being saved, the plan's models being fetched after a sign-in,
+	// and the ChatGPT plan's one-time notice. None has a field.
+	connectSaving
+	connectFinishing
+	connectNotice
 )
 
 // connectDialog is /connect's state. The zero value is no dialog, which is
@@ -156,6 +174,18 @@ type connectDialog struct {
 	// carries it back (connectLoadedMsg), and applies only to it.
 	gen  uint64
 	step connectStep
+	// pre says this is the pre-session dialog (plan 036 §3.6,
+	// connect_pre.go), opened from a picker before any session; returnTo is
+	// where it goes back to, and back what it says there, set by the way
+	// out that has something to say (preExit). list is the session list as
+	// the dialog closed it (decision 11), put back as every way out opens it
+	// again; nil when it was opened from the startup picker. signed is its
+	// sign-in once finished.
+	pre      bool
+	returnTo connectReturn
+	back     connectBack
+	list     *sessBackState
+	signed   preSigned
 	// loaded says the providers' read has answered: until then step one says
 	// it is reading them. loadErr is its failure, value-free (the store's
 	// errors name files and rules, never a key).
@@ -256,7 +286,14 @@ func (m Model) openConnect() (Model, tea.Cmd) {
 // continuation. late is what is applied instead when no answer comes within
 // the gate's deadline. A model with no backend — one a test built bare — has
 // no gate to run it under, and runs it as a plain command.
+//
+// The pre-session dialog makes no backend call, whatever the model holds
+// (plan 036 §3.6): its read and its save are plain commands too, each raced
+// by late after a deadline of its own (preConnectCall).
 func (m Model) connectCall(read tea.Cmd, late connectAnswer) (Model, tea.Cmd) {
+	if m.cdlg.pre {
+		return m, preConnectCall(read, late)
+	}
 	if m.eng == nil {
 		return m, read
 	}
@@ -288,9 +325,12 @@ type connectLoadedMsg struct {
 // providers' stored keys that cannot be used (brokenKeyNote). It carries no
 // key. shownGen is the shown-session generation it was asked under: the
 // notice is that conversation's, so one landing after a switch is dropped by
-// the command gate (shownStamped).
+// the command gate (shownStamped). pre says it is the pre-session dialog's,
+// numbered gen, whose save step alone takes it (preSaved).
 type connectSavedMsg struct {
 	shownGen uint64
+	pre      bool
+	gen      uint64
 	name     string
 	err      string
 	notes    []string
@@ -477,6 +517,11 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		// reason to be here — or on the first one when every one has one.
 		m.cdlg.sel = max(firstUnconnected(msg.infos), 0)
 	case connectSavedMsg:
+		if msg.pre {
+			// The pre-session dialog's (plan 036 §3.6): nothing of it is the
+			// transcript's, and no session is asked to take the models up.
+			return m.preSaved(msg)
+		}
 		if msg.err != "" {
 			m.addError("/connect: " + msg.err)
 			return m, nil
@@ -497,6 +542,8 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		}
 	case signInBegunMsg, signInDoneMsg, signInFinishedMsg, signInShownMsg, signInCopiedMsg, signInLogOffMsg:
 		return m.applySignIn(msg)
+	case preNoticeMarkedMsg:
+		return m.preNoticeMarked(msg)
 	}
 	return m, nil
 }
@@ -520,12 +567,18 @@ func (m Model) pasteIntoKey(msg pasteMsg) Model {
 // for the ChatGPT plan, its sign-in (pickConnectProvider) — and Esc closes the
 // box; everything else — typing, a paste — is swallowed, since step one has no
 // field and a key pasted there must land nowhere.
+//
+// The pre-session dialog's own steps (plan 036 §3.6: saving, finishing, the
+// notice) have keys of their own (handlePreStepKey); its Esc, on any step,
+// never reaches here (handlePreConnectKey).
 func (m Model) handleConnectDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.cdlg.step {
 	case connectKey:
 		return m.handleConnectKeyStep(msg)
 	case connectSignIn:
 		return m.handleSignInKey(msg)
+	case connectSaving, connectFinishing, connectNotice:
+		return m.handlePreStepKey(msg)
 	}
 	n := len(m.cdlg.providers)
 	switch msg.Type {
@@ -591,6 +644,11 @@ func (m Model) handleConnectKeyStep(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // take is refused in the field, which is emptied, and nothing is written.
 // Otherwise the box closes — the field with it — and the key is stored off
 // the Update (saveConnectKey), whose answer writes the notice.
+//
+// The pre-session dialog stays up instead (plan 036 §3.6), on its save step
+// until the store answers or the deadline does (preSaved), since where it
+// goes back to has to hear what came of it; the field is emptied all the
+// same, the key living in the save's closure alone.
 func (m Model) saveConnect() (tea.Model, tea.Cmd) {
 	p, ok := m.cdlg.provider()
 	if !ok {
@@ -607,6 +665,12 @@ func (m Model) saveConnect() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	dir, getenv, shown := m.nativeDir, m.nativeEnv, m.shownGen
+	if m.cdlg.pre {
+		gen, name := m.cdlg.gen, sanitizeLine(p.Name)
+		m.cdlg.step, m.cdlg.field, m.cdlg.key, m.cdlg.keyErr = connectSaving, 0, textinput.Model{}, ""
+		return m.connectCall(preStampedSave(saveConnectKey(shown, dir, getenv, p, k), gen),
+			connectSavedMsg{shownGen: shown, pre: true, gen: gen, name: name, err: preSaveLateText})
+	}
 	m = m.closeDialog(false)
 	// The late answer is only ever applied in the gate's continuation, which
 	// the gate fences to this session, and applyConnect reads a refusal's err
@@ -663,6 +727,8 @@ func (m Model) connectDialogBody(inner, budget int) []string {
 		return m.connectKeyBody(inner, budget)
 	case connectSignIn:
 		return m.signInBody(inner, budget)
+	case connectSaving, connectFinishing, connectNotice:
+		return m.preStepBody(inner, budget)
 	}
 	plan := m.connectPickPlan(inner, budget)
 	rows := []string{m.dialogTitle(connectDialogTitle, inner)}
@@ -761,7 +827,7 @@ func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
 	switch m.cdlg.step {
 	case connectSignIn:
 		return m.signInClick(i)
-	case connectKey:
+	case connectKey, connectSaving, connectFinishing, connectNotice:
 		return m, nil
 	}
 	plan := m.connectPickPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)

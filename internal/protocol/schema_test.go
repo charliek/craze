@@ -51,6 +51,8 @@ var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodAsksGet:           {protocol.AsksGetParams{}, protocol.AsksGetResult{}},
 	protocol.MethodAsksAnswer:        {protocol.AsksAnswerParams{}, protocol.Empty{}},
 	protocol.MethodSessionCreate:     {protocol.CreateParams{}, protocol.CreateResult{}},
+	// The hub's (plan 036 §3.4).
+	protocol.MethodSessionsCreateOptions: {protocol.CreateOptionsParams{}, protocol.CreateOptionsResult{}},
 }
 
 // errorResultTypes is the data.result a method's refusal carries beside it,
@@ -428,6 +430,11 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 	if m, ok := protocol.Method(protocol.MethodSessionCreate); !ok || m.HostUnsupported != protocol.ReasonHubOnly || m.SessionScoped || m.Mutating {
 		t.Fatalf("session.create is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
 	}
+	// So is sessions.createOptions (plan 036 §3.4), a read.
+	if m, ok := protocol.Method(protocol.MethodSessionsCreateOptions); !ok || m.HostUnsupported != protocol.ReasonHubOnly ||
+		m.SessionScoped || m.Mutating || m.Capability != "" {
+		t.Fatalf("sessions.createOptions is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
+	}
 }
 
 // TestScopedAndMutatingMethodsCarryTheirIds: a session-scoped method's
@@ -518,9 +525,9 @@ func asStrings[T ~string](vs []T) []string {
 // reset and cursor reasons (the hub's hub_closing included, plan 032 §3.5),
 // activities, when, the prompt modes, the setting kinds, the cancel outcomes,
 // the ask statuses, the permission modes and turn outcomes (plan 030 §3.7),
-// the roster statuses (plan 032 §3.6), the JSON-RPC integers and the endpoint
-// kind — in the same order, so a value added on one side and not the other
-// fails here.
+// the roster statuses (plan 032 §3.6), the provider states (plan 036 §3.4),
+// the JSON-RPC integers and the endpoint kind — in the same order, so a value
+// added on one side and not the other fails here.
 func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 	var hostReasons []string
 	byCode := map[string][]string{}
@@ -555,6 +562,7 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 		{"roster statuses", "info.json", "/$defs/rosterStatus/enum", asStrings(protocol.RosterStatuses())},
 		{"create prompt outcomes", "session.create.json", "/$defs/result/properties/prompt/enum", asStrings(protocol.CreatePrompts())},
 		{"models refresh statuses", "session.models.refresh.json", "/$defs/result/properties/status/enum", asStrings(protocol.ModelsStatuses())},
+		{"provider states", "sessions.createOptions.json", "/$defs/providerState/enum", asStrings(protocol.ProviderStates())},
 		{"JSON-RPC integers", "envelope.json", "/$defs/error/properties/code/enum", []string{"-32700", "-32600", "-32601", "-32602", "-32000"}},
 	} {
 		if got := schemaEnum(t, tc.file, tc.pointer); !slices.Equal(got, tc.want) {

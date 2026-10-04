@@ -13,7 +13,7 @@ non-test source lines, from the reference reviews (`09`).
 | done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
 | done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
 | done | S4b | complete (Plan 032; 5 PRs: #75, #76, #78, #79, #81) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
-| 1 | S3 | design settled 2026-10-03 (shed `docs/discovery/craze-lane.md`, SD-40 to SD-46); **S3a (craze) next**, then S3b (shed + shed-mobile); Plan 035 (#83, #84) readied the protocol | craze as shed's machine-level source: provider availability and create options in craze (S3a); the source/lane contract split, `shed-craze`, the desktop and phone clients, gx retired, a settings sheet (S3b) |
+| 1 | S3 | design settled 2026-10-03 (shed `docs/discovery/craze-lane.md`, SD-40 to SD-46); Plan 035 (#83, #84) readied the protocol; **S3a complete (Plan 036, PR #87)**; **S3b (shed + shed-mobile) next, in shed** | craze as shed's machine-level source: provider availability and create options in craze (S3a); the source/lane contract split, `shed-craze`, the desktop and phone clients, gx retired, a settings sheet (S3b) |
 | 2 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
 | 2 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
 | 2 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
@@ -254,6 +254,16 @@ in the craze, shed and shed-mobile repos.
     - the Tauri desktop and phone clients, with the create sheet (provider,
       directory, first prompt; SD-45) and the hub row as the row (SD-43);
     - last and cuttable, the settings sheet (SD-45).
+- **S3a done (Plan 036, PR #87).** All four items above shipped, with two
+  departures from the list: the fixture is 26 (Plan 034 took 24 and 25), and
+  `craze providers` is in (`--hub` too; it never starts a hub). The hub's
+  `sessions.createOptions` answers each provider's state with a reason and a
+  fix, the default provider and up to 20 recent directories, behind the
+  connection capability `createOptions`; the TUI's pickers dim and refuse
+  what cannot start, and native with no key leads into `/connect`; the hermetic
+  recipe is `protocol.md`'s "Testing a client against a real hub" and
+  `tests/cli/test_client_recipe.py`. See `12`, Plan 036 and its handoff to S3b,
+  and `13`, SF-142–SF-150. **S3b is next, in shed.**
 - **Ready from craze's side (Plan 035).** The roster rows carry the session's
   model; `session.create` fails with the agent's own words and, on macOS, a
   hint when the hub was not started in the GUI login session; `craze new

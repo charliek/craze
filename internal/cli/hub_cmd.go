@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
+	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/transcript"
 	"github.com/charliek/craze/internal/tui"
 )
@@ -71,7 +74,8 @@ func runHub(cmd *cobra.Command, ready *hub.ReadyPipe, sigs <-chan os.Signal) err
 // hubCreates is what the hub's session.create reads of this build (plan 032
 // §3.10): the config file's provider, at each create — the default of a
 // create that names none — and the providers craze can start, by the name
-// --provider takes.
+// --provider takes; and sessions.createOptions' answer (hubCreateOptions,
+// plan 036 §3.4).
 func hubCreates() *hub.Creates {
 	return &hub.Creates{
 		DefaultProvider: tui.ConfigProvider,
@@ -79,7 +83,69 @@ func hubCreates() *hub.Creates {
 			_, err := agent.ProviderByName(id)
 			return err == nil
 		},
+		Options: hubCreateOptions,
 	}
+}
+
+// hubCreateOptions is the hub's answer to sessions.createOptions (plan 036
+// §3.4), computed afresh at each call, in the hub's process: the listed
+// providers' availability by the check's hub column (hubAvailInputs — the
+// binaries a host the hub creates would find, native and the login session
+// the hub's own, its fix naming this pid), the default provider
+// (hubDefaultProvider) and the recent directories (hubRecentDirs). Every
+// file it reads is the process's own CRAZE_HOME's — config.toml, native's
+// directory, the session index — which in production is the hub's namespace
+// (hub.Options.Env is the same process environment's). logf is the hub's
+// log.
+func hubCreateOptions(logf func(string, ...any)) protocol.CreateOptionsResult {
+	return protocol.CreateOptionsResult{
+		Providers:       providerOptions(availability(hubAvailInputs(os.Getpid()), agent.Providers())),
+		DefaultProvider: hubDefaultProvider(),
+		RecentDirs:      hubRecentDirs(logf),
+	}
+}
+
+// hubDefaultProvider is the provider a session.create that names none
+// starts, for sessions.createOptions to say (plan 036 decision 8):
+// config.toml's provider when it is set and names a provider craze knows,
+// else "" (absent) — never cursor for an empty one, which
+// agent.ProviderByName("") would answer.
+func hubDefaultProvider() string {
+	id := tui.ConfigProvider()
+	if id == "" {
+		return ""
+	}
+	if _, err := agent.ProviderByName(id); err != nil {
+		return ""
+	}
+	return id
+}
+
+// hubRecentDirs is sessions.createOptions' recent directories (plan 036
+// §3.4, decision 7): the session index's distinct workspaces that are still
+// directories, newest first (sessions.Store.RecentDirs, read uncapped, so
+// its own cap cannot count an entry this drops), absolute and within the
+// wire's bound only — a relative one names no place a client can start in —
+// then cut to protocol.CreateOptionsDirsMax, each time in UTC. Never nil: []
+// for none, and for an index that cannot be read, which says why through
+// logf.
+func hubRecentDirs(logf func(string, ...any)) []protocol.RecentDir {
+	out := []protocol.RecentDir{}
+	dirs, err := (&sessions.Store{}).RecentDirs(0)
+	if err != nil {
+		logf("sessions.createOptions: the session index cannot be read (%v): no recent directories", err)
+		return out
+	}
+	for _, d := range dirs {
+		if !filepath.IsAbs(d.Dir) || utf8.RuneCountInString(d.Dir) > protocol.RecentDirMax {
+			continue
+		}
+		out = append(out, protocol.RecentDir{Dir: d.Dir, UsedAt: d.UsedAt.UTC()})
+		if len(out) == protocol.CreateOptionsDirsMax {
+			break
+		}
+	}
+	return out
 }
 
 // openHubLog opens the hub's log at path (hub.LogPath: hub-<ns>.log in the

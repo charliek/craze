@@ -514,9 +514,19 @@ func (m Model) closeDialog(revert bool) Model {
 		// key field goes with the state, so no key typed or pasted into it
 		// outlives the dialog (plan 031 §3.9, astra 15). So does a sign-in's
 		// attempt, its listener closed (plan 033 §3.13).
+		//
+		// The pre-session dialog's every way out lands here too, so its way
+		// back is taken here (plan 036 §3.6, connectReturned): to the picker
+		// under it, or to the list it closed — but for a quit, which clears
+		// returnTo first (requestQuit, preConnectQuit). Only the pre-session
+		// dialog has a returnTo (openPreConnect).
 		m.dialog = dialogNone
 		m.cdlg.signIn.end(chatgptauth.CloseDialog)
+		to, back, list := m.cdlg.returnTo, m.cdlg.back, m.cdlg.list
 		m.cdlg = connectDialog{}
+		if to != 0 {
+			m = m.connectReturned(to, back, list)
+		}
 	case dialogHelp:
 		m.dialog = dialogNone
 		m.helpTop = 0

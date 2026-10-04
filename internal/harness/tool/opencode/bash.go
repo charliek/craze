@@ -251,7 +251,7 @@ func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 		return nil, err
 	}
 	call := &bashCall{host: b.host, id: c.ID, command: command, dir: env.Workspace, timeout: defaultTimeout,
-		ops: realOps, spillCap: maxSpillBytes, spillWait: spillWait}
+		ops: realOps, spillCap: maxSpillBytes, spillWait: spillWait, termGrace: termGrace}
 	// `params.workdir ? resolvePath(params.workdir, ...) : directory`
 	// (shell.ts:612-614): an empty workdir is the workspace. Whether it
 	// exists is checked when the call runs, since an earlier call in the
@@ -308,6 +308,10 @@ type bashCall struct {
 	ops       ops
 	spillCap  int64
 	spillWait time.Duration
+	// termGrace is the SIGTERM-to-SIGKILL grace the command's group gets
+	// (group.grace) — the constant termGrace, but in a test whose premise
+	// needs the command scheduled inside the grace, longer (plan 036 F2).
+	termGrace time.Duration
 }
 
 // ops is every call a bash call makes that can stall on a filesystem that
@@ -504,6 +508,7 @@ func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgre
 // registry: a token the ChatGPT sign-in mints while a command runs must not
 // reach the rest of its output raw (plan 033 C14r, r12 #6a).
 func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
+	g.grace = c.termGrace
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
 	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
 		copied: make(chan struct{}), began: began, closing: env.Closing, untrack: func() {}}

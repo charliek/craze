@@ -91,9 +91,12 @@ func TestFrameNativeLiveKeySave(t *testing.T) {
 	// script waits for that note — the switch acknowledged — before it types,
 	// as a person reads it: typed sooner, the prompt's row lands above the
 	// note whenever the answer is slower than the keys (a socket's round trip,
-	// one CPU), in either transport.
+	// one CPU), in either transport. The reply's text is on screen before its
+	// turn has ended, so the frame is taken once the TUI is idle again: every
+	// run's frame must be the same settled one (plan 036: the macOS runner and
+	// a 5% CPU quota caught a run mid-turn, "✳ Working" against a blank line).
 	got = runLiveFrame(t, build, 100, 30, script+"/model<enter><wait:text:Gamma Big>Gamma<enter><wait:text:model → gamma/big><wait:idle>"+
-		"hi<enter><wait:text:hello from gamma/big>", key)
+		"hi<enter><wait:text:hello from gamma/big><wait:idle>", key)
 	if !strings.Contains(got, "hello from gamma/big") || !strings.Contains(got, "Gamma Big") {
 		t.Fatalf("a switch to the model the key funded, and a turn on it, did not work:\n%s", got)
 	}

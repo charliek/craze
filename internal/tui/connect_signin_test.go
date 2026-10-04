@@ -1611,7 +1611,7 @@ func TestConnectSignInLogsThroughItsObserver(t *testing.T) {
 				m = pressKey(t, m, tea.KeyEsc) // back to step one, the plan still selected
 			}
 			_, _ = finishRun(io.Discard, nil, initial, nil)
-			if l, _ := initial.signIns.logFor(dir); l != nil {
+			if l, _ := initial.signIns.logFor(dir, signInStamp{}); l != nil {
 				t.Fatal("finishRun left the sign-in log open")
 			}
 			if !refused {

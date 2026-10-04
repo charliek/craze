@@ -166,6 +166,14 @@ func dialogMark(cursor, selected bool) string {
 // the keys have left keeps its "·" but gives up the cursor mark and the
 // SelectionBG band — exactly one thing in the box looks active at a time.
 func (m Model) dialogRow(text, tag string, selected, focused bool, inner int) string {
+	return m.dialogRowDim(text, tag, selected, focused, false, inner)
+}
+
+// dialogRowDim is dialogRow, its text and tag in the dim colour when dim is
+// set — on the selection band too, when the row is the cursor's: a provider
+// the picker offers but cannot start (plan 036 §3.3). The frame goldens are
+// ANSI-stripped, so the dim is a colour alone and the tag says the state.
+func (m Model) dialogRowDim(text, tag string, selected, focused, dim bool, inner int) string {
 	cursor := selected && focused
 	// One row is one line. An agent-supplied name with a newline in it would
 	// otherwise draw two, and then the box would be taller than the rectangle
@@ -177,9 +185,16 @@ func (m Model) dialogRow(text, tag string, selected, focused bool, inner int) st
 		body += strings.Repeat(" ", pad) + tag
 	}
 	body = padRow(clampWidth(body, inner), inner)
-	st := styleFG(m.theme.FG)
+	fg := m.theme.FG
 	if cursor {
-		st = lipgloss.NewStyle().Foreground(m.theme.Bright).Background(m.theme.SelectionBG)
+		fg = m.theme.Bright
+	}
+	if dim {
+		fg = m.theme.Dim
+	}
+	st := styleFG(fg)
+	if cursor {
+		st = st.Background(m.theme.SelectionBG)
 	}
 	return st.Render(body)
 }

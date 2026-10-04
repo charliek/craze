@@ -2,9 +2,10 @@
 // per user, HOME and CRAZE_HOME namespace that knows every session host on
 // the machine — by reading the registry, which every host already writes
 // (P1) — and that a client asks for the roster, routes through to a session
-// (session.connect), and asks to start one (session.create). It is `craze
-// hub`, started on demand by Ensure and gone when idle: no client and no live
-// host, after a grace (P12, owner decision 7).
+// (session.connect), asks to start one (session.create) and asks what it
+// can start (sessions.createOptions). It is `craze hub`, started on demand
+// by Ensure and gone when idle: no client and no live host, after a grace
+// (P12, owner decision 7).
 //
 // The pieces:
 //
@@ -18,11 +19,15 @@
 //     start waited for, its first prompt sent, and the requestId that makes
 //     a retry, across a hub restart too, answer the same session — and
 //     Create, a client's ask for one (craze new).
+//   - options.go: sessions.createOptions — what a create can start, the
+//     CLI's answer (Creates.Options) served — and CreateOptions, a client's
+//     ask for it (craze providers --hub).
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.
 //   - ensure.go: Ensure, a client's find-or-start (and the wedged hub's
-//     replacement, P17), and Command, the spawn seam.
+//     replacement, P17), Find, the find that never starts one, and Command,
+//     the spawn seam.
 //   - dialer.go: Dialer, internal/remote's dial for a client that reaches
 //     its session through the hub, which brings a dead hub back.
 //   - list.go: the roster read once (craze ps) — List from a hub, and

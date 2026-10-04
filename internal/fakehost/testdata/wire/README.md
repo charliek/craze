@@ -20,7 +20,7 @@ JSON object, one of:
   Stub without an agent: emitting text, opening an ask, restarting the engine
   (a new incarnation), and so on. `cmd/craze-fake-host`'s stdin reads the same
   shape.
-- A c2s line may also carry `"invalid": true` (fixture 10 only): it is
+- A c2s line may also carry `"invalid": true` (fixtures 10 and 26): it is
   deliberately not a well-formed request of a method protocol 1 defines with
   today's params (an unknown method, or a field no schema allows) — sent as it
   stands, and not held to the request schema, which such a line is designed
@@ -68,38 +68,10 @@ fixture is not flaky before committing it.
 
 ## The fixtures
 
-1. `01-hello-attach-snapshot` — hello, a fresh attach (a snapshot, no
-   cursor), synchronized.
-2. `02-resume-cursor-replay` — detach, two events published while detached,
-   then an attach with a cursor: a replay of both, then synchronized.
-3. `03-cursor-foreign-incarnation` — a `restart` (a new incarnation) closes
-   the first connection; a new one's attach names the old incarnation's
-   cursor: `reset: foreign_incarnation`, a fresh snapshot.
-4. `04-slow-consumer-reattach` — an attach with a tiny `maxBytes` budget,
-   then one push too large for it to ever hold: `reset{slow_consumer}` with
-   nothing delivered, then a cursor re-attach replays it.
-5. `05-ask-answered-twice` — a permission ask, answered, then answered again:
-   `{}` then `already_resolved`.
-6. `06-invalid-answer` — a permission answered with an option it never
-   offered: `bad_request`/`bad_answer`, and `asks.get` shows it still open.
-7. `07-cancel-idle` — `session.cancel` with nothing running:
-   `not_accepting`.
-8. `08-resend-commandid` — the same `commandId` sent twice with the same
-   payload (replayed, same result) and then with a different one
-   (`bad_request`).
-9. `09-prompt-seen-by-both` — two connections attached to the same session;
-   one sends `session.prompt`, and BOTH its own subscription and the other
-   connection's carry every event the turn produced, plus its own reply — a
-   `hang_next` op keeps the turn open (never racing its own automatic echo
-   against the reply's barrier) until an `end` op closes it.
-10. `10-refusals` — a command before `hello` (`hello_required`), an unknown
-    `sessionId` (`unknown_session`), an unknown method (`unknown_method`),
-    and an unknown params field (`unknown_field`).
-11. `11-snapshot-main-and-child` — `session.snapshot` of the main transcript
-    and of a child, both windowed to a small byte budget, plus an unknown
-    child id (`unknown_subagent`).
-12. `12-omitted-reset` — a normal event, then one too large for any budget:
-    `reset{omitted}`, then a fresh (cursorless) re-attach.
-13. `13-hello-resume-tokens` — a resume with the right token (`resumed:
-    true`), a token that names another client (`bad_token`), and a resume
-    of a binding aged past the idle bound (`resumed: false`, a fresh id).
+What each fixture exercises is listed once, in
+[`docs/reference/protocol.md`'s "Fixtures and the fake host"](../../../../docs/reference/protocol.md#fixtures-and-the-fake-host),
+beside the protocol it documents, so the list cannot drift from it here.
+That section also covers what this file does not: a fixture's first line
+`{"dir": "host", "host": {...}}`, which says how its host was built, and the
+`"sock": "hub"` lines of a two-socket fixture, which run the real hub in
+front of the host.

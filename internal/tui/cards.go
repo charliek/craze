@@ -189,8 +189,14 @@ func (m *Model) makeWayForCard() {
 		m.note("send now dropped")
 	}
 	// Either dialog goes with the rest: the model dialog applies nothing on
-	// the way out, and the theme dialog takes its live preview with it.
-	*m = m.closeDialog(true)
+	// the way out, and the theme dialog takes its live preview with it. The
+	// pre-session connect dialog stays (plan 036 §3.6): it is over the list
+	// the session was left for, not over the session, which the card waits
+	// in until the list goes back to it — as a card that arrives under the
+	// list does.
+	if !m.preConnectOpen() {
+		*m = m.closeDialog(true)
+	}
 }
 
 // askRead is the mask's read of one ask (maskRead): its record, and whether
