@@ -704,6 +704,11 @@ func TestBashCloseSignal(t *testing.T) {
 	t.Run("after a cancel, during its grace", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
+		// A failure before the close below still closes the session first:
+		// the cancel has already fixed the call's cause, so startBash's
+		// cleanup cannot make it a close, and the shell would run on through
+		// its minute's grace (plan 036 r7).
+		defer closeSession()
 		// The shell survives SIGTERM and says it got it, waiting in the wait
 		// builtin, which a trapped signal ends at once (bashWaitLoop); its
 		// child ignores SIGTERM.
