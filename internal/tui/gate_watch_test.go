@@ -290,6 +290,11 @@ var (
 		reflect.TypeFor[textarea.Model]():  true,
 		reflect.TypeFor[textinput.Model](): true,
 		reflect.TypeFor[*time.Location]():  true,
+		// A sign-in attempt is a live object outside the model — a real
+		// chatgptauth.Attempt or the tests' stand-in, with a listener and
+		// goroutines of its own — so its insides are not the model's state
+		// (and walking them races its accept loop).
+		reflect.TypeFor[signInAttempt](): true,
 	}
 	contextType = reflect.TypeFor[context.Context]()
 )

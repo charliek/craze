@@ -70,7 +70,13 @@ func connectModelOf(t *testing.T, cfg Config) Model {
 	isolateSkillsHome(t)
 	cfg.Theme, cfg.Workspace, cfg.Model, cfg.Yolo = "tokyo-night", t.TempDir(), "grok", true
 	tm, _ := New(cfg).Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	return startedLikeInit(t, tm.(Model))
+	m := startedLikeInit(t, tm.(Model))
+	// A box that reaches the ChatGPT sign-in step opens the sign-in log,
+	// whose writer goroutine works in cfg.NativeDir: close it (joining the
+	// writer) before the test's temp directories are removed, as finishRun
+	// does at exit. Registered after the caller's TempDirs, so it runs first.
+	t.Cleanup(func() { _ = m.signIns.closeLog() })
+	return m
 }
 
 // nativeStub is a Stub whose session is a native one, as its facts name it.
