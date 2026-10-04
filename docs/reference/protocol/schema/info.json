@@ -120,7 +120,7 @@
       "additionalProperties": false
     },
     "connectionCapabilities": {
-      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create.",
+      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true; createOptions is absent. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create; createOptions true where it serves sessions.createOptions, and absent otherwise.",
       "type": "object",
       "properties": {
         "rosterSubscribe": {"type": "boolean"},
@@ -128,7 +128,8 @@
         "multiplex": {"type": "boolean"},
         "connect": {"type": "boolean"},
         "snapshot": {"type": "boolean"},
-        "attachWhenNow": {"type": "boolean"}
+        "attachWhenNow": {"type": "boolean"},
+        "createOptions": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.createOptions. Absent — false — on a host, on a hub from before it existed, and on one given no answer to it: a client makes no call."}
       },
       "required": ["rosterSubscribe", "sessionCreate", "multiplex", "connect", "snapshot", "attachWhenNow"],
       "additionalProperties": false

@@ -162,20 +162,27 @@ func TestTheLimits(t *testing.T) {
 	if l := protocol.HostLimits(); l.InboundLine != protocol.InboundLineMax || l.OutboundLine != protocol.OutboundLineMax {
 		t.Fatalf("HostLimits = %+v", l)
 	}
-	if c := protocol.HostCapabilities(); c.RosterSubscribe || c.SessionCreate || c.Multiplex || c.Connect || !c.Snapshot || !c.AttachWhenNow {
+	if c := protocol.HostCapabilities(); c.RosterSubscribe || c.SessionCreate || c.Multiplex || c.Connect || !c.Snapshot || !c.AttachWhenNow ||
+		c.CreateOptions {
 		t.Fatalf("HostCapabilities = %+v", c)
 	}
 	// The hub's (plan 032 §3.6, §3.10): the roster subscription, session
 	// creation and the splice; never a multiplexed session, a snapshot or an
 	// attach of its own — those are a host's, through the splice.
-	if c := protocol.HubCapabilities(); !c.RosterSubscribe || !c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow {
+	// createOptions is never in either static set (plan 036 §3.4): the hub
+	// writes it in its hello only when it is given an answer to
+	// sessions.createOptions, so the six-field hellos of a host and of every
+	// hub without one read exactly as they did.
+	if c := protocol.HubCapabilities(); !c.RosterSubscribe || !c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow ||
+		c.CreateOptions {
 		t.Fatalf("HubCapabilities = %+v", c)
 	}
 }
 
-// TestTheMethodTable pins §3.3's method list, the hub's session.create
-// last, and which of them a TUI host answers unsupported, with which reason
-// (X6): each an unsupported reason of the table.
+// TestTheMethodTable pins §3.3's method list, the hub's session.create and
+// sessions.createOptions (plan 036 §3.4) last, and which of them a TUI host
+// answers unsupported, with which reason (X6): each an unsupported reason of
+// the table.
 func TestTheMethodTable(t *testing.T) {
 	var names []string
 	unsupported := map[string]protocol.Reason{}
@@ -195,7 +202,7 @@ func TestTheMethodTable(t *testing.T) {
 		"session.state", "session.snapshot", "session.sync", "session.prompt", "session.cancel", "session.disarm",
 		"session.queue.add", "session.queue.edit", "session.queue.remove", "session.queue.clear", "session.set",
 		"session.setTitle", "session.subagent.cancel", "session.stop", "session.models.refresh", "asks.list", "asks.get",
-		"asks.answer", "session.create"}
+		"asks.answer", "session.create", "sessions.createOptions"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("methods\n got %v\nwant %v", names, want)
 	}
@@ -205,6 +212,7 @@ func TestTheMethodTable(t *testing.T) {
 		"session.stop":           protocol.ReasonStopUnsupported,
 		"session.models.refresh": protocol.ReasonModelsRefreshUnsupported,
 		"session.create":         protocol.ReasonHubOnly,
+		"sessions.createOptions": protocol.ReasonHubOnly,
 	}
 	if !maps.Equal(unsupported, wantUnsupported) {
 		t.Fatalf("host-unsupported %v, want %v", unsupported, wantUnsupported)

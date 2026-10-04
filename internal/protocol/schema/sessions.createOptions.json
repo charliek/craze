@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.createOptions.json",
+  "title": "sessions.createOptions",
+  "description": "The hub's (plan 036 §3.4): what a session.create can start on this machine, before any session exists — the agent providers with their availability, the default provider, and the directories sessions last ran in. It takes nothing (a member is bad_request, reason unknown_field) and is a read: neither session-scoped nor mutating. Every call recomputes it; nothing is cached. A state marks and never refuses: session.create starts a provider whatever its state. A host answers unsupported, reason hub_only; the connection capability createOptions says a hub serves it, and a hub that cannot answer it refuses it unsupported, reason unsupported.",
+  "$defs": {
+    "params": {"$ref": "envelope.json#/$defs/empty"},
+    "result": {
+      "type": "object",
+      "properties": {
+        "providers": {"type": "array", "items": {"$ref": "#/$defs/providerOption"}, "maxItems": 16, "description": "The agent providers this machine lists, in craze's registry order (cursor, grok, gx, native): gx only when its binary is found. Each provider's binary is resolved as a host the hub creates resolves it — [agents] in the hub's config.toml, then PATH — and native and the macOS login session are the hub's own, which its hosts inherit."},
+        "defaultProvider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The provider a session.create that names none starts: provider in the hub's config.toml (the one the last session to start persisted). Absent when none is set, or when it names no provider craze knows. It may name a provider that is not listed (a missing gx) or not ready."},
+        "recentDirs": {"type": "array", "items": {"$ref": "#/$defs/recentDir"}, "maxItems": 20, "description": "The directories sessions ran in, newest first, from the hub's session index: distinct once cleaned, absolute, and still directories. [] for none, and when the index cannot be read (the hub logs why)."}
+      },
+      "required": ["providers", "recentDirs"],
+      "additionalProperties": false
+    },
+    "providerOption": {
+      "description": "One agent provider: its id (what session.create's provider takes), its label (what a client shows), its state and — present exactly when the state is not ready — why it cannot start and what to do about it. craze providers --json prints the same objects.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "label": {"type": "string", "minLength": 1, "maxLength": 64},
+        "state": {"$ref": "#/$defs/providerState"},
+        "reason": {"$ref": "info.json#/$defs/rowText", "minLength": 1, "description": "Why it cannot start, as a row fact's text is cut: one line of at most 200 terminal cells. It names a file, never its content."},
+        "fix": {"$ref": "info.json#/$defs/rowText", "minLength": 1, "description": "What to do about it, as a row fact's text is cut: one line of at most 200 terminal cells."}
+      },
+      "required": ["id", "label", "state"],
+      "additionalProperties": false,
+      "if": {"properties": {"state": {"const": "ready"}}},
+      "then": {"properties": {"reason": false, "fix": false}},
+      "else": {"required": ["reason", "fix"]}
+    },
+    "providerState": {
+      "description": "ready: it can start here. needs_setup: it cannot start until something craze can lead a person through is set up — native with no model whose provider has a key (craze auth login funds one). unavailable: it cannot start, and nothing in craze can make it — its binary is not found, cursor runs outside the macOS login session (over ssh), or native's model files cannot be read.",
+      "type": "string",
+      "enum": ["ready", "needs_setup", "unavailable"]
+    },
+    "recentDir": {
+      "description": "A directory sessions ran in, and when one last did.",
+      "type": "object",
+      "properties": {
+        "dir": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "An absolute path to a directory that existed as the hub answered."},
+        "usedAt": {"$ref": "event.json#/$defs/time", "description": "The newest session index row's update time for the directory, in UTC."}
+      },
+      "required": ["dir", "usedAt"],
+      "additionalProperties": false
+    }
+  }
+}

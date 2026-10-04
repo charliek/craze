@@ -117,8 +117,33 @@ var Command func(argv []string) (*exec.Cmd, error)
 
 // ErrNoHub is Ensure in a test binary that has not installed Command: a test
 // never spawns a hub it did not ask for, so a production path that would is
-// told at once and takes its fallback.
+// told at once and takes its fallback. It is also Find with no hub answering,
+// which a caller says in its own words.
 var ErrNoHub = errors.New("hub: no hub in a test binary unless the test installs hub.Command")
+
+// Find finds the namespace's running hub and never starts one (plan 036
+// §3.2, §3.4): Ensure's steps 1 and 3 (ensurer.find) and nothing after — a
+// hub that answers as its record says, with the capabilities need names,
+// is the answer (its socket); one without them is a *LacksError, never used;
+// no record, a stale one, or a hub that does not answer is ErrNoHub, and so
+// is a wedged hub once step 3 has ended it — nothing replaces it. A
+// diagnostic run over ssh (craze providers --hub) must not start the
+// ssh-born hub it is asking about.
+func Find(ctx context.Context, env rundir.Env, need protocol.ConnectionCapabilities) (string, error) {
+	ns, err := rundir.Namespace(env.CrazeDir)
+	if err != nil {
+		return "", err
+	}
+	e := &ensurer{env: env, ns: ns, need: need}
+	sock, found, err := e.find(ctx)
+	switch {
+	case err != nil:
+		return "", err
+	case !found:
+		return "", ErrNoHub
+	}
+	return sock, nil
+}
 
 // Ensure's bounds and seams: variables only so a test can change them (never
 // in parallel).
@@ -191,6 +216,7 @@ func missing(have, need protocol.ConnectionCapabilities) []string {
 		}
 	}
 	check(need.SessionCreate, have.SessionCreate, "create sessions")
+	check(need.CreateOptions, have.CreateOptions, lacksCreateOptions)
 	check(need.RosterSubscribe, have.RosterSubscribe, "subscribe to the session roster")
 	check(need.Connect, have.Connect, "connect to a session")
 	check(need.Multiplex, have.Multiplex, "multiplex sessions")

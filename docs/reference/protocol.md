@@ -174,7 +174,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -190,6 +190,15 @@ reached through the splice; `multiplex` is `false` because one connection
 carries the roster or one spliced session, never several. `sessionCreate` is
 `true` only on a hub that serves `session.create` — `false` on a hub from
 before it existed: a client checks it, never the hub's version.
+
+`createOptions` says the hub serves
+[`sessions.createOptions`](#sessionscreateoptions), what a create can start.
+Unlike the six before it, it is **omitted when `false`**: written only by a
+hub that serves the method, so a host's `hello`, an older hub's and that of a
+hub given no answer to it are byte for byte what they were. Absent means an
+older hub (or one that cannot answer): a client makes no call. A client built
+before it reads this `hello` as it always has, because a client ignores a
+result member it does not know ([above](#tolerant-inbound-strict-outbound)).
 
 ### Client ids and resume
 
@@ -431,11 +440,12 @@ same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
 The hub serves `hello`, `sessions.list`, `sessions.subscribe`,
-`session.connect` and `session.create`; every other session-scoped method
-sent to it is refused `unsupported`, reason `host_only`. `session.create` is
-neither session-scoped (its session does not exist until it answers) nor
-mutating (the hub mints no client ids and keeps no command receipts: its
-idempotency is its own `requestId`).
+`session.connect`, `session.create` and `sessions.createOptions`; every other
+session-scoped method sent to it is refused `unsupported`, reason
+`host_only`. `session.create` is neither session-scoped (its session does not
+exist until it answers) nor mutating (the hub mints no client ids and keeps no
+command receipts: its idempotency is its own `requestId`).
+Nor is `sessions.createOptions`, an endpoint-level read.
 
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
@@ -464,6 +474,7 @@ idempotency is its own `requestId`).
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
 | `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?` (no `sessionId`, no `commandId`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
+| `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
@@ -612,7 +623,9 @@ session has started**.
 **Params.** `cwd` is an absolute path to an existing directory. `provider`
 is a provider id; absent, it is the hub's configured default — `provider` in
 the hub's `config.toml`, read at each create (the provider the last session
-to start persisted) — and with none configured the create is `bad_request`.
+to start persisted), which
+[`sessions.createOptions`](#sessionscreateoptions) reports as
+`defaultProvider` — and with none configured the create is `bad_request`.
 `model`, `effort` and `fast` are the session's start settings, each absent
 for the provider's own default: an absent `model` is the agent's own default
 model (craze keeps no default model of its own for an ACP provider, and a
@@ -715,6 +728,81 @@ pid> (no session ends) and run this again from a terminal in your Mac's login
 session (a Roost tab, Terminal.app)`. The host adds it only when its agent
 exited and its session lacks the GUI login's graphic access; a client should
 show the cause as it is, not parse it.
+
+### `sessions.createOptions`
+
+The hub's, where its `hello` says `createOptions: true`: what a
+[`session.create`](#sessioncreate) can start on this machine, before any
+session exists — the agent providers and whether each can start, the default
+provider, and the directories sessions last ran in. It is what a client's
+create sheet offers; `craze providers --hub` prints it.
+
+```json
+{"jsonrpc":"2.0","id":"3","method":"sessions.createOptions","params":{}}
+{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
+```
+
+**Params.** None: `{}`, or none at all. Any member is `bad_request`, reason
+`unknown_field`.
+
+**`providers`** is every agent provider this machine lists, in craze's own
+order — `cursor`, `grok`, `gx`, `native` — at most 16. `gx`, a fork few
+machines have, is listed only when its binary is found. Each has its `id`
+(what `session.create`'s `provider` takes), its `label` (what a client shows)
+and its `state`:
+
+| `state` | meaning |
+|---|---|
+| `ready` | it can start here |
+| `needs_setup` | it cannot start until something craze can lead a person through is set up: native with no model whose provider has a key (`craze auth login` funds one) |
+| `unavailable` | it cannot start, and nothing in craze can make it: its binary is not found, cursor runs outside the macOS login session, or native's model files cannot be read |
+
+`reason` (why) and `fix` (what to do) are present exactly when the state is
+not `ready`, each one line of at most 200 terminal cells, cut as a [row
+fact](#the-row-facts) is. The hub judges each provider as a host it creates
+would start it, in the hub's own process:
+
+- **cursor, grok and gx** are `ready` when their binary resolves as a created
+  host resolves it: `[agents].<provider>` in the hub's `config.toml`, else the
+  provider's own name on the hub's `PATH` — never `CRAZE_AGENT_BIN`, which the
+  hub hands no host. A binary not found is `unavailable`, and the reason names
+  where the hub looked: `cursor-agent not found on PATH`, or `[agents].cursor
+  /opt/x/cursor-agent not found`.
+- **cursor, on macOS,** is also `unavailable` when the hub runs outside the
+  Mac's login session — first started over `ssh` — where cursor may not reach
+  the login keychain; its hosts inherit that session. The fix names the hub's
+  pid: `kill <pid> (no session ends), then run "craze ps" in a terminal on the
+  Mac`. A missing binary is reported first. Where the session is not known
+  (Linux), nothing is marked for it.
+- **native** is `ready` when its model table — in the hub's craze directory,
+  with the hub's environment, both of which its hosts inherit — loads and a
+  model's provider has a key; `needs_setup` when none has; `unavailable` when
+  `providers.toml` or `models.toml` cannot be read. The reason then names the
+  file and nothing from it: an error there can quote a pasted key's name, and
+  `craze auth list` on the machine shows the detail.
+
+Nothing is cached: every call reads the config, looks the binaries up and
+reads native's files again — no network request, no keychain access. A state
+only marks: `session.create` starts a provider whatever its state, with the
+same start failure as ever when it cannot start.
+
+**`defaultProvider`** is the provider a `session.create` that names none
+starts: `provider` in the hub's `config.toml` (the provider the last session
+to start persisted). It is absent when none is set, or when it names no
+provider craze knows, and it may name one that is not listed (a missing gx)
+or not ready.
+
+**`recentDirs`** is the directories sessions ran in, from the hub's own
+session index (its `CRAZE_HOME`'s `sessions.jsonl`), newest first: each once
+(compared cleaned), its `usedAt` its newest session's last update, in UTC.
+Only absolute paths that are directories as the hub answers are listed, at
+most 20. It is always a list: `[]` for none, and for an index that cannot be
+read, which the hub's log then says.
+
+**Refusals.** A hub that cannot answer — one from before the method, or one
+given no answer — says no `createOptions` in its `hello` and answers the
+method `unsupported`, reason `unsupported`. A host answers it `unsupported`,
+reason `hub_only`.
 
 ## Notifications
 
@@ -1008,7 +1096,10 @@ what **this session** can do.
 alone — plus `snapshot` and `attachWhenNow`, both `true` on a host. On the
 hub, `rosterSubscribe` and `connect` are `true`, `sessionCreate` is `true`
 where it serves `session.create`, and the other three are `false` (see [the
-hub's result](#the-hubs-result)).
+hub's result](#the-hubs-result)). A seventh, `createOptions`, is the hub's
+and **omitted when `false`**: `true` where the hub serves
+[`sessions.createOptions`](#sessionscreateoptions), absent on a host, on an
+older hub and on one given no answer.
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
@@ -1093,7 +1184,9 @@ saying what it holds; a host with no `stop` keeps refusing
 reason set, each under a code a client already decides from, so one that does
 not know a reason decides by its code ([Errors and retry](#errors-and-retry));
 the reset reason `hub_closing` ends only a roster subscription, which no older
-client holds.
+client holds. A hub's `capabilities.createOptions` is absent on an older hub
+(and on one given no answer): a client makes no `sessions.createOptions` call
+there, and a client built before the method ignores the member.
 
 ## The foreign turn
 
@@ -1532,8 +1625,8 @@ Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
 schema does not describe, or vice versa, fails the build — the hub's
-`session.create` among them, which a host answers `unsupported`, reason
-`hub_only`, like `session.connect`. The event and snapshot codecs' own
+`session.create` and `sessions.createOptions` among them, which a host answers
+`unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
 hand-shaped wire structs get the same treatment in `internal/agent`
 (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
 (`TestSnapshotSchemaCoversTheCodec`), since this package cannot import
@@ -1560,7 +1653,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-five scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-six scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1598,7 +1691,11 @@ the delta reaching the three direct clients too (24); and, through the
 hub, the method sent to the hub itself (`host_only`) and, through a splice,
 an ACP-like session whose info document says no `modelsRefresh` — the
 document an older host sends too, to which a client makes no call — refusing
-it `models_refresh_unsupported` (25). Every line is
+it `models_refresh_unsupported` (25); and a hub that serves
+`sessions.createOptions`, its `hello` saying `createOptions: true`,
+answering it with its answer as it stands and refusing a stray params member
+`unknown_field`, beside the host, whose `hello` has no `createOptions` and
+which refuses the method `hub_only` (26). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
@@ -1635,6 +1732,9 @@ the test binary run as a fake `craze serve`; a host a create started is
 named by placeholder too, from its registry entry: its id (which the hub
 minted) as `cccccccccccc`, its session's incarnation as
 `CREATED-INCARNATION`, and its pid, in the create's result, as `999999999`.
+A `host` line that also carries `createOptions` — a `sessions.createOptions`
+result, written out — has that hub answer the method with it, as it stands,
+at every call (it needs `hubCreates`).
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`

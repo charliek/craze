@@ -179,8 +179,10 @@ type Options struct {
 	// the writer, and its close. nil, or one that fails, leaves the hub
 	// speaking on Stderr.
 	OpenLog func(path string) (io.Writer, func(), error)
-	// Creates is what session.create needs (create.go): nil — a test's hub
-	// alone — creates nothing, and its hello says sessionCreate false.
+	// Creates is what session.create needs (create.go), and
+	// sessions.createOptions (options.go): nil — a test's hub alone —
+	// creates nothing, and its hello says sessionCreate false and omits
+	// createOptions.
 	Creates *Creates
 	// IdleGrace is the idle exit's grace; 0 is DefaultIdleGrace.
 	IdleGrace time.Duration

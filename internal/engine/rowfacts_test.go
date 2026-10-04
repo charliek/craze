@@ -97,6 +97,11 @@ func TestRowLineIsOneBoundedLine(t *testing.T) {
 		{"control characters dropped", "a\x1b[31mb\x7fc\u009bd", "a[31mbcd"},
 		{"two hundred cells fit", strings.Repeat("x", 200), strings.Repeat("x", 200)},
 		{"one more is cut", strings.Repeat("x", 201), strings.Repeat("x", 199) + "…"},
+		// Control characters take no cell (plan 036 §3.1, A3): dropped before
+		// the cap, so they never push a line over it.
+		{"control characters count no cell", strings.Repeat("x", 100) + "\x1b\x07\u0085" + strings.Repeat("x", 100), strings.Repeat("x", 200)},
+		{"a hundred wide characters fit", strings.Repeat("漢", 100), strings.Repeat("漢", 100)},
+		{"a wide character that would end past the cap is cut whole", "x" + strings.Repeat("漢", 100), "x" + strings.Repeat("漢", 99) + "…"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := RowLine(tc.in); got != tc.want {

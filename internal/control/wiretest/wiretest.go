@@ -178,6 +178,14 @@ func (c *Checker) Notification(line []byte) error {
 	return c.validate(protocol.NotificationSchema(n.Method), "#/$defs/params", n.Params)
 }
 
+// Document validates one document that is no wire line against the schema at
+// file#fragment ("#/$defs/providerOption"): what a command prints in a wire
+// type's shape — craze providers --json's providers are sessions.createOptions'
+// providerOptions (plan 036 §3.2).
+func (c *Checker) Document(file, fragment string, doc []byte) error {
+	return c.validate(file, fragment, trim(doc))
+}
+
 // ErrNotALine is Server's answer for a line that is neither a response nor a
 // notification.
 var ErrNotALine = errors.New("wiretest: neither a response nor a notification")

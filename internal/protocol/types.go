@@ -159,6 +159,15 @@ type Endpoint struct {
 // ConnectionCapabilities is the connection's capability set (plan 027 §3.3,
 // SD-28): what the endpoint itself can do, as opposed to one session. A
 // client hides what a capability says it cannot do (05).
+//
+// CreateOptions is plan 036's (§3.4, decision 2): the hub serves
+// sessions.createOptions. Unlike the six before it it is omitted when false —
+// written only by a hub that serves the method, as the session capabilities
+// rowFacts and presence are — so every hello of a host, of an older hub and
+// of a hub that cannot answer it reads exactly as it did. Absent means not
+// served; a newer hello's member reaches an older client, which ignores a
+// result member it does not know (protocol.md, "Tolerant inbound, strict
+// outbound").
 type ConnectionCapabilities struct {
 	RosterSubscribe bool `json:"rosterSubscribe"`
 	SessionCreate   bool `json:"sessionCreate"`
@@ -166,6 +175,7 @@ type ConnectionCapabilities struct {
 	Connect         bool `json:"connect"`
 	Snapshot        bool `json:"snapshot"`
 	AttachWhenNow   bool `json:"attachWhenNow"`
+	CreateOptions   bool `json:"createOptions,omitempty"`
 }
 
 // HostCapabilities is a session host's connection capabilities in protocol
@@ -184,6 +194,9 @@ func HostCapabilities() ConnectionCapabilities {
 // client that needs one checks it, never the hub's version: a hub from
 // before session.create says sessionCreate false, and so does a hub given no
 // way to spawn a host (internal/hub's Options.Creates, nil only in a test).
+// CreateOptions is false here: the hub sets it in its hello only when it is
+// given an answer to sessions.createOptions (Creates.Options; plan 036
+// §3.4).
 func HubCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
@@ -757,6 +770,82 @@ func ValidRequestID(id string) bool {
 	}
 	return true
 }
+
+// CreateOptionsParams is sessions.createOptions' params (plan 036 §3.4): it
+// takes nothing, and a member is unknown_field. A host answers unsupported,
+// reason hub_only; the connection capability createOptions says a hub serves
+// it.
+type CreateOptionsParams struct{}
+
+// CreateOptionsResult is what the hub can create (plan 036 §3.4): the agent
+// providers this machine lists, each with its availability, in the
+// registry's order (at most CreateOptionsProvidersMax); the provider a
+// session.create that names none starts — config.toml's provider, present
+// only when it is set and names a provider craze knows, which need be
+// neither listed nor ready (a missing gx); and the directories sessions last
+// ran in, newest first (at most CreateOptionsDirsMax, absolute, still
+// directories). Both lists are always written, [] for none, never null.
+type CreateOptionsResult struct {
+	Providers       []ProviderOption `json:"providers"`
+	DefaultProvider string           `json:"defaultProvider,omitempty"`
+	RecentDirs      []RecentDir      `json:"recentDirs"`
+}
+
+// ProviderOption is one agent provider a create can name: its id (what
+// session.create's provider takes), its label (what a client shows), its
+// state, and for a state but ready why it cannot start (Reason) and what to
+// do about it (Fix) — each one line of at most 200 terminal cells, as a row
+// fact is, present exactly when the state is not ready. craze providers
+// --json prints the same objects.
+type ProviderOption struct {
+	ID     string        `json:"id"`
+	Label  string        `json:"label"`
+	State  ProviderState `json:"state"`
+	Reason string        `json:"reason,omitempty"`
+	Fix    string        `json:"fix,omitempty"`
+}
+
+// ProviderState is a provider's availability on the machine that answers
+// (plan 036 §3.1). It marks: the hub's session.create starts a provider
+// whatever its state (decision 3).
+type ProviderState string
+
+const (
+	// ProviderReady: it can start here.
+	ProviderReady ProviderState = "ready"
+	// ProviderNeedsSetup: it cannot start until something is set up that
+	// craze can lead a person through — native with no funded model, which
+	// craze auth login (or the TUI's /connect) funds.
+	ProviderNeedsSetup ProviderState = "needs_setup"
+	// ProviderUnavailable: it cannot start, and nothing in craze can make it
+	// — its binary is not there, cursor runs outside the macOS login
+	// session, native's model files cannot be read.
+	ProviderUnavailable ProviderState = "unavailable"
+)
+
+var providerStates = []ProviderState{ProviderReady, ProviderNeedsSetup, ProviderUnavailable}
+
+// ProviderStates is every provider state, ready first.
+func ProviderStates() []ProviderState { return slices.Clone(providerStates) }
+
+// RecentDir is a directory sessions have run in and when one last did (the
+// session index's newest row of it), in UTC, as every wire time is.
+type RecentDir struct {
+	Dir    string    `json:"dir"`
+	UsedAt time.Time `json:"usedAt"`
+}
+
+// sessions.createOptions' bounds (plan 036 decision 7), which the schema
+// states.
+const (
+	// CreateOptionsProvidersMax is the most providers a result lists.
+	CreateOptionsProvidersMax = 16
+	// CreateOptionsDirsMax is the most recent directories a result lists.
+	CreateOptionsDirsMax = 20
+	// RecentDirMax bounds a recent directory, in characters: Linux's
+	// PATH_MAX, as session.create's cwd is bounded.
+	RecentDirMax = 4096
+)
 
 // ------------------------------------------------------------------ attach
 

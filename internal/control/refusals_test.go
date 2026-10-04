@@ -104,10 +104,11 @@ func TestEveryRefusalPath(t *testing.T) {
 
 	// What a session host does not serve, whatever the params.
 	for method, reason := range map[string]protocol.Reason{
-		protocol.MethodSessionStop:       protocol.ReasonStopUnsupported,
-		protocol.MethodSessionsSubscribe: protocol.ReasonRosterUnsupported,
-		protocol.MethodSessionConnect:    protocol.ReasonHubOnly,
-		protocol.MethodSessionCreate:     protocol.ReasonHubOnly,
+		protocol.MethodSessionStop:           protocol.ReasonStopUnsupported,
+		protocol.MethodSessionsSubscribe:     protocol.ReasonRosterUnsupported,
+		protocol.MethodSessionConnect:        protocol.ReasonHubOnly,
+		protocol.MethodSessionCreate:         protocol.ReasonHubOnly,
+		protocol.MethodSessionsCreateOptions: protocol.ReasonHubOnly,
 	} {
 		refusedWith(t, c.call(method, map[string]any{"anything": true}), protocol.RPCRefused, protocol.CodeUnsupported, reason)
 	}
