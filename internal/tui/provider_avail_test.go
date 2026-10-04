@@ -957,3 +957,124 @@ func TestCompletePopupKeepsARefusalsLine(t *testing.T) {
 		t.Fatal("the next key left the refusal")
 	}
 }
+
+// ------------------------------------------------------- membership (X42)
+
+// pickerRowNames is the startup picker's rows, by id.
+func pickerRowNames(m Model) []string {
+	out := make([]string, 0, len(m.providers))
+	for _, p := range m.providers {
+		out = append(out, p.Name())
+	}
+	return out
+}
+
+// TestProviderPickerRowsFollowTheAnswers (plan 036 X42, r9): each answer the
+// startup picker takes is its membership too, as /provider's is: a row the
+// answer leaves out is dropped — a gx whose binary went while the picker was
+// up, which the check leaves out unless it is the default — so no row the
+// answer did not judge is drawn or started as ready; a provider it names that
+// the rows lack — a gx installed since — is added, in the registry's order.
+// The default is always a row: one a non-empty answer leaves out is
+// unavailable, but for a hidden or in-process default, which keeps today's
+// rule. The cursor stays on its provider, or goes to the default when its
+// row went.
+func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
+	cursor, grok, gx, native := agent.CursorProvider(), agent.GrokProvider(), agent.GxProvider(), agent.NativeProvider()
+	// states answers cursor and grok ready, gx ready while installed says
+	// so, and native as the fixture's store says (needing setup).
+	states := func(installed *atomic.Bool, dir string, getenv func(string) string) func() []ProviderAvail {
+		return func() []ProviderAvail {
+			out := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}}
+			if installed.Load() {
+				out = append(out, ProviderAvail{ID: "gx", State: AvailReady})
+			}
+			return append(out, preNative(dir, getenv, nil))
+		}
+	}
+
+	t.Run("a gx removed under the pre-session dialog", func(t *testing.T) {
+		var installed atomic.Bool
+		installed.Store(true)
+		dir, getenv := preFixture(t, false, false)
+		log := &builtLog{}
+		cfg := availPickerConfig(t, grok, states(&installed, dir, getenv), nil, log.build)
+		cfg.NativeDir, cfg.Getenv = dir, getenv
+		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		m := availPicker(t, cfg, 100, 30)
+		t.Cleanup(func() { _ = m.signIns.closeLog() })
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "gx", "native"}) {
+			t.Fatalf("fixture: the rows %v", got)
+		}
+		m, _ = preOpen(t, returnPicker, m)
+		installed.Store(false) // gx's binary removed while the dialog is up
+		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m = preBack(t, "Esc", returnPicker, m, cmd, connectBack{}, listShown{})
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
+			t.Fatalf("after the fresh answer the rows are %v; want gx gone", got)
+		}
+		if m.providers[m.providerCursor].Name() != "native" || strings.Contains(plainView(m), " gx ") {
+			t.Fatalf("cursor on %s, frame:\n%s", m.providers[m.providerCursor].Name(), plainView(m))
+		}
+		// Every row Enter can reach: none is gx.
+		for range m.providers {
+			m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+			if m.providers[m.providerCursor].Name() == "gx" {
+				t.Fatal("the cursor reached a gx row")
+			}
+		}
+	})
+	t.Run("the cursor's row dropped", func(t *testing.T) {
+		var installed atomic.Bool // gx missing by the time the first answer is read
+		dir, getenv := preFixture(t, false, false)
+		cfg := availPickerConfig(t, grok, states(&installed, dir, getenv), nil, (&builtLog{}).build)
+		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		m := New(cfg)
+		tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		m = tm.(Model)
+		answer := runWatched(t, m.Init()).(providerAvailMsg)
+		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown}) // grok → gx, before the answer
+		if m.providers[m.providerCursor].Name() != "gx" {
+			t.Fatalf("fixture: the cursor is on %s", m.providers[m.providerCursor].Name())
+		}
+		m = applyMsg(t, m, answer)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) || m.providers[m.providerCursor].Name() != "grok" {
+			t.Fatalf("rows %v, cursor on %s — want gx gone and the cursor on the default", got, m.providers[m.providerCursor].Name())
+		}
+	})
+	t.Run("a gx installed since", func(t *testing.T) {
+		var installed atomic.Bool
+		installed.Store(true)
+		dir, getenv := preFixture(t, false, false)
+		m := availPicker(t, availPickerConfig(t, grok, states(&installed, dir, getenv), nil, (&builtLog{}).build), 80, 24)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "gx", "native"}) || m.providers[m.providerCursor].Name() != "grok" {
+			t.Fatalf("rows %v, cursor on %s — want gx added in order, the cursor on grok still", got, m.providers[m.providerCursor].Name())
+		}
+	})
+	t.Run("an unlisted default", func(t *testing.T) {
+		log := &builtLog{}
+		cfg := availPickerConfig(t, gx, availFixture, nil, log.build) // the answer never names gx
+		m := availPicker(t, cfg, 80, 24)
+		c := m.providerChoice(gx)
+		if !slices.Contains(pickerRowNames(m), "gx") || c.a.State != AvailUnavailable || c.a.Reason != availUnlistedReason {
+			t.Fatalf("rows %v, gx %+v — want the default kept, unavailable", pickerRowNames(m), c.a)
+		}
+		next, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		if !next.pickingProvider || len(log.got()) != 0 || !strings.HasPrefix(next.providerErr, "can't start gx: ") {
+			t.Fatalf("Esc to the unlisted default: picking %v, built %v, error %q", next.pickingProvider, log.got(), next.providerErr)
+		}
+	})
+	t.Run("an unlisted hidden default", func(t *testing.T) {
+		hidden := plantHidden(t)
+		log := &builtLog{}
+		m := availPicker(t, availPickerConfig(t, hidden, availFixture, nil, log.build), 80, 24)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native", hidden.Name()}) ||
+			!m.providerChoice(hidden).a.ready() {
+			t.Fatalf("rows %v, the hidden default %+v — want it kept, last, ready", got, m.providerChoice(hidden).a)
+		}
+		next, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		if next.pickingProvider || !slices.Equal(log.got(), []string{hidden.Name()}) {
+			t.Fatalf("Esc to the hidden default: picking %v, built %v — want it started", next.pickingProvider, log.got())
+		}
+	})
+}

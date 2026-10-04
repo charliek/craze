@@ -23,9 +23,10 @@ const (
 // pickers — the startup picker (Config.Availability) and the session list's
 // /provider (ProviderAvailabilitySource) — where a provider that is not ready
 // is dimmed, says why, and is refused in place when it is chosen. Nothing
-// else refuses on it: an explicit --provider, $CRAZE_PROVIDER, the resume
-// picker and a create start as they always have (plan 036 decision 3), so a
-// misjudged state never locks anyone out. Before the first answer arrives —
+// else refuses on it: an explicit --provider, the resume picker and a create
+// start as they always have (plan 036 decision 3), so a misjudged state never
+// locks anyone out; $CRAZE_PROVIDER only chooses the picker's default, which
+// is gated like any row (X24). Before the first answer arrives —
 // and with no callback at all, as every test Config and golden has — every
 // row is ready and a choice is taken as it always was: the states are advice
 // (X12).
@@ -234,20 +235,72 @@ func (m Model) providerAvailCmd() tea.Cmd {
 // closed the picker (its spawn pending, say), which no later opening may be
 // drawn from (X25).
 //
-// The answer to the pre-session connect dialog's return (availNative) also
-// moves the cursor onto native when it says native is ready now (plan 036
-// decision 5, X21): Enter then starts it. Nothing starts on its own.
+// An answer is the picker's membership too (X42, reconcileProviderRows): its
+// rows become the providers it names and the default. The answer to the
+// pre-session connect dialog's return (availNative) also moves the cursor
+// onto native when it says native is ready now (plan 036 decision 5, X21):
+// Enter then starts it. Nothing starts on its own.
 func (m Model) providerAvailed(msg providerAvailMsg) Model {
 	if msg.seq != m.availSeq || !m.pickingProvider {
 		return m
 	}
 	m.provAvail = availByID(msg.avail)
+	m = m.reconcileProviderRows(msg.avail)
 	if m.availNative != 0 && m.availNative == msg.seq {
 		m.availNative = 0
 		for i, p := range m.providers {
 			if p.Name() == nativeProviderName && m.providerChoice(p).a.ready() {
 				m.providerCursor = i
 			}
+		}
+	}
+	return m
+}
+
+// availUnlistedReason is the default's reason when an answer that names
+// providers leaves it out (reconcileProviderRows): the check names every
+// default it is given (internal/cli's pickerAvailability), so this is an
+// answer that does not know it.
+const availUnlistedReason = "the availability check does not list it"
+
+// reconcileProviderRows makes the startup picker's rows the providers avail
+// names — a known provider each, under its own id — and the default, in
+// agent.Providers() order (pickerRows), as /provider's membership follows its
+// answers (sessProviderChoices; plan 036 X42). A row the answer leaves out is
+// dropped — a gx whose binary went while the picker was up, which the check
+// leaves out unless it is the default — so a fresh answer never leaves a row
+// it did not judge, drawn and started as ready; a provider it names that the
+// rows lack — a gx installed meanwhile — is added. The default is always a
+// row (pickerRows' invariant): left out of a non-empty answer it is
+// unavailable rather than ready, unless it is hidden or runs in process — a
+// default the TUI alone knows of (a hidden --provider/$CRAZE_PROVIDER, which
+// the check is given and names anyway), which keeps today's rule, ready with
+// no state. The cursor stays on its provider when that row survives, and
+// goes to the default when it does not. An answer that names no provider
+// says nothing of the rows (the check always names native), and leaves them.
+func (m Model) reconcileProviderRows(avail []ProviderAvail) Model {
+	list := make([]agent.Provider, 0, len(avail))
+	for _, a := range avail {
+		if p, err := agent.ProviderByName(a.ID); err == nil && p.Name() == a.ID {
+			list = append(list, p)
+		}
+	}
+	if len(list) == 0 {
+		return m
+	}
+	def := m.providerDefault
+	if _, named := m.provAvail[def.Name()]; !named && def.Name() != "" && !def.Hidden() && !def.InProcess() {
+		m.provAvail[def.Name()] = ProviderAvail{ID: def.Name(), State: AvailUnavailable, Reason: availUnlistedReason}
+	}
+	at := ""
+	if c := m.providerCursor; c >= 0 && c < len(m.providers) {
+		at = m.providers[c].Name()
+	}
+	m.providers = pickerRows(list, def)
+	m.providerCursor = m.providerIndex(def)
+	for i, p := range m.providers {
+		if p.Name() == at {
+			m.providerCursor = i
 		}
 	}
 	return m

@@ -70,7 +70,10 @@ row that cannot start:
 - With no row that can start, every choice is refused; `Ctrl+C` still quits.
 - The check reads only files, never the network, and runs as the dialog
   opens. Until it answers every row is ready and a choice is taken as it
-  always was.
+  always was. Each answer also decides the rows, as `/provider`'s does: a
+  `gx` installed since the dialog opened is listed, and one removed is
+  dropped — unless it is the default, which always stays, marked
+  `unavailable`.
 
 The states are advice for the dialogs alone: `--provider <id>` and
 `--resume` start exactly as they always have, whatever the check says, so a

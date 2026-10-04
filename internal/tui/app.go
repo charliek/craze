@@ -705,10 +705,12 @@ type Model struct {
 	// on the detail lines until the cursor moves.
 	providerBack    connectBack
 	providerDefault agent.Provider
-	// providers is the picker's rows, settled once in New: the caller's
-	// availability-filtered list unioned with providerDefault (§3.4). Nothing
-	// after the constructor recomputes it, so the rows the user sees are the
-	// rows Esc and Enter act on.
+	// providers is the picker's rows, settled in New — the caller's
+	// availability-filtered list unioned with providerDefault (§3.4) — and
+	// again by each availability answer the picker takes (plan 036 X42,
+	// reconcileProviderRows), the default always among them. Nothing else
+	// recomputes it, so the rows the user sees are the rows Esc and Enter act
+	// on.
 	providers  []agent.Provider
 	newSession func(agent.Provider) agent.Session
 	// availability is Config.Availability. availSeq is the startup picker's

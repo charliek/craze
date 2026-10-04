@@ -1266,8 +1266,10 @@ again, with no network request and no keychain access. The TUI's provider
 dialog and the session list's `/provider` show the same states and refuse a
 provider that cannot start when it is picked there ([Provider
 states](tui.md#provider-states)); everywhere else the states only report: an
-explicit `--provider` or `$CRAZE_PROVIDER` starts a provider whatever its
-state, with the same start error as ever when it cannot start.
+explicit `--provider <id>` (like `--resume` and `--continue`) starts a provider
+whatever its state, with the same start error as ever when it cannot start.
+`$CRAZE_PROVIDER` (like config.toml's `provider`) only chooses the provider
+dialog's default, which the check gates like any other row.
 
 | Flag | Description |
 |------|-------------|

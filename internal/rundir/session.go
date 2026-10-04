@@ -15,8 +15,9 @@ import (
 // It does not prove the keychain is locked (a GUI session's can be locked by
 // hand; an ssh session's unlocked with security unlock-keychain), so the mark
 // refuses only a choice made in a TUI picker — never an explicit --provider
-// or $CRAZE_PROVIDER, and never a hub's session.create, which start as they
-// always have (plan 036 decision 3).
+// and never a hub's session.create, which start as they always have (plan 036
+// decision 3). $CRAZE_PROVIDER only chooses the picker's default, which the
+// picker gates like any row (X24).
 
 // AuditFlagGraphicAccess is <bsm/audit_session.h>'s
 // AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS: the session has the GUI login's

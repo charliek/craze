@@ -26,9 +26,10 @@ import (
 // (hubAvailInputs).
 //
 // A state marks; it refuses only a choice made in a TUI picker. An explicit
-// --provider, $CRAZE_PROVIDER and the hub's session.create start as they
-// always have, so a misjudged state never locks anyone out (plan 036 decision
-// 3).
+// --provider and the hub's session.create start as they always have, so a
+// misjudged state never locks anyone out (plan 036 decision 3);
+// $CRAZE_PROVIDER only chooses the picker's default, which the picker gates
+// like any row (X24).
 //
 // Nothing is cached: each call re-reads config.toml, looks the binaries up,
 // loads native's model table and asks the login session again, all of it file
