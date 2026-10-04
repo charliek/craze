@@ -650,7 +650,11 @@ var onAwaitEnds func()
 // that takes a log already stopped never relabels the failure — which the
 // watcher, resuming later, tells as it was. A record an earlier run queued
 // that is written after a later run took the log counts as the later run's:
-// the failure concerns its records too. A run in a session that takes a log
+// the failure concerns its records too. So does a stop the writer publishes
+// while a run is taking the log — between this check and its assignment,
+// since the writer stops the log without logMu (plan 036 r8, X40): told by
+// the run taking it, at once in its own context, or at the program's end. A
+// run in a session that takes a log
 // stopped by a pre-session run's failure — said on no transcript — is told
 // on its own, once, with the command answered (logToldCmd); else the command
 // is nil.
@@ -681,8 +685,9 @@ func (s *signInRuns) logFor(dir string, st signInStamp) (*signinlog.Log, tea.Cmd
 // logFailedByLocked is the run that had the log as it stopped, and whether it
 // has stopped — refused as it opened, or Stopped closed — freezing it from
 // logBy the first time the stop is seen: logBy changes only in logFor, which
-// asks this first, so what is frozen is the run that had the log the instant
-// it stopped. logMu is held.
+// asks this first, so what is frozen is the run that had the log when it
+// stopped — or, for a stop published while logFor was taking it for another
+// run, that run (logFor's comment). logMu is held.
 func (s *signInRuns) logFailedByLocked() (signInStamp, bool) {
 	if s.logFailSet {
 		return s.logFailBy, true
