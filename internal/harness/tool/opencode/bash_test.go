@@ -633,6 +633,9 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 		// — 4 runs in 20 under a 2% CPU quota, 1 in 10 with -race under 5%;
 		// none in 20 and 30 so since (plan 033 C11r3).
 		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; : > ready; " + bashWaitLoop, "timeout": longTimeout})
+		// The handler must run before the grace's SIGKILL, so the grace is
+		// long here, as in TestBashCloseSignal's case (plan 036 F2).
+		c.termGrace = time.Minute
 		expire := make(chan time.Time, 1)
 		c.ops.expire = expire
 		r := startBash(t, c, env)
@@ -663,8 +666,12 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 // handler never run: 1 run in 30 failed so under systemd-run -p CPUQuota=5%,
 // none in 30 with this loop (plan 033 C11r3, reported by plan 032). The shell
 // itself must still be scheduled within the grace: under a 2% quota, 2 runs
-// in 20 still miss it.
-const bashWaitLoop = "while :; do sleep 0.05 & wait $!; done"
+// in 20 still miss it — which the tests that need the handler now meet with a
+// longer grace (bashCall.termGrace, plan 036 F2). The sleep's length does not
+// delay the handler, since the signal ends the wait at once; a second, not
+// 50 ms, keeps the loop from forking 20 times a second, which alone could use
+// up a starved quota.
+const bashWaitLoop = "while :; do sleep 1 & wait $!; done"
 
 // withClosing gives env a session close signal, Env.Closing, and returns
 // the func that closes it.
