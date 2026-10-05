@@ -194,7 +194,7 @@ func TestBlockquoteBarStaysDimWhenWrapped(t *testing.T) {
 	if len(rows) < 2 {
 		t.Fatalf("want a wrapped quote, got %d row(s): %q", len(rows), rows)
 	}
-	dim := ansiFG(string(th.Dim))
+	dim := ansiFG(th.Dim.TrueColor)
 	for i, ln := range rows {
 		if !strings.HasPrefix(ln, dim) {
 			t.Fatalf("quote row %d does not open with the dim colour: %q", i, ln)
@@ -403,7 +403,7 @@ func TestMarkdownTableHeaderAndRuleAreStyled(t *testing.T) {
 	if !strings.HasPrefix(rows[0], head.Render("A")) {
 		t.Fatalf("header is not bright: %q", rows[0])
 	}
-	if !strings.HasPrefix(rows[1], ansiFG(string(th.Dim))) {
+	if !strings.HasPrefix(rows[1], ansiFG(th.Dim.TrueColor)) {
 		t.Fatalf("rule is not dim: %q", rows[1])
 	}
 	if !strings.Contains(rows[2], dim.Render(tableGap)) {

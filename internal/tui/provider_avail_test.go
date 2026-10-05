@@ -699,7 +699,7 @@ func TestSessProviderDimsAndRefuses(t *testing.T) {
 		if !strings.Contains(view, "  "+availCursorRefusal[:40]) {
 			t.Fatalf("%s: the refusal is not on screen:\n%s", how, view)
 		}
-		if !strings.Contains(m.View(), ansiFG(string(m.theme.Err))+"  can't start") {
+		if !strings.Contains(m.View(), ansiFG(m.theme.Err.TrueColor)+"  can't start") {
 			t.Fatalf("%s: the refusal is not in the error colour", how)
 		}
 	}

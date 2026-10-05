@@ -741,6 +741,25 @@ integration gx has — a craze-owned Responses API driver, and the ChatGPT plan
 signed in to through OpenAI's Sign in with ChatGPT (`craze auth login
 chatgpt` or `/connect`) rather than codex's `auth.json` (D-81).
 
+**Done since (plan 037, release readiness, 2026-10-04):** the native items it
+took, all without a new feature. **SF-132**: about ten opencode `bash` tests
+ran on the production 1 s `spillWait` and failed on a slow filesystem call (an
+injected 1.5 s open delay failed 7 tests); they now set their own wait. **F-2 and F-5**: bash tests that
+cancelled before the launch returned, and a test that read a relative
+`os.Args[0]`, are ordered or anchored; **SF-151**
+(`TestBashNoControllingTerminal`, a `TIOCSCTTY` EPERM from an outside opener)
+retries only the terminal's setup, then skips by name. **SF-143 / LC-8**: the
+no-funded-model text now names `craze auth login chatgpt`, and the provider-401
+advice is clearer. **N1**: native redacts a `!` command's output (a possible
+credential path) at prompt admission, before the engine journals it. **F1 and
+F2** (the docs audit): the quick-start's "four providers" and `tui.md`'s
+`/model <effort>` shorthand, which does not exist, are corrected. Native items
+left as accepted residuals are rows in
+`discovery/session-control/13-follow-ups.md`'s "Plan 037" section: SF-165
+(defence in depth on tool rows and ANSI), SF-166 (a prompt in argv),
+SF-167 (the `← n agents` count and bash jobs), SF-168 (the deepseek plan-mode
+doom loop, waiting on the next eval), SF-169 (eval harness follow-ups).
+
 **Lazy loading and `paths:` gating stay deferred** (D-47 kept; plan 033 owner
 decision 12, 2026-10-01). Measured on 2026-09-30 across the owner's 43
 repositories: only two — shed and slaudio — have nested instruction files

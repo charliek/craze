@@ -168,6 +168,8 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ripgrep && rg --version
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.7"
       # The pytest suites drive the real binaries — `craze frame`'s token
       # scripts and `craze prompt` against the fake agent — so the build is a
       # prerequisite, not a duplicate of the build job. The tmux smoke suite is

@@ -402,7 +402,7 @@ func TestAnOrphanedTestChildExits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the shell's pid line %q: %v", line, err)
 	}
-	gone := func() bool { return !processAlive(pid) || procState(pid) == "Z" }
+	gone := func() bool { return !processAlive(pid) || exitedState(procState(pid)) }
 	t.Cleanup(func() {
 		if !gone() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)

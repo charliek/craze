@@ -49,8 +49,8 @@ func (t *terminalColors) apply(th Theme) {
 	if t == nil {
 		return
 	}
-	bg, okBG := oscRGB(string(th.BG))
-	fg, okFG := oscRGB(string(th.FG))
+	bg, okBG := oscRGB(th.BG.TrueColor)
+	fg, okFG := oscRGB(th.FG.TrueColor)
 	if !okBG || !okFG {
 		// A malformed palette is not a reason to write garbage at the
 		// terminal. Every preset's BG/FG is a well-formed #rrggbb today.

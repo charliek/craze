@@ -56,6 +56,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
+| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens), the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -104,7 +105,10 @@ theme = "gruvbox"
 provider = "grok"
 ```
 
-Unrelated keys in that file are preserved. A file craze cannot parse is never
+craze rewrites the file only when a setting it saves (the theme or the provider)
+changes; a start that leaves both as they are writes nothing. When it does
+write, comments and layout are not kept; every key is, including keys craze
+does not know. A file craze cannot parse is never
 clobbered, and the save that refused to overwrite it is reported in the
 transcript. A malformed file does not prevent startup; the theme falls back to
 the default.
@@ -164,8 +168,10 @@ object per line, under the [craze directory](#the-craze-directory):
 The directory below `journal/` is the workspace's own path with its separators
 turned into dashes, wrapped in `--…--` — the same name the native harness gives
 that workspace's session store, so the two pair by eye. The file name is the
-UTC time the session was built and the session's own id, which the first line
-of the file repeats.
+UTC time the session was built and its incarnation id, minted once per run of
+a session, which the first line of the file repeats as `incarnation`. It is not
+the craze session id that `craze ps` shows; that id is in the file's
+`craze_session` diag line.
 
 **One file per session, and no process ever appends to a file another process
 wrote.** A `craze prompt` run leaves one; a TUI run leaves one per session it
@@ -178,7 +184,7 @@ journals.
 
 | Line | Holds |
 |------|-------|
-| `header` | Format and codec versions, the session id, the craze version, OS and architecture, the provider, the agent binary asked for, the workspace, `force`, `interactive`, `mode`, and the pid |
+| `header` | Format and codec versions, the incarnation id, the craze version, OS and architecture, the provider, the agent binary asked for, the workspace, `force`, `interactive`, `mode`, and the pid |
 | `session` | The provider's own session id, the id it was loaded from on a resume, and the binary craze actually spawned |
 | `event` | One line per event the session emitted, with its `seq` and the whole event — the same numbers `craze prompt --json` prints (see [CLI](cli.md#json-events)) |
 | `prompt` / `prompt_end` | Your prompt or interjection **as typed**, before craze expanded any slash command into it; then how that turn ended — stop reason, or error class and message, and its duration |
@@ -192,10 +198,12 @@ craze says so once on stderr. The session itself carries on either way.
 
 ### Journals can contain secrets
 
-Prompts and tool output are written **verbatim, with no redaction**. Whatever
-you type and whatever a tool prints — an API key in a shell command, the
-contents of a file the agent read, a token in an error message — is on disk in
-plain text. That is the point of the record, and it is why the files are
+The journal itself adds no redaction: it records what the session admitted.
+Native already replaces the provider keys it knows with
+`[craze:redacted-credential]` — in a `!` command's output before the prompt is
+recorded, and in its tools' results — but any other secret can be on disk in
+plain text: a token you type, a credential craze does not know in a shell
+command's output, a file the agent read, an error message. That is the point of the record, and it is why the files are
 `0600` in `0700` directories, both *no broader than*: a restrictive umask
 narrows them further, and a directory that already exists is used as it is,
 never tightened. Treat a journal as being as sensitive as the session it came
@@ -218,7 +226,8 @@ run, and craze writes no journal and creates no `journal` directory. Either
 switch turns it off on its own, and neither can turn it on against the other:
 `CRAZE_JOURNAL=1` does not defeat `journal = false`.
 
-**The opt-out fails closed**, unlike every other switch on this page. A
+**The opt-out fails closed**, as `control_socket` and `detach` do, unlike
+`terminal_title`, `background` and `host_status`, which fail open. A
 journal holds prompts and tool output, so anything craze cannot read as a
 plain `true` means *off*, not on: a `config.toml` it cannot read or parse, a
 `journal` key that is not a bool (`journal = "false"` is a string), and a
@@ -394,7 +403,14 @@ TUI's host in its terminal's, a host the hub created in the hub's — and a hub
 keeps the session of whichever command first started it, while any session
 runs. The login keychain, which `cursor` needs, is unlocked only in the GUI
 login session, so start craze, and its hub, from a terminal in your Mac's
-login session (a Roost tab, Terminal.app). A host outside it whose agent
+login session (a Roost tab, Terminal.app). Over `ssh` to a Mac that means
+running craze from a terminal on the Mac, or through shed-host-agent, not
+from the ssh login. craze now names the reason while it starts: a `craze` or
+`craze prompt` that starts cursor itself from such a login says `cursor may
+not start here: this craze runs outside the macOS login session (over ssh),
+where cursor may not reach the login keychain; run craze from a terminal on
+the Mac` (a note in the TUI, a line on stderr for `craze prompt`) instead of
+sitting at `starting…`. A host outside it whose agent
 exited that way ends its start error with a hint saying so: for a host the hub created
 it names the hub to stop (`kill <hub pid>` ends only the hub; no session
 ends), and for one a TUI launched it says to start the session from the login
@@ -663,15 +679,17 @@ a session's `/model` lists those whose provider has a key ([which models, in
 what order](tui.md#model-dialog)). With the catalog, a machine needs only a key:
 store one with [`craze auth login`](#keys), or export one of the variables
 above, and run `craze --provider native`. With no key at all, a native session
-refuses to start and names `craze auth login`, the variables to set and the
-file an inline key goes in.
+refuses to start and names `craze auth login` (an API key, or `craze auth login
+chatgpt` for a ChatGPT plan), the variables to set and the file an inline key
+goes in.
 
 ### Your two files
 
 Both files are optional, each on its own, and each starts with `version = 1`.
 
-- `providers.toml` holds keys and provider settings. It is the only place a
-  secret lives: keep it `0600` (craze tightens a looser one when it reads it,
+- `providers.toml` holds keys and provider settings. It is the only one of
+  these two files that holds a secret (the ChatGPT plan's tokens are kept apart,
+  in `auth/chatgpt.json`: see [The ChatGPT plan](#the-chatgpt-plan)): keep it `0600` (craze tightens a looser one when it reads it,
   and [`craze auth`](#keys) writes it so) and never paste it anywhere.
 - `models.toml` holds model settings and models you add, and no secrets.
 
@@ -794,7 +812,9 @@ list`](cli.md#craze-auth-list) shows how each provider is connected: by a
 variable, which always wins, by its stored key, or not at all. In a native
 session, [`/connect`](tui.md#connect) stores a key the same way `login` does.
 No key is checked with its provider when it is stored; a wrong one shows on
-first use. When they write, `login`, `logout` and `/connect`:
+first use, as `native: <Name> rejected the API key (HTTP 401); replace it with
+"craze auth login <id>"`, followed by `, or check` and the provider's key
+variables when it has any. When they write, `login`, `logout` and `/connect`:
 
 - **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
   `0700`). Comments and layout are not kept — the header they write says so —
@@ -1028,7 +1048,10 @@ on the first of:
 1. the newest remembered model whose provider has a key, at its remembered
    effort when the model still offers it (its `default_effort` otherwise);
 2. `default_model`;
-3. when `default_model`'s provider has no key, the first model, by alias, whose
+3. when `default_model`'s provider has no key and the ChatGPT plan is signed in,
+   the first model in the plan's `start` list (`chatgpt/gpt-6.1-sol`, then
+   `chatgpt/gpt-5.6-sol`) that the account lists;
+4. when `default_model`'s provider has no key, the first model, by alias, whose
    provider has one — with a note saying so.
 
 A remembered model is found by its alias while that alias still names the

@@ -25,8 +25,10 @@ const (
 // is dimmed, says why, and is refused in place when it is chosen. Nothing
 // else refuses on it: an explicit --provider, the resume picker and a create
 // start as they always have (plan 036 decision 3), so a misjudged state never
-// locks anyone out; $CRAZE_PROVIDER only chooses the picker's default, which
-// is gated like any row (X24). Before the first answer arrives —
+// locks anyone out — such a start this process spawns only says why it may
+// not start, in a note (Config.StartCheck, start_check.go); $CRAZE_PROVIDER
+// only chooses the picker's default, which is gated like any row (X24).
+// Before the first answer arrives —
 // and with no callback at all, as every test Config and golden has — every
 // row is ready and a choice is taken as it always was: the states are advice
 // (X12).

@@ -194,7 +194,7 @@ func (m Model) dialogRowDim(text, tag string, selected, focused, dim bool, inner
 	}
 	st := styleFG(fg)
 	if cursor {
-		st = st.Background(m.theme.SelectionBG)
+		st = selectionBand(lipgloss.ColorProfile(), st, m.theme.SelectionBG)
 	}
 	return st.Render(body)
 }

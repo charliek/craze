@@ -19,9 +19,31 @@ type gitInfo struct{ dir string }
 // the status row re-reads HEAD from the directory this found, and never
 // repeats the search.
 func discoverGit(start string) gitInfo {
+	stop := ""
+	if gitBoundary != nil {
+		stop = gitBoundary(start)
+	}
+	return discoverGitUpTo(start, stop)
+}
+
+// gitBoundary is a test seam: the directory a search from start stops at
+// (discoverGitUpTo), set once for a test binary before its tests run. nil in
+// production, which walks to the root.
+var gitBoundary func(start string) string
+
+// discoverGitUpTo is discoverGit with the walk stopped at stop, the last
+// directory it looks in, when stop is one of start's ancestors (or start);
+// "" walks to the root, as craze does. It is a test's boundary: a `.git`
+// above a test's own directory — one left in /tmp — is not the test's.
+func discoverGitUpTo(start, stop string) gitInfo {
 	dir, err := filepath.Abs(start)
 	if err != nil {
 		return gitInfo{}
+	}
+	if stop != "" {
+		if stop, err = filepath.Abs(stop); err != nil {
+			return gitInfo{}
+		}
 	}
 	// filepath.Dir strictly shortens a cleaned path until it reaches the root,
 	// where it returns the root itself, so this always terminates. There is no
@@ -31,7 +53,7 @@ func discoverGit(start string) gitInfo {
 			return gitInfo{dir: d}
 		}
 		parent := filepath.Dir(dir)
-		if parent == dir {
+		if parent == dir || dir == stop {
 			return gitInfo{}
 		}
 		dir = parent

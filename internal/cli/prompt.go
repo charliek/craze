@@ -118,7 +118,7 @@ func newPromptCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "prompt [text]",
 		Short: "Run a headless ACP turn (and optional follow-ups)",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  atMostArgs(1, "quote the prompt text"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.stdout = cmd.OutOrStdout()
 			o.stderr = cmd.ErrOrStderr()
@@ -132,7 +132,7 @@ func newPromptCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&o.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an ACP model id (session/set_model after session/new), or a native model alias")
-	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
+	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
 	registerPluginDirFlag(cmd, &o.pluginDirs)
@@ -178,6 +178,12 @@ func (o *promptOpts) run() (retErr error) {
 	}
 	if err := refuseInProcess("craze", resolved.Provider, o.agentBin, o.mode()); err != nil {
 		return err
+	}
+	// The one line a start that may sit unanswered says before it starts
+	// (LM-2(a), plan 037 §3.5): the not-GUI verdict alone, on stderr, and
+	// nothing refused — stdout and the exit status are the run's as ever.
+	if reason, fix := startWarning(processAvailInputs(resolved.Provider, o.agentBin), resolved.Provider); reason != "" {
+		fmt.Fprintf(o.stderr, "craze prompt: %s may not start here: %s; %s\n", resolved.Provider.Name(), reason, fix)
 	}
 
 	parent := context.Background()

@@ -198,8 +198,8 @@ func (s *spawned) cmd(i int) (*exec.Cmd, []string) {
 // spawns is this test binary run as a fake craze serve (serveTestChild) in
 // mode(n) — n counting the spawns from 0 — in the test's environment plus
 // env's HOME, CRAZE_HOME and runtime base, so it is listed where the test's
-// hub looks. Every child still running when the test ends is SIGKILLed and
-// waited for.
+// hub looks. Every child still running when the test ends is SIGKILLed —
+// all of them first — and then waited for.
 func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spawned {
 	t.Helper()
 	exe, err := os.Executable()
@@ -233,16 +233,17 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 		s.mu.Lock()
 		cmds := slices.Clone(s.cmds)
 		s.mu.Unlock()
+		var pids []int
 		for _, cmd := range cmds {
 			if cmd.Process == nil {
 				continue
 			}
 			_ = cmd.Process.Kill()
-			deadline := time.Now().Add(step)
-			for alive(cmd.Process.Pid) && time.Now().Before(deadline) {
-				time.Sleep(5 * time.Millisecond)
-			}
+			pids = append(pids, cmd.Process.Pid)
 		}
+		// As before, one still there after step is not this cleanup's
+		// failure; a look that fails is (stillThere).
+		_ = stillThere(t, pids)
 	})
 	return s
 }
@@ -397,7 +398,7 @@ func (s *spawned) gone(t *testing.T, env rundir.Env, i int) {
 	id := fakehost.ParseSpawnArgs(argv).HostID
 	waitFor(t, "host "+id+" gone", func() bool {
 		_, listed := listedEntry(t, env, id)
-		return !listed && cmd.Process != nil && !alive(cmd.Process.Pid)
+		return !listed && cmd.Process != nil && !alive(t, cmd.Process.Pid)
 	})
 }
 

@@ -49,10 +49,9 @@ craze/
 ## Per-commit gate
 
 ```bash
-make lint && make test && make build
+make lint && make test && make test-race && make build && make test-cli
 ```
 
-Once `tests/cli/pyproject.toml` exists, also run `make test-cli` (and CI will).
 Do not pipe gate commands through `| tail`.
 
 Docs are not in that gate. See [Documentation](#documentation) and

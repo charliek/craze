@@ -262,7 +262,7 @@ func (m Model) modeChip() (string, lipgloss.Style) {
 
 // modeColor is the chip colour for a mode kind. A mode craze does not
 // recognise is dim rather than miscoloured.
-func (m Model) modeColor(kind agent.ModeKind) lipgloss.Color {
+func (m Model) modeColor(kind agent.ModeKind) lipgloss.CompleteColor {
 	switch kind {
 	case agent.ModeImplement:
 		return m.theme.ModeImplement

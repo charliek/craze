@@ -236,12 +236,13 @@ def test_bridge_no_flag_no_host_running(craze_bin: Path, tmp_path: Path) -> None
 
 
 def test_bridge_unknown_flag_exits_one(craze_bin: Path, tmp_path: Path) -> None:
+    """A flag bridge does not take is its contract line, exit 1 -- the usage
+    error every command gives, which never names the flag (plan 037 LC-1)."""
     home = tmp_path / "home"
     result = _run_bridge(craze_bin, home, ["--nope"])
     assert result.returncode == 1, result
     assert result.stdout == b"", result.stdout
-    assert result.stderr.startswith(b"craze bridge: "), result.stderr
-    assert result.stderr.count(b"\n") == 1, result.stderr
+    assert result.stderr == b"craze bridge: unknown or malformed flag; see craze bridge --help\n", result.stderr
 
 
 def test_bridge_stray_config_env_exits_one(craze_bin: Path, tmp_path: Path) -> None:

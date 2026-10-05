@@ -98,13 +98,27 @@ func prepareBash(t *testing.T, env tool.Env, in any) *bashCall {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.(*bashCall)
+	c := p.(*bashCall)
+	// A test that is not about the spill wait must not lose its spill file
+	// to a slow filesystem: a CI filesystem stalled past the real 1 s cost a
+	// run the file (run 36667761335, plan 035 C5), and an open held 1.5 s
+	// failed seven tests that need it (plan 037 SF-132). So the writer gets
+	// savedWait; the tests that pin the real wait set c.spillWait = spillWait.
+	c.spillWait = savedWait
+	return c
 }
+
+// savedWait is the spill wait of a test that needs the file and is not
+// about the wait.
+const savedWait = 20 * time.Second
 
 // bashRun is a call running on a goroutine of its own.
 type bashRun struct {
 	cancel context.CancelCauseFunc
 	res    chan tool.Result
+	// returned is when Run returned, taken on its goroutine before the
+	// result is sent: read it once the result has been received.
+	returned time.Time
 }
 
 // startBash runs c. When the test ends it closes the call, as a session
@@ -116,7 +130,9 @@ func startBash(t *testing.T, c *bashCall, env tool.Env) *bashRun {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		r.res <- c.Run(ctx, env)
+		res := c.Run(ctx, env)
+		r.returned = time.Now()
+		r.res <- res
 	}()
 	t.Cleanup(func() {
 		cancel(tool.ErrClosing)
@@ -474,12 +490,15 @@ func TestBashAbortBeforeItStarts(t *testing.T) {
 
 // TestBashCancelKillsTheCommand: `sleep & wait` dies on a cancel, the
 // backgrounded sleep with it, and the result is aborted. The control is the
-// sleep running before the cancel.
+// sleep running before the cancel. The cancel waits until the command is
+// under supervise (supervisedOn).
 func TestBashCancelKillsTheCommand(t *testing.T) {
 	t.Parallel()
 	env := bashEnv(t, nil)
+	supervised := supervisedOn(t, &env, "before")
 	r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo before; sleep 601 & echo $! > pid; wait"}), env)
 	pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 601")
+	supervised()
 	if !alive(pid, "sleep 601") {
 		t.Fatal("control: the backgrounded sleep is not running before the cancel")
 	}
@@ -566,21 +585,26 @@ func TestBashExitKillsWhatItLeftRunning(t *testing.T) {
 // SIGTERM gets SIGKILL after the 3 s grace; one whose background child
 // ignores it and holds the pipe has the child killed once the leader has
 // exited and the 2 s drain wait is over. Either way Run returns within the
-// grace and the drain wait of the cancel.
+// grace and the drain wait of the cancel. The cancel waits until the command
+// is under supervise (supervisedOn): one that came before was discarded with
+// SIGKILL at once, and Run returned in microseconds (macOS -race on main
+// 0f82531, run 36729655954; plan 037 F-2).
 func TestBashTermIgnoringCommandIsKilled(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, command, marker string
 		atLeast               time.Duration
 	}{
-		{"the leader ignores it", "trap '' TERM; sleep 604 & echo $! > pid; wait", "sleep 604", planGrace},
-		{"a child holding the pipe ignores it", "(trap '' TERM; sleep 605) & echo $! > pid; wait", "sleep 605", planDrain},
+		{"the leader ignores it", "trap '' TERM; sleep 604 & echo $! > pid; echo supervised; wait", "sleep 604", planGrace},
+		{"a child holding the pipe ignores it", "(trap '' TERM; sleep 605) & echo $! > pid; echo supervised; wait", "sleep 605", planDrain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := bashEnv(t, nil)
+			supervised := supervisedOn(t, &env, "supervised")
 			r := startBash(t, prepareBash(t, env, map[string]any{"command": tc.command}), env)
 			pid := bashPID(t, filepath.Join(env.Workspace, "pid"), tc.marker)
+			supervised()
 			if !alive(pid, tc.marker) {
 				t.Fatal("control: the sleep is not running before the cancel")
 			}
@@ -603,23 +627,26 @@ func TestBashTermIgnoringCommandIsKilled(t *testing.T) {
 // SIGKILL at once, so a command that ignores SIGTERM ends well inside the
 // 3 s grace an ordinary cancel gives it (TestBashTermIgnoringCommandIsKilled
 // is the control); and a close during a timeout's grace cuts the grace
-// short.
+// short. The close waits until the command is under supervise
+// (supervisedOn), and the result, which keeps the command's output, says
+// it was: a close before then is launch's discard, a SIGKILL at once whatever
+// the cause, which proves nothing of supervise's (plan 037 F-2b).
 func TestBashCloseKillsAtOnce(t *testing.T) {
 	t.Parallel()
 	t.Run("a close", func(t *testing.T) {
 		t.Parallel()
 		env := bashEnv(t, nil)
-		r := startBash(t, prepareBash(t, env, map[string]any{"command": "trap '' TERM; sleep 606 & echo $! > pid; wait"}), env)
+		supervised := supervisedOn(t, &env, "supervised")
+		r := startBash(t, prepareBash(t, env, map[string]any{"command": "trap '' TERM; sleep 606 & echo $! > pid; echo supervised; wait"}), env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 606")
+		supervised()
 		closed := time.Now()
 		r.cancel(fmt.Errorf("session 1: %w", tool.ErrClosing))
 		res := r.await(t, 30*time.Second)
 		if took := time.Since(closed); took >= planGrace-500*time.Millisecond {
 			t.Fatalf("Run took %v after a close; want it well inside the %v grace", took, planGrace)
 		}
-		if res.Class != tool.ClassAborted || !strings.HasPrefix(res.Text, tool.AbortedText) {
-			t.Fatalf("result = %+v, want aborted", res)
-		}
+		abortedUnderSupervise(t, res, "supervised\n")
 		gone(t, pid, "sleep 606")
 	})
 	t.Run("a close during a timeout's grace", func(t *testing.T) {
@@ -690,6 +717,45 @@ func untilFile(t *testing.T, env tool.Env, name, what string) {
 	}
 }
 
+// supervisedOn makes env's progress report when a snapshot first holds
+// marker, which the command prints, and returns the bounded wait for it. A
+// test that stops a command to see how supervise stops it — a cancel's grace,
+// a close's kill, the drain wait — waits for it first: a stop that fires
+// before launch has returned the started command is discarded with SIGKILL
+// at once (launched.discard), whatever its cause, and the command's files
+// and pids say nothing of launch. Its output does: it is copied only once
+// launch has returned (attach), so from the snapshot on a stop goes through
+// supervise (plan 036 F2 gave TestBashCloseSignal this order; plan 037 F-2,
+// every such test).
+func supervisedOn(t *testing.T, env *tool.Env, marker string) (wait func()) {
+	t.Helper()
+	attached := make(chan struct{})
+	var once sync.Once
+	env.Progress = func(s string) {
+		if strings.Contains(s, marker) {
+			once.Do(func() { close(attached) })
+		}
+	}
+	return func() {
+		t.Helper()
+		select {
+		case <-attached:
+		case <-time.After(15 * time.Second):
+			t.Fatal("control: the command's output never arrived (launch never returned)")
+		}
+	}
+}
+
+// abortedUnderSupervise fails the test unless res is the abort of a command
+// supervise stopped: class aborted, and the command's output kept after
+// opencode's text. Launch's discard returns the bare text, with no output.
+func abortedUnderSupervise(t *testing.T, res tool.Result, output string) {
+	t.Helper()
+	if res.Class != tool.ClassAborted || !strings.HasPrefix(res.Text, tool.AbortedText+"\n\n"+output) {
+		t.Fatalf("result = {Class:%q Text:%q}, want supervise's abort, keeping the output %q", res.Class, res.Text, output)
+	}
+}
+
 // TestBashCloseSignal: Env.Closing closes the session for a call in every
 // state — the case it exists for being a call an ordinary cancel has already
 // cancelled, whose ctx can carry no other cause. A close during that
@@ -720,26 +786,12 @@ func TestBashCloseSignal(t *testing.T) {
 		// stronger claim (plan 036 F2).
 		c.termGrace = time.Minute
 		// And the cancel must find the command under supervise, which
-		// signals with the grace: a stop that fires before launch has taken
-		// the start's result discards the command with SIGKILL at once
-		// (launched.discard), and the shell's file and pid say nothing of
-		// launch. The output does: it is copied only once launch has returned
-		// (attach), so the cancel waits for the marker in a progress snapshot
-		// — 3 runs in 20 under a 2% quota cancelled before (plan 036 F2).
-		attached := make(chan struct{})
-		var once sync.Once
-		env.Progress = func(s string) {
-			if strings.Contains(s, "supervised") {
-				once.Do(func() { close(attached) })
-			}
-		}
+		// signals with the grace (supervisedOn) — 3 runs in 20 under a 2%
+		// quota cancelled before (plan 036 F2).
+		supervised := supervisedOn(t, &env, "supervised")
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
-		select {
-		case <-attached:
-		case <-time.After(15 * time.Second):
-			t.Fatal("control: the command's output never arrived (launch never returned)")
-		}
+		supervised()
 		r.cancel(nil)
 		untilFile(t, env, "got", "the cancel's SIGTERM")
 		closed := time.Now()
@@ -753,39 +805,92 @@ func TestBashCloseSignal(t *testing.T) {
 		}
 		gone(t, pid, "sleep 614")
 	})
+	// The next two close once the command is under supervise (supervisedOn),
+	// and the result, which keeps the command's output, says it was: a close
+	// before then is launch's discard, which the result of the first would
+	// pass for, and which fails the second (plan 037 F-2b).
 	t.Run("while it runs", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
-		r := startBash(t, prepareBash(t, env, map[string]any{"command": "trap '' TERM; sleep 615 & echo $! > pid; wait"}), env)
+		supervised := supervisedOn(t, &env, "supervised")
+		r := startBash(t, prepareBash(t, env, map[string]any{"command": "trap '' TERM; sleep 615 & echo $! > pid; echo supervised; wait"}), env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 615")
+		supervised()
 		closed := time.Now()
 		closeSession()
 		res := r.await(t, 30*time.Second)
 		if took := time.Since(closed); took > 1500*time.Millisecond {
 			t.Fatalf("Run took %v after a close", took)
 		}
-		if res.Class != tool.ClassAborted {
-			t.Fatalf("result = %+v, want aborted", res)
-		}
+		abortedUnderSupervise(t, res, "supervised\n")
 		gone(t, pid, "sleep 615")
 	})
 	t.Run("during the drain wait", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
-		// The leader exits at once; its child holds the pipe.
-		r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; sleep 616 & echo $! > pid"}), env)
+		supervised := supervisedOn(t, &env, "supervised")
+		// The leader's child holds the pipe, and the leader itself waits for
+		// the test's go-ahead: the output's snapshot must come first, which a
+		// leader exiting at once could miss — under a loaded scheduler the
+		// drain could run out, and Run return, before the first snapshot
+		// (plan 037 C3r). Once released the leader exits, and the drain wait
+		// begins.
+		c := prepareBash(t, env, map[string]any{"command": "echo $$ > leader; sleep 616 & echo $! > pid; echo supervised; while [ ! -e go ]; do sleep 0.1; done"})
+		// The drain wait is 30 s, not the real 2 s (bashCall.drainWait), so
+		// the close lands in it however late the test is scheduled after the
+		// release: against the real timer a delayed close failed, or came
+		// once the drain was over and cut nothing (plan 037 C3r2, r9).
+		const drain = 30 * time.Second
+		c.drainWait = drain
+		// supervise says when it starts the drain (bashCall.onDrain), and the
+		// close waits for that, not for a pause: it lands in the drain
+		// whatever the scheduler does — never while the command runs, nor
+		// between the leader's exit and the drain, where supervise would see
+		// the close first, drain nothing, and leave the close nothing to cut
+		// (plan 037 C3r3, r13).
+		entered := make(chan time.Time, 1)
+		c.onDrain = func() { entered <- time.Now() }
+		r := startBash(t, c, env)
 		leader := bashPID(t, filepath.Join(env.Workspace, "leader"), "sleep 616")
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 616")
-		if !waitFor(15*time.Second, func() bool { return !alive(leader, "sleep 616") }) {
-			t.Fatal("control: the leader never exited")
+		supervised()
+		if !alive(leader, "sleep 616") {
+			t.Fatal("control: the leader did not wait for the go-ahead")
+		}
+		if err := os.WriteFile(filepath.Join(env.Workspace, "go"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var drained time.Time
+		select {
+		case drained = <-entered:
+		case <-time.After(15 * time.Second):
+			t.Fatal("control: supervise never started the drain wait (the leader never exited)")
+		}
+		// Nothing has ended the call yet: the drain is far from over, and
+		// the child holds the pipe.
+		select {
+		case res := <-r.res:
+			t.Fatalf("Run had returned before the close, %v into the drain (result %+v)", time.Since(drained), res)
+		default:
 		}
 		closed := time.Now()
 		closeSession()
-		res := r.await(t, 30*time.Second)
-		if took := time.Since(closed); took > time.Second {
-			t.Fatalf("Run took %v after a close in the drain wait; want the %v wait cut short", took, planDrain)
+		// The bound is the drain's, past it, so a close that cut nothing
+		// fails on the time it took, not on the await.
+		res := r.await(t, 2*drain)
+		// Well inside the drain: the close cut it short. Timed from the
+		// close, the bound allows a starved CPU the SIGKILL, the pipe's close
+		// and the result; timed from the drain's start, a close that came
+		// late in the drain cannot pass for one that ended it (r13).
+		if took := time.Since(closed); took > 10*time.Second {
+			t.Fatalf("Run took %v after a close in the drain wait (%v into it); want the %v wait cut short", took, closed.Sub(drained), drain)
 		}
-		if res.IsError || res.Text != "(no output)" {
+		if in := r.returned.Sub(drained); in > drain/2 {
+			t.Fatalf("Run returned %v into the drain wait (the close came %v into it); want the %v wait cut short", in, closed.Sub(drained), drain)
+		}
+		// The exit's result, not an abort: supervise had seen the exit, so
+		// the close came in the drain, not while the command ran.
+		if res.IsError || res.Text != "supervised\n" {
 			t.Fatalf("result = %+v, want the exit it was first", res)
 		}
 		gone(t, pid, "sleep 616")
@@ -815,6 +920,7 @@ func TestBashCloseSignal(t *testing.T) {
 			t.Parallel()
 			env, closeSession := withClosing(bashEnv(t, nil))
 			c := prepareBash(t, env, map[string]any{"command": "seq 1 20000; echo $$ > leader; sleep 617"})
+			c.spillWait = spillWait // the control's bound is the real wait's
 			stallOp(t, c, "spill write")
 			r := startBash(t, c, env)
 			untilFile(t, env, "leader", "the output")
@@ -850,20 +956,23 @@ func TestBashCloseSignal(t *testing.T) {
 
 // TestBashCancelContinuesAStoppedCommand: a cancel continues the group as
 // it terminates it, so a stopped command acts on SIGTERM at once instead of
-// waiting out the grace for SIGKILL.
+// waiting out the grace for SIGKILL. The cancel waits until the command is
+// under supervise (supervisedOn), and the result, which keeps the command's
+// output, says it was: a cancel before then is launch's discard, a SIGKILL
+// that needs no SIGCONT (plan 037 F-2b).
 func TestBashCancelContinuesAStoppedCommand(t *testing.T) {
 	t.Parallel()
 	env := bashEnv(t, nil)
-	r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; kill -STOP $$; sleep 609"}), env)
+	supervised := supervisedOn(t, &env, "supervised")
+	r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; echo supervised; kill -STOP $$; sleep 609"}), env)
 	leader := bashPID(t, filepath.Join(env.Workspace, "leader"), "sleep 609")
+	supervised()
 	if !waitFor(15*time.Second, func() bool { state, _, ok := proc(leader); return ok && strings.HasPrefix(state, "T") }) {
 		t.Fatal("control: the command never stopped")
 	}
 	cancelled := time.Now()
 	r.cancel(nil)
-	if res := r.await(t, 30*time.Second); res.Class != tool.ClassAborted {
-		t.Fatalf("result = %+v, want aborted", res)
-	}
+	abortedUnderSupervise(t, r.await(t, 30*time.Second), "supervised\n")
 	if took := time.Since(cancelled); took >= planGrace-500*time.Millisecond {
 		t.Fatalf("Run took %v: the stopped command waited out the grace", took)
 	}
@@ -912,6 +1021,17 @@ func TestBashSetsidEscapee(t *testing.T) {
 // have a controlling terminal, a pseudo-terminal, where an ordinary child
 // opens /dev/tty and the tool's child cannot — so the failure is the tool's
 // doing, whether or not this test process has a terminal.
+//
+// The helper's terminal is a fresh pty, which it makes its controlling
+// terminal as it starts (Setsid, Setctty). The kernel refuses that with EPERM
+// when another process has made the pty its own first: a session leader with
+// no terminal that opens a new /dev/pts/N without O_NOCTTY takes it. Nothing
+// in this package does; something else on the machine can (plan 037 SF-151:
+// a model of such an opener failed 52 runs in 100). So getting the terminal,
+// and only that, is retried on that refusal alone, on a fresh pty each time;
+// when every attempt is refused the terminal half is skipped, saying why,
+// never passed. Any other failure — another start error, a helper that
+// fails, the tool's child opening the terminal — fails as it always did.
 func TestBashNoControllingTerminal(t *testing.T) {
 	t.Parallel()
 	res := runBash(t, bashEnv(t, nil), map[string]any{"command": "echo $$; ps -o pgid= -p $$; : </dev/tty"})
@@ -923,24 +1043,90 @@ func TestBashNoControllingTerminal(t *testing.T) {
 		t.Fatalf("the shell %s is in process group %s (this test's is %d); want its own", fields[0], fields[1], syscall.Getpgrp())
 	}
 
-	ptmx, tty, err := pty.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ptmx.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	var holder string
+	for attempt := 1; attempt <= ttyAttempts; attempt++ {
+		ptmx, tty, err := pty.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, started, err := runTTYHelper(ctx, tty)
+		if !started && errors.Is(err, syscall.EPERM) {
+			t.Logf("attempt %d of %d: another process claimed the fresh pty %s before the helper could make it its terminal (%v)", attempt, ttyAttempts, tty.Name(), err)
+			if attempt == ttyAttempts {
+				holder = ptyHolder(tty)
+			}
+			_, _ = tty.Close(), ptmx.Close()
+			continue
+		}
+		// Closed only now, the helper gone: closing the master under it
+		// would hang its terminal up, and the hangup's SIGHUP kill it.
+		_, _ = tty.Close(), ptmx.Close()
+		if err != nil || !strings.Contains(out, "--- PASS: TestBashTTYHelper") {
+			t.Fatalf("the helper under a terminal failed (%v):\n%s", err, out)
+		}
+		return
+	}
+	if holder != "" {
+		holder = "; the last pty is the terminal of " + holder
+	}
+	t.Skipf("could not get a controlling terminal: another process claimed each of %d fresh ptys (EPERM at TIOCSCTTY); environment, not craze%s", ttyAttempts, holder)
+}
+
+// ttyAttempts is how many fresh ptys TestBashNoControllingTerminal tries
+// before it gives the terminal half up as the machine's doing.
+const ttyAttempts = 3
+
+// runTTYHelper runs TestBashTTYHelper in a process of its own whose
+// controlling terminal is tty, and returns its output. started is false when
+// the helper never started; err is then the start's error.
+func runTTYHelper(ctx context.Context, tty *os.File) (out string, started bool, err error) {
 	helper := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBashTTYHelper$", "-test.v", "-test.count=1")
 	helper.Env = append(os.Environ(), ttyHelper+"=1")
 	helper.Stdin = tty
-	var out bytes.Buffer
-	helper.Stdout, helper.Stderr = &out, &out
+	var b bytes.Buffer
+	helper.Stdout, helper.Stderr = &b, &b
 	helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-	err = helper.Run()
-	_ = tty.Close()
-	if err != nil || !strings.Contains(out.String(), "--- PASS: TestBashTTYHelper") {
-		t.Fatalf("the helper under a terminal failed (%v):\n%s", err, out.String())
+	if err := helper.Start(); err != nil {
+		return "", false, err
 	}
+	err = helper.Wait()
+	return b.String(), true, err
+}
+
+// ptyHolder names, best-effort, every process whose controlling terminal tty
+// is (/proc/<pid>/stat's tty_nr), for the skip's record: Linux only, and ""
+// elsewhere or when there is none. An opener that keeps the pty is named; one
+// that took it and let it go again leaves no trace.
+func ptyHolder(tty *os.File) string {
+	info, err := tty.Stat()
+	if runtime.GOOS != "linux" || err != nil {
+		return ""
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	procs, _ := filepath.Glob("/proc/[0-9]*")
+	var held []string
+	for _, p := range procs {
+		raw, err := os.ReadFile(filepath.Join(p, "stat"))
+		i := bytes.LastIndexByte(raw, ')')
+		if err != nil || i < 0 {
+			continue
+		}
+		f := strings.Fields(string(raw[i+1:])) // state ppid pgrp session tty_nr ...
+		if len(f) < 5 {
+			continue
+		}
+		if nr, err := strconv.ParseUint(f[4], 10, 64); err != nil || nr != uint64(st.Rdev) {
+			continue
+		}
+		cmd, _ := os.ReadFile(filepath.Join(p, "cmdline"))
+		held = append(held, fmt.Sprintf("pid %s (session %s) %q", filepath.Base(p), f[3], strings.TrimSpace(strings.ReplaceAll(string(cmd), "\x00", " "))))
+	}
+	return strings.Join(held, ", ")
 }
 
 // ttyHelper is set in TestBashTTYHelper's environment when
@@ -1145,9 +1331,10 @@ func (s *snapshots) all() []string {
 //
 // It reads the spill file, and is not about the spill wait
 // (TestBashSlowSpillLosesNothing and TestSpillerAbandonDropsTheBacklog pin
-// that): its calls give the spill writer 20 s, not spillWait, to finish the
-// file. A CI filesystem stalled past the real 1 s cost a run the file, offered
-// to nobody as designed (run 36667761335, plan 035 C5).
+// that): its calls give the spill writer savedWait, not spillWait, to finish
+// the file, as prepareBash gives every call. A CI filesystem stalled past the
+// real 1 s cost a run the file, offered to nobody as designed (run
+// 36667761335, plan 035 C5).
 func TestBashRedactsItsOutput(t *testing.T) {
 	t.Parallel()
 	const split = `printf 'before\n'; printf 'sk-canary-'; sleep 0.8; printf 'alpha-0001\n'; sleep 0.8; printf 'after\n'`
@@ -1155,9 +1342,7 @@ func TestBashRedactsItsOutput(t *testing.T) {
 		env := bashEnv(t, red)
 		var s snapshots
 		env.Progress = s.add
-		c := prepareBash(t, env, map[string]any{"command": command})
-		c.spillWait = 20 * time.Second
-		res := startBash(t, c, env).await(t, 30*time.Second)
+		res := runBash(t, env, map[string]any{"command": command})
 		return res, s.all(), env
 	}
 	leaks := func(s string) bool { return strings.Contains(s, "sk-canary-") || strings.Contains(s, "alpha-0001") }
@@ -1315,11 +1500,14 @@ func seqOutput(from, to int) string {
 	return b.String()
 }
 
-// TestBashTruncation ports opencode's truncation cases, through the
-// dispatcher as the runner will call it: past 2000 lines or 50 KiB the model
-// gets the tail with opencode's notice naming the spill file, which holds
-// everything, mode 0600; the dispatcher does not cut it again. Small output
-// is the control: no notice, no file.
+// TestBashTruncation ports opencode's truncation cases: past 2000 lines or
+// 50 KiB the model gets the tail with opencode's notice naming the spill
+// file, which holds everything, mode 0600, and is named for the call. The
+// cases call the tool directly (prepareBash), so a slow filesystem cannot
+// cost them the file (plan 037 SF-132). Through the dispatcher, as the runner
+// will call it, the dispatcher does not cut the output again, and the file is
+// named for the dispatcher's own call id; small output is the control: no
+// notice, no file.
 func TestBashTruncation(t *testing.T) {
 	t.Parallel()
 	notice := func(res tool.Result) string {
@@ -1338,8 +1526,9 @@ func TestBashTruncation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFixture(t)
-			_, res := f.call(t, "bash", map[string]any{"command": tc.command})
+			env := bashEnv(t, nil)
+			c := prepareBash(t, env, map[string]any{"command": tc.command})
+			res := startBash(t, c, env).await(t, 30*time.Second)
 			if text := ok(t, res); res.Trunc.Spill == "" || text != notice(res)+tc.kept {
 				t.Fatalf("text = %.200q..., want the notice and the tail", text)
 			}
@@ -1354,11 +1543,38 @@ func TestBashTruncation(t *testing.T) {
 			if load(t, res.Trunc.Spill) != tc.full {
 				t.Fatal("the spill file does not hold the whole output")
 			}
-			if p := perm(t, res.Trunc.Spill); p != 0o600 || filepath.Base(res.Trunc.Spill) != "tool_t1.1.1" {
+			if p := perm(t, res.Trunc.Spill); p != 0o600 || filepath.Base(res.Trunc.Spill) != "tool_"+c.id {
 				t.Fatalf("spill file %s is mode %v", res.Trunc.Spill, p)
 			}
 		})
 	}
+	t.Run("through the dispatcher", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		_, res := f.call(t, "bash", map[string]any{"command": "seq 1 20000"})
+		// A call through the dispatcher has the real 1 s spill wait, which a
+		// slow filesystem can outlast: then the result says the output could
+		// not be saved, which is as designed and not what this case is about.
+		kept, want := seqOutput(18002, 20000), notSaved
+		if res.Trunc.Spill != "" {
+			want = notice(res)
+		}
+		if text := ok(t, res); text != want+kept || res.Output.Output != kept {
+			t.Fatalf("text = %.200q..., want the notice and the tail, cut once", text)
+		}
+		// The file is named for the dispatcher's call id, t1.1.1. It is read
+		// from the directory, where the writer leaves it whether or not the
+		// wait outlasted it (TestBashAbandonedSpillIsLeftForSweep), and the
+		// result, when it names a file, names that one.
+		spill := filepath.Join(f.env.Home, tool.SpillDir, "tool_t1.1.1")
+		if !waitFor(15*time.Second, func() bool { _, err := os.Stat(spill); return err == nil }) {
+			entries, _ := os.ReadDir(filepath.Dir(spill))
+			t.Fatalf("no spill file is named for the dispatcher's call id: %s holds %v", filepath.Dir(spill), entries)
+		}
+		if res.Trunc.Spill != "" && res.Trunc.Spill != spill {
+			t.Fatalf("the result names %s, want %s", res.Trunc.Spill, spill)
+		}
+	})
 	t.Run("small", func(t *testing.T) {
 		t.Parallel()
 		f := newFixture(t)
@@ -1652,6 +1868,9 @@ func TestBashStalledFilesystem(t *testing.T) {
 					in["timeout"] = timeout.Milliseconds()
 				}
 				c := prepareBash(t, env, in)
+				if !preStart && trigger != "control" {
+					c.spillWait = spillWait // the bound below is the real wait's
+				}
 				s := stallOp(t, c, op)
 				pids := startedPIDs(c)
 				r := startBash(t, c, env)
@@ -1931,6 +2150,7 @@ func TestBashAbandonedSpillIsLeftForSweep(t *testing.T) {
 	t.Parallel()
 	env := bashEnv(t, nil)
 	c := prepareBash(t, env, map[string]any{"command": "seq 1 20000"})
+	c.spillWait = spillWait // the stalled write is given up after the real wait
 	s := newStall(t)
 	opened := make(chan *heldFile, 1)
 	c.ops.openSpill = func(home, id string) (spillFile, error) {
@@ -1995,6 +2215,9 @@ func TestBashSlowSpillLosesNothing(t *testing.T) {
 			t.Parallel()
 			env := bashEnv(t, nil)
 			c := prepareBash(t, env, map[string]any{"command": "seq 1 200000"})
+			if !tc.saved {
+				c.spillWait = spillWait // the file outlasts the real wait
+			}
 			f, open := slowSpill(t, tc.delay)
 			c.ops.openSpill = open
 			res := startBash(t, c, env).await(t, 30*time.Second)
@@ -2098,21 +2321,60 @@ func TestBashOutputHeldOpen(t *testing.T) {
 			env := bashEnv(t, nil)
 			const marker = "TestBashEscapeeHelper"
 			escaped := filepath.Join(env.Workspace, "escaped")
+			// The command runs in the workspace, so the test binary is named
+			// by its absolute path: os.Args[0] is relative when the binary was
+			// run as ./pkg.test (plan 037 F-5).
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
 			command := fmt.Sprintf("%s%s=%s '%s' -test.run='^%s$' & echo $! > pid; i=0; while [ ! -e escaped ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done",
-				tc.prefix, escapeeHelper, escaped, os.Args[0], marker)
-			r := startBash(t, prepareBash(t, env, map[string]any{"command": command}), env)
+				tc.prefix, escapeeHelper, escaped, self, marker)
+			c := prepareBash(t, env, map[string]any{"command": command})
+			// supervise says when it starts the drain wait (bashCall.onDrain),
+			// and Run's return is taken on its own goroutine (bashRun.returned):
+			// the drain is timed between the two, so no delay of the test's —
+			// a slow pid file, a late poll for the child — can hide a longer
+			// drain (plan 037 C3r3, r13).
+			entered := make(chan time.Time, 1)
+			c.onDrain = func() { entered <- time.Now() }
+			r := startBash(t, c, env)
 			bashPID(t, filepath.Join(env.Workspace, "pid"), marker)
 			if !waitFor(20*time.Second, func() bool { _, err := os.Stat(escaped); return err == nil }) {
 				t.Fatal("control: the child never left the command's session")
 			}
-			began := time.Now()
 			res := r.await(t, 30*time.Second)
-			if res.IsError || !strings.Contains(res.Text, "escapee\n") || !strings.HasSuffix(res.Text, meta(partialText)) {
+			var drained time.Time
+			select {
+			case drained = <-entered:
+			default:
+				t.Fatal("control: Run returned, but supervise never started the drain wait")
+			}
+			took := r.returned.Sub(drained)
+			if res.IsError || !strings.Contains(res.Text, "escapee\n") || !strings.HasSuffix(res.Text, meta(partialText)) || res.Output == nil {
 				t.Fatalf("result = {IsError:%v Text:...%q}, want the output so far and the note", res.IsError, res.Text[max(len(res.Text)-300, 0):])
 			}
-			// The 2 s drain wait, then at most the 0.7 s read of the pipe.
-			if took := time.Since(began); took > planDrain+time.Second+3*time.Second {
-				t.Fatalf("Run took %v after the leader exited", took)
+			if res.Output.Duration <= 0 {
+				t.Fatalf("the result's duration is %v, want the time the command ran", res.Output.Duration)
+			}
+			// The reading stops at its bound: the 2 s drain wait, then at most
+			// the 0.7 s read of the pipe, timed from the drain's start to Run's
+			// return. The short output is never cut (below), so it never spills
+			// and nothing but the drain and the read stands between the two:
+			// its bound is the drain's, as before C3.
+			bound := planDrain + time.Second + 3*time.Second
+			if !tc.spilled && res.Trunc.Truncated() {
+				t.Fatalf("the short output was cut (%+v), so it spilled and waited for its file", res.Trunc)
+			}
+			// A spilled output's Run waits for its file too, up to savedWait
+			// (prepareBash), so a slow filesystem does not fail it (plan 037
+			// SF-132): its bound shows Run returns once the file is done or
+			// given up, and the short case is what pins the drain.
+			if tc.spilled {
+				bound += savedWait
+			}
+			if took > bound {
+				t.Fatalf("Run returned %v after the drain wait began; want at most %v", took, bound)
 			}
 			if strings.Contains(res.Text, "Full output saved") {
 				t.Fatalf("an output not read to its end was called full: %.200q", res.Text)

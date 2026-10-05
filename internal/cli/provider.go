@@ -35,6 +35,23 @@ func joinOr(names []string) string {
 	}
 }
 
+// joinOrPlain is joinOr without the Oxford comma: "a, b, c or d", the
+// spelling of a sentence that already has commas of its own (craze new's
+// no-default refusal).
+func joinOrPlain(names []string) string {
+	if len(names) < 3 {
+		return joinOr(names)
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// unknownProviderError is every command's refusal of a --provider that names
+// no provider: a usage error that quotes the value — a recognised flag's,
+// given on purpose — and lists the ids.
+func unknownProviderError(id string) error {
+	return usagef("craze: unknown provider %q (want %s)", id, providerIDs)
+}
+
 type resolvedProvider struct {
 	Provider agent.Provider
 	Locked   bool
@@ -78,7 +95,7 @@ func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic
 		if id := strings.TrimSpace(flag); id != "" {
 			p, err := agent.ProviderByName(id)
 			if err != nil {
-				return resolvedProvider{}, usagef("craze: unknown provider %q (want %s)", id, providerIDs)
+				return resolvedProvider{}, unknownProviderError(id)
 			}
 			return resolvedProvider{Provider: p, Locked: true}, nil
 		}

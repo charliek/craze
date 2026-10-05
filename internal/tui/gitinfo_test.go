@@ -100,8 +100,22 @@ func TestGitBranchVariants(t *testing.T) {
 	})
 
 	t.Run("no repo", func(t *testing.T) {
-		// A temp dir has no .git anywhere between it and the root.
-		g := discoverGit(t.TempDir())
+		// No .git between the workspace and the walk's boundary, the test's
+		// own root: what lies above a temporary directory is the machine's
+		// (a /tmp/.git that some program left failed this case, plan 037).
+		// The parent's planted .git is that, here on purpose, and the control
+		// is the walk to the root, which finds it.
+		parent := t.TempDir()
+		planted := writeRepo(t, parent, "ref: refs/heads/planted\n")
+		root := filepath.Join(parent, "root")
+		ws := filepath.Join(root, "ws")
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if g := discoverGit(ws); g.dir != planted {
+			t.Fatalf("control: the walk to the root found %q, not the planted %q", g.dir, planted)
+		}
+		g := discoverGitUpTo(ws, root)
 		if g.dir != "" {
 			t.Fatalf("found a repo at %q", g.dir)
 		}
@@ -132,8 +146,56 @@ func TestStatusRowShowsTheBranchAndRefreshesAtTurnEnd(t *testing.T) {
 	}
 }
 
+// ownTempRoot is this package's git walk boundary (gitBoundary, set in
+// TestMain): a search that starts under base, the machine's temporary
+// directory, stops at the test's own one — <base>/<Test><n>/<nnn>, what
+// t.TempDir returned — so a `.git` above it, one some program left in /tmp
+// among them, gives no model here a branch, and every status row and frame
+// built on a temporary workspace shows none (plan 037). A start outside base
+// walks to the root, as craze does.
+func ownTempRoot(base string) func(start string) string {
+	return func(start string) string {
+		dir, err := filepath.Abs(start)
+		if err != nil {
+			return ""
+		}
+		rel, err := filepath.Rel(base, dir)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return ""
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		return filepath.Join(append([]string{base}, parts[:min(len(parts), 2)]...)...)
+	}
+}
+
+func TestOwnTempRoot(t *testing.T) {
+	root := ownTempRoot("/tmp")
+	for start, want := range map[string]string{
+		"/tmp/TestX1/001":       "/tmp/TestX1/001",
+		"/tmp/TestX1/001/ws/a":  "/tmp/TestX1/001",
+		"/tmp/craze-x1":         "/tmp/craze-x1",
+		"/tmp":                  "",
+		"/home/u/proj":          "",
+		"/tmpfoo/TestX1/001/ws": "",
+	} {
+		if got := root(start); got != want {
+			t.Errorf("ownTempRoot(%q) = %q, want %q", start, got, want)
+		}
+	}
+}
+
+// TestNoRepoDropsTheBranchSegment: a workspace in no repository shows no
+// branch segment. The test's own temporary directory bounds the search
+// (ownTempRoot): the planted .git, with a HEAD, in the directory above it
+// stands for one a program left in /tmp, and the control is the walk to the
+// root, which finds it.
 func TestNoRepoDropsTheBranchSegment(t *testing.T) {
-	m := startSized(t, t.TempDir())
+	ws := t.TempDir()
+	planted := writeRepo(t, filepath.Dir(ws), "ref: refs/heads/planted\n")
+	if g := discoverGitUpTo(ws, ""); g.dir != planted || g.branch() != "planted" {
+		t.Fatalf("control: the walk to the root found %q (branch %q), not the planted %q", g.dir, g.branch(), planted)
+	}
+	m := startSized(t, ws)
 	row := statusText(m.statusRow1())
 	if strings.Contains(row, " │  │ ") {
 		t.Fatalf("an empty branch must not leave an empty segment: %q", row)

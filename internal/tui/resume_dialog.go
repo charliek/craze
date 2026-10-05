@@ -227,6 +227,14 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 		// write puts in the file.
 		m.setSession(m.loadSession(p, row), row.CrazeID)
 	}
+	// The row's session is this process's own, its agent spawned here, and
+	// its provider was chosen with no provider picker: the start's check is
+	// asked of it (LM-2(a), start_check.go) — of the row's provider, the one
+	// that starts.
+	var check tea.Cmd
+	if m.eng != nil {
+		check = m.askStartCheck(p)
+	}
 	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub(), "")
 	}
@@ -240,7 +248,7 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	// Init's batch, as confirmProvider returns it; the read it arms is the one
 	// the command gate's reader rule counts (readOn).
 	m.reading = m.eng != nil
-	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), check)
 }
 
 func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -37,11 +37,13 @@ row that cannot start:
 │  grok                                              │
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
-│install cursor-agent, or set [agents].cursor in ~/.…│
+│install cursor-agent, or set [agents].cursor in /ho…│
 │↑↓ · tab · enter starts · esc uses default          │
 ╰────────────────────────────────────────────────────╯
 ```
 
+- The fix line names the config file by its absolute path, which the box's
+  fixed width cuts short (`/ho…`); `craze providers` prints it whole.
 - A row that is not ready is dimmed, and its tag says its state —
   `unavailable` or `needs setup` — before `default`. When the box is too narrow
   for both, `default` is dropped first.
@@ -78,7 +80,12 @@ row that cannot start:
 The states are advice for the dialogs alone: `--provider <id>` and
 `--resume` start exactly as they always have, whatever the check says, so a
 provider it misjudges — cursor's keychain unlocked some other way — can still
-be started by name. `CRAZE_PROVIDER` (like config.toml's `provider`) only
+be started by name. On a Mac, cursor needs the GUI login session, so over `ssh`
+run craze from a terminal on the Mac, or through shed-host-agent. A start by
+name that this craze launches itself from outside that session does not hang
+silently: it adds a note, `cursor may not start here: this craze runs outside
+the macOS login session (over ssh), where cursor may not reach the login
+keychain; run craze from a terminal on the Mac`, and the start goes on. `CRAZE_PROVIDER` (like config.toml's `provider`) only
 chooses the dialog's default, which the check gates like any other row:
 `--provider <id>` is the way past it.
 
@@ -145,9 +152,9 @@ This works the same on a background sub-agent's row (below).
 
 On native, a sub-agent the model started with `run_in_background` shows in
 the same band, marked `bg` first in its suffix — a running row reads `bg ·
-0s · 15 tok`, a finished one just `bg · <model>` with no duration, since its
-row went final at the call's own acknowledgement, before the child ever
-started. `Delete`/`Backspace` stops a running background row exactly like
+0s · 15 tok`, a finished one `bg · <duration> · <model>` (`bg · 8.0s · grok-4.6`); the
+`agent` call's own card is what goes final at the acknowledgement, before the
+child ever started. `Delete`/`Backspace` stops a running background row exactly like
 any other.
 
 A background child that finishes while its own turn is still running is
@@ -355,7 +362,7 @@ off.
 | Key | Action |
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
-| `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
+| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
@@ -419,15 +426,16 @@ queue), and `Backspace` cancels it.
 
 ### The three verbs
 
-| Verb | Cursor | Grok | Cancels the turn? | Asks first? |
+| Verb | Cursor | Grok, gx, native | Cancels the turn? | Asks first? |
 |---|---|---|---|---|
 | queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
 | send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
-| interject (`Ctrl+L` on a draft under Grok) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+| interject (`Ctrl+L` on a draft under Grok, gx or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
 
-Grok is the only agent with a mid-turn path: `x.ai/interject` hands it text
-that it folds into the turn at its next safe point (after a tool result), and
-the transcript shows it as a `↳` entry when the agent broadcasts it back.
+Grok (and gx) and native have a mid-turn path: grok's `x.ai/interject` hands it
+text that it folds into the turn at its next safe point (after a tool result),
+and native steers it into the turn's next step. The transcript shows either as
+a `↳` entry.
 Cursor has none — a second prompt there silently cancels the first — so craze
 never sends one and offers send now instead, always with
 
@@ -680,7 +688,7 @@ Two other notes can appear when you paste:
 
 | Agent | Receives |
 |---|---|
-| Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in the chip's place instead (Grok and gx are sent images regardless, since they take them without saying so) |
+| Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in place of each image block instead (the chip stays in the message text) (Grok and gx are sent images regardless, since they take them without saying so) |
 | An agent that rejects the images | when it answers the prompt with an invalid-params error without having done anything with it, craze sends the message once more with each image as `[Image #N: <path>]` text. Updates about the session itself (its command list, mode, settings or title) do not count as doing something. After the agent has done anything for the turn, before its error or since, or you cancelled, the error is shown as it is |
 | Native | the same chips; how the image reaches the model depends on the model: see below |
 | An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
@@ -810,6 +818,11 @@ message refused for length keeps the draft *and* the output for the next
 attempt — and the attached output counts against the queue's 32 KiB per-message
 limit. `/clear` and a session change drop it.
 
+On native, the block is **redacted** before it reaches the model, the transcript
+or the journal: a value craze knows as a key (an API key variable's value, a
+stored key) in a command's output becomes `[craze:redacted-credential]`. The ACP agents (cursor,
+grok, gx) get the block verbatim.
+
 What is attached is never drawn: your transcript row, the queue band, the queue
 editor and the session title show the message you typed, not the block that
 went with it. A `/name` inside a command's output is output and nothing else —
@@ -938,7 +951,7 @@ start:
 | `Esc` with something typed | hide the input's popup, then clear the input |
 | `←` `→` with something typed | move the input's cursor (`Alt+←`/`Alt+→` by word) |
 | `Esc`, `←` with nothing typed | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
-| `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
+| `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host still connecting; on a host that is not answering it says `that session is not answering` |
 | `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
 | `Ctrl+D`, `Ctrl+C` twice, `/exit` in the input | quit craze; every session keeps running |
 
@@ -1145,10 +1158,12 @@ nothing.
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
-  provider has a key, else the model table's `default_model`, else the first
-  model (alphabetically) whose key resolves. With no provider funded it says
-  so (`no model provider has an API key — run craze auth login, …`) and leaves
-  the model to the agent's own.
+  provider has a key, else the model table's `default_model`; if that has no
+  key and the ChatGPT plan is signed in, the first of the plan's preferred
+  models; else the first model (alphabetically) whose key resolves. With no
+  provider funded it says so (`no model provider has an API key — run craze
+  auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or
+  set its API key variable`) and leaves the model to the agent's own.
 - **`/model`** lists the provider's models. Native's are its model table's,
   only those whose provider has a key, the recently used ones first in the
   order they were last picked and the rest by name, with no label — the same
@@ -1216,8 +1231,9 @@ folded). One that matches nothing — `xhigh` where a model stops at `high`, or
 a model with no effort or no fast mode at all — is skipped, noted in the
 session's journal, and the session starts at the model's own. So is one the
 agent refuses. An agent that does not answer the setting at all within 15
-seconds fails the session's start instead, and the list shows that session
-as failed, with the setting named in its error.
+seconds fails the session's start instead: the hint line says `could not start
+a session in <dir>: …` and names the setting, and the host that was spawned is
+stopped.
 
 ## Modes
 
@@ -1239,8 +1255,8 @@ enter implements this plan  ·  type to refine  ·  shift+tab leaves plan mode
 `Enter` on the still-empty composer switches to an implement-kind mode and
 sends `Implement the plan above.`; typing instead keeps the session in plan
 mode and the offer disappears once the composer is non-empty. `Esc` clears the
-offer without losing focus. Changing mode, `/clear`, the next turn or a card
-arriving all clear it too.
+offer without losing focus. Changing mode, `/clear`, the next turn clears it too. A card arriving hides it until the card is
+answered, and then it is offered again.
 
 On the native provider (`--provider native`) the same `/plan`,
 `/ask`, `/agent`, `Shift+Tab` and the offer above work. Plan mode lets the
@@ -1282,8 +1298,10 @@ sonnet = "glm-5.3"
 haiku  = "fireworks/deepseek-v4p1-flash"
 ```
 
-The `agent` tool runs at most four children at once; a fifth call waits for
-a slot to free.
+The `agent` tool runs at most four children at once, background ones included.
+A fifth foreground call waits for a slot; a background call, or a foreground
+one when every slot holds a background child, is refused at once (`All 4
+sub-agent slots are in use…`).
 
 ## Compaction
 
@@ -1310,8 +1328,9 @@ Compacting on its own switches itself off after a compaction that failed or
 still left the context over the threshold, and back on after one that
 succeeded under it, or a model change.
 
-While a compaction runs, status row 1 reads `compacting context…` in place
-of the model or the elapsed time. Once it ends it leaves one note in the
+While a compaction runs, the spinner line reads `compacting context…` in place
+of what the turn is doing (`✳ compacting context… · 12s · esc to interrupt`).
+Once it ends it leaves one note in the
 transcript:
 
 | how it ended | note |
@@ -1889,8 +1908,8 @@ them under; any other option the model offers — `context` or `thinking` on
 cursor's Claude models — gets a tab too, labelled with the agent's own name,
 lowercased, showing its raw values. A tab is shown whenever the catalog
 advertises the option; there is no capability-bit gate on a tab (the
-provider's effort/fast bits gate only the status-row chips and the
-`/model <effort>` shorthand, never a control the model itself advertises).
+provider's effort/fast bits gate only the status-row chips, never a control
+the model itself advertises).
 Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
 `context` and `thinking`; grok shows `effort` alone, never `fast`.
 
@@ -1944,7 +1963,8 @@ any other tab has no footer of old to keep and falls back to `tab options`
 once the tabs' names do not fit. Typing filters the list whatever has focus.
 
 `Tab`/`Shift+Tab` move focus between the list and the tabs; `←`/`→` change
-the focused tab's value; clicking a row focuses it. `Enter` closes the
+the focused tab's value; clicking a model row picks it and applies the dialog,
+as `Enter` does, and clicking a tab focuses it. `Enter` closes the
 dialog and applies model, then each **changed** tab, in catalog order, each
 as its own step — a tab the user never moved is left alone: it always shows
 its option's live value (tracking a delta that lands while the box is open),
@@ -1957,7 +1977,8 @@ applies nothing. Status row 1 then reads `Name (effort · fast)`, with `fast`
 shown only when it is on.
 
 `/model <id>` and `/model <id> <effort>` still work without opening the
-dialog. `/model <id> <effort>` resolves the model first — matched against the
+dialog; a bare effort word is not a shorthand (`/model high` looks for a model
+named `high`). `/model <id> <effort>` resolves the model first — matched against the
 model list without reading any catalog — and then checks the effort word
 against the **destination** model's catalog, so `/model grok-4.6 high` typed
 while on composer-2.5 (which has no effort) still lands on grok-4.6 instead
@@ -1989,7 +2010,7 @@ card arriving closes it; nothing else is bound while it is up.
 On a provider that shows the band, `panels and views` gains the sub-agent view
 keys — `enter on a row` to open one, `esc, ←` to return, and
 `tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
-`sub-agent rows, or a list inside a dialog`. On native, `panels and views`
+`queued messages, sub-agent rows, or a list inside a dialog`. On native, `panels and views`
 also gains `del, backspace — stop the selected running sub-agent, or the one
 in view`.
 

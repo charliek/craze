@@ -1,7 +1,7 @@
 # Testing
 
 ```bash
-make lint && make test && make build && make test-cli
+make lint && make test && make test-race && make build && make test-cli
 ```
 
 Everything below that talks to an agent uses `craze-fake-agent`, so no Cursor
@@ -20,8 +20,8 @@ go test -timeout 5m -v ./...
 ```
 
 Frame goldens live in `internal/tui/testdata/` and render through the same TUI
-model as a live session. CI also runs `-race` on `internal/acp`,
-`internal/agent`, and `internal/tui`.
+model as a live session. CI also runs `make test-race`: `-race` over every package with real
+concurrency (the list is the `test-race` target in the Makefile).
 
 ### Sub-agent scripts
 
@@ -166,7 +166,7 @@ what the goldens render against.
 |------|-------------|
 | `--cols` | Terminal width (default 100) |
 | `--rows` | Terminal height (default 30) |
-| `--agent-bin` | Path to `cursor-agent` / fake agent (or `CRAZE_AGENT_BIN`) |
+| `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`): the session frame starts, so the resolved provider, or on `--continue`/`--resume` the seeded row's. Tests pass the fake agent |
 | `--fake-script` | Sets `CRAZE_FAKE_SCRIPT` for the child |
 | `--keys` | Key script, e.g. `go<enter><wait:text:TASKS>` |
 | `--ansi` | Print the raw frame with a forced true-colour profile |

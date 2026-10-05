@@ -220,7 +220,7 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 // errNativeNothingFunded is what the list says when not one native model's
 // provider has an API key: the popup's note (`native has no models: …`) and
 // /provider native's warning (`its model table: …`) both carry it.
-var errNativeNothingFunded = errors.New("no model provider has an API key — run craze auth login, or set its API key variable")
+var errNativeNothingFunded = errors.New(`no model provider has an API key — run craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set its API key variable`)
 
 // nativeModelName is a native model as the list names it: its table name,
 // cleaned for the terminal, else its alias.

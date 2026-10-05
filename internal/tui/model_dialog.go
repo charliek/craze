@@ -1354,7 +1354,7 @@ func fastLabel(opt *agent.ConfigOption) func(string) string {
 func (m Model) dialogValueRow(label string, opt *agent.ConfigOption, chosen string, focused bool, inner int, name func(string) string) string {
 	base, pick := styleFG(m.theme.Dim), styleFG(m.theme.Bright)
 	if focused {
-		band := lipgloss.NewStyle().Background(m.theme.SelectionBG)
+		band := selectionBand(lipgloss.ColorProfile(), lipgloss.NewStyle(), m.theme.SelectionBG)
 		base, pick = band.Foreground(m.theme.FG), band.Foreground(m.theme.Bright).Bold(true)
 	}
 	head := dialogMark(focused, false) + label

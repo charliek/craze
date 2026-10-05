@@ -14,9 +14,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
+	"github.com/charliek/craze/internal/tui"
 	"github.com/charliek/craze/internal/version"
 )
 
@@ -47,6 +49,10 @@ const (
 	// lost.
 	newPromptLost = "the prompt may not have reached it"
 )
+
+// newProviderChoices is the providers craze new's no-default refusal names,
+// as a choice: "cursor, grok, gx or native".
+var newProviderChoices = joinOrPlain(agent.ProviderNames())
 
 // newClient is who craze new says it is to the hub.
 var newClient = protocol.ClientInfo{Kind: "cli", Name: "craze new", Version: version.Version}
@@ -90,6 +96,18 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	if f.fast && f.noFast {
 		return usagef("craze new: --fast and --no-fast are mutually exclusive")
 	}
+	// An explicit, non-empty --provider is checked here, before anything is
+	// dialled (plan 037 LC-4): by its id alone — no CRAZE_PROVIDER, no
+	// config, no default — and a wrong one is the usage error every other
+	// command gives, plain and exit 2 with or without --json (cli.md: a
+	// usage error is never JSON). Omitted or empty, the hub chooses: its
+	// configured default.
+	provider := strings.TrimSpace(f.provider)
+	if provider != "" {
+		if _, err := agent.ProviderByName(provider); err != nil {
+			return unknownProviderError(provider)
+		}
+	}
 	out := cmd.OutOrStdout()
 	// A stdout whose reader has gone fails its write with EPIPE rather than
 	// killing craze new with SIGPIPE before its stderr line (plan 035 r18): a
@@ -122,11 +140,23 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
 		return fail(nil, "%s is not a directory", abs)
 	}
+	// The hub's refusal of a create that names no provider when it has no
+	// default is wire words (params.provider …), and its badParams carries
+	// no reason of its own to tell it by. So in plain mode the same question
+	// is asked here first, of the config file the hub reads its default
+	// from (hubCreates' tui.ConfigProvider, which trims it), and answered in
+	// craze's words — never by matching the hub's message. Not
+	// hubDefaultProvider: an unknown configured id is the hub's own
+	// (different) refusal, not "no default". --json passes the hub's refusal
+	// through whole, as cli.md documents.
+	if provider == "" && !f.json && tui.ConfigProvider() == "" {
+		return fail(nil, "no default provider yet; pass --provider %s", newProviderChoices)
+	}
 	id, err := newRequestID()
 	if err != nil {
 		return fail(err, "%v", err)
 	}
-	p := protocol.CreateParams{Cwd: abs, Prompt: strings.Join(args, " "), Provider: strings.TrimSpace(f.provider),
+	p := protocol.CreateParams{Cwd: abs, Prompt: strings.Join(args, " "), Provider: provider,
 		Model: strings.TrimSpace(f.model), Effort: strings.TrimSpace(f.effort), RequestID: id}
 	if strings.TrimSpace(p.Prompt) == "" {
 		p.Prompt = ""

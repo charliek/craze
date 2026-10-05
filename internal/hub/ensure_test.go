@@ -144,7 +144,7 @@ func TestEnsureNeverKillsAWedgedHubItCannotIdentify(t *testing.T) {
 			if !errors.As(err, &wedged) || wedged.PID != pid {
 				t.Fatalf("Ensure = %v; want the wedged hub (pid %d) reported", err, pid)
 			}
-			if !alive(pid) {
+			if !alive(t, pid) {
 				t.Fatalf("Ensure signalled pid %d, whose identity it could not verify", pid)
 			}
 			if n := d.accepted.Load(); n < 2 {
@@ -174,7 +174,7 @@ func TestEnsureTakesEOFOrClosingForNoHub(t *testing.T) {
 			if n := d.accepted.Load(); n != 1 {
 				t.Fatalf("the hub that went said hello to %d times, want once", n)
 			}
-			if !alive(pid) {
+			if !alive(t, pid) {
 				t.Fatal("Ensure signalled a hub that answered EOF or closing")
 			}
 			if n := kids.n.Load(); n != 1 {
@@ -243,7 +243,7 @@ func TestEnsureReportsAnOlderHub(t *testing.T) {
 	if n := d.accepted.Load(); n != 1 {
 		t.Fatalf("the older hub was said hello to %d times, want once (no retry)", n)
 	}
-	if !alive(pid) {
+	if !alive(t, pid) {
 		t.Fatal("Ensure signalled an older hub")
 	}
 	sock, err := ensure(t, env, protocol.ConnectionCapabilities{Connect: true})
@@ -309,7 +309,7 @@ func TestEnsureReapsAContenderThatDoesNotAnswer(t *testing.T) {
 	if pids := kids.pids(); len(pids) != 2 || pids[0] != first {
 		t.Fatalf("the hubs spawned are %v; the first record named %d", pids, first)
 	}
-	if alive(first) {
+	if alive(t, first) {
 		t.Fatalf("the hub that did not answer (pid %d) is still running (%s)", first, procState(first))
 	}
 	rec, _, err := rundir.ReadHubRecord(env)
@@ -469,7 +469,7 @@ func TestTwoRacingEnsuresMakeOneHub(t *testing.T) {
 			waitGone(t, pid)
 		}
 	}
-	if !alive(rec.PID) {
+	if !alive(t, rec.PID) {
 		t.Fatalf("the hub the record names (pid %d) is not running", rec.PID)
 	}
 }
@@ -655,7 +655,7 @@ func TestAFullBacklogIsNoStrike(t *testing.T) {
 		if err != nil || sock != d.path {
 			t.Fatalf("Ensure past a full backlog = %q, %v; want the hub at %s", sock, err, d.path)
 		}
-		if !alive(pid) {
+		if !alive(t, pid) {
 			t.Fatalf("Ensure signalled the hub (pid %d) behind a full backlog", pid)
 		}
 		if n := dials.Load(); n != 4 {

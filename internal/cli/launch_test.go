@@ -300,6 +300,10 @@ func TestALaunchSpawnsOneHostTheTUIAdopts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewBackend: %v", err)
 		}
+		// A host this launch spawned: the TUI checks its start (LM-2(a)).
+		if lb, ok := b.(*launchedBackend); !ok || !lb.SpawnedHost() {
+			t.Fatalf("the backend %T does not say this launch spawned its host", b)
+		}
 		started(t, b)
 		crazeID = b.Info().CrazeSessionID
 		_ = b.Close()
@@ -479,8 +483,8 @@ func TestContinueOfAHeldSessionAttaches(t *testing.T) {
 			t.Fatalf("LoadBackend: %v", err)
 		}
 		lb, ok := b.(*launchedBackend)
-		if !ok || !lb.ref.held || lb.ref.child != nil {
-			t.Fatalf("the backend %T %+v, want the holder's", b, lb)
+		if !ok || !lb.ref.held || lb.ref.child != nil || lb.SpawnedHost() {
+			t.Fatalf("the backend %T %+v, want the holder's, not a host this launch spawned (LM-2(a))", b, lb)
 		}
 		socket = lb.ref.entry.Socket
 		started(t, b)
@@ -1247,8 +1251,8 @@ func TestAReattachSpawnsNothing(t *testing.T) {
 					t.Fatalf("LoadBackend: %v", err)
 				}
 				lb, ok := b.(*launchedBackend)
-				if !ok || !lb.ref.held || lb.ref.child != nil || lb.ref.entry.HostID != holder.entry.HostID {
-					t.Fatalf("the backend %T %+v, want the host %s serving the session", b, lb, holder.entry.HostID)
+				if !ok || !lb.ref.held || lb.ref.child != nil || lb.ref.entry.HostID != holder.entry.HostID || lb.SpawnedHost() {
+					t.Fatalf("the backend %T %+v, want the host %s serving the session, not one spawned (LM-2(a))", b, lb, holder.entry.HostID)
 				}
 				started(t, b)
 				if got := b.Info().CrazeSessionID; got != id {

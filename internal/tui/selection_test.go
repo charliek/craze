@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -538,7 +541,7 @@ func TestSelectingDoesNotReRenderTheTranscript(t *testing.T) {
 		t.Fatalf("selecting re-rendered %d entries", m.main.renders-before)
 	}
 	// And the highlight really is on the screen.
-	if !strings.Contains(m.View(), selectionSeq(m.theme.SelectionBG)) {
+	if !strings.Contains(m.View(), selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)) {
 		t.Fatal("the selection background is missing from the frame")
 	}
 }
@@ -567,7 +570,7 @@ func selectedCells(s, bg string) []bool {
 // background — and no cell outside it does.
 func TestHighlightSpanPaintsExactlyTheSpan(t *testing.T) {
 	th := Preset("tokyo-night")
-	bg := selectionSeq(th.SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), th.SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}
@@ -611,6 +614,163 @@ func TestHighlightSpanPaintsExactlyTheSpan(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// sgrCell is the SGR state one display cell is drawn in: reverse video, and
+// the parameters that last set its foreground and background ("" is the
+// terminal's default).
+type sgrCell struct {
+	reverse bool
+	fg, bg  string
+}
+
+// sgrCells is the SGR state of every display cell of s.
+func sgrCells(s string) []sgrCell {
+	var out []sgrCell
+	var cur sgrCell
+	walkANSI(s, func(chunk string, esc bool) {
+		if esc {
+			if strings.HasPrefix(chunk, "\x1b[") && strings.HasSuffix(chunk, "m") {
+				cur = applySGR(cur, chunk[2:len(chunk)-1])
+			}
+			return
+		}
+		for i, w := 0, max(ansi.StringWidth(chunk), 1); i < w; i++ {
+			out = append(out, cur)
+		}
+	})
+	return out
+}
+
+func applySGR(c sgrCell, params string) sgrCell {
+	ps := strings.Split(params, ";")
+	for i := 0; i < len(ps); i++ {
+		n, _ := strconv.Atoi(ps[i])
+		switch {
+		case n == 0:
+			c = sgrCell{}
+		case n == 7:
+			c.reverse = true
+		case n == 27:
+			c.reverse = false
+		case n == 38 || n == 48:
+			end := min(i+3, len(ps)) // 38;5;N
+			if i+1 < len(ps) && ps[i+1] == "2" {
+				end = min(i+5, len(ps)) // 38;2;R;G;B
+			}
+			if n == 38 {
+				c.fg = strings.Join(ps[i:end], ";")
+			} else {
+				c.bg = strings.Join(ps[i:end], ";")
+			}
+			i = end - 1
+		case n == 39:
+			c.fg = ""
+		case n == 49:
+			c.bg = ""
+		case n >= 30 && n <= 37, n >= 90 && n <= 97:
+			c.fg = ps[i]
+		case n >= 40 && n <= 47, n >= 100 && n <= 107:
+			c.bg = ps[i]
+		}
+	}
+	return c
+}
+
+// TestSelectionBandAtEveryDepth (SF-142): the selection band is the slot's own
+// colour at each depth, for the raw sequence the mouse selection paints with
+// and for the style the dialog rows paint with. At true colour it is the same
+// bytes as before the fix; at 256 colours it is the slot's own index, never
+// termenv's conversion of the hex; at 16 colours it is reverse video. The
+// profile is a parameter, so every branch is checked here although the
+// package runs at true colour.
+func TestSelectionBandAtEveryDepth(t *testing.T) {
+	for _, name := range ThemeNames() {
+		th := Preset(name)
+		c := th.SelectionBG
+		n := nearest256(c.TrueColor)
+		if c.ANSI256 != strconv.Itoa(n) {
+			t.Fatalf("%s: SelectionBG's 256-colour index is %q, want nearest256 %d", name, c.ANSI256, n)
+		}
+		for _, tc := range []struct {
+			p       termenv.Profile
+			seq     string
+			bg      string
+			reverse bool
+		}{
+			{termenv.TrueColor, "\x1b[" + ansiBG(c.TrueColor) + "m", ansiBG(c.TrueColor), false},
+			{termenv.ANSI256, fmt.Sprintf("\x1b[48;5;%dm", n), fmt.Sprintf("48;5;%d", n), false},
+			{termenv.ANSI, "\x1b[7m", "", true},
+			{termenv.Ascii, "", "", false},
+		} {
+			if got := selectionSeq(tc.p, c); got != tc.seq {
+				t.Errorf("%s %s: selectionSeq = %q, want %q", name, tc.p.Name(), got, tc.seq)
+			}
+			r := lipgloss.NewRenderer(io.Discard)
+			r.SetColorProfile(tc.p)
+			cells := sgrCells(selectionBand(tc.p, r.NewStyle().Foreground(th.Bright), c).Render("x"))
+			if len(cells) != 1 || cells[0].bg != tc.bg || cells[0].reverse != tc.reverse {
+				t.Errorf("%s %s: selectionBand paints %+v, want bg %q reverse %v", name, tc.p.Name(), cells, tc.bg, tc.reverse)
+			}
+		}
+	}
+	if seq := selectionSeq(termenv.TrueColor, Preset("tokyo-night").SelectionBG); !strings.HasPrefix(seq, "\x1b[48;2;") {
+		t.Fatalf("the true-colour band is %q, want a 48;2 background", seq)
+	}
+}
+
+// TestHighlightSpanBandStopsAtTheSpan: at every depth the band is in force on
+// every cell of the span, through a reset inside it, while each cell keeps its
+// own foreground; and every cell outside the span is drawn exactly as it was,
+// so at 16 colours reverse video is off again after the band. The plain row is
+// the case only highlightSpan's closing reset can turn reverse off for: a
+// styled tail replays the row's own reset.
+func TestHighlightSpanBandStopsAtTheSpan(t *testing.T) {
+	th := Preset("craze-dark")
+	styled := "\x1b[91maaaa\x1b[m" + "bbbb" + "\x1b[94mcccc\x1b[0m" + "dddd"
+	for _, p := range []termenv.Profile{termenv.TrueColor, termenv.ANSI256, termenv.ANSI} {
+		bg := selectionSeq(p, th.SelectionBG)
+		for _, tc := range []struct {
+			name   string
+			line   string
+			lo, hi int
+		}{
+			{"plain row", "alpha bravo charlie", 2, 8},
+			{"a reset inside the band, a style across its end", styled, 2, 9},
+			{"the band ends on a reset", styled, 0, 3},
+			{"the band starts after a reset", styled, 4, 7},
+			{"to the end of the row", styled, 6, 15},
+		} {
+			got := highlightSpan(tc.line, tc.lo, tc.hi, bg)
+			if plain(got) != plain(tc.line) {
+				t.Fatalf("%s %s: text changed: %q", p.Name(), tc.name, plain(got))
+			}
+			if head := ansi.Truncate(tc.line, tc.lo, ""); !strings.HasPrefix(got, head) {
+				t.Errorf("%s %s: the row before the band changed: %q", p.Name(), tc.name, got)
+			}
+			was, is := sgrCells(tc.line), sgrCells(got)
+			if len(is) != len(was) {
+				t.Fatalf("%s %s: %d cells, want %d", p.Name(), tc.name, len(is), len(was))
+			}
+			for x := range is {
+				if x < tc.lo || x > tc.hi {
+					if is[x] != was[x] {
+						t.Errorf("%s %s: cell %d outside the band is %+v, want %+v as before: %q",
+							p.Name(), tc.name, x, is[x], was[x], got)
+					}
+					continue
+				}
+				on := is[x].reverse
+				if p != termenv.ANSI {
+					on = is[x].bg == strings.TrimSuffix(strings.TrimPrefix(bg, "\x1b["), "m")
+				}
+				if !on || is[x].fg != was[x].fg {
+					t.Errorf("%s %s: cell %d inside the band is %+v (band %q), want the band over fg %q: %q",
+						p.Name(), tc.name, x, is[x], bg, was[x].fg, got)
+				}
+			}
+		}
 	}
 }
 
@@ -705,7 +865,7 @@ func TestPressBelowTheContentStartsNoSelection(t *testing.T) {
 	if copies := rec.copies(); len(copies) != 0 {
 		t.Fatalf("blank space copied %q", copies)
 	}
-	if bg := selectionSeq(m.theme.SelectionBG); bg != "" && strings.Contains(m.View(), bg) {
+	if bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG); bg != "" && strings.Contains(m.View(), bg) {
 		t.Fatalf("a highlight was painted for a gesture over blank space:\n%s", plainView(m))
 	}
 	// A press on the last row of content is still a press, one row above the
@@ -737,7 +897,7 @@ func TestDoubleClickSelectsAOneCellWord(t *testing.T) {
 	if got := m.selectionText(); got != "I" {
 		t.Fatalf("selected %q, want %q", got, "I")
 	}
-	if bg := selectionSeq(m.theme.SelectionBG); bg != "" && !strings.Contains(m.View(), bg) {
+	if bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG); bg != "" && !strings.Contains(m.View(), bg) {
 		t.Fatal("the one-cell word is not highlighted")
 	}
 	m = release(t, m, 0, top)
@@ -782,7 +942,7 @@ func selectedText(s, bg string) string {
 // two have to name the same graphemes — without breaking the width invariant.
 func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
 	th := Preset("tokyo-night")
-	bg := selectionSeq(th.SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), th.SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}

@@ -1327,7 +1327,7 @@ type sessLine struct {
 	kind sessLineKind
 	// A group's header: its label, colour and count.
 	label string
-	color lipgloss.Color
+	color lipgloss.CompleteColor
 	count int
 	// row is a session row's; for sessLineNote its text is want, and
 	// noteErr colours it as an error.
@@ -1348,7 +1348,7 @@ func (m Model) sessLines() []sessLine {
 	running := m.sessRunningRows()
 	slices.SortStableFunc(running, sessOrder)
 	var out []sessLine
-	group := func(label string, color lipgloss.Color, rows []sessRow) {
+	group := func(label string, color lipgloss.CompleteColor, rows []sessRow) {
 		if len(rows) == 0 {
 			return
 		}
@@ -1381,7 +1381,7 @@ func (m Model) sessLines() []sessLine {
 		for _, g := range []struct {
 			state sessState
 			label string
-			color lipgloss.Color
+			color lipgloss.CompleteColor
 		}{
 			{sessNeedsYou, "needs you", th.Warn},
 			{sessWorking, "working", th.Accent},
@@ -1608,7 +1608,7 @@ func (m Model) sessHeaderRow(lines []sessLine) string {
 	var chips []seg
 	for i, c := range []struct {
 		text  string
-		color lipgloss.Color
+		color lipgloss.CompleteColor
 	}{
 		{"! %d need you", th.Warn},
 		{m.spinnerGlyph() + " %d working", th.Accent},

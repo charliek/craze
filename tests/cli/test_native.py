@@ -24,6 +24,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1227,6 +1228,7 @@ def test_native_cancel_during_bash_reports_cancelled_and_leaves_nothing_running(
         assert until_alive(child, CANCEL_CHILD_MARKER), (
             f"the child ({child}) was not running; craze "
             + ("still running" if proc.poll() is None else f"exited {proc.returncode}")
+            + f"; {until_alive.evidence}"
         )
 
         proc.send_signal(signal.SIGINT)
@@ -1345,6 +1347,7 @@ def alive(pid: int, marker: str) -> bool:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,  # a ps that never answers fails the test, never hangs the run
     )
     fields = out.stdout.split()
     if out.returncode != 0 or not fields:
@@ -1354,13 +1357,74 @@ def alive(pid: int, marker: str) -> bool:
 
 def until_alive(pid: int, marker: str, timeout: float = 10) -> bool:
     """Whether pid comes to run as marker within timeout: a process just
-    forked is awaited as the command it is about to become."""
+    forked is awaited as the command it is about to become.
+
+    A read that missed is kept: what the kernel showed for pid then is a
+    warning when pid came alive after all (the flake's mechanism, on a green
+    run) and part of the failure when it never did (plan 036 F3). Collecting
+    it is bounded (proc_evidence) and never decides the answer: pid is read
+    once more after the last of it, so a child that came alive while it was
+    collected -- past the deadline, on a slow machine -- is found alive
+    (plan 037 C3r)."""
     deadline = time.monotonic() + timeout
+    start, first_miss, misses = time.monotonic(), "", 0
+    until_alive.evidence = ""
     while not alive(pid, marker):
+        misses += 1
+        if not first_miss:
+            first_miss = proc_evidence(pid)
         if time.monotonic() >= deadline:
+            last = proc_evidence(pid)
+            if alive(pid, marker):
+                break
+            until_alive.evidence = f"first miss: {first_miss}; last: {last}"
             return False
         time.sleep(0.05)
+    if misses:
+        warnings.warn(
+            f"pid {pid} read as not running {misses}x before it ran as {marker!r} "
+            f"({time.monotonic() - start:.3f}s); first miss: {first_miss}"
+        )
     return True
+
+
+until_alive.evidence = ""
+
+
+# EVIDENCE_TIMEOUT bounds proc_evidence's ps, in seconds.
+EVIDENCE_TIMEOUT = 2
+
+
+def proc_evidence(pid: int) -> str:
+    """What the kernel shows for pid, for a flake's record: ps's own answer,
+    and on Linux the executable, raw command line and stat. An empty command
+    line beside the new executable is the instant of an exec; no /proc entry
+    is a process gone and reaped; a Z state is a zombie. A ps that does not
+    answer within EVIDENCE_TIMEOUT, or cannot be run, is recorded as such:
+    the record never fails the test, and its ps holds it up no longer than
+    that."""
+    try:
+        ps = subprocess.run(
+            ["ps", "-ww", "-o", "pid=,ppid=,pgid=,stat=,etime=,args=", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=EVIDENCE_TIMEOUT,
+        )
+        out = [f"ps rc={ps.returncode} {ps.stdout.strip()!r}"]
+    except subprocess.TimeoutExpired:
+        out = [f"ps=<no answer in {EVIDENCE_TIMEOUT}s>"]
+    except OSError as e:
+        out = [f"ps=<{e}>"]
+    base = Path(f"/proc/{pid}")
+    if Path("/proc/self").exists():
+        try:
+            out.append(f"exe={os.readlink(base / 'exe')}")
+        except OSError as e:
+            out.append(f"exe=<{e.strerror}>")
+        for name in ("cmdline", "stat"):
+            try:
+                out.append(f"{name}={(base / name).read_bytes()[:200]!r}")
+            except OSError as e:
+                out.append(f"{name}=<{e.strerror}>")
+    return " ".join(out)
 
 
 def gone(pid: int, marker: str, timeout: float = 10) -> None:

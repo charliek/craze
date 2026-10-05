@@ -705,14 +705,14 @@ func TestShellRunningKeepsTheSpinnerTicking(t *testing.T) {
 func TestShellModeDoesNotColourTheSubAgentView(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("!ls")
-	if !strings.Contains(m.composerRule(false), ansiFG(string(m.theme.Shell))) {
+	if !strings.Contains(m.composerRule(false), ansiFG(m.theme.Shell.TrueColor)) {
 		t.Fatal("setup: the composer's own rule is not in the shell colour")
 	}
 	m.viewing = "task-a"
-	if strings.Contains(m.composerRule(false), ansiFG(string(m.theme.Shell))) {
+	if strings.Contains(m.composerRule(false), ansiFG(m.theme.Shell.TrueColor)) {
 		t.Fatal("the sub-agent view's rule took the shell colour")
 	}
-	if !strings.Contains(m.composerRule(false), ansiFG(string(m.theme.Rule))) {
+	if !strings.Contains(m.composerRule(false), ansiFG(m.theme.Rule.TrueColor)) {
 		t.Fatal("the sub-agent view's rule is not the ordinary one")
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/journal"
+	"github.com/charliek/craze/internal/paths"
 )
 
 // session is the ACP-backed provider session.
@@ -373,6 +374,19 @@ func newSession(opts Options) *session {
 }
 
 // provider is the agent behind this session; nil Options.Provider is cursor.
+// binaryNotFound is acp's lookup failure with what to do about it (plan 037
+// LC-3), added here because only here are the provider and the config file
+// known: "…; install it, or set [agents].<id> in <config file>". acp's own
+// words — the "agent binary not found: " prefix, what it looked for — are
+// kept as they are.
+func binaryNotFound(err error, id string) error {
+	config := paths.ConfigPath()
+	if config == "" {
+		config = "config.toml"
+	}
+	return fmt.Errorf("%w; install it, or set [agents].%s in %s", err, id, config)
+}
+
 func (s *session) provider() Provider {
 	if s.opts.Provider != nil {
 		return *s.opts.Provider
@@ -503,7 +517,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	binary, err := resolve(s.opts.Binary, s.provider().Bins())
 	if err != nil {
 		s.unstart()
-		return false, err
+		return false, binaryNotFound(err, s.provider().Name())
 	}
 	if testAfterBinaryResolved != nil {
 		testAfterBinaryResolved()

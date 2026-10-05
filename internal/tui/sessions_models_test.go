@@ -1057,3 +1057,13 @@ func TestFrameGoldenSessionsEffortAndFast(t *testing.T) {
 			nil)
 	}
 }
+
+// TestNativeNothingFundedNamesTheChatGPTPlan is SF-143's TUI half: the
+// session list's nothing-funded note says what craze auth login does — an
+// API key, or the ChatGPT plan's sign-in — as craze providers' fix does.
+func TestNativeNothingFundedNamesTheChatGPTPlan(t *testing.T) {
+	want := `no model provider has an API key — run craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set its API key variable`
+	if got := errNativeNothingFunded.Error(); got != want {
+		t.Fatalf("%q\nwant %q", got, want)
+	}
+}

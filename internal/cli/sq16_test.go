@@ -112,7 +112,7 @@ func TestContinueOfAnOpenSessionAttaches(t *testing.T) {
 		argv     []string
 		ignored  string
 	}{
-		{"a row with a craze id", "018f-open-thread", []string{"--model", "gpt-5", "--plan", "--theme", "dracula", "--no-mouse"},
+		{"a row with a craze id", "018f-open-thread", []string{"--model", "gpt-5", "--plan", "--theme", "gruvbox", "--no-mouse"},
 			" (ignored: --model, --plan)"},
 		// The start settings are a new session's too (plan 032 §3.11).
 		{"start settings", "018f-open-thread-2", []string{"--effort", "high", "--no-fast", "--no-mouse"},

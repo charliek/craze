@@ -15,6 +15,7 @@ import (
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -197,6 +198,9 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 		{name: "a TUI's host, outside the login session", forced: "0", bin: fake, want: a6Cause + terminalHint},
 		{name: "in the login session", forced: "1", bin: fake, argv: []string{"--hub-pid=4242"}, want: a6Cause},
 		{name: "unforced, its session not known", bin: fake, argv: []string{"--hub-pid=4242"}, want: a6Cause},
+		// LC-3 (plan 037): what was looked for and the fix, after the prefix
+		// configuration.md quotes — the whole cause is checked below, once
+		// the config file's path is known.
 		{name: "no agent exit", forced: "0", bin: filepath.Join(t.TempDir(), "no-such-agent"), argv: []string{"--hub-pid=4242"},
 			wantPrefix: "agent binary not found: "},
 	} {
@@ -219,6 +223,9 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 			}
 			if tc.wantPrefix != "" && (!strings.HasPrefix(re.Cause, tc.wantPrefix) || strings.Contains(re.Cause, "login session")) {
 				t.Fatalf("data.cause %q, want %q… and no hint", re.Cause, tc.wantPrefix)
+			}
+			if want := tc.wantPrefix + tc.bin + "; install it, or set [agents].cursor in " + paths.ConfigPath(); tc.wantPrefix != "" && re.Cause != want {
+				t.Fatalf("data.cause %q\nwant       %q", re.Cause, want)
 			}
 			waitServeLog(t, r, "craze serve: the session did not start: "+re.Cause+"\n")
 		})

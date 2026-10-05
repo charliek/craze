@@ -27,7 +27,8 @@ import (
 //
 // A state marks; it refuses only a choice made in a TUI picker. An explicit
 // --provider and the hub's session.create start as they always have, so a
-// misjudged state never locks anyone out (plan 036 decision 3);
+// misjudged state never locks anyone out (plan 036 decision 3) — a start this
+// process makes with no picker says the not-GUI verdict first (startWarning);
 // $CRAZE_PROVIDER only chooses the picker's default, which the picker gates
 // like any row (X24).
 //
@@ -70,6 +71,10 @@ type providerAvail struct {
 	State  availState
 	Reason string
 	Fix    string
+	// notGUI says the state is the not-GUI rule's — cursor outside the macOS
+	// login session — the one verdict a start hangs on rather than fails
+	// (startWarning). It is never on the wire.
+	notGUI bool
 }
 
 // The places an agent binary comes from (binResolution.Source), each named in
@@ -160,12 +165,40 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 	if p.Name() == agent.CursorProvider().Name() {
 		if _, gui, known := in.gui(); known && !gui {
 			a.State, a.Reason, a.Fix = availUnavailable, notGUIReason, notGUIFix
+			a.notGUI = true
 			if in.hubPID > 0 {
 				a.Fix = fmt.Sprintf(notGUIHubFix, in.hubPID)
 			}
 		}
 	}
 	return a, true
+}
+
+// startWarning is what a start of p this process is about to make with no
+// picker says before it starts (LM-2(a), plan 037 §3.5): the not-GUI
+// verdict's reason and fix under in, each one line, and "" for every other
+// verdict. That verdict is the one a start sits on — cursor blocked on the
+// login keychain, at starting… with nothing to say why — where a missing
+// binary or an unreadable native table fails on its own, in its own words.
+// Nothing is refused: the start goes on (plan 036 decision 3).
+func startWarning(in availInputs, p agent.Provider) (reason, fix string) {
+	a, listed := providerAvailability(in, p)
+	if !listed || !a.notGUI {
+		return "", ""
+	}
+	return engine.RowLine(a.Reason), engine.RowLine(a.Fix)
+}
+
+// startCheckFor is tui.Config.StartCheck (LM-2(a)): startWarning for a start
+// of p made by this process, whose binary it resolves as that session would
+// (processAvailInputs) — p is the launch's own provider in every start the
+// TUI checks (an explicit --provider, a load's row), so --agent-bin,
+// explicitBin, is its — in this process's login session, which a host it
+// spawns inherits.
+func startCheckFor(explicitBin string) func(agent.Provider) (string, string) {
+	return func(p agent.Provider) (string, string) {
+		return startWarning(processAvailInputs(p, explicitBin), p)
+	}
 }
 
 // The not-GUI rule's reason, the TUI's and CLI's fix, and the hub's, a

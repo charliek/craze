@@ -412,7 +412,7 @@ def pid_alive(pid: int) -> bool:
         return True
     # A zombie still answers signal 0; only its /proc state says it is gone.
     try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        state = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace").rsplit(")", 1)[1].split()[0]
     except (OSError, IndexError):
         return True
     return state != "Z"
@@ -461,13 +461,30 @@ def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) ->
 
 def _stop_hosts(tmp_path: Path, fake: str) -> str | None:
     """host_cleanup's stop and check: None when nothing of the test's is left,
-    and otherwise why the test fails. A failed scan raises ProcessScanError."""
+    and otherwise why the test fails. A failed scan raises ProcessScanError.
+
+    Every process it signals is also waited for by its pid (plan 037): one
+    that is already exiting has given its memory back, so its environment and
+    its arguments read as empty and the marker scan no longer sees it -- yet it
+    is not gone until it is reaped or a zombie, and a cleanup that stopped
+    looking then reported a hub that outlived it as nothing left. A watched
+    process is its pid and its start time (Linux), so a number the kernel
+    reuses for another process is never taken for it, and it leaves the watch
+    once gone; only marker processes are ever SIGKILLed, never a watched pid
+    the scan no longer recognises. A process that is already exiting before
+    the first scan is still unseen (a limit: its identity is known only from
+    an earlier look, such as _the_hub's)."""
     mine = marker_pids()
     registered = {pid for pid in map(_entry_pid, _registry_files(tmp_path)) if pid is not None}
-    _signal((registered & mine) | {p for p in mine if _is_lingering(p)}, signal.SIGTERM)
+    signalled = (registered & mine) | {p for p in mine if _is_lingering(p)}
+    # On Linux a pid whose start time cannot be read is already gone: it is
+    # not watched, so its number can never stand for another process.
+    watched = {p: t for p in signalled if (t := _started(p)) is not None or sys.platform != "linux"}
+    _signal(signalled, signal.SIGTERM)
     deadline = time.monotonic() + 8.0
     while True:
-        left = _stray_processes(fake) + [_describe_entry(p) for p in _registry_files(tmp_path)]
+        watched = _still(watched)
+        left = _left(watched, fake) + [_describe_entry(p) for p in _registry_files(tmp_path)]
         if not left or time.monotonic() >= deadline:
             break
         time.sleep(0.05)
@@ -477,12 +494,33 @@ def _stop_hosts(tmp_path: Path, fake: str) -> str | None:
     # checked, not assumed.
     _signal(marker_pids(), signal.SIGKILL)
     deadline = time.monotonic() + 5.0
-    while (alive := _stray_processes(fake)) and time.monotonic() < deadline:
+    while True:
+        watched = _still(watched)
+        alive = _left(watched, fake)
+        if not alive or time.monotonic() >= deadline:
+            break
         time.sleep(0.05)
     why = "a test left craze behind: " + "; ".join(left)
     if alive:
         why += "; still running after SIGKILL: " + "; ".join(alive)
     return why
+
+
+def _left(watched: dict[int, str | None], fake_agent: str) -> list[str]:
+    """One check of what is left: this test's hosts, hubs and fake agents the
+    marker scan sees, then every watched process still itself that the same
+    scan did not report (exiting: _stop_hosts) -- one scan, so a process
+    cannot slip between two of them, and each identity checked again after
+    it (and its line written before that last check), so a number reused
+    meanwhile is not reported. A reuse between that check and the report is
+    a residual: the kernel would have to recycle one pid within the same few
+    milliseconds, and it could only fail the test, never kill anything."""
+    strays = _stray_pids(fake_agent)
+    lines = [f"process {p}: {' '.join(_argv(p))[:200]}" for p in strays]
+    pending = {p: f"process {p}: signalled and not yet gone ({describe_pid(p)})" for p in sorted(set(watched) - set(strays))}
+    still = _still({p: watched[p] for p in pending})
+    lines += [pending[p] for p in sorted(still)]
+    return lines
 
 
 def _signal(pids: set[int], sig: signal.Signals) -> None:
@@ -493,11 +531,80 @@ def _signal(pids: set[int], sig: signal.Signals) -> None:
             pass
 
 
+def _exiting(pids: set[int], fake_agent: str) -> list[str]:
+    """The live pids of pids that the marker scan does not report as a host,
+    a hub or an agent (exiting: _stop_hosts), one line each."""
+    watched = {p: t for p in pids if (t := _started(p)) is not None or sys.platform != "linux"}
+    return [line for line in _left(watched, fake_agent) if line.startswith(tuple(f"process {p}: signalled" for p in watched))]
+
+
+def _started(pid: int) -> str | None:
+    """pid's start time (Linux: /proc/<pid>/stat's 22nd field, in clock
+    ticks since boot), which with the pid names one process; None where it
+    cannot be read (macOS, or gone)."""
+    if sys.platform != "linux":
+        return None
+    try:
+        return _proc_text(pid, "stat").rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _still(watched: dict[int, str | None]) -> dict[int, str | None]:
+    """The watched processes still alive and still themselves: a pid that is
+    gone, or whose start time is now another's or cannot be read (a number the
+    kernel reused, or one going), leaves the watch. Without a start time
+    (macOS) the pid alone is the identity."""
+    return {p: t for p, t in watched.items() if pid_alive(p) and (t is None or _started(p) == t)}
+
+
+def _proc_text(pid: int, name: str) -> str:
+    """/proc/<pid>/<name>, decoded with replacement: a task's name can hold
+    bytes that are not UTF-8."""
+    return Path(f"/proc/{pid}/{name}").read_bytes().decode("utf-8", "replace")
+
+
+def describe_pid(pid: int) -> str:
+    """What the kernel says of pid, for a failure's message: its state, its
+    thread count and where it waits (Linux), and how much of its arguments and
+    environment can still be read -- none once an exiting process has given
+    its memory back. It never raises."""
+    parts = []
+    if sys.platform == "linux":
+        try:
+            parts.append("state " + _proc_text(pid, "stat").rsplit(")", 1)[1].split()[0])
+        except (OSError, IndexError):
+            parts.append("state unreadable")
+        try:
+            threads = [ln.split(":", 1)[1].strip() for ln in _proc_text(pid, "status").splitlines() if ln.startswith("Threads:")]
+            parts.append("threads " + (threads[0] if threads else "?"))
+        except OSError:
+            parts.append("status unreadable")
+        try:
+            parts.append("wchan " + (_proc_text(pid, "wchan").strip() or "-"))
+        except OSError:
+            parts.append("wchan unreadable")
+    try:
+        argv = _argv(pid)
+        env = _environ(pid)
+    except Exception as e:  # a diagnostic, never the cleanup's failure
+        parts.append(f"argv/environ unreadable: {e!r}")
+    else:
+        parts.append(f"argv {' '.join(argv)[:120]!r}")
+        parts.append("environ " + ("unreadable" if env is None else f"{len(env)} entries"))
+    return ", ".join(parts)
+
+
+def _stray_pids(fake_agent: str) -> list[int]:
+    """The pids of this test's `craze serve` hosts, `craze hub`s and fake
+    agents still running."""
+    return [p for p in sorted(marker_pids()) if pid_alive(p) and _is_host_or_agent(p, fake_agent)]
+
+
 def _stray_processes(fake_agent: str) -> list[str]:
     """This test's `craze serve` hosts, `craze hub`s and fake agents still
     running."""
-    live = sorted(p for p in marker_pids() if pid_alive(p))
-    return [f"process {p}: {' '.join(_argv(p))[:200]}" for p in live if _is_host_or_agent(p, fake_agent)]
+    return [f"process {p}: {' '.join(_argv(p))[:200]}" for p in _stray_pids(fake_agent)]
 
 
 def _describe_entry(path: Path) -> str:

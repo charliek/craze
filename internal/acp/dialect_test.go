@@ -69,6 +69,31 @@ func TestResolveBinaryCandidates(t *testing.T) {
 	}
 }
 
+// TestLookupBinaryNamesWhatItLookedFor is plan 037 LC-3's half in acp: a
+// lookup that finds nothing names what it looked for in its own words —
+// the first candidate and the rest it tried, or the explicit path — never
+// exec's ("exec: \"agent\": executable file not found in $PATH", which named
+// the last fallback). The "agent binary not found: " prefix is kept.
+func TestLookupBinaryNamesWhatItLookedFor(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	missing := filepath.Join(t.TempDir(), "no-such-agent")
+	for _, tc := range []struct {
+		explicit   string
+		candidates []string
+		want       string
+	}{
+		{"", []string{"cursor-agent", "agent"}, "agent binary not found: cursor-agent is not on PATH (also tried agent)"},
+		{"", []string{"a", "b", "c"}, "agent binary not found: a is not on PATH (also tried b, c)"},
+		{"", []string{"grok"}, "agent binary not found: grok is not on PATH"},
+		{missing, []string{"grok"}, "agent binary not found: " + missing},
+		{"no-such-agent", nil, "agent binary not found: no-such-agent"},
+	} {
+		if _, err := LookupBinary(tc.explicit, tc.candidates); err == nil || err.Error() != tc.want {
+			t.Errorf("LookupBinary(%q, %q) = %v, want %q", tc.explicit, tc.candidates, err, tc.want)
+		}
+	}
+}
+
 // TestAuthenticateSendsMethodAndMeta pins the U1 auth shape: cursor sends
 // cursor_login with no _meta, grok sends its method with headless meta.
 func TestAuthenticateSendsMethodAndMeta(t *testing.T) {

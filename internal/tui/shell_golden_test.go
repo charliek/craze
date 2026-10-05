@@ -31,10 +31,10 @@ func TestFrameGoldenShellComposer100x30(t *testing.T) {
 		t.Fatalf("the session title should have given way to the mode:\n%s", plain)
 	}
 	th := Preset("tokyo-night")
-	if !strings.Contains(raw, ansiFG(string(th.Shell))) {
+	if !strings.Contains(raw, ansiFG(th.Shell.TrueColor)) {
 		t.Fatal("the composer's rules are not painted in the shell colour")
 	}
-	if th.Shell == th.Rule {
+	if th.Shell.TrueColor == th.Rule.TrueColor {
 		t.Fatal("the shell colour must differ from the ordinary rule")
 	}
 	// One `!` away, the composer is the composer again — there is no mode flag
@@ -92,16 +92,16 @@ func TestShellColourIsDerivedForEveryPreset(t *testing.T) {
 				spec = p
 			}
 		}
-		if want := blend(spec.border, spec.purple, shellMix); th.Shell != want {
+		if want := blend(spec.border, spec.purple, shellMix); th.Shell.TrueColor != want {
 			t.Fatalf("%s: Shell = %s, want Border blended %d%% towards Purple (%s)", name, th.Shell, shellMix, want)
 		}
 		// It has to read as a different line from the one it replaces, and it
 		// must not vanish into the background it is drawn on.
 		for _, other := range []struct {
 			name string
-			c    lipgloss.Color
+			c    lipgloss.CompleteColor
 		}{{"Rule", th.Rule}, {"Border", th.Border}, {"BG", th.BG}} {
-			if th.Shell == other.c {
+			if th.Shell.TrueColor == other.c.TrueColor {
 				t.Fatalf("%s: Shell must not equal %s", name, other.name)
 			}
 		}

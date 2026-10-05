@@ -99,7 +99,7 @@ func TestCreateStartsASession(t *testing.T) {
 	if !slices.Contains(cmd.Env, "CRAZE_HOME="+env.CrazeDir) {
 		t.Errorf("the host's environment has no absolute CRAZE_HOME %s", env.CrazeDir)
 	}
-	if !alive(cmd.Process.Pid) {
+	if !alive(t, cmd.Process.Pid) {
 		t.Fatal("the created host did not run on")
 	}
 
@@ -189,8 +189,8 @@ func TestCreateStartFailureLeavesNoHost(t *testing.T) {
 				t.Fatalf("the start failure says %q, cause %q; want the cause %q", e.Message, e.Data.Cause, failCause)
 			}
 			cmd, argv := s.cmd(0)
-			if _, listed := listedEntry(t, env, fakehost.ParseSpawnArgs(argv).HostID); listed || alive(cmd.Process.Pid) {
-				t.Fatalf("the failed session's host is still there (listed %v, alive %v)", listed, alive(cmd.Process.Pid))
+			if _, listed := listedEntry(t, env, fakehost.ParseSpawnArgs(argv).HostID); listed || alive(t, cmd.Process.Pid) {
+				t.Fatalf("the failed session's host is still there (listed %v, alive %v)", listed, alive(t, cmd.Process.Pid))
 			}
 		})
 	}
@@ -215,7 +215,7 @@ func TestCreateSpawnFailures(t *testing.T) {
 			if e.Message != tc.want {
 				t.Fatalf("spawn_failed says %q, want %q", e.Message, tc.want)
 			}
-			if cmd, _ := s.cmd(0); alive(cmd.Process.Pid) {
+			if cmd, _ := s.cmd(0); alive(t, cmd.Process.Pid) {
 				t.Fatal("the host that failed to spawn is still running")
 			}
 		})
@@ -545,7 +545,7 @@ func TestCreateTeardownMidCreate(t *testing.T) {
 		t.Fatalf("the cut create was answered %s", line)
 	}
 	cmd, _ := s.cmd(0)
-	if e, listed := listedEntry(t, env, id); !listed || e.RequestID != "r-td" || !alive(cmd.Process.Pid) {
+	if e, listed := listedEntry(t, env, id); !listed || e.RequestID != "r-td" || !alive(t, cmd.Process.Pid) {
 		t.Fatalf("the cut create's host did not run on: %+v, %v", e, listed)
 	}
 	openGate(t, gate, "ok")
@@ -923,14 +923,14 @@ func TestACreatedHostsAgentsAreEndedWhenItDies(t *testing.T) {
 		t.Fatalf("the host's agents' record %q (%v)", b, err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(-g.PGID, syscall.SIGKILL) })
-	if !alive(g.PGID) {
+	if !alive(t, g.PGID) {
 		t.Fatalf("the host's agent %d is not running", g.PGID)
 	}
 	cmd, _ := s.cmd(0)
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the dead host's agent ended", func() bool { return !alive(g.PGID) })
+	waitFor(t, "the dead host's agent ended", func() bool { return !alive(t, g.PGID) })
 	waitFor(t, "the dead host's agents' record removed", func() bool {
 		_, err := os.Stat(record)
 		return errors.Is(err, os.ErrNotExist)

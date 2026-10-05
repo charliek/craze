@@ -17,17 +17,22 @@ func NewRootCmd() *cobra.Command {
 	flags := &tuiFlags{force: true}
 	var showVersion bool
 	cmd := &cobra.Command{
-		Use:           "craze",
-		Short:         "An ACP client TUI for Cursor, Grok, and gx",
-		Long:          "craze is a terminal UI that drives cursor-agent, grok, or gx (a third-party Grok CLI fork) over ACP.",
+		Use:   "craze",
+		Short: "A terminal UI for coding agents",
+		// "built-in agent", never "native": the root --help names native
+		// exactly once, as a --provider choice (plan 028 D-65,
+		// TestRootHelpNamesNativeOnceAndNeverTheHarness).
+		Long: "craze is a terminal UI for coding agents: cursor-agent, grok or gx over ACP, or craze's own " +
+			"built-in agent, which needs only a model provider's API key or a ChatGPT plan (see craze auth).",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// cobra's own version flag answered before argument validation; keep that.
+		// Anything else is an unknown command, never quoted back (args.go).
 		Args: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
 				return nil
 			}
-			return cobra.NoArgs(cmd, args)
+			return noArgs(cmd, args)
 		},
 		// Every command, the root included, refuses to run while the removed
 		// config-file variable is set (paths.CheckEnv), before it can read or
@@ -35,7 +40,7 @@ func NewRootCmd() *cobra.Command {
 		// own: it would replace this one. --help never reaches a hook, and
 		// --version is let through here; both touch no file, so they still
 		// answer.
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Only the root's RunE honours --version, so only the root may skip
 			// the check for it.
 			if showVersion && cmd == cmd.Root() {
@@ -43,6 +48,9 @@ func NewRootCmd() *cobra.Command {
 			}
 			if err := paths.CheckEnv(); err != nil {
 				return usagef("craze: %v", err)
+			}
+			if isCompletionRequest(cmd) {
+				return checkCompletionRequest(cmd, args)
 			}
 			return nil
 		},
@@ -76,6 +84,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newHubCmd())
 	cmd.AddCommand(newAuthCmd())
+	// Every subcommand inherits it, but auth's, which sets its own in the
+	// same words (args.go).
+	cmd.SetFlagErrorFunc(usageFlagError)
+	withoutEchoingArgs(cmd)
 	return cmd
 }
 
@@ -83,7 +95,7 @@ func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the craze version",
-		Args:  cobra.NoArgs,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, err := fmt.Fprintln(cmd.OutOrStdout(), version.Version)
 			return err
@@ -118,6 +130,12 @@ func diagnose(ranCmd *cobra.Command, err error) (line string, code int) {
 	var ee *exitError
 	if errors.As(err, &ee) {
 		return ee.msg, ee.code
+	}
+	// A completion request's own argument check is cobra's (it takes at
+	// least the word being completed), and runs before anything of craze's
+	// could: it is a usage error like every other, in craze's words.
+	if isCompletionRequest(ranCmd) {
+		return diagnose(nil, completionRequestUsage(ranCmd, "takes the command line to complete"))
 	}
 	return err.Error(), 1
 }

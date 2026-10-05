@@ -195,7 +195,7 @@ func TestModeChipColourPerKind(t *testing.T) {
 	m := statusFixture(t)
 	for _, tc := range []struct {
 		mode  string
-		want  lipgloss.Color
+		want  lipgloss.CompleteColor
 		which string
 	}{
 		{"agent", m.theme.ModeImplement, "implement"},
@@ -213,7 +213,7 @@ func TestModeChipColourPerKind(t *testing.T) {
 			t.Fatalf("%s (%s) chip is %v, want %v", tc.mode, tc.which, got, tc.want)
 		}
 		row, _ := m.statusRow2(m.lay)
-		if !strings.Contains(row, ansiFG(string(tc.want))+text) {
+		if !strings.Contains(row, ansiFG(tc.want.TrueColor)+text) {
 			t.Fatalf("%s chip is not drawn in %s:\n%q", tc.mode, tc.want, row)
 		}
 		if !strings.Contains(plainView(m), text) {

@@ -230,7 +230,7 @@ def _cleanup_stops(rec: dict, tmp_path: Path, fake_agent_bin: Path) -> None:
     deadline = time.monotonic() + WAIT
     while conftest.pid_alive(rec["pid"]) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not conftest.pid_alive(rec["pid"]), "the hub outlived the cleanup"
+    assert not conftest.pid_alive(rec["pid"]), f"the hub outlived the cleanup: {conftest.describe_pid(rec['pid'])}"
     assert not Path(rec["socket"]).exists(), "the hub left its socket"
     assert not conftest._stray_processes(str(fake_agent_bin))
 
@@ -451,13 +451,90 @@ def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path
     _cleanup_stops(rec, tmp_path, fake_agent_bin)
 
 
-def test_new_refuses_with_the_hubs_words(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
-    """A create the hub refuses is its words on one stderr line, exit 1: no
-    provider named and none configured. Nothing is started."""
+def test_new_with_no_default_says_how_to_choose_one(craze_bin: Path, tmp_path: Path) -> None:
+    """No provider named and none configured: plain craze new says so in its
+    own words, before it asks any hub (plan 037 LC-4) -- one stderr line, exit
+    1, nothing started, not even a hub. --json passes the hub's own refusal
+    through whole (test_new_json_refusal_is_the_wire_error)."""
     out = _new(craze_bin, "-C", str(tmp_path), "hello")
     assert out.returncode == 1 and out.stdout == b"", out
-    assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
+    assert out.stderr == b"craze new: no default provider yet; pass --provider cursor, grok, gx or native\n", out.stderr
+    assert not list(_hubs(_home()).glob("*.json"))
     assert not [e for e in _entries(_home()) if e.get("requestId")]
+
+
+def test_new_unknown_provider_is_a_usage_error(craze_bin: Path, tmp_path: Path) -> None:
+    """An explicit --provider that names no provider is the usage error every
+    command gives (plan 037 LC-4): exit 2, one plain line -- with --json too,
+    since a usage error is never JSON -- before any hub is asked."""
+    for flags in ([], ["--json"]):
+        out = _new(craze_bin, *flags, "--provider", "nosuch", "-C", str(tmp_path), "hello")
+        assert out.returncode == 2 and out.stdout == b"", (flags, out)
+        assert out.stderr == b'craze: unknown provider "nosuch" (want cursor, grok, gx, or native)\n', (flags, out.stderr)
+    assert not list(_hubs(_home()).glob("*.json"))
+
+
+def _start_failure(out: subprocess.CompletedProcess[bytes]) -> str:
+    """A `craze new --json` whose session did not start: the wire's error,
+    whole, on stdout -- not_accepting, start_failed -- its message the cause
+    after "the session did not start: ", and the same words on stderr, exit 1.
+    Returns data.cause."""
+    assert out.returncode == 1, (out.returncode, out.stdout, out.stderr)
+    body = json.loads(out.stdout)
+    err = body["error"]
+    assert err["data"]["code"] == "not_accepting" and err["data"]["reason"] == "start_failed", err
+    cause = err["data"]["cause"]
+    assert err["message"] == "the session did not start: " + cause, err
+    assert out.stderr.decode() == "craze new: the session did not start: " + cause + "\n", out.stderr
+    return cause
+
+
+def test_new_native_with_no_key_names_the_chatgpt_plan(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """P-1 (plan 037): a native session started through the hub with no key
+    anywhere fails its start with SF-143's words in data.cause -- craze auth
+    login for an API key, or "craze auth login chatgpt" for a ChatGPT plan --
+    over the socket and into `craze new --json`'s error. Prose in data.cause,
+    not a wire change: the code and the reason are as ever."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n', encoding="utf-8")
+    work = tmp_path / "proj-native"
+    work.mkdir()
+    cause = _start_failure(_new(craze_bin, "--json", "--provider", "native", "-C", str(work)))
+    assert cause.startswith(
+        'native: no model provider has an API key \u2014 run "craze auth login" '
+        '(an API key, or "craze auth login chatgpt" for a ChatGPT plan), '
+    ), cause
+    assert cause.endswith(f"add api_key to {craze_home / 'native' / 'providers.toml'}"), cause
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
+def test_new_start_failure_names_the_missing_agent(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """P-1 (plan 037): a host whose agent binary is nowhere fails its start
+    with LC-3's words in data.cause over the socket -- what was looked for and
+    the fix, after the "agent binary not found: " prefix configuration.md
+    quotes -- never exec's error naming the last fallback. PATH holds nothing,
+    so neither candidate is found whatever this machine has installed."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    config = craze_home / "config.toml"
+    config.write_text(f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n', encoding="utf-8")
+    work = tmp_path / "proj-missing"
+    work.mkdir()
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    out = subprocess.run(
+        [str(craze_bin), "new", "--json", "--provider", "cursor", "-C", str(work)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env={**os.environ, "PATH": str(empty), "CRAZE_AGENT_BIN": ""},
+        timeout=6 * WAIT,
+    )
+    cause = _start_failure(out)
+    assert cause == (
+        "agent binary not found: cursor-agent is not on PATH (also tried agent); "
+        f"install it, or set [agents].cursor in {config}"
+    ), cause
     _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
 
 

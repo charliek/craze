@@ -501,7 +501,9 @@ func TestASetRefusedAfterTheDequeueIsNeverClaimed(t *testing.T) {
 		t.Cleanup(releaseCaller)
 		// A primary nobody reads, so the outbox can really be saturated, and no
 		// rig subscription yet, so nothing drains it behind the test's back.
-		s := newFake(t, agent.EventLogOptions{})
+		// The ring is saturableRing because readerOn below replays from the
+		// start.
+		s := newFake(t, agent.EventLogOptions{RingEvents: saturableRing})
 		e, err := newEngine(s, Options{}, &hooks{beforeRunSet: park})
 		if err != nil {
 			t.Fatal(err)

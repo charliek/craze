@@ -4,11 +4,21 @@ A Linux and macOS terminal UI that talks ACP to **Cursor** (`cursor-agent acp`),
 **Grok** (`grok agent stdio`), or **gx** — a third-party fork of the Grok
 CLI. You own the chrome; the provider still runs the agent. Its **native**
 provider runs the agent inside craze instead, against a model provider's API
-(see [Native provider](#native-provider)).
+or a ChatGPT plan, with no other CLI to install (see [Native
+provider](#native-provider)).
+
+Sessions run in a detached host and outlive the terminal: close the tab and the
+session keeps going. `craze ps` lists this machine's sessions, `craze attach`
+(or `craze -c`) rejoins one, and `craze new` starts one in the background
+through a per-machine hub that starts itself and exits when idle. See [Sessions
+outlive their terminal](docs/reference/cli.md#sessions-outlive-their-terminal)
+and the [`craze ps`](docs/reference/cli.md#craze-ps) and [`craze
+new`](docs/reference/cli.md#craze-new) reference.
 
 ## Install
 
-Either way, for the ACP providers you also need the [Cursor CLI](https://cursor.com/cli), the
+Either way, to run craze you need one way to reach a model. For the ACP
+providers that is the [Cursor CLI](https://cursor.com/cli), the
 [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
 [`gx`](https://github.com/charliek/grok-build) installed and logged in:
 `cursor-agent login` (also installed as `agent`), or `grok login` / set
@@ -16,8 +26,12 @@ Either way, for the ACP providers you also need the [Cursor CLI](https://cursor.
 same ACP dialect as `grok`, so everything here about Grok's behaviour
 applies to it too; it currently shares grok's `~/.grok` home (config, auth,
 sessions, skills) — that is the fork's current behaviour, not a craze
-guarantee. The native provider needs none of them, only an API key (see
-[Native provider](#native-provider)).
+guarantee. The native provider needs none of them, only an API key or a
+ChatGPT plan sign-in (see [Native provider](#native-provider)).
+
+Upgrading from v0.0.1? See [Upgrading from
+v0.0.1](docs/getting-started/upgrading.md): what changed, and how to turn each
+change off.
 
 ### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
 
@@ -110,8 +124,9 @@ Needs Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`; `mise install`).
 ./bin/craze --resume             # pick one of the last 10 sessions here
 ```
 
-Without `--provider`, the TUI shows a picker listing `cursor`, `grok`, and
-`gx` — gx only when a binary for it resolves — preselected to
+Without `--provider`, the TUI shows a picker listing `cursor`, `grok`, `gx` — gx
+only when a binary for it resolves — and `native`, a provider that cannot start
+dimmed with why (`unavailable`, `needs setup`), preselected to
 `$CRAZE_PROVIDER`, then `provider` in `~/.craze/config.toml`, then cursor.
 `Enter` starts that row; `Esc` starts the preselected default. `--provider`
 skips the picker; `--provider gx` works regardless of whether a binary
@@ -137,11 +152,22 @@ leaves a usable craze, so quitting out of one is an ordinary exit 0.
 
 ### Native provider
 
-`--provider native` needs no agent CLI, only an API key for one of the model
-providers craze ships a catalog for: Fireworks (`fireworks`, or export
-`FIREWORKS_API_KEY`), Meta (`meta`, `META_API_KEY`), OpenRouter (`openrouter`,
-`OPENROUTER_API_KEY`) or Z.AI Coding Plan (`zai-coding-plan`, `ZHIPU_API_KEY`
-or `ZAI_API_KEY`).
+`--provider native` needs no agent CLI, only a credential for one of the five
+providers craze ships a catalog for:
+
+| Provider | Id for `craze auth` | Or export |
+|---|---|---|
+| ChatGPT plan | `chatgpt` | none: a sign-in, not a key |
+| Fireworks | `fireworks` | `FIREWORKS_API_KEY` |
+| Meta | `meta` | `META_API_KEY` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Z.AI Coding Plan | `zai-coding-plan` | `ZHIPU_API_KEY` or `ZAI_API_KEY` |
+
+A ChatGPT plan signs in rather than giving a key: `craze auth login chatgpt`
+prints an address to open in a browser (it opens one itself on a desktop or a
+Mac) and, over SSH or with the browser on another machine, takes the address the
+browser lands on pasted back. See [Signing in to the ChatGPT
+plan](docs/reference/cli.md#signing-in-to-the-chatgpt-plan).
 
 ```shell
 ./bin/craze auth login fireworks   # asks for the key without echoing it; or export FIREWORKS_API_KEY
@@ -165,7 +191,7 @@ models and providers](docs/reference/configuration.md#native-models-and-provider
 | Key | Action |
 |---|---|
 | `Enter` | send; queue the draft while a turn is running |
-| `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first) |
+| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first) |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
 | `Ctrl+C` | cancel the running turn and everything queued behind it; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
@@ -337,7 +363,7 @@ out (the last frame and the wait it was stuck on go to stderr).
 ## Tests
 
 ```shell
-make lint && make test && make build && make test-cli
+make lint && make test && make test-race && make build && make test-cli
 ```
 
 `make test-cli` runs the Python suite in `tests/cli` under `uv`: `test_prompt.py`
@@ -367,6 +393,7 @@ Published site: https://charliek.github.io/craze/
 Sources live under `docs/`:
 
 - [Quick Start](docs/getting-started/quick-start.md)
+- [Upgrading from v0.0.1](docs/getting-started/upgrading.md)
 - [CLI](docs/reference/cli.md)
 - [TUI](docs/reference/tui.md)
 - [Configuration](docs/reference/configuration.md)

@@ -32,6 +32,24 @@ type AdmissionFence interface {
 	FenceDown()
 }
 
+// PromptAdmitter is a session that rewrites what a person sends it before
+// anything records it (plan 037 N1): native redacts the key values it knows
+// in the shell context block a `!` command puts in front of the next message,
+// which is what that command printed, not what the person typed. The engine
+// admits every text a client gives it through it — a prompt, a queued row, an
+// edit of one, an interjection — before the text reaches a turn's record, the
+// queue's, the journal or the session; a session that is not one (an ACP
+// agent's) gets the text as it was sent.
+//
+// The contract: AdmitPrompt never blocks on anything but the session's own
+// short sections (native reads its redactor under s.mu and the harness's leaf
+// locks), never calls back into the engine, and publishes nothing; the engine
+// calls it with no lock of its own held. Admitting a text twice changes
+// nothing the first did not.
+type PromptAdmitter interface {
+	AdmitPrompt(text string) string
+}
+
 // OwedWork is a session that can owe its user work outside any turn — native's
 // background children (plan 026 §3.11): a child still running, or its result
 // published and waiting for the wake that delivers it. A host deciding whether
