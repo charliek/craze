@@ -5472,10 +5472,10 @@ and a `craze-live-smoke` skill). No new feature, no protocol change: not one
 golden, wire fixture or schema file moved (V8 reported 0 at every commit). One
 PR, eight milestone commits (C1–C8) with their fix rounds, gated per commit,
 reviewed on a detached snapshot after each commit in Plan 036's pattern. The
-plan lives outside the repo; its execution amendments (X1–X32 and the
+plan lives outside the repo; its execution amendments (X1–X38 and the
 sub-notes, in the plan folder's `progress.md`) are the truth.
 
-PR: #<n> (pending)
+PR: #90, merged as 3d5deab (2026-10-05).
 
 **Owner decisions (2026-10-04), at the Phase 3b pause.** Q1 (SF-151, the
 `TestBashNoControllingTerminal` flake): the owner declined the plan's options
@@ -5536,6 +5536,23 @@ overrode the brief's "never a paid turn").
 - **C8 — this record.** `13`: the closed rows deleted, SF-106 and SF-116
   updated, a "Plan 037 — release readiness" section (SF-152–SF-185); this
   section; native-harness `07-roadmap.md` and `README.md`. Docs only.
+- **C9 (`ffa7d64`) — live-check fix-ups.** ssh to the mac-mini returns 0
+  whatever the remote command did, so `smoke.sh --host mac stop` reads output,
+  not exit codes (the skill says so); the README's docs list links the upgrade
+  page.
+- **C10 (`bafa758`), C11 (`0090574`), C11r (`0773e3c`) — the branch review's
+  P3s and their reviews.** The journal docs say what native redacts upstream;
+  `native/` is created on first use; the verify scripts' option guards refuse
+  missing and empty values (exit 2), checked by the selftest; every tmux target
+  in `smoke.sh` is exact (`=name:`), so an absent name never reaches the
+  owner's `smoke` session.
+- **C12 (`b714726`) — CodeRabbit on PR #90.** `v1.sh --changed` selects the
+  whole test-race set after a go.mod/go.sum change; `--calibrate` refuses an
+  empty selection; two suggestions declined with evidence (the upgrade page's
+  anchor is Zensical's own id; `craze new`'s pre-check mirrors session.create's
+  rule, now pinned by two test cases).
+- **C13 (`9e1aaee`) — a CI flake on PR #90** (below): the host cleanup waits,
+  by pid and start time, for every process it signalled.
 
 ### Execution decisions
 
@@ -5690,7 +5707,20 @@ test beside each other, `starve.sh` for a CPU quota).
   passed before the fix. (3) A forced-delay proof of a hypothesis is not proof
   it is the failing mechanism; only the stressed repro going green is.
 
-### Verification so far
+- **F-CI1: `test_hub.py::test_new_native_with_no_key_names_the_chatgpt_plan`
+  (new in C6), PR #90's push run 37274185415 at `b714726`, cli ubuntu; 1 of 4
+  runs, 0 of 70 here.** Its own assertions passed; then `_cleanup_stops` saw
+  `_stop_hosts` report nothing left while the hub's pid was alive, not a
+  zombie, 10 s later. `_stop_hosts` re-derived what was left from each
+  process's environment (the marker) and argv, and an exiting process that has
+  released its memory reads as having neither, so the hub dropped out of the
+  scan before it was gone. C13 watches each signalled process by pid and start
+  time until it is reaped or a zombie, SIGKILLs only marker processes, and puts
+  the kernel's view (`describe_pid`) in the failure; why that exit took over
+  10 s on the runner is not proven. Four review rounds (r22–r26); the residual
+  pid-reuse window of a few milliseconds can only fail a test, never kill.
+
+### Verification
 
 Proof numbers (before → after) are in the flakes above; the rest:
 
@@ -5738,12 +5768,21 @@ Proof numbers (before → after) are in the flakes above; the rest:
 - **Per-commit gates.** Every commit's `make lint`, `make test`, `make
   test-race`, `make build` and `make test-cli` exited 0, and `gate.sh` (gate-at)
   on the committed shas reported `GATE_EXIT=0`: c1r, c2r (covering C2), c3
-  (covering C2r2), c3r, c4, c5 (covering C1r2, C1r3 and C3r2) and c6 (covering
-  C3r3). `make docs` ok at C1.
-- **Pending at this record:** the branch-level astra review (r17), V1 (the long
-  `-race -count=20` jobs), the macOS test run over the branch, CI on both
-  operating systems for both runs of the final head, and the merge SHA (a
-  docs-only push to main after the merge, gated).
+  (covering C2r2), c3r, c4, c5 (covering C1r2, C1r3 and C3r2), c6 (covering
+  C3r3), c7c6r, final (C8–C9), c10, c11, c11r, c12 and c13e. `make docs` ok at
+  C1, C7 and the docs fix-ups.
+- **Branch-level review (r17, astra):** no P1/P2 across the commits'
+  interactions; its four P3s fixed in C10, closed by r18–r20.
+- **V1** (`-race -count=20`, tui as 4 × `-count=5`): every test-race package,
+  35/35 ok, 0 data races — the 22 `--changed` jobs at `ffa7d64`, the other 13
+  at `b714726`.
+- **mac-mini:** `mac-test.sh` at `ffa7d64`, 8 real `ok` lines, 0 FAIL.
+- **CI:** both runs (push and pull_request) of the final head `9e1aaee` green
+  on ubuntu and macOS (test, cli) with lint, build and release-snapshot; of
+  the earlier runs only `b714726`'s push run failed (cli ubuntu: F-CI1, fixed
+  in C13); the Docs PR Build passed on every head.
+- **Docs:** docs.yml's first run on main (`3d5deab`) built and deployed with
+  setup-uv pinned to 0.12.7 (run 37281894328).
 
 ### Not done, and where it went
 
