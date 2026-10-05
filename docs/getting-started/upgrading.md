@@ -78,8 +78,10 @@ is `~/.cache/craze/host-logs/<hostId>.log`.
 Every session now writes a journal, one file per session, under
 `~/.craze/journal/<workspace>/` (or `$CRAZE_HOME/journal/`). A `craze prompt`
 run leaves one file too. It records the events, and your prompts and every
-tool's output **verbatim, with no redaction**: a key you typed into a shell
-command, or a file the agent read, is in it in plain text. The files are `0600`
+tool's output as the session admitted them. The journal itself adds no
+redaction (on native, a `!` command's known provider credentials are already
+redacted before the prompt is recorded), so any other secret, such as a key you
+typed into a shell command or a file the agent read, is in it in plain text. The files are `0600`
 in `0700` directories, never uploaded, and **never pruned**: they accumulate
 until you delete them (deleting the directory is always safe).
 
@@ -173,7 +175,7 @@ them:
 | Where | Holds |
 |-------|-------|
 | `~/.craze/journal/` | [the journals](#the-journal) |
-| `~/.craze/native/` | the native provider's keys (`providers.toml`), `models.toml`, `recent.json`, and the ChatGPT plan's tokens (`auth/chatgpt.json`); made on the first `craze auth login` |
+| `~/.craze/native/` | the native provider's keys (`providers.toml`), `models.toml`, `recent.json`, and the ChatGPT plan's tokens (`auth/chatgpt.json`); native session transcripts (`sessions/`); created on first use |
 | `~/.craze/attachments/` | images pasted into the composer, swept after seven days |
 | `~/.cache/craze/` | the host registry, the hub's record, locks, host logs and the model catalog cache; under your own `$HOME`, not `CRAZE_HOME` |
 | `$XDG_RUNTIME_DIR/craze/<ns>/` | [the sockets](#the-control-socket) |

@@ -12,7 +12,7 @@ repo's tests), in a few minutes:
   --help on every script; an invalid sha (2) on every script that takes one;
   a failed export (2); a failing test (1); a malformed or too-long label (2,
   nothing written); an output or export dir that reaches the repository
-  through `..` or a symlink (2, nothing written); two concurrent runs with
+  through \`..\` or a symlink (2, nothing written); two concurrent runs with
   one label (two unique export dirs); starve.sh and contend.sh without
   systemd-run/taskset (3); a failed build (2: cpu1, v2, and starve/contend
   where the tools exist); a panic before any test in contend.sh (and
@@ -242,6 +242,9 @@ if command -v systemd-run >/dev/null; then expect "invalid sha: starve" STARVE 2
 if command -v taskset >/dev/null; then expect "invalid sha: contend" CONTEND 2 "$V/contend.sh" inv "$BAD" internal/ok 0 1 .; fi
 expect "invalid sha: v1 --plan" V1 2 "$V/v1.sh" inv --plan --sha "$BAD" --pkgs ./internal/ok
 expect "invalid sha: v2" V2 2 "$V/v2.sh" inv "$BAD"
+expect "option without a value: v8 --base" V8 2 "$V/v8.sh" --base
+expect "option without a value: v1 --sha" V1 2 "$V/v1.sh" inv --plan --sha
+expect "option without a value: v2 --only" V2 2 "$V/v2.sh" inv "$(git -C "$REAL_ROOT" rev-parse HEAD)" --only
 
 # 3. A failed export (the commit exists; one of its blobs does not).
 expect "failed export" CPU1 2 "$V/cpu1.sh" exp broken-export ./internal/ok

@@ -174,12 +174,12 @@ do_plan() {
 	local sha=HEAD base=origin/main sel=changed pkgs='' count=20
 	while (($#)); do
 		case $1 in
-		--sha) sha=${2:?--sha needs a value}; shift 2 ;;
-		--base) base=${2:?--base needs a value}; shift 2 ;;
-		--pkgs) sel=pkgs; pkgs=${2:?--pkgs needs a value}; shift 2 ;;
+		--sha) (($# >= 2)) || die 2 "--sha needs a value"; sha=$2; shift 2 ;;
+		--base) (($# >= 2)) || die 2 "--base needs a value"; base=$2; shift 2 ;;
+		--pkgs) (($# >= 2)) || die 2 "--pkgs needs a value"; sel=pkgs; pkgs=$2; shift 2 ;;
 		--changed) sel=changed; shift ;;
 		--makefile-set) sel=makefile-set; shift ;;
-		--count) count=${2:?--count needs a value}; shift 2 ;;
+		--count) (($# >= 2)) || die 2 "--count needs a value"; count=$2; shift 2 ;;
 		*) usage >&2; die 2 "unknown --plan option: $1" ;;
 		esac
 	done
@@ -259,7 +259,7 @@ do_job() {
 	shift
 	while (($#)); do
 		case $1 in
-		--sha) sha=${2:?--sha needs a value}; shift 2 ;;
+		--sha) (($# >= 2)) || die 2 "--sha needs a value"; sha=$2; shift 2 ;;
 		*) usage >&2; die 2 "unknown --job option: $1" ;;
 		esac
 	done

@@ -56,7 +56,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
-| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens) and the sign-in log — see [Native models and providers](#native-models-and-providers). Made on first use |
+| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens), the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -198,8 +198,10 @@ craze says so once on stderr. The session itself carries on either way.
 
 ### Journals can contain secrets
 
-Prompts and tool output are written **verbatim, with no redaction**. Whatever
-you type and whatever a tool prints — an API key in a shell command, the
+The journal itself adds no redaction: it records what the session admitted. On
+native, a `!` command's known provider credentials are already redacted
+(`[craze:redacted-credential]`) before the prompt is recorded, but nothing else
+is. Whatever you type and whatever a tool prints — an API key in a shell command, the
 contents of a file the agent read, a token in an error message — is on disk in
 plain text. That is the point of the record, and it is why the files are
 `0600` in `0700` directories, both *no broader than*: a restrictive umask
