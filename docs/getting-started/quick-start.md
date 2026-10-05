@@ -3,18 +3,21 @@
 ## Prerequisites
 
 1. Linux or macOS.
-2. For the ACP providers, install the [Cursor CLI](https://cursor.com/cli), the
-   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
-   [`gx`](https://github.com/charliek/grok-build) — a third-party fork of
-   the Grok CLI that speaks the same ACP dialect as `grok`, so everything
-   here about Grok applies to it too.
-3. Log in: `cursor-agent login` (the same binary is also installed as
-   `agent`), or `grok login` / set `XAI_API_KEY`. `gx` currently shares
-   grok's `~/.grok` home, so the same login covers it — that is the fork's
-   current behaviour, not a craze guarantee.
+2. One way to reach a model, either of:
+    - **craze's own native provider**, which needs no other CLI: an API key for
+      one of the model providers craze ships a catalog for, or a ChatGPT plan
+      to sign in with (see [Native provider](#native-provider) below); or
+    - **an ACP agent**: install the [Cursor CLI](https://cursor.com/cli), the
+      [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
+      [`gx`](https://github.com/charliek/grok-build) — a third-party fork of
+      the Grok CLI that speaks the same ACP dialect as `grok`, so everything
+      here about Grok applies to it too — and log in: `cursor-agent login` (the
+      same binary is also installed as `agent`), or `grok login` / set
+      `XAI_API_KEY`. `gx` currently shares grok's `~/.grok` home, so the same
+      login covers it — that is the fork's current behaviour, not a craze
+      guarantee.
 
-The native provider needs neither step: it runs inside craze and needs only an
-API key (see [Native provider](#native-provider) below).
+Coming from v0.0.1? Read [Upgrading from v0.0.1](upgrading.md) first.
 
 ## Install
 
@@ -90,8 +93,8 @@ make build
 ```
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
-is for tests; a live session uses `cursor-agent`, `grok`, or `gx` on `PATH` (or
-`--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27+ (this repo pins 1.27.1 via
+is for tests; a live session uses the native provider, or `cursor-agent`, `grok`
+or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27+ (this repo pins 1.27.1 via
 `.mise.toml`; `mise install`).
 
 ## First run
@@ -121,17 +124,36 @@ craze refuses to start the TUI on a non-tty. For a scripted turn, use
 
 The native provider (`--provider native`) runs the agent inside craze itself,
 talking to a model provider's API: there is no agent CLI to install, only an
-API key to give it. craze ships a catalog of models from four providers and
-needs a key for at least one:
+API key or a ChatGPT plan sign-in to give it. craze ships a catalog of models
+from four API-key providers, and can also use a ChatGPT plan; it needs one of
+them connected:
 
 | Provider | Id for `craze auth` | Or export |
 |----------|---------------------|-----------|
+| ChatGPT plan | `chatgpt` | none: `craze auth login chatgpt` signs in with your ChatGPT account |
 | Fireworks | `fireworks` | `FIREWORKS_API_KEY` |
 | Meta | `meta` | `META_API_KEY` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
 | Z.AI Coding Plan | `zai-coding-plan` | `ZHIPU_API_KEY` or `ZAI_API_KEY` |
 
-1. Give craze a key, one of two ways:
+1. Connect one, either of two ways:
+
+    **With a ChatGPT plan**, sign in instead of giving a key:
+
+    ```bash
+    craze auth login chatgpt          # prints an address to open and approve in a browser
+    ```
+
+    craze opens the browser itself on a desktop or on macOS, and waits for the
+    browser to come back to `http://127.0.0.1:1455/auth/callback`. Over SSH, or
+    when the browser is on another machine, that page does not load: copy its
+    whole address from the browser's address bar and paste it at craze's
+    `Redirect address: ` prompt (`craze auth login chatgpt --no-browser` skips
+    the browser and the listener and uses only that prompt). Inside the TUI,
+    `/connect` does the same. Details: [Signing in to the ChatGPT
+    plan](../reference/cli.md#signing-in-to-the-chatgpt-plan).
+
+    **With an API key**, give craze one of two ways:
 
     ```bash
     craze auth login fireworks        # asks for the key; it is not shown as you type
@@ -147,7 +169,8 @@ needs a key for at least one:
     you store it: a wrong one shows as an error on first use.
 
 2. Check it: `craze auth list` shows each provider and how it is connected
-   (`env FIREWORKS_API_KEY`, `stored key`, or `not connected`).
+   (`env FIREWORKS_API_KEY`, `stored key`, `not connected`; the ChatGPT plan
+   reads `signed in as <email> …` or `not signed in`).
 
 3. Start a native session:
 
@@ -156,8 +179,8 @@ needs a key for at least one:
     craze prompt --provider native "hello"     # one headless turn
     ```
 
-    With no key for any provider, the session refuses to start and says how to
-    give it one. `/model` switches models, listing those of providers that
+    With nothing connected, the session refuses to start and says how to
+    connect one. `/model` switches models, listing those of providers that
     have a key (with a `Connect a provider…` row while some provider has none;
     `/connect` stores a key from inside the TUI, and a newly connected provider's
     models are in `/model` at once, and in new sessions). `--model <alias>` starts on one.
@@ -173,10 +196,20 @@ retired ones go, with no edit on your side. Your own files hold only keys,
 changes to shipped models, and models you add, and an upgrade never rewrites
 them.
 
+## Sessions outlive the terminal
+
+The ordinary `craze` runs the session in a detached host, so closing the terminal
+keeps it running: `craze ps` lists this machine's sessions, `craze attach` (or
+`craze -c`) joins one, `craze new` starts one in the background through the
+per-machine hub, and `/exit` ends one. Detaching, the journal and the control
+socket each have a switch, listed in [Upgrading from v0.0.1](upgrading.md); the
+[CLI reference](../reference/cli.md#sessions-outlive-their-terminal) has the
+commands.
+
 ## Exit codes
 
 craze exits **nonzero when the session never started** — not logged in to the
-provider, or an agent binary (`cursor-agent`, `grok`, `gx`) that would not come up. It still draws the TUI and puts the
+provider, no native credential, or an agent binary (`cursor-agent`, `grok`, `gx`) that would not come up. It still draws the TUI and puts the
 error in the transcript, because that is where you can read it, but the process
 tells a script that nothing ran. An error *during* a session leaves a usable
 craze, so quitting out of one is an ordinary exit 0.
@@ -185,4 +218,5 @@ craze, so quitting out of one is an ordinary exit 0.
 
 - [CLI](../reference/cli.md) — flags for `craze` and `craze prompt`, and `craze auth`
 - [TUI](../reference/tui.md) — keys, cards, slash commands
+- [Upgrading from v0.0.1](upgrading.md) — what changed since the first release
 - [Configuration](../reference/configuration.md) — themes and `~/.craze/config.toml`

@@ -259,7 +259,7 @@ A row is the [session info document](#the-session-info-document) plus:
 |---|---|
 | `title` | |
 | `activity` | `starting`, `replaying`, `idle`, `working`, `error` or `closing` |
-| `foreignTurn` | the agent is running a turn of its own — grok's interjection fallback, or a native sub-agent's wake — during which `activity` reads `idle` |
+| `foreignTurn` | the agent is running a turn of its own — grok's interjection fallback, or a native wake (a background sub-agent's or shell job's result) — during which `activity` reads `idle` |
 | `pendingAsks` | how many asks are open |
 | `headAsk` | `{id, kind, label, summary?}`, the first open ask (absent when none is); `summary` is a [row fact](#the-row-facts) |
 | `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
@@ -483,8 +483,9 @@ own lifecycle), a bare `Subscribe` (attach subsumes it) and `NewClientID`
 
 ### The reply barrier
 
-Every mutating method's reply, and `session.sync`'s own (it is the barrier
-with no command), waits for the **event barrier** before it is queued: the
+Every mutating method's reply except `session.stop`'s receipt (queued before
+anything the stop causes), and `session.sync`'s own (it is the barrier with no
+command) and `session.models.refresh`'s, waits for the **event barrier** before it is queued: the
 log's committed head at the moment of the call, forwarded to this
 connection's attachment — or the attachment's terminal acknowledgement, if it
 ends first — so a client is never handed a reply before the events the
@@ -764,7 +765,8 @@ would start it, in the hub's own process:
 
 - **cursor, grok and gx** are `ready` when their binary resolves as a created
   host resolves it: `[agents].<provider>` in the hub's `config.toml`, else the
-  provider's own name on the hub's `PATH` — never `CRAZE_AGENT_BIN`, which the
+  provider's own binary names on the hub's `PATH` (`cursor-agent` then `agent` for
+  cursor, `grok`, `gx`) — never `CRAZE_AGENT_BIN`, which the
   hub hands no host. A binary not found is `unavailable`, and the reason names
   where the hub looked: `cursor-agent not found on PATH`, or `[agents].cursor
   /opt/x/cursor-agent not found`.
@@ -1192,30 +1194,32 @@ there, and a client built before the method ignores the member.
 
 `foreignTurn` (on `sessions.list` rows, `session.state`, and inside a
 snapshot) says the agent is running a turn of its own that craze did not
-start: grok's interjection fallback, or a native sub-agent's background
-"wake". While one runs, the engine's own `activity` reads `idle` — a foreign
+start: grok's interjection fallback, or a native wake (a background
+sub-agent's or shell job's result). While one runs, the engine's own `activity` reads `idle` — a foreign
 turn is not itself an activity, it overlays whichever one is current.
 
-On the event stream, a foreign turn is bracketed by two
-`foreign_turn` events, `{id, text, reason?, running}`:
+On the event stream, a foreign turn is bracketed by two `foreign_turn` events
+whose `foreignTurn` member is `{id, text?, reason?, running?}` — `running: true`
+on the start, absent on the end:
 
 ```json
-{"type":"foreign_turn","id":"wake-1","text":"sub-agent result","reason":"subagent_wake","running":true, "at":"..."}
-{"type":"foreign_turn","id":"wake-1","reason":"subagent_wake","running":false, "at":"..."}
+{"type":"foreign_turn","foreignTurn":{"id":"wake-1","text":"sub-agent result","reason":"subagent_wake","running":true},"at":"..."}
+{"type":"foreign_turn","foreignTurn":{"id":"wake-1","reason":"subagent_wake"},"at":"..."}
 ```
 
-`reason` is an **open string** — not a closed enum — with two values known
-today: `""` (grok's fallback) and `subagent_wake` (a native child's wake). An
+`reason` is an **open string** — not a closed enum — with three values known
+today: `""` (grok's fallback), `subagent_wake` (a native child's wake) and
+`job_wake` (a native wake delivering background shell jobs' results). An
 unknown value renders with the default wording; a client must not fail on
 one it has never seen.
 
 A foreign turn has **no `EventDone` and no `EventError`**: nothing about how
-it ended is on the wire beyond `running: false`. A client learns only that it
-is over, never its outcome. `foreignTurn{running: false}` always precedes the
+it ended is on the wire beyond the end bracket (no `running`). A client learns only that it
+is over, never its outcome. The end bracket (`foreignTurn` with no `running`) always precedes the
 next turn's own output on the stream — an agent's own next turn (a queued
 follow-up draining, say) never races ahead of the foreign turn's ending.
 
-A `foreign_turn` ending with `next: ""` and a non-empty queue does **not**
+A `foreign_turn` ending followed by a non-empty queue does **not**
 mean the queue is stuck: it can equally mean a queued row was restored to
 the head of the queue and will drain on its own paced retry. A client tells
 the two apart by `session.state.activity` (idle means it will drain; a
@@ -1751,8 +1755,10 @@ ready line on stdout,
 {"socket":"/tmp/.../host.sock","sessionId":"session-fake-1","hostId":"0123456789ab"}
 ```
 
-then reads the same NDJSON ops described above from stdin —
-`text`, `thought`, `tool`, `permission`, `question`, `plan`, `end`,
+then reads ops from stdin, one JSON object per line: the `op` member of a
+fixture's op line, e.g. `{"name":"text","text":"hi"}` or
+`{"name":"foreign_turn","id":"wake-1","reason":"subagent_wake","running":true}`.
+The names are `text`, `thought`, `tool`, `permission`, `question`, `plan`, `end`,
 `foreign_turn`, `stall_writes`, `resume_writes`, `drop_connections`,
 `restart` (a new incarnation of the same session), `quit`, plus a few the
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
@@ -2209,7 +2215,8 @@ naming `/run/user/<uid>` makes the second and third candidates the same one):
    symlink) — never `$TMPDIR`, which on macOS is long enough on its own to
    crowd out `sun_path`.
 
-Only a host searches these bases; a resolver never does; see
+Only a host, and its namespace's hub (`<base>/<ns>/hub.sock`), search these
+bases; a resolver never does; see
 [the registry](#the-registry) below.
 
 ### The namespace and the socket path

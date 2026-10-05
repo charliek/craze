@@ -72,7 +72,7 @@ the session synthesizes the same records from `cursor/task` receipts.
 
 ## Host and client
 
-The session does not live in the terminal's process (plan 030 §3.3–§3.6).
+The session does not live in the terminal's process.
 `craze serve` is the **host**: it owns the engine, the agent process, the
 claim on the session, the journal and the session-index writes, and serves the
 session over the control socket. The ordinary `craze` is a **launcher** and
