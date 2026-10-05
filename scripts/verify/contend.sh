@@ -17,7 +17,11 @@ cores) and SF-135 (8 copies on 2 cores) where a CPU quota could not.
 Linux only (exit 3 without taskset). CRAZE_GOLDEN_TRANSPORT defaults to both.
 
 Prints CONTEND rcs=<each copy's exit> pass=<n> fail=<n> (top-level lines,
-all copies) and the first failures. Logs: \$OUT/contend-<stamp>.<i>.log
+all copies) crashed=<n> and the first failures. A copy that exits non-zero
+before any top-level PASS/FAIL line (a panic in init or TestMain) is crashed:
+a test failure (1), shown by its first panic: lines. Exit 2 is kept for a
+harness failure: the build, the export, or taskset itself failing (a bad
+<cpus>). Logs: \$OUT/contend-<stamp>.<i>.log
 $CV_HELP_COMMON
 EOF
 }
@@ -70,18 +74,31 @@ contend() {
 }
 s0=$(date +%s)
 cv_run "$CV_LOG" contend
-rcs=() pass=0 fail=0 bad=0
+rcs=() pass=0 fail=0 bad=0 crashed=0 harness=()
 for ((i = 1; i <= copies; i++)); do
 	r=$(cat "$base.$i.rc" 2>/dev/null || echo '?')
 	rcs+=("$r")
 	[[ $r == 0 ]] || bad=1
-	n=$(grep -c '^--- PASS' "$base.$i.log" 2>/dev/null)
-	pass=$((pass + ${n:-0}))
-	n=$(grep -c '^--- FAIL' "$base.$i.log" 2>/dev/null)
-	fail=$((fail + ${n:-0}))
+	p=$(grep -c '^--- PASS' "$base.$i.log" 2>/dev/null)
+	f=$(grep -c '^--- FAIL' "$base.$i.log" 2>/dev/null)
+	pass=$((pass + ${p:-0})) fail=$((fail + ${f:-0}))
+	if [[ $r == '?' ]]; then
+		harness+=("copy $i has no exit status")
+	elif [[ $r != 0 ]] && grep -q '^taskset: ' "$base.$i.log" 2>/dev/null; then
+		harness+=("copy $i: $(grep -m1 '^taskset: ' "$base.$i.log")")
+	elif [[ $r != 0 && ${p:-0} == 0 && ${f:-0} == 0 ]]; then
+		# The binary ended before any test result: a panic in init or TestMain
+		# (or an os.Exit there) is a test failure, not a harness one.
+		crashed=$((crashed + 1))
+		echo "CONTEND copy $i rc=$r ended before any test result:"
+		if grep -q '^panic:' "$base.$i.log"; then grep -m3 '^panic:' "$base.$i.log"; else tail -5 "$base.$i.log"; fi
+	fi
 done
-echo "CONTEND label=$CV_LABEL sha=$CV_SHA pkg=$pkg cpus=$cpus copies=$copies count=$count race=${race:-no} rcs=${rcs[*]} pass=$pass fail=$fail elapsed=$(($(date +%s) - s0))s logs=$base.<i>.log"
+echo "CONTEND label=$CV_LABEL sha=$CV_SHA pkg=$pkg cpus=$cpus copies=$copies count=$count race=${race:-no} rcs=${rcs[*]} pass=$pass fail=$fail crashed=$crashed elapsed=$(($(date +%s) - s0))s logs=$base.<i>.log"
 grep -hE '^ *--- FAIL|^ +[^ ]+\.go:[0-9]+: |^panic:' "$base".*.log 2>/dev/null | head -20
 if ((bad == 0)); then exit 0; fi
-if ((pass == 0 && fail == 0)); then die 2 "no copy produced a result (see $base.1.log)"; fi
+if ((${#harness[@]} > 0)); then
+	printf '%s\n' "${harness[@]}" >&2
+	die 2 "a copy did not run its test binary (see $base.<i>.log)"
+fi
 exit 1

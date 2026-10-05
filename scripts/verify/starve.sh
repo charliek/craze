@@ -18,7 +18,10 @@ that use contend.sh. Linux with a systemd user session only (exit 3 without
 systemd-run). CRAZE_GOLDEN_TRANSPORT defaults to both, as in the gate.
 
 Prints STARVE pass=<n> fail=<n> (top-level --- PASS/--- FAIL lines) and the
-first failing lines. Log: \$OUT/starve-<stamp>.log
+first failing lines. A binary that exits non-zero before any result (a panic
+or an os.Exit in init or TestMain) is a test failure (1); exit 2 is kept for
+the build, the export, or systemd-run's own failure ("Failed to …").
+Log: \$OUT/starve-<stamp>.log
 $CV_HELP_COMMON
 EOF
 }
@@ -68,6 +71,9 @@ grep -E '^ *--- FAIL|^ +[^ ]+\.go:[0-9]+: |^panic:' "$CV_LOG" | head -20
 if ((rc == 0)); then exit 0; fi
 if ((fail == 0 && pass == 0)) && ! grep -qE '^(FAIL|panic:)' "$CV_LOG"; then
 	tail -5 "$CV_LOG"
-	die 2 "the test binary produced no result (systemd-run failed?)"
+	if grep -qE '^(Failed to |systemd-run: )' "$CV_LOG"; then
+		die 2 "systemd-run failed; the test binary never ran"
+	fi
+	echo "starve.sh: the test binary exited $rc before any test result (init or TestMain)" >&2
 fi
 exit 1

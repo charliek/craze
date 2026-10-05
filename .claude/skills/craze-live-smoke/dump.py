@@ -4,8 +4,9 @@ transcript -- role, tool name, a slice of the input/result/text -- plus the
 mode, model and effort changes and each step's usage, so a live smoke can be
 read without the TUI's scrollback (the TUI runs in the alternate screen).
 
-The transcripts are $CRAZE_HOME/native/sessions/<slug>/*.jsonl (a scratch
-CRAZE_HOME in a smoke, never the owner's ~/.craze). Taken from Plan 023's
+The transcripts are $CRAZE_HOME/native/sessions/<slug>/<UTC stamp>_<session
+id>.jsonl, so one session is *_<session id>.jsonl (a scratch CRAZE_HOME in a
+smoke, never the owner's ~/.craze). Taken from Plan 023's
 smoke/dump.py. Stdlib only.
 """
 import json

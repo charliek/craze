@@ -6,20 +6,27 @@
 #   smoke.sh [--host …] key  <name> <keys…>           named keys: Enter Escape C-d BSpace …
 #   smoke.sh [--host …] wait <name> <regex> <secs>    poll the pane until <regex> matches
 #   smoke.sh [--host …] snap <name> <file> [--ansi]   capture the pane (--ansi keeps SGR codes)
-#   smoke.sh [--host …] stop <name>                   Escape, C-d, then end the session
+#   smoke.sh [--host …] stop <name>                   Escape, C-d, end it, confirm it is gone
 #
 # local (the default): one tmux server per smoke, `tmux -L craze-<name>`
 # (CRAZE_SMOKE_SOCK overrides the socket name), started with -f /dev/null so
-# no user config applies; `stop` kills that whole server. Pane size:
-# CRAZE_SMOKE_COLS x CRAZE_SMOKE_ROWS (default 120x36).
+# no user config applies; `stop` kills that whole server and confirms it is
+# gone. Pane size: CRAZE_SMOKE_COLS x CRAZE_SMOKE_ROWS (default 120x36).
 # mac: the mac-mini's smoke server through ~/.claude/plans/craze/mac-mini/mac-tmux.sh
 # (`tmux -L smoke`, the only server whose panes reach the login keychain); a
 # session of your own in it, and `stop` kills only that session, never the
-# server. Every remote call is bounded (the privacy-prompt trap).
+# server, and confirms the session is gone.
+#
+# Every tmux call, local or remote, is bounded (the privacy-prompt trap) at
+# CRAZE_SMOKE_BOUND_S seconds (default 20) by timeout(1), else gtimeout
+# (Homebrew coreutils), else a perl fork + alarm that TERMs, then KILLs, the
+# call's process group; with none of the three, smoke.sh refuses (exit 3)
+# rather than make an unbounded call.
 #
 # Text goes in as a bracketed paste: `send-keys -l` drops words that are key
-# names (end, home, up, tab…) in craze's TUI. Exit: 0 ok, 1 a wait timed out
-# or tmux failed, 2 usage, 3 the mac-mini runbook's scripts are missing.
+# names (end, home, up, tab…) in craze's TUI. Exit: 0 ok, 1 a wait timed out,
+# tmux failed or `stop` could not confirm the end, 2 usage, 3 no bounded
+# runner or the mac-mini runbook's scripts are missing, 124 a call hit its bound.
 set -u -o pipefail
 
 MAC_DIR=$HOME/.claude/plans/craze/mac-mini
@@ -46,22 +53,48 @@ name=${2:-}
 [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die 2 "a session name is letters, digits, _ and - only: $name"
 shift 2
 
-# bounded <secs> <cmd…>: run with a time limit where timeout(1) exists.
+# The bounded runner: `<runner> <secs> <cmd…>` exits 124 when the call
+# outlives <secs>, after ending its whole process group (an ssh under
+# mac-tmux.sh included). The perl fallback mirrors `timeout -k 2`.
+BOUND_PERL='
+my $s = shift;
+my $pid = fork;
+defined $pid or die "smoke.sh: fork: $!\n";
+if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "smoke.sh: exec $ARGV[0]: $!\n"; }
+setpgrp($pid, $pid);
+$SIG{ALRM} = sub { kill "TERM", -$pid; sleep 2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 };
+alarm $s;
+waitpid $pid, 0;
+exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+'
+if command -v timeout >/dev/null; then
+	BOUND=(timeout -k 2)
+elif command -v gtimeout >/dev/null; then
+	BOUND=(gtimeout -k 2)
+elif command -v perl >/dev/null; then
+	BOUND=(perl -e "$BOUND_PERL")
+else
+	die 3 "no bounded runner (timeout, gtimeout or perl): refusing to make an unbounded tmux call"
+fi
+BOUND_S=${CRAZE_SMOKE_BOUND_S:-20}
+[[ $BOUND_S =~ ^[1-9][0-9]*$ ]] || die 2 "CRAZE_SMOKE_BOUND_S must be a positive whole number: $BOUND_S"
+
+# bounded <secs> <cmd…>: run cmd with that time limit.
 bounded() {
 	local s=$1
 	shift
-	if command -v timeout >/dev/null; then timeout "$s" "$@"; else "$@"; fi
+	"${BOUND[@]}" "$s" "$@"
 }
 
 if [[ $host == mac ]]; then
 	[[ -x $MAC_TMUX ]] ||
 		die 3 "--host mac needs $MAC_TMUX: see the mac-mini runbook ($MAC_DIR/README.md); if it is missing, ask the owner"
-	T() { bounded 20 "$MAC_TMUX" "$@"; }
-	paste_text() { bounded 20 "$MAC_TMUX" type "$name" "$1"; }
+	T() { bounded "$BOUND_S" "$MAC_TMUX" "$@"; }
+	paste_text() { bounded "$BOUND_S" "$MAC_TMUX" type "$name" "$1"; }
 else
 	command -v tmux >/dev/null || die 1 "tmux not found"
 	sock=${CRAZE_SMOKE_SOCK:-craze-$name}
-	T() { bounded 20 tmux -L "$sock" "$@"; }
+	T() { bounded "$BOUND_S" tmux -L "$sock" "$@"; }
 	paste_text() { printf '%s' "$1" | T load-buffer -b smoke - && T paste-buffer -p -d -b smoke -t "$name"; }
 fi
 
@@ -115,11 +148,24 @@ stop)
 	sleep 0.3
 	T send-keys -t "$name" C-d 2>/dev/null
 	sleep 0.5
+	# End it (it may already be gone: C-d can end the last pane), then confirm
+	# with a probe that must report it absent; anything else, a timeout
+	# included, is a failure.
 	if [[ $host == mac ]]; then
+		what="session $name" killcmd=kill-session probe=(has-session -t "$name")
 		T kill-session -t "$name" 2>/dev/null
 	else
+		what="tmux server $sock" killcmd=kill-server probe=(list-sessions)
 		T kill-server 2>/dev/null
 	fi
+	krc=$?
+	err=$(T "${probe[@]}" 2>&1 >/dev/null)
+	prc=$?
+	((prc == 0)) && die 1 "$what is still running after $killcmd (rc $krc)"
+	case $err in
+	*"no server running"* | *"error connecting to"* | *"can't find session"*) ;;
+	*) die 1 "cannot confirm $what is gone after $killcmd (rc $krc): ${probe[0]} exited $prc${err:+: $err}" ;;
+	esac
 	echo "stopped $name"
 	;;
 *) die 2 "unknown command: $cmd (start, type, key, wait, snap, stop)" ;;

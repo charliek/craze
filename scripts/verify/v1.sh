@@ -33,11 +33,16 @@ groups), each well under the 2 h background cap.
   reports INCOMPLETE. A tui job first takes a non-blocking flock on the
   per-user lock \${XDG_CACHE_HOME:-~/.cache}/craze-verify/locks/v1-tui.lock and
   is refused at once (exit 4) while another tui job holds it: two tui -race
-  jobs never run together. The lock is released only once the group is gone.
-  Writes \$OUT/v1-<id>.log and \$OUT/v1-<id>.result.
+  jobs never run together. The job's own processes hold the lock too, so it
+  is released only once the group is gone, even when this script is
+  SIGKILLed. --sha, when given, must be the manifest's sha (else exit 2).
+  Writes \$OUT/v1-<id>.log and \$OUT/v1-<id>.result, bound to the manifest
+  (its generation, sha, package and count).
 --summary prints JOB PKG COUNT RC OK FAIL DATA_RACE ELAPSED STATUS (+ the
   first 3 failing tests) for every manifest job, then
-  V1_TOTAL jobs= ok= fail= data_race= incomplete= not_run=
+  V1_TOTAL jobs= ok= fail= data_race= incomplete= not_run= stale=
+  A result from another manifest (an earlier --plan under this label, even an
+  identical one) is STALE: it counts for nothing, and the job must be run.
 A failed job is never retried: diagnose, do not re-run.
 Job exit: 0 PASS, 1 FAIL, 2 INCOMPLETE or BUILD_FAILED, 4 refused.
 $CV_HELP_COMMON
@@ -179,9 +184,12 @@ do_plan() {
 		;;
 	esac
 	local tmp=$CV_LOG.tmp.$$
+	# The generation binds every job result to this manifest: a re-plan under
+	# the label (even an identical one) makes the old results STALE.
 	{
 		echo "# craze-verify v1 manifest"
 		echo "# sha=$CV_SHA_FULL count=$count selection=$sel generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		echo "# gen=$(date +%s)-$$-$RANDOM$RANDOM"
 	} >"$tmp"
 	local p n=0 max=0 total=0 slice e i left c id
 	while IFS= read -r p; do
@@ -219,6 +227,7 @@ do_plan() {
 }
 
 manifest_sha() { sed -n 's/^# sha=\([0-9a-f]*\) .*/\1/p' "$1" | head -1; }
+manifest_gen() { sed -n 's/^# gen=\([^ ]*\)$/\1/p' "$1" | head -1; }
 
 do_job() {
 	local id=${1:-} sha=''
@@ -230,13 +239,16 @@ do_job() {
 		*) usage >&2; die 2 "unknown --job option: $1" ;;
 		esac
 	done
-	local manifest=$OUT/v1-manifest.tsv row pkg count est
+	local manifest=$OUT/v1-manifest.tsv row pkg count est msha gen
 	[[ -f $manifest ]] || die 2 "no manifest at $manifest: run v1.sh $CV_LABEL --plan first"
 	row=$(awk -F'\t' -v id="$id" '$1 == id' "$manifest")
 	[[ -n $row ]] || die 2 "no job '$id' in $manifest"
 	IFS=$'\t' read -r _ pkg count est <<<"$row"
-	[[ -n $sha ]] || sha=$(manifest_sha "$manifest")
-	cv_resolve "$sha"
+	msha=$(manifest_sha "$manifest") gen=$(manifest_gen "$manifest")
+	[[ -n $msha && -n $gen ]] || die 2 "$manifest has no sha or gen header: run v1.sh $CV_LABEL --plan again"
+	cv_resolve "${sha:-$msha}"
+	[[ $CV_SHA_FULL == "$msha" ]] ||
+		die 2 "--sha $sha is not the manifest's sha ($msha): its result would be stale; run --plan --sha $sha first"
 	CV_LOG=$OUT/v1-$id.log
 	local result=$OUT/v1-$id.result
 	rm -f "$result"
@@ -247,6 +259,10 @@ do_job() {
 		exec 9>>"$LOCK" || die 2 "cannot open $LOCK"
 		flock -n 9 || die 4 "a tui job is running; launch this one after it (lock $LOCK)"
 		echo "V1 tui lock held: $LOCK"
+		# On a handled exit (a signal, a die) cv_on_exit stops the group, then
+		# this releases the lock, unless the group survived SIGKILL (then its
+		# processes keep holding it).
+		cv_cleanup_hook() { ((CV_STOP_FAILED)) || flock -u 9 2>/dev/null; }
 	fi
 
 	: >"$CV_LOG"
@@ -264,6 +280,7 @@ do_job() {
 	rm -f "$marker"
 	local left=$((WATCHDOG_S - ($(date +%s) - CV_START)))
 	((left < 1)) && left=1
+	# The watchdog closes fd 9: only the job's own processes hold the lock.
 	set -m
 	(
 		trap - INT TERM HUP EXIT
@@ -279,17 +296,22 @@ do_job() {
 	) </dev/null >/dev/null 2>&1 9>&- &
 	CV_WATCHDOG=$!
 	set +m
+	echo "V1 watchdog pgid=$CV_WATCHDOG at ${left}s"
 
 	local rc=0
-	cv_wait || rc=$?
-	cv_stop_group "$CV_WATCHDOG"
+	cv_wait || rc=$? # dies (2) when the group survives SIGKILL: the lock stays held
+	cv_stop_group "$CV_WATCHDOG" || {
+		CV_STOP_FAILED=1
+		die 2 "the watchdog (group $CV_WATCHDOG) survived SIGKILL"
+	}
 	CV_WATCHDOG=
 	local elapsed=$(($(date +%s) - s0))
-	# The group is gone (cv_wait ends what is left of it); only now may the
+	# The group is gone (cv_wait ended what was left of it); only now may the
 	# lock go, so a second tui job never overlaps this one's stragglers.
 	if [[ $pkg == ./internal/tui ]]; then
 		flock -u 9
 		exec 9>&-
+		unset -f cv_cleanup_hook
 		echo "V1 tui lock released"
 	fi
 
@@ -307,8 +329,8 @@ do_job() {
 		cv_go_verdict "$rc" "$CV_LOG" 2>/dev/null
 		if (($? == 2)); then status=BUILD_FAILED; else status=FAIL; fi
 	fi
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$id" "$pkg" "$count" "$rc" "$ok" "$fail" "$dr" "${elapsed}s" "$status" "${names:--}" >"$result"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$id" "$gen" "$CV_SHA_FULL" "$pkg" "$count" "$rc" "$ok" "$fail" "$dr" "${elapsed}s" "$status" "${names:--}" >"$result"
 	grep -E '^(--- FAIL|FAIL|ok|panic)' "$CV_LOG" | head -10
 	echo "V1_JOB id=$id pkg=$pkg count=$count rc=$rc ok=$ok fail=$fail data_race=$dr elapsed=${elapsed}s status=$status${names:+ failing=$names}"
 	case $status in
@@ -322,31 +344,45 @@ do_summary() {
 	(($# == 0)) || die 2 "--summary takes no options"
 	local manifest=$OUT/v1-manifest.tsv
 	[[ -f $manifest ]] || die 2 "no manifest at $manifest: run v1.sh $CV_LABEL --plan first"
-	CV_SHA=$(git -C "$ROOT" rev-parse --short "$(manifest_sha "$manifest")" 2>/dev/null || echo -)
+	local msha gen
+	msha=$(manifest_sha "$manifest") gen=$(manifest_gen "$manifest")
+	[[ -n $msha && -n $gen ]] || die 2 "$manifest has no sha or gen header: run v1.sh $CV_LABEL --plan again"
+	CV_SHA=$(git -C "$ROOT" rev-parse --short "$msha" 2>/dev/null || echo -)
 	CV_LOG=$manifest
-	local jobs=0 ok=0 fail=0 dr=0 inc=0 notrun=0
-	printf '%-24s %-34s %5s %4s %4s %5s %9s %8s %-12s %s\n' JOB PKG COUNT RC OK FAIL DATA_RACE ELAPSED STATUS FAILING
-	local id pkg count est r
+	local jobs=0 ok=0 fail=0 dr=0 inc=0 notrun=0 stale=0
+	local fmt='%-24s %-34s %5s %4s %4s %5s %9s %8s %-12s %s\n'
+	# shellcheck disable=SC2059
+	printf "$fmt" JOB PKG COUNT RC OK FAIL DATA_RACE ELAPSED STATUS FAILING
+	local id pkg count est rid rgen rsha rpkg rcount rrc rok rfail rdr rel rstatus rnames
 	while IFS=$'\t' read -r id pkg count est; do
 		[[ -z $id || $id == \#* ]] && continue
 		jobs=$((jobs + 1))
-		if [[ -f $OUT/v1-$id.result ]]; then
-			IFS=$'\t' read -r _ _ _ rrc rok rfail rdr rel rstatus rnames <"$OUT/v1-$id.result"
-			printf '%-24s %-34s %5s %4s %4s %5s %9s %8s %-12s %s\n' "$id" "$pkg" "$count" "$rrc" "$rok" "$rfail" "$rdr" "$rel" "$rstatus" "$rnames"
-			dr=$((dr + rdr))
-			case $rstatus in
-			PASS) ok=$((ok + 1)) ;;
-			FAIL) fail=$((fail + 1)) ;;
-			*) inc=$((inc + 1)) ;;
-			esac
-		else
+		if [[ ! -f $OUT/v1-$id.result ]]; then
 			notrun=$((notrun + 1))
-			printf '%-24s %-34s %5s %4s %4s %5s %9s %8s %-12s %s\n' "$id" "$pkg" "$count" - - - - - NOT_RUN -
+			# shellcheck disable=SC2059
+			printf "$fmt" "$id" "$pkg" "$count" - - - - - NOT_RUN -
+			continue
 		fi
+		rid='' rgen='' rsha='' rpkg='' rcount=''
+		IFS=$'\t' read -r rid rgen rsha rpkg rcount rrc rok rfail rdr rel rstatus rnames <"$OUT/v1-$id.result"
+		if [[ $rid != "$id" || $rgen != "$gen" || $rsha != "$msha" || $rpkg != "$pkg" || $rcount != "$count" ]]; then
+			stale=$((stale + 1))
+			# shellcheck disable=SC2059
+			printf "$fmt" "$id" "$pkg" "$count" - - - - - STALE "(a result from another manifest)"
+			continue
+		fi
+		# shellcheck disable=SC2059
+		printf "$fmt" "$id" "$pkg" "$count" "$rrc" "$rok" "$rfail" "$rdr" "$rel" "$rstatus" "$rnames"
+		dr=$((dr + rdr))
+		case $rstatus in
+		PASS) ok=$((ok + 1)) ;;
+		FAIL) fail=$((fail + 1)) ;;
+		*) inc=$((inc + 1)) ;;
+		esac
 	done <"$manifest"
-	echo "V1_TOTAL jobs=$jobs ok=$ok fail=$fail data_race=$dr incomplete=$inc not_run=$notrun"
+	echo "V1_TOTAL jobs=$jobs ok=$ok fail=$fail data_race=$dr incomplete=$inc not_run=$notrun stale=$stale"
 	((fail > 0 || dr > 0)) && { echo "v1.sh: diagnose, do not re-run" >&2; return 1; }
-	((inc > 0 || notrun > 0)) && return 2
+	((inc > 0 || notrun > 0 || stale > 0)) && return 2
 	return 0
 }
 

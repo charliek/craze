@@ -5,14 +5,19 @@
 # The contract every script keeps (Plan 037 §3.1):
 #   - it verifies a COMMITTED sha, exported with `git archive` into a unique
 #     short directory, mktemp -d "${CRAZE_VERIFY_TMP:-/tmp}/cv-<label>.XXXX",
-#     refused (exit 2) when that path would be over 40 characters (SF-b);
+#     refused (exit 2) when that path would be over 40 characters (SF-b),
+#     checked with the label, before anything is written;
 #   - a label matches ^[A-Za-z0-9._-]{1,40}$;
 #   - output goes to ${CRAZE_VERIFY_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/craze-verify}/<label>/,
-#     never under the repo;
-#   - every long step runs in its own process group, so SIGINT/SIGTERM (or
+#     never under the repo, and neither is the export: both are checked as
+#     physical paths, symlinks resolved and `..` collapsed;
+#   - every long step runs in its own process group, so SIGTERM/SIGINT (or
 #     v1's watchdog) ends everything it started; the export directory is
-#     removed on every exit;
-#   - the last line is always <NAME>_EXIT=<rc> elapsed=<s>s sha=<sha> log=<path>;
+#     removed on every exit. A script launched with `&` from a non-interactive
+#     shell inherits SIGINT ignored, which bash cannot re-arm: stop a
+#     background run with SIGTERM (`kill <pid>`);
+#   - the last line of every run is <NAME>_EXIT=<rc> elapsed=<s>s sha=<sha> log=<path>
+#     (--help is not a run and prints none);
 #   - exit 0 ok, 1 a test failure, 2 a harness failure (usage, label, sha,
 #     export, build), 3 a platform tool missing, 4 v1's tui lock refused,
 #     130/143 interrupted (SIGINT/SIGTERM);
@@ -43,6 +48,9 @@ CV_EXPORTS=()
 CV_CHILD=
 CV_WATCHDOG=
 CV_LAST_EXPORT=
+CV_EXPORT_BASE=
+CV_PHYS=
+CV_STOP_FAILED=0
 
 # The help footer every usage text ends with.
 CV_HELP_COMMON='Environment:
@@ -51,10 +59,13 @@ CV_HELP_COMMON='Environment:
   CRAZE_VERIFY_OUT    output root (default ${XDG_CACHE_HOME:-~/.cache}/craze-verify); <label>/ under it
 Exit: 0 ok, 1 test failure, 2 harness failure (usage, label, sha, export,
 build), 3 platform tool missing, 4 tui lock refused (v1), 130/143 interrupted.
+Stop a run with SIGTERM (kill <pid>): one launched with & from a
+non-interactive shell inherits SIGINT ignored, and bash cannot re-arm it.
 The last line is always <NAME>_EXIT=<rc> elapsed=<s>s sha=<sha> log=<path>.
 A failure is diagnosed, never re-run.'
 
 # cv_wants_help "$@": true when any argument is --help (or the first is -h).
+# Accepted residual: a --help exit prints no summary line (help is not a run).
 cv_wants_help() {
 	[[ ${1:-} == -h ]] && return 0
 	local a
@@ -76,6 +87,8 @@ cv_stamp() { printf '%s-%s' "$(date +%Y%m%d-%H%M%S)" "$$"; }
 cv_setup() {
 	CV_NAME=$1
 	trap cv_on_exit EXIT
+	# A SIGINT inherited as ignored (a `&` launch with job control off) stays
+	# ignored whatever this says: SIGTERM is the documented stop signal.
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
@@ -87,10 +100,13 @@ cv_setup() {
 cv_on_exit() {
 	local rc=$?
 	trap '' INT TERM HUP
-	cv_stop_group "$CV_CHILD"
+	# A group that survives SIGKILL is a harness failure: CV_STOP_FAILED tells
+	# cv_cleanup_hook (v1's lock) not to release what it guards.
+	cv_stop_group "$CV_CHILD" || CV_STOP_FAILED=1
 	CV_CHILD=
-	cv_stop_group "$CV_WATCHDOG"
+	cv_stop_group "$CV_WATCHDOG" || CV_STOP_FAILED=1
 	CV_WATCHDOG=
+	((CV_STOP_FAILED && rc == 0)) && rc=2
 	if declare -F cv_cleanup_hook >/dev/null; then cv_cleanup_hook; fi
 	local d
 	for d in "${CV_EXPORTS[@]+"${CV_EXPORTS[@]}"}"; do
@@ -109,20 +125,74 @@ summary_line() {
 		"$CV_NAME" "$1" "$(($(date +%s) - CV_START))" "$CV_SHA" "$CV_LOG"
 }
 
-# cv_label <label>: validates it and creates $OUT.
+# cv_physical <path>: the absolute physical path: every existing component
+# resolved through symlinks (cd -P), `.` and `..` collapsed, the missing tail
+# appended as is (it cannot be a symlink). Fails on a component that exists
+# but is no directory (a file, a dangling symlink) or cannot be entered.
+cv_physical() {
+	local rest=$1 cur='' c nmiss=0
+	[[ $rest == /* ]] || rest=$PWD/$rest
+	while [[ -n $rest ]]; do
+		c=${rest%%/*}
+		if [[ $rest == */* ]]; then rest=${rest#*/}; else rest=; fi
+		case $c in
+		'' | .) continue ;;
+		..)
+			cur=${cur%/*}
+			((nmiss > 0)) && nmiss=$((nmiss - 1))
+			continue
+			;;
+		esac
+		if ((nmiss > 0)) || [[ ! -e $cur/$c && ! -L $cur/$c ]]; then
+			cur=$cur/$c
+			nmiss=$((nmiss + 1))
+		elif [[ -d $cur/$c ]]; then
+			cur=$(cd -P -- "$cur/$c" 2>/dev/null && pwd -P) || return 1
+			[[ $cur == / ]] && cur=
+		else
+			return 1
+		fi
+	done
+	printf '%s\n' "${cur:-/}"
+}
+
+# cv_outside_repo <what> <path>: dies (2) when <path>, resolved physically,
+# is the repository or inside it; else sets CV_PHYS to the resolved path.
+cv_outside_repo() {
+	local p root
+	p=$(cv_physical "$2") || die 2 "$1 $2 cannot be resolved (a component is not a directory)"
+	root=$(cv_physical "$ROOT") || die 2 "the repository $ROOT cannot be resolved"
+	case "$p/" in
+	"$root"/*) die 2 "$1 $2 is inside the repository $root (resolved: $p)" ;;
+	esac
+	CV_PHYS=$p
+}
+
+# cv_label <label>: validates it, then (before anything is written) the
+# export path's length and that neither the output dir nor the export base is
+# inside the repository; then creates $OUT.
 cv_label() {
 	local label=$1
 	[[ $label =~ ^[A-Za-z0-9._-]{1,40}$ ]] ||
 		die 2 "label '$label' must match ^[A-Za-z0-9._-]{1,40}\$"
 	[[ $label =~ ^\.+$ ]] && die 2 "label '$label' is only dots"
 	CV_LABEL=$label
+	local base=${CRAZE_VERIFY_TMP:-/tmp}
+	cv_export_len_ok "$base/cv-$label.XXXX"
+	cv_outside_repo "export dir (CRAZE_VERIFY_TMP)" "$base"
+	# The export keeps the logical base: the 40-character budget is for the
+	# path the tests see ($PWD), and /tmp is /private/tmp on macOS.
+	CV_EXPORT_BASE=$base
 	local root_out=${CRAZE_VERIFY_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/craze-verify}
-	[[ $root_out == /* ]] || root_out=$PWD/$root_out
-	OUT=$root_out/$label
-	case "$OUT/" in
-	"$ROOT"/*) die 2 "output dir $OUT is inside the repository $ROOT" ;;
-	esac
+	cv_outside_repo "output dir" "$root_out/$label"
+	OUT=$CV_PHYS
 	mkdir -p "$OUT" || die 2 "cannot create output dir $OUT"
+}
+
+# cv_export_len_ok <pattern>: dies (2) when the export path is over 40 characters.
+cv_export_len_ok() {
+	((${#1} <= 40)) ||
+		die 2 "export path $1 is ${#1} characters, over the 40-character limit (SF-b): use a shorter label or CRAZE_VERIFY_TMP"
 }
 
 # cv_resolve <rev>: the commit to verify, as CV_SHA_FULL / CV_SHA.
@@ -134,10 +204,9 @@ cv_resolve() {
 
 # cv_export_dir: a fresh unique short directory, removed on exit, in CV_LAST_EXPORT.
 cv_export_dir() {
-	local base=${CRAZE_VERIFY_TMP:-/tmp}
-	local pattern=$base/cv-$CV_LABEL.XXXX
-	((${#pattern} <= 40)) ||
-		die 2 "export path $pattern is ${#pattern} characters, over the 40-character limit (SF-b): use a shorter label or CRAZE_VERIFY_TMP"
+	[[ -n $CV_EXPORT_BASE ]] || die 2 "cv_export_dir before cv_label"
+	local pattern=$CV_EXPORT_BASE/cv-$CV_LABEL.XXXX
+	cv_export_len_ok "$pattern"
 	CV_LAST_EXPORT=$(mktemp -d "$pattern" 2>/dev/null) ||
 		die 2 "export failed: mktemp -d $pattern"
 	CV_EXPORTS+=("$CV_LAST_EXPORT")
@@ -154,23 +223,32 @@ export_tree() {
 }
 
 # cv_start <log> <cmd…>: start cmd in its own process group (pgid = CV_CHILD),
-# stdin from /dev/null, stdout and stderr appended to <log>, fd 9 (v1's lock)
-# not inherited. A shell function is fine as <cmd>.
+# stdin from /dev/null, stdout and stderr appended to <log>. fd 9 (v1's tui
+# lock, when held) IS inherited: the job's own processes hold the lock, so a
+# SIGKILLed script cannot release it while they run. A shell function is fine
+# as <cmd>.
 cv_start() {
 	local log=$1
 	shift
 	set -m
-	"$@" </dev/null >>"$log" 2>&1 9>&- &
+	"$@" </dev/null >>"$log" 2>&1 &
 	CV_CHILD=$!
 	set +m
 	echo "$CV_NAME running pgid=$CV_CHILD log=$log"
 }
 
-# cv_wait: wait for CV_CHILD, then end whatever is left in its group. Returns its rc.
+# cv_wait: wait for CV_CHILD, then end whatever is left in its group. Returns
+# its rc; dies (2) when the group survives SIGKILL, so nothing it guards (v1's
+# lock) is released and no success is reported.
+# Accepted residual: the leader is reaped before the group is signalled, so the
+# pgid could be reused in between (a pid wrap within microseconds).
 cv_wait() {
 	local rc=0 g=$CV_CHILD
 	wait "$g" || rc=$?
-	cv_stop_group "$g"
+	if ! cv_stop_group "$g"; then
+		CV_CHILD= CV_STOP_FAILED=1
+		die 2 "process group $g survived SIGKILL: diagnose it before running again"
+	fi
 	CV_CHILD=
 	return "$rc"
 }
@@ -181,8 +259,11 @@ cv_run() {
 	cv_wait
 }
 
-# cv_stop_group <pgid>: TERM the group, give it 10 s, then KILL; returns
-# once no process is left in it.
+# cv_stop_group <pgid>: TERM the group, give it 10 s, then KILL; returns 0
+# once no process is left in it, 1 when one survives SIGKILL.
+# Accepted residual: a descendant a test detached with setsid (a shell's
+# sleeper, a host, an agent) is in no group of ours and can outlive an
+# interrupted run, exactly as with a bare `go test`; it ends on its own timeout.
 cv_stop_group() {
 	local g=${1:-} i
 	[[ -n $g ]] || return 0

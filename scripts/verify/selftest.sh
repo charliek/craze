@@ -10,18 +10,28 @@ Checks that each of scripts/verify's failure paths ends with the summary line
 and the right exit code, against a throwaway scratch module (never the real
 repo's tests), in a few minutes:
   --help on every script; an invalid sha (2) on every script that takes one;
-  a failed export (2); a failing test (1); a malformed or too-long label (2);
-  two concurrent runs with one label (two unique export dirs); starve.sh and
-  contend.sh without systemd-run/taskset (3); a failed build (2: cpu1, v2,
-  and starve/contend where the tools exist); SIGINT to a running script (130:
-  its child process group gone, its export dir removed, the summary line
-  printed); a v1 tui job with a shortened watchdog (INCOMPLETE, its group
-  killed, the tui lock released) and v1 --summary; two v1 tui jobs with
-  different labels (the second refused, 4); gate.sh's steps on a scratch
-  Makefile (both lint passes through the wrapper, a failing step stops it);
-  v8.sh --selftest; and the craze-live-smoke skill's smoke.sh
-  start/type/wait/key/snap/stop on a dedicated tmux server running cat, and
-  its --host mac refusal (3) when the mac-mini runbook's scripts are missing.
+  a failed export (2); a failing test (1); a malformed or too-long label (2,
+  nothing written); an output or export dir that reaches the repository
+  through `..` or a symlink (2, nothing written); two concurrent runs with
+  one label (two unique export dirs); starve.sh and contend.sh without
+  systemd-run/taskset (3); a failed build (2: cpu1, v2, and starve/contend
+  where the tools exist); a panic before any test in contend.sh (and
+  starve.sh where a systemd user session works) (1); SIGINT to a running
+  script (130) and SIGTERM to one launched with a plain & (143): its child
+  process group gone, its export dir removed, the summary line printed; a v1
+  tui job with a shortened watchdog (INCOMPLETE, its group killed, the tui
+  lock released) and v1 --summary; two v1 tui jobs with different labels
+  (the second refused, 4); a SIGKILLed v1 script whose tui job lives on (a
+  second tui job refused until the watchdog ends the group); v1 results bound
+  to their manifest (a re-plan makes them STALE; --job --sha off the
+  manifest refused); gate.sh's steps on a scratch Makefile (both lint passes
+  through the wrapper, a failing step stops it); v8.sh --selftest; and the
+  craze-live-smoke skill's smoke.sh start/type/wait/key/snap/stop on a
+  dedicated tmux server running cat (also through the perl runner), its
+  refusal without a bounded runner (3), a hung tmux bounded (124, its process
+  group gone) through timeout and perl, a stop that cannot confirm the end
+  (1), a stop of an absent server (0), and its --host mac refusal (3) when
+  the mac-mini runbook's scripts are missing.
 Every case's output is appended to the log.
 
 Log: \$OUT/selftest-<stamp>.log (label "selftest").
@@ -45,11 +55,20 @@ CV_EXPORTS+=("$S")
 R=$S/r
 mkdir -p "$R" "$S/o" "$S/x" "$S/t" || die 2 "cannot create $S"
 SOCK=cv-st-$$
-BG=()
+BG=()  # process groups this selftest started
+BGP=() # plain pids it started (a `&` launch with job control off)
+STUB_PIDS=$S/stub.pids
 cv_cleanup_hook() {
 	local p
+	for p in "${BGP[@]+"${BGP[@]}"}"; do kill -TERM "$p" 2>/dev/null; done
 	for p in "${BG[@]+"${BG[@]}"}"; do cv_stop_group "$p"; done
-	if command -v tmux >/dev/null; then tmux -L "$SOCK" kill-server 2>/dev/null; fi
+	if [[ -f $STUB_PIDS ]]; then
+		while read -r p; do kill -KILL "$p" 2>/dev/null; done <"$STUB_PIDS"
+	fi
+	if command -v tmux >/dev/null; then
+		tmux -L "$SOCK" kill-server 2>/dev/null
+		tmux -L "$SOCK-p" kill-server 2>/dev/null
+	fi
 	return 0
 }
 
@@ -72,6 +91,7 @@ w internal/broken/broken.go $'package broken\n\nfunc F() int { return "not an in
 w internal/broken/broken_test.go $'package broken\n\nimport "testing"\n\nfunc TestF(t *testing.T) { F() }'
 w internal/sleep/sleep_test.go $'package sleep\n\nimport (\n\t"os"\n\t"strconv"\n\t"testing"\n\t"time"\n)\n\nfunc TestSleep(t *testing.T) {\n\tn, _ := strconv.Atoi(os.Getenv("CVSELF_SLEEP_S"))\n\ttime.Sleep(time.Duration(n) * time.Second)\n}'
 w internal/tui/tui_test.go $'package tui\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(300 * time.Second) }'
+w internal/boom/boom_test.go $'package boom\n\nimport "testing"\n\nfunc init() { panic("deliberate init panic") }\n\nfunc TestBoom(t *testing.T) {}'
 printf '%s\n' \
 	'export PATH := $(HOME)/.local/share/mise/shims:$(PATH)' \
 	'CVSELF_TEST_PKG ?= ./internal/ok' \
@@ -156,13 +176,32 @@ finish_bg() {
 	done
 	if kill -0 "$1" 2>/dev/null; then
 		cv_stop_group "$1"
+		kill -KILL "$1" 2>/dev/null
 		wait "$1" 2>/dev/null
 		RC=124
 		return
 	fi
 	wait "$1"
 	RC=$?
-	BG=()
+	BG=() BGP=()
+}
+# farm <dir> <name…>: a PATH directory of links to every command in the usual
+# bin directories (and tmux's) except the names given.
+farm() {
+	local dir=$1 d f b x skip tdir=''
+	shift
+	mkdir -p "$dir"
+	command -v tmux >/dev/null && tdir=$(dirname "$(command -v tmux)")
+	for d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin ${tdir:+"$tdir"}; do
+		[[ -d $d ]] || continue
+		for f in "$d"/*; do
+			b=${f##*/}
+			[[ -e $dir/$b ]] && continue
+			skip=0
+			for x in "$@"; do [[ $b == "$x" ]] && skip=1; done
+			((skip)) || ln -s "$f" "$dir/$b" 2>/dev/null
+		done
+	done
 }
 
 echo "SELFTEST scratch=$S log=$CV_LOG"
@@ -200,6 +239,20 @@ expect "malformed label" CPU1 2 "$V/cpu1.sh" 'bad label' good ./internal/ok
 expect "41-character label" CPU1 2 "$V/cpu1.sh" "$(printf 'a%.0s' {1..41})" good ./internal/ok
 expect "export path over 40 characters" CPU1 2 "$V/cpu1.sh" "$(printf 'b%.0s' {1..30})" good ./internal/ok
 has "$OUTF" '40-character' || bad "export path over 40 characters" "no 40-character message"
+[[ -e $S/o/$(printf 'b%.0s' {1..30}) ]] && bad "export path over 40 characters" "refused only after creating its output dir"
+
+# 5b. The never-under-repo guard resolves paths physically (`..`, a symlink
+# into the repo), and refuses before anything is written.
+ln -s "$R" "$S/lnk"
+expect "output dir through ..: refused" CPU1 2 env CRAZE_VERIFY_OUT="$S/o/../r/vo" "$V/cpu1.sh" pg good ./internal/ok
+has "$OUTF" 'is inside the repository' && [[ ! -e $R/vo ]] || bad "output dir through .." "no refusal message, or $R/vo was written"
+expect "output dir through a symlink: refused" CPU1 2 env CRAZE_VERIFY_OUT="$S/lnk/vo" "$V/cpu1.sh" pg good ./internal/ok
+has "$OUTF" 'is inside the repository' && [[ ! -e $R/vo ]] || bad "output dir through a symlink" "no refusal message, or $R/vo was written"
+expect "export dir through a symlink: refused" CPU1 2 env CRAZE_VERIFY_TMP="$S/lnk" "$V/cpu1.sh" pg good ./internal/ok
+if has "$OUTF" 'is inside the repository' && [[ ! -e $S/o/pg ]] && ! compgen -G "$R/cv-*" >/dev/null; then :; else
+	bad "export dir through a symlink" "no refusal message, or something was written"
+fi
+[[ -z $(git -C "$R" status --porcelain 2>&1) ]] || bad "never under the repo" "the scratch repo is dirty: $(git -C "$R" status --porcelain 2>&1 | head -3)"
 
 # 6. Two concurrent runs with one label.
 a=$S/conc-a.out b=$S/conc-b.out
@@ -262,6 +315,40 @@ else
 	cv_stop_group "$p"
 fi
 
+# 9b. SIGTERM to a script launched with a plain & (job control off, so it
+# inherits SIGINT ignored: SIGTERM is the documented stop signal).
+f=$S/sigterm.out
+CVSELF_SLEEP_S=300 "$V/cpu1.sh" sigt good ./internal/sleep >"$f" 2>&1 </dev/null &
+p=$!
+BGP+=("$p")
+if wait_for "$f" '^CPU1 running pgid=' 120; then
+	g=$(sed -n 's/^CPU1 running pgid=\([0-9]*\).*/\1/p' "$f")
+	d=$(sed -n 's/^CPU1 export=\([^ ]*\).*/\1/p' "$f")
+	for ((i = 0; i < 240; i++)); do pgrep -g "$g" -f 'sleep\.test' >/dev/null && break; sleep 0.25; done
+	kill -TERM "$p"
+	finish_bg "$p" 30
+	cat "$f" >>"$CV_LOG"
+	if [[ $RC == 143 ]] && summary_ok "$f" CPU1 143 && group_gone "$g" && [[ -n $d && ! -e $d ]]; then
+		ok "SIGTERM to a plain & launch: exit 143, group $g gone, $d removed, summary printed"
+	else
+		bad "SIGTERM (plain &)" "rc $RC, group $g $(group_gone "$g" && echo gone || echo ALIVE), dir '$d' $([[ -e $d ]] && echo LEFT || echo removed), last: $(tail -1 "$f")"
+	fi
+else
+	bad "SIGTERM (plain &)" "the script never started its child: $(tail -3 "$f")"
+	kill -TERM "$p" 2>/dev/null
+fi
+
+# 9c. A panic before any test (in init) is a test failure (1), not a harness one.
+if command -v taskset >/dev/null; then
+	expect "contend: a panic before any test" CONTEND 1 "$V/contend.sh" cp good internal/boom 0 2 .
+	has "$OUTF" '^panic: deliberate init panic' && has "$OUTF" ' crashed=2 ' ||
+		bad "contend: a panic before any test" "no panic line or crashed=2"
+fi
+if command -v systemd-run >/dev/null && systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+	expect "starve: a panic before any test" STARVE 1 "$V/starve.sh" sp good internal/boom 50 .
+	has "$OUTF" '^panic: deliberate init panic' || bad "starve: a panic before any test" "no panic line"
+fi
+
 # 10. v1: a tui job past a shortened watchdog, then --summary.
 expect "v1 --plan (watchdog label)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" wd --plan --sha good --pkgs ./internal/tui --count 5
 has "$OUTF" '^tui-s1 +\./internal/tui +5 ' || bad "v1 --plan (watchdog label)" "no tui-s1 row of -count=5"
@@ -274,7 +361,7 @@ else
 	bad "v1 watchdog" "status/group/lock wrong (group '$g')"
 fi
 expect "v1 --summary" V1 2 env XDG_CACHE_HOME="$XC" "$V/v1.sh" wd --summary
-has "$OUTF" '^V1_TOTAL jobs=1 ok=0 fail=0 data_race=0 incomplete=1 not_run=0$' || bad "v1 --summary" "wrong V1_TOTAL"
+has "$OUTF" '^V1_TOTAL jobs=1 ok=0 fail=0 data_race=0 incomplete=1 not_run=0 stale=0$' || bad "v1 --summary" "wrong V1_TOTAL"
 
 # 11. v1: two tui jobs with different labels.
 expect "v1 --plan (label la)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" la --plan --sha good --pkgs ./internal/tui --count 5
@@ -298,6 +385,49 @@ else
 	bad "v1 tui lock" "the first tui job never started: $(tail -3 "$f")"
 	cv_stop_group "$p"
 fi
+
+# 11b. v1: SIGKILL the script (not its group) during a tui job. The job's own
+# processes hold the lock, so a second tui job is refused until the watchdog
+# (30 s from the script's start) has ended the group; then the lock is free.
+expect "v1 --plan (label lk)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" lk --plan --sha good --pkgs ./internal/tui --count 5
+f=$S/v1-lk.out
+XDG_CACHE_HOME=$XC CRAZE_VERIFY_V1_WATCHDOG_S=30 start_bg "$f" "$V/v1.sh" lk --job tui-s1
+p=$BGPID
+if wait_for "$f" '^V1 watchdog pgid=' 120; then
+	g=$(sed -n 's/^V1 running pgid=\([0-9]*\).*/\1/p' "$f")
+	wd=$(sed -n 's/^V1 watchdog pgid=\([0-9]*\).*/\1/p' "$f")
+	BG+=("$g" "$wd")
+	for ((i = 0; i < 240; i++)); do pgrep -g "$g" -f 'tui\.test' >/dev/null && break; sleep 0.25; done
+	kill -KILL "$p"
+	wait "$p" 2>/dev/null
+	expect "v1: SIGKILLed script, job alive: a second tui job is refused" V1 4 env XDG_CACHE_HOME="$XC" "$V/v1.sh" lb --job tui-s1
+	then_alive=$(group_gone "$g" && echo gone || echo alive)
+	for ((i = 0; i < 240; i++)); do group_gone "$g" && break; sleep 0.25; done
+	if [[ $then_alive == alive ]] && group_gone "$g" && flock -n "$LOCK" true; then
+		ok "v1: SIGKILLed script: refused while group $g lived, lock free once the watchdog ended it"
+	else
+		bad "v1 SIGKILL" "group $g was $then_alive at the refusal, now $(group_gone "$g" && echo gone || echo ALIVE); lock $(flock -n "$LOCK" true && echo free || echo HELD)"
+	fi
+	for ((i = 0; i < 80; i++)); do group_gone "$wd" && break; sleep 0.25; done
+	group_gone "$wd" || bad "v1 SIGKILL" "the watchdog group $wd did not end"
+	cat "$f" >>"$CV_LOG"
+	BG=()
+else
+	bad "v1 SIGKILL" "the tui job never started: $(tail -3 "$f")"
+	cv_stop_group "$p"
+fi
+
+# 11c. v1: results are bound to their manifest.
+expect "v1 --plan (label stl)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --plan --sha good --pkgs ./internal/ok --count 1
+expect "v1 --job ok (label stl)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --job ok
+expect "v1 --summary (current result)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --summary
+has "$OUTF" '^V1_TOTAL jobs=1 ok=1 fail=0 data_race=0 incomplete=0 not_run=0 stale=0$' || bad "v1 --summary (current result)" "wrong V1_TOTAL"
+expect "v1 --job --sha off the manifest: refused" V1 2 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --job ok --sha broken-export
+has "$OUTF" "is not the manifest's sha" || bad "v1 --job --sha off the manifest" "no refusal message"
+expect "v1 --plan again, identical (label stl)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --plan --sha good --pkgs ./internal/ok --count 1
+expect "v1 --summary after a re-plan: STALE" V1 2 env XDG_CACHE_HOME="$XC" "$V/v1.sh" stl --summary
+has "$OUTF" '^ok +\./internal/ok +1 .* STALE ' && has "$OUTF" '^V1_TOTAL jobs=1 ok=0 fail=0 data_race=0 incomplete=0 not_run=0 stale=1$' ||
+	bad "v1 --summary after a re-plan" "the old result was not reported STALE"
 
 # 12. gate.sh's steps on the scratch Makefile.
 expect "gate: green" GATE 0 "$V/gate.sh" gt good
@@ -343,6 +473,67 @@ if command -v tmux >/dev/null; then
 	unset CRAZE_SMOKE_SOCK
 else
 	bad "smoke.sh" "tmux not found"
+fi
+# smoke.sh's bounded runner. A PATH without timeout/gtimeout takes the perl
+# fallback; one without perl as well is refused (3).
+farm "$S/noto" timeout gtimeout
+farm "$S/norun" timeout gtimeout perl
+if command -v tmux >/dev/null && command -v perl >/dev/null; then
+	run env PATH="$S/noto" CRAZE_SMOKE_SOCK="$SOCK-p" "$SMOKE" start sp cat
+	r1=$RC
+	run env PATH="$S/noto" CRAZE_SMOKE_SOCK="$SOCK-p" "$SMOKE" type sp "$text"
+	r2=$RC
+	run env PATH="$S/noto" CRAZE_SMOKE_SOCK="$SOCK-p" "$SMOKE" wait sp "$text" 10
+	r3=$RC
+	run env PATH="$S/noto" CRAZE_SMOKE_SOCK="$SOCK-p" "$SMOKE" stop sp
+	r4=$RC
+	if [[ "$r1$r2$r3$r4" == 0000 ]] && ! tmux -L "$SOCK-p" has-session 2>/dev/null; then
+		ok "smoke.sh through the perl runner: start/type/wait/stop"
+	else
+		bad "smoke.sh (perl runner)" "rcs $r1 $r2 $r3 $r4"
+	fi
+fi
+run env PATH="$S/norun" "$SMOKE" start sn cat
+if [[ $RC == 3 ]] && has "$OUTF" 'no bounded runner'; then ok "smoke.sh without a bounded runner: 3"; else bad "smoke.sh without a bounded runner" "exit $RC"; fi
+# A hung tmux (a stand-in that never returns, nor does its child) is bounded:
+# 124 within the bound plus the 2 s grace, its whole process group gone.
+mkdir -p "$S/stub"
+printf '%s\n' '#!/bin/sh' \
+	'# A stand-in tmux: CVSTUB_MODE=hang never returns (nor does its child);' \
+	'# alive claims every call worked (a server that will not die).' \
+	'case ${CVSTUB_MODE:-} in' \
+	'hang) echo $$ >>"$CVSTUB_PIDS"; sleep 1000 & echo $! >>"$CVSTUB_PIDS"; wait; exit 0 ;;' \
+	'alive) exit 0 ;;' \
+	'esac' \
+	'exit 1' >"$S/stub/tmux"
+chmod 755 "$S/stub/tmux"
+for via in timeout perl; do
+	if [[ $via == timeout ]]; then
+		command -v timeout >/dev/null || command -v gtimeout >/dev/null || continue
+		pth=$S/stub:$PATH
+	else
+		command -v perl >/dev/null || continue
+		pth=$S/stub:$S/noto
+	fi
+	: >"$STUB_PIDS"
+	t0=$(date +%s)
+	run env PATH="$pth" CVSTUB_MODE=hang CVSTUB_PIDS="$STUB_PIDS" CRAZE_SMOKE_SOCK="$SOCK-h" CRAZE_SMOKE_BOUND_S=2 "$SMOKE" start sh1 cat
+	el=$(($(date +%s) - t0))
+	alive=''
+	while read -r q; do kill -0 "$q" 2>/dev/null && alive+=" $q"; done <"$STUB_PIDS"
+	if [[ $RC == 124 ]] && ((el <= 9)) && [[ -s $STUB_PIDS && -z $alive ]]; then
+		ok "smoke.sh: a hung tmux is bounded through $via (124 in ${el}s, its group gone)"
+	else
+		bad "smoke.sh hang ($via)" "exit $RC in ${el}s, pids alive:${alive:- none}"
+	fi
+	while read -r q; do kill -KILL "$q" 2>/dev/null; done <"$STUB_PIDS"
+done
+# stop: a server that claims to die but stays is a failure (1); an absent one is success (0).
+run env PATH="$S/stub:$PATH" CVSTUB_MODE=alive CRAZE_SMOKE_SOCK="$SOCK-a" "$SMOKE" stop sa
+if [[ $RC == 1 ]] && has "$OUTF" 'still running after kill-server'; then ok "smoke.sh stop: a server that stays is reported (1)"; else bad "smoke.sh stop (server stays)" "exit $RC"; fi
+if command -v tmux >/dev/null; then
+	run env CRAZE_SMOKE_SOCK="$SOCK-gone" "$SMOKE" stop sg
+	if [[ $RC == 0 ]] && has "$OUTF" '^stopped sg$'; then ok "smoke.sh stop: an absent server counts as stopped (0)"; else bad "smoke.sh stop (absent)" "exit $RC"; fi
 fi
 # --host mac without the mac-mini runbook's scripts (a scratch HOME: no ssh).
 run env HOME="$S/nohome" "$SMOKE" --host mac start st cat
