@@ -210,6 +210,11 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	}
 	if !first {
 		m.addNote(reloadedNote)
+	} else {
+		// The start's warning (LM-2(a)), when its check answered before this
+		// restore: the rebuild above took its row, as it takes a start
+		// failure's (below), and no snapshot holds it.
+		m.redrawStartWarning()
 	}
 	switch {
 	case m.startErr != nil && m.startLeft():

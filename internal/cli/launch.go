@@ -152,6 +152,10 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 		Providers: pickerProviders(resolved.Provider, f.agentBin),
 		// The picker's states, asked for as it opens (plan 036 §3.3).
 		Availability: pickerAvailabilityFor(resolved.Provider, f.agentBin),
+		// A start made with no picker says why its provider may not start
+		// here (LM-2(a)), when this launch spawned its host
+		// (launchedBackend.SpawnedHost) — never for a host attached to.
+		StartCheck: startCheckFor(f.agentBin),
 		// No picker when the provider is known; the picker's choice is
 		// spawned otherwise. The host persists the provider it starts
 		// (serve's persistProvider), so the TUI does not: PersistProvider
@@ -647,6 +651,12 @@ func (b *launchedBackend) release() {
 		b.releaseOnce.Do(b.released)
 	}
 }
+
+// SpawnedHost says this launch spawned b's host (tui's hostSpawner) — so its
+// agent starts in this process's login session — rather than attaching to a
+// host that serves the session already, or that holds it (hostRef.held): the
+// TUI checks a start's provider only for a host it spawned (LM-2(a)).
+func (b *launchedBackend) SpawnedHost() bool { return !b.ref.held }
 
 // AckStarted is the TUI's acknowledgement that the session came up there
 // (tui's startAcker): called from the program's Update, when the start's

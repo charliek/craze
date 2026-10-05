@@ -179,6 +179,12 @@ func (o *promptOpts) run() (retErr error) {
 	if err := refuseInProcess("craze", resolved.Provider, o.agentBin, o.mode()); err != nil {
 		return err
 	}
+	// The one line a start that may sit unanswered says before it starts
+	// (LM-2(a), plan 037 §3.5): the not-GUI verdict alone, on stderr, and
+	// nothing refused — stdout and the exit status are the run's as ever.
+	if reason, fix := startWarning(processAvailInputs(resolved.Provider, o.agentBin), resolved.Provider); reason != "" {
+		fmt.Fprintf(o.stderr, "craze prompt: %s may not start here: %s; %s\n", resolved.Provider.Name(), reason, fix)
+	}
 
 	parent := context.Background()
 	if o.cmd != nil {

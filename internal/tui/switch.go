@@ -149,6 +149,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		providerDefault: m.providerDefault,
 		providers:       m.providers,
 		availability:    m.availability,
+		startCheck:      m.startCheck,
 		newSession:      m.newSession,
 		spawnNew:        m.spawnNew,
 		spawnLoad:       m.spawnLoad,

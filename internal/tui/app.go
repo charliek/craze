@@ -112,6 +112,21 @@ type Config struct {
 	// golden but the availability ones, and the frame runner — so they draw
 	// what they always drew.
 	Availability func() []ProviderAvail
+	// StartCheck is a start's own availability check (LM-2(a), plan 037
+	// §3.5): asked, off the Update, of the provider a start makes without the
+	// provider picker — an explicit --provider, --continue's row, the resume
+	// picker's row — when this process spawns that session's agent or its
+	// host, and never for an attach to a host that was running already (the
+	// launch flow's backend says which: hostSpawner). It answers why the
+	// provider may not start here and what to do about it, one line each, or
+	// "" with nothing to say: internal/cli answers the not-GUI verdict alone —
+	// cursor outside the macOS login session, which sits at starting… rather
+	// than failing — since a missing binary or an unreadable native table
+	// fails on its own, in its own words. An answer for the start the model
+	// is still waiting on is one local note carrying the reason and the fix,
+	// and the start goes on: nothing is refused (plan 036 decision 3). nil —
+	// every test Config, every golden and the frame runner — asks nothing.
+	StartCheck func(p agent.Provider) (reason, fix string)
 	// ProviderLocked skips the picker: an explicit --provider, or the frame
 	// runner. The session is constructed immediately.
 	ProviderLocked bool
@@ -289,11 +304,11 @@ type Config struct {
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
 // everything the host alone owns is cleared — the pickers' closures and rows,
-// the claim and engine hooks, the launch flow's spawns, provider persistence,
-// the session index and the host-status hub — so that no path of New or Run
-// can reach it. Viewer without a Backend means nothing and is cleared too;
-// any other Config is returned as it is. It is idempotent: Run applies it,
-// and New again.
+// the claim and engine hooks, the launch flow's spawns, a start's check,
+// provider persistence, the session index and the host-status hub — so that
+// no path of New or Run can reach it. Viewer without a Backend means nothing
+// and is cleared too; any other Config is returned as it is. It is
+// idempotent: Run applies it, and New again.
 func (c Config) viewing() Config {
 	if !c.Viewer || c.Backend == nil {
 		c.Viewer = false
@@ -303,6 +318,7 @@ func (c Config) viewing() Config {
 	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
 	c.LocalPresence = nil
 	c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
+	c.StartCheck = nil
 	c.PersistProvider = false
 	c.SessionIndex = nil
 	c.Host = nil
@@ -725,6 +741,14 @@ type Model struct {
 	// native when it says native is ready (plan 036 X21); 0 for none, and
 	// once the user has moved the cursor themselves.
 	availNative uint64
+	// startCheck is Config.StartCheck, and startAsk the start its answer is
+	// taken for — the session generation it runs under and its provider —
+	// the zero value when no answer is (LM-2(a), start_check.go).
+	startCheck func(agent.Provider) (string, string)
+	startAsk   startIdentity
+	// startWarn is the note the check drew, kept for the first restore of
+	// its start's session, which takes every local row (redrawStartWarning).
+	startWarn startWarnNote
 
 	// backCmd is the command the pre-session connect dialog's way back left
 	// to run (connectReturned): the list's reopening, the picker's states
@@ -1720,6 +1744,7 @@ func New(cfg Config) Model {
 		providerDefault: prov,
 		providers:       pickerRows(cfg.Providers, prov),
 		availability:    cfg.Availability,
+		startCheck:      cfg.StartCheck,
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
 		spawnNew:        cfg.NewBackend,
@@ -1761,6 +1786,7 @@ func New(cfg Config) Model {
 		shownGen: 1,
 	}.withSession(sessionSeed{workspace: cwd, model: cfg.Model, provider: prov.Name(), loading: cfg.Loading})
 	sess := cfg.Session
+	checked := false
 	switch {
 	case cfg.Backend != nil:
 		// A session served elsewhere: there is nothing to pick, build or
@@ -1790,6 +1816,10 @@ func New(cfg Config) Model {
 		if sess == nil && m.newSession != nil {
 			sess = m.newSession(prov)
 		}
+		// A session of this process's own making, started with no picker —
+		// an explicit --provider, --continue's row: its agent is spawned
+		// here, so a start's check is asked of its provider (LM-2(a)).
+		checked = sess != nil
 		if sess == nil {
 			sess = NewStub()
 		}
@@ -1805,6 +1835,10 @@ func New(cfg Config) Model {
 		m.localPresence = nil
 	} else {
 		m.setSession(sess, m.crazeID)
+	}
+	if checked {
+		// Init asks it, and cannot record the request: New does.
+		m.recordStartCheck(prov)
 	}
 	// Init arms the stream's first read exactly when it has a session to read
 	// and no picker to wait for, and it cannot record that itself (a value
@@ -2086,7 +2120,9 @@ func (m Model) Init() tea.Cmd {
 		// start and its reader are armed once it is adopted (launch.go).
 		return tea.Batch(m.initSpawn(), presence)
 	}
-	return tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), presence)
+	// A start's check, beside the start it is about (start_check.go): nil
+	// unless New recorded one.
+	return tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), presence, m.startCheckCmd(m.providerDefault))
 }
 
 // startCmd starts the session through the engine, whose gate opens on it: until
@@ -2125,8 +2161,15 @@ func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng 
 // Update is the command gate (gate.go) over the handler: a message that
 // arrives while a gated call is waiting for its reply, or while the messages
 // held behind one are still draining, is held in arrival order; everything
-// else runs the handler and then the wrapper (finish).
+// else runs the handler and then the wrapper (finish). A burst of typed keys
+// is split first (burst.go), so each of its keys meets the gate as a key typed
+// alone does.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		if keys := burstKeys(k); len(keys) > 1 {
+			return m.burst(keys)
+		}
+	}
 	return m.gated(msg, Model.update)
 }
 
@@ -2306,6 +2349,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.startInc == "" {
 			m.startInc = m.incarnation()
 		}
+		// The host's start is over, come up or failed: the start's check
+		// takes no answer from here on (LM-2(a), start_check.go).
+		m.retireStartCheck()
 		m.recompute()
 		return m, nil
 
@@ -2389,6 +2435,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case providerAvailMsg:
 		return m.providerAvailed(msg), nil
+
+	case startCheckMsg:
+		return m.startChecked(msg), nil
 
 	case unstartedSpawnedMsg:
 		return m.unstartedSpawned(msg)

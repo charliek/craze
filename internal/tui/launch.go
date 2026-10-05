@@ -60,11 +60,12 @@ type startAcker interface {
 }
 
 // spawnedMsg is a spawn's answer: the backend to adopt, or why there is none.
-// attempt is the stamp spawn gave it, and from the picker whose choice it was
-// (dialogNone for Init's own).
+// attempt is the stamp spawn gave it, from the picker whose choice it was
+// (dialogNone for Init's own), and p the provider it was for.
 type spawnedMsg struct {
 	attempt int
 	from    dialogKind
+	p       agent.Provider
 	b       backend.Backend
 	err     error
 }
@@ -117,7 +118,7 @@ func (m Model) spawnCmd(attempt int, from dialogKind, p agent.Provider, row *ses
 		load = *row
 	}
 	return func() tea.Msg {
-		msg := spawnedMsg{attempt: attempt, from: from}
+		msg := spawnedMsg{attempt: attempt, from: from, p: p}
 		switch {
 		case row != nil && loadB != nil:
 			msg.b, msg.err = loadB(p, load)
@@ -168,6 +169,14 @@ func (m Model) spawned(msg spawnedMsg) (tea.Model, tea.Cmd) {
 		return m.spawnFailed(msg.err), nil
 	}
 	m.setBackend(msg.b)
+	var check tea.Cmd
+	if msg.from != dialogProvider && spawnedHost(msg.b) {
+		// A provider chosen with no provider picker — Init's own spawn (an
+		// explicit --provider, --continue's row) or the resume picker's row —
+		// whose host this process spawned: the start's check is asked of it
+		// (LM-2(a), start_check.go). Never of a host attached to.
+		check = m.askStartCheck(msg.p)
+	}
 	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
@@ -178,7 +187,14 @@ func (m Model) spawned(msg spawnedMsg) (tea.Model, tea.Cmd) {
 	// Init's batch, for the backend Init could not start: the read it arms is
 	// the one the command gate's reader rule counts (readOn).
 	m.reading = true
-	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), check)
+}
+
+// spawnedHost reports whether this process spawned b's host (hostSpawner): a
+// backend that does not say is an attach.
+func spawnedHost(b backend.Backend) bool {
+	s, ok := b.(hostSpawner)
+	return ok && s.SpawnedHost()
 }
 
 // repick brings back the picker a refused choice came from, with the refusal

@@ -214,6 +214,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		Provider:        resolved.Provider,
 		Providers:       pickerProviders(resolved.Provider, f.agentBin),
 		Availability:    pickerAvailabilityFor(resolved.Provider, f.agentBin),
+		StartCheck:      startCheckFor(f.agentBin), // LM-2(a): every session this path starts is spawned here
 		ProviderLocked:  resolved.Locked,
 		PersistProvider: true,
 		FallbackDefault: resolved.Fallback,
