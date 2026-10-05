@@ -184,6 +184,8 @@ stop)
 	err=$(T "${probe[@]}" 2>&1 >/dev/null)
 	prc=$?
 	((prc == 0)) && die 1 "$what is still running after $killcmd (rc $krc)"
+	# A probe that hit its bound proves nothing, whatever it printed first.
+	((prc == 124)) && failed 124 "cannot confirm $what is gone after $killcmd (rc $krc): ${probe[0]}"
 	case $err in
 	*"no server running"* | *"can't find session"* | *"error connecting to "*"(No such file or directory)"*) ;;
 	*) failed "$prc" "cannot confirm $what is gone after $killcmd (rc $krc): ${probe[0]} exited $prc${err:+: $err}" ;;
