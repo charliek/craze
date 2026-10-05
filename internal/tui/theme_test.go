@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,7 +38,7 @@ func ansiBG(hex string) string {
 func TestSelectionBGIsADerivedBackground(t *testing.T) {
 	th := Preset("craze-dark")
 	want := blend("#0c0c11", "#e8a33d", selectionMix)
-	if th.SelectionBG != want {
+	if th.SelectionBG.TrueColor != want {
 		t.Fatalf("SelectionBG = %q, want %q", th.SelectionBG, want)
 	}
 	if th.Selection != th.Accent {
@@ -44,7 +48,7 @@ func TestSelectionBGIsADerivedBackground(t *testing.T) {
 	m = m.openModelDialog()
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	if !strings.Contains(m.View(), ansiBG(string(want))) {
+	if !strings.Contains(m.View(), ansiBG(want)) {
 		t.Fatal("the dialog cursor row does not paint with SelectionBG")
 	}
 }
@@ -69,7 +73,7 @@ var hexColor = regexp.MustCompile(`^#[0-9a-f]{6}$`)
 // any slot, so a preset that left one empty would render that element with no
 // colour at all rather than fail anywhere near the table.
 func TestEveryPresetFillsEverySlot(t *testing.T) {
-	colorType := reflect.TypeOf(lipgloss.Color(""))
+	colorType := reflect.TypeOf(lipgloss.CompleteColor{})
 	for _, name := range ThemeNames() {
 		th := Preset(name)
 		if th.Name != name {
@@ -82,7 +86,7 @@ func TestEveryPresetFillsEverySlot(t *testing.T) {
 				continue
 			}
 			slots++
-			got := v.Field(i).String()
+			got := v.Field(i).FieldByName("TrueColor").String()
 			if !hexColor.MatchString(got) {
 				t.Fatalf("%s: slot %s is %q, want a #rrggbb colour", name, v.Type().Field(i).Name, got)
 			}
@@ -102,30 +106,30 @@ func TestEveryPresetFillsEverySlot(t *testing.T) {
 func TestPresetTableIsTheSpec(t *testing.T) {
 	dark := Preset("craze-dark")
 	for _, tc := range []struct{ name, got, want string }{
-		{"bg", string(dark.BG), "#0c0c11"},
-		{"fg", string(dark.FG), "#c9c9d4"},
-		{"dim", string(dark.Dim), "#82829a"},
-		{"bright", string(dark.Bright), "#e2e2ea"},
-		{"border", string(dark.Border), "#24242f"},
-		{"accent", string(dark.Accent), "#e8a33d"},
-		{"teal", string(dark.Teal), "#3fc8c8"},
-		{"ok", string(dark.OK), "#6fbf73"},
-		{"warn", string(dark.Warn), "#e8a33d"},
-		{"err", string(dark.Err), "#e06c75"},
-		{"purple", string(dark.Purple), "#bb9af7"},
+		{"bg", dark.BG.TrueColor, "#0c0c11"},
+		{"fg", dark.FG.TrueColor, "#c9c9d4"},
+		{"dim", dark.Dim.TrueColor, "#82829a"},
+		{"bright", dark.Bright.TrueColor, "#e2e2ea"},
+		{"border", dark.Border.TrueColor, "#24242f"},
+		{"accent", dark.Accent.TrueColor, "#e8a33d"},
+		{"teal", dark.Teal.TrueColor, "#3fc8c8"},
+		{"ok", dark.OK.TrueColor, "#6fbf73"},
+		{"warn", dark.Warn.TrueColor, "#e8a33d"},
+		{"err", dark.Err.TrueColor, "#e06c75"},
+		{"purple", dark.Purple.TrueColor, "#bb9af7"},
 	} {
 		if tc.got != tc.want {
 			t.Fatalf("craze-dark %s = %s, want %s", tc.name, tc.got, tc.want)
 		}
 	}
-	if got := string(Preset("gruvbox").Accent); got != "#fabd2f" {
+	if got := Preset("gruvbox").Accent.TrueColor; got != "#fabd2f" {
 		t.Fatalf("gruvbox accent %s", got)
 	}
 
 	// Derived slots name a role; they must stay tied to their source colour.
 	for _, tc := range []struct {
 		name       string
-		got, want  lipgloss.Color
+		got, want  lipgloss.CompleteColor
 		derivation string
 	}{
 		{"User", dark.User, dark.Teal, "Teal"},
@@ -152,15 +156,15 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 	}
 	// The tinted diff backgrounds are 10% of the diff colour over the
 	// background, so they sit beside BG and nowhere near OK/Err.
-	if dark.DiffAddBG == dark.BG || dark.DiffAddBG == dark.OK || dark.DiffAddBG == dark.DiffDelBG {
+	if add, del := dark.DiffAddBG.TrueColor, dark.DiffDelBG.TrueColor; add == dark.BG.TrueColor || add == dark.OK.TrueColor || add == del {
 		t.Fatalf("diff backgrounds are not blends: add=%s del=%s bg=%s", dark.DiffAddBG, dark.DiffDelBG, dark.BG)
 	}
-	if got, want := blend("#000000", "#ffffff", 10), lipgloss.Color("#1a1a1a"); got != want {
+	if got, want := blend("#000000", "#ffffff", 10), "#1a1a1a"; got != want {
 		t.Fatalf("blend 10%% = %s, want %s", got, want)
 	}
 	// The composer's two rules sit one step off Border, towards the text they
 	// frame; Border itself is too dim to read as a frame.
-	if got, want := dark.Rule, blend("#24242f", "#c9c9d4", ruleMix); got != want || got == dark.Border {
+	if got, want := dark.Rule.TrueColor, blend("#24242f", "#c9c9d4", ruleMix); got != want || got == dark.Border.TrueColor {
 		t.Fatalf("Rule = %s, want Border blended %d%% towards FG (%s)", got, ruleMix, want)
 	}
 
@@ -170,13 +174,13 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 	// defeat the point of splitting the slots out.
 	for _, name := range ThemeNames() {
 		th := Preset(name)
-		if th.Heading == th.Accent {
+		if th.Heading.TrueColor == th.Accent.TrueColor {
 			t.Fatalf("%s: Heading must not equal Accent (inline code / spinner / chips)", name)
 		}
-		if th.UserMark == th.User {
+		if th.UserMark.TrueColor == th.User.TrueColor {
 			t.Fatalf("%s: UserMark must not equal User", name)
 		}
-		if th.User == th.Assistant {
+		if th.User.TrueColor == th.Assistant.TrueColor {
 			t.Fatalf("%s: User must not equal Assistant", name)
 		}
 	}
@@ -505,5 +509,328 @@ func TestThemePickerIgnoredWhileACardIsUp(t *testing.T) {
 	m = tm.(Model)
 	if m.dialog == dialogTheme {
 		t.Fatal("ctrl+g must be ignored while a card is up")
+	}
+}
+
+// The two tests below hold SF-142: every theme legible at every colour depth.
+// They assert on the bytes a style renders, not on the Theme's field types, and
+// render through a private renderer per profile, so they touch no global (the
+// package's TestMain forces the default renderer to true colour) and are
+// parallel-safe.
+
+// depthSGR is one SGR sequence in a rendered string.
+var depthSGR = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
+// depthPaint is what a style paints under one profile: the foreground and the
+// background as a palette index (0..255, or -1 for none, which for the
+// foreground means the terminal's default) or as an RGB hex at true colour,
+// and whether the style reverses them.
+type depthPaint struct {
+	fgIdx, bgIdx int
+	fgHex, bgHex string
+	reverse      bool
+}
+
+// depthRender renders one cell in the style st builds, through a private
+// renderer at profile p, and reads back what it paints.
+func depthRender(p termenv.Profile, st func(lipgloss.Style) lipgloss.Style) depthPaint {
+	r := lipgloss.NewRenderer(io.Discard)
+	r.SetColorProfile(p)
+	return depthParse(st(r.NewStyle()).Render("x"))
+}
+
+// depthParse reads the colours the SGR sequences in s leave in force.
+func depthParse(s string) depthPaint {
+	out := depthPaint{fgIdx: -1, bgIdx: -1}
+	for _, m := range depthSGR.FindAllStringSubmatch(s, -1) {
+		ps := strings.Split(m[1], ";")
+		for i := 0; i < len(ps); i++ {
+			n, _ := strconv.Atoi(ps[i])
+			switch {
+			case (n == 38 || n == 48) && i+2 < len(ps) && ps[i+1] == "5":
+				k, _ := strconv.Atoi(ps[i+2])
+				if n == 38 {
+					out.fgIdx = k
+				} else {
+					out.bgIdx = k
+				}
+				i += 2
+			case (n == 38 || n == 48) && i+4 < len(ps) && ps[i+1] == "2":
+				rr, _ := strconv.Atoi(ps[i+2])
+				gg, _ := strconv.Atoi(ps[i+3])
+				bb, _ := strconv.Atoi(ps[i+4])
+				h := string(rgb(uint8(rr), uint8(gg), uint8(bb)))
+				if n == 38 {
+					out.fgHex = h
+				} else {
+					out.bgHex = h
+				}
+				i += 4
+			case n == 7:
+				out.reverse = true
+			case n >= 30 && n <= 37:
+				out.fgIdx = n - 30
+			case n >= 90 && n <= 97:
+				out.fgIdx = n - 90 + 8
+			case n >= 40 && n <= 47:
+				out.bgIdx = n - 40
+			case n >= 100 && n <= 107:
+				out.bgIdx = n - 100 + 8
+			}
+		}
+	}
+	return out
+}
+
+// depthXterm is xterm's own default 0..15 (XTerm-col.ad), the reference
+// palette for the 16-colour floor; depthVGA is termenv's table. 0..15 are the
+// user's palette, so neither is the truth, and the 16-colour test is semantic
+// with these two as an "is it invisible" floor.
+var (
+	depthXterm = [16]string{"#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+		"#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"}
+	depthVGA = [16]string{"#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
+		"#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff", "#00ffff", "#ffffff"}
+)
+
+// depthIdxHex is a palette index's RGB: pal for 0..15, the fixed xterm cube
+// and grey ramp above.
+func depthIdxHex(i int, pal [16]string) string {
+	if i < 16 {
+		return pal[i]
+	}
+	if i >= 232 {
+		v := uint8(8 + 10*(i-232))
+		return string(rgb(v, v, v))
+	}
+	lv := [6]uint8{0, 0x5f, 0x87, 0xaf, 0xd7, 0xff}
+	i -= 16
+	return string(rgb(lv[i/36], lv[(i/6)%6], lv[i%6]))
+}
+
+// depthFGHex is a paint's foreground as RGB. No foreground is the terminal's
+// default, which OSC 10 makes exactly the theme's FG while craze runs. With
+// OSC off (--no-background, or a terminal that ignores OSC 10) it is the
+// user's own default instead, which is intended: it is the readable choice on
+// the user's own background, and no test can know that background.
+func depthFGHex(pt depthPaint, th Theme, pal [16]string) string {
+	switch {
+	case pt.fgHex != "":
+		return pt.fgHex
+	case pt.fgIdx >= 0:
+		return depthIdxHex(pt.fgIdx, pal)
+	}
+	return depthHex(th.FG)
+}
+
+// depthKey names what a paint's foreground is, for telling two slots apart.
+func depthKey(pt depthPaint) string {
+	if pt.fgHex != "" {
+		return pt.fgHex
+	}
+	return strconv.Itoa(pt.fgIdx)
+}
+
+// depthHex is a theme colour's true-colour hex, whatever type the slot is.
+func depthHex(c lipgloss.TerminalColor) string {
+	v := reflect.ValueOf(c)
+	if v.Kind() == reflect.String {
+		return v.String()
+	}
+	return v.FieldByName("TrueColor").String()
+}
+
+func depthLum(hex string) float64 {
+	r, g, b := hexRGB(hex)
+	lin := func(v uint8) float64 {
+		c := float64(v) / 255
+		if c <= 0.04045 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+// depthContrast is the WCAG contrast ratio of two colours.
+func depthContrast(a, b string) float64 {
+	la, lb := depthLum(a), depthLum(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+type depthSlot struct {
+	name string
+	line bool // a rule, not text: a lower floor
+	get  func(Theme) lipgloss.TerminalColor
+}
+
+// depthSlots are the slots that paint text or a rule on the theme's
+// background; every other foreground slot is one of these by derivation.
+var depthSlots = []depthSlot{
+	{"FG", false, func(t Theme) lipgloss.TerminalColor { return t.FG }},
+	{"Dim", false, func(t Theme) lipgloss.TerminalColor { return t.Dim }},
+	{"Bright", false, func(t Theme) lipgloss.TerminalColor { return t.Bright }},
+	{"Accent", false, func(t Theme) lipgloss.TerminalColor { return t.Accent }},
+	{"Teal", false, func(t Theme) lipgloss.TerminalColor { return t.Teal }},
+	{"OK", false, func(t Theme) lipgloss.TerminalColor { return t.OK }},
+	{"Warn", false, func(t Theme) lipgloss.TerminalColor { return t.Warn }},
+	{"Err", false, func(t Theme) lipgloss.TerminalColor { return t.Err }},
+	{"Purple", false, func(t Theme) lipgloss.TerminalColor { return t.Purple }},
+	{"Rule", true, func(t Theme) lipgloss.TerminalColor { return t.Rule }},
+	{"Shell", true, func(t Theme) lipgloss.TerminalColor { return t.Shell }},
+}
+
+func depthSlotNamed(n string) depthSlot {
+	for _, s := range depthSlots {
+		if s.name == n {
+			return s
+		}
+	}
+	panic("no slot " + n)
+}
+
+// depthWant is the contrast a converted colour must keep: three quarters of
+// its true-colour contrast or AA (4.5), whichever is lower, and never under the
+// floor, 2.0 for text and 1.5 for a rule.
+func depthWant(tc float64, line bool) float64 {
+	floor := 2.0
+	if line {
+		floor = 1.5
+	}
+	return math.Max(floor, math.Min(4.5, 0.75*tc))
+}
+
+// TestThemeLegibleAtEveryDepth: at true colour and at 256 colours, every
+// preset's text and rules stay legible on its background, colours that differ
+// in true colour still differ, and the two composites (text on the selection
+// band, the chip's BG on Accent) keep their contrast. SF-142 was craze-dark's
+// Err painting 256-colour 232, near-black on a near-black background.
+func TestThemeLegibleAtEveryDepth(t *testing.T) {
+	for _, name := range ThemeNames() {
+		th := Preset(name)
+		bg := depthHex(th.BG)
+		for _, p := range []termenv.Profile{termenv.TrueColor, termenv.ANSI256} {
+			paints := map[string]string{}
+			for _, s := range depthSlots {
+				c := s.get(th)
+				pt := depthRender(p, func(st lipgloss.Style) lipgloss.Style { return st.Foreground(c) })
+				got := depthFGHex(pt, th, depthXterm)
+				tc := depthContrast(depthHex(c), bg)
+				if cr := depthContrast(got, bg); cr < depthWant(tc, s.line) {
+					t.Errorf("%s %s: %s %s paints %s, contrast %.2f against %s, want >= %.2f (true colour %.2f)",
+						name, p.Name(), s.name, depthHex(c), got, cr, bg, depthWant(tc, s.line), tc)
+				}
+				paints[s.name] = depthKey(pt)
+			}
+			// Colours that differ in true colour keep differing: an error that
+			// reads as a warning, or a rule that reads as body text, is the
+			// collapse this test exists for.
+			for i := range depthSlots {
+				for j := i + 1; j < len(depthSlots); j++ {
+					a, b := depthSlots[i], depthSlots[j]
+					if depthHex(a.get(th)) != depthHex(b.get(th)) && paints[a.name] == paints[b.name] {
+						t.Errorf("%s %s: %s and %s differ in true colour but paint the same", name, p.Name(), a.name, b.name)
+					}
+				}
+			}
+			for _, pr := range []struct {
+				name   string
+				fg, bk lipgloss.TerminalColor
+			}{
+				{"FG on SelectionBG", th.FG, th.SelectionBG},
+				{"Bright on SelectionBG", th.Bright, th.SelectionBG},
+				{"BG on Accent", th.BG, th.Accent},
+			} {
+				pt := depthRender(p, func(st lipgloss.Style) lipgloss.Style { return st.Foreground(pr.fg).Background(pr.bk) })
+				f, b := depthFGHex(pt, th, depthXterm), pt.bgHex
+				if pt.bgIdx >= 0 {
+					b = depthIdxHex(pt.bgIdx, depthXterm)
+				}
+				tc := depthContrast(depthHex(pr.fg), depthHex(pr.bk))
+				if cr := depthContrast(f, b); cr < depthWant(tc, false) {
+					t.Errorf("%s %s: %s paints %s on %s, contrast %.2f, want >= %.2f (true colour %.2f)",
+						name, p.Name(), pr.name, f, b, cr, depthWant(tc, false), tc)
+				}
+			}
+		}
+	}
+}
+
+// TestThemeSixteenColours: sixteen colours are the user's own palette, so each
+// preset's picks are held to what a palette cannot undo: each role in its hue
+// family, no slot in the background's own index, the bright half on a dark
+// theme and the normal half on a light one, distinct roles distinct, plus a
+// contrast floor against two reference palettes that only an invisible pick
+// fails. FG paints the terminal's default here (see depthFGHex).
+func TestThemeSixteenColours(t *testing.T) {
+	family := map[string][]int{"Err": {1, 9}, "OK": {2, 10}, "Warn": {3, 11}, "Teal": {6, 14}, "Purple": {5, 13}, "Dim": {8}}
+	for _, name := range ThemeNames() {
+		th := Preset(name)
+		bg := depthHex(th.BG)
+		dark := depthLum(bg) < 0.18
+		bgPick := depthRender(termenv.ANSI, func(st lipgloss.Style) lipgloss.Style { return st.Foreground(th.BG) }).fgIdx
+		idx := map[string]int{}
+		for _, s := range depthSlots {
+			c := s.get(th)
+			pt := depthRender(termenv.ANSI, func(st lipgloss.Style) lipgloss.Style { return st.Foreground(c) })
+			idx[s.name] = pt.fgIdx
+			if want, ok := family[s.name]; ok && !slices.Contains(want, pt.fgIdx) {
+				t.Errorf("%s: %s paints 16-colour %d, want one of %v", name, s.name, pt.fgIdx, want)
+			}
+			if pt.fgIdx >= 0 && pt.fgIdx == bgPick {
+				t.Errorf("%s: %s paints the background's own index %d", name, s.name, pt.fgIdx)
+			}
+			// 8 (Dim), 0 and 15 (black and white) sit in whichever half they
+			// must; every other text colour picks its half by the theme.
+			if !s.line && pt.fgIdx >= 0 && pt.fgIdx != 8 && pt.fgIdx != 0 && pt.fgIdx != 15 {
+				if dark && pt.fgIdx < 8 {
+					t.Errorf("%s: %s paints %d, the dim half, on a dark theme", name, s.name, pt.fgIdx)
+				}
+				if !dark && pt.fgIdx >= 8 {
+					t.Errorf("%s: %s paints %d, the bright half, on a light theme", name, s.name, pt.fgIdx)
+				}
+			}
+			for _, pal := range [][16]string{depthXterm, depthVGA} {
+				if got := depthFGHex(pt, th, pal); depthContrast(got, bg) < 1.5 {
+					t.Errorf("%s: %s paints %s, contrast %.2f against %s", name, s.name, got, depthContrast(got, bg), bg)
+				}
+			}
+		}
+		for _, pr := range [][2]string{{"FG", "Dim"}, {"FG", "Bright"}, {"Err", "Warn"}, {"Err", "OK"}, {"OK", "Warn"},
+			{"Err", "Purple"}, {"Teal", "Accent"}, {"Shell", "Rule"}} {
+			a, b := depthSlotNamed(pr[0]), depthSlotNamed(pr[1])
+			if depthHex(a.get(th)) != depthHex(b.get(th)) && idx[pr[0]] == idx[pr[1]] {
+				t.Errorf("%s: %s and %s both paint 16-colour %d", name, pr[0], pr[1], idx[pr[0]])
+			}
+		}
+	}
+}
+
+// TestNearest256 pins craze's own 256-colour conversion: an exact cube or grey
+// entry maps to itself, nothing maps into 0..15 (the user's palette), and
+// craze-dark's Err, which termenv painted 232 (SF-142), is 167.
+func TestNearest256(t *testing.T) {
+	for _, tc := range []struct {
+		hex  string
+		want int
+	}{
+		{"#e06c75", 167},
+		{"#d75f87", 168},
+		{"#5f5f5f", 59},
+		{"#080808", 232},
+		{"#eeeeee", 255},
+		{"#000000", 16},
+		{"#ffffff", 231},
+		{"#ff0000", 196},
+	} {
+		if got := nearest256(tc.hex); got != tc.want {
+			t.Errorf("nearest256(%s) = %d, want %d", tc.hex, got, tc.want)
+		}
+	}
+	if got := Preset("craze-dark").Err.ANSI256; got != "167" {
+		t.Fatalf("craze-dark Err paints 256-colour %s, want 167", got)
 	}
 }

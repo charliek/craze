@@ -215,7 +215,7 @@ func (m Model) transcriptView() string {
 		return m.vp.View()
 	}
 	from, to := m.sel.bounds()
-	bg := selectionSeq(m.theme.SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
 	top := m.vp.YOffset
 	var rows []string
 	if drawn := m.cur().drawn; drawn != nil {
@@ -231,21 +231,43 @@ func (m Model) transcriptView() string {
 	return strings.Join(rows, "\n")
 }
 
-// selectionSeq is the raw SGR that turns the selection background on. It is
-// raw rather than a lipgloss style because the background has to survive every
-// sequence already inside the row, and a style would close itself with a reset
-// that takes the row's own colours with it. An empty string means the profile
-// has no colour to give, and the highlight is simply not drawn.
-func selectionSeq(c lipgloss.Color) string {
-	col := lipgloss.ColorProfile().Color(string(c))
+// selectionSeq is the raw SGR that turns the selection band on under profile
+// p. It is raw rather than a lipgloss style because the band has to survive
+// every sequence already inside the row, and a style would close itself with a
+// reset that takes the row's own colours with it. An empty string means the
+// profile has no colour to give, and the highlight is simply not drawn.
+//
+// The band is c's own colour for the depth: the hex at true colour, and at 256
+// colours c's own index, never termenv's conversion of the hex (SF-142, see
+// tone). At 16 colours it is reverse video, because no index of the user's
+// own palette keeps FG, Dim and Bright all legible on it; reverse keeps each
+// slot's own contrast against the background, whatever the palette is.
+// highlightSpan's closing reset turns it off after the span.
+func selectionSeq(p termenv.Profile, c lipgloss.CompleteColor) string {
+	var col termenv.Color
+	switch p {
+	case termenv.TrueColor:
+		col = p.Color(c.TrueColor)
+	case termenv.ANSI256:
+		col = p.Color(c.ANSI256)
+	case termenv.ANSI:
+		return termenv.CSI + "7m"
+	}
 	if col == nil {
 		return ""
 	}
-	seq := col.Sequence(true)
-	if seq == "" {
-		return ""
+	return termenv.CSI + col.Sequence(true) + "m"
+}
+
+// selectionBand is st on the selection band under profile p: the band's own
+// colour, or reverse video at 16 colours (selectionSeq says why). It is the
+// style half of selectionSeq, for a row craze styles itself: the dialog
+// cursor row and the /model value row.
+func selectionBand(p termenv.Profile, st lipgloss.Style, c lipgloss.CompleteColor) lipgloss.Style {
+	if p == termenv.ANSI {
+		return st.Reverse(true)
 	}
-	return termenv.CSI + seq + "m"
+	return st.Background(c)
 }
 
 // highlightSpan paints cells [from, to] of an already-rendered row with the

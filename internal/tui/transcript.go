@@ -650,7 +650,7 @@ type idSeg struct {
 	id spanID
 }
 
-func styleFG(c lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
+func styleFG(c lipgloss.TerminalColor) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 
 // renderSegs styles and concatenates segs, clamping the result to width.
 func renderSegs(width int, segs ...seg) string {

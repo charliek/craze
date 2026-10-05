@@ -367,7 +367,7 @@ func TestSignInLinkSurvivesEveryCut(t *testing.T) {
 			}
 		}
 	}
-	bg := selectionSeq(m.theme.SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
 	for full := 0; full <= r.X+r.W+3; full++ {
 		base := bg + styleFG(m.theme.Err).Render(strings.Repeat("x", full)) + ansi.ResetStyle
 		for i, line := range box {
@@ -409,7 +409,7 @@ func TestSignInLinksOverASelection(t *testing.T) {
 		t.Fatal("the reply closed the sign-in step")
 	}
 	m.sel = selection{on: true, anchor: cellPos{line: 0, col: 0}, head: cellPos{line: 1 << 20, col: m.width - 1}}
-	bg := selectionSeq(m.theme.SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
 	if bg == "" || !strings.Contains(m.View(), bg) {
 		t.Fatal("the control: the frame has no selection highlight under the box")
 	}

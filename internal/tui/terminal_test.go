@@ -111,7 +111,7 @@ func TestTerminalColorsSkipsAMalformedColour(t *testing.T) {
 	w := &oscRecorder{}
 	tc := newTerminalColors(w)
 	th := Preset("gruvbox")
-	th.BG = "not-a-colour"
+	th.BG.TrueColor = "not-a-colour"
 	tc.apply(th)
 	if got := w.String(); got != "" {
 		t.Fatalf("a malformed BG wrote %q", got)
@@ -142,7 +142,7 @@ func TestThemePickerMovesTheTerminalColours(t *testing.T) {
 	m = tm.(Model)
 	light := Preset("craze-light")
 	want := setPair("f6/f6/f2", "2a/2a/33")
-	if string(light.BG) != "#f6f6f2" || string(light.FG) != "#2a2a33" {
+	if light.BG.TrueColor != "#f6f6f2" || light.FG.TrueColor != "#2a2a33" {
 		t.Fatalf("craze-light bg/fg moved: %q/%q", light.BG, light.FG)
 	}
 	if got := w.take(); got != want {
@@ -153,7 +153,7 @@ func TestThemePickerMovesTheTerminalColours(t *testing.T) {
 	m = tm.(Model)
 	dark := Preset("craze-dark")
 	want = setPair("0c/0c/11", "c9/c9/d4")
-	if string(dark.BG) != "#0c0c11" || string(dark.FG) != "#c9c9d4" {
+	if dark.BG.TrueColor != "#0c0c11" || dark.FG.TrueColor != "#c9c9d4" {
 		t.Fatalf("craze-dark bg/fg moved: %q/%q", dark.BG, dark.FG)
 	}
 	if got := w.take(); got != want {

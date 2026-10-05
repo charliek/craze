@@ -1641,7 +1641,7 @@ func TestFrameGoldenSelectStyledRow(t *testing.T) {
 // which is the only place the highlight exists: the goldens are stripped.
 func assertSelected(t *testing.T, raw string, on, off [][2]int) {
 	t.Helper()
-	bg := selectionSeq(Preset("tokyo-night").SelectionBG)
+	bg := selectionSeq(lipgloss.ColorProfile(), Preset("tokyo-night").SelectionBG)
 	if bg == "" {
 		t.Skip("no colour profile")
 	}

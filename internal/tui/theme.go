@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -35,21 +37,32 @@ const shellMix = 55
 
 // paletteSpec is the hand-picked part of a theme. Every other slot is derived
 // from these eleven colours, so a new preset is one row of this table.
+//
+// ansi is the row's 16-colour column: one pick per colour, in the order of the
+// eleven above, used when the terminal has only sixteen colours. 0..15 are the
+// user's own palette, so the picks are by role rather than by hex: a dark
+// preset takes the bright half {0,"",8,15,8,Acc,14,10,11,9,13} and a light one
+// the normal half {15,"",8,0,7,Acc,6,2,3,1,5}, with Acc the accent's own hue.
+// FG is "", the terminal's default foreground, which OSC 10 makes exactly the
+// theme's FG while craze runs (terminal.go) and which is the readable choice on
+// the user's own background when it does not. 256 colours need no column: each
+// colour's index is computed (nearest256).
 type paletteSpec struct {
 	name                                                             string
 	bg, fg, dim, bright, border, accent, teal, ok, warn, err, purple string
+	ansi                                                             [11]string
 }
 
 // palettes is the pinned preset table, in the order the picker lists them.
 // The first entry is the default.
 var palettes = []paletteSpec{
-	{"craze-dark", "#0c0c11", "#c9c9d4", "#82829a", "#e2e2ea", "#24242f", "#e8a33d", "#3fc8c8", "#6fbf73", "#e8a33d", "#e06c75", "#bb9af7"},
-	{"craze-light", "#f6f6f2", "#2a2a33", "#7a7a8c", "#101018", "#d8d8d0", "#b8760f", "#137f7f", "#3f8a45", "#b8760f", "#b8404a", "#7a4fbf"},
-	{"tokyo-night", "#1a1b26", "#a9b1d6", "#565f89", "#c0caf5", "#292e42", "#7aa2f7", "#7dcfff", "#9ece6a", "#e6c248", "#f7768e", "#bb9af7"},
-	{"dark", "#1c1c1c", "#d0d0d0", "#808080", "#e4e4e4", "#3a3a3a", "#5f87d7", "#5fafd7", "#87af5f", "#e6c850", "#d75f5f", "#af87d7"},
-	{"light", "#fafafa", "#383a42", "#a0a1a7", "#101010", "#d4d4d4", "#4078f2", "#0184bc", "#50a14f", "#c89614", "#e45649", "#a626a4"},
-	{"catppuccin", "#1e1e2e", "#cdd6f4", "#6c7086", "#f5f5ff", "#313244", "#89b4fa", "#89dceb", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7"},
-	{"gruvbox", "#282828", "#ebdbb2", "#928374", "#fbf1c7", "#3c3836", "#fabd2f", "#83a598", "#b8bb26", "#fabd2f", "#fb4934", "#d3869b"},
+	{"craze-dark", "#0c0c11", "#c9c9d4", "#82829a", "#e2e2ea", "#24242f", "#e8a33d", "#3fc8c8", "#6fbf73", "#e8a33d", "#e06c75", "#bb9af7", [11]string{"0", "", "8", "15", "8", "11", "14", "10", "11", "9", "13"}},
+	{"craze-light", "#f6f6f2", "#2a2a33", "#7a7a8c", "#101018", "#d8d8d0", "#b8760f", "#137f7f", "#3f8a45", "#b8760f", "#b8404a", "#7a4fbf", [11]string{"15", "", "8", "0", "7", "3", "6", "2", "3", "1", "5"}},
+	{"tokyo-night", "#1a1b26", "#a9b1d6", "#565f89", "#c0caf5", "#292e42", "#7aa2f7", "#7dcfff", "#9ece6a", "#e6c248", "#f7768e", "#bb9af7", [11]string{"0", "", "8", "15", "8", "12", "14", "10", "11", "9", "13"}},
+	{"dark", "#1c1c1c", "#d0d0d0", "#808080", "#e4e4e4", "#3a3a3a", "#5f87d7", "#5fafd7", "#87af5f", "#e6c850", "#d75f5f", "#af87d7", [11]string{"0", "", "8", "15", "8", "12", "14", "10", "11", "9", "13"}},
+	{"light", "#fafafa", "#383a42", "#a0a1a7", "#101010", "#d4d4d4", "#4078f2", "#0184bc", "#50a14f", "#c89614", "#e45649", "#a626a4", [11]string{"15", "", "8", "0", "7", "4", "6", "2", "3", "1", "5"}},
+	{"catppuccin", "#1e1e2e", "#cdd6f4", "#6c7086", "#f5f5ff", "#313244", "#89b4fa", "#89dceb", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7", [11]string{"0", "", "8", "15", "8", "12", "14", "10", "11", "9", "13"}},
+	{"gruvbox", "#282828", "#ebdbb2", "#928374", "#fbf1c7", "#3c3836", "#fabd2f", "#83a598", "#b8bb26", "#fabd2f", "#fb4934", "#d3869b", [11]string{"0", "", "8", "15", "8", "11", "14", "10", "11", "9", "13"}},
 }
 
 // themeAliases are the spellings that are not a preset name but mean one.
@@ -72,49 +85,55 @@ var themeAliases = map[string]string{
 // --no-background it leaves the terminal alone and draws on whatever
 // background the terminal already has. BG also derives the tinted backgrounds
 // below either way.
+//
+// Every colour carries all three depths (tone): TrueColor is the hex, which
+// is also what OSC 10/11 and blend use; ANSI256 and ANSI are what a 256- or
+// 16-colour terminal paints. lipgloss picks one by the renderer's profile.
 type Theme struct {
 	Name string
 
-	BG, FG, Dim, Bright, Border         lipgloss.Color
-	Accent, Teal, OK, Warn, Err, Purple lipgloss.Color
+	BG, FG, Dim, Bright, Border         lipgloss.CompleteColor
+	Accent, Teal, OK, Warn, Err, Purple lipgloss.CompleteColor
 
 	// UserMark colours the ❯ / ↳ glyph that opens a user row; User is the bold
 	// prompt text beside it. Heading colours a markdown heading (h1-h6 draw
 	// identically), kept apart from Accent so a heading and inline code in
 	// the same reply are not the same colour.
-	User, UserMark, Assistant, Thought, ToolKind, Heading lipgloss.Color
-	DiffAdd, DiffDel                                      lipgloss.Color
-	DiffAddBG, DiffDelBG                                  lipgloss.Color
-	LineNo, TaskRail, Selection, Rule                     lipgloss.Color
+	User, UserMark, Assistant, Thought, ToolKind, Heading lipgloss.CompleteColor
+	DiffAdd, DiffDel                                      lipgloss.CompleteColor
+	DiffAddBG, DiffDelBG                                  lipgloss.CompleteColor
+	LineNo, TaskRail, Selection, Rule                     lipgloss.CompleteColor
 	// Shell is the composer's two rules while the draft is a shell command, and
 	// the `!` that opens the transcript row it produces — one colour for "this
 	// is your shell, not the agent", the way UserMark means "you, here". It is
 	// derived rather than hand-picked so no preset row has to change for it.
-	Shell lipgloss.Color
+	Shell lipgloss.CompleteColor
 	// SelectionBG is the background the dialog cursor row (and V4's mouse
-	// selection) paints with; Selection stays a foreground slot.
-	SelectionBG                      lipgloss.Color
-	ChipBypass, ChipPrompt, Provider lipgloss.Color
+	// selection) paints with; Selection stays a foreground slot. At 16
+	// colours the band is reverse video instead (selectionBand).
+	SelectionBG                      lipgloss.CompleteColor
+	ChipBypass, ChipPrompt, Provider lipgloss.CompleteColor
 	// One colour per mode kind, not per mode id: the chip has to stay
 	// readable for an agent that spells plan mode "architect".
-	ModeImplement, ModePlan, ModeReadOnly lipgloss.Color
+	ModeImplement, ModePlan, ModeReadOnly lipgloss.CompleteColor
 }
 
 // theme expands a palette into every slot the UI can ask for.
 func (p paletteSpec) theme() Theme {
+	a := p.ansi
 	th := Theme{
 		Name:   p.name,
-		BG:     lipgloss.Color(p.bg),
-		FG:     lipgloss.Color(p.fg),
-		Dim:    lipgloss.Color(p.dim),
-		Bright: lipgloss.Color(p.bright),
-		Border: lipgloss.Color(p.border),
-		Accent: lipgloss.Color(p.accent),
-		Teal:   lipgloss.Color(p.teal),
-		OK:     lipgloss.Color(p.ok),
-		Warn:   lipgloss.Color(p.warn),
-		Err:    lipgloss.Color(p.err),
-		Purple: lipgloss.Color(p.purple),
+		BG:     tone(p.bg, a[0]),
+		FG:     tone(p.fg, a[1]),
+		Dim:    tone(p.dim, a[2]),
+		Bright: tone(p.bright, a[3]),
+		Border: tone(p.border, a[4]),
+		Accent: tone(p.accent, a[5]),
+		Teal:   tone(p.teal, a[6]),
+		OK:     tone(p.ok, a[7]),
+		Warn:   tone(p.warn, a[8]),
+		Err:    tone(p.err, a[9]),
+		Purple: tone(p.purple, a[10]),
 	}
 	// User was Bright, which vanished into body text. Teal makes it read as
 	// "you" without competing for the loudest colour on screen. UserMark on
@@ -132,18 +151,22 @@ func (p paletteSpec) theme() Theme {
 	th.Heading = th.OK
 	th.DiffAdd = th.OK
 	th.DiffDel = th.Err
-	th.DiffAddBG = blend(p.bg, p.ok, diffBGMix)
-	th.DiffDelBG = blend(p.bg, p.err, diffBGMix)
+	// A blended slot has no hand-picked 16-colour index of its own, so it
+	// takes its parent's: a tint is no colour at 16, the band is reverse
+	// video there and takes Border's, the rule reads as Dim does (Border's 7
+	// would vanish on a light background), and the shell rule as Purple.
+	th.DiffAddBG = tone(blend(p.bg, p.ok, diffBGMix), "")
+	th.DiffDelBG = tone(blend(p.bg, p.err, diffBGMix), "")
 	th.LineNo = th.Dim
 	th.TaskRail = th.Accent
 	th.Selection = th.Accent
-	th.SelectionBG = blend(p.bg, p.accent, selectionMix)
-	th.Rule = blend(p.border, p.fg, ruleMix)
+	th.SelectionBG = tone(blend(p.bg, p.accent, selectionMix), a[4])
+	th.Rule = tone(blend(p.border, p.fg, ruleMix), a[2])
 	// Shell is the same rule leaning on Purple instead of FG. Purple is spoken
 	// for only by the plan chip, which is a two-word chip on the status row and
 	// never on screen beside the composer's rules, so the shell band is the one
 	// purple thing the eye finds.
-	th.Shell = blend(p.border, p.purple, shellMix)
+	th.Shell = tone(blend(p.border, p.purple, shellMix), a[10])
 	th.ChipBypass = th.Err
 	th.ChipPrompt = th.Warn
 	th.Provider = th.Teal
@@ -193,13 +216,14 @@ func normalizeThemeName(name string) string {
 	return n
 }
 
-func rgb(r, g, b uint8) lipgloss.Color {
-	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
+// rgb is the "#rrggbb" hex of one colour.
+func rgb(r, g, b uint8) string {
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
 }
 
 // blend mixes pct percent of fg into bg. It is how the tinted diff backgrounds
 // stay on the right side of a light or a dark palette without a second table.
-func blend(bg, fg string, pct int) lipgloss.Color {
+func blend(bg, fg string, pct int) string {
 	br, bgr, bb := hexRGB(bg)
 	fr, fg2, fb := hexRGB(fg)
 	mix := func(a, b uint8) uint8 {
@@ -220,6 +244,75 @@ func hexRGB(s string) (r, g, b uint8) {
 		return 0, 0, 0
 	}
 	return uint8(n >> 16), uint8(n >> 8), uint8(n)
+}
+
+// tone is one theme colour at every depth: the hex itself at true colour,
+// craze's own nearest256 at 256 colours, and the preset's hand-picked index
+// at 16 ("" is the terminal's default foreground).
+//
+// craze converts rather than leaving 256 colours to termenv, whose
+// conversion is SF-142: its grey candidate averages the cube indices rather
+// than the channels, so it is always 232, and it picks between cube and grey
+// by an HSLuv distance that does not wrap hue, so craze-dark's Err (#e06c75)
+// painted 232, near-black on a near-black background.
+func tone(hex, ansi16 string) lipgloss.CompleteColor {
+	return lipgloss.CompleteColor{TrueColor: hex, ANSI256: strconv.Itoa(nearest256(hex)), ANSI: ansi16}
+}
+
+// nearest256 is the xterm-256 index nearest hex by plain Euclidean distance in
+// OKLab, over 16..255 only: 0..15 are the user's own palette, not fixed
+// colours, so no hex can be matched against them.
+func nearest256(hex string) int {
+	l, a, b := oklab(hexRGB(hex))
+	best, bd := 16, math.MaxFloat64
+	for i, c := range xtermLab() {
+		if d := (l-c[0])*(l-c[0]) + (a-c[1])*(a-c[1]) + (b-c[2])*(b-c[2]); d < bd {
+			best, bd = 16+i, d
+		}
+	}
+	return best
+}
+
+// xtermLab is the OKLab coordinates of xterm-256's fixed entries 16..255,
+// computed once: every theme build converts every slot, and tests build
+// themes thousands of times.
+var xtermLab = sync.OnceValue(func() [][3]float64 {
+	out := make([][3]float64, 0, 240)
+	for i := 16; i < 256; i++ {
+		l, a, b := oklab(xterm256(i))
+		out = append(out, [3]float64{l, a, b})
+	}
+	return out
+})
+
+// xterm256 is the RGB of a fixed xterm-256 entry: 16..231 the 6×6×6 cube,
+// 232..255 the grey ramp.
+func xterm256(i int) (r, g, b uint8) {
+	if i >= 232 {
+		v := uint8(8 + 10*(i-232))
+		return v, v, v
+	}
+	lv := [6]uint8{0, 0x5f, 0x87, 0xaf, 0xd7, 0xff}
+	i -= 16
+	return lv[i/36], lv[(i/6)%6], lv[i%6]
+}
+
+// oklab converts an sRGB colour to OKLab (Björn Ottosson's matrices).
+func oklab(r, g, b uint8) (l, a, bb float64) {
+	lin := func(v uint8) float64 {
+		c := float64(v) / 255
+		if c <= 0.04045 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	lr, lg, lb := lin(r), lin(g), lin(b)
+	lc := math.Cbrt(0.4122214708*lr + 0.5363325363*lg + 0.0514459929*lb)
+	mc := math.Cbrt(0.2119034982*lr + 0.6806995451*lg + 0.1073969566*lb)
+	sc := math.Cbrt(0.0883024619*lr + 0.2817188376*lg + 0.6299787005*lb)
+	return 0.2104542553*lc + 0.7936177850*mc - 0.0040720468*sc,
+		1.9779984951*lc - 2.4285922050*mc + 0.4505937099*sc,
+		0.0259040371*lc + 0.7827717662*mc - 0.8086757660*sc
 }
 
 // applyTheme repaints the whole screen. The textarea keeps its own copies of

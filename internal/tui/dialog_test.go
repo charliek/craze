@@ -76,8 +76,8 @@ func TestOverlayKeepsEveryRowsWidth(t *testing.T) {
 // TestOverlayRestoresTheBaseStyle: the box's own colours stop at its right
 // edge, and whatever the base line was painting resumes after it.
 func TestOverlayRestoresTheBaseStyle(t *testing.T) {
-	base := styleFG("#ff0000").Render("aaaaaaaaaaaaaaaaaaaa")
-	box := styleFG("#00ff00").Render("####")
+	base := styleFG(lipgloss.Color("#ff0000")).Render("aaaaaaaaaaaaaaaaaaaa")
+	box := styleFG(lipgloss.Color("#00ff00")).Render("####")
 	out := overlay(base, box, rect{X: 8, Y: 0, W: 4, H: 1})
 	if plain(out) != "aaaaaaaa####aaaaaaaa" {
 		t.Fatalf("text %q", plain(out))
@@ -94,8 +94,8 @@ func TestOverlayRestoresTheBaseStyle(t *testing.T) {
 // TestOverlaySplicesInsideResets: a base line that resets in the middle, and a
 // box that does too, still come out the right width with the right text.
 func TestOverlaySplicesInsideResets(t *testing.T) {
-	base := styleFG("#ff0000").Render("aaaa") + "bbbb" + styleFG("#0000ff").Render("cccc") + "dddd"
-	box := styleFG("#00ff00").Render("##") + "@@"
+	base := styleFG(lipgloss.Color("#ff0000")).Render("aaaa") + "bbbb" + styleFG(lipgloss.Color("#0000ff")).Render("cccc") + "dddd"
+	box := styleFG(lipgloss.Color("#00ff00")).Render("##") + "@@"
 	out := overlay(base, box, rect{X: 6, Y: 0, W: 4, H: 1})
 	if plain(out) != "aaaabb##@@ccdddd" {
 		t.Fatalf("text %q", plain(out))
@@ -487,7 +487,7 @@ func TestModelDialogFocusPaintsTheFocusedRow(t *testing.T) {
 	m = m.openModelDialog()
 	tm, _ = m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	band := ansiBG(string(m.theme.SelectionBG))
+	band := ansiBG(m.theme.SelectionBG.TrueColor)
 
 	for _, tc := range []struct {
 		name, want string
