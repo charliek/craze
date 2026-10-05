@@ -79,6 +79,11 @@ type group struct {
 	// command scheduled inside the grace gives it longer, so a starved CPU
 	// cannot spend the grace before the command runs (plan 036 F2).
 	grace time.Duration
+	// drain is the drain wait supervise gives the output once the leader
+	// has exited: 0 is drainWait, every production group's. A test whose
+	// premise needs the call held in the drain gives it longer, so the
+	// real 2 s timer cannot end the drain first (plan 037 C3r2).
+	drain time.Duration
 }
 
 // termGrace is the group's SIGTERM-to-SIGKILL grace (group.grace).
@@ -87,6 +92,14 @@ func (g *group) termGrace() time.Duration {
 		return g.grace
 	}
 	return termGrace
+}
+
+// drainWait is the group's drain wait (group.drain).
+func (g *group) drainWait() time.Duration {
+	if g.drain > 0 {
+		return g.drain
+	}
+	return drainWait
 }
 
 // startGroup starts cmd, which must set SysProcAttr.Setsid, and watches its
@@ -308,7 +321,7 @@ wait:
 			if isClosing() {
 				break wait
 			}
-			drain = time.After(drainWait) // limit, if set, stays: the drain does not restart the clock
+			drain = time.After(g.drainWait()) // limit, if set, stays: the drain does not restart the clock
 		case <-output:
 			output = nil
 		case <-done:

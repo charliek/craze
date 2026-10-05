@@ -1347,6 +1347,7 @@ def alive(pid: int, marker: str) -> bool:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,  # a ps that never answers fails the test, never hangs the run
     )
     fields = out.stdout.split()
     if out.returncode != 0 or not fields:

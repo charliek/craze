@@ -830,7 +830,14 @@ func TestBashCloseSignal(t *testing.T) {
 		// drain could run out, and Run return, before the first snapshot
 		// (plan 037 C3r). Once released the leader exits, and the drain wait
 		// begins.
-		r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; sleep 616 & echo $! > pid; echo supervised; while [ ! -e go ]; do sleep 0.1; done"}), env)
+		c := prepareBash(t, env, map[string]any{"command": "echo $$ > leader; sleep 616 & echo $! > pid; echo supervised; while [ ! -e go ]; do sleep 0.1; done"})
+		// The drain wait is 30 s, not the real 2 s (bashCall.drainWait), so
+		// the close lands in it however late the test is scheduled after the
+		// release: against the real timer a delayed close failed, or came
+		// once the drain was over and cut nothing (plan 037 C3r2, r9).
+		const drain = 30 * time.Second
+		c.drainWait = drain
+		r := startBash(t, c, env)
 		leader := bashPID(t, filepath.Join(env.Workspace, "leader"), "sleep 616")
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 616")
 		supervised()
@@ -844,20 +851,30 @@ func TestBashCloseSignal(t *testing.T) {
 		if !waitFor(15*time.Second, func() bool { return !alive(leader, "sleep 616") }) {
 			t.Fatal("control: the leader never exited")
 		}
-		// The close must find the call in the drain wait, which ends in a
-		// SIGKILL and the result; a call already returned is a drain that
-		// ran out first, and the close would cut nothing short.
+		// The leader's exit wakes supervise, which starts the drain. A
+		// moment's pause, a small part of the 30 s, lets it get there first:
+		// a close that beat it to the exit would stop a running command,
+		// whose aborted result fails the check below, never passes it.
+		time.Sleep(time.Second)
+		// Nothing has ended the call yet: it was held until the release,
+		// and the drain is far from over.
 		select {
 		case res := <-r.res:
-			t.Fatalf("Run had returned before the close, %v after the leader was released: the drain wait was over (result %+v)", time.Since(released), res)
+			t.Fatalf("Run had returned before the close, %v after the leader was released (result %+v)", time.Since(released), res)
 		default:
 		}
 		closed := time.Now()
 		closeSession()
-		res := r.await(t, 30*time.Second)
-		if took := time.Since(closed); took > time.Second {
-			t.Fatalf("Run took %v after a close in the drain wait (%v after the release); want the %v wait cut short", took, closed.Sub(released), planDrain)
+		// The bound is the drain's, past it, so a close that cut nothing
+		// fails on the time it took, not on the await.
+		res := r.await(t, 2*drain)
+		// Well inside the drain: the close cut it short. The bound allows a
+		// starved CPU the SIGKILL, the pipe's close and the result.
+		if took := time.Since(closed); took > 10*time.Second {
+			t.Fatalf("Run took %v after a close in the drain wait (%v after the release); want the %v wait cut short", took, closed.Sub(released), drain)
 		}
+		// The exit's result, not an abort: supervise had seen the exit, so
+		// the close came in the drain, not while the command ran.
 		if res.IsError || res.Text != "supervised\n" {
 			t.Fatalf("result = %+v, want the exit it was first", res)
 		}
@@ -2298,7 +2315,6 @@ func TestBashOutputHeldOpen(t *testing.T) {
 			}
 			command := fmt.Sprintf("%s%s=%s '%s' -test.run='^%s$' & echo $! > pid; i=0; while [ ! -e escaped ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done",
 				tc.prefix, escapeeHelper, escaped, self, marker)
-			start := time.Now() // no later than Run's own start
 			r := startBash(t, prepareBash(t, env, map[string]any{"command": command}), env)
 			bashPID(t, filepath.Join(env.Workspace, "pid"), marker)
 			if !waitFor(20*time.Second, func() bool { _, err := os.Stat(escaped); return err == nil }) {
@@ -2310,20 +2326,23 @@ func TestBashOutputHeldOpen(t *testing.T) {
 			if res.IsError || !strings.Contains(res.Text, "escapee\n") || !strings.HasSuffix(res.Text, meta(partialText)) || res.Output == nil {
 				t.Fatalf("result = {IsError:%v Text:...%q}, want the output so far and the note", res.IsError, res.Text[max(len(res.Text)-300, 0):])
 			}
-			// The reading stops at its bound: the 2 s drain wait, then at most
-			// the 0.7 s read of the pipe. It is timed to the reading's end,
-			// which the result's duration marks — taken before the wait for
-			// the spill file (bashJob.ended) — so a slow spill file does not
-			// count against it (plan 037 SF-132, C3r). Run started after
-			// start, so start plus the duration is no later than that end:
-			// the measure can only come out short, never make the bound
-			// tighter than it is.
-			bound := planDrain + time.Second + 3*time.Second
-			if read := start.Add(res.Output.Duration).Sub(began); read > bound {
-				t.Fatalf("the reading ended %v after the leader exited", read)
+			if res.Output.Duration <= 0 {
+				t.Fatalf("the result's duration is %v, want the time the command ran", res.Output.Duration)
 			}
-			// Run itself returns within the same bound, and a spilled output's
-			// within the spill file's wait too (savedWait, prepareBash).
+			// The reading stops at its bound: the 2 s drain wait, then at most
+			// the 0.7 s read of the pipe. Run's own return pins it, timed from
+			// when the test saw the child leave, which the leader's exit follows
+			// within a poll. The short output is never cut (below), so it never
+			// spills and nothing but the drain and the read stands between the
+			// exit and the return: its bound is the drain's, as before C3.
+			bound := planDrain + time.Second + 3*time.Second
+			if !tc.spilled && res.Trunc.Truncated() {
+				t.Fatalf("the short output was cut (%+v), so it spilled and waited for its file", res.Trunc)
+			}
+			// A spilled output's Run waits for its file too, up to savedWait
+			// (prepareBash), so a slow filesystem does not fail it (plan 037
+			// SF-132): its bound shows Run returns once the file is done or
+			// given up, and the short case is what pins the drain.
 			if tc.spilled {
 				bound += savedWait
 			}
