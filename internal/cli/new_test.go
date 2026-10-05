@@ -84,6 +84,10 @@ func TestNewProviderBeforeTheHub(t *testing.T) {
 		{name: "absent, no default, CRAZE_PROVIDER is not the hub's default", env: "grok", code: 1, want: noDefault},
 		{name: "absent, no default, --json goes to the hub", argv: []string{"--json"}, code: 1, wantLike: noHub},
 		{name: "absent, a configured default", config: "provider = \"cursor\"\n", code: 1, wantLike: noHub},
+		// The hub trims config.toml's provider (session.create), so a blank
+		// one is no default here too; an unknown one is the hub's own refusal.
+		{name: "absent, a blank configured default", config: "provider = \"  \"\n", code: 1, want: noDefault},
+		{name: "absent, an unknown configured default goes to the hub", config: "provider = \"bogus\"\n", code: 1, wantLike: noHub},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			serveHome(t)

@@ -144,8 +144,10 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// default is wire words (params.provider …), and its badParams carries
 	// no reason of its own to tell it by. So in plain mode the same question
 	// is asked here first, of the config file the hub reads its default
-	// from (hubCreates' tui.ConfigProvider), and answered in craze's words —
-	// never by matching the hub's message. --json passes the hub's refusal
+	// from (hubCreates' tui.ConfigProvider, which trims it), and answered in
+	// craze's words — never by matching the hub's message. Not
+	// hubDefaultProvider: an unknown configured id is the hub's own
+	// (different) refusal, not "no default". --json passes the hub's refusal
 	// through whole, as cli.md documents.
 	if provider == "" && !f.json && tui.ConfigProvider() == "" {
 		return fail(nil, "no default provider yet; pass --provider %s", newProviderChoices)

@@ -941,6 +941,9 @@ def run_calibrate(args) -> int:
     scenarios = build_scenarios()
     if args.only:
         scenarios = [s for s in scenarios if args.only in s.name]
+    if not scenarios:
+        print(f"no scenario matches --only {args.only!r}", file=sys.stderr)
+        return 2
     baseline = Path(args.baseline)
     fake_agent = Path(args.fake_agent)
     hold_fake_agent = Path(args.hold_fake_agent) if args.hold_fake_agent else None

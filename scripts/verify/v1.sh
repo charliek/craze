@@ -133,7 +133,18 @@ makefile_set() {
 # changed_pkgs <tree> <merge-base> <sha>: the test-race packages that changed
 # or import (directly, transitively, or from their tests) a changed package.
 changed_pkgs() {
-	local tree=$1 mb=$2 sha=$3 mod files
+	local tree=$1 mb=$2 sha=$3 mod files deps
+	# A changed go.mod or go.sum can change any package's build: every
+	# test-race package, not none.
+	deps=$(git -C "$ROOT" diff --name-only "$mb" "$sha" -- go.mod go.sum) || die 2 "git diff failed"
+	if [[ -n $deps ]]; then
+		local all
+		all=$(makefile_set "$tree")
+		[[ -n $all ]] || die 2 "no test-race packages found in $tree/Makefile"
+		# shellcheck disable=SC2086
+		go_pkgs "$tree" $all || exit $?
+		return 0
+	fi
 	files=$(git -C "$ROOT" diff --name-only "$mb" "$sha" -- '*.go') || die 2 "git diff failed"
 	[[ -z $files ]] && return 0
 	mod=$(cd "$tree" && go list -m) || die 2 "go list -m failed"
