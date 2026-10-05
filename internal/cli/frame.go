@@ -53,7 +53,7 @@ func newFrameCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&o.cols, "cols", 100, "terminal width")
 	cmd.Flags().IntVar(&o.rows, "rows", 30, "terminal height")
-	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
+	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringVar(&o.fakeScript, "fake-script", "", "CRAZE_FAKE_SCRIPT for the child agent")
 	cmd.Flags().StringVar(&o.keys, "keys", "", "key script, e.g. \"go<enter><wait:text:TASKS>\"")
 	cmd.Flags().BoolVar(&o.ansi, "ansi", false, "print the raw frame with a forced true-colour profile")

@@ -215,6 +215,15 @@ func checkCompletionRequest(cmd *cobra.Command, args []string) error {
 	}
 	probe := NewRootCmd()
 	probe.InitDefaultHelpCmd()
+	// The completion request itself, as cobra adds it when it runs (astra
+	// r16): a line that completes it parses no flags, so it is never refused.
+	probe.AddCommand(&cobra.Command{
+		Use:                cobra.ShellCompRequestCmd + " [command-line]",
+		Aliases:            []string{cobra.ShellCompNoDescRequestCmd},
+		Hidden:             true,
+		DisableFlagParsing: true,
+		Args:               cobra.MinimumNArgs(1),
+	})
 	final, finalArgs, err := probe.Find(slices.Clone(args[:len(args)-1]))
 	if err != nil {
 		return completionRequestUsage(cmd, "unknown command")

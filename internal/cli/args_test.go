@@ -210,5 +210,14 @@ func TestCompletionRequestsNeverEchoWhatTheyWereGiven(t *testing.T) {
 				t.Errorf("craze %q: exit %d, stdout %q, stderr %q; want 0, \":0\\n\"", argv, code, stdout, stderr)
 			}
 		}
+		// A completion request is itself a command cobra completes, and it
+		// parses no flags, so nothing after it is refused (astra r16).
+		for _, inner := range []string{"__complete", "__completeNoDesc"} {
+			argv := []string{req, inner, "--unknown", ""}
+			stdout, stderr, code := executeErr(argv)
+			if code != 0 || stdout != ":0\n" || stderr != "Completion ended with directive: ShellCompDirectiveDefault\n" {
+				t.Errorf("craze %q: exit %d, stdout %q, stderr %q; want 0, \":0\\n\"", argv, code, stdout, stderr)
+			}
+		}
 	}
 }
