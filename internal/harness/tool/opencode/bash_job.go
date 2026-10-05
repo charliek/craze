@@ -146,7 +146,7 @@ func (c *bashCall) runBackground(ctx context.Context, env tool.Env) tool.Result 
 	}
 	j.out.startSpill()
 	slot.Start(tool.JobSpec{ID: c.id, Command: c.command, Workdir: c.dir, Limit: c.timeout, Began: began}, j)
-	path := j.out.spillName(spillWait, env.Closing)
+	path := j.out.spillName(c.spillWait, env.Closing)
 	return tool.Result{Text: env.Jobs.Redact(c.startReceipt(path))}
 }
 
@@ -164,7 +164,7 @@ func (c *bashCall) promote(env tool.Env, j *bashJob, slot tool.JobSlot, handed *
 	*handed = true
 	slot.Start(tool.JobSpec{ID: c.id, Command: c.command, Workdir: c.dir, Limit: tool.JobPromotedLimit,
 		Promoted: true, Began: j.began, Seen: seen}, j)
-	path := j.out.spillName(spillWait, env.Closing)
+	path := j.out.spillName(c.spillWait, env.Closing)
 	return tool.Result{Text: env.Jobs.Redact(c.promotionReceipt(kept, cut, path)),
 		Output: &tool.ExecOutput{ExitCode: -1, Output: kept, Duration: time.Since(j.began)}}
 }

@@ -312,6 +312,12 @@ func TestMain(m *testing.M) {
 	// it carry it too; a test about the session sets rundir.GUISessionEnv
 	// itself, over this.
 	_ = os.Setenv(rundir.GUISessionEnv, "1")
+	// Every model here looks for its workspace's repository no higher than
+	// the test's own temporary directory (ownTempRoot): a .git above it —
+	// /tmp/.git, which another program can leave — would otherwise put a
+	// branch in every status row and frame built on a temporary workspace
+	// (plan 037). Set before any test runs, and never again.
+	gitBoundary = ownTempRoot(filepath.Clean(os.TempDir()))
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
