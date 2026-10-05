@@ -824,19 +824,39 @@ func TestBashCloseSignal(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
 		supervised := supervisedOn(t, &env, "supervised")
-		// The leader exits at once; its child holds the pipe.
-		r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; echo supervised; sleep 616 & echo $! > pid"}), env)
+		// The leader's child holds the pipe, and the leader itself waits for
+		// the test's go-ahead: the output's snapshot must come first, which a
+		// leader exiting at once could miss — under a loaded scheduler the
+		// drain could run out, and Run return, before the first snapshot
+		// (plan 037 C3r). Once released the leader exits, and the drain wait
+		// begins.
+		r := startBash(t, prepareBash(t, env, map[string]any{"command": "echo $$ > leader; sleep 616 & echo $! > pid; echo supervised; while [ ! -e go ]; do sleep 0.1; done"}), env)
 		leader := bashPID(t, filepath.Join(env.Workspace, "leader"), "sleep 616")
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 616")
 		supervised()
+		if !alive(leader, "sleep 616") {
+			t.Fatal("control: the leader did not wait for the go-ahead")
+		}
+		released := time.Now()
+		if err := os.WriteFile(filepath.Join(env.Workspace, "go"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
 		if !waitFor(15*time.Second, func() bool { return !alive(leader, "sleep 616") }) {
 			t.Fatal("control: the leader never exited")
+		}
+		// The close must find the call in the drain wait, which ends in a
+		// SIGKILL and the result; a call already returned is a drain that
+		// ran out first, and the close would cut nothing short.
+		select {
+		case res := <-r.res:
+			t.Fatalf("Run had returned before the close, %v after the leader was released: the drain wait was over (result %+v)", time.Since(released), res)
+		default:
 		}
 		closed := time.Now()
 		closeSession()
 		res := r.await(t, 30*time.Second)
 		if took := time.Since(closed); took > time.Second {
-			t.Fatalf("Run took %v after a close in the drain wait; want the %v wait cut short", took, planDrain)
+			t.Fatalf("Run took %v after a close in the drain wait (%v after the release); want the %v wait cut short", took, closed.Sub(released), planDrain)
 		}
 		if res.IsError || res.Text != "supervised\n" {
 			t.Fatalf("result = %+v, want the exit it was first", res)
@@ -2278,6 +2298,7 @@ func TestBashOutputHeldOpen(t *testing.T) {
 			}
 			command := fmt.Sprintf("%s%s=%s '%s' -test.run='^%s$' & echo $! > pid; i=0; while [ ! -e escaped ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done",
 				tc.prefix, escapeeHelper, escaped, self, marker)
+			start := time.Now() // no later than Run's own start
 			r := startBash(t, prepareBash(t, env, map[string]any{"command": command}), env)
 			bashPID(t, filepath.Join(env.Workspace, "pid"), marker)
 			if !waitFor(20*time.Second, func() bool { _, err := os.Stat(escaped); return err == nil }) {
@@ -2285,11 +2306,28 @@ func TestBashOutputHeldOpen(t *testing.T) {
 			}
 			began := time.Now()
 			res := r.await(t, 30*time.Second)
-			if res.IsError || !strings.Contains(res.Text, "escapee\n") || !strings.HasSuffix(res.Text, meta(partialText)) {
+			took := time.Since(began)
+			if res.IsError || !strings.Contains(res.Text, "escapee\n") || !strings.HasSuffix(res.Text, meta(partialText)) || res.Output == nil {
 				t.Fatalf("result = {IsError:%v Text:...%q}, want the output so far and the note", res.IsError, res.Text[max(len(res.Text)-300, 0):])
 			}
-			// The 2 s drain wait, then at most the 0.7 s read of the pipe.
-			if took := time.Since(began); took > planDrain+time.Second+3*time.Second {
+			// The reading stops at its bound: the 2 s drain wait, then at most
+			// the 0.7 s read of the pipe. It is timed to the reading's end,
+			// which the result's duration marks — taken before the wait for
+			// the spill file (bashJob.ended) — so a slow spill file does not
+			// count against it (plan 037 SF-132, C3r). Run started after
+			// start, so start plus the duration is no later than that end:
+			// the measure can only come out short, never make the bound
+			// tighter than it is.
+			bound := planDrain + time.Second + 3*time.Second
+			if read := start.Add(res.Output.Duration).Sub(began); read > bound {
+				t.Fatalf("the reading ended %v after the leader exited", read)
+			}
+			// Run itself returns within the same bound, and a spilled output's
+			// within the spill file's wait too (savedWait, prepareBash).
+			if tc.spilled {
+				bound += savedWait
+			}
+			if took > bound {
 				t.Fatalf("Run took %v after the leader exited", took)
 			}
 			if strings.Contains(res.Text, "Full output saved") {

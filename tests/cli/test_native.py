@@ -1360,7 +1360,11 @@ def until_alive(pid: int, marker: str, timeout: float = 10) -> bool:
 
     A read that missed is kept: what the kernel showed for pid then is a
     warning when pid came alive after all (the flake's mechanism, on a green
-    run) and part of the failure when it never did (plan 036 F3)."""
+    run) and part of the failure when it never did (plan 036 F3). Collecting
+    it is bounded (proc_evidence) and never decides the answer: pid is read
+    once more after the last of it, so a child that came alive while it was
+    collected -- past the deadline, on a slow machine -- is found alive
+    (plan 037 C3r)."""
     deadline = time.monotonic() + timeout
     start, first_miss, misses = time.monotonic(), "", 0
     until_alive.evidence = ""
@@ -1369,7 +1373,10 @@ def until_alive(pid: int, marker: str, timeout: float = 10) -> bool:
         if not first_miss:
             first_miss = proc_evidence(pid)
         if time.monotonic() >= deadline:
-            until_alive.evidence = f"first miss: {first_miss}; last: {proc_evidence(pid)}"
+            last = proc_evidence(pid)
+            if alive(pid, marker):
+                break
+            until_alive.evidence = f"first miss: {first_miss}; last: {last}"
             return False
         time.sleep(0.05)
     if misses:
@@ -1383,16 +1390,28 @@ def until_alive(pid: int, marker: str, timeout: float = 10) -> bool:
 until_alive.evidence = ""
 
 
+# EVIDENCE_TIMEOUT bounds proc_evidence's ps, in seconds.
+EVIDENCE_TIMEOUT = 2
+
+
 def proc_evidence(pid: int) -> str:
     """What the kernel shows for pid, for a flake's record: ps's own answer,
     and on Linux the executable, raw command line and stat. An empty command
     line beside the new executable is the instant of an exec; no /proc entry
-    is a process gone and reaped; a Z state is a zombie."""
-    ps = subprocess.run(
-        ["ps", "-ww", "-o", "pid=,ppid=,pgid=,stat=,etime=,args=", "-p", str(pid)],
-        capture_output=True, text=True, check=False,
-    )
-    out = [f"ps rc={ps.returncode} {ps.stdout.strip()!r}"]
+    is a process gone and reaped; a Z state is a zombie. A ps that does not
+    answer within EVIDENCE_TIMEOUT, or cannot be run, is recorded as such:
+    the record never fails the test, and its ps holds it up no longer than
+    that."""
+    try:
+        ps = subprocess.run(
+            ["ps", "-ww", "-o", "pid=,ppid=,pgid=,stat=,etime=,args=", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=EVIDENCE_TIMEOUT,
+        )
+        out = [f"ps rc={ps.returncode} {ps.stdout.strip()!r}"]
+    except subprocess.TimeoutExpired:
+        out = [f"ps=<no answer in {EVIDENCE_TIMEOUT}s>"]
+    except OSError as e:
+        out = [f"ps=<{e}>"]
     base = Path(f"/proc/{pid}")
     if Path("/proc/self").exists():
         try:
