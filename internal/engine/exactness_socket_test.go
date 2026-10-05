@@ -458,12 +458,12 @@ func (c *wireClient) attachedAt(t *testing.T, k int, trace []agent.Event) *trans
 // payload over the wire): the trace's edit report at its caps — eight 64 KiB
 // old/new diff pairs, ~1 MiB, which the every-cut subtest of
 // TestAttachMidTurnOverTheSocketReproducesTheFirst cuts to a byte a side —
-// reaches three socket clients whole: one attached at the cut just before it
-// (the report comes to it live, fanned out with another client attached),
+// reaches four socket clients whole: two attached at the two cuts before it
+// (the report comes to both live, fanned out to more than one subscriber),
 // one at the cut that carries it (in its snapshot) and one at the cut after
 // (in its snapshot, the rest of the trace live). Each folds to the trace
 // folded whole, which is the host's own model, and holds the report's diffs
-// exactly. Three clients, not one per cut: bounded under -race at a 5% CPU
+// exactly. Four clients, not one per cut: bounded under -race at a 5% CPU
 // quota.
 func TestAFullSizeEditReportReachesEachSocketClientWhole(t *testing.T) {
 	trace := wireTrace(t)
@@ -476,7 +476,7 @@ func TestAFullSizeEditReportReachesEachSocketClientWhole(t *testing.T) {
 			edit = i
 		}
 	}
-	if edit < 0 || edit+2 > len(trace) {
+	if edit < 1 || edit+2 > len(trace) {
 		t.Fatalf("fixture: the edit report is at index %d of %d events", edit, len(trace))
 	}
 	report := trace[edit].Tool
@@ -493,7 +493,7 @@ func TestAFullSizeEditReportReachesEachSocketClientWhole(t *testing.T) {
 	start := time.Now()
 	// Cut k is the host holding the trace's first k events: the report is
 	// the edit+1-th.
-	cuts := []int{edit, edit + 1, edit + 2}
+	cuts := []int{edit - 1, edit, edit + 1, edit + 2}
 	clients := make([]*wireClient, 0, len(cuts))
 	for k := 0; k <= len(trace); k++ {
 		publishCut(t, ctx, stub, e, trace, k)
