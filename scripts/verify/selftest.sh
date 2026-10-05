@@ -18,20 +18,25 @@ repo's tests), in a few minutes:
   where the tools exist); a panic before any test in contend.sh (and
   starve.sh where a systemd user session works) (1); SIGINT to a running
   script (130) and SIGTERM to one launched with a plain & (143): its child
-  process group gone, its export dir removed, the summary line printed; a v1
-  tui job with a shortened watchdog (INCOMPLETE, its group killed, the tui
-  lock released) and v1 --summary; two v1 tui jobs with different labels
-  (the second refused, 4); a SIGKILLed v1 script whose tui job lives on (a
-  second tui job refused until the watchdog ends the group); v1 results bound
+  process group gone, its export dir removed, the summary line printed; a
+  handled exit whose cleanup fails (a group that survives SIGKILL: 2, not
+  143); a v1 tui job with a shortened watchdog (INCOMPLETE, its group killed,
+  the tui lock released) and v1 --summary; two v1 tui jobs with different
+  labels (the second refused, 4); a SIGKILLed v1 script whose tui job lives
+  on and leaves a detached setsid descendant (a second tui job refused while
+  the group lives, the lock free once the watchdog ends it although the
+  descendant lives, and a second tui job then accepted); v1 results bound
   to their manifest (a re-plan makes them STALE; --job --sha off the
   manifest refused); gate.sh's steps on a scratch Makefile (both lint passes
   through the wrapper, a failing step stops it); v8.sh --selftest; and the
   craze-live-smoke skill's smoke.sh start/type/wait/key/snap/stop on a
   dedicated tmux server running cat (also through the perl runner), its
-  refusal without a bounded runner (3), a hung tmux bounded (124, its process
-  group gone) through timeout and perl, a stop that cannot confirm the end
-  (1), a stop of an absent server (0), and its --host mac refusal (3) when
-  the mac-mini runbook's scripts are missing.
+  refusal without a bounded runner (3), a hung tmux and a TERM-ignoring one
+  bounded (124, its process group gone) through timeout and perl, wait and
+  snap passing a bound's 124 on, a stop that cannot confirm the end (a
+  server that stays, a Permission denied: 1), a stop of an absent server (0),
+  and its --host mac refusal (3) when the mac-mini runbook's scripts are
+  missing.
 Every case's output is appended to the log.
 
 Log: \$OUT/selftest-<stamp>.log (label "selftest").
@@ -91,6 +96,18 @@ w internal/broken/broken.go $'package broken\n\nfunc F() int { return "not an in
 w internal/broken/broken_test.go $'package broken\n\nimport "testing"\n\nfunc TestF(t *testing.T) { F() }'
 w internal/sleep/sleep_test.go $'package sleep\n\nimport (\n\t"os"\n\t"strconv"\n\t"testing"\n\t"time"\n)\n\nfunc TestSleep(t *testing.T) {\n\tn, _ := strconv.Atoi(os.Getenv("CVSELF_SLEEP_S"))\n\ttime.Sleep(time.Duration(n) * time.Second)\n}'
 w internal/tui/tui_test.go $'package tui\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(300 * time.Second) }'
+# Runs before TestSlow (file order): with CVSELF_DETACH_PIDFILE set, it leaves
+# a descendant in a session of its own, as a tui shell test's sleeper does.
+w internal/tui/a_detach_test.go "$(printf '%s\n' 'package tui' '' 'import (' \
+	$'\t"os"' $'\t"os/exec"' $'\t"strconv"' $'\t"syscall"' $'\t"testing"' ')' '' \
+	'func TestDetach(t *testing.T) {' \
+	$'\tf := os.Getenv("CVSELF_DETACH_PIDFILE")' \
+	$'\tif f == "" {' $'\t\tt.Skip("no CVSELF_DETACH_PIDFILE")' $'\t}' \
+	$'\tc := exec.Command("sleep", "600")' \
+	$'\tc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}' \
+	$'\tif err := c.Start(); err != nil {' $'\t\tt.Fatal(err)' $'\t}' \
+	$'\tif err := os.WriteFile(f, []byte(strconv.Itoa(c.Process.Pid)), 0o644); err != nil {' $'\t\tt.Fatal(err)' $'\t}' \
+	'}')"
 w internal/boom/boom_test.go $'package boom\n\nimport "testing"\n\nfunc init() { panic("deliberate init panic") }\n\nfunc TestBoom(t *testing.T) {}'
 printf '%s\n' \
 	'export PATH := $(HOME)/.local/share/mise/shims:$(PATH)' \
@@ -338,6 +355,42 @@ else
 	kill -TERM "$p" 2>/dev/null
 fi
 
+# 9d. A handled exit whose cleanup fails exits 2 whatever the status was
+# (here SIGTERM's 143). A zombie that joined the job's group, whose parent (a
+# perl of ours) never reaps it, keeps the group alive through SIGKILL.
+if command -v perl >/dev/null; then
+	f=$S/stopfail.out
+	CVSELF_SLEEP_S=300 "$V/cpu1.sh" sfail good ./internal/sleep >"$f" 2>&1 </dev/null &
+	p=$!
+	BGP+=("$p")
+	if wait_for "$f" '^CPU1 running pgid=' 120; then
+		g=$(sed -n 's/^CPU1 running pgid=\([0-9]*\).*/\1/p' "$f")
+		for ((i = 0; i < 240; i++)); do pgrep -g "$g" -f 'sleep\.test' >/dev/null && break; sleep 0.25; done
+		perl -e 'my $g = shift; my $c = fork; if (defined $c && $c == 0) { setpgrp(0, $g) or exit 1; exit 0 } sleep 120' "$g" </dev/null >/dev/null 2>&1 &
+		zp=$!
+		BGP+=("$zp")
+		for ((i = 0; i < 40; i++)); do
+			ps -e -o pgid=,stat= | awk -v g="$g" '$1 == g && $2 ~ /^Z/ { f = 1 } END { exit !f }' && break
+			sleep 0.25
+		done
+		kill -TERM "$p"
+		finish_bg "$p" 40
+		cat "$f" >>"$CV_LOG"
+		if [[ $RC == 2 ]] && summary_ok "$f" CPU1 2 && has "$f" "process group $g survived SIGKILL"; then
+			ok "a failed cleanup after SIGTERM exits 2, not 143 (group $g held by a zombie)"
+		else
+			bad "failed cleanup" "rc $RC, last: $(tail -1 "$f")"
+		fi
+		kill -KILL "$zp" 2>/dev/null
+		wait "$zp" 2>/dev/null
+		for ((i = 0; i < 40; i++)); do group_gone "$g" && break; sleep 0.25; done
+		group_gone "$g" || bad "failed cleanup" "group $g still there after its zombie's parent ended"
+	else
+		bad "failed cleanup" "the script never started its child: $(tail -3 "$f")"
+		kill -TERM "$p" 2>/dev/null
+	fi
+fi
+
 # 9c. A panic before any test (in init) is a test failure (1), not a harness one.
 if command -v taskset >/dev/null; then
 	expect "contend: a panic before any test" CONTEND 1 "$V/contend.sh" cp good internal/boom 0 2 .
@@ -386,32 +439,54 @@ else
 	cv_stop_group "$p"
 fi
 
-# 11b. v1: SIGKILL the script (not its group) during a tui job. The job's own
-# processes hold the lock, so a second tui job is refused until the watchdog
-# (30 s from the script's start) has ended the group; then the lock is free.
+# 11b. v1: SIGKILL the script (not its group) during a tui job whose test
+# leaves a detached setsid descendant. The keeper holds the lock, so a second
+# tui job is refused while the group lives; once the watchdog (30 s from the
+# script's start) has ended the group, the keeper lets go and the lock is
+# free although the descendant (which never had fd 9) lives on; a second tui
+# job is then accepted.
 expect "v1 --plan (label lk)" V1 0 env XDG_CACHE_HOME="$XC" "$V/v1.sh" lk --plan --sha good --pkgs ./internal/tui --count 5
-f=$S/v1-lk.out
-XDG_CACHE_HOME=$XC CRAZE_VERIFY_V1_WATCHDOG_S=30 start_bg "$f" "$V/v1.sh" lk --job tui-s1
+f=$S/v1-lk.out pidf=$S/detached.pid
+rm -f "$pidf"
+XDG_CACHE_HOME=$XC CRAZE_VERIFY_V1_WATCHDOG_S=30 CVSELF_DETACH_PIDFILE=$pidf start_bg "$f" "$V/v1.sh" lk --job tui-s1
 p=$BGPID
 if wait_for "$f" '^V1 watchdog pgid=' 120; then
 	g=$(sed -n 's/^V1 running pgid=\([0-9]*\).*/\1/p' "$f")
 	wd=$(sed -n 's/^V1 watchdog pgid=\([0-9]*\).*/\1/p' "$f")
+	kp=$(sed -n 's/^V1 tui lock keeper pid=\([0-9]*\).*/\1/p' "$f")
 	BG+=("$g" "$wd")
-	for ((i = 0; i < 240; i++)); do pgrep -g "$g" -f 'tui\.test' >/dev/null && break; sleep 0.25; done
+	[[ -n $kp ]] && BGP+=("$kp")
+	for ((i = 0; i < 240; i++)); do
+		pgrep -g "$g" -f 'tui\.test' >/dev/null && [[ -s $pidf ]] && break
+		sleep 0.25
+	done
+	dp=$(cat "$pidf" 2>/dev/null)
+	[[ -n $dp ]] && BGP+=("$dp")
 	kill -KILL "$p"
 	wait "$p" 2>/dev/null
 	expect "v1: SIGKILLed script, job alive: a second tui job is refused" V1 4 env XDG_CACHE_HOME="$XC" "$V/v1.sh" lb --job tui-s1
 	then_alive=$(group_gone "$g" && echo gone || echo alive)
 	for ((i = 0; i < 240; i++)); do group_gone "$g" && break; sleep 0.25; done
-	if [[ $then_alive == alive ]] && group_gone "$g" && flock -n "$LOCK" true; then
-		ok "v1: SIGKILLed script: refused while group $g lived, lock free once the watchdog ended it"
+	for ((i = 0; i < 20; i++)); do flock -n "$LOCK" true && break; sleep 0.25; done
+	lock=$(flock -n "$LOCK" true && echo free || echo HELD)
+	if [[ $then_alive == alive && -n $kp ]] && group_gone "$g" && [[ $lock == free ]] && ! kill -0 "$kp" 2>/dev/null; then
+		ok "v1: SIGKILLed script: refused while group $g lived; keeper $kp gone and lock free once the watchdog ended it"
 	else
-		bad "v1 SIGKILL" "group $g was $then_alive at the refusal, now $(group_gone "$g" && echo gone || echo ALIVE); lock $(flock -n "$LOCK" true && echo free || echo HELD)"
+		bad "v1 SIGKILL" "group $g was $then_alive at the refusal, now $(group_gone "$g" && echo gone || echo ALIVE); lock $lock; keeper '$kp' $(kill -0 "$kp" 2>/dev/null && echo ALIVE || echo gone)"
 	fi
+	if [[ -n $dp ]] && kill -0 "$dp" 2>/dev/null && [[ $lock == free ]]; then
+		ok "v1: a detached setsid descendant ($dp) outlives the group but holds no lock"
+	else
+		bad "v1 detached descendant" "descendant '$dp' $(kill -0 "$dp" 2>/dev/null && echo alive || echo GONE/never started), lock $lock"
+	fi
+	[[ -n $dp ]] && kill -KILL "$dp" 2>/dev/null
+	expect "v1: once the group is gone a second tui job is accepted" V1 2 env XDG_CACHE_HOME="$XC" CRAZE_VERIFY_V1_WATCHDOG_S=5 "$V/v1.sh" lb --job tui-s1
+	has "$OUTF" '^V1 tui lock held' && has "$OUTF" 'status=INCOMPLETE' && flock -n "$LOCK" true ||
+		bad "v1: a second tui job accepted" "no 'V1 tui lock held', no INCOMPLETE, or the lock left held"
 	for ((i = 0; i < 80; i++)); do group_gone "$wd" && break; sleep 0.25; done
 	group_gone "$wd" || bad "v1 SIGKILL" "the watchdog group $wd did not end"
 	cat "$f" >>"$CV_LOG"
-	BG=()
+	BG=() BGP=()
 else
 	bad "v1 SIGKILL" "the tui job never started: $(tail -3 "$f")"
 	cv_stop_group "$p"
@@ -500,13 +575,31 @@ if [[ $RC == 3 ]] && has "$OUTF" 'no bounded runner'; then ok "smoke.sh without 
 mkdir -p "$S/stub"
 printf '%s\n' '#!/bin/sh' \
 	'# A stand-in tmux: CVSTUB_MODE=hang never returns (nor does its child);' \
-	'# alive claims every call worked (a server that will not die).' \
+	'# stubborn is hang ignoring TERM (only the KILL after the grace ends it);' \
+	'# alive claims every call worked (a server that will not die); denied' \
+	'# fails as a socket it may not open does.' \
 	'case ${CVSTUB_MODE:-} in' \
-	'hang) echo $$ >>"$CVSTUB_PIDS"; sleep 1000 & echo $! >>"$CVSTUB_PIDS"; wait; exit 0 ;;' \
+	'stubborn) trap "" TERM ;;' \
+	'esac' \
+	'case ${CVSTUB_MODE:-} in' \
+	'hang | stubborn) echo $$ >>"$CVSTUB_PIDS"; sleep 1000 & echo $! >>"$CVSTUB_PIDS"; wait; exit 0 ;;' \
 	'alive) exit 0 ;;' \
+	'denied) echo "error connecting to /tmp/tmux-0/cvst (Permission denied)" >&2; exit 1 ;;' \
 	'esac' \
 	'exit 1' >"$S/stub/tmux"
 chmod 755 "$S/stub/tmux"
+# stub_run <mode> <PATH> <smoke args…>: smoke.sh against the stand-in, bound
+# 2 s; sets RC, EL (seconds) and ALIVE (stand-in pids still alive).
+stub_run() {
+	local mode=$1 pth=$2 t0 q
+	shift 2
+	: >"$STUB_PIDS"
+	t0=$(date +%s)
+	run env PATH="$pth" CVSTUB_MODE="$mode" CVSTUB_PIDS="$STUB_PIDS" CRAZE_SMOKE_SOCK="$SOCK-h" CRAZE_SMOKE_BOUND_S=2 "$SMOKE" "$@"
+	EL=$(($(date +%s) - t0)) ALIVE=''
+	while read -r q; do kill -0 "$q" 2>/dev/null && ALIVE+=" $q"; done <"$STUB_PIDS"
+	while read -r q; do kill -KILL "$q" 2>/dev/null; done <"$STUB_PIDS"
+}
 for via in timeout perl; do
 	if [[ $via == timeout ]]; then
 		command -v timeout >/dev/null || command -v gtimeout >/dev/null || continue
@@ -515,22 +608,26 @@ for via in timeout perl; do
 		command -v perl >/dev/null || continue
 		pth=$S/stub:$S/noto
 	fi
-	: >"$STUB_PIDS"
-	t0=$(date +%s)
-	run env PATH="$pth" CVSTUB_MODE=hang CVSTUB_PIDS="$STUB_PIDS" CRAZE_SMOKE_SOCK="$SOCK-h" CRAZE_SMOKE_BOUND_S=2 "$SMOKE" start sh1 cat
-	el=$(($(date +%s) - t0))
-	alive=''
-	while read -r q; do kill -0 "$q" 2>/dev/null && alive+=" $q"; done <"$STUB_PIDS"
-	if [[ $RC == 124 ]] && ((el <= 9)) && [[ -s $STUB_PIDS && -z $alive ]]; then
-		ok "smoke.sh: a hung tmux is bounded through $via (124 in ${el}s, its group gone)"
-	else
-		bad "smoke.sh hang ($via)" "exit $RC in ${el}s, pids alive:${alive:- none}"
-	fi
-	while read -r q; do kill -KILL "$q" 2>/dev/null; done <"$STUB_PIDS"
+	for mode in hang stubborn; do
+		stub_run "$mode" "$pth" start sh1 cat
+		if [[ $RC == 124 ]] && ((EL <= 9)) && [[ -s $STUB_PIDS && -z $ALIVE ]]; then
+			ok "smoke.sh: a $mode tmux is bounded through $via (124 in ${EL}s, its group gone)"
+		else
+			bad "smoke.sh $mode ($via)" "exit $RC in ${EL}s, pids alive:${ALIVE:- none}"
+		fi
+	done
 done
-# stop: a server that claims to die but stays is a failure (1); an absent one is success (0).
+# wait and snap pass a bound's 124 on (not 1).
+stub_run hang "$S/stub:$PATH" wait sh1 never 10
+[[ $RC == 124 && -z $ALIVE ]] && ok "smoke.sh wait: a bound's 124 is passed on" || bad "smoke.sh wait (bound)" "exit $RC"
+stub_run hang "$S/stub:$PATH" snap sh1 "$S/never.txt"
+[[ $RC == 124 && -z $ALIVE ]] && ok "smoke.sh snap: a bound's 124 is passed on" || bad "smoke.sh snap (bound)" "exit $RC"
+# stop: a server that claims to die but stays is a failure (1), and so is a
+# socket it may not open (Permission denied); an absent one is success (0).
 run env PATH="$S/stub:$PATH" CVSTUB_MODE=alive CRAZE_SMOKE_SOCK="$SOCK-a" "$SMOKE" stop sa
 if [[ $RC == 1 ]] && has "$OUTF" 'still running after kill-server'; then ok "smoke.sh stop: a server that stays is reported (1)"; else bad "smoke.sh stop (server stays)" "exit $RC"; fi
+run env PATH="$S/stub:$PATH" CVSTUB_MODE=denied CRAZE_SMOKE_SOCK="$SOCK-a" "$SMOKE" stop sd
+if [[ $RC == 1 ]] && has "$OUTF" 'cannot confirm .*Permission denied'; then ok "smoke.sh stop: Permission denied is not gone (1)"; else bad "smoke.sh stop (denied)" "exit $RC"; fi
 if command -v tmux >/dev/null; then
 	run env CRAZE_SMOKE_SOCK="$SOCK-gone" "$SMOKE" stop sg
 	if [[ $RC == 0 ]] && has "$OUTF" '^stopped sg$'; then ok "smoke.sh stop: an absent server counts as stopped (0)"; else bad "smoke.sh stop (absent)" "exit $RC"; fi

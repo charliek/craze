@@ -26,7 +26,8 @@
 # Text goes in as a bracketed paste: `send-keys -l` drops words that are key
 # names (end, home, up, tab…) in craze's TUI. Exit: 0 ok, 1 a wait timed out,
 # tmux failed or `stop` could not confirm the end, 2 usage, 3 no bounded
-# runner or the mac-mini runbook's scripts are missing, 124 a call hit its bound.
+# runner or the mac-mini runbook's scripts are missing, 124 a call hit its
+# bound (every command, `wait`, `snap` and `stop` included).
 set -u -o pipefail
 
 MAC_DIR=$HOME/.claude/plans/craze/mac-mini
@@ -56,6 +57,11 @@ shift 2
 # The bounded runner: `<runner> <secs> <cmd…>` exits 124 when the call
 # outlives <secs>, after ending its whole process group (an ssh under
 # mac-tmux.sh included). The perl fallback mirrors `timeout -k 2`.
+# Accepted residual: GNU timeout signals the leader's group, but when the
+#   leader dies on TERM it exits at once, so a TERM-resistant descendant gets
+#   no KILL (a tmux client spawns none; mac-tmux.sh's ssh dies on TERM).
+# Accepted residual: the perl fallback's final waitpid can block on a child
+#   stuck in uninterruptible I/O, which no signal ends.
 BOUND_PERL='
 my $s = shift;
 my $pid = fork;
@@ -67,10 +73,11 @@ alarm $s;
 waitpid $pid, 0;
 exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
 '
+BOUND_GNU=0
 if command -v timeout >/dev/null; then
-	BOUND=(timeout -k 2)
+	BOUND=(timeout -k 2) BOUND_GNU=1
 elif command -v gtimeout >/dev/null; then
-	BOUND=(gtimeout -k 2)
+	BOUND=(gtimeout -k 2) BOUND_GNU=1
 elif command -v perl >/dev/null; then
 	BOUND=(perl -e "$BOUND_PERL")
 else
@@ -79,11 +86,24 @@ fi
 BOUND_S=${CRAZE_SMOKE_BOUND_S:-20}
 [[ $BOUND_S =~ ^[1-9][0-9]*$ ]] || die 2 "CRAZE_SMOKE_BOUND_S must be a positive whole number: $BOUND_S"
 
-# bounded <secs> <cmd…>: run cmd with that time limit.
+# bounded <secs> <cmd…>: run cmd with that time limit; 124 when it hit it.
+# GNU timeout -k exits 137 when the KILL after the grace ended the call: that
+# is the bound too.
 bounded() {
-	local s=$1
+	local s=$1 rc
 	shift
 	"${BOUND[@]}" "$s" "$@"
+	rc=$?
+	((rc == 137 && BOUND_GNU)) && rc=124
+	return "$rc"
+}
+
+# failed <rc> <message…>: exit 124 for a call that hit its bound, else 1.
+failed() {
+	local rc=$1
+	shift
+	((rc == 124)) && die 124 "$* (a tmux call hit its ${BOUND_S}s bound)"
+	die 1 "$*"
 }
 
 if [[ $host == mac ]]; then
@@ -121,7 +141,7 @@ wait)
 	[[ $secs =~ ^[0-9]+$ ]] || die 2 "secs must be a whole number: $secs"
 	end=$(($(date +%s) + secs))
 	while :; do
-		pane=$(T capture-pane -p -t "$name") || die 1 "capture-pane failed (is session $name running?)"
+		pane=$(T capture-pane -p -t "$name") || failed $? "capture-pane failed (is session $name running?)"
 		if grep -Eq -- "$re" <<<"$pane"; then
 			echo "matched: $re"
 			exit 0
@@ -139,7 +159,7 @@ snap)
 	flags=(-p)
 	[[ ${2:-} == --ansi ]] && flags+=(-e)
 	[[ -z ${2:-} || ${2:-} == --ansi ]] || die 2 "snap's second argument must be --ansi"
-	T capture-pane "${flags[@]}" -t "$name" >"$file" || die 1 "capture-pane failed"
+	T capture-pane "${flags[@]}" -t "$name" >"$file" || failed $? "capture-pane failed"
 	echo "saved $file"
 	;;
 stop)
@@ -149,8 +169,10 @@ stop)
 	T send-keys -t "$name" C-d 2>/dev/null
 	sleep 0.5
 	# End it (it may already be gone: C-d can end the last pane), then confirm
-	# with a probe that must report it absent; anything else, a timeout
-	# included, is a failure.
+	# with a probe whose error establishes absence: no server on the socket
+	# ("no server running", or the socket file missing), or no such session.
+	# Anything else (a Permission denied, another connection error, a probe
+	# that hit its bound) is a failure.
 	if [[ $host == mac ]]; then
 		what="session $name" killcmd=kill-session probe=(has-session -t "$name")
 		T kill-session -t "$name" 2>/dev/null
@@ -163,8 +185,8 @@ stop)
 	prc=$?
 	((prc == 0)) && die 1 "$what is still running after $killcmd (rc $krc)"
 	case $err in
-	*"no server running"* | *"error connecting to"* | *"can't find session"*) ;;
-	*) die 1 "cannot confirm $what is gone after $killcmd (rc $krc): ${probe[0]} exited $prc${err:+: $err}" ;;
+	*"no server running"* | *"can't find session"* | *"error connecting to "*"(No such file or directory)"*) ;;
+	*) failed "$prc" "cannot confirm $what is gone after $killcmd (rc $krc): ${probe[0]} exited $prc${err:+: $err}" ;;
 	esac
 	echo "stopped $name"
 	;;

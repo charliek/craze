@@ -20,8 +20,10 @@ $S stop  v1                               # Escape, C-d, kill the server, confir
 
 Every tmux call `smoke.sh` makes, local or on the mac-mini, is bounded at 20 s (`CRAZE_SMOKE_BOUND_S`) by
 `timeout`, else `gtimeout` (Homebrew coreutils), else a perl fork + alarm that ends the call's whole process group;
-with none of them it refuses (exit 3) rather than make an unbounded call. A call that hits the bound exits 124.
-`stop` exits 0 only once a probe reports the server (mac: the session) gone; an already-absent one counts as gone.
+with none of them it refuses (exit 3) rather than make an unbounded call. A call that hits the bound (TERM, then
+KILL after 2 s) exits 124, from any command, `wait` and `snap` included. `stop` exits 0 only once a probe reports
+the server (mac: the session) absent (`no server running`, no socket file, `can't find session`); an already-absent
+one counts as gone, but a `Permission denied` or any other connection error does not (exit 1).
 
 ## Rules
 

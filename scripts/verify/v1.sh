@@ -33,9 +33,12 @@ groups), each well under the 2 h background cap.
   reports INCOMPLETE. A tui job first takes a non-blocking flock on the
   per-user lock \${XDG_CACHE_HOME:-~/.cache}/craze-verify/locks/v1-tui.lock and
   is refused at once (exit 4) while another tui job holds it: two tui -race
-  jobs never run together. The job's own processes hold the lock too, so it
-  is released only once the group is gone, even when this script is
-  SIGKILLed. --sha, when given, must be the manifest's sha (else exit 2).
+  jobs never run together. A keeper process in a session of its own holds
+  the lock too and lets it go only once the job's group is gone (or a minute
+  past the watchdog), so it outlives a SIGKILL of this script while the
+  group lives; the job's processes never hold it, so a test's detached
+  descendant cannot keep it. --sha, when given, must be the manifest's sha
+  (else exit 2).
   Writes \$OUT/v1-<id>.log and \$OUT/v1-<id>.result, bound to the manifest
   (its generation, sha, package and count).
 --summary prints JOB PKG COUNT RC OK FAIL DATA_RACE ELAPSED STATUS (+ the
@@ -73,6 +76,27 @@ OVERHEAD_MIN=5
 BUDGET_MIN=100
 WATCHDOG_S=${CRAZE_VERIFY_V1_WATCHDOG_S:-6600}
 LOCK=${XDG_CACHE_HOME:-$HOME/.cache}/craze-verify/locks/v1-tui.lock
+KEEPER=
+
+# The tui lock's keeper: started with fd 9 (the locked file) in a session of
+# its own, so neither a SIGKILL of v1.sh nor one of the job's group reaches
+# it. It polls the job's group about once a second and exits (closing fd 9,
+# releasing the lock) once the group is gone, or at its deadline.
+# shellcheck disable=SC2016
+KEEPER_SH='g=$1 end=$(($(date +%s) + $2))
+while kill -0 -- "-$g" 2>/dev/null && (($(date +%s) < end)); do sleep 1; done'
+
+# release_lock: the job's group is gone; drop the tui lock (flock -u frees it
+# for the keeper too: one open file description), then end the keeper.
+release_lock() {
+	flock -u 9 2>/dev/null
+	exec 9>&-
+	if [[ -n $KEEPER ]]; then
+		kill "$KEEPER" 2>/dev/null
+		wait "$KEEPER" 2>/dev/null
+		KEEPER=
+	fi
+}
 
 est_min() { # est_min <pkg> <count>
 	local s
@@ -255,14 +279,15 @@ do_job() {
 
 	if [[ $pkg == ./internal/tui ]]; then
 		command -v flock >/dev/null || die 3 "flock not found: a tui job needs util-linux flock"
+		command -v setsid >/dev/null || die 3 "setsid not found: a tui job needs util-linux setsid"
 		mkdir -p "$(dirname "$LOCK")" || die 2 "cannot create $(dirname "$LOCK")"
 		exec 9>>"$LOCK" || die 2 "cannot open $LOCK"
 		flock -n 9 || die 4 "a tui job is running; launch this one after it (lock $LOCK)"
 		echo "V1 tui lock held: $LOCK"
 		# On a handled exit (a signal, a die) cv_on_exit stops the group, then
-		# this releases the lock, unless the group survived SIGKILL (then its
-		# processes keep holding it).
-		cv_cleanup_hook() { ((CV_STOP_FAILED)) || flock -u 9 2>/dev/null; }
+		# this releases the lock, unless the group survived SIGKILL (then the
+		# keeper holds it until the group is gone).
+		cv_cleanup_hook() { ((CV_STOP_FAILED)) || release_lock; }
 	fi
 
 	: >"$CV_LOG"
@@ -273,14 +298,24 @@ do_job() {
 	echo "V1 job $id: $pkg -race -count=$count -timeout ${timeout}m (est ${est}m) at $CV_SHA" | tee -a "$CV_LOG"
 
 	run_job() { cd "$tree" && CRAZE_GOLDEN_TRANSPORT=both go test -race -count="$count" -timeout "${timeout}m" "$pkg"; }
-	local s0
-	s0=$(date +%s)
-	cv_start "$CV_LOG" run_job
-	local g=$CV_CHILD marker=$OUT/v1-$id.incomplete.$$
+	local s0 marker=$OUT/v1-$id.incomplete.$$
 	rm -f "$marker"
 	local left=$((WATCHDOG_S - ($(date +%s) - CV_START)))
 	((left < 1)) && left=1
-	# The watchdog closes fd 9: only the job's own processes hold the lock.
+	s0=$(date +%s)
+	cv_start "$CV_LOG" run_job
+	local g=$CV_CHILD
+	if [[ $pkg == ./internal/tui ]]; then
+		# The job has no fd 9 (cv_start closes it); the keeper takes this
+		# script's. Job control is off here, so the keeper is no group leader
+		# and setsid execs it in place: $! is the keeper. A SIGKILL in the
+		# instant between cv_start and this line frees the lock early (the
+		# same microsecond class as the pgid-reuse residual).
+		setsid bash -c "$KEEPER_SH" v1-tui-lock-keeper "$g" "$((left + 60))" </dev/null >/dev/null 2>&1 &
+		KEEPER=$!
+		echo "V1 tui lock keeper pid=$KEEPER holds it until group $g is gone"
+	fi
+	# The watchdog closes fd 9: only this script and the keeper hold the lock.
 	set -m
 	(
 		trap - INT TERM HUP EXIT
@@ -309,8 +344,7 @@ do_job() {
 	# The group is gone (cv_wait ended what was left of it); only now may the
 	# lock go, so a second tui job never overlaps this one's stragglers.
 	if [[ $pkg == ./internal/tui ]]; then
-		flock -u 9
-		exec 9>&-
+		release_lock
 		unset -f cv_cleanup_hook
 		echo "V1 tui lock released"
 	fi

@@ -100,13 +100,15 @@ cv_setup() {
 cv_on_exit() {
 	local rc=$?
 	trap '' INT TERM HUP
-	# A group that survives SIGKILL is a harness failure: CV_STOP_FAILED tells
-	# cv_cleanup_hook (v1's lock) not to release what it guards.
+	# A group that survives SIGKILL is a harness failure whatever the run's
+	# status was (0, a test's 1, SIGINT's 130, SIGTERM's 143): the exit is 2,
+	# and CV_STOP_FAILED tells cv_cleanup_hook (v1's lock) not to release what
+	# it guards.
 	cv_stop_group "$CV_CHILD" || CV_STOP_FAILED=1
 	CV_CHILD=
 	cv_stop_group "$CV_WATCHDOG" || CV_STOP_FAILED=1
 	CV_WATCHDOG=
-	((CV_STOP_FAILED && rc == 0)) && rc=2
+	((CV_STOP_FAILED)) && rc=2
 	if declare -F cv_cleanup_hook >/dev/null; then cv_cleanup_hook; fi
 	local d
 	for d in "${CV_EXPORTS[@]+"${CV_EXPORTS[@]}"}"; do
@@ -223,15 +225,15 @@ export_tree() {
 }
 
 # cv_start <log> <cmd…>: start cmd in its own process group (pgid = CV_CHILD),
-# stdin from /dev/null, stdout and stderr appended to <log>. fd 9 (v1's tui
-# lock, when held) IS inherited: the job's own processes hold the lock, so a
-# SIGKILLed script cannot release it while they run. A shell function is fine
-# as <cmd>.
+# stdin from /dev/null, stdout and stderr appended to <log>, fd 9 (v1's tui
+# lock) not inherited: a test's detached descendant must never hold the lock
+# (v1's keeper holds it while the group lives). A shell function is fine as
+# <cmd>.
 cv_start() {
 	local log=$1
 	shift
 	set -m
-	"$@" </dev/null >>"$log" 2>&1 &
+	"$@" </dev/null >>"$log" 2>&1 9>&- &
 	CV_CHILD=$!
 	set +m
 	echo "$CV_NAME running pgid=$CV_CHILD log=$log"
