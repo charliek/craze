@@ -174,8 +174,20 @@ stop)
 	# Anything else (a Permission denied, another connection error, a probe
 	# that hit its bound) is a failure.
 	if [[ $host == mac ]]; then
-		what="session $name" killcmd=kill-session probe=(has-session -t "$name")
+		# ssh to the mac-mini does not carry the remote exit status (it is 0
+		# whatever tmux returned), so the mac probe is judged by what it
+		# prints: the smoke server's session list, read for this name.
 		T kill-session -t "$name" 2>/dev/null
+		krc=$?
+		out=$(T list-sessions -F 'S:#{session_name}' 2>&1)
+		prc=$?
+		((prc == 124)) && failed 124 "cannot confirm session $name is gone after kill-session (rc $krc): list-sessions"
+		grep -qxF "S:$name" <<<"$out" && die 1 "session $name is still running after kill-session"
+		if ! grep -q '^S:' <<<"$out" && [[ $out != *"no server running"* ]]; then
+			die 1 "cannot confirm session $name is gone: list-sessions printed no session list${out:+: $out}"
+		fi
+		echo "stopped $name"
+		exit 0
 	else
 		what="tmux server $sock" killcmd=kill-server probe=(list-sessions)
 		T kill-server 2>/dev/null

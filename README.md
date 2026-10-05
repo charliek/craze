@@ -393,6 +393,7 @@ Published site: https://charliek.github.io/craze/
 Sources live under `docs/`:
 
 - [Quick Start](docs/getting-started/quick-start.md)
+- [Upgrading from v0.0.1](docs/getting-started/upgrading.md)
 - [CLI](docs/reference/cli.md)
 - [TUI](docs/reference/tui.md)
 - [Configuration](docs/reference/configuration.md)

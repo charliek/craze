@@ -69,6 +69,11 @@ without a bounded runner): a tmux server blocked on a macOS privacy prompt hangs
 runbook's "privacy-prompt trap". If the runbook or its scripts are missing, `smoke.sh --host mac` exits 3: ask
 the owner.
 
+**ssh to the mac-mini does not carry the remote exit status back** (`ssh mac-mini 'exit 3'` returns 0, checked
+2026-10-04), so judge every mac step by its output, never its exit code: real `ok` lines from `mac-test.sh` (its
+`MAC_EXIT=0` alone proves nothing), the `MAC_BUILD_OK` line, a capture. `smoke.sh --host mac stop` reads the smoke
+server's session list for that reason.
+
 ## The fake agent
 
 For layout checks that need no real agent, `tests/cli/tmux_smoke.py` stays the in-repo driver of the fake agent
