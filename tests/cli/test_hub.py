@@ -230,7 +230,7 @@ def _cleanup_stops(rec: dict, tmp_path: Path, fake_agent_bin: Path) -> None:
     deadline = time.monotonic() + WAIT
     while conftest.pid_alive(rec["pid"]) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not conftest.pid_alive(rec["pid"]), "the hub outlived the cleanup"
+    assert not conftest.pid_alive(rec["pid"]), f"the hub outlived the cleanup: {conftest.describe_pid(rec['pid'])}"
     assert not Path(rec["socket"]).exists(), "the hub left its socket"
     assert not conftest._stray_processes(str(fake_agent_bin))
 

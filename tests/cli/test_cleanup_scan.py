@@ -83,3 +83,21 @@ def test_a_failed_scan_signals_nothing(tmp_path: Path) -> None:
         # real cleanup looks.
         entry.unlink()
     assert signalled == []
+
+
+def test_a_signalled_process_the_scan_cannot_see_is_waited_for() -> None:
+    """A process already exiting has given its memory back, so its
+    environment and arguments read as empty and the marker scan no longer
+    sees it, though it is not gone yet (plan 037, PR #90's CI): the cleanup
+    still waits for every pid it signalled, by pid, until it is gone. A
+    process started without the marker stands in for one."""
+    env = {k: v for k, v in os.environ.items() if k != conftest.MARKER_ENV}
+    proc = subprocess.Popen(["sleep", "30"], env=env)
+    try:
+        assert proc.pid not in conftest.marker_pids()
+        left = conftest._exiting({proc.pid}, "/no/fake/agent")
+        assert len(left) == 1 and left[0].startswith(f"process {proc.pid}: signalled and not yet gone"), left
+    finally:
+        proc.kill()
+        proc.wait()
+    assert conftest._exiting({proc.pid}, "/no/fake/agent") == []
