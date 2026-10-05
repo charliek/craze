@@ -35,9 +35,12 @@ these documents, one per roadmap phase.
 | 2026-09-26 | H7 PR 2 (compaction) shipped: #59 → `d097845` — reminders stored as variants, the compaction entry and context rule, the summarizer and segments, when to compact, the segmented turn, overflow recovery, the `compaction` event, `/compact`; exit criterion 1 (resume a compacted session) and cache alignment verified live on Linux and the mac-mini (V3–V6, V9) |
 | 2026-09-26 | H7 PR 3 (cost) shipped: per-model `cost` in `models.toml`, spend, `Usage` on the wire, and the status row's usage part |
 | 2026-09-26/27 | H7 complete — C19's V1–V8 live gate passed on Linux and the mac-mini: exit criterion 2 (spend visible per turn) met, hand sums equal the row on both platforms, the unpriced model shows tokens, spend survives compaction and resume (V8); native became a listed, resumable, persistable provider (Q10, D-65) |
+| 2026-10-04 | Plan 037 (release readiness) shipped the native items it took: SF-132, F-2, F-5 and SF-151 (bash test flakes), SF-143 and LC-8 (native's no-funded-model and 401 texts), N1 (native redacts a `!` command's output at prompt admission), and the F1/F2 docs fixes; accepted native residuals are SF-165–SF-169 in `discovery/session-control/13-follow-ups.md` (no new decision; D-74's default still waits on the next eval) |
 
-**H0, H1, H2, H4, H5, H6 and H7 are complete — native is a listed provider
-(D-65) — H3 (approval) still comes after H8 (D-48).**
+**H0, H1, H2 and H4–H8 are complete — native is a listed provider (D-65) —
+and H3 (approval) is the one phase not started: it was scheduled after H8
+(D-48), and H8 has shipped, so H3 is next when the owner plans it. HL stays
+unscheduled.**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness was built in this repository as a hidden side quest beside the

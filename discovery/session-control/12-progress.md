@@ -5460,3 +5460,307 @@ What it must know:
   session. A relative PATH entry is read in the hub's cwd (r1, accepted).
 - No model at create and no per-provider model list in the answer (SD-45;
   SF-148).
+
+## Plan 037 — release readiness
+
+Plan 037 is the pass before the owner cuts the next release (the first since
+v0.0.1): it closes the backlog's cheap and flaky items, fixes what two live
+passes (Linux, and the mac-mini over ssh) and a docs audit found, describes
+today's craze in the docs, and records the rest. It also builds the
+verification tooling the last four plans each re-invented (`scripts/verify/`
+and a `craze-live-smoke` skill). No new feature, no protocol change: not one
+golden, wire fixture or schema file moved (V8 reported 0 at every commit). One
+PR, eight milestone commits (C1–C8) with their fix rounds, gated per commit,
+reviewed on a detached snapshot after each commit in Plan 036's pattern. The
+plan lives outside the repo; its execution amendments (X1–X32 and the
+sub-notes, in the plan folder's `progress.md`) are the truth.
+
+PR: #<n> (pending)
+
+**Owner decisions (2026-10-04), at the Phase 3b pause.** Q1 (SF-151, the
+`TestBashNoControllingTerminal` flake): the owner declined the plan's options
+(a)–(f) and chose a new one, **(g)**: retry only the terminal's setup on the
+diagnosed EPERM (up to three fresh ptys), then a named skip; never retry the
+assertion and never pass by default ("(c) is too much code for a one-setting
+behaviour"). Q2: keep LM-2's note (show why cursor may hang at `starting…`).
+Q3: close SF-32 as accepted (its row is deleted in C8). Q4: confirm P-1, error
+prose in `message`/`data.cause` is not wire ("only the TUI and the shed updates
+happening now are the consumers, so likely we should remain pragmatic"). Also:
+real agent turns are allowed for testing within a couple of dollars (this
+overrode the brief's "never a paid turn").
+
+### What shipped per commit
+
+- **C1 (`ee7c762`) — `scripts/verify/` and the live-smoke skill.** `gate.sh`
+  (the gate on a `git archive` export of a committed sha, lint through the
+  waiting wrapper), `cpu1.sh`, `starve.sh` and `contend.sh` (a test under a CPU
+  quota, or beside copies of itself, counted), `v1.sh` (the long `-race
+  -count=20` run as jobs of at most 100 estimated minutes, one tui job at a
+  time under a per-user lock), `v2.sh` (the CLI parity run, with `--equivalence`
+  comparing the saved baseline pair against a rebuilt one), `v8.sh` (fixture,
+  golden and schema diffs), `mac-test.sh`, `smoke.sh` and a `selftest.sh` over
+  every failure path; the `craze-live-smoke` skill; a CLAUDE.md pointer; the
+  `uv` pin (0.12.7) in CI.
+- **C1r (`eb7717c`), C1r2 (`1b81a87`), C1r3 (`6df5b6b`) — r1, r7, r12.** The
+  scripts' signals, the tui lock (held by the job's own processes, then by a
+  keeper with a bound), stale V1 results bound to their manifest, crashes
+  counted as failures, bounded smoke calls without GNU `timeout`, cleanup's exit
+  2, a bounded call's exit 124, and `stop` proving real absence.
+- **C2 (`744f07f`), C2r (`81e1ad7`), C2r2 (`cd71ad1`) — four flakes.** SF-118,
+  SF-133, SF-135 and SF-136, all test-only. See the flakes below.
+- **C3 (`5cf4f71`), C3r (`75d2378`), C3r2 (`0fa43ba`), C3r3 (`c0b8be2`) — the
+  bash and harness flakes.** SF-132, F-2 (and its two siblings), F-5, SF-151
+  (option g), the git-boundary seam in the tui tests, and F3's diagnostics. Two
+  no-behaviour production seams (X25, X32).
+- **C4 (`6f6b7fa`) — colour at every depth (SF-142).** Every theme colour is a
+  `CompleteColor`: truecolor keeps its hex (byte-identical), 256 colours use an
+  OKLab nearest of 16–255, 16 colours a hand column per preset; selection bands
+  reverse at 16.
+- **C5 (`4e6e299`) — typed bursts (SF-40) and the start note (LM-2).** A burst
+  is replayed as the same keys typed one at a time; the TUI and `craze prompt`
+  name why cursor may hang at starting.
+- **C6 (`dfaa601`), C6r (`b8f038e`) — the CLI surface, native texts and release
+  config.** Usage errors that never echo the input (LC-1,
+  `internal/cli/args.go`), a clearer start error (LC-3), `craze new` validating
+  only an explicit provider and not echoing wire names (LC-4), `config.toml` not
+  rewritten when nothing changed (LC-5), help texts without plan citations
+  (LC-6), the 401 advice (LC-8), `--theme` validated (LC-10), the no-funded-model
+  text naming ChatGPT sign-in (SF-143), **native redacts a `!` command's output
+  before anything records it (N1, a credential path)**, and the brew/deb
+  description (R1, R2). C6r: completion mirrors cobra (`__complete` is cobra's
+  own) and frame's `--agent-bin` help.
+- **C7 (`06ddea0`) — docs.** The docs describe today's craze (the audit's
+  false statements fixed, `README`, `index`, quick-start, the reference pages),
+  document C1–C6, and add "Upgrading from v0.0.1" (what changed, what to
+  check, how to turn each new behaviour off). `make docs` strict.
+- **C8 — this record.** `13`: the closed rows deleted, SF-106 and SF-116
+  updated, a "Plan 037 — release readiness" section (SF-152–SF-185); this
+  section; native-harness `07-roadmap.md` and `README.md`. Docs only.
+
+### Execution decisions
+
+`progress.md` holds the full list; the ones a later reader needs.
+
+**UX.**
+- X22: the TUI's start note is the `craze prompt` wording without its prefix,
+  `cursor may not start here: <reason>; <fix>`; an attach never makes a false
+  note on a GUI-born host.
+- X23: a burst is replayed one `KeyRunes` per extended grapheme cluster, not per
+  rune, so a multi-rune grapheme (`1️⃣`, a decomposed letter, a ZWJ emoji) is one
+  key as before and its first rune can never fire a shortcut (r8: it would have
+  granted a permission card). Segmentation by `rivo/uniseg`, already in the
+  module graph.
+- X27: `craze providers` inherits the root's flag error (it echoed the flag); the
+  suggestion reads `… --help (did you mean "ps"?)`; `--theme` is validated on
+  `attach` and `frame` too; `--theme ""` is accepted.
+- X28: the brew and deb description is "Terminal UI for coding agents:
+  cursor-agent, grok, gx, or a built-in agent" (the plan's text failed `brew
+  audit`).
+- X29: with no default provider the plain-mode pre-check reads config.toml's
+  `provider` before dialing, never matching a message; `--json` passes the hub's
+  refusal whole.
+**Architecture.**
+- X13: the git boundary is package-wide: `discoverGit` takes its stop from a
+  seam the tui `TestMain` sets to the test's own temp root, because a stray
+  `/tmp/.git` with a HEAD would have put a branch into every frame golden on a
+  temp workspace (it did break `TestGitBranchVariants/no_repo`).
+- X25, X32: two no-behaviour production seams (a per-call drain wait; a
+  drain-entry hook, nil in production) so the bash drain tests key off the phase
+  instead of sleeps.
+- X26: N1 redacts at admission. The engine journals the raw prompt before native
+  sees it, so a `PromptAdmitter` hook in `internal/engine` (Submit, Queue,
+  EditQueued, Interject) lets native redact first; only native implements it.
+- X9: the tooling's harness bug: `starve.sh`/`contend.sh` built the test binary
+  at the export root, where a repo-scan test found it (20/260 red); now in its
+  own scratch dir (0/260).
+- X11, X19, X30: scripts' accepted residuals (PGID reuse, setsid descendants of
+  an interrupted run, the lock keeper's bound); a verify script is never run
+  from a tree an implementer is editing (bash reads a script as it runs).
+- P-1 (Q4): error prose is not wire, so LC-4's `craze new` text and the others
+  change without a protocol decision; the hub's own refusal text is SF-173.
+
+### Review rounds
+
+Reviewers: `sol` and `astra` (codex), per the cost ladder; every finding was
+fixed or dispositioned, none retried.
+
+- **r1 (sol, C1).** 9 P2 and 3 P3 on the scripts (signals, preflight, the lock,
+  stale results, crashes, the smoke bound, `stop`); C1r.
+- **r2 (astra, C2).** 3 P2 and 2 P3 (cleanup abort, a state, SF-133's socket
+  coverage; the parser, a SIGQUIT message); C2r.
+- **r3 (astra, C3).** 3 P2: the held-open and spilled read's 6 s bound against a
+  20 s wait, the drain-wait's progress loss, F3's diagnostics against its
+  deadline; C3r.
+- **r4 (astra, C2r).** 4 resolved, 1 partly (only one live subscriber of the
+  1 MiB report); C2r2. **r5 (sol, C2r2):** no findings.
+- **r6 (sol, C4).** No findings (after a `simplify` pass removed a dead branch);
+  two notes accepted (X18).
+- **r7 (sol, C1r).** 6 resolved, 4 P2 (the lock held forever by detached loops,
+  cleanup's exit, timeout 137, `stop` accepting EACCES); C1r2.
+- **r8 (sol, C5).** 3 P2, fixed before commit (the grapheme rule X23, a start
+  note redraw, Ready retiring the note); **r10 (sol):** all resolved.
+- **r9 (astra, C3r).** F3 resolved; 2 P2 (the held-open read undercounts; the
+  drain-wait close races a 2 s timer); C3r2. **r13 (astra, C3r2):** the seam is
+  clean; 2 P2 (drain phase inferred from sleeps); C3r3. **r15 (sol, C3r3):** both
+  resolved, nothing introduced. C3 took three rounds, the budget.
+- **r11 (astra, C6).** A P1 (N1's startup race: the identity redactor before
+  Start) and 2 P2 (`__complete` echoes; the completion parent ignores Args).
+  **r14 (astra):** P1 and the parent resolved; 2 P2 (completion after `--`
+  regressed; the direct-native deferred continuation drops the block), fixed in a
+  third round before commit (completion mirrors cobra: 64 of 80 cases
+  byte-identical, the 16 others refused without echo; Begin before Start
+  refused for good). **r16 (astra):** r14's items and the C5 merge resolved; one
+  P2 left (the probe lacked `__complete`); C6r.
+- **r12 (sol, C1r2).** 2 resolved; the keeper's deadline accepted (X30); the
+  stop probe fixed in C1r3 (re-reviewed by the branch-level review).
+- **r17 (astra, the branch).** Run before the push; its result and the
+  disposition of any finding are filled in with the PR line.
+
+### Flakes diagnosed
+
+All pre-existing; none was retried, each is fixed or its cause named with a
+before and after on a stressed box (`scripts/verify/contend.sh` for copies of a
+test beside each other, `starve.sh` for a CPU quota).
+
+- **SF-118: `TestEnsureOutlastsAHubTearingDown` and its siblings (the reopened
+  row), a corrected cause.** The earlier record (Plan 032 X54, X58 and X67; Plan
+  035 X34) read the report literally, "a re-executed hub test child still alive
+  30 s after its SIGTERM", and chased a slow exit under `-race`
+  (`syscall.Exit` in place of `os.Exit`, per-thread `/proc` diagnostics). **The
+  child had already exited. The report was false, made by the test helper
+  `alive()`, which raced the reaper:** it read `/proc/<pid>` twice, and a reap
+  between the two reads looked like a process that was still there while
+  `kill(pid, 0)` then said it was gone. The signature in every sighting,
+  "unreadable `/proc` entry (ENOENT) a moment after the deadline" with `kill`
+  answering "no such process", and the tests lasting 0.1–0.3 s, is that. The
+  fix (C2, test-only): `alive` and `hubAlive` take `t` and treat a reap between
+  the two reads as gone, with a deterministic test
+  (`TestAliveTreatsAReapBetweenTheTwoReadsAsGone`) red on the old logic. **Proof,
+  `contend.sh`, hub, 10 `-race` copies, ×1200 each: 25 failures in 48000 test
+  runs before, 0 in 48000 after; the cli half (×300 per test, 10 copies): 1 in
+  15000 before, 0 after.** A CPU quota alone could not reproduce it (it needs
+  contention between the test and its reaper). The row is deleted from `13`.
+- **SF-133: `TestAttachMidTurnOverTheSocketReproducesTheFirst/every_cut`.** The
+  cause was the 1 MiB edit report's fan-out to socket clients under a starved
+  CPU, where each `every_cut` subtest ran 315–637 s and ended
+  `attach: context deadline exceeded`. Test-only fix, plus a full-size socket test
+  whose clients attach at cuts that let two subscribers see the report live (r4).
+  `starve.sh`, 5% `-race` ×5: 5/5 red before, 5/5 green after (every cut 1m33–1m46
+  over the wire), and 5/5 green at 2%.
+- **SF-135: `TestASaturatedOutboxRefusesAdmissionsAndStillCompletesTurns` and
+  two siblings.** `readerOn` subscribed late, so a replay from Seq 1 met the
+  default 4096-event ring; the tests now use a `saturableRing`, and `saturate`
+  counts the events it takes (4096 measured) and fails unless the ring holds twice
+  that (X5, X6, a fourth caller found by the same rule). 291 failures in 48000
+  before, 0 in 48000 after.
+- **SF-136: the detached host's "early" check could never fail.** The old
+  check passed with the admitted prompt changed to "early"; the new check, which
+  reads the fake agent's prompt dump (`CRAZE_FAKE_DUMP_PROMPTS`), fails on it.
+  Unmodified, 10/10 at a 5% quota.
+- **SF-132: about ten opencode bash tests on the production 1 s `spillWait`.**
+  The trigger is a slow filesystem call, not load: an injected 1.5 s open delay
+  failed 7 tests (18 FAIL lines), 3 s failed 10; with the tests setting their own
+  wait, 0 at both and a ×20 `-race` run (202.6 s) with no delay green.
+- **F-2: the bash tests that cancel before the launch has returned.** On macOS
+  `-race`, a stop before `launch` has taken the start's result is discarded with
+  SIGKILL at once, by design (the same window as Plan 036 F2). Seven sites were
+  forced into the bad order, ×15 each: 4 red and 3 vacuous before, all green
+  after; on the mac-mini ×50 beside eight CPU burners, 250/250 top-level and 550
+  subtests passed (evidence, not a gate).
+- **F-5: a relative `os.Args[0]`** in the held-open output test: 6/6 red from the
+  package directory, 6/6 green.
+- **SF-151: `TestBashNoControllingTerminal`.** The cause was not load: an
+  outside process that opens the pty without `O_NOCTTY` makes `TIOCSCTTY`
+  refuse it (EPERM); a model of that opener failed the test 52/100. Option (g):
+  retry only a start-time EPERM on a fresh pty, three times, then skip naming the
+  holder, with the helper split into Start and Wait so only a start retries. With
+  the opener model ×100: 41/100 failures before, 0 after (44 passed after one
+  retry, 0 skips); ×200 without it, 0 skips and 0 retries; a non-EPERM helper
+  failure still fails (3/3), and a claimer holding every pty skips (3/3).
+- **F3: `test_native_cancel_during_bash…` (cli, Plan 036's).** Only diagnostics
+  were added (it prints on a forced miss, and in the assertion on every miss);
+  its cause remains the likeliest, unproven, one (Plan 036 F3).
+- **A stray directory:** a `/tmp/.git` with a HEAD broke
+  `TestGitBranchVariants/no_repo`; the orchestrator removed the empty directory
+  and X13 made the package immune.
+- **Lessons.** (1) A test helper's report is evidence about the helper first: SF-118 was
+  chased as a slow exit across three plans, while the signature said otherwise (a
+  0.1 s test "failing" on a 30 s bound, a `kill` answering "no such process"). (2) A negative control is
+  vacuous unless it fails for the reason under test: seven of C3's F-2 sites
+  passed before the fix. (3) A forced-delay proof of a hypothesis is not proof
+  it is the failing mechanism; only the stressed repro going green is.
+
+### Verification so far
+
+Proof numbers (before → after) are in the flakes above; the rest:
+
+- **V2, the CLI parity run (103 outputs).** `v2.sh --equivalence` (Plan 021's
+  saved pair against the rebuilt one): 103 same, 0 different (95 s). At C1:
+  103/103 (94 s). At the code tip `dfaa601`: 103/103 (97 s).
+- **V8 (fixtures, goldens, schemas).** 0 modified at every commit.
+- **`cpu1.sh`** (`-cpu=1 -count=2`, transport=both, the 8 changed packages) at
+  `dfaa601`: all ok (288 s).
+- **V4, V9, V10 at `dfaa601`.** V4 (the CLI texts): 65 commands all match; a dummy
+  key appears nowhere outside `providers.toml`; LC-5's no-op save keeps bytes,
+  inode, mtime and comments. V9: `goreleaser check` and a snapshot ok, the
+  description 74 characters, the caveats cover R1 and R2. V10 (N1): the request
+  body, journal, native transcript, host log and `sessions.jsonl` hold the key 0
+  times, with a negative control. The redaction marker is `[craze:redacted-credential]`. One residual: `craze --theme nosuch` on a
+  terminal sends its colour and cursor queries before the usage error (SF-181).
+- **V3, V5, V6** (live in tmux at `4e6e299`, which holds every colour, burst and
+  LM-2 change; C6 does not touch them). V3 on Linux, 7 themes × 3 depths against
+  `a3aa101`: truecolor byte-identical in all 21 captures; craze-dark's error row,
+  bypass chip, diff deletion and picker refusal `38;5;167` at 256 and `91m` at 16
+  (were `232` and `0`, contrast 1.0–1.1); captures with any text under contrast 1.3:
+  0 (were 16); selection bands and a mouse selection legible at every depth. V3 on
+  the mac-mini over plain ssh: the chip `38;5;167`; in the smoke server truecolor.
+  V5: "go up the tree and the end of it" intact in the composer, beside an image
+  chip, in the session-list filter and the `/model` filter; bracketed and image
+  pastes as before (a keycap emoji renders with a stray cell, identical before
+  C5: SF-185). V6 on the mac-mini: over plain ssh `craze --provider cursor`
+  showed the note at 0.66 s, the start was not refused, Esc then C-d quit; no note
+  in the GUI smoke server (cursor ready) or on an attach over ssh to a GUI-born
+  host; `craze prompt --provider cursor x` over ssh printed its stderr line at
+  0.14 s and sent nothing. No real turn was spent.
+- **V7, a fresh reader** (docs only, no source): from the README, the upgrade page
+  in one link; what replaced `CRAZE_CONFIG`, stopping a session and turning
+  detaching off, the journal and its off-switches, the hub and its 60 s exit, and
+  native with a key or a ChatGPT plan, all answered from the docs and confirmed on
+  a scratch binary where that needed no real agent.
+- **mac-mini.** The F-2 evidence above. The runbook's `mac-test.sh` joins its
+  arguments unquoted into the remote command, so a `-run` regex needs
+  pre-quoting and a failed remote command can still print `MAC_EXIT=0` — ssh to
+  the mac-mini returns 0 whatever the remote command did (`ssh mac-mini 'exit
+  3'` → 0), so every mac result was read from its output (`ok` lines,
+  captures), never an exit code; the skill's `smoke.sh --host mac stop` now
+  reads the session list for that reason. The runbook scripts are the owner's,
+  out of the repo, and not edited.
+- **Per-commit gates.** Every commit's `make lint`, `make test`, `make
+  test-race`, `make build` and `make test-cli` exited 0, and `gate.sh` (gate-at)
+  on the committed shas reported `GATE_EXIT=0`: c1r, c2r (covering C2), c3
+  (covering C2r2), c3r, c4, c5 (covering C1r2, C1r3 and C3r2) and c6 (covering
+  C3r3). `make docs` ok at C1.
+- **Pending at this record:** the branch-level astra review (r17), V1 (the long
+  `-race -count=20` jobs), the macOS test run over the branch, CI on both
+  operating systems for both runs of the final head, and the merge SHA (a
+  docs-only push to main after the merge, gated).
+
+### Not done, and where it went
+
+`13`'s "Plan 037 — release readiness" lists every open item: SF-152 (the
+find-only `craze bridge --hub`, promised to shed's S3b session), SF-153–SF-178
+(the triage of the backlog and the live passes), SF-179 and SF-180 (config
+writes and a `theme` typo), and SF-181–SF-185 (what execution found). The closed
+rows (SF-40, SF-118, SF-132, SF-133, SF-135, SF-136, SF-142, SF-143, SF-151) and
+the two obsolete (SF-28, SF-126) and the accepted one (SF-32) are deleted from
+`13`, each section noting where. The native-harness items are in
+`discovery/native-harness/07-roadmap.md`.
+
+#### Handoff
+
+The owner cuts the release after the merge; the plan suggests v0.1.0 (no
+version change is in this PR, and `internal/version`'s default is untouched).
+Owner chores that remain: rotate the four provider keys Plan 032 leaked,
+disconnect the three test ChatGPT apps (Plan 034), the #5 checklist (the
+earlier plans' notes), and SF-172's SHA-pinning call. SF-168 (the deepseek default's doom loop) waits on the
+next eval campaign.
