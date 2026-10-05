@@ -84,6 +84,12 @@ type group struct {
 	// premise needs the call held in the drain gives it longer, so the
 	// real 2 s timer cannot end the drain first (plan 037 C3r2).
 	drain time.Duration
+	// onDrain, a test seam, is called once, on supervise's goroutine, as it
+	// starts the drain wait — before the drain's timer and before it waits
+	// again — so a test keys off the drain itself: a close it sends after
+	// the call lands in the drain, and a time it records is never later
+	// than the drain's start (plan 037 C3r3). nil in production.
+	onDrain func()
 }
 
 // termGrace is the group's SIGTERM-to-SIGKILL grace (group.grace).
@@ -320,6 +326,9 @@ wait:
 			exited, expire, grace = nil, nil, nil
 			if isClosing() {
 				break wait
+			}
+			if g.onDrain != nil {
+				g.onDrain()
 			}
 			drain = time.After(g.drainWait()) // limit, if set, stays: the drain does not restart the clock
 		case <-output:

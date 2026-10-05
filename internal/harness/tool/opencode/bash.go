@@ -316,6 +316,9 @@ type bashCall struct {
 	// pipe to close (group.drain) — the constant drainWait, but in a test
 	// whose premise needs the call held in the drain, longer (plan 037 C3r2).
 	drainWait time.Duration
+	// onDrain is a test seam: group.onDrain, called as supervise starts the
+	// drain wait (plan 037 C3r3). nil in production.
+	onDrain func()
 }
 
 // ops is every call a bash call makes that can stall on a filesystem that
@@ -512,7 +515,7 @@ func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgre
 // registry: a token the ChatGPT sign-in mints while a command runs must not
 // reach the rest of its output raw (plan 033 C14r, r12 #6a).
 func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
-	g.grace, g.drain = c.termGrace, c.drainWait
+	g.grace, g.drain, g.onDrain = c.termGrace, c.drainWait, c.onDrain
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
 	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
 		copied: make(chan struct{}), began: began, closing: env.Closing, untrack: func() {}}
