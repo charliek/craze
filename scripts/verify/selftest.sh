@@ -243,11 +243,17 @@ if command -v taskset >/dev/null; then expect "invalid sha: contend" CONTEND 2 "
 expect "invalid sha: v1 --plan" V1 2 "$V/v1.sh" inv --plan --sha "$BAD" --pkgs ./internal/ok
 expect "invalid sha: v2" V2 2 "$V/v2.sh" inv "$BAD"
 expect "option without a value: v8 --base" V8 2 "$V/v8.sh" --base
+has "$OUTF" '--base needs a non-empty value' || bad "option without a value: v8 --base" "not refused by the option guard"
 expect "option without a value: v1 --sha" V1 2 "$V/v1.sh" inv --plan --sha
+has "$OUTF" '--sha needs a non-empty value' || bad "option without a value: v1 --sha" "not refused by the option guard"
 expect "option without a value: v2 --only" V2 2 "$V/v2.sh" inv "$(git -C "$REAL_ROOT" rev-parse HEAD)" --only
+has "$OUTF" '--only needs a non-empty value' || bad "option without a value: v2 --only" "not refused by the option guard"
 expect "option with an empty value: v8 --head" V8 2 "$V/v8.sh" --head ""
+has "$OUTF" '--head needs a non-empty value' || bad "option with an empty value: v8 --head" "not refused by the option guard"
 expect "option with an empty value: v1 --pkgs" V1 2 "$V/v1.sh" inv --plan --pkgs ""
+has "$OUTF" '--pkgs needs a non-empty value' || bad "option with an empty value: v1 --pkgs" "not refused by the option guard"
 expect "option with an empty value: v2 --repeat" V2 2 "$V/v2.sh" inv "$(git -C "$REAL_ROOT" rev-parse HEAD)" --repeat ""
+has "$OUTF" '--repeat needs a non-empty value' || bad "option with an empty value: v2 --repeat" "not refused by the option guard"
 
 # 3. A failed export (the commit exists; one of its blobs does not).
 expect "failed export" CPU1 2 "$V/cpu1.sh" exp broken-export ./internal/ok

@@ -53,6 +53,9 @@ name=${2:-}
 [[ -n $name ]] || die 2 "$cmd needs a session name"
 [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die 2 "a session name is letters, digits, _ and - only: $name"
 shift 2
+# Every pane target names the session exactly ("=name:"), never by prefix:
+# on the mac-mini an absent name must not reach the owner's own session.
+tgt="=$name:"
 
 # The bounded runner: `<runner> <secs> <cmd…>` exits 124 when the call
 # outlives <secs>, after ending its whole process group (an ssh under
@@ -110,12 +113,12 @@ if [[ $host == mac ]]; then
 	[[ -x $MAC_TMUX ]] ||
 		die 3 "--host mac needs $MAC_TMUX: see the mac-mini runbook ($MAC_DIR/README.md); if it is missing, ask the owner"
 	T() { bounded "$BOUND_S" "$MAC_TMUX" "$@"; }
-	paste_text() { bounded "$BOUND_S" "$MAC_TMUX" type "$name" "$1"; }
+	paste_text() { bounded "$BOUND_S" "$MAC_TMUX" type "$tgt" "$1"; }
 else
 	command -v tmux >/dev/null || die 1 "tmux not found"
 	sock=${CRAZE_SMOKE_SOCK:-craze-$name}
 	T() { bounded "$BOUND_S" tmux -L "$sock" "$@"; }
-	paste_text() { printf '%s' "$1" | T load-buffer -b smoke - && T paste-buffer -p -d -b smoke -t "$name"; }
+	paste_text() { printf '%s' "$1" | T load-buffer -b smoke - && T paste-buffer -p -d -b smoke -t "$tgt"; }
 fi
 
 case $cmd in
@@ -133,7 +136,7 @@ type)
 	;;
 key)
 	(($# >= 1)) || die 2 "key needs at least one key"
-	T send-keys -t "$name" "$@"
+	T send-keys -t "$tgt" "$@"
 	;;
 wait)
 	(($# == 2)) || die 2 "wait needs <regex> <secs>"
@@ -141,7 +144,7 @@ wait)
 	[[ $secs =~ ^[0-9]+$ ]] || die 2 "secs must be a whole number: $secs"
 	end=$(($(date +%s) + secs))
 	while :; do
-		pane=$(T capture-pane -p -t "$name") || failed $? "capture-pane failed (is session $name running?)"
+		pane=$(T capture-pane -p -t "$tgt") || failed $? "capture-pane failed (is session $name running?)"
 		if grep -Eq -- "$re" <<<"$pane"; then
 			echo "matched: $re"
 			exit 0
@@ -159,14 +162,14 @@ snap)
 	flags=(-p)
 	[[ ${2:-} == --ansi ]] && flags+=(-e)
 	[[ -z ${2:-} || ${2:-} == --ansi ]] || die 2 "snap's second argument must be --ansi"
-	T capture-pane "${flags[@]}" -t "$name" >"$file" || failed $? "capture-pane failed"
+	T capture-pane "${flags[@]}" -t "$tgt" >"$file" || failed $? "capture-pane failed"
 	echo "saved $file"
 	;;
 stop)
 	(($# == 0)) || die 2 "stop takes no arguments"
-	T send-keys -t "$name" Escape 2>/dev/null
+	T send-keys -t "$tgt" Escape 2>/dev/null
 	sleep 0.3
-	T send-keys -t "$name" C-d 2>/dev/null
+	T send-keys -t "$tgt" C-d 2>/dev/null
 	sleep 0.5
 	# End it (it may already be gone: C-d can end the last pane), then confirm
 	# with a probe whose error establishes absence: no server on the socket
@@ -186,10 +189,9 @@ stop)
 		out=$(T has-session -t "=$name" 2>&1)
 		prc=$?
 		((prc == 124)) && failed 124 "cannot confirm session $name is gone after kill-session (rc $krc): has-session"
-		case $out in
-		*"can't find session"* | *"no server running"*) ;;
-		*) die 1 "session $name is still running after kill-session, or its absence cannot be confirmed${out:+: $out}" ;;
-		esac
+		if ! grep -qxF "can't find session: $name" <<<"$out" && ! grep -q '^no server running' <<<"$out"; then
+			die 1 "session $name is still running after kill-session, or its absence cannot be confirmed${out:+: $out}"
+		fi
 		echo "stopped $name"
 		exit 0
 	else
