@@ -27,6 +27,18 @@ outside CI. Toolchain is [mise](https://mise.jdx.dev/) (`.mise.toml`); the
 Makefile prepends `~/.local/share/mise/shims` so `make` works without an
 activated shell.
 
+## Verification beyond the gate
+
+`scripts/verify/` holds the reviewed helpers plans run on a **committed** sha (exported to a short scratch
+path, never the working tree): `gate.sh` (the gate; a concurrent run waits on golangci-lint's lock),
+`cpu1.sh`, `starve.sh` (a CPU quota), `contend.sh` (copies sharing a few cores), `v1.sh` (the race soak:
+`--plan`, then one `--job` per background command, then `--summary`), `v2.sh` (`craze prompt` parity against
+commit `6581e0a`) and `v8.sh` (goldens, wire fixtures and schema files changed against the merge base). Each
+prints its usage with `--help` and ends with a `<NAME>_EXIT=` line; output goes to
+`~/.cache/craze-verify/<label>/`; `selftest.sh` checks their failure paths. A failure is diagnosed, never
+re-run. For live smokes (the real cursor-agent, grok, gx or native in a dedicated tmux server, or on the
+mac-mini) follow the `craze-live-smoke` skill in `.claude/skills/`.
+
 ## Docs
 
 Docs are **not** in the per-commit gate. Run this only when touching `docs/`,
