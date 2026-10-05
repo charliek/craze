@@ -218,12 +218,21 @@ func procState(pid int) string {
 	if err != nil {
 		return "?"
 	}
+	if state, ok := statLetter(b); ok {
+		return state
+	}
+	return "?"
+}
+
+// statLetter is the state letter in a /proc stat file's contents: the field
+// after the command's closing parenthesis; false when there is none.
+func statLetter(b []byte) (string, bool) {
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 || i+2 >= len(s) {
-		return "?"
+		return "", false
 	}
-	return s[i+2 : i+3]
+	return s[i+2 : i+3], true
 }
 
 // waitNoZombies: no child of this process is a zombie, within serveStep — a

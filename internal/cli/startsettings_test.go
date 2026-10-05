@@ -396,6 +396,10 @@ func TestADetachedHostSetsItsStartSettingsBeforeAnyPrompt(t *testing.T) {
 		b, _ := os.ReadFile(callsPath)
 		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
 	}
+	// What the agent read of each prompt: the calls record a prompt by its
+	// method alone, so only this tells "first" from "early" (SF-136).
+	promptsPath := filepath.Join(t.TempDir(), "prompts")
+	t.Setenv("CRAZE_FAKE_DUMP_PROMPTS", promptsPath)
 	gate := filepath.Join(t.TempDir(), "set-gate")
 	if err := syscall.Mkfifo(gate, 0o600); err != nil {
 		t.Fatal(err)
@@ -445,11 +449,16 @@ func TestADetachedHostSetsItsStartSettingsBeforeAnyPrompt(t *testing.T) {
 	got := calls()
 	prompt := slices.Index(got, "session/prompt")
 	if prompt < 0 || slices.Index(got, "session/set_config_option effort=low") > prompt ||
-		slices.Index(got, "session/set_config_option fast=true") > prompt || strings.Contains(strings.Join(got, "\n"), "early") {
+		slices.Index(got, "session/set_config_option fast=true") > prompt {
 		t.Fatalf("the agent's calls: %q", got)
 	}
 	if n := strings.Count(strings.Join(got, "\n"), "session/prompt"); n != 1 {
 		t.Fatalf("%d prompts reached the agent, want the admitted one: %q", n, got)
+	}
+	// The fake records a prompt before it answers it, so the turn that has
+	// ended has its prompt here.
+	if b, _ := os.ReadFile(promptsPath); string(b) != `{"prompt":[{"type":"text","text":"first"}]}`+"\n" {
+		t.Fatalf("the agent read %q, want the admitted prompt alone", b)
 	}
 	_, s := attachedTranscript(t, ref.entry)
 	stopOver(t, s, "1")

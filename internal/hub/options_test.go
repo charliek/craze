@@ -222,7 +222,7 @@ func TestFindNeverStartsAHub(t *testing.T) {
 		if sock, err := find(t, env, needOptions); !errors.Is(err, ErrNoHub) || sock != "" {
 			t.Fatalf("Find with a hub that closes its hello = %q, %v; want ErrNoHub", sock, err)
 		}
-		if !alive(pid) {
+		if !alive(t, pid) {
 			t.Fatal("Find signalled the hub")
 		}
 	})

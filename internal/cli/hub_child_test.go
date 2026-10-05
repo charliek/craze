@@ -86,32 +86,61 @@ func hubAsChild(t *testing.T, extra ...string) *hubChildren {
 	t.Cleanup(func() {
 		hub.Command = prev
 		for _, pid := range kids.pids() {
-			if !hubAlive(pid) {
-				continue
-			}
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			deadline := time.Now().Add(serveStep)
-			for hubAlive(pid) && time.Now().Before(deadline) {
-				time.Sleep(10 * time.Millisecond)
-			}
-			if hubAlive(pid) {
-				// Where it is before anything else is sent (plan 033 saw one
-				// once, on a loaded box, and it never reproduced: X54): its
-				// state and signal masks, then the goroutine dump a SIGQUIT
-				// writes to its stderr.
-				state := procSignalState(pid)
-				_ = syscall.Kill(pid, syscall.SIGQUIT)
-				quit := time.Now().Add(5 * time.Second)
-				for hubAlive(pid) && time.Now().Before(quit) {
-					time.Sleep(10 * time.Millisecond)
-				}
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-				dump, _ := os.ReadFile(filepath.Join(stderrs, strconv.Itoa(pid)))
-				t.Errorf("hub child %d did not exit within %v of SIGTERM; killed\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, serveStep, state, dump)
-			}
+			endHubChild(t, pid, stderrs)
 		}
 	})
 	return kids
+}
+
+// endHubChild ends pid, a hub child whose stderr is in dir/<pid>, and fails
+// the test if it will not go: SIGTERM, serveStep to exit, then SIGKILL. One
+// still there says first where it is — its state and signal masks, then the
+// goroutine dump a SIGQUIT writes to its stderr — and how long it outlived
+// its SIGTERM, measured. (Plan 032 X54 took this report for a child that
+// would not exit; it was hubAlive's own race, SF-118.) A look that fails ends
+// the wait as it is: the child is killed and the failure said, taken for
+// neither answer, and the cleanup goes on to the children after it.
+func endHubChild(t *testing.T, pid int, dir string) {
+	t.Helper()
+	var lookErr error
+	alive := func() bool {
+		if lookErr != nil {
+			return false
+		}
+		a, err := hubLiveness(pid)
+		lookErr = err
+		return a
+	}
+	defer func() {
+		if lookErr != nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Errorf("ending hub child %d, whether it is alive: %v; killed", pid, lookErr)
+		}
+	}()
+	if !alive() {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	termed := time.Now()
+	deadline := termed.Add(serveStep)
+	for alive() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !alive() {
+		return
+	}
+	// How long it has outlived its SIGTERM, measured at the look that still
+	// saw it.
+	outlived := time.Since(termed).Round(time.Millisecond)
+	state := procSignalState(pid)
+	_ = syscall.Kill(pid, syscall.SIGQUIT)
+	quit := time.Now().Add(5 * time.Second)
+	for alive() && time.Now().Before(quit) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	dump, _ := os.ReadFile(filepath.Join(dir, strconv.Itoa(pid)))
+	t.Errorf("hub child %d had not exited %v after its SIGTERM; killed\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, outlived, state, dump)
 }
 
 // procSignalState is what /proc says of pid's state and signals — State,
@@ -141,16 +170,53 @@ func procSignalState(pid int) string {
 }
 
 // hubAlive reports whether pid has not exited: not gone, and not a zombie
-// its reaper has not taken yet.
-func hubAlive(pid int) bool {
-	return processAlive(pid) && procState(pid) != "Z"
+// its reaper has not taken yet. A look that fails (hubLiveness says which
+// do) fails the test: it is this helper's own failure, never taken for
+// either answer.
+func hubAlive(t testing.TB, pid int) bool {
+	t.Helper()
+	a, err := hubLiveness(pid)
+	if err != nil {
+		t.Fatalf("whether process %d is alive: %v", pid, err)
+	}
+	return a
+}
+
+// hubLiveness is whether pid has not exited, from two looks: kill(pid, 0),
+// then — on Linux — its /proc stat. A process kill does not find is gone.
+// One it finds is gone too when it is a zombie, or when its stat is no more
+// by the read: ENOENT at the open, ESRCH at the read, a reaper that took the
+// zombie between the two looks (SF-118: taking that for a live process made
+// a hub that exited at once look like one that outlived its whole step).
+// Any other error, or a stat with no state letter, is an error: the helper
+// cannot say. internal/hub's alive is the same, and its tests pin it.
+func hubLiveness(pid int) (bool, error) {
+	if !processAlive(pid) {
+		return false, nil
+	}
+	if runtime.GOOS != "linux" {
+		// No /proc: a process kill finds has not exited, a zombie included.
+		return true, nil
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	switch {
+	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ESRCH):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("its stat, after kill found it: %w", err)
+	}
+	state, ok := statLetter(b)
+	if !ok {
+		return false, fmt.Errorf("a stat with no state letter: %q", b)
+	}
+	return state != "Z", nil
 }
 
 // waitHubGone waits for pid to exit, within serveStep.
 func waitHubGone(t *testing.T, pid int, log func() string) {
 	t.Helper()
 	deadline := time.Now().Add(serveStep)
-	for hubAlive(pid) {
+	for hubAlive(t, pid) {
 		if time.Now().After(deadline) {
 			t.Fatalf("hub %d is still running after %v (%s); its log: %s", pid, serveStep, procState(pid), log())
 		}
@@ -328,7 +394,7 @@ func TestHubChildStaysWhileAHostLives(t *testing.T) {
 	log := hubLog(env)
 	// Three graces with the host up: the hub stays.
 	time.Sleep(3 * time.Second)
-	if !hubAlive(rec.PID) {
+	if !hubAlive(t, rec.PID) {
 		t.Fatalf("the hub exited with a live host in the registry: %s", log())
 	}
 	if err := host.Close(); err != nil {
@@ -384,7 +450,7 @@ func TestAnOrphanedHubChildExits(t *testing.T) {
 		t.Fatalf("the shell's pid line %q: %v", line, err)
 	}
 	t.Cleanup(func() {
-		if hubAlive(pid) {
+		if hubAlive(t, pid) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
@@ -395,7 +461,7 @@ func TestAnOrphanedHubChildExits(t *testing.T) {
 		if err == nil && rec.PID == pid {
 			break
 		}
-		if !hubAlive(pid) || time.Now().After(deadline) {
+		if !hubAlive(t, pid) || time.Now().After(deadline) {
 			t.Fatalf("the hub child %d did not serve within %v: %s", pid, serveStep, output())
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -407,7 +473,7 @@ func TestAnOrphanedHubChildExits(t *testing.T) {
 		t.Fatal("the shell did not exit when its stdin closed")
 	}
 	deadline = time.Now().Add(serveStep)
-	for processAlive(pid) && procState(pid) != "Z" {
+	for hubAlive(t, pid) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the orphaned hub %d is still running after %v: %s", pid, serveStep, output())
 		}

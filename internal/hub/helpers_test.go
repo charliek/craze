@@ -162,13 +162,13 @@ func init() {
 }
 
 // exitChild ends a test child with code through the exit system call, not
-// os.Exit: under -race, os.Exit(0) first runs the race runtime's finalizer
-// (racefini: __tsan_fini, then C's exit), and a hub child that had already
-// finished its teardown — "stopped" in its log — was seen not to exit for its
-// test's whole 30 s, three times and only under make test-race, its SIGQUIT
-// answered with no goroutine dump (plan 032 X67, SF-118). A child's exit
-// status is all its test reads; it owes no race summary and runs no exit
-// hook.
+// os.Exit: a child's exit status is all its test reads, so it owes no race
+// summary (under -race, os.Exit first runs the race runtime's finalizer) and
+// runs no exit hook. It came from plan 032 X67, which took "hub child did not
+// exit within 30s" for a child slow to exit under -race. It was not: the
+// sightings lasted 1–2.5 s in all, and the report was alive's own — a child
+// reaped between its kill(pid, 0) and its /proc read was taken for a live one
+// (SF-118, plan 037).
 func exitChild(code int) { syscall.Exit(code) }
 
 // stallAt is the child's teardown held just before its Release
@@ -739,12 +739,61 @@ func noCommand(t *testing.T) {
 }
 
 // alive reports whether pid is a process that has not exited: not gone, and
-// not a zombie.
-func alive(pid int) bool {
-	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
+// not a zombie. A look that fails (osLooks.alive says which do) fails the
+// test: it is this helper's own failure, never taken for either answer.
+func alive(t testing.TB, pid int) bool {
+	t.Helper()
+	a, err := osLooks.alive(pid)
+	if err != nil {
+		t.Fatalf("whether process %d is alive: %v", pid, err)
 	}
-	return procState(pid) != "Z"
+	return a
+}
+
+// procLooks is how alive looks at a process, in this order: kill(pid, 0),
+// then pid's /proc stat (nil where there is no /proc). A test swaps them to
+// put a reap between the two (TestAliveTreatsAReapBetweenTheTwoReadsAsGone).
+type procLooks struct {
+	kill func(pid int) error
+	stat func(pid int) ([]byte, error)
+}
+
+// osLooks are the process's own looks: the stat on Linux only.
+var osLooks = func() procLooks {
+	l := procLooks{kill: func(pid int) error { return syscall.Kill(pid, 0) }}
+	if runtime.GOOS == "linux" {
+		l.stat = func(pid int) ([]byte, error) { return os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)) }
+	}
+	return l
+}()
+
+// alive is whether pid has not exited, from l's two looks. A process kill
+// does not find is gone. One it finds is gone too when it is a zombie, or —
+// on Linux — when its stat is no more by the read: ENOENT at the open, ESRCH
+// at the read, a reaper that took the zombie between the two looks (SF-118:
+// taking that for a live process made a child that exited at once look like
+// one that outlived its whole step). Any other error, or a stat with no state
+// letter, is an error: the helper cannot say.
+func (l procLooks) alive(pid int) (bool, error) {
+	if err := l.kill(pid); err != nil && !errors.Is(err, syscall.EPERM) {
+		return false, nil
+	}
+	if l.stat == nil {
+		// No /proc: a process kill finds has not exited, a zombie included.
+		return true, nil
+	}
+	b, err := l.stat(pid)
+	switch {
+	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ESRCH):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("its stat, after kill found it: %w", err)
+	}
+	state, err := parseState(b)
+	if err != nil {
+		return false, err
+	}
+	return state != "Z", nil
 }
 
 // procState is pid's state letter from /proc on Linux, "?" elsewhere.
@@ -758,62 +807,162 @@ func taskState(pid, tid int) string {
 }
 
 // statState is the state letter in a /proc stat file, "?" when it cannot be
-// read.
+// read or has none: for a failure's message and a thread's state, never for
+// whether a process is alive (procLooks.alive says why).
 func statState(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "?"
 	}
+	state, err := parseState(b)
+	if err != nil {
+		return "?"
+	}
+	return state
+}
+
+// parseState is the state letter in a /proc stat file's contents: the field
+// after the command's closing parenthesis.
+func parseState(b []byte) (string, error) {
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 || i+2 >= len(s) {
-		return "?"
+		return "", fmt.Errorf("a stat with no state letter: %q", s)
 	}
-	return s[i+2 : i+3]
+	return s[i+2 : i+3], nil
+}
+
+// TestAliveTreatsAReapBetweenTheTwoReadsAsGone (SF-118): kill(pid, 0) finds
+// the process, and by the read its stat is no more — the reaper took the
+// zombie between the two looks — so it has exited. The old alive took that
+// unreadable stat for a live process, and endProcess's re-check then
+// reported a child that had exited at once as one that outlived its step.
+func TestAliveTreatsAReapBetweenTheTwoReadsAsGone(t *testing.T) {
+	const pid = 4242
+	found := func(int) error { return nil }
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"reaped before the stat's open", &os.PathError{Op: "open", Path: "/proc/4242/stat", Err: syscall.ENOENT}},
+		{"reaped between the stat's open and its read", &os.PathError{Op: "read", Path: "/proc/4242/stat", Err: syscall.ESRCH}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			looks := procLooks{kill: found, stat: func(int) ([]byte, error) { return nil, tc.err }}
+			if a, err := looks.alive(pid); a || err != nil {
+				t.Fatalf("kill found it, then its stat said %v: alive %v, %v; want gone", tc.err, a, err)
+			}
+		})
+	}
+}
+
+// TestAliveSaysOnlyWhatItSaw: alive's other answers from the same two looks
+// — a running process, a zombie, one kill does not find, one kill may not
+// signal, and no /proc at all — and the looks it cannot read: a stat it may
+// not read, or one with no state letter, is the helper's own failure, never
+// gone or alive (SF-118).
+func TestAliveSaysOnlyWhatItSaw(t *testing.T) {
+	const pid = 4242
+	found := func(int) error { return nil }
+	stat := func(s string) func(int) ([]byte, error) {
+		return func(int) ([]byte, error) { return []byte(s), nil }
+	}
+	for _, tc := range []struct {
+		name    string
+		looks   procLooks
+		alive   bool
+		failure string
+	}{
+		{"running", procLooks{found, stat("4242 (craze hub) S 1 4242 4242 0 -1")}, true, ""},
+		{"a zombie", procLooks{found, stat("4242 (a (paren) name) Z 1 4242 4242 0 -1")}, false, ""},
+		{"gone at the kill", procLooks{func(int) error { return syscall.ESRCH }, func(int) ([]byte, error) {
+			t.Error("alive read the stat of a process kill did not find")
+			return nil, nil
+		}}, false, ""},
+		{"not ours to signal", procLooks{func(int) error { return syscall.EPERM }, stat("4242 (init) S 0")}, true, ""},
+		{"no /proc", procLooks{found, nil}, true, ""},
+		{"a stat it may not read", procLooks{found, func(int) ([]byte, error) {
+			return nil, &os.PathError{Op: "open", Path: "/proc/4242/stat", Err: syscall.EACCES}
+		}}, false, "permission denied"},
+		{"a stat with no state letter", procLooks{found, stat("4242 (craze")}, false, "no state letter"},
+		{"an empty stat", procLooks{found, stat("")}, false, "no state letter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := tc.looks.alive(pid)
+			switch {
+			case tc.failure != "" && (err == nil || !strings.Contains(err.Error(), tc.failure)):
+				t.Fatalf("alive %v, %v; want the helper's failure %q", a, err, tc.failure)
+			case tc.failure == "" && (err != nil || a != tc.alive):
+				t.Fatalf("alive %v, %v; want %v", a, err, tc.alive)
+			}
+		})
+	}
 }
 
 // endProcess ends pid — a child of this test, its stderr in dir/<pid>
 // (hubTestStderrDir) — and fails the test if it will not go: SIGCONT and
 // SIGTERM, step to exit, then SIGKILL. One that has not gone within step
 // says first where it is — /proc's state and signal masks, then the
-// goroutine dump a SIGQUIT writes to its stderr — before its SIGKILL (plan
-// 032 X58: a hub child ignored its SIGTERM for the whole step, twice, on
-// loaded boxes).
+// goroutine dump a SIGQUIT writes to its stderr — before its SIGKILL. (Plan
+// 032 X58 and X67 took this report for a child that ignored its SIGTERM; it
+// was alive's own race, SF-118, and the report now says the time it
+// measured.) A look that fails ends the wait as it is: the child is killed
+// and the failure said, taken for neither answer, and the cleanup goes on to
+// the children after it.
 func endProcess(t *testing.T, pid int, dir string) {
 	t.Helper()
-	if !alive(pid) {
+	var lookErr error
+	alive := func() bool {
+		if lookErr != nil {
+			return false
+		}
+		a, err := osLooks.alive(pid)
+		lookErr = err
+		return a
+	}
+	defer func() {
+		if lookErr != nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Errorf("ending hub child %d, whether it is alive: %v; killed", pid, lookErr)
+		}
+	}()
+	if !alive() {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGCONT)
 	_ = syscall.Kill(pid, syscall.SIGTERM)
-	deadline := time.Now().Add(step)
-	for alive(pid) && time.Now().Before(deadline) {
+	termed := time.Now()
+	deadline := termed.Add(step)
+	for alive() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if alive(pid) {
-		state := procSignalState(pid)
-		var dump []byte
-		// How long the child outlived the step, as a SIGQUIT's wait sees it:
-		// one gone at once was ending just then (SF-118: exits that took the
-		// whole step), one still there was not ending at all.
-		outlived := "it was still there after the SIGQUIT's wait"
-		if dir != "" {
-			_ = syscall.Kill(pid, syscall.SIGQUIT)
-			quitStart := time.Now()
-			quit := quitStart.Add(5 * time.Second)
-			for alive(pid) && time.Now().Before(quit) {
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !alive(pid) {
-				outlived = fmt.Sprintf("it was gone %v into the SIGQUIT's wait", time.Since(quitStart).Round(time.Millisecond))
-			}
-		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		if dir != "" {
-			dump, _ = os.ReadFile(filepath.Join(dir, strconv.Itoa(pid)))
-		}
-		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed (%s)\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, step, outlived, state, dump)
+	if !alive() {
+		return
 	}
+	// How long it has outlived its SIGTERM, measured at the look that still
+	// saw it.
+	outlived := time.Since(termed).Round(time.Millisecond)
+	state := procSignalState(pid)
+	var dump []byte
+	// What the SIGQUIT's wait sees: one gone at once was ending just then,
+	// one still there was not ending at all.
+	quitWait := "it was still there after the SIGQUIT's wait"
+	if dir != "" {
+		_ = syscall.Kill(pid, syscall.SIGQUIT)
+		quitStart := time.Now()
+		quit := quitStart.Add(5 * time.Second)
+		for alive() && time.Now().Before(quit) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if lookErr == nil && !alive() {
+			quitWait = fmt.Sprintf("it was gone %v into the SIGQUIT's wait", time.Since(quitStart).Round(time.Millisecond))
+		}
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if dir != "" {
+		dump, _ = os.ReadFile(filepath.Join(dir, strconv.Itoa(pid)))
+	}
+	t.Errorf("hub child %d had not exited %v after its SIGTERM; killed (%s)\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, outlived, quitWait, state, dump)
 }
 
 // procSignalState is what /proc says of pid's state and signals — State,
@@ -901,7 +1050,7 @@ func allStopped(pid int) bool {
 // taken yet), within step.
 func waitGone(t *testing.T, pid int) {
 	t.Helper()
-	waitFor(t, fmt.Sprintf("process %d exits", pid), func() bool { return !alive(pid) })
+	waitFor(t, fmt.Sprintf("process %d exits", pid), func() bool { return !alive(t, pid) })
 }
 
 // sleeper is a process of the test's own that does nothing — a pid a record

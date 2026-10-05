@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -90,20 +91,19 @@ func stepCtx(parent context.Context, budget time.Duration) (context.Context, con
 	return context.WithTimeout(parent, budget)
 }
 
-// dialAttachBudget bounds dialWire's own dial and attach. This is not the
-// reset path: the test replaces the trace's one over-8-MiB event with a
-// short string before replay, and asserts exactly one restore at each
-// client's own cut — an omitted reset would fail that assertion. The
-// trace's remaining large payload is an edit tool report carrying eight
-// 64 KiB old/new diff pairs (exactness_test.go's fixture, published right
-// after the 80-chunk text run); the cut right after it can overlap that
-// event's fan-out to the clients already attached with the new attach's
-// own snapshot sizing and encoding — real wire and product costs, under
-// -race. Measured: ~10-18s for that one cut's dial+attach uncontended, and
-// ~57s under a quarter-core cgroup quota (`systemd-run --user --scope -p
-// CPUQuota=25%`) — far past a plain watchdog, though nothing is hung:
-// every other cut's dial+attach is sub-second. dialAttachBudget gives that
-// one cut room while still catching a real hang.
+// dialAttachBudget bounds dialWire's own dial and attach: a hang bound,
+// with room for a starved run, since every cut's dial+attach is sub-second
+// uncontended. Neither of the trace's two large events is this test's
+// business. Its one over-8-MiB event is replaced with a short string before
+// replay, and the test asserts exactly one restore at each client's own cut
+// — an omitted reset would fail that assertion. Its edit report's eight
+// 64 KiB old/new diff pairs are cut to a byte a side (SF-133): that ~1 MiB
+// event, fanned out to the 118 clients already attached under -race, cost
+// the next cut's dial+attach minutes at a 5% CPU quota. The large payload
+// is held in process by A2 (exactness_test.go's
+// TestASecondSubscriberAttachedMidTurnReproducesTheFirst, every cut of the
+// same trace, its edit report whole) and over the wire by the remote's own
+// large-event tests.
 const dialAttachBudget = 12 * watchdog
 
 // dialWire attaches a new client to the host at path — a snapshot attach,
@@ -221,12 +221,29 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			t.Fatal("fixture: the trace has no oversized event")
 		}
 		trace[oversized-1].Text = "an oversized reply, cut to fit a record on the wire"
+		// The edit report's eight 64 KiB diff pairs cut to a byte a side
+		// (SF-133): fanned out to every client already attached, that one
+		// ~1 MiB event cost the next cut's attach minutes under -race at a
+		// 5% CPU quota. The large payload is A2's in process and the
+		// remote's own tests'; this subtest is about the cuts. The trace is
+		// the source of full, the host's model and every client's, so all
+		// of them see the same small report.
+		for i := range trace {
+			if tl := trace[i].Tool; tl != nil && len(tl.Diffs) > 0 {
+				small := *tl
+				small.Diffs = slices.Clone(tl.Diffs)
+				for j := range small.Diffs {
+					small.Diffs[j].OldText, small.Diffs[j].NewText = "-", "+"
+				}
+				trace[i].Tool = &small
+			}
+		}
 
 		// ctx carries no deadline of its own: the loop below is 145 cuts
 		// deep, each holding one more attached client folding the rest of
 		// the trace live, and under -race that whole loop can run well past
-		// a single watchdog window (measured: ~24s at full CPU under
-		// -race, ~47s at CPUQuota=50%). A single ctx sized for the whole
+		// a single watchdog window (measured with the report cut: ~3s at
+		// full CPU, ~2m at CPUQuota=5%). A single ctx sized for the whole
 		// loop times out later cuts even when each step is individually
 		// healthy. Every blocking step below instead gets its own
 		// watchdog-bounded stepCtx, fresh off ctx, so a real hang at any

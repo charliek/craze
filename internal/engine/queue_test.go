@@ -419,7 +419,7 @@ func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T
 // open at all.
 func saturableEngine(t *testing.T) (*fakeSession, *Engine, <-chan string) {
 	t.Helper()
-	s := newFake(t, agent.EventLogOptions{})
+	s := newFake(t, agent.EventLogOptions{RingEvents: saturableRing})
 	returned := make(chan string, 32)
 	e, err := newEngine(s, Options{}, &hooks{turnReturned: func(id string) { returned <- id }})
 	if err != nil {
@@ -439,22 +439,40 @@ func saturableEngine(t *testing.T) (*fakeSession, *Engine, <-chan string) {
 	return s, e, returned
 }
 
-// saturate fills the outbox past its soft bound.
+// saturableRing is the ring of a log readerOn reads: four times the outbox's
+// soft bound (4096 events), so it holds the whole saturated record — the
+// flood saturate enqueues, and everything recorded before and after it — and
+// readerOn's replay from the start is never cut (SF-135). saturate checks it
+// against the bound it measures.
+const saturableRing = 1 << 14
+
+// saturate fills the outbox past its soft bound, and fails if saturableRing
+// would not hold what that took twice over: once for the flood, once for the
+// record around it.
 func saturate(t *testing.T, e *Engine) {
 	t.Helper()
 	filler := make([]agent.Event, 512)
 	for i := range filler {
 		filler[i] = agent.Event{Type: agent.EventText, Text: fmt.Sprintf("fill-%d", i)}
 	}
+	n := 0
 	for e.log.OutboxRoom() {
 		e.log.Enqueue(filler...)
+		n += len(filler)
+	}
+	if 2*n > saturableRing {
+		t.Fatalf("the outbox took %d events to saturate: a ring of %d no longer holds the saturated record twice over", n, saturableRing)
 	}
 }
 
 // readerOn starts reading a saturated log: a budgeted subscription for the
 // record, and a goroutine on the primary to unwedge the drainer. The
 // subscription is opened after that goroutine because Subscribe waits for the
-// publishing boundary, which the parked drainer holds.
+// publishing boundary, which the parked drainer holds — so by the time it wins
+// that boundary the goroutine and the drainer may have committed the whole
+// backlog, the turn's ending included (SF-135). It therefore replays from the
+// start, which the log's ring must hold: saturableRing, or a ring as large.
+// Every predicate a test reads it to must be unique across the whole record.
 func readerOn(t *testing.T, s *fakeSession, e *Engine) *rig {
 	t.Helper()
 	var wg sync.WaitGroup
@@ -471,7 +489,8 @@ func readerOn(t *testing.T, s *fakeSession, e *Engine) *rig {
 		}
 	}()
 	t.Cleanup(func() { close(stop); wg.Wait() })
-	sub, err := e.Subscribe(agent.SubscribeOptions{MaxItems: 1 << 16, MaxBytes: 64 << 20})
+	sub, err := e.Subscribe(agent.SubscribeOptions{MaxItems: 1 << 16, MaxBytes: 64 << 20,
+		After: &agent.Cursor{Incarnation: e.log.Incarnation()}})
 	if err != nil {
 		t.Fatal(err)
 	}

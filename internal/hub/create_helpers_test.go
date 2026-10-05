@@ -239,7 +239,7 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 			}
 			_ = cmd.Process.Kill()
 			deadline := time.Now().Add(step)
-			for alive(cmd.Process.Pid) && time.Now().Before(deadline) {
+			for alive(t, cmd.Process.Pid) && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
@@ -397,7 +397,7 @@ func (s *spawned) gone(t *testing.T, env rundir.Env, i int) {
 	id := fakehost.ParseSpawnArgs(argv).HostID
 	waitFor(t, "host "+id+" gone", func() bool {
 		_, listed := listedEntry(t, env, id)
-		return !listed && cmd.Process != nil && !alive(cmd.Process.Pid)
+		return !listed && cmd.Process != nil && !alive(t, cmd.Process.Pid)
 	})
 }
 

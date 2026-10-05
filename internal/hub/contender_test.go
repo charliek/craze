@@ -118,7 +118,7 @@ func TestEnsureLeavesAContenderItCannotWaitFor(t *testing.T) {
 	case <-time.After(step / 3):
 		t.Fatalf("Ensure did not return within %v of its context's end: it waited for the contender's end", step/3)
 	}
-	if !alive(pid) {
+	if !alive(t, pid) {
 		t.Fatalf("the contender (pid %d) is gone already: nothing here tells an Ensure that waited for it", pid)
 	}
 	if err == nil || !strings.Contains(err.Error(), "answered no ready line") || !strings.Contains(err.Error(), "is being ended") {
