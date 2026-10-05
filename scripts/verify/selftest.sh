@@ -245,6 +245,9 @@ expect "invalid sha: v2" V2 2 "$V/v2.sh" inv "$BAD"
 expect "option without a value: v8 --base" V8 2 "$V/v8.sh" --base
 expect "option without a value: v1 --sha" V1 2 "$V/v1.sh" inv --plan --sha
 expect "option without a value: v2 --only" V2 2 "$V/v2.sh" inv "$(git -C "$REAL_ROOT" rev-parse HEAD)" --only
+expect "option with an empty value: v8 --head" V8 2 "$V/v8.sh" --head ""
+expect "option with an empty value: v1 --pkgs" V1 2 "$V/v1.sh" inv --plan --pkgs ""
+expect "option with an empty value: v2 --repeat" V2 2 "$V/v2.sh" inv "$(git -C "$REAL_ROOT" rev-parse HEAD)" --repeat ""
 
 # 3. A failed export (the commit exists; one of its blobs does not).
 expect "failed export" CPU1 2 "$V/cpu1.sh" exp broken-export ./internal/ok

@@ -176,16 +176,20 @@ stop)
 	if [[ $host == mac ]]; then
 		# ssh to the mac-mini does not carry the remote exit status (it is 0
 		# whatever tmux returned), so the mac probe is judged by what it
-		# prints: the smoke server's session list, read for this name.
-		T kill-session -t "$name" 2>/dev/null
+		# prints, and only an explicit absence counts: has-session on the
+		# exact name ("=name", never a prefix such as the owner's "smoke")
+		# says "can't find session" or "no server running" when it is gone,
+		# and nothing when it is there. Silence, a truncated answer or any
+		# other error is not proof of absence.
+		T kill-session -t "=$name" 2>/dev/null
 		krc=$?
-		out=$(T list-sessions -F 'S:#{session_name}' 2>&1)
+		out=$(T has-session -t "=$name" 2>&1)
 		prc=$?
-		((prc == 124)) && failed 124 "cannot confirm session $name is gone after kill-session (rc $krc): list-sessions"
-		grep -qxF "S:$name" <<<"$out" && die 1 "session $name is still running after kill-session"
-		if ! grep -q '^S:' <<<"$out" && [[ $out != *"no server running"* ]]; then
-			die 1 "cannot confirm session $name is gone: list-sessions printed no session list${out:+: $out}"
-		fi
+		((prc == 124)) && failed 124 "cannot confirm session $name is gone after kill-session (rc $krc): has-session"
+		case $out in
+		*"can't find session"* | *"no server running"*) ;;
+		*) die 1 "session $name is still running after kill-session, or its absence cannot be confirmed${out:+: $out}" ;;
+		esac
 		echo "stopped $name"
 		exit 0
 	else

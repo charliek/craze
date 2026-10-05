@@ -79,9 +79,10 @@ Every session now writes a journal, one file per session, under
 `~/.craze/journal/<workspace>/` (or `$CRAZE_HOME/journal/`). A `craze prompt`
 run leaves one file too. It records the events, and your prompts and every
 tool's output as the session admitted them. The journal itself adds no
-redaction (on native, a `!` command's known provider credentials are already
-redacted before the prompt is recorded), so any other secret, such as a key you
-typed into a shell command or a file the agent read, is in it in plain text. The files are `0600`
+redaction. Native already replaces the provider keys it knows with
+`[craze:redacted-credential]` — in a `!` command's output before the prompt is
+recorded, and in its tools' results — but any other secret, such as a token you
+typed by hand or one craze does not know, can be in it in plain text. The files are `0600`
 in `0700` directories, never uploaded, and **never pruned**: they accumulate
 until you delete them (deleting the directory is always safe).
 

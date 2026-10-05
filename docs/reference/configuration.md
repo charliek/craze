@@ -198,12 +198,12 @@ craze says so once on stderr. The session itself carries on either way.
 
 ### Journals can contain secrets
 
-The journal itself adds no redaction: it records what the session admitted. On
-native, a `!` command's known provider credentials are already redacted
-(`[craze:redacted-credential]`) before the prompt is recorded, but nothing else
-is. Whatever you type and whatever a tool prints — an API key in a shell command, the
-contents of a file the agent read, a token in an error message — is on disk in
-plain text. That is the point of the record, and it is why the files are
+The journal itself adds no redaction: it records what the session admitted.
+Native already replaces the provider keys it knows with
+`[craze:redacted-credential]` — in a `!` command's output before the prompt is
+recorded, and in its tools' results — but any other secret can be on disk in
+plain text: a token you type, a credential craze does not know in a shell
+command's output, a file the agent read, an error message. That is the point of the record, and it is why the files are
 `0600` in `0700` directories, both *no broader than*: a restrictive umask
 narrows them further, and a directory that already exists is used as it is,
 never tightened. Treat a journal as being as sensitive as the session it came

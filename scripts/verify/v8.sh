@@ -235,8 +235,8 @@ cv_setup V8
 base=origin/main head=HEAD expect=0 self=0
 while (($#)); do
 	case $1 in
-	--base) (($# >= 2)) || die 2 "--base needs a value"; base=$2; shift 2 ;;
-	--head) (($# >= 2)) || die 2 "--head needs a value"; head=$2; shift 2 ;;
+	--base) (($# >= 2)) && [[ -n $2 ]] || die 2 "--base needs a non-empty value"; base=$2; shift 2 ;;
+	--head) (($# >= 2)) && [[ -n $2 ]] || die 2 "--head needs a non-empty value"; head=$2; shift 2 ;;
 	--expect-none-modified) expect=1; shift ;;
 	--selftest) self=1; shift ;;
 	*) usage >&2; die 2 "unknown option: $1" ;;

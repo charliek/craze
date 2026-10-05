@@ -51,8 +51,8 @@ shift 2
 mode=compare only='' repeat=''
 while (($#)); do
 	case $1 in
-	--only) (($# >= 2)) || die 2 "--only needs a value"; only=$2; shift 2 ;;
-	--repeat) (($# >= 2)) || die 2 "--repeat needs a value"; repeat=$2; shift 2 ;;
+	--only) (($# >= 2)) && [[ -n $2 ]] || die 2 "--only needs a non-empty value"; only=$2; shift 2 ;;
+	--repeat) (($# >= 2)) && [[ -n $2 ]] || die 2 "--repeat needs a non-empty value"; repeat=$2; shift 2 ;;
 	--calibrate) [[ $mode == compare ]] || die 2 "--calibrate and --equivalence exclude each other"; mode=calibrate; shift ;;
 	--equivalence) [[ $mode == compare ]] || die 2 "--calibrate and --equivalence exclude each other"; mode=equivalence; shift ;;
 	*) usage >&2; die 2 "unknown option: $1" ;;
