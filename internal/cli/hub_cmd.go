@@ -29,7 +29,7 @@ func newHubCmd() *cobra.Command {
 		Use:    "hub",
 		Short:  "Run the per-machine session hub (started on demand)",
 		Hidden: true,
-		Args:   cobra.NoArgs,
+		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// First: the ready pipe is close-on-exec, and the spawner's marks
 			// leave the environment, before anything could start a process.

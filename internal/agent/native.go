@@ -1617,11 +1617,16 @@ func nothingFundedText(table *modeltable.Table, dir string) string {
 	slices.Sort(names)
 	file := filepath.Join(dir, modeltable.ProvidersFile)
 	if len(names) == 0 {
-		return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or add api_key to %s`, file)
+		return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login" %s, or add api_key to %s`, nothingFundedHow, file)
 	}
-	return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or set one of %s, or add api_key to %s`,
-		sanitizeLine(strings.Join(slices.Compact(names), ", ")), file)
+	return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login" %s, or set one of %s, or add api_key to %s`,
+		nothingFundedHow, sanitizeLine(strings.Join(slices.Compact(names), ", ")), file)
 }
+
+// nothingFundedHow is what "craze auth login" does, in nothingFundedText:
+// the ChatGPT plan's sign-in as well as a key (SF-143), as craze providers'
+// fix says it (internal/cli's nativeNoKeyFix).
+const nothingFundedHow = `(an API key, or "craze auth login chatgpt" for a ChatGPT plan)`
 
 // nativeWorkspace is the session's workspace as the harness needs it:
 // absolute, the process's working directory when none was given — the same
@@ -1830,9 +1835,64 @@ func (s *nativeSession) Prompt(ctx context.Context, text string) (Result, error)
 // continuation writes the prompt_end its own (Result, error) says. A
 // continuation run a second time is refused without a second ending: the
 // attempt is already closed by the run that happened.
+//
+// The text is admitted first (admit): a shell context block in front of it
+// is redacted before the journal's prompt note, the transcript or the model
+// sees it — whether the claim is taken or refused. A Begin made before Start
+// has installed the harness is refused for good, whatever has happened by the
+// time its continuation runs (unstarted): no redactor knew a key when it was
+// admitted, so its block was withheld, and the text it was given is not one
+// it may now send without it. The engine never begins before it has started.
 func (s *nativeSession) Begin(text string) func(context.Context) (Result, error) {
+	text, started := s.admit(text)
+	if !started {
+		return s.log.wrapPrompt(journal.PromptKindPrompt, text, func(context.Context) (Result, error) {
+			return Result{}, s.unstarted()
+		})
+	}
 	run := s.claim(text)
 	return s.log.wrapPrompt(journal.PromptKindPrompt, text, run)
+}
+
+// AdmitPrompt is PromptAdmitter (plan 037 N1): text with the shell context
+// block in front of it redacted by the session's redactor — every key value
+// the session knows becomes the redaction marker — and nothing else changed
+// (redactShellContext). The engine admits every text it is given through it
+// before it records any of it, and only once it has started; Begin and
+// Interject admit again (admit), for a caller with no engine, and a second
+// pass changes nothing, since a redacted string holds no key.
+func (s *nativeSession) AdmitPrompt(text string) string {
+	text, _ = s.admit(text)
+	return text
+}
+
+// admit is AdmitPrompt, and whether the session had its harness — installed
+// by Start, and never taken away — when it judged the text. Before that no
+// redactor knows a key, and the block is withheld instead, so that what an
+// unstarted session records (the journal's note of the attempt it refuses)
+// holds no output it could not redact; its caller refuses the text for good
+// (Begin, Interject), never sending it altered.
+func (s *nativeSession) admit(text string) (admitted string, started bool) {
+	s.mu.Lock()
+	hs := s.hs
+	s.mu.Unlock()
+	if hs == nil {
+		return redactShellContext(text, func() func(string) string { return nil }), false
+	}
+	return redactShellContext(text, hs.Redactor), true
+}
+
+// unstarted is the refusal of a text admitted before Start: the closed
+// session's, once it is closed, and otherwise the unstarted one's — the
+// words prompt and interject give with no harness.
+func (s *nativeSession) unstarted() error {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return fmt.Errorf("agent: session closed")
+	}
+	return fmt.Errorf("agent: session not started")
 }
 
 // claim claims the prompt slot now, on the caller's goroutine, with the live
@@ -2119,7 +2179,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	var failed error
 	switch {
 	case err != nil:
-		failed = phraseTurnError(err)
+		failed = s.phraseTurn(err)
 	case res.StopReason == harness.StopCancelled:
 		failed = s.callerEnded(ctx)
 	}
@@ -3181,8 +3241,17 @@ var _ OwedWork = (*nativeSession)(nil)
 // offered to a turn that had already ended — are both on the record, under an
 // attempt id of the wrapper's own rather than any id the harness mints.
 func (s *nativeSession) Interject(ctx context.Context, text string) error {
+	// Admitted before the journal's note, as Begin admits a prompt, and
+	// refused for good, as Begin's is, when admitted before Start: a Start
+	// and a turn could otherwise come between the admission and the steer.
+	text, started := s.admit(text)
 	a := s.log.beginAttempt(journal.PromptKindInterject, text)
-	err := s.interject(ctx, text)
+	var err error
+	if started {
+		err = s.interject(ctx, text)
+	} else {
+		err = s.unstarted()
+	}
 	a.end("", err)
 	return err
 }
@@ -3270,7 +3339,7 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 		// the unanswered ones become.
 		return ErrQueueFull
 	default:
-		return phraseTurnError(err)
+		return s.phraseTurn(err)
 	}
 }
 
@@ -3370,14 +3439,30 @@ const (
 	chatgptPlanOffText     = "native: ChatGPT plan usage is off for craze; run craze auth login chatgpt to enable it"
 )
 
-// phraseTurnError is a failed turn in the adapter's own words (plan 018
+// phraseTurn is phraseTurnErrorIn over the session's model table as it is
+// now, read under s.mu, which the caller does not hold: the table names the
+// provider a rejected key is for, and where that key can come from.
+func (s *nativeSession) phraseTurn(err error) error {
+	s.mu.Lock()
+	table := s.table
+	s.mu.Unlock()
+	return phraseTurnErrorIn(err, table)
+}
+
+// phraseTurnError is phraseTurnErrorIn with no model table: a rejected key's
+// provider is named by its id, with no variable to check.
+func phraseTurnError(err error) error { return phraseTurnErrorIn(err, nil) }
+
+// phraseTurnErrorIn is a failed turn in the adapter's own words (plan 018
 // §3.8): the harness's typed errors each get a sentence that says what to do,
 // and the provider's own message, already bounded to one line by the harness,
 // is sanitized before a terminal shows it. The ChatGPT plan's own failures —
 // its usage limit, an ineligible account, a capability the route refuses, a
 // sign-in that is gone, plan usage off — are worded for the plan (plan 033
-// §3.12, phraseChatGPT).
-func phraseTurnError(err error) error {
+// §3.12, phraseChatGPT). table, nil when there is none, is the session's model
+// table: a rejected key's advice names its provider and variables from it
+// (rejectedKeyText).
+func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 	phrase := func(msg string) error { return &nativeError{msg: msg, cause: err} }
 	if errors.Is(err, harness.ErrEmptyStep) {
 		// No output ceiling is ever sent on the ChatGPT plan (its route
@@ -3419,8 +3504,7 @@ func phraseTurnError(err error) error {
 	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
 		// The plan has no key to check: its 401 is phraseChatGPT's, and any
 		// other refusal it flags is said as the provider's own, below.
-		return phrase(fmt.Sprintf("native: provider %q rejected the API key%s; check its env_keys or api_key in providers.toml",
-			provider, status))
+		return phrase(rejectedKeyText(table, pe.Provider, status))
 	case errors.Is(err, harness.ErrModelNotFound):
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
@@ -3438,6 +3522,39 @@ func phraseTurnError(err error) error {
 		msg += ": " + m
 	}
 	return phrase(msg)
+}
+
+// rejectedKeyText is a provider's refusal of its key — a 401, a 403, or a
+// failure it flagged as authentication (harness.ErrAuth) — and what to do
+// (plan 037 LC-8): store another with craze auth login, or check the
+// variable the key may come from instead, which is used before a stored one.
+// status is the HTTP status as phraseTurnErrorIn spells it, "" for none. It
+// names the provider by its display name, its id for the command, and its
+// variables by name, never a value.
+func rejectedKeyText(table *modeltable.Table, id, status string) string {
+	name, envs := id, []string(nil)
+	if table != nil {
+		if p, ok := table.Providers[id]; ok {
+			envs = p.EnvKeys
+			if p.Name != "" {
+				name = p.Name
+			}
+		}
+	}
+	msg := fmt.Sprintf(`native: %s rejected the API key%s; replace it with "craze auth login %s"`,
+		sanitizeLine(name), status, sanitizeLine(id))
+	if len(envs) > 0 {
+		msg += ", or check " + sanitizeLine(joinEnvNames(envs))
+	}
+	return msg
+}
+
+// joinEnvNames is variable names as a choice: "A", "A or B", "A, B or C".
+func joinEnvNames(names []string) string {
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
 }
 
 // phraseChatGPT is the ChatGPT plan's failure err carries in the adapter's
@@ -3563,4 +3680,5 @@ var (
 	_ LogOwner       = (*nativeSession)(nil)
 	_ Clocked        = (*nativeSession)(nil)
 	_ AdmissionFence = (*nativeSession)(nil)
+	_ PromptAdmitter = (*nativeSession)(nil)
 )

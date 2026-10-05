@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"io"
 	"testing"
 
@@ -83,4 +84,37 @@ func TestThemePrecedence(t *testing.T) {
 			t.Fatalf("theme %q, want the default", got)
 		}
 	})
+}
+
+// TestUnknownThemeFlagIsAUsageError is plan 037 LC-10: an explicitly passed
+// --theme that names no preset is a usage error — exit 2, the value quoted,
+// as --provider's is, and the presets listed — on every command that takes
+// one, before anything starts: the TUI (through runTUI, so before the
+// detached or in-process split), craze attach and craze frame. A preset's
+// alias and an explicitly empty --theme (the default's spelling) still pass,
+// and so does a typo in config.toml, which falls back to the default as it
+// always has.
+func TestUnknownThemeFlagIsAUsageError(t *testing.T) {
+	crazeHome(t)
+	want := `craze: unknown theme "nosuch" (want craze-dark, craze-light, tokyo-night, dark, light, catppuccin, or gruvbox)`
+	cmd, f := parseTUIFlags(t, "--theme", "nosuch")
+	var ee *exitError
+	if err := runTUI(cmd, f, hostEnv{}); !errors.As(err, &ee) || ee.code != 2 || ee.msg != want {
+		t.Fatalf("craze --theme nosuch: %v, want exit 2, %q", err, want)
+	}
+	for _, argv := range [][]string{{"attach", "--theme", "nosuch"}, {"frame", "--theme", "nosuch"}} {
+		if stdout, stderr, code := executeErr(argv); code != 2 || stdout != "" || stderr != want+"\n" {
+			t.Fatalf("craze %q: exit %d, stdout %q, stderr %q; want 2, %q", argv, code, stdout, stderr, want)
+		}
+	}
+	for _, theme := range []string{"gruvbox", "Tokyo_Night", "craze", ""} {
+		cmd, f := parseTUIFlags(t, "--theme", theme)
+		if err := checkThemeFlag(cmd, f.theme); err != nil {
+			t.Fatalf("--theme %q: %v, want it taken", theme, err)
+		}
+	}
+	writeThemeConfig(t, "nosuch")
+	if got := themeFor(t); got != "nosuch" || tui.Preset(got).Name != tui.DefaultTheme {
+		t.Fatalf("config.toml's typo: %q, want it kept and drawn as the default", got)
+	}
 }

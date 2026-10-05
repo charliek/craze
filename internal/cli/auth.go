@@ -333,8 +333,12 @@ func (a *authRun) connectedBy(p modeltable.ProviderInfo) string {
 }
 
 // fail is err, from modeltable, as a's exit 1 on one line.
+//
+// The model table's own errors lose their package's "modeltable: " prefix
+// here, at the command line's boundary (plan 037 LC-8): "craze auth login:
+// the key for provider …", never "craze auth login: modeltable: …".
 func (a *authRun) fail(err error) error {
-	return exitf(1, "%s: %s", a.name, sanitizeLine(err.Error()))
+	return exitf(1, "%s: %s", a.name, sanitizeLine(strings.TrimPrefix(err.Error(), "modeltable: ")))
 }
 
 // providers is modeltable.Providers over a's directory and environment, its

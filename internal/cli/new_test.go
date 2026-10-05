@@ -24,6 +24,8 @@ import (
 // TestNewRefusesBeforeTheHub: --fast with --no-fast is a usage error, a -C
 // that is no directory exit 1, both before a hub is asked for; with no hub to
 // be had — this test binary spawns none (hub.ErrNoHub) — exit 1, in one line.
+// The create names its provider: with none, and no default configured, it
+// would be refused before the hub too (TestNewProviderBeforeTheHub).
 func TestNewRefusesBeforeTheHub(t *testing.T) {
 	serveHome(t)
 	for _, tc := range []struct {
@@ -39,9 +41,73 @@ func TestNewRefusesBeforeTheHub(t *testing.T) {
 			t.Fatalf("%v exited %d: stdout %q, stderr %q; want %d, %q", tc.argv, code, stdout, stderr, tc.code, tc.want)
 		}
 	}
-	stdout, stderr, code := executeErr([]string{"new", "-C", t.TempDir(), "hello"})
+	stdout, stderr, code := executeErr([]string{"new", "--provider", "cursor", "-C", t.TempDir(), "hello"})
 	if code != 1 || stdout != "" || !regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`).MatchString(stderr) {
 		t.Fatalf("craze new with no hub exited %d: stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// TestNewProviderBeforeTheHub is plan 037 LC-4. An explicit, non-empty
+// --provider is checked by its id alone, before a hub is asked for: a wrong
+// one is the usage error every command gives — exit 2, one plain line, with
+// --json too — and neither CRAZE_PROVIDER nor config.toml's provider is
+// consulted, whichever way they point. Omitted or empty, the hub chooses its
+// configured default; with none configured, plain mode says so in craze's
+// words before dialling (exit 1, a refusal), and --json goes to the hub,
+// whose refusal it passes through whole (TestNewJSONRefusedThroughAHub). Every
+// case that reaches the hub meets this test binary's none (hub.ErrNoHub).
+func TestNewProviderBeforeTheHub(t *testing.T) {
+	const (
+		unknown   = `craze: unknown provider "nosuch" (want cursor, grok, gx, or native)` + "\n"
+		noDefault = "craze new: no default provider yet; pass --provider cursor, grok, gx or native\n"
+	)
+	noHub := regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`)
+	for _, tc := range []struct {
+		name     string
+		config   string // config.toml's body, "" for no file
+		env      string // CRAZE_PROVIDER
+		argv     []string
+		code     int
+		want     string         // the exact stderr, or
+		wantLike *regexp.Regexp // its shape
+	}{
+		{name: "invalid", argv: []string{"--provider", "nosuch"}, code: 2, want: unknown},
+		{name: "invalid, --json", argv: []string{"--json", "--provider", "nosuch"}, code: 2, want: unknown},
+		{name: "invalid, a valid env and config not consulted", config: "provider = \"grok\"\n", env: "grok",
+			argv: []string{"--provider", "nosuch"}, code: 2, want: unknown},
+		{name: "valid", argv: []string{"--provider", "grok"}, code: 1, wantLike: noHub},
+		{name: "valid, an invalid env and config not consulted", config: "provider = \"bogus\"\n", env: "bogus",
+			argv: []string{"--provider", "native"}, code: 1, wantLike: noHub},
+		{name: "valid, padded", argv: []string{"--provider", " gx "}, code: 1, wantLike: noHub},
+		{name: "absent, no default", code: 1, want: noDefault},
+		{name: "empty, no default", argv: []string{"--provider", ""}, code: 1, want: noDefault},
+		{name: "absent, no default, CRAZE_PROVIDER is not the hub's default", env: "grok", code: 1, want: noDefault},
+		{name: "absent, no default, --json goes to the hub", argv: []string{"--json"}, code: 1, wantLike: noHub},
+		{name: "absent, a configured default", config: "provider = \"cursor\"\n", code: 1, wantLike: noHub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveHome(t)
+			if tc.config != "" {
+				writeCrazeConfig(t, tc.config)
+			}
+			t.Setenv(envProvider, tc.env)
+			argv := append([]string{"new", "-C", t.TempDir()}, tc.argv...)
+			stdout, stderr, code := executeErr(append(argv, "hello"))
+			if code != tc.code {
+				t.Fatalf("%v exited %d, want %d: stdout %q, stderr %q", argv, code, tc.code, stdout, stderr)
+			}
+			if tc.want != "" && stderr != tc.want {
+				t.Fatalf("%v said %q, want %q", argv, stderr, tc.want)
+			}
+			if tc.wantLike != nil && !tc.wantLike.MatchString(stderr) {
+				t.Fatalf("%v said %q, want %v", argv, stderr, tc.wantLike)
+			}
+			// A usage error and the plain refusal print nothing on stdout; a
+			// --json failure that reached the hub prints its one object.
+			if jsonMode := slices.Contains(tc.argv, "--json"); (stdout == "") == (jsonMode && tc.code == 1 && tc.wantLike != nil) {
+				t.Fatalf("%v printed %q on stdout", argv, stdout)
+			}
+		})
 	}
 }
 

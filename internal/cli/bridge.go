@@ -53,11 +53,11 @@ func newBridgeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bridge",
 		Short: "Pump bytes between stdin/stdout and a running craze session's control socket",
-		Long: "craze bridge is a pure byte pump for an SSH client (plan 027 §3.10): it " +
+		Long: "craze bridge is a pure byte pump for an SSH client: it " +
 			"resolves the one running craze session (or --session's), dials its control " +
 			"socket, and relays stdin/stdout to it verbatim. With --hub it relays to this " +
 			"machine's hub instead, starting it if none runs. It speaks no protocol itself.",
-		Args: cobra.NoArgs,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if toHub {
 				if cmd.Flags().Changed("session") {

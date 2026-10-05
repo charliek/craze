@@ -46,7 +46,7 @@ func newFrameCmd() *cobra.Command {
 		Use:    "frame",
 		Short:  "Render a headless frame from a key script",
 		Hidden: true,
-		Args:   cobra.NoArgs,
+		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.run(cmd)
 		},
@@ -77,6 +77,9 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	}
 	if o.cont && o.resume {
 		return usagef("craze frame: --continue and --resume are mutually exclusive")
+	}
+	if err := checkThemeFlag(cmd, o.theme); err != nil {
+		return err
 	}
 	ws, err := resolveWorkspace("")
 	if err != nil {

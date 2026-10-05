@@ -601,7 +601,7 @@ func TestNativeStartRefusals(t *testing.T) {
 		// (§3.5).
 		{name: "an empty craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
-		}, want: []string{`native: no model provider has an API key — run "craze auth login", or set one of FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to `,
+		}, want: []string{`native: no model provider has an API key — run "craze auth login" (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set one of FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to `,
 			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "no craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", "")
@@ -614,7 +614,7 @@ func TestNativeStartRefusals(t *testing.T) {
 			is:   harness.ErrNoAPIKey},
 		{name: "no model has a key", setup: func(t *testing.T, f *nativeFixture) {
 			f.env = map[string]string{}
-		}, want: []string{`no model provider has an API key — run "craze auth login", or set one of NATIVE_NOKEY_KEY, NATIVE_OTHER_KEY, NATIVE_TEST_KEY, or add api_key to `,
+		}, want: []string{`no model provider has an API key — run "craze auth login" (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set one of NATIVE_NOKEY_KEY, NATIVE_OTHER_KEY, NATIVE_TEST_KEY, or add api_key to `,
 			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "explicit default with no key does not fall back", setup: func(t *testing.T, f *nativeFixture) {
 			delete(f.env, "NATIVE_TEST_KEY")
@@ -771,9 +771,9 @@ func TestNativeTypedErrorsArePhrased(t *testing.T) {
 		want string
 	}{
 		{"401", &fantasy.ProviderError{StatusCode: 401, Message: "who are you"}, harness.ErrAuth,
-			`native: provider "test" rejected the API key (HTTP 401); check its env_keys or api_key in providers.toml`},
+			`native: test rejected the API key (HTTP 401); replace it with "craze auth login test", or check NATIVE_TEST_KEY`},
 		{"auth flag", &fantasy.ProviderError{StatusCode: 400, AuthError: true}, harness.ErrAuth,
-			`native: provider "test" rejected the API key (HTTP 400); check its env_keys or api_key in providers.toml`},
+			`native: test rejected the API key (HTTP 400); replace it with "craze auth login test", or check NATIVE_TEST_KEY`},
 		{"404", &fantasy.ProviderError{StatusCode: 404, Message: "no such model"}, harness.ErrModelNotFound,
 			`native: provider "test" does not serve model "test/a" (HTTP 404); check its wire_model in models.toml`},
 		// A new session's first request: nothing to compact, so nothing was
@@ -1740,7 +1740,7 @@ func TestNativeWireErrorsArePhrasedWithoutTheKey(t *testing.T) {
 		text    string // text streamed before the failure
 	}{
 		{name: "401", replies: []http.HandlerFunc{echo(401, "invalid credentials: ")}, is: harness.ErrAuth,
-			want: `native: provider "wire" rejected the API key (HTTP 401)`},
+			want: `native: wire rejected the API key (HTTP 401); replace it with "craze auth login wire", or check NATIVE_WIRE_KEY`},
 		{name: "403", replies: []http.HandlerFunc{echo(403, "forbidden: ")}, is: harness.ErrAuth,
 			want: `rejected the API key (HTTP 403)`},
 		{name: "404", replies: []http.HandlerFunc{echo(404, "no model for ")}, is: harness.ErrModelNotFound,

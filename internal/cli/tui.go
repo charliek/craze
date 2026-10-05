@@ -113,6 +113,9 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if f.cont && f.resume {
 		return usagef("craze: --continue and --resume are mutually exclusive")
 	}
+	if err := checkThemeFlag(cmd, f.theme); err != nil {
+		return err
+	}
 	// The TUI owns the alt screen for the whole run, so nothing else may write
 	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
 	// takes none of the renderer's locks, and would garble it. The agent's
@@ -599,6 +602,19 @@ func resolveTheme(cmd *cobra.Command, flag string) string {
 		return name
 	}
 	return tui.DefaultTheme
+}
+
+// checkThemeFlag refuses an explicitly passed --theme that names no preset
+// (plan 037 LC-10): a usage error that lists them, where a typo used to start
+// on the default without a word. The value is quoted, as --provider's is: it
+// is a recognised flag's value, put there on purpose. An explicitly empty
+// --theme is the default's spelling (resolveTheme), and a typo in config.toml
+// stays the quiet fallback it always was.
+func checkThemeFlag(cmd *cobra.Command, flag string) error {
+	if cmd == nil || !cmd.Flags().Changed("theme") || strings.TrimSpace(flag) == "" || tui.KnownPreset(flag) {
+		return nil
+	}
+	return usagef("craze: unknown theme %q (want %s)", flag, joinOr(tui.ThemeNames()))
 }
 
 // stdoutIsTerminal is whether cmd's stdout is a terminal a TUI can take

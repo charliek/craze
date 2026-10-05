@@ -79,7 +79,7 @@ func newPsCmd() *cobra.Command {
 			"per-machine hub (started on demand): its id, state, provider, model, directory, how " +
 			"long it has been in that state, and its title. --no-hub reads each session's host " +
 			"directly instead.",
-		Args: cobra.NoArgs,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPs(cmd, *f)
 		},

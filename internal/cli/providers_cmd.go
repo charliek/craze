@@ -56,10 +56,8 @@ func newProvidersCmd() *cobra.Command {
 			return runProviders(cmd, *f)
 		},
 	}
-	// A flag it does not take is a usage error, exit 2, as an argument is.
-	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		return usagef("%s: %v", cmd.CommandPath(), err)
-	})
+	// A flag it does not take is a usage error, exit 2, as an argument is:
+	// the root's (usageFlagError), which never quotes the flag.
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the providers as JSON")
 	cmd.Flags().BoolVar(&f.hub, "hub", false, "ask the running hub what it can create (never starts one)")
 	return cmd

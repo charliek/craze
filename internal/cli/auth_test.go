@@ -218,9 +218,10 @@ func TestAuthLoginRefusals(t *testing.T) {
 		{"a blank first line", "  \n" + authKey + "\n", []string{"auth", "login", "fireworks"}, 1,
 			[]string{"no key given"}},
 		{"a 3-byte key", shortKey + "\n", []string{"auth", "login", "fireworks"}, 1,
-			[]string{`the key for provider "fireworks" was not saved: shorter than 8 bytes`}},
+			// Without the model table's "modeltable: " (plan 037 LC-8).
+			[]string{`craze auth login: the key for provider "fireworks" was not saved: shorter than 8 bytes`}},
 		{"a key the marker prints back", "credential\n", []string{"auth", "login", "fireworks"}, 1,
-			[]string{"was not saved: overlaps craze's redaction marker"}},
+			[]string{"craze auth login: the key for provider \"fireworks\" was not saved: overlaps craze's redaction marker"}},
 		{"a line over 8 KiB", strings.Repeat("k", maxKeyLine+1), []string{"auth", "login", "fireworks"}, 1,
 			[]string{"the key is longer than 8 KiB; nothing was saved"}},
 		{"logout of nothing named", "", []string{"auth", "logout"}, 2,

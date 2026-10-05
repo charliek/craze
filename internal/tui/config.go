@@ -103,8 +103,7 @@ func SaveTheme(name string) error {
 	if err != nil {
 		return fmt.Errorf("craze: not saving the theme: %w", err)
 	}
-	cfg["theme"] = name
-	return writeConfig(path, cfg)
+	return saveSetting(path, cfg, "theme", name)
 }
 
 // ConfigTerminalTitle is whether craze may set the terminal tab title
@@ -394,7 +393,8 @@ func ConfigProvider() string {
 }
 
 // SaveProvider persists the provider id with the same lock and atomic write
-// as the theme. The TUI writes it on startedMsg and craze prompt writes it
+// as the theme, and like it writes nothing when the file already holds it
+// (saveSetting). The TUI writes it on startedMsg and craze prompt writes it
 // after Start; the session itself never persists.
 func SaveProvider(name string) error {
 	path := configPath()
@@ -414,7 +414,21 @@ func SaveProvider(name string) error {
 	if err != nil {
 		return fmt.Errorf("craze: not saving the provider: %w", err)
 	}
-	cfg["provider"] = name
+	return saveSetting(path, cfg, "provider", name)
+}
+
+// saveSetting sets key to value in cfg — the map just parsed from path,
+// under the lock that covers this read-modify-write — and writes the file,
+// unless key already holds exactly value: then nothing is written (plan 037
+// LC-5). Re-encoding the whole file is what loses the user's comments and
+// layout, so a start that saves the provider it started on, unchanged, must
+// leave the file exactly as it was — its bytes and its inode. A file that does
+// not exist yet has no value, so the first save still creates it.
+func saveSetting(path string, cfg map[string]any, key, value string) error {
+	if stored, ok := cfg[key].(string); ok && stored == value {
+		return nil
+	}
+	cfg[key] = value
 	return writeConfig(path, cfg)
 }
 

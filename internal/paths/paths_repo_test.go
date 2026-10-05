@@ -12,9 +12,12 @@ import (
 // removedEnvAllowed are the only places the removed variable's name may
 // appear, relative to the module root: this package (the tripwire and its
 // tests), the discovery record (history), the changelog (written at release
-// time), and the one migration note in the configuration reference, so a
-// user searching for the old name finds how to replace it.
-var removedEnvAllowed = []string{"internal/paths/", "discovery/", "CHANGELOG.md", "docs/reference/configuration.md"}
+// time), the one migration note in the configuration reference, so a user
+// searching for the old name finds how to replace it, and the upgrade page,
+// which tells a v0.0.1 user it is gone (plan 037 CR-2).
+var removedEnvAllowed = []string{
+	"internal/paths/", "discovery/", "CHANGELOG.md", "docs/reference/configuration.md", "docs/getting-started/upgrading.md",
+}
 
 // removedEnvSkipNames are directories never walked, wherever they sit: VCS
 // metadata, virtualenvs and tool caches. Nothing a commit adds lives there.

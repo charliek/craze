@@ -67,10 +67,10 @@ func newAttachCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "attach",
 		Short: "Join a craze session running in another terminal",
-		Long: "craze attach runs the full TUI over a running craze session's control socket " +
-			"(plan 027 §3.15): the session in this directory, or --session's. /exit ends the " +
+		Long: "craze attach runs the full TUI over a running craze session's control socket: " +
+			"the session in this directory, or --session's. /exit ends the " +
 			"session; closing the terminal leaves it running on its host.",
-		Args: cobra.NoArgs,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAttach(cmd, f)
 		},
@@ -98,6 +98,9 @@ func runAttach(cmd *cobra.Command, f *attachFlags) error {
 		if cmd.Flags().Changed(name) {
 			return usagef("craze attach: --%s does not apply: attach joins a running session", name)
 		}
+	}
+	if err := checkThemeFlag(cmd, f.theme); err != nil {
+		return err
 	}
 	explicit := cmd.Flags().Changed("session")
 	if explicit && !rundir.ValidToken(f.session) {

@@ -174,11 +174,11 @@ func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Host a session with no terminal, for craze to attach to",
-		Long: "craze serve hosts one session with no terminal of its own (plan 030 §3.3): built as " +
+		Long: "craze serve hosts one session with no terminal of its own: built as " +
 			"the TUI builds it, and served over its control socket until a client ends it or the " +
 			"process is sent SIGTERM or SIGINT. craze attach joins it. It takes the session flags " +
 			"the TUI takes, and --load to load a session by its id.",
-		Args: cobra.NoArgs,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// First: the ready pipe is close-on-exec before anything could
 			// start a process, and the spawner's marks leave the environment

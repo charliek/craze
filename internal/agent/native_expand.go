@@ -139,6 +139,35 @@ func nativeBlock(ref pluginRef, sessionID string, redact func(string) string) st
 	return nativeRedacted(redact, pluginFrame(ref, kind, nativeSourcePhrase(sanitizeLine(e.Plugin)), body))
 }
 
+// redactShellContext is text with the shell context block in front of it — a
+// `!` command's output, spliced into the user's next message by the TUI —
+// passed through redact, and the rest of text untouched (plan 037 N1). That
+// block is what a command printed, not what the user typed: `!env` followed
+// by a message would otherwise send an exported key to the provider, the
+// transcript and the journal, where native redacts every other block craze
+// adds (nativeBlock). The user's own words are left as they are, as they
+// always were (nativePrompt). A text with no block, or one with nothing to
+// redact in it, comes back as the very string handed in. redactor is asked
+// for the redactor only when there is a block to apply it to; nil from it is
+// a session with none yet, and the block is withheld whole — the envelope
+// and the user's words are what is left.
+func redactShellContext(text string, redactor func() func(string) string) string {
+	envelope, _, _ := leadingEnvelope(text)
+	block, rest := splitShellBlock(text[len(envelope):])
+	if block == "" {
+		return text
+	}
+	redact := redactor()
+	if redact == nil {
+		return envelope + rest
+	}
+	red := redact(block)
+	if red == block {
+		return text
+	}
+	return envelope + red + rest
+}
+
 // nativeRedacted is redact applied when there is one. The nil redactor is the
 // unstarted session and the unit tests, which have no harness to borrow one
 // from; every path that reaches the wire passes the session's own.

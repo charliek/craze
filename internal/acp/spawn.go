@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -121,6 +122,13 @@ func ResolveBinaryCandidates(explicit string, candidates []string) (string, erro
 // lookup for a caller that has already decided whether the variable is its
 // session's to take (plan 032 §3.11, P7: only the launch's own provider's),
 // and must not have it read again here for a session of another provider.
+//
+// Its error names what it looked for, in its own words and never in
+// exec's (plan 037 LC-3): "agent binary not found: <path>" for an explicit
+// one, and for the candidates the first of them and the rest it tried —
+// "agent binary not found: cursor-agent is not on PATH (also tried agent)".
+// What to do about it is the caller's to add: acp knows neither the
+// provider nor the config file.
 func LookupBinary(explicit string, candidates []string) (string, error) {
 	var names []string
 	if explicit != "" {
@@ -128,20 +136,26 @@ func LookupBinary(explicit string, candidates []string) (string, error) {
 	} else {
 		names = append(names, candidates...)
 	}
-	var last error
 	for _, name := range names {
 		path, err := exec.LookPath(name)
 		if err == nil {
 			return path, nil
 		}
-		last = err
 		if filepath.IsAbs(name) {
 			if _, statErr := os.Stat(name); statErr == nil {
 				return name, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("agent binary not found: %w", last)
+	switch {
+	case explicit != "":
+		return "", fmt.Errorf("agent binary not found: %s", explicit)
+	case len(names) == 0:
+		return "", errors.New("agent binary not found: no binary to look for")
+	case len(names) == 1:
+		return "", fmt.Errorf("agent binary not found: %s is not on PATH", names[0])
+	}
+	return "", fmt.Errorf("agent binary not found: %s is not on PATH (also tried %s)", names[0], strings.Join(names[1:], ", "))
 }
 
 // Child is the agent process Spawn started, the leader of a process group of

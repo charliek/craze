@@ -769,7 +769,11 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 			return refused
 		}
 		defer done()
-		return e.sess.Interject(ctx, text)
+		admitted, err := e.admitText(text)
+		if err != nil {
+			return err
+		}
+		return e.sess.Interject(ctx, admitted)
 	})
 }
 
@@ -1188,8 +1192,44 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 	}
 	hash := receiptHash("Submit", text, string(mode), fromRow)
 	return withSyncReceipt(e.receipts, c, hash, func() (SubmitResult, error) {
-		return e.submit(c, text, mode, fromRow)
+		admitted, err := e.admitText(text)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		return e.submit(c, admitted, mode, fromRow)
 	})
+}
+
+// admitText is text as the session admits it (agent.PromptAdmitter, plan 037
+// N1) — native redacts the key values it knows in the shell context block in
+// front of it — before any of it is recorded: a turn's started event, a
+// queued row, the journal that keeps both, the session itself. Called with no
+// lock of the engine's held, and after the receipt's hash, which is the
+// command as the client sent it. A session that admits nothing is given the
+// text as it was sent.
+//
+// First, under e.mu, it refuses what the operation's own admission would
+// refuse now (refusalLocked) — an engine still starting above all. The
+// session's redactor is its started one only once its Start has returned
+// (native's harness is installed there), and Started opens the gate only
+// after that, never to close it back to starting; so the redactor taken
+// after this check is the started one, and no text that a session redacting
+// nothing yet let through can be recorded. (astra r11 P1: a socket command
+// that reached admission before the gate opened, and was recorded after it.)
+// The redaction itself runs with e.mu released, and the operation's own
+// admission, after it, still decides.
+func (e *Engine) admitText(text string) (string, error) {
+	a, ok := e.sess.(agent.PromptAdmitter)
+	if !ok {
+		return text, nil
+	}
+	e.mu.Lock()
+	err := e.refusalLocked()
+	e.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return a.AdmitPrompt(text), nil
 }
 
 // submit is Submit's own work, run at most once per command id: see

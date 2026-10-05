@@ -34,6 +34,10 @@ import (
 func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 	hash := receiptHash("Queue", text)
 	return withSyncReceipt(e.receipts, c, hash, func() (agent.QueuedPrompt, error) {
+		admitted, err := e.admitText(text)
+		if err != nil {
+			return agent.QueuedPrompt{}, err
+		}
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		defer e.syncFenceLocked()
@@ -43,7 +47,7 @@ func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 		if !e.log.OutboxRoom() {
 			return agent.QueuedPrompt{}, ErrUnavailable
 		}
-		row, qev, err := e.queue.Add(text, e.now())
+		row, qev, err := e.queue.Add(admitted, e.now())
 		if err != nil {
 			// A full queue or an oversized message, refused with nothing mutated,
 			// so the client still has the draft it tried to queue.
@@ -71,6 +75,10 @@ func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 func (e *Engine) EditQueued(c Command, id, text string, expectedVersion *int) error {
 	hash := receiptHash("EditQueued", id, text, versionSpelling(expectedVersion))
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		admitted, err := e.admitText(text)
+		if err != nil {
+			return err
+		}
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		defer e.syncFenceLocked()
@@ -87,7 +95,7 @@ func (e *Engine) EditQueued(c Command, id, text string, expectedVersion *int) er
 		if expectedVersion != nil && *expectedVersion != row.Version {
 			return fmt.Errorf("%w: %s is at version %d, not %d", ErrStaleVersion, id, row.Version, *expectedVersion)
 		}
-		qev, err := e.queue.Edit(id, text)
+		qev, err := e.queue.Edit(id, admitted)
 		if err != nil {
 			return err
 		}

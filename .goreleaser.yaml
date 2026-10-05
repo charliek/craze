@@ -39,7 +39,7 @@ nfpms:
     vendor: charliek
     homepage: "https://github.com/charliek/craze"
     maintainer: "Charlie Knudsen <charlie.knudsen@gmail.com>"
-    description: "Terminal UI for Cursor and Grok coding agents over ACP"
+    description: "Terminal UI for coding agents: cursor-agent, grok, gx, or a built-in agent"
     license: MIT
     formats:
       - deb
@@ -65,15 +65,18 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/charliek/craze"
-    description: "Terminal UI for Cursor and Grok coding agents over ACP"
+    description: "Terminal UI for coding agents: cursor-agent, grok, gx, or a built-in agent"
     license: "MIT"
     install: |
       bin.install "craze"
     test: |
       system bin/"craze", "version"
     caveats: |
-      craze drives a coding agent that you install separately: the Cursor
-      CLI (`cursor-agent login`) or the Grok CLI (`grok login`).
+      craze's built-in agent needs no other CLI: `craze auth login` stores a
+      model provider's API key, and `craze auth login chatgpt` signs in to a
+      ChatGPT plan. cursor-agent, grok and gx are optional: install one and
+      log in to drive it over ACP instead.
+      Docs: https://charliek.github.io/craze/
 
 checksum:
   name_template: "checksums.txt"

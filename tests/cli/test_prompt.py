@@ -273,6 +273,38 @@ def test_usage_exit_2(craze_bin: Path, tmp_path: Path) -> None:
     assert proc.stdout == ""
 
 
+def test_usage_errors_never_echo_what_they_were_given(craze_bin: Path, tmp_path: Path) -> None:
+    """Plan 037 LC-1: an unquoted prompt, an unknown command word and an
+    unknown flag are usage errors -- exit 2, one line that says what the
+    command takes and where its help is -- and none of them says back what it
+    was given, which is where a pasted key lands."""
+    key = "sk-pasted-key-0123456789"
+    for argv, want in (
+        (["prompt", "fix", "the", key], "craze prompt: takes one argument at most (quote the prompt text); see craze prompt --help"),
+        ([key], "craze: unknown command; see craze --help"),
+        (["--" + key], "craze: unknown or malformed flag; see craze --help"),
+        (["prompt", "--" + key, "hi"], "craze prompt: unknown or malformed flag; see craze prompt --help"),
+        (["ps", key], "craze ps: takes no arguments; see craze ps --help"),
+        (["completion", key], "craze completion: takes no arguments; see craze completion --help"),
+        # A shell's completion request: cobra's own parser would print the
+        # value on stderr (astra r11).
+        (["__complete", "ps", "--json=" + key, ""], "craze __complete: unknown or malformed flag; see craze __complete --help"),
+        (["__completeNoDesc", "-x" + key, ""], "craze __completeNoDesc: unknown or malformed flag; see craze __completeNoDesc --help"),
+    ):
+        proc = subprocess.run(
+            [str(craze_bin), *argv],
+            check=False,
+            capture_output=True,
+            text=True,
+            input="",
+            cwd=tmp_path,
+            timeout=5,
+        )
+        assert proc.returncode == 2, (argv, proc.returncode, proc.stderr)
+        assert proc.stderr == want + "\n", (argv, proc.stderr)
+        assert proc.stdout == "" and key not in proc.stderr, (argv, proc.stdout)
+
+
 def test_removed_config_env_exits_2(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:
