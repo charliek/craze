@@ -218,21 +218,64 @@ func procState(pid int) string {
 	if err != nil {
 		return "?"
 	}
-	if state, ok := statLetter(b); ok {
+	if state, err := parseState(b); err == nil {
 		return state
 	}
 	return "?"
 }
 
-// statLetter is the state letter in a /proc stat file's contents: the field
-// after the command's closing parenthesis; false when there is none.
-func statLetter(b []byte) (string, bool) {
+// parseState is the state letter in a /proc stat file's contents: the field
+// after the command's closing parenthesis — exactly ") ", one letter, then a
+// space or the contents' end. Anything else has no state letter. (The copy
+// in internal/hub is the same: a test helper cannot be shared without a
+// package of its own.)
+func parseState(b []byte) (string, error) {
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
-	if i < 0 || i+2 >= len(s) {
-		return "", false
+	if i < 0 || len(s) < i+3 || s[i+1] != ' ' || !isLetter(s[i+2]) || (len(s) > i+3 && s[i+3] != ' ') {
+		return "", fmt.Errorf("a stat with no state letter: %q", s)
 	}
-	return s[i+2 : i+3], true
+	return s[i+2 : i+3], nil
+}
+
+// isLetter is whether c is an ASCII letter: every /proc state is one.
+func isLetter(c byte) bool { return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' }
+
+// exitedState is whether a /proc state letter is a process that has exited:
+// a zombie (Z), or one its reaper has taken to EXIT_DEAD (X).
+func exitedState(state string) bool { return state == "Z" || state == "X" }
+
+// TestParseStateTakesOnlyAWellFormedState (SF-118): this package's copy of
+// internal/hub's parseState, on the cases TestAliveSaysOnlyWhatItSaw pins
+// there — a state letter after ") ", followed by a space or the end, is the
+// answer, and Z and X are exited; anything else has no state letter.
+func TestParseStateTakesOnlyAWellFormedState(t *testing.T) {
+	for _, tc := range []struct {
+		stat, state string
+		exited      bool
+	}{
+		{"4242 (craze hub) S 1 4242 4242 0 -1", "S", false},
+		{"4242 (a (paren) name) Z 1 4242 4242 0 -1", "Z", true},
+		{"4242 (craze hub) X 1 4242 4242 0 -1", "X", true},
+		{"4242 (craze) R", "R", false},
+		{"4242 (craze", "", false},
+		{"", "", false},
+		{"4242 (craze)  ", "", false},
+		{"4242 (craze) ZZ", "", false},
+		{"4242 (craze) S1 4242", "", false},
+		{"4242 (craze)S 1", "", false},
+		{"4242 (craze) 1 4242", "", false},
+	} {
+		state, err := parseState([]byte(tc.stat))
+		switch {
+		case tc.state == "" && (err == nil || !strings.Contains(err.Error(), "no state letter")):
+			t.Errorf("parseState(%q) = %q, %v; want no state letter", tc.stat, state, err)
+		case tc.state != "" && (err != nil || state != tc.state):
+			t.Errorf("parseState(%q) = %q, %v; want %q", tc.stat, state, err, tc.state)
+		case tc.state != "" && exitedState(state) != tc.exited:
+			t.Errorf("exitedState(%q) = %v, want %v", state, !tc.exited, tc.exited)
+		}
+	}
 }
 
 // waitNoZombies: no child of this process is a zombie, within serveStep — a

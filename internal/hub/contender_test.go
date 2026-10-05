@@ -76,9 +76,12 @@ func asContenders(t *testing.T, delay time.Duration) *children {
 	}
 	t.Cleanup(func() {
 		Command = prev
-		for _, pid := range c.pids() {
+		pids := c.pids()
+		for _, pid := range pids {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			waitGone(t, pid)
+		}
+		for _, pid := range stillThere(t, pids) {
+			t.Errorf("contender %d is still there %v after its SIGKILL (%s)", pid, step, procState(pid))
 		}
 	})
 	return c

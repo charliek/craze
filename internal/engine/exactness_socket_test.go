@@ -102,8 +102,9 @@ func stepCtx(parent context.Context, budget time.Duration) (context.Context, con
 // the next cut's dial+attach minutes at a 5% CPU quota. The large payload
 // is held in process by A2 (exactness_test.go's
 // TestASecondSubscriberAttachedMidTurnReproducesTheFirst, every cut of the
-// same trace, its edit report whole) and over the wire by the remote's own
-// large-event tests.
+// same trace, its edit report whole) and over the wire by
+// TestAFullSizeEditReportReachesEachSocketClientWhole (three clients around
+// that report, whole).
 const dialAttachBudget = 12 * watchdog
 
 // dialWire attaches a new client to the host at path — a snapshot attach,
@@ -216,18 +217,15 @@ func (c *wireClient) close() {
 //     with the primary reader's at the turn's settled cutoff.
 func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 	t.Run("every cut of a recorded Stub trace", func(t *testing.T) {
-		trace, _, oversized, _ := recordStubSession(t)
-		if oversized == 0 {
-			t.Fatal("fixture: the trace has no oversized event")
-		}
-		trace[oversized-1].Text = "an oversized reply, cut to fit a record on the wire"
+		trace := wireTrace(t)
 		// The edit report's eight 64 KiB diff pairs cut to a byte a side
 		// (SF-133): fanned out to every client already attached, that one
 		// ~1 MiB event cost the next cut's attach minutes under -race at a
-		// 5% CPU quota. The large payload is A2's in process and the
-		// remote's own tests'; this subtest is about the cuts. The trace is
-		// the source of full, the host's model and every client's, so all
-		// of them see the same small report.
+		// 5% CPU quota. The large payload is A2's in process and
+		// TestAFullSizeEditReportReachesEachSocketClientWhole's over the
+		// wire; this subtest is about the cuts. The trace is the source of
+		// full, the host's model and every client's, so all of them see the
+		// same small report.
 		for i := range trace {
 			if tl := trace[i].Tool; tl != nil && len(tl.Diffs) > 0 {
 				small := *tl
@@ -249,62 +247,16 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 		// watchdog-bounded stepCtx, fresh off ctx, so a real hang at any
 		// one step still fails within watchdog.
 		ctx := context.Background()
-		stub := tui.NewStubNoPrimary()
-		stub.Clock = traceClock()
-		e, err := engine.New(stub, engine.Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = e.Close() })
-		startCtx, startCancel := stepCtx(ctx, watchdog)
-		err = e.Start(startCtx)
-		startCancel()
-		if err != nil {
-			t.Fatal(err)
-		}
-		path := serveWire(t, e)
+		stub, e, path := stubHost(t, ctx)
 
 		start := time.Now()
 		clients := make([]*wireClient, 0, len(trace)+1)
 		for k := 0; k <= len(trace); k++ {
-			if k > 0 {
-				ev := trace[k-1]
-				ev.Seq = 0
-				pubCtx, pubCancel := stepCtx(ctx, watchdog)
-				ok := stub.EventLog().Publish(pubCtx, nil, ev)
-				pubCancel()
-				if !ok {
-					t.Fatalf("cut %d: the host did not publish the trace's event", k)
-				}
-			}
-			// The host holds exactly the trace's first k events: nothing
-			// of its own is published between them.
-			syncCtx, syncCancel := stepCtx(ctx, watchdog)
-			head, err := e.SyncSeq(syncCtx)
-			syncCancel()
-			if err != nil || head != uint64(k) {
-				t.Fatalf("cut %d: the host's head is %d (%v)", k, head, err)
-			}
+			publishCut(t, ctx, stub, e, trace, k)
 			clients = append(clients, dialWire(t, ctx, path))
 		}
 		n := uint64(len(trace))
-		full := transcript.New(transcript.Options{})
-		for _, ev := range trace {
-			full.Fold(ev)
-		}
-		attachCtx, attachCancel := stepCtx(ctx, watchdog)
-		a, err := e.Attach(attachCtx, engine.AttachOptions{SnapshotBytes: 1 << 30})
-		attachCancel()
-		if err != nil {
-			t.Fatal(err)
-		}
-		a.Sub.Close()
-		if a.Snapshot.Seq != n {
-			t.Fatalf("the host's model is at %d, the trace %d", a.Snapshot.Seq, n)
-		}
-		if d := engine.DiffModels(full, transcript.Restore(a.Snapshot, transcript.Options{}), true); d != "" {
-			t.Fatalf("the trace folded whole is not the host's own model: %s", d)
-		}
+		full := hostIsTheTrace(t, ctx, e, trace)
 
 		first := clients[0]
 		first.foldThrough(t, n)
@@ -312,18 +264,9 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			t.Fatalf("the first client, folding every event from the wire, is not the trace folded whole: %s", d)
 		}
 		for k, c := range clients {
-			c.foldThrough(t, n)
-			c.mu.Lock()
-			restored, folded, model := c.restoredAt, c.folded, c.model
-			c.mu.Unlock()
-			if len(restored) != 1 || restored[0] != uint64(k) {
-				t.Fatalf("cut %d: the client restored snapshots at %v, want one at %d", k, restored, k)
-			}
-			if folded != len(trace)-k {
-				t.Fatalf("cut %d: the client folded %d events after its snapshot, want the %d of the suffix", k, folded, len(trace)-k)
-			}
+			model := c.attachedAt(t, k, trace)
 			if d := engine.DiffModels(first.model, model, true); d != "" {
-				t.Fatalf("cut %d (attached at %d, compared at %d): %s", k, restored[0], n, d)
+				t.Fatalf("cut %d (attached at %d, compared at %d): %s", k, k, n, d)
 			}
 		}
 		t.Logf("%d events, %d cuts over the wire in %v", len(trace), len(clients), time.Since(start).Round(time.Millisecond))
@@ -407,4 +350,184 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			second.close()
 		}
 	})
+}
+
+// wireTrace is recordStubSession's trace with its one event over the log's
+// record bound cut to fit: a subscriber is handed that one Omitted, which the
+// wire answers with reset{omitted} and a fresh snapshot — the reset path, not
+// these tests' business (A2 in process and the remote's own tests hold it).
+func wireTrace(t *testing.T) []agent.Event {
+	t.Helper()
+	trace, _, oversized, _ := recordStubSession(t)
+	if oversized == 0 {
+		t.Fatal("fixture: the trace has no oversized event")
+	}
+	trace[oversized-1].Text = "an oversized reply, cut to fit a record on the wire"
+	return trace
+}
+
+// stubHost is a started engine over a Stub with no primary, on the trace's
+// clock, served on the wire: the Stub, whose log a test publishes a trace
+// into (publishCut), the engine and its socket's path.
+func stubHost(t *testing.T, ctx context.Context) (*tui.Stub, *engine.Engine, string) {
+	t.Helper()
+	stub := tui.NewStubNoPrimary()
+	stub.Clock = traceClock()
+	e, err := engine.New(stub, engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	startCtx, startCancel := stepCtx(ctx, watchdog)
+	err = e.Start(startCtx)
+	startCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stub, e, serveWire(t, e)
+}
+
+// publishCut moves the host to cut k: it publishes the trace's k-th event
+// (none at cut 0), and fails unless the host then holds exactly the trace's
+// first k events — nothing of its own is published between them.
+func publishCut(t *testing.T, ctx context.Context, stub *tui.Stub, e *engine.Engine, trace []agent.Event, k int) {
+	t.Helper()
+	if k > 0 {
+		ev := trace[k-1]
+		ev.Seq = 0
+		pubCtx, pubCancel := stepCtx(ctx, watchdog)
+		ok := stub.EventLog().Publish(pubCtx, nil, ev)
+		pubCancel()
+		if !ok {
+			t.Fatalf("cut %d: the host did not publish the trace's event", k)
+		}
+	}
+	syncCtx, syncCancel := stepCtx(ctx, watchdog)
+	head, err := e.SyncSeq(syncCtx)
+	syncCancel()
+	if err != nil || head != uint64(k) {
+		t.Fatalf("cut %d: the host's head is %d (%v)", k, head, err)
+	}
+}
+
+// hostIsTheTrace is the trace folded whole, once the host holds all of it,
+// and fails unless that is the host engine's own model (its snapshot,
+// restored).
+func hostIsTheTrace(t *testing.T, ctx context.Context, e *engine.Engine, trace []agent.Event) *transcript.Model {
+	t.Helper()
+	n := uint64(len(trace))
+	full := transcript.New(transcript.Options{})
+	for _, ev := range trace {
+		full.Fold(ev)
+	}
+	attachCtx, attachCancel := stepCtx(ctx, watchdog)
+	a, err := e.Attach(attachCtx, engine.AttachOptions{SnapshotBytes: 1 << 30})
+	attachCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Sub.Close()
+	if a.Snapshot.Seq != n {
+		t.Fatalf("the host's model is at %d, the trace %d", a.Snapshot.Seq, n)
+	}
+	if d := engine.DiffModels(full, transcript.Restore(a.Snapshot, transcript.Options{}), true); d != "" {
+		t.Fatalf("the trace folded whole is not the host's own model: %s", d)
+	}
+	return full
+}
+
+// attachedAt waits for c, attached at cut k, to fold the whole trace, and
+// fails unless it restored one snapshot, at k, and folded the trace's suffix
+// after it: its model at the trace's end.
+func (c *wireClient) attachedAt(t *testing.T, k int, trace []agent.Event) *transcript.Model {
+	t.Helper()
+	c.foldThrough(t, uint64(len(trace)))
+	c.mu.Lock()
+	restored, folded, model := c.restoredAt, c.folded, c.model
+	c.mu.Unlock()
+	if len(restored) != 1 || restored[0] != uint64(k) {
+		t.Fatalf("cut %d: the client restored snapshots at %v, want one at %d", k, restored, k)
+	}
+	if folded != len(trace)-k {
+		t.Fatalf("cut %d: the client folded %d events after its snapshot, want the %d of the suffix", k, folded, len(trace)-k)
+	}
+	return model
+}
+
+// TestAFullSizeEditReportReachesEachSocketClientWhole (SF-133's large
+// payload over the wire): the trace's edit report at its caps — eight 64 KiB
+// old/new diff pairs, ~1 MiB, which the every-cut subtest of
+// TestAttachMidTurnOverTheSocketReproducesTheFirst cuts to a byte a side —
+// reaches three socket clients whole: one attached at the cut just before it
+// (the report comes to it live, fanned out with another client attached),
+// one at the cut that carries it (in its snapshot) and one at the cut after
+// (in its snapshot, the rest of the trace live). Each folds to the trace
+// folded whole, which is the host's own model, and holds the report's diffs
+// exactly. Three clients, not one per cut: bounded under -race at a 5% CPU
+// quota.
+func TestAFullSizeEditReportReachesEachSocketClientWhole(t *testing.T) {
+	trace := wireTrace(t)
+	edit := -1
+	for i := range trace {
+		if tl := trace[i].Tool; tl != nil && len(tl.Diffs) > 0 {
+			if edit >= 0 {
+				t.Fatalf("fixture: edit reports at seq %d and %d, want one", edit+1, i+1)
+			}
+			edit = i
+		}
+	}
+	if edit < 0 || edit+2 > len(trace) {
+		t.Fatalf("fixture: the edit report is at index %d of %d events", edit, len(trace))
+	}
+	report := trace[edit].Tool
+	size := 0
+	for _, d := range report.Diffs {
+		size += len(d.OldText) + len(d.NewText)
+	}
+	if size < 1<<20 {
+		t.Fatalf("fixture: the edit report's diffs are %d bytes, want its full ~1 MiB", size)
+	}
+
+	ctx := context.Background()
+	stub, e, path := stubHost(t, ctx)
+	start := time.Now()
+	// Cut k is the host holding the trace's first k events: the report is
+	// the edit+1-th.
+	cuts := []int{edit, edit + 1, edit + 2}
+	clients := make([]*wireClient, 0, len(cuts))
+	for k := 0; k <= len(trace); k++ {
+		publishCut(t, ctx, stub, e, trace, k)
+		if slices.Contains(cuts, k) {
+			clients = append(clients, dialWire(t, ctx, path))
+		}
+	}
+	full := hostIsTheTrace(t, ctx, e, trace)
+	diffsOf := func(m *transcript.Model) []agent.ToolDiff {
+		for _, tl := range m.Tools() {
+			if tl.ID == report.ID {
+				return tl.Diffs
+			}
+		}
+		return nil
+	}
+	if !slices.Equal(diffsOf(full), report.Diffs) {
+		t.Fatalf("fixture: the trace folded whole does not hold the edit report %s whole", report.ID)
+	}
+	for i, c := range clients {
+		k := cuts[i]
+		model := c.attachedAt(t, k, trace)
+		if got := diffsOf(model); !slices.Equal(got, report.Diffs) {
+			n := 0
+			for _, d := range got {
+				n += len(d.OldText) + len(d.NewText)
+			}
+			t.Fatalf("cut %d: the client holds %d diffs of %d bytes for %s, want the report's %d of %d bytes",
+				k, len(got), n, report.ID, len(report.Diffs), size)
+		}
+		if d := engine.DiffModels(full, model, true); d != "" {
+			t.Fatalf("cut %d (attached at %d, compared at %d): %s", k, k, len(trace), d)
+		}
+	}
+	t.Logf("the %d-byte edit report at seq %d, clients at cuts %v, over the wire in %v",
+		size, edit+1, cuts, time.Since(start).Round(time.Millisecond))
 }
