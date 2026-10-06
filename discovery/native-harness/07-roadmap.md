@@ -760,6 +760,18 @@ left as accepted residuals are rows in
 SF-167 (the `← n agents` count and bash jobs), SF-168 (the deepseek plan-mode
 doom loop, waiting on the next eval), SF-169 (eval harness follow-ups).
 
+**Done since (plan 038, start defaults, 2026-10-05):** the catalog's single
+`default_model` (deepseek, SF-168's loop) became a provider rank,
+`provider_order` (Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta),
+and a start model per provider (`glm-5.3`; the ChatGPT plan's start list;
+`fireworks/ember-1`; `openrouter/gemini-3.8-flash`;
+`muse-spark-1.3-contributor`). A new session with nothing remembered starts on
+the user's `default_model` pin, else the first ranked provider with a key at
+its start model, else the first funded alias by name with a note; a resume
+whose model is gone falls back the same way short of that last step. Fireworks
+gained Ember-1, GLM 5.3 and GLM 5.3 Flash, and the catalog's price gaps were
+filled. The record is `discovery/session-control/12-progress.md`'s "Plan 038".
+
 **Lazy loading and `paths:` gating stay deferred** (D-47 kept; plan 033 owner
 decision 12, 2026-10-01). Measured on 2026-09-30 across the owner's 43
 repositories: only two — shed and slaudio — have nested instruction files

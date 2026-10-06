@@ -5803,3 +5803,111 @@ Owner chores that remain: rotate the four provider keys Plan 032 leaked,
 disconnect the three test ChatGPT apps (Plan 034), the #5 checklist (the
 earlier plans' notes), and SF-172's SHA-pinning call. SF-168 (the deepseek default's doom loop) waits on the
 next eval campaign.
+
+## Plan 038 — where a new native session starts
+
+Plan 038 lands before the owner tags v0.1.0. A new native session with nothing
+remembered started on one global `default_model`,
+`fireworks/deepseek-v4p1-flash`, whose plan-mode repetition loop showed in 5 of
+25 eval runs (SF-168); when Fireworks had no key it started on the first funded
+alias in alphabetical order, so a Z.AI-only owner landed on whatever sorted
+first. Only the ChatGPT plan had a start list of its own. The owner pinned every
+decision interactively (2026-10-05), so the plan had no panel. The plan lives
+outside the repo; its execution amendments (X1–X12, in the plan folder's
+`progress.md`) are the truth.
+
+PR: #91.
+
+**Owner decisions (2026-10-05).** No single default. The catalog ranks the
+providers, `provider_order = ["zai-coding-plan", "chatgpt", "fireworks",
+"openrouter", "meta"]` ("eval winner first"), and gives each provider a `start`
+list: `glm-5.3`; the ChatGPT plan's `[chatgpt_defaults] start` (unchanged,
+`gpt-6.1-sol` then `gpt-5.6-sol`); `fireworks/ember-1` (new);
+`openrouter/gemini-3.8-flash` ("the others overlap with models in cheaper
+providers"); `muse-spark-1.3-contributor`. A user's `default_model` in
+`models.toml` stays a pin, and `models.toml` may set its own `provider_order`.
+Fireworks gains Ember-1, GLM 5.3 and GLM 5.3 Flash, and the catalog's price gaps
+are filled before the release. Also settled with the owner that day, outside the
+code: the four provider keys Plan 032 leaked were rotated and never reached
+GitHub (its history, PRs, issues, comments and reviews, and craze-evals, were
+searched); disconnecting the three test ChatGPT apps is off the launch list,
+left for the owner to do later.
+
+### What shipped
+
+- **C1 (`c21771c`) — start models per provider and a provider rank.** A new
+  session starts on the first of: the newest remembered model whose provider
+  has a key (unchanged); the user's pin (a pin that fails for any reason but a
+  missing key is still the answer, so the owner sees it); for each provider in
+  the order with a key, its first start model that resolves; the first funded
+  alias by name, with a note, which now fires only on this last step; else
+  `ErrNothingFunded`. The catalog's top-level `default_model` is gone (a
+  catalog that still sets it fails as an unknown key). The catalog is strict:
+  `provider_order` names every shipped provider exactly once, each start alias
+  exists and belongs to its provider, and ChatGPT keeps its account-slug list
+  instead; each failure is a named error, checked by `TestShippedCatalog` (X7).
+  A user `provider_order` replaces the shipped one whole; unknown names are
+  ignored, a duplicate or blank one is a load error (X2). The other readers
+  follow the same order: a resume whose recorded model is gone falls back to
+  the pin and then the start models, never to a model by name (X8); the
+  sub-agent model list puts the pin and the start models first; the harness's
+  `Open` with no model takes the pin, else the start rule. Three models are
+  new, each verified live first (a tool loop, every effort accepted):
+  `fireworks/ember-1` (Fireworks' Kimi K3 derivative, 1M context, vision),
+  `fireworks/glm-5p3` and `fireworks/glm-5p3-flash`; on Fireworks the GLM
+  models reason only at `xhigh` and `max`, which a catalog comment records.
+  Prices filled: `fireworks/qwen3p8-max`, `openrouter/gemini-3.8-flash`,
+  `openrouter/glm-5.3-flash`, `openrouter/minimax-m3` and the Muse
+  contributor's cached input; the Z.AI coding-plan models stay unpriced (a
+  flat-rate plan, as ChatGPT's is). `configuration.md` documents the order,
+  `provider_order` and the pin; RELEASING.md says a provider added to the
+  catalog must join `provider_order`.
+- **C2 (`34e0a79`) — the review's fixes.** The last-resort note no longer
+  claims a missing key when a user `provider_order` left a funded provider
+  out ("no start model in the provider order is available"), and the pin's
+  says "no usable API key or sign-in", since a ChatGPT pin is skipped on a
+  sign-in problem too (X10, X11). `tui.md`'s resume paragraph describes the new
+  fallback, and `configuration.md` tells upgraders that a `default_model`
+  naming deepseek is now a pin like any other.
+- **C3 — this record.** `13`'s SF-168 is rewritten (deepseek is no longer the
+  default; the loop stays a row for the next eval), `13` gains a "Plan 038"
+  section with SF-186 (below, V2), and the native-harness roadmap notes the
+  change.
+
+**For upgraders.** A `models.toml` whose `default_model` names deepseek (model
+files of the gx-import era wrote one) is now a real pin, no longer a copy of
+the shipped default: delete the line to follow the rank.
+
+### Review rounds
+
+- **r1 (gpt-6-astra, C1, adversarial):** no issue in the order, funding,
+  efforts, catalog content or upgrade. Two P2s answered without a change: the
+  catalog's validation runs in `TestShippedCatalog`, not at load, the house
+  pattern since Plan 031, and the embedded catalog is the only one (X7); resume
+  keeps Plan 028's rule of never falling back to a model by name (X8). Two P3s
+  (the note's text, `tui.md`'s resume paragraph) fixed in C2.
+- **r2 (gpt-6.1-sol, C2):** agrees with both P2 dispositions; one P3, older
+  than the plan (the pin's "has no API key" for a ChatGPT sign-in), fixed in C2
+  before the push.
+
+### Verification
+
+- **Per-commit gates.** `gate.sh` on the committed shas, C1 `c21771c` and C2
+  `34e0a79`: lint, test, test-race, build and test-cli (258 passed) all exited
+  0. `make docs` ok at C1 and C2.
+- **Live, at `c21771c`** (`craze prompt --provider native --json` with no
+  `--model`, each in a scratch home holding only the named keys): Fireworks
+  alone started on `fireworks/ember-1` (high); Z.AI alone, and Z.AI with
+  Fireworks, on `glm-5.3` (max: the rank); OpenRouter alone on
+  `openrouter/gemini-3.8-flash` (medium); Meta alone on
+  `muse-spark-1.3-contributor` (high). Five one-word turns, under $0.05; the
+  three new models' live check before the code (a tool loop at every effort)
+  cost about $0.10. The ChatGPT step was not driven live (its start list is
+  Plan 034's, unchanged; a unit test covers it).
+- **V8.** One modified path, `shipped-aliases.txt`, the three-line append
+  `TestShippedCatalogHistory` requires (X1); no wire or schema path.
+- **V2** at `34e0a79`: 102/103, the one DIFF the baseline's SF-122 loss of the
+  closing line in `sigint-foreign-turn-holds-the-drain` (the candidate printed
+  all 15). That scenario alone ×20: the candidate printed 15 lines every time;
+  each binary once printed the primary's `done` before the foreign turn's text,
+  a race older than this plan, recorded as SF-186 (X12).
