@@ -1600,9 +1600,9 @@ func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.
 	}
 	if start.Fallback {
 		if table.DefaultModel != "" {
-			s.note(fmt.Sprintf("the default model %q has no API key; starting on %q", table.DefaultModel, start.Alias))
+			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; starting on %q", table.DefaultModel, start.Alias))
 		} else {
-			s.note(fmt.Sprintf("no provider's start model has an API key; starting on %q", start.Alias))
+			s.note(fmt.Sprintf("no start model in the provider order is available; starting on %q", start.Alias))
 		}
 	}
 	return start.Alias, start.Effort, nil

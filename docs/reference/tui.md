@@ -273,9 +273,13 @@ above, over its own transcript in place of an agent's `session/load`:
   (an edit, or an `agent` call) carries the label unseen.
 - **The model** is the transcript's last one, matched by identity (provider
   and wire model) rather than restored by name — a re-pointed alias never
-  silently switches models; one no longer available falls back to the model
-  table's default and warns on stderr, naming the alias it fell back to and
-  why. **The mode** (agent/plan/ask) is the transcript's last `mode → <id>`
+  silently switches models; one no longer available falls back to your
+  `default_model`, else to the start model of the first provider in the
+  provider order that can run (see
+  [which model a session starts on](#which-model-a-session-starts-on)), never
+  to another model by name, and warns on stderr, naming the alias it fell
+  back to and why; with none of them, the resume refuses and says why each
+  failed. **The mode** (agent/plan/ask) is the transcript's last `mode → <id>`
   change, unless `--plan`/`--ask` set it explicitly; an unrecognised last
   mode restores agent mode instead, warning the same way.
 - **The todo list** is restored from the last tool entry that recorded one.

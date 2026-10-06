@@ -662,7 +662,7 @@ func TestNativeStartFallsBackFromAnUnfundedDefault(t *testing.T) {
 	if got := s.Snapshot().CurrentModel; got != "other/c" {
 		t.Fatalf("CurrentModel = %q, want the first funded alias other/c", got)
 	}
-	if !strings.Contains(diag.String(), `the default model "test/a" has no API key; starting on "other/c"`) {
+	if !strings.Contains(diag.String(), `the default model "test/a" has no usable API key or sign-in; starting on "other/c"`) {
 		t.Fatalf("Diag = %q, want the fallback noted", diag.String())
 	}
 	f.models["other/c"].push(answer("ok"))
@@ -682,7 +682,7 @@ func TestNativeStartNotesOnlyTheLastResort(t *testing.T) {
 	for _, tc := range []struct{ name, models, want, note string }{
 		{"the provider order's start", "", "fireworks/ember-1", ""},
 		{"the last resort", "version = 1\nprovider_order = [\"meta\"]\n", fallback,
-			`no provider's start model has an API key; starting on "` + fallback + `"`},
+			`no start model in the provider order is available; starting on "` + fallback + `"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newNativeFixture(t)

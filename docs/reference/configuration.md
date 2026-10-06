@@ -794,6 +794,9 @@ store a key with [`/connect`](tui.md#connect).
 - **`default_model`** is yours alone: your pin, when it names a model. The
   catalog has no default model, so with none a new session starts by the
   provider order ([where a new session starts](#model-memory-recentjson)).
+  Earlier versions shipped `fireworks/deepseek-v4p1-flash` as the catalog's
+  default; a `default_model` line naming it, written then, is now a pin like
+  any other: delete it to follow the provider order.
 - **`provider_order`** replaces the catalog's order whole: a new session
   that remembers nothing and has no funded pin tries only the providers it
   lists, in its order, each on that provider's start model, which only the
