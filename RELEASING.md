@@ -93,9 +93,13 @@ There is no refresh between releases.
   only when a model it lists needs a newer one and has been verified live; the
   procedure is the comment above that table in the catalog.
 - `TestShippedCatalog` (part of `make test`, so of CI) checks the file: it
-  rejects a malformed catalog, a `default_model` that is not a model, two
+  rejects a malformed catalog (a top-level `default_model` among them: that is
+  the user's own pin), a `provider_order` that does not name every provider
+  exactly once, a provider `start` that is not that provider's own models, two
   aliases sharing an identity, a retired alias that is still a model, and a
-  shipped model whose identity is retired.
+  shipped model whose identity is retired. Adding a provider means adding it
+  to `provider_order`; removing a model a `start` names means changing that
+  `start`.
 
 ## Snapshot / dev versioning
 

@@ -273,9 +273,13 @@ above, over its own transcript in place of an agent's `session/load`:
   (an edit, or an `agent` call) carries the label unseen.
 - **The model** is the transcript's last one, matched by identity (provider
   and wire model) rather than restored by name — a re-pointed alias never
-  silently switches models; one no longer available falls back to the model
-  table's default and warns on stderr, naming the alias it fell back to and
-  why. **The mode** (agent/plan/ask) is the transcript's last `mode → <id>`
+  silently switches models; one no longer available falls back to your
+  `default_model`, else to the start model of the first provider in the
+  provider order that can run (see
+  [which model a session starts on](#which-model-a-session-starts-on)), never
+  to another model by name, and warns on stderr, naming the alias it fell
+  back to and why; with none of them, the resume refuses and says why each
+  failed. **The mode** (agent/plan/ask) is the transcript's last `mode → <id>`
   change, unless `--plan`/`--ask` set it explicitly; an unrecognised last
   mode restores agent mode instead, warning the same way.
 - **The todo list** is restored from the last tool entry that recorded one.
@@ -295,10 +299,14 @@ A **new** native session starts where you left off: a model or effort picked
 in any native session's [`/model`](#model-dialog) is remembered, and the next
 session with no `--model` starts on the newest remembered model whose provider
 has a key, at the effort last used on it. With no remembered model it can use,
-it starts on the model table's default; if that has no key and the ChatGPT plan
-is signed in, on the first of the plan's preferred models its account lists
-(`gpt-6.1-sol`, then `gpt-5.6-sol`); and otherwise on the first model that has a
-key, with a note. `--model` picks the model for one start — at
+it starts on your `default_model` when you set one and its provider has a key;
+else on the start model of the first provider, in craze's provider order, that
+you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
+preferred model its account lists, `fireworks/ember-1`,
+`openrouter/gemini-3.8-flash`, `muse-spark-1.3-contributor`, in that order
+([the provider order](configuration.md#the-shipped-catalog), which
+`provider_order` in `models.toml` changes); and otherwise on the first model
+that has a key, with a note. `--model` picks the model for one start — at
 the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
@@ -702,8 +710,8 @@ the text is never sent.
 On a native session what the model receives depends on the model's `vision`
 setting (see [Native vision](configuration.md#native-vision)):
 
-- A model that takes images (the shipped catalog marks the default model and
-  most others) receives the picture itself.
+- A model that takes images (the shipped catalog marks most of its models)
+  receives the picture itself.
 - A model that does not, such as `glm-5.3`, receives
   `[Image omitted: <model> does not accept images. File: <path>]` in the
   image's place, so it can still name the file, and the composer warns when you
@@ -1158,9 +1166,9 @@ nothing.
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
-  provider has a key, else the model table's `default_model`; if that has no
-  key and the ChatGPT plan is signed in, the first of the plan's preferred
-  models; else the first model (alphabetically) whose key resolves. With no
+  provider has a key, else your `default_model` when its provider has one,
+  else the start model of the first connected provider in the provider order;
+  else the first model (alphabetically) whose key resolves. With no
   provider funded it says so (`no model provider has an API key — run craze
   auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or
   set its API key variable`) and leaves the model to the agent's own.

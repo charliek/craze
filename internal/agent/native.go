@@ -1582,25 +1582,30 @@ func sealedGetenv(getenv func(string) string) (read func(string) string, release
 }
 
 // startModel is the model and effort a new session with no --model starts
-// on: the table's rule over the model memory (Table.StartModel, plan 031
-// §3.5) — the newest remembered model whose provider has a key, at its
-// remembered effort; else the default; else the first funded alias — with
-// getenv the harness's, so keys are judged exactly as Open will judge them.
-// Starting on a fallback alias rather than on the default or a remembered
-// model is noted, as it always was (plan 018 §3.8): a remembered model is the
-// owner's own choice, and needs no word. With nothing funded — a fresh
-// machine, with the shipped catalog and no key — the error says how to give
-// craze one (nothingFundedText); dir is the directory the table was read
-// from.
+// on: the table's rule over the model memory (Table.StartPick, plan 031 §3.5,
+// plan 038 §2.3) — the newest remembered model whose provider has a key, at
+// its remembered effort; else the owner's default_model pin; else the start
+// model of the first provider in the provider order that has one funded;
+// else the first funded alias — with getenv the harness's, so keys are judged
+// exactly as Open will judge them. Starting on that last fallback is noted,
+// as it always was (plan 018 §3.8); a remembered model, the pin and the
+// order's start are each a choice made for the owner, and need no word. With
+// nothing funded — a fresh machine, with the shipped catalog and no key — the
+// error says how to give craze one (nothingFundedText); dir is the directory
+// the table was read from.
 func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.RecentEntry, getenv func(string) string, dir string) (alias, effort string, err error) {
-	alias, effort, err = table.StartModel(recent, getenv)
+	start, err := table.StartPick(recent, getenv)
 	if err != nil {
 		return "", "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
 	}
-	if alias != table.DefaultModel && !slices.ContainsFunc(table.Recent(recent), func(e modeltable.RecentEntry) bool { return e.Alias == alias }) {
-		s.note(fmt.Sprintf("the default model %q has no API key; starting on %q", table.DefaultModel, alias))
+	if start.Fallback {
+		if table.DefaultModel != "" {
+			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; starting on %q", table.DefaultModel, start.Alias))
+		} else {
+			s.note(fmt.Sprintf("no start model in the provider order is available; starting on %q", start.Alias))
+		}
 	}
-	return alias, effort, nil
+	return start.Alias, start.Effort, nil
 }
 
 // nothingFundedText is the start error when no model's provider has a key

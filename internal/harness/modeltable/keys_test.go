@@ -712,7 +712,9 @@ func TestProvidersStructuralErrorsNameNoValue(t *testing.T) {
 
 // TestSetKeyOverTheShippedCatalog: the exported store over the catalog this
 // binary ships. A key stored for fireworks in an empty directory funds its
-// models through Load, and Providers says so; RemoveKey takes it back.
+// models through Load — a new session starts on Fireworks' start,
+// fireworks/ember-1 (plan 038 §2.2) — and Providers says so; RemoveKey takes
+// it back.
 func TestSetKeyOverTheShippedCatalog(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "native")
 	const key = "sk-fireworks-stored-0021"
@@ -729,9 +731,13 @@ func TestSetKeyOverTheShippedCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := tbl.Resolve(tbl.DefaultModel, fakeEnv(nil))
+	alias, _, err := tbl.StartModel(nil, fakeEnv(nil))
+	if err != nil || alias != "fireworks/ember-1" {
+		t.Fatalf("StartModel = %q, %v; want Fireworks' start fireworks/ember-1", alias, err)
+	}
+	got, err := tbl.Resolve(alias, fakeEnv(nil))
 	if err != nil || got.APIKey.Reveal() != key {
-		t.Fatalf("the default model is not funded by the stored key: %v", err)
+		t.Fatalf("the start model is not funded by the stored key: %v", err)
 	}
 	infos, err := Providers(dir, fakeEnv(nil))
 	if err != nil {

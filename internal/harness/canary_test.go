@@ -224,8 +224,18 @@ func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alias := cat.DefaultModel
-	id := cat.Models[alias].Provider
+	// A shipped model on a key-funded provider: the start model of the first
+	// such provider in the shipped order (plan 038 §2).
+	var id, alias string
+	for _, p := range cat.ProviderOrder {
+		if len(cat.Providers[p].EnvKeys) > 0 && len(cat.Starts[p]) > 0 {
+			id, alias = p, cat.Starts[p][0]
+			break
+		}
+	}
+	if alias == "" {
+		t.Fatal("control: the shipped catalog has no start model on a key-funded provider")
+	}
 	shippedVar := cat.Providers[id].EnvKeys[0]
 	// The process environment is what a command inherits, so the test sets it
 	// rather than a Getenv of its own: nothing from the developer's shell,
@@ -323,7 +333,8 @@ func TestMovedEndpointsShippedKeyInTheFrozenPrompt(t *testing.T) {
 		other  = "sk-not-in-the-prompt-0010"
 	)
 	cat := &modeltable.Catalog{
-		DefaultModel: "acme/a",
+		ProviderOrder: []string{"acme"},
+		Starts:        map[string][]string{"acme": {"acme/a"}},
 		Providers: map[string]modeltable.Provider{"acme": {Name: "Acme", Driver: modeltable.DriverOpenAICompat,
 			BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_API_KEY"}}},
 		Models: map[string]modeltable.Model{

@@ -7,7 +7,8 @@
 # per-model overrides and models the user adds, never a copy of this file.
 #
 # It never holds a key. Its schema is its own, and it is decoded strictly: an
-# api_key, source, catalog, [subagents] or [compaction] here is a load error.
+# api_key, source, catalog, default_model, [subagents] or [compaction] here is
+# a load error (default_model is the user's own pin, in models.toml: plan 038).
 # TestShippedCatalog (catalog_test.go, run by `make test` and CI) checks every
 # rule the merge relies on.
 #
@@ -18,13 +19,20 @@
 # id it has pointed at.
 
 version = 1
-default_model = "fireworks/deepseek-v4p1-flash"
+
+# Where a new session with nothing remembered and no default_model pin of the
+# user's starts (plan 038 §2): the first provider here with a key, on the
+# first model of its start that resolves; "eval winner first". It names every
+# provider below exactly once. A user's models.toml provider_order replaces it
+# whole.
+provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta"]
 
 # ---------------------------------------------------------------------------
 # Retired aliases. A user's entry an old import left for one (source = "gx") is
-# ignored, a [subagents] or default_model naming one falls back silently, and
-# any user model entry whose (provider, wire model) is one of these identities
-# is dropped silently: a dead wire id is dead whoever wrote it (plan 031 §3.3).
+# ignored, a [subagents] model or default_model naming one is dropped
+# silently, and any user model entry whose (provider, wire model) is one of
+# these identities is dropped silently: a dead wire id is dead whoever wrote it
+# (plan 031 §3.3).
 # Wire ids from the owner's models.toml backups (2026-09-18 to 2026-09-29), gx's
 # Fireworks presets (grok-build providers_cmd.rs) and D-24 (deepseek-v4-pro-0813).
 
@@ -76,36 +84,45 @@ provider = "openrouter"
 
 # ---------------------------------------------------------------------------
 # Providers: a display name, the endpoint, and the environment variables a key
-# may come from, tried in order before the user's inline api_key.
+# may come from, tried in order before the user's inline api_key. start is the
+# provider's own models a new session starts on when provider_order reaches
+# it, in order of preference: the first that resolves wins (plan 038 §2.2).
 
 [providers.fireworks]
 name = "Fireworks"
 driver = "openai-compat"
 base_url = "https://api.fireworks.ai/inference/v1"
 env_keys = ["FIREWORKS_API_KEY"]
+start = ["fireworks/ember-1"]
 
 [providers.meta]
 name = "Meta"
 driver = "openai-compat"
 base_url = "https://api.meta.ai/v1"
 env_keys = ["META_API_KEY"]
+start = ["muse-spark-1.3-contributor"]
 
+# OpenRouter's start is Gemini: its other models overlap with ones a cheaper
+# provider ships.
 [providers.openrouter]
 name = "OpenRouter"
 driver = "openrouter"
 env_keys = ["OPENROUTER_API_KEY"]
+start = ["openrouter/gemini-3.8-flash"]
 
 [providers.zai-coding-plan]
 name = "Z.AI Coding Plan"
 driver = "openai-compat"
 base_url = "https://api.z.ai/api/coding/paas/v4"
 env_keys = ["ZHIPU_API_KEY", "ZAI_API_KEY"]
+start = ["glm-5.3"]
 
 # The ChatGPT plan (plan 033 §3.11): OpenAI's Responses API at its fixed
 # endpoint, funded by Sign in with ChatGPT (craze auth login chatgpt, or
 # /connect), never by a key, so it names no variable and takes no api_key. Its
 # models are not shipped here: they are the signed-in account's own list,
-# fetched and cached beside the model files, and each is chatgpt/<slug>.
+# fetched and cached beside the model files, and each is chatgpt/<slug>. Its
+# start is [chatgpt_defaults] start, below, never a start key here.
 [providers.chatgpt]
 name = "ChatGPT plan"
 driver = "chatgpt"
@@ -113,9 +130,9 @@ driver = "chatgpt"
 # craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
 # over the account's list: never models of the catalog's, so they need no
 # history line and show nothing for an account that does not list them. start
-# is the slug a new session with nothing remembered starts on when the
-# default model is not funded; a slug's table takes name, efforts,
-# default_effort and tool_profile.
+# is the plan's start (plan 038 §2.2): the slugs a new session with nothing
+# remembered starts on when provider_order reaches chatgpt; a slug's table
+# takes name, efforts, default_effort and tool_profile.
 #
 # models_client_version (plan 034 §3.1, D-82) is the client_version every
 # request for the account's model list carries: the server gates the list on
@@ -132,9 +149,8 @@ driver = "chatgpt"
 # refresh, and a reader drops a model above its own pin, so an older binary
 # never offers a newer pin's models.
 #
-# start is the ordered preference for a new session's model when nothing is
-# remembered and the default is unfunded: the first slug the account lists and
-# the sign-in funds wins, then the first alias that resolves.
+# start is in order of preference: the first slug the account lists and the
+# sign-in funds wins; with none, provider_order goes on to the next provider.
 [chatgpt_defaults]
 models_client_version = "0.160.0"
 start = ["gpt-6.1-sol", "gpt-5.6-sol"]
@@ -144,7 +160,8 @@ default_effort = "low"
 
 # ---------------------------------------------------------------------------
 # Models, by alias. Every key but provider and wire_model is optional, as in
-# models.toml; cost is dollars per 1,000,000 tokens.
+# models.toml; cost is dollars per 1,000,000 tokens. The Z.AI Coding Plan's
+# models are unpriced: a flat-rate plan, like ChatGPT's (plan 038 §2.6).
 
 [models."fireworks/deepseek-v4p1-flash"]
 provider = "fireworks"
@@ -159,6 +176,50 @@ vision = true
 input = 0.3
 output = 1.2
 cache_read = 0.006
+
+[models."fireworks/ember-1"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/ember-1"
+name = "Ember-1 (Fireworks)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."fireworks/ember-1".cost]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+
+# On Fireworks the GLM models (this one and the Flash below) reason only at
+# xhigh and max (observed live, 2026-10-05, plan 038): low, medium and high
+# are accepted and answer without reasoning.
+[models."fireworks/glm-5p3"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/glm-5p3"
+name = "GLM 5.3 (Fireworks)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "max"
+
+[models."fireworks/glm-5p3".cost]
+input = 1.4
+output = 4.4
+cache_read = 0.26
+
+[models."fireworks/glm-5p3-flash"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/glm-5p3-flash"
+name = "GLM 5.3 Flash (Fireworks)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."fireworks/glm-5p3-flash".cost]
+input = 0.15
+output = 0.5
+cache_read = 0.03
 
 [models."fireworks/kimi-k3"]
 provider = "fireworks"
@@ -182,6 +243,11 @@ context_window = 262144
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+
+[models."fireworks/qwen3p8-max".cost]
+input = 2.0
+output = 6.0
+cache_read = 0.25
 
 [models."glm-5.3"]
 provider = "zai-coding-plan"
@@ -230,6 +296,7 @@ vision = true
 [models."muse-spark-1.3-contributor".cost]
 input = 0.1
 output = 0.2
+cache_read = 0.002
 
 [models."openrouter/gemini-3.8-flash"]
 provider = "openrouter"
@@ -241,6 +308,11 @@ efforts = ["low", "medium", "high"]
 default_effort = "medium"
 vision = true
 
+[models."openrouter/gemini-3.8-flash".cost]
+input = 0.75
+output = 3.75
+cache_read = 0.075
+
 [models."openrouter/glm-5.3-flash"]
 provider = "openrouter"
 wire_model = "z-ai/glm-5.3-flash"
@@ -249,6 +321,11 @@ context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+
+[models."openrouter/glm-5.3-flash".cost]
+input = 0.036
+output = 0.5
+cache_read = 0.0238
 
 [models."openrouter/gpt-6-astra"]
 provider = "openrouter"
@@ -298,3 +375,8 @@ wire_model = "minimax/minimax-m3"
 name = "MiniMax M3 (OpenRouter)"
 context_window = 1048576
 vision = true
+
+[models."openrouter/minimax-m3".cost]
+input = 0.3
+output = 1.2
+cache_read = 0.06

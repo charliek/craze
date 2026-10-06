@@ -19,9 +19,10 @@ import (
 
 // Model memory (plan 031 §3.4, owner decision Q1): the models a session's
 // /model picked, newest first, each with the effort last used on it, so that
-// the next session starts where the last one left off rather than on
-// default_model. It is one small file beside the two model files,
-// recent.json, which nothing but a model switch or an effort change made in a
+// the next session starts where the last one left off rather than where
+// nothing remembered would put it (StartPick). It is one small file beside
+// the two model files, recent.json, which nothing but a model switch or an
+// effort change made in a
 // running session writes: not --model, not `craze prompt`, not a resume, not a
 // sub-agent, and not plan 030's session list, each of which applies to one
 // start only.
@@ -305,50 +306,116 @@ func (t *Table) recentAlias(e RecentEntry) (string, bool) {
 }
 
 // StartModel is the model and effort a new session with no --model starts on
-// (plan 031 §3.5), the first of:
+// (plan 031 §3.5, plan 038 §2.3); StartPick says which step chose it.
+func (t *Table) StartModel(recent []RecentEntry, getenv func(string) string) (alias, effort string, err error) {
+	p, err := t.StartPick(recent, getenv)
+	return p.Alias, p.Effort, err
+}
+
+// Start is where StartPick starts a new session: a model, its effort, and
+// whether it is the last step's fallback.
+type Start struct {
+	Alias, Effort string
+	// Fallback says the model is the first funded alias in sorted order, the
+	// last step: nothing remembered resolves, no pin is funded, and no
+	// provider in the order has a start that resolves. The caller says the
+	// session did not start where it would have.
+	Fallback bool
+}
+
+// StartPick is where a new session with no --model starts (plan 031 §3.5,
+// plan 038 §2.3), the first of:
 //
-//   - the newest entry of recent (through Recent) whose model resolves —
+//  1. the newest entry of recent (through Recent) whose model resolves —
 //     its provider has a usable key, judged exactly as Resolve judges it with
 //     getenv — at the effort remembered with it when the model still offers
 //     it, and otherwise at its default_effort;
-//   - DefaultModel, at its default_effort, unless its provider has no key. A
-//     default that fails for any other reason is still the answer, left for
-//     the caller's open to report, as it always was (plan 018 §3.8);
-//   - the first of the ChatGPT plan's start models ([chatgpt_defaults] start,
-//     an ordered list: plan 033 §3.11, plan 034 Q4) that resolves — the
-//     account lists it and the sign-in funds it — at its default_effort: an
-//     owner signed in with nothing else funded starts on the plan's chosen
-//     model, the newest it prefers that the account has, not on whichever
+//  2. the user's pin, DefaultModel, at its default_effort, unless its
+//     provider has no key. A pin that fails for any other reason is still
+//     the answer, left for the caller's open to report, so the user sees it
+//     (plan 018 §3.8);
+//  3. for each provider in StartOrder, the first of its start models that
+//     resolves, at its default_effort — the ChatGPT plan's when the account
+//     lists it and the sign-in funds it (plan 034 Q4): an owner starts on
+//     the chosen model of the first provider they fund, not on whichever
 //     sorts first;
-//   - the first alias in sorted order that resolves, at its default_effort:
-//     one unfunded provider must not lock the owner out of the others. The
-//     caller says it did not start on the default.
+//  4. the first alias in sorted order that resolves, at its default_effort,
+//     with Fallback set: one unfunded choice must not lock the owner out of
+//     the others.
 //
 // With none of them — a fresh machine with the shipped catalog and no key —
-// the error is ErrNothingFunded, which also unwraps to the default's
-// ErrNoAPIKey. A nil getenv is os.Getenv.
-func (t *Table) StartModel(recent []RecentEntry, getenv func(string) string) (alias, effort string, err error) {
+// the error is ErrNothingFunded, which also unwraps to the ErrNoAPIKey of the
+// first model it tried that has no key: the pin's, else the first start
+// model's, else the first alias's. A nil getenv is os.Getenv.
+func (t *Table) StartPick(recent []RecentEntry, getenv func(string) string) (Start, error) {
 	for _, e := range t.Recent(recent) {
 		if _, err := t.Resolve(e.Alias, getenv); err == nil {
-			return e.Alias, cmp.Or(t.offeredEffort(e.Alias, e.Effort), t.Models[e.Alias].DefaultEffort), nil
+			return Start{Alias: e.Alias, Effort: cmp.Or(t.offeredEffort(e.Alias, e.Effort), t.Models[e.Alias].DefaultEffort)}, nil
 		}
 	}
-	def := t.DefaultModel
-	_, derr := t.Resolve(def, getenv)
-	if !errors.Is(derr, ErrNoAPIKey) {
-		return def, t.Models[def].DefaultEffort, nil
+	var unfunded error // the first ErrNoAPIKey met, which ErrNothingFunded wraps
+	try := func(alias string) bool {
+		_, err := t.Resolve(alias, getenv)
+		if unfunded == nil && errors.Is(err, ErrNoAPIKey) {
+			unfunded = err
+		}
+		return err == nil
 	}
-	for _, start := range t.chatgptStart {
-		if _, err := t.Resolve(start, getenv); err == nil {
-			return start, t.Models[start].DefaultEffort, nil
+	if pin := t.DefaultModel; pin != "" {
+		_, err := t.Resolve(pin, getenv)
+		if !errors.Is(err, ErrNoAPIKey) {
+			return Start{Alias: pin, Effort: t.Models[pin].DefaultEffort}, nil
+		}
+		unfunded = err
+	}
+	for _, alias := range t.StartAliases() {
+		if try(alias) {
+			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort}, nil
 		}
 	}
 	for _, alias := range t.Aliases() {
-		if _, err := t.Resolve(alias, getenv); err == nil {
-			return alias, t.Models[alias].DefaultEffort, nil
+		if try(alias) {
+			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort, Fallback: true}, nil
 		}
 	}
-	return "", "", fmt.Errorf("%w (%w)", ErrNothingFunded, derr)
+	if unfunded == nil {
+		return Start{}, ErrNothingFunded
+	}
+	return Start{}, fmt.Errorf("%w (%w)", ErrNothingFunded, unfunded)
+}
+
+// StartOrder is the order a new session with nothing remembered and no funded
+// pin tries the providers in (plan 038 §2.1, §2.4): the user's provider_order
+// when models.toml writes one, else the catalog's; nil for a table with
+// neither.
+func (t *Table) StartOrder() []string {
+	if t.ProviderOrder != nil {
+		return slices.Clone(t.ProviderOrder)
+	}
+	return slices.Clone(t.catalogOrder)
+}
+
+// StartAliases is every provider's start model in StartOrder, each
+// provider's in its own order of preference (plan 038 §2.2): what
+// StartPick's third step tries. A provider listed twice counts once, and a
+// start alias whose model the user's files moved to another provider is
+// left out — it is no longer that provider's model. Whether a model resolves
+// is not judged here.
+func (t *Table) StartAliases() []string {
+	var out []string
+	var seen []string
+	for _, id := range t.StartOrder() {
+		if slices.Contains(seen, id) {
+			continue
+		}
+		seen = append(seen, id)
+		for _, alias := range t.starts[id] {
+			if m, ok := t.Models[alias]; ok && m.Provider == id && !slices.Contains(out, alias) {
+				out = append(out, alias)
+			}
+		}
+	}
+	return out
 }
 
 // offeredEffort is effort when alias's model still offers it, else "": what

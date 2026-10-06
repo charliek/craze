@@ -207,7 +207,7 @@ are deleted from the sections above, each with a note (`12`, Plan 037). Each
 | SF-165 | **Native defence in depth**: a second redact/sanitize pass on non-task tool-row fields (native/X15); strip whole ANSI sequences before `oneLine` in provider errors (native/ESC). | A key split by a zero-width character could be rejoined onto a row; a `[2J` leftover. | `internal/agent/native_tools.go:216-268`, `internal/harness/errors.go:348,378-396` | S |
 | SF-166 | **`craze prompt "<text>"` puts the prompt in argv**, so a model's `pkill -f "<pattern>"` can kill craze (native/X111). | Edge case; stdin works; the fix is a cli.md tip (S) or a re-exec (M). | `internal/cli/prompt.go`, `docs/reference/cli.md` | S-M |
 | SF-167 | **`← n agents` counts running bash-job rows**; count `!IsBashJob` or show `n jobs` (native/JC). | Documented (`tui.md`); wording polish. | `internal/tui/status.go:376-390`, `internal/tui/agents.go:104-106` | S |
-| SF-168 | **deepseek plan-mode doom loop** (5/25 eval runs) on the shipped default `fireworks/deepseek-v4p1-flash`: resample, repetition detector or prompt change (native/DL). | Owner 2026-09-29: the ceiling (D-74) only, until the next eval brings evidence. | `internal/harness/modeltable/catalog.toml:21`, `internal/harness/doomloop.go:28-32` | M |
+| SF-168 | **deepseek plan-mode doom loop** (5/25 eval runs) on `fireworks/deepseek-v4p1-flash`: resample, repetition detector or prompt change (native/DL). No longer the default since Plan 038, which replaced the single default with a start model per provider (`12`, Plan 038); deepseek stays in the catalog, reached by `/model`, a pin or the last-resort fallback. | Owner 2026-09-29: the ceiling (D-74) only, until the next eval brings evidence. | `internal/harness/modeltable/catalog.toml:166`, `internal/harness/doomloop.go:28-32` | M |
 | SF-169 | **Eval harness follow-ups**: `crazeeval snapshot-config` reads the moved-aside `~/.craze/native/models.toml` (native/SF-a); the L7 held-out set, the glm-5.3-flash win, and Read-image and bash-job measurement (native/EV). | Eval-only, not a user path; RUNBOOK documents the first. | `eval/crazeeval/snapshot.py:54,70`, `eval/RUNBOOK.md:105` | S-M |
 | SF-170 | **Comment hygiene**: `journal.ErrStalled`'s doc says the writer "finishes on its own" (native/SF-d); `version.go`'s comment says "stays dev until the first release bumps it" while the variable reads `0.0.1` (DOC-G10). | Comment-only. | `internal/journal/writer.go:131-134,750-753`, `internal/version/version.go:15-18` | S |
 | SF-171 | **Test hygiene**: audit goldens for spinner lines without `Freeze` (native/P33-spin); strict sign-in log reads after `Close` trust a 1 s flush (flakes-c/F-1c). | Flake risk, none observed open. | `internal/tui/*_test.go` goldens, `internal/cli/auth_chatgpt_test.go` (the strict log reads), `internal/signinlog/signinlog.go` | S-M |
@@ -227,6 +227,14 @@ are deleted from the sections above, each with a note (`12`, Plan 037). Each
 | SF-185 | **A keycap emoji renders with a stray cell in the composer.** `1️⃣` (`1` U+FE0F U+20E3) typed into the composer shows as `1️e⃣`: an extra cell between the variation selector and the combining keycap. The bytes tmux sends are right, and `a3aa101` shows the same, so it predates SF-40's grapheme-cluster replay (Plan 037 V5). | A width/rendering quirk of the composer's textarea with a multi-rune grapheme; what is submitted was not checked. Polish. | `internal/tui/composer.go` (the pinned bubbles textarea) | S |
 
 33 rows (SF-152 through SF-185; SF-164 is withdrawn and not counted).
+
+## Plan 038 — start defaults
+
+What Plan 038's verification found that is not its own (`12`, Plan 038).
+
+| id | what | why it is open | where | size |
+|---|---|---|---|---|
+| SF-186 | **V2's `sigint-foreign-turn-holds-the-drain` has a second, order-only flake in both binaries**: the primary turn's `done` can print before the foreign turn's `noted:` text. Run alone ×20 at `34e0a79`: the baseline (`6581e0a`) did it once and lost its closing `foreign_turn ended` once (SF-122, fixed since Plan 035); the candidate did it once and printed all 15 lines every time. | Not a regression (the baseline does it; Plan 038 changed nothing on that path), but V2 judges whole ordered stdout with `flaky_ok=False`, so it reads as a DIFF about 1 run in 20 per side. Fix direction: find which of the two event paths the order depends on, then either make it deterministic or have V2 compare those two lines as a set for this scenario. | `scripts/verify/run_v2.py` (the scenario), `internal/cli/prompt.go` (`readChain`) | S |
 
 ## Plan 025 — effort and speed per provider
 

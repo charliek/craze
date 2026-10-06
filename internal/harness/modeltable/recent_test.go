@@ -432,10 +432,10 @@ func TestTableRecentMatchesByAliasThenIdentity(t *testing.T) {
 }
 
 // TestStartModel (§3.5): the newest remembered model that resolves, at its
-// remembered effort while the model offers it; else the default; else the
-// first funded alias; else ErrNothingFunded. Every remembered entry that is
-// unfunded, unknown or re-pointed is passed over; a renamed one is found
-// under its new alias.
+// remembered effort while the model offers it; else the user's pin; else the
+// first funded alias (recentTable has no provider order); else
+// ErrNothingFunded. Every remembered entry that is unfunded, unknown or
+// re-pointed is passed over; a renamed one is found under its new alias.
 func TestStartModel(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -443,7 +443,7 @@ func TestStartModel(t *testing.T) {
 		env          func(string) string
 		alias, effrt string
 	}{
-		{name: "no memory is the default at its default effort", env: fundedEnv("p", "q"),
+		{name: "no memory is the pin at its default effort", env: fundedEnv("p", "q"),
 			alias: "p/default", effrt: "low"},
 		{name: "the newest remembered, at its effort",
 			recent: []RecentEntry{entry(t, "p/effort", "xhigh"), entry(t, "q/plain", "")}, env: fundedEnv("p", "q"),
@@ -460,10 +460,10 @@ func TestStartModel(t *testing.T) {
 		{name: "a renamed model is found by identity",
 			recent: []RecentEntry{{Alias: "p/effort-2025", Provider: "p", WireModel: "w-effort", Effort: "low"}}, env: fundedEnv("p"),
 			alias: "p/effort", effrt: "low"},
-		{name: "no funded memory is the default",
+		{name: "no funded memory is the pin",
 			recent: []RecentEntry{entry(t, "q/plain", "")}, env: fundedEnv("p"),
 			alias: "p/default", effrt: "low"},
-		{name: "an unfunded default gives way to the first funded alias",
+		{name: "an unfunded pin gives way to the first funded alias",
 			recent: []RecentEntry{entry(t, "nk/dry", "high")}, env: fundedEnv("q"),
 			alias: "q/plain", effrt: ""},
 	} {
@@ -480,12 +480,158 @@ func TestStartModel(t *testing.T) {
 			t.Fatalf("StartModel with no key = %q, %q, %v; want ErrNothingFunded, also ErrNoAPIKey", alias, effort, err)
 		}
 	})
-	t.Run("a default that fails for another reason is left to Open", func(t *testing.T) {
+	t.Run("a pin that fails for another reason is left to Open", func(t *testing.T) {
 		table := recentTable()
 		table.Models["p/default"] = Model{Provider: "missing", WireModel: "w-default"}
 		alias, _, err := table.StartModel(nil, fundedEnv("q"))
 		if err != nil || alias != "p/default" {
 			t.Fatalf("StartModel = %q, %v; want the default, whose own error Open reports", alias, err)
+		}
+	})
+}
+
+// rankedTable is recentTable over a catalog's provider order and starts
+// (plan 038 §2): nk, then q, then p, each starting on one of its models — q
+// on a model that does not sort first among its own — and no pin.
+func rankedTable() *Table {
+	t := recentTable()
+	t.NoCatalog, t.DefaultModel = false, ""
+	t.catalogOrder = []string{"nk", "q", "p"}
+	t.starts = map[string][]string{"nk": {"nk/dry"}, "q": {"q/twin-b", "q/plain"}, "p": {"p/effort"}}
+	return t
+}
+
+// TestStartPickSteps (plan 038 §2.3): each step of the order, over a table
+// with a provider order. The pin beats the order; a pin with no key gives way
+// to it, and one that fails for another reason is still the answer; the
+// order takes the first ranked provider with a start that resolves, at the
+// start's default effort; a user's ProviderOrder replaces the catalog's,
+// passing over names that are no provider; and only the last step, the first
+// funded alias by name, is a Fallback.
+func TestStartPickSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Table)
+		recent []RecentEntry
+		env    func(string) string
+		want   Start
+	}{
+		{name: "remembered beats everything", recent: []RecentEntry{entry(t, "p/default", "high")},
+			mutate: func(t *Table) { t.DefaultModel = "q/plain" }, env: fundedEnv("p", "q"),
+			want: Start{Alias: "p/default", Effort: "high"}},
+		{name: "a funded pin beats the order", mutate: func(t *Table) { t.DefaultModel = "p/default" },
+			env: fundedEnv("p", "q", "nk"), want: Start{Alias: "p/default", Effort: "low"}},
+		{name: "an unfunded pin gives way to the order", mutate: func(t *Table) { t.DefaultModel = "p/default" },
+			env: fundedEnv("q"), want: Start{Alias: "q/twin-b"}},
+		{name: "a pin that fails for another reason is still the answer", mutate: func(t *Table) {
+			t.DefaultModel = "p/default"
+			t.Models["p/default"] = Model{Provider: "missing", WireModel: "w-default"}
+		}, env: fundedEnv("q"), want: Start{Alias: "p/default"}},
+		{name: "no pin: the first ranked provider funded, on its start", env: fundedEnv("p", "q"),
+			want: Start{Alias: "q/twin-b"}},
+		{name: "the first ranked provider wins over a later one", env: fundedEnv("p", "q", "nk"),
+			want: Start{Alias: "nk/dry", Effort: "high"}},
+		{name: "a start whose model moved provider is passed over", mutate: func(t *Table) {
+			t.Models["q/twin-b"] = Model{Provider: "p", WireModel: "w-twin"}
+		}, env: fundedEnv("q"), want: Start{Alias: "q/plain"}},
+		{name: "the user's order replaces the catalog's", mutate: func(t *Table) { t.ProviderOrder = []string{"nope", "p", "q"} },
+			env: fundedEnv("p", "q"), want: Start{Alias: "p/effort", Effort: "medium"}},
+		{name: "nothing in the order funded: the first funded alias, a fallback",
+			mutate: func(t *Table) { t.ProviderOrder = []string{"nk"} }, env: fundedEnv("p", "q"),
+			want: Start{Alias: "p/default", Effort: "low", Fallback: true}},
+		{name: "an empty order is no order", mutate: func(t *Table) { t.ProviderOrder = []string{} }, env: fundedEnv("q"),
+			want: Start{Alias: "q/plain", Fallback: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			table := rankedTable()
+			if tc.mutate != nil {
+				tc.mutate(table)
+			}
+			got, err := table.StartPick(tc.recent, tc.env)
+			if err != nil || got != tc.want {
+				t.Fatalf("StartPick = %+v, %v; want %+v", got, err, tc.want)
+			}
+			alias, effort, err := table.StartModel(tc.recent, tc.env)
+			if err != nil || alias != tc.want.Alias || effort != tc.want.Effort {
+				t.Fatalf("StartModel = %q, %q, %v; want StartPick's %+v", alias, effort, err, tc.want)
+			}
+		})
+	}
+	t.Run("nothing funded", func(t *testing.T) {
+		for _, pin := range []string{"", "p/default"} {
+			table := rankedTable()
+			table.DefaultModel = pin
+			got, err := table.StartPick(nil, fundedEnv())
+			if !errors.Is(err, ErrNothingFunded) || !errors.Is(err, ErrNoAPIKey) || got != (Start{}) {
+				t.Fatalf("pin %q: StartPick with no key = %+v, %v; want ErrNothingFunded, also ErrNoAPIKey", pin, got, err)
+			}
+		}
+	})
+}
+
+// TestStartModelOverTheShippedCatalog (plan 038 §4): where a new session with
+// nothing remembered starts on a home with the shipped catalog — Z.AI alone
+// on glm-5.3, Fireworks alone on fireworks/ember-1, OpenRouter alone on
+// openrouter/gemini-3.8-flash, Meta alone on muse-spark-1.3-contributor, and
+// with every key the eval winner, Z.AI; never on deepseek. The user's pin in
+// models.toml beats the order, the user's provider_order reorders it, and an
+// order that leaves out the funded provider falls back to the first funded
+// alias by name, which the caller notes. No key: ErrNothingFunded.
+func TestStartModelOverTheShippedCatalog(t *testing.T) {
+	const (
+		zai = "ZHIPU_API_KEY"
+		fw  = "FIREWORKS_API_KEY"
+		or  = "OPENROUTER_API_KEY"
+		mt  = "META_API_KEY"
+	)
+	for _, tc := range []struct {
+		name   string
+		models string
+		keys   []string
+		want   Start
+	}{
+		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.3", Effort: "max"}},
+		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-3.8-flash", Effort: "medium"}},
+		{"Meta alone", "", []string{mt}, Start{Alias: "muse-spark-1.3-contributor", Effort: "high"}},
+		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.3", Effort: "max"}},
+		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"a pin beats the order", `default_model = "fireworks/kimi-k3"`, []string{zai, fw},
+			Start{Alias: "fireworks/kimi-k3", Effort: "high"}},
+		{"an unfunded pin gives way to the order", `default_model = "fireworks/kimi-k3"`, []string{zai},
+			Start{Alias: "glm-5.3", Effort: "max"}},
+		{"the user's order", `provider_order = ["meta", "fireworks", "zai-coding-plan"]`, []string{zai, fw},
+			Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"an order without the funded provider", `provider_order = ["meta"]`, []string{fw},
+			Start{Alias: "fireworks/deepseek-v4p1-flash", Effort: "high", Fallback: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			models := ""
+			if tc.models != "" {
+				models = "version = 1\n" + tc.models + "\n"
+			}
+			tbl, err := Load(writeFiles(t, "", models))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWarnings(t, tbl)
+			env := map[string]string{}
+			for _, k := range tc.keys {
+				env[k] = "sk-start-dummy-0001"
+			}
+			got, err := tbl.StartPick(nil, fakeEnv(env))
+			if err != nil || got != tc.want {
+				t.Fatalf("StartPick = %+v, %v; want %+v", got, err, tc.want)
+			}
+		})
+	}
+	t.Run("nothing funded", func(t *testing.T) {
+		tbl, err := Load(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := tbl.StartPick(nil, fakeEnv(nil)); !errors.Is(err, ErrNothingFunded) || !errors.Is(err, ErrNoAPIKey) || got != (Start{}) {
+			t.Fatalf("StartPick with no key = %+v, %v; want ErrNothingFunded, also ErrNoAPIKey", got, err)
 		}
 	})
 }

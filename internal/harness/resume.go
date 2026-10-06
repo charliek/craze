@@ -393,7 +393,11 @@ func (r *turnReader) numbered() int { return max(r.largest, r.inferred) }
 //     own alias when that still names it, then every other alias that does,
 //     in sorted order — never an alias that has been re-pointed at another
 //     model, which would switch models under the conversation (D-33);
-//   - the table's default model.
+//   - the table's pin, its DefaultModel (the user's default_model);
+//   - each provider's start model, in the provider order (Table.StartAliases,
+//     plan 038 §2): where a new session with nothing remembered and no funded
+//     pin starts. Never the first funded alias by name, which is a new
+//     session's last resort, not a model chosen for the owner.
 //
 // None is ErrResumeModel, naming why each failed. Landing anywhere but on the
 // transcript's own model is reported to Options.Warn.
@@ -407,8 +411,10 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		candidates = identityAliases(table, was.model)
 	}
 	own := len(candidates)
-	if def := table.DefaultModel; def != "" && !slices.Contains(candidates, def) {
-		candidates = append(candidates, def)
+	for _, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
+		if alias != "" && !slices.Contains(candidates, alias) {
+			candidates = append(candidates, alias)
+		}
 	}
 	var why []string
 	for i, alias := range candidates {
@@ -427,7 +433,7 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		}
 		return m, nil
 	}
-	reason := "the transcript names no model the table has, and the table has no default"
+	reason := "the transcript names no model the table has, and the table has no default_model and no start model"
 	if len(why) > 0 {
 		reason = strings.Join(why, "; ")
 	}
