@@ -449,11 +449,12 @@ func TestChoicesKeepTheRunningPlanModel(t *testing.T) {
 	}
 }
 
-// TestStartModelPrefersTheChatGPTStart (§3.11): with the default unfunded and
-// only the plan funded, a new session starts on [chatgpt_defaults] start —
-// gpt-5.6-sol, though luna sorts first — at its default effort. The controls:
-// a funded default still wins, and with sol not on the account's list the
-// first funded alias is taken, as before.
+// TestStartModelPrefersTheChatGPTStart (§3.11): with only the plan funded, a
+// new session starts on [chatgpt_defaults] start — gpt-5.6-sol, though luna
+// sorts first — at its default effort. The controls: a Fireworks key as well
+// changes nothing, the plan being ranked above Fireworks (plan 038 §2.1), and
+// with sol not on the account's list the first funded alias is taken, as
+// before.
 func TestStartModelPrefersTheChatGPTStart(t *testing.T) {
 	dir := signedInDir(t)
 	tbl, err := Load(dir)
@@ -465,8 +466,8 @@ func TestStartModelPrefersTheChatGPTStart(t *testing.T) {
 		t.Fatalf("StartModel = %q, %q, %v; want chatgpt/gpt-5.6-sol at medium", alias, effort, err)
 	}
 	alias, _, err = tbl.StartModel(nil, fakeEnv(map[string]string{"FIREWORKS_API_KEY": canary}))
-	if err != nil || alias != tbl.DefaultModel {
-		t.Fatalf("with the default funded StartModel = %q, %v", alias, err)
+	if err != nil || alias != "chatgpt/gpt-5.6-sol" {
+		t.Fatalf("with Fireworks funded too StartModel = %q, %v; want the plan's start, ranked first", alias, err)
 	}
 	withPlanModels(t, dir, strings.Replace(planModels(planSubject, planClient), `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, 1))
 	if tbl, err = Load(dir); err != nil {
@@ -600,7 +601,7 @@ func TestSetKeyRefusesTheSignInProvider(t *testing.T) {
 // efforts, an unknown tool profile, and the section with no chatgpt provider to
 // apply to. The control is the shipped catalog, valid.
 func TestChatGPTDefaultsAreStrict(t *testing.T) {
-	const head = "version = 1\ndefault_model = \"m\"\n\n[providers.p]\nname = \"P\"\ndriver = \"openrouter\"\nenv_keys = [\"P_KEY\"]\n\n" +
+	const head = "version = 1\nprovider_order = [\"p\", \"chatgpt\"]\n\n[providers.p]\nname = \"P\"\ndriver = \"openrouter\"\nenv_keys = [\"P_KEY\"]\n\n" +
 		"[providers.chatgpt]\nname = \"ChatGPT plan\"\ndriver = \"chatgpt\"\n\n[models.m]\nprovider = \"p\"\nwire_model = \"w\"\n"
 	const pin = "\n[chatgpt_defaults]\nmodels_client_version = \"0.160.0\"\n"
 	if _, err := parseCatalog(CatalogFile, []byte(head+pin+"\n[chatgpt_defaults.models.\"gpt-x\"]\ncolour = \"red\"\n")); err == nil {
@@ -654,5 +655,6 @@ func TestChatGPTDefaultsAreStrict(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(c.Providers, ChatGPTProvider)
+	c.ProviderOrder = slices.DeleteFunc(c.ProviderOrder, func(id string) bool { return id == ChatGPTProvider })
 	wantFileError(t, c.validate(CatalogFile), CatalogFile, "chatgpt_defaults", "")
 }

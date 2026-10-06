@@ -15,9 +15,11 @@ import (
 // every provider has a display name, a valid driver and base URL and at least
 // one env_keys name and no key — the ChatGPT plan's none at all, since it
 // signs in (plan 033 §3.11) — every model validates against the catalog's own
-// providers, default_model is a model, no two aliases share an identity, the
-// retired aliases are unique and none is a model, and no model's identity is
-// a retired one. Merged over an empty directory it is a valid Table.
+// providers, no two aliases share an identity, provider_order names every
+// provider exactly once and nothing else, each provider's start is models of
+// its own (plan 038 §2), the retired aliases are unique and none is a model,
+// and no model's identity is a retired one. Merged over an empty directory it
+// is a valid Table, with no default model of its own.
 func TestShippedCatalog(t *testing.T) {
 	c, err := shippedCatalog()
 	if err != nil {
@@ -47,8 +49,18 @@ func TestShippedCatalog(t *testing.T) {
 		}
 		ids[id] = alias
 	}
-	if _, ok := c.Models[c.DefaultModel]; !ok {
-		t.Errorf("default_model %q is not a model", c.DefaultModel)
+	if !slices.Equal(slices.Sorted(slices.Values(c.ProviderOrder)), slices.Sorted(maps.Keys(c.Providers))) {
+		t.Errorf("provider_order %q does not name every provider once: %q", c.ProviderOrder, slices.Sorted(maps.Keys(c.Providers)))
+	}
+	for id, start := range c.Starts {
+		if id == ChatGPTProvider || len(start) == 0 {
+			t.Errorf("provider %q has start %q: want none for the ChatGPT plan, and a non-empty one otherwise", id, start)
+		}
+		for _, alias := range start {
+			if m, ok := c.Models[alias]; !ok || m.Provider != id {
+				t.Errorf("provider %q's start %q is not one of its models (%+v)", id, alias, m)
+			}
+		}
 	}
 	retired := map[string]bool{}
 	for _, r := range c.Retired {
@@ -72,12 +84,18 @@ func TestShippedCatalog(t *testing.T) {
 	if err := tbl.Validate(); err != nil {
 		t.Fatalf("the catalog alone is not a valid Table: %v", err)
 	}
+	if tbl.DefaultModel != "" || tbl.ProviderOrder != nil || !slices.Equal(tbl.StartOrder(), c.ProviderOrder) {
+		t.Fatalf("the catalog alone pins %q, orders %q (start order %q); want no pin and the catalog's order", tbl.DefaultModel, tbl.ProviderOrder, tbl.StartOrder())
+	}
 	// The vision flags (plan 033 X57, from V2's live probe): exactly these
 	// models were seen to describe a pasted screenshot, so exactly these are
 	// true; glm-5.3 stays false, which is what the composer's paste note and
 	// the host's placeholder (D-38, P8) are for.
+	// Plan 038 §2.5 adds Ember-1 and GLM 5.3 Flash on Fireworks, each seen
+	// taking an image live; GLM 5.3 on Fireworks does not, as on Z.AI.
 	seesImages := map[string]bool{
 		"fireworks/deepseek-v4p1-flash": true, "fireworks/kimi-k3": true,
+		"fireworks/ember-1": true, "fireworks/glm-5p3-flash": true,
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
 		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
 		"openrouter/gemini-3.8-flash": true, "openrouter/glm-5.3-flash": true,
@@ -89,8 +107,10 @@ func TestShippedCatalog(t *testing.T) {
 			t.Errorf("%s: vision = %v (present %v), want true", alias, md.Vision, ok)
 		}
 	}
-	if md, ok := tbl.Models["glm-5.3"]; !ok || md.Vision {
-		t.Errorf("glm-5.3: vision = %v (present %v), want false", md.Vision, ok)
+	for _, alias := range []string{"glm-5.3", "fireworks/glm-5p3"} {
+		if md, ok := tbl.Models[alias]; !ok || md.Vision {
+			t.Errorf("%s: vision = %v (present %v), want false", alias, md.Vision, ok)
+		}
 	}
 	for alias, md := range tbl.Models {
 		if md.Vision && !seesImages[alias] {
@@ -180,8 +200,10 @@ func TestShippedCatalogHistory(t *testing.T) {
 // providers' display names, the ChatGPT plan's among them (plan 033 §3.11),
 // and no generic MODEL_API_KEY — a variable that name could be set for
 // anything, and would fund (and be redacted as) Meta. And the ChatGPT plan's
-// defaults: gpt-5.6-sol to start on, gpt-6-astra at low effort, and none of
-// it a model of the catalog's.
+// defaults: gpt-6.1-sol then gpt-5.6-sol to start on, gpt-6-astra at low
+// effort, and none of it a model of the catalog's. And plan 038 §2: the
+// provider order, each provider's start, the three Fireworks models it adds
+// and the prices it fills.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -210,8 +232,55 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("%s is a shipped model of the ChatGPT plan; its models are the account's own", alias)
 		}
 	}
-	if c.DefaultModel != "fireworks/deepseek-v4p1-flash" {
-		t.Fatalf("default_model = %q", c.DefaultModel)
+	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta"}; !slices.Equal(c.ProviderOrder, want) {
+		t.Fatalf("provider_order = %q, want %q", c.ProviderOrder, want)
+	}
+	wantStarts := map[string][]string{
+		"zai-coding-plan": {"glm-5.3"},
+		"fireworks":       {"fireworks/ember-1"},
+		"openrouter":      {"openrouter/gemini-3.8-flash"},
+		"meta":            {"muse-spark-1.3-contributor"},
+	}
+	if !reflect.DeepEqual(c.Starts, wantStarts) {
+		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
+	}
+	// The three Fireworks models (§2.5), as verified live.
+	for alias, want := range map[string]struct {
+		wire, name, effort string
+		vision             bool
+	}{
+		"fireworks/ember-1":       {"accounts/fireworks/models/ember-1", "Ember-1 (Fireworks)", "high", true},
+		"fireworks/glm-5p3":       {"accounts/fireworks/models/glm-5p3", "GLM 5.3 (Fireworks)", "max", false},
+		"fireworks/glm-5p3-flash": {"accounts/fireworks/models/glm-5p3-flash", "GLM 5.3 Flash (Fireworks)", "high", true},
+	} {
+		m := c.Models[alias]
+		if m.Provider != "fireworks" || m.WireModel != want.wire || m.Name != want.name || m.ContextWindow != 1048576 ||
+			!slices.Equal(m.Efforts, []string{"low", "medium", "high", "xhigh", "max"}) || m.DefaultEffort != want.effort || m.Vision != want.vision {
+			t.Errorf("%s = %+v", alias, m)
+		}
+	}
+	// The prices (§2.5, §2.6): input, output, cache read, per 1M tokens.
+	for alias, want := range map[string][3]float64{
+		"fireworks/ember-1":           {3.0, 15.0, 0.3},
+		"fireworks/glm-5p3":           {1.4, 4.4, 0.26},
+		"fireworks/glm-5p3-flash":     {0.15, 0.5, 0.03},
+		"fireworks/qwen3p8-max":       {2.0, 6.0, 0.25},
+		"openrouter/gemini-3.8-flash": {0.75, 3.75, 0.075},
+		"openrouter/glm-5.3-flash":    {0.036, 0.5, 0.0238},
+		"openrouter/minimax-m3":       {0.3, 1.2, 0.06},
+		"muse-spark-1.3-contributor":  {0.1, 0.2, 0.002},
+	} {
+		cost := c.Models[alias].Cost
+		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil ||
+			[3]float64{*cost.Input, *cost.Output, *cost.CacheRead} != want {
+			t.Errorf("%s cost = %+v, want %v", alias, cost, want)
+		}
+	}
+	// The Z.AI coding plan is flat-rate, like ChatGPT's: unpriced.
+	for _, alias := range []string{"glm-5.3", "glm-5.3-flash"} {
+		if cost := c.Models[alias].Cost; cost != nil {
+			t.Errorf("%s is priced (%+v): the coding plan is flat-rate", alias, cost)
+		}
 	}
 	// Aliases the owner dropped while their wire ids still answer retire the
 	// alias only (plan 031 X6): a hand entry pointing at the live id stays the
@@ -247,7 +316,20 @@ func TestCatalogValidateRefuses(t *testing.T) {
 			c.Models["glm-5.3"] = m
 		}, `models."glm-5.3"`, "provider"},
 		{"two aliases of one identity", func(c *Catalog) { c.Models["glm-5.3-again"] = c.Models["glm-5.3"] }, `models."glm-5.3-again"`, "wire_model"},
-		{"a default that is not a model", func(c *Catalog) { c.DefaultModel = "nope" }, "", "default_model"},
+		// Plan 038 §2.1–§2.2: the order, and each provider's start.
+		{"no provider_order", func(c *Catalog) { c.ProviderOrder = nil }, "", "provider_order"},
+		{"a provider ordered twice", func(c *Catalog) { c.ProviderOrder = append(c.ProviderOrder, "meta") }, "", "provider_order"},
+		{"an unknown provider ordered", func(c *Catalog) { c.ProviderOrder = append(c.ProviderOrder, "nope") }, "", "provider_order"},
+		{"a provider left out of the order", func(c *Catalog) {
+			c.ProviderOrder = slices.DeleteFunc(c.ProviderOrder, func(id string) bool { return id == "meta" })
+		}, "", "provider_order"},
+		{"a start alias of another provider", func(c *Catalog) { c.Starts["fireworks"] = []string{"glm-5.3"} }, "providers.fireworks", "start"},
+		{"a start alias that is not a model", func(c *Catalog) { c.Starts["fireworks"] = []string{"fireworks/nope"} }, "providers.fireworks", "start"},
+		{"a start alias twice", func(c *Catalog) {
+			c.Starts["fireworks"] = []string{"fireworks/ember-1", "fireworks/ember-1"}
+		}, "providers.fireworks", "start"},
+		{"an empty start", func(c *Catalog) { c.Starts["fireworks"] = []string{} }, "providers.fireworks", "start"},
+		{"a start for the ChatGPT plan", func(c *Catalog) { c.Starts["chatgpt"] = []string{"glm-5.3"} }, "providers.chatgpt", "start"},
 		{"a retired alias twice", func(c *Catalog) { c.Retired = append(c.Retired, c.Retired[0]) }, "retired", "alias"},
 		{"a retired alias that is a model", func(c *Catalog) {
 			c.Retired = append(c.Retired, Retired{Alias: "glm-5.3", Provider: "zai-coding-plan"})
@@ -268,12 +350,13 @@ func TestCatalogValidateRefuses(t *testing.T) {
 }
 
 // TestCatalogSchemaRefusesUserKeys: the catalog's own schema has no api_key,
-// source, catalog, [subagents] or [compaction], so a strict decode refuses
-// each — a key can never be shipped by mistake, nor a setting that belongs
-// to the user (plan 031 §3.1).
+// source, catalog, default_model, [subagents] or [compaction], so a strict
+// decode refuses each — a key can never be shipped by mistake, nor a setting
+// that belongs to the user (plan 031 §3.1). default_model is the user's pin
+// alone since plan 038 §2.3: a catalog that still has one does not load.
 func TestCatalogSchemaRefusesUserKeys(t *testing.T) {
-	const head = "version = 1\ndefault_model = \"m\"\n"
-	const prov = "\n[providers.p]\nname = \"P\"\ndriver = \"openrouter\"\nenv_keys = [\"P_KEY\"]\n"
+	const head = "version = 1\nprovider_order = [\"p\"]\n"
+	const prov = "\n[providers.p]\nname = \"P\"\ndriver = \"openrouter\"\nenv_keys = [\"P_KEY\"]\nstart = [\"m\"]\n"
 	const model = "\n[models.m]\nprovider = \"p\"\nwire_model = \"w\"\n"
 	if _, err := parseCatalog(CatalogFile, []byte(head+prov+model)); err != nil {
 		t.Fatalf("control: %v", err)
@@ -283,6 +366,7 @@ func TestCatalogSchemaRefusesUserKeys(t *testing.T) {
 		{"provider source", head + prov + "source = \"gx\"\n" + model, "providers.p", "source"},
 		{"model source", head + prov + model + "source = \"gx\"\n", "models.m", "source"},
 		{"catalog", "catalog = false\n" + head + prov + model, "", "catalog"},
+		{"default_model", head + "default_model = \"m\"\n" + prov + model, "", "default_model"},
 		{"subagents", head + prov + model + "\n[subagents]\nmodel = \"m\"\n", "", "subagents"},
 		{"compaction", head + prov + model + "\n[compaction]\nauto = false\n", "", "compaction"},
 	} {

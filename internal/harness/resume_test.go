@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -394,6 +395,33 @@ func TestResumeModelPrecedence(t *testing.T) {
 		current(t, s, "test/a", "high")
 		if len(*warns) != 1 || !strings.Contains((*warns)[0], "test/b") || !strings.Contains((*warns)[0], "continuing on test/a") {
 			t.Fatalf("falling back to the default warned %q; want one warning naming both models", *warns)
+		}
+	})
+	t.Run("no pin: the provider order's start", func(t *testing.T) {
+		// Plan 038 §2: a table over a catalog has no default model; with no
+		// pin, a resume whose model is gone continues on the first start
+		// model of the provider order that resolves — nokey/d has no key —
+		// and never on a model that merely sorts first.
+		f := newFixture(t, url)
+		id := storedTurn(t, f, f.options(), onB)
+		models := maps.Clone(f.table.Models)
+		delete(models, "test/b")
+		cat := &modeltable.Catalog{
+			ProviderOrder: []string{"nokey", "other", "test"},
+			Starts:        map[string][]string{"nokey": {"nokey/d"}, "other": {"other/c"}, "test": {"test/a"}},
+			Providers:     f.table.Providers, Models: models,
+		}
+		table, err := modeltable.LoadWith(t.TempDir(), cat)
+		if err != nil || table.DefaultModel != "" {
+			t.Fatalf("control: the table over the catalog = pin %q, %v", table.DefaultModel, err)
+		}
+		f.table = table
+		opts := resumeOptions(f.options(), id)
+		warns := warned(&opts)
+		s := resumed(t, opts)
+		current(t, s, "other/c", "")
+		if len(*warns) != 1 || !strings.Contains((*warns)[0], "continuing on other/c") {
+			t.Fatalf("falling back to the start model warned %q; want one warning naming it", *warns)
 		}
 	})
 	t.Run("an explicit model that does not resolve refuses", func(t *testing.T) {

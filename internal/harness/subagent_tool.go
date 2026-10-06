@@ -156,7 +156,8 @@ func renderSubagentModels(table *modeltable.Table, getenv func(string) string, r
 // subagentModelOrder is the table's aliases in the order the section lists
 // them, which decides what survives a cut: the ones the owner configured for
 // children first — [subagents] model, then the tiers' in tierOrder — then the
-// table's default, then the rest by alias. Each once.
+// owner's default_model pin, then each provider's start model in the provider
+// order (plan 038 §2), then the rest by alias. Each once.
 func subagentModelOrder(table *modeltable.Table) []string {
 	out := make([]string, 0, len(table.Models))
 	add := func(alias string) {
@@ -169,6 +170,9 @@ func subagentModelOrder(table *modeltable.Table) []string {
 		add(table.Subagents.Tiers[tier])
 	}
 	add(table.DefaultModel)
+	for _, alias := range table.StartAliases() {
+		add(alias)
+	}
 	for _, alias := range table.Aliases() {
 		add(alias)
 	}

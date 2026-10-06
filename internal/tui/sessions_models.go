@@ -198,7 +198,9 @@ func nativeModelChoices(dir string, getenv func(string) string) ([]agent.ModelIn
 // nativeDefaultModel is the model /provider native resets the list's model
 // to (plan 031 §3.5): the one a new native session with no --model starts on
 // (Table.StartModel) — the newest remembered model that is still funded, else
-// the table's default_model, else the first funded alias, sorted — judged
+// the owner's default_model pin, else the start model of the first provider
+// in the provider order with one funded (plan 038 §2.3), else the first
+// funded alias, sorted — judged
 // against getenv, which is this process's environment, which the host a
 // dispatch spawns inherits. Nothing funded is an error, as it is at a
 // session's start. It reads the disk, and is called off the Update.

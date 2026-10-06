@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -268,4 +271,46 @@ func TestAgentDescriptionBudgets(t *testing.T) {
 			t.Fatalf("the small section is\n%s", got)
 		}
 	})
+}
+
+// TestSubagentModelOrderFollowsTheStart (plan 038 §2): after the models the
+// owner configured for children, the section lists the owner's
+// default_model pin, then each provider's start model in the provider order,
+// then the rest by alias — the models a session starts on survive a cut
+// before the ones that merely sort first.
+func TestSubagentModelOrderFollowsTheStart(t *testing.T) {
+	provider := func(name, env string) modeltable.Provider {
+		return modeltable.Provider{Name: name, Driver: modeltable.DriverOpenAICompat, BaseURL: "http://127.0.0.1:1/v1", EnvKeys: []string{env}}
+	}
+	cat := &modeltable.Catalog{
+		ProviderOrder: []string{"q", "p"},
+		Starts:        map[string][]string{"q": {"q/b"}, "p": {"p/z"}},
+		Providers:     map[string]modeltable.Provider{"p": provider("P", "ORDER_P_KEY"), "q": provider("Q", "ORDER_Q_KEY")},
+		Models: map[string]modeltable.Model{
+			"p/a": {Provider: "p", WireModel: "a"}, "p/z": {Provider: "p", WireModel: "z"},
+			"q/a": {Provider: "q", WireModel: "a"}, "q/b": {Provider: "q", WireModel: "b"},
+		},
+	}
+	for _, tc := range []struct {
+		models string
+		want   []string
+	}{
+		{"", []string{"q/b", "p/z", "p/a", "q/a"}},
+		{"version = 1\ndefault_model = \"q/a\"\n", []string{"q/a", "q/b", "p/z", "p/a"}},
+		{"version = 1\n\n[subagents]\nmodel = \"p/a\"\n", []string{"p/a", "q/b", "p/z", "q/a"}},
+	} {
+		dir := t.TempDir()
+		if tc.models != "" {
+			if err := os.WriteFile(filepath.Join(dir, modeltable.ModelsFile), []byte(tc.models), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		table, err := modeltable.LoadWith(dir, cat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := subagentModelOrder(table); !slices.Equal(got, tc.want) {
+			t.Errorf("models.toml %q: order %q, want %q", tc.models, got, tc.want)
+		}
+	}
 }

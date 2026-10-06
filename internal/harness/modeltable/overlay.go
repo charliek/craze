@@ -24,7 +24,8 @@ import (
 // against what the catalog holds — its provider gone, a default_effort the
 // model no longer offers, an override of a model craze stopped shipping —
 // drops that key or that entry with one Table.Warnings line instead: a
-// release never breaks a load (§3.2).
+// release never breaks a load (§3.2). A provider_order name that is no
+// provider is passed over silently (plan 038 §2.4).
 
 // legacySource is the source craze's former gx importer wrote on every entry
 // it made (removed by plan 031 C1). Such an entry yields to the catalog (plan 031 §3.3): a model entry is
@@ -77,11 +78,14 @@ type modelsOverlay struct {
 	// Catalog is `catalog = false` (plan 031 P10): the directory's two files
 	// are then the whole table, under the rules that held before the catalog
 	// existed.
-	Catalog      *bool                   `toml:"catalog"`
-	DefaultModel *string                 `toml:"default_model"`
-	Subagents    *subagentsDoc           `toml:"subagents"`
-	Compaction   *compactionDoc          `toml:"compaction"`
-	Models       map[string]modelOverlay `toml:"models"`
+	Catalog      *bool   `toml:"catalog"`
+	DefaultModel *string `toml:"default_model"`
+	// ProviderOrder is provider_order (plan 038 §2.4): written, it replaces
+	// the catalog's whole.
+	ProviderOrder *[]string               `toml:"provider_order"`
+	Subagents     *subagentsDoc           `toml:"subagents"`
+	Compaction    *compactionDoc          `toml:"compaction"`
+	Models        map[string]modelOverlay `toml:"models"`
 }
 
 func (d *modelsOverlay) version() int { return d.Version }
@@ -280,11 +284,11 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 		disc, discWarnings := withDiscovered(c, dir)
 		warnings = append(warnings, discWarnings...)
 		t = merge(c, ppath, mpath, &pd, &md)
-		t.discover(disc, c)
+		t.discover(disc)
 		// Every entry of the user's that could not stand was dropped above,
 		// and every shipped entry passed TestShippedCatalog: a failure here is
 		// a bug in the catalog or the merge, reported rather than papered over.
-		if err := validate(t, ppath, mpath); err != nil {
+		if err := validate(t, ppath, mpath, false); err != nil {
 			return nil, err
 		}
 	}
@@ -300,15 +304,11 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 	return t, nil
 }
 
-// discover records what withDiscovered added to cat, the catalog t was
-// merged over: each discovered model still in t, by its rank, as
-// OriginDiscovered unless the user's files overrode it; the account the list
-// was bound to; and the start aliases [chatgpt_defaults] names, in order. A nil disc
-// discovered nothing.
-func (t *Table) discover(disc *discovered, cat *Catalog) {
-	for _, s := range cat.ChatGPT.Start {
-		t.chatgptStart = append(t.chatgptStart, ChatGPTAliasPrefix+s)
-	}
+// discover records what withDiscovered added to the catalog t was merged
+// over: each discovered model still in t, by its rank, as OriginDiscovered
+// unless the user's files overrode it; and the account the list was bound
+// to. A nil disc discovered nothing.
+func (t *Table) discover(disc *discovered) {
 	if disc == nil {
 		return
 	}
@@ -353,11 +353,12 @@ func loadAlone(dir, ppath, mpath string, pHas, mHas bool, pd *providersOverlay, 
 		return nil, fmt.Errorf("modeltable: %s is missing although %s exists (%w)", mpath, ProvidersFile, fs.ErrNotExist)
 	}
 	t := &Table{
-		DefaultModel: deref(md.DefaultModel),
-		Providers:    make(map[string]Provider, len(pd.Providers)),
-		Models:       make(map[string]Model, len(md.Models)),
-		Subagents:    subagentsFromDoc(md.Subagents),
-		Compaction:   compactionFromDoc(md.Compaction),
+		DefaultModel:  deref(md.DefaultModel),
+		ProviderOrder: userOrder(md.ProviderOrder),
+		Providers:     make(map[string]Provider, len(pd.Providers)),
+		Models:        make(map[string]Model, len(md.Models)),
+		Subagents:     subagentsFromDoc(md.Subagents),
+		Compaction:    compactionFromDoc(md.Compaction),
 	}
 	for id, o := range pd.Providers {
 		t.Providers[id] = o.complete()
@@ -365,7 +366,7 @@ func loadAlone(dir, ppath, mpath string, pHas, mHas bool, pd *providersOverlay, 
 	for alias, o := range md.Models {
 		t.Models[alias] = o.complete()
 	}
-	if err := validate(t, ppath, mpath); err != nil {
+	if err := validate(t, ppath, mpath, true); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -391,10 +392,23 @@ func checkOverlays(ppath, mpath string, pd *providersOverlay, md *modelsOverlay)
 			return err
 		}
 	}
+	if r := providerOrderProblem(deref(md.ProviderOrder)); r != "" {
+		return &FileError{File: mpath, Key: "provider_order", Reason: r}
+	}
 	if err := validateTierNames(mpath, subagentsFromDoc(md.Subagents)); err != nil {
 		return err
 	}
 	return validateCompaction(mpath, compactionFromDoc(md.Compaction))
+}
+
+// userOrder is the user's provider_order as the table keeps it: nil when the
+// file leaves it out, and otherwise a list of its own — non-nil even when
+// empty, which is an explicit empty order (plan 038 §2.4).
+func userOrder(written *[]string) []string {
+	if written == nil {
+		return nil
+	}
+	return append([]string{}, *written...)
 }
 
 func checkProviderOverlay(file, id string, o providerOverlay) error {
@@ -515,9 +529,37 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 		m.model(alias, md.Models[alias])
 	}
 	m.defaultModel(md.DefaultModel)
+	m.t.ProviderOrder = userOrder(md.ProviderOrder)
+	m.t.catalogOrder = slices.Clone(cat.ProviderOrder)
+	m.t.starts = cat.startAliases()
 	m.subagents(subagentsFromDoc(md.Subagents))
 	m.t.credentialEnv = credentialNames(cat, pd)
 	return m.t
+}
+
+// startAliases is every provider's start as aliases of a merged table (plan
+// 038 §2.2): each provider's Starts, and the ChatGPT plan's
+// [chatgpt_defaults] start as chatgpt/<slug>, each in order; nil for none.
+func (c *Catalog) startAliases() map[string][]string {
+	var out map[string][]string
+	add := func(id string, aliases []string) {
+		if len(aliases) == 0 {
+			return
+		}
+		if out == nil {
+			out = make(map[string][]string)
+		}
+		out[id] = aliases
+	}
+	for id, start := range c.Starts {
+		add(id, slices.Clone(start))
+	}
+	var plan []string
+	for _, s := range c.ChatGPT.Start {
+		plan = append(plan, ChatGPTAliasPrefix+s)
+	}
+	add(ChatGPTProvider, plan)
+	return out
 }
 
 // credentialNames is every variable name cat's providers and the user's
@@ -715,26 +757,22 @@ func sameAsShippedModel(s Model, o modelOverlay) bool {
 		rate(o.Cost.CacheRead, sc.CacheRead) && rate(o.Cost.CacheWrite, sc.CacheWrite)
 }
 
-// defaultModel is the user's default_model when it names a merged model, else
-// the catalog's: silently when it names a retired alias, with a warning for
-// anything else (plan 031 §3.2). The catalog's default is always a merged
-// model, since a dropped override restores the shipped entry.
+// defaultModel is the user's default_model — their pin (plan 038 §2.3) — when
+// it names a merged model, and otherwise none: dropped silently when it names
+// a retired alias, with a warning for anything else (plan 031 §3.2). The
+// catalog has no default of its own; with no pin a new session starts by the
+// provider order (StartModel).
 func (m *merger) defaultModel(user *string) {
-	m.t.DefaultModel = m.cat.DefaultModel
 	if user == nil {
 		return
 	}
 	switch u := *user; {
 	case hasModel(m.t.Models, u):
 		m.t.DefaultModel = u
-		if u == m.cat.DefaultModel {
-			m.redundant(&FileError{File: m.mpath, Key: "default_model",
-				Reason: "repeats craze's shipped default — delete it to follow craze's updates"})
-		}
 	case m.retiredAlias[u]:
 	default:
 		m.warn(&FileError{File: m.mpath, Key: "default_model", Reason: fmt.Sprintf("%q is not a model", u)},
-			fmt.Sprintf("craze's default %q is used", m.cat.DefaultModel))
+			"a new session starts by craze's provider order")
 	}
 }
 
@@ -788,8 +826,8 @@ func (t *Table) ProviderOrigin(id string) Origin {
 
 // RedundantOverrides are the user's entries that repeat what craze ships
 // (plan 031 §3.3): a model entry for a shipped alias whose every field it
-// writes equals the shipped value, a provider entry whose endpoint fields do,
-// and a default_model equal to the catalog's. Each is legal but pins those
+// writes equals the shipped value, and a provider entry whose endpoint fields
+// do. Each is legal but pins those
 // values against later catalog updates, so `craze auth list` names it. One
 // line each, located like a FileError, in file order; never a key.
 func (t *Table) RedundantOverrides() []string {

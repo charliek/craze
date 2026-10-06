@@ -132,7 +132,9 @@ func startList(slugs ...string) string {
 // [gpt-6.1-sol, gpt-5.6-sol], and StartModel takes the first of them the
 // account lists, ahead of the alias that sorts first; with neither listed it
 // takes the first alias that resolves; with no start configured, the same.
-// The remembered model and a funded default still beat the whole list.
+// The plan is ranked above Fireworks (plan 038 §2.1), so a Fireworks key as
+// well still starts on the plan's start; the remembered model and a funded
+// pin of the user's beat the whole list.
 func TestStartModelOrderedChatGPTStart(t *testing.T) {
 	signed := func(slugs ...string) *Table {
 		t.Helper()
@@ -169,10 +171,17 @@ func TestStartModelOrderedChatGPTStart(t *testing.T) {
 	if got := start(neither, nil, nil); got != "chatgpt/gpt-5.5" {
 		t.Fatalf("neither listed: StartModel = %q, want the first resolving alias chatgpt/gpt-5.5", got)
 	}
-	// The configured default, funded, beats the list.
-	if got := start(both, nil, map[string]string{"FIREWORKS_API_KEY": canary}); got != both.DefaultModel {
-		t.Fatalf("funded default: StartModel = %q, want %q", got, both.DefaultModel)
+	// Signed in with a Fireworks key as well: the plan is ranked first.
+	fireworks := map[string]string{"FIREWORKS_API_KEY": canary}
+	if got := start(both, nil, fireworks); got != "chatgpt/gpt-6.1-sol" {
+		t.Fatalf("plan and Fireworks: StartModel = %q, want the plan's start chatgpt/gpt-6.1-sol", got)
 	}
+	// The user's pin, funded, beats the rank.
+	both.DefaultModel = "fireworks/kimi-k3"
+	if got := start(both, nil, fireworks); got != "fireworks/kimi-k3" {
+		t.Fatalf("funded pin: StartModel = %q, want fireworks/kimi-k3", got)
+	}
+	both.DefaultModel = ""
 	// A remembered model beats everything.
 	prov, wire := both.Models["chatgpt/gpt-5.6-luna"].Provider, both.Models["chatgpt/gpt-5.6-luna"].WireModel
 	rem := []RecentEntry{{Alias: "chatgpt/gpt-5.6-luna", Provider: prov, WireModel: wire}}

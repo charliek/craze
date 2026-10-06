@@ -112,10 +112,12 @@ type Options struct {
 	// changes it; SetTable hands the session another while it runs (plan 034
 	// §3.4), and spend still prices from this one what the newer cannot.
 	Table *modeltable.Table
-	// Model is the alias the session starts on; "" is the table's default.
-	// For a resumed session (Resume) "" is unspecified — the transcript's own
-	// model, found by its identity, else the default — and anything else is
-	// explicit and must resolve (plan 028 §3.3).
+	// Model is the alias the session starts on; "" is the table's pin, its
+	// DefaultModel, else where a new session with nothing remembered starts
+	// (modeltable's StartModel: plan 038 §2.3). For a resumed session
+	// (Resume) "" is unspecified — the transcript's own model, found by its
+	// identity, else the pin or the provider order's start (resumeModel) — and
+	// anything else is explicit and must resolve (plan 028 §3.3).
 	Model string
 	// Resume reopens the stored session with this id instead of starting one
 	// (plan 028 §3.3): its transcript in Workspace's session directory under
@@ -604,6 +606,13 @@ func Open(opts Options) (*Session, error) {
 	alias := opts.Model
 	if alias == "" {
 		alias = opts.Table.DefaultModel
+	}
+	if alias == "" {
+		// No pin: the start rule, without the memory, which the caller
+		// applies (the agent always names a new session's model).
+		if alias, _, err = opts.Table.StartModel(nil, s.getenv); err != nil {
+			return nil, fmt.Errorf("harness: %w", err)
+		}
 	}
 	m, err := s.build(opts.Table, alias)
 	if err != nil {

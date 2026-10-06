@@ -303,7 +303,7 @@ func TestLoadMissingFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.DefaultModel != shipped.DefaultModel || len(got.Models) != len(shipped.Models) ||
+		if got.DefaultModel != "" || len(got.Models) != len(shipped.Models) ||
 			len(got.Providers) != len(shipped.Providers) || len(got.Warnings) != 0 {
 			t.Fatalf("an empty directory = default %q, %d models, %d providers, warnings %q; want the catalog alone",
 				got.DefaultModel, len(got.Models), len(got.Providers), got.Warnings)
@@ -647,6 +647,8 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 	}{
 		{"default_model missing", func(t *Table) { t.DefaultModel = "" }, ModelsFile, "", "default_model"},
 		{"default_model unknown", func(t *Table) { t.DefaultModel = "nope" }, ModelsFile, "", "default_model"},
+		{"provider_order twice", func(t *Table) { t.ProviderOrder = []string{"fireworks", "fireworks"} }, ModelsFile, "", "provider_order"},
+		{"provider_order blank", func(t *Table) { t.ProviderOrder = []string{""} }, ModelsFile, "", "provider_order"},
 		{"driver missing", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.Driver = "" }) }, ProvidersFile, fw, "driver"},
 		{"driver unknown", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.Driver = "anthropic" }) }, ProvidersFile, fw, "driver"},
 		{"base_url missing for openai-compat", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.BaseURL = "" }) }, ProvidersFile, fw, "base_url"},
@@ -692,6 +694,13 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 	// A valid table stays valid: the cases above fail for their own reason.
 	if err := validTable().Validate(); err != nil {
 		t.Fatalf("validTable: %v", err)
+	}
+	// Over a catalog default_model is the user's optional pin (plan 038
+	// §2.3), and a provider_order name that is no provider is passed over.
+	pinless := validTable()
+	pinless.NoCatalog, pinless.DefaultModel, pinless.ProviderOrder = false, "", []string{"nope"}
+	if err := pinless.Validate(); err != nil {
+		t.Fatalf("a table over a catalog with no pin: %v", err)
 	}
 }
 

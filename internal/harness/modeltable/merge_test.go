@@ -17,7 +17,7 @@ import (
 // cases at the end run the owner's own files over the shipped catalog.
 
 const testCatalogV1 = `version = 1
-default_model = "acme/fast"
+provider_order = ["acme", "router"]
 
 [[retired]]
 alias = "acme/old"
@@ -29,11 +29,13 @@ name = "Acme"
 driver = "openai-compat"
 base_url = "https://api.acme.example/v1"
 env_keys = ["ACME_API_KEY"]
+start = ["acme/fast"]
 
 [providers.router]
 name = "Router"
 driver = "openrouter"
 env_keys = ["ROUTER_API_KEY"]
+start = ["router/m"]
 
 [models."acme/fast"]
 provider = "acme"
@@ -105,8 +107,11 @@ func TestMergeCatalogAlone(t *testing.T) {
 	cat := testCatalog(t, testCatalogV1)
 	before := cat.Clone()
 	tbl, _ := loadOver(t, cat, "", "")
-	if tbl.DefaultModel != "acme/fast" || !reflect.DeepEqual(tbl.Models, before.Models) || !reflect.DeepEqual(tbl.Providers, before.Providers) {
+	if tbl.DefaultModel != "" || !reflect.DeepEqual(tbl.Models, before.Models) || !reflect.DeepEqual(tbl.Providers, before.Providers) {
 		t.Fatalf("the catalog alone = %+v", tbl)
+	}
+	if got := tbl.StartAliases(); !slices.Equal(got, []string{"acme/fast", "router/m"}) {
+		t.Fatalf("the catalog alone starts on %q, want its order's starts", got)
 	}
 	for _, alias := range tbl.Aliases() {
 		if o := tbl.ModelOrigin(alias); o != OriginShipped {
@@ -346,12 +351,12 @@ haiku = "gone/too"
 		[]string{mp, `[models."acme/fast"] default_effort`, `"max"`, "the key is ignored"},
 		[]string{mp, `[models."half/m"] provider`, `"half"`, "the entry is ignored"},
 		[]string{mp, `[models."local/ok"] default_effort`, `"low"`, "the key is ignored"},
-		[]string{mp, "default_model", `"gone/model"`, `craze's default "acme/fast" is used`},
+		[]string{mp, "default_model", `"gone/model"`, "a new session starts by craze's provider order"},
 		[]string{mp, "[subagents] model", `"gone/model"`, "parent's model"},
 		[]string{mp, "[subagents.tiers] haiku", `"gone/too"`, "parent's model"},
 	)
-	if tbl.DefaultModel != "acme/fast" {
-		t.Fatalf("default = %q", tbl.DefaultModel)
+	if tbl.DefaultModel != "" {
+		t.Fatalf("default = %q, want no pin", tbl.DefaultModel)
 	}
 	if m := tbl.Models["acme/fast"]; m.DefaultEffort != "medium" {
 		t.Fatalf("acme/fast default effort = %q, want the shipped one", m.DefaultEffort)
@@ -471,8 +476,8 @@ source = "gx"
 	if _, ok := tbl.Models["acme/old"]; ok {
 		t.Fatal("an import's entry for a retired alias survived")
 	}
-	if tbl.DefaultModel != "acme/fast" {
-		t.Fatalf("a retired default fell back to %q", tbl.DefaultModel)
+	if tbl.DefaultModel != "" {
+		t.Fatalf("a retired default_model pins %q, want none", tbl.DefaultModel)
 	}
 	if m := tbl.Models["other/x"]; m.Source != legacySource || tbl.ModelOrigin("other/x") != OriginYours {
 		t.Fatalf("other/x = %+v", m)
@@ -565,9 +570,9 @@ sonnet = "acme/fast"
 	}
 }
 
-// TestMergeDefaultModel (plan 031 §3.2): the user's default_model when it
-// names a merged model, the catalog's otherwise — silently for a retired
-// alias.
+// TestMergeDefaultModel (plan 031 §3.2, plan 038 §2.3): the user's
+// default_model is their pin when it names a merged model, and otherwise no
+// pin at all — the catalog has no default — silently for a retired alias.
 func TestMergeDefaultModel(t *testing.T) {
 	cat := testCatalog(t, testCatalogV1)
 	for _, tc := range []struct {
@@ -575,9 +580,10 @@ func TestMergeDefaultModel(t *testing.T) {
 		warns            int
 	}{
 		{"a shipped alias", `default_model = "router/m"`, "router/m", 0},
-		{"none", ``, "acme/fast", 0},
-		{"a retired alias", `default_model = "acme/old"`, "acme/fast", 0},
-		{"an unknown alias", `default_model = "who/knows"`, "acme/fast", 1},
+		{"the first start", `default_model = "acme/fast"`, "acme/fast", 0},
+		{"none", ``, "", 0},
+		{"a retired alias", `default_model = "acme/old"`, "", 0},
+		{"an unknown alias", `default_model = "who/knows"`, "", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl, _ := loadOver(t, cat, "", "version = 1\n"+tc.line+"\n")
@@ -588,10 +594,53 @@ func TestMergeDefaultModel(t *testing.T) {
 	}
 }
 
+// TestMergeProviderOrder (plan 038 §2.4): models.toml's provider_order
+// replaces the catalog's whole — an empty one too — and a name that is no
+// provider is passed over with no warning; a name listed twice, or a blank
+// one, is a problem the file has on its own, which stops the load as an
+// effort listed twice does. Save writes the user's list back, and nothing
+// when the file wrote none.
+func TestMergeProviderOrder(t *testing.T) {
+	cat := testCatalog(t, testCatalogV1)
+	for _, tc := range []struct {
+		name, line string
+		order      []string // ProviderOrder: nil is not written
+		starts     []string
+	}{
+		{"none: the catalog's", ``, nil, []string{"acme/fast", "router/m"}},
+		{"reordered", `provider_order = ["router", "acme"]`, []string{"router", "acme"}, []string{"router/m", "acme/fast"}},
+		{"one provider", `provider_order = ["router"]`, []string{"router"}, []string{"router/m"}},
+		{"an unknown name", `provider_order = ["nope", "acme"]`, []string{"nope", "acme"}, []string{"acme/fast"}},
+		{"empty", `provider_order = []`, []string{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, dir := loadOver(t, cat, "", "version = 1\n"+tc.line+"\n")
+			wantWarnings(t, tbl)
+			if !reflect.DeepEqual(tbl.ProviderOrder, tc.order) || !slices.Equal(tbl.StartAliases(), tc.starts) {
+				t.Fatalf("ProviderOrder %#v, starts %q; want %#v, %q", tbl.ProviderOrder, tbl.StartAliases(), tc.order, tc.starts)
+			}
+			if err := Save(dir, tbl); err != nil {
+				t.Fatal(err)
+			}
+			again, err := LoadWith(dir, cat)
+			if err != nil || !reflect.DeepEqual(again.ProviderOrder, tc.order) {
+				t.Fatalf("after Save: ProviderOrder %#v, %v; want %#v", again.ProviderOrder, err, tc.order)
+			}
+		})
+	}
+	for _, line := range []string{`provider_order = ["acme", "acme"]`, `provider_order = ["acme", " "]`} {
+		dir := writeFiles(t, "", "version = 1\n"+line+"\n")
+		_, err := LoadWith(dir, cat)
+		wantFileError(t, err, filepath.Join(dir, ModelsFile), "", "provider_order")
+	}
+}
+
 // TestRedundantOverrides (plan 031 §3.3): a hand entry for a shipped entry
-// whose every written field equals the shipped value, and a default_model
-// equal to the catalog's, is legal and named; one that differs anywhere, or a
-// provider entry that only stores a key, is not.
+// whose every written field equals the shipped value is legal and named; one
+// that differs anywhere, or a provider entry that only stores a key, is not.
+// A default_model is the user's pin, never a repeat of the catalog's (plan
+// 038 §2.3): the catalog has none, so it is never named, even on the model
+// the provider order would start on.
 func TestRedundantOverrides(t *testing.T) {
 	cat := testCatalog(t, testCatalogV1)
 	tbl, dir := loadOver(t, cat, `version = 1
@@ -630,7 +679,6 @@ source = "manual"
 		"modeltable: " + pp + ": [providers.acme]: repeats craze's shipped settings — keep only api_key to follow craze's updates",
 		"modeltable: " + mp + `: [models."acme/fast"]: repeats craze's shipped entry — delete it to follow craze's updates`,
 		"modeltable: " + mp + `: [models."router/m"]: repeats craze's shipped entry — delete it to follow craze's updates`,
-		"modeltable: " + mp + ": default_model: repeats craze's shipped default — delete it to follow craze's updates",
 	}
 	if got := tbl.RedundantOverrides(); !slices.Equal(got, want) {
 		t.Fatalf("RedundantOverrides =\n%q\nwant\n%q", got, want)
@@ -879,13 +927,14 @@ wire_model = "x"
 // loads both times with no error, and the v2 table reflects every change: the
 // legacy entries of the retired and renamed aliases vanish, a hand entry on a
 // retired wire id is dropped, a default_effort v2 no longer offers is dropped
-// with a warning, [subagents] naming the retired alias falls back, and a hand
-// override of the shipped default pointed at a wire id v2 retires restores the
-// shipped default, which survives.
+// with a warning, [subagents] naming the retired alias falls back, a
+// default_model naming it pins nothing, and a hand override of the shipped
+// start model pointed at a wire id v2 retires restores the shipped entry, so
+// the start survives.
 func TestReleaseTransition(t *testing.T) {
 	v1 := testCatalog(t, testCatalogV1)
 	v2 := testCatalog(t, `version = 1
-default_model = "acme/fast"
+provider_order = ["router", "acme"]
 
 [[retired]]
 alias = "acme/old"
@@ -913,6 +962,7 @@ name = "Acme"
 driver = "openai-compat"
 base_url = "https://api.acme.example/v1"
 env_keys = ["ACME_API_KEY"]
+start = ["acme/fast"]
 
 [providers.router]
 name = "Router"
@@ -987,8 +1037,11 @@ model = "acme/big"
 	if got, want := after.Aliases(), []string{"acme/fast", "acme/huge", "router/m2"}; !slices.Equal(got, want) {
 		t.Fatalf("over v2 aliases = %q, want %q", got, want)
 	}
-	if after.DefaultModel != "acme/fast" || !reflect.DeepEqual(after.Subagents, Subagents{}) || after.Models["acme/fast"].DefaultEffort != "high" {
+	if after.DefaultModel != "" || !reflect.DeepEqual(after.Subagents, Subagents{}) || after.Models["acme/fast"].DefaultEffort != "high" {
 		t.Fatalf("over v2 = default %q, subagents %+v, fast %+v", after.DefaultModel, after.Subagents, after.Models["acme/fast"])
+	}
+	if got, want := after.StartOrder(), []string{"router", "acme"}; !slices.Equal(got, want) || !slices.Equal(after.StartAliases(), []string{"acme/fast"}) {
+		t.Fatalf("over v2 the order is %q starting %q; want v2's %q, starting acme/fast", got, after.StartAliases(), want)
 	}
 	if r, err := after.Resolve("acme/huge", fakeEnv(nil)); err != nil || r.APIKey.Reveal() != "legacy-acme-key-01" {
 		t.Fatalf("the new model is not funded by the old key: %v", err)
@@ -997,8 +1050,8 @@ model = "acme/big"
 		t.Fatal("a load rewrote models.toml")
 	}
 
-	// r2-6: a hand override of the shipped default whose wire id the next
-	// catalog retires restores the shipped default, so the default survives.
+	// r2-6: a hand override of the shipped start model whose wire id the next
+	// catalog retires restores the shipped entry, so the start survives.
 	v3 := v2.Clone()
 	v3.Retired = append(v3.Retired, Retired{Alias: "acme/fast-rc", Provider: "acme", WireModels: []string{"acme-fast-rc"}})
 	pinned, err := LoadWith(writeFiles(t, "", "version = 1\n\n[models.\"acme/fast\"]\nwire_model = \"acme-fast-rc\"\n"), v2)
@@ -1011,8 +1064,8 @@ model = "acme/big"
 		t.Fatal(err)
 	}
 	wantWarnings(t, restored)
-	if m := restored.Models["acme/fast"]; m.WireModel != "acme-fast-1" || restored.DefaultModel != "acme/fast" {
-		t.Fatalf("over v3 acme/fast = %+v, default %q", m, restored.DefaultModel)
+	if m := restored.Models["acme/fast"]; m.WireModel != "acme-fast-1" || !slices.Equal(restored.StartAliases(), []string{"acme/fast"}) {
+		t.Fatalf("over v3 acme/fast = %+v, starts %q", m, restored.StartAliases())
 	}
 }
 
@@ -1020,11 +1073,12 @@ model = "acme/big"
 // replicas of the owner's own files (testdata/upgrade; the providers file's
 // keys are dummies): the 2026-09-29 models.toml over the gx-era
 // providers.toml loads to exactly the shipped catalog's models, all four
-// providers funded by their inline keys, the default unchanged — the twelve gx
-// entries ignored, the manual deepseek entry a no-op override named as
-// redundant, with default_model — and no warning. The import-era models.toml
+// providers funded by their inline keys — the twelve gx entries ignored, the
+// manual deepseek entry a no-op override named as redundant — and no warning;
+// its default_model is now the owner's own pin (plan 038 §2.3), so it still
+// starts on deepseek and is not named as redundant. The import-era models.toml
 // of an older machine loads to the same models: its retired aliases vanish
-// silently and its retired default falls back to the catalog's.
+// silently and its retired default_model pins nothing.
 func TestOwnerFilesUpgrade(t *testing.T) {
 	cat, err := ShippedCatalog()
 	if err != nil {
@@ -1040,10 +1094,11 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 	providers := read("providers-gx.toml")
 	for _, tc := range []struct {
 		models    string
+		pin       string
 		redundant int
 	}{
-		{"models-2026-09-29.toml", 2},
-		{"models-import-era.toml", 0},
+		{"models-2026-09-29.toml", "fireworks/deepseek-v4p1-flash", 1},
+		{"models-import-era.toml", "", 0},
 	} {
 		t.Run(tc.models, func(t *testing.T) {
 			dir := writeFiles(t, providers, read(tc.models))
@@ -1052,8 +1107,8 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantWarnings(t, tbl)
-			if tbl.DefaultModel != cat.DefaultModel {
-				t.Fatalf("default = %q", tbl.DefaultModel)
+			if tbl.DefaultModel != tc.pin {
+				t.Fatalf("default = %q, want %q", tbl.DefaultModel, tc.pin)
 			}
 			if !slices.Equal(tbl.Aliases(), slices.Sorted(maps.Keys(cat.Models))) {
 				t.Fatalf("aliases = %q", tbl.Aliases())

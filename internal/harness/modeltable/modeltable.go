@@ -132,11 +132,19 @@ const (
 // Table is the whole model table: the shipped catalog with both files merged
 // over it, validated.
 type Table struct {
-	// DefaultModel is the alias a session starts on when none is asked for:
-	// the user's default_model when it names a model, else the catalog's. It
-	// is required because TOML tables decode into Go maps, which have no
-	// order to take "the first model" from.
+	// DefaultModel is the user's default_model when it names a model: their
+	// pin, which a new session with nothing remembered starts on before the
+	// provider order (StartModel, plan 038 §2.3). "" is no pin, and over a
+	// catalog is the usual case: the catalog has no default model of its own.
+	// A table with no catalog (`catalog = false`) requires it, because TOML
+	// tables decode into Go maps, which have no order to take "the first
+	// model" from.
 	DefaultModel string
+	// ProviderOrder is the user's provider_order (plan 038 §2.4): nil when
+	// models.toml writes none, so the catalog's holds; a list, even an empty
+	// one, replaces the catalog's whole. A name that is no provider, or one
+	// with no start, is passed over (StartOrder).
+	ProviderOrder []string
 	// Providers is keyed by provider id, Models by alias (the key users
 	// select, which may differ from the wire id).
 	Providers map[string]Provider
@@ -199,11 +207,13 @@ type Table struct {
 	// another account in a running process does not fund the first
 	// account's list with the second's sign-in.
 	discoveredFor Account
-	// chatgptStart is the aliases [chatgpt_defaults] start names, in order of
-	// preference: StartModel takes the first that resolves among the funded
-	// models when the default is not funded (plan 033 §3.11, plan 034 Q4);
-	// nil for none.
-	chatgptStart []string
+	// catalogOrder is the catalog's provider_order, and starts each
+	// provider's start aliases from the catalog — the ChatGPT plan's from
+	// [chatgpt_defaults] start, as chatgpt/<slug> — in order of preference
+	// (plan 038 §2, plan 034 Q4): StartModel's third step. Both nil for a
+	// table loaded without a catalog or built in memory.
+	catalogOrder []string
+	starts       map[string][]string
 
 	// carried binds each model Carry put in this table to the ChatGPT account
 	// its entry was bound to where it came from — the zero Account for one
@@ -461,8 +471,14 @@ type modelsDoc struct {
 	Version int `toml:"version"`
 	// Catalog is written only as `catalog = false`, for a Table whose
 	// NoCatalog is set; nil otherwise, so a table saves as it always did.
-	Catalog      *bool  `toml:"catalog,omitempty"`
-	DefaultModel string `toml:"default_model"`
+	Catalog *bool `toml:"catalog,omitempty"`
+	// DefaultModel is omitted when empty: over a catalog a table need not pin
+	// one (plan 038 §2.3); a `catalog = false` table always has one.
+	DefaultModel string `toml:"default_model,omitempty"`
+	// ProviderOrder carries no omitempty, as providerEntry.EnvKeys: nil is
+	// left out, and a non-nil empty list — an explicit empty order — is
+	// written as `[]` (plan 038 §2.4).
+	ProviderOrder []string `toml:"provider_order"`
 	// Subagents is nil whenever Table.Subagents is its zero value, so a
 	// table with no sub-agent configuration saves byte-identically to a
 	// models.toml written before this section existed (plan 026 §3.6).
@@ -697,8 +713,8 @@ func (t *Table) encodeModels() ([]byte, error) {
 		}
 		entries[alias] = e
 	}
-	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents),
-		Compaction: compactionToDoc(t.Compaction)}
+	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, ProviderOrder: t.ProviderOrder,
+		Subagents: subagentsToDoc(t.Subagents), Compaction: compactionToDoc(t.Compaction)}
 	if t.NoCatalog {
 		top.Catalog = new(bool)
 	}
@@ -790,12 +806,16 @@ func encodeFile[E any](header string, top any, table string, entries map[string]
 // failure as a *FileError naming the file, table and key. Entries are checked
 // in sorted order, so the same table always reports the same problem. The
 // file is named by its base name: an in-memory table has no directory. Save
-// calls it, so an invalid table is never written.
+// calls it, so an invalid table is never written. A NoCatalog table needs a
+// default_model; any other may leave it out (plan 038 §2.3).
 func (t *Table) Validate() error {
-	return validate(t, ProvidersFile, ModelsFile)
+	return validate(t, ProvidersFile, ModelsFile, t.NoCatalog)
 }
 
-func validate(t *Table, pfile, mfile string) error {
+// validate is Validate's rules, against the two files' names; needDefault
+// says the table is the whole of its files (no catalog), so default_model
+// is the one place its sessions can start.
+func validate(t *Table, pfile, mfile string, needDefault bool) error {
 	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
 		if err := validateProvider(pfile, id, t.Providers[id]); err != nil {
 			return err
@@ -806,17 +826,36 @@ func validate(t *Table, pfile, mfile string) error {
 			return err
 		}
 	}
-	if t.DefaultModel == "" {
+	if t.DefaultModel == "" && needDefault {
 		return &FileError{File: mfile, Key: "default_model", Reason: "missing: name the alias a session starts on"}
 	}
-	if _, ok := t.Models[t.DefaultModel]; !ok {
+	if _, ok := t.Models[t.DefaultModel]; !ok && t.DefaultModel != "" {
 		return &FileError{File: mfile, Key: "default_model",
 			Reason: fmt.Sprintf("%q is not a model in %s", t.DefaultModel, ModelsFile)}
+	}
+	if r := providerOrderProblem(t.ProviderOrder); r != "" {
+		return &FileError{File: mfile, Key: "provider_order", Reason: r}
 	}
 	if err := validateSubagents(mfile, t.Subagents, t.Models); err != nil {
 		return err
 	}
 	return validateCompaction(mfile, t.Compaction)
+}
+
+// providerOrderProblem is what is wrong with a user's provider_order on its
+// own, "" for nothing (plan 038 §2.4): a blank name, or a name listed twice.
+// A name that is no provider is not a problem: it is passed over, as other
+// dangling references are.
+func providerOrderProblem(order []string) string {
+	for i, id := range order {
+		switch {
+		case strings.TrimSpace(id) == "":
+			return fmt.Sprintf("entry %d is empty: name a provider id", i+1)
+		case slices.Contains(order[:i], id):
+			return fmt.Sprintf("lists %q twice", id)
+		}
+	}
+	return ""
 }
 
 // providerTable and modelTable are an entry's TOML table path, as a

@@ -650,7 +650,8 @@ func TestSessionStartGitHasNoProviderKeys(t *testing.T) {
 // key (CredentialEnvNames), not only the ones a provider is funded from.
 func TestSessionStartGitHasAMovedEndpointsShippedKey(t *testing.T) {
 	cat := &modeltable.Catalog{
-		DefaultModel: "acme/a",
+		ProviderOrder: []string{"acme"},
+		Starts:        map[string][]string{"acme": {"acme/a"}},
 		Providers: map[string]modeltable.Provider{"acme": {Name: "Acme", Driver: modeltable.DriverOpenAICompat,
 			BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_SHIPPED_KEY"}}},
 		Models: map[string]modeltable.Model{"acme/a": {Provider: "acme", WireModel: "acme-a"}},

@@ -20,8 +20,9 @@ var (
 
 	// ErrNothingFunded is StartModel's error when not one model of the table
 	// resolves — no provider any model is on has a usable key (plan 031 §3.5).
-	// StartModel's error also unwraps to the default model's ErrNoAPIKey, so a
-	// caller that asks errors.Is(err, ErrNoAPIKey) is answered as before. The
+	// StartModel's error also unwraps to the ErrNoAPIKey of the first model it
+	// tried (StartPick), so a caller that asks errors.Is(err, ErrNoAPIKey) is
+	// answered as before. The
 	// adapter phrases it for the person: the command, the variables and the
 	// file that would give craze a key.
 	ErrNothingFunded = errors.New("modeltable: no model provider has an API key")

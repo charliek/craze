@@ -672,14 +672,36 @@ from, tried in order:
 | `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
 | `zai-coding-plan` | Z.AI Coding Plan | `ZHIPU_API_KEY`, `ZAI_API_KEY` |
 
-Its models — aliases, wire model ids, context windows, efforts and costs — and
-its default model are in
+Its models — aliases, wire model ids, context windows, efforts and costs — are
+in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
 a session's `/model` lists those whose provider has a key ([which models, in
-what order](tui.md#model-dialog)). With the catalog, a machine needs only a key:
-store one with [`craze auth login`](#keys), or export one of the variables
-above, and run `craze --provider native`. With no key at all, a native session
-refuses to start and names `craze auth login` (an API key, or `craze auth login
+what order](tui.md#model-dialog)).
+
+The catalog has no default model. It ranks its providers instead, in
+`provider_order`, and gives each a **start model**: a new session that
+remembers nothing, and has no [`default_model`](#your-two-files) pin of yours
+with a key, starts on the start model of the first provider in that order
+that you have connected ([where a new session
+starts](#model-memory-recentjson)):
+
+| Rank | Provider | Start model |
+|------|----------|-------------|
+| 1 | `zai-coding-plan` | `glm-5.3` |
+| 2 | `chatgpt` | the first of `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
+| 3 | `fireworks` | `fireworks/ember-1` |
+| 4 | `openrouter` | `openrouter/gemini-3.8-flash` |
+| 5 | `meta` | `muse-spark-1.3-contributor` |
+
+So a machine with only a Fireworks key starts on `fireworks/ember-1`, one with
+only a Z.AI key on `glm-5.3`, and one signed in to the ChatGPT plan with a
+Fireworks key as well on the plan's model. `provider_order` in your
+`models.toml` changes the order; `default_model` picks one model outright.
+
+With the catalog, a machine needs only a key: store one with
+[`craze auth login`](#keys), or export one of the variables above, and run
+`craze --provider native`. With no key at all, a native session refuses to
+start and names `craze auth login` (an API key, or `craze auth login
 chatgpt` for a ChatGPT plan), the variables to set and the file an inline key
 goes in.
 
@@ -706,7 +728,8 @@ api_key = "fw_..."            # an inline key (craze auth login writes this); an
 ```toml
 # models.toml
 version = 1
-default_model = "muse-spark-1.3-contributor"   # optional: where a new session starts when it remembers nothing
+default_model = "muse-spark-1.3-contributor"   # optional: your pin, where a new session starts when it remembers nothing
+provider_order = ["fireworks", "zai-coding-plan"]   # optional: replaces craze's provider order (below)
 
 [models."fireworks/kimi-k3"]
 default_effort = "max"        # everything else stays as shipped
@@ -768,21 +791,28 @@ store a key with [`/connect`](tui.md#connect).
   kept out of the commands a native session runs and redacted from what they
   print, as every key is ([Keys](#keys)), so it does not reach your endpoint
   that way either.
-- **`default_model`** is yours when it names a model, the catalog's
-  otherwise.
+- **`default_model`** is yours alone: your pin, when it names a model. The
+  catalog has no default model, so with none a new session starts by the
+  provider order ([where a new session starts](#model-memory-recentjson)).
+- **`provider_order`** replaces the catalog's order whole: a new session
+  that remembers nothing and has no funded pin tries only the providers it
+  lists, in its order, each on that provider's start model, which only the
+  catalog sets. An empty list (`provider_order = []`) tries none of them. A
+  name that is not a provider is passed over with no warning.
 
 **A release never breaks a load.** What a file gets wrong on its own still
 stops a native session, naming the file, the table and the key: TOML syntax,
 a key craze does not know, a `version` other than 1, an inline key that
 cannot be one (below), or a value no entry could hold (an unknown driver, a
 negative window, an effort listed twice, a `default_effort` outside the
-`efforts` the same entry lists, a cost out of range). What an entry gets wrong
-only against the catalog is dropped with a warning at session start, naming
+`efforts` the same entry lists, a cost out of range, a provider listed twice in
+`provider_order`). What an entry gets wrong only against the catalog is
+dropped with a warning at session start, naming
 the file, the table and the key, and the session carries on: a model whose
 provider no longer exists, a `default_effort` the model no longer offers, a
 partial entry for a model craze no longer ships, a `default_model` or
 `[subagents]` target that is not a model. Dropping your entry for a shipped
-model restores the shipped entry, so the catalog's default model always
+model restores the shipped entry, so every provider's start model always
 survives.
 
 An entry for a shipped model or provider that repeats every value it writes
@@ -908,10 +938,10 @@ are not offered; a session already on one keeps it in its picker, as with any
 provider that loses its key.
 
 The shipped catalog's `[chatgpt_defaults]` table holds craze's own settings for
-the plan's models, laid over the account's list: `start`, an ordered list of
-the models a new session starts on when nothing it remembers is funded and the
-default model is not either (`gpt-6.1-sol`, then `gpt-5.6-sol`; the first the
-account lists wins), and per-slug `name`, `efforts` (which can only
+the plan's models, laid over the account's list: `start`, the plan's start
+model in the [provider order](#the-shipped-catalog), an ordered list
+(`gpt-6.1-sol`, then `gpt-5.6-sol`; the first the account lists wins), and
+per-slug `name`, `efforts` (which can only
 narrow the account's), `default_effort` and `tool_profile` (`gpt-6-astra`
 defaults to `low`). It ships in the binary like the rest of the catalog; it is
 not a `models.toml` setting.
@@ -1047,12 +1077,19 @@ on the first of:
 
 1. the newest remembered model whose provider has a key, at its remembered
    effort when the model still offers it (its `default_effort` otherwise);
-2. `default_model`;
-3. when `default_model`'s provider has no key and the ChatGPT plan is signed in,
-   the first model in the plan's `start` list (`chatgpt/gpt-6.1-sol`, then
-   `chatgpt/gpt-5.6-sol`) that the account lists;
-4. when `default_model`'s provider has no key, the first model, by alias, whose
-   provider has one — with a note saying so.
+2. your `default_model`, when you set one and its provider has a key (one that
+   fails for another reason is still used, so the session says why);
+3. for each provider in the provider order — your `provider_order`, else the
+   [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
+   Fireworks, OpenRouter, Meta — that has a key, the provider's start model
+   (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-5.6-sol`
+   that the account lists; `fireworks/ember-1`;
+   `openrouter/gemini-3.8-flash`; `muse-spark-1.3-contributor`);
+4. otherwise the first model, by alias, whose provider has a key — with a note
+   saying so.
+
+Steps 2 to 4 start at the model's `default_effort`. With no provider funded
+at all the session does not start, and says how to connect one.
 
 A remembered model is found by its alias while that alias still names the
 same provider and wire model, and otherwise by its provider and wire model,
@@ -1076,8 +1113,10 @@ in the file.
 A `models.toml` with `catalog = false` at the top turns the catalog off for
 its directory: the two files are then the whole table, as before the catalog
 existed — both are needed, `default_model` is required, and every entry is
-complete. It is meant for sandboxes such as the evaluation harness's homes,
-where no model beyond the ones written may appear.
+complete. There is no provider order there (start models come from the
+catalog), so `provider_order` changes nothing. It is meant for sandboxes such
+as the evaluation harness's homes, where no model beyond the ones written may
+appear.
 
 ### Files from an older craze
 
@@ -1097,10 +1136,11 @@ catalog records the alias and every *dead* wire model id it pointed at; an
 alias whose wire id still answers is retired by alias alone, with no wire ids
 listed, so an entry of yours pointing at that id is not dropped. A retired
 alias disappears from an untouched directory with no warning: a `source =
-"gx"` entry for it is ignored, a `default_model` naming it falls back to the
-catalog's, and a `[subagents]` model or tier naming it falls back to its
-default (the parent's model). Any model entry of yours, under any alias,
-whose provider and wire model are a retired pair is dropped silently too — a
+"gx"` entry for it is ignored, a `default_model` naming it is no pin (a new
+session starts by the provider order), and a `[subagents]` model or tier
+naming it falls back to its default (the parent's model). Any model entry of
+yours, under any alias, whose provider and wire model are a retired pair is
+dropped silently too — a
 dead wire id is dead whoever wrote it. An entry of yours for a retired alias
 that points at a live wire id is your own model and stays.
 
@@ -1188,7 +1228,8 @@ cache_write = 0.0
 Every key is optional and independent; a model with no `[cost]` table saves
 exactly as it did before this section existed. Shipped models may carry a
 cost of their own; a rate you write for one replaces that rate alone (see
-[How the files merge](#how-the-files-merge)). Each rate is dollars per
+[How the files merge](#how-the-files-merge)). The Z.AI Coding Plan's models
+carry none, like the ChatGPT plan's: both are flat-rate plans. Each rate is dollars per
 1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
 that is not a finite number (`nan`, `inf`), is refused at load. There are no
 tiers yet: a tier is per request, and a sub-agent's usage row already sums
@@ -1215,8 +1256,9 @@ it.
 A native model's `vision` key says whether craze may send it images: the
 pictures pasted into the composer (see [Images](tui.md#images)) and the ones
 the `Read` tool returns for an image file. The shipped catalog sets it
-`true` on the models seen to describe a screenshot, among them the default
-model, and leaves it off on `glm-5.3`. A model you add defaults to `false`.
+`true` on the models seen to describe a screenshot, and leaves it off on GLM
+5.3 — `glm-5.3`, Z.AI's start model, and `fireworks/glm-5p3`. A model you add
+defaults to `false`.
 
 ```toml
 [models."local/qwen"]

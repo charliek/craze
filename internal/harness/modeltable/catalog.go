@@ -23,16 +23,27 @@ var catalogTOML []byte
 const CatalogFile = "catalog.toml"
 
 // Catalog is a model table craze ships (plan 031 §3.1): providers without
-// keys, models, the model a session starts on, and the aliases a release has
-// retired. Load merges the user's two files over the one compiled into the
-// binary; LoadWith takes another, so a test can pass its own. It holds no key
-// and no source: its providers' APIKey and Source and its models' Source are
-// always empty.
+// keys, models, the order a new session tries the providers in and the model
+// each starts on (plan 038 §2), and the aliases a release has retired. Load
+// merges the user's two files over the one compiled into the binary; LoadWith
+// takes another, so a test can pass its own. It holds no key and no source:
+// its providers' APIKey and Source and its models' Source are always empty.
+// It has no default model: default_model is the user's own pin (models.toml).
 type Catalog struct {
-	DefaultModel string
-	Providers    map[string]Provider
-	Models       map[string]Model
-	Retired      []Retired
+	// ProviderOrder is provider_order (plan 038 §2.1): the providers a new
+	// session with nothing remembered and no funded pin tries, in order, each
+	// on the first of its Starts that resolves (Table.StartModel). validate
+	// requires it to name every provider exactly once and nothing else.
+	ProviderOrder []string
+	Providers     map[string]Provider
+	Models        map[string]Model
+	// Starts is each provider's [providers.<id>] start (plan 038 §2.2): the
+	// provider's own catalog aliases, in order of preference, keyed by
+	// provider id; a provider with none has no key here. The ChatGPT plan's
+	// start is never here: its models are the account's, so it stays
+	// [chatgpt_defaults] start, slugs (ChatGPT.Start).
+	Starts  map[string][]string
+	Retired []Retired
 	// ChatGPT is [chatgpt_defaults] (plan 033 §3.11): craze's own settings for
 	// the ChatGPT plan's models, which a load learns from the account's list
 	// (withDiscovered) and never ships, so they are no [models] rows — no
@@ -43,11 +54,13 @@ type Catalog struct {
 
 // ChatGPTDefaults is the catalog's [chatgpt_defaults] (plan 033 §3.11).
 type ChatGPTDefaults struct {
-	// Start is the slugs a new session with nothing remembered and an unfunded
-	// default starts on among the plan's models (StartModel), in order of
-	// preference: the first one the account lists and the sign-in funds wins
-	// (plan 034 Q4). Nil is no preference; present, it is non-empty and
-	// unique (validateChatGPT). It is catalog-only, so it is an array outright.
+	// Start is the ChatGPT plan's start (plan 038 §2.2): the slugs a new
+	// session with nothing remembered and no funded pin starts on among the
+	// plan's models when the plan's turn in provider_order comes (StartModel),
+	// in order of preference: the first one the account lists and the sign-in
+	// funds wins (plan 034 Q4). Nil is no preference; present, it is non-empty
+	// and unique (validateChatGPT). It is catalog-only, so it is an array
+	// outright.
 	Start []string
 	// startSet says the file wrote start, even as an empty array, so
 	// validation can refuse `start = []` and still read an absent key as no
@@ -83,8 +96,8 @@ type ChatGPTModelDefaults struct {
 
 // Retired is one alias a release took out of the catalog, with the provider
 // it was on and every wire model id it has pointed at (plan 031 §3.3). An
-// entry an old import left for the alias is ignored, a [subagents] or
-// default_model naming it falls back silently, and any user model whose
+// entry an old import left for the alias is ignored, a [subagents] model or
+// the user's default_model naming it is dropped silently, and any user model whose
 // (provider, wire model) is one of these identities is dropped silently.
 type Retired struct {
 	Alias      string
@@ -93,14 +106,15 @@ type Retired struct {
 }
 
 // The catalog's own on-disk shape. It has no api_key, source, catalog,
-// [subagents] or [compaction] key, so decodeStrict refuses any of them: the
-// schema itself keeps a key, or a user-only setting, out of the file.
+// default_model, [subagents] or [compaction] key, so decodeStrict refuses any
+// of them: the schema itself keeps a key, or a user-only setting, out of the
+// file (default_model is the user's pin since plan 038 §2.3).
 type catalogDoc struct {
-	Version      int                             `toml:"version"`
-	DefaultModel string                          `toml:"default_model"`
-	Retired      []catalogRetiredEntry           `toml:"retired"`
-	Providers    map[string]catalogProviderEntry `toml:"providers"`
-	Models       map[string]catalogModelEntry    `toml:"models"`
+	Version       int                             `toml:"version"`
+	ProviderOrder []string                        `toml:"provider_order"`
+	Retired       []catalogRetiredEntry           `toml:"retired"`
+	Providers     map[string]catalogProviderEntry `toml:"providers"`
+	Models        map[string]catalogModelEntry    `toml:"models"`
 	// ChatGPT is [chatgpt_defaults], decoded as strictly as the rest: a slug's
 	// table takes name, efforts, default_effort and tool_profile, and nothing
 	// else (plan 033 §3.11).
@@ -133,6 +147,8 @@ type catalogProviderEntry struct {
 	Driver  string   `toml:"driver"`
 	BaseURL string   `toml:"base_url"`
 	EnvKeys []string `toml:"env_keys"`
+	// Start is catalog-only (plan 038 §2.2): no user file has the key.
+	Start []string `toml:"start"`
 }
 
 type catalogModelEntry struct {
@@ -158,12 +174,19 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 		return nil, err
 	}
 	c := &Catalog{
-		DefaultModel: d.DefaultModel,
-		Providers:    make(map[string]Provider, len(d.Providers)),
-		Models:       make(map[string]Model, len(d.Models)),
+		ProviderOrder: nilIfEmpty(d.ProviderOrder),
+		Providers:     make(map[string]Provider, len(d.Providers)),
+		Models:        make(map[string]Model, len(d.Models)),
 	}
 	for id, e := range d.Providers {
 		c.Providers[id] = Provider{Name: e.Name, Driver: e.Driver, BaseURL: e.BaseURL, EnvKeys: nilIfEmpty(e.EnvKeys)}
+		if e.Start != nil {
+			// Written, even as `start = []`, which validate refuses.
+			if c.Starts == nil {
+				c.Starts = make(map[string][]string)
+			}
+			c.Starts[id] = slices.Clone(e.Start)
+		}
 	}
 	for alias, e := range d.Models {
 		c.Models[alias] = Model{
@@ -252,13 +275,19 @@ func (c *Catalog) Clone() *Catalog {
 		return nil
 	}
 	out := &Catalog{
-		DefaultModel: c.DefaultModel,
-		Providers:    make(map[string]Provider, len(c.Providers)),
-		Models:       make(map[string]Model, len(c.Models)),
+		ProviderOrder: slices.Clone(c.ProviderOrder),
+		Providers:     make(map[string]Provider, len(c.Providers)),
+		Models:        make(map[string]Model, len(c.Models)),
 	}
 	for id, p := range c.Providers {
 		p.EnvKeys = slices.Clone(p.EnvKeys)
 		out.Providers[id] = p
+	}
+	for id, start := range c.Starts {
+		if out.Starts == nil {
+			out.Starts = make(map[string][]string, len(c.Starts))
+		}
+		out.Starts[id] = slices.Clone(start)
 	}
 	for alias, m := range c.Models {
 		out.Models[alias] = cloneModel(m)
@@ -324,10 +353,11 @@ func hasModel(models map[string]Model, alias string) bool {
 // has a name, a valid driver and base URL, and at least one env_keys name and
 // no key — but the ChatGPT plan's, which signs in and names no variable (plan
 // 033 §3.11); each model validates against the catalog's own providers, as a
-// models.toml entry would; default_model is a model; no two aliases share an
-// identity; the retired aliases are unique, none is a model, and no model's
-// identity is a retired one; and [chatgpt_defaults] is valid
-// (validateChatGPT). Errors are *FileErrors against name.
+// models.toml entry would; no two aliases share an identity; provider_order
+// and each provider's start are valid (validateStarts, plan 038 §2); the
+// retired aliases are unique, none is a model, and no model's identity is a
+// retired one; and [chatgpt_defaults] is valid (validateChatGPT). Errors are
+// *FileErrors against name.
 func (c *Catalog) validate(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -365,8 +395,8 @@ func (c *Catalog) validate(name string) error {
 		}
 		byIdentity[id] = alias
 	}
-	if !hasModel(c.Models, c.DefaultModel) {
-		return at("", "default_model", "not a model in the catalog")
+	if err := c.validateStarts(name); err != nil {
+		return err
 	}
 	seen := make(map[string]bool, len(c.Retired))
 	for i, r := range c.Retired {
@@ -389,6 +419,59 @@ func (c *Catalog) validate(name string) error {
 		}
 	}
 	return c.validateChatGPT(name)
+}
+
+// validateStarts checks where a new session with nothing remembered starts
+// (plan 038 §2): provider_order is there and names every provider exactly
+// once and nothing else; and each provider's start — never the ChatGPT
+// plan's, which is [chatgpt_defaults] start — is a non-empty list of models
+// of that provider, each listed once. The order is checked entry by entry,
+// then the providers it misses, sorted; the starts by provider, sorted.
+func (c *Catalog) validateStarts(name string) error {
+	at := func(table, key, reason string) error {
+		return &FileError{File: name, Table: table, Key: key, Reason: reason}
+	}
+	if len(c.ProviderOrder) == 0 {
+		return at("", "provider_order", "missing: list every provider, in the order a new session with nothing remembered tries them")
+	}
+	for i, id := range c.ProviderOrder {
+		switch _, ok := c.Providers[id]; {
+		case !ok:
+			return at("", "provider_order", fmt.Sprintf("entry %d, %q, is not a provider in the catalog", i+1, id))
+		case slices.Contains(c.ProviderOrder[:i], id):
+			return at("", "provider_order", fmt.Sprintf("lists %q twice", id))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.Providers)) {
+		if !slices.Contains(c.ProviderOrder, id) {
+			return at("", "provider_order", fmt.Sprintf("does not list provider %q: name every provider once", id))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.Starts)) {
+		start, table := c.Starts[id], providerTable(id)
+		switch p, ok := c.Providers[id]; {
+		case !ok:
+			// Unreachable from a file, whose start sits in its provider's
+			// own table; a Catalog built in memory can still say it.
+			return at(table, "start", "is for a provider the catalog does not have")
+		case p.Driver == DriverChatGPT:
+			return at(table, "start", "the ChatGPT plan's start is [chatgpt_defaults] start, its account's model slugs")
+		case len(start) == 0:
+			return at(table, "start", "is empty: list at least one of the provider's models, or leave start out")
+		}
+		for i, alias := range start {
+			m, ok := c.Models[alias]
+			switch {
+			case !ok:
+				return at(table, "start", fmt.Sprintf("entry %d, %q, is not a model in the catalog", i+1, alias))
+			case m.Provider != id:
+				return at(table, "start", fmt.Sprintf("entry %d, %q, is a model of provider %q, not of %q", i+1, alias, m.Provider, id))
+			case slices.Contains(start[:i], alias):
+				return at(table, "start", fmt.Sprintf("lists %q twice", alias))
+			}
+		}
+	}
+	return nil
 }
 
 // validateChatGPT checks [chatgpt_defaults] (plan 033 §3.11): it is only for a
