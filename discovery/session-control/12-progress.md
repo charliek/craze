@@ -5816,7 +5816,7 @@ decision interactively (2026-10-05), so the plan had no panel. The plan lives
 outside the repo; its execution amendments (X1–X12, in the plan folder's
 `progress.md`) are the truth.
 
-PR: #91.
+PR: #91, merged as fb684d1 (2026-10-05).
 
 **Owner decisions (2026-10-05).** No single default. The catalog ranks the
 providers, `provider_order = ["zai-coding-plan", "chatgpt", "fireworks",
@@ -5911,3 +5911,7 @@ the shipped default: delete the line to follow the rank.
   all 15). That scenario alone ×20: the candidate printed 15 lines every time;
   each binary once printed the primary's `done` before the foreign turn's text,
   a race older than this plan, recorded as SF-186 (X12).
+- **CI:** both runs (push and pull_request) of the final head `c305f94` green
+  on ubuntu and macOS (test, cli) with lint, build and release-snapshot, and
+  the Docs PR Build; CodeRabbit posted no actionable comments. On main,
+  `fb684d1`'s CI and Documentation (build and deploy) runs passed.
