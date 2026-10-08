@@ -404,6 +404,8 @@ def _entry_pid(path: Path) -> int | None:
 
 
 def pid_alive(pid: int) -> bool:
+    """Whether pid is a running process: it answers signal 0 and, where its
+    /proc state can be read, that state is not a zombie's."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -413,7 +415,19 @@ def pid_alive(pid: int) -> bool:
     # A zombie still answers signal 0; only its /proc state says it is gone.
     try:
         state = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace").rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
+    except OSError:
+        # No state to read: there is no /proc (macOS), /proc hides the process,
+        # or the zombie was reaped between signal 0 and this read (CI's cleanup
+        # check read such a hub as alive at 659fa8c). Ask again: only a pid
+        # that no longer answers is gone.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    except IndexError:
         return True
     return state != "Z"
 
