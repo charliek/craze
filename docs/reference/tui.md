@@ -370,10 +370,10 @@ off.
 | Key | Action |
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
-| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
+| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
-| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
 | `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
@@ -389,6 +389,8 @@ off.
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
+| `Enter` on `/btw <question>` | where the session answers side questions (native, Grok, gx): open the [side view](#side-questions-btw) and ask it, even mid-turn; inside the view, `Enter` asks a follow-up |
+| `Esc` or `Ctrl+C` inside the side view | close it: the question in flight is cancelled and the side thread discarded; the main turn runs on, and `Ctrl+C` arms no quit (with a card up, `Ctrl+C` is what it always is) |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
 | wheel | scroll the transcript three lines a notch; over an open slash menu, move its selection one row a notch instead — it selects, it does not page (see [Mouse](#mouse)) |
@@ -466,8 +468,10 @@ actually goes.
 | Quitting | gone with the session; there is no persistence across restarts |
 
 Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks` and `/clear`
-run immediately even mid-turn; the ones that need the agent (`/model`,
-`/plan`, …) keep today's refusal. A slash line the agent advertises is
+run immediately even mid-turn, and so does `/btw` where it is offered — it
+opens the [side view](#side-questions-btw) beside the running turn rather than
+behind it; the ones that need the agent (`/model`, `/plan`, …) keep today's
+refusal. A slash line the agent advertises is
 ordinary text and queues like any other message.
 
 The queue holds 32 messages of up to 32 KiB each. Past either bound the
@@ -884,6 +888,73 @@ Typing, pasting and the slash menu are inert inside the view, and a card
 still lands on top and owns the keyboard until it is answered — `←` aside,
 which opens the [session list](#session-list) and comes back to the view
 and its card (see [Cards](#cards)).
+
+## Side questions (`/btw`)
+
+`/btw <question>` asks the session a quick question about its work without
+interrupting it and without adding to it. It is offered where the session can
+answer one — **native, Grok and gx**; on Cursor `/btw` is not in the menu and
+a typed `/btw …` goes to the agent as the text it is. Where it is offered, a
+plugin or skill named `btw` is shadowed, as `/connect` shadows one on native.
+
+It runs whatever the session is doing — mid-turn, and during a turn the agent
+runs on its own — and never queues. The draft is read raw: `/btw` (any case)
+then the question, which may span several lines and is sent verbatim. An empty
+`/btw` says `usage: /btw <question>`; a draft carrying an image chip is
+refused (`side questions are text only`) and kept; output of a `!` command
+waiting for your next message stays waiting for it and is never attached. On a
+[new session not started yet](#starting-a-session-from-the-list) `/btw` is
+refused with `/btw needs a running session: send a first message`. `Ctrl+L` on
+a `/btw` draft opens the view too; it is never interjected into the turn. A
+queued message is never turned into a side question: `/btw` typed over a
+queued row's text while editing it is refused on `Enter` and `Ctrl+L` alike
+(`/btw is a side question, not a queued message: esc the edit, then ask it`),
+the edit left open.
+
+The answer opens in a **side view** that takes the transcript region: a dim
+`Side question — not saved. Esc returns to the session.`, your question, the
+answer streaming in (native streams it; Grok and gx answer in one piece), and a
+dim footer with the model that answered and, on native, its tokens —
+`Echo · 1.2k in (800 cached) · 40 out`. While it is answering the working line
+reads `Answering · <elapsed> · esc closes`; status row 2 reads
+`side question · esc to return` where the mode chip was, and the composer's top
+rule carries a `btw` chip. Everything else on screen — the status rows, the
+sub-agent rows, the queue strip and the tasks panel — is the main session's,
+still live underneath, and inert while the view is open (clicks on it do
+nothing).
+
+Keys inside the view:
+
+- `Enter` asks a **follow-up** with the composer's text, carrying the earlier
+  questions and answers of this view (it is ignored while one is answering). A
+  view takes 21 questions; after that it says
+  `this side thread is full: Esc and start a new /btw`. An earlier answer over
+  64 KiB is resent cut, with a `[…truncated]` mark.
+- The composer is plain text: every editing key works, the arrows move through
+  a draft of several lines, and `Ctrl+V` pastes text. There is no shell mode,
+  slash menu, `@` popup or image paste, and the keys that would leave the view
+  or reach the main session — `↑` into the rows, `←` into the session list,
+  `Ctrl+L`, `Shift+Tab` — do nothing.
+- `PgUp`/`PgDn` and the wheel scroll it, a drag selects in it, `Ctrl+Y` copies
+  its last answer; `Ctrl+O`, `Ctrl+T` and `Ctrl+G` are what they are
+  everywhere.
+- `Esc` or `Ctrl+C` closes it: the question in flight is cancelled, the
+  thread and a half-typed follow-up are discarded, and the main transcript
+  comes back where you left it with an empty composer. `Ctrl+C` here does not
+  touch the main turn and arms no quit. A card that arrives takes the keyboard
+  as always — `Esc` answers the card, not the view, and the view is there
+  again once it is answered; with a card up `Ctrl+C` keeps its usual meaning.
+
+A failure is an error row in the view, which stays open; an answer cut off
+part way keeps what streamed, marked `(incomplete)`. A question a reconnect
+cut says `connection lost — ask again` — it is never sent twice, since the
+host may have answered it already. Opening another session, the session list,
+or quitting closes the view first.
+
+**What is saved:** nothing of the side thread — no transcript row, no journal
+entry, nothing in the session's history or event log, and nothing another
+client attached to the session sees. On native the tokens a side question
+spends count in the session's total for this process (not after a resume).
 
 ## Session list
 
@@ -1508,6 +1579,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/plan` | Set plan mode |
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
+| `/btw <question>` | Ask a side question, not saved — [native, Grok and gx only](#side-questions-btw); runs mid-turn |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
 
@@ -2020,7 +2092,8 @@ keys — `enter on a row` to open one, `esc, ←` to return, and
 `tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
 `queued messages, sub-agent rows, or a list inside a dialog`. On native, `panels and views`
 also gains `del, backspace — stop the selected running sub-agent, or the one
-in view`.
+in view`. Where `/btw` is offered (native, Grok, gx) the box gains a
+`side questions` group with the side view's keys.
 
 ## Mouse
 

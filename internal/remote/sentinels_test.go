@@ -568,6 +568,13 @@ const (
 	// checked here) — the explicit quit's reading of a host that cannot stop
 	// its session.
 	proofStop = "stop"
+	// proofLost: errors.Is of backend.ErrConnectionLost or
+	// backend.ErrStaleEpoch, the client's own answers to a side question
+	// (plan 040 §3.6, §3.7) — sent and then lost (ErrConnectionLost wraps
+	// backend's), or answered after the client left the identity it was sent
+	// as — which no host's refusal ever reconstructs (checked here, over
+	// every twin).
+	proofLost = "lost"
 )
 
 // tuiSites is every error read in internal/tui's production files
@@ -739,6 +746,19 @@ var tuiSites = []tuiSite{
 	{"sessions_models.go", "nativeDefaultModel", "Is", "modeltable.ErrNothingFunded", 1, proofLocal},
 	{"sessions_models.go", "sessNativeDefault", "Error", "msg.err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
+	// The side question's failure, as its error row words it (plan 040
+	// §3.6): the client's own losses, the host's refusals by sentinel, a
+	// host's aborted/context (its bound, the session's end, a cancel) as the
+	// deadline it reconstructs, the asking client's own cancel — its ctx's
+	// error, which no reply carries — and the host's text for the rest.
+	{"btw.go", "btwErrText", "Is", "backend.ErrConnectionLost", 1, proofLost},
+	{"btw.go", "btwErrText", "Is", "backend.ErrStaleEpoch", 1, proofLost},
+	{"btw.go", "btwErrText", "Is", "engine.ErrAsideBusy", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "agent.ErrQueueTextTooLong", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "engine.ErrClosing", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "context.Canceled", 1, proofLocal},
+	{"btw.go", "btwErrText", "Is", "context.DeadlineExceeded", 1, proofDeadline},
+	{"btw.go", "btwErrText", "Error", "err", 1, proofText},
 }
 
 // scanTUI is every error read in internal/tui's production files, keyed as
@@ -861,6 +881,16 @@ func TestEveryTUIErrorSiteWorksOverTheWire(t *testing.T) {
 				Data: protocol.ErrorData{Code: protocol.CodeUnsupported, Reason: protocol.ReasonStopUnsupported}})
 			if !errors.Is(got, backend.ErrStopUnsupported) {
 				t.Errorf("%s %s: a host's stop_unsupported is not backend.ErrStopUnsupported over the wire (%v)", s.file, s.fn, got)
+			}
+		case proofLost:
+			for _, tw := range twins {
+				got := reconstructed(t, tw.err)
+				if errors.Is(got, backend.ErrConnectionLost) || errors.Is(got, backend.ErrStaleEpoch) {
+					t.Errorf("%s %s: the host's %s reconstructs a lost or stale answer", s.file, s.fn, tw.sentinel)
+				}
+			}
+			if !errors.Is(remote.ErrConnectionLost, backend.ErrConnectionLost) {
+				t.Errorf("%s %s: the client's own ErrConnectionLost is not backend.ErrConnectionLost", s.file, s.fn)
 			}
 		case proofOutcome:
 			for _, tw := range twins {

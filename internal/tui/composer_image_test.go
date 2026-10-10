@@ -1044,7 +1044,7 @@ func TestTheEmptyPasteProbe(t *testing.T) {
 	}
 
 	clipboardReadImage = noClipboardImage
-	if msg := runWatched(t, probeClipboardImage(1)); msg != nil {
+	if msg := runWatched(t, probeClipboardImage(1, 0)); msg != nil {
 		t.Fatalf("a probe of a clipboard with no image answered %#v", msg)
 	}
 }

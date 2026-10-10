@@ -295,6 +295,12 @@ var (
 		// goroutines of its own — so its insides are not the model's state
 		// (and walking them races its accept loop).
 		reflect.TypeFor[signInAttempt](): true,
+		// A side question's pump (plan 040 §3.6) is written by its call's
+		// goroutine and by onDelta, on the backend's reader: the answer
+		// arriving while a gate is open is held as its pump message, and the
+		// pump's own buffer is not the model's state (walking it would race
+		// the writer).
+		reflect.TypeFor[btwPump](): true,
 	}
 	contextType = reflect.TypeFor[context.Context]()
 )

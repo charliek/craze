@@ -502,8 +502,10 @@ type frameState struct {
 	// held: every message that had reached the model was reduced — and no
 	// pasted image was still being processed (plan 033 §3.3), whose answer
 	// would otherwise race the quit, and its write the run's removal of the
-	// isolated HOME it stores into. folded is the seq of the last event the
-	// model folded (its shared transcript's).
+	// isolated HOME it stores into — and no side question was in flight (plan
+	// 040 §3.6), whose answer would otherwise race the quit as well. folded
+	// is the seq of the last event the model folded (its shared
+	// transcript's).
 	// The runner sends its quit only once the newest frame is settled and has
 	// folded the session's stream as far as it had gone when the script ended
 	// (RunFrameScript); the capture itself need not be settled (final).
@@ -850,7 +852,7 @@ func (f frameModel) publish() {
 		copied:    f.inner.copyLingering(),
 		sync:      f.inner.syncAck,
 		gated:     f.inner.gate != nil,
-		settled:   f.inner.gate == nil && len(f.inner.held) == 0 && !f.inner.imagesInFlight(),
+		settled:   f.inner.gate == nil && len(f.inner.held) == 0 && !f.inner.imagesInFlight() && !f.inner.btwPending(),
 		folded:    f.inner.foldedSeq(),
 		shared:    f.inner.shared,
 		final:     f.inner.harnessQuit,

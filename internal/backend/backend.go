@@ -51,6 +51,15 @@ var ErrOutcomeUnknown = errors.New("backend: the command's outcome is unknown: i
 // answers it.
 var ErrStopUnsupported = errors.New("backend: the session's host cannot stop it")
 
+// ErrConnectionLost is a call (not a command) whose connection went before its
+// reply came: the host may have run it, and it is never sent again (plan 040
+// §3.6, §3.7). A socket backend's own error for it (internal/remote's
+// ErrConnectionLost) wraps this sentinel, so a client matches it by errors.Is
+// without knowing the transport — the TUI's side question says "connection
+// lost — ask again" rather than resending a paid call. An in-process backend
+// never answers it.
+var ErrConnectionLost = errors.New("the connection was lost before the reply")
+
 // epochKey is WithEpoch's context key.
 type epochKey struct{}
 

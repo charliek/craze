@@ -90,8 +90,11 @@ func (m Model) helpKeyLines() []helpLine {
 		)
 		out = append(out, m.stopHelpLines()...)
 	}
+	out = append(out, helpLine{key: "click the model", desc: "model dialog, from status row 1"})
+	// The side view's keys, where /btw is offered alone (plan 040 §3.6): a
+	// cursor session's box is line for line what it always was.
+	out = append(out, m.btwHelpLines()...)
 	out = append(out,
-		helpLine{key: "click the model", desc: "model dialog, from status row 1"},
 		helpLine{desc: "selection and clipboard"},
 		helpLine{key: "drag", desc: "select transcript rows and copy them"},
 		helpLine{key: "double-click", desc: "select the word under the pointer"},

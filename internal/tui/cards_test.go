@@ -125,8 +125,8 @@ func planCard(t *testing.T) (Model, *Stub) {
 	return cardEvent(t, m, stub, agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()}), stub
 }
 
-func press(m Model, k tea.KeyMsg) (Model, tea.Cmd) {
-	tm, cmd := m.Update(k)
+func press(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	tm, cmd := m.Update(msg)
 	return tm.(Model), cmd
 }
 

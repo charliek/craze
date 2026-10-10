@@ -105,8 +105,9 @@ var clipboardRead = systemPaste
 
 // clipboardReadImage is the paste seam's image half (plan 033 §3.3): the
 // clipboard's image as bytes — nil when it holds none — read before its text
-// by every paste asked for in the composer (pasteFromClipboard), and by an
-// empty bracketed paste (probeClipboardImage).
+// by every paste asked for in the composer outside the side view
+// (pasteFromClipboardForComposer), and by an empty bracketed paste
+// (probeClipboardImage).
 var clipboardReadImage = systemPasteImage
 
 // setClipboardOut installs the OSC 52 writer alone and returns the previous
@@ -283,6 +284,12 @@ type pasteMsg struct {
 	// the same (C15r, astra r30-c15 2).
 	listGen uint64
 	key     keyField
+	// composerGen is the composer's generation a paste for the composer was
+	// asked under (Model.composerGen, plan 040 §3.6): the side view opening or
+	// closing puts another draft in the one composer without the session
+	// shown changing, and a paste asked for in one draft never lands in the
+	// other (staleComposer). 0 is a message a test built by hand.
+	composerGen uint64
 	// textRefused says the clipboard's "text" was not text — not UTF-8, or
 	// holding a NUL (pastableText) — and was dropped: text is "" and the
 	// status row says so (clipboardNotText, plan 033 C3r).
@@ -293,38 +300,63 @@ type pasteMsg struct {
 // (plan 033 §3.3): a chip's business, not a text paste's.
 func (m pasteMsg) hasImage() bool { return m.image != nil || m.imageErr != nil }
 
-// pasteFromClipboard is Ctrl+V. bubbles' own binding calls clipboard.ReadAll
-// from inside the textarea (textarea.go:1391), which would run xclip under a
-// test or a frame script, so craze binds the key itself and reads through the
-// seam. Like copyText, the seam is read on the Update goroutine; shown is the
-// shown-session generation the paste is for, and listGen the opening of the
-// session list whose input it is for, 0 for the composer (pasteMsg).
-//
-// A paste for the composer (listGen 0) reads the clipboard's image first (plan
-// 033 §3.3): Ctrl+V — whose binding is handleKey's, unchanged — and Alt+V,
-// its alias, both come here, so an image on the clipboard becomes a chip, and
-// the text is still read alongside it for where no chip may be made. The
-// session list's input is text only, as ever.
+// pasteFromClipboard is Ctrl+V in the session list's input. bubbles' own
+// binding calls clipboard.ReadAll from inside the textarea (textarea.go:1391),
+// which would run xclip under a test or a frame script, so craze binds the key
+// itself and reads through the seam. Like copyText, the seam is read on the
+// Update goroutine; shown is the shown-session generation the paste is for,
+// and listGen the opening of the session list whose input it is for
+// (pasteMsg). The list's input is text only, as ever; the composer's paste is
+// pasteFromClipboardForComposer.
 func pasteFromClipboard(shown, listGen uint64) tea.Cmd {
 	read := clipboardRead
-	if listGen != 0 {
-		return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, listGen: listGen}) }
+	return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, listGen: listGen}) }
+}
+
+// pasteFromClipboardForComposer is Ctrl+V — whose binding is handleKey's —
+// and Alt+V, its alias, in the composer (composerPaste). With image it reads
+// the clipboard's image first (plan 033 §3.3), so an image on the clipboard
+// becomes a chip, and the text is still read alongside it for where no chip
+// may be made; the side view's composer, which takes no image (plan 040
+// §3.6), reads the text alone. composer is the composer generation it is
+// asked under (pasteMsg.composerGen). Its own closure, like
+// pasteFromClipboard's, so a command is named for what it reads.
+func pasteFromClipboardForComposer(shown, composer uint64, image bool) tea.Cmd {
+	read := clipboardRead
+	msg := pasteMsg{shownGen: shown, composerGen: composer}
+	if !image {
+		return func() tea.Msg { return readPaste(read, msg) }
 	}
 	readImage := clipboardReadImage
-	return func() tea.Msg {
-		return readPaste(read, readPasteImage(readImage, pasteMsg{shownGen: shown}))
-	}
+	return func() tea.Msg { return readPaste(read, readPasteImage(readImage, msg)) }
+}
+
+// composerPaste is the composer's clipboard paste
+// (pasteFromClipboardForComposer): the image, then the text — the text alone
+// in the side view — stamped with the composer generation it was asked under.
+func (m Model) composerPaste() tea.Cmd {
+	return pasteFromClipboardForComposer(m.shownGen, m.composerGen, m.btw == nil)
+}
+
+// staleComposer reports that a paste for the composer was asked for in
+// another of its drafts — before the side view opened, or in the view since
+// closed (pasteMsg.composerGen): it lands nowhere. A paste for the session
+// list's input or a key field carries no composer generation, and is judged
+// where it lands instead.
+func (p pasteMsg) staleComposer(gen uint64) bool {
+	return p.composerGen != 0 && p.composerGen != gen
 }
 
 // probeClipboardImage is an empty bracketed paste in the composer (plan 033
 // §3.3): what a terminal sends for a paste of an image it cannot paste as
 // text. The clipboard's image, if it holds one, is pasted as a chip; nothing
 // else is — the text the terminal pasted was nothing — and no image is no
-// message at all.
-func probeClipboardImage(shown uint64) tea.Cmd {
+// message at all. composer is the composer generation it is asked under
+// (pasteMsg.composerGen).
+func probeClipboardImage(shown, composer uint64) tea.Cmd {
 	readImage := clipboardReadImage
 	return func() tea.Msg {
-		msg := readPasteImage(readImage, pasteMsg{shownGen: shown})
+		msg := readPasteImage(readImage, pasteMsg{shownGen: shown, composerGen: composer})
 		if !msg.hasImage() {
 			return nil
 		}

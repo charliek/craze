@@ -247,6 +247,12 @@ func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
 		// to the agent instead (plan 022 §3.6).
 		return m, nil
 	}
+	// A /btw draft where the session offers it (plan 040 §3.6) is a side
+	// question, whichever key sends it: Ctrl+L opens the side view as Enter
+	// does, and never interjects it or sends it into the main turn.
+	if q, isBtw := btwDraft(m.input.Value()); isBtw && m.btwOffered() {
+		return m.openBtw(q)
+	}
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
 		return m, nil
@@ -559,6 +565,16 @@ func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if m.eng == nil {
 		return then(m)
+	}
+	// A side question is never saved as a queued message (plan 040, C3–C4
+	// review): /btw typed over a queued row's text would otherwise become
+	// that row and be prompted into the main session when the queue drains.
+	// Enter and Ctrl+L both save through here, so both are refused, with a
+	// line, the edit left open; where /btw is not offered (cursor) the text
+	// is the agent's, as it always was.
+	if _, isBtw := btwDraft(m.input.Value()); isBtw && m.btwOffered() {
+		m.addError(btwNotQueued)
+		return m, nil
 	}
 	// A chip pasted into the edit and still being processed holds the save
 	// as it holds a send (plan 033 §3.3); the edit stays open.
@@ -942,7 +958,9 @@ func (m Model) dropQueuedRow(id string, then linkThen) (Model, tea.Cmd) {
 func (m Model) queueHoverAt(x, y int) queueHover {
 	r := m.lay.Region(regionQueue)
 	row := r.Row(y)
-	if row < 0 || row >= len(m.visibleQueue()) {
+	if m.btw != nil || row < 0 || row >= len(m.visibleQueue()) {
+		// No row under the pointer — or the side view open, under which the
+		// strip is inert (plan 040 §3.6) and shows no actions to click.
 		return noHover()
 	}
 	return queueHover{row: row, action: queueActionAt(x, m.width)}
@@ -987,12 +1005,14 @@ func (m Model) queueClick(x, row int) (tea.Model, tea.Cmd) {
 // terminal for no reporting at all and must not start now.
 //
 // "Rows" means queued messages, not drawn rows: a band degradation took away
-// keeps all-motion, and the hover simply has nothing to hit.
+// keeps all-motion, and the hover simply has nothing to hit. The side view
+// wants none (plan 040 §3.6): the strip is inert under it, and every pointer
+// move would be an Update and a frame for a hover it never shows.
 func (m *Model) queueMouseCmd() tea.Cmd {
 	if !m.mouseEnabled {
 		return nil
 	}
-	want := len(m.queueItems()) > 0
+	want := m.btw == nil && len(m.queueItems()) > 0
 	if want == m.mouseAll {
 		return nil
 	}

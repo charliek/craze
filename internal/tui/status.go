@@ -216,9 +216,15 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	chip, chipStyle := m.permissionChip()
 	mode, modeStyle := m.modeChip()
+	modeID := spanMode
 	hint := ""
 	if mode != "" {
 		hint = modeHint
+	}
+	if m.btw != nil {
+		// The side view says where the keyboard is in the mode's place (plan
+		// 040 §3.6), and the span is no mode to click.
+		mode, modeStyle, modeID, hint = btwStatusChip, styleFG(m.theme.Accent), spanNone, ""
 	}
 	parts := make([]statusPart, 0, 9)
 	if lay.SpinnerMerged {
@@ -230,7 +236,7 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 		})
 	}
 	parts = append(parts,
-		statusPart{text: mode, style: modeStyle, id: spanMode},
+		statusPart{text: mode, style: modeStyle, id: modeID},
 		statusPart{text: hint, style: dim, drop: 2},
 		// The copy note is here for two seconds and gone; it never drops,
 		// because the row it is crowding is the only feedback a copy gets.

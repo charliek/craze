@@ -120,7 +120,12 @@ func (t *pane) reset() {
 	}
 }
 
+// cur is the pane on screen: the side view's while it is open (plan 040
+// §3.6), else the viewed sub-agent's, else main.
 func (m *Model) cur() *pane {
+	if m.btw != nil {
+		return m.btw.pane
+	}
 	if m.viewing != "" {
 		if t := m.subs[m.viewing]; t != nil {
 			return t
