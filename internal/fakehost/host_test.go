@@ -280,3 +280,33 @@ func (c *testClient) hello(t *testing.T, resume *protocol.Resume) protocol.Hello
 	}
 	return res
 }
+
+// TestTheAsideOptIn (plan 040 §3.8): Options.Aside is refused beside
+// Options.Start, as ModelsRefresh is — gatedStart embeds the Stub, so its
+// session would answer no side questions — and goes with ModelsRefresh: the
+// session is then one value that both takes up models and answers side
+// questions (tui.RefreshingAsidingStub). Each opt-in alone serves only its
+// own, and a Host with neither serves neither. Negative control: a Host that
+// builds the plain RefreshingStub whenever ModelsRefresh is on answers no
+// side questions with both opt-ins.
+func TestTheAsideOptIn(t *testing.T) {
+	if _, err := New(Options{Aside: true, Start: func(context.Context) error { return nil }}); err == nil {
+		t.Fatal("Options.Aside beside Options.Start built a Host")
+	}
+	for _, o := range []Options{{}, {Aside: true}, {ModelsRefresh: true}, {Aside: true, ModelsRefresh: true}} {
+		h, err := New(o)
+		if err != nil {
+			t.Fatalf("%+v: %v", o, err)
+		}
+		eng := h.currentEngine()
+		if eng.Asides() != o.Aside || eng.RefreshesModels() != o.ModelsRefresh {
+			t.Errorf("aside %v, modelsRefresh %v: the session answers side questions %v, refreshes models %v",
+				o.Aside, o.ModelsRefresh, eng.Asides(), eng.RefreshesModels())
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+		cancel()
+	}
+}

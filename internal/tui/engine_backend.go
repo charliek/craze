@@ -234,6 +234,17 @@ func (b *engineBackend) RefreshModels(ctx context.Context, nativeDir string) (ag
 	return b.eng.RefreshModels(ctx, nativeDir)
 }
 
+// Aside is the engine's (plan 040 §3.7): the session's side question, on this
+// tea.Cmd's goroutine, onDelta called from the session's own as the answer
+// streams; agent.ErrAsideUnsupported for a session that has none (cursor) —
+// so a client reads one answer in both transports.
+func (b *engineBackend) Aside(ctx context.Context, req agent.AsideRequest, onDelta func(string)) (agent.AsideResult, error) {
+	if err := b.fence(ctx); err != nil {
+		return agent.AsideResult{}, err
+	}
+	return b.eng.Aside(ctx, req, onDelta)
+}
+
 // LastTurn is State()'s (plan 030 §3.7): read directly, as every in-process
 // read is. In process no restore ever comes, so the model never asks it; it
 // is here because the socket's is (backend.Backend.LastTurn).
@@ -274,6 +285,7 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		Models:            st.Models,
 		CatalogRevision:   st.CatalogRevision,
 		ModelsRefresh:     b.eng.RefreshesModels(),
+		Aside:             b.eng.Asides(),
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,
 	}

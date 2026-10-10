@@ -1052,6 +1052,7 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		Capabilities:      capabilities(p.Capabilities),
 		CatalogRevision:   p.Catalogs.Revision,
 		ModelsRefresh:     p.Capabilities.ModelsRefresh,
+		Aside:             p.Capabilities.Aside,
 		RetryHorizon:      retryHorizon(p.RetryHorizon),
 		PermissionMode:    permissionMode(p.PermissionMode),
 		StartedAt:         p.StartedAt,
@@ -1084,9 +1085,9 @@ func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
 // inverted; TestEveryWireCapabilityComesBack holds the two to a bijection).
 // cancel, approvals, historyCursor and stop are the protocol's own, stated for
 // every host, and rowFacts the host's (what its sessions.list row carries,
-// plan 030 §3.8), each with no agent field; modelsRefresh is the session's,
-// and goes to backend.SessionInfo.ModelsRefresh instead (sessionInfo, plan
-// 034 §3.4).
+// plan 030 §3.8), each with no agent field; modelsRefresh and aside are the
+// session's, and go to backend.SessionInfo.ModelsRefresh and Aside instead
+// (sessionInfo, plan 034 §3.4, plan 040 §3.7).
 func capabilities(c protocol.SessionCapabilities) agent.Capabilities {
 	return agent.Capabilities{
 		Interject:           c.Interject,

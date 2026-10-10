@@ -149,6 +149,9 @@ type Stub struct {
 	// models is what RefreshingStub's refresh reads and writes (plan 034
 	// §3.4; stub_models.go): set-up and state, under mu.
 	models stubModels
+	// asides is what AsidingStub's side questions read and write (plan 040
+	// §3.8; stub_aside.go): set-up and state, under mu.
+	asides stubAsides
 }
 
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
@@ -1059,10 +1062,21 @@ func (s *Stub) setOptionLocked(cause, id, value string) {
 	s.enqueueDeltaLocked(cause, &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}})
 }
 
-// stubHold is one armed HoldNextSet.
+// stubHold is one armed HoldNextSet or HoldNextAside.
 type stubHold struct {
 	held    chan struct{}
 	release chan struct{}
+}
+
+// armHold arms a fresh hold in *slot, a field under mu: held closes once its
+// call is parked, and release, which may be called more than once, frees it.
+func (s *Stub) armHold(slot **stubHold) (held <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := &stubHold{held: make(chan struct{}), release: make(chan struct{})}
+	*slot = h
+	var once sync.Once
+	return h.held, func() { once.Do(func() { close(h.release) }) }
 }
 
 // HoldNextSet is a change still waiting for the agent's answer, held open for
@@ -1075,14 +1089,7 @@ type stubHold struct {
 // answers with the session as it stands; closing the Stub frees it too, so a
 // test that fails before its release cannot hang the engine's Close. release
 // may be called more than once.
-func (s *Stub) HoldNextSet() (held <-chan struct{}, release func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	h := &stubHold{held: make(chan struct{}), release: make(chan struct{})}
-	s.hold = h
-	var once sync.Once
-	return h.held, func() { once.Do(func() { close(h.release) }) }
-}
+func (s *Stub) HoldNextSet() (held <-chan struct{}, release func()) { return s.armHold(&s.hold) }
 
 // parkIfHeld is where an armed HoldNextSet parks its setter, and disarms it.
 func (s *Stub) parkIfHeld() {

@@ -202,7 +202,7 @@ func buildSocketHost(cfg Config, startedAt time.Time) (*frameHost, error) {
 	if cfg.Backend != nil || len(cfg.Resume) > 0 || (cfg.NewSession != nil && !cfg.ProviderLocked) {
 		return nil, errors.New("a Config with a backend or a picker has no socket run: pickers are the host TUI's alone")
 	}
-	if st, ok := sess.(*Stub); ok && !st.NoPrimary {
+	if st, ok := stubBehind(sess); ok && !st.NoPrimary {
 		return nil, errors.New("the builder built its Stub with a primary: a socket run's host is NoPrimary (frameStub)")
 	}
 	ws := configWorkspace(cfg.Workspace)

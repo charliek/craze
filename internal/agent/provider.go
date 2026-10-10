@@ -118,6 +118,11 @@ type Provider struct {
 	// the environment, config.toml and the session index hold, so the label
 	// can change without touching anything persisted. Empty is the id.
 	displayName string
+	// aside is a provider whose sessions answer side questions (/btw, plan
+	// 040 §3.3): its live session is an Asider whose Asides is this bit. It
+	// is not one of Capabilities (that would be a required wire field); the
+	// host reports it as the session capability aside.
+	aside bool
 }
 
 // authMethod is one way a provider can authenticate, in preference order.
@@ -546,6 +551,11 @@ func (p Provider) Resumable() bool { return p.resumable }
 // InProcess reports whether craze runs p itself rather than spawning an agent
 // binary over ACP.
 func (p Provider) InProcess() bool { return p.inProcess }
+
+// Aside reports whether p's sessions answer side questions (/btw, plan 040
+// §3.3). No provider does yet: later commits turn native, grok and gx on;
+// cursor's stays false.
+func (p Provider) Aside() bool { return p.aside }
 
 // BinaryResolves reports whether binary lookup for p succeeds — the same
 // question acp.Spawn asks, with the same precedence: --agent-bin (explicit),

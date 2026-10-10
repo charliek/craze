@@ -38,6 +38,19 @@ const (
 // models_refresh_unsupported otherwise.
 const MethodModelsRefresh = "session.models.refresh"
 
+// MethodSessionAside and MethodSessionAsideCancel are plan 040's (§3.2): a
+// side question (/btw) answered from the session's context, its answer
+// streamed as aside notifications to the connection that asked and whole in
+// the reply, nothing journaled and nothing in the session's history; and its
+// cancel, by the client-minted asideId, on the same connection. Both are
+// session-scoped and not mutating (no commandId, no receipt), and a host
+// serves them where the session capability aside is true, answering them
+// aside_unsupported otherwise.
+const (
+	MethodSessionAside       = "session.aside"
+	MethodSessionAsideCancel = "session.aside.cancel"
+)
+
 // MethodSessionCreate is the hub's (plan 032 §3.10, P5): it starts a session
 // in a new host and answers once the session has started. It is neither
 // session-scoped — the session does not exist yet — nor mutating: the hub
@@ -57,9 +70,9 @@ const MethodSessionCreate = "session.create"
 // it unsupported, reason unsupported.
 const MethodSessionsCreateOptions = "sessions.createOptions"
 
-// The notifications (plan 027 §3.3; plan 032 §3.6). Each carries its
-// subscription id: an attachment's, from a host, or the roster subscription's,
-// from the hub.
+// The notifications (plan 027 §3.3; plan 032 §3.6; plan 040 §3.2). Each
+// carries its subscription id — an attachment's, from a host, or the roster
+// subscription's, from the hub — or, for aside, its aside id.
 const (
 	// NotifyEvent is one committed event: {subscription, seq, event}, event
 	// being the record's body in the lossless codec, verbatim.
@@ -86,6 +99,14 @@ const (
 	// subscriber's last cursor: {subscription, epoch, cursor, upserts,
 	// removes} (RosterParams; plan 032 §3.6). Only the hub sends it.
 	NotifyRoster = "roster"
+	// NotifyAside is the next piece of a side question's answer:
+	// {asideId, seq, text} (AsideNoticeParams; plan 040 §3.2). A host sends
+	// it only on the connection that asked session.aside, seq counting from 1
+	// per aside, each at most AsideNoticeMax bytes of text, every one before
+	// that aside's reply; it carries no subscription and is never sequenced or
+	// journaled. The reply's text is the whole answer all the same: a client
+	// may drop the notices, and drops those of an aside it stopped waiting for.
+	NotifyAside = "aside"
 )
 
 // MethodInfo is one method's place on the wire.
@@ -114,8 +135,9 @@ type MethodInfo struct {
 	// session.create and sessions.createOptions, hub_only, X6) — which no
 	// host serves — or one a host serves only where Capability says so
 	// (session.stop, stop_unsupported; session.models.refresh,
-	// models_refresh_unsupported). Such a method's schema is protocol 1's all
-	// the same.
+	// models_refresh_unsupported; session.aside and session.aside.cancel,
+	// aside_unsupported). Such a method's schema is protocol 1's all the
+	// same.
 	HostUnsupported Reason
 	// Capability, when set, is the session capability (its wire name) whose
 	// true says a host serves the method (plan 030 §3.6a): a host whose
@@ -124,8 +146,10 @@ type MethodInfo struct {
 	// false on a TUI-hosted session and on an older host;
 	// session.models.refresh's is modelsRefresh — true for a native session,
 	// whoever hosts it, absent for an ACP session and on an older host (plan
-	// 034 §3.4). "" for a method whose HostUnsupported, if any, holds on
-	// every host.
+	// 034 §3.4); session.aside's and session.aside.cancel's is aside — true
+	// for a native, grok or gx session, absent for cursor and on an older
+	// host (plan 040 §3.2). "" for a method whose HostUnsupported, if any,
+	// holds on every host.
 	Capability string
 }
 
@@ -138,6 +162,12 @@ const CapabilityStop = "stop"
 // wire name): true for a native session, and absent — false — for an ACP
 // session and on an older host.
 const CapabilityModelsRefresh = "modelsRefresh"
+
+// CapabilityAside is the session capability that says a host serves
+// session.aside and session.aside.cancel (plan 040 §3.2;
+// SessionCapabilities.Aside's wire name): true for a native, grok or gx
+// session, and absent — false — for cursor and on an older host.
+const CapabilityAside = "aside"
 
 var methods = []MethodInfo{
 	{Name: MethodHello, Tolerant: true},
@@ -161,6 +191,8 @@ var methods = []MethodInfo{
 	{Name: MethodSubagentCancel, SessionScoped: true, Mutating: true},
 	{Name: MethodSessionStop, SessionScoped: true, Mutating: true, HostUnsupported: ReasonStopUnsupported, Capability: CapabilityStop},
 	{Name: MethodModelsRefresh, SessionScoped: true, HostUnsupported: ReasonModelsRefreshUnsupported, Capability: CapabilityModelsRefresh},
+	{Name: MethodSessionAside, SessionScoped: true, HostUnsupported: ReasonAsideUnsupported, Capability: CapabilityAside},
+	{Name: MethodSessionAsideCancel, SessionScoped: true, HostUnsupported: ReasonAsideUnsupported, Capability: CapabilityAside},
 	{Name: MethodAsksList, SessionScoped: true},
 	{Name: MethodAsksGet, SessionScoped: true},
 	{Name: MethodAsksAnswer, SessionScoped: true, Mutating: true},
@@ -184,8 +216,9 @@ func Method(name string) (MethodInfo, bool) {
 	return MethodInfo{}, false
 }
 
-var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset, NotifyPresence, NotifyRoster}
+var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset, NotifyPresence, NotifyRoster, NotifyAside}
 
 // Notifications is every notification protocol 1 names: a host's, in §3.3's
-// order and then presence (plan 032 §3.14), then the hub's roster.
+// order and then presence (plan 032 §3.14), then the hub's roster, then a
+// host's aside (plan 040 §3.2).
 func Notifications() []string { return slices.Clone(notifications) }

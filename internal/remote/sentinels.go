@@ -71,6 +71,8 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 		return []error{context.DeadlineExceeded}
 	case protocol.ReasonAttachRaced:
 		return []error{engine.ErrAttachRaced}
+	case protocol.ReasonAsideBusy:
+		return []error{engine.ErrAsideBusy}
 	case protocol.ReasonClosing:
 		// The engine's close fence (plan 030 §3.6) and the server's attach
 		// fence answer one reason: an attach refused closing is the same
@@ -94,6 +96,10 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 		// method its capability stop says it does not serve (plan 030
 		// §3.6a), which Session.Stop's caller tells from any other failure.
 		return []error{backend.ErrStopUnsupported}
+	case protocol.ReasonAsideUnsupported:
+		// The engine's (a session whose agent turned out not to serve side
+		// questions) and the host's capability gate alike (plan 040 §3.3).
+		return []error{agent.ErrAsideUnsupported}
 	// every other code: the code itself, its one reason
 	case protocol.ReasonUnknownAsk:
 		return []error{agent.ErrUnknownAsk}

@@ -117,7 +117,21 @@ type Options struct {
 	// close fence counts connections (FenceAttaches). True only for the
 	// TUI-hosted server.
 	LocalClient bool
+	// AsideInterval is how often an aside's streamed answer is sent as aside
+	// notifications (plan 040 §3.2): the pieces that arrived since are sent
+	// together, a notice at most AsideNoticeMax bytes, and a full notice's
+	// worth at once. 0 is DefaultAsideInterval; AsideEachDelta sends one
+	// notice per piece as it arrives — the fake host's, so its fixtures are
+	// deterministic.
+	AsideInterval time.Duration
 }
+
+// DefaultAsideInterval is Options.AsideInterval's default: 50 ms.
+const DefaultAsideInterval = 50 * time.Millisecond
+
+// AsideEachDelta is the Options.AsideInterval that sends one aside notice
+// per piece of the answer, as it arrives.
+const AsideEachDelta time.Duration = -1
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems
 // and MaxBytes.
@@ -148,6 +162,14 @@ const (
 	// the session's start (§3.4): past it the attach is unavailable, reason
 	// not_ready — a load can take minutes, so it is not a flat 30 s.
 	readyWait = 10 * time.Minute
+	// asideCeiling is the server's own bound on one session.aside (plan 040
+	// §3.2): past it the aside is cancelled and answers aborted, reason
+	// context.
+	asideCeiling = 10 * time.Minute
+	// asideCancelWait bounds how long a session.aside.cancel that found its
+	// aside in flight waits for that aside's reply to be queued before it
+	// answers {} anyway.
+	asideCancelWait = 5 * time.Second
 )
 
 // Server is the control socket's server: one session (SetEngine), any number
@@ -166,7 +188,11 @@ type Server struct {
 	backoffMin time.Duration
 	backoffMax time.Duration
 	readyWait  time.Duration
-	hooks      hooks
+	// asideCeiling bounds each session.aside (asideCeiling); asideInterval
+	// is Options.AsideInterval with its default applied.
+	asideCeiling  time.Duration
+	asideInterval time.Duration
+	hooks         hooks
 
 	// bindMu guards the engine, the binding table, the token index, the
 	// released list and every conn's bound state (bind.go). A leaf above the
@@ -191,6 +217,10 @@ type Server struct {
 	// released is every release of the current engine's bindings, oldest
 	// first, for the lazy drop of the idle ones (bind.go, "Lifetime").
 	released []releaseRecord
+
+	// asides counts the session.aside reservations every connection holds
+	// (aside.go), a closed one's until its handler has left.
+	asides atomic.Int64
 
 	connMu    sync.Mutex
 	conns     map[*conn]struct{}
@@ -353,30 +383,42 @@ type hooks struct {
 	// queued its attachment's synchronized, before it arms the presence
 	// slot, with the subscription's id.
 	beforeArm func(sub string)
+	// beforeAside runs on a session.aside's handler once its params are
+	// accepted, just before it calls the engine, with the aside's context and
+	// its asideId.
+	beforeAside func(ctx context.Context, asideID string)
+	// beforeAsideCancel runs on a session.aside.cancel's handler once its
+	// params are accepted, before it cancels anything, with its asideId.
+	beforeAsideCancel func(asideID string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
 func New(o Options) *Server {
 	s := &Server{
-		opts:       o,
-		hostID:     o.HostID,
-		version:    o.CrazeVersion,
-		pid:        o.PID,
-		maxBudget:  o.MaxBudget,
-		stall:      writeStall,
-		maxLine:    protocol.OutboundLineMax,
-		backoffMin: acceptBackoffMin,
-		backoffMax: acceptBackoffMax,
-		readyWait:  readyWait,
-		binds:      map[string]*binding{},
-		tokens:     map[string]tokenOwner{},
-		conns:      map[*conn]struct{}{},
-		listeners:  map[net.Listener]struct{}{},
-		presence:   map[*outbox]struct{}{},
-		done:       make(chan struct{}),
+		opts:          o,
+		hostID:        o.HostID,
+		version:       o.CrazeVersion,
+		pid:           o.PID,
+		maxBudget:     o.MaxBudget,
+		stall:         writeStall,
+		maxLine:       protocol.OutboundLineMax,
+		backoffMin:    acceptBackoffMin,
+		backoffMax:    acceptBackoffMax,
+		readyWait:     readyWait,
+		binds:         map[string]*binding{},
+		asideCeiling:  asideCeiling,
+		asideInterval: o.AsideInterval,
+		tokens:        map[string]tokenOwner{},
+		conns:         map[*conn]struct{}{},
+		listeners:     map[net.Listener]struct{}{},
+		presence:      map[*outbox]struct{}{},
+		done:          make(chan struct{}),
 	}
 	if s.opts.Clock == nil {
 		s.opts.Clock = time.Now
+	}
+	if s.asideInterval == 0 {
+		s.asideInterval = DefaultAsideInterval
 	}
 	if s.opts.Tokens == nil {
 		s.opts.Tokens = rand.Reader

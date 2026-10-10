@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -111,6 +112,16 @@ type TestHooks struct {
 	// slot, with the subscription's id: a test that blocks in it holds the
 	// arm back (conn.mu held) while the writer drains.
 	BeforeArm func(sub string)
+	// BeforeAside runs on a session.aside's handler once its params are
+	// accepted, just before it calls the engine, with the aside's context
+	// (the reservation's, which a session.aside.cancel ends) and its asideId:
+	// a test that blocks in it holds the aside reserved and not yet asked.
+	BeforeAside func(ctx context.Context, asideID string)
+	// BeforeAsideCancel runs on a session.aside.cancel's handler once its
+	// params are accepted, before it cancels anything, with its asideId: a
+	// test that blocks in it holds a cancel already read and not yet acted
+	// on.
+	BeforeAsideCancel func(asideID string)
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -118,32 +129,34 @@ type TestHooks struct {
 func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Server {
 	s := New(o)
 	s.hooks = hooks{
-		beforeAcquire:  h.BeforeAcquire,
-		admissionFull:  h.AdmissionFull,
-		beforeUnbind:   h.BeforeUnbind,
-		beforeBind:     h.BeforeBind,
-		beforeCommand:  h.BeforeCommand,
-		beforeBarrier:  h.BeforeBarrier,
-		outboxFull:     h.OutboxFull,
-		beforeForward:  h.BeforeForward,
-		beforeTerminal: h.BeforeTerminal,
-		barrierWaits:   h.BarrierWaits,
-		readyOwed:      h.ReadyOwed,
-		readyDecided:   h.ReadyDecided,
-		beforeReset:    h.BeforeReset,
-		ackQueued:      h.AckQueued,
-		resetWritten:   h.ResetWritten,
-		beforeWrite:    h.BeforeWrite,
-		beforeReply:    h.BeforeReply,
-		detaching:      h.Detaching,
-		beforeReserve:  h.BeforeReserve,
-		reserved:       h.Reserved,
-		reserving:      h.Reserving,
-		fenceWaits:     h.FenceWaits,
-		closeFenceStep: h.CloseFenceStep,
-		presenceTaken:  h.PresenceTaken,
-		writerIdle:     h.WriterIdle,
-		beforeArm:      h.BeforeArm,
+		beforeAcquire:     h.BeforeAcquire,
+		admissionFull:     h.AdmissionFull,
+		beforeUnbind:      h.BeforeUnbind,
+		beforeBind:        h.BeforeBind,
+		beforeCommand:     h.BeforeCommand,
+		beforeBarrier:     h.BeforeBarrier,
+		outboxFull:        h.OutboxFull,
+		beforeForward:     h.BeforeForward,
+		beforeTerminal:    h.BeforeTerminal,
+		barrierWaits:      h.BarrierWaits,
+		readyOwed:         h.ReadyOwed,
+		readyDecided:      h.ReadyDecided,
+		beforeReset:       h.BeforeReset,
+		ackQueued:         h.AckQueued,
+		resetWritten:      h.ResetWritten,
+		beforeWrite:       h.BeforeWrite,
+		beforeReply:       h.BeforeReply,
+		detaching:         h.Detaching,
+		beforeReserve:     h.BeforeReserve,
+		reserved:          h.Reserved,
+		reserving:         h.Reserving,
+		fenceWaits:        h.FenceWaits,
+		closeFenceStep:    h.CloseFenceStep,
+		presenceTaken:     h.PresenceTaken,
+		writerIdle:        h.WriterIdle,
+		beforeArm:         h.BeforeArm,
+		beforeAside:       h.BeforeAside,
+		beforeAsideCancel: h.BeforeAsideCancel,
 	}
 	if stall > 0 {
 		s.stall = stall
@@ -161,6 +174,14 @@ func (s *Server) SetAcceptBackoff(lo, hi time.Duration) { s.backoffMin, s.backof
 // SetReadyWait sets a when: "ready" attach's bound on its wait for the
 // session's start (10 minutes in production), before Serve.
 func (s *Server) SetReadyWait(d time.Duration) { s.readyWait = d }
+
+// SetAsideCeiling sets the bound on one session.aside (10 minutes in
+// production), before Serve.
+func (s *Server) SetAsideCeiling(d time.Duration) { s.asideCeiling = d }
+
+// Asides is how many session.aside reservations the server's connections
+// hold, closed ones' included: 0 once every one has left its handler.
+func (s *Server) Asides() int64 { return s.asides.Load() }
 
 // Bindings is how many bindings the table holds and how many tokens the index
 // holds.

@@ -109,13 +109,17 @@ type StopRequest struct {
 // gated by a session capability its info document advertises — session.stop,
 // with Options.Stop set; session.models.refresh, where b's engine's session
 // can take up models (engine.RefreshesModels: the capability modelsRefresh,
-// sessionInfoReady). The hub's methods are never served.
+// sessionInfoReady); session.aside and session.aside.cancel, where it answers
+// side questions (engine.Asides: the capability aside, plan 040 §3.2). The
+// hub's methods are never served.
 func (s *Server) serves(info protocol.MethodInfo, b *bound) bool {
 	switch info.Capability {
 	case protocol.CapabilityStop:
 		return s.opts.Stop != nil
 	case protocol.CapabilityModelsRefresh:
 		return b.eng.RefreshesModels()
+	case protocol.CapabilityAside:
+		return b.eng.Asides()
 	}
 	return false
 }

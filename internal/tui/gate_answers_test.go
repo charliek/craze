@@ -1005,6 +1005,10 @@ func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) 
 		"Settings":       func() error { _, err := b.Settings(stale); return err },
 		"LastTurn":       func() error { _, err := b.LastTurn(stale); return err },
 		"RefreshModels":  func() error { _, err := b.RefreshModels(stale, "/n"); return err },
+		"Aside": func() error {
+			_, err := b.Aside(stale, agent.AsideRequest{Question: "never asked"}, nil)
+			return err
+		},
 	}
 	// Every command and read of the interface, by name: a new one is fenced
 	// or this fails.

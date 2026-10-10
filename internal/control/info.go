@@ -103,6 +103,10 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	// funded while it runs, so this server serves session.models.refresh for
 	// it (serves); left out for one that cannot, an ACP session's.
 	info.Capabilities.ModelsRefresh = eng.RefreshesModels()
+	// aside is the session's too (plan 040 §3.2): it answers side questions,
+	// so this server serves session.aside and session.aside.cancel for it
+	// (serves); left out for one that does not, cursor's.
+	info.Capabilities.Aside = eng.Asides()
 	if ready {
 		// The list as the session offers it now, with its revision, read in
 		// the one State: a native session's reload swaps both in one locked

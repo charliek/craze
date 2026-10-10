@@ -40,14 +40,14 @@ func TestTheReasonTableIsExhaustive(t *testing.T) {
 	shared := map[protocol.Code][]protocol.Reason{
 		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed"},
 		protocol.CodeAborted:      {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-		protocol.CodeUnavailable: {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing",
-			"spawn_failed", "host_unreachable"},
+		protocol.CodeUnavailable: {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
+			"closing", "spawn_failed", "host_unreachable"},
 		protocol.CodeFailed: {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 		protocol.CodeBadRequest: {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 			"protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed",
 			"request_conflict"},
-		protocol.CodeUnsupported: {"unsupported", "unknown_method", "stop_unsupported", "models_refresh_unsupported", "roster_unsupported",
-			"hub_only", "host_only"},
+		protocol.CodeUnsupported: {"unsupported", "unknown_method", "stop_unsupported", "models_refresh_unsupported", "aside_unsupported",
+			"roster_unsupported", "hub_only", "host_only"},
 	}
 	byCode := map[protocol.Code][]protocol.Reason{}
 	seen := map[protocol.Reason]bool{}
@@ -201,8 +201,8 @@ func TestTheMethodTable(t *testing.T) {
 	want := []string{"hello", "sessions.list", "sessions.subscribe", "session.connect", "session.attach", "session.detach",
 		"session.state", "session.snapshot", "session.sync", "session.prompt", "session.cancel", "session.disarm",
 		"session.queue.add", "session.queue.edit", "session.queue.remove", "session.queue.clear", "session.set",
-		"session.setTitle", "session.subagent.cancel", "session.stop", "session.models.refresh", "asks.list", "asks.get",
-		"asks.answer", "session.create", "sessions.createOptions"}
+		"session.setTitle", "session.subagent.cancel", "session.stop", "session.models.refresh", "session.aside",
+		"session.aside.cancel", "asks.list", "asks.get", "asks.answer", "session.create", "sessions.createOptions"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("methods\n got %v\nwant %v", names, want)
 	}
@@ -211,6 +211,8 @@ func TestTheMethodTable(t *testing.T) {
 		"session.connect":        protocol.ReasonHubOnly,
 		"session.stop":           protocol.ReasonStopUnsupported,
 		"session.models.refresh": protocol.ReasonModelsRefreshUnsupported,
+		"session.aside":          protocol.ReasonAsideUnsupported,
+		"session.aside.cancel":   protocol.ReasonAsideUnsupported,
 		"session.create":         protocol.ReasonHubOnly,
 		"sessions.createOptions": protocol.ReasonHubOnly,
 	}
@@ -219,9 +221,10 @@ func TestTheMethodTable(t *testing.T) {
 	}
 	// The ones a host serves where its session capability says so:
 	// session.stop, gated by stop (plan 030 §3.6a), and
-	// session.models.refresh, gated by modelsRefresh (plan 034 §3.4) — each
-	// the capability's own wire name, its SessionCapabilities field's json
-	// tag. The hub's stay unconditional.
+	// session.models.refresh, gated by modelsRefresh (plan 034 §3.4), and
+	// session.aside and session.aside.cancel, gated by aside (plan 040 §3.2)
+	// — each the capability's own wire name, its SessionCapabilities field's
+	// json tag. The hub's stay unconditional.
 	gated := map[string]string{}
 	for _, m := range protocol.Methods() {
 		if m.Capability != "" {
@@ -231,11 +234,13 @@ func TestTheMethodTable(t *testing.T) {
 			}
 		}
 	}
-	wantGated := map[string]string{"session.stop": protocol.CapabilityStop, "session.models.refresh": protocol.CapabilityModelsRefresh}
+	wantGated := map[string]string{"session.stop": protocol.CapabilityStop, "session.models.refresh": protocol.CapabilityModelsRefresh,
+		"session.aside": protocol.CapabilityAside, "session.aside.cancel": protocol.CapabilityAside}
 	if !maps.Equal(gated, wantGated) {
 		t.Fatalf("capability-gated methods %v, want %v", gated, wantGated)
 	}
-	for field, wire := range map[string]string{"Stop": protocol.CapabilityStop, "ModelsRefresh": protocol.CapabilityModelsRefresh} {
+	for field, wire := range map[string]string{"Stop": protocol.CapabilityStop, "ModelsRefresh": protocol.CapabilityModelsRefresh,
+		"Aside": protocol.CapabilityAside} {
 		f, ok := reflect.TypeFor[protocol.SessionCapabilities]().FieldByName(field)
 		if name, _, _ := strings.Cut(f.Tag.Get("json"), ","); !ok || name != wire {
 			t.Fatalf("SessionCapabilities.%s's wire name is not %q", field, wire)
@@ -244,7 +249,7 @@ func TestTheMethodTable(t *testing.T) {
 	if _, ok := protocol.Method("session.teleport"); ok {
 		t.Fatal("Method found a method protocol 1 does not name")
 	}
-	if want := []string{"event", "synchronized", "ready", "reset", "presence", "roster"}; !slices.Equal(protocol.Notifications(), want) {
+	if want := []string{"event", "synchronized", "ready", "reset", "presence", "roster", "aside"}; !slices.Equal(protocol.Notifications(), want) {
 		t.Fatalf("notifications %v, want %v", protocol.Notifications(), want)
 	}
 }

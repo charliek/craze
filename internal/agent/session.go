@@ -1285,3 +1285,50 @@ const (
 	// as it was, and the reason is journaled (value-free).
 	ModelsFailed ModelsStatus = "failed"
 )
+
+// AsideTurn is one earlier question of a side conversation and the answer it
+// got (plan 040 §3.3).
+type AsideTurn struct{ Question, Answer string }
+
+// AsideRequest is one side question (/btw, plan 040): Question, asked after
+// the side conversation's earlier pairs in Prior, oldest first.
+type AsideRequest struct {
+	Question string
+	Prior    []AsideTurn
+}
+
+// AsideUsage is what one side question spent, in tokens.
+type AsideUsage struct{ Input, Output, CacheRead int64 }
+
+// AsideResult is a side question's answer.
+type AsideResult struct {
+	// Text is the whole answer.
+	Text string
+	// Model is the display name of the model that answered; may be "".
+	Model string
+	// Usage is nil when the provider reports none (grok, gx).
+	Usage *AsideUsage
+}
+
+// Asider is the optional verb behind /btw (plan 040). Asides reports whether
+// this session serves it now (the provider's bit: grok and gx through x.ai/btw,
+// native always); Aside answers one side question from the session's context,
+// calling onDelta with each piece of a streamed answer (never for a provider
+// that answers in one piece). onDelta must not block. Nothing is journaled,
+// appended to history, or published on the session's event stream.
+type Asider interface {
+	Asides() bool
+	Aside(ctx context.Context, req AsideRequest, onDelta func(string)) (AsideResult, error)
+}
+
+// ErrAsideUnsupported is a side question to a session that has none: one
+// whose agent turns out not to serve it (an older grok answering -32601).
+var ErrAsideUnsupported = errors.New("agent: this session has no side questions")
+
+// ErrAsideEmpty is a side question the model answered nothing to — no text,
+// or a tool call instead of an answer.
+var ErrAsideEmpty = errors.New("agent: the side question got no answer")
+
+// ErrAsideNotReady is a side question to a session that cannot answer one
+// now: not started, loading, or closed. The engine answers it not_accepting.
+var ErrAsideNotReady = errors.New("agent: the session cannot take a side question now")

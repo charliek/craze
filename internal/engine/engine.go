@@ -276,6 +276,10 @@ type Engine struct {
 	cancelled       bool
 	err             string
 	startFailed     bool
+	// asides is how many side questions are in flight on the session
+	// (aside.go): Aside counts one in under e.mu before it calls the session
+	// and out in a defer, so it is 0 again on every path.
+	asides int
 	// fence is the session's agent.AdmissionFence, nil for a session without
 	// one; it is set in newEngine and never written again. fenced is what the
 	// engine last told it, so every call it makes is a transition (the type

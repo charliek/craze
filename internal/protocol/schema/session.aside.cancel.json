@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.aside.cancel.json",
+  "title": "session.aside.cancel",
+  "description": "Cancels the session.aside asideId of this connection, which then answers aborted, reason context. Always answered {}: an id unknown, finished, or another connection's is no error and cancels nothing. Served where the session capability aside is true; a host whose capability is false answers unsupported, reason aside_unsupported. Not mutating: no commandId, no receipt.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "asideId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"}
+      },
+      "required": ["sessionId", "asideId"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

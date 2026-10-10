@@ -25,15 +25,27 @@ func (c *conn) handle(b *bound, info protocol.MethodInfo, req *request) {
 	case !o.ok:
 		c.drop()
 	default:
-		if h := c.srv.hooks.beforeReply; h != nil {
-			h(req.method)
-		}
-		if o.perr != nil {
-			c.replyErr(req.id, o.perr)
-			return
-		}
-		c.reply(req.id, o.res)
+		c.replyOutcome(req, o, nil)
 	}
+}
+
+// replyOutcome queues o's result or error as the answer to req, as reply and
+// replyErr do, once the beforeReply hook has run; commit is send's (nil:
+// none).
+func (c *conn) replyOutcome(req *request, o outcome, commit func()) {
+	if h := c.srv.hooks.beforeReply; h != nil {
+		h(req.method)
+	}
+	resp := protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: req.id, Error: o.perr}
+	if o.perr == nil {
+		raw, err := rawJSON(o.res)
+		if err != nil {
+			resp.Error = failed(err)
+		} else {
+			resp.Result = raw
+		}
+	}
+	c.send(resp, commit)
 }
 
 // outcome is a handler's answer: a result, or an error, and whether a reply
@@ -99,6 +111,10 @@ func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) outcome {
 		o = c.sessionStop(b, info, req)
 	case protocol.MethodModelsRefresh:
 		o = c.modelsRefresh(b, info, req)
+	case protocol.MethodSessionAside:
+		o = c.sessionAside(b, info, req)
+	case protocol.MethodSessionAsideCancel:
+		o = c.sessionAsideCancel(b, info, req)
 	default:
 		// Every method protocol.Method knows is answered above, or in
 		// dispatch (hello, and the ones a host does not serve).

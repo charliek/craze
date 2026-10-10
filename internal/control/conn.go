@@ -77,6 +77,10 @@ type conn struct {
 	// A replaced connection waits only for its terminal line, which the
 	// outbox counts itself (outbox.owesTerminal).
 	unwritten int
+	// asides is the connection's session.aside calls in flight, by asideId
+	// (aside.go): reserved by dispatch on the reader, removed as the reply is
+	// queued or on any other way out of the handler. Nil until the first.
+	asides map[string]*asideEntry
 }
 
 func newConn(s *Server, nc net.Conn) *conn {

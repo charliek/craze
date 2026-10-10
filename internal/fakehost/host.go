@@ -99,6 +99,17 @@ type Options struct {
 	ModelsRefresh bool
 	NativeDir     string
 
+	// Aside is plan 040's opt-in (§3.8): every incarnation's session is the
+	// Stub as one that answers side questions (tui.AsidingStub, or
+	// tui.RefreshingAsidingStub with ModelsRefresh) — capabilities.aside in
+	// the info document, session.aside answered with the Stub's scripted
+	// answer (tui.StubAsidePieces) streamed as aside notifications, one per
+	// piece, and session.aside.cancel served; the hold_aside op parks the
+	// next answer after its first piece. Off, the Host is cursor's as far as
+	// the methods go — it refuses both, aside_unsupported — and its wire is
+	// exactly what it was. It does not go with Start.
+	Aside bool
+
 	// Start, when set, is the first incarnation's start (plan 032 §3.10's
 	// tests): the Host serves its engine before the start has run — a
 	// client's attach with when: ready waits for it, as on a real host whose
@@ -254,6 +265,11 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		// test needs the two together.
 		return nil, errors.New("fakehost: Options.ModelsRefresh does not go with Options.Start")
 	}
+	if o.Aside && o.Start != nil {
+		// gatedStart embeds the Stub, so its session would answer no side
+		// questions either.
+		return nil, errors.New("fakehost: Options.Aside does not go with Options.Start")
+	}
 	h := &Host{opts: o, clk: newClock(), hooks: hooks, stopHeard: make(chan struct{})}
 	co := control.Options{
 		Log:            o.Log,
@@ -266,6 +282,10 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		PermissionMode: o.PermissionMode,
 		RowFacts:       o.RowFacts,
 		Presence:       o.Presence,
+		// One aside notice per piece of the answer, as it arrives: no
+		// interval decides how an answer is cut, so a fixture's notices are
+		// the same on every run.
+		AsideInterval: control.AsideEachDelta,
 	}
 	if o.Stop {
 		co.Stop = h.stopRequested
@@ -297,7 +317,14 @@ func (h *Host) newIncarnation() error {
 	var sess agent.Session = stub
 	if h.opts.ModelsRefresh {
 		stub.SetNativeDir(h.opts.NativeDir)
+	}
+	switch {
+	case h.opts.ModelsRefresh && h.opts.Aside:
+		sess = tui.RefreshingAsidingStub{Stub: stub}
+	case h.opts.ModelsRefresh:
 		sess = tui.RefreshingStub{Stub: stub}
+	case h.opts.Aside:
+		sess = tui.AsidingStub{Stub: stub}
 	}
 	if f := h.hooks.session; f != nil {
 		sess = f(stub)
@@ -547,7 +574,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // registered Host leaving the registry, for the hub's roster (fixture 20).
 // Plan 034 adds stage_models (StageModels): what the next
 // session.models.refresh of a Host built with Options.ModelsRefresh takes up
-// (fixture 24). Do is what runs an
+// (fixture 24). Plan 040 adds hold_aside (HoldAside): the next session.aside
+// of a Host built with Options.Aside parked after its first notice, for a
+// cancel mid-answer (fixture 28). Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -850,6 +879,13 @@ func (h *Host) AdvanceClock(d time.Duration) { h.clk.advance(d) }
 // Options.ModelsRefresh; on another, nothing ever takes it up.
 func (h *Host) StageModels(models []agent.ModelInfo) { h.currentStub().StageModels(models) }
 
+// HoldAside parks the next side question once its first piece is sent, until
+// its session.aside.cancel, its connection's close or the session's end
+// (plan 040 §3.8; tui.Stub.HoldNextAside): a fixture reads that one notice,
+// then cancels. Meaningful on a Host built with Options.Aside; on another,
+// no side question ever takes it up.
+func (h *Host) HoldAside() { h.currentStub().HoldNextAside() }
+
 // Quit closes the Host: cmd/craze-fake-host's "quit" op and stdin EOF both
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
@@ -1071,6 +1107,8 @@ func (h *Host) do(p opParams) error {
 			models[i] = agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent}
 		}
 		h.StageModels(models)
+	case "hold_aside":
+		h.HoldAside()
 	default:
 		return fmt.Errorf("fakehost: unknown op %q", p.Name)
 	}
