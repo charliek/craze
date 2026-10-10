@@ -119,6 +119,9 @@ func classifyTable() []classifyCase {
 			"not_accepting", "not_accepting", true},
 		{"an aside whose context ended, as Aside answers it", fmt.Errorf("%w: %w", context.Canceled, errors.New("pipe closed")),
 			"aborted", "context", false},
+		// An aside the session's own shutdown cut short (branch review P2):
+		// context.Canceled, so stopped, whatever the caller's context says.
+		{"agent.ErrAsideInterrupted", agent.ErrAsideInterrupted, "aborted", "context", false},
 		{"an unclassified provider/RPC error (classify's own default)", boom, "failed", "failed", false},
 	}
 }
@@ -305,6 +308,9 @@ func agentSentinels() map[string]error {
 		"ErrStaleModel": agent.ErrStaleModel,
 		// A side question to a session with none (plan 040 §3.3).
 		"ErrAsideUnsupported": agent.ErrAsideUnsupported,
+		// A side question the session's own shutdown cut short: it wraps
+		// context.Canceled, which classify places (aborted, context).
+		"ErrAsideInterrupted": agent.ErrAsideInterrupted,
 	}
 }
 

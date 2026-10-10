@@ -137,9 +137,11 @@ func wantCode(t *testing.T, what string, err error, code, reason string) {
 // a session with no side questions is aside_unsupported; a context already
 // ended is aborted, context. None of those reaches the session. The session's
 // own answers are translated: agent.ErrAsideNotReady is not_accepting,
-// agent.ErrAsideUnsupported aside_unsupported, agent.ErrAsideEmpty failed, and
-// an error of its own for a call whose context ended is the cancel (aborted,
-// context). The answer and every streamed piece pass through as they are.
+// agent.ErrAsideInterrupted (its shutdown cut the call short) aborted,
+// context with the caller's context live, agent.ErrAsideUnsupported
+// aside_unsupported, agent.ErrAsideEmpty failed, and an error of its own for
+// a call whose context ended is the cancel (aborted, context). The answer and
+// every streamed piece pass through as they are.
 func TestAsideIsTheSessionsDoor(t *testing.T) {
 	ctx := context.Background()
 
@@ -271,6 +273,9 @@ func TestAsideIsTheSessionsDoor(t *testing.T) {
 			sentinel     error
 		}{
 			{"not ready", agent.ErrAsideNotReady, "not_accepting", "not_accepting", engine.ErrNotAccepting},
+			// The session's own shutdown cut the call short, ctx live: the
+			// cancel, not a refusal and not a failure (branch review P2).
+			{"interrupted by the session's shutdown", agent.ErrAsideInterrupted, "aborted", "context", context.Canceled},
 			{"unsupported", agent.ErrAsideUnsupported, "unsupported", "aside_unsupported", agent.ErrAsideUnsupported},
 			{"no answer", agent.ErrAsideEmpty, "failed", "failed", agent.ErrAsideEmpty},
 			{"a provider's failure", errors.New("model overloaded"), "failed", "failed", nil},

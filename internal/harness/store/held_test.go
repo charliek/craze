@@ -25,9 +25,9 @@ func heldTexts(msgs []fantasy.Message, marks []bool) []string {
 }
 
 // TestContextWithHeldTakesOnlyItsTurnsHeldEntries (plan 040 §3.4 step 4): the
-// written context, then the held user entries whose Turn is the one asked
-// for — a results entry marked as one — and never another turn's held entry,
-// nor any for turn 0.
+// written context as ContextWithResults has it, and apart from it the held
+// user entries whose Turn is the one asked for — a results entry marked as
+// one — and never another turn's held entry, nor any for turn 0.
 func TestContextWithHeldTakesOnlyItsTurnsHeldEntries(t *testing.T) {
 	s := newStore(t, testOptions(t))
 	first := user("one", kimi)
@@ -57,17 +57,20 @@ func TestContextWithHeldTakesOnlyItsTurnsHeldEntries(t *testing.T) {
 		turn int
 		want []string
 	}{
-		{0, []string{"one:false"}},
-		{2, []string{"one:false", "two:false", "results:true"}},
-		{3, []string{"one:false", "three:false"}},
-		{4, []string{"one:false"}},
+		{0, nil},
+		{2, []string{"two:false", "results:true"}},
+		{3, []string{"three:false"}},
+		{4, nil},
 	} {
-		msgs, marks := s.ContextWithHeld(kimi, tc.turn)
-		if got := heldTexts(msgs, marks); fmt.Sprint(got) != fmt.Sprint(tc.want) {
-			t.Errorf("ContextWithHeld(turn %d)'s user messages = %v, want %v", tc.turn, got, tc.want)
+		msgs, marks, held, heldMarks := s.ContextWithHeld(kimi, tc.turn)
+		if got := heldTexts(held, heldMarks); fmt.Sprint(got) != fmt.Sprint(tc.want) || len(held) != len(heldMarks) {
+			t.Errorf("ContextWithHeld(turn %d)'s held messages = %v (%d marks), want %v", tc.turn, got, len(heldMarks), tc.want)
 		}
-		if len(msgs) < len(written) {
-			t.Fatalf("ContextWithHeld(turn %d) has %d messages, fewer than the written context's %d", tc.turn, len(msgs), len(written))
+		if got := heldTexts(msgs, marks); fmt.Sprint(got) != "[one:false]" {
+			t.Errorf("ContextWithHeld(turn %d)'s written user messages = %v, want the written context's alone", tc.turn, got)
+		}
+		if len(msgs) != len(written) || len(marks) != len(writtenMarks) {
+			t.Fatalf("ContextWithHeld(turn %d) has %d written messages, the written context %d", tc.turn, len(msgs), len(written))
 		}
 		for i := range written {
 			if msgs[i].Role != written[i].Role || marks[i] != writtenMarks[i] {
@@ -80,8 +83,9 @@ func TestContextWithHeldTakesOnlyItsTurnsHeldEntries(t *testing.T) {
 	if _, err := s.AppendStep(nil, answer("", "done", kimi), nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := heldTexts(s.ContextWithHeld(kimi, 0)); len(got) != 4 {
-		t.Fatalf("after the step the written context's user messages are %v, want all four", got)
+	msgs, marks, held, _ := s.ContextWithHeld(kimi, 2)
+	if got := heldTexts(msgs, marks); len(got) != 4 || len(held) != 0 {
+		t.Fatalf("after the step the written context's user messages are %v and %d are held, want all four written", got, len(held))
 	}
 }
 
@@ -131,10 +135,10 @@ func TestContextWithHeldAgainstAConcurrentStep(t *testing.T) {
 				if k == 0 {
 					continue
 				}
-				msgs, _ := s.ContextWithHeld(kimi, k)
+				msgs, _, held, _ := s.ContextWithHeld(kimi, k)
 				want := fmt.Sprintf("prompt %d", k)
 				n := 0
-				for _, m := range msgs {
+				for _, m := range append(msgs, held...) {
 					if m.Role != fantasy.MessageRoleUser {
 						continue
 					}

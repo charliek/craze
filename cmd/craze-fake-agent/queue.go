@@ -514,9 +514,15 @@ func (s *server) holdFallback(text string, runFor time.Duration) {
 	time.Sleep(runFor)
 }
 
+// holdBtwMarker in a side question, under the grok-btw script alone, leaves
+// its _x.ai/btw unanswered: the call stays out until the connection closes —
+// what a test of a session closed under a side question waits on.
+const holdBtwMarker = "HOLD-BTW"
+
 // handleBtw answers _x.ai/btw the way live grok does: the answer in the nested
-// {"result":{"answer":…}} payload, at once and whether or not a turn runs.
-// The bare x.ai/btw answers -32601, as live; so do the cursor scripts and
+// {"result":{"answer":…}} payload, at once and whether or not a turn runs —
+// except a question holding holdBtwMarker, which is never answered. The bare
+// x.ai/btw answers -32601, as live; so do the cursor scripts and
 // grok-btw-missing.
 func (s *server) handleBtw(msg *acp.Message) {
 	dumpBtw(msg.Params)
@@ -527,6 +533,9 @@ func (s *server) handleBtw(msg *acp.Message) {
 	var p acp.BtwParams
 	if err := json.Unmarshal(msg.Params, &p); err != nil || p.Question == "" {
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: acp.CodeInvalidParams, Message: "invalid btw params"})
+		return
+	}
+	if s.script == "grok-btw" && strings.Contains(p.Question, holdBtwMarker) {
 		return
 	}
 	answer := "btw: " + p.Question

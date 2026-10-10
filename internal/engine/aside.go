@@ -65,6 +65,10 @@ func (e *Engine) asider() agent.Asider {
 //   - the context's error (aborted, context): ctx ended — before the call, or
 //     during it, whatever the session's own error then said (even
 //     agent.ErrAsideNotReady: the context's end wins);
+//   - agent.ErrAsideInterrupted (aborted, context): the session's own
+//     shutdown cut short a call it had taken — a host closing the engine
+//     while another client's aside streams — whatever ctx says. It is
+//     context.Canceled, and passes through as it is: stopped, not refused;
 //   - any other error, agent.ErrAsideEmpty among them (failed): the model or
 //     the agent failed, or answered nothing.
 //

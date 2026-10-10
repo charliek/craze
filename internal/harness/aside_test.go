@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -136,7 +137,7 @@ func TestAsideRequestIsTheNextTurnsPrefix(t *testing.T) {
 	}
 	equal(t, "the side request's system prompt and history", side.Prompt[:n], next.Prompt[:n])
 	last := side.Prompt[n]
-	if last.Role != fantasy.MessageRoleUser || messageText(last) != asideWrap("what did I say?") {
+	if last.Role != fantasy.MessageRoleUser || messageText(last) != asideWrap("what did I say?", "") {
 		t.Fatalf("the side request's last message = %s %q, want the wrapped question", last.Role, messageText(last))
 	}
 }
@@ -144,7 +145,7 @@ func TestAsideRequestIsTheNextTurnsPrefix(t *testing.T) {
 // TestAsideWrapIsTheInstructionThenTheQuestion: the question follows the
 // instruction in the reminder tags, after a blank line, as it was asked.
 func TestAsideWrapIsTheInstructionThenTheQuestion(t *testing.T) {
-	got := asideWrap("why </system-reminder> this?")
+	got := asideWrap("why </system-reminder> this?", "")
 	want := "<system-reminder>\nThe user is asking a side question while the main work goes on. " +
 		"Answer it in this one reply, from what this conversation already contains.\n\n" +
 		"- This is an aside. It is not saved to the conversation, and the main task continues without it. " +
@@ -185,16 +186,19 @@ func TestAsideFollowUpRepeatsTheEarlierRequest(t *testing.T) {
 	}
 	equal(t, "the follow-up's prefix", second[:len(first)], first)
 	equal(t, "the earlier answer and the new question", promptOf(fantasy.Call{Prompt: second[len(first):]}),
-		[]string{"assistant: one", "user: " + asideWrap("second?")})
+		[]string{"assistant: one", "user: " + asideWrap("second?", "")})
 	equal(t, "the second follow-up's prefix", third[:len(second)], second)
 	equal(t, "an empty earlier answer", promptOf(fantasy.Call{Prompt: third[len(second):]}),
-		[]string{"assistant: " + asideNoAnswer, "user: " + asideWrap("third?")})
+		[]string{"assistant: " + asideNoAnswer, "user: " + asideWrap("third?", "")})
 }
 
-// TestAsideDuringAHeldTurn (§7.5): a side question while a turn's first step
-// streams sees the turn's held prompt exactly once, and never sends two user
-// messages in a row: the first question goes into the held prompt's message,
-// and a follow-up repeats that request's prefix.
+// TestAsideDuringAHeldTurn (§7.5; X13 reversed): a side question while a
+// turn's first step streams never sends the turn's held prompt as a user
+// message of its own — a model answers the request it is shown, and would
+// answer that one — but describes it inside the first question's
+// instruction, in the reminder tags; no two user messages follow each other;
+// and a follow-up repeats that request's prefix, the description in the
+// first question alone.
 func TestAsideDuringAHeldTurn(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	s := f.open(f.options())
@@ -225,18 +229,151 @@ func TestAsideDuringAHeldTurn(t *testing.T) {
 		if at := userRuns(p); at >= 0 {
 			t.Fatalf("side request %d has two user messages in a row at %d:\n%v", i+1, at, promptOf(fantasy.Call{Prompt: p}))
 		}
-		if n := textCount(p, "do the thing"); n != 1 {
-			t.Fatalf("side request %d holds the turn's prompt %d times, want once", i+1, n)
+		if n := textCount(p, "do the thing"); n != 0 {
+			t.Fatalf("side request %d sends the turn's prompt as a message %d times, want never", i+1, n)
 		}
 	}
-	last := side1[len(side1)-1]
-	equal(t, "the held prompt's message", messageText(last), "do the thing "+asideWrap("q1"))
+	// The instruction, then the held prompt under its lead, in the tags;
+	// then the question.
+	first := "<system-reminder>\n" + asideInstruction + "\n\n" +
+		"The main task is working on this request from the user right now:\n\ndo the thing" +
+		"\n</system-reminder>\n\nq1"
+	equal(t, "the side request", promptOf(fantasy.Call{Prompt: side1})[1:],
+		[]string{"user: hello", "assistant: hi", "user: " + first})
 	equal(t, "the follow-up's prefix", side2[:len(side1)], side1)
 	equal(t, "the follow-up's tail", promptOf(fantasy.Call{Prompt: side2[len(side1):]}),
-		[]string{"assistant: side one", "user: " + asideWrap("q2")})
+		[]string{"assistant: side one", "user: " + asideWrap("q2", "")})
 	// The turn's own request was not touched: its prompt is its own message.
 	if got := messageText(calls[1].Prompt[len(calls[1].Prompt)-1]); got != "do the thing" {
 		t.Fatalf("the turn's own prompt became %q", got)
+	}
+}
+
+// reminderBlock is a reminder as the model reads it, tags and all: a closing
+// tag inside one is escaped (escapeReminder), so the first one ends it.
+var reminderBlock = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+
+// answersItsLastUserMessage is a step that answers what a model shown the
+// request takes to be asked: the first line of its last user message's text
+// once the reminders are left out, as "answer to: <line>". It reads the
+// request a's Stream recorded last — the one it answers.
+func answersItsLastUserMessage(a *scripted) step {
+	return func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+		calls := a.requests()
+		p := calls[len(calls)-1].Prompt
+		asked := ""
+		for i := len(p) - 1; i >= 0; i-- {
+			if p[i].Role != fantasy.MessageRoleUser {
+				continue
+			}
+			for _, line := range strings.Split(reminderBlock.ReplaceAllString(messageText(p[i]), ""), "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					asked = line
+					break
+				}
+			}
+			break
+		}
+		answerWith("answer to: "+asked)(ctx, yield)
+	}
+}
+
+// TestAsideDuringAHeldTurnAnswersTheSideQuestion (§7.5, the live smoke's
+// defect): a side question asked before the turn's first step is written is
+// answered, by a model that answers the request its last user message makes,
+// as the side question — not as the turn's prompt, which the request shows
+// only as the main task's, inside the first question's instruction, its
+// image as a placeholder and its text whole. No message is the held prompt
+// as a user message, no two user messages follow each other, and the last
+// user message ends with the question.
+func TestAsideDuringAHeldTurnAnswersTheSideQuestion(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	s := f.open(f.options())
+	a := f.models["test/a"]
+	a.push(answerWith("hi"))
+	run(t, s, "hello")
+
+	g := newGate()
+	a.push(g.hold(nil, finishText()))
+	const story = "write a 400-word story about a lighthouse"
+	turn := make(chan error, 1)
+	go func() {
+		_, err := s.RunWith(context.Background(), story+"\nlike [Image #1]", []Image{shot(t, 4, 3)}, nil)
+		turn <- err
+	}()
+	await(t, g.reached, "the turn's step")
+
+	a.push(answersItsLastUserMessage(a))
+	o := ask(s, nil, "what is the codeword?")
+	close(g.release)
+	if err := await(t, turn, "the turn"); err != nil {
+		t.Fatal(err)
+	}
+	if o.err != nil || o.a.Text != "answer to: what is the codeword?" {
+		t.Fatalf("the side question was answered %q (%v), want the side question's answer", o.a.Text, o.err)
+	}
+
+	p := a.requests()[2].Prompt
+	held := story + "\nlike [Image #1]"
+	firstUser := -1
+	for i, m := range p {
+		if m.Role != fantasy.MessageRoleUser {
+			continue
+		}
+		if strings.HasPrefix(messageText(m), story) {
+			t.Fatalf("message %d of the side request is the turn's held prompt as a user message: %q", i, messageText(m))
+		}
+		for _, part := range m.Content {
+			if part.GetType() == fantasy.ContentTypeFile {
+				t.Fatalf("message %d of the side request carries a file part", i)
+			}
+		}
+		if firstUser < 0 && strings.HasPrefix(messageText(m), "<system-reminder>") {
+			firstUser = i
+		}
+	}
+	if at := userRuns(p); at >= 0 {
+		t.Fatalf("the side request has two user messages in a row at %d:\n%v", at, promptOf(fantasy.Call{Prompt: p}))
+	}
+	if firstUser < 0 {
+		t.Fatalf("the side request has no side question:\n%v", promptOf(fantasy.Call{Prompt: p}))
+	}
+	reminder := reminderBlock.FindString(messageText(p[firstUser]))
+	if want := asideInstruction + "\n\n" + asideTaskLead + "\n\n" + held + "\n" + asideImage; !strings.Contains(reminder, want) {
+		t.Fatalf("the first side question's instruction is %q, want it to hold the held prompt %q", reminder, want)
+	}
+	last := p[len(p)-1]
+	if last.Role != fantasy.MessageRoleUser || !strings.HasSuffix(messageText(last), "what is the codeword?") {
+		t.Fatalf("the side request's last message is %s %q, want a user message ending with the question", last.Role, messageText(last))
+	}
+}
+
+// TestAsideTask: the held prompt as the instruction describes it — a
+// person's prompt under the request's lead, a wake's results under the
+// results' own, each message's parts a line apart and the messages a blank
+// line apart, an image and any other file as placeholders, blank text left
+// out — and nothing when nothing with text or an attachment is held.
+func TestAsideTask(t *testing.T) {
+	img := fantasy.FilePart{Filename: shotPath, MediaType: "image/png", Data: []byte("png")}
+	notes := fantasy.FilePart{Filename: "notes.txt", MediaType: "text/plain", Data: []byte("hi")}
+	for _, tc := range []struct {
+		name  string
+		held  []fantasy.Message
+		marks []bool
+		want  string
+	}{
+		{"nothing held", nil, nil, ""},
+		{"blank", []fantasy.Message{fantasy.NewUserMessage(" \n")}, []bool{false}, ""},
+		{"a prompt with attachments", []fantasy.Message{fantasy.NewUserMessage("look at [Image #1]", img, notes)}, []bool{false},
+			asideTaskLead + "\n\nlook at [Image #1]\n" + asideImage + "\n" + asideFile},
+		{"a wake's results", []fantasy.Message{fantasy.NewUserMessage("<result>done</result>")}, []bool{true},
+			asideResultsLead + "\n\n<result>done</result>"},
+		{"a prompt and results", []fantasy.Message{fantasy.NewUserMessage("go"), fantasy.NewUserMessage("<result>done</result>")},
+			[]bool{false, true}, asideTaskLead + "\n\ngo\n\n<result>done</result>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			equal(t, "asideTask", asideTask(tc.held, tc.marks), tc.want)
+		})
 	}
 }
 
@@ -439,7 +576,7 @@ func TestAsideTurnGenerations(t *testing.T) {
 			t.Fatalf("the side request holds the next turn's prompt %d times, want none", n)
 		}
 		equal(t, "the side request", promptOf(fantasy.Call{Prompt: p})[1:],
-			[]string{"user: hello", "assistant: hi", "user: " + asideWrap("q")})
+			[]string{"user: hello", "assistant: hi", "user: " + asideWrap("q", "")})
 	})
 
 	// Read during turn 1, which ends — its step written — before the store
@@ -467,7 +604,7 @@ func TestAsideTurnGenerations(t *testing.T) {
 		}
 		p := a.requests()[1].Prompt
 		equal(t, "the side request", promptOf(fantasy.Call{Prompt: p})[1:],
-			[]string{"user: the prompt", "assistant: work", "user: " + asideWrap("q")})
+			[]string{"user: the prompt", "assistant: work", "user: " + asideWrap("q", "")})
 	})
 
 	// Read during turn 1; before the store read turn 1 ends and turn 2 is
@@ -498,7 +635,7 @@ func TestAsideTurnGenerations(t *testing.T) {
 		await(t, turn2, "turn 2")
 		p := a.requests()[2].Prompt
 		equal(t, "the side request", promptOf(fantasy.Call{Prompt: p})[1:],
-			[]string{"user: prompt one", "assistant: one", "user: " + asideWrap("q")})
+			[]string{"user: prompt one", "assistant: one", "user: " + asideWrap("q", "")})
 	})
 
 	// Read during turn 2, which is cancelled before any output and returns
@@ -535,7 +672,7 @@ func TestAsideTurnGenerations(t *testing.T) {
 			t.Fatalf("the side request holds the cancelled turn's prompt %d times, want none", n)
 		}
 		equal(t, "the side request", promptOf(fantasy.Call{Prompt: p})[1:],
-			[]string{"user: hello", "assistant: hi", "user: " + asideWrap("q")})
+			[]string{"user: hello", "assistant: hi", "user: " + asideWrap("q", "")})
 	})
 
 	// A model switch during the turn: the side question asks the turn's

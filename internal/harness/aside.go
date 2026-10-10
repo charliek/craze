@@ -18,12 +18,16 @@ import (
 // the session's own context and never part of it. The request is a turn's as
 // far as a provider's prefix cache can tell — the frozen system prompt, the
 // same tool definitions (inert), the same effort options, headers and output
-// ceiling, and the history the next request sends — with the side
-// conversation's earlier pairs and the question after it, each question
-// opened by craze's instruction in the reminder tags. Nothing of it is
-// written to the transcript, emitted as an Event or steered into a turn: the
-// one trace it leaves is its usage, noted as no turn's (asideTurn), which the
-// session's spend counts from then on.
+// ceiling, and the written history — with the side conversation's earlier
+// pairs and the question after it, each question opened by craze's
+// instruction in the reminder tags. A running turn's prompt that has had no
+// step written yet is never sent as a user message of its own: the model
+// would take it for the request to answer, and answer it. It is described
+// inside the first side question's instruction instead, as the request the
+// main task is working on. Nothing of it is written to the transcript,
+// emitted as an Event or steered into a turn: the one trace it leaves is its
+// usage, noted as no turn's (asideTurn), which the session's spend counts
+// from then on.
 
 // AsidePair is one earlier question of a side conversation and the answer it
 // got, as the caller kept them.
@@ -71,12 +75,76 @@ const asideInstruction = `The user is asking a side question while the main work
 - Do not call tools. None will run, and there is no next step in which to use a result.
 - Do not offer to check, look up or try anything. If the conversation does not contain the answer, say so plainly.`
 
+// asideTaskLead and asideResultsLead open the description of the running
+// turn's held prompt (asideTask) inside the first side question's
+// instruction: a person's request, or a wake's background results.
+const (
+	asideTaskLead    = "The main task is working on this request from the user right now:"
+	asideResultsLead = "The main task is working right now on these background results:"
+)
+
+// asideImage and asideFile stand for an attachment of a held prompt
+// described in the instruction (asideTask): the model is told one was there,
+// and is sent none of it.
+const (
+	asideImage = "[image]"
+	asideFile  = "[file]"
+)
+
 // asideWrap is question as a side question sends it: the instruction in the
 // reminder tags, escaped as every reminder is, a blank line, then the
-// question as it was asked. It is a function of the question alone, so a
-// follow-up's request repeats the earlier one's byte for byte.
-func asideWrap(question string) string {
-	return reminderText(asideInstruction) + "\n\n" + question
+// question as it was asked. task, when not "", is the running turn's held
+// prompt as asideTask describes it, and goes inside the tags after the
+// instruction, a blank line apart — so the held prompt is never a user
+// message of the request, which the model would answer as if it were the
+// question. It is a function of its arguments alone, so a follow-up's
+// request repeats the earlier one's byte for byte.
+func asideWrap(question, task string) string {
+	instruction := asideInstruction
+	if task != "" {
+		instruction += "\n\n" + task
+	}
+	return reminderText(instruction) + "\n\n" + question
+}
+
+// asideTask is the description of a running turn's held prompt that the
+// first side question's instruction carries (asideWrap): a lead — the
+// person's request, or background results when every held entry is a wake's
+// results (marks) — then each held message's text, its parts a line apart
+// and the messages a blank line apart, an image as asideImage and any other
+// file as asideFile. held is already redacted as a request's history is. It
+// is "" when nothing is held, or nothing held has text or an attachment.
+func asideTask(held []fantasy.Message, marks []bool) string {
+	var msgs []string
+	for _, m := range held {
+		var parts []string
+		for _, p := range m.Content {
+			if tp, ok := fantasy.AsMessagePart[fantasy.TextPart](p); ok {
+				if strings.TrimSpace(tp.Text) != "" {
+					parts = append(parts, tp.Text)
+				}
+				continue
+			}
+			if f, ok := fantasy.AsMessagePart[fantasy.FilePart](p); ok {
+				if isImage(f.MediaType) {
+					parts = append(parts, asideImage)
+				} else {
+					parts = append(parts, asideFile)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			msgs = append(msgs, strings.Join(parts, "\n"))
+		}
+	}
+	if len(msgs) == 0 {
+		return ""
+	}
+	lead := asideTaskLead
+	if !slices.Contains(marks, false) {
+		lead = asideResultsLead
+	}
+	return lead + "\n\n" + strings.Join(msgs, "\n\n")
 }
 
 // Aside answers one side question (plan 040 §3.4): question, after the side
@@ -86,17 +154,18 @@ func asideWrap(question string) string {
 // model's reasoning is not passed on.
 //
 // The context is the running turn's when one is attached (its model, and the
-// prompt it sent that has had no step written yet), the session's current
-// model and stored history otherwise (asideContext). It is refused, having
-// sent nothing, with ErrClosed after Close, and with ErrStoredKeyFrozen in
-// the refusal state, whether the session is found in it before the request
-// is built or as a request is sent (asideGate). A failure before any text arrived that a retry may cure — the
-// compaction summarizer's rule, summarizerFailureKind — is retried once, after
-// asideRetryWait; any other failure stands, through classify. An answer with
-// no text is ErrAsideEmpty, or ErrAsideToolCall when the model asked for a
-// tool. A context that ends returns its error; a Close cancels the request
-// and returns ErrClosed, and waits for this to return before the transcript
-// closes.
+// prompt it sent that has had no step written yet, described in the first
+// question's instruction), the session's current model and stored history
+// otherwise (asideContext). It is refused, having sent nothing, with
+// ErrClosed after Close, and with ErrStoredKeyFrozen in the refusal state,
+// whether the session is found in it before the request is built or as a
+// request is sent (asideGate). A failure before any text arrived that a
+// retry may cure — the compaction summarizer's rule, summarizerFailureKind —
+// is retried once, after asideRetryWait; any other failure stands, through
+// classify. An answer with no text is ErrAsideEmpty, or ErrAsideToolCall
+// when the model asked for a tool. A context that ends returns its error; a
+// Close cancels the request and returns ErrClosed, and waits for this to
+// return before the transcript closes.
 //
 // It may run while a turn runs, and beside other side questions. Nothing is
 // written to the transcript and no Event is emitted; whatever each request
@@ -125,8 +194,10 @@ func (s *Session) Aside(ctx context.Context, prior []AsidePair, question string,
 		return AsideAnswer{}, ErrStoredKeyFrozen
 	}
 
-	m, msgs, marks := s.asideContext()
-	messages, prompt := asideMessages(requestHistory(s.redactor(), msgs, marks, m.r), prior, question)
+	m, c := s.asideContext()
+	red := s.redactor()
+	task := asideTask(redactHistory(red, c.held, c.heldMarks), c.heldMarks)
+	messages, prompt := asideMessages(requestHistory(red, c.msgs, c.marks, m.r), task, prior, question)
 	// The summarizer's agent: no retries of Fantasy's own, which would
 	// replay a request whose text the caller already has. Its model is behind
 	// the refusal gate (asideGate): the check above refuses before anything
@@ -194,11 +265,19 @@ func (s *Session) registerAside(ctx context.Context) (context.Context, func(), e
 	}, nil
 }
 
-// asideContext is the model a side question asks and the history it sends
-// (§3.4 steps 3-4). The basis is the attached turn's, from the turn link —
-// its model, which the history's reasoning and the cache prefix are the
-// turn's for, and its number, whose held prompt the store read takes. With
-// none — idle, or the instant between begin and attach — it is the idle
+// asideHistory is what a side question knows of the session (§3.4 step 4,
+// store.ContextWithHeld): the written history with its marks, and apart from
+// it the held prompt of the turn it was asked during, with its marks.
+type asideHistory struct {
+	msgs, held       []fantasy.Message
+	marks, heldMarks []bool
+}
+
+// asideContext is the model a side question asks and what it knows of the
+// session (§3.4 steps 3-4). The basis is the attached turn's, from the turn
+// link — its model, which the history's reasoning and the cache prefix are
+// the turn's for, and its number, whose held prompt the store read takes.
+// With none — idle, or the instant between begin and attach — it is the idle
 // basis: the session's current model and turn 0, which takes no held prompt.
 // s.running is not read: begin sets it before a dead turn's held prompt is
 // discarded and the new one appended.
@@ -211,7 +290,7 @@ func (s *Session) registerAside(ctx context.Context) (context.Context, func(), e
 // check of its own; the next turn's held prompt is never taken either, as the
 // link read first never named that turn. A link still attached was attached
 // throughout the read, so what was held for it was a live turn's.
-func (s *Session) asideContext() (model, []fantasy.Message, []bool) {
+func (s *Session) asideContext() (model, asideHistory) {
 	var link *turnLink
 	if s.subs != nil {
 		link = s.subs.turn.Load()
@@ -223,13 +302,14 @@ func (s *Session) asideContext() (model, []fantasy.Message, []bool) {
 	if seam := s.asideRead; seam != nil {
 		seam()
 	}
-	msgs, marks := s.store.ContextWithHeld(m.id(), turn)
+	var c asideHistory
+	c.msgs, c.marks, c.held, c.heldMarks = s.store.ContextWithHeld(m.id(), turn)
 	if link == nil || s.subs.turn.Load() == link {
-		return m, msgs, marks
+		return m, c
 	}
 	m = s.idleModel()
-	msgs, marks = s.store.ContextWithHeld(m.id(), 0)
-	return m, msgs, marks
+	c.msgs, c.marks, c.held, c.heldMarks = s.store.ContextWithHeld(m.id(), 0)
+	return m, c
 }
 
 // idleModel is what the next turn runs on (s.cur), read under mu.
@@ -271,39 +351,28 @@ func asideEnded(ctx context.Context) error {
 }
 
 // asideMessages is a side question's request after the system prompt (§3.4
-// step 5): history, then each earlier pair as the wrapped question and the
-// answer as an assistant message, and the wrapped question itself as the
-// prompt. When history ends with a user message — a turn's held prompt — the
-// first question to follow it (the first pair's, else the question itself)
-// is another text part of that message rather than a second user message in
-// a row, which some drivers refuse; the prompt is then "" when it was the
-// question itself. history is not changed.
-func asideMessages(history []fantasy.Message, prior []AsidePair, question string) ([]fantasy.Message, string) {
+// step 5): history — the written one, which ends with an answer (a step's,
+// or its tool results), or with a compaction's summary as the next turn's
+// prompt would follow it, or is empty — then each earlier pair as the
+// wrapped question and the answer as an assistant message, and the wrapped
+// question itself as the prompt. task, a running turn's held prompt as
+// asideTask describes it, goes inside the first wrapped question's
+// instruction — the first pair's, else the question's — and no other: the
+// held prompt is never a user message here, so the model never takes it for
+// the request to answer; and past history no two user messages follow each
+// other. history is not changed.
+func asideMessages(history []fantasy.Message, task string, prior []AsidePair, question string) ([]fantasy.Message, string) {
 	msgs := slices.Clone(history)
-	trailing := len(msgs) > 0 && msgs[len(msgs)-1].Role == fantasy.MessageRoleUser
-	ask := func(text string) {
-		if trailing {
-			last := msgs[len(msgs)-1]
-			last.Content = append(slices.Clip(last.Content), fantasy.TextPart{Text: text})
-			msgs[len(msgs)-1] = last
-			trailing = false
-			return
-		}
-		msgs = append(msgs, fantasy.NewUserMessage(text))
-	}
 	for _, p := range prior {
-		ask(asideWrap(p.Question))
+		msgs = append(msgs, fantasy.NewUserMessage(asideWrap(p.Question, task)))
+		task = ""
 		answer := p.Answer
 		if strings.TrimSpace(answer) == "" {
 			answer = asideNoAnswer
 		}
 		msgs = append(msgs, streamed("", answer))
 	}
-	if trailing {
-		ask(asideWrap(question))
-		return msgs, ""
-	}
-	return msgs, asideWrap(question)
+	return msgs, asideWrap(question, task)
 }
 
 // askAside sends one request of a side question (§3.4 step 6) and returns the

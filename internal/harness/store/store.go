@@ -839,30 +839,31 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 	return s.t.ContextWithResults(current)
 }
 
-// ContextWithHeld is ContextWithResults, and after it the held user entries
-// of turn — those whose Turn is turn — in order, each marked as its
-// SubagentResults says: the history a side question asked while turn runs
-// sends (plan 040 §3.4), the prompt turn sent and has had no step written for
-// yet included. One lock covers both reads, so a step appended meanwhile
-// (AppendStepLed, which writes the held entries and lets them go) can neither
-// show the prompt twice nor drop it; and a held entry of any other turn — a
-// dead one's, or the next one's — is never taken. turn 0 takes none. It works
-// after Close, which discards the held entries.
-func (s *Store) ContextWithHeld(current Model, turn int) ([]fantasy.Message, []bool) {
+// ContextWithHeld is ContextWithResults — msgs, with their marks — and,
+// apart from it, the held user entries of turn — those whose Turn is turn —
+// in order, each marked as its SubagentResults says: what a side question
+// asked while turn runs knows of the session (plan 040 §3.4), the written
+// history and the prompt turn sent and has had no step written for yet. One
+// lock covers both reads, so a step appended meanwhile (AppendStepLed, which
+// writes the held entries and lets them go) can neither show the prompt
+// twice nor drop it; and a held entry of any other turn — a dead one's, or
+// the next one's — is never taken. turn 0 takes none. It works after Close,
+// which discards the held entries.
+func (s *Store) ContextWithHeld(current Model, turn int) (msgs []fantasy.Message, marks []bool, held []fantasy.Message, heldMarks []bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	msgs, marks := s.t.ContextWithResults(current)
+	msgs, marks = s.t.ContextWithResults(current)
 	if turn == 0 {
-		return msgs, marks
+		return msgs, marks, nil, nil
 	}
 	for _, u := range s.users {
 		if u.Turn != turn {
 			continue
 		}
-		msgs = append(msgs, u.Message)
-		marks = append(marks, u.SubagentResults)
+		held = append(held, u.Message)
+		heldMarks = append(heldMarks, u.SubagentResults)
 	}
-	return msgs, marks
+	return msgs, marks, held, heldMarks
 }
 
 // LeadsWithSummary is Transcript.LeadsWithSummary. It works after Close.

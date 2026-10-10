@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -1330,5 +1331,13 @@ var ErrAsideUnsupported = errors.New("agent: this session has no side questions"
 var ErrAsideEmpty = errors.New("agent: the side question got no answer")
 
 // ErrAsideNotReady is a side question to a session that cannot answer one
-// now: not started, loading, or closed. The engine answers it not_accepting.
+// now: not started, loading, or closed before the call began — a refusal, and
+// nothing was asked. The engine answers it not_accepting.
 var ErrAsideNotReady = errors.New("agent: the session cannot take a side question now")
+
+// ErrAsideInterrupted is a side question the session had taken and its own
+// shutdown then cut short: Close ran while it was being answered, whoever
+// called it. It is context.Canceled (errors.Is holds), so the engine answers
+// it aborted, reason context — the call was stopped, not refused — whatever
+// the caller's own context says.
+var ErrAsideInterrupted = fmt.Errorf("agent: the session closed while the side question was being answered: %w", context.Canceled)

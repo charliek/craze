@@ -137,8 +137,9 @@ func TestNativeAsideSanitizes(t *testing.T) {
 
 // TestNativeAsideErrors: a tool call instead of an answer is ErrAsideEmpty,
 // saying so; the earlier pairs reach the model, the last answer just before
-// the question; and a side question the session's Close cut short is
-// ErrAsideNotReady.
+// the question; and a side question the session's Close cut short, the
+// caller's context live, is ErrAsideInterrupted — context.Canceled, stopped
+// and not refused — never the refusal ErrAsideNotReady (branch review P2).
 func TestNativeAsideErrors(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -164,8 +165,12 @@ func TestNativeAsideErrors(t *testing.T) {
 	side := startNativeAside(s, "q")
 	await(t, h.reached, "the side question's request")
 	go func() { _ = s.Close() }()
-	if o := await(t, side, "the side question"); !errors.Is(o.err, ErrAsideNotReady) {
-		t.Fatalf("a side question Close cut short answered %v, want ErrAsideNotReady", o.err)
+	if o := await(t, side, "the side question"); !errors.Is(o.err, ErrAsideInterrupted) ||
+		!errors.Is(o.err, context.Canceled) || errors.Is(o.err, ErrAsideNotReady) {
+		t.Fatalf("a side question Close cut short answered %v, want ErrAsideInterrupted alone", o.err)
+	}
+	if o := askNative(s, "q"); !errors.Is(o.err, ErrAsideNotReady) {
+		t.Fatalf("a side question asked once the session closed answered %v, want ErrAsideNotReady", o.err)
 	}
 }
 

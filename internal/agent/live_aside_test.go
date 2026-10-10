@@ -2,12 +2,15 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/charliek/craze/internal/acp"
 )
 
 // dumpedBtws is every x.ai/btw question the fake read, in arrival order.
@@ -206,6 +209,35 @@ func TestFoldTruncateKeepsTheHeadOnARuneBoundary(t *testing.T) {
 	}
 	if foldTruncate("short") != "short" {
 		t.Fatal("a short answer changed")
+	}
+}
+
+// TestLiveAsideCutShortByCloseIsInterrupted (plan 040 §3.3, branch review
+// P2): a side question the session had taken, out on the wire when the
+// session's own Close tears its client down, is ErrAsideInterrupted —
+// context.Canceled, stopped and not refused — with the caller's context still
+// live: not the refusal ErrAsideNotReady, and not the transport's
+// acp.ErrClosed, which the engine would answer failed. One asked once the
+// session has closed is still refused ErrAsideNotReady.
+func TestLiveAsideCutShortByCloseIsInterrupted(t *testing.T) {
+	dump := promptDumpFile(t)
+	s := startProviderScript(t, GrokProvider(), "grok-btw")
+	out := make(chan error, 1)
+	go func() {
+		_, err := s.Aside(context.Background(), AsideRequest{Question: "q HOLD-BTW"}, nil)
+		out <- err
+	}()
+	waitUntil(t, "the agent holding the side question", func() bool { return len(dumpedBtws(t, dump)) == 1 })
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := await(t, out, "the side question")
+	if !errors.Is(err, ErrAsideInterrupted) || !errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrAsideNotReady) || errors.Is(err, acp.ErrClosed) {
+		t.Fatalf("a side question the session's Close cut short answered %v, want ErrAsideInterrupted alone", err)
+	}
+	if _, err := s.Aside(context.Background(), AsideRequest{Question: "q"}, nil); !errors.Is(err, ErrAsideNotReady) {
+		t.Fatalf("after Close: %v, want ErrAsideNotReady", err)
 	}
 }
 

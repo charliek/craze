@@ -32,7 +32,10 @@ const (
 func (s *session) Asides() bool { return s.provider().Aside() }
 
 // Aside is Asider's. onDelta is never called: x.ai/btw answers in one piece.
-// Cancelling ctx only abandons the wait; grok keeps generating.
+// Cancelling ctx only abandons the wait; grok keeps generating. One asked of
+// a session not started, or closed, is refused ErrAsideNotReady; one the
+// session's own Close cut short — the client torn down under the call — is
+// ErrAsideInterrupted.
 func (s *session) Aside(ctx context.Context, req AsideRequest, onDelta func(string)) (AsideResult, error) {
 	if !s.Asides() {
 		return AsideResult{}, ErrAsideUnsupported
@@ -53,6 +56,13 @@ func (s *session) Aside(ctx context.Context, req AsideRequest, onDelta func(stri
 		return AsideResult{}, fmt.Errorf("%w: no session", ErrAsideNotReady)
 	case errors.Is(err, acp.ErrEmptyAnswer):
 		return AsideResult{}, ErrAsideEmpty
+	case errors.Is(err, acp.ErrClosed) && ctx.Err() == nil && isClosed(s.done):
+		// teardown closes done before it closes the client, whose close is
+		// what failed the call (acp.ErrClosed): stopped, not refused, and not
+		// the agent's failure either. Only that error says the shutdown cut
+		// the call short; any other failure that merely lands after Close
+		// began is the agent's own and stays as it is (plan 040, C5 review).
+		return AsideResult{}, ErrAsideInterrupted
 	case err != nil:
 		return AsideResult{}, err
 	}

@@ -24,6 +24,7 @@ var _ Asider = (*nativeSession)(nil)
 // asked before the session is ready — not started, loading, or closed — is
 // refused ErrAsideNotReady, which the engine answers not_accepting, so a
 // client's info document never hides /btw from a session still starting.
+// One the session had taken when Close ran is ErrAsideInterrupted instead.
 func (s *nativeSession) Asides() bool { return true }
 
 // Aside is Asider's (plan 040 §3.4): the harness's side question, its
@@ -31,9 +32,11 @@ func (s *nativeSession) Asides() bool { return true }
 // model label and error sanitized too — an answer that is nothing once
 // sanitized is ErrAsideEmpty. An escape sequence split across two pieces may
 // show in the stream, and the final text is what corrects it. ctx also ends
-// when the session closes. The whole call, the publication of the session's
-// spend after it included, is joined by Close, so nothing is published after
-// Close returns.
+// when the session closes, and a call Close cut short — taken here, past the
+// readiness check — is ErrAsideInterrupted, never the refusal
+// ErrAsideNotReady. The whole call, the publication of the session's spend
+// after it included, is joined by Close, so nothing is published after Close
+// returns.
 func (s *nativeSession) Aside(ctx context.Context, req AsideRequest, onDelta func(string)) (AsideResult, error) {
 	if onDelta == nil {
 		onDelta = func(string) {}
@@ -122,15 +125,17 @@ func (s *nativeSession) publishOwedSpend(hs *harness.Session) {
 
 // phraseAside is a failed side question in the adapter's words, as an agent
 // sentinel where there is one: the caller's context's own error when it
-// ended; ErrAsideNotReady once the session has closed; ErrAsideEmpty for an
-// answer with no text, a tool call's or an empty step's; and a turn's
-// phrasing of anything else (phraseTurn), whose text is sanitized.
+// ended; ErrAsideInterrupted once the session has closed — the call was
+// taken (Aside's readiness check), and the session's own shutdown cut it
+// short, so it was stopped and not refused; ErrAsideEmpty for an answer with
+// no text, a tool call's or an empty step's; and a turn's phrasing of
+// anything else (phraseTurn), whose text is sanitized.
 func (s *nativeSession) phraseAside(parent context.Context, err error) error {
 	switch {
 	case parent.Err() != nil:
 		return parent.Err()
 	case errors.Is(err, harness.ErrClosed), isClosed(s.done):
-		return fmt.Errorf("%w: session closed", ErrAsideNotReady)
+		return ErrAsideInterrupted
 	case errors.Is(err, harness.ErrAsideToolCall):
 		return fmt.Errorf("%w: the model tried to use a tool, which a side question cannot do", ErrAsideEmpty)
 	case errors.Is(err, harness.ErrAsideEmpty):
