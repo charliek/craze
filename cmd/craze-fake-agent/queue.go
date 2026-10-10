@@ -513,3 +513,25 @@ func (s *server) holdFallback(text string, runFor time.Duration) {
 	}
 	time.Sleep(runFor)
 }
+
+// handleBtw answers _x.ai/btw the way live grok does: the answer in the nested
+// {"result":{"answer":…}} payload, at once and whether or not a turn runs.
+// The bare x.ai/btw answers -32601, as live; so do the cursor scripts and
+// grok-btw-missing.
+func (s *server) handleBtw(msg *acp.Message) {
+	dumpBtw(msg.Params)
+	if !grokScript(s.script) || msg.Method != acp.MethodGrokBtwWrapped || s.script == "grok-btw-missing" {
+		_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+		return
+	}
+	var p acp.BtwParams
+	if err := json.Unmarshal(msg.Params, &p); err != nil || p.Question == "" {
+		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: acp.CodeInvalidParams, Message: "invalid btw params"})
+		return
+	}
+	answer := "btw: " + p.Question
+	if s.script == "grok-btw-escape" {
+		answer = "btw: \x1b[31m" + p.Question + "\x1b[0m\x07"
+	}
+	s.reply(msg.ID, map[string]any{"result": map[string]any{"answer": answer}})
+}

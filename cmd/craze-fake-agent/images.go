@@ -218,3 +218,13 @@ func dumpInterject(params json.RawMessage) {
 	_ = json.Unmarshal(params, &p)
 	dumpPromptFile(map[string]any{"interject": p.Text})
 }
+
+// dumpBtw records an x.ai/btw in CRAZE_FAKE_DUMP_PROMPTS.
+func dumpBtw(params json.RawMessage) {
+	if os.Getenv("CRAZE_FAKE_DUMP_PROMPTS") == "" {
+		return
+	}
+	var p acp.BtwParams
+	_ = json.Unmarshal(params, &p)
+	dumpPromptFile(map[string]any{"btw": p.Question})
+}

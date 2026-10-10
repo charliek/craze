@@ -301,6 +301,8 @@ func GrokProvider() Provider {
 			ParameterizedPicker: true,
 			Interject:           true,
 		},
+		// x.ai/btw (plan 040 §3.5); gx inherits it through GxProvider.
+		aside:            true,
 		dialect:          acp.DialectGrok,
 		subagentToolName: "spawn_subagent",
 		// Grok advertises its whole catalog, plugin skills included, over
