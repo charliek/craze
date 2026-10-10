@@ -678,6 +678,14 @@ in
 a session's `/model` lists those whose provider has a key ([which models, in
 what order](tui.md#model-dialog)).
 
+OpenRouter's models are its `~<family>-latest` routers where OpenRouter has
+one: `openrouter/gpt-sol-latest` sends `~openai/gpt-sol-latest`, which
+OpenRouter answers with the newest GPT Sol, so a new release in the family
+reaches you with no craze upgrade. A model whose family has no router, such
+as `openrouter/mimo-v2.6-pro`, uses its numbered id. To stay on one numbered
+model, add it as a model of your own in [`models.toml`](#your-two-files),
+with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
+
 The catalog has no default model. It ranks its providers instead, in
 `provider_order`, and gives each a **start model**: a new session that
 remembers nothing, and has no [`default_model`](#your-two-files) pin of yours
@@ -690,7 +698,7 @@ starts](#model-memory-recentjson)):
 | 1 | `zai-coding-plan` | `glm-5.3` |
 | 2 | `chatgpt` | the first of `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
 | 3 | `fireworks` | `fireworks/ember-1` |
-| 4 | `openrouter` | `openrouter/gemini-3.8-flash` |
+| 4 | `openrouter` | `openrouter/gemini-flash-latest` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
 
 So a machine with only a Fireworks key starts on `fireworks/ember-1`, one with
@@ -1087,7 +1095,7 @@ on the first of:
    Fireworks, OpenRouter, Meta — that has a key, the provider's start model
    (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-5.6-sol`
    that the account lists; `fireworks/ember-1`;
-   `openrouter/gemini-3.8-flash`; `muse-spark-1.3-contributor`);
+   `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`);
 4. otherwise the first model, by alias, whose provider has a key — with a note
    saying so.
 

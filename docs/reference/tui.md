@@ -303,7 +303,7 @@ it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
 preferred model its account lists, `fireworks/ember-1`,
-`openrouter/gemini-3.8-flash`, `muse-spark-1.3-contributor`, in that order
+`openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
 that has a key, with a note. `--model` picks the model for one start — at
