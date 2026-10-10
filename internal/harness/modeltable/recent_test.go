@@ -572,7 +572,7 @@ func TestStartPickSteps(t *testing.T) {
 // TestStartModelOverTheShippedCatalog (plan 038 §4): where a new session with
 // nothing remembered starts on a home with the shipped catalog — Z.AI alone
 // on glm-5.3, Fireworks alone on fireworks/ember-1, OpenRouter alone on
-// openrouter/gemini-3.8-flash, Meta alone on muse-spark-1.3-contributor, and
+// openrouter/gemini-flash-latest, Meta alone on muse-spark-1.3-contributor, and
 // with every key the eval winner, Z.AI; never on deepseek. The user's pin in
 // models.toml beats the order, the user's provider_order reorders it, and an
 // order that leaves out the funded provider falls back to the first funded
@@ -592,7 +592,7 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 	}{
 		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.3", Effort: "max"}},
 		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/ember-1", Effort: "high"}},
-		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-3.8-flash", Effort: "medium"}},
+		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-flash-latest", Effort: "medium"}},
 		{"Meta alone", "", []string{mt}, Start{Alias: "muse-spark-1.3-contributor", Effort: "high"}},
 		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.3", Effort: "max"}},
 		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/ember-1", Effort: "high"}},

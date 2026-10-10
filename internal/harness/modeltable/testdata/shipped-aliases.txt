@@ -22,3 +22,11 @@ openrouter/gpt-6.1-sol
 fireworks/ember-1
 fireworks/glm-5p3
 fireworks/glm-5p3-flash
+openrouter/deepseek-flash-latest
+openrouter/gemini-flash-latest
+openrouter/glm-flash-latest
+openrouter/glm-latest
+openrouter/gpt-astra-latest
+openrouter/gpt-luna-latest
+openrouter/gpt-sol-latest
+openrouter/mimo-v2.6-pro

@@ -92,22 +92,26 @@ func TestShippedCatalog(t *testing.T) {
 	// true; glm-5.3 stays false, which is what the composer's paste note and
 	// the host's placeholder (D-38, P8) are for.
 	// Plan 038 §2.5 adds Ember-1 and GLM 5.3 Flash on Fireworks, each seen
-	// taking an image live; GLM 5.3 on Fireworks does not, as on Z.AI.
+	// taking an image live; GLM 5.3 on Fireworks does not, as on Z.AI. The
+	// OpenRouter *-latest routers (2026-10-09) keep their models' flags, and
+	// DeepSeek Flash Latest and MiMo V2.6 Pro were seen describing an image
+	// read from disk; GLM Latest, GLM 5.3 on OpenRouter, takes text only.
 	seesImages := map[string]bool{
 		"fireworks/deepseek-v4p1-flash": true, "fireworks/kimi-k3": true,
 		"fireworks/ember-1": true, "fireworks/glm-5p3-flash": true,
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
 		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
-		"openrouter/gemini-3.8-flash": true, "openrouter/glm-5.3-flash": true,
-		"openrouter/gpt-6-astra": true, "openrouter/gpt-6-luna": true,
-		"openrouter/gpt-6.1-sol": true, "openrouter/minimax-m3": true,
+		"openrouter/deepseek-flash-latest": true, "openrouter/gemini-flash-latest": true,
+		"openrouter/glm-flash-latest": true, "openrouter/gpt-astra-latest": true,
+		"openrouter/gpt-luna-latest": true, "openrouter/gpt-sol-latest": true,
+		"openrouter/mimo-v2.6-pro": true, "openrouter/minimax-m3": true,
 	}
 	for alias := range seesImages {
 		if md, ok := tbl.Models[alias]; !ok || !md.Vision {
 			t.Errorf("%s: vision = %v (present %v), want true", alias, md.Vision, ok)
 		}
 	}
-	for _, alias := range []string{"glm-5.3", "fireworks/glm-5p3"} {
+	for _, alias := range []string{"glm-5.3", "fireworks/glm-5p3", "openrouter/glm-latest"} {
 		if md, ok := tbl.Models[alias]; !ok || md.Vision {
 			t.Errorf("%s: vision = %v (present %v), want false", alias, md.Vision, ok)
 		}
@@ -203,7 +207,9 @@ func TestShippedCatalogHistory(t *testing.T) {
 // defaults: gpt-6.1-sol then gpt-5.6-sol to start on, gpt-6-astra at low
 // effort, and none of it a model of the catalog's. And plan 038 §2: the
 // provider order, each provider's start, the three Fireworks models it adds
-// and the prices it fills.
+// and the prices it fills. And OpenRouter's models (2026-10-09): each family
+// with a ~<family>-latest router is on it, so a new release needs no catalog
+// change, and the numbered aliases it replaced retire the alias only.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -238,11 +244,40 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	wantStarts := map[string][]string{
 		"zai-coding-plan": {"glm-5.3"},
 		"fireworks":       {"fireworks/ember-1"},
-		"openrouter":      {"openrouter/gemini-3.8-flash"},
+		"openrouter":      {"openrouter/gemini-flash-latest"},
 		"meta":            {"muse-spark-1.3-contributor"},
 	}
 	if !reflect.DeepEqual(c.Starts, wantStarts) {
 		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
+	}
+	// OpenRouter's models and their wire ids: a family's router where
+	// OpenRouter has one, the numbered id where it does not (MiMo, MiniMax).
+	wantOpenRouter := map[string]string{
+		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
+		"openrouter/gemini-flash-latest":   "~google/gemini-flash-latest",
+		"openrouter/glm-flash-latest":      "~z-ai/glm-flash-latest",
+		"openrouter/glm-latest":            "~z-ai/glm-latest",
+		"openrouter/gpt-astra-latest":      "~openai/gpt-astra-latest",
+		"openrouter/gpt-luna-latest":       "~openai/gpt-luna-latest",
+		"openrouter/gpt-sol-latest":        "~openai/gpt-sol-latest",
+		"openrouter/mimo-v2.6-pro":         "xiaomi/mimo-v2.6-pro",
+		"openrouter/minimax-m3":            "minimax/minimax-m3",
+	}
+	gotOpenRouter := map[string]string{}
+	for alias, m := range c.Models {
+		if m.Provider == "openrouter" {
+			gotOpenRouter[alias] = m.WireModel
+		}
+	}
+	if !maps.Equal(gotOpenRouter, wantOpenRouter) {
+		t.Fatalf("OpenRouter's models = %q, want %q", gotOpenRouter, wantOpenRouter)
+	}
+	// OpenRouter takes only low, high and max for GLM and DeepSeek (its model
+	// list's supported_efforts), so those routers offer no others.
+	for _, alias := range []string{"openrouter/deepseek-flash-latest", "openrouter/glm-flash-latest", "openrouter/glm-latest"} {
+		if got := c.Models[alias].Efforts; !slices.Equal(got, []string{"low", "high", "max"}) {
+			t.Errorf("%s efforts = %q, want low, high, max", alias, got)
+		}
 	}
 	// The three Fireworks models (§2.5), as verified live.
 	for alias, want := range map[string]struct {
@@ -261,14 +296,17 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	// The prices (§2.5, §2.6): input, output, cache read, per 1M tokens.
 	for alias, want := range map[string][3]float64{
-		"fireworks/ember-1":           {3.0, 15.0, 0.3},
-		"fireworks/glm-5p3":           {1.4, 4.4, 0.26},
-		"fireworks/glm-5p3-flash":     {0.15, 0.5, 0.03},
-		"fireworks/qwen3p8-max":       {2.0, 6.0, 0.25},
-		"openrouter/gemini-3.8-flash": {0.75, 3.75, 0.075},
-		"openrouter/glm-5.3-flash":    {0.036, 0.5, 0.0238},
-		"openrouter/minimax-m3":       {0.3, 1.2, 0.06},
-		"muse-spark-1.3-contributor":  {0.1, 0.2, 0.002},
+		"fireworks/ember-1":                {3.0, 15.0, 0.3},
+		"fireworks/glm-5p3":                {1.4, 4.4, 0.26},
+		"fireworks/glm-5p3-flash":          {0.15, 0.5, 0.03},
+		"fireworks/qwen3p8-max":            {2.0, 6.0, 0.25},
+		"openrouter/deepseek-flash-latest": {0.016, 0.6, 0.005},
+		"openrouter/gemini-flash-latest":   {0.75, 3.75, 0.075},
+		"openrouter/glm-flash-latest":      {0.032, 0.72, 0.01},
+		"openrouter/glm-latest":            {0.039, 4.8, 0.038},
+		"openrouter/mimo-v2.6-pro":         {0.435, 0.87, 0.0036},
+		"openrouter/minimax-m3":            {0.3, 1.2, 0.06},
+		"muse-spark-1.3-contributor":       {0.1, 0.2, 0.002},
 	} {
 		cost := c.Models[alias].Cost
 		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil ||
@@ -289,7 +327,8 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		switch r.Alias {
 		case "fireworks/glm-5p3-fast", "fireworks/kimi-k3-fast",
 			"openrouter/gpt-5.6-luna", "openrouter/gpt-5.6-sol", "openrouter/gpt-5.6-terra",
-			"openrouter/gpt-6-sol":
+			"openrouter/gpt-6-sol", "openrouter/gemini-3.8-flash", "openrouter/glm-5.3-flash",
+			"openrouter/gpt-6-astra", "openrouter/gpt-6-luna", "openrouter/gpt-6.1-sol":
 			if len(r.WireModels) != 0 {
 				t.Errorf("retired %q names live wire ids %v", r.Alias, r.WireModels)
 			}

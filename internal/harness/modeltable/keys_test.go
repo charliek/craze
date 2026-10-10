@@ -50,6 +50,9 @@ env_keys = ["NONE_API_KEY"]
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil { // defeat the umask
+		t.Fatal(err)
+	}
 	got, err := StoredKeys(dir)
 	if err != nil {
 		t.Fatalf("StoredKeys: %v", err)
