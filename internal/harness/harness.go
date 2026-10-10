@@ -371,6 +371,18 @@ type Session struct {
 	// can land in (plan 034 §3.4, A24). **A test seam: nil in production**,
 	// set only by a test in this package before the switch.
 	setModelBuilt func()
+	// asideRead runs in Aside between its reading of the turn link and its
+	// reading of the store, and sidesJoin in Close just before it joins the
+	// side questions (aside.go, plan 040 §3.4), with no lock held. **Test
+	// seams: nil in production**, set only by a test in this package before
+	// the call.
+	asideRead func()
+	sidesJoin func()
+	// idleSpentRead runs in IdleSpent and OwedSpent between the section of mu
+	// that reads what the report is of and takes its Seq, and the report's
+	// own reading (spend.go), with no lock held. **A test seam: nil in
+	// production**, set only by a test in this package before the call.
+	idleSpentRead func()
 
 	// sleep is compact's backoff between summarizer attempts (compact.go,
 	// plan 028 §3.8 item 5): a context-aware wait in production (defaultSleep)
@@ -424,6 +436,26 @@ type Session struct {
 	// spend prices them at those rates, never at the table's when the result
 	// arrived. One per delivered result that spent anything.
 	carried map[rowKey][]carriedUsage
+
+	// sides are the side questions running (aside.go, plan 040 §3.4), each
+	// one's cancel by a number of its own (sideNext): signalClose cancels
+	// them all. Each is counted into sideCalls in the same section, under mu
+	// and only while the session is not closed, so Close's Wait — after
+	// signalClose has marked it closed — never meets an Add.
+	sides     map[uint64]context.CancelCauseFunc
+	sideNext  uint64
+	sideCalls sync.WaitGroup
+
+	// spentSeq numbers every Spent (Spent.Seq), under mu: taken before the
+	// report reads anything (nextSeqLocked), and by IdleSpent in the section
+	// that reads what its report is of, so a later number never reports older
+	// data.
+	spentSeq uint64
+	// spentOwed is a report owed (spend.go's IdleSpent, plan 040 §3.4): an
+	// IdleSpent was refused while a turn or a Replay ran, after its caller
+	// noted usage, and no report has been numbered since. OwedSpent makes it
+	// once no turn runs; any report numbered in the meantime settles it.
+	spentOwed bool
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
@@ -1283,6 +1315,9 @@ func (s *Session) redactor() *redact.Replacer {
 // that was never delivered — as a SubagentUndelivered through Options.Sink,
 // the only record of what those children spent — before the transcript
 // closes. Nothing delivers a result after that.
+//
+// A side question running (Aside, plan 040 §3.4) is cancelled with the turn
+// and joined before the transcript closes; it writes nothing there either way.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.subs.closeChildren()
@@ -1290,6 +1325,14 @@ func (s *Session) Close() error {
 			<-done
 		}
 		s.subs.closeBackground()
+		// The side questions signalClose cancelled (aside.go, plan 040 §3.4)
+		// are joined before the store closes, with no lock held: one that is
+		// finishing notes its usage under mu (noteUnsaved), and reads the
+		// store.
+		if seam := s.sidesJoin; seam != nil {
+			seam()
+		}
+		s.sideCalls.Wait()
 		if err := s.store.Close(); err != nil {
 			s.closeErr = fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
@@ -1314,9 +1357,15 @@ func (s *Session) signalClose() (done chan struct{}) {
 	s.mu.Lock()
 	s.closed = true
 	cancel, done := s.cancel, s.done
+	sides := slices.Collect(maps.Values(s.sides))
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel(errClosing)
+	}
+	// Every side question running (aside.go, plan 040 §3.4): none registers
+	// from here, closed being set in the section that collected these.
+	for _, c := range sides {
+		c(errClosing)
 	}
 	s.tools.close()
 	return done

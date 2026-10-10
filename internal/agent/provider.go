@@ -388,6 +388,7 @@ func NativeProvider() Provider {
 			SubagentCancel:     true,
 			SubagentBackground: true,
 		},
+		aside: true,
 	}
 }
 
@@ -553,8 +554,8 @@ func (p Provider) Resumable() bool { return p.resumable }
 func (p Provider) InProcess() bool { return p.inProcess }
 
 // Aside reports whether p's sessions answer side questions (/btw, plan 040
-// §3.3). No provider does yet: later commits turn native, grok and gx on;
-// cursor's stays false.
+// §3.3): native's do (its session's Asides is always true); grok's and gx's
+// are turned on with their x.ai/btw; cursor's stays false.
 func (p Provider) Aside() bool { return p.aside }
 
 // BinaryResolves reports whether binary lookup for p succeeds — the same

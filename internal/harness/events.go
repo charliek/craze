@@ -189,9 +189,16 @@ const (
 // (§3.7): the last reported usage and the estimate of what the context has
 // gained since, or the whole context's estimate. ContextWindow is the context
 // window of the model that request goes to, 0 when the table does not know it.
+//
+// Seq numbers the reports of one session in the order their data was read
+// (plan 040 §3.4): a report with a higher Seq never reflects older data than
+// one with a lower, so a consumer that may receive two out of order — an idle
+// side question's (IdleSpent) racing a turn's — applies one only above the
+// last it applied. It is the harness's own and goes nowhere else.
 type Spent struct {
 	ContextTokens, ContextWindow int64
 	Turn, Session                Spend
+	Seq                          uint64
 }
 
 // Spend is a sum of usage and what it cost: the token counts — Reasoning is

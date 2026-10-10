@@ -410,7 +410,9 @@ func testLiveAndResumedSpend(t *testing.T, unsaved bool) {
 	if n := len(of[Spent](evs)); n != 1 {
 		t.Fatalf("the replay sent %d Spents; want one, at its end", n)
 	}
+	// The report's Seq is the resumed session's own count (plan 040 §3.4).
 	want := final
+	want.Seq = got.Seq
 	if unsaved {
 		// The failed append's step is the one thing the transcript never held.
 		want.Session = plus(times(4, a), b)

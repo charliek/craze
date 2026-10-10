@@ -504,7 +504,8 @@ func messageText(m fantasy.Message) string {
 
 // plain is evs with what differs from run to run made fixed: a StepDone's
 // time to first token is zeroed and its entry ids, which are random, each
-// become "id"; a ToolCalled's and a ToolFinished's times are zeroed.
+// become "id"; a ToolCalled's and a ToolFinished's times are zeroed; and a
+// Spent's Seq, which counts every report the session made, is zeroed.
 func plain(evs []Event) []Event {
 	out := make([]Event, len(evs))
 	for i, ev := range evs {
@@ -520,6 +521,9 @@ func plain(evs []Event) []Event {
 			ev = e
 		case ToolFinished:
 			e.At, e.Duration = time.Time{}, 0
+			ev = e
+		case Spent:
+			e.Seq = 0
 			ev = e
 		}
 		out[i] = ev

@@ -360,6 +360,21 @@ type nativeSession struct {
 	// seam: nil in production**, set only by a test in this package before
 	// Start.
 	turnSeam func(stage string)
+
+	// asides counts the side questions running (native_aside.go, plan 040
+	// §3.4), the harness's call and the publication after it: each is added
+	// under s.mu while the session is not closed, and Close waits for them
+	// once the harness has closed, so no usage is published after Close.
+	asides sync.WaitGroup
+	// spentSeq is the Seq of the last harness.Spent spent applied (plan 040
+	// §3.4): a report at or below it is older than what the snapshot shows,
+	// and dropped. Under s.mu.
+	spentSeq uint64
+	// asideSeam runs with no lock held: in Aside, "spent" between the
+	// harness's IdleSpent and its publication; in Close, "join" just before
+	// it waits for the side questions. **A test seam: nil in production**,
+	// set only by a test in this package before Start.
+	asideSeam func(stage string)
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -2127,6 +2142,13 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	if signIn != nil {
 		signIn.ClearUsageLimit()
 	}
+	// A side question that finished while this turn or /compact ran, after
+	// its last report, is owed a publication (publishOwedSpend): deferred
+	// before the harness is called, not after it returns, so it runs on every
+	// way out — a panic in the turn included (plan 040, C2 review r2) — after
+	// the ending, and before the claim's release, which Close waits for
+	// before the log closes.
+	defer s.publishOwedSpend(hs)
 
 	var (
 		res harness.Result
@@ -2478,6 +2500,13 @@ func (s *nativeSession) spent(e harness.Spent) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A report whose data is older than the last applied one's — an idle side
+	// question's, computed before a turn's step was reported (plan 040 §3.4)
+	// — would put the older numbers back: dropped.
+	if e.Seq <= s.spentSeq {
+		return
+	}
+	s.spentSeq = e.Seq
 	s.snap.Usage = &u
 	if s.loading {
 		return
@@ -2667,6 +2696,13 @@ func (s *nativeSession) Close() error {
 				s.note(sanitizeLine(err.Error()))
 			}
 		}
+		// The side questions (native_aside.go, plan 040 §3.4): the harness's
+		// Close has cancelled and joined their requests, and each one's
+		// publication after it is joined here, before the log closes.
+		if seam := s.asideSeam; seam != nil {
+			seam("join")
+		}
+		s.asides.Wait()
 		if live {
 			<-rel
 		}

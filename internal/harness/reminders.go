@@ -661,7 +661,14 @@ func (t *turn) modeHeard() {
 // wrapped in <system-reminder> tags, which is how grok-build injects its own
 // (conversation.rs:1109-1123, reminders.rs:10-18).
 func reminderMessage(text string) fantasy.Message {
-	return fantasy.NewUserMessage("<" + reminderTag + ">\n" + escapeReminder(text) + "\n</" + reminderTag + ">")
+	return fantasy.NewUserMessage(reminderText(text))
+}
+
+// reminderText is text inside the reminder tags, escaped: the text of every
+// reminder message, and of the instruction a side question opens with
+// (aside.go, plan 040 §3.4).
+func reminderText(text string) string {
+	return "<" + reminderTag + ">\n" + escapeReminder(text) + "\n</" + reminderTag + ">"
 }
 
 // escapeReminder is grok-build's escape_reminder_close_tag. The texts are

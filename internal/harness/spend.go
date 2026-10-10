@@ -176,11 +176,84 @@ func (s *Session) stepSpent(turn int, m model, d StepDone) Spent {
 
 // spent is the Spent the session reports now: turn's spend and the
 // session's, and the context the next request sends to next's model — its
-// size (§3.7) and that model's window.
+// size (§3.7) and that model's window. Its Seq is taken first, before
+// anything is read (plan 040 §3.4; nextSeqLocked): turn and next are the
+// caller's own — a turn's, or a Replay's read before it — so nothing the
+// report is built from was read before it.
 func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
+	s.mu.Lock()
+	seq := s.nextSeqLocked()
+	s.mu.Unlock()
+	return s.spentAt(seq, turn, next)
+}
+
+// spentAt is spent with its Seq already taken, by a caller that read turn and
+// next in the same section of mu that took it (idleSpent).
+func (s *Session) spentAt(seq uint64, turn int, next modeltable.Resolved) Spent {
 	tokens, _ := s.contextTokensOn(next)
 	inTurn, session := s.spend(turn)
-	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session}
+	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session, Seq: seq}
+}
+
+// nextSeqLocked numbers a report about to be built (Spent.Seq) and settles
+// an owed one (spentOwed): everything noted before this section — an
+// IdleSpent refused while a turn ran marked it after noting its usage — is
+// read by this report, which reads after it. mu is held.
+func (s *Session) nextSeqLocked() uint64 {
+	s.spentSeq++
+	s.spentOwed = false
+	return s.spentSeq
+}
+
+// IdleSpent is the Spent the session reports now, when no turn and no Replay
+// holds it (plan 040 §3.4): the last turn's spend, the session's — a side
+// question's usage, which no turn's spend counts, among it — and the context
+// the next request sends to the current model. ok is false for a sub-agent,
+// which reports none (P33), and while a turn or a Replay runs: the report is
+// then owed (spentOwed) — the turn's next report counts whatever was noted
+// meanwhile, and when it has none left to make, OwedSpent makes this one once
+// it has ended.
+//
+// It reads running, the turn count and the current model and takes the
+// report's Seq in one section of mu, and computes the report with mu released
+// (spentAt takes the store's lock, then mu): a turn that begins after that
+// section takes every Seq of its own after this one, so a consumer that
+// applies only a Seq above the last it applied drops this report if that
+// turn's own lands first.
+func (s *Session) IdleSpent() (Spent, bool) { return s.idleSpent(false) }
+
+// OwedSpent is IdleSpent when one is owed, and only then (plan 040 §3.4): an
+// IdleSpent was refused while a turn or a Replay ran, and no report has been
+// numbered since — so whatever its caller noted may be in none. It is false
+// while a turn or a Replay runs, and the debt stands; true at most once per
+// debt. The native adapter asks it when a turn or a wake has ended, after its
+// ending.
+func (s *Session) OwedSpent() (Spent, bool) { return s.idleSpent(true) }
+
+// idleSpent is IdleSpent, or OwedSpent when owed.
+func (s *Session) idleSpent(owed bool) (Spent, bool) {
+	if s.child {
+		return Spent{}, false
+	}
+	s.mu.Lock()
+	switch {
+	case s.running:
+		if !owed {
+			s.spentOwed = true
+		}
+		s.mu.Unlock()
+		return Spent{}, false
+	case owed && !s.spentOwed:
+		s.mu.Unlock()
+		return Spent{}, false
+	}
+	seq := s.nextSeqLocked()
+	turns, next := s.turns, s.cur.r
+	s.mu.Unlock()
+	if seam := s.idleSpentRead; seam != nil {
+		seam()
+	}
+	return s.spentAt(seq, turns, next), true
 }
 
 // spend is turn's spend and the session's, by the rule above: every usage on
