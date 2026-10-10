@@ -21,8 +21,7 @@ non-tty.
 ## Flags
 
 These flags apply to `craze` (the TUI). `craze prompt` takes most of the session
-flags (not `--effort`, `--fast`/`--no-fast` or `--continue`); see
-[craze prompt](#craze-prompt).
+flags (not `--continue`); see [craze prompt](#craze-prompt).
 
 | Flag | Description |
 |------|-------------|
@@ -385,6 +384,8 @@ echo "hello" | ./bin/craze prompt --json
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
+| `--effort` | Effort to start at, where the model offers an effort setting: a level's id or name, matched as the TUI's `--effort` is (see [Flags](#flags)). Set after `--model` and before the first prompt; applies to this run only |
+| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one; neither leaves it as the model has it. Both together exit 2 |
 | `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
