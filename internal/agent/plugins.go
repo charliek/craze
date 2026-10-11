@@ -851,19 +851,6 @@ func isPluginNameByte(c byte) bool {
 // every entry it ships would be unreachable the moment it collided.
 func pluginIDOK(id string) bool { return pluginNameOK(id) }
 
-// BuiltinSlashNames are craze's own slash commands, the names the TUI answers
-// itself. They live here so the session resolving plugin names and the menu
-// drawing them agree on what is already spoken for: a plugin shipping a
-// command called "help" has to show as plugin:help everywhere, because a bare
-// row would be shadowed by the builtin in the menu and expanded by craze in
-// `craze prompt` — the same name meaning two things.
-//
-// internal/tui/slash.go's builtinSlash is the other half of this list, with the
-// descriptions the menu draws; the two are pinned to each other by a test.
-func BuiltinSlashNames() []string {
-	return []string{"help", "model", "clear", "tasks", "theme", "rename", "plan", "ask", "agent", "exit"}
-}
-
 // PluginCommand is a plugin entry as the menu and the JSON stream see it. Bare
 // is the entry's own name, Qualified is plugin:name, Display is the spelling
 // the menu shows — Bare when it is unambiguous, else Qualified.

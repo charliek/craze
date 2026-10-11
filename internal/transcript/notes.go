@@ -3,7 +3,6 @@ package transcript
 import (
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -317,71 +316,14 @@ func commandLine(qualified, kind string) string {
 
 // sanitizeLine folds a string onto one line: escape sequences and control
 // characters go, and runs of whitespace collapse. It is the TUI's sanitizeLine
-// (internal/tui/transcript.go) ported whole, because this package may not
-// import the terminal library its ansi.Strip comes from: stripANSI below is
-// that function, transcribed.
-//
-// A name that is already one clean line — printable ASCII words separated by
-// single spaces, which is every plugin name craze resolves — comes back as it
-// was, without allocating; that fast path returns exactly what the full path
-// would.
-func sanitizeLine(s string) string {
-	if s == "" {
-		return ""
-	}
-	if cleanLine(s) {
-		return s
-	}
-	return strings.Join(strings.Fields(dropControls(stripANSI(s))), " ")
-}
+// (internal/tui/transcript.go), which this package may not import the terminal
+// library of: agent.DisplayLine, which transcribes ansi.Strip and which the TUI
+// and the slash catalog's builder call too (plan 043 C1 moved the transcription
+// there from here, so the three cannot drift apart).
+func sanitizeLine(s string) string { return agent.DisplayLine(s) }
 
 // SanitizeLine is sanitizeLine for the packages below the clients that fold a
 // string onto one line the TUI's way and may not import a terminal library to
 // do it either: internal/engine's IndexTitleLine (plan 030 §3.3), which every
 // host writes a session-index title through.
 func SanitizeLine(s string) string { return sanitizeLine(s) }
-
-// cleanLine reports whether s is printable ASCII with single inner spaces and
-// none at either end: a string sanitizeLine's full path returns unchanged,
-// since stripANSI prints every byte 0x20-0x7E in the ground state, nothing in
-// it is a control character, and Fields/Join rebuild exactly the same words
-// and spaces.
-func cleanLine(s string) bool {
-	if s[0] == ' ' || s[len(s)-1] == ' ' {
-		return false
-	}
-	prevSpace := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == ' ':
-			if prevSpace {
-				return false
-			}
-			prevSpace = true
-		case c > ' ' && c < 0x7f:
-			prevSpace = false
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// dropControls is the TUI's: newlines, carriage returns and tabs become a
-// space, and every other control code point goes — unicode.IsControl, the
-// whole Cc category, so a C1 CSI in UTF-8 cannot pass as text.
-func dropControls(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\r' || r == '\t':
-			b.WriteByte(' ')
-		case unicode.IsControl(r):
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}

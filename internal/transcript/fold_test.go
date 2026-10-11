@@ -698,20 +698,6 @@ func TestCommandLines(t *testing.T) {
 	}
 }
 
-func TestSanitizeLineFastPathMatchesTheFullOne(t *testing.T) {
-	full := func(s string) string {
-		if s == "" {
-			return ""
-		}
-		return strings.Join(strings.Fields(dropControls(stripANSI(s))), " ")
-	}
-	for _, s := range []string{"a", "p:c", "a b c", "a  b", " a", "a ", "tab\tx", "é", "~!@#$%^&*()_+{}|:\"<>?`-=[]\\;',./", "\x7f"} {
-		if got, want := sanitizeLine(s), full(s); got != want {
-			t.Fatalf("sanitizeLine(%q) = %q, the full path %q", s, got, want)
-		}
-	}
-}
-
 // TestForeignTurnReasonPicksNote (plan 026 §3.11): the note a foreign turn's
 // start draws is worded by the bracket's Reason — the native wake's own for
 // agent.ReasonSubagentWake and, for a wake delivering background bash jobs'

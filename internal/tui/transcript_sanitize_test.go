@@ -3,7 +3,10 @@ package tui
 import (
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 	// Aliased: this package already has its own type named transcript, which
@@ -11,28 +14,65 @@ import (
 	trmodel "github.com/charliek/craze/internal/transcript"
 )
 
+// ansiSanitizeLine is the rule the TUI's sanitizeLine drew by before plan 043
+// C1 made it agent.DisplayLine: x/ansi's own ansi.Strip, then this package's
+// dropControls, then Fields joined by single spaces. It is the reference the
+// two drift guards below hold the transcription (agent/strip.go) to, because
+// after C1 nothing in the TUI calls ansi.Strip for a line any more — comparing
+// sanitizeLine with the transcript model's would be comparing
+// agent.DisplayLine with itself.
+func ansiSanitizeLine(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(dropControls(ansi.Strip(s))), " ")
+}
+
+// TestDisplayLineMatchesTheTUIsAnsiStrip is the drift guard for the one
+// sanitizer (plan 024 r1 X12, plan 043 C1): agent.DisplayLine — the TUI's
+// sanitizeLine, the transcript model's and the slash catalog builder's —
+// gives x/ansi's answer on every seed case and on the same seeded random
+// strings as below. So a bump of x/ansi that changes ansi.Strip, or an edit of
+// the transcription that changes it, fails the gate; it cannot silently move
+// the TUI's lines and the host's catalog apart from what they were.
+func TestDisplayLineMatchesTheTUIsAnsiStrip(t *testing.T) {
+	check := func(t *testing.T, s string) {
+		t.Helper()
+		if got, want := sanitizeLine(s), ansiSanitizeLine(s); got != want {
+			t.Fatalf("sanitizeLine(%q) = %q, x/ansi's rule %q", s, got, want)
+		}
+	}
+	for _, s := range seedSanitizeStrings() {
+		check(t, s)
+	}
+	r := rand.New(rand.NewPCG(0x043, 0x0c1)) // plan 043, C1
+	for i := 0; i < 3000; i++ {
+		check(t, randSanitizeString(r))
+	}
+}
+
 // TestTranscriptModelsCommandLineMatchesTheTUIs is a drift guard for r1's
-// execution amendment X12: internal/transcript/strip.go transcribes
-// ansi.Strip from github.com/charmbracelet/x/ansi so the model's command-line
-// note matches the TUI's sanitizeLine without importing a terminal library.
+// execution amendment X12: the transcription of ansi.Strip (agent/strip.go
+// since plan 043 C1, internal/transcript/strip.go before) lets the model's
+// command-line note match the TUI's without importing a terminal library.
 //
 // It folds the same EventCommand into a transcript.New(...) model — the
-// package's own commandLine, built from its transcribed sanitizeLine — and
-// holds the resulting note's text against what this package's own
-// sanitizeLine and commandLineMark would draw (the rule the TUI's own
-// addCommandLine drew by before the shared model took the row over in C5c:
-// commandLineMark + sanitizeLine(q), plus " (" + sanitizeLine(k) + ")" when
-// the kind sanitises to something, and no note at all when
-// sanitizeLine(q) == ""). So a bump of x/ansi that changes
-// the TUI's answer — and not the transcribed copy's — fails the gate.
+// package's own commandLine, built from its sanitizeLine — and holds the
+// resulting note's text against the rule the TUI's own addCommandLine drew by
+// before the shared model took the row over in C5c: commandLineMark +
+// the line, plus " (" + the kind + ")" when the kind sanitises to something,
+// and no note at all when the name sanitises to "" — each line folded by
+// x/ansi's rule (ansiSanitizeLine), never by the function under test. So a
+// bump of x/ansi that changes the TUI's old answer — and not the transcribed
+// copy's — fails the gate.
 func TestTranscriptModelsCommandLineMatchesTheTUIs(t *testing.T) {
 	check := func(t *testing.T, q, k string) {
 		t.Helper()
 
 		want := ""
-		if name := sanitizeLine(q); name != "" {
+		if name := ansiSanitizeLine(q); name != "" {
 			want = commandLineMark + name
-			if kind := sanitizeLine(k); kind != "" {
+			if kind := ansiSanitizeLine(k); kind != "" {
 				want += " (" + kind + ")"
 			}
 		}
@@ -88,7 +128,7 @@ func TestTranscriptModelsCommandLineMatchesTheTUIs(t *testing.T) {
 	})
 }
 
-// seedSanitizeStrings is the deterministic edge-case set for the drift guard
+// seedSanitizeStrings is the deterministic edge-case set for the drift guards
 // above: every C0 and C1 control byte, CSI/OSC/DCS/APC sequences both
 // terminated (ST and BEL alike) and left open, the C1 8-bit introducers for
 // each of those, invalid UTF-8, multi-byte runes, and tabs/newlines/runs of

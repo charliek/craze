@@ -29,6 +29,9 @@ import (
 // test: a codec that began carrying one fails it.
 var codecExcluded = map[string]string{
 	"Event.Seq": "the record envelope's (Record.Seq, the journal line's seq), not the codec object's; Record.Event sets it back",
+	// Plan 043 C1 builds the slash catalog in process; C2 puts it on the wire
+	// and takes this line out — which this test will insist on.
+	"StateDelta.Slash": "in process only until plan 043 C2 encodes the slash catalog",
 }
 
 // codecExclusion is why typ's field is one of codecExcluded, or "".

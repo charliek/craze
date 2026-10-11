@@ -304,6 +304,18 @@ type StateDelta struct {
 	// change together, on the one update that brings a new catalog.
 	Commands *CommandsState
 	Plugins  *PluginsState
+	// Slash is the session's slash catalog, as Snapshot.Slash now stands
+	// (plan 043 D3): every row, whole, as Commands and Plugins are carried. It
+	// is derived from them, from the modes and from the disk skills the host
+	// scanned, so it travels in the same delta as whichever of those changed
+	// (P3) — and only when the catalog itself differs from the one last said;
+	// a scan that found nothing new says nothing. Every install restates it.
+	//
+	// In process only until plan 043's C2 puts it on the wire: the event codec
+	// does not encode it yet, so over a socket a delta carrying nothing else
+	// arrives as a meta with an empty state, which every client folds as no
+	// change.
+	Slash *SlashCatalog
 	// SendNow is the engine's armed send-now, in full: nil when this event did
 	// not touch it, Armed true for a send just armed, and a value with Armed
 	// false for one that is gone, with Reason saying why.
@@ -531,6 +543,12 @@ type Snapshot struct {
 	// provider, already resolved to the names the menu and the wire both use,
 	// in discovery order. Cloned by Snapshot.
 	Plugins []PluginCommand
+	// Slash is the session's slash catalog (plan 043 D1): every `/` row it
+	// offers, built by SlashCatalogFor from the sections above and the disk
+	// skills its host scanned, and rebuilt in the locked section that changes
+	// any of them. nil until the session's first install (or a catalog update
+	// before it) builds one. Its own copy, cloned by Snapshot.
+	Slash []SlashItem
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, as the last StateDelta.Usage left
 	// it. nil until a native session's first step — or its load's replay —
@@ -1321,6 +1339,20 @@ type AsideResult struct {
 type Asider interface {
 	Asides() bool
 	Aside(ctx context.Context, req AsideRequest, onDelta func(string)) (AsideResult, error)
+}
+
+// SkillRescanner is a session that keeps its slash catalog's disk skills by a
+// scan of its own (plan 043 P5): the live session, whose provider's skills are
+// SKILL.md trees craze finds on disk. RescanSkills asks for a scan and returns
+// at once: it takes one leaf mutex and waits on nothing else — no scan, no
+// lock of the session's, no publish — so a caller may make it from anywhere,
+// the engine's Attach included. What the scan finds is applied later, off the
+// caller's goroutine, and published as a StateDelta.Slash only when the catalog
+// changed. Like Asider it is optional and found by a type assertion; the native
+// session has no disk skills of this kind (its skills are plugin rows) and does
+// not implement it.
+type SkillRescanner interface {
+	RescanSkills()
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

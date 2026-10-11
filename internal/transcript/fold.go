@@ -702,6 +702,11 @@ var deltaFields = []deltaField{
 			m.settings.Truncated.SendNow = false
 		}
 	}},
+	// Slash (plan 043): the session's slash catalog. The model does not hold
+	// it yet — plan 043 C2 adds it to the settings, the snapshot and the
+	// codec — so the section is classified and folded as nothing until then,
+	// which is also what a client that predates it does with it.
+	{name: "Slash", apply: func(*Model, *agent.StateDelta, time.Time) {}},
 	// Usage (plan 028 §3.14, seam 8): a copy, so the model holds nothing the
 	// event it came from does. It has no truncation mark to clear.
 	{name: "Usage", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {

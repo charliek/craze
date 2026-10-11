@@ -1,10 +1,13 @@
-package transcript
+package agent
 
 // stripANSI and its transition table are ansi.Strip from
 // github.com/charmbracelet/x/ansi v0.10.1 (width.go, parser.go's utf8ByteLen,
-// and parser/transition_table.go), transcribed so that sanitizeLine gives the
-// TUI's exact answer without this package importing a terminal library (plan
-// 024 §3.1's depguard rule). Only the names changed. Its license:
+// and parser/transition_table.go), transcribed so that DisplayLine gives the
+// TUI's exact answer without importing a terminal library (plan 024 §3.1's
+// depguard rule). Only the names changed. It was internal/transcript's until
+// plan 043 C1 moved it here, below every client, so the slash catalog's
+// builder (slash.go) folds a description onto one line by the same rule the
+// transcript model and the TUI do, rather than by a third copy. Its license:
 //
 //	MIT License
 //
@@ -312,7 +315,8 @@ func utf8ByteLen(b byte) int {
 }
 
 // stripANSI is ansi.Strip: it removes ANSI escape codes, keeping printable
-// characters and the executed controls (which dropControls deals with next).
+// characters and the executed controls (which displayDropControls deals with
+// next).
 func stripANSI(s string) string {
 	var (
 		buf    strings.Builder // collects printable characters

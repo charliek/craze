@@ -133,6 +133,16 @@ func (e *Engine) Attach(ctx context.Context, o AttachOptions) (*Attachment, erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Every attach is a reason to look at the session's disk skills again (plan
+	// 043 P5): a client opening an idle session would otherwise see the skills
+	// of the last turn's end, and none created since. Asked for, never waited
+	// on — RescanSkills takes one leaf mutex and returns, and what the scan
+	// finds follows this attach's snapshot as a delta on its subscription — and
+	// before the snapshot, with nothing of the engine's held. A session with no
+	// scan of its own (native, the Stub) is not one.
+	if r, ok := e.sess.(agent.SkillRescanner); ok {
+		r.RescanSkills()
+	}
 	subscribe := func(after agent.Cursor) (*agent.Subscription, error) {
 		return e.log.Subscribe(agent.SubscribeOptions{
 			After: &after, MaxItems: o.MaxItems, MaxBytes: o.MaxBytes, Ctx: ctx,

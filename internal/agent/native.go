@@ -709,6 +709,12 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.Modes = nativeModes()
 	s.snap.CurrentMode = nativeCurrentMode(hs.Mode())
 	s.refreshCurrentLocked()
+	// The slash catalog over all of it (plan 043 D2): the commands, the plugin
+	// rows and the modes just installed, and no disk skills — native's skills
+	// are plugin rows, resolved once here (X3), so it never scans and its
+	// catalog never changes after this. Both installs restate it
+	// (installDeltaLocked).
+	s.snap.Slash = SlashCatalogFor(s.snap, nil).Items
 	// The wake worker, in the section that installs the harness it wakes,
 	// so a Close that finds the harness finds the worker to join too
 	// (native_wake.go). It has nothing to do until a background child's
@@ -785,6 +791,7 @@ func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
 		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
 		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		Slash:    &SlashCatalog{Items: cloneSlash(s.snap.Slash)},
 	}
 	if withTitle {
 		title := s.snap.Title
@@ -3159,6 +3166,9 @@ func (s *nativeSession) Snapshot() Snapshot {
 	// copy, so handing out the backing array would let a consumer that sorted
 	// or filtered its rows change what a typed name resolves to.
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
+	// The slash catalog likewise (plan 043 P6): a client projecting it into a
+	// menu must not be able to reach the session's own rows.
+	out.Slash = cloneSlash(s.snap.Slash)
 	out.Config = cloneConfig(s.snap.Config)
 	// Cloned for the same reason, and for one of its own: the list the tasks
 	// panel draws is replaced whole by every todo_write (applyTodos), and a

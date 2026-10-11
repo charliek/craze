@@ -89,7 +89,9 @@ const (
 // before /exit (slashCatalog). builtinNamed never names it — like /connect,
 // where it is not offered a plugin's or the agent's /btw is what it always
 // was — so dispatch has its own gate (handleEnter).
-var btwBuiltin = slashItem{Name: "btw", Desc: "Ask a side question (not saved): /btw <question>", Builtin: true}
+//
+// Its name and description are agent's descriptor table's (plan 043 D1).
+var btwBuiltin = tableBuiltin("btw")
 
 // btwOffered reports whether this session has /btw: its backend says it
 // answers side questions (SessionInfo.Aside) — a native, grok or gx session,

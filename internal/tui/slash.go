@@ -76,19 +76,42 @@ func (it slashItem) qualifiedAlias() string {
 	return it.Qualified
 }
 
-func builtinSlash() []slashItem {
-	return []slashItem{
-		{Name: "help", Desc: "Keybindings and commands", Builtin: true},
-		{Name: "model", Desc: "Switch model", Builtin: true},
-		{Name: "clear", Desc: "Clear transcript", Builtin: true},
-		{Name: "tasks", Desc: "Tasks panel: compact, expanded, hidden", Builtin: true},
-		{Name: "theme", Desc: "Theme picker, or /theme <name>", Builtin: true},
-		{Name: "rename", Desc: "Rename this session, /rename <title>", Builtin: true},
-		{Name: "plan", Desc: "Set plan mode", Builtin: true},
-		{Name: "ask", Desc: "Set ask mode", Builtin: true},
-		{Name: "agent", Desc: "Set agent mode", Builtin: true},
-		{Name: "exit", Desc: "End this session", Builtin: true},
+// builtinSlash is craze's fixed builtins — help, model, clear, tasks, theme,
+// rename, plan, ask, agent, exit — with the descriptions the menu draws: the
+// reserved rows of agent's descriptor table (agent.SlashBuiltins), the one
+// place a builtin's name and sentence are written, so the menu here and the
+// catalog a host sends cannot describe one differently (plan 043 D1, P12).
+// Each call returns a slice of its own, as it always has.
+func builtinSlash() []slashItem { return slices.Clone(reservedSlash) }
+
+// reservedSlash is builtinSlash's rows, read off the table once.
+var reservedSlash = func() []slashItem {
+	var out []slashItem
+	for _, b := range agent.SlashBuiltins() {
+		if b.Reserved {
+			out = append(out, menuBuiltin(b.Item))
+		}
 	}
+	return out
+}()
+
+// tableBuiltin is the table's row named name as a menu row — /btw and
+// /connect, the two builtins that are not reserved and are listed only where
+// the session has them (btwBuiltin, connectBuiltin). A name the table lacks is
+// a programming error, and the package fails at init rather than drawing a
+// blank row.
+func tableBuiltin(name string) slashItem {
+	for _, b := range agent.SlashBuiltins() {
+		if b.Item.Name == name {
+			return menuBuiltin(b.Item)
+		}
+	}
+	panic("tui: the slash table has no builtin " + name)
+}
+
+// menuBuiltin is a row of the table as the menu draws it.
+func menuBuiltin(it agent.SlashItem) slashItem {
+	return slashItem{Name: it.Name, Desc: it.Description, Builtin: true}
 }
 
 // sessionsBuiltin is /sessions (plan 030 §3.10): the session list, a
@@ -207,28 +230,10 @@ func (m Model) slashCatalog() []slashItem {
 	return items
 }
 
-// slashNameOK keeps the catalog to names a token could hold. A directory name
-// or an advertised command with whitespace in it could never be typed as one
-// token, so it would sit in the menu unreachable; a control character would
-// break the row it draws on. Rejecting them here means every later stage — the
-// filter, the accept, the row — can assume one clean token.
-//
-// utf8.RuneError goes with them, and for a sharper reason than looks: bubbles'
-// rune sanitizer *drops* it (runeutil.go:67), so a name carrying one — or the
-// invalid UTF-8 that range yields it for — would come out of SetValue shorter
-// than the string acceptSlash measured the new cursor offset against, and the
-// cursor would land that many bytes into the rest of the draft.
-func slashNameOK(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
-			return false
-		}
-	}
-	return true
-}
+// slashNameOK keeps the catalog to names a token could hold: agent.SlashNameOK,
+// which says why, and which the host's catalog builder applies too (plan 043
+// C1 moved it there with the catalog).
+func slashNameOK(name string) bool { return agent.SlashNameOK(name) }
 
 // slashToken is the slash token under the cursor: [start,end) are byte offsets
 // into value on rune boundaries, name is the token without its "/", and ok
