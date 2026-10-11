@@ -208,6 +208,40 @@ func TestCutResult(t *testing.T) {
 	}
 }
 
+// TestTheResultsPathIsTheResolvedOne (C10): with HOME reached through a
+// symlink — macOS's temp directories, /var → /private/var, the condition
+// under which the --max-message tests failed there — craze writes, and
+// names, a cut result's file under its HOME resolved; resultsPath, which
+// every test comparing such a path builds its expectation with, is that
+// path, and a join on the unresolved HOME is not.
+func TestTheResultsPathIsTheResolvedOne(t *testing.T) {
+	target := t.TempDir()
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(target, home); err != nil {
+		t.Fatal(err)
+	}
+	env := rundir.Env{Home: home, EUID: os.Geteuid()}
+	res := newResult(resultSession{id: "0199c0de-1111-7000-8000-00000000a001", provider: "native", model: "m"}, statusCompleted)
+	res.Turn, res.inc = "turn-1", "0199c0de-2222-7000-8000-00000000b001"
+	a := newTurnAccumulator()
+	a.fold(agent.Event{Type: agent.EventText, Text: "0123456789abcdefghij"})
+	res.fill(a)
+	var out, errs strings.Builder
+	if err := writeResult(&out, &errs, resultOutput{what: waitWhat, maxMessage: 10, env: env}, res); err != nil {
+		t.Fatalf("writeResult: %v, %q", err, errs.String())
+	}
+	const name = "0000a001-0000b001-turn-1.md"
+	if want := resultsPath(t, env, name); res.MessageFile != want || !strings.Contains(out.String(), "[… cut: full result in "+want+"]") {
+		t.Fatalf("the cut result's file is %q, printed %q; want %q", res.MessageFile, out.String(), want)
+	}
+	if naive := filepath.Join(home, ".cache", "craze", "results", name); res.MessageFile == naive {
+		t.Fatalf("the file is named through the unresolved HOME %s: the symlink does not reproduce the macOS condition", naive)
+	}
+}
+
 // TestAReloadsResultIsAFileOfItsOwn (C8, 1): turn ids restart at turn-1 with
 // every incarnation, and a reloaded session keeps its short id; so two
 // results for turn-1 of two incarnations of one session, both cut, are

@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -403,6 +405,11 @@ func reparent(raw string, shared bool) int {
 		fmt.Fprintf(os.Stderr, "craze: %s is set, and there is no ready pipe (%s=3) to pass on\n", ReparentEnv, ReadyFDEnv)
 		return 2
 	}
+	// Before anything else, everything this process holds past the ready
+	// pipe — the report pipe, and whatever its spawner was itself handed
+	// open and not close-on-exec (C10) — stays behind when the host is
+	// started (closeOnExecInherited).
+	closeOnExecInherited()
 	// Only the ready pipe crosses to the host.
 	syscall.CloseOnExec(fd)
 	report := os.NewFile(uintptr(fd), "craze-reparent")
@@ -455,6 +462,49 @@ func reparent(raw string, shared bool) int {
 		return 1
 	}
 	return 0
+}
+
+// closeOnExecInherited marks every descriptor the intermediate holds past the
+// ones it hands the host on purpose — stdin, stdout and stderr (/dev/null)
+// and the ready pipe, 3 — close-on-exec (plan 041 C10): a descriptor its
+// spawner was itself handed open, and not close-on-exec, would otherwise
+// reach the host through the intermediate's exec and be held for the host's
+// whole life — a caller's pipe never seeing its end, a Bash tool's output
+// pipe keeping that call open while the host lives (seen on a CI runner,
+// whose test process held two such pipes). Not fatal: a descriptor that
+// cannot be marked is left as it is, and said on stderr (the spawner's
+// /dev/null, but a person running craze by hand sees it).
+func closeOnExecInherited() {
+	if err := closeOnExecFrom(4); err != nil {
+		fmt.Fprintln(os.Stderr, "craze: the intermediate's descriptors:", err)
+	}
+}
+
+// closeOnExecListed marks close-on-exec each descriptor from first up that
+// dir — /proc/self/fd, /dev/fd — lists for this process. The directory's own
+// descriptor is among them, closed once it is read: marking it then fails
+// EBADF, which is no descriptor left to hand on, and is passed over. Any
+// other failure is answered, the rest marked all the same.
+func closeOnExecListed(dir string, first int) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil || fd < first {
+			continue
+		}
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err == nil {
+			_, err = unix.FcntlInt(uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC)
+		}
+		if err != nil && !errors.Is(err, unix.EBADF) {
+			errs = append(errs, fmt.Errorf("descriptor %d: %w", fd, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // isPipe reports whether fd is an open pipe or FIFO.

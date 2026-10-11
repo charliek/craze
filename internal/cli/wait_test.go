@@ -362,9 +362,24 @@ func TestSessionIdsNoLiveHostServes(t *testing.T) {
 
 // resultsFile is the file --max-message writes the whole result of r's turn
 // to: <short>-<inc>-<turn>.md, inc the incarnation's last 8 characters (C8,
-// 1).
+// 1), in the results directory as craze resolves it (resultsPath).
 func (r *waitRig) resultsFile(turn string) string {
-	return filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-"+psShort(r.eng.State().Incarnation)+"-"+turn+".md")
+	return resultsPath(r.t, r.env, "0000a001-"+psShort(r.eng.State().Incarnation)+"-"+turn+".md")
+}
+
+// resultsPath is where craze writes a --max-message result named name under
+// env, as craze itself resolves it (rundir.ResultsDir): the cache tree
+// canonical, so on macOS, whose temp directories are reached through /var →
+// /private/var, a path under /private/var — never a join on the unresolved
+// HOME, which names the same file by another path and so never equals the
+// one craze prints (C10).
+func resultsPath(t *testing.T, env rundir.Env, name string) string {
+	t.Helper()
+	dir, err := rundir.ResultsDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, name)
 }
 
 // TestWaitMaxMessageBoundsThePlanToo (C3 r3, 4; C8, 2): --max-message's

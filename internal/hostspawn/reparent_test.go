@@ -157,7 +157,21 @@ func readLine(t *testing.T, f *os.File) (string, error) {
 // the ready pipe is the host's alone (EOF once it closed it). The Child, an
 // identity and no reaper, says it serves, then ends it: Terminate returns
 // with it gone, its pid no one's, its Err nil.
+//
+// The spawner here holds a pipe that is not close-on-exec, as a CI runner
+// hands its test process (C10): the intermediate inherits it, and the host
+// must not — its pipes are the ready pipe's 3 alone.
 func TestStartReparentedLeavesTheSpawnersTree(t *testing.T) {
+	inheritedR, inheritedW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inheritedR.Close(); _ = inheritedW.Close() })
+	for _, f := range []*os.File{inheritedR, inheritedW} {
+		if _, err := unix.FcntlInt(f.Fd(), unix.F_SETFD, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cmd := fakeHostCmd(t, "CRAZE_HOSTSPAWN_TEST_MARK=kept")
 	child, r, err := StartReparented(context.Background(), cmd, HostChildEnv, "", "", ReparentSpawn{})
 	if err != nil {
@@ -216,6 +230,37 @@ func TestStartReparentedLeavesTheSpawnersTree(t *testing.T) {
 	}
 	if _, err := rundir.ProcessIdentity(self.PID); !errors.Is(err, rundir.ErrNoProcess) {
 		t.Fatalf("the host's pid after Terminate: %v", err)
+	}
+}
+
+// TestCloseOnExecListedMarksWhatItLists (C10): the walk the intermediate
+// falls back to — macOS's only way, /dev/fd; Linux's before close_range's
+// CLOEXEC flag (5.11), /proc/self/fd — marks close-on-exec each descriptor it
+// lists from first up: a pipe whose flag was cleared has it again, both ends,
+// and the walk's own directory descriptor, closed under it, is no error.
+func TestCloseOnExecListedMarksWhatItLists(t *testing.T) {
+	dir := "/dev/fd"
+	if runtime.GOOS == "linux" {
+		dir = "/proc/self/fd"
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	fds := []int{int(r.Fd()), int(w.Fd())}
+	for _, fd := range fds {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := closeOnExecListed(dir, min(fds[0], fds[1])); err != nil {
+		t.Fatalf("closeOnExecListed(%s): %v", dir, err)
+	}
+	for _, fd := range fds {
+		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("descriptor %d after the walk: flags %#x, %v; want close-on-exec", fd, flags, err)
+		}
 	}
 }
 
