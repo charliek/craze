@@ -19,9 +19,11 @@ import (
 // which is the provider's answer: stop is the host's own, and a server that
 // serves session.stop turns it on in the document it builds
 // (sessionInfoReady; plan 030 §3.6a), as a server with the row facts turns on
-// rowFacts (§3.8), one that counts its clients presence (plan 032 §3.14) and
-// one whose session can take up models modelsRefresh (plan 034 §3.4), each
-// omitted while false. TestEveryCapabilityIsOnTheWire
+// rowFacts (§3.8), one that counts its clients presence (plan 032 §3.14), one
+// whose session can take up models modelsRefresh (plan 034 §3.4), one whose
+// session answers side questions aside (plan 040 §3.2) and one whose session
+// publishes the slash catalog slashCatalog (plan 043 P2), each omitted while
+// false. TestEveryCapabilityIsOnTheWire
 // holds every agent.Capabilities field to a wire name here and in the schema,
 // so a field added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
@@ -107,6 +109,11 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	// so this server serves session.aside and session.aside.cancel for it
 	// (serves); left out for one that does not, cursor's.
 	info.Capabilities.Aside = eng.Asides()
+	// slashCatalog is the session's too (plan 043 P2): it publishes the slash
+	// catalog section on its stream and in its snapshots, so a client can offer
+	// its `/` menu from them; left out for one that does not — a session that
+	// is not craze's own, the fake host's by default — and by an older host.
+	info.Capabilities.SlashCatalog = eng.PublishesSlashCatalog()
 	if ready {
 		// The list as the session offers it now, with its revision, read in
 		// the one State: a native session's reload swaps both in one locked

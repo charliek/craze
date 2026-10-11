@@ -29,9 +29,6 @@ import (
 // test: a codec that began carrying one fails it.
 var codecExcluded = map[string]string{
 	"Event.Seq": "the record envelope's (Record.Seq, the journal line's seq), not the codec object's; Record.Event sets it back",
-	// Plan 043 C1 builds the slash catalog in process; C2 puts it on the wire
-	// and takes this line out — which this test will insist on.
-	"StateDelta.Slash": "in process only until plan 043 C2 encodes the slash catalog",
 }
 
 // codecExclusion is why typ's field is one of codecExcluded, or "".
@@ -599,6 +596,22 @@ func emitSiteEvents() []emitSiteEvent {
 				{ID: "fireworks/kimi-k3", Name: "Kimi K3 (Fireworks)"},
 			}},
 		}, At: at}},
+		// The slash catalog (plan 043 C2) as the live session's commands
+		// update publishes it — the commands, the plugin rows resolved
+		// against them and the catalog built from both, one delta (P3) —
+		// over a grok-like session advertising agent and plan but not ask,
+		// so every run kind but local's and picker's own is in it: a mode
+		// row unavailable, a requires row, a plugin row with its qualified
+		// spelling, a skill.
+		{"a commands update, the slash catalog restated beside it", Event{Type: EventMeta, State: &StateDelta{
+			Commands: &CommandsState{Commands: slashCodecCommands()},
+			Plugins:  &PluginsState{Plugins: slashCodecPlugins()},
+			Slash:    &SlashCatalog{Items: slashCodecCatalog().Items},
+		}, At: at}},
+		{"a skill scan's change, the slash catalog alone", Event{Type: EventMeta, State: &StateDelta{
+			Slash: &SlashCatalog{Items: slashCodecCatalog().Items},
+		}, At: at}},
+		{"a slash catalog cleared", Event{Type: EventMeta, State: &StateDelta{Slash: &SlashCatalog{}}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
 }
@@ -788,6 +801,40 @@ func pinnedWireShapes() []pinnedWireShape {
 				`{"id":"test/b","name":""}],"revision":3}}}`},
 		{Event{Type: EventMeta, State: &StateDelta{Catalog: &CatalogState{}}},
 			`{"type":"meta","state":{"catalog":{"revision":0}}}`},
+		// The slash section (plan 043 §3.2): the rows under a key of their
+		// own, each with its name always and every other key omitted at its
+		// zero value — an absent arg is none, an absent whileWorking false —
+		// the run's kind always within a run, and session.set's setting as a
+		// client sends it; HTML not escaped. Present and empty is {}, a
+		// catalog cleared.
+		{Event{Type: EventMeta, State: &StateDelta{
+			Commands: &CommandsState{Commands: []CommandInfo{{Name: "deploy", Description: "ship it"}}},
+			Slash: &SlashCatalog{Items: []SlashItem{
+				{Name: "rename", Description: "Rename this session, /rename <title>", Source: SlashSourceBuiltin, WhileWorking: true,
+					Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodSetTitle, Param: "title", Arg: SlashArgRequired, ArgHint: "<title>"}},
+				{Name: "plan", Description: "Set plan mode", Source: SlashSourceBuiltin,
+					Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodSet, Setting: SlashSetting{Kind: "mode", Value: "plan"}}},
+				{Name: "ask", Description: "Set ask mode", Source: SlashSourceBuiltin,
+					Run: SlashRun{Kind: SlashRunUnavailable, Reason: "mode ask is not advertised"}},
+				{Name: "btw", Description: "Ask a side question (not saved): /btw <question>", Source: SlashSourceBuiltin,
+					Requires: SlashRequiresAside, WhileWorking: true,
+					Run: SlashRun{Kind: SlashRunAside, Param: "question", Arg: SlashArgRequired, ArgHint: "<question>"}},
+				{Name: "review", Description: "look it over", Source: SlashSourcePlugin, Plugin: "pr-tools", Qualified: "pr-tools:review",
+					Run: SlashRun{Kind: SlashRunPrompt, Arg: SlashArgOptional}},
+				{Name: "deploy", Description: "ship it", Source: SlashSourceAgent, Run: SlashRun{Kind: SlashRunPrompt, Arg: SlashArgOptional}},
+			}},
+		}},
+			`{"type":"meta","state":{"commands":{"commands":[{"name":"deploy","description":"ship it"}]},"slash":{"items":[` +
+				`{"name":"rename","description":"Rename this session, /rename <title>","source":"builtin","whileWorking":true,` +
+				`"run":{"kind":"method","method":"session.setTitle","param":"title","arg":"required","argHint":"<title>"}},` +
+				`{"name":"plan","description":"Set plan mode","source":"builtin","run":{"kind":"method","method":"session.set","setting":{"kind":"mode","value":"plan"}}},` +
+				`{"name":"ask","description":"Set ask mode","source":"builtin","run":{"kind":"unavailable","reason":"mode ask is not advertised"}},` +
+				`{"name":"btw","description":"Ask a side question (not saved): /btw <question>","source":"builtin","requires":"aside","whileWorking":true,` +
+				`"run":{"kind":"aside","param":"question","arg":"required","argHint":"<question>"}},` +
+				`{"name":"review","description":"look it over","source":"plugin","plugin":"pr-tools","qualified":"pr-tools:review","run":{"kind":"prompt","arg":"optional"}},` +
+				`{"name":"deploy","description":"ship it","source":"agent","run":{"kind":"prompt","arg":"optional"}}]}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{Slash: &SlashCatalog{}}},
+			`{"type":"meta","state":{"slash":{}}}`},
 	}
 }
 
@@ -1440,6 +1487,8 @@ func TestLeafWrappersWriteWhatTheEventCarries(t *testing.T) {
 		[]string{"state", "commands"}, EncodeCommandsState, DecodeCommandsState)
 	checkLeaf(t, "PluginsState", func(v *PluginsState) Event { return Event{Type: EventMeta, State: &StateDelta{Plugins: v}} },
 		[]string{"state", "plugins"}, EncodePluginsState, DecodePluginsState)
+	checkLeaf(t, "SlashCatalog", func(v *SlashCatalog) Event { return Event{Type: EventMeta, State: &StateDelta{Slash: v}} },
+		[]string{"state", "slash"}, EncodeSlashCatalog, DecodeSlashCatalog)
 	checkLeaf(t, "SendNowState", func(v *SendNowState) Event { return Event{Type: EventMeta, State: &StateDelta{SendNow: v}} },
 		[]string{"state", "sendNow"}, EncodeSendNowState, DecodeSendNowState)
 	checkLeaf(t, "UsageState", func(v *UsageState) Event { return Event{Type: EventMeta, State: &StateDelta{Usage: v}} },

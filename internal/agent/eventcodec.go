@@ -57,6 +57,10 @@ import (
 //     sanitizeText, which make the same replacement. The rest — the user's
 //     own text, a plugin file's body in ExpandedCommand.Text — reached the
 //     agent as JSON too, so the replaced text is what the agent was given.
+//   - A slash catalog row whose name no token could hold is dropped on
+//     decode, as is a row that is not one at all (wireSlashIn): the
+//     malformed-row rule every client of the section keeps. The builder never
+//     makes one, so no catalog a session publishes loses a row.
 //
 // Every other field is carried exactly, uncapped, except Event.Seq: the
 // sequence number belongs to the record envelope (the event log's Record.Seq,
@@ -578,12 +582,125 @@ type wireState struct {
 	Config   *wireConfig      `json:"config,omitempty"`
 	Commands *wireCommands    `json:"commands,omitempty"`
 	Plugins  *wirePluginsList `json:"plugins,omitempty"`
+	Slash    *wireSlashIn     `json:"slash,omitempty"`
 	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
 	Usage    *wireUsage       `json:"usage,omitempty"`
 	Catalog  *wireCatalog     `json:"catalog,omitempty"`
 	Reason   string           `json:"reason,omitempty"`
 	Detail   string           `json:"detail,omitempty"`
 	IndexErr string           `json:"indexErr,omitempty"`
+}
+
+// wireSlash is a SlashCatalog (plan 043 §3.2, D4): the session's slash
+// catalog, its rows under a key of their own as the list sections keep theirs
+// — {"items":[…]} — so a section that is present and empty ({}) is a catalog
+// cleared and an absent one is a delta that did not touch it (P6). It sits
+// beside commands and plugins, which it is built from and travels with: a
+// delta that carries either always restates it (P3), and one that carries it
+// alone is a change of the disk skills a scan found. An older decoder skips
+// the key as it skips any key it does not know, so the section is additive:
+// no codec version bump (§2.6), and a client that predates it folds every
+// other section exactly as before.
+//
+// Like the catalog section, this codec cuts nothing (P7): a row's name, its
+// qualified spelling, its plugin, its requires and its run are what a client
+// acts on, and one cut short would name a command, a method or a setting that
+// does not exist. Commands and plugins travel the same way — whole, every
+// string uncapped — so a delta carrying the three is held to the event log's
+// record limit as a commands-and-plugins delta always was: an event over it is
+// omitted, and its subscriber resets and attaches again, its snapshot carrying
+// the catalog held to the snapshot's own bounds (internal/transcript's
+// capSlash: a row with an action field over ItemCap dropped, a description cut
+// to its head, at most SlashRows rows, the section marked truncated — and the
+// whole catalog left out, marked, where it would not fit the budget).
+//
+// wireSlash is the section's shape — what the encoder writes, and what
+// event.json's slash $def describes (TestEventSchemaCoversTheCodec walks it
+// there) — and wireSlashIn is the same shape as the decoder reads it, row by
+// row (UnmarshalJSON).
+type wireSlash struct {
+	Items []wireSlashItem `json:"items,omitempty"`
+}
+
+// wireSlashIn is wireSlash as a decoder reads it (plan 043 P17, §3.2:
+// "malformed rows are dropped individually; the section is never rejected for
+// one row"): each row on its own, so a row that is not an object of
+// wireSlashItem's shape — a key of the wrong type, "name":42 — or whose name
+// a token could not hold (SlashNameOK: empty, whitespace, a control
+// character, invalid UTF-8) is dropped and the rest kept, and a section or an
+// items list that is not an object or an array is a section with no rows. The
+// event around it decodes as it would have, so one bad row from a host can
+// never end a client's stream. A row's keys this build does not know are
+// skipped, as everywhere. null is no section at all — the pointer's nil —
+// as for every section.
+//
+// The encoder writes it as the plain struct it is: craze's builder never
+// makes a row this drops (BuildSlashCatalog keeps SlashNameOK names alone),
+// so for every catalog a session publishes the codec is lossless.
+type wireSlashIn wireSlash
+
+// UnmarshalJSON is wireSlashIn's row-by-row read. It never fails: the
+// bytes are already known to be JSON (encoding/json checks the whole input
+// before it calls this), and everything else degrades to fewer rows.
+func (w *wireSlashIn) UnmarshalJSON(b []byte) error {
+	*w = wireSlashIn{}
+	var sec struct {
+		Items json.RawMessage `json:"items"`
+	}
+	var rows []json.RawMessage
+	if json.Unmarshal(b, &sec) != nil || len(sec.Items) == 0 || json.Unmarshal(sec.Items, &rows) != nil {
+		return nil
+	}
+	for _, raw := range rows {
+		var it wireSlashItem
+		if json.Unmarshal(raw, &it) != nil || !SlashNameOK(it.Name) {
+			continue
+		}
+		w.Items = append(w.Items, it)
+	}
+	return nil
+}
+
+// wireSlashItem is a SlashItem: name always written — the token a client
+// matches, accepts and runs the row by, which the protocol's schema requires —
+// and every other key omitted at its zero value, run included when it is the
+// zero SlashRun (no row the builder makes has one). It is not converted by a
+// plain conversion, because its run is a struct of its own wire twin; the
+// completeness test (TestEventCodecCarriesEveryFieldReachableFromEvent) fills
+// every field of it, so a field SlashItem gains and this misses fails there.
+type wireSlashItem struct {
+	Name         string       `json:"name"`
+	Description  string       `json:"description,omitempty"`
+	Source       string       `json:"source,omitempty"`
+	Plugin       string       `json:"plugin,omitempty"`
+	Qualified    string       `json:"qualified,omitempty"`
+	Requires     string       `json:"requires,omitempty"`
+	WhileWorking bool         `json:"whileWorking,omitempty"`
+	Run          wireSlashRun `json:"run,omitzero"`
+}
+
+// wireSlashRun is a SlashRun: kind always written once there is a run at all
+// (a client hides a row whose kind it does not know, P17, so the key is never
+// left to be guessed), every other key omitted at its zero value — arg
+// absent is "none", and setting absent is a run that sends none.
+type wireSlashRun struct {
+	Kind    string           `json:"kind"`
+	Method  string           `json:"method,omitempty"`
+	Param   string           `json:"param,omitempty"`
+	Setting wireSlashSetting `json:"setting,omitzero"`
+	Arg     string           `json:"arg,omitempty"`
+	ArgHint string           `json:"argHint,omitempty"`
+	Picker  string           `json:"picker,omitempty"`
+	Local   string           `json:"local,omitempty"`
+	Reason  string           `json:"reason,omitempty"`
+}
+
+// wireSlashSetting is SlashSetting, field for field in the same order, so it
+// converts by a plain conversion: session.set's setting object as a client
+// sends it, verbatim.
+type wireSlashSetting struct {
+	Kind  string `json:"kind,omitempty"`
+	Value string `json:"value,omitempty"`
 }
 
 // wireCatalog is a CatalogState (plan 034 §3.4, Q17): the models a native
@@ -808,10 +925,55 @@ func toWireEvent(ev Event) wireEvent {
 		w.State.Config = toWireConfig(s.Config)
 		w.State.Commands = toWireCommands(s.Commands)
 		w.State.Plugins = toWirePlugins(s.Plugins)
+		w.State.Slash = toWireSlash(s.Slash)
 		w.State.Catalog = toWireCatalog(s.Catalog)
 	}
 	w.Err = toWireError(ev.Err)
 	return w
+}
+
+// toWireSlash is a slash section on the wire, nil for nil: a StateDelta's and
+// a transcript snapshot's (EncodeSlashCatalog). Every row is carried as it
+// is, an action field never cut (wireSlash).
+func toWireSlash(c *SlashCatalog) *wireSlashIn {
+	if c == nil {
+		return nil
+	}
+	return &wireSlashIn{Items: convertSlice(c.Items, func(it SlashItem) wireSlashItem {
+		r := it.Run
+		return wireSlashItem{
+			Name: it.Name, Description: it.Description, Source: it.Source,
+			Plugin: it.Plugin, Qualified: it.Qualified, Requires: it.Requires,
+			WhileWorking: it.WhileWorking,
+			Run: wireSlashRun{
+				Kind: r.Kind, Method: r.Method, Param: r.Param, Setting: wireSlashSetting(r.Setting),
+				Arg: r.Arg, ArgHint: r.ArgHint, Picker: r.Picker, Local: r.Local, Reason: r.Reason,
+			},
+		}
+	})}
+}
+
+// slash is a wireSlashIn back as a SlashCatalog, nil for nil. A value this
+// build does not know — a source, a run kind, a method, a requires, a local
+// action a later host adds — is kept as it came (P17): it is the client's to
+// hide the row, never the decoder's to refuse the section. A row the decoder
+// could not read is already gone (UnmarshalJSON).
+func (w *wireSlashIn) slash() *SlashCatalog {
+	if w == nil {
+		return nil
+	}
+	return &SlashCatalog{Items: convertSlice(w.Items, func(it wireSlashItem) SlashItem {
+		r := it.Run
+		return SlashItem{
+			Name: it.Name, Description: it.Description, Source: it.Source,
+			Plugin: it.Plugin, Qualified: it.Qualified, Requires: it.Requires,
+			WhileWorking: it.WhileWorking,
+			Run: SlashRun{
+				Kind: r.Kind, Method: r.Method, Param: r.Param, Setting: SlashSetting(r.Setting),
+				Arg: r.Arg, ArgHint: r.ArgHint, Picker: r.Picker, Local: r.Local, Reason: r.Reason,
+			},
+		}
+	})}
 }
 
 // toWireCatalog is a catalog section on the wire, nil for nil: a StateDelta's,
@@ -1113,6 +1275,7 @@ func (w *wireEvent) event() Event {
 		ev.State.Config = s.Config.config()
 		ev.State.Commands = s.Commands.commands()
 		ev.State.Plugins = s.Plugins.plugins()
+		ev.State.Slash = s.Slash.slash()
 		ev.State.Catalog = s.Catalog.catalog()
 	}
 	if e := w.Err; e != nil {
@@ -1472,6 +1635,22 @@ func DecodePluginsState(raw json.RawMessage) (*PluginsState, error) {
 		return nil, err
 	}
 	return w.plugins(), nil
+}
+
+// EncodeSlashCatalog is c as the event codec writes a StateDelta's Slash
+// section (plan 043 §3.2), nil for nil: what a transcript snapshot's settings
+// carry.
+func EncodeSlashCatalog(c *SlashCatalog) (json.RawMessage, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return encodeLeaf("slash", toWireSlash(c))
+}
+
+// DecodeSlashCatalog is EncodeSlashCatalog's inverse.
+func DecodeSlashCatalog(raw json.RawMessage) (*SlashCatalog, error) {
+	w, err := decodeLeaf[wireSlashIn]("slash", raw)
+	return w.slash(), err
 }
 
 // EncodeSendNowState is s as the event codec writes a StateDelta's SendNow

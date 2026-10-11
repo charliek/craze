@@ -14,10 +14,11 @@ import (
 // the engine's live memory:
 //
 //  1. m.shared, this client's own fold of the stream: the settings (title,
-//     mode, model, config, the catalogs of commands and plugins, the armed
-//     send-now, and — once a native session has reloaded its table — the
-//     models it offers), the todo list, the roster, the ordered tools, the
-//     queue and the agent's own turn (transcript.Model.Mirror);
+//     mode, model, config, the catalogs of commands and plugins, the slash
+//     catalog (plan 043), the armed send-now, and — once a native session
+//     has reloaded its table — the models it offers), the todo list, the
+//     roster, the ordered tools, the queue and the agent's own turn
+//     (transcript.Model.Mirror);
 //  2. Backend.Info(), the session's facts: the provider — by name, for its
 //     local vocabulary; its capabilities come from Info through caps() — the
 //     provider's session id, and the model and mode catalogs, the model
@@ -79,6 +80,10 @@ func (m *Model) recompute() {
 		Provider:     providerNamed(info.Provider),
 		ForeignTurn:  f.Turn.Foreign != nil && f.Turn.Foreign.Running,
 		Plugins:      f.Settings.Plugins,
+		// The session's slash catalog (plan 043 P6), the fold's own copy of
+		// the last slash section folded: nil from a session that publishes
+		// none (Info().SlashCatalog false), and until its install.
+		Slash: f.Settings.Slash,
 		// The session's usage (plan 028 §3.14): the status row reads it from
 		// the fold like every other settings section.
 		Usage: f.Settings.Usage,

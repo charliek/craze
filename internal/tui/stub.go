@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -116,6 +117,20 @@ type Stub struct {
 	// fixtures carry the install every real client would see.
 	InstallOnStart bool
 
+	// PublishSlash makes the Stub a session that publishes the slash catalog
+	// (plan 043 C2; stub_slash.go): agent.SlashCataloger says so — so a host
+	// over it says capabilities.slashCatalog — its install delta carries the
+	// catalog agent.SlashCatalogFor builds over its snapshot and the disk
+	// skills SetSkills gave it, and SetCommands, SetPlugins and SetSkills
+	// publish what the live session would: one delta per change, the slash
+	// section restated beside commands or plugins, alone for a skills
+	// change, and nothing for a change that changed nothing. Off — every
+	// Stub, unless a test or the fake host opts in — the Stub publishes no
+	// catalog and its deltas are byte-for-byte what they always were, so no
+	// golden and no wire fixture from before it moves. Set before Start, with
+	// InstallOnStart.
+	PublishSlash bool
+
 	// Replay is the transcript Start hands back before the session is up, as
 	// a loaded session's replay does. Start emits agent.EventReplay{start},
 	// then each of these with Replayed set, then agent.EventReplay{end} —
@@ -152,6 +167,10 @@ type Stub struct {
 	// asides is what AsidingStub's side questions read and write (plan 040
 	// §3.8; stub_aside.go): set-up and state, under mu.
 	asides stubAsides
+	// skills are the disk skills a PublishSlash Stub's catalog lists, as the
+	// live session's last scan found them (SetSkills; stub_slash.go), under
+	// mu.
+	skills []agent.Skill
 }
 
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
@@ -349,10 +368,18 @@ func (s *Stub) SetTodos(todos []agent.Todo) {
 // mirror reads. The flush makes it a test-side call only (flushSetter): past
 // the primary's buffer with nobody reading it, it blocks, and it must never
 // be called from the primary's reader.
+//
+// A PublishSlash Stub publishes what the live session's update does instead
+// (catalogDeltaLocked): the commands with the slash catalog restated beside
+// them, and nothing at all for a list it already had.
 func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 	s.mu.Lock()
+	before := s.snap.Commands
 	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
-	s.enqueueDeltaLocked("", &agent.StateDelta{Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), cmds...)}})
+	st := &agent.StateDelta{Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), cmds...)}}
+	if st = s.catalogDeltaLocked(st, slices.Equal(before, s.snap.Commands)); st != nil {
+		s.enqueueDeltaLocked("", st)
+	}
 	s.mu.Unlock()
 	s.flushSetter()
 }
@@ -363,10 +390,17 @@ func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 // same test-side constraint (flushSetter). Tests build it through
 // agent.ResolvePluginNames so the naming rule under test is the one the
 // session applies.
+//
+// A PublishSlash Stub restates the slash catalog beside them, as SetCommands
+// does.
 func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 	s.mu.Lock()
+	before := s.snap.Plugins
 	s.snap.Plugins = append([]agent.PluginCommand(nil), plugins...)
-	s.enqueueDeltaLocked("", &agent.StateDelta{Plugins: &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), plugins...)}})
+	st := &agent.StateDelta{Plugins: &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), plugins...)}}
+	if st = s.catalogDeltaLocked(st, slices.Equal(before, s.snap.Plugins)); st != nil {
+		s.enqueueDeltaLocked("", st)
+	}
 	s.mu.Unlock()
 	s.flushSetter()
 }
@@ -594,6 +628,9 @@ func (s *Stub) installStateLocked() *agent.StateDelta {
 		Config:   &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)},
 		Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), s.snap.Commands...)},
 		Plugins:  &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), s.snap.Plugins...)},
+		// A PublishSlash Stub's install restates its catalog, as every install
+		// of the live session does (plan 043 P3); nil otherwise.
+		Slash: s.installSlashLocked(),
 	}
 }
 
@@ -1349,6 +1386,7 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
 	out.Plugins = append([]agent.PluginCommand(nil), s.snap.Plugins...)
+	out.Slash = slices.Clone(s.snap.Slash)
 	out.Config = cloneStubConfig(s.snap.Config)
 	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)

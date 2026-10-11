@@ -353,6 +353,14 @@ type SessionInfo struct {
 	// the host sent it). False for cursor and from a host from before the
 	// method: a client then offers no /btw and makes no call.
 	Aside bool
+	// SlashCatalog says the session publishes the slash catalog section
+	// (plan 043 P2): the `/` rows it offers, on its stream and in its
+	// snapshot's settings (transcript.Settings.Slash) — a live ACP or native
+	// session, in process (engine.PublishesSlashCatalog) or over the socket
+	// (the session capability slashCatalog, as the host sent it). False for
+	// a session that is not craze's own and from a host from before the
+	// section: a client then builds its menu as it did without one.
+	SlashCatalog bool
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon

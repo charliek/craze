@@ -6,9 +6,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -279,6 +281,56 @@ func (c *testClient) hello(t *testing.T, resume *protocol.Resume) protocol.Hello
 		t.Fatalf("decode hello result: %v: %s", err, raw)
 	}
 	return res
+}
+
+// TestTheSlashOptIn (plan 043 C2): Options.Slash makes every incarnation's
+// session one that publishes the slash catalog, whatever else it is — alone,
+// beside aside and modelsRefresh (the Stub's wrappers promote it), beside
+// Start — its install carrying the catalog agent.SlashCatalogFor builds; a
+// Host without it publishes none, as every fixture from before it records. A
+// restart's incarnation publishes it too, and an unknown Options.Provider is
+// refused. Negative control: a newIncarnation that sets PublishSlash only on
+// the first incarnation fails the restart's check.
+func TestTheSlashOptIn(t *testing.T) {
+	if _, err := New(Options{Provider: "no-such-provider"}); err == nil {
+		t.Fatal("an unknown Options.Provider built a Host")
+	}
+	for _, o := range []Options{{}, {Slash: true}, {Slash: true, Aside: true, ModelsRefresh: true},
+		{Slash: true, Provider: "native"}, {Slash: true, Start: func(context.Context) error { return nil }}} {
+		h, err := New(o)
+		if err != nil {
+			t.Fatalf("%+v: %v", o, err)
+		}
+		check := func(what string) {
+			t.Helper()
+			eng := h.currentEngine()
+			select {
+			case <-eng.Ready():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: the session never came up", what)
+			}
+			if got := eng.PublishesSlashCatalog(); got != o.Slash {
+				t.Errorf("slash %v, %s: the session publishes the catalog %v", o.Slash, what, got)
+			}
+			snap := h.currentStub().Snapshot()
+			if want := agent.SlashCatalogFor(snap, nil).Items; o.Slash != (len(snap.Slash) > 0) ||
+				o.Slash && !slices.Equal(snap.Slash, want) {
+				t.Errorf("slash %v, %s: the installed catalog %+v, want %+v", o.Slash, what, snap.Slash, want)
+			}
+		}
+		check("the first incarnation")
+		if o.Start == nil {
+			if err := h.Restart(); err != nil {
+				t.Fatal(err)
+			}
+			check("after a restart")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+		cancel()
+	}
 }
 
 // TestTheAsideOptIn (plan 040 §3.8): Options.Aside is refused beside

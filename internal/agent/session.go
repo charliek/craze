@@ -311,10 +311,11 @@ type StateDelta struct {
 	// (P3) — and only when the catalog itself differs from the one last said;
 	// a scan that found nothing new says nothing. Every install restates it.
 	//
-	// In process only until plan 043's C2 puts it on the wire: the event codec
-	// does not encode it yet, so over a socket a delta carrying nothing else
-	// arrives as a meta with an empty state, which every client folds as no
-	// change.
+	// On the wire it is the state's "slash" section (plan 043 C2,
+	// eventcodec.go's wireSlash), {"items":[…]}: absent untouched, present a
+	// whole replacement, present and empty a catalog cleared (P6). A client
+	// that predates it skips the key, so to it a delta carrying nothing else
+	// is a meta with an empty state, which it folds as no change.
 	Slash *SlashCatalog
 	// SendNow is the engine's armed send-now, in full: nil when this event did
 	// not touch it, Armed true for a send just armed, and a value with Armed
@@ -1353,6 +1354,23 @@ type Asider interface {
 // not implement it.
 type SkillRescanner interface {
 	RescanSkills()
+}
+
+// SlashCataloger is a session that publishes the slash catalog section (plan
+// 043 P2, D5): Snapshot.Slash built at its install and StateDelta.Slash on
+// every change of it — the live session and the native session, each true
+// from the moment it is built, since each installs a catalog at Start. Its
+// host says so as the session capability slashCatalog, which a client reads
+// before it offers a `/` menu from the stream (the server's info document,
+// internal/control). It is a fact of the session, not of its provider
+// (agent.Capabilities, which TestEveryCapabilityIsOnTheWire forces onto every
+// host's document): a session that is not one of craze's own publishes none.
+// Like Asider it is optional and found by a type assertion, and
+// PublishesSlashCatalog is asked rather than the assertion trusted alone, so
+// a session whose catalog is a choice — the TUI's Stub, which publishes one
+// only when a test or the fake host opts it in — answers for itself.
+type SlashCataloger interface {
+	PublishesSlashCatalog() bool
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

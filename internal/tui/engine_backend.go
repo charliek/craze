@@ -286,6 +286,7 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		CatalogRevision:   st.CatalogRevision,
 		ModelsRefresh:     b.eng.RefreshesModels(),
 		Aside:             b.eng.Asides(),
+		SlashCatalog:      b.eng.PublishesSlashCatalog(),
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,
 	}

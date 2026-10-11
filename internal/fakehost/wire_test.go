@@ -76,8 +76,9 @@ type fixtureLine struct {
 // its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
 // plan 031's model catalog (Options.Models), plan 032's presence
 // (Options.Presence), plan 034's models refresh (Options.ModelsRefresh,
-// NativeDir) and plan 040's side questions (Options.Aside) — and, in a two-socket fixture, what its hub serves (hubCreates,
-// plan 036's createOptions).
+// NativeDir), plan 040's side questions (Options.Aside) and plan 043's slash
+// catalog (Options.Slash, Provider, Plugins) — and, in a two-socket fixture,
+// what its hub serves (hubCreates, plan 036's createOptions).
 type fixtureHost struct {
 	// HubCreates is the hub's, in a two-socket fixture: one that serves
 	// session.create (hub.Options.Creates), its hosts this test binary run
@@ -99,6 +100,13 @@ type fixtureHost struct {
 	// Aside is plan 040's (Options.Aside): a session that answers side
 	// questions.
 	Aside bool `json:"aside,omitempty"`
+	// Slash, Provider and Plugins are plan 043's (Options.Slash,
+	// Options.Provider, Options.Plugins): a session that publishes the slash
+	// catalog, the provider it names, and the plugin rows it starts with,
+	// each written as the plugins section writes one.
+	Slash    bool            `json:"slash,omitempty"`
+	Provider string          `json:"provider,omitempty"`
+	Plugins  []fixturePlugin `json:"plugins,omitempty"`
 	// CreateOptions is the hub's, in a two-socket fixture whose hub creates
 	// (hubCreates): the answer it serves to sessions.createOptions (plan 036
 	// §3.4; hub.Creates.Options), as it stands, at every call. nil is a hub
@@ -115,8 +123,25 @@ func (fh *fixtureHost) options() Options {
 	for _, m := range fh.Models {
 		models = append(models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
 	}
+	var plugins []agent.PluginCommand
+	for _, p := range fh.Plugins {
+		plugins = append(plugins, agent.PluginCommand(p))
+	}
 	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts,
-		Presence: fh.Presence, Models: models, ModelsRefresh: fh.ModelsRefresh, NativeDir: fh.NativeDir, Aside: fh.Aside}
+		Presence: fh.Presence, Models: models, ModelsRefresh: fh.ModelsRefresh, NativeDir: fh.NativeDir, Aside: fh.Aside,
+		Slash: fh.Slash, Provider: fh.Provider, Plugins: plugins}
+}
+
+// fixturePlugin is a host line's plugin row, agent.PluginCommand field for
+// field in the same order (so it converts by a plain conversion), written as
+// the event codec's plugins section writes one.
+type fixturePlugin struct {
+	Plugin      string `json:"plugin,omitempty"`
+	Bare        string `json:"bare,omitempty"`
+	Display     string `json:"display,omitempty"`
+	Qualified   string `json:"qualified,omitempty"`
+	Description string `json:"description,omitempty"`
+	Kind        string `json:"kind,omitempty"`
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its

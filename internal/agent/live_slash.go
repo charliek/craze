@@ -9,7 +9,15 @@ import (
 // disk skills it scans for its provider, and the catalog it rebuilds from them
 // and its snapshot. The scanner itself is slash_scan.go's.
 
-var _ SkillRescanner = (*session)(nil)
+var (
+	_ SkillRescanner = (*session)(nil)
+	_ SlashCataloger = (*session)(nil)
+)
+
+// PublishesSlashCatalog is SlashCataloger's: every live session does (plan 043
+// P2) — its installs restate the catalog, and a commands update or a scan
+// that changes it publishes it — whichever ACP agent it drives.
+func (s *session) PublishesSlashCatalog() bool { return true }
 
 // RescanSkills is SkillRescanner's: a scan asked for and never waited on. The
 // engine calls it for every attach (engine.Attach), so a client opening an

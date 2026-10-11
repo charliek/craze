@@ -3185,6 +3185,13 @@ func (s *nativeSession) Snapshot() Snapshot {
 	return out
 }
 
+var _ SlashCataloger = (*nativeSession)(nil)
+
+// PublishesSlashCatalog is SlashCataloger's: a native session does (plan 043
+// P2) — both of its installs restate the catalog, which never changes after
+// them (it scans no skills of its own; they are plugin rows).
+func (s *nativeSession) PublishesSlashCatalog() bool { return true }
+
 // ForeignTurn is the Session leaf accessor (plan 021 §3.3): true while a wake
 // runs — the one turn native starts without a craze prompt, delivering a
 // background sub-agent's result (native_wake.go, plan 026 §3.11) — and false

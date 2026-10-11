@@ -62,6 +62,9 @@ func (m *Model) Mirror() Mirror {
 	mr.Settings.Config = cloneOptions(m.settings.Config)
 	mr.Settings.Commands = slices.Clone(m.settings.Commands)
 	mr.Settings.Plugins = slices.Clone(m.settings.Plugins)
+	// The slash catalog's rows hold only values (plan 043 P6): one copy of the
+	// list owns them whole.
+	mr.Settings.Slash = slices.Clone(m.settings.Slash)
 	if u := m.settings.Usage; u != nil {
 		// A value type, so one copy owns it whole (as every cut's Usage is).
 		cu := *u

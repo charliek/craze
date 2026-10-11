@@ -1246,7 +1246,7 @@ older hub and on one given no answer.
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
 what this host can do — and `rowFacts` and `presence`, the host's too, and
-`modelsRefresh` and `aside`, the session's own:
+`modelsRefresh`, `aside` and `slashCatalog`, the session's own:
 
 | wire name | meaning |
 |---|---|
@@ -1270,6 +1270,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
+| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, gx or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -1312,6 +1313,15 @@ one an older client's decoder skips as it skips any key it does not know (the
 event codec stays at version 1), so an older client attached to a newer host
 keeps the list the info document gave it until it attaches again — what every
 client did before the section existed.
+
+The [slash catalog](#slash-catalog) is announced the same way: where
+`capabilities.slashCatalog` is absent — every older host — a client offers no
+`/` menu from the stream (the TUI builds its own, as it always has). The
+state delta's `slash` section and the snapshot's `settings.slash` are keys an
+older client's decoder skips, so it folds every other section exactly as
+before and the codecs stay at version 1; and the catalog's values are open
+— a client hides a row with a `source`, `requires` or `run` value it does not
+know — so a later host can add one without a version of its own.
 
 Side questions are announced the same way: where `capabilities.aside` is
 absent — cursor, every older host — a client makes no `session.aside` call.
@@ -1534,6 +1544,187 @@ A catalog-only delta prints no `craze prompt --json` line, but takes a `seq`
 like every event. The section is additive: no codec version bump; the method
 that asks for a change now, [`session.models.refresh`](#sessionmodelsrefresh),
 has the capability `modelsRefresh`.
+
+## Slash catalog
+
+A session says which `/` commands it offers, and what running each one does:
+the **slash catalog section**, `{items}`, a state delta section like the
+catalog section — `state.slash` on a `meta` event — and a snapshot's
+`settings.slash`. The host builds it with the same builder the TUI's own menu
+uses, from the session's facts: craze's builtins under the session's gates,
+the agent's advertised commands, the plugin commands and skills craze found,
+and (for cursor, grok and gx) the provider's disk skills. A client renders the
+rows instead of re-deriving the TUI's rules. A session publishes it where
+[`capabilities.slashCatalog`](#capabilities) is `true` — every cursor, grok,
+gx and native session on a host that has it.
+
+```json
+{"type":"meta","state":{"commands":{"commands":[{"name":"research","description":"Agent-advertised command"},{"name":"btw","description":"The agent's own btw"}]},"slash":{"items":[
+  {"name":"help","description":"Keybindings and commands","source":"builtin","whileWorking":true,"run":{"kind":"local","local":"help"}},
+  {"name":"model","description":"Switch model","source":"builtin","run":{"kind":"picker","arg":"optional","argHint":"<model> [effort]","picker":"model"}},
+  {"name":"rename","description":"Rename this session, /rename <title>","source":"builtin","whileWorking":true,"run":{"kind":"method","method":"session.setTitle","param":"title","arg":"required","argHint":"<title>"}},
+  {"name":"plan","description":"Set plan mode","source":"builtin","run":{"kind":"method","method":"session.set","setting":{"kind":"mode","value":"plan"}}},
+  {"name":"ask","description":"Set ask mode","source":"builtin","run":{"kind":"unavailable","reason":"mode ask is not advertised"}},
+  {"name":"btw","description":"Ask a side question (not saved): /btw <question>","source":"builtin","requires":"aside","whileWorking":true,"run":{"kind":"aside","param":"question","arg":"required","argHint":"<question>"}},
+  {"name":"exit","description":"End this session","source":"builtin","requires":"stop","whileWorking":true,"run":{"kind":"method","method":"session.stop"}},
+  {"name":"research","description":"Agent-advertised command","source":"agent","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"btw","description":"The agent's own btw","source":"agent","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"review","description":"Review a pull request","source":"plugin","plugin":"pr-tools","qualified":"pr-tools:review","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"deploy","description":"Ship it to production","source":"skill","run":{"kind":"prompt","arg":"optional"}}
+]}},"at":"2026-01-01T00:00:00Z"}
+```
+
+(An illustration, its rows drawn from the fixtures `30-slash-catalog-acp`
+and `31-slash-catalog-native` — the `ask` row's from a session that does not
+advertise ask mode. A real catalog lists every builtin its session has.)
+
+### The rows
+
+The rows are in the order a menu lists them, and each name appears once —
+case-insensitively, the first source to claim a name keeps it, in the order
+builtins, the agent's commands, plugin rows, disk skills — except that a row
+with `requires` claims no name (below). Each row:
+
+| field | meaning |
+|---|---|
+| `name` | the token without its `/`: one run of characters with no whitespace or control character, what a client matches, accepts and runs the row by. Always present, and never cut |
+| `description` | what the TUI's menu draws for the row, folded onto one line: a builtin's own sentence, or the advertised, plugin or skill description. Absent when there is none |
+| `source` | `builtin` (craze's own), `agent` (a command the agent advertised), `plugin` (a plugin command or skill craze found and expands) or `skill` (a disk skill the agent resolves) |
+| `plugin`, `qualified` | a plugin row's: the plugin it came from, and its `plugin:name` spelling — present only where it differs from `name`, the second spelling the row answers to |
+| `requires` | the session capability the row needs, `stop` or `aside`: show the row only where that capability is `true`. Absent for none |
+| `whileWorking` | `true` where the row runs while a turn is running — craze's or the agent's own (`foreignTurn`) — rather than waiting for the turn to end. Absent is `false`; a `prompt` row leaves it absent, since a prompt queues |
+| `run.kind` | what selecting the row does — the next table |
+| `run.arg` | absent for none (the row takes no argument), `optional` or `required`; `run.argHint` is how to show it (`<title>`) |
+| `run.method` | a `method` row's method: `session.setTitle`, `session.set` or `session.stop` |
+| `run.param` | the parameter the argument fills: `title` (`session.setTitle`), `question` (an `aside` row) |
+| `run.setting` | a `session.set` row's `setting`, sent verbatim: `{kind: "mode", value}`, the mode already resolved to an id the session advertised |
+| `run.picker` | a `picker` row's picker: `model` |
+| `run.local` | a `local` row's action, the client's own: `help`, `clear`, `tasks`, `theme` or `connect` |
+| `run.reason` | why an `unavailable` row cannot run, in the words the TUI refuses it with (`mode ask is not advertised`) |
+
+| `run.kind` | selecting the row |
+|---|---|
+| `prompt` | sends `/name` — or `/qualified` — and the argument, if any, after a space, as a `session.prompt`'s text, which starts a turn or queues as any prompt does. craze expands a plugin row into its file's prompt on the host; an agent command or a skill goes to the agent as typed |
+| `method` | calls `run.method` with its own params plus the client's usual `sessionId` and `commandId`: `session.setTitle` with the argument as `title`; `session.set` with `setting` = `run.setting`; `session.stop` with nothing more |
+| `picker` | opens the client's picker named by `run.picker`. `model`'s lists the info document's `catalogs.models` (and the catalog section's, [live models](#live-models)) and sends `session.set` `{kind: "model"}`; a client that parses `<model> [effort]` may also take the model inline, and one that does not shows only the picker |
+| `aside` | asks a side question, [`session.aside`](#sessionaside), the argument as `question` |
+| `local` | runs the client's own action named by `run.local` — a help view, clearing the client's transcript view, the tasks panel, the theme picker (or `/theme <name>`), storing a provider key. None touches the session, and `connect` stores a key on the machine the client runs on, so a remote client hides it |
+| `unavailable` | nothing: the row cannot run in this session. A client lists it or hides it as it likes, and selecting it reports `run.reason`. The TUI lists the mode rows a session shows modes for, and refuses one the session did not advertise this way |
+
+Every value of `source`, `requires` and the `run` keys is open — a later host
+may add one, and the schema does not close them: **a client hides a row with a
+value it does not know**, and only that row — an unknown `source`, `run.kind`,
+`run.method`, `requires` or `run.arg`, a `run.picker` or `run.local` it has no
+action for; a `run` with no `kind` has a kind the client does not know.
+
+**Malformed rows are dropped individually.** A row a client cannot read — not
+an object, a key of the wrong type (`"name":42`, `"run":5`), a `name` that is
+empty or not one token — is dropped, and only that row: a client never rejects
+the section, still less the event, for one row, and a `slash` or `items` value
+that is not an object or an array is a section with no rows (which still
+replaces the catalog, as `{}` does). A key a client does not know is ignored.
+craze's own decoder does exactly this, so one bad row from a host never ends a
+`craze attach` or a remote TUI's stream; craze itself never writes such a
+row.
+
+### Which rows a client shows
+
+- **`requires`.** A row with `requires` is shown only where that session
+  capability is `true` — `stop` for [`session.stop`](#sessionstop), `aside`
+  for [`session.aside`](#sessionaside). It is always listed, because whether
+  a session is served with them is the host's fact, not the session's.
+- **A `requires` row does not claim its name.** The catalog deduplicates the
+  rows after it as if it were not there, so a client keeps, per name
+  (case-insensitively), **the first row it actually shows**. On cursor
+  (`aside` absent) the builtin `/btw` is hidden and an agent's own `/btw`,
+  listed after it, shows; on grok the builtin shows and the agent's is hidden.
+- **Client rows.** A client may add rows of its own, and **a client row wins
+  over a catalog row with the same name (case-insensitively), which it
+  hides.** The host never lists one: whether a client has a session list is
+  the client's fact. The TUI adds `/sessions`, before `/exit`, where it has a
+  hub session list; without one, an agent's own `/sessions` shows.
+- **`whileWorking`.** While a turn is running — `activity` `working`, or a
+  `foreignTurn` — a client runs only the rows with `whileWorking`, and sends a
+  `prompt` row as it sends any prompt (it queues). The TUI leaves any other
+  builtin in the composer until the turn ends; the host itself refuses
+  nothing for it.
+
+### Carrying it
+
+The section follows the list sections' rules. **Absent** is unchanged;
+**present** replaces the whole catalog; **present and empty** (`{}`) clears it.
+Restoring a snapshot and folding the deltas after it gives the catalog
+folding the whole stream gives.
+
+- **One delta per change.** A delta that carries `commands` or `plugins`
+  always restates `slash` beside them — even when the catalog came out the
+  same, so a client reads the two as one change; a change of the disk skills
+  alone carries `slash` alone; an update that changes nothing publishes
+  nothing. Every install restates it: session/new's, and a load's, stamped
+  `replayed` before the replay's `end`.
+- **Disk skills.** For a cursor, grok or gx session the host looks at the
+  provider's skills on disk at the install, after every turn of craze's ends
+  (done, cancelled or failed), at each `available_commands_update`, and at
+  each `session.attach`: a skill created while the session sat idle reaches
+  a client as a slash-only delta after the next attach's snapshot, or after
+  the next turn. A native session's skills are plugin rows, found once at its
+  start.
+- **The snapshot.** `settings.slash` is the last section a delta carried,
+  absent when there is none, and `settings.truncated.slash` says the snapshot
+  did not carry it whole. **Truncation never alters an action**: a row whose
+  `name`, `source`, `plugin`, `qualified`, `requires` or `run` key other than
+  `argHint` and `reason` is over 262,144 bytes (256 KiB, the snapshot's item
+  cap) is **dropped**, never cut, since a cut name would run a command that
+  does not exist; `description`, `run.argHint` and `run.reason` are cut to
+  their head at that size, as a command's description is; and at most **512**
+  rows are carried. `truncated.slash` is set when a row was dropped or a
+  string cut, and the next section a delta carries clears it. Real catalogs
+  are far inside these bounds.
+- **The catalog yields to the snapshot's budget.** It repeats what the
+  `commands` and `plugins` beside it already carry, so it is never what makes
+  an attach fail: when the snapshot's mandatory state — with the main
+  transcript's newest entry — would not fit its budget with the catalog, the
+  snapshot carries no `settings.slash` and sets `settings.truncated.slash`.
+  **`truncated.slash` with no `slash` means the catalog did not fit**: the
+  client holds no catalog until the next `slash` section a delta carries
+  restates it — at the next change of the session's commands, plugins or disk
+  skills — and meanwhile offers what it would without one (the TUI builds its
+  menu itself). Where even that mark would not fit, it is left out too, and the
+  snapshot is exactly the one a host without the catalog would send; a client
+  then reads it as a session whose catalog is still to come. An attach that
+  would succeed without the catalog always succeeds with it.
+- **The stream** carries the section whole, uncapped, as it carries
+  `commands` and `plugins`: an event over the event log's record limit is
+  [omitted](#cursors-and-resets) like any other, and the client attaches
+  again, its snapshot bounded as above.
+- It is not in `session.state`'s `settings`: the stream and the snapshot are
+  where it is read.
+
+A slash-only delta prints no `craze prompt --json` line, but takes a `seq`
+like every event. The section is additive: no codec version bump, and a
+client that predates it skips the key and folds every other section exactly
+as before — the capability `slashCatalog` is how a client knows to look.
+
+### The menu, as the TUI draws it
+
+How a client matches, completes and runs what is typed is its own; the TUI's
+rules, which a client can follow to feel the same:
+
+- **The token** is the run of non-whitespace characters around the cursor,
+  starting with `/` at the start of the draft or after whitespace (so
+  `foo/bar` and `https://x` are never one). A bare `/` lists every row.
+- **Builtins** (`source` `builtin`) are offered only when the token is the
+  draft's first word and the draft is one line — the only place one runs.
+- **Matching** is case-insensitive, in four groups, each in catalog order:
+  `name` starting with what was typed, then `qualified` starting with it,
+  then `name` containing it, then `qualified` containing it. No fuzzy
+  matching and no cap; the list scrolls.
+- **Accepting** a row (Tab) replaces the token with `/name ` — or
+  `/qualified `, when the typed token holds a `:` and the row has a
+  `qualified` — taking in one space that already followed it.
+- **Enter** on a highlighted row whose name (either spelling) is not yet
+  fully typed accepts it; once the token spells it, Enter runs it (or sends
+  it). A bare `/` accepts the first row.
 
 ## Errors and retry
 
@@ -1804,7 +1995,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-nine scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is thirty-one scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1855,7 +2046,21 @@ own `session.state` reply, then a follow-up carrying the first pair as
 by `session.aside.cancel` — the aside's `aborted`, reason `context`, before
 the cancel's `{}` — and the same cancel again, answered `{}` (28); and a
 session that answers none — cursor's, or an older host's — whose info
-document says no `aside`, refusing both methods `aside_unsupported` (29).
+document says no `aside`, refusing both methods `aside_unsupported` (29); a
+session that publishes the [slash catalog](#slash-catalog) — its info
+document saying `slashCatalog: true`, its attach snapshot carrying
+`settings.slash` — whose agent's commands update is one delta carrying the
+commands and the catalog restated (an agent's own `/help` shadowed by the
+builtin, its own `/btw` listed after the builtin's `requires` row), an
+identical update publishing nothing, a disk skill found by a scan the
+catalog alone (a skill an agent command shadows left out), an identical scan
+nothing — a `session.sync` answering at the seq the two deltas left — and a
+second client whose attach snapshot carries the catalog as it now stands
+(30); and a native session's catalog — `/connect` after `/model`, a plugin row
+with its `qualified` spelling and one shown qualified because a builtin
+holds its bare name, its info document saying `stop`, `aside` and
+`slashCatalog` — whose `plan` row's `setting` and `rename` row's `title`,
+sent as written, change the mode and the title (31).
 Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
@@ -1863,10 +2068,13 @@ directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt`, `rowFacts`, `presence`, `modelsRefresh` and `aside` turn on what an older host does not have, and
-`models` gives it a catalog of its own. The seventeen fixtures from before
-`modelsRefresh` without one are, byte for byte, an older host to a newer
-client. `TestWireFixtures` replays
+`startedAt`, `rowFacts`, `presence`, `modelsRefresh`, `aside` and `slash`
+turn on what an older host does not have, `models` gives it a catalog of its
+own, `provider` names the provider its session reports (`native`, say) in
+place of the Stub's own, and `plugins` are the plugin rows its session
+starts with, each as the `plugins` section writes one. The seventeen
+fixtures from before `modelsRefresh` without one are, byte for byte, an older
+host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixtures 10 and 26 mark
 `"invalid": true`: deliberately not a well-formed request of a method
@@ -1922,10 +2130,15 @@ fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
 `hang_next`, `run_stop`, `stage_models` — what the next
 `session.models.refresh` of a `modelsRefresh` host takes up — `hold_aside` —
 the next `session.aside` of an `aside` host parked after its first
-notification, until it is cancelled — and `unlist` — a `--registry` host leaving the
-registry while it keeps serving the connections it has). The binary has no
-flag for the `modelsRefresh` or `aside` opt-ins yet, so its host refuses both
-features as an older host does, and those two ops change nothing there. Its clock, ids, host id, craze version, pid and token source
+notification, until it is cancelled — `set_commands` and `set_skills` — an
+agent's whole command list, `{"commands":[{name, description}]}`, and the
+disk skills a scan found, `{"skills":[{name, description}]}`, which a `slash`
+host publishes as a live session does — and `unlist` — a `--registry` host
+leaving the registry while it keeps serving the connections it has). The
+binary has no flag for the `modelsRefresh`, `aside` or `slash` opt-ins yet,
+so its host refuses the first two features and publishes no slash catalog,
+as an older host does: `stage_models` and `hold_aside` change nothing there,
+and `set_commands` publishes the commands section alone. Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry
 carries its real pid, as every host's does).

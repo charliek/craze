@@ -110,6 +110,25 @@ type Options struct {
 	// exactly what it was. It does not go with Start.
 	Aside bool
 
+	// Slash is plan 043's opt-in (C2): every incarnation's session is the
+	// Stub as one that publishes the slash catalog (tui.Stub.PublishSlash) —
+	// capabilities.slashCatalog in the info document, the slash section in
+	// the install delta and so in every attach's snapshot, and the
+	// set_commands and set_skills ops publishing what a live session's
+	// commands update and skill scan do. Off, the Host publishes no catalog,
+	// an older host's wire — and every fixture from before it, byte for byte.
+	Slash bool
+	// Provider, when set, is the provider every incarnation's session names
+	// (agent.ProviderByName; tui.Stub.SetProvider): its name, label and
+	// capabilities in the info document, and the catalog's provider facts
+	// (native's /connect). "" is the Stub's own, which names none and reads
+	// as cursor's — the wire of every fixture from before it.
+	Provider string
+	// Plugins, when non-empty, is the resolved plugin rows every
+	// incarnation's session starts with (tui.Stub.SeedPlugins), carried by its
+	// install as a native session's are. Empty, the Stub has none.
+	Plugins []agent.PluginCommand
+
 	// Start, when set, is the first incarnation's start (plan 032 §3.10's
 	// tests): the Host serves its engine before the start has run — a
 	// client's attach with when: ready waits for it, as on a real host whose
@@ -270,6 +289,11 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		// questions either.
 		return nil, errors.New("fakehost: Options.Aside does not go with Options.Start")
 	}
+	if o.Provider != "" {
+		if _, err := agent.ProviderByName(o.Provider); err != nil {
+			return nil, fmt.Errorf("fakehost: Options.Provider: %w", err)
+		}
+	}
 	h := &Host{opts: o, clk: newClock(), hooks: hooks, stopHeard: make(chan struct{})}
 	co := control.Options{
 		Log:            o.Log,
@@ -314,6 +338,18 @@ func (h *Host) newIncarnation() error {
 	if len(h.opts.Models) > 0 {
 		stub.SetModels(h.opts.Models)
 	}
+	if h.opts.Provider != "" {
+		p, err := agent.ProviderByName(h.opts.Provider)
+		if err != nil {
+			return fmt.Errorf("fakehost: Options.Provider: %w", err)
+		}
+		stub.SetProvider(p)
+	}
+	if len(h.opts.Plugins) > 0 {
+		stub.SeedPlugins(h.opts.Plugins)
+	}
+	// Before Start, which reads it for the install (Options.Slash).
+	stub.PublishSlash = h.opts.Slash
 	var sess agent.Session = stub
 	if h.opts.ModelsRefresh {
 		stub.SetNativeDir(h.opts.NativeDir)
@@ -576,7 +612,10 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // session.models.refresh of a Host built with Options.ModelsRefresh takes up
 // (fixture 24). Plan 040 adds hold_aside (HoldAside): the next session.aside
 // of a Host built with Options.Aside parked after its first notice, for a
-// cancel mid-answer (fixture 28). Do is what runs an
+// cancel mid-answer (fixture 28). Plan 043 adds set_commands (SetCommands)
+// and set_skills (SetSkills): an agent's commands update and a skill scan's
+// result, which a Host built with Options.Slash publishes as a live session
+// does (fixture 30). Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -886,6 +925,19 @@ func (h *Host) StageModels(models []agent.ModelInfo) { h.currentStub().StageMode
 // no side question ever takes it up.
 func (h *Host) HoldAside() { h.currentStub().HoldNextAside() }
 
+// SetCommands is an available_commands_update: the agent's whole command list
+// replaced (tui.Stub.SetCommands). On a Host built with Options.Slash it is
+// published as a live session's is (plan 043 P3) — one delta, the slash
+// catalog restated beside the commands, and nothing for the list the session
+// already has; on another, the commands delta alone, as it always was.
+func (h *Host) SetCommands(cmds []agent.CommandInfo) { h.currentStub().SetCommands(cmds) }
+
+// SetSkills is a skill scan's result: the disk skills the session's catalog
+// lists (tui.Stub.SetSkills). On a Host built with Options.Slash a change
+// publishes the slash section alone (plan 043 P5), and a scan that found what
+// the last one did publishes nothing; on another, it publishes nothing ever.
+func (h *Host) SetSkills(skills []agent.Skill) { h.currentStub().SetSkills(skills) }
+
 // Quit closes the Host: cmd/craze-fake-host's "quit" op and stdin EOF both
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
@@ -997,6 +1049,20 @@ type opParams struct {
 	// fixture 4's deterministic overflow, a single push too large for a small
 	// requested budget to ever hold, needs no exact wording.
 	Bytes int `json:"bytes,omitempty"`
+
+	// set_commands: the agent's whole command list, as an
+	// available_commands_update carries it, each written as the commands
+	// section writes one (name, description). set_skills: the disk skills a
+	// scan found, written the same way.
+	Commands []opNamed `json:"commands,omitempty"`
+	Skills   []opNamed `json:"skills,omitempty"`
+}
+
+// opNamed is a set_commands command or a set_skills skill: a name and its
+// description.
+type opNamed struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 type opPermOption struct {
@@ -1109,6 +1175,18 @@ func (h *Host) do(p opParams) error {
 		h.StageModels(models)
 	case "hold_aside":
 		h.HoldAside()
+	case "set_commands":
+		cmds := make([]agent.CommandInfo, len(p.Commands))
+		for i, c := range p.Commands {
+			cmds[i] = agent.CommandInfo{Name: c.Name, Description: c.Description}
+		}
+		h.SetCommands(cmds)
+	case "set_skills":
+		skills := make([]agent.Skill, len(p.Skills))
+		for i, sk := range p.Skills {
+			skills[i] = agent.Skill{Name: sk.Name, Description: sk.Description}
+		}
+		h.SetSkills(skills)
 	default:
 		return fmt.Errorf("fakehost: unknown op %q", p.Name)
 	}

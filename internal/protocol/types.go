@@ -371,6 +371,15 @@ type CatalogMode struct {
 // modelsRefresh is: absent is cursor, or an older host, which answers the
 // methods unsupported (aside_unsupported, or unknown_method from a host from
 // before them), and a client then offers no side questions.
+//
+// SlashCatalog is the session's own too (plan 043 P2, D5): true where the
+// session publishes the slash catalog — the state delta's and the snapshot's
+// settings' slash section, every `/` row it offers and what running each
+// means — a live ACP session and a native one, detached or TUI-hosted. It is
+// omitted when false, as aside is: absent is an older host, or a session that
+// is not craze's own (the fake host's by default, so no fixture from before it
+// moves), and a client then offers no `/` menu from the stream. True with no
+// section yet — a session still starting — is a catalog still to come.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -392,6 +401,7 @@ type SessionCapabilities struct {
 	Presence            bool `json:"presence,omitempty"`
 	ModelsRefresh       bool `json:"modelsRefresh,omitempty"`
 	Aside               bool `json:"aside,omitempty"`
+	SlashCatalog        bool `json:"slashCatalog,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
