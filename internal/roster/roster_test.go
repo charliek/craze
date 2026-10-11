@@ -1362,3 +1362,41 @@ func TestRunningRowsCarryTheIndexSubAgentMark(t *testing.T) {
 		}
 	}
 }
+
+// TestAMarkOnlyChangeIsPublished: the index gains a marked row for a listed,
+// unreachable host's session while the saved rows (that session is running, so
+// none shows it) and every status stay as they were. The poller's tick still
+// publishes a snapshot, whose running row carries the mark: the change
+// detection is in the read every caller shares, not in Saved.Read alone.
+func TestAMarkOnlyChangeIsPublished(t *testing.T) {
+	g := newRegistry(t)
+	dead := rundir.Entry{Protocol: 1, HostID: hostID(7), Socket: filepath.Join(g.dir, "nobody"), CrazeSessionID: sessionID(7), Provider: "cursor"}
+	g.list(dead)
+	idx := &memIndex{rows: []sessions.Row{{SessionID: "p-5", Provider: "cursor", CWD: "/w", Title: "five", CrazeID: sessionID(5)}}}
+	stamp := filepath.Join(t.TempDir(), "sessions.jsonl")
+	if err := os.WriteFile(stamp, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rg := newRig(t, g, idx, func(o *roster.TestOptions) { o.IndexPath = func() string { return stamp } })
+	rg.waitApplied(1)
+	s := rg.until("the dead host unreachable", status(roster.Unreachable, dead.HostID))
+	if r := row(s, dead.HostID); r.IndexSubAgent {
+		t.Fatal("the host is tagged before its row exists")
+	}
+
+	idx.mu.Lock()
+	idx.rows = append(idx.rows, sessions.Row{SessionID: "p-7", Provider: "cursor", CWD: "/w", Title: "seven", CrazeID: sessionID(7),
+		Unattended: &sessions.Unattended{PermissionMode: sessions.PermissionBypass}})
+	idx.mu.Unlock()
+	if err := os.WriteFile(stamp, []byte("xx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rg.tick()
+	s = rg.until("the mark published", func(s roster.Snapshot) bool {
+		r := row(s, dead.HostID)
+		return r != nil && r.IndexSubAgent
+	})
+	if got := titles(s.Saved); got != "five" {
+		t.Fatalf("saved %q: the saved half was meant to stay as it was", got)
+	}
+}

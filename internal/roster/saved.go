@@ -60,7 +60,8 @@ func stampOf(path string) indexStamp {
 
 // read brings the saved rows up to date: the index re-read if its file
 // changed (reread), and the sessions run names taken out (subtract). It says
-// whether the rows or the error changed. A nil index is no saved rows.
+// whether the rows, the error, a title or a sub-agent mark changed. A nil
+// index is no saved rows.
 func (s *savedRows) read(index Index, indexPath func() string, max int, run runningSet) bool {
 	if index == nil {
 		return false
@@ -72,7 +73,7 @@ func (s *savedRows) read(index Index, indexPath func() string, max int, run runn
 // reread reads the index again when its file has changed since the last good
 // read — a stat otherwise — and says whether the error changed: the
 // candidates' own change shows in the rows (subtract), which the running are
-// not taken out of here.
+// not taken out of here; a title or mark that moved is a change too.
 func (s *savedRows) reread(index Index, indexPath func() string) bool {
 	if index == nil {
 		return false
@@ -90,8 +91,13 @@ func (s *savedRows) reread(index Index, indexPath func() string) bool {
 	changed := s.err != nil
 	s.err = nil
 	s.stamp, s.haveRead = st, true
+	titles, subAgents := s.titles, s.subAgents
 	s.candidates, s.titles, s.subAgents = candidates(all)
-	return changed
+	// A title or a mark can move with the saved rows and the running statuses
+	// both unchanged (the session is running, so no saved row shows it), and a
+	// running row is drawn from them: every caller is told, the poller's tick
+	// as much as Saved.Read.
+	return changed || !maps.Equal(titles, s.titles) || !maps.Equal(subAgents, s.subAgents)
 }
 
 // subtract is the candidates less every session run names, at most max: the
@@ -253,9 +259,7 @@ func NewSaved(index Index, indexPath func() string) *Saved {
 // (Title) changed — a running row's index title is part of what a reader is
 // told of, so a read that moved only titles is a change too.
 func (s *Saved) Read(running []Row) bool {
-	titles, subAgents := s.s.titles, s.s.subAgents
-	changed := s.s.read(s.index, s.path, s.max, runningOfRows(running))
-	return changed || !maps.Equal(titles, s.s.titles) || !maps.Equal(subAgents, s.s.subAgents)
+	return s.s.read(s.index, s.path, s.max, runningOfRows(running))
 }
 
 // Subtract takes every session running serves out of the index as last read,
@@ -278,3 +282,8 @@ func (s *Saved) Err() error { return s.s.err }
 // Title is the index's title for craze session id — its newest row's — ""
 // when it has none: what a running row shows before its host has answered.
 func (s *Saved) Title(crazeID string) string { return s.s.titles[crazeID] }
+
+// SubAgent is whether the index's newest row for craze session id is marked as
+// a sub-agent's session (plan 041 §3.3), false when it has none: what a
+// running row tags itself by, as Title is what it names itself by.
+func (s *Saved) SubAgent(crazeID string) bool { return s.s.subAgents[crazeID] }

@@ -186,6 +186,24 @@ arrive and retired ones go, with no edit on your side. See [Native
 provider](docs/getting-started/quick-start.md#native-provider) and [Native
 models and providers](docs/reference/configuration.md#native-models-and-providers).
 
+## Use craze from Claude Code
+
+This repository is also a Claude Code plugin: sub-agents that hand a task to a
+craze session on a native, Grok or Cursor model and return its result, so
+Claude Code can delegate work to those models. It needs **craze 0.2.0 or
+newer** on your `PATH`.
+
+```text
+/plugin marketplace add charliek/craze
+/plugin install craze@craze
+```
+
+Then dispatch `craze:delegate` (any provider and model), or a preset: `craze:sol`,
+`craze:astra`, `craze:muse`, `craze:grok`, `craze:cursor`. A craze session's tools
+run in craze: Claude Code's permission rules and hooks do not apply inside it.
+[Claude Code sub-agents](docs/getting-started/claude-code.md) has the agents,
+examples, permissions and the differences from a native sub-agent.
+
 ## Keys
 
 | Key | Action |
@@ -394,6 +412,7 @@ Sources live under `docs/`:
 
 - [Quick Start](docs/getting-started/quick-start.md)
 - [Upgrading from v0.0.1](docs/getting-started/upgrading.md)
+- [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - [CLI](docs/reference/cli.md)
 - [TUI](docs/reference/tui.md)
 - [Configuration](docs/reference/configuration.md)

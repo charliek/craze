@@ -1183,6 +1183,31 @@ func TestARowWithNoBodyIsNamedByItsRegistryEntry(t *testing.T) {
 	}
 }
 
+// TestAHubListedRowCarriesTheIndexSubAgentMark (plan 041 §3.3): a running row
+// the hub lists says whether its craze id's newest index row is marked as a
+// sub-agent's session, which is what the session list tags it by; an
+// unmarked one, and one with no index row, do not.
+func TestAHubListedRowCarriesTheIndexSubAgentMark(t *testing.T) {
+	marked := savedRow(1, "delegated", 9)
+	marked.Unattended = &sessions.Unattended{PermissionMode: sessions.PermissionBypass}
+	rows := []protocol.RosterRow{bodiless(1, protocol.RosterConnecting), bodiless(2, protocol.RosterConnecting), bodiless(3, protocol.RosterConnecting)}
+	h := newScriptHub(t, hostOf(0xa), rows...)
+	rg := newListRig(t, testEnv(t), newListIndex(t, marked, savedRow(2, "mine", 8)), func(o *listOptions) {
+		o.seedWait, o.reseedWait = step, step
+		o.ensure = fixed(h.sock)
+		o.hosts = registryOf(sessionOf, 1, 2, 3)
+	})
+	rg.epoch()
+	s := rg.until("the hub's rows", 0, func(s roster.Snapshot) bool {
+		return len(s.Running) == 3 && s.Running[0].Host.Socket == ""
+	})
+	for n, want := range map[int]bool{1: true, 2: false, 3: false} {
+		if r := hostRow(s, hostOf(n)); r == nil || r.IndexSubAgent != want {
+			t.Fatalf("host %d: IndexSubAgent = %+v, want %v: %s", n, r, want, listed(s))
+		}
+	}
+}
+
 // TestARegistryRepairIsPublished (r30 3, 5): a row with no body whose host
 // the registry did not list when the hub's reply came is named once the
 // registry lists it — on the saved half's next tick, the hub and the index

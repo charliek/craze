@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# update-version.sh — mechanical bump of craze's version manifest.
+# update-version.sh — mechanical bump of craze's version manifests.
 #
-# internal/version/version.go IS the version manifest (see RELEASING.md).
+# internal/version/version.go and .claude-plugin/plugin.json are the version
+# manifests (see RELEASING.md).
 # This script is run by the release-workflows:release skill, locally, from
 # the repo root, before the version-bump commit is created. It must be
 # idempotent, do no network I/O, and never `git add` — the skill stages and
@@ -58,3 +59,29 @@ if [ "$actual" != "$expected" ]; then
 fi
 
 echo "$version_file"
+
+# The Claude Code plugin's manifest carries the same version (plan 041 §3.6).
+# jq rewrites it through a temp file and mv, as prox's bump does; the
+# top-level .version is read back, so a manifest that lost the field fails the
+# release here instead of shipping a stale version.
+plugin_file=".claude-plugin/plugin.json"
+
+if [ ! -f "$plugin_file" ]; then
+  echo "error: ${plugin_file} not found — run this from the repo root" >&2
+  exit 1
+fi
+
+plugin_tmp="$(mktemp)"
+trap 'rm -f "$tmp" "$plugin_tmp"' EXIT
+jq --arg v "$version" '.version = $v' "$plugin_file" >"$plugin_tmp"
+# mktemp makes the file 0600; the manifest is a tracked 0644 file.
+chmod 644 "$plugin_tmp"
+mv "$plugin_tmp" "$plugin_file"
+
+plugin_actual="$(jq -r '.version' "$plugin_file")"
+if [ "$plugin_actual" != "$version" ]; then
+  echo "error: ${plugin_file} top-level .version is '${plugin_actual}' after bump, expected '${version}'" >&2
+  exit 1
+fi
+
+echo "$plugin_file"

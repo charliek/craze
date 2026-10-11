@@ -1,0 +1,14 @@
+{
+  "name": "craze",
+  "owner": {
+    "name": "Charlie Knudsen",
+    "url": "https://github.com/charliek"
+  },
+  "plugins": [
+    {
+      "name": "craze",
+      "source": "./",
+      "description": "Sub-agents for Claude Code that run on other models through craze (native, Grok, Cursor)."
+    }
+  ]
+}
