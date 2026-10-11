@@ -1250,7 +1250,7 @@ command to run next for a `running` or `needs_input` result.
 |------|-------------|
 | `--from <handle>` | Follow exactly the turn or queued prompt the handle names, from its place in the stream; a signal then cancels it |
 | `--timeout <duration>` | Stop waiting after this long, counted from the command's start (`9m`, `30s`): `running`, exit 5, with a handle. Default: no limit |
-| `--max-message <n>` | Print at most `n` characters of the message and the plan together: the message first, and the plan what is left — at least its first line (up to `n` characters) when anything is left, none when nothing is. When anything is cut, the plain output ends its message and plan with `[… cut: full result in <path>]`, and the whole result — the message, plan and footer, or the JSON — is written to `~/.cache/craze/results/<short>-<turn>.md` (`0600`). Default: no limit |
+| `--max-message <n>` | Print at most `n` characters of the message and the plan together, never more: the message first, then the plan with what is left — cut back to the end of its last whole line when one ends within that, and left out when nothing is left. When anything is cut or left out, the plain output ends its message and plan with `[… cut: full result in <path>]`, and the whole result — the message, plan and footer, or the JSON — is written to `~/.cache/craze/results/<short>-<inc>-<turn>.md` (`0600`), where `<inc>` is the last 8 characters of the incarnation the turn ran in. A reloaded session numbers its turns from `turn-1` again, so this keeps each turn's file its own. If that file cannot be written, the output is cut all the same: the marker reads `[… cut: the full result could not be saved: <reason>]`, stderr says so, and `--json` names no `messageFile`. Default: no limit |
 | `--json` | Print the result as one JSON object on one line |
 
 With `--json`, one object. These keys are always there: `status`, `session`
@@ -1268,7 +1268,7 @@ queued prompt, `turn` and/or `row`.
 | `handle` | `running`, `needs_input`, and a failure with one |
 | `partial` | `true` when some of the turn's events were not seen |
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
-| `messageFile` | `--max-message`'s file, holding the whole result, when it cut the message or the plan; `message` and `plan` are then what was kept |
+| `messageFile` | `--max-message`'s file, holding the whole result, when it cut or left out the message or the plan; `message` and `plan` are then what was kept |
 
 A key that does not apply is absent, never `null` or `false`:
 

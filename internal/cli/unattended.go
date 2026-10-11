@@ -203,6 +203,9 @@ type promptJob struct {
 	relayed   <-chan os.Signal
 	signalled func() bool
 	stopRelay func()
+	// hurry is relaySignals': a reparented spawn's abandon arms it, so a
+	// further signal cuts that clean-up short (spawnOptions.hurry, C8, 3).
+	hurry func() <-chan struct{}
 	// spawned is the host of the session this command started — craze new
 	// --wait's, brand new, its id told to no one else — which it stops when
 	// its prompt never reached it (undo). nil for every other: a reload's host
@@ -234,7 +237,7 @@ func newPromptJob(cmd *cobra.Command, what, text string, wait bool, started time
 		cancel = func() { cancelDeadline(); inner() }
 	}
 	r.ctx, r.cancel = ctx, cancel
-	r.relayed, r.signalled, r.stopRelay = relaySignals(sigs, cancel)
+	r.relayed, r.signalled, r.stopRelay, r.hurry = relaySignals(sigs, cancel)
 	return r
 }
 
@@ -249,11 +252,13 @@ func (r *promptJob) timedOut() bool {
 	return !r.deadline.IsZero() && !time.Now().Before(r.deadline)
 }
 
-// spawn starts a host for opts on the run's work context. own says the
+// spawn starts a host for opts on the run's work context, a further signal
+// hurrying a reparented start's clean-up (r.hurry, C8, 3). own says the
 // session is the command's own — new, its id known to no one else (craze new
 // --wait) — and so the run's to undo (spawned); a held answer is the
 // holder's host, never the run's.
 func (r *promptJob) spawn(opts spawnOptions, own bool) (hostRef, error) {
+	opts.hurry = r.hurry
 	ref, err := spawnHost(r.ctx, opts)
 	if err == nil && !ref.held {
 		if own {

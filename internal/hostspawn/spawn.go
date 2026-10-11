@@ -418,14 +418,22 @@ func (c *Child) Terminate() {
 func (c *Child) End(grace time.Duration) bool {
 	if !c.Exited() {
 		c.terminate()
-		if !c.WaitExit(grace) {
-			if !c.Exited() {
-				c.killGroup()
-			}
-			c.WaitExit(grace)
-		}
+		c.escalate(grace)
 	}
 	return c.Exited()
+}
+
+// escalate is End past its SIGTERM: grace for the child to exit, then
+// SIGKILL to its process group and a second grace for the reaper — the part a
+// hurried clean-up leaves to a goroutine of its own (StartReparented's
+// abandon, C8, 3).
+func (c *Child) escalate(grace time.Duration) {
+	if !c.WaitExit(grace) {
+		if !c.Exited() {
+			c.killGroup()
+		}
+		c.WaitExit(grace)
+	}
 }
 
 // Kill ends the host at once — SIGKILL to its process group (setsid made it

@@ -126,7 +126,7 @@ func runWait(cmd *cobra.Command, f *waitFlags, args []string, sigs <-chan os.Sig
 	// The attach waits for the session's start, which may never come: a
 	// signal ends it as --timeout's end does, and every signal goes on to
 	// the waiter once it runs.
-	relayed, signalled, stopRelay := relaySignals(sigs, cancel)
+	relayed, signalled, stopRelay, _ := relaySignals(sigs, cancel)
 	defer stopRelay()
 	var cursor *protocol.Cursor
 	if from != nil {
@@ -168,16 +168,45 @@ var waitAttachedHook = func() {}
 // signal, waiting for good. signalled says one came; stop ends the relay.
 // The waiting commands' own (C3's new --wait and send --wait spawn and attach
 // under it too).
-func relaySignals(sigs <-chan os.Signal, cancel context.CancelFunc) (out <-chan os.Signal, signalled func() bool, stop func()) {
+//
+// hurry is for work that is itself the answer to the first signal — or to
+// --timeout's end — and that a further signal should cut short, as a second
+// signal hurries C3's undo (plan 041 C8, 3: a reparented spawn's abandon,
+// hostspawn.ReparentSpawn.Hurry): called as that work begins, it answers a
+// channel closed at the next signal from then on — at once when two have
+// come already, the second being that further one — without taking any
+// signal from out.
+func relaySignals(sigs <-chan os.Signal, cancel context.CancelFunc) (out <-chan os.Signal, signalled func() bool,
+	stop func(), hurry func() <-chan struct{}) {
 	ch := make(chan os.Signal, 4)
 	done := make(chan struct{})
 	var got atomic.Bool
 	var once sync.Once
+	var (
+		mu     sync.Mutex
+		n      int
+		armed  []chan struct{}
+		armedN []int
+	)
 	go func() {
 		for {
 			select {
 			case s := <-sigs:
 				got.Store(true)
+				// Counted before the cancel (C8 r1, 1): the cancel wakes the
+				// work that answers this signal, which may arm a hurry at
+				// once — armed before the count, this same signal would close
+				// it, and one signal would both start that work and cut it
+				// short.
+				mu.Lock()
+				n++
+				for i, c := range armed {
+					if c != nil && n > armedN[i] {
+						close(c)
+						armed[i] = nil
+					}
+				}
+				mu.Unlock()
 				cancel()
 				select {
 				case ch <- s:
@@ -188,5 +217,16 @@ func relaySignals(sigs <-chan os.Signal, cancel context.CancelFunc) (out <-chan 
 			}
 		}
 	}()
-	return ch, got.Load, func() { once.Do(func() { close(done) }) }
+	hurry = func() <-chan struct{} {
+		mu.Lock()
+		defer mu.Unlock()
+		c := make(chan struct{})
+		if n >= 2 {
+			close(c)
+			return c
+		}
+		armed, armedN = append(armed, c), append(armedN, n)
+		return c
+	}
+	return ch, got.Load, func() { once.Do(func() { close(done) }) }, hurry
 }

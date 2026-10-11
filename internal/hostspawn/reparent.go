@@ -99,6 +99,12 @@ type ReparentSpawn struct {
 	// craze send's reload, --outlive-spawner — which a failed start leaves
 	// serving rather than ends.
 	Shared bool
+	// Hurry, when set, is called as a failed start's clean-up begins
+	// (abandon) and answers a channel that closes when the clean-up is to be
+	// cut short (C8, 3) — the command's further signal: the host it ends is
+	// then sent SIGTERM and not waited for, its grace and the SIGKILL past
+	// it skipped, as C3's hurried undo sends session.stop and does not wait.
+	Hurry func() <-chan struct{}
 }
 
 // StartReparented is StartCmd with the host left out of this process's tree
@@ -183,8 +189,15 @@ func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log str
 	// was told of is one nobody would ever stop. Found nowhere, only the
 	// record is acted on (a host the intermediate killed may have left an
 	// agent). A shared spawn's host is left as it is. The host's log says
-	// which, where whoever reads it looks.
+	// which, where whoever reads it looks. The host's end is waited for
+	// only until the spawner's hurry closes (rs.Hurry, C8, 3), armed before
+	// anything else: SIGTERM has gone by then, and its grace, and the SIGKILL
+	// past it, are left to a goroutine of their own.
 	abandon := func(host *AgentGroup, cause error) (*Child, *os.File, error) {
+		var hurry <-chan struct{}
+		if rs.Hurry != nil {
+			hurry = rs.Hurry()
+		}
 		ReparentAbandoning()
 		endIntermediate()
 		_ = r.Close()
@@ -207,7 +220,20 @@ func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log str
 				break
 			}
 			said.note("its start failed (%v); ending this host", cause)
-			c.Terminate()
+			if !c.Exited() {
+				c.terminate()
+			}
+			ended := make(chan struct{})
+			go func() {
+				defer close(ended)
+				c.escalate(TermGrace)
+				c.KillAgents()
+			}()
+			select {
+			case <-ended:
+			case <-hurry:
+				said.note("hurried: SIGTERM sent, and this host's end not waited for")
+			}
 		}
 		return nil, nil, cause
 	}

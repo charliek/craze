@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/rundir"
 )
 
 // TestAccumulatorMessageIsTheLastAssistantEntry: the message is the last run
@@ -168,11 +172,14 @@ func TestCutMessage(t *testing.T) {
 	}
 }
 
-// TestCutResult (C3 r3, 4): --max-message's budget over the message and the
-// plan, the message first; the plan gets what is left — at least its first
-// line, never more than the budget of it — and none when nothing is left.
+// TestCutResult (C3 r3, 4; C8, 2): --max-message's budget over the message
+// and the plan, the message first; the plan gets what is left — back to the
+// end of its last whole line when one ends within it, else cut at a
+// character — and none when nothing is left. The two together are never
+// more than the budget: no first-line allowance (X29, amended).
 func TestCutResult(t *testing.T) {
 	const plan = "## Steps\n1. one\n2. two"
+	long := strings.Repeat("p", 20000)
 	for _, c := range []struct {
 		name, msg, plan string
 		n               int
@@ -180,17 +187,61 @@ func TestCutResult(t *testing.T) {
 		cut             bool
 	}{
 		{"both fit", "0123456789", plan, 40, "0123456789", plan, false},
+		{"both fit exactly", "0123456789", plan, 10 + utf8.RuneCountInString(plan), "0123456789", plan, false},
 		{"the message cut, no plan", "0123456789", plan, 5, "01234", "", true},
 		{"the message whole, nothing left", "0123456789", plan, 10, "0123456789", "", true},
-		{"what is left, at least the first line", "0123456789", plan, 12, "0123456789", "## Steps", true},
-		{"what is left, past the first line", "ab", plan, 15, "ab", "## Steps\n1. o", true},
+		{"what is left, within the first line", "0123456789", plan, 12, "0123456789", "##", true},
+		{"what is left, back to a line's end", "ab", plan, 15, "ab", "## Steps", true},
+		{"what is left, back to the last line's end", "", plan, 20, "", "## Steps\n1. one", true},
 		{"a first line longer than the budget", "", "0123456789abcdef", 10, "", "0123456789", true},
 		{"no plan", "0123456789", "", 5, "01234", "", true},
-		{"characters, not bytes", "héllo", "wörld\nmore", 7, "héllo", "wörld", true},
+		{"characters, not bytes", "héllo", "wörld\nmore", 7, "héllo", "wö", true},
+		{"the review's case", strings.Repeat("m", 19999), long, 20000, strings.Repeat("m", 19999), "p", true},
 	} {
 		msgHead, head, cut := cutResult(c.msg, c.plan, c.n)
 		if msgHead != c.msgHead || head != c.head || cut != c.cut {
 			t.Errorf("%s: %q %q %v, want %q %q %v", c.name, msgHead, head, cut, c.msgHead, c.head, c.cut)
+		}
+		if n := utf8.RuneCountInString(msgHead) + utf8.RuneCountInString(head); n > c.n {
+			t.Errorf("%s: %d characters kept, over the budget of %d", c.name, n, c.n)
+		}
+	}
+}
+
+// TestAReloadsResultIsAFileOfItsOwn (C8, 1): turn ids restart at turn-1 with
+// every incarnation, and a reloaded session keeps its short id; so two
+// results for turn-1 of two incarnations of one session, both cut, are
+// written to two files — named for the incarnation's last 8 characters, its
+// random part — each holding its own result.
+func TestAReloadsResultIsAFileOfItsOwn(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := resultOutput{what: waitWhat, maxMessage: 4, env: rundir.Env{Home: home, EUID: os.Geteuid()}}
+	s := resultSession{id: "0199c0de-1111-7000-8000-00000000a001", provider: "native", model: "m"}
+	paths := map[string]string{}
+	for _, inc := range []string{"0199c0de-2222-7000-8000-00000000b001", "0199c0de-2222-7000-8000-00000000b002"} {
+		res := newResult(s, statusCompleted)
+		res.Turn, res.inc = "turn-1", inc
+		a := newTurnAccumulator()
+		a.fold(agent.Event{Type: agent.EventText, Text: "the answer of " + inc})
+		res.fill(a)
+		var out, errs strings.Builder
+		if err := writeResult(&out, &errs, o, res); err != nil || res.MessageFile == "" {
+			t.Fatalf("incarnation %s: %v, %q, file %q", inc, err, errs.String(), res.MessageFile)
+		}
+		if want := "0000a001-" + inc[len(inc)-8:] + "-turn-1.md"; filepath.Base(res.MessageFile) != want {
+			t.Fatalf("incarnation %s's file: %s, want %s", inc, res.MessageFile, want)
+		}
+		paths[inc] = res.MessageFile
+	}
+	if len(paths) != 2 || paths["0199c0de-2222-7000-8000-00000000b001"] == paths["0199c0de-2222-7000-8000-00000000b002"] {
+		t.Fatalf("two incarnations' turn-1 share a file: %v", paths)
+	}
+	for inc, path := range paths {
+		if b, err := os.ReadFile(path); err != nil || !strings.HasPrefix(string(b), "the answer of "+inc+"\n") {
+			t.Fatalf("incarnation %s's file holds %q, %v", inc, b, err)
 		}
 	}
 }
@@ -265,5 +316,22 @@ func TestStatusExit(t *testing.T) {
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 4 || ee.msg != "" {
 		t.Fatalf("a needs_input result's exit: %v", err)
+	}
+}
+
+// TestUnsavedWhyIsOneShortLine pins the unsaved-result marker's reason: one
+// line, never more than unsavedWhyMax characters with its ellipsis (C8 review
+// round 2), and a short reason left whole.
+func TestUnsavedWhyIsOneShortLine(t *testing.T) {
+	long := errors.New("open /home/" + strings.Repeat("é", 300) + "/.cache/craze/results:\nnot a directory")
+	got := unsavedWhy(long)
+	if n := len([]rune(got)); n > unsavedWhyMax {
+		t.Fatalf("the reason is %d characters, over %d: %q", n, unsavedWhyMax, got)
+	}
+	if !strings.HasSuffix(got, "…") || strings.Contains(got, "\n") {
+		t.Fatalf("a cut reason is one line ending in an ellipsis: %q", got)
+	}
+	if got := unsavedWhy(errors.New("disk full")); got != "disk full" {
+		t.Fatalf("a short reason is %q, want it whole", got)
 	}
 }

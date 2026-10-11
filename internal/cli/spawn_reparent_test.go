@@ -435,3 +435,56 @@ func TestNewWaitTimeoutCutsAStalledIntermediate(t *testing.T) {
 		return err == nil && len(entries) == 0 && strings.Contains(string(b), "craze serve: stopping:")
 	})
 }
+
+// TestASecondSignalHurriesAnAbandonedSpawn is C8, 3: craze new --wait's
+// host is up and listed but never acts on SIGTERM (cliChildReady=block), and
+// its intermediate never reports it (cliChildReparentHold). A first signal
+// ends the report's wait: the start is abandoned, and its clean-up finds the
+// host and sends it SIGTERM, which it ignores — a clean-up that would wait
+// out the host's grace (30 s here) and the SIGKILL past it. A second signal,
+// once the clean-up has begun (hostspawn.ReparentAbandoning), cuts that short
+// as it cuts C3's undo short: the command returns at once, `cancelled`, exit
+// 3, the host sent SIGTERM and left (its log says so), still running.
+func TestASecondSignalHurriesAnAbandonedSpawn(t *testing.T) {
+	env, ws := serveHome(t)
+	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	never := filepath.Join(t.TempDir(), "never")
+	spawnAsChild(t, func(int) []string { return []string{cliChildReparentHold + "=" + never, cliChildReady + "=block"} })
+	spawnBounds(t, serveStep, serveStep, serveStep)
+	sigs := withWaitSignals(t)
+	abandoning := make(chan struct{}, 1)
+	prev := hostspawn.ReparentAbandoning
+	hostspawn.ReparentAbandoning = func() { abandoning <- struct{}{} }
+	t.Cleanup(func() { hostspawn.ReparentAbandoning = prev })
+
+	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "-C", ws, "never sent")
+	e := onlyHost(t, env)
+	t.Cleanup(func() {
+		// It never acts on SIGTERM: killed, and the agents it recorded.
+		_ = syscall.Kill(-e.PID, syscall.SIGKILL)
+		waitReaped(t, e.PID)
+		hostspawn.KillRecordedAgents(filepath.Join(hostLogsDir(t, env), hostspawn.AgentGroupsName(e.HostID)), 0, func(string, ...any) {})
+	})
+	sigs <- syscall.SIGINT
+	select {
+	case <-abandoning:
+	case <-time.After(serveStep):
+		t.Fatal("the start was never abandoned")
+	}
+	sigs <- syscall.SIGINT
+	hurried := time.Now()
+	select {
+	case <-run.done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("craze new --wait has not returned %v after its second signal (the host's grace is %v)", time.Since(hurried), hostspawn.TermGrace)
+	}
+	m := decodeResult(t, run.stdout)
+	if run.code != 3 || m["status"] != "cancelled" || m["error"] != "interrupted before the prompt was sent" {
+		t.Fatalf("a hurried abandon: exit %d, %v, %q", run.code, m, run.stderr)
+	}
+	b, _ := os.ReadFile(filepath.Join(hostLogsDir(t, env), e.HostID+".log"))
+	if !strings.Contains(string(b), "ending this host") || !strings.Contains(string(b), "hurried: SIGTERM sent") || !processAlive(e.PID) {
+		t.Fatalf("the host after a hurried abandon (alive %v): %s", processAlive(e.PID), b)
+	}
+}

@@ -1662,6 +1662,7 @@ func proveIdentity(ctx context.Context, c *remote.Client, sessionID, inc string)
 // handle a non-terminal one carries, and — for a terminal one — its facts.
 func (w *turnWaiter) newResult(status string) *turnResult {
 	res := newResult(w.session, status)
+	res.inc = w.inc
 	switch w.target.kind {
 	case targetTurn, targetForeign:
 		res.Turn = w.target.id

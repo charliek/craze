@@ -416,6 +416,12 @@ type turnResult struct {
 	// cutBody, when set, is the plain body in place of plainBody's: the
 	// head --max-message kept and the pointer to the whole (writeResult).
 	cutBody string
+	// inc is the incarnation whose stream the result's target is in, ""
+	// when the command never had one: part of the name --max-message's
+	// whole result is written under (writeFull), since turn ids restart at
+	// turn-1 with every incarnation — a reload's first turn is another
+	// turn-1 of the same session (plan 041 C8, 1).
+	inc string
 }
 
 // resultAsk is a needs_input result's open ask.
@@ -666,12 +672,17 @@ func (o resultOutput) render(res *turnResult) ([]byte, error) {
 // cut is --max-message (P13): N characters bound the message and the plan
 // together, in that order (cutResult) — a --plan sub-agent's main output is
 // its plan (X28), and P13's reason, a caller that truncates long output,
-// applies to it as much as to a message. When anything was cut, the message
-// and plan printed are what was kept: plain output's body then ends with
+// applies to it as much as to a message. When anything was cut or left out,
+// the message and plan printed are what was kept — never more than N
+// characters of the two (C8, 2) — plain output's body then ends with
 // `[… cut: full result in <path>]`, and --json's messageFile names the file;
 // the whole result — the plain body and footer, or the JSON — is written to
-// that file under the cache tree (rundir.ResultsDir), <short>-<turn>.md. A
-// file that cannot be written leaves the result whole, and says so on stderr.
+// that file under the cache tree (rundir.ResultsDir), <short>-<inc>-<turn>.md
+// (writeFull). A file that cannot be written does not lift the bound (C8 r1,
+// 2): the message and plan are cut all the same, --json names no
+// messageFile, plain output's marker reads `[… cut: the full result could
+// not be saved: <reason>]`, stderr says so too, and the exit is the
+// result's own.
 func (o resultOutput) cut(stderr io.Writer, res *turnResult) {
 	msg, plan, cut := cutResult(res.message(), res.Plan, o.maxMessage)
 	if !cut {
@@ -682,25 +693,44 @@ func (o resultOutput) cut(stderr io.Writer, res *turnResult) {
 	if err == nil {
 		path, err = o.writeFull(res, full)
 	}
+	marker := "[… cut: full result in " + path + "]"
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: --max-message: %s; the message is whole\n", o.what, sanitizeLine(err.Error()))
-		return
+		why := unsavedWhy(err)
+		fmt.Fprintf(stderr, "%s: --max-message: the full result could not be saved: %s; the message and plan are cut\n", o.what, why)
+		marker = "[… cut: the full result could not be saved: " + why + "]"
+	} else {
+		res.MessageFile = path
 	}
-	res.MessageFile = path
 	if o.json {
 		if res.Message != nil {
 			res.Message = &msg
 		}
 		res.Plan = plan
 	} else {
-		res.cutBody = plainBodyOf(msg, plan) + "\n[… cut: full result in " + path + "]"
+		res.cutBody = plainBodyOf(msg, plan) + "\n" + marker
 	}
 }
 
+// unsavedWhyMax bounds the reason an unsaved result's marker gives, in
+// characters, its ellipsis included: one short line.
+const unsavedWhyMax = 200
+
+// unsavedWhy is the reason an unsaved result's marker gives: err on one line,
+// at most unsavedWhyMax characters, a cut one ending in an ellipsis.
+func unsavedWhy(err error) string {
+	why := sanitizeLine(err.Error())
+	if short, cut := cutMessage(why, unsavedWhyMax-1); cut {
+		why = short + "…"
+	}
+	return why
+}
+
 // cutResult is --max-message's budget of n characters over a result's message
-// and plan, in that order: the message's first n; the plan, what is left — at
-// least its first line when anything is left, though never more than n
-// characters of it — and none when nothing is; and whether either was cut.
+// and plan, in that order (plan 041 C8, 2, amending X29): the message's first
+// n; the plan, what is left — cut at a character's boundary, and back to the
+// end of its last whole line when one ends within what is left — and none
+// when nothing is left; and whether either was cut or left out. The two
+// together are never more than n characters.
 func cutResult(msg, plan string, n int) (msgHead, planHead string, cut bool) {
 	msgHead, cut = cutMessage(msg, n)
 	if plan == "" {
@@ -710,17 +740,27 @@ func cutResult(msg, plan string, n int) (msgHead, planHead string, cut bool) {
 	if left <= 0 {
 		return msgHead, "", true
 	}
-	planHead, _ = cutMessage(plan, left)
-	first, _, _ := strings.Cut(plan, "\n")
-	if first, _ = cutMessage(first, n); len(first) > len(planHead) {
-		planHead = first
+	planHead, planCut := cutMessage(plan, left)
+	if !planCut {
+		return msgHead, plan, cut
 	}
-	return msgHead, planHead, cut || planHead != plan
+	if i := strings.LastIndexByte(planHead, '\n'); i > 0 {
+		planHead = planHead[:i]
+	}
+	return msgHead, planHead, true
 }
 
-// writeFull writes a whole result to <results>/<short>-<turn>.md (the row's
-// id for a row that never ran), 0600 and atomically — a later wait on the same
-// turn rewrites it under a reader — and answers its path.
+// writeFull writes a whole result to <results>/<short>-<inc>-<turn>.md (the
+// row's id for a row that never ran), 0600 and atomically — a later wait on
+// the same turn rewrites it under a reader — and answers its path. <inc> is
+// the incarnation's last 8 characters (plan 041 C8, 1): turn ids restart at
+// turn-1 with every incarnation, and a reloaded session keeps its short id,
+// so without it a reload's turn-1 would overwrite the first incarnation's.
+// The last 8, as the session's short id is its craze id's: an incarnation is
+// a UUIDv7, whose first characters are its creation time and so are shared by
+// two incarnations made within a minute or so of each other, and whose last
+// are random. A result whose incarnation is unknown has no <inc> part; one
+// that is not a handle's characters is written encoded, as a turn id is.
 func (o resultOutput) writeFull(res *turnResult, data []byte) (string, error) {
 	dir, err := rundir.ResultsDir(o.env)
 	if err != nil {
@@ -732,6 +772,12 @@ func (o resultOutput) writeFull(res *turnResult, data []byte) (string, error) {
 	}
 	if name == "" || !handleChars(name, true) {
 		name = base64.RawURLEncoding.EncodeToString([]byte(name))
+	}
+	if inc := psShort(res.inc); inc != "" {
+		if !handleChars(inc, false) {
+			inc = base64.RawURLEncoding.EncodeToString([]byte(inc))
+		}
+		name = inc + "-" + name
 	}
 	path := filepath.Join(dir, res.Short+"-"+name+".md")
 	if err := atomicfile.Write(path, data, 0o600); err != nil {

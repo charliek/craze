@@ -104,6 +104,11 @@ type spawnOptions struct {
 	// whose start (startWithHubEnv) honours it; the TUI's own spawns set
 	// neither, and their hosts stay its children.
 	reparent bool
+	// hurry, with reparent, cuts short the clean-up of a reparented start
+	// that failed (hostspawn.ReparentSpawn.Hurry, plan 041 C8, 3): the
+	// prompt commands' relaySignals hurry, so a further signal has its host
+	// sent SIGTERM and left, rather than waited for, as C3's undo is.
+	hurry func() <-chan struct{}
 }
 
 // hostRef is a host a spawn found for its caller: the one it started, which
@@ -211,7 +216,7 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 	if opts.hubEnv {
 		var rs *hostspawn.ReparentSpawn
 		if opts.reparent {
-			rs = &hostspawn.ReparentSpawn{Env: opts.env, HostID: hostID, Shared: opts.shared}
+			rs = &hostspawn.ReparentSpawn{Env: opts.env, HostID: hostID, Shared: opts.shared, Hurry: opts.hurry}
 		}
 		child, r, err = startWithHubEnv(ctx, argv, groups, logPath, rs)
 	} else {

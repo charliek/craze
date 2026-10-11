@@ -360,27 +360,36 @@ func TestSessionIdsNoLiveHostServes(t *testing.T) {
 	}
 }
 
-// TestWaitMaxMessageBoundsThePlanToo (C3 r3, 4): --max-message's characters
-// bound the message and the plan together, the message first — a --plan
-// sub-agent's output is its plan. The plan gets what the message left, at
-// least its first line; nothing left, it gets none. Either way the whole
-// result is in the file messageFile names, which plain output's marker names.
-// Each wait replays the turn whole from its handle: an automatic plan is in
-// no snapshot (P9).
+// resultsFile is the file --max-message writes the whole result of r's turn
+// to: <short>-<inc>-<turn>.md, inc the incarnation's last 8 characters (C8,
+// 1).
+func (r *waitRig) resultsFile(turn string) string {
+	return filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-"+psShort(r.eng.State().Incarnation)+"-"+turn+".md")
+}
+
+// TestWaitMaxMessageBoundsThePlanToo (C3 r3, 4; C8, 2): --max-message's
+// characters bound the message and the plan together, the message first — a
+// --plan sub-agent's output is its plan — and never more than that (X29's
+// first-line allowance gone). The plan gets what the message left, cut back
+// to its last whole line when one ends within it; nothing left, it gets
+// none. Either way the whole result is in the file messageFile names, which
+// plain output's marker names. Each wait replays the turn whole from its
+// handle: an automatic plan is in no snapshot (P9).
 func TestWaitMaxMessageBoundsThePlanToo(t *testing.T) {
 	plan := agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{Name: "p", Plan: "## Steps\n1. one\n2. two", Auto: true, Accepted: true}}
 	r := newWaitRig(t, 0, answerTurn(plan, textEv("0123456789")))
 	r.submit("go")
 	r.waitIdle()
-	path := filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-turn-1.md")
+	path := r.resultsFile("turn-1")
 	h := turnHandle{incarnation: r.eng.State().Incarnation, target: waitTarget{kind: targetTurn, id: "turn-1"}}
 	waitFrom := func(maxMessage ...string) (string, string, int) {
 		return executeErr(append([]string{"wait", waitRigShort, "--from", h.String(), "--max-message"}, maxMessage...))
 	}
 
-	// The message (10) leaves 4: the plan's first line, whole.
+	// The message (10) leaves 4: the plan's first 4 characters, no line
+	// ending within them.
 	stdout, stderr, code := waitFrom("14")
-	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n\nplan:\n## Steps\n[… cut: full result in "+path+"]\n---\ncompleted · ") {
+	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n\nplan:\n## S\n[… cut: full result in "+path+"]\n---\ncompleted · ") {
 		t.Fatalf("plain --max-message over a plan: exit %d, %q %q", code, stdout, stderr)
 	}
 	whole, err := os.ReadFile(path)
@@ -389,12 +398,18 @@ func TestWaitMaxMessageBoundsThePlanToo(t *testing.T) {
 	}
 	stdout, _, code = waitFrom("14", "--json")
 	m := decodeResult(t, stdout)
-	if code != 0 || m["message"] != "0123456789" || m["plan"] != "## Steps" || m["messageFile"] != path {
+	if code != 0 || m["message"] != "0123456789" || m["plan"] != "## S" || m["messageFile"] != path {
 		t.Fatalf("--json --max-message over a plan: exit %d, %v", code, m)
 	}
 	whole, _ = os.ReadFile(path)
 	if full := decodeResult(t, string(whole)); full["plan"] != "## Steps\n1. one\n2. two" || full["messageFile"] != nil {
 		t.Fatalf("the whole JSON result's file: %v", full)
+	}
+
+	// It leaves 13: up to the end of the plan's last whole line within them.
+	stdout, _, code = waitFrom("23", "--json")
+	if m := decodeResult(t, stdout); code != 0 || m["plan"] != "## Steps" || m["messageFile"] != path {
+		t.Fatalf("--json with 13 left for the plan: exit %d, %v", code, m)
 	}
 
 	// The message takes the whole budget: no plan, and the cut said.
@@ -415,6 +430,32 @@ func TestWaitMaxMessageBoundsThePlanToo(t *testing.T) {
 	}
 }
 
+// TestWaitMaxMessageIsAStrictBound (C8, 2, the branch review's case): at
+// the plugin's --max-message 20000, a 19,999-character message and a plan of
+// one 20,000-character line print 20,000 characters of the two — the message
+// whole and one of the plan's — then the marker; and the whole result, both
+// whole, is in the file the marker names. Under X29's first-line allowance
+// the plan's whole line was printed, 39,999 characters, and no file written.
+func TestWaitMaxMessageIsAStrictBound(t *testing.T) {
+	msg, line := strings.Repeat("m", 19999), strings.Repeat("p", 20000)
+	plan := agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{Name: "p", Plan: line, Auto: true, Accepted: true}}
+	r := newWaitRig(t, 0, answerTurn(plan, textEv(msg)))
+	r.submit("go")
+	r.waitIdle()
+	path := r.resultsFile("turn-1")
+	h := turnHandle{incarnation: r.eng.State().Incarnation, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--from", h.String(), "--max-message", "20000"})
+	body, _, _ := strings.Cut(stdout, "\n---\n")
+	kept, marked := strings.CutSuffix(body, "\n[… cut: full result in "+path+"]")
+	if code != 0 || !marked || kept != msg+"\n\nplan:\np" {
+		t.Fatalf("plain --max-message 20000: exit %d, %d bytes before the footer, the marker %v; %q", code, len(body), marked, stderr)
+	}
+	whole, err := os.ReadFile(path)
+	if err != nil || !strings.HasPrefix(string(whole), msg+"\n\nplan:\n"+line+"\n---\n") {
+		t.Fatalf("the whole result's file: %d bytes, %v", len(whole), err)
+	}
+}
+
 // TestWaitMaxMessageAndJSONFailures is §7 W1 10: --max-message cuts a long
 // message to its first N characters with the pointer to a file holding the
 // whole result (plain: message and footer; --json: the object), and --json's
@@ -424,7 +465,7 @@ func TestWaitMaxMessageAndJSONFailures(t *testing.T) {
 	r := newWaitRig(t, 0, answerTurn(textEv("0123456789abcdefghij")))
 	r.submit("go")
 	r.waitIdle()
-	path := filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-turn-1.md")
+	path := r.resultsFile("turn-1")
 
 	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--max-message", "10"})
 	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n[… cut: full result in "+path+"]\n---\ncompleted (partial) · ") {
@@ -468,5 +509,132 @@ func TestWaitMaxMessageAndJSONFailures(t *testing.T) {
 	stdout, stderr, code = executeErr([]string{"wait", "--json"})
 	if code != 2 || stdout != "" || stderr == "" {
 		t.Fatalf("a usage error under --json: %d, %q %q", code, stdout, stderr)
+	}
+}
+
+// TestRelaySignalsHurry (C8, 3): relaySignals' hurry, armed as a piece of
+// work answering the first signal (or --timeout's end) begins, closes at the
+// next signal from then on, and at once when two have come already; every
+// signal still reaches out, none taken by the hurry.
+func TestRelaySignalsHurry(t *testing.T) {
+	closed := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		default:
+			return false
+		}
+	}
+	sigs := make(chan os.Signal)
+	out, _, stop, hurry := relaySignals(sigs, func() {})
+	defer stop()
+	got := func() {
+		t.Helper()
+		select {
+		case <-out:
+		case <-time.After(stubWatchdog):
+			t.Fatal("a signal never reached out")
+		}
+	}
+
+	afterNone := hurry()
+	if closed(afterNone) {
+		t.Fatal("a hurry armed before any signal is closed")
+	}
+	sigs <- syscall.SIGINT
+	got()
+	afterOne := hurry()
+	if !closed(afterNone) {
+		t.Fatal("the first signal did not close the hurry armed before it")
+	}
+	if closed(afterOne) {
+		t.Fatal("a hurry armed after the first signal is closed by it")
+	}
+	sigs <- syscall.SIGINT
+	got()
+	if !closed(afterOne) {
+		t.Fatal("the second signal did not close the hurry armed after the first")
+	}
+	if !closed(hurry()) {
+		t.Fatal("a hurry armed after two signals is not closed at once")
+	}
+}
+
+// TestAHurryArmedByTheFirstSignalsWorkIsNotClosedByIt (C8 r1, 1): the work
+// the first signal's cancel wakes — a reparented spawn's abandon — may arm a
+// hurry before the relay has done anything more; armed from inside that
+// cancel, here, it is the earliest it can be. That one signal must not close
+// it: only a second does. (The relay counted the signal after the cancel, so
+// a hurry armed in that gap was closed by the signal that woke it.)
+func TestAHurryArmedByTheFirstSignalsWorkIsNotClosedByIt(t *testing.T) {
+	var (
+		hurry    func() <-chan struct{}
+		inCancel []<-chan struct{}
+	)
+	cancel := func() { inCancel = append(inCancel, hurry()) }
+	sigs := make(chan os.Signal)
+	out, _, stop, h := relaySignals(sigs, cancel)
+	defer stop()
+	hurry = h
+	got := func() {
+		t.Helper()
+		select {
+		case <-out:
+		case <-time.After(stubWatchdog):
+			t.Fatal("a signal never reached out")
+		}
+	}
+	closed := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		default:
+			return false
+		}
+	}
+	sigs <- syscall.SIGINT
+	got()
+	if len(inCancel) != 1 || closed(inCancel[0]) {
+		t.Fatalf("the hurry the first signal's own cancel armed is closed by that signal (%d armed)", len(inCancel))
+	}
+	sigs <- syscall.SIGINT
+	got()
+	if !closed(inCancel[0]) {
+		t.Fatal("the second signal did not close the hurry the first one's work armed")
+	}
+}
+
+// TestWaitMaxMessageWhenTheFullResultCannotBeSaved (C8 r1, 2): with the
+// results directory unusable — a regular file where it goes — a 20-character
+// result under --max-message 10 is cut all the same, its bound kept (X35):
+// plain output prints the first 10 and a marker saying the full result could
+// not be saved, and why; --json carries the cut message and no messageFile;
+// stderr says so; the exit is the completed result's, 0. (It used to print
+// the whole message, unmarked.)
+func TestWaitMaxMessageWhenTheFullResultCannotBeSaved(t *testing.T) {
+	r := newWaitRig(t, 0, answerTurn(textEv("0123456789abcdefghij")))
+	r.submit("go")
+	r.waitIdle()
+	cache := filepath.Join(r.env.Home, ".cache", "craze")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "results"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const note = "craze wait: --max-message: the full result could not be saved: "
+
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--max-message", "10"})
+	body, _, _ := strings.Cut(stdout, "\n---\n")
+	kept, marker, _ := strings.Cut(body, "\n")
+	if code != 0 || kept != "0123456789" || !strings.HasPrefix(marker, "[… cut: the full result could not be saved: ") ||
+		!strings.HasSuffix(marker, "]") || strings.Contains(marker, "\n") || !strings.HasPrefix(stderr, note) {
+		t.Fatalf("plain --max-message with no results directory: exit %d, %q %q", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = executeErr([]string{"wait", waitRigShort, "--max-message", "10", "--json"})
+	m := decodeResult(t, stdout)
+	if _, named := m["messageFile"]; code != 0 || m["message"] != "0123456789" || named || !strings.HasPrefix(stderr, note) {
+		t.Fatalf("--json --max-message with no results directory: exit %d, %v, %q", code, m, stderr)
 	}
 }
