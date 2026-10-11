@@ -137,6 +137,14 @@ func (m Model) composerCovered() bool {
 	return m.cardOpen() || m.dialogOpen() || m.viewing != ""
 }
 
+// composerPlain reports that the draft is plain text to the composer: a `!`
+// command line (shellMode), or any draft in the side view (plan 040 §3.6),
+// whose composer asks a question. Neither has the slash menu, the `@` popup or
+// an image chip: a path in either is text.
+func (m Model) composerPlain() bool {
+	return m.shellMode() || m.btw != nil
+}
+
 // composerCursorOffset is the cursor's byte offset into the draft, which is
 // what slashToken works in.
 //
@@ -265,6 +273,14 @@ func (m Model) planPlaceholder() string {
 // priority; under a running turn the hint says what Enter and Ctrl+L do,
 // which differs by provider because only grok can interject.
 func (m Model) composerHint() string {
+	if m.btw != nil {
+		// The side view's composer asks follow-ups (plan 040 §3.6): neither
+		// the plan offer nor the queue's verbs are its.
+		if m.cardOpen() || m.input.Value() != "" {
+			return ""
+		}
+		return clampWidth(btwHint, m.composerInner())
+	}
 	if p := m.planPlaceholder(); p != "" {
 		return p
 	}
@@ -359,6 +375,11 @@ func (m Model) composerRule(top bool) string {
 		// truncated "editing #1 · enter saves…" still says the composer is
 		// not the composer right now; nothing at all does not.
 		title = clampWidth(chip, max(0, width-4))
+	}
+	if top && m.btw != nil {
+		// The side view's composer (plan 040 §3.6) carries the view's chip
+		// where the title stands, as a sub-agent view's top rule does.
+		return m.chipRule(btwRuleChip)
 	}
 	// "─"*n + " " + title + " ─": the two spaces and the closing dash are the
 	// three cells the title needs beside itself.

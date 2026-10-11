@@ -119,6 +119,8 @@ type hostConfig struct {
 	// presence is control.Options.Presence: the host counts its clients for
 	// them (plan 032 §3.14); unset, an older host's wire.
 	presence bool
+	// asideInterval is control.Options.AsideInterval (plan 040 §3.2).
+	asideInterval time.Duration
 }
 
 type hostOpt func(*hostConfig)
@@ -190,7 +192,7 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 		}
 	}
 	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: cfg.workspace, Clock: h.clock.now, Stop: cfg.stop,
-		PermissionMode: cfg.perm, StartedAt: cfg.startedAt, Presence: cfg.presence})
+		PermissionMode: cfg.perm, StartedAt: cfg.startedAt, Presence: cfg.presence, AsideInterval: cfg.asideInterval})
 	h.srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {

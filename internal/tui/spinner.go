@@ -66,7 +66,7 @@ func (m *Model) handleTick(msg tickMsg) {
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
 		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() || m.viewedRunning() ||
-		m.shellRunning() || m.compacting("") || m.sessListSpinning()
+		m.shellRunning() || m.compacting("") || m.sessListSpinning() || m.btwPending()
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
@@ -80,6 +80,12 @@ func untilNextMinute(now time.Time) time.Duration {
 }
 
 func (m Model) spinnerVisible() bool {
+	// The side view's question in flight has a working line of its own
+	// (plan 040 §3.6); with none, the line is the main session's, shown as
+	// it runs.
+	if m.btwPending() {
+		return true
+	}
 	if m.viewing != "" {
 		return m.viewedRunning() || m.cardOpen()
 	}
@@ -106,11 +112,16 @@ func (m Model) spinnerView() string {
 			seg{"Waiting for your answer", styleFG(m.theme.Warn)},
 		)
 	}
+	if m.btwPending() {
+		return m.btwSpinnerView()
+	}
 	if m.viewing != "" {
 		return m.subagentSpinnerView()
 	}
 	text := m.spinnerActivity() + " · " + m.spinnerElapsed()
-	if m.status == statusWorking {
+	// Under the side view Esc closes the view (plan 040 §3.6): it interrupts
+	// nothing, so the line does not offer it.
+	if m.status == statusWorking && m.btw == nil {
 		text += " · esc to interrupt"
 	}
 	return renderSegs(m.width,

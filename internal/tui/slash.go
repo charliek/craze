@@ -123,15 +123,16 @@ func parseSlashLine(s string) (name, args string, ok bool) {
 }
 
 func (m Model) slashCatalog() []slashItem {
-	// The two capability reads are hoisted: each one rebuilds the whole
-	// Provider to answer a bool, and the loop would ask four times.
-	modes, todos := m.showModes(), m.showTodos()
+	// The capability reads are hoisted: each one rebuilds the whole Provider
+	// (or reads the backend's facts) to answer a bool, and the loop would ask
+	// several times.
+	modes, todos, btw := m.showModes(), m.showTodos(), m.btwOffered()
 	builtins := builtinSlash()
 	// An upper bound on the whole catalog: every loop below can only drop
-	// rows, bar the two builtins a session may add (/sessions, /connect). It
-	// sizes the row slice and the dedupe map, which holds one key per row
-	// that survives and so grows to the same shape.
-	size := len(builtins) + 2 + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
+	// rows, bar the three builtins a session may add (/sessions, /connect,
+	// /btw). It sizes the row slice and the dedupe map, which holds one key
+	// per row that survives and so grows to the same shape.
+	size := len(builtins) + 3 + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
 	items := make([]slashItem, 0, size)
 	for _, it := range builtins {
 		switch it.Name {
@@ -144,6 +145,12 @@ func (m Model) slashCatalog() []slashItem {
 				continue
 			}
 		case "exit":
+			if btw {
+				// After the mode rows and before /exit, where the session
+				// answers side questions alone (plan 040 §3.6): a cursor
+				// session's catalog, menu and /help are what they always were.
+				items = append(items, btwBuiltin)
+			}
 			if m.sessions != nil {
 				items = append(items, sessionsBuiltin)
 			}
@@ -286,10 +293,11 @@ func (m Model) slashMenuOpen() bool {
 	}
 	// A shell draft has no slash tokens in it, whatever it looks like: `!ls
 	// /usr` is a path the shell will resolve, not a command craze would offer
-	// to complete. Suppressing it here rather than in the filter is what keeps
-	// the band and the keys agreeing — Tab, Enter and Esc all read slashRows,
-	// which reads this (plan 022 §3.6).
-	if m.shellMode() {
+	// to complete; nor has a side view's follow-up, a question and never a
+	// command (composerPlain, plan 040 §3.6). Suppressing it here rather than
+	// in the filter is what keeps the band and the keys agreeing — Tab, Enter
+	// and Esc all read slashRows, which reads this (plan 022 §3.6).
+	if m.composerPlain() {
 		return false
 	}
 	start, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset())

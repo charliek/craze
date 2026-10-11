@@ -135,6 +135,8 @@ type hostConfig struct {
 	session func(*tui.Stub) agent.Session
 	// readyWait is a when: "ready" attach's bound, 0 for production's.
 	readyWait time.Duration
+	// asideCeiling is a session.aside's bound, 0 for production's.
+	asideCeiling time.Duration
 	// onClose runs before the server closes: what a test holds a server
 	// goroutine with is let go (stream_test.go's withOnClose).
 	onClose []func()
@@ -202,6 +204,9 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 	h.srv = control.NewForTest(cfg.opts, cfg.hooks, cfg.stall, cfg.maxLine)
 	if cfg.readyWait > 0 {
 		h.srv.SetReadyWait(cfg.readyWait)
+	}
+	if cfg.asideCeiling > 0 {
+		h.srv.SetAsideCeiling(cfg.asideCeiling)
 	}
 	if !cfg.noSet {
 		h.srv.SetEngine(h.eng)

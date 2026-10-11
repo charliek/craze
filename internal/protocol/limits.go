@@ -61,6 +61,33 @@ const (
 	NativeDirMax = 4096
 )
 
+// The side question's bounds (plan 040 §3.2), in bytes of UTF-8 — the host
+// holds them in Go; the schema's maxLength (characters) carries the same
+// number, which is never stricter. A question or prior answer over its bound
+// is refused text_too_long, more prior pairs than AsidePriorMax bad_request.
+// A whole request at its bounds is about 1.9 MiB before JSON escaping, inside
+// InboundLineMax; a client checks the encoded request too and drops the
+// oldest prior pairs until it fits.
+const (
+	// AsideQuestionMax bounds session.aside's question and each prior
+	// question: 32 KiB.
+	AsideQuestionMax = 32 << 10
+	// AsideAnswerMax bounds each prior answer a client resends: 64 KiB (a
+	// client cuts a longer answer to it, keeping the head).
+	AsideAnswerMax = 64 << 10
+	// AsidePriorMax is how many earlier question and answer pairs one
+	// session.aside may carry: 20.
+	AsidePriorMax = 20
+	// AsidePendingMax bounds an aside's answer text a host holds unsent while
+	// its connection is not reading: past 1 MiB the host stops sending that
+	// aside's notices and discards their text — the reply still carries the
+	// whole answer.
+	AsidePendingMax = 1 << 20
+	// AsideNoticeMax bounds one aside notification's text: 4 KiB, cut on a
+	// character boundary.
+	AsideNoticeMax = 4 << 10
+)
+
 // The hub roster's bounds (plan 032 §3.6), which the hub enforces (C11) and
 // the schema states (info.json's rosterRow, rosterHost and forwardedRow;
 // maxItems on every roster list), so that a whole roster — RosterRowsMax

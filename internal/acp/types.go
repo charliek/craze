@@ -48,6 +48,11 @@ const (
 	// what goes out; both are accepted inbound.
 	MethodGrokInterject        = "x.ai/interject"
 	MethodGrokInterjectWrapped = "_x.ai/interject"
+	// Btw is grok's side question (plan 040): answered beside a running turn,
+	// from the session's context, with no session/update of its own. The bare
+	// name answers -32601 live, so the wrapped one goes out.
+	MethodGrokBtw        = "x.ai/btw"
+	MethodGrokBtwWrapped = "_x.ai/btw"
 	// Interjection is the broadcast every client renders the user block from.
 	// There is no user_message_chunk for an interjection.
 	MethodGrokInterjection        = "x.ai/session/interjection"

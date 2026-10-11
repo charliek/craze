@@ -206,7 +206,7 @@ func (s *nativeSession) recheckPending() {
 
 	res, err := s.wakeTurn(hs, turnCtx, func() { s.openWake(id, reason, text) })
 	cancel()
-	s.endWake(id, reason, tok, rel, res, err)
+	s.endWake(hs, id, reason, tok, rel, res, err)
 }
 
 // openWake is the wake's opening bracket (the file's "The transitions"):
@@ -267,7 +267,9 @@ func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context, open 
 // prompt); the flush; the journal's note of what the wake came to; and the
 // recheck's kick, because a result that finished during the wake's last step
 // is pending now and this ending is what delivers it. reason is the opening's.
-func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
+// Once the ending is out, a side question's report the wake owes hs is
+// published (publishOwedSpend), before the kick.
+func (s *nativeSession) endWake(hs *harness.Session, id, reason string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
 	s.settleTools()
 	s.asks.EndTurn(tok)
 	s.mu.Lock()
@@ -294,6 +296,7 @@ func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struc
 	s.mu.Lock()
 	s.wakeEndingQueued = false
 	s.mu.Unlock()
+	s.publishOwedSpend(hs)
 	if owed {
 		s.reloadFlushed(reloadOwed)
 	}

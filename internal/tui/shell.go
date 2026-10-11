@@ -39,8 +39,11 @@ const (
 // else's text there — a message already accepted for the agent — and Enter
 // saves it; a row that happens to start with `!` is a message about a command,
 // not a command.
+//
+// The side view (plan 040 §3.6) has no shell mode either: its composer asks
+// a question, and a `!` there is the first character of one.
 func (m Model) shellMode() bool {
-	return m.queueEdit == "" && strings.HasPrefix(m.input.Value(), "!")
+	return m.queueEdit == "" && m.btw == nil && strings.HasPrefix(m.input.Value(), "!")
 }
 
 // shellDraft is the command in the draft: everything after the `!`, trimmed.

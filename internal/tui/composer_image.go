@@ -369,8 +369,9 @@ func sourceEstimate(srcSize int64) int {
 // and the status row says why. One that is not image paths says nothing: it
 // is what the user pasted.
 func (m *Model) pasteImages(text string) (string, tea.Cmd) {
-	if m.shellMode() {
-		// A command line: a path pasted into it is an argument.
+	if m.composerPlain() {
+		// A command line, where a path pasted is an argument, or the side
+		// view, which takes no image (plan 040 §3.6).
 		return text, nil
 	}
 	toks, ok := splitPaste(text)
@@ -423,7 +424,8 @@ func (m Model) pasteClipboardImage(msg pasteMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.imageErr != nil:
 		note = "the clipboard image was not pasted: " + attachErrReason(msg.imageErr)
-	case m.shellMode():
+	case m.composerPlain():
+		// A command line, or the side view (plan 040 §3.6): text alone.
 	case !m.attachmentsReadable():
 		note = p27ClipNote
 	default:

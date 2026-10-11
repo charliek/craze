@@ -50,7 +50,8 @@ by construction:
   when it cut one;
 - `session.state`'s queue rows are capped at 32 KiB each, and its settings
   carry only the provider's own (bounded) config catalog and, for a native
-  session, the fixed-size [usage section](#usage).
+  session, the fixed-size [usage section](#usage);
+- an [`aside`](#aside) notification carries at most 4 KiB of text.
 
 A host tolerates a final line at end-of-file with no trailing `\n` (a lone
 trailing `\r` is stripped): a peer that half-closes right after an
@@ -470,6 +471,8 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
 | `session.stop` | ✓ | — | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
 | `session.models.refresh` | | `nativeDir?` | `status`, `revision`, `sameDir?` | served where the session capability `modelsRefresh` is `true` (a native session): the session takes up the models funded since it opened — see [`session.models.refresh`](#sessionmodelsrefresh); idempotent, so not mutating; a session whose `modelsRefresh` is absent (an ACP session) is refused `unsupported`, reason `models_refresh_unsupported` |
+| `session.aside` | | `asideId`, `question`, `prior?[]` | `text`, `model?`, `usage?` | served where the session capability `aside` is `true` (a native, grok or gx session): a side question answered from the session's context, its answer streamed as [`aside`](#aside) notifications to this connection and whole in the reply, nothing of it journaled or in the session's history — see [`session.aside`](#sessionaside); not mutating; a session whose `aside` is absent (cursor) is refused `unsupported`, reason `aside_unsupported` |
+| `session.aside.cancel` | | `asideId` | `{}` | cancels this connection's `session.aside` of that `asideId`, which then answers `aborted`, reason `context`; answers `{}` always, after that aside's reply when it found one — see [`session.aside.cancel`](#sessionasidecancel); refused `aside_unsupported` where `aside` is absent |
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
@@ -593,6 +596,112 @@ closed.
 ```
 
 (From the fake host's `24-models-refresh` fixture.)
+
+### `session.aside`
+
+A side question — the `/btw` of craze's TUI — asked of the session's agent
+about the session's work, without interrupting a running turn and without
+touching the session: nothing of it is journaled, appended to the session's
+history, or published on its stream, and no other client sees it. The agent
+answers from the session's context as it stands (a native session's stored
+history; grok's and gx's own), with no tools. A side conversation is the
+client's to keep: a follow-up carries the earlier pairs in `prior`, and the
+host remembers nothing between calls.
+
+It is served where the session capability `aside` is `true`: a native session
+(it streams its answer) and a grok or gx session (answered in one piece,
+through grok's own `x.ai/btw`). Where it is absent — cursor, and every host
+from before the method — a client offers no side questions and makes **no
+call**; a host refuses the call anyway `unsupported`, reason
+`aside_unsupported` (one from before the method, `unknown_method`). A grok
+that turns out not to serve it (an older grok) is refused the same reason,
+with a message saying to update grok.
+
+| params | |
+|---|---|
+| `sessionId` | as every session-scoped method |
+| `asideId` | the client's own id for the call, with `session.create`'s `requestId` rules: 1 to 64 of `[A-Za-z0-9._-]`, else `-32602`, `bad_request`. It must be unique among this connection's asides in flight — one an aside of this connection still holds is refused `bad_request` — and may be reused once that aside has answered. The `aside` notifications carry it, and `session.aside.cancel` names it |
+| `question` | the question: not blank (`bad_request`), at most 32 KiB (`AsideQuestionMax`) |
+| `prior` | optional: the side conversation so far, oldest first, each `{question, answer}` — at most 20 pairs (`AsidePriorMax`; more is `bad_request`), each question at most 32 KiB and each answer at most 64 KiB (`AsideAnswerMax`) |
+
+The bounds are bytes of UTF-8, which the host holds; the schema's
+`maxLength` (characters) carries the same numbers and is never the stricter.
+A question or answer over its bound is refused `text_too_long`. A request at
+every bound is about 1.9 MiB before JSON escaping, inside the 4 MiB inbound
+line; escaping can grow it, so a client checks its encoded request against
+the line limit (less some headroom) and drops the oldest `prior` pairs until
+it fits. craze's TUI cuts an answer it resends to 64 KiB, keeping its head.
+
+| result | |
+|---|---|
+| `text` | the whole answer. It is authoritative: a client that ignored every `aside` notification still has it |
+| `model` | the display name of the model that answered; absent when unknown |
+| `usage` | `{input, output, cacheRead}`, the call's token counts, where the provider reports them (a native session); absent for grok and gx |
+
+While the answer is produced, the host sends the asking connection — and
+only it — [`aside`](#aside) notifications carrying its pieces, every one
+before the reply. It is **not mutating**: no `commandId`, no receipt, no
+[reply barrier](#the-reply-barrier) (it publishes nothing), and it is never
+resent — it costs a model call, so a client whose connection went after it
+sent one does not send it again (craze's client answers that loss
+`ErrConnectionLost`); the connection's close has cancelled it on the host.
+
+Refusals and endings, beyond the parameters':
+
+- `not_accepting` — the session has not started, has closed, or is closing;
+  nothing was asked.
+- `unavailable`, reason `aside_busy` — two side questions are already in
+  flight on the session, from every client together; nothing was asked. Ask
+  again once one has answered.
+- `aborted`, reason `context` — the aside was cancelled:
+  `session.aside.cancel`, its connection's close (a hard close or a read
+  error; a client's half-close lets a request in flight finish, so the
+  answer is still written), the session's end, or the host's own bound of 10
+  minutes on one aside.
+- `failed` — the model or the agent failed, or answered nothing (a native
+  model that called a tool instead of answering), with a readable message.
+
+An aside holds one of the connection's 16 request slots while it runs, as
+every request does: asides finished but not yet written, beside other
+requests in flight, can fill them all, and a `session.aside.cancel` behind
+them then waits to be read (the connection's close still cancels). Asides do
+not count toward the session's activity: they hold no turn, fence no close
+and keep no idle host alive. On grok and gx a cancel abandons the wait and
+frees the session's slot while grok may still be generating the answer, in
+its own process.
+
+```json
+{"jsonrpc":"2.0","id":"3","method":"session.aside","params":{"sessionId":"session-fake-1","asideId":"a-1","question":"what is left to do?"}}
+{"jsonrpc":"2.0","method":"aside","params":{"asideId":"a-1","seq":1,"text":"You asked: "}}
+{"jsonrpc":"2.0","method":"aside","params":{"asideId":"a-1","seq":2,"text":"what is left to do?"}}
+{"jsonrpc":"2.0","method":"aside","params":{"asideId":"a-1","seq":3,"text":" (side question 1)."}}
+{"jsonrpc":"2.0","method":"aside","params":{"asideId":"a-1","seq":4,"text":" The session goes on."}}
+{"jsonrpc":"2.0","id":"3","result":{"text":"You asked: what is left to do? (side question 1). The session goes on.","model":"Grok","usage":{"input":1000,"output":4,"cacheRead":800}}}
+```
+
+(From the fake host's `27-aside-served` fixture, whose scripted answer names
+the question.)
+
+### `session.aside.cancel`
+
+Cancels a side question of the **same connection**: `{sessionId, asideId}`,
+answered `{}` always. When it finds that aside in flight it cancels it, and
+answers once the aside's own reply — `aborted`, reason `context` — is queued
+(waiting at most 5 seconds), so a client reads the aside's ending and then
+the cancel's `{}`, in that order. An `asideId` unknown, already answered, or
+another connection's is answered `{}` at once and cancels nothing; an
+`asideId` of the wrong shape is `-32602`, `bad_request`. A cancel sent right
+behind its aside always finds it: the host reserves the aside's id as it
+reads the aside's line, before the aside starts. It is served, and refused
+`aside_unsupported`, exactly where `session.aside` is.
+
+```json
+{"jsonrpc":"2.0","id":"3","method":"session.aside.cancel","params":{"sessionId":"session-fake-1","asideId":"a-1"}}
+{"jsonrpc":"2.0","id":"2","error":{"code":-32000,"message":"context canceled","data":{"code":"aborted","reason":"context"}}}
+{"jsonrpc":"2.0","id":"3","result":{}}
+```
+
+(From the fake host's `28-aside-cancel` fixture: request `2` is the aside.)
 
 ### `session.snapshot`
 
@@ -808,8 +917,9 @@ reason `hub_only`.
 
 ## Notifications
 
-A notification has no `id` and carries its subscription id in `params`: an
-attachment's, from a host, or the roster subscription's, from the hub.
+A notification has no `id` and carries its subscription id in `params` — an
+attachment's, from a host, or the roster subscription's, from the hub — or,
+for `aside`, its aside id.
 
 | notification | params | meaning |
 |---|---|---|
@@ -819,6 +929,7 @@ attachment's, from a host, or the roster subscription's, from the hub.
 | `reset` | `subscription`, `reason` | the subscription is over (below) |
 | `presence` | `subscription`, `attached` | how many clients are attached to the session now, this one included — see [below](#presence); only from a host whose session capability `presence` is `true` |
 | `roster` | `subscription`, `epoch`, `cursor`, `upserts[]`, `removes[]` | the hub's alone: the roster's net change since the cursor the subscriber last had — see [the hub's roster](#the-hubs-roster) |
+| `aside` | `asideId`, `seq`, `text` | the next piece of a [`session.aside`](#sessionaside)'s answer, sent only to the connection that asked — see [below](#aside) |
 
 A `reset` is a notification, not a gap: nothing is ever silently lost. Every
 reason and what a client does about it:
@@ -864,6 +975,29 @@ or lists is not attached.
 A client that does not know `presence` ignores it, as any notification it
 does not know. A host without the capability sends none, and its rows carry no
 `attached`.
+
+### `aside`
+
+The streamed answer of a [`session.aside`](#sessionaside): `asideId` is the
+aside's, `seq` counts from 1 per aside, and `text` is the next piece of the
+answer, at most 4 KiB (`AsideNoticeMax`), cut between characters.
+
+- It is sent only on the connection that asked, every one before that
+  aside's reply, in `seq` order. It carries no subscription: it needs no
+  attachment, and an attached client's other connections and every other
+  client are sent none.
+- It is no session event: nothing sequences, journals or replays it, and no
+  cursor covers it.
+- The host gathers the pieces an agent streams and sends what has arrived
+  every 50 ms, a full 4 KiB at once. A grok or gx answer comes in one piece,
+  and so has no notification before its reply.
+- A connection that is not reading holds them back: once 1 MiB
+  (`AsidePendingMax`) of an aside's text waits unsent, the host sends no more
+  of that aside's notifications and drops their text. The reply's `text` is
+  the whole answer all the same — a client never relies on the
+  notifications.
+- A client drops a notification of an aside it is no longer waiting for (one
+  it cancelled, or has its answer to), and one it does not know.
 
 ## Attach, resume, and snapshots
 
@@ -1107,7 +1241,7 @@ older hub and on one given no answer.
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
 what this host can do — and `rowFacts` and `presence`, the host's too, and
-`modelsRefresh`, the session's own:
+`modelsRefresh` and `aside`, the session's own:
 
 | wire name | meaning |
 |---|---|
@@ -1130,6 +1264,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `rowFacts` | the host's own too, and omitted when `false`: the session's `sessions.list` row carries the [row facts](#the-row-facts). It is a session capability, not a connection one, because it describes the row, and a hub's roster carries rows of hosts of different builds |
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
+| `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -1172,6 +1307,13 @@ one an older client's decoder skips as it skips any key it does not know (the
 event codec stays at version 1), so an older client attached to a newer host
 keeps the list the info document gave it until it attaches again — what every
 client did before the section existed.
+
+Side questions are announced the same way: where `capabilities.aside` is
+absent — cursor, every older host — a client makes no `session.aside` call.
+The `aside` notification goes only to a connection that asked, so a client
+that does not know it never receives one; `aside_busy` and
+`aside_unsupported` are new reasons under codes a client already decides
+from.
 
 The hub is announced the same way. A client learns it is talking to one from
 `hello`'s `endpoint.kind`, and what it serves from its connection
@@ -1459,10 +1601,10 @@ client never mistakes one for a host's own answer — no host ever sends them.
 |---|---|
 | `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed` |
 | `aborted` | `command_aborted`, `set_outcome_unknown`, `bad_catalog`, `context` |
-| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
+| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `aside_busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |
 | `bad_request` | `bad_request`, `bad_answer`, `hello_required`, `unknown_field`, `line_too_long`, `protocol_version`, `bad_token`, `already_attached`; the hub's `connect_not_first`, `ambiguous_session`, `already_subscribed`, `request_conflict` |
-| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `models_refresh_unsupported`, `roster_unsupported`, `hub_only`; the hub's `host_only` |
+| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `models_refresh_unsupported`, `aside_unsupported`, `roster_unsupported`, `hub_only`; the hub's `host_only` |
 | `unknown_session` | `unknown_session` |
 | `unknown_ask` | `unknown_ask` |
 | `already_submitted` | `already_submitted` |
@@ -1657,7 +1799,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-six scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-nine scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1699,14 +1841,24 @@ it `models_refresh_unsupported` (25); and a hub that serves
 `sessions.createOptions`, its `hello` saying `createOptions: true`,
 answering it with its answer as it stands and refusing a stray params member
 `unknown_field`, beside the host, whose `hello` has no `createOptions` and
-which refuses the method `hub_only` (26). Every line is
+which refuses the method `hub_only` (26); a session that answers side
+questions — its info document saying `aside: true` — answering a
+`session.aside` with four `aside` notifications, one per piece of its scripted
+answer, and then the reply, while a second attached client's next line is its
+own `session.state` reply, then a follow-up carrying the first pair as
+`prior` (27); a `session.aside` held after its first notification, cancelled
+by `session.aside.cancel` — the aside's `aborted`, reason `context`, before
+the cancel's `{}` — and the same cancel again, answered `{}` (28); and a
+session that answers none — cursor's, or an older host's — whose info
+document says no `aside`, refusing both methods `aside_unsupported` (29).
+Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt`, `rowFacts`, `presence` and `modelsRefresh` turn on what an older host does not have, and
+`startedAt`, `rowFacts`, `presence`, `modelsRefresh` and `aside` turn on what an older host does not have, and
 `models` gives it a catalog of its own. The seventeen fixtures from before
 `modelsRefresh` without one are, byte for byte, an older host to a newer
 client. `TestWireFixtures` replays
@@ -1763,8 +1915,12 @@ The names are `text`, `thought`, `tool`, `permission`, `question`, `plan`, `end`
 `restart` (a new incarnation of the same session), `quit`, plus a few the
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
 `hang_next`, `run_stop`, `stage_models` — what the next
-`session.models.refresh` of a `modelsRefresh` host takes up — and `unlist` — a `--registry` host leaving the
-registry while it keeps serving the connections it has). Its clock, ids, host id, craze version, pid and token source
+`session.models.refresh` of a `modelsRefresh` host takes up — `hold_aside` —
+the next `session.aside` of an `aside` host parked after its first
+notification, until it is cancelled — and `unlist` — a `--registry` host leaving the
+registry while it keeps serving the connections it has). The binary has no
+flag for the `modelsRefresh` or `aside` opt-ins yet, so its host refuses both
+features as an older host does, and those two ops change nothing there. Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry
 carries its real pid, as every host's does).

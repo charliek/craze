@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.aside.json",
+  "title": "session.aside",
+  "description": "A side question (/btw): the session's agent answers question from the session's context, the earlier pairs of the side conversation in prior first, and nothing of it is journaled, put in the session's history or sent on its event stream. The answer streams as aside notifications, each carrying asideId, sent only to this connection and every one before this reply; the reply's text is the whole answer all the same. Served where the session capability aside is true; a host whose capability is false (cursor) answers unsupported, reason aside_unsupported, as does one whose agent turns out not to serve it (an older grok), and one from before the method unknown_method. Not mutating: no commandId, no receipt. An invalid asideId, or one an aside in flight on this connection holds, is bad_request; a blank question, or more than 20 prior pairs, bad_request; a question or prior question over 32 KiB, or a prior answer over 64 KiB (bytes of UTF-8, which the maxLength characters never undercut), text_too_long; a session not ready or closing, not_accepting; a third aside in flight on the session, unavailable, reason aside_busy; one cancelled (session.aside.cancel, the connection closing, the session ending) or past the host's 10-minute bound, aborted, reason context; a model or agent that failed or answered nothing, failed.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "asideId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "description": "The client's id for this aside, unique among the connection's asides in flight: the aside notifications carry it and session.aside.cancel names it."},
+        "question": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "prior": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "The side conversation so far, oldest first.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question": {"type": "string", "maxLength": 32768},
+              "answer": {"type": "string", "maxLength": 65536}
+            },
+            "required": ["question", "answer"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["sessionId", "asideId", "question"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "The whole answer."},
+        "model": {"type": "string", "description": "The display name of the model that answered; absent when unknown."},
+        "usage": {
+          "type": "object",
+          "description": "What the call spent, where the provider reports it (a native session); absent otherwise.",
+          "properties": {
+            "input": {"type": "integer", "minimum": 0},
+            "output": {"type": "integer", "minimum": 0},
+            "cacheRead": {"type": "integer", "minimum": 0}
+          },
+          "required": ["input", "output", "cacheRead"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["text"],
+      "additionalProperties": false
+    }
+  }
+}

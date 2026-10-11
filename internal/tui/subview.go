@@ -52,14 +52,7 @@ func (m *Model) enterView(id string) {
 		m.setViewportContent(true)
 		return
 	}
-	// setViewportContent stores the viewport back into tr, so the saved
-	// position has to be read before the call, not after it.
-	stick, off := tr.atBottom, tr.yOffset
-	m.setViewportContent(stick)
-	if !stick {
-		m.vp.SetYOffset(off)
-		m.storeViewport(tr)
-	}
+	m.restoreViewport(tr)
 }
 
 func (m *Model) leaveView() {
@@ -88,12 +81,7 @@ func (m *Model) leaveView() {
 			delete(m.agentDone, id)
 		}
 	}
-	stick, off := m.main.atBottom, m.main.yOffset
-	m.setViewportContent(stick)
-	if !stick {
-		m.vp.SetYOffset(off)
-		m.storeViewport(m.main)
-	}
+	m.restoreViewport(m.main)
 }
 
 func (m *Model) switchView(delta int) {
@@ -334,12 +322,20 @@ func (m Model) subagentChip() string {
 }
 
 func (m Model) subagentTopRule() string {
-	width := max(1, m.width)
-	style := styleFG(m.theme.Rule)
 	chip := m.subagentChip()
 	if chip == "" {
-		return style.Render(strings.Repeat("─", width))
+		return styleFG(m.theme.Rule).Render(strings.Repeat("─", max(1, m.width)))
 	}
+	return m.chipRule(chip)
+}
+
+// chipRule is a top rule that ends in chip, the chip in the accent:
+// `──── <chip> ─` across the width, or the chip alone, cut to the width,
+// where no rule fits beside it. The sub-agent view's band and the side
+// view's composer (plan 040 §3.6) top theirs with it.
+func (m Model) chipRule(chip string) string {
+	width := max(1, m.width)
+	style := styleFG(m.theme.Rule)
 	chipSt := lipgloss.NewStyle().Foreground(m.theme.BG).Background(m.theme.Accent)
 	lead := width - lipgloss.Width(chip) - 3
 	if lead < 1 {
@@ -454,6 +450,10 @@ func (m Model) subElapsed(info agent.SubagentInfo) string {
 }
 
 func (m Model) mergedSpinnerText() string {
+	if m.btwPending() {
+		// The side view's question in flight (plan 040 §3.6).
+		return m.spinnerGlyph() + " " + m.btwElapsed()
+	}
 	if m.viewing != "" {
 		if info, ok := m.viewedInfo(); ok {
 			glyph, _ := m.agentGlyph(info)

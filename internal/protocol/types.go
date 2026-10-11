@@ -363,6 +363,14 @@ type CatalogMode struct {
 // false, as rowFacts is: absent is an ACP session, or an older host, which
 // answers the method unsupported (models_refresh_unsupported, or
 // unknown_method from a host from before it), and a client makes no call.
+//
+// Aside is the session's own too (plan 040 §3.2): true where the host serves
+// session.aside and session.aside.cancel for the session — side questions
+// (/btw) its agent answers from the session's context: a native session, and
+// a grok or gx one — detached or TUI-hosted. It is omitted when false, as
+// modelsRefresh is: absent is cursor, or an older host, which answers the
+// methods unsupported (aside_unsupported, or unknown_method from a host from
+// before them), and a client then offers no side questions.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -383,6 +391,7 @@ type SessionCapabilities struct {
 	RowFacts            bool `json:"rowFacts,omitempty"`
 	Presence            bool `json:"presence,omitempty"`
 	ModelsRefresh       bool `json:"modelsRefresh,omitempty"`
+	Aside               bool `json:"aside,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -1325,6 +1334,64 @@ func ModelsStatuses() []ModelsStatus { return slices.Clone(modelsStatuses) }
 
 // ------------------------------------------------------------------- asks
 
+// AsideParams is session.aside's params (plan 040 §3.2): a side question
+// the session's agent answers from the session's context, nothing of it
+// journaled or put in the session's history. It is served where the session
+// capability aside is true; a host whose capability is false answers
+// unsupported, reason aside_unsupported. It is not mutating: no commandId and
+// no receipt.
+//
+// AsideID is the client's own id for the call, unique among that
+// connection's asides in flight, with session.create's requestId rules
+// (ValidRequestID): the aside notifications carry it, and
+// session.aside.cancel names it. An invalid one, or one an aside in flight
+// on the connection already holds, is refused bad_request.
+//
+// Question is at most AsideQuestionMax bytes and not blank; Prior is the
+// side conversation so far, oldest first, at most AsidePriorMax pairs, each
+// question at most AsideQuestionMax bytes and each answer at most
+// AsideAnswerMax.
+type AsideParams struct {
+	SessionID string           `json:"sessionId"`
+	AsideID   string           `json:"asideId"`
+	Question  string           `json:"question"`
+	Prior     []AsideTurnParam `json:"prior,omitempty"`
+}
+
+// AsideTurnParam is one earlier question of a side conversation and the
+// answer it got.
+type AsideTurnParam struct {
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+}
+
+// AsideResult is a side question's answer (plan 040 §3.2). Text is the whole
+// answer and authoritative — a client that dropped every aside notification
+// still has it. Model is the display name of the model that answered, absent
+// when unknown; Usage is what the call spent, where the provider reports it
+// (a native session; absent for grok and gx).
+type AsideResult struct {
+	Text  string            `json:"text"`
+	Model string            `json:"model,omitempty"`
+	Usage *AsideUsageResult `json:"usage,omitempty"`
+}
+
+// AsideUsageResult is a side question's token counts.
+type AsideUsageResult struct {
+	Input     int64 `json:"input"`
+	Output    int64 `json:"output"`
+	CacheRead int64 `json:"cacheRead"`
+}
+
+// AsideCancelParams is session.aside.cancel's params (plan 040 §3.2): it
+// cancels the aside AsideID of the same connection, which then answers
+// aborted, reason context. It always answers {} (Empty): an id unknown,
+// finished, or another connection's is no error and changes nothing.
+type AsideCancelParams struct {
+	SessionID string `json:"sessionId"`
+	AsideID   string `json:"asideId"`
+}
+
 // AsksListParams is asks.list's params.
 type AsksListParams struct {
 	SessionID string `json:"sessionId"`
@@ -1460,6 +1527,19 @@ type ReadyParams struct {
 type PresenceParams struct {
 	Subscription string `json:"subscription"`
 	Attached     uint   `json:"attached"`
+}
+
+// AsideNoticeParams is an aside notification's params (plan 040 §3.2): the
+// next piece of the answer to session.aside AsideID, Seq counting from 1 per
+// aside, Text at most AsideNoticeMax bytes. A host sends it only on the
+// connection that asked, every one before that aside's reply; it carries no
+// subscription, and no cursor or journal holds it. A host whose connection is
+// not reading stops sending an aside's notices once AsidePendingMax bytes of
+// them wait, so a client never relies on them: the reply's text is whole.
+type AsideNoticeParams struct {
+	AsideID string `json:"asideId"`
+	Seq     uint64 `json:"seq"`
+	Text    string `json:"text"`
 }
 
 // RosterParams is a roster notification's params (plan 032 §3.6): the hub's

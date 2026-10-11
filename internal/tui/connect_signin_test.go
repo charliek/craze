@@ -1472,8 +1472,7 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 	}
 	if s.listening {
 		u, _ := url.Parse(s.redirect)
-		if c, err := net.DialTimeout("tcp", u.Host, time.Second); err == nil {
-			_ = c.Close()
+		if !portFreesWithin(u.Host, 10*time.Second) {
 			t.Fatal("the attempt's listener is still open after the sign-in")
 		}
 	}
@@ -1643,6 +1642,43 @@ func TestConnectSignInLogsThroughItsObserver(t *testing.T) {
 	}
 }
 
+// portFreesWithin reports whether addr can be listened on at some point
+// within d — what a closed listener leaves behind. A dial cannot tell: a first
+// sign-in listens on 127.0.0.1:1455, and other packages' tests bind 1455 too,
+// in parallel under `go test ./...`, so one that took it after the attempt
+// closed answers the dial for it (plan 040, C6). A listener of the attempt's
+// that never closed holds the port for good, while another test holds it
+// briefly: a bind that succeeds within d proves the attempt's is gone.
+func portFreesWithin(addr string, d time.Duration) bool {
+	for deadline := time.Now().Add(d); ; time.Sleep(10 * time.Millisecond) {
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			_ = ln.Close()
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+}
+
+// TestPortFreesWithin: an open listener keeps its port from being listened on
+// for the whole wait; once closed, the port is listened on; another holder that
+// lets go within the wait is waited out.
+func TestPortFreesWithin(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if portFreesWithin(addr, 100*time.Millisecond) {
+		t.Fatal("an open listener's port was listened on")
+	}
+	time.AfterFunc(50*time.Millisecond, func() { _ = ln.Close() })
+	if !portFreesWithin(addr, 2*time.Second) {
+		t.Fatal("a port let go within the wait was not listened on")
+	}
+}
+
 // TestConnectSignInEscClosesTheRealListener: the same Esc as
 // TestConnectSignInEscClosesTheListener, over chatgptauth's own attempt — its
 // loopback listener refuses connections after, and no sign-in command or
@@ -1653,7 +1689,33 @@ func TestConnectSignInLogsThroughItsObserver(t *testing.T) {
 // never skips (review r14 6). Its run is ended and its wait joined on every
 // way out of the test (runWait, beginStep). The control is the listener
 // before Esc, which takes a connection.
+//
+// The test holds 127.0.0.1:1455 itself, so the attempt always takes the
+// re-login's fallback, a free port of its own. Other packages' tests bind
+// 1455 too, in parallel under `go test ./...`, and one that took it in the
+// instant between the attempt's close and the dial below answered that dial —
+// "Esc left the attempt's listener open" with nothing of this test's left
+// open (seen on macOS CI, plan 040's PR; reproduced by binding 1455 the moment
+// it came free). A free port is nobody else's to take in that instant. The
+// hold is retried for up to 10 s, outlasting another test's brief hold, so it
+// is not taken from under the attempt between a failed hold and the attempt's
+// own bind (C6 review); a program that holds 1455 for longer than that keeps
+// it for the attempt too, which then usually falls back all the same, and the
+// port is asserted only when the test holds it. The check after Esc is
+// portFreesWithin rather than a dial, so even an attempt that did land on 1455
+// is judged by its own listener, not by whoever binds 1455 next (C6 review r2).
 func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
+	held := false
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if hold, err := net.Listen("tcp", "127.0.0.1:1455"); err == nil {
+			t.Cleanup(func() { _ = hold.Close() })
+			held = true
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+	}
 	newFakeIssuer(t)
 	m, dir := signInModel(t, true)
 	m, wait := beginStep(t, m)
@@ -1663,6 +1725,9 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 		t.Fatal("a re-login's attempt has no listener: neither 1455 nor a free port could be bound")
 	}
 	u, _ := url.Parse(s.redirect)
+	if held && u.Port() == "1455" {
+		t.Fatal("the attempt listens on 1455, which this test holds: not the re-login's free port")
+	}
 	c, err := net.DialTimeout("tcp", u.Host, time.Second)
 	if err != nil {
 		t.Fatalf("the control: the attempt's listener takes no connection: %v", err)
@@ -1672,8 +1737,7 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 	if _, ok := awaitMsg(t, done).(signInDoneMsg); !ok {
 		t.Fatal("the wait did not end with Esc")
 	}
-	if c, err := net.DialTimeout("tcp", u.Host, time.Second); err == nil {
-		_ = c.Close()
+	if !portFreesWithin(u.Host, 10*time.Second) {
 		t.Fatal("Esc left the attempt's listener open")
 	}
 	if m.cdlg.step != connectPick {

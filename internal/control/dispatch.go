@@ -11,11 +11,17 @@ import (
 )
 
 // request is one line the reader parsed into a request: its id verbatim, its
-// method and its params, raw.
+// method and its params, raw. aside is a session.aside's reservation, which
+// dispatch makes on the reader before the handler runs; cancels is, for a
+// session.aside.cancel, the aside of the connection in flight under its
+// asideId when its line was read, nil when none — found on the reader too
+// (aside.go).
 type request struct {
-	id     json.RawMessage
-	method string
-	params json.RawMessage
+	id      json.RawMessage
+	method  string
+	params  json.RawMessage
+	aside   *asideEntry
+	cancels *asideEntry
 }
 
 // envelopeMembers are the members a request may carry (envelope.json's
@@ -100,11 +106,22 @@ func (c *conn) dispatch(line []byte) {
 		// before plan 030 answered it; session.models.refresh for a session
 		// that cannot take up models, an ACP session's: plan 034 §3.4).
 		msg := "%s is not served by a session host"
-		if info.Capability == protocol.CapabilityModelsRefresh {
+		switch info.Capability {
+		case protocol.CapabilityModelsRefresh:
 			msg = "%s is not served for this session: it cannot take up models while it runs"
+		case protocol.CapabilityAside:
+			msg = "%s is not served for this session: it has no side questions"
 		}
 		c.replyErr(req.id, refused(protocol.CodeUnsupported, info.HostUnsupported, msg, req.method))
+	case req.method == protocol.MethodSessionAside && !c.reserveAside(req):
+		// Its asideId is invalid, or one of this connection's asides in flight
+		// holds it: answered on the reader (reserveAside).
 	default:
+		if req.method == protocol.MethodSessionAsideCancel {
+			// The aside it cancels is the one in flight when its line was
+			// read, found here on the reader, never later (liveAside).
+			req.cancels = c.liveAside(req)
+		}
 		b := c.bound
 		c.srv.handlers.add()
 		go func() {
@@ -235,21 +252,30 @@ func (c *conn) reply(id json.RawMessage, result any) {
 		c.replyErr(id, failed(err))
 		return
 	}
-	c.send(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Result: raw})
+	c.send(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Result: raw}, nil)
 }
 
 // replyErr queues e as the answer to id (nil: null), as reply does.
 func (c *conn) replyErr(id json.RawMessage, e *protocol.Error) {
-	c.send(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Error: e})
+	c.send(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Error: e}, nil)
 }
 
-func (c *conn) send(resp protocol.Response) {
+// send queues resp, taking over the line's admission slot as reply says.
+// commit, when set, is made in the conn.mu section that queues the line
+// (enqueue): a session.aside's reservation leaves with its reply (aside.go).
+func (c *conn) send(resp protocol.Response, commit func()) {
 	line, _ := c.responseLine(resp)
 	if line == nil {
 		c.release()
 		return
 	}
-	if c.out.push(c.ctx, line, c.release) != nil {
+	var err error
+	if commit != nil {
+		err = c.enqueue(c.ctx, nil, line, c.release, nil, commit, ordinaryLine)
+	} else {
+		err = c.out.push(c.ctx, line, c.release)
+	}
+	if err != nil {
 		c.release()
 	}
 }

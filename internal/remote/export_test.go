@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"sync"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
@@ -61,6 +62,9 @@ type TestHooks struct {
 	// Broken runs on a Session's detach of a stream a decode failure ended,
 	// before the detach is made.
 	Broken func()
+	// Delivering runs on a connection's reader once an aside notification
+	// has found its aside's sink, before the sink is asked to hand it over.
+	Delivering func(asideID string, seq uint64)
 }
 
 // DialForTest is Dial with h in place.
@@ -88,7 +92,33 @@ func (h TestHooks) hooks() hooks {
 		entered:    h.Entered,
 		attached:   h.Attached,
 		broken:     h.Broken,
+		delivering: h.Delivering,
 	}
+}
+
+// AsideCancelWait is how long Session.Aside, its ctx ended, waits for the
+// session.aside.cancel it sends (asideCancelWait).
+const AsideCancelWait = asideCancelWait
+
+// HoldWrites takes the write lock of the connection calls go to now, as a
+// request mid-write to a peer that has stopped reading holds it: nothing is
+// written on that connection until release is called. release may be called
+// more than once.
+func (c *Client) HoldWrites() (release func()) {
+	c.mu.Lock()
+	w := c.cur
+	c.mu.Unlock()
+	w.wmu.Lock()
+	var once sync.Once
+	return func() { once.Do(w.wmu.Unlock) }
+}
+
+// AsideSinks is how many aside sinks the client holds: one per Session.Aside
+// in flight, none once each has returned or the client has stopped.
+func (c *Client) AsideSinks() int {
+	c.asideMu.Lock()
+	defer c.asideMu.Unlock()
+	return len(c.asides)
 }
 
 // QueuedBytes is what the stream's queue counts now; QueuedItems how many

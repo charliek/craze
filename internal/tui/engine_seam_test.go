@@ -32,11 +32,28 @@ func stubOf(t *testing.T, m Model) *Stub {
 		t.Fatal("the model has no engine")
 	}
 	eng := engineOf(t, m)
-	stub, ok := eng.Session().(*Stub)
+	stub, ok := stubBehind(eng.Session())
 	if !ok {
 		t.Fatalf("the engine wraps %T, want *Stub", eng.Session())
 	}
 	return stub
+}
+
+// stubBehind is the Stub sess is, directly or as one of its opt-in wrappers
+// (RefreshingStub, AsidingStub, RefreshingAsidingStub), which keep the
+// optional interfaces the engine looks for.
+func stubBehind(sess agent.Session) (*Stub, bool) {
+	switch s := sess.(type) {
+	case *Stub:
+		return s, true
+	case RefreshingStub:
+		return s.Stub, s.Stub != nil
+	case AsidingStub:
+		return s.Stub, s.Stub != nil
+	case RefreshingAsidingStub:
+		return s.Stub, s.Stub != nil
+	}
+	return nil, false
 }
 
 // closeCounter is a session that counts the Closes it was given, so a test can say

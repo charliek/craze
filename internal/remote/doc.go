@@ -59,7 +59,10 @@
 // reconstructed: *Error's Is
 // maps (code, reason) to the engine's and agent's sentinels through one
 // table (sentinels.go), and every *OutcomeUnknownError is
-// backend.ErrOutcomeUnknown.
+// backend.ErrOutcomeUnknown. Its Aside (aside.go, plan 040) is session.aside,
+// bound and fenced as a read but never resent: its aside notifications reach
+// the caller through a sink on the Client, bound to the connection the aside
+// went out on and retired before Aside returns.
 //
 // resume_lost and disconnected are protocol's client-side reasons: a client
 // names these outcomes itself, and no host ever sends them.
@@ -70,7 +73,9 @@
 // its notifications and its own attach replies — runs on it, in the order the
 // host wrote them, and it never waits for the stream's caller: an item that
 // finds no room in the stream's queue makes the stream fall behind
-// (attach.go). Nor does it ever write: a re-attach or a detach it decides on
+// (attach.go). The one caller it runs is an aside's onDelta, inline under
+// its sink's own lock, which the agent.Asider contract says must not block
+// (aside.go). Nor does it ever write: a re-attach or a detach it decides on
 // is posted to the connection's writer goroutine, which runs them in order
 // (Client.post) — as is Stream.Close's own detach, so a Close waits for
 // nothing but answers, bounded by its context. So replies, resets and the

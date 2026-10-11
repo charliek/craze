@@ -51,6 +51,15 @@ var ErrOutcomeUnknown = errors.New("backend: the command's outcome is unknown: i
 // answers it.
 var ErrStopUnsupported = errors.New("backend: the session's host cannot stop it")
 
+// ErrConnectionLost is a call (not a command) whose connection went before its
+// reply came: the host may have run it, and it is never sent again (plan 040
+// §3.6, §3.7). A socket backend's own error for it (internal/remote's
+// ErrConnectionLost) wraps this sentinel, so a client matches it by errors.Is
+// without knowing the transport — the TUI's side question says "connection
+// lost — ask again" rather than resending a paid call. An in-process backend
+// never answers it.
+var ErrConnectionLost = errors.New("the connection was lost before the reply")
+
 // epochKey is WithEpoch's context key.
 type epochKey struct{}
 
@@ -201,6 +210,21 @@ type Backend interface {
 	// socket nothing is sent. It is fenced by the epoch ctx carries, like
 	// every read.
 	RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error)
+	// Aside answers one side question (/btw, plan 040 §3.7) from the
+	// session's context, calling onDelta with each piece of a streamed
+	// answer — inline, so onDelta must not block — and never after Aside
+	// returns. It is no command (no engine.Command, no receipt, nothing
+	// journaled or in the session's history) and a blocking call, for
+	// tea.Cmds only, never Update: in process it is the engine's Aside, over
+	// the socket session.aside, whose aside notifications are onDelta's
+	// pieces. It is never resent: over the socket a request sent and then
+	// lost answers ErrConnectionLost (the host may have run it), and a ctx
+	// ended mid-answer posts session.aside.cancel on the same connection and
+	// answers ctx's error. A session that cannot — SessionInfo.Aside false:
+	// cursor, a host from before the method — answers
+	// agent.ErrAsideUnsupported, and over the socket nothing is sent. It is
+	// fenced by the epoch ctx carries, like every read.
+	Aside(ctx context.Context, req agent.AsideRequest, onDelta func(string)) (agent.AsideResult, error)
 	// LastTurn is how the session's last turn ended (plan 030 §3.7, SF-57;
 	// engine.State.LastTurn): nil while a turn runs, before any has ended,
 	// and from a host that does not say (one from before plan 030). It is
@@ -323,6 +347,12 @@ type SessionInfo struct {
 	// ACP session and from a host from before the method: a client then
 	// makes no call.
 	ModelsRefresh bool
+	// Aside says the session answers side questions (/btw, plan 040 §3.7),
+	// and Aside asks one: a native, grok or gx session, in process
+	// (engine.Asides) or over the socket (the session capability aside, as
+	// the host sent it). False for cursor and from a host from before the
+	// method: a client then offers no /btw and makes no call.
+	Aside bool
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon

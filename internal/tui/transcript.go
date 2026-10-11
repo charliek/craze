@@ -333,6 +333,18 @@ func (m *Model) storeViewport(tr *pane) {
 	tr.atBottom = m.vp.AtBottom()
 }
 
+// restoreViewport paints tr, the pane now on screen (cur), back at the place
+// storeViewport left it: at the bottom, or at its offset. setViewportContent
+// stores the viewport back into tr, so the saved place is read before it.
+func (m *Model) restoreViewport(tr *pane) {
+	stick, off := tr.atBottom, tr.yOffset
+	m.setViewportContent(stick)
+	if !stick {
+		m.vp.SetYOffset(off)
+		m.storeViewport(tr)
+	}
+}
+
 // setViewportContent re-renders the dirty entries of the drawn transcript,
 // hands the viewport the rows (paint) and only then scrolls, so "stick to
 // bottom" is decided by where the user was before the change, not after it.

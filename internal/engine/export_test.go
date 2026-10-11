@@ -29,3 +29,11 @@ func NewForGateTable(sess agent.Session, opts Options, h GateTableHooks) (*Engin
 		beforeSessionClose:  h.BeforeSessionClose,
 	})
 }
+
+// AsidesInFlight is how many side questions the engine counts in flight
+// (aside.go): 0 again once every Aside has returned, whatever it came to.
+func (e *Engine) AsidesInFlight() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.asides
+}

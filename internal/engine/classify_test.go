@@ -106,6 +106,22 @@ func classifyTable() []classifyCase {
 		{"agent.ErrForeignTurn", agent.ErrForeignTurn, "foreign_turn", "foreign_turn", false},
 		{"agent.ErrPromptCancelled", agent.ErrPromptCancelled, "prompt_cancelled", "prompt_cancelled", false},
 		{"agent.ErrUnsupported", agent.ErrUnsupported, "unsupported", "unsupported", false},
+		// Plan 040 §3.3's side question. ErrBadAside and ErrAsideTooLong are
+		// ErrBadRequest and agent.ErrQueueTextTooLong; a session's own
+		// agent.ErrAsideNotReady leaves Aside as ErrNotAccepting; a context
+		// that ended while the session's own error said something else is the
+		// cancel.
+		{"ErrBadAside", fmt.Errorf("%w: the question is blank", ErrBadAside), "bad_request", "bad_request", false},
+		{"ErrAsideTooLong", fmt.Errorf("%w: the question is 40000 bytes, over 32768", ErrAsideTooLong), "text_too_long", "text_too_long", false},
+		{"ErrAsideBusy", ErrAsideBusy, "unavailable", "aside_busy", true},
+		{"agent.ErrAsideUnsupported", agent.ErrAsideUnsupported, "unsupported", "aside_unsupported", false},
+		{"agent.ErrAsideNotReady, as Aside answers it", fmt.Errorf("%w: %w", ErrNotAccepting, agent.ErrAsideNotReady),
+			"not_accepting", "not_accepting", true},
+		{"an aside whose context ended, as Aside answers it", fmt.Errorf("%w: %w", context.Canceled, errors.New("pipe closed")),
+			"aborted", "context", false},
+		// An aside the session's own shutdown cut short (branch review P2):
+		// context.Canceled, so stopped, whatever the caller's context says.
+		{"agent.ErrAsideInterrupted", agent.ErrAsideInterrupted, "aborted", "context", false},
 		{"an unclassified provider/RPC error (classify's own default)", boom, "failed", "failed", false},
 	}
 }
@@ -118,14 +134,14 @@ func classifyTable() []classifyCase {
 var wireReasons = map[string][]string{
 	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-	"unavailable": {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing",
-		"spawn_failed", "host_unreachable"},
+	"unavailable": {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
+		"closing", "spawn_failed", "host_unreachable"},
 	"failed": {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 		"protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed",
 		"request_conflict"},
-	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "models_refresh_unsupported", "roster_unsupported",
-		"hub_only", "host_only"},
+	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "models_refresh_unsupported", "aside_unsupported",
+		"roster_unsupported", "hub_only", "host_only"},
 }
 
 // reasonBelongsToCode reports whether §3.2's table lets a host send reason
@@ -261,6 +277,9 @@ func engineSentinels() map[string]error {
 		"ErrCommandAborted":    ErrCommandAborted,
 		"ErrAttachRaced":       ErrAttachRaced,
 		"ErrUnknownClient":     ErrUnknownClient,
+		"ErrBadAside":          ErrBadAside,
+		"ErrAsideTooLong":      ErrAsideTooLong,
+		"ErrAsideBusy":         ErrAsideBusy,
 	}
 }
 
@@ -287,6 +306,11 @@ func agentSentinels() map[string]error {
 		// before the write. engine.ErrStaleModel is this very value, so the
 		// table's ErrStaleModel row is its row too.
 		"ErrStaleModel": agent.ErrStaleModel,
+		// A side question to a session with none (plan 040 §3.3).
+		"ErrAsideUnsupported": agent.ErrAsideUnsupported,
+		// A side question the session's own shutdown cut short: it wraps
+		// context.Canceled, which classify places (aborted, context).
+		"ErrAsideInterrupted": agent.ErrAsideInterrupted,
 	}
 }
 
@@ -312,8 +336,16 @@ func agentSentinels() map[string]error {
 //   - ErrAgentExited is the transport's. A command that runs into it ran, and
 //     its failure is a real one: "failed" is exactly right for it, and it
 //     needs no row.
+//   - ErrAsideEmpty is a side question the model answered nothing to (plan
+//     040 §3.3): the call ran and failed, so "failed" is right, as for
+//     ErrAgentExited.
+//   - ErrAsideNotReady is a session's answer to a side question it cannot
+//     take now; Engine.Aside wraps it in ErrNotAccepting before it leaves
+//     (the table's row for it), so classify never sees it bare.
 var agentSentinelsNotClassified = []string{
 	"ErrAgentExited",
+	"ErrAsideEmpty",
+	"ErrAsideNotReady",
 	"ErrAskIDInUse",
 	"ErrClosed",
 	"ErrFlushGaveUp",

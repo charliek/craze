@@ -68,11 +68,12 @@ func newComposerAt(src completeSource, loads *completeLoadSet) completePopup {
 }
 
 // composerAtCompletes says the composer completes `@` tokens at all: it has
-// the popup, the draft is not a shell command (a `!ls @x` is the shell's to
-// read), and there is a workspace to search. A popup with no source is a
-// model a test built by hand, which has none.
+// the popup, the draft is not plain text (composerPlain: a `!ls @x` is the
+// shell's to read, and a side view's follow-up is a question), and there is
+// a workspace to search. A popup with no source is a model a test built by
+// hand, which has none.
 func (m Model) composerAtCompletes() bool {
-	return m.composerAt.src != nil && !m.shellMode() && m.sessHereDir() != ""
+	return m.composerAt.src != nil && !m.composerPlain() && m.sessHereDir() != ""
 }
 
 // composerAtOn says the composer may have its `@` popup now: it completes

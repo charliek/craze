@@ -541,6 +541,8 @@ func (s *server) onRequest(msg *acp.Message) {
 			return
 		}
 		go s.handleInterject(msg)
+	case acp.MethodGrokBtw, acp.MethodGrokBtwWrapped:
+		s.handleBtw(msg)
 	case acp.MethodSessionSetModel:
 		if refusesSetModel(s.script) {
 			// An agent that has no session/set_model at all: the live wire for
@@ -717,6 +719,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.rejectImage(msg.ID, msg.Params, n)
 	case "grok-reject-image":
 		s.grokRejectImage(msg.ID, msg.Params, n)
+	case "grok-btw", "grok-btw-missing", "grok-btw-escape":
+		s.echo(msg.ID, text)
 	default:
 		s.echo(msg.ID, text)
 	}

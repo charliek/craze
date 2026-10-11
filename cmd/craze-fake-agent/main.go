@@ -146,6 +146,16 @@ Flags:
                       image's mimeType, data=<base64 length>, bytes=<decoded
                       length> and uri
           grok-prompt-dump the same over the grok dialect (image:false)
+          grok-btw    grok-echo, and _x.ai/btw is answered "btw: <question>" in
+                      grok's nested shape ({"result":{"answer":...}}), recorded
+                      in the prompt dump as {"btw":"<question>"}; a question
+                      holding HOLD-BTW is never answered; the bare x.ai/btw
+                      and every cursor script answer -32601
+          grok-btw-missing the same, but _x.ai/btw is answered -32601, as an
+                      older grok does
+          grok-btw-escape the same, but the answer carries terminal escape
+                      sequences ("btw: \x1b[31m<question>\x1b[0m\x07"), and
+                      HOLD-BTW is not special
           reject-image a prompt carrying an image block is refused -32602
                       (after one message chunk when its text holds SAY-FIRST);
                       any other prompt is answered as prompt-dump answers
@@ -265,6 +275,7 @@ func main() {
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
 		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after",
 		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image",
+		"grok-btw", "grok-btw-missing", "grok-btw-escape",
 		"exit-two-lines":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)

@@ -156,8 +156,9 @@ var (
 	ErrSessionEnded = errors.New("remote: the session has ended")
 	// ErrConnectionLost answers a call (not a command) whose connection went
 	// before its reply came. A read may be sent again; the client is
-	// reconnecting.
-	ErrConnectionLost = errors.New("remote: the connection was lost before the reply")
+	// reconnecting. It wraps backend.ErrConnectionLost, so a client of the
+	// Backend seam matches it without knowing the transport (plan 040 §3.6).
+	ErrConnectionLost = fmt.Errorf("remote: %w", backend.ErrConnectionLost)
 	// ErrNotRun answers a command the client settled knowing it did not run:
 	// it was never sent (it waited for a connection), or its last answer said
 	// nothing ran, and the client stopped before another attempt. A

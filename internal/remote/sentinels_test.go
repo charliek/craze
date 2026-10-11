@@ -131,16 +131,22 @@ func engineTwins(t *testing.T) []twin {
 		{"agent.ErrForeignTurn", "", agent.ErrForeignTurn},
 		{"agent.ErrPromptCancelled", "", agent.ErrPromptCancelled},
 		{"agent.ErrUnsupported", "", agent.ErrUnsupported},
+		{"engine.ErrAsideBusy", "", engine.ErrAsideBusy},
+		{"agent.ErrAsideUnsupported", "", agent.ErrAsideUnsupported},
 		{"(default)", "a failure classify names no sentinel for: a provider's refusal", errors.New("the agent refused the mode")},
 	}
 }
 
-// neverOnTheWire is every sentinel classify names that no host's reply can
-// carry, and why: TestEveryReasonReconstructsItsSentinel's guard holds the
-// twins and this list to classify's source together.
+// neverOnTheWire is every sentinel classify names that no host's reply
+// reconstructs — none carries it, or the reason one carries rebuilds another
+// sentinel — and why: TestEveryReasonReconstructsItsSentinel's guard holds
+// the twins and this list to classify's source together.
 var neverOnTheWire = map[string]string{
 	"engine.ErrUnknownClient": "ClaimClient's answer, never a command's: the server answers a failed claim resumed: false (§3.6)",
-	"context.Canceled":        "a host's command context is a timeout cancelled only once its call has returned (control's commandCtx): its end is a deadline",
+	"context.Canceled": "a host's command context is a timeout cancelled only once its call has returned (control's commandCtx): its end is a deadline; " +
+		"a side question's (plan 040) is cancelled — session.aside.cancel, its connection's close, the session's end — and its reply says aborted, context, " +
+		"which reconstructs that reason's one sentinel, context.DeadlineExceeded: no reply tells a cancel from a deadline. " +
+		"The asking client's own cancel never reads that reply: remote.Session.Aside answers its ctx's error",
 }
 
 // matchSet is every sentinel a caller of the Backend might match: every one
@@ -165,6 +171,7 @@ func matchSet() map[string]error {
 		"agent.ErrQueueFull": agent.ErrQueueFull, "agent.ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
 		"agent.ErrPromptInFlight": agent.ErrPromptInFlight, "agent.ErrForeignTurn": agent.ErrForeignTurn,
 		"agent.ErrPromptCancelled": agent.ErrPromptCancelled, "agent.ErrUnsupported": agent.ErrUnsupported,
+		"engine.ErrAsideBusy": engine.ErrAsideBusy, "agent.ErrAsideUnsupported": agent.ErrAsideUnsupported,
 		"transcript.ErrSnapshotTooLarge": transcript.ErrSnapshotTooLarge,
 		"backend.ErrOutcomeUnknown":      backend.ErrOutcomeUnknown, "backend.ErrStaleEpoch": backend.ErrStaleEpoch,
 		"backend.ErrStopUnsupported": backend.ErrStopUnsupported,
@@ -471,11 +478,12 @@ func TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown(t *testing.T) {
 // its sessions.list row carries, no concern of a session's client) and
 // presence (plan 032 §3.14: the host's count, which reaches a client on its
 // stream, not in its capabilities) and modelsRefresh (plan 034 §3.4:
-// backend.SessionInfo.ModelsRefresh, beside the capabilities) to exactly one
-// agent field.
+// backend.SessionInfo.ModelsRefresh, beside the capabilities) and aside (plan
+// 040 §3.2: the session's own, beside the capabilities as modelsRefresh is)
+// to exactly one agent field.
 func TestEveryWireCapabilityComesBack(t *testing.T) {
 	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true, "Presence": true,
-		"ModelsRefresh": true}
+		"ModelsRefresh": true, "Aside": true}
 	wt := reflect.TypeFor[protocol.SessionCapabilities]()
 	at := reflect.TypeFor[agent.Capabilities]()
 	from := map[string]string{} // agent field → wire field
@@ -560,6 +568,13 @@ const (
 	// checked here) — the explicit quit's reading of a host that cannot stop
 	// its session.
 	proofStop = "stop"
+	// proofLost: errors.Is of backend.ErrConnectionLost or
+	// backend.ErrStaleEpoch, the client's own answers to a side question
+	// (plan 040 §3.6, §3.7) — sent and then lost (ErrConnectionLost wraps
+	// backend's), or answered after the client left the identity it was sent
+	// as — which no host's refusal ever reconstructs (checked here, over
+	// every twin).
+	proofLost = "lost"
 )
 
 // tuiSites is every error read in internal/tui's production files
@@ -716,7 +731,7 @@ var tuiSites = []tuiSite{
 	// unless it is no answer (promptUnknown, C15r2): the call's time ran out —
 	// the deadline, which a remote command answers itself when its ctx ends
 	// and a host's own bound's reasons reconstruct; context.Canceled, only
-	// ever the dispatch's own ctx's, which no host's reply carries
+	// ever the dispatch's own ctx's, which no host's reply reconstructs
 	// (neverOnTheWire) — or the client could not learn the outcome (its
 	// connection went after sending, or closed under it), which it says
 	// itself and no host's refusal ever is.
@@ -731,6 +746,19 @@ var tuiSites = []tuiSite{
 	{"sessions_models.go", "nativeDefaultModel", "Is", "modeltable.ErrNothingFunded", 1, proofLocal},
 	{"sessions_models.go", "sessNativeDefault", "Error", "msg.err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
+	// The side question's failure, as its error row words it (plan 040
+	// §3.6): the client's own losses, the host's refusals by sentinel, a
+	// host's aborted/context (its bound, the session's end, a cancel) as the
+	// deadline it reconstructs, the asking client's own cancel — its ctx's
+	// error, which no reply carries — and the host's text for the rest.
+	{"btw.go", "btwErrText", "Is", "backend.ErrConnectionLost", 1, proofLost},
+	{"btw.go", "btwErrText", "Is", "backend.ErrStaleEpoch", 1, proofLost},
+	{"btw.go", "btwErrText", "Is", "engine.ErrAsideBusy", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "agent.ErrQueueTextTooLong", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "engine.ErrClosing", 1, proofSentinel},
+	{"btw.go", "btwErrText", "Is", "context.Canceled", 1, proofLocal},
+	{"btw.go", "btwErrText", "Is", "context.DeadlineExceeded", 1, proofDeadline},
+	{"btw.go", "btwErrText", "Error", "err", 1, proofText},
 }
 
 // scanTUI is every error read in internal/tui's production files, keyed as
@@ -853,6 +881,16 @@ func TestEveryTUIErrorSiteWorksOverTheWire(t *testing.T) {
 				Data: protocol.ErrorData{Code: protocol.CodeUnsupported, Reason: protocol.ReasonStopUnsupported}})
 			if !errors.Is(got, backend.ErrStopUnsupported) {
 				t.Errorf("%s %s: a host's stop_unsupported is not backend.ErrStopUnsupported over the wire (%v)", s.file, s.fn, got)
+			}
+		case proofLost:
+			for _, tw := range twins {
+				got := reconstructed(t, tw.err)
+				if errors.Is(got, backend.ErrConnectionLost) || errors.Is(got, backend.ErrStaleEpoch) {
+					t.Errorf("%s %s: the host's %s reconstructs a lost or stale answer", s.file, s.fn, tw.sentinel)
+				}
+			}
+			if !errors.Is(remote.ErrConnectionLost, backend.ErrConnectionLost) {
+				t.Errorf("%s %s: the client's own ErrConnectionLost is not backend.ErrConnectionLost", s.file, s.fn)
 			}
 		case proofOutcome:
 			for _, tw := range twins {

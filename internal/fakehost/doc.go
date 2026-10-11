@@ -32,7 +32,15 @@
 // capabilities.modelsRefresh, session.models.refresh served, and the catalog
 // section on the stream when a refresh takes up what the stage_models op
 // staged. Without it, the Host refuses the method as an ACP session's host
-// does (models_refresh_unsupported).
+// does (models_refresh_unsupported). Its aside (Options.Aside, plan 040 §3.8)
+// makes the session the Stub as one that answers side questions
+// (tui.AsidingStub, or tui.RefreshingAsidingStub beside modelsRefresh):
+// capabilities.aside, session.aside answered with the Stub's scripted answer,
+// streamed one aside notification per piece (the server's
+// control.AsideEachDelta, which every Host uses), and session.aside.cancel
+// served; the hold_aside op parks the next answer after its first piece.
+// Without it, the Host refuses both methods as cursor's host does
+// (aside_unsupported). cmd/craze-fake-host has no flag for it yet.
 //
 // A Host is served on a listener its caller makes, listed nowhere, unless it
 // is registered (Register, plan 032 §3.15): then it is bound and listed in a

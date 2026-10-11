@@ -491,6 +491,13 @@ func classify(err error) classification {
 		// ran, and asking again is the answer — ErrUnavailable's case exactly,
 		// a log under a burst, so its code and never stored.
 		return classification{code: "unavailable", reason: "attach_raced"}
+	case errors.Is(err, ErrAsideBusy):
+		// A side question past the session's cap of two in flight (plan 040
+		// §3.3): nothing was asked of the model, and asking again once one has
+		// answered is the answer — a gate refusal, NEVER STORED (asides keep
+		// no receipt anyway). ErrBadAside and ErrAsideTooLong need no case:
+		// they are ErrBadRequest and agent.ErrQueueTextTooLong.
+		return classification{code: "unavailable", reason: "aside_busy"}
 	case errors.Is(err, ErrBadRequest), errors.Is(err, ErrUnknownClient):
 		// ErrUnknownClient is ClaimClient's answer and never a command's. It
 		// never reaches the wire — the socket server turns a failed claim into
@@ -510,6 +517,12 @@ func classify(err error) classification {
 		return classification{code: "prompt_cancelled", stored: true, reason: "prompt_cancelled"}
 	case errors.Is(err, agent.ErrUnsupported):
 		return classification{code: "unsupported", stored: true, reason: "unsupported"}
+	case errors.Is(err, agent.ErrAsideUnsupported):
+		// A side question to a session with none, or whose agent turned out
+		// not to serve them (plan 040 §3.3): the reason the host's capability
+		// gate answers too. agent.ErrAsideEmpty, a side question the model
+		// answered nothing to, is the default's: failed.
+		return classification{code: "unsupported", stored: true, reason: "aside_unsupported"}
 	default:
 		// Every error the switch above does not name is a command that RAN
 		// and failed — a provider/RPC refusal of a Set, an Interject the
@@ -541,10 +554,10 @@ func Reason(err error) string { return classify(err).reason }
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
 // Ask, Answer, CancelSubagent, SetTitle, State, NewClientID, ReleaseClient,
-// ClaimClient, Events, Ready, RefreshesModels and Note wait on nothing: no
-// channel, no provider call, no Publish (Ready hands out a channel and never
-// waits on it). Start, Subscribe, Attach, Interject,
-// Cancel, Stop, Set, RefreshModels, Sync, SyncSeq and Close block and belong
+// ClaimClient, Events, Ready, RefreshesModels, Asides and Note wait on
+// nothing: no channel, no provider call, no Publish (Ready hands out a channel
+// and never waits on it). Start, Subscribe, Attach, Interject,
+// Cancel, Stop, Set, RefreshModels, Aside, Sync, SyncSeq and Close block and belong
 // on a goroutine
 // that is not the primary's reader — a tea.Cmd; Sync and SyncSeq wait for the
 // outbox's drainer, which waits for that reader. Subscribe is among
@@ -659,6 +672,16 @@ type Control interface {
 	// a session not yet up.
 	RefreshesModels() bool
 	RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error)
+
+	// Asides says the session answers side questions (agent.Asider whose
+	// Asides is true: /btw, plan 040), and Aside asks one (aside.go). Asides
+	// waits on nothing. Aside is no command — no Command, no receipt, nothing
+	// journaled or published — and it blocks for the whole answer, calling
+	// onDelta (which must not block) with each streamed piece; it is bounded
+	// by ctx, refused ErrAsideBusy past two in flight, and never called from
+	// the primary's reader.
+	Asides() bool
+	Aside(ctx context.Context, req agent.AsideRequest, onDelta func(string)) (agent.AsideResult, error)
 
 	// The session's settings. Set blocks — one FIFO worker asks the provider,
 	// the session writes the change and its delta in one locked section, and

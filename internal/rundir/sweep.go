@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"time"
 )
 
 // Hosts is every live host in the registry, in host-id order: what `craze
@@ -56,12 +57,17 @@ func HostsScan(env Env) ([]Entry, []string, error) {
 	}
 	var live []Entry
 	var unreadable []string
+	// One retry budget for the whole scan, not one per entry (C7 review): a
+	// scan over many damaged entries under held locks waits at most this
+	// long in all, so callers with deadlines (a hub's first list, `craze
+	// ps`) are not held N windows.
+	contended := time.Now().Add(probeContendedFor)
 	for _, name := range names {
 		id, ok := strings.CutSuffix(name, ".json")
 		if !ok || !ValidHostID(id) {
 			continue
 		}
-		switch e, st := probe(hosts, id); st {
+		switch e, st := probe(hosts, id, contended); st {
 		case probeLive:
 			live = append(live, e)
 		case probeUnreadable:
@@ -84,9 +90,36 @@ const (
 	probeUnreadable
 )
 
+// probeContendedFor is how long a scan keeps trying the taken locks of
+// entries that cannot be read before it calls those hosts alive — one budget
+// for the whole scan: long enough to outlast another prober's sweep of the
+// same dead host (a few unlinks, even a prober descheduled under load), and
+// far shorter than any live host holds its lock.
+var probeContendedFor = 250 * time.Millisecond
+
+// probeContended runs in probe when it finds a host's lock taken over an
+// entry it cannot read, before it tries the lock again: nothing in
+// production, and in a test (never in parallel) the barrier that holds
+// another prober's sweep until the probe is really contending with it.
+var probeContended = func(string) {}
+
+// tryLockUntil is tryLock retried every couple of milliseconds until it takes
+// the lock or deadline has passed; past it, it tries once.
+func tryLockUntil(f *os.File, deadline time.Time) (bool, error) {
+	for ; ; time.Sleep(2 * time.Millisecond) {
+		taken, err := tryLock(f)
+		if err != nil || taken {
+			return taken, err
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+	}
+}
+
 // probe is one registry entry's check, in the held registry directory: its
 // live Entry, or why it is not listed (probeState).
-func probe(hosts *dir, id string) (Entry, probeState) {
+func probe(hosts *dir, id string, contended time.Time) (Entry, probeState) {
 	lockName := id + ".lock"
 	lock, err := hosts.openFile(lockName, os.O_RDWR, 0)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -102,10 +135,22 @@ func probe(hosts *dir, id string) (Entry, probeState) {
 	}
 	if !taken {
 		e, err := readEntry(hosts, id+".json")
-		if err != nil || e.HostID != id {
+		if err == nil && e.HostID == id {
+			return e, probeLive
+		}
+		// A taken lock over an entry that cannot be read is a live host's —
+		// mid-bind, or its entry damaged — or another prober's: a Scan
+		// sweeping this same dead host holds its lock for the instant of the
+		// sweep, and a probe that met it there called the dead host alive
+		// (a hub's create refused host_unreachable on CI, plan 040 C7). The
+		// lock is tried again, until the scan's contended deadline, before
+		// the host is called alive: a live host holds it for good, a prober
+		// lets go. An entry that reads is answered at once, so a scan of live
+		// hosts pays nothing.
+		probeContended(id)
+		if taken, err = tryLockUntil(lock, contended); err != nil || !taken {
 			return Entry{}, probeUnreadable
 		}
-		return e, probeLive
 	}
 	defer func() { _ = unlock(lock) }() // before the Close deferred above
 	// The lock taken must still be the one at the name: a sweeper that got

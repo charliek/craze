@@ -1303,6 +1303,7 @@ var (
 		"syncPending", "gateSync", "harnessQuit", "completeLoads", "signIns", "unstartedSeq", "sessPick",
 		"connSeq", "nativeDir", "nativeEnv", "composerAt", "images", "attachSeq", "attachDir", "attachRuns",
 		"localPresence", "hostAttached", "availability", "availSeq", "backCmd", "startCheck",
+		"composerGen", "btwSeq",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
@@ -1321,7 +1322,7 @@ var (
 		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
 		"upDone", "indexTitle", "unstarted", "first", "cdlg", "attachReads", "editImages", "attached",
-		"provAvail", "providerBack", "availNative", "startAsk", "startWarn",
+		"provAvail", "providerBack", "availNative", "startAsk", "startWarn", "btw",
 	}
 )
 

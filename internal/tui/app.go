@@ -412,6 +412,17 @@ type Model struct {
 	// built by hand, and means whichever session is shown. Like bgen it only
 	// ever moves forward, across every session this TUI shows.
 	shownGen uint64
+	// composerGen is the composer's generation (plan 040 §3.6): it moves when
+	// the side view opens and when it closes (enterBtw, leaveBtw) — the one
+	// composer then holds another draft without the session shown changing —
+	// and a paste carries the one it was asked under (pasteMsg), so a paste
+	// asked for in one draft never lands in the other. New starts it at 1, so
+	// the zero stamp is a message a test built by hand and lands anywhere.
+	// The TUI's, as the composer is, and like shownGen it only moves forward.
+	composerGen uint64
+	// btwSeq numbers the side questions this TUI asks (btwCall.id), for its
+	// whole life: an answer is taken only by the call that bears its number.
+	btwSeq uint64
 	// cmdSeq numbers this model's commands from 1. Each command also names the
 	// backend's client id, read per command (nextCmd) and never cached, so
 	// every mutating command it sends names itself and the events it caused
@@ -486,6 +497,11 @@ type Model struct {
 	subs      map[string]*pane
 	viewing   string
 	tombstone *agent.SubagentInfo
+	// btw is the side view while it is open (/btw, plan 040 §3.6, btw.go):
+	// its pane — which cur() returns ahead of any other — its thread and the
+	// side question in flight. nil while closed. The session's: a switch
+	// closes it (switchBackend) and the constructor makes none.
+	btw *btwState
 
 	expanded bool
 	width    int
@@ -1641,6 +1657,9 @@ func (m *Model) followWorkspace(ws string) {
 // session the model held: its commands, its generation, its fold, its
 // overlays and its client, leaving no backend.
 func (m *Model) dropSession() {
+	// The side view is the session's (plan 040 §3.6): it closes first, its
+	// question cancelled.
+	m.leaveBtw()
 	// A command belongs to the session it was run from — its workspace is that
 	// session's — so a session change ends it. It does not *wait* for it: this
 	// runs inside Update, on the one goroutine bubbletea draws from, and a
@@ -1784,6 +1803,9 @@ func New(cfg Config) Model {
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
 		shownGen: 1,
+		// The composer's draft is the first one from here (composerGen): 1
+		// for the same reason.
+		composerGen: 1,
 	}.withSession(sessionSeed{workspace: cwd, model: cfg.Model, provider: prov.Name(), loading: cfg.Loading})
 	sess := cfg.Session
 	checked := false
@@ -2260,6 +2282,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, ok := m.applySessMsg(msg); ok {
 		return next, cmd
 	}
+	if p, ok := msg.(pasteMsg); ok && p.staleComposer(m.composerGen) {
+		// A paste asked for in another of the composer's drafts — before
+		// the side view opened, or in the view since closed (plan 040 §3.6):
+		// it lands in neither, wherever the keyboard is now.
+		return m, nil
+	}
 	if p, ok := msg.(pasteMsg); ok && p.textRefused && !p.hasImage() {
 		// Clipboard "text" that was not text (plan 033 C3r): nothing lands,
 		// wherever it was asked for, and the status row says why. With an
@@ -2668,6 +2696,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// has since left never gets here (staleShown, attachDoneMsg).
 		return m.attachAnswer(msg)
 
+	case btwPumpMsg:
+		// The side question's answer, as it streams and as it ends (plan 040
+		// §3.6, btw.go). One for a session the model has since left never
+		// gets here (staleShown); one for a question the view has let go of
+		// is dropped where it lands.
+		return m.applyBtwPump(msg)
+
 	case completeLoadedMsg:
 		// The composer `@` popup's search (plan 030 §3.16): the list's own
 		// results were applySessMsg's. One asked for in a session the model
@@ -3029,6 +3064,19 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		}
 		return m.closeDialog(true), nil
 	}
+	if m.btw != nil {
+		// The side view replaces the transcript region alone (plan 040
+		// §3.6): the chrome around it — the tasks panel, the queue strip, the
+		// status rows and the sub-agent rows — is the main session's, shown
+		// as it runs and inert. A click on it is swallowed: it would open a
+		// sub-agent view or a queue edit over the view's composer, cycle the
+		// main session's mode, or open the model dialog.
+		for _, r := range []regionID{regionTasks, regionQueue, regionAgents, regionStatus} {
+			if lay.Region(r).Contains(y) {
+				return m, nil
+			}
+		}
+	}
 	switch {
 	case lay.Region(regionOverlay).Contains(y):
 		if m.composerAtShown() {
@@ -3144,6 +3192,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlD:
 		return m.requestQuit()
 	case tea.KeyCtrlC:
+		// The side view takes Ctrl+C first, with no card up (plan 040 §3.6):
+		// it closes — its question cancelled, its thread discarded — and
+		// nothing else happens: the main turn is not touched, and the
+		// double-press window is not armed. With a card up the key is what it
+		// always was, the view waiting behind the card.
+		if m.btw != nil && !m.cardOpen() {
+			m.leaveBtw()
+			m.ctrlCDeadline = time.Time{}
+			return m, nil
+		}
 		// A running command outranks the whole Ctrl+C state machine, and is the
 		// only way to stop one while a card has the keyboard (a card takes Esc
 		// before the ladder below ever sees it). One press, one kill: it does
@@ -3203,6 +3261,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// The side view (plan 040 §3.6, btw.go) is the next rung: below the card,
+	// the dialogs and the confirm line, which keep the keyboard over it, and
+	// above the sub-agent view — which the side view never opens over, nor
+	// it over the side view — and everything of the main composer.
+	if m.btw != nil {
+		return m.handleBtwKey(msg)
+	}
+
 	if m.viewing != "" {
 		return m.handleViewKey(msg)
 	}
@@ -3216,7 +3282,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.copySelectionOrLastReply()
 	}
 	if msg.Type == tea.KeyCtrlV {
-		return m, pasteFromClipboard(m.shownGen, 0)
+		return m, m.composerPaste()
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
@@ -3476,17 +3542,17 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	switch {
 	case msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'v':
 		// Alt+V is Ctrl+V's alias: the clipboard's image, then its text.
-		return pasteFromClipboard(m.shownGen, 0)
+		return m.composerPaste()
 	case msg.Paste && len(msg.Runes) == 0:
 		// An empty bracketed paste: what a terminal sends for an image it
 		// could not paste as text. Its clipboard is the GUI's — except over
 		// SSH, where the clipboard craze could read is the remote machine's,
 		// not the one the user pasted from — and a `!` command line takes no
-		// image.
-		if m.overSSH() || m.shellMode() {
+		// image, nor does the side view (composerPlain, plan 040 §3.6).
+		if m.overSSH() || m.composerPlain() {
 			return nil
 		}
-		return probeClipboardImage(m.shownGen)
+		return probeClipboardImage(m.shownGen, m.composerGen)
 	case msg.Paste:
 		// A paste of image paths becomes their chips, inserted as the paste
 		// would have been; any other paste goes in as it came.
@@ -3676,6 +3742,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.unstarted != nil {
 		// A new session not spawned yet (plan 030 §3.13): its first prompt
 		// spawns it. A builtin or a shell command needs a session to run in.
+		// So does /btw where the session would answer side questions (plan
+		// 040 §3.6) — a native, grok or gx one, by its provider: refused
+		// with a line, rather than spawning a session whose first prompt is
+		// the side question; on cursor it is the text it always was.
+		if _, isBtw := btwDraft(m.input.Value()); isBtw && m.unstarted.spec.Provider.Aside() {
+			m.addError(btwUnstarted)
+			return m, nil
+		}
 		return m.enterUnstarted(ok && name != "" && builtinNamed(name))
 	}
 	// The offer outranks the sub-agent rows: an empty composer under a live
@@ -3704,6 +3778,15 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// line, not the silence below — and never queued.
 	if ok && name == connectBuiltin.Name && m.connectOffered() {
 		return m.runBuiltin(name, args)
+	}
+	// /btw is a builtin of the sessions that answer side questions alone
+	// (plan 040 §3.6, btw.go): anywhere else it goes to the agent below as
+	// the text it is. It runs whatever the session is doing — mid-turn, and
+	// during a turn the agent runs on its own — and never queues. It reads
+	// the raw draft, a draft of many lines included, which parseSlashLine
+	// refuses.
+	if q, isBtw := btwDraft(m.input.Value()); isBtw && m.btwOffered() {
+		return m.openBtw(q)
 	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
 	// and holding it until the turn ends would be surprising. The ones that
@@ -4390,6 +4473,9 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	// (plan 036 §3.6): nothing is reopened for a program that is ending.
 	m.cdlg.returnTo = 0
 	m = m.dropConnect()
+	// The side view closes first (plan 040 §3.6): its question is cancelled
+	// rather than left to run on past the program that asked it.
+	m.leaveBtw()
 	if m.remote && m.eng != nil {
 		return m.stopQuit()
 	}

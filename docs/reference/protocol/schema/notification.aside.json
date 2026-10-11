@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.aside.json",
+  "title": "aside",
+  "description": "The next piece of the answer to the session.aside asideId: seq counts from 1 per aside, text is at most 4 KiB (cut on a character boundary). Sent only on the connection that asked, every one before that aside's reply. It carries no subscription and no event seq: it is none of the session's events, and is never sequenced or journalled. A host whose connection is not reading stops sending an aside's notices once 1 MiB of them wait; the reply's text is the whole answer, so a client may drop them, and drops those of an aside it stopped waiting for. A client that does not know it ignores it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "asideId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"},
+        "seq": {"type": "integer", "minimum": 1},
+        "text": {"type": "string", "maxLength": 4096}
+      },
+      "required": ["asideId", "seq", "text"],
+      "additionalProperties": false
+    }
+  }
+}

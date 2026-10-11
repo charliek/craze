@@ -174,6 +174,15 @@ type Client struct {
 	// own hello resumes (the fresh client a failed reconnect was given).
 	unresumed bool
 
+	// asideMu guards asides, every Session.Aside in flight's sink by its
+	// asideId, and asidesClosed, which says the client has stopped and takes
+	// no more (aside.go). A leaf: nothing else is taken under it.
+	asideMu      sync.Mutex
+	asides       map[string]*asideSink
+	asidesClosed bool
+	// nextAside mints asideIds (per client, so unique on every connection).
+	nextAside atomic.Uint64
+
 	// hooks are the tests' schedule points (export_test.go), nil in
 	// production and set before the client starts.
 	hooks hooks
@@ -228,6 +237,9 @@ type hooks struct {
 	// broken runs on a Session's detach of a stream a decode failure ended,
 	// before the detach is made.
 	broken func()
+	// delivering runs on a connection's reader once an aside notification
+	// has found its aside's sink, before the sink is asked to hand it over.
+	delivering func(asideID string, seq uint64)
 }
 
 // wire is one connection: its reader's framing, its writer's lock, and the
@@ -781,11 +793,15 @@ func (m inMsg) response() *protocol.Response {
 	return &protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: m.ID, Result: m.Result, Error: m.Error}
 }
 
-// notification routes one notification to the stream. A method protocol 1
-// does not name is ignored (tolerant inbound, §3.2); params of one it names
-// that do not decode break the protocol (errMalformed).
+// notification routes one notification: an aside notification to its
+// aside's sink (aside.go; it carries no subscription), every other to the
+// stream. A method protocol 1 does not name is ignored (tolerant inbound,
+// §3.2); params of one it names that do not decode break the protocol
+// (errMalformed).
 func (c *Client) notification(w *wire, method string, params json.RawMessage) error {
 	switch method {
+	case protocol.NotifyAside:
+		return c.asideNotice(w, params)
 	case protocol.NotifyEvent, protocol.NotifySynchronized, protocol.NotifyReady, protocol.NotifyReset,
 		protocol.NotifyPresence:
 	default:
@@ -907,18 +923,24 @@ func (c *Client) callAs(ctx context.Context, ident uint64, method string, params
 	case protocol.MethodSessionAttach:
 		return fmt.Errorf("remote: %s is Attach's", method)
 	}
+	return c.onWireAs(ctx, ident, func(w *wire) error { return c.callOn(ctx, w, method, params, result) })
+}
+
+// onWireAs runs attempt on the connection of identity ident (wireAs) and
+// answers what it does — but for errUnsent: w was gone before a byte was
+// written (its reader had not yet handed it to the reconnect), so it waits
+// for the next connection, as a call made while the client reconnects does,
+// and attempts there. Nothing reached the host, so that is no resend.
+func (c *Client) onWireAs(ctx context.Context, ident uint64, attempt func(w *wire) error) error {
 	for {
 		w, err := c.wireAs(ctx, ident)
 		if err != nil {
 			return err
 		}
-		err = c.callOn(ctx, w, method, params, result)
+		err = attempt(w)
 		if !errors.Is(err, errUnsent) {
 			return err
 		}
-		// w was gone before a byte was written — its reader had not yet
-		// handed it to the reconnect: wait for the next connection, as a
-		// call made while the client reconnects does.
 		if err := c.awaitNot(ctx, w); err != nil {
 			return err
 		}
@@ -950,6 +972,13 @@ func (c *Client) callOn(ctx context.Context, w *wire, method string, params, res
 	if err != nil {
 		return err
 	}
+	return c.callRaw(ctx, w, method, raw, result, nil)
+}
+
+// callRaw is callOn with its params encoded. owed, when set, runs once ctx
+// has ended while the host still owed the reply — its waiter taken off w
+// first (Session.Aside's cancel).
+func (c *Client) callRaw(ctx context.Context, w *wire, method string, raw json.RawMessage, result any, owed func()) error {
 	ch := make(chan cmdResult, 1)
 	id, err := c.send(w, method, raw, func(resp *protocol.Response, err error) { ch <- cmdResult{resp: resp, err: err} }, writeHooks{})
 	if err != nil {
@@ -965,7 +994,9 @@ func (c *Client) callOn(ctx context.Context, w *wire, method string, params, res
 		}
 		return decodeReply(r.resp, result)
 	case <-ctx.Done():
-		w.take(id)
+		if w.take(id) != nil && owed != nil {
+			owed()
+		}
 		return ctx.Err()
 	}
 }
@@ -1064,6 +1095,7 @@ func (c *Client) terminate(err error) {
 	c.cur, c.adopting = nil, nil
 	c.mu.Unlock()
 	c.cancel()
+	c.closeAsideSinks()
 	if s != nil {
 		s.fail(err)
 	}

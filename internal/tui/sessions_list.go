@@ -355,6 +355,10 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 	if r == nil {
 		return m, nil
 	}
+	// The side view closes first (plan 040 §3.6), its question cancelled and
+	// its follow-up discarded: the session the list comes back to shows its
+	// own transcript, at its own place.
+	m.leaveBtw()
 	// An unstarted session the list is opened over is discarded (plan 030
 	// §3.13): nothing is behind the list, and the cursor starts where that
 	// session was opened from.

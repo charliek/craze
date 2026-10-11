@@ -14,7 +14,7 @@ import (
 )
 
 // The clipboard's image (plan 033 §3.3): what Ctrl+V, Alt+V and an empty
-// bracketed paste read before they read text (pasteFromClipboard,
+// bracketed paste read before they read text (pasteFromClipboardForComposer,
 // probeClipboardImage). atotto/clipboard, which reads the text, is text only
 // on every platform — pbpaste cannot emit image data at all — so the image is
 // asked of the platform's own tools:

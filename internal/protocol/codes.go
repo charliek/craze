@@ -129,6 +129,10 @@ const (
 	// ReasonBusy is a command past the host's cap of commands in flight
 	// (CommandsPerHost, §3.6): not run, never stored.
 	ReasonBusy Reason = "busy"
+	// ReasonAsideBusy is a session.aside past the session's cap of side
+	// questions in flight, two (engine.ErrAsideBusy, plan 040 §3.3): nothing
+	// was asked of the model; ask again once one has answered.
+	ReasonAsideBusy Reason = "aside_busy"
 	// ReasonClosing is a session.attach refused because the host is closing
 	// its session, or deciding whether to (plan 030 §3.6, §3.6a): a
 	// session.stop has been accepted, or a close fence is up while the host
@@ -173,6 +177,12 @@ const (
 	// whose capability modelsRefresh is false — an ACP session's host (plan
 	// 034 §3.4). A host from before the method answers it unknown_method.
 	ReasonModelsRefreshUnsupported Reason = "models_refresh_unsupported"
+	// ReasonAsideUnsupported is session.aside or session.aside.cancel on a
+	// session whose capability aside is false — cursor's host (plan 040
+	// §3.2) — and session.aside on one whose agent turns out not to serve it
+	// (an older grok). A host from before the methods answers them
+	// unknown_method.
+	ReasonAsideUnsupported Reason = "aside_unsupported"
 	// ReasonRosterUnsupported is sessions.subscribe on a host
 	// (rosterSubscribe: false); the hub defines it (S4).
 	ReasonRosterUnsupported Reason = "roster_unsupported"
@@ -272,6 +282,7 @@ var reasons = []ReasonInfo{
 	{ReasonAttachRaced, CodeUnavailable, true, false},
 	{ReasonNotReady, CodeUnavailable, false, false},
 	{ReasonBusy, CodeUnavailable, false, false},
+	{ReasonAsideBusy, CodeUnavailable, true, false},
 	{ReasonClosing, CodeUnavailable, true, false},
 	{ReasonSpawnFailed, CodeUnavailable, false, false},
 	{ReasonHostUnreachable, CodeUnavailable, false, false},
@@ -298,6 +309,7 @@ var reasons = []ReasonInfo{
 	{ReasonUnknownMethod, CodeUnsupported, false, false},
 	{ReasonStopUnsupported, CodeUnsupported, false, false},
 	{ReasonModelsRefreshUnsupported, CodeUnsupported, false, false},
+	{ReasonAsideUnsupported, CodeUnsupported, true, false},
 	{ReasonRosterUnsupported, CodeUnsupported, false, false},
 	{ReasonHubOnly, CodeUnsupported, false, false},
 	{ReasonHostOnly, CodeUnsupported, false, false},

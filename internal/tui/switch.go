@@ -92,6 +92,11 @@ type sessionSeed struct {
 // would reach its step again.
 func (m Model) withSession(seed sessionSeed) Model {
 	m.cdlg.signIn.end(chatgptauth.CloseDialog)
+	// The side view is the session's too (plan 040 §3.6): every path that
+	// replaces the session has closed it already (switchBackend,
+	// dropSession), and this is the backstop that cancels a side question
+	// one of them left in flight.
+	m.btw.retire()
 	s := Model{
 		// ---- The TUI's: kept across every session it shows.
 		theme:  m.theme,
@@ -192,6 +197,8 @@ func (m Model) withSession(seed sessionSeed) Model {
 		sessGen:       m.sessGen,
 		bgen:          m.bgen,
 		shownGen:      m.shownGen,
+		composerGen:   m.composerGen,
+		btwSeq:        m.btwSeq,
 		gateSeq:       m.gateSeq,
 		resumeAttempt: m.resumeAttempt,
 		spawnSeq:      m.spawnSeq,
@@ -252,6 +259,10 @@ func (m Model) withSession(seed sessionSeed) Model {
 // while it names none of its own (sessTitle).
 func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string) (Model, tea.Cmd) {
 	old := m.eng
+	// The side view closes first (plan 040 §3.6), its question cancelled: a
+	// follow-up half typed in it is the side thread's, discarded with it, and
+	// never stashed as the session's draft.
+	m.leaveBtw()
 	m.stashDraft()
 	roster := m.sessList.roster
 	// The list's input goes with the list: its popup's load, if one runs, is
