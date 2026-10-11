@@ -22,6 +22,10 @@ spawn. `Enter` on it shows the refusal `--provider native` would have exited 2
 with, as an error row under the list, and the dialog stays open for another
 choice; nothing is saved as the default. Moving the cursor clears the row.
 
+The provider dialog's keys: `↑`/`Shift+Tab` and `↓`/`Tab` move the cursor,
+wrapping, `Enter` starts the row under it, and `Esc` or a click outside the
+box starts the default.
+
 ### Provider states
 
 As the dialog opens, craze checks each provider the way
@@ -97,12 +101,48 @@ session](#resuming-a-session) and [CLI reference](cli.md#-continue-and-resume).
 
 Top to bottom:
 
-1. Transcript
-2. Pinned tasks panel
-3. Spinner line
-4. Composer
-5. Two status rows
-6. One row per in-flight sub-agent (all providers)
+1. The session band: one row naming the session (`title · provider · dir`)
+   and the way back to the list (`← sessions`). It appears only once the
+   [session list](#session-list) has been opened in this terminal
+2. Transcript
+3. The overlay, while it is open: the [slash menu](#slash-commands) or the
+   [`@` file popup](#file-mentions)
+4. Pinned tasks panel
+5. The [queue band](#queued-messages): one row per queued message
+6. Spinner line
+7. Composer
+8. The card band, while a [card](#cards) is waiting for an answer
+9. Two status rows (below)
+10. One row per in-flight sub-agent (all providers)
+
+### Status rows
+
+Row 1 reads `workspace · branch · provider · model · usage · elapsed`. The
+model carries what the agent lets craze set beside it, `Name (high · fast)`:
+the effort when the model offers one, and `fast` only when it is on. The usage
+part is the native provider's alone (see [Usage and cost](#usage-and-cost)),
+and the elapsed time is the session's age. When the terminal is too narrow the
+parts go in this order: elapsed, branch, usage, provider, then the model;
+only the workspace always stays.
+
+Row 2 reads, left to right:
+
+- the mode chip `◆ <mode>` (see [Modes](#modes)) and a hint beside it, or on
+  a session with no modes nothing;
+- the permission chip: `▸▸ bypass permissions on` under `--force` (the
+  default), `▸ prompting for permissions` under `--no-force`. It states what the
+  session's agent is running with, as its host says it;
+- the tools in flight, by kind (`2 reads, 1 command`);
+- `⧗ n queued` while messages are [queued](#queued-messages);
+- `← n agents` (`↓ n agents` where `←` opens the session list) counting the
+  running sub-agents;
+- `N attached` while another client has the session open.
+
+Narrow, row 2 gives up `N attached` first, then the hint beside the mode, then
+the queued count and the agent count, then the tool counts. Neither chip is
+dropped; if the two do not fit together the permission chip is cut short. A
+copy note (`copied 2 lines`) takes a place on the row for two seconds and is
+never dropped.
 
 The composer never scrolls: it grows to show every line up to a cap (6 rows,
 3 on a short terminal), then windows to keep the cursor visible. A rule above
@@ -229,8 +269,12 @@ sessions (it fills the picker only when fewer than 10 of those exist). `↑`/`�
 move and wrap, `Enter` loads the selected row, and a click loads the row
 clicked; `Esc` quits craze outright (exit 0 — no session was ever started,
 so there is no "default" the way the provider dialog has one) and a click
-outside the box does nothing, unlike every other dialog. `--continue` skips
-the picker and loads the newest row for the workspace directly. See [CLI
+outside the box does nothing, unlike every other dialog. A row that is refused
+does not close the picker: the reason shows in red under the list, and moving
+the cursor clears it. `--continue` skips
+the picker and loads the newest row for the workspace directly, skipping the
+sub-agent sessions (when only those exist it refuses, and says how many: [the
+wording](cli.md#-continue-and-resume)). See [CLI
 reference](cli.md#-continue-and-resume) for the flags, the filtering
 rules, and the exit codes when nothing matches.
 
@@ -375,7 +419,7 @@ off.
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
 | `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
@@ -389,6 +433,7 @@ off.
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
+| `Ctrl+L` while editing a queued message | save the edit and send that message now, so its text cannot go out twice (once as a draft and again from the queue) |
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
@@ -470,11 +515,12 @@ actually goes.
 | A turn that ends in an error | cleared, with a note — nothing drains from an error state |
 | Quitting | gone with the session; there is no persistence across restarts |
 
-Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks` and `/clear`
-run immediately even mid-turn, and so does `/btw` where it is offered — it
-opens the [side view](#side-questions-btw) beside the running turn rather than
-behind it; the ones that need the agent (`/model`, `/plan`, …) keep today's
-refusal. A slash line the agent advertises is
+Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks`, `/clear` and
+`/rename` run immediately even mid-turn, and so does `/btw` where it is offered
+— it opens the [side view](#side-questions-btw) beside the running turn rather
+than behind it — and `/sessions` where there is a [session list](#session-list).
+The ones that need the agent (`/model`, `/plan`, …) keep today's refusal, and
+`/connect` is refused with a line while work runs. A slash line the agent advertises is
 ordinary text and queues like any other message.
 
 The queue holds 32 messages of up to 32 KiB each. Past either bound the
@@ -948,7 +994,10 @@ Keys inside the view:
   as always — `Esc` answers the card, not the view, and the view is there
   again once it is answered; with a card up `Ctrl+C` keeps its usual meaning.
 
-A failure is an error row in the view, which stays open; an answer cut off
+A follow-up too long for the host to take says `this side question is too long`
+(the question on its own does not fit); when it is the earlier questions and
+answers that make the request too long, the oldest pairs are dropped first
+until it fits. A failure is an error row in the view, which stays open; an answer cut off
 part way keeps what streamed, marked `(incomplete)`. A question a reconnect
 cut says `connection lost — ask again` — it is never sent twice, since the
 host may have answered it already. Opening another session, the session list,
@@ -1036,6 +1085,8 @@ start:
 | `Esc`, `←` with nothing typed | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
 | `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host still connecting; on a host that is not answering it says `that session is not answering` |
 | `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
+| `Ctrl+V` | paste the clipboard's text into the input under the list |
+| `Tab` | nothing in the input (it never submits), except to complete a value in an open popup |
 | `Ctrl+D`, `Ctrl+C` twice, `/exit` in the input | quit craze; every session keeps running |
 
 The hint line under the list names what the selected row takes (`enter
@@ -1521,9 +1572,9 @@ reported again only when you come back to it.
 
 | Card | Keys |
 |---|---|
-| permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a` allow once, **`A` allow always**, `n` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
+| permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a`, `y` or `1` allow once, **`A` allow always**, `n`, `r` or `2` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
 | question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. |
-| plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a` accept, `r` reject. `Esc` cancels the turn. |
+| plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a`, `y` or `1` accept, `r`, `n` or `2` reject. `Esc` cancels the turn. |
 
 A question card's option may carry a description, drawn dimmed on its own
 line under the label.
@@ -1576,16 +1627,40 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/help` | Keybindings and commands |
 | `/model` | Switch model |
 | `/connect` | Store a model provider's API key, or sign in to the ChatGPT plan — [native sessions only](#connect) |
-| `/clear` | Clear transcript |
-| `/tasks` | Tasks panel: compact, expanded, hidden |
-| `/theme` | Theme picker, or `/theme <name>` |
-| `/rename <title>` | Rename this session — craze's own; never sent to the agent |
-| `/plan` | Set plan mode |
-| `/ask` | Set ask mode |
-| `/agent` | Set agent mode |
+| `/clear` | Clear transcript — see below |
+| `/tasks` | Tasks panel: compact, expanded, hidden — only where the agent reports a task list |
+| `/theme` | Theme picker, or `/theme <name>` — see below |
+| `/rename <title>` | Rename this session — craze's own; never sent to the agent — see below |
+| `/plan` | Set plan mode — only where the agent advertises modes |
+| `/ask` | Set ask mode — only where the agent advertises modes |
+| `/agent` | Set agent mode — only where the agent advertises modes |
 | `/btw <question>` | Ask a side question, not saved — [native, Grok and gx only](#side-questions-btw); runs mid-turn |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
+
+`/plan`, `/ask` and `/agent` are in the menu only when the session advertises
+modes, and on a session that does not offer the one typed, `Enter` says `mode
+<name> is not advertised`. `/tasks` is in the menu only when the agent reports
+a task list.
+
+`/theme <name>` applies and saves a preset by name, in any case, with `_` or
+`-` between words. It also takes the spellings `tokyo`, `tokyonight`,
+`craze`, `crazedark` and `crazelight`. A name that is none of the presets
+is an error row listing them, and changes nothing. The choice is saved to
+`config.toml` like the picker's.
+
+`/rename <title>` names this session: the title replaces `craze` in the rule
+above the composer and is written to the session index, so `--resume` and the
+[session list](#session-list) show it. A title is cut to 120 characters. With
+none, it says `usage: /rename <title>`; while the session is still starting or
+restoring it says why it cannot yet. It is craze's own and is never sent to
+the agent.
+
+`/clear` empties this terminal's transcript, the draft with its image chips
+(the numbering starts again at `[Image #1]`), the queued messages with any
+confirm or send-now waiting on them, a plan offer, and the output of `!`
+commands waiting to go with the next message. The agent's context is not
+touched: the session goes on as it was.
 
 Matches are prefix hits first, then substring hits, each group kept in the
 catalog's own order, case-insensitive — no fuzzy matching. The band shows up
@@ -2070,8 +2145,9 @@ of being read as an unknown model. There is no full-width picker band and no
 `Ctrl+M` binding; the only band left under the transcript is the slash menu.
 
 `Ctrl+G`/`/theme` opens the same kind of box (title `theme`, no filter);
-`↑`/`↓` preview live, `Enter` keeps it, and `Esc` or a click outside reverts to
-the theme that was active when it opened. A card arriving from the agent
+`↑`/`↓` (or `j`/`k`) preview live and wrap at either end, `Enter` keeps it, a
+digit `1`–`9` applies the theme at that position and keeps it at once, and
+`Esc` or a click outside reverts to the theme that was active when it opened. A card arriving from the agent
 closes any dialog — the model dialog applies nothing, the theme dialog
 reverts.
 
@@ -2080,8 +2156,8 @@ reverts.
 `/help` opens a third box in the same frame (title `help`, 72 cells wide
 because it is a two-column table). The keys are one per row, the key in a fixed
 left gutter and what it does beside it, grouped under headings — sending and
-editing, mode, moving and scrolling, panels and views, selection and clipboard
-— then `commands` for craze's own slash commands and
+editing, queued messages, mode (only where the session advertises modes), moving and scrolling, panels and views,
+selection and clipboard — then `commands` for craze's own slash commands and
 `this session's commands` for whatever the agent advertises and the skills
 found on disk, which vary by session.
 
@@ -2123,7 +2199,7 @@ clickable cannot drift apart:
 | Model name in status row 1 | Opens the model dialog (same as `/model`) |
 | `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
 | A row inside an open dialog | Picks that row; a `/help` row is inert; in `/connect`'s sign-in, a row of the address copies the whole address (same as `Ctrl+Y`) and the rest are inert |
-| Anywhere outside an open dialog | Closes it, applying nothing |
+| Anywhere outside an open dialog | Closes it, applying nothing — except the provider picker, where it starts the default provider, and the resume picker, where it does nothing |
 | The transcript | Starts a selection |
 
 Dragging and double-clicking inside the sub-agent view select and copy from

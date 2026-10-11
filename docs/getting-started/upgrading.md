@@ -1,4 +1,39 @@
-# Upgrading from v0.0.1
+# Upgrading
+
+Two sections: [since v0.1.0](#since-v010), the changes after the second
+release, and [from v0.0.1](#from-v001), the first release's.
+
+## Since v0.1.0
+
+Nothing needs migrating, and nothing here has an opt-out switch: every change
+is an addition, but the first two change what an existing command does.
+
+- **`craze -c` and `--continue` skip sub-agent sessions.** A session started by
+  `craze new --wait` (the Claude Code plugin's) is marked `unattended` in the
+  session index, and `--continue` loads the newest session that is not one. In a
+  workspace holding only such sessions it refuses, saying how many there are:
+  `craze: no session to continue in /abs/workspace (3 sub-agent sessions here:
+  craze -r lists them)`. `--resume` lists them after your own sessions, tagged
+  `sub-agent`. See [`--continue` and
+  `--resume`](../reference/cli.md#-continue-and-resume).
+- **OpenRouter models are `~family-latest` routers.** Where OpenRouter has a
+  router for a family, craze's alias sends it (`openrouter/gpt-sol-latest`), so
+  the alias may resolve to a newer model after OpenRouter moves the router. To
+  stay on a numbered model, add it to `models.toml` with its wire id. See [The
+  shipped catalog](../reference/configuration.md#the-shipped-catalog).
+- **A native session starts on the first connected provider, in a fixed
+  order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta, each on
+  its own start model, unless you remembered a model with `/model` or pinned
+  one with `default_model`. `provider_order` in `models.toml` changes the order.
+- **New commands:** `craze new --wait`, `craze send`, `craze wait`, `craze
+  cancel` and `craze stop` drive sessions from a script or another program
+  ([CLI reference](../reference/cli.md#craze-new)); the [Claude
+  Code](claude-code.md) plugin uses them.
+- **`/btw <question>`** asks a side question in a view of its own, without
+  adding to the session, on native, Grok and gx
+  ([TUI reference](../reference/tui.md#side-questions-btw)).
+
+## From v0.0.1
 
 v0.0.1 was the first release. Nothing in `~/.craze` needs migrating: it wrote
 only `config.toml` and `sessions.jsonl` (each with a `.lock` beside it), and
@@ -8,7 +43,7 @@ the sessions v0.0.1 saved. A downgrade works too: v0.0.1 keeps what it does
 not know, and falls back to `cursor` with a warning from a
 `provider = "native"`.
 
-What changed is how craze behaves around those files. This page lists each
+What changed is how craze behaves around those files. This section lists each
 change a v0.0.1 user meets, how to turn it off where it can be turned off, and
 the setting that controls it.
 

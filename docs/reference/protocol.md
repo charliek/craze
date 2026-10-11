@@ -2420,6 +2420,9 @@ general — so discovery does not depend on `CRAZE_HOME`, `XDG_RUNTIME_DIR` or
   locks/<crazeSessionId>.lock   one lock per craze session (SQ16, below)
   host-logs/<hostId>.log        a detached host's log; not part of discovery
   catalogs/<provider>.json      the model catalog cache; not part of discovery
+  hubs/<ns>.json                the per-machine hub's record; <ns> is the runtime namespace
+  hubs/<ns>.lock                the hub's lifetime flock
+  results/<short>-<inc>-<turn>.md  a waiting command's whole result when its output was cut; not part of discovery
 ```
 
 A registry entry, `hosts/<hostId>.json`, has exactly these members:

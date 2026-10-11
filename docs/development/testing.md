@@ -23,6 +23,23 @@ Frame goldens live in `internal/tui/testdata/` and render through the same TUI
 model as a live session. CI also runs `make test-race`: `-race` over every package with real
 concurrency (the list is the `test-race` target in the Makefile).
 
+### Docs drift tests
+
+Four tests fail when the reference pages lose track of the code, so a new
+command, flag, key or method cannot ship undocumented. They read the docs from
+the module root, the way `internal/engine/gate_table_published_test.go` reads
+`protocol.md`:
+
+| Test | Checks against |
+|------|----------------|
+| `internal/cli/docs_test.go` | `reference/cli.md`: every visible command has a heading naming it (`## craze ps`), and each visible, non-deprecated flag is named in that command's section (the root's in the Flags table) |
+| `internal/tui/docs_test.go`, slash commands | `reference/tui.md`: every builtin slash command appears as `` `/name` ``, the conditional `/sessions`, `/connect` and `/btw` included |
+| `internal/tui/docs_test.go`, config keys | `reference/configuration.md`: every `config.toml` key the decoder reads in `internal/tui/config.go`, and every key of the `[agents]` and `[compat.claude]` tables, in the section that shows the table |
+| `internal/protocol/docs_test.go` | `reference/protocol.md`: every method, notification, error code and error reason |
+
+A failure names the missing command, flag, key or method and the section it
+looked in. Hidden commands and flags are exempt.
+
 ### Sub-agent scripts
 
 The `grok-subagent*` fake scripts replay the wire shapes captured from a live
@@ -287,6 +304,28 @@ starved copy cannot cut the lines. A wait ends as soon as the copy does.
 instead of `fake-session-1`. The session index keys a row by provider and
 that id, so two sessions of one test `HOME` under the default would be one
 row; `test_sessions.py` names each after its workspace.
+
+## Verification scripts
+
+`scripts/verify/` holds the reviewed helpers a plan runs on a **committed** sha,
+exported to a short scratch path, never on the working tree. Each prints its
+usage with `--help`, ends with a `<NAME>_EXIT=` line, and writes its output to
+`~/.cache/craze-verify/<label>/`.
+
+| Script | Runs |
+|--------|------|
+| `gate.sh <label> <sha>` | The per-commit gate (`make lint`, `test`, `test-race`, `build`, `test-cli`) on the committed tree; a concurrent run waits on golangci-lint's lock |
+| `cpu1.sh <label> <sha> <pkg>…` | The pre-push one-CPU run (`-cpu=1 -count=2`) of the named packages |
+| `starve.sh <label> <sha> <pkg-dir> <quota%> <regex>` | One package's tests under a CPU quota |
+| `contend.sh <label> <sha> <pkg-dir> <cpus> <copies> <regex>` | Several copies of one test binary sharing a few cores |
+| `v1.sh <label>` | The `-race` soak: `--plan`, then one `--job` per background command, then `--summary` |
+| `v2.sh <label> <sha>` | `craze prompt --json` parity against commit `6581e0a` |
+| `v8.sh` | The goldens, wire fixtures and schema files a change adds, modifies or deletes against the merge base |
+| `selftest.sh` | The scripts' own failure paths, in a scratch module |
+
+A failure is diagnosed, not re-run. A live check against the real
+`cursor-agent`, `grok`, `gx` or native in a dedicated tmux server, on Linux or
+macOS, follows the `craze-live-smoke` skill (`.claude/skills/craze-live-smoke/`).
 
 ## tmux smoke
 

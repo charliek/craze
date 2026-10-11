@@ -6,7 +6,7 @@ and return the session's result to Claude Code, the way a native Claude Code
 sub-agent returns its own. Use it to put another model on a task, to get a
 second opinion, or to run several models side by side.
 
-It needs **craze 0.2.0 or newer** on your `PATH`, signed in to the providers
+It needs **craze 0.2.0 or newer** (the next release; v0.1.x is too old) on your `PATH`, signed in to the providers
 you use ([Quick Start](quick-start.md)). An older craze fails with `this craze
 is too old; the plugin needs craze ≥ 0.2.0`.
 
