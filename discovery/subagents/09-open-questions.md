@@ -4,24 +4,15 @@
 otherwise. A resolved question stays here, rewritten in place as
 `**Resolved (TD-nn).**`.
 
-**TQ-1 — Plain verbs, or a `craze task` group?** Plain verbs next to `new`,
-`ps` and `attach`: `craze new --wait`, `craze send`, `craze wait`, `craze
-result`, `craze cancel`, `craze stop`. A group is easier to document for
-plugins (`craze task start|send|wait|…`). *Default: plain verbs.* Most of
-them make sense for any session, such as sending a message to a session open
-in the TUI. What makes a call sub-agent-like is a flag.
+**TQ-1 — Plain verbs, or a `craze task` group?** **Resolved (TD-10).** Plain
+verbs: `craze new --wait`, `craze send`, `craze wait`, `craze cancel`, `craze
+stop`; no `craze result` (a handle replays a finished turn).
 
-**TQ-2 — How an unattended session answers asks.** A session created for a
-sub-agent usually has no client attached. *Default:*
-- a question takes its first option, as `craze prompt` answers one (the
-  approval policy has no skip, `internal/agent/asks.go:259-276`);
-- a plan is accepted;
-- a permission request (which only arises with `--no-force`) stays open, and
-  the waiting command returns `needs_input` with its own exit code, so the
-  orchestrator decides.
-
-The host applies the policy, not the client, so it holds between calls. See
-[03](03-design.md).
+**TQ-2 — How an unattended session answers asks.** **Resolved (TD-11).** A
+question takes its first option; on cursor, grok and gx a plan is returned and
+the turn ends (grok implemented an accepted plan live); native's accepted plan
+ends its turn; a permission request (`--no-force` only) reports `needs_input`,
+exit 4. The host applies the policy, so it holds with no client attached.
 
 **TQ-3 — Does craze replace `codex exec` in `cc-plugins`' flows?** Same model,
 same finding on one planted bug. codex was faster and leaner, and its
@@ -30,46 +21,32 @@ for reviews yet.* Revisit when craze has a sandboxed read-only mode and
 `eval/` has compared the two on more than one sample. For implementation and
 rescue work, `craze:sol` can be used now.
 
-**TQ-4 — A follow-up after the session's host has exited.** A host with no
-client exits after `host_idle_exit` (an hour by default). A `SendMessage`
-after that finds no session. *Default:* `craze send` loads the session in a
-new host through the hub, the way `craze serve --load` loads one, then
-prompts it. If that is out of reach for the first plan, `craze send` fails
-saying the session has ended and how to resume it.
+**TQ-4 — A follow-up after the session's host has exited.** **Resolved
+(TD-12).** `craze send` reloads the session from the index, through a direct
+spawn rather than the hub, with its recorded start settings.
 
-**TQ-5 — Which presets ship.** *Default:* `delegate` (names its target),
-`sol`, `astra`, `muse`, `grok`, `cursor`. A preset whose provider is not
-ready here fails with craze's own availability message.
+**TQ-5 — Which presets ship.** **Resolved (TD-13).** `delegate`, `sol`,
+`astra`, `muse`, `grok`, `cursor`.
 
-**TQ-6 — Getting the prompt to craze without a heredoc.** A session pinned to
-a worktree refuses heredocs and `$(…)`. *Default:* the wrapper writes the
-prompt to a file with Claude Code's `Write` tool (so the agent's tools are
-`Bash, Write`), and passes `--prompt-file`. A plain heredoc on stdin stays
-supported for everyone else.
+**TQ-6 — Getting the prompt to craze without a heredoc.** **Resolved
+(TD-14).** `Write` to `/tmp/craze-delegate-<12 hex>.md`, then `--prompt-file …
+--remove-prompt-file`; the default-mode rule is `Edit(//tmp/craze-delegate-*)`.
 
-**TQ-7 — Marking sessions so `craze -c` skips them.** *Default:* a session
-created with `--wait` (or through `craze send`'s reload) is recorded as
-unattended in its session-index row. `craze -c` skips unattended rows unless
-told otherwise, and `--resume`'s picker and the session list label them. A
-plain `craze new` stays an ordinary session, since a person may attach to it.
+**TQ-7 — Marking sessions so `craze -c` skips them.** **Resolved (TD-16).**
+The index row's `unattended` record marks the session (set-only, inherited by
+craze id); `-c` skips it, the picker and session list tag it `sub-agent`.
 
 **TQ-8 — A shorter idle exit for unattended sessions.** *Default:* the same
-`host_idle_exit` as any session until TQ-4's reload exists. After that, a
-short one (about ten minutes), since a follow-up can always reload.
+`host_idle_exit` as any session for now; an unattended host stays until
+`craze stop`. TQ-4's reload now exists (TD-12), so a short idle exit (about ten
+minutes) is safe to add: TF-9.
 
-**TQ-9 — What `TaskStop` sends to a sub-agent's Bash call.** The waiting
-commands cancel their turn on SIGINT, SIGTERM or SIGHUP ([03](03-design.md)).
-Claude Code's documentation does not say which signal a stopped sub-agent's
-foreground command gets, or whether it is SIGKILL. *Default:* catch the three
-catchable signals, and verify live in T1. If `TaskStop` turns out to kill
-outright, the plugin documents `craze cancel <id>` as the way to stop the
-work, and the parity row in [04](04-parity.md) says so.
+**TQ-9 — What `TaskStop` sends to a sub-agent's Bash call.** **Resolved
+(TD-15).** SIGTERM, to the Bash call's whole process tree by parent pid. The
+waiting command catches it and cancels its own turn; a direct-spawned host is
+outside that tree, so the session stays and `SendMessage` continues it
+(live L6).
 
-**TQ-10 — Ordering against plan 040 (`/btw`).** Plan 040 is executing in
-another session. It changes the same protocol files: `internal/protocol/types.go`,
-`schema/info.json`, the schema tests, `docs/reference/protocol.md`, and the
-wire fixtures (it adds 27–29). *Default (revised by TD-08):* T1 changes no protocol
-file, so it can run beside plan 040. Two things remain: the two sessions must
-not gate at the same time on one machine, and the branch rebases onto
-`origin/main` before its push. A new fake-agent script or a TUI change waits
-for 040 if it would touch 040's files.
+**TQ-10 — Ordering against plan 040 (`/btw`).** **Resolved (TD-08).** T1
+changed no protocol file; it ran beside plan 040 without overlapping gates and
+rebased onto `origin/main` once plan 040 merged.

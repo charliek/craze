@@ -18,10 +18,10 @@ follow-ups `TF-nn`.
 |---|---|
 | 2026-10-10 | Discovery session. A Python prototype drove hub sessions as Claude Code sub-agents through a Haiku 5.5 wrapper; tested live on cursor, grok, native Muse and native ChatGPT Sol, including a `SendMessage` follow-up and an end-to-end plugin run from a headless Opus. A same-model review against `codex exec`. Owner's calls TD-01, TD-02, TD-04. Folder written. |
 | 2026-10-10 | Plan 041 (T1) written and panel-reviewed (Codex `gpt-6-astra`, GLM 5.3, CodeRabbit): TD-08 (direct spawn, no protocol change) and TD-09 (no background work on unattended hosts); `03` carries a revision note. |
+| 2026-10-11 | T1 done (plan 041): `craze wait`/`cancel`/`stop`, `craze new --wait`, `craze send`, unattended hosts, the `-c` skip and `sub-agent` tag, `craze prompt --effort/--fast`, the inline plugin. Live checks L1–L10 passed; TD-10–TD-16 record what they decided. |
 
-**Current phase: T1, planned and panel-reviewed as plan 041** (outside the
-repo, `~/.claude/plans/craze/041-subagent-tasks.md`). It changes no protocol
-file (TD-08), so it can run beside plan 040 (`/btw`) as TQ-10 describes.
+**Current phase: T1 done (plan 041); T2 is directional.** T1's exit result is
+in [07](07-roadmap.md); what it left is in [10](10-follow-ups.md).
 
 ## Reading order
 
