@@ -125,7 +125,7 @@ type Index interface {
 }
 
 // IndexOptions is what writing a row needs that the engine cannot know: the
-// store, and the four things about the run that live in the client.
+// store, and the things about the run that live in the client.
 type IndexOptions struct {
 	// Store persists the rows. nil writes nothing at all — not an error, and
 	// not a retry: there is simply no index in this run.
@@ -149,6 +149,12 @@ type IndexOptions struct {
 	// draw is a rendering rule, and the TUI's own is what every row in the
 	// file was written with. nil leaves a title exactly as it came.
 	TitleLine func(string) string
+	// Unattended is the provenance record every row this session writes
+	// carries (plan 041 §3.2, P10–P11): its start settings, set by a host
+	// nobody attends (craze serve --unattended); nil — every other host —
+	// writes none. The index keeps it set-only and hands it on by craze id
+	// (sessions.Store.Upsert), so nil never clears a row's record.
+	Unattended *sessions.Unattended
 }
 
 // NewCrazeSessionID mints a durable craze session id: a UUIDv7, as the host
@@ -798,12 +804,13 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		return errNoSessionID
 	}
 	row := sessions.Row{
-		SessionID: snap.SessionID,
-		Provider:  provider,
-		CWD:       w.opts.CWD,
-		CrazeID:   w.craze,
-		Title:     w.titleLine(title),
-		TitleKind: kind,
+		SessionID:  snap.SessionID,
+		Provider:   provider,
+		CWD:        w.opts.CWD,
+		CrazeID:    w.craze,
+		Unattended: w.opts.Unattended,
+		Title:      w.titleLine(title),
+		TitleKind:  kind,
 	}
 	if err := w.opts.Store.Upsert(row); err != nil {
 		if report {

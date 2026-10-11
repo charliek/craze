@@ -67,6 +67,12 @@ type turnAccumulator struct {
 	plan string
 	// auto is every automatic question or plan answer, in order (P9).
 	auto []autoAnswer
+	// returned says the turn presented a plan an unattended host returned
+	// rather than accepted (X28, agent.ApprovalReturn): an automatic plan
+	// answer that did not accept, which no other policy ever writes. The
+	// host then cancelled the turn itself, and its cancelled ending is the
+	// plan's delivery, not a person's cancel (turnWaiter.ended).
+	returned bool
 }
 
 // accTool is one tool call's merged state: its kind (an update may carry it
@@ -125,6 +131,7 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 			a.plan = p.Plan
 			if p.Auto {
 				a.auto = append(a.auto, autoPlan(p))
+				a.returned = a.returned || !p.Accepted
 			} else {
 				a.split()
 			}
@@ -322,9 +329,11 @@ func autoQuestion(q *agent.QuestionEvent) autoAnswer {
 		Choice: psLine(strings.Join(picks, "; "))}
 }
 
-// autoPlan is an automatic plan answer: its name, accepted or rejected.
+// autoPlan is an automatic plan answer: its name, and accepted — or
+// returned, the one automatic answer that does not accept (X28,
+// agent.ApprovalReturn): the plan handed back to the caller, its turn ended.
 func autoPlan(p *agent.PlanEvent) autoAnswer {
-	choice := "rejected"
+	choice := "returned"
 	if p.Accepted {
 		choice = "accepted"
 	}
@@ -422,11 +431,16 @@ type resultSession struct {
 	id, provider, model string
 }
 
-// newResult is a result about s with status, its always-present keys set.
+// newResult is a result about s with status, its always-present keys set —
+// "" for a session the command never learnt (craze new --wait cancelled while
+// its host was still starting), which has no attach command either.
 func newResult(s resultSession, status string) *turnResult {
 	short := psShort(s.id)
-	return &turnResult{Status: status, Session: s.id, Short: short, Provider: s.provider, Model: s.model,
-		Attach: "craze attach --session " + short}
+	res := &turnResult{Status: status, Session: s.id, Short: short, Provider: s.provider, Model: s.model}
+	if short != "" {
+		res.Attach = "craze attach --session " + short
+	}
+	return res
 }
 
 // fill sets a result's turn facts from the accumulator: plan, usage and the
@@ -467,17 +481,19 @@ func (r *turnResult) message() string {
 
 // plainBody is what plain output prints above the footer: the message, then
 // a plan the turn presented, or `(no final message)` when there is neither.
-func (r *turnResult) plainBody() string {
-	msg := r.message()
+func (r *turnResult) plainBody() string { return plainBodyOf(r.message(), r.Plan) }
+
+// plainBodyOf is plainBody of a message and a plan.
+func plainBodyOf(msg, plan string) string {
 	switch {
-	case r.Plan == "" && msg == "":
+	case plan == "" && msg == "":
 		return "(no final message)"
-	case r.Plan == "":
+	case plan == "":
 		return msg
 	case msg == "":
-		return "plan:\n" + r.Plan
+		return "plan:\n" + plan
 	}
-	return msg + "\n\nplan:\n" + r.Plan
+	return msg + "\n\nplan:\n" + plan
 }
 
 // footer is plain output's footer (§3.1): the status line —
@@ -507,7 +523,9 @@ func (r *turnResult) footer() string {
 	lines = append(lines, strings.Join(parts, " · "))
 	if r.Error != "" {
 		lines = append(lines, "error: "+psLine(r.Error))
-	} else if r.StopReason != "" && r.StopReason != stopEndTurn && r.Status != statusCancelled {
+	} else if r.StopReason != "" && r.StopReason != stopEndTurn && r.Status != statusCancelled && r.Status != statusCompleted {
+		// A completed turn's stop other than end_turn is a returned plan's
+		// cancel (X28), which its auto-answered line says.
 		lines = append(lines, "stopped: "+psLine(r.StopReason))
 	}
 	if r.Files != nil && len(*r.Files) > 0 {
@@ -522,7 +540,9 @@ func (r *turnResult) footer() string {
 	if r.BlockedBy != "" {
 		lines = append(lines, "blocked by: "+psLine(r.BlockedBy))
 	}
-	lines = append(lines, "session "+r.Short+" · "+r.Attach)
+	if r.Short != "" {
+		lines = append(lines, "session "+r.Short+" · "+r.Attach)
+	}
 	switch r.Status {
 	case statusRunning:
 		lines = append(lines, "next: "+waitCommand(r.Short, r.Handle))
@@ -643,19 +663,17 @@ func (o resultOutput) render(res *turnResult) ([]byte, error) {
 	return append(b, '\n'), err
 }
 
-// cut is --max-message (P13): a message longer than N characters is printed
-// as its first N, then `[… cut: full message in <path>]` (plain), or with
-// messageFile naming it (--json), and the whole result — the plain message
-// and footer, or the JSON — is written to that file under the cache tree
-// (rundir.ResultsDir), <short>-<turn>.md. Plain output cuts what it prints
-// above the footer: the message with any plan after it. A file that cannot
-// be written leaves the result whole, and says so on stderr.
+// cut is --max-message (P13): N characters bound the message and the plan
+// together, in that order (cutResult) — a --plan sub-agent's main output is
+// its plan (X28), and P13's reason, a caller that truncates long output,
+// applies to it as much as to a message. When anything was cut, the message
+// and plan printed are what was kept: plain output's body then ends with
+// `[… cut: full result in <path>]`, and --json's messageFile names the file;
+// the whole result — the plain body and footer, or the JSON — is written to
+// that file under the cache tree (rundir.ResultsDir), <short>-<turn>.md. A
+// file that cannot be written leaves the result whole, and says so on stderr.
 func (o resultOutput) cut(stderr io.Writer, res *turnResult) {
-	body := res.plainBody()
-	if o.json {
-		body = res.message()
-	}
-	head, cut := cutMessage(body, o.maxMessage)
+	msg, plan, cut := cutResult(res.message(), res.Plan, o.maxMessage)
 	if !cut {
 		return
 	}
@@ -670,10 +688,34 @@ func (o resultOutput) cut(stderr io.Writer, res *turnResult) {
 	}
 	res.MessageFile = path
 	if o.json {
-		res.Message = &head
+		if res.Message != nil {
+			res.Message = &msg
+		}
+		res.Plan = plan
 	} else {
-		res.cutBody = head + "\n[… cut: full message in " + path + "]"
+		res.cutBody = plainBodyOf(msg, plan) + "\n[… cut: full result in " + path + "]"
 	}
+}
+
+// cutResult is --max-message's budget of n characters over a result's message
+// and plan, in that order: the message's first n; the plan, what is left — at
+// least its first line when anything is left, though never more than n
+// characters of it — and none when nothing is; and whether either was cut.
+func cutResult(msg, plan string, n int) (msgHead, planHead string, cut bool) {
+	msgHead, cut = cutMessage(msg, n)
+	if plan == "" {
+		return msgHead, "", cut
+	}
+	left := n - utf8.RuneCountInString(msgHead)
+	if left <= 0 {
+		return msgHead, "", true
+	}
+	planHead, _ = cutMessage(plan, left)
+	first, _, _ := strings.Cut(plan, "\n")
+	if first, _ = cutMessage(first, n); len(first) > len(planHead) {
+		planHead = first
+	}
+	return msgHead, planHead, cut || planHead != plan
 }
 
 // writeFull writes a whole result to <results>/<short>-<turn>.md (the row's

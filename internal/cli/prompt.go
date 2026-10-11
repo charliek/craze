@@ -155,6 +155,27 @@ func newPromptCmd() *cobra.Command {
 	return cmd
 }
 
+// headlessApproval is the approval policy of a session nobody answers: what
+// Force and the absence of a frontend used to derive, spelled out (plan 021
+// §3.6). Headless craze answers permissions itself under force (the default)
+// and parks them otherwise — for --permission-decision, or for whoever
+// attaches — and it always answers questions with their first option and
+// accepts plans. Saying so explicitly is what separates policy from frontend
+// presence — a headless host that parks asks for a phone to answer is the
+// same code with a different policy. craze prompt's, and an unattended
+// host's (plan 041 §3.2, unattendedPolicy): the one policy, spelled once.
+func headlessApproval(force bool) *agent.ApprovalPolicy {
+	approval := &agent.ApprovalPolicy{
+		Permission: agent.ApprovalAsk,
+		Question:   agent.ApprovalFirstOption,
+		Plan:       agent.ApprovalAccept,
+	}
+	if force {
+		approval.Permission = agent.ApprovalAllow
+	}
+	return approval
+}
+
 // agentOptions is the session this run starts. --effort and --fast/--no-fast
 // are the TUI's start settings (plan 041 §3.5): Start sets them after the model
 // and mode, and with neither flag the options are what they always were.
@@ -225,22 +246,7 @@ func (o *promptOpts) run() (retErr error) {
 	defer stop()
 
 	prov := resolved.Provider
-	// What Force and the absence of a frontend used to derive, spelled out
-	// (plan 021 §3.6): headless craze answers permissions itself when --force
-	// is on and parks them for --permission-decision otherwise, and it always
-	// answers questions with their first option and accepts plans. Saying so
-	// explicitly is what separates policy from frontend presence — a headless
-	// host that parks asks for a phone to answer is the same code with a
-	// different policy.
-	approval := &agent.ApprovalPolicy{
-		Permission: agent.ApprovalAsk,
-		Question:   agent.ApprovalFirstOption,
-		Plan:       agent.ApprovalAccept,
-	}
-	if o.force {
-		approval.Permission = agent.ApprovalAllow
-	}
-	opts := o.agentOptions(ws, approval, &prov)
+	opts := o.agentOptions(ws, headlessApproval(o.force), &prov)
 	// Its one session is its launch's own (plan 032 §3.11, P7): --agent-bin,
 	// else CRAZE_AGENT_BIN — read by the agent's own lookup, as it always
 	// was — else `[agents].<provider>`, else the provider's PATH candidates.

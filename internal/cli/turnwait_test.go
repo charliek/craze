@@ -253,6 +253,10 @@ type tap struct {
 	swallowed []string
 	// hold, when set, keeps every dial after the first waiting for it.
 	hold *gate
+	// lose is a match a read from the host must not deliver: the read that
+	// holds it closes its connection instead, and lost is closed (loseReply).
+	lose string
+	lost chan struct{}
 }
 
 type tapHook struct {
@@ -269,9 +273,27 @@ type tapConn struct {
 func (c tapConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	c.tp.mu.Lock()
+	if lose := c.tp.lose; lose != "" && strings.Contains(string(b[:n]), lose) {
+		// Never delivered: the connection goes with it.
+		c.tp.lose = ""
+		close(c.tp.lost)
+		c.tp.mu.Unlock()
+		_ = c.Close()
+		return 0, net.ErrClosed
+	}
 	c.tp.in.Write(b[:n])
 	c.tp.mu.Unlock()
 	return n, err
+}
+
+// loseReply makes the first read from the host that holds match never reach
+// the client — its connection is closed under it instead — and answers what
+// is closed once that has happened: a reply lost with its connection.
+func (tp *tap) loseReply(match string) <-chan struct{} {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.lose, tp.lost = match, make(chan struct{})
+	return tp.lost
 }
 
 // read says the client has read match from the host: a reply, or a

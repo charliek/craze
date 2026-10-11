@@ -69,3 +69,27 @@ func TestArgsPassTheHubPIDOnlyWhenSet(t *testing.T) {
 		}
 	}
 }
+
+// TestArgsPassUnattendedOnlyWhenSet (plan 041 §3.2): craze new --wait's and
+// craze send's spawns hand their host --unattended; every other spawn — a
+// TUI's launch, the list's, the hub's create — passes none.
+func TestArgsPassUnattendedOnlyWhenSet(t *testing.T) {
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", Unattended: true}); !slices.Contains(argv, "--unattended") {
+		t.Fatalf("%q lacks --unattended", argv)
+	}
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", NoHostStatus: true}); slices.Contains(argv, "--unattended") {
+		t.Fatalf("an attended spawn passes --unattended: %q", argv)
+	}
+}
+
+// TestArgsPassOutliveSpawnerOnlyWhenSet (plan 041 C3 review r2, 1): craze
+// send's reload hands its host --outlive-spawner; every other spawn passes
+// none.
+func TestArgsPassOutliveSpawnerOnlyWhenSet(t *testing.T) {
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", OutliveSpawner: true}); !slices.Contains(argv, "--outlive-spawner") {
+		t.Fatalf("%q lacks --outlive-spawner", argv)
+	}
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", Unattended: true}); slices.Contains(argv, "--outlive-spawner") {
+		t.Fatalf("a spawn not for a reload passes --outlive-spawner: %q", argv)
+	}
+}

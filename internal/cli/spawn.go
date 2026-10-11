@@ -11,6 +11,7 @@ import (
 
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/hostspawn"
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -70,6 +71,26 @@ type spawnOptions struct {
 	// §3.11, P7; ownsAgentBin): CRAZE_AGENT_BIN is left out of its
 	// environment, as the launcher leaves --agent-bin out of flags.
 	foreign bool
+	// unattended is --unattended (plan 041 §3.2): a host nobody attends,
+	// craze new --wait's or craze send's.
+	unattended bool
+	// shared is a host for a session that existed before this spawn — craze
+	// send's reload (plan 041 C3 review r2, 1) — which, once it may be
+	// serving, other senders may have found in the registry and prompted:
+	// the spawn never ends it then. A handshake given up (the caller's
+	// context ended, a timeout, a line that cannot be read) leaves it
+	// running, its pipe abandoned — only a host that has provably exited is
+	// settled — and the host itself serves on when its ready line is not
+	// taken (--outlive-spawner).
+	shared bool
+	// hubEnv hands the host the environment the hub hands every host it
+	// creates (hub.ChildEnv, plan 032 §3.5) rather than this process's own:
+	// craze new --wait's and craze send's direct spawns (plan 041 P1), which
+	// stand in for the hub's create — no CRAZE_PROVIDER, CRAZE_AGENT_BIN,
+	// TMUX, HERDR_* or ROOST_* of the shell that ran the command reaches the
+	// host, whose agent binary is then `[agents]`'s or PATH's. The TUI's own
+	// spawns keep the launch's environment.
+	hubEnv bool
 }
 
 // hostRef is a host a spawn found for its caller: the one it started, which
@@ -167,13 +188,27 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 	if opts.foreign {
 		unset = []string{envAgentBin}
 	}
-	child, r, err := hostspawn.Start(hostspawn.Args(serveSpec(&opts.flags, opts.load, hostID, logPath)), unset, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
+	spec := serveSpec(&opts.flags, opts.load, hostID, logPath)
+	spec.Unattended, spec.OutliveSpawner = opts.unattended, opts.shared
+	argv, groups := hostspawn.Args(spec), filepath.Join(dir, hostspawn.AgentGroupsName(hostID))
+	var (
+		child *hostspawn.Child
+		r     *os.File
+	)
+	if opts.hubEnv {
+		child, r, err = startWithHubEnv(argv, groups, logPath)
+	} else {
+		child, r, err = hostspawn.Start(argv, unset, groups, logPath)
+	}
 	if err != nil {
 		return hostRef{}, nil, &spawnError{kind: spawnStartFailed, msg: "craze: the session host cannot be started: " + err.Error(), err: err}
 	}
 	line, failure, why := hostspawn.ReadReady(ctx, r)
 	_ = r.Close()
 	if failure != 0 {
+		if opts.shared && failure != hostspawn.Exited {
+			return hostRef{}, nil, leaveSpawn(ctx, readFailure(failure), why, logPath)
+		}
 		return hostRef{}, nil, failSpawn(ctx, child, readFailure(failure), why, logPath)
 	}
 	if !line.OK {
@@ -209,6 +244,25 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 		entry = e
 	}
 	return hostRef{entry: entry, version: line.CrazeVersion, log: logPath, child: child}, nil, nil
+}
+
+// startWithHubEnv starts a host for argv as hostspawn.Start does, in the
+// environment the hub hands its hosts (spawnOptions.hubEnv): this process's
+// own — or the command's, a test's — passed through hub.ChildEnv against this
+// process's working directory, which a relative CRAZE_HOME is made absolute
+// against, as the hub's create does.
+func startWithHubEnv(argv []string, groups, logPath string) (*hostspawn.Child, *os.File, error) {
+	cmd, err := hostspawn.Command(argv)
+	if err != nil {
+		return nil, nil, err
+	}
+	environ := cmd.Env
+	if environ == nil {
+		environ = os.Environ()
+	}
+	wd, _ := os.Getwd()
+	cmd.Env = hub.ChildEnv(environ, wd)
+	return hostspawn.StartCmd(cmd, hostspawn.HostChildEnv, groups, logPath)
 }
 
 // serveSpec is craze serve's command line for a spawn (hostspawn.Args): the
@@ -309,6 +363,29 @@ func failSpawn(ctx context.Context, c *hostspawn.Child, failure spawnFailure, wh
 		err = ctx.Err()
 	}
 	return &spawnError{kind: failure, msg: "craze: " + msg + "; its log: " + logPath, err: err}
+}
+
+// leaveSpawn is failSpawn for a shared spawn (spawnOptions.shared) whose host
+// may be serving already: the same answer, and the host left running — its
+// ready pipe abandoned, which it serves on past (--outlive-spawner) — since a
+// host another sender may have found and prompted is not this spawn's to end.
+func leaveSpawn(ctx context.Context, failure spawnFailure, why, logPath string) error {
+	var msg string
+	switch failure {
+	case spawnTimedOut:
+		msg = "the session host was not ready within " + hostspawn.ReadyWait.String()
+	case spawnOversized:
+		msg = fmt.Sprintf("the session host's ready line is longer than %d bytes", hostspawn.ReadyLineMax)
+	case spawnCancelled:
+		msg = "the session host's start was abandoned"
+	default:
+		msg = "the session host's ready line cannot be read: " + why
+	}
+	err := errors.New(msg)
+	if failure == spawnCancelled {
+		err = ctx.Err()
+	}
+	return &spawnError{kind: failure, msg: "craze: " + msg + " (it may serve the session still; its log: " + logPath + ")", err: err}
 }
 
 // rendezvous finds the host holding a session a spawn was refused

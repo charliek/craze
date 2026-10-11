@@ -133,6 +133,9 @@ type pendingReq struct {
 	params  RequestParams
 	decide  chan any
 	replied bool
+	// claimed says its handler took the answer for itself before writing it
+	// (Arrival.Claim): only the handler's own reply is written from then on.
+	claimed bool
 	// repliedBy is who wrote the reply, under incomingMu with replied itself:
 	// one of the repliedBy constants. It is what tells a cancel's answer from a
 	// close's, for the early-answer reason and for a lost reply's Lost alike.
@@ -158,9 +161,23 @@ const (
 )
 
 // arrival is the request's Arrival: both halves of "which turn did this come
-// from", as the read loop recorded them, and the request's own lifetime.
-func (in *pendingReq) arrival() Arrival {
-	return Arrival{Turn: in.turn, InTurn: in.inTurn, Call: in.ctx}
+// from", as the read loop recorded them, the request's own lifetime, and the
+// claim of its answer for its handler (claimIncoming).
+func (c *Client) arrival(in *pendingReq) Arrival {
+	return Arrival{Turn: in.turn, InTurn: in.inTurn, Call: in.ctx, claim: func() bool { return c.claimIncoming(in) }}
+}
+
+// claimIncoming is Arrival.Claim: the request's answer taken for its handler
+// under incomingMu, the lock every answer is recorded under — unless
+// something has answered it already.
+func (c *Client) claimIncoming(in *pendingReq) bool {
+	c.incomingMu.Lock()
+	defer c.incomingMu.Unlock()
+	if in.replied {
+		return false
+	}
+	in.claimed = true
+	return true
 }
 
 type promptResult struct {
@@ -1496,7 +1513,7 @@ func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 	h := c.permHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.finishPermission(in, req, h(in.arrival(), req))
+		c.finishPermission(in, req, h(c.arrival(in), req))
 		return
 	}
 	select {
@@ -1542,7 +1559,7 @@ func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		dec := h(in.arrival(), req)
+		dec := h(c.arrival(in), req)
 		disp := c.replyIncoming(in, askOutcome(d, req, dec))
 		if dec.Replied != nil {
 			dec.Replied(disp)
@@ -1563,7 +1580,7 @@ func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		dec := h(in.arrival(), req)
+		dec := h(c.arrival(in), req)
 		disp := c.replyIncoming(in, planOutcome(d, dec))
 		if dec.Replied != nil {
 			dec.Replied(disp)
@@ -1603,6 +1620,12 @@ func (c *Client) replyIncomingBy(in *pendingReq, result any, by string) ReplyDis
 		lost := in.repliedBy
 		c.incomingMu.Unlock()
 		return ReplyDisposition{Lost: lost}
+	}
+	if in.claimed && by != repliedByHandler {
+		// Its handler took the answer (Arrival.Claim) and writes it: this
+		// one is not written, and the handler's goes on as ever.
+		c.incomingMu.Unlock()
+		return ReplyDisposition{Lost: repliedByHandler}
 	}
 	in.replied = true
 	in.repliedBy = by

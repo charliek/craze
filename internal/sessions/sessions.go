@@ -89,10 +89,46 @@ type Row struct {
 	// unchanged. A row with none gains one on its next upsert.
 	CrazeID string `json:"crazeId,omitempty"`
 
+	// Unattended is the provenance record of a session craze started for no
+	// one to attend (plan 041 §3.2, P10–P11): `craze new --wait`'s, or `craze
+	// send`'s reload of one — nil for every other session. It is set-only:
+	// Upsert fills it and never clears it, and a new row for a craze id that
+	// has a marked row already (a load under a new provider session id)
+	// inherits it. It records how the session started, not how the next host
+	// runs it: a person's resume of a marked session is an ordinary
+	// interactive host, and the row stays marked.
+	//
+	// Additive, as CrazeID is: written only when set, so an unmarked row keeps
+	// exactly the keys it had, and an older craze carries the key through a
+	// rewrite like any other it does not know.
+	Unattended *Unattended `json:"unattended,omitempty"`
+
 	// TitleKind is only meaningful as input to Upsert; see the type's doc.
 	// It is never read from or written to the file.
 	TitleKind TitleKind `json:"-"`
 }
+
+// Unattended is an unattended session's start settings (plan 041 §3.2, P11):
+// what `craze send` passes again when it reloads the session, since an ACP
+// agent applies a mode and a model only from the options after a load and
+// --no-force is a spawn flag. Each is as the start gave it, "" when it was
+// not given: Mode "", "plan" or "ask"; PermissionMode "bypass" (craze's
+// default, --force) or "prompt" (--no-force); Model and Effort the flags'
+// values.
+type Unattended struct {
+	Mode           string `json:"mode"`
+	PermissionMode string `json:"permissionMode"`
+	Model          string `json:"model"`
+	Effort         string `json:"effort"`
+}
+
+// The permission modes an Unattended record holds: protocol.PermissionBypass
+// and protocol.PermissionPrompt's spellings, which this leaf package does not
+// import.
+const (
+	PermissionBypass = "bypass"
+	PermissionPrompt = "prompt"
+)
 
 // record is a decoded line plus whatever the store does not model: unknown
 // fields (round-tripped so a newer craze's extra keys survive an older
@@ -140,7 +176,9 @@ type Store struct {
 //
 // in.CrazeID follows applyCrazeID: the stored id is the row's identity and is
 // never replaced, an empty one is filled, and an empty incoming id changes
-// nothing.
+// nothing. in.Unattended follows applyUnattended, the same rule; a row created
+// here inherits the record of a marked row of its craze id first (plan 041
+// P10).
 //
 // CreatedAt is set once, when the row is first created. The whole operation
 // -- read, merge by key, rewrite -- runs under atomicfile.Lock; unlike
@@ -184,6 +222,7 @@ func (s *Store) Upsert(in Row) error {
 		records[i].Row.UpdatedAt = now
 		applyTitle(&records[i].Row, in)
 		applyCrazeID(&records[i].Row, in)
+		applyUnattended(&records[i].Row, in.Unattended)
 		found = true
 		break
 	}
@@ -197,6 +236,13 @@ func (s *Store) Upsert(in Row) error {
 			UpdatedAt: now,
 		}}
 		applyTitle(&rec.Row, in)
+		// A new row of a craze id that is marked already — the thread loaded
+		// into a new provider session — is that thread's, and inherits its
+		// record whoever writes the row: a person's interactive host too
+		// (plan 041 P10). The writer's own record, when it has one, is the
+		// fallback for a craze id nothing marked yet.
+		applyUnattended(&rec.Row, inheritedUnattended(records, in.CrazeID))
+		applyUnattended(&rec.Row, in.Unattended)
 		records = append(records, rec)
 	}
 
@@ -317,6 +363,43 @@ func applyCrazeID(row *Row, in Row) {
 		return
 	}
 	row.CrazeID = in.CrazeID
+}
+
+// applyUnattended folds a provenance record into row (plan 041 §3.2): set-
+// only, by applyCrazeID's rule — nil changes nothing ("I did not say" never
+// clears it), an unmarked row is marked, and a marked row keeps the record it
+// has, which says how the session first started.
+func applyUnattended(row *Row, u *Unattended) {
+	if u == nil || row.Unattended != nil {
+		return
+	}
+	c := *u
+	row.Unattended = &c
+}
+
+// inheritedUnattended is the record a new row of craze id inherits (plan 041
+// P10): the newest marked row's of that id, in Recent's order, nil when none
+// is marked — or when there is no id to inherit by (a legacy row, or one
+// written before its session knew its id).
+func inheritedUnattended(records []record, crazeID string) *Unattended {
+	if crazeID == "" {
+		return nil
+	}
+	var newest *record
+	for i := range records {
+		r := &records[i]
+		if r.Row.CrazeID != crazeID || r.Row.Unattended == nil {
+			continue
+		}
+		if newest == nil || r.Row.UpdatedAt.After(newest.Row.UpdatedAt) ||
+			(r.Row.UpdatedAt.Equal(newest.Row.UpdatedAt) && r.pos > newest.pos) {
+			newest = r
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return newest.Row.Unattended
 }
 
 // evictOverflow drops the oldest rows (by UpdatedAt, ties broken by file
@@ -686,17 +769,36 @@ func decodeLine(line string) (record, error) {
 
 	return record{
 		Row: Row{
-			SessionID: sessionID,
-			Provider:  provider,
-			CWD:       cwd,
-			Title:     title,
-			Pinned:    pinned,
-			CrazeID:   crazeID,
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
+			SessionID:  sessionID,
+			Provider:   provider,
+			CWD:        cwd,
+			Title:      title,
+			Pinned:     pinned,
+			CrazeID:    crazeID,
+			Unattended: decodeUnattended(raw["unattended"]),
+			CreatedAt:  createdAt,
+			UpdatedAt:  updatedAt,
 		},
 		extra: extra,
 	}, nil
+}
+
+// decodeUnattended reads a row's `unattended` (plan 041 §3.2): an object is
+// the record, each of its four keys "" when absent or not a string; anything
+// else is no record, as a crazeId that is not a string is none. The raw value
+// stays in the record's extra keys either way, so whatever else a newer craze
+// put in it — or a value that is not an object at all — is written back as it
+// came (encodeLine).
+func decodeUnattended(v any) *Unattended {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	str := func(k string) string {
+		s, _ := m[k].(string)
+		return s
+	}
+	return &Unattended{Mode: str("mode"), PermissionMode: str("permissionMode"), Model: str("model"), Effort: str("effort")}
 }
 
 // encodeLine is decodeLine's inverse: known fields plus whatever unknown
@@ -716,6 +818,19 @@ func encodeLine(rec record) ([]byte, error) {
 		// id keeps exactly the keys it had: an older craze rewriting this file
 		// sees no new key, and neither does anyone diffing it.
 		out["crazeId"] = rec.Row.CrazeID
+	}
+	if u := rec.Row.Unattended; u != nil {
+		// Written only when there is one, as crazeId. Over the object the
+		// file held, when it held one, so a key a newer craze added to it
+		// survives this one's rewrite.
+		obj := map[string]any{}
+		if prev, ok := rec.extra["unattended"].(map[string]any); ok {
+			for k, v := range prev {
+				obj[k] = v
+			}
+		}
+		obj["mode"], obj["permissionMode"], obj["model"], obj["effort"] = u.Mode, u.PermissionMode, u.Model, u.Effort
+		out["unattended"] = obj
 	}
 	out["createdAt"] = rec.Row.CreatedAt.UTC().Format(time.RFC3339Nano)
 	out["updatedAt"] = rec.Row.UpdatedAt.UTC().Format(time.RFC3339Nano)

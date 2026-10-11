@@ -66,7 +66,7 @@ func newWaitCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&f.from, "from", "", "follow exactly the turn or queued prompt this handle names, from its place in the stream; a signal cancels it")
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "stop waiting after this long (from the command's start): the result is running, exit 5, with a handle to follow it (default: no limit)")
-	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "print at most this many characters of the message, and write the whole result to a file named in the output (default: no limit)")
+	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the result as one JSON object")
 	return cmd
 }

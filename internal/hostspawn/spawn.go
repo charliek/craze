@@ -127,6 +127,15 @@ type Spec struct {
 	// status, so the host leaves the agent's host hook gates in its
 	// environment, as an in-process session would.
 	NoHostStatus bool
+	// Unattended is --unattended (plan 041 §3.2): a host nobody attends,
+	// spawned by craze new --wait or craze send — craze prompt's approval
+	// policy, no background work, and the session index's provenance record.
+	Unattended bool
+	// OutliveSpawner is --outlive-spawner (plan 041 C3 review r2, 1): the
+	// host serves on when its spawner goes before taking its ready line —
+	// craze send's reload, whose host another sender may have found and
+	// prompted by then — where any other host stops.
+	OutliveSpawner bool
 	// RequestID and RequestHash are --request-id and --request-hash, each
 	// passed only when set: the hub's session.create that spawns the host
 	// (plan 032 §3.10), its idempotency id and its params' hash, which the
@@ -141,8 +150,9 @@ type Spec struct {
 
 // Args is craze serve's command line for s: the host's id and log, then every
 // session flag s carries — each only when it says something — and --load,
-// --no-host-status, --request-id, --request-hash and --hub-pid. Every value
-// is spelled --flag=value, so none is read as a flag of its own.
+// --no-host-status, --unattended, --outlive-spawner, --request-id,
+// --request-hash and --hub-pid.
+// Every value is spelled --flag=value, so none is read as a flag of its own.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
 	str := func(name, v string) {
@@ -180,6 +190,12 @@ func Args(s Spec) []string {
 	str("load", s.Load)
 	if s.NoHostStatus {
 		argv = append(argv, "--no-host-status")
+	}
+	if s.Unattended {
+		argv = append(argv, "--unattended")
+	}
+	if s.OutliveSpawner {
+		argv = append(argv, "--outlive-spawner")
 	}
 	str("request-id", s.RequestID)
 	str("request-hash", s.RequestHash)

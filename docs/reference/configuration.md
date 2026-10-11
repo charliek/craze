@@ -149,6 +149,24 @@ One JSON object per line:
   kept on disk but never offered by `--continue` or `--resume`.
 - `craze prompt` never writes to the index — headless sessions are not
   resumable.
+- `unattended` marks a session craze started for no one to attend —
+  [`craze new --wait`](cli.md#craze-new-wait)'s, the way a coding agent
+  hands craze a task — with the settings it started with, which
+  [`craze send`](cli.md#craze-send) passes again when it loads the session
+  after it has ended:
+
+    ```json
+    {"sessionId":"…","provider":"cursor","cwd":"/abs/workspace","title":"fix the test","pinned":false,"crazeId":"…","unattended":{"mode":"plan","permissionMode":"bypass","model":"composer-2.5","effort":""},"createdAt":"…","updatedAt":"…"}
+    ```
+
+    `mode` is `""`, `plan` or `ask`; `permissionMode` `bypass` (the default)
+    or `prompt` (`--no-force`); `model` and `effort` as they were given, `""`
+    when they were not. The key is there only on such a session's rows. It is
+    never removed or changed once written, and a row of the same session
+    written later — loaded into a new agent session — carries it too. It
+    records how the session started, not how it runs next: opening it from
+    `--resume` or the session list, or `craze send` to a session of your own,
+    runs an ordinary interactive session.
 
 **A `--continue` or `--resume` never changes the persisted default
 provider.** Loading yesterday's grok thread is not a decision about

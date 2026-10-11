@@ -3,10 +3,10 @@ package rundir
 // The waiting commands' full results (plan 041 §3.1, P13):
 // <Home>/.cache/craze/results, beside the registry, the session locks, the
 // host logs and the catalog cache, and validated as they are. `craze wait
-// --max-message N` (and new --wait, send --wait) prints a long message's
-// head and writes the whole result here, one <short>-<turn>.md a turn, for a
-// caller whose output is cut (Claude Code's Bash truncates near 30,000
-// characters). It is keyed by HOME, as the rest of the cache tree is.
+// --max-message N` (and new --wait, send --wait) prints the head of a long
+// message and plan and writes the whole result here, one <short>-<turn>.md a
+// turn, for a caller whose output is cut (Claude Code's Bash truncates near
+// 30,000 characters). It is keyed by HOME, as the rest of the cache tree is.
 
 // resultsName is the results' directory under the cache tree.
 const resultsName = "results"

@@ -81,6 +81,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newPsCmd())
 	cmd.AddCommand(newProvidersCmd())
 	cmd.AddCommand(newNewCmd())
+	cmd.AddCommand(newSendCmd())
 	cmd.AddCommand(newWaitCmd())
 	cmd.AddCommand(newCancelCmd())
 	cmd.AddCommand(newStopCmd())

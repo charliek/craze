@@ -360,6 +360,61 @@ func TestSessionIdsNoLiveHostServes(t *testing.T) {
 	}
 }
 
+// TestWaitMaxMessageBoundsThePlanToo (C3 r3, 4): --max-message's characters
+// bound the message and the plan together, the message first — a --plan
+// sub-agent's output is its plan. The plan gets what the message left, at
+// least its first line; nothing left, it gets none. Either way the whole
+// result is in the file messageFile names, which plain output's marker names.
+// Each wait replays the turn whole from its handle: an automatic plan is in
+// no snapshot (P9).
+func TestWaitMaxMessageBoundsThePlanToo(t *testing.T) {
+	plan := agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{Name: "p", Plan: "## Steps\n1. one\n2. two", Auto: true, Accepted: true}}
+	r := newWaitRig(t, 0, answerTurn(plan, textEv("0123456789")))
+	r.submit("go")
+	r.waitIdle()
+	path := filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-turn-1.md")
+	h := turnHandle{incarnation: r.eng.State().Incarnation, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	waitFrom := func(maxMessage ...string) (string, string, int) {
+		return executeErr(append([]string{"wait", waitRigShort, "--from", h.String(), "--max-message"}, maxMessage...))
+	}
+
+	// The message (10) leaves 4: the plan's first line, whole.
+	stdout, stderr, code := waitFrom("14")
+	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n\nplan:\n## Steps\n[… cut: full result in "+path+"]\n---\ncompleted · ") {
+		t.Fatalf("plain --max-message over a plan: exit %d, %q %q", code, stdout, stderr)
+	}
+	whole, err := os.ReadFile(path)
+	if err != nil || !strings.HasPrefix(string(whole), "0123456789\n\nplan:\n## Steps\n1. one\n2. two\n---\ncompleted · ") {
+		t.Fatalf("the whole result's file: %q, %v", whole, err)
+	}
+	stdout, _, code = waitFrom("14", "--json")
+	m := decodeResult(t, stdout)
+	if code != 0 || m["message"] != "0123456789" || m["plan"] != "## Steps" || m["messageFile"] != path {
+		t.Fatalf("--json --max-message over a plan: exit %d, %v", code, m)
+	}
+	whole, _ = os.ReadFile(path)
+	if full := decodeResult(t, string(whole)); full["plan"] != "## Steps\n1. one\n2. two" || full["messageFile"] != nil {
+		t.Fatalf("the whole JSON result's file: %v", full)
+	}
+
+	// The message takes the whole budget: no plan, and the cut said.
+	stdout, _, code = waitFrom("10", "--json")
+	m = decodeResult(t, stdout)
+	if _, hasPlan := m["plan"]; code != 0 || m["message"] != "0123456789" || hasPlan || m["messageFile"] != path {
+		t.Fatalf("--json with nothing left for the plan: exit %d, %v", code, m)
+	}
+	stdout, _, code = waitFrom("10")
+	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n[… cut: full result in "+path+"]\n---\n") {
+		t.Fatalf("plain with nothing left for the plan: exit %d, %q", code, stdout)
+	}
+
+	// Room for both: nothing cut, no file named.
+	stdout, _, code = waitFrom("40", "--json")
+	if m := decodeResult(t, stdout); code != 0 || m["plan"] != "## Steps\n1. one\n2. two" || m["messageFile"] != nil {
+		t.Fatalf("a message and plan that fit: %v", m)
+	}
+}
+
 // TestWaitMaxMessageAndJSONFailures is §7 W1 10: --max-message cuts a long
 // message to its first N characters with the pointer to a file holding the
 // whole result (plain: message and footer; --json: the object), and --json's
@@ -372,7 +427,7 @@ func TestWaitMaxMessageAndJSONFailures(t *testing.T) {
 	path := filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-turn-1.md")
 
 	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--max-message", "10"})
-	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n[… cut: full message in "+path+"]\n---\ncompleted (partial) · ") {
+	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n[… cut: full result in "+path+"]\n---\ncompleted (partial) · ") {
 		t.Fatalf("plain --max-message: exit %d, %q %q", code, stdout, stderr)
 	}
 	whole, err := os.ReadFile(path)

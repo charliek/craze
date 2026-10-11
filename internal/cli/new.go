@@ -63,7 +63,18 @@ type newFlags struct {
 	effort                string
 	fast, noFast, noForce bool
 	json                  bool
+
+	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
+	wait       bool
+	plan, ask  bool
+	timeout    time.Duration
+	maxMessage int
+	prompt     promptInput
 }
+
+// newWaitOnly is every flag only craze new --wait takes: on plain craze new
+// each is a usage error.
+var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask"}
 
 func newNewCmd() *cobra.Command {
 	f := &newFlags{}
@@ -74,9 +85,22 @@ func newNewCmd() *cobra.Command {
 			"demand), in the current directory or -C's, and returns once it has started: its id and " +
 			"directory, and — given a PROMPT — whether its first prompt was taken. The session runs on; " +
 			"craze attach, the session list (←) and craze ps find it. Without --provider the hub's " +
-			"configured default (config.toml's provider) starts it.",
+			"configured default (config.toml's provider) starts it. With --wait it starts an unattended " +
+			"session itself, without the hub — questions answered with their first option, plans accepted — " +
+			"sends it the prompt (PROMPT, --prompt-file, or stdin) and waits for its turn's result, as " +
+			"craze wait prints one; craze send continues the session.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.wait {
+				sigs, stop := waitSignals()
+				defer stop()
+				return runNewWait(cmd, f, args, sigs)
+			}
+			for _, name := range newWaitOnly {
+				if cmd.Flags().Changed(name) {
+					return usagef("craze new: --%s needs --wait", name)
+				}
+			}
 			return runNew(cmd, f, args)
 		},
 	}
@@ -87,7 +111,16 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.fast, "fast", false, "start with the fast setting on, where the model offers one")
 	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo: the session's agent asks for permission, and a client answers")
-	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result) as JSON")
+	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result) as JSON; with --wait, the result")
+	// --wait (plan 041 §3.2): another path, past the hub — the session's
+	// host spawned here, unattended, sent the prompt and followed to its
+	// turn's end.
+	cmd.Flags().BoolVar(&f.wait, "wait", false, "start an unattended session here, without the hub, send it the prompt, and wait for its turn's result")
+	cmd.Flags().BoolVar(&f.plan, "plan", false, "with --wait: start in plan mode")
+	cmd.Flags().BoolVar(&f.ask, "ask", false, "with --wait: start in ask mode")
+	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "with --wait: stop waiting after this long (from the command's start): the result is running, exit 5, with a handle to follow it (default: no limit)")
+	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
+	registerPromptInputFlags(cmd, &f.prompt)
 	return cmd
 }
 

@@ -148,7 +148,9 @@ var (
 // to session sessionID from cursor (nil: a snapshot), waiting for the
 // session's start (when: ready). The dial is bounded by dialTimeout and the
 // attach by ctx (--timeout's, when given). A failure is the command's exit-1
-// error.
+// error, carrying the attach's own refusal (exitError.cause): craze send
+// tells a host closing its session (engine.ErrClosing), or one whose session
+// has ended, from any other by it, and reloads the session (plan 041 §3.4).
 func dialWait(ctx context.Context, e rundir.Entry, sessionID, what string, cursor *protocol.Cursor) (*waitConn, error) {
 	c, err := dialCLI(ctx, e, what)
 	if err != nil {
@@ -171,9 +173,9 @@ func dialWait(ctx context.Context, e rundir.Entry, sessionID, what string, curso
 		case ctx.Err() != nil:
 			return nil, exitf(1, "%s: timed out before session %s answered", what, psShort(sessionID))
 		case errors.As(err, &re) && re.Reason == protocol.ReasonStartFailed:
-			return nil, exitf(1, "%s: session %s did not start: %s", what, psShort(sessionID), sanitizeLine(re.Cause))
+			return nil, &exitError{code: 1, msg: what + ": session " + psShort(sessionID) + " did not start: " + sanitizeLine(re.Cause), cause: err}
 		case errors.Is(err, engine.ErrNotAccepting), errors.Is(err, remote.ErrSessionEnded):
-			return nil, exitf(1, "%s: %s", what, endedLine(sessionID))
+			return nil, &exitError{code: 1, msg: what + ": " + endedLine(sessionID), cause: err}
 		}
 		return nil, unreachable(what, e, err)
 	}
@@ -333,6 +335,14 @@ type turnWaiter struct {
 	removeSent bool
 	cancelSent bool
 
+	// unsettled is the target's ending, read already, whose settlement an
+	// interrupt cut short — its returned-plan lookup (returnedCancel) — set
+	// until it is settled: nothing on the stream after it is the target's,
+	// and the interrupt, already on its way, decides (run). An owned wait's
+	// cleanup settles it on its own context (signalled), as it would an
+	// ending it read itself.
+	unsettled func(context.Context)
+
 	// result and fail are the wait's end: one of them is set.
 	result *turnResult
 	fail   *waitFailure
@@ -425,6 +435,22 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 		w.item(op, p)
 	}
 	for !w.done() {
+		if w.unsettled != nil {
+			// The target's ending is read and its settlement was cut short by
+			// the interrupt, which is on its way (the work's context ended
+			// first): nothing the stream brings now is the target's.
+			select {
+			case in := <-w.intr:
+				if in.timeout {
+					w.timedOut(items)
+				} else {
+					w.signalled(items)
+				}
+			case <-ctx.Done():
+				w.fail = &waitFailure{msg: ctx.Err().Error(), handle: w.handle(), follow: true}
+			}
+			continue
+		}
 		// What the stream has handed over already goes first: an ending that
 		// came before the timeout, or before a signal, is the result.
 		select {
@@ -522,23 +548,42 @@ func submitPrompt(conn *waitConn, text string) func(context.Context, uint64) (wa
 		var res protocol.PromptResult
 		_, err := conn.c.Command(ctx, protocol.MethodSessionPrompt,
 			protocol.PromptParams{SessionID: conn.sessionID, Text: text, Mode: protocol.PromptQueue}, &res, remote.CommandOptions{Identity: ident})
+		follow := "; craze wait " + psShort(conn.sessionID) + " follows the session"
 		switch {
 		case errors.Is(err, remote.ErrOutcomeUnknown):
-			return waitTarget{}, errors.New("the prompt may not have reached it; craze wait " + psShort(conn.sessionID) + " follows the session")
+			return waitTarget{}, &submitError{msg: "the prompt may not have reached it" + follow, err: err}
+		case refusedByHost(err):
+			return waitTarget{}, &submitError{msg: "the prompt was refused: " + sanitizeLine(err.Error()), err: err}
 		case err != nil:
-			return waitTarget{}, errors.New("the prompt was refused: " + sanitizeLine(err.Error()))
+			// Not the host's refusal: a reply this client cannot read, or a
+			// failure after the request may have gone — the prompt may have
+			// run (C3 review r1, 5).
+			return waitTarget{}, &submitError{msg: "the prompt's answer cannot be read (" + sanitizeLine(err.Error()) +
+				"); it may have reached the session" + follow, err: err}
 		case res.Turn != "":
 			return waitTarget{kind: targetTurn, id: res.Turn}, nil
 		case res.Queued != nil:
 			row, err := agent.DecodeQueuedPrompt(res.Queued)
 			if err != nil || row.ID == "" {
-				return waitTarget{}, errors.New("the prompt's queued row cannot be read")
+				return waitTarget{}, errors.New("the prompt's queued row cannot be read; it may have reached the session" + follow)
 			}
 			return waitTarget{kind: targetRow, id: row.ID}, nil
 		}
-		return waitTarget{}, errors.New("the prompt started no turn and was not queued")
+		return waitTarget{}, errors.New("the prompt's answer names no turn and no queued row; it may have reached the session" + follow)
 	}
 }
+
+// submitError is submitPrompt's failure: its words, as the command says them,
+// and the client's error behind them, so a caller tells an answer lost with
+// its connection (remote.ErrOutcomeUnknown: the prompt may have run) from a
+// prompt that never ran (submitGate.close).
+type submitError struct {
+	msg string
+	err error
+}
+
+func (e *submitError) Error() string { return e.msg }
+func (e *submitError) Unwrap() error { return e.err }
 
 // pumpStream hands the stream's items over, in order, until ctx ends or the
 // stream stops.
@@ -745,15 +790,17 @@ func (w *turnWaiter) reconcile(ctx context.Context, r *protocol.AttachResult) {
 		w.requeue(w.row, r.After.Seq)
 		return
 	}
+	// The same incarnation (above), and the same turn: what the waiter
+	// folded of it that no snapshot carries is kept (followFrom).
 	switch w.target.kind {
 	case targetTurn:
 		if snap.Turn.ID == w.target.id {
-			w.followFrom(snap, r.After.Seq)
+			w.followFrom(snap, r.After.Seq, true)
 			return
 		}
 	case targetForeign:
 		if f := snap.Turn.Foreign; f != nil && f.Running && f.ID == w.target.id {
-			w.followFrom(snap, r.After.Seq)
+			w.followFrom(snap, r.After.Seq, true)
 			return
 		}
 	}
@@ -785,7 +832,7 @@ func (w *turnWaiter) reconcile(ctx context.Context, r *protocol.AttachResult) {
 		w.notObserved()
 		return
 	}
-	w.settleLastTurn(lt, snap)
+	w.settleLastTurn(ctx, lt, snap)
 }
 
 // undecided says a read's failure decides nothing for plain wait's look at
@@ -833,12 +880,12 @@ func (w *turnWaiter) plainStart(ctx context.Context, r *protocol.AttachResult) {
 	case snap.Turn.ID != "":
 		w.target = waitTarget{kind: targetTurn, id: snap.Turn.ID}
 		w.partial = true
-		w.followFrom(snap, r.After.Seq)
+		w.followFrom(snap, r.After.Seq, false)
 	case snap.Turn.Foreign != nil && snap.Turn.Foreign.Running:
 		w.target = waitTarget{kind: targetForeign, id: snap.Turn.Foreign.ID}
 		w.foreign = snap.Turn.Foreign.ID
 		w.partial = true
-		w.followFrom(snap, r.After.Seq)
+		w.followFrom(snap, r.After.Seq, false)
 	default:
 		w.idleLook(ctx, snap, r.After.Seq)
 	}
@@ -873,7 +920,7 @@ func (w *turnWaiter) idleLook(ctx context.Context, snap *transcript.Snapshot, se
 	}
 	look := &idleScan{st: st, snap: snap, until: sync.Seq}
 	if sync.Seq <= seq {
-		w.finishIdle(look)
+		w.finishIdle(ctx, look)
 		return
 	}
 	w.idle = look
@@ -883,7 +930,7 @@ func (w *turnWaiter) idleLook(ctx context.Context, snap *transcript.Snapshot, se
 // idle when it has had no turn (or its host does not say how its last one
 // ended), and otherwise the last turn, settled from lastTurn and the
 // snapshot (partial: an idle wait has no stop reason).
-func (w *turnWaiter) finishIdle(look *idleScan) {
+func (w *turnWaiter) finishIdle(ctx context.Context, look *idleScan) {
 	w.idle = nil
 	st, snap := look.st, look.snap
 	if st.LastTurn == nil {
@@ -898,7 +945,7 @@ func (w *turnWaiter) finishIdle(look *idleScan) {
 		w.acc.start(snap.Turn.At)
 	}
 	w.partial = true
-	w.settleLastTurn(lt, snap)
+	w.settleLastTurn(ctx, lt, snap)
 }
 
 // settleLastTurn is the target's result from how the session says its last
@@ -907,32 +954,173 @@ func (w *turnWaiter) finishIdle(look *idleScan) {
 // this turn's at all — a turn withdrawn before it opened, or one that failed
 // before its first step, reports none, and the one before it stands (P6). A
 // usage the waiter folded from the turn's own events, before a gap, stays.
-func (w *turnWaiter) settleLastTurn(lt *protocol.LastTurn, snap *transcript.Snapshot) {
+func (w *turnWaiter) settleLastTurn(ctx context.Context, lt *protocol.LastTurn, snap *transcript.Snapshot) {
 	seedFromSnapshot(w.acc, snap)
 	w.acc.end(lt.EndedAt)
+	w.partial = true
+	w.settleOutcome(ctx, lt)
+}
+
+// settleOutcome is settleLastTurn's result from lastTurn's outcome. A
+// cancelled turn is settled by the one rule for a cancelled ending
+// (returnedCancel): completed when its plan was returned; one whose lookup an
+// interrupt cut short is left unsettled for the interrupt to decide.
+func (w *turnWaiter) settleOutcome(ctx context.Context, lt *protocol.LastTurn) {
 	status := statusCompleted
 	switch lt.Outcome {
 	case protocol.TurnFailed:
 		status = statusFailed
 	case protocol.TurnCancelled:
+		returned, decided := w.returnedCancel(ctx, lt.TurnID)
+		if !decided {
+			w.unsettled = func(ctx context.Context) { w.settleOutcome(ctx, lt) }
+			return
+		}
 		status = statusCancelled
+		if returned {
+			status = statusCompleted
+		}
 	}
 	res := w.newResult(status)
 	res.Error = lt.Err
-	w.partial = true
 	w.finish(res)
+}
+
+// returnedCancel is the one rule for a cancelled ending of the target turn
+// (X28), wherever it is settled — live (ended), or from lastTurn after a
+// restore, a reconcile or an idle look (settleLastTurn): whether the host
+// returned the turn's plan and cancelled the turn itself, so that the plan is
+// the turn's result and the ending is completed. The waiter's own mark says
+// so: the plan it folded, kept across a snapshot of the same turn
+// (followFrom). Without it, a waiter that has not seen the whole turn
+// (partial: it met the turn running, or a gap came) looks for the plan in the
+// turn's events as the host still holds them (lookReturned) — a snapshot
+// never carries it; one that folded every event of the turn has read
+// everything the lookup could, and has its answer. A turn whose events are
+// gone is what can be proven: cancelled.
+//
+// decided is false when the lookup was interrupted — a signal, --timeout's
+// end — or would be a read past --timeout's end (expired): interrupted is
+// not "not found", and the interrupt decides, exactly as if it had come a
+// step earlier (unsettled).
+func (w *turnWaiter) returnedCancel(ctx context.Context, turn string) (returned, decided bool) {
+	switch {
+	case w.target.kind != targetTurn:
+		return false, true
+	case w.acc.returned:
+		return true, true
+	case !w.partial:
+		return false, true
+	case w.expired:
+		return false, false
+	}
+	found, err := w.lookReturned(ctx, turn)
+	if err != nil {
+		return false, false
+	}
+	return found, true
+}
+
+// lookReturned looks for turn's returned plan in its events (returnedPlanOf)
+// and, found, folds it into the accumulator as the live wait would have: the
+// plan, its automatic answer, and the mark. err is the lookup's interruption
+// (its context's error), never a plan not found.
+func (w *turnWaiter) lookReturned(ctx context.Context, turn string) (bool, error) {
+	p, err := returnedPlanOf(ctx, w.conn.entry, w.session.id, w.inc, turn)
+	if p == nil {
+		return false, err
+	}
+	w.acc.plan = p.Plan
+	w.acc.auto = append(w.acc.auto, autoPlan(p))
+	w.acc.returned = true
+	return true, nil
+}
+
+// waitLookingBack sees the returned-plan lookup (returnedPlanOf) about to
+// make its own attach, on the lookup's context: a no-op, and the barrier a
+// test stalls that attach at.
+var waitLookingBack = func(context.Context) {}
+
+// returnedPlanOf is the plan an unattended host returned in turn (X28) of
+// incarnation inc — an automatic plan answer that did not accept, between
+// the turn's started and its ended — read from the session's events as its
+// host still holds them: a connection of its own, attached at the very start
+// of inc's stream (cursor seq 0) and read until it has caught up, within
+// readBound and ctx. Found, it is the plan. Otherwise it is nil, and the
+// error says which: nil is not found — a replay the host refuses (the events
+// evicted), another incarnation's answer, none such in the turn, or no
+// answer within readBound — and ctx's own error is interrupted: the waiter's
+// work ended under the lookup (a signal, --timeout's end), which decides
+// nothing about the plan. No protocol change: an attach with a cursor is
+// what wait --from makes.
+func returnedPlanOf(ctx context.Context, e rundir.Entry, sessionID, inc, turn string) (*agent.PlanEvent, error) {
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, readBound)
+	defer cancel()
+	miss := func() (*agent.PlanEvent, error) { return nil, parent.Err() }
+	c, err := dialCLI(ctx, e, waitWhat)
+	if err != nil {
+		return miss()
+	}
+	defer func() { _ = c.Close() }()
+	waitLookingBack(ctx)
+	st, err := c.Attach(ctx, remote.AttachOptions{SessionID: sessionID, Cursor: &protocol.Cursor{Incarnation: inc}, When: protocol.WhenNow})
+	if err != nil {
+		return miss()
+	}
+	in := false
+	for {
+		it, err := st.Next(ctx)
+		if err != nil {
+			return miss()
+		}
+		switch it.Kind {
+		case remote.KindAttached:
+			if r := it.Reply; r == nil || r.Snapshot != nil || r.After.Incarnation != inc {
+				return miss()
+			}
+		case remote.KindEvent:
+			ev, err := agent.DecodeEvent(string(it.Body))
+			if err != nil {
+				return miss()
+			}
+			switch tu := ev.Turn; {
+			case ev.Type == agent.EventTurn && tu != nil && tu.ID == turn && tu.Phase == agent.TurnStarted:
+				in = true
+			case ev.Type == agent.EventTurn && tu != nil && tu.ID == turn && tu.Phase == agent.TurnEnded:
+				return miss()
+			case in && ev.Type == agent.EventPlan && ev.Plan != nil && ev.Plan.Auto && !ev.Plan.Accepted && ev.Agent == "":
+				return ev.Plan, nil
+			}
+		case remote.KindReady, remote.KindPresence:
+		default:
+			// Caught up (synchronized), restored, ended or lost: not found.
+			return miss()
+		}
+	}
 }
 
 // followFrom follows the target from a snapshot that shows it running: its
 // turn so far as the snapshot holds it (seedFromSnapshot), the stream from
-// seq.
-func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64) {
+// seq. same says the snapshot is of the turn the waiter was folding already,
+// in the same incarnation (reconcile): what it folded that no snapshot
+// carries is kept — the turn's automatic answers (P9) and, when the host
+// returned its plan (X28), the plan and the mark that its cancelled ending is
+// the plan's delivery (returnedCancel).
+func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool) {
+	prev := w.acc
 	w.folding = true
 	w.acc = newTurnAccumulator()
 	if w.target.kind == targetTurn && !snap.Turn.At.IsZero() {
 		w.acc.start(snap.Turn.At)
 	}
 	seedFromSnapshot(w.acc, snap)
+	if same {
+		w.acc.auto = append(prev.auto, w.acc.auto...)
+		if prev.returned {
+			w.acc.returned, w.acc.plan = true, prev.plan
+		}
+	}
 	// The cursor is past the row's `sent` and the turn's `started` now: the
 	// handle names the turn (rowLinked).
 	w.anchor, w.rowLinked = seq, false
@@ -1039,7 +1227,7 @@ func (w *turnWaiter) scan(ctx context.Context, ev agent.Event) {
 		return
 	}
 	if ev.Seq >= w.idle.until {
-		w.finishIdle(w.idle)
+		w.finishIdle(ctx, w.idle)
 	}
 }
 
@@ -1096,7 +1284,7 @@ func (w *turnWaiter) runningEvent(ctx context.Context, ev agent.Event) {
 				return
 			}
 			w.acc.end(ev.At)
-			w.ended(tu)
+			w.ended(ctx, tu)
 		}
 		return
 	}
@@ -1150,7 +1338,13 @@ func (w *turnWaiter) restoring(ev agent.Event) (string, bool) {
 // ended is the target turn's ending as its result (§3.1): completed is
 // end_turn with no error, an error is failed, a cancel is cancelled — and any
 // other stop the turn ended without completing, failed, its stop reason said.
-func (w *turnWaiter) ended(tu *agent.TurnInfo) {
+// A cancel is the one rule's (returnedCancel): when the unattended host
+// returned the turn's plan and cancelled the turn itself (X28), the plan is
+// the turn's result, completed. Only that policy writes an automatic plan
+// answer that does not accept, so a person's cancel of a turn with no
+// returned plan is still cancelled. A cancel whose lookup an interrupt cut
+// short is left unsettled, for the interrupt to decide.
+func (w *turnWaiter) ended(ctx context.Context, tu *agent.TurnInfo) {
 	if tu.Synthetic && tu.StopReason == stopClosing {
 		// The engine's close authored it (engine.Close): the session ended
 		// under the turn, which §3.1 says as the session's end — exit 1, the
@@ -1158,20 +1352,28 @@ func (w *turnWaiter) ended(tu *agent.TurnInfo) {
 		w.fail = &waitFailure{msg: endedLine(w.session.id), handle: w.handle()}
 		return
 	}
+	if !w.folding {
+		// Its ending, and nothing of the turn before it.
+		w.partial = true
+	}
 	status := statusFailed
 	switch {
 	case tu.StopReason == stopCancelled:
+		returned, decided := w.returnedCancel(ctx, tu.ID)
+		if !decided {
+			w.unsettled = func(ctx context.Context) { w.ended(ctx, tu) }
+			return
+		}
 		status = statusCancelled
+		if returned {
+			status = statusCompleted
+		}
 	case tu.Err != "":
 	case tu.StopReason == stopEndTurn:
 		status = statusCompleted
 	}
 	res := w.newResult(status)
 	res.StopReason, res.Error = tu.StopReason, tu.Err
-	if !w.folding {
-		// Its ending, and nothing of the turn before it.
-		w.partial = true
-	}
 	w.finish(res)
 }
 
@@ -1516,7 +1718,7 @@ func (w *turnWaiter) handle() string {
 // ended with the timeout, and only move the target: an ending among them is
 // the result, as one the stream handed over before the timeout is in the
 // loop, but nothing read past the timeout — a look for an ask, a reconcile's
-// state — decides it (expired). A signal while the reply is awaited is
+// state, a returned plan's lookup — decides it (expired). A signal while the reply is awaited is
 // answered as any signal is (signalled): an owned wait's cleanup, a second
 // signal exiting at once.
 func (w *turnWaiter) timedOut(items <-chan pumped) {
@@ -1572,7 +1774,9 @@ func (w *turnWaiter) submitAnswered(ctx context.Context, a submitAnswer) {
 	buffered := w.buffer
 	w.buffer = nil
 	for _, p := range buffered {
-		if w.done() {
+		if w.done() || w.unsettled != nil {
+			// Settled; or the target's ending read, and nothing after it is
+			// the target's (unsettled).
 			return
 		}
 		w.item(ctx, p)
@@ -1636,6 +1840,8 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 			case w.result != nil:
 			case w.buffering():
 				w.fail = &waitFailure{msg: "interrupted again before the prompt's answer; it may have reached the session", handle: w.handle()}
+			case w.unsettled != nil:
+				w.fail = &waitFailure{msg: errUnsettled + " again", handle: w.handle(), follow: true}
 			default:
 				w.fail = &waitFailure{msg: "interrupted again before the cancel was confirmed", handle: w.handle(), follow: true}
 			}
@@ -1657,11 +1863,29 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 			return
 		}
 	}
+	if settle := w.unsettled; settle != nil {
+		// The target's ending was read before the signal, and only whether
+		// its plan was returned was not (an interrupted lookup): settled now,
+		// on the cleanup's own context, as the cleanup settles an ending it
+		// reads itself. A turn that has ended has nothing to cancel.
+		w.unsettled = nil
+		settle(ctx)
+		if !w.done() {
+			w.fail = &waitFailure{msg: errUnsettled, handle: w.handle(), follow: true}
+		}
+		return
+	}
 	w.act(ctx)
 	for !w.done() {
 		select {
 		case p := <-items:
 			w.item(ctx, p)
+			if !w.done() && w.unsettled != nil {
+				// An ending the cleanup read, its lookup cut short by the
+				// cleanup's own end or a second signal.
+				w.fail = &waitFailure{msg: errUnsettled, handle: w.handle(), follow: true}
+				continue
+			}
 			if !w.done() {
 				w.act(ctx)
 			}
@@ -1672,6 +1896,10 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 		}
 	}
 }
+
+// errUnsettled is a cleanup that ended before the target's ending, read
+// already, could be settled (unsettled).
+const errUnsettled = "interrupted before the turn's ending was settled"
 
 // waitCleanupEnding sees an owned wait's cleanup end, before it stops its
 // watch for a second signal; taken is closed once the watch has taken one.

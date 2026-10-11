@@ -168,6 +168,33 @@ func TestCutMessage(t *testing.T) {
 	}
 }
 
+// TestCutResult (C3 r3, 4): --max-message's budget over the message and the
+// plan, the message first; the plan gets what is left — at least its first
+// line, never more than the budget of it — and none when nothing is left.
+func TestCutResult(t *testing.T) {
+	const plan = "## Steps\n1. one\n2. two"
+	for _, c := range []struct {
+		name, msg, plan string
+		n               int
+		msgHead, head   string
+		cut             bool
+	}{
+		{"both fit", "0123456789", plan, 40, "0123456789", plan, false},
+		{"the message cut, no plan", "0123456789", plan, 5, "01234", "", true},
+		{"the message whole, nothing left", "0123456789", plan, 10, "0123456789", "", true},
+		{"what is left, at least the first line", "0123456789", plan, 12, "0123456789", "## Steps", true},
+		{"what is left, past the first line", "ab", plan, 15, "ab", "## Steps\n1. o", true},
+		{"a first line longer than the budget", "", "0123456789abcdef", 10, "", "0123456789", true},
+		{"no plan", "0123456789", "", 5, "01234", "", true},
+		{"characters, not bytes", "héllo", "wörld\nmore", 7, "héllo", "wörld", true},
+	} {
+		msgHead, head, cut := cutResult(c.msg, c.plan, c.n)
+		if msgHead != c.msgHead || head != c.head || cut != c.cut {
+			t.Errorf("%s: %q %q %v, want %q %q %v", c.name, msgHead, head, cut, c.msgHead, c.head, c.cut)
+		}
+	}
+}
+
 // TestResultJSONKeys is §3.1's JSON keys, types and omission rules: the
 // always-present keys; a terminal result's message, toolCalls, durationMs
 // and files ([] when none); nothing absent written as null or false; a

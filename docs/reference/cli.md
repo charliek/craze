@@ -7,6 +7,8 @@ craze bridge [flags]
 craze attach [flags]
 craze ps [flags]
 craze new [prompt...] [flags]
+craze new --wait [prompt...] [--prompt-file <f>] [flags]
+craze send <id> [prompt...] [--wait] [--prompt-file <f>] [flags]
 craze wait <id> [--from <handle>] [--timeout <d>] [--max-message <n>] [--json]
 craze cancel <id>
 craze stop <id>
@@ -883,6 +885,11 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
 | `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
 | `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
+| `--wait` | Start an unattended session without the hub, send it the prompt and wait for its turn's result ([below](#craze-new-wait)) |
+
+`--timeout`, `--max-message`, `--prompt-file`, `--remove-prompt-file`,
+`--plan` and `--ask` are `--wait`'s alone: without it each is a usage error
+(`craze new: --plan needs --wait`, exit 2).
 
 The session's host finds its agent binary as a session the list starts for
 another provider does — `[agents]` in `config.toml`, then `PATH`: a hub never
@@ -964,6 +971,171 @@ craze prompt: cursor may not start here: this craze runs outside the macOS login
 and the TUI draws the same words as a note in the transcript (`cursor may not
 start here: …`). It is a warning, never a refusal: nothing is stopped, and a
 cursor that can reach the keychain some other way starts as usual.
+
+### craze new --wait
+
+```bash
+./bin/craze new --wait --provider native --model chatgpt/gpt-6.1-sol "fix the flaky test in stats/"
+./bin/craze new --wait --timeout 9m --max-message 20000 --provider grok --prompt-file /tmp/task.md --remove-prompt-file
+./bin/craze new --wait --plan --provider cursor --json "how would you split core.py?"
+```
+
+Hands a task to a new session and prints its result: what a coding agent runs
+to delegate work to a model craze can drive. It is another path than plain
+`craze new`'s — **no hub**: the session's host is started here, as the TUI
+starts its own, and runs **unattended**:
+
+- **Questions** the agent asks are answered with their first option, as
+  [`craze prompt`](#craze-prompt) answers them, and **a plan** it presents
+  ends the turn there: it is the result (`plan`), never accepted on the
+  agent's behalf — so the agent cannot go on to carry it out unread (each is
+  listed in the result, `auto-answered:`, a plan as `returned`). Permissions
+  are allowed under the default bypass; with `--no-force` a permission
+  request stays open for a person to answer (`needs_input`, exit 4).
+- **No background work**: a native session runs every sub-agent and every
+  shell command in the foreground, so a turn is whole when it ends.
+
+The command starts the host, sends it the prompt and follows the turn the
+prompt became to its end, printing the result exactly as
+[`craze wait`](#craze-wait) prints one — the turn's last message and a footer,
+or one JSON object with `--json` — and exiting with its status's code
+([Waiting commands](#waiting-commands)): 0 completed, 3 failed or cancelled, 4
+needs_input, 5 running at `--timeout`. The session runs on once the turn has
+ended, until its host's [idle exit](configuration.md#host-idle-exit):
+[`craze send`](#craze-send) gives it the next prompt, with the context of the
+first; `craze attach`, `craze ps` and the session list find it like any
+session.
+
+The host is detached from the command — in a session of its own, so it
+outlives the shell and the process group that ran it — and is handed the
+environment a session the hub creates is handed: none of `CRAZE_PROVIDER`,
+`CRAZE_AGENT_BIN`, `TMUX`, `HERDR_*` or `ROOST_*`. So it finds its agent
+binary in `[agents]` in `config.toml`, then on `PATH`, as such a session does.
+Its [session index](configuration.md#session-index) rows carry `unattended`,
+the settings it started with.
+
+| Flag | Description |
+|------|-------------|
+| `-C`, `--dir <dir>` | The session's directory (default: the current one) |
+| `--provider <id>` | The session's provider; without it `provider` in `config.toml`, and with none configured exit 1 (`no default provider yet; pass --provider …`) |
+| `--model`, `--effort`, `--fast` / `--no-fast`, `--no-force` | As plain `craze new`'s |
+| `--plan`, `--ask` | Start in plan or ask mode — for a native session, `--ask` refuses edits and the shell, and `--plan` refuses edits but the agent's own plan file and lets the shell through; a task that says "read-only" is a request, not a rule. **The turn ends at the plan, on every provider**: the result is `completed` with the plan (`plan`), the session still in plan mode. A native session accepts its own plan and stops; on cursor and grok craze accepts nothing — it answers the plan cancelled and ends the turn (its stop reason `cancelled`, the plan auto-answered `returned`) — since an ACP agent told its plan is accepted goes on to carry it out. A plain `craze wait` afterwards reports such a turn the same way while its host still holds the turn's events, and `cancelled` once it does not; `craze wait --from <handle>` — the handle `craze send` prints — recognises it whenever its replay is honoured |
+| `--prompt-file <path>` | Read the prompt from this file, `-` for stdin ([The prompt](#the-prompt)) |
+| `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
+| `--timeout <duration>` | Stop waiting after this long, counted from the command's start — the host's start included: `running`, exit 5, with a handle. Before the prompt was sent, the session is stopped instead, exit 1, `timed out before the prompt was sent` |
+| `--max-message <n>` | As `craze wait`'s |
+| `--json` | Print the result as one JSON object; a failure as `{"error":{"message":…}}` |
+
+**Signals.** The prompt is the command's own, as a handle's turn is
+`craze wait --from`'s: `Ctrl+C`, `SIGTERM` or `SIGHUP` remove it while it is
+queued (`dropped`) or cancel its turn by its id (`cancelled`), exit 3, within
+2 seconds; a second signal exits at once. One that comes before the prompt
+was sent — while the host starts, or the session does — stops the session the
+command started: `cancelled`, exit 3, its error `interrupted before the prompt
+was sent; the session it started was stopped` — or, when a second signal
+already came, `… was told to stop`: the stop is sent, and the command does not
+wait for the host to go. A prompt whose answer was lost, or cannot be read,
+may have reached the session, which is then never stopped.
+
+A provider that cannot start is exit 1 with the host's own words, and the
+session is stopped:
+
+```text
+craze new: session 8327352e did not start: agent binary not found: /opt/cursor/agent; install it, or set [agents].cursor in ~/.craze/config.toml; the session it started was stopped
+```
+
+A prompt whose answer was lost with its connection is never sent again: exit
+1, `the prompt may not have reached it; craze wait <short> follows the
+session`.
+
+## craze send
+
+```bash
+./bin/craze send 8327352e "now add a test for it"
+./bin/craze send 8327352e --wait --timeout 9m --max-message 20000 --prompt-file /tmp/next.md --remove-prompt-file
+./bin/craze send 8327352e --json "and the docs"
+```
+
+Sends a prompt to a session — any id [`craze ps`](#craze-ps) prints, or the
+index's for one that has ended — queued behind any turn it is running, as a
+prompt typed in its TUI is. Without `--wait` it prints where the prompt went
+and the command that follows it, and exits 0:
+
+```text
+queued q-2 (position 1)
+next: craze wait 8327352e --from 0199c0de-1111-7000-8000-397e175bfe79.41.row-q-2
+```
+
+`started turn-3` when the session was idle. `position` counts from the next
+prompt to run; it is taken from the stream, or else from the session's queue
+as it stands, and is left out — `queued q-2` alone — when the prompt has
+already left the queue by then. A turn whose start the stream did not show
+before the command gave up looking prints `next: craze wait <short>`, with no
+handle. With `--json`, one object: `status` (`started` or `queued`),
+`session`, `short`, `provider`, `turn` or `row` and `position` (absent when
+unknown), `handle`, `attach`.
+
+With `--wait` it follows **this** prompt to its turn's end — not a turn ahead
+of it in the queue — and prints its result as `craze wait` does, with the same
+statuses, exit codes and signals as [`craze new --wait`](#craze-new-wait): a
+signal removes the prompt while it waits in the queue (`dropped`) or cancels
+its turn (`cancelled`), and one before the prompt was sent is `cancelled`
+too — the session left as it was.
+
+**A session that has ended is loaded again.** When no running session has
+the id, it is looked up in the [session index](configuration.md#session-index)
+— the newest row of each session, by the same short, prefix and whole-id
+rules (a row written before craze ids existed is not addressable; a session of
+a provider craze cannot load again has no row: `no session <id>`; several
+match: exit 1, naming them) — and a host is started to load it, as `craze new
+--wait` starts one. A session `craze new --wait` started is loaded unattended
+again, with the mode, permission mode, model and effort it started with (its
+row's `unattended`); a session of your own is loaded as the ordinary
+interactive session `--resume` would give you, so `craze send` is also a way
+to message a saved session. The same happens when a running session's host is
+closing it — stopped, or idling out: craze waits, up to 10 seconds, for that
+host to go (or to keep the session) and loads it in its own; a host that is
+gone by the time craze dials it is looked past the same way. Two `craze
+send`s loading one session at once end up in one host, each prompt its own
+turn. A session whose directory is gone, or that its agent refuses to load,
+is exit 1 with the host's own words. The host a reload starts is never
+stopped by `craze send`, whatever becomes of its prompt — another `craze send`
+may have found it and prompted it meanwhile — not even when `craze send` gives
+up while that host is still starting (a signal, `--timeout`): it stays up like
+any session's host (an interactive one idles out; an unattended one until
+`craze stop`).
+
+| Flag | Description |
+|------|-------------|
+| `--wait` | Wait for the prompt's turn to end and print its result |
+| `--prompt-file <path>` | Read the prompt from this file, `-` for stdin ([The prompt](#the-prompt)) |
+| `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
+| `--timeout <duration>` | Give up after this long, counted from the command's start (a reload included). With `--wait`, `running` at its end, exit 5, with a handle |
+| `--max-message <n>` | With `--wait`, as `craze wait`'s (a usage error without it) |
+| `--json` | One JSON object: the result with `--wait`, where the prompt went without it; a failure as `{"error":{"message":…}}` |
+
+### The prompt
+
+`craze new --wait` and `craze send` take their prompt from exactly one
+source:
+
+- `--prompt-file <path>` — a file, or stdin for `-`;
+- the words after the command's arguments, joined by spaces;
+- stdin, when neither is given and stdin is not a terminal (`/dev/null`
+  counts as one).
+
+Words and `--prompt-file` together are a usage error (exit 2), and so are no
+prompt at all, a prompt that is empty once the whitespace around it is gone,
+and one over 32 KiB — the most a queued prompt may be — each refused before
+anything is started or sent. `--remove-prompt-file` deletes the file once it
+has been read, whatever the prompt turns out to be (empty, too long), and
+never a file it could not read; a file it cannot delete is said on stderr, and
+the command goes on. The prompt is read under the command's `--timeout` and
+its signals: a source that does not end — a pipe held open, a FIFO nobody
+writes — ends the command, exit 1, `timed out reading the prompt from stdin`
+or `interrupted while reading the prompt from <path>`, before anything is
+started. Plain `craze new` keeps its own rule: its words, or no prompt — it
+never reads stdin.
 
 ## craze wait
 
@@ -1058,7 +1230,7 @@ command to run next for a `running` or `needs_input` result.
 |------|-------------|
 | `--from <handle>` | Follow exactly the turn or queued prompt the handle names, from its place in the stream; a signal then cancels it |
 | `--timeout <duration>` | Stop waiting after this long, counted from the command's start (`9m`, `30s`): `running`, exit 5, with a handle. Default: no limit |
-| `--max-message <n>` | Print at most the first `n` characters of the message, then `[… cut: full message in <path>]`, and write the whole result — the message and footer, or the JSON — to `~/.cache/craze/results/<short>-<turn>.md` (`0600`). Default: no limit |
+| `--max-message <n>` | Print at most `n` characters of the message and the plan together: the message first, and the plan what is left — at least its first line (up to `n` characters) when anything is left, none when nothing is. When anything is cut, the plain output ends its message and plan with `[… cut: full result in <path>]`, and the whole result — the message, plan and footer, or the JSON — is written to `~/.cache/craze/results/<short>-<turn>.md` (`0600`). Default: no limit |
 | `--json` | Print the result as one JSON object on one line |
 
 With `--json`, one object. These keys are always there: `status`, `session`
@@ -1076,7 +1248,7 @@ queued prompt, `turn` and/or `row`.
 | `handle` | `running`, `needs_input`, and a failure with one |
 | `partial` | `true` when some of the turn's events were not seen |
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
-| `messageFile` | `--max-message`'s file, when it cut the message |
+| `messageFile` | `--max-message`'s file, holding the whole result, when it cut the message or the plan; `message` and `plan` are then what was kept |
 
 A key that does not apply is absent, never `null` or `false`:
 
@@ -1543,15 +1715,16 @@ command is hidden. See [Testing](../development/testing.md#craze-frame).
 
 ### Waiting commands
 
-[`craze wait`](#craze-wait) exits with its result's status, so a script can
-branch on the code alone:
+[`craze wait`](#craze-wait), [`craze new --wait`](#craze-new-wait) and
+[`craze send --wait`](#craze-send) exit with their result's status, so a
+script can branch on the code alone:
 
 | Code | Status | When |
 |------|--------|------|
 | 0 | `completed`, `idle` | The turn ended `end_turn` with no error; `wait` on a session that has had no turn |
-| 1 | — | craze failed: no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal |
-| 2 | — | Usage error |
-| 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing; the queued prompt was removed before it ran |
+| 1 | — | craze failed: no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal; for `new --wait` and `send`, a session that could not start or load, `--timeout` before the prompt was sent, and a prompt whose answer was lost (`the prompt may not have reached it`, never sent again) |
+| 2 | — | Usage error — for `new --wait` and `send`, no prompt, two prompts, an empty one or one over 32 KiB too |
+| 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing; the queued prompt was removed before it ran; a `new --wait` or `send --wait` interrupted before its prompt was sent |
 | 4 | `needs_input` | An ask is open that nothing here answers |
 | 5 | `running` | `--timeout` passed; the turn goes on (`craze wait <id> --from <handle>` follows it) |
 

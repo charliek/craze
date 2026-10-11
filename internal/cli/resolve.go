@@ -153,7 +153,9 @@ func dialCLI(ctx context.Context, e rundir.Entry, what string) (*remote.Client, 
 	})
 }
 
-// unreachable is a resolved session whose socket did not answer.
+// unreachable is a resolved session whose socket did not answer, or whose
+// attach was refused: exit 1, carrying err (exitError.cause), which craze
+// send reads a host closing its session from (plan 041 §3.4).
 func unreachable(what string, e rundir.Entry, err error) error {
-	return exitf(1, "%s: session %s is unreachable: %s", what, psShort(entryID(e)), sanitizeLine(err.Error()))
+	return &exitError{code: 1, msg: what + ": session " + psShort(entryID(e)) + " is unreachable: " + sanitizeLine(err.Error()), cause: err}
 }
