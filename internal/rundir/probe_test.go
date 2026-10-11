@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -26,19 +27,25 @@ func deadHost(t *testing.T, env Env, id string) (entry, lock string) {
 // finds it let go and the host swept, and lists nothing. A hub's create used
 // to be refused host_unreachable over exactly this on CI. The control, with
 // no retry budget (probeContendedFor 0), lists the swept host unreadable: the
-// hub's symptom.
+// hub's symptom. Both are synchronized on the probe itself (probeContended),
+// never on a sleep (PR review): the other prober lets go only once the scan
+// has met its lock — and, for the control, only once the scan has returned —
+// so each case really contends.
 func TestAProbeWaitsOutAnotherProbersSweep(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		budget time.Duration
 		listed bool
 	}{
-		{"with the retry", probeContendedFor, false},
+		// A long budget: the scan returns the moment the other prober lets
+		// go, so the cap only keeps a descheduled prober from failing the
+		// test (C8 review).
+		{"with the retry", 10 * time.Second, false},
 		{"control: no retry", 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setProbeContendedFor(t, tc.budget)
-			if listed := sweptByAnotherProber(t); listed != tc.listed {
+			if listed := sweptByAnotherProber(t, tc.listed); listed != tc.listed {
 				t.Fatalf("the dead host swept by another prober listed unreadable: %v, want %v", listed, tc.listed)
 			}
 		})
@@ -55,16 +62,27 @@ func setProbeContendedFor(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { probeContendedFor = was })
 }
 
-// sweptByAnotherProber scans while another prober holds a dead host's lock
-// for 30 ms and then sweeps it, and reports whether the scan listed the host
-// unreadable.
-func sweptByAnotherProber(t *testing.T) bool {
+// sweptByAnotherProber scans while another prober holds a dead host's lock,
+// and reports whether the scan listed the host unreadable. The other prober
+// sweeps the host and lets its lock go once the scan has met the lock
+// (probeContended) — or, holdThroughScan, once the scan has returned.
+func sweptByAnotherProber(t *testing.T, holdThroughScan bool) bool {
 	t.Helper()
 	env := testEnv(t)
 	id := NewHostID()
 	entry, lock := deadHost(t, env, id)
 
-	locked, released := make(chan struct{}), make(chan struct{})
+	contended := make(chan struct{})
+	var once sync.Once
+	was := probeContended
+	probeContended = func(got string) {
+		if got == id {
+			once.Do(func() { close(contended) })
+		}
+	}
+	t.Cleanup(func() { probeContended = was })
+
+	locked, scanned, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(released)
 		f, err := os.OpenFile(lock, os.O_RDWR, 0)
@@ -80,9 +98,16 @@ func sweptByAnotherProber(t *testing.T) bool {
 			return
 		}
 		close(locked)
+		select {
+		case <-contended:
+		case <-time.After(10 * time.Second):
+			t.Error("the scan never met the other prober's lock")
+		}
+		if holdThroughScan {
+			<-scanned
+		}
 		// The other prober's sweep: the entry, then the lock file, unlinked
 		// under the lock, then the lock let go.
-		time.Sleep(30 * time.Millisecond)
 		_ = os.Remove(entry)
 		_ = os.Remove(lock)
 		_ = unlock(f)
@@ -90,6 +115,7 @@ func sweptByAnotherProber(t *testing.T) bool {
 	<-locked
 
 	live, unreadable, err := HostsScan(env)
+	close(scanned)
 	<-released
 	if err != nil {
 		t.Fatal(err)
