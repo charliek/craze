@@ -780,9 +780,13 @@ direction, not formatting. A `title` that comes to nothing — `""`, blank, or
 nothing but what is dropped (`"\u200b"`) — is `bad_request`; a long one is
 cut, not refused. The host is handed the normalized title and holds it before
 its session is published: the session's first `sessions.list` row, the
-create's `session` row and its first `session.state` all carry it, and its
-first state delta (the session's install, which every attach folds) restates
-it. Once the session has its id the host writes it to the session index as
+create's `session` row and its first `session.state` all carry it, and the
+session's install delta carries it too, as does every attach snapshot (the
+install is not necessarily the stream's first delta: an agent's commands update
+can come before it). A roster subscription opened before the create may first receive a
+`connecting` upsert with no `row` (the roster coalesces, so it is not
+guaranteed); every row that describes the session, from
+its first `reachable` one, carries the title. Once the session has its id the host writes it to the session index as
 the user's title, pinned, as a `/rename` is (a failed write is the session's
 `indexErr`, as for every index write it makes on its own). A hub from before
 `title` refuses it `unknown_field` — check `createTitle` first.

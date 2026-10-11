@@ -231,6 +231,13 @@ Environment:
                        session's workspace -- for the hosts one terminal
                        starts, which inherit its environment.
 
+Every script, whatever it does with a prompt, first reads two directives: a
+prompt whose text starts "SET-COMMANDS a,b" makes the agent send an
+available_commands_update naming exactly the commands a and b, before the turn
+starts. Sent twice with the same names it is a repeat of an identical catalog. Likewise
+"SET-TITLE <text>" sends a session_info_update titled <text>, the agent naming
+its own session.
+
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in
 for cursor-agent acp or grok agent stdio.

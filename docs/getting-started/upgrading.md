@@ -27,9 +27,12 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
 - **A skill saved mid-session appears in the `/` menu at the session's next
   turn end, not when you type `/`.** The session's host now builds the menu
   (the [slash catalog](../reference/protocol.md#slash-catalog)) and walks the
-  disk for skills itself — at the start, after every turn, when the agent's
-  command list changes, and when a client attaches (`craze attach` from
-  another terminal) — so a bare `/` no longer rescans. A TUI attached to a session served by an older craze keeps
+  disk for skills itself — at the start, after every turn, at each command
+  list the agent sends (whether or not it differs from the last), and when a
+  client attaches (`craze attach` from another terminal) — so a bare `/` no
+  longer rescans. Some agents, Grok among them, send their command list again
+  a few seconds after a skill file appears, so there a skill can arrive without
+  any of those. A TUI attached to a session served by an older craze keeps
   rescanning on a bare `/`, as before. See [Slash
   commands](../reference/tui.md#slash-commands).
 - **For a client reading the session stream:** a delta carrying `commands`

@@ -1718,12 +1718,15 @@ itself before there was a catalog. What each client shows differs by design:
 a client hides the rows it cannot run and adds rows of its own — the TUI adds
 `/sessions` where it has a session list, and shows `/btw` only on a session
 that answers side questions. The host walks the disk for skills when the
-session starts, when each turn ends (done, cancelled or failed), when the
-agent updates its command list, and when a client attaches to the session.
-**A skill saved while the session sits idle reaches the menu at the next of
-those**, not when you type `/`: let a turn finish, or attach to the session
-from another terminal with `craze attach`, and the menu updates in every
-client. Picking the session you are already in from the
+session starts, when each turn ends (done, cancelled or failed), at every
+command list the agent sends (an identical one included: it is the walk that
+is asked for, and the menu changes only if the walk found something), and when
+a client attaches to the session. **A skill saved while the session sits idle
+reaches the menu at the next of those**, not when you type `/`: let a turn
+finish, or attach to the session from another terminal with `craze attach`, and
+the menu updates in every client. Some agents help: Grok sends its command list
+again a few seconds after a skill file appears under the directories it
+watches, so on Grok an idle skill usually arrives within seconds by itself. Picking the session you are already in from the
 [session list](#session-list) does not attach again, so it does not pick the
 skill up. A session with no catalog from its host — one served by a craze from
 before the catalog, the moment before the session's catalog arrives, or a
