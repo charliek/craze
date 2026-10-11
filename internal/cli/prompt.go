@@ -41,6 +41,9 @@ const (
 type promptOpts struct {
 	workspace string
 	model     string
+	effort    string
+	fast      bool
+	noFast    bool
 	agentBin  string
 	provider  string
 	followUps []string
@@ -132,6 +135,7 @@ func newPromptCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&o.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an ACP model id (session/set_model after session/new), or a native model alias")
+	registerStartSettingFlags(cmd, &o.effort, &o.fast, &o.noFast)
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
@@ -151,9 +155,55 @@ func newPromptCmd() *cobra.Command {
 	return cmd
 }
 
+// headlessApproval is the approval policy of a session nobody answers: what
+// Force and the absence of a frontend used to derive, spelled out (plan 021
+// §3.6). Headless craze answers permissions itself under force (the default)
+// and parks them otherwise — for --permission-decision, or for whoever
+// attaches — and it always answers questions with their first option and
+// accepts plans. Saying so explicitly is what separates policy from frontend
+// presence — a headless host that parks asks for a phone to answer is the
+// same code with a different policy. craze prompt's, and an unattended
+// host's (plan 041 §3.2, unattendedPolicy): the one policy, spelled once.
+func headlessApproval(force bool) *agent.ApprovalPolicy {
+	approval := &agent.ApprovalPolicy{
+		Permission: agent.ApprovalAsk,
+		Question:   agent.ApprovalFirstOption,
+		Plan:       agent.ApprovalAccept,
+	}
+	if force {
+		approval.Permission = agent.ApprovalAllow
+	}
+	return approval
+}
+
+// agentOptions is the session this run starts. --effort and --fast/--no-fast
+// are the TUI's start settings (plan 041 §3.5): Start sets them after the model
+// and mode, and with neither flag the options are what they always were.
+func (o *promptOpts) agentOptions(ws string, approval *agent.ApprovalPolicy, prov *agent.Provider) agent.Options {
+	return agent.Options{
+		Workspace:  ws,
+		Force:      o.force,
+		Approval:   approval,
+		Model:      o.model,
+		Effort:     strings.TrimSpace(o.effort),
+		Fast:       fastFlags(o.fast, o.noFast),
+		Mode:       o.mode(),
+		Stderr:     o.stderr,
+		PluginDirs: o.pluginDirs,
+		Provider:   prov,
+		Compat:     compatClaude(o.stderr),
+		// Headless craze has one stream for its own notes, stderr, as it
+		// does for discoverPlugins' (Options.Diag falls back to it).
+		JournalDir: journalDir(o.stderr),
+	}
+}
+
 func (o *promptOpts) run() (retErr error) {
 	if o.ask && o.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
+	}
+	if o.fast && o.noFast {
+		return usagef("craze: --fast and --no-fast are mutually exclusive")
 	}
 	for _, d := range o.decisions {
 		if _, err := decisionKind(d); err != nil {
@@ -196,35 +246,7 @@ func (o *promptOpts) run() (retErr error) {
 	defer stop()
 
 	prov := resolved.Provider
-	// What Force and the absence of a frontend used to derive, spelled out
-	// (plan 021 §3.6): headless craze answers permissions itself when --force
-	// is on and parks them for --permission-decision otherwise, and it always
-	// answers questions with their first option and accepts plans. Saying so
-	// explicitly is what separates policy from frontend presence — a headless
-	// host that parks asks for a phone to answer is the same code with a
-	// different policy.
-	approval := &agent.ApprovalPolicy{
-		Permission: agent.ApprovalAsk,
-		Question:   agent.ApprovalFirstOption,
-		Plan:       agent.ApprovalAccept,
-	}
-	if o.force {
-		approval.Permission = agent.ApprovalAllow
-	}
-	opts := agent.Options{
-		Workspace:  ws,
-		Force:      o.force,
-		Approval:   approval,
-		Model:      o.model,
-		Mode:       o.mode(),
-		Stderr:     o.stderr,
-		PluginDirs: o.pluginDirs,
-		Provider:   &prov,
-		Compat:     compatClaude(o.stderr),
-		// Headless craze has one stream for its own notes, stderr, as it
-		// does for discoverPlugins' (Options.Diag falls back to it).
-		JournalDir: journalDir(o.stderr),
-	}
+	opts := o.agentOptions(ws, headlessApproval(o.force), &prov)
 	// Its one session is its launch's own (plan 032 §3.11, P7): --agent-bin,
 	// else CRAZE_AGENT_BIN — read by the agent's own lookup, as it always
 	// was — else `[agents].<provider>`, else the provider's PATH candidates.

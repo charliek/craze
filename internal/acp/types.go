@@ -661,6 +661,25 @@ type Arrival struct {
 	// directly, or EarlyAnswer.Arrival, where the request is answered already —
 	// and a caller treats nil as "no signal of its own".
 	Call context.Context
+
+	// claim is Claim's: the client's, nil on an Arrival built by hand.
+	claim func() bool
+}
+
+// Claim takes this request's answer for its own handler before the handler
+// has written it (plan 041 X28): from here nothing else — a Cancel's or
+// CancelHeld's cancelled answer, a Close's, the stale-turn reply — answers
+// it, so an agent still waiting on it is waiting on this handler alone, and
+// Call does not end on another's answer. It reports false when something else
+// answered it first — the handler's own reply is lost then anyway, and it
+// decides nothing more. The handler's reply, when it returns its decision, is
+// written as ever. An Arrival with no client behind it (built by hand) has
+// nothing to claim: true.
+func (a Arrival) Claim() bool {
+	if a.claim == nil {
+		return true
+	}
+	return a.claim()
 }
 
 // Ended reports whether a.Call has ended: the request has been answered by

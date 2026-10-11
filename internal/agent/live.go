@@ -129,6 +129,16 @@ type session struct {
 	// prompt's. An interjection sent in that window is exactly what grok
 	// strands.
 	cancelling bool
+	// planHold is a returned plan's session/cancel still to be written for
+	// the turn in flight (returnPlan, plan 041 X28), closed once that write
+	// has returned — written or failed — or the session is done, and never
+	// on a timer; nil when none is owed. The prompt's release waits for it
+	// before it gives the claim back, so the next prompt cannot be claimed,
+	// and cannot reach the wire, ahead of a cancel meant for this turn.
+	// releasing says the release has begun: a returnPlan that finds it set
+	// finds the turn over, and owes no cancel.
+	planHold  chan struct{}
+	releasing bool
 	// foreign mirrors the client's foreign-turn state for Snapshot.
 	foreign      bool
 	interjectSeq int
@@ -1422,7 +1432,21 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// Cancel can outlive the claim waiting on its wire.
 	var done chan struct{}
 	defer func() {
+		// A returned plan's cancel still owed this turn is written before the
+		// claim is given back (planHold): the claim is what the next prompt's
+		// admission meets, so it cannot overtake that cancel onto the wire.
+		// The wait is the write's own, unbounded but for the session's end
+		// (s.done): a writer that stalls the cancel would stall the next
+		// prompt's write behind it anyway, and Close ends both.
 		s.mu.Lock()
+		s.releasing = true
+		hold := s.planHold
+		s.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
+		s.mu.Lock()
+		s.releasing = false
 		wire.publishLocked(wireFailed)
 		if s.wire == wire {
 			s.wire = nil
@@ -2368,15 +2392,21 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 }
 
 // onCreatePlan mirrors onAskQuestion: park under policy ask, accept and report
-// otherwise.
+// under accept — and, under return (plan 041 X28), record the plan as an
+// automatic answer that did not accept, end the turn it belongs to, and answer
+// the request cancelled: the agent is told to stop before it hears that its
+// plan went unaccepted, so it never acts on it.
 func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.PlanDecision {
 	ask := AskRequest{Kind: AskPlan, Body: AskBody{Plan: planBody(req)}}
 	token, live := s.askToken(a)
-	if EffectiveApproval(s.opts).Plan == ApprovalAccept {
+	switch EffectiveApproval(s.opts).Plan {
+	case ApprovalAccept:
 		rec := s.automaticAsk(token, ask, AskAnswer{Accept: true})
 		dec := planDecision(rec)
 		dec.Replied = s.reportedBy(rec.ID)
 		return dec
+	case ApprovalReturn:
+		return s.returnPlan(a, token, live, ask)
 	}
 	if !live {
 		return planDecision(s.staleAsk(ask))
@@ -2385,6 +2415,122 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 	dec := planDecision(rec)
 	dec.Replied = replied
 	return dec
+}
+
+// returnPlanCancelWait bounds how long a returned plan's handler waits for
+// its session/cancel to be written before it gives the request its answer
+// (returnPlan): one notification, unless the agent has stopped reading. It
+// bounds the handler alone, never the turn's hold (planHold), which lasts
+// until the write has returned. A variable only so a test can pass it.
+var returnPlanCancelWait = 5 * time.Second
+
+// returnPlanSeam sees returnPlan reach a stage — "handler", as it starts;
+// "decided", with the plan recorded as returned and the turn's cancel not yet
+// written; "writing", on the write's own goroutine, the cancel about to be
+// written and the handler's bounded wait for it begun — a no-op, and the
+// barrier a test places another cancel, a turn's end, a next prompt or a
+// stalled writer at.
+var returnPlanSeam = func(stage string) {}
+
+// returnPlan is ApprovalReturn's whole answer to a plan request (plan 041 X28):
+// the plan is handed back — recorded as an automatic answer that did not
+// accept — the turn it belongs to is ended (session/cancel), and the request
+// is answered cancelled, so the agent never acts on a plan nobody read. Each
+// step only when it is this handler's to take:
+//
+//   - A request whose turn is over (live false, askToken) is recorded as any
+//     stale request is (staleAsk), and nothing is cancelled.
+//   - The answer is claimed for this handler first (acp.Arrival.Claim). One
+//     that a person's cancel or a close answered already is recorded as such
+//     an answer is when no handler gives it (onEarlyAnswer's cancelled
+//     ending), and nothing is cancelled: a cancel won the race, and the turn
+//     ends as that cancel's.
+//   - Claimed, the turn must still be craze's own turn in flight, not being
+//     released, with no other return's cancel owed (s.mu); and from that same
+//     section a cancel is owed for it (planHold), which the prompt's release
+//     waits for — so the turn's claim, the fence the next prompt's admission
+//     meets, is held until the cancel is on the wire, and the cancel can reach
+//     no other turn. A request from the agent's own turn (no turn of craze's)
+//     has no such fence and is answered cancelled, policy's, with no
+//     session/cancel: the agent hears its plan unaccepted.
+//
+// Only then is the plan recorded as returned — the one record of an automatic
+// answer that did not accept, which a waiter reads as this policy having ended
+// the turn — the plan turn's own asks cancelled (never another turn's), and
+// session/cancel written: before the answer, while the agent still waits on
+// it, the cancel answering no held request (the request's answer is this
+// handler's, as its decision). Nothing waits for the prompt to return, which
+// would wait on the very answer this goroutine has yet to give.
+//
+// The write runs on its own goroutine, and the hold is given back on its
+// account alone: when the write has returned, written or failed, or the
+// session is done (Close fails a write still blocked). A write abandoned on
+// a timer could still land after the next prompt's — Notify reads its
+// context only before the encoder, and the encoder's lock promises no order
+// — so the handler's wait is bounded (returnPlanCancelWait) and the hold is
+// not: a handler that stops waiting answers the request, and the turn's
+// claim stays held until the cancel is on the wire.
+func (s *session) returnPlan(a acp.Arrival, token TurnToken, live bool, ask AskRequest) acp.PlanDecision {
+	returnPlanSeam("handler")
+	cancelled := acp.PlanDecision{Cancelled: true}
+	if !live {
+		s.staleAsk(ask)
+		return cancelled
+	}
+	if !a.Claim() {
+		s.asks.AnsweredEarly(token, ask, AskCancelled, AskByProvider)
+		s.flushAsks()
+		return cancelled
+	}
+	client := s.clientRef()
+	s.mu.Lock()
+	ours := client != nil && a.InTurn && s.inPrompt && !s.releasing && s.planHold == nil && s.turnActiveLocked(a.Turn)
+	var hold chan struct{}
+	if ours {
+		s.cancelling = true
+		hold = make(chan struct{})
+		s.planHold = hold
+	}
+	s.mu.Unlock()
+	switch {
+	case !ours && a.InTurn:
+		s.staleAsk(ask)
+		return cancelled
+	case !ours:
+		s.asks.AnsweredEarly(token, ask, AskCancelled, AskByPolicy)
+		s.flushAsks()
+		return cancelled
+	}
+	rec := s.automaticAsk(token, ask, AskAnswer{Reject: true})
+	s.asks.CancelOwnTurn(token)
+	returnPlanSeam("decided")
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		returnPlanSeam("writing")
+		_ = client.CancelHeld(context.Background(), acp.HeldRequests{})
+	}()
+	go func() {
+		select {
+		case <-written:
+		case <-s.done:
+		}
+		s.mu.Lock()
+		if s.planHold == hold {
+			s.planHold = nil
+		}
+		s.mu.Unlock()
+		close(hold)
+	}()
+	wait := time.NewTimer(returnPlanCancelWait)
+	defer wait.Stop()
+	select {
+	case <-written:
+	case <-wait.C:
+	case <-s.done:
+	}
+	cancelled.Replied = s.reportedBy(rec.ID)
+	return cancelled
 }
 
 // onEarlyAnswer is ACP reporting a blocking request it answered before any

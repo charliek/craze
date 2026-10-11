@@ -291,7 +291,7 @@ func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg 
 		filter = cfg.Provider.Name()
 	}
 	if f.resume {
-		rows, err := (&sessions.Store{KnownProvider: knownProvider}).Recent(cwd, filter, resumeRowLimit)
+		rows, err := (&sessions.Store{KnownProvider: knownProvider}).Picker(cwd, filter, resumeRowLimit)
 		if err != nil {
 			return exitf(1, "%s: %v", noSessionMsg(cwd, filter), err)
 		}

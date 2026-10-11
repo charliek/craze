@@ -220,7 +220,7 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 			return cfg, err
 		}
 		if !ok {
-			return cfg, usagef("%s", noSessionMsg(cwd, ""))
+			return cfg, usagef("%s", noContinueMsg(index, cwd, ""))
 		}
 		p, err := agent.ProviderByName(row.Provider)
 		if err != nil {
@@ -236,7 +236,7 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 		// belongs to the session built from it (session control SD-22).
 		cfg.CrazeSessionID = row.CrazeID
 	case o.resume:
-		rows, err := index.Recent(cwd, "", resumeRowLimit)
+		rows, err := index.Picker(cwd, "", resumeRowLimit)
 		if err != nil {
 			return cfg, err
 		}

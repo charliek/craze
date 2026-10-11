@@ -505,6 +505,53 @@ func TestARewriteRefreshesTheRegistryIdentity(t *testing.T) {
 	}
 }
 
+// TestTheRegistryEntrysPIDStartRoundTrips (plan 041 C6 r3): the start a host
+// records of its own pid, given at Bind, is written as pidStart, kept by
+// every rewrite whatever the rewrite does to it, and listed by Hosts; an
+// older reader decodes the same file as before, ignoring it (an unknown
+// member is ignored by encoding/json, as for requestId); and a host given
+// none writes none (TestTheRegistryEntrysRequestMembersRoundTrip's plain
+// host: the 11 older members only).
+func TestTheRegistryEntrysPIDStartRoundTrips(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	h, err := Bind(env, NewHostID(), Entry{Workspace: "/w", Provider: "fake", PIDStart: 4242})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.Update(func(e *Entry) { e.Ready, e.PIDStart = true, 7 }); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hostsDir(env), h.ID()+".json")
+	got := readEntryFile(t, path)
+	if got.PIDStart != 4242 || !got.Ready {
+		t.Fatalf("the rewritten entry is %+v; want pidStart kept and the rewrite applied", got)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["pidStart"] != float64(4242) {
+		t.Fatalf("the entry file holds %v; want pidStart", m)
+	}
+	var old entryV1
+	if err := json.Unmarshal(b, &old); err != nil {
+		t.Fatalf("an older reader cannot decode the entry: %v", err)
+	}
+	if old.PID != got.PID || old.Workspace != "/w" || !old.Ready {
+		t.Fatalf("an older reader decoded %+v", old)
+	}
+	listed, err := Hosts(env)
+	if err != nil || len(listed) != 1 || listed[0].PIDStart != 4242 {
+		t.Fatalf("Hosts = %+v, %v; want the entry with its pid's start", listed, err)
+	}
+}
+
 func TestUpdateKeepsBindsMembers(t *testing.T) {
 	t.Parallel()
 	h := bind(t, testEnv(t))

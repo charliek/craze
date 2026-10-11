@@ -123,7 +123,7 @@ func childCommand(t *Transcript, ev agent.Event) {
 // never display content.
 func foldUser(m *Model, ev agent.Event) {
 	if ev.Interjection {
-		_, text := agent.SplitShellContext(ev.Text)
+		text, _ := InterjectionRow(ev)
 		m.Main.addInterjection(text, m.stamp(ev.At))
 		return
 	}
@@ -131,6 +131,22 @@ func foldUser(m *Model, ev agent.Event) {
 		_, text := agent.SplitShellContext(ev.Text)
 		m.Main.addUser(text, m.stamp(ev.At))
 	}
+}
+
+// InterjectionRow is the main session's user row an interjection draws (ev
+// an EventUser with Interjection set; anything else draws none here): its
+// text with the shell context in front of it gone — wire content, never
+// display content — and whether it draws a row at all. An empty one draws
+// none (addInterjection), and so ends no assistant run either: foldUser
+// draws by it, and a client that splits a turn's last assistant message
+// where the transcript splits its entries (plan 041's result accumulator)
+// reads the same rule.
+func InterjectionRow(ev agent.Event) (string, bool) {
+	if ev.Type != agent.EventUser || !ev.Interjection {
+		return "", false
+	}
+	_, text := agent.SplitShellContext(ev.Text)
+	return text, text != ""
 }
 
 // childUser is a child's user event, which streams (today's rule): a prompt

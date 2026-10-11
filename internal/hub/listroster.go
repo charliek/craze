@@ -934,11 +934,12 @@ func complete(r *roster.Row, e rundir.Entry, ok bool) {
 }
 
 // snapshot is the Snapshot of now: the running rows, each with its index
-// title, and the saved half. The list's roster is one run (Snapshot.Run).
+// title (and sub-agent mark), and the saved half. The list's roster is one run (Snapshot.Run).
 func (l *listRows) snapshot() roster.Snapshot {
 	run := l.running()
 	for i := range run {
 		run[i].IndexTitle = l.saved.Title(run[i].Host.CrazeSessionID)
+		run[i].IndexSubAgent = l.saved.SubAgent(run[i].Host.CrazeSessionID)
 	}
 	return roster.Snapshot{Running: run, Saved: l.saved.Rows(), RegistryErr: l.regErr, IndexErr: l.saved.Err(), Run: 1}
 }

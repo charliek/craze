@@ -31,10 +31,14 @@ var ErrNoProcess = errors.New("rundir: no such process")
 // Start is its start time as the kernel keeps it — on Linux in clock ticks
 // since boot (/proc/<pid>/stat field 22), on macOS in microseconds since the
 // epoch (kinfo_proc's p_starttime) — meaningful only compared with another
-// read on the same machine and boot; PPID is its parent's pid.
+// read on the same machine and boot; PPID is its parent's pid. Zombie says
+// the process has exited and waits only for its parent to reap it (plan 041
+// C6 r1, 3): Linux's state Z — or X, its reaper at work — macOS's SZOMB. Its
+// pid is still taken, and its start time still its own.
 type ProcIdentity struct {
-	Start uint64
-	PPID  int
+	Start  uint64
+	PPID   int
+	Zombie bool
 }
 
 // ProcessIdentity is pid's identity, read from the kernel: ErrNoProcess when
@@ -54,9 +58,10 @@ func ProcessIdentity(pid int) (ProcIdentity, error) {
 // parseProcStat is the identity a Linux /proc/<pid>/stat line names. The
 // command, field 2, is in parentheses and may hold anything — spaces and
 // parentheses included — so it ends at the line's last ")"; the fields after
-// it are 3 (the state) on, so the parent's pid, field 4, is the second of
-// them and the start time, field 22, the twentieth. It lives here, not in the
-// Linux file, so every platform's tests check it.
+// it are 3 (the state) on, so the state is the first of them — one letter, Z
+// or X a zombie — the parent's pid, field 4, the second and the start time,
+// field 22, the twentieth. It lives here, not in the Linux file, so every
+// platform's tests check it.
 func parseProcStat(line string) (ProcIdentity, error) {
 	i := strings.LastIndexByte(line, ')')
 	if i < 0 {
@@ -66,6 +71,9 @@ func parseProcStat(line string) (ProcIdentity, error) {
 	if len(f) < 20 {
 		return ProcIdentity{}, fmt.Errorf("/proc stat: %d fields after the command, want 20 or more", len(f))
 	}
+	if len(f[0]) != 1 {
+		return ProcIdentity{}, fmt.Errorf("/proc stat: the state %q is not one letter", f[0])
+	}
 	ppid, err := strconv.Atoi(f[1])
 	if err != nil {
 		return ProcIdentity{}, fmt.Errorf("/proc stat: the parent: %w", err)
@@ -74,7 +82,7 @@ func parseProcStat(line string) (ProcIdentity, error) {
 	if err != nil {
 		return ProcIdentity{}, fmt.Errorf("/proc stat: the start time: %w", err)
 	}
-	return ProcIdentity{Start: start, PPID: ppid}, nil
+	return ProcIdentity{Start: start, PPID: ppid, Zombie: f[0] == "Z" || f[0] == "X"}, nil
 }
 
 // bootSessionScope is a start time's scope on macOS, read through sysctl

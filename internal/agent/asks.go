@@ -272,6 +272,17 @@ const (
 	ApprovalFirstOption Approval = "first_option"
 	// ApprovalAccept accepts a plan. Plans only.
 	ApprovalAccept Approval = "accept"
+	// ApprovalReturn returns a plan to whoever started the turn and ends the
+	// turn there, accepting nothing (plan 041 X28): the request is answered
+	// cancelled and the turn the plan belongs to is cancelled (session/cancel),
+	// so the agent can never act on a plan nobody read. The plan itself is
+	// recorded as an automatic answer that did not accept — the one way such
+	// a record is ever written, which is how a waiter tells a returned plan's
+	// cancelled ending from a person's cancel. An unattended host's policy on
+	// an ACP provider (craze new --wait --plan); an ACP session's alone:
+	// native's own plan acceptance already ends its turn in plan mode, and
+	// treats any value but accept as ask. Plans only.
+	ApprovalReturn Approval = "return"
 )
 
 // ApprovalPolicy is what the session does with each kind of ask, independently
@@ -706,6 +717,22 @@ func (r *AskRegistry) CancelTurn(token TurnToken) {
 	defer r.mu.Unlock()
 	r.markLocked(token, true)
 	r.resolveAllLocked(func(*askEntry) bool { return true }, AskCancelled, AskByCancel)
+}
+
+// CancelOwnTurn is CancelTurn for one turn alone (plan 041 X28): the turn's
+// token is marked cancelled, so a request that races in for it is refused,
+// and the asks opened against it — and no other turn's, nor the no-turn
+// token's — are answered cancelled. A returned plan's (agent.ApprovalReturn),
+// whose cancel is that turn's and nobody else's. Nothing for the no-turn or a
+// foreign token.
+func (r *AskRegistry) CancelOwnTurn(token TurnToken) {
+	if token.NoTurn() || r.foreign(token) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.markLocked(token, true)
+	r.resolveAllLocked(func(e *askEntry) bool { return e.rec.Token == token }, AskCancelled, AskByCancel)
 }
 
 // EndTurn ends every ask opened against token, and nothing else: an ask on the

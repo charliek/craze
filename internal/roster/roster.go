@@ -96,6 +96,10 @@ type Row struct {
 	// the host's craze id — "" when there is none: what a row shows before
 	// its host has answered.
 	IndexTitle string
+	// IndexSubAgent is whether the newest index row with the host's craze id
+	// is marked as a sub-agent's session (plan 041 §3.3): false when it is
+	// not, and when there is no row yet.
+	IndexSubAgent bool
 
 	// Raw is the host's last sessions.list row as the JSON value it sent,
 	// compacted — every member kept, those this build does not know
@@ -962,7 +966,7 @@ func (p *poller) snapshot() Snapshot {
 		if h.gone {
 			continue
 		}
-		row := Row{Host: HostOf(h.entry), Status: h.status, Version: h.version, IndexTitle: p.saved.titles[h.entry.CrazeSessionID],
+		row := Row{Host: HostOf(h.entry), Status: h.status, Version: h.version, IndexTitle: p.saved.titles[h.entry.CrazeSessionID], IndexSubAgent: p.saved.subAgents[h.entry.CrazeSessionID],
 			Raw: h.raw, ReadAt: h.readAt,
 			Polled: p.run != 0 && h.doneRun == p.run || h.failures > 0 && now.Before(h.next)}
 		if h.session != nil {

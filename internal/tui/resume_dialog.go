@@ -97,7 +97,7 @@ func (m Model) resumeRowText(row sessions.Row, inner int) string {
 		title = row.SessionID
 	}
 	budget := inner - lipgloss.Width(dialogNoMark) - lipgloss.Width(tail)
-	return clampWidth(title, max(budget, 0)) + tail
+	return titleWithTag(title, budget, isSubAgent(row)) + tail
 }
 
 // resumeClaimMsg is Config.ClaimSession's answer for the row the picker chose
@@ -364,7 +364,8 @@ func (m Model) resumeDialogBody(inner, budget int) []string {
 	top, shown, footer := m.resumeDialogPlanAt(inner, budget)
 	rows := []string{m.dialogTitle(resumeDialogTitle, inner)}
 	for i := top; i < top+shown; i++ {
-		rows = append(rows, m.dialogRow(m.resumeRowText(m.resume[i], inner), "", i == m.resumeCursor, true, inner))
+		// A sub-agent row is drawn dim, tagged after its title (plan 041 §3.3).
+		rows = append(rows, m.dialogRowDim(m.resumeRowText(m.resume[i], inner), "", i == m.resumeCursor, true, isSubAgent(m.resume[i]), inner))
 	}
 	for _, line := range m.resumeErrLines(inner)[:m.resumeErrRows(inner, budget)] {
 		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(line, inner)))

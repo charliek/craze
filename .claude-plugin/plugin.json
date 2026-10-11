@@ -1,0 +1,13 @@
+{
+  "name": "craze",
+  "version": "0.1.0",
+  "description": "Sub-agents for Claude Code that run on other models through craze: delegate a task to a native, Grok or Cursor session and get its result back.",
+  "author": {
+    "name": "Charlie Knudsen",
+    "url": "https://github.com/charliek"
+  },
+  "homepage": "https://github.com/charliek/craze",
+  "repository": "https://github.com/charliek/craze",
+  "license": "MIT",
+  "keywords": ["craze", "sub-agents", "delegation", "acp", "grok", "cursor"]
+}

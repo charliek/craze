@@ -56,10 +56,16 @@ The maintainer runs step 1; everything else is automated.
 `scripts/release/update-version.sh` bumps:
 
 - `internal/version/version.go` — the `var Version = "X.Y.Z"` line. This
-  is the only source-tree version manifest craze has; the Go binary has
+  is the only Go version literal; the Go binary has
   no other literal version string, and the built binary's `--version`
   output always comes from an ldflag override (`make build` → `dev`,
   GoReleaser → the tag) rather than from this default.
+- `.claude-plugin/plugin.json` — the top-level `"version"` of the inline
+  Claude Code plugin (`agents/`, `skills/`), set with `jq` and read back.
+  `internal/plugin`'s test fails when it differs from `version.go`, and
+  `release.yml`'s `version-check` compares it with the tag too. The plugin
+  states the minimum craze version it needs (0.2.0) in its agents, its skill
+  and the README; raise it there when a plugin change needs a newer craze.
 
 NOT bumped:
 

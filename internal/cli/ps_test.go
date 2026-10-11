@@ -222,7 +222,14 @@ func TestPsNothingRunning(t *testing.T) {
 // its model among them, when rowFacts; it is closed when the test ends.
 func psHost(t *testing.T, env rundir.Env, hostID, sessionID, workspace string, rowFacts bool) {
 	t.Helper()
-	h, err := fakehost.New(fakehost.Options{HostID: hostID, CrazeSessionID: sessionID, Workspace: workspace, RowFacts: rowFacts})
+	serveFakeHost(t, env, fakehost.Options{HostID: hostID, CrazeSessionID: sessionID, Workspace: workspace, RowFacts: rowFacts})
+}
+
+// serveFakeHost serves an in-process fake host made with o, listed in env's
+// registry; it is closed when the test ends.
+func serveFakeHost(t *testing.T, env rundir.Env, o fakehost.Options) *fakehost.Host {
+	t.Helper()
+	h, err := fakehost.New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +249,7 @@ func psHost(t *testing.T, env rundir.Env, hostID, sessionID, workspace string, r
 			_ = reg.Close()
 		})
 	})
+	return h
 }
 
 // psTwo is two fake hosts in env, their workspaces under HOME, and the rows

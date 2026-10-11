@@ -112,6 +112,16 @@ type serveFlags struct {
 	// host (plan 035 P3), named by the macOS login-session hint
 	// (loginSessionHint); 0 for any other host.
 	hubPID int
+	// unattended is --unattended (hidden): a host nobody attends, spawned by
+	// craze new --wait or craze send (plan 041 §3.2, P2) — craze prompt's
+	// approval policy and no background work (unattendedPolicy), and its
+	// start settings on the session's index row (unattendedRecord).
+	unattended bool
+	// outliveSpawner is --outlive-spawner (hidden): a host craze send spawned
+	// to reload a session (plan 041 C3 review r2, 1), which serves on when its
+	// spawner went before taking its ready line (announce) — by then another
+	// sender may have found it in the registry and prompted it.
+	outliveSpawner bool
 	// ready is the spawner's ready pipe (CRAZE_READY_FD, ready.go), taken
 	// before anything else runs; nil for a host run by hand. Not a flag.
 	ready *readyPipe
@@ -169,6 +179,11 @@ var serveAgentGroup = func(pgid int, err error) {}
 // false in production.
 var serveAnnouncing = func(*readyPipe) bool { return false }
 
+// serveAnnounced is told how the ready line's write went (announce): nil
+// once it went out whole. A seam for the test of a spawner that gives up
+// after the line went out (plan 041 C6 r1, 1); a no-op in production.
+var serveAnnounced = func(error) {}
+
 func newServeCmd() *cobra.Command {
 	f := &serveFlags{tuiFlags: tuiFlags{force: true}}
 	cmd := &cobra.Command{
@@ -221,11 +236,20 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	// The hub's too (plan 035 P3): its own pid, for a start failure that
 	// tells the user which hub to stop.
 	cmd.Flags().IntVar(&f.hubPID, "hub-pid", 0, "the pid of the hub that created this host (set by the hub)")
+	// craze new --wait's and craze send's (plan 041 §3.2): a host nobody
+	// attends answers its own questions and plans, and runs no background
+	// work, so each turn is whole when it ends.
+	cmd.Flags().BoolVar(&f.unattended, "unattended", false,
+		"host a session nobody attends: questions answered with their first option, a plan returned and its turn ended, no background work (set by the spawner)")
 	_ = cmd.Flags().MarkHidden("host-id")
 	_ = cmd.Flags().MarkHidden("no-host-status")
 	_ = cmd.Flags().MarkHidden("request-id")
 	_ = cmd.Flags().MarkHidden("request-hash")
 	_ = cmd.Flags().MarkHidden("hub-pid")
+	cmd.Flags().BoolVar(&f.outliveSpawner, "outlive-spawner", false,
+		"serve on when the spawner goes before taking the ready line (set by the spawner)")
+	_ = cmd.Flags().MarkHidden("unattended")
+	_ = cmd.Flags().MarkHidden("outlive-spawner")
 }
 
 // serveSignals is craze serve's signal set, registered for the command's
@@ -476,6 +500,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, p, row)
 	opts.JournalDir = journalAt
 	opts.NoPrimary = true
+	if f.unattended {
+		unattendedPolicy(&opts)
+	}
 	// A start that fails leaves the session listable and attachable until
 	// the host stops (plan 030 C5): its log stays open, so a client attached
 	// while it started is sent the failure (the ready notification's failed
@@ -505,6 +532,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	sess := agent.New(opts)
 	engOpts := engine.HostOptions(row.CrazeID, &sessions.Store{KnownProvider: knownProvider}, indexCWD, p.Name())
 	engOpts.MintedCrazeSessionID = minted
+	if f.unattended {
+		engOpts.Index.Unattended = f.unattendedRecord()
+	}
 	// The model catalog cache (plan 030 §3.14): each catalog the agent
 	// installs is recorded for the session list's /model, off the engine's
 	// locks (catalogRecorder). Closed when this returns, after the stop
@@ -529,10 +559,12 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		hostID, eng.State().CrazeSessionID, p.Name(), indexCWD)
 	serveServing()
 
-	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out, ready: f.ready, groups: groups, started: make(chan struct{})}
+	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out, ready: f.ready, groups: groups, started: make(chan struct{}), outliveSpawner: f.outliveSpawner}
 	go func() {
 		defer close(h.started)
-		h.start(persistsProvider(cmd, &f.tuiFlags, loading), resolvedProvider{Provider: p, Fallback: resolved.Fallback})
+		// An unattended host never does (plan 041 X17): a delegation is not a
+		// decision about the next plain craze's provider.
+		h.start(persistsProvider(cmd, &f.tuiFlags, loading) && !f.unattended, resolvedProvider{Provider: p, Fallback: resolved.Fallback})
 	}()
 	go idle.run(ticks, lc.stopping, lc.request)
 	if f.ready == nil {
@@ -695,6 +727,9 @@ type serveHost struct {
 	ready   *readyPipe
 	groups  *agentGroups
 	started chan struct{}
+	// outliveSpawner is --outlive-spawner: a ready line its spawner did not
+	// take is said on the log, and the host serves on (announce).
+	outliveSpawner bool
 }
 
 // start starts the session, on a goroutine of its own. A failure is said once
@@ -791,8 +826,16 @@ func (h *serveHost) announce() {
 		CrazeSessionID: h.eng.State().CrazeSessionID,
 		CrazeVersion:   version.Version,
 	})
+	serveAnnounced(err)
 	if err != nil {
 		fmt.Fprintf(h.log, "craze serve: the launcher did not take the ready line: %v\n", err)
+		if h.outliveSpawner {
+			// A reload's host (craze send): registered and serving, maybe
+			// prompted by another sender already — it serves on, and idles
+			// out as any host does.
+			fmt.Fprintln(h.log, "craze serve: serving on: this host outlives its spawner")
+			return
+		}
 		h.lc.request("its launcher went before it was ready")
 	}
 }

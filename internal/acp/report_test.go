@@ -165,10 +165,10 @@ func TestArrivalRecordsTurnMembershipNotJustTheCounter(t *testing.T) {
 	if !p.client.TurnLive(during.turn) || !p.client.TurnLive(after.turn) {
 		t.Fatal("both are still the client's turn; the counter cannot separate them")
 	}
-	if !during.arrival().InTurn {
+	if !p.client.arrival(during).InTurn {
 		t.Fatal("a request registered inside the prompt belongs to that turn")
 	}
-	if after.arrival().InTurn {
+	if p.client.arrival(after).InTurn {
 		t.Fatal("a request registered after the prompt returned belongs to no turn")
 	}
 }

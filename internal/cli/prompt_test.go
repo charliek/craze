@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -343,5 +349,124 @@ func TestPickPermissionKeepsUnusedDecisions(t *testing.T) {
 	}
 	if len(rest) != 1 || rest[0] != "allow-once" {
 		t.Fatalf("queue should keep unused allow-once, got %v", rest)
+	}
+}
+
+// promptOptionsFor parses a craze prompt command line and answers the
+// agent.Options its run builds (plan 041 §3.5): the flags as the command
+// registers them, the options as run hands them to agent.New.
+func promptOptionsFor(t *testing.T, argv ...string) agent.Options {
+	t.Helper()
+	// agentOptions reads the config and journal settings: the case's own,
+	// never a developer's.
+	isolateRunEnv(t)
+	cmd := newPromptCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.RunE = func(*cobra.Command, []string) error { return nil }
+	cmd.SetArgs(argv)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("parse %v: %v", argv, err)
+	}
+	effort, _ := cmd.Flags().GetString("effort")
+	fast, _ := cmd.Flags().GetBool("fast")
+	noFast, _ := cmd.Flags().GetBool("no-fast")
+	po := &promptOpts{effort: effort, fast: fast, noFast: noFast, force: true, stderr: io.Discard}
+	return po.agentOptions(t.TempDir(), nil, nil)
+}
+
+// TestPromptStartSettingsBuildTheOptions is plan 041 §3.5 (criterion 19) on
+// the built options: --effort trimmed, --fast and --no-fast as true and false,
+// and neither as the empty effort and a nil Fast — the options of a run that
+// never heard of the flags.
+func TestPromptStartSettingsBuildTheOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		argv   []string
+		effort string
+		fast   *bool
+	}{
+		{"neither", nil, "", nil},
+		{"effort", []string{"--effort", " high "}, "high", nil},
+		{"fast", []string{"--fast"}, "", boolPtr(true)},
+		{"no-fast", []string{"--no-fast"}, "", boolPtr(false)},
+		{"all", []string{"--effort", "low", "--no-fast"}, "low", boolPtr(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := promptOptionsFor(t, tc.argv...)
+			if got.Effort != tc.effort {
+				t.Fatalf("Effort %q, want %q", got.Effort, tc.effort)
+			}
+			if (got.Fast == nil) != (tc.fast == nil) || (got.Fast != nil && *got.Fast != *tc.fast) {
+				t.Fatalf("Fast %v, want %v", got.Fast, tc.fast)
+			}
+		})
+	}
+}
+
+// TestPromptFastAndNoFastAreAUsageError: the session flags' wording and exit
+// code (2), refused before anything is resolved or started.
+func TestPromptFastAndNoFastAreAUsageError(t *testing.T) {
+	isolateRunEnv(t)
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"prompt", "--fast", "--no-fast", "hi"})
+	err := cmd.Execute()
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.code != 2 {
+		t.Fatalf("got %v", err)
+	}
+	if ee.msg != "craze: --fast and --no-fast are mutually exclusive" {
+		t.Fatalf("msg %q", ee.msg)
+	}
+}
+
+// TestPromptStartSettingsReachTheAgent is criterion 19's wire half: against
+// the fake agent's per-model catalog (grok-4.6 offers effort and fast), the
+// flags arrive as session/set_config_option calls, after the model and ahead
+// of the first prompt.
+func TestPromptStartSettingsReachTheAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{"effort", []string{"--effort", "low"}, []string{"model=grok-4.6", "effort=low"}},
+		{"fast", []string{"--no-fast"}, []string{"model=grok-4.6", "fast=false"}},
+		{"neither", nil, []string{"model=grok-4.6"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("CRAZE_FAKE_DUMP_CALLS", path)
+			runPromptStdout(t, "permodel", append([]string{"--json", "--model", "grok-4.6"}, tc.argv...), "go")
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+			var sets []string
+			prompts := 0
+			for i, c := range calls {
+				if v, ok := strings.CutPrefix(c, "session/set_config_option "); ok {
+					sets = append(sets, v)
+				}
+				if c == "session/prompt" {
+					prompts++
+					if len(sets) != len(tc.want) {
+						t.Fatalf("a prompt at call %d, ahead of the start settings %v: %q", i, tc.want, calls)
+					}
+				}
+			}
+			// The run's one prompt, after every start setting: a run that
+			// never prompted would satisfy the ordering vacuously.
+			if prompts != 1 {
+				t.Fatalf("%d session/prompt calls, want 1: %q", prompts, calls)
+			}
+			if !slices.Equal(sets, tc.want) {
+				t.Fatalf("sets %q, want %q (calls %q)", sets, tc.want, calls)
+			}
+		})
 	}
 }

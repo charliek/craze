@@ -10,11 +10,11 @@ import (
 )
 
 // processIdentity reads the kernel's kinfo_proc for pid (sysctl
-// kern.proc.pid.<pid>): p_starttime, in microseconds since the epoch, and the
-// parent's pid. The sysctl answers a pid no process has with no bytes, which
-// x/sys reports as EIO; a read that fails while kill(pid, 0) finds nobody is
-// ErrNoProcess. A struct naming another pid than the one asked for is not
-// trusted to name this one.
+// kern.proc.pid.<pid>): p_starttime, in microseconds since the epoch, the
+// parent's pid, and p_stat, SZOMB for a zombie. The sysctl answers a pid no
+// process has with no bytes, which x/sys reports as EIO; a read that fails
+// while kill(pid, 0) finds nobody is ErrNoProcess. A struct naming another
+// pid than the one asked for is not trusted to name this one.
 func processIdentity(pid int) (ProcIdentity, error) {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
@@ -30,8 +30,12 @@ func processIdentity(pid int) (ProcIdentity, error) {
 	if tv.Sec <= 0 || tv.Usec < 0 {
 		return ProcIdentity{}, fmt.Errorf("sysctl kern.proc.pid: start time %d.%06d", tv.Sec, tv.Usec)
 	}
-	return ProcIdentity{Start: uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), PPID: int(kp.Eproc.Ppid)}, nil
+	return ProcIdentity{Start: uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), PPID: int(kp.Eproc.Ppid), Zombie: kp.Proc.P_stat == sZomb}, nil
 }
+
+// sZomb is <sys/proc.h>'s SZOMB, kinfo_proc's p_stat for a process that has
+// exited and waits for its parent to reap it.
+const sZomb = 5
 
 // processTokenScope is a start time's scope on macOS: the kernel's boot
 // session UUID, and no PID namespace (bootSessionScope).

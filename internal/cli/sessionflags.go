@@ -39,9 +39,7 @@ func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an ACP model id, or a model alias")
 	// --effort and --fast/--no-fast (plan 032 §3.11, P6): the session's own
 	// settings, set by its Start after --model and before any prompt.
-	cmd.Flags().StringVar(&f.effort, "effort", "", "effort to start at, where the model offers one: a level's id or name (default: the model's own)")
-	cmd.Flags().BoolVar(&f.fast, "fast", false, "start with the fast setting on, where the model offers one")
-	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
+	registerStartSettingFlags(cmd, &f.effort, &f.fast, &f.noFast)
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	registerPluginDirFlag(cmd, &f.pluginDirs)
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
@@ -50,6 +48,30 @@ func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
 	registerProviderFlag(cmd, &f.provider)
+}
+
+// registerStartSettingFlags declares --effort and --fast/--no-fast on cmd
+// (plan 032 §3.11, P6): the session's own settings, set by its Start after
+// --model and before any prompt. craze prompt takes them too (plan 041 §3.5),
+// so their wording is spelled here once.
+func registerStartSettingFlags(cmd *cobra.Command, effort *string, fast, noFast *bool) {
+	cmd.Flags().StringVar(effort, "effort", "", "effort to start at, where the model offers one: a level's id or name (default: the model's own)")
+	cmd.Flags().BoolVar(fast, "fast", false, "start with the fast setting on, where the model offers one")
+	cmd.Flags().BoolVar(noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
+}
+
+// fastFlags is --fast/--no-fast as the session takes them: true, false, or
+// nil for neither. The caller has refused both.
+func fastFlags(fast, noFast bool) *bool {
+	switch {
+	case fast:
+		on := true
+		return &on
+	case noFast:
+		off := false
+		return &off
+	}
+	return nil
 }
 
 // settle is the session flags' own rules, before anything reads them: --ask
@@ -73,15 +95,7 @@ func (f *tuiFlags) settle() error {
 // hostspawn.Spec.Fast): true, false, or nil for neither — the provider's own
 // default. settle has refused both.
 func (f *tuiFlags) fastSetting() *bool {
-	switch {
-	case f.fast:
-		on := true
-		return &on
-	case f.noFast:
-		off := false
-		return &off
-	}
-	return nil
+	return fastFlags(f.fast, f.noFast)
 }
 
 // setFast is fastSetting's inverse: the command line that asks for v.
@@ -125,7 +139,7 @@ func continueRow(cwd, filter string) (sessions.Row, error) {
 		return sessions.Row{}, exitf(1, "%s: %v", noSessionMsg(cwd, filter), err)
 	}
 	if !ok {
-		return sessions.Row{}, exitf(1, "%s", noSessionMsg(cwd, filter))
+		return sessions.Row{}, exitf(1, "%s", noContinueMsg(index, cwd, filter))
 	}
 	return row, nil
 }

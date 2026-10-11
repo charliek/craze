@@ -281,8 +281,15 @@ type hostRequest struct {
 // (control.Options.Presence, plan 032 §3.14).
 func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostRequest, stop control.StopFunc, local bool, diag io.Writer) (*controlHost, error) {
 	started := time.Now().UTC()
+	// This process's own start as its kernel keeps it (rundir.Entry.PIDStart,
+	// plan 041 C6 r3): what tells it from a later process given its pid, for
+	// a spawner that never heard from it. Left out when it cannot be read.
+	var pidStart uint64
+	if id, err := rundir.ProcessIdentity(os.Getpid()); err == nil {
+		pidStart = id.Start
+	}
 	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace,
-		RequestID: req.id, RequestHash: req.hash})
+		RequestID: req.id, RequestHash: req.hash, PIDStart: pidStart})
 	if err != nil {
 		return nil, err
 	}

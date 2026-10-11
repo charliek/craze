@@ -54,6 +54,14 @@ type Entry struct {
 	// RequestHash is that create's hash of its normalized params, which a
 	// retry with the same RequestID must match; "" and absent like RequestID.
 	RequestHash string `json:"requestHash,omitempty"`
+	// PIDStart is the host process's start as its kernel keeps it — PID's
+	// ProcIdentity.Start, which the host reads of itself as it binds (plan
+	// 041 C6 r3) — fixed for the host's life: with PID, what tells the host
+	// from a later process given its pid, so a spawner that never heard
+	// from its host signals that host and nobody else. 0 — and absent from
+	// the file — when the host could not read it, or wrote none (an older
+	// craze). Added after the original members, like RequestID.
+	PIDStart uint64 `json:"pidStart,omitempty"`
 }
 
 // ErrClosed is Update on a closed Host.
@@ -299,8 +307,8 @@ func (h *Host) Entry() Entry {
 // Update rewrites the registry entry with fn's changes — when the engine
 // becomes ready, and when it changes — and records the new file's identity.
 // Protocol, HostID, PID and Socket are kept as Bind wrote them, as are
-// RequestID and RequestHash: the request that made a host is fixed for its
-// life. After Close it returns ErrClosed and writes nothing. The new file's
+// RequestID and RequestHash — the request that made a host is fixed for its
+// life — and PIDStart, its pid's start. After Close it returns ErrClosed and writes nothing. The new file's
 // identity is taken from the descriptor it was written through, before the
 // rename, so a rename that succeeds always records the file it installed.
 func (h *Host) Update(fn func(*Entry)) error {
@@ -312,7 +320,7 @@ func (h *Host) Update(fn func(*Entry)) error {
 	e := h.entry
 	fn(&e)
 	e.Protocol, e.HostID, e.PID, e.Socket = h.entry.Protocol, h.entry.HostID, h.entry.PID, h.entry.Socket
-	e.RequestID, e.RequestHash = h.entry.RequestID, h.entry.RequestHash
+	e.RequestID, e.RequestHash, e.PIDStart = h.entry.RequestID, h.entry.RequestHash, h.entry.PIDStart
 	return h.writeEntry(e)
 }
 
