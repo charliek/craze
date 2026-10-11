@@ -225,10 +225,15 @@ func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log str
 			if !c.Exited() {
 				c.terminate()
 			}
+			// The grace is read here, not on the goroutine: a hurried
+			// abandon leaves that goroutine running past this call, and
+			// it must not read the package's tunables after (a test
+			// restoring them raced it).
+			grace := TermGrace
 			ended := make(chan struct{})
 			go func() {
 				defer close(ended)
-				c.escalate(TermGrace)
+				c.escalate(grace)
 				c.KillAgents()
 			}()
 			select {
