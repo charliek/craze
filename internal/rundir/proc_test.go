@@ -9,9 +9,10 @@ import (
 )
 
 // TestParseProcStat is a Linux stat line read (parseProcStat): the command
-// ends at the last ")" whatever it holds, the parent is field 4 and the start
-// time field 22; a line with too few fields, no command or a field that is
-// not a number is an error, never a zero identity.
+// ends at the last ")" whatever it holds, the state is field 3 — Z or X a
+// zombie (plan 041 C6 r1, 3) — the parent field 4 and the start time field
+// 22; a line with too few fields, no command, a state that is not one letter
+// or a field that is not a number is an error, never a zero identity.
 func TestParseProcStat(t *testing.T) {
 	// Fields 3..22, the state first: the parent 4242, the start time 987654.
 	tail := " S 4242 77 77 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1234 56"
@@ -24,6 +25,9 @@ func TestParseProcStat(t *testing.T) {
 		{name: "plain", line: "77 (craze-fake-agen)" + tail, want: ProcIdentity{Start: 987654, PPID: 4242}},
 		{name: "a command with spaces and parentheses", line: "77 (a) b (c) 1 2)" + tail, want: ProcIdentity{Start: 987654, PPID: 4242}},
 		{name: "exactly twenty fields", line: "77 (x)" + strings.Join(strings.Fields(tail)[:20], " ") + "\n", want: ProcIdentity{Start: 987654, PPID: 4242}},
+		{name: "a zombie", line: "77 (x) Z" + tail[2:], want: ProcIdentity{Start: 987654, PPID: 4242, Zombie: true}},
+		{name: "a zombie its reaper is taking", line: "77 (x) X" + tail[2:], want: ProcIdentity{Start: 987654, PPID: 4242, Zombie: true}},
+		{name: "a state that is not one letter", line: "77 (x) SS" + tail[2:], err: true},
 		{name: "too few fields", line: "77 (x) S 4242 77", err: true},
 		{name: "no command", line: "77 x S 4242", err: true},
 		{name: "a parent that is not a number", line: "77 (x) S p 77 77 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654", err: true},

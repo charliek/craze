@@ -179,6 +179,11 @@ var serveAgentGroup = func(pgid int, err error) {}
 // false in production.
 var serveAnnouncing = func(*readyPipe) bool { return false }
 
+// serveAnnounced is told how the ready line's write went (announce): nil
+// once it went out whole. A seam for the test of a spawner that gives up
+// after the line went out (plan 041 C6 r1, 1); a no-op in production.
+var serveAnnounced = func(error) {}
+
 func newServeCmd() *cobra.Command {
 	f := &serveFlags{tuiFlags: tuiFlags{force: true}}
 	cmd := &cobra.Command{
@@ -821,6 +826,7 @@ func (h *serveHost) announce() {
 		CrazeSessionID: h.eng.State().CrazeSessionID,
 		CrazeVersion:   version.Version,
 	})
+	serveAnnounced(err)
 	if err != nil {
 		fmt.Fprintf(h.log, "craze serve: the launcher did not take the ready line: %v\n", err)
 		if h.outliveSpawner {

@@ -29,7 +29,10 @@ import (
 //     its agents' process-group record are before the host has said a word.
 //  2. os.Executable() is re-executed as `craze serve <session flags>`
 //     (serveSpec, hostspawn.Args) detached, the write end of a pipe as its
-//     fd 3, and one goroutine waits for it (hostspawn.Start).
+//     fd 3, and one goroutine waits for it (hostspawn.Start) — or, for a
+//     direct spawn of craze new --wait's or craze send's, through an
+//     intermediate that leaves it out of this process's tree
+//     (spawnOptions.reparent).
 //  3. The host's one ready line (hostspawn.ReadyLine) is read, bounded
 //     (hostspawn.ReadReady). ok — the host is in the registry under its
 //     session's craze id — is the ref the caller dials. Anything else ends
@@ -91,6 +94,16 @@ type spawnOptions struct {
 	// host, whose agent binary is then `[agents]`'s or PATH's. The TUI's own
 	// spawns keep the launch's environment.
 	hubEnv bool
+	// reparent starts the host through a short-lived intermediate that
+	// leaves it out of this process's tree (hostspawn.StartReparented, plan
+	// 041 X32), so a signal for the command's whole process tree — Claude
+	// Code's TaskStop finds one by parent pid — reaches the command alone,
+	// which cancels its own turn (§3.1 "Signals"), and the session goes on,
+	// as a session the hub creates is no descendant of the command either.
+	// craze new --wait's and craze send's direct spawns set it with hubEnv,
+	// whose start (startWithHubEnv) honours it; the TUI's own spawns set
+	// neither, and their hosts stay its children.
+	reparent bool
 }
 
 // hostRef is a host a spawn found for its caller: the one it started, which
@@ -196,11 +209,20 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 		r     *os.File
 	)
 	if opts.hubEnv {
-		child, r, err = startWithHubEnv(argv, groups, logPath)
+		var rs *hostspawn.ReparentSpawn
+		if opts.reparent {
+			rs = &hostspawn.ReparentSpawn{Env: opts.env, HostID: hostID, Shared: opts.shared}
+		}
+		child, r, err = startWithHubEnv(ctx, argv, groups, logPath, rs)
 	} else {
 		child, r, err = hostspawn.Start(argv, unset, groups, logPath)
 	}
 	if err != nil {
+		// A reparented start the caller's context cut short (C6 r1, 2) is a
+		// spawn abandoned, as one cut short in its handshake is.
+		if cerr := ctx.Err(); cerr != nil && errors.Is(err, cerr) {
+			return hostRef{}, nil, &spawnError{kind: spawnCancelled, msg: "craze: the session host's start was abandoned; its log: " + logPath, err: cerr}
+		}
 		return hostRef{}, nil, &spawnError{kind: spawnStartFailed, msg: "craze: the session host cannot be started: " + err.Error(), err: err}
 	}
 	line, failure, why := hostspawn.ReadReady(ctx, r)
@@ -250,8 +272,11 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 // environment the hub hands its hosts (spawnOptions.hubEnv): this process's
 // own — or the command's, a test's — passed through hub.ChildEnv against this
 // process's working directory, which a relative CRAZE_HOME is made absolute
-// against, as the hub's create does.
-func startWithHubEnv(argv []string, groups, logPath string) (*hostspawn.Child, *os.File, error) {
+// against, as the hub's create does. A non-nil rs starts it out of this
+// process's tree (spawnOptions.reparent, startReparented), under ctx: the
+// host's id, the registry and whether the spawn is shared, for a host its
+// intermediate never reports.
+func startWithHubEnv(ctx context.Context, argv []string, groups, logPath string, rs *hostspawn.ReparentSpawn) (*hostspawn.Child, *os.File, error) {
 	cmd, err := hostspawn.Command(argv)
 	if err != nil {
 		return nil, nil, err
@@ -262,8 +287,16 @@ func startWithHubEnv(argv []string, groups, logPath string) (*hostspawn.Child, *
 	}
 	wd, _ := os.Getwd()
 	cmd.Env = hub.ChildEnv(environ, wd)
+	if rs != nil {
+		return startReparented(ctx, cmd, hostspawn.HostChildEnv, groups, logPath, *rs)
+	}
 	return hostspawn.StartCmd(cmd, hostspawn.HostChildEnv, groups, logPath)
 }
+
+// startReparented is a reparented spawn's start, hostspawn.StartReparented:
+// a test's seam, which the tree-kill test's control sets to
+// hostspawn.StartCmd to show that same kill ending a host left in the tree.
+var startReparented = hostspawn.StartReparented
 
 // serveSpec is craze serve's command line for a spawn (hostspawn.Args): the
 // host's id and log, then every session flag f carries — each passed only

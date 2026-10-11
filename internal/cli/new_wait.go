@@ -21,7 +21,11 @@ import (
 // CRAZE_PROVIDER, CRAZE_AGENT_BIN, TMUX, HERDR_* …) and no --agent-bin, so
 // the agent binary is `[agents]`'s or PATH's, as a hub-created host's is. It
 // is detached in a session of its own (setsid), so it outlives the command
-// and the process group that ran it; -C defaults to the current directory.
+// and the process group that ran it, and started through an intermediate
+// that leaves it out of the command's process tree (spawnOptions.reparent,
+// X32), so a signal for that whole tree — Claude Code's TaskStop — reaches
+// the command alone, which cancels its own turn, and the session goes on;
+// -C defaults to the current directory.
 //
 // Then the command is the waiter's (§3.1): it attaches, sends the prompt
 // (PROMPT…, --prompt-file, or stdin: prompt_input.go) once the attachment's
@@ -108,7 +112,7 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
 		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
 	r.session = resultSession{provider: provider, model: flags.model}
-	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true}, true)
+	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true, reparent: true}, true)
 	if err != nil {
 		return r.failBefore(spawnExit(newWhat, err))
 	}

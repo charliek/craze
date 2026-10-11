@@ -150,7 +150,7 @@ Claude Code applies `Edit` rules to its Write tool, and `//` marks an absolute p
 | Background run, completion notice | yes | yes |
 | The caller's context stays clean | yes | yes: the last message and a footer |
 | SendMessage continues with context | yes | yes, also after the host has exited |
-| TaskStop stops the work | yes | stops the waiting command, which cancels its own turn when it gets SIGINT, SIGTERM or SIGHUP; if the turn runs on, `craze cancel <short>` or `craze stop <short>` ends it |
+| TaskStop stops the work | yes | cancels its craze turn: TaskStop signals the waiting command, which cancels its own turn (should it say the cancel was not confirmed, `craze cancel <short>`); the session's host is not in that command's process tree, so the session stays, and SendMessage continues it. `craze stop <short>` ends the session |
 | Turn longer than ten minutes | yes | `running`, then `craze wait` |
 | Watch it live | transcript view | `craze attach --session <short>` |
 | Cost reported | yes | native only (`unpriced` on a ChatGPT plan); cursor and grok report none |

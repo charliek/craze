@@ -2438,12 +2438,13 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `workspace` | The session's working directory |
 | `ready` | Whether the engine has started |
 | `requestId`, `requestHash` | Only on a host the hub's [`session.create`](#sessioncreate) spawned, and absent otherwise: the create's `requestId` and its params' hash, fixed for the host's life — what a restarted hub joins a retried create by |
+| `pidStart` | The host process's start as its kernel records it, which the host reads of itself as it binds — on Linux clock ticks since boot (`/proc/<pid>/stat` field 22), on macOS microseconds since the epoch — fixed for the host's life: with `pid`, what tells the host from a later process given its pid, so a `craze new --wait` that never heard from the host it started ends that host and no other process. Absent when the host could not read it, and on hosts from crazes that predate it |
 
 This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
 session, so none of them is ever renamed or removed; members may be added
-(`requestId` and `requestHash` were), and a reader ignores those it does not
-know.
+(`requestId`, `requestHash` and `pidStart` were), and a reader ignores those it
+does not know.
 
 The socket writes an initial entry at bind time, before any engine is
 attached (`crazeSessionId`, `provider` and the rest of the identity still

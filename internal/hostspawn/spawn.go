@@ -33,10 +33,19 @@
 //     session (Rendezvous). The spawner never claims a session itself: the
 //     host claims it.
 //
+// Step 2 has an opt-in (plan 041 X32, reparent.go): StartReparented starts
+// the host through a short-lived intermediate — craze itself, marked
+// ReparentEnv, which craze's main hands to Reparent before anything else —
+// that starts `craze serve` in a session of its own, reports the host's pid
+// and start time back, and exits at once. The host is then reparented (to
+// init, launchd or the nearest subreaper) and is no descendant of its spawner
+// at all: a signal for the spawner's whole process tree, found by parent
+// pid, never reaches it. Steps 3 and 4 are the same for it.
+//
 // Linux and macOS alike: Setsid and ExtraFiles mean the same on both (the
-// first extra file is fd 3 in the child), and so do close-on-exec and group
-// signals. Nothing here reports to roost or herdr, and nothing is written to
-// the terminal.
+// first extra file is fd 3 in the child), and so do close-on-exec, group
+// signals and reparenting. Nothing here reports to roost or herdr, and
+// nothing is written to the terminal.
 package hostspawn
 
 import (
@@ -48,6 +57,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -206,10 +216,23 @@ func Args(s Spec) []string {
 }
 
 // Child is a host this process started, and the one goroutine that waits for
-// it (the reaper).
+// it (the reaper) — or, for a host started reparented (StartReparented),
+// which is not this process's child and is reaped by its new parent, what
+// tells that host from any later process with its pid: its start time. Every
+// method means the same for both; for a reparented host, "exited and been
+// reaped" is a look at its identity (gone) — a zombie, which its new parent
+// may never reap, counts as gone — and a signal goes to it only while that
+// identity is the host's, bound to the process by a pidfd on Linux
+// (signalHost).
 type Child struct {
+	// cmd is the host's own command; nil for a reparented host.
 	cmd *exec.Cmd
 	pid int
+	// start is a reparented host's start time (rundir.ProcIdentity), read
+	// by its intermediate while the host was still that process's child —
+	// so it is the host's, never a stranger's; 0 for a child of this
+	// process's own.
+	start uint64
 	// groups is the host's record of its agents' process groups
 	// (AgentGroupsName).
 	groups string
@@ -218,6 +241,9 @@ type Child struct {
 	log  string
 	done chan struct{}
 	err  error // cmd.Wait's, once done is closed
+	// A reparented host's done is closed by whoever first sees it gone
+	// (gone), once (closeDone); watch starts Done's poll of it once.
+	closeDone, watch sync.Once
 }
 
 // Start starts `craze serve argv…` detached (the package's doc comment, step
@@ -300,15 +326,32 @@ func (c *Child) PID() int { return c.pid }
 // Groups is the host's record of its agents' process groups.
 func (c *Child) Groups() string { return c.groups }
 
-// Done is closed once the host has exited and been reaped.
-func (c *Child) Done() <-chan struct{} { return c.done }
+// Done is closed once the host has exited and been reaped. A reparented
+// host's is closed by a poll of its identity (gone), every reparentPoll,
+// which the first call starts.
+func (c *Child) Done() <-chan struct{} {
+	if c.cmd == nil {
+		c.watch.Do(func() {
+			go func() {
+				for !c.gone() {
+					time.Sleep(reparentPoll)
+				}
+			}()
+		})
+	}
+	return c.done
+}
 
 // Err is the host's exit, cmd.Wait's error, once Done is closed: nil for an
-// exit 0.
+// exit 0 — and always nil for a reparented host, whose exit status is its new
+// parent's to collect.
 func (c *Child) Err() error { return c.err }
 
 // Exited reports whether the host has exited and been reaped.
 func (c *Child) Exited() bool {
+	if c.cmd == nil {
+		return c.gone()
+	}
 	select {
 	case <-c.done:
 		return true
@@ -317,8 +360,20 @@ func (c *Child) Exited() bool {
 	}
 }
 
-// WaitExit waits up to d for the host to exit: whether it did.
+// WaitExit waits up to d for the host to exit: whether it did. A reparented
+// host is looked for every reparentPoll (gone).
 func (c *Child) WaitExit(d time.Duration) bool {
+	if c.cmd == nil {
+		deadline := time.Now().Add(d)
+		for !c.gone() {
+			left := time.Until(deadline)
+			if left <= 0 {
+				return false
+			}
+			time.Sleep(min(reparentPoll, left))
+		}
+		return true
+	}
 	select {
 	case <-c.done:
 		return true
@@ -362,12 +417,10 @@ func (c *Child) Terminate() {
 // caller's.
 func (c *Child) End(grace time.Duration) bool {
 	if !c.Exited() {
-		// Signal on the Process, not the pid: once the reaper has waited for
-		// it, this is refused rather than sent to whatever reused the pid.
-		_ = c.cmd.Process.Signal(syscall.SIGTERM)
+		c.terminate()
 		if !c.WaitExit(grace) {
 			if !c.Exited() {
-				_ = syscall.Kill(-c.pid, syscall.SIGKILL)
+				c.killGroup()
 			}
 			c.WaitExit(grace)
 		}
@@ -383,9 +436,78 @@ func (c *Child) End(grace time.Duration) bool {
 // id reused in between would be signalled instead (SF-120).
 func (c *Child) Kill() {
 	if !c.Exited() {
-		_ = syscall.Kill(-c.pid, syscall.SIGKILL)
+		c.killGroup()
 	}
-	<-c.done
+	<-c.Done()
+}
+
+// terminate sends the host SIGTERM. A child of this process's own is
+// signalled on its Process, not the pid: once the reaper has waited for it,
+// this is refused rather than sent to whatever reused the pid. A reparented
+// host, which no reaper here waits for, only while the process with its pid
+// is provably the host — started at the host's instant (rundir.ProcIdentity)
+// — and on Linux through a pidfd that binds the signal to that process
+// (signalHost).
+func (c *Child) terminate() {
+	if c.cmd != nil {
+		_ = c.cmd.Process.Signal(syscall.SIGTERM)
+		return
+	}
+	signalHost(c.pid, c.start, syscall.SIGTERM, false)
+}
+
+// killGroup sends SIGKILL to the host's process group (setsid made it the
+// leader of its own): by its id for a child of this process's own, after an
+// Exited check the reaper can overtake (SF-120); for a reparented host only
+// while its leader is provably the host, through its pidfd on Linux
+// (signalHost).
+func (c *Child) killGroup() {
+	if c.cmd != nil {
+		_ = syscall.Kill(-c.pid, syscall.SIGKILL)
+		return
+	}
+	signalHost(c.pid, c.start, syscall.SIGKILL, true)
+}
+
+// gone reports whether a reparented host has exited: no process has its pid,
+// the one that has it started at another instant than the host — its pid
+// reused — or it is the host, a zombie (plan 041 C6 r1, 3): exited, and left
+// for a new parent to reap that may not, or not yet — a container's first
+// process, a slow subreaper. A pid whose identity cannot be read is not gone.
+// Seen gone once, the host stays gone — a later process given its pid never
+// makes it alive again — and its done is closed.
+func (c *Child) gone() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+	}
+	id, err := rundir.ProcessIdentity(c.pid)
+	if !errors.Is(err, rundir.ErrNoProcess) && (err != nil || (id.Start == c.start && !id.Zombie)) {
+		return false
+	}
+	c.closeDone.Do(func() { close(c.done) })
+	return true
+}
+
+// isHost reports whether pid is the host whose start time is start: alive,
+// or a zombie whose group may still have members.
+func isHost(pid int, start uint64) bool {
+	id, err := rundir.ProcessIdentity(pid)
+	return err == nil && id.Start == start
+}
+
+// checkThenSignal is signalHost without a pidfd: the host's identity checked
+// (isHost), then sig sent to its pid — or its group, with group — by number.
+func checkThenSignal(pid int, start uint64, sig syscall.Signal, group bool) bool {
+	if !isHost(pid, start) {
+		return false
+	}
+	target := pid
+	if group {
+		target = -pid
+	}
+	return syscall.Kill(target, sig) == nil
 }
 
 // KillAgents kills every agent process group the host recorded and removes

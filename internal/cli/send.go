@@ -35,7 +35,8 @@ import (
 // same tiers over the craze ids; a row with no craze id is not addressable,
 // and a provider craze cannot load again has no row), and a host is spawned
 // for it as craze new --wait spawns one — directly, with the hub's
-// environment — loading it (`craze serve --load <crazeId>`) with the row's
+// environment, out of the command's process tree — loading it (`craze serve
+// --load <crazeId>`) with the row's
 // recorded start settings and --unattended (reloadFlags), or, for a row with
 // no record — a person's session — as the ordinary interactive host the
 // session list would spawn. A host that took the session meanwhile (another
@@ -265,7 +266,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 // spawned is never stopped by this run, whatever becomes of its prompt (C3
 // review r1, 1): another send may have found it and prompted it already.
 func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
-	opts := spawnOptions{env: r.env, flags: reloadFlags(row), load: loadArg(row), unattended: row.Unattended != nil, shared: true, hubEnv: true}
+	opts := spawnOptions{env: r.env, flags: reloadFlags(row), load: loadArg(row), unattended: row.Unattended != nil, shared: true, hubEnv: true, reparent: true}
 	r.session = resultSession{id: row.CrazeID, provider: row.Provider}
 	until := time.Now().Add(reloadWait)
 	for {

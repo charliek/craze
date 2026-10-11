@@ -276,7 +276,7 @@ func waitLastTurn2(t *testing.T, e rundir.Entry) *protocol.LastTurn {
 // without --force; the row stays marked. A person's row (no record) is
 // reloaded as an ordinary interactive host: none of those flags.
 func TestSendReloadsAnEndedSessionWithItsRecordedSettings(t *testing.T) {
-	_, ws, kids := unattendedHome(t)
+	env, ws, kids := unattendedHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 	stdout, stderr, code := executeErr([]string{"new", "--wait", "--json", "--provider", "cursor", "--model", "m-1", "--effort", "low",
 		"--plan", "--no-force", "-C", ws, "the task"})
@@ -289,10 +289,16 @@ func TestSendReloadsAnEndedSessionWithItsRecordedSettings(t *testing.T) {
 	if row := waitIndexRowByID(t, id); row.Unattended == nil || *row.Unattended != rec {
 		t.Fatalf("the new session's row: %+v", row)
 	}
+	// The host's own pid, from its entry: the command started it reparented
+	// (X32), so the process its spawn built was the intermediate, long gone.
+	e, ok := hostServing(env, id)
+	if !ok {
+		t.Fatalf("no host serves the new session %s", id)
+	}
 	if stdout, stderr, code = executeErr([]string{"stop", short}); code != 0 || stdout != "stopped "+short+"\n" {
 		t.Fatalf("craze stop: exit %d, %q %q", code, stdout, stderr)
 	}
-	waitReaped(t, kids.cmd(t, 0).Process.Pid)
+	waitReaped(t, e.PID)
 
 	dumps := t.TempDir()
 	argvDump, callsDump := filepath.Join(dumps, "argv"), filepath.Join(dumps, "calls")

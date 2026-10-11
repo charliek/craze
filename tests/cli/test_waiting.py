@@ -12,15 +12,17 @@ own.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from conftest import TEST_HOST_IDLE_EXIT, _argv
+from conftest import PS_TIMEOUT, TEST_HOST_IDLE_EXIT, _argv, pid_alive
 from test_detach import _entries
 
 WAIT = 10.0
@@ -152,3 +154,98 @@ def test_the_prompt_rules(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path)
     out = _craze(craze_bin, "send", "abcd1234", "hello")
     assert out.returncode == 1 and out.stderr == b"craze send: no session abcd1234\n", out
     assert _entries(_home()) == []
+
+
+def _process_tree(root: int) -> list[int]:
+    """root and every process descending from it, found as a tree kill finds
+    them -- each process whose parent is in the tree -- from a snapshot of
+    every process's parent: /proc/<pid>/stat on Linux, `ps` on macOS."""
+    parents: dict[int, int] = {}
+    if sys.platform == "linux":
+        for p in Path("/proc").iterdir():
+            if not p.name.isdigit():
+                continue
+            try:
+                stat = (p / "stat").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            parents[int(p.name)] = int(stat.rsplit(")", 1)[1].split()[1])
+    else:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, check=True, timeout=PS_TIMEOUT).stdout
+        for line in out.decode().splitlines():
+            f = line.split()
+            if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+                parents[int(f[0])] = int(f[1])
+    tree = [root]
+    i = 0
+    while i < len(tree):
+        tree += [pid for pid, ppid in parents.items() if ppid == tree[i] and pid not in tree]
+        i += 1
+    return tree
+
+
+def _open_gate(gate: Path, waiter: subprocess.Popen[bytes]) -> int:
+    """The write end of the fake agent's gate FIFO, once the agent has it open
+    -- which it does when its first turn reaches its first step -- within
+    WAIT; a FIFO no one reads refuses a non-blocking writer (ENXIO)."""
+    deadline = time.monotonic() + WAIT
+    while True:
+        try:
+            return os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as e:
+            if e.errno != errno.ENXIO:
+                raise
+        assert waiter.poll() is None, ("craze new --wait exited", waiter.returncode, waiter.communicate())
+        assert time.monotonic() < deadline, "the session's turn never reached its first step"
+        time.sleep(0.02)
+
+
+def test_a_tree_kill_cancels_the_turn_and_leaves_the_session(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """Claude Code's TaskStop ends a Bash call by signalling its whole process
+    tree, found by parent pid (plan 041 X32, live check L6). craze new
+    --wait's host is not in that tree -- it was started through an
+    intermediate that exited at once -- so such a kill reaches the command
+    alone: it cancels its own turn, `cancelled`, exit 3, and the session goes
+    on, its host serving, for craze send to continue."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    gate = tmp_path / "gate"
+    os.mkfifo(gate)
+    env = os.environ.copy()
+    env["CRAZE_FAKE_SCRIPT"] = "long-turn"
+    env["CRAZE_FAKE_GATE"] = str(gate)
+    waiter = subprocess.Popen(
+        [str(craze_bin), "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "a long task"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    fd = -1
+    try:
+        fd = _open_gate(gate, waiter)
+        (entry,) = _entries(_home())
+        tree = _process_tree(waiter.pid)
+        assert entry["pid"] not in tree, ("the host is in the command's process tree", entry["pid"], tree)
+        for pid in tree:
+            os.kill(pid, signal.SIGTERM)
+        out, err = waiter.communicate(timeout=6 * WAIT)
+        assert waiter.returncode == 3 and err == b"", (waiter.returncode, out, err)
+        res = json.loads(out)
+        assert res["status"] == "cancelled" and res["turn"] == "turn-1" and res["session"] == entry["crazeSessionId"], res
+        short = res["short"]
+        assert pid_alive(entry["pid"]), "the tree kill ended the host"
+        assert [e["hostId"] for e in _entries(_home())] == [entry["hostId"]]
+        # The next turn's two steps, let through at the gate.
+        os.write(fd, b"\x01\x01")
+        out = _craze(craze_bin, "send", short, "--wait", "--json", "and on", script="long-turn")
+        res = json.loads(out.stdout)
+        assert out.returncode == 0 and res["status"] == "completed" and res["turn"] == "turn-2", out
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+    _stop(craze_bin, short)

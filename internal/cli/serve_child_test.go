@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -76,6 +77,32 @@ const (
 	// re-executes as craze too, and a hub the test did not mean to create
 	// with never runs the binary as a host.
 	cliChildHubHosts = "CRAZE_CLI_TEST_HUB_HOSTS"
+	// cliChildSpawnHosts makes a craze child — craze new --wait run in a
+	// process of its own — spawn its hosts as this test binary run as craze
+	// serve (hostspawn.Command; without it a child would run the test binary
+	// with serve's command line, which runs the tests), each watched by the
+	// test process that started the child (cliChildParent), not by the
+	// child: a host the command started outlives the command. The handshake's
+	// bounds and the waiter's cleanup are serveStep, as the in-process tests'
+	// are (spawnBounds), so a starved run is not timed out.
+	cliChildSpawnHosts = "CRAZE_CLI_TEST_SPAWN_HOSTS"
+	// cliChildNoReparent makes a craze child start its direct spawns' hosts
+	// as children of its own (startReparented = hostspawn.StartCmd): the
+	// tree-kill test's control.
+	cliChildNoReparent = "CRAZE_CLI_TEST_NO_REPARENT"
+	// cliChildReparentHold is a file: a reparenting spawn's intermediate,
+	// once it has started its host, waits before its report
+	// (hostspawn.ReparentStarted) until the file exists — for good, when the
+	// test never makes it: an intermediate that stalls, its host started and
+	// unreported (C6 r1, 1); or until the test lets it go, to attempt its
+	// report when nobody reads it any more (C6 r2, 1). Read by the
+	// intermediate alone (marked hostspawn.ReparentEnv), and not handed on to
+	// the host.
+	cliChildReparentHold = "CRAZE_CLI_TEST_REPARENT_HOLD"
+	// cliChildAnnounced is a file a spawned craze serve creates once its ready
+	// line has gone out whole (serveAnnounced): what the test waits for
+	// before it gives up on an intermediate that never reported.
+	cliChildAnnounced = "CRAZE_CLI_TEST_ANNOUNCED"
 )
 
 // The child's watchdog (plan 030 C5r): a child of the test binary can park —
@@ -83,12 +110,15 @@ const (
 // gates wait on FIFOs nobody may write, no-idle and skip serve on for good —
 // and its own test ends it only if that test lives to run its cleanup. A test
 // binary that dies first (its -timeout's panic, a kill) left one such host
-// running for hours, reparented to init. So every child watches its parent:
-// once the test process that started it is no longer its parent it SIGTERMs
-// itself — a host that can still act runs its ordinary stop sequence, closing
-// its agent and leaving no registry entry; a craze hub child (plan 032 C10,
-// hub_child_test.go) its teardown, leaving no record — and exits
-// childTermGrace later whatever it is doing. childLifetime is the backstop behind that, longer
+// running for hours, reparented to init. So every child watches the process
+// that started it: once that process is gone — no longer its parent, and no
+// longer there at all — it SIGTERMs itself — a host that can still act runs
+// its ordinary stop sequence, closing its agent and leaving no registry
+// entry; a craze hub child (plan 032 C10, hub_child_test.go) its teardown,
+// leaving no record — and exits childTermGrace later whatever it is doing. A
+// host started reparented (plan 041 X32: hostspawn.StartReparented) is never
+// its starter's child at all, so being reparented is not enough: the process
+// it names must have gone. childLifetime is the backstop behind that, longer
 // than any test binary's timeout (make test-race's is 20 minutes).
 const (
 	childWatchEvery = 100 * time.Millisecond
@@ -98,16 +128,17 @@ const (
 	childWatchdogExit = 98
 )
 
-// childWatchdog ends this child once parent is no longer its parent, or once
-// it has lived childLifetime (the constants' comment). It runs for the
-// child's life on a goroutine of its own, which a parked main goroutine does
-// not stop.
+// childWatchdog ends this child once parent has gone — it is no longer this
+// child's parent, and no process has its pid (a zombie, not yet reaped, is
+// still there) — or once it has lived childLifetime (the constants'
+// comment). It runs for the child's life on a goroutine of its own, which a
+// parked main goroutine does not stop.
 func childWatchdog(parent int) {
 	born := time.Now()
 	tick := time.NewTicker(childWatchEvery)
 	defer tick.Stop()
 	for range tick.C {
-		if os.Getppid() == parent && time.Since(born) < childLifetime {
+		if (os.Getppid() == parent || processAlive(parent)) && time.Since(born) < childLifetime {
 			continue
 		}
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
@@ -123,6 +154,28 @@ func childEnv(argv []byte) []string {
 }
 
 func init() {
+	// A reparenting spawn's intermediate first, exactly as craze's main runs
+	// it (plan 041 X32): it re-executes this binary — the same arguments and
+	// environment, cliChildEnv's command line included — as the host, and
+	// exits; in any other process it returns at once. Held, it waits once its
+	// host is started (cliChildReparentHold).
+	if hold, ok := os.LookupEnv(cliChildReparentHold); ok {
+		if _, mid := os.LookupEnv(hostspawn.ReparentEnv); mid {
+			_ = os.Unsetenv(cliChildReparentHold)
+			// Until the file exists, or the spawner kills it — or has gone
+			// itself (a test that failed), when the intermediate goes on to
+			// its report as it would; childLifetime is the backstop.
+			spawner := os.Getppid()
+			hostspawn.ReparentStarted = func(int) {
+				for born := time.Now(); time.Since(born) < childLifetime && os.Getppid() == spawner; time.Sleep(5 * time.Millisecond) {
+					if _, err := os.Stat(hold); err == nil {
+						return
+					}
+				}
+			}
+		}
+	}
+	hostspawn.Reparent()
 	raw, ok := os.LookupEnv(cliChildEnv)
 	if !ok {
 		return
@@ -187,6 +240,14 @@ func init() {
 			}
 		}
 	}
+	if path, ok := os.LookupEnv(cliChildAnnounced); ok {
+		_ = os.Unsetenv(cliChildAnnounced)
+		serveAnnounced = func(err error) {
+			if err == nil {
+				_ = os.WriteFile(path, nil, 0o600)
+			}
+		}
+	}
 	if _, ok := os.LookupEnv(cliChildNoIdle); ok {
 		_ = os.Unsetenv(cliChildNoIdle)
 		idleTicks = func() (<-chan time.Time, func() time.Time, func()) { return nil, time.Now, func() {} }
@@ -202,6 +263,18 @@ func init() {
 	if _, ok := os.LookupEnv(cliChildHubHosts); ok {
 		_ = os.Unsetenv(cliChildHubHosts)
 		hub.HostCommand = childHostCommand
+	}
+	if _, ok := os.LookupEnv(cliChildSpawnHosts); ok {
+		_ = os.Unsetenv(cliChildSpawnHosts)
+		hostspawn.Command = childSpawnCommand(parent)
+		hostspawn.ReadyWait, hostspawn.RendezvousWait, hostspawn.TermGrace = serveStep, serveStep, serveStep
+		hostspawn.ReparentWait, cleanupWait = serveStep, serveStep
+	}
+	if _, ok := os.LookupEnv(cliChildNoReparent); ok {
+		_ = os.Unsetenv(cliChildNoReparent)
+		startReparented = func(_ context.Context, cmd *exec.Cmd, marker, groups, log string, _ hostspawn.ReparentSpawn) (*hostspawn.Child, *os.File, error) {
+			return hostspawn.StartCmd(cmd, marker, groups, log)
+		}
 	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
@@ -249,6 +322,26 @@ func childHostCommand(argv []string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// childSpawnCommand is hostspawn.Command in a craze child that spawns hosts
+// itself (cliChildSpawnHosts): this test binary run as `craze <argv…>` —
+// craze serve — in the child's environment, its watchdog watching parent, the
+// test process that started the child, which outlives the child.
+func childSpawnCommand(parent int) func([]string) (*exec.Cmd, error) {
+	return func(argv []string) (*exec.Cmd, error) {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		b, err := json.Marshal(argv)
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.Command(exe, "-test.run=^$")
+		cmd.Env = append(os.Environ(), cliChildEnv+"="+string(b), cliChildParent+"="+strconv.Itoa(parent))
+		return cmd, nil
+	}
+}
+
 // childAnnouncing is serveAnnouncing for cliChildReady's mode.
 func childAnnouncing(mode string) func(*readyPipe) bool {
 	return func(p *readyPipe) bool {
@@ -287,6 +380,13 @@ type crazeChild struct {
 // ends is sent SIGTERM, then SIGKILL, so no host outlives its test.
 func startCrazeChild(t *testing.T, argv ...string) *crazeChild {
 	t.Helper()
+	return startCrazeChildWith(t, nil, argv...)
+}
+
+// startCrazeChildWith is startCrazeChild with extra in the child's
+// environment besides: its test hooks.
+func startCrazeChildWith(t *testing.T, extra []string, argv ...string) *crazeChild {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +398,7 @@ func startCrazeChild(t *testing.T, argv ...string) *crazeChild {
 	// -test.run matches nothing, so a child whose init somehow fell through
 	// runs no test.
 	cmd := exec.Command(exe, "-test.run=^$")
-	cmd.Env = childEnv(b)
+	cmd.Env = append(childEnv(b), extra...)
 	out := &lockedBuffer{}
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {

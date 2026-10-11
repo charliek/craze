@@ -1019,8 +1019,13 @@ ended, until its host's [idle exit](configuration.md#host-idle-exit):
 first; `craze attach`, `craze ps` and the session list find it like any
 session.
 
-The host is detached from the command — in a session of its own, so it
-outlives the shell and the process group that ran it — and is handed the
+The host is detached from the command: in a session of its own, so it
+outlives the shell and the process group that ran it, and out of the
+command's process tree — craze starts it through a short-lived process that
+exits at once. So stopping the command — `Ctrl+C`, `SIGTERM`, or a tree kill
+such as Claude Code's TaskStop, which signals every process descended from
+the one it stops — never ends the host: the command cancels its own turn
+(**Signals**, below) and the session goes on. The host is handed the
 environment a session the hub creates is handed: none of `CRAZE_PROVIDER`,
 `CRAZE_AGENT_BIN`, `TMUX`, `HERDR_*` or `ROOST_*`. So it finds its agent
 binary in `[agents]` in `config.toml`, then on `PATH`, as such a session does.
@@ -1042,7 +1047,9 @@ the settings it started with.
 **Signals.** The prompt is the command's own, as a handle's turn is
 `craze wait --from`'s: `Ctrl+C`, `SIGTERM` or `SIGHUP` remove it while it is
 queued (`dropped`) or cancel its turn by its id (`cancelled`), exit 3, within
-2 seconds; a second signal exits at once. One that comes before the prompt
+2 seconds; a second signal exits at once. The signal is the command's alone —
+the host, out of its process tree, never receives it — so the session runs on
+for [`craze send`](#craze-send). One that comes before the prompt
 was sent — while the host starts, or the session does — stops the session the
 command started: `cancelled`, exit 3, its error `interrupted before the prompt
 was sent; the session it started was stopped` — or, when a second signal

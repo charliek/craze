@@ -20,8 +20,9 @@ import (
 // or craze send reloads, for no one to attend. Its host is spawned directly —
 // spawnHost and serveSpec, the TUI launcher's path, never the hub's
 // session.create (P1) — with the environment the hub hands its hosts
-// (spawnOptions.hubEnv), and is told it is unattended (craze serve's hidden
-// --unattended):
+// (spawnOptions.hubEnv), out of the command's process tree
+// (spawnOptions.reparent, X32), and is told it is unattended (craze serve's
+// hidden --unattended):
 //
 //   - unattendedPolicy: Interactive false and craze prompt's own approval
 //     policy (headlessApproval, P2) — questions answered with their first
