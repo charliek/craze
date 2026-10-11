@@ -168,6 +168,12 @@ One JSON object per line:
     `--resume` or the session list, or `craze send` to a session of your own,
     runs an ordinary interactive session.
 
+    A marked row is a **sub-agent's session**: `--continue` (and `craze
+    serve -c`) skips it and loads the newest session that is not one, the
+    `--resume` picker lists such rows after the others, the picker and the
+    session list tag them `sub-agent`, and when the index reaches its 500-row
+    cap they are dropped before any other row (the oldest first).
+
 **A `--continue` or `--resume` never changes the persisted default
 provider.** Loading yesterday's grok thread is not a decision about
 tomorrow's default: `provider` in `config.toml` is only touched when

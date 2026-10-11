@@ -379,7 +379,7 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 
 	index := &sessions.Store{KnownProvider: knownProvider}
 	if f.resume {
-		rows, err := index.Recent(cwd, filter, resumeRowLimit)
+		rows, err := index.Picker(cwd, filter, resumeRowLimit)
 		if err != nil {
 			return exitf(1, "%s: %v", noSessionMsg(cwd, filter), err)
 		}
@@ -423,6 +423,23 @@ func noSessionMsg(cwd, provider string) string {
 	msg := "craze: no session to continue in " + cwd
 	if provider != "" {
 		msg += " for provider " + provider
+	}
+	return msg
+}
+
+// noContinueMsg is --continue's refusal: noSessionMsg, and when the directory
+// does hold sessions but only sub-agent ones (an unattended host's, which
+// --continue skips; plan 041 §3.3), a hint naming how many and where to find
+// them. N counts the marked rows Recent would list for this cwd and provider
+// filter. A count that cannot be read leaves the plain message.
+func noContinueMsg(index *sessions.Store, cwd, filter string) string {
+	msg := noSessionMsg(cwd, filter)
+	if n, err := index.SubAgentCount(cwd, filter); err == nil && n > 0 {
+		noun := "sessions"
+		if n == 1 {
+			noun = "session"
+		}
+		msg += fmt.Sprintf(" (%d sub-agent %s here: craze -r lists them)", n, noun)
 	}
 	return msg
 }

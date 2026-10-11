@@ -139,7 +139,7 @@ func continueRow(cwd, filter string) (sessions.Row, error) {
 		return sessions.Row{}, exitf(1, "%s: %v", noSessionMsg(cwd, filter), err)
 	}
 	if !ok {
-		return sessions.Row{}, exitf(1, "%s", noSessionMsg(cwd, filter))
+		return sessions.Row{}, exitf(1, "%s", noContinueMsg(index, cwd, filter))
 	}
 	return row, nil
 }

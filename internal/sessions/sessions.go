@@ -28,9 +28,9 @@ import (
 	"github.com/charliek/craze/internal/paths"
 )
 
-// maxRows caps the index; a write that would overflow it drops the oldest
-// rows by UpdatedAt (ties broken by file order, earlier position dropped
-// first).
+// maxRows caps the index; a write that would overflow it drops marked
+// (unattended) rows before unmarked ones, and within each the oldest by
+// UpdatedAt (ties broken by file order, earlier position dropped first).
 const maxRows = 500
 
 // indexLockSuffix names the sibling file Upsert flocks, mirroring config.go's
@@ -402,10 +402,12 @@ func inheritedUnattended(records []record, crazeID string) *Unattended {
 	return newest.Row.Unattended
 }
 
-// evictOverflow drops the oldest rows (by UpdatedAt, ties broken by file
-// order -- the earlier position loses the tie) once records exceeds
-// maxRows, otherwise it returns records unchanged. The relative order of
-// the rows that survive is preserved.
+// evictOverflow drops rows once records exceeds maxRows, otherwise it
+// returns records unchanged: marked rows (Unattended set) first, then
+// unmarked, the oldest first within each (by UpdatedAt, ties broken by file
+// order -- the earlier position loses the tie). A flood of sub-agent
+// sessions therefore never pushes a person's sessions out of the index (plan
+// 041 §3.3). The relative order of the rows that survive is preserved.
 func evictOverflow(records []record) []record {
 	if len(records) <= maxRows {
 		return records
@@ -416,6 +418,9 @@ func evictOverflow(records []record) []record {
 	}
 	sort.Slice(order, func(a, b int) bool {
 		ra, rb := records[order[a]], records[order[b]]
+		if ma, mb := ra.Row.Unattended != nil, rb.Row.Unattended != nil; ma != mb {
+			return ma
+		}
 		if !ra.Row.UpdatedAt.Equal(rb.Row.UpdatedAt) {
 			return ra.Row.UpdatedAt.Before(rb.Row.UpdatedAt)
 		}
@@ -435,18 +440,66 @@ func evictOverflow(records []record) []record {
 	return out
 }
 
-// Latest is the newest row matching cwd (exact string equality, no symlink
-// resolution) and provider ("" means any provider), or ok=false if there is
-// none.
+// Latest is the newest *unmarked* row matching cwd (exact string equality, no
+// symlink resolution) and provider ("" means any provider), or ok=false if
+// there is none. A row an unattended host wrote (Row.Unattended) is a
+// sub-agent's session, never a person's: it is skipped before the limit is
+// applied, so --continue, serve -c, the launcher and craze frame all pass
+// over it (plan 041 §3.3). Ties order as Recent orders them.
 func (s *Store) Latest(cwd, provider string) (Row, bool, error) {
-	rows, err := s.Recent(cwd, provider, 1)
+	records, err := s.matching(cwd, provider)
 	if err != nil {
 		return Row{}, false, err
 	}
-	if len(rows) == 0 {
-		return Row{}, false, nil
+	for _, rec := range records {
+		if rec.Row.Unattended == nil {
+			return rec.Row, true, nil
+		}
 	}
-	return rows[0], true, nil
+	return Row{}, false, nil
+}
+
+// SubAgentCount is how many marked rows Recent would show for cwd and
+// provider: the figure --continue's refusal reports when a directory holds
+// only sub-agent sessions. It counts rows, not craze ids, as Recent lists
+// them.
+func (s *Store) SubAgentCount(cwd, provider string) (int, error) {
+	records, err := s.matching(cwd, provider)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, rec := range records {
+		if rec.Row.Unattended != nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// Picker is the --resume picker's rows: up to n, taken from the unmarked
+// rows first (newest first) and then, for any remainder, the marked ones
+// (plan 041 §3.3). n <= 0 means no cap. Recent stays the plain list.
+func (s *Store) Picker(cwd, provider string, n int) ([]Row, error) {
+	records, err := s.matching(cwd, provider)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Row, 0, len(records))
+	for _, rec := range records {
+		if rec.Row.Unattended == nil {
+			out = append(out, rec.Row)
+		}
+	}
+	for _, rec := range records {
+		if rec.Row.Unattended != nil {
+			out = append(out, rec.Row)
+		}
+	}
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
 }
 
 // Recent returns up to n rows matching cwd and provider, newest first
@@ -455,6 +508,19 @@ func (s *Store) Latest(cwd, provider string) (Row, bool, error) {
 // Store's KnownProvider reports as unknown is filtered out here, but never
 // removed from the file. No home directory reads as zero rows and no error.
 func (s *Store) Recent(cwd, provider string, n int) ([]Row, error) {
+	records, err := s.matching(cwd, provider)
+	if err != nil {
+		return nil, err
+	}
+	if n > 0 && len(records) > n {
+		records = records[:n]
+	}
+	return rowsOf(records), nil
+}
+
+// matching is every record for cwd and provider, newest first: the one
+// filter and order Latest, Recent, Picker and SubAgentCount share.
+func (s *Store) matching(cwd, provider string) ([]record, error) {
 	path := paths.SessionsPath()
 	if path == "" {
 		return nil, nil
@@ -478,10 +544,7 @@ func (s *Store) Recent(cwd, provider string, n int) ([]Row, error) {
 		filtered = append(filtered, rec)
 	}
 	newestFirst(filtered)
-	if n > 0 && len(filtered) > n {
-		filtered = filtered[:n]
-	}
-	return rowsOf(filtered), nil
+	return filtered, nil
 }
 
 // newestFirst sorts records by UpdatedAt descending, ties broken by file

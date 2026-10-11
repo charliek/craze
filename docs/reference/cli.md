@@ -45,7 +45,7 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
 | `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok, gx and native |
-| `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one. No matching session exits 1 |
+| `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one, skipping sub-agent sessions. No matching session exits 1 |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
 
 `--ask` and `--plan` are mutually exclusive. So are `--fast` and `--no-fast`,
@@ -110,7 +110,20 @@ craze: no session to continue in /abs/workspace
 craze: no session to continue in /abs/workspace for provider grok
 ```
 
-exit 1, and no TUI is drawn. A session index that exists but craze cannot
+exit 1, and no TUI is drawn. `--continue` skips sessions started for a
+coding agent (`craze new --wait`'s, marked `unattended` in the index): it
+loads the newest session that is not one. A workspace holding only such
+sessions refuses, and says how many there are:
+
+```text
+craze: no session to continue in /abs/workspace (3 sub-agent sessions here: craze -r lists them)
+```
+
+With exactly one it reads `(1 sub-agent session here: craze -r lists them)`.
+
+The count is the marked rows `--resume` would list for that workspace and
+provider filter. `--resume` shows them, after the other rows (they fill the
+picker's ten only when fewer than ten others remain). A session index that exists but craze cannot
 parse fails the same way, exit 1, naming the file; the index is never
 rewritten by a failed read. `--continue` and `--resume` together is a usage
 error, exit 2, and `--resume` on a non-tty gets the ordinary non-tty

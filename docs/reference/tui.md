@@ -222,7 +222,10 @@ timeout kills it.
 
 `--resume` opens a **resume** picker in place of the provider dialog: rows
 of `<title> · <provider> · <age>` (age as `3m`, `2h`, or `5d` since the
-session was last touched), newest first, up to 10 rows. `↑`/`↓`/`Tab`/`Shift+Tab`
+session was last touched), newest first, up to 10 rows. A session that
+`craze new --wait` started for a coding agent is a sub-agent's: its row is
+dim and carries a `sub-agent` tag after the title, and it comes after your own
+sessions (it fills the picker only when fewer than 10 of those exist). `↑`/`↓`/`Tab`/`Shift+Tab`
 move and wrap, `Enter` loads the selected row, and a click loads the row
 clicked; `Esc` quits craze outright (exit 0 — no session was ever started,
 so there is no "default" the way the provider dialog has one) and a click
@@ -991,7 +994,8 @@ prompt`), **unreachable** (`?`: its host is registered and not answering) —
 then `▸ saved · N not running`, collapsed. Within a group the row that
 changed state most recently is first. Each row reads: state glyph, title, what
 it wants, provider, directory (`· here` for the session you came from), and
-how long it has been in its state. A session run by an older craze is listed
+how long it has been in its state. A sub-agent's session, running or saved, carries
+the same dim `sub-agent` tag after its title. A session run by an older craze is listed
 with what that craze reports, and its version on the row (`· craze 0.0.9`).
 A host that has not answered yet is drawn with the working rows, `Starting…`
 or `Connecting…`. With no other session the list says `No other sessions.

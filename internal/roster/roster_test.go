@@ -1327,3 +1327,38 @@ func bindFakeHost(t testing.TB, env rundir.Env, n int) string {
 	}
 	return id
 }
+
+// TestRunningRowsCarryTheIndexSubAgentMark: a listed host's row says whether
+// the newest index row of its craze id is marked (plan 041 §3.3) — the newest,
+// not any; a host with no index row yet is not.
+func TestRunningRowsCarryTheIndexSubAgentMark(t *testing.T) {
+	g := newRegistry(t)
+	mk := func(n int) rundir.Entry {
+		return rundir.Entry{Protocol: 1, HostID: hostID(n), Socket: filepath.Join(g.dir, "nobody"), CrazeSessionID: sessionID(n), Provider: "cursor"}
+	}
+	marked, resumed, bare := mk(7), mk(5), mk(3)
+	g.list(marked)
+	g.list(resumed)
+	g.list(bare)
+	at := func(h int) time.Time { return time.Date(2026, 9, 29, h, 0, 0, 0, time.UTC) }
+	un := &sessions.Unattended{PermissionMode: sessions.PermissionBypass}
+	idx := &memIndex{rows: []sessions.Row{
+		{SessionID: "p-7", Provider: "cursor", CWD: "/w", Title: "seven", CrazeID: sessionID(7), UpdatedAt: at(9), Unattended: un},
+		// Marked once, but its newest row (the index lists newest first) is
+		// unmarked: not a sub-agent now.
+		{SessionID: "p-5b", Provider: "cursor", CWD: "/w", Title: "five new", CrazeID: sessionID(5), UpdatedAt: at(8)},
+		{SessionID: "p-5a", Provider: "cursor", CWD: "/w", Title: "five old", CrazeID: sessionID(5), UpdatedAt: at(6), Unattended: un},
+	}}
+	rg := newRig(t, g, idx, nil)
+	rg.waitApplied(3)
+	s := rg.until("all three listed", status(roster.Unreachable, marked.HostID, resumed.HostID, bare.HostID))
+	for _, tc := range []struct {
+		name string
+		id   string
+		want bool
+	}{{"marked", marked.HostID, true}, {"newest row unmarked", resumed.HostID, false}, {"no index row", bare.HostID, false}} {
+		if r := row(s, tc.id); r == nil || r.IndexSubAgent != tc.want {
+			t.Fatalf("%s: IndexSubAgent = %+v, want %v", tc.name, r, tc.want)
+		}
+	}
+}

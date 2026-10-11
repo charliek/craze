@@ -260,6 +260,9 @@ type sessRow struct {
 	// ended is the session behind the list, ended while the list was up.
 	ended bool
 	saved bool
+	// subAgent marks a row the index records as a sub-agent's session
+	// (plan 041 §3.3): its title carries the dim tag.
+	subAgent bool
 	// here is the session the list was opened from.
 	here bool
 	// title, want (what it wants — §3.10's fourth column) and note (an
@@ -1178,6 +1181,7 @@ func sessRunningRow(r roster.Row, here sessKey) sessRow {
 		provider:   h.Provider,
 		workspace:  h.Workspace,
 		indexTitle: sanitizeLine(r.IndexTitle),
+		subAgent:   r.IndexSubAgent,
 		key:        sessRowKey(r),
 	}
 	own := ""
@@ -1292,7 +1296,7 @@ func sessSavedRow(r sessions.Row) sessRow {
 		title = r.SessionID
 	}
 	return sessRow{
-		key: sessKey{id: id}, state: sessSaved, saved: true,
+		key: sessKey{id: id}, state: sessSaved, saved: true, subAgent: isSubAgent(r),
 		title: title, indexTitle: sanitizeLine(r.Title),
 		provider: r.Provider, workspace: r.CWD, since: r.UpdatedAt,
 		ref: roster.SavedRef(r),
@@ -1777,7 +1781,8 @@ func (m Model) sessRowView(r sessRow, selected bool) string {
 		wantSt = styleFG(th.Err)
 	}
 	none := lipgloss.NewStyle()
-	segs := []seg{m.sessMark(selected), {glyph + " ", gst}, {padCells(r.title, tW), titleSt}, {"  ", none}}
+	segs := append([]seg{m.sessMark(selected), {glyph + " ", gst}}, m.sessTitleSegs(r, tW, titleSt)...)
+	segs = append(segs, seg{"  ", none})
 	// An older host's note keeps its cells: what it wants is clipped
 	// first, down to a few cells, before the note is dropped.
 	note := ""
