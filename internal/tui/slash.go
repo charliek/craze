@@ -117,7 +117,8 @@ func menuBuiltin(it agent.SlashItem) slashItem {
 // sessionsBuiltin is /sessions (plan 030 §3.10): the session list, a
 // builtin only where there is one (Config.Sessions) — so without it the
 // catalog, the menu and /help are exactly what they always were, and
-// builtinNamed, which knows the fixed set alone, never names it.
+// builtinNamed, which knows the fixed set alone, never names it. It is this
+// client's own row, never the host's (plan 043 P13): projectSlash adds it.
 var sessionsBuiltin = slashItem{Name: "sessions", Desc: "Every session on this machine", Builtin: true}
 
 func builtinNamed(name string) bool {
@@ -145,89 +146,224 @@ func parseSlashLine(s string) (name, args string, ok bool) {
 	return name, args, true
 }
 
+// slashCatalog is the menu's rows, which /help, the filter, the accept and
+// the Enter rule all read (plan 043 §3.4 D7, P14): the session's slash
+// catalog as this client shows it (projectSlash). The catalog is the one its
+// host published (hostSlash) when there is one, and otherwise the one the
+// host would have published, built here by the same builder from what this
+// client holds (localSlash) — so the menu is one list, row for row, whichever
+// way it came, and only where the skills were found differs: the host's scan,
+// or this client's own.
+//
+// Nothing that runs a command reads it. handleEnter and runBuiltin dispatch by
+// name, and refuse what they refuse, whatever the catalog lists (P14).
 func (m Model) slashCatalog() []slashItem {
-	// The capability reads are hoisted: each one rebuilds the whole Provider
-	// (or reads the backend's facts) to answer a bool, and the loop would ask
-	// several times.
-	modes, todos, btw := m.showModes(), m.showTodos(), m.btwOffered()
-	builtins := builtinSlash()
-	// An upper bound on the whole catalog: every loop below can only drop
-	// rows, bar the three builtins a session may add (/sessions, /connect,
-	// /btw). It sizes the row slice and the dedupe map, which holds one key
-	// per row that survives and so grows to the same shape.
-	size := len(builtins) + 3 + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
-	items := make([]slashItem, 0, size)
-	for _, it := range builtins {
-		switch it.Name {
-		case "plan", "ask", "agent":
-			if !modes {
-				continue
-			}
-		case "tasks":
-			if !todos {
-				continue
-			}
-		case "exit":
-			if btw {
-				// After the mode rows and before /exit, where the session
-				// answers side questions alone (plan 040 §3.6): a cursor
-				// session's catalog, menu and /help are what they always were.
-				items = append(items, btwBuiltin)
-			}
-			if m.sessions != nil {
-				items = append(items, sessionsBuiltin)
-			}
-		}
-		items = append(items, it)
-		if it.Name == "model" && m.connectOffered() {
-			// Right after /model, on native alone (plan 031 §3.9): an ACP
-			// session's catalog, menu and /help are what they always were.
-			items = append(items, connectBuiltin)
-		}
+	rows, ok := m.hostSlash()
+	if !ok {
+		rows = m.localSlash()
 	}
-	seen := make(map[string]struct{}, size)
-	for _, it := range items {
-		seen[it.Name] = struct{}{}
+	return m.projectSlash(rows)
+}
+
+// hostSlash is the catalog the session's host published, and whether the menu
+// draws from it: a session whose backend says it publishes one
+// (SessionInfo.SlashCatalog, a live ACP or native session, in process or over
+// the socket) and whose catalog the mirror holds — which is not yet so before
+// its install delta has been folded, never so after a start that failed
+// before it, and not so after a snapshot that left the catalog out or cut it
+// (recompute). Everywhere else — a host from before the catalog, a session
+// that is not craze's own, an unstarted session, a bare Model — the menu
+// builds its own (localSlash). An empty section — one that cleared the
+// catalog, or a malformed one the decoder read as no rows (plan 043 A13) — is
+// held as none too (the fold keeps no empty catalog), on purpose: no live
+// session sends one, since its builtins are always listed, and for a section
+// that came to nothing the menu built here is the useful answer.
+func (m Model) hostSlash() ([]agent.SlashItem, bool) {
+	if m.eng == nil || m.snap.Slash == nil || !m.info().SlashCatalog {
+		return nil, false
 	}
-	// add is the one gate every non-builtin source passes: an untypable name
-	// never reaches the menu, and the first source to claim a name keeps it,
-	// case insensitively. Source order is therefore the whole precedence rule.
-	add := func(it slashItem) {
-		if !slashNameOK(it.Name) {
-			return
-		}
-		n := strings.ToLower(it.Name)
-		if _, ok := seen[n]; ok {
-			return
-		}
-		seen[n] = struct{}{}
-		items = append(items, it)
+	return m.snap.Slash, true
+}
+
+// localSlash is the catalog the session's host would publish, built here
+// (P14) by the builder every host runs, over the same snapshot facts
+// (agent.SlashCatalogWith) — under the capabilities this client's backend
+// advertised (caps), never this binary's provider table, which over a socket
+// need not be the host's — and the disk skills this client scanned itself
+// (rescanSkills), which it keeps for this path alone.
+func (m Model) localSlash() []agent.SlashItem {
+	return agent.SlashCatalogWith(m.snap, m.caps(), m.skills).Items
+}
+
+// slashHosted reports whether the menu draws from the host's catalog
+// (hostSlash): its disk skills are then the host's to find, and a bare "/"
+// does not walk the disk here.
+func (m Model) slashHosted() bool {
+	_, ok := m.hostSlash()
+	return ok
+}
+
+// projectSlash is a catalog as this client's menu lists it: the client's half
+// of the catalog's contract (protocol.md "Which rows a client shows"), applied
+// the same way to the host's catalog and to the one built here.
+//
+//   - A row this client cannot run is hidden, and only that row (P17): one
+//     whose source, requires, run kind, method, picker, local action or
+//     argument it does not know (slashRowRuns), a builtin its dispatch does not
+//     answer to by that name (dispatchesBuiltin), and a malformed one — a name,
+//     a plugin id or a qualified spelling that is not one token.
+//   - requires "aside" shows where the session answers side questions
+//     (btwOffered), requires "stop" where Stop ends it (stopOffered) — bar
+//     the builtin /exit, which always shows: it is this client's own quit
+//     (requestQuit), which detaches where the host cannot stop the session
+//     (stopquit.go), so the menu lists it as it always has.
+//   - Of each name, case-insensitively, the first row shown is kept (plan 043
+//     A1): a hidden row claims nothing, so a cursor session's menu shows an
+//     agent's own /btw where the builtin's is hidden.
+//   - /sessions is this client's own row (P13), added before /exit where
+//     there is a session list, and it wins over a catalog row of its name,
+//     which it hides; without a list, an agent's own /sessions shows.
+//   - An unavailable row is listed (P15): the mode rows of a session that
+//     shows modes, one it did not advertise among them, which runBuiltin
+//     refuses as it always has.
+//
+// A row's source sets the flags everything downstream reads — Builtin,
+// Skill, and a plugin row's Plugin and Qualified (labeledDesc,
+// qualifiedAlias) — and its description and plugin id are folded onto one
+// line as the band needs them, which a catalog the builder made already is
+// (DisplayLine is idempotent) and one from a host that did not is made here.
+func (m Model) projectSlash(rows []agent.SlashItem) []slashItem {
+	btw, stop, list := m.btwOffered(), m.stopOffered(), m.sessions != nil
+	out := make([]slashItem, 0, len(rows)+1)
+	seen := make(map[string]struct{}, len(rows)+1)
+	if list {
+		seen[sessionsBuiltin.Name] = struct{}{}
 	}
-	for _, c := range m.snap.Commands {
-		add(slashItem{Name: c.Name, Desc: sanitizeLine(c.Description)})
-	}
-	// Plugin rows sit between what the agent advertised and what the disk
-	// scan found. The agent's own names win because craze expands nothing it
-	// advertised — the resolver has already qualified anything that would
-	// have collided — and a plugin row beats a disk skill of the same name
-	// because only the plugin row says which plugin it came from.
-	for _, p := range m.snap.Plugins {
-		// Both spellings have to be typable, not just the displayed one: the
-		// filter and the accept offer the qualified name too.
-		if !slashNameOK(p.Qualified) || !slashNameOK(p.Plugin) {
+	placed := !list
+	for _, it := range rows {
+		if !m.slashRowRuns(it, btw, stop) {
 			continue
 		}
-		add(slashItem{
-			Name:      p.Display,
-			Desc:      sanitizeLine(p.Description),
-			Plugin:    sanitizeLine(p.Plugin),
-			Qualified: sanitizeLine(p.Qualified),
-		})
+		n := strings.ToLower(it.Name)
+		if !placed && it.Source == agent.SlashSourceBuiltin && n == "exit" {
+			out = append(out, sessionsBuiltin)
+			placed = true
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, menuRow(it))
 	}
-	for _, sk := range m.skills {
-		add(slashItem{Name: sk.Name, Desc: sanitizeLine(sk.Desc), Skill: true})
+	if !placed {
+		// A catalog with no /exit — no host's — still gets the list's row.
+		out = append(out, sessionsBuiltin)
 	}
-	return items
+	return out
+}
+
+// menuRow is a catalog row as the menu draws it.
+func menuRow(it agent.SlashItem) slashItem {
+	row := slashItem{Name: it.Name, Desc: sanitizeLine(it.Description)}
+	switch it.Source {
+	case agent.SlashSourceBuiltin:
+		row.Builtin = true
+	case agent.SlashSourceSkill:
+		row.Skill = true
+	case agent.SlashSourcePlugin:
+		row.Plugin, row.Qualified = sanitizeLine(it.Plugin), it.Qualified
+	}
+	return row
+}
+
+// slashRowRuns reports whether this client shows catalog row it — whether it
+// knows everything the row says and could run it (projectSlash's first two
+// rules). btw and stop are btwOffered and stopOffered, read once per catalog
+// by the caller.
+func (m Model) slashRowRuns(it agent.SlashItem, btw, stop bool) bool {
+	if !slashNameOK(it.Name) {
+		return false
+	}
+	switch it.Source {
+	case agent.SlashSourceAgent, agent.SlashSourceSkill:
+	case agent.SlashSourceBuiltin:
+		if !m.dispatchesBuiltin(it.Name) {
+			return false
+		}
+	case agent.SlashSourcePlugin:
+		// Both spellings have to be typable, not just the displayed one: the
+		// filter and the accept offer the qualified name too.
+		if !slashNameOK(it.Plugin) || (it.Qualified != "" && !slashNameOK(it.Qualified)) {
+			return false
+		}
+	default:
+		return false
+	}
+	switch it.Requires {
+	case "":
+	case agent.SlashRequiresStop:
+		// /exit is this client's own quit, offered whatever the host serves
+		// (projectSlash); any other row that needs session.stop is not.
+		if !stop && (it.Source != agent.SlashSourceBuiltin || !strings.EqualFold(it.Name, "exit")) {
+			return false
+		}
+	case agent.SlashRequiresAside:
+		if !btw {
+			return false
+		}
+	default:
+		return false
+	}
+	return slashRunKnown(it.Run)
+}
+
+// stopOffered reports whether Stop ends this session (SessionInfo.Stop): in
+// process always, over the socket where the host serves session.stop.
+func (m Model) stopOffered() bool { return m.eng != nil && m.info().Stop }
+
+// dispatchesBuiltin reports whether handleEnter runs a builtin named name as
+// craze's own rather than sending it to the agent: the fixed set (builtinNamed),
+// /btw — whose row requires aside, and handleEnter's gate is the same fact —
+// and /connect on a native session. A builtin row of any other name is one a
+// later host added, and Enter would send it as text, so the menu does not
+// offer it.
+func (m Model) dispatchesBuiltin(name string) bool {
+	switch name = strings.ToLower(name); name {
+	case btwBuiltin.Name:
+		return true
+	case connectBuiltin.Name:
+		return m.connectOffered()
+	}
+	return builtinNamed(name)
+}
+
+// slashRunKnown reports whether this client knows what running r means: its
+// kind, and for that kind the method, the picker or the local action it
+// names, and the argument it takes — every value a later host might add is
+// one it does not (P17, plan 043 A9).
+func slashRunKnown(r agent.SlashRun) bool {
+	switch r.Arg {
+	case agent.SlashArgNone, agent.SlashArgOptional, agent.SlashArgRequired:
+	default:
+		return false
+	}
+	switch r.Kind {
+	case agent.SlashRunPrompt, agent.SlashRunAside, agent.SlashRunUnavailable:
+		return true
+	case agent.SlashRunMethod:
+		switch r.Method {
+		case agent.SlashMethodSetTitle, agent.SlashMethodSet, agent.SlashMethodStop:
+			return true
+		}
+	case agent.SlashRunPicker:
+		return r.Picker == "model"
+	case agent.SlashRunLocal:
+		switch r.Local {
+		case "help", "clear", "tasks", "theme", "connect":
+			return true
+		}
+	}
+	return false
 }
 
 // slashNameOK keeps the catalog to names a token could hold: agent.SlashNameOK,
@@ -340,6 +476,11 @@ func (m Model) slashActive() bool { return m.slashRows() > 0 }
 // handleEnter, between the confirm and the queue edit's save.
 func (m Model) handleSlashKey(k tea.KeyType, rows int) Model {
 	if k == tea.KeyTab {
+		if name, ok := m.slashTypedBuiltin(); ok {
+			// The builtin the token spells, not the row the menu offers in
+			// its place (slashTypedBuiltin).
+			return m.acceptSlashRow(slashItem{Name: name, Builtin: true})
+		}
 		return m.acceptSlash(m.slashSel)
 	}
 	items := m.filteredSlash()
@@ -407,11 +548,16 @@ func (m Model) filteredSlash() []slashItem {
 
 // slashExactlyTyped is grok-build's Enter rule: a token that already spells the
 // highlighted row is not completed again, it is run or sent. A bare "/" spells
-// nothing, so Enter there accepts the first row instead of sending "/".
+// nothing, so Enter there accepts the first row instead of sending "/". A
+// token that spells a builtin the host's catalog hides is run too
+// (slashTypedBuiltin).
 func (m Model) slashExactlyTyped() bool {
 	_, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset())
 	if !ok || name == "" {
 		return false
+	}
+	if _, ok := m.slashTypedBuiltin(); ok {
+		return true
 	}
 	items := m.filteredSlash()
 	if m.slashSel < 0 || m.slashSel >= len(items) {
@@ -423,6 +569,41 @@ func (m Model) slashExactlyTyped() bool {
 	// the menu rewriting a name that already works. name is non-empty here, so
 	// a row with no alias cannot match the "" qualifiedAlias returns.
 	return strings.EqualFold(name, it.Name) || strings.EqualFold(name, it.qualifiedAlias())
+}
+
+// slashTypedBuiltin is the builtin the token under the cursor spells in full
+// where the host's catalog has none to show (astra C3 T5): a name this
+// client's dispatch answers to (dispatchesBuiltin), which the menu built here
+// lists as craze's own row (localSlash) and the menu shown — the host's
+// catalog, projected — does not, as when a later host gives /help an action
+// this client does not know (hidden, P17) and offers a /helpful. Enter runs
+// it and Tab completes it, as they did when the menu was always built here
+// and the builtin's row was the first match: a fully typed /help opens help
+// rather than completing to /helpful. Only while the selection is still on the
+// first row — a row the user moved to is the row they meant — and only where
+// builtins are offered at all (slashBuiltinsEligible).
+//
+// With the catalog every host sends today the two menus are one list, so this
+// finds nothing and Enter and Tab are exactly what they were; a builtin the
+// menu built here does not list either — /plan on a session with no modes —
+// is completed as it always was.
+func (m Model) slashTypedBuiltin() (string, bool) {
+	value := m.input.Value()
+	start, _, name, ok := slashToken(value, m.composerCursorOffset())
+	if !ok || name == "" || m.slashSel != 0 || !slashBuiltinsEligible(value, start) {
+		return "", false
+	}
+	name = strings.ToLower(name)
+	if !m.dispatchesBuiltin(name) || !m.slashHosted() {
+		return "", false
+	}
+	// Case-insensitively, as the projection, the filter and dispatch all match
+	// names: a host's /HELP is the builtin it names (sol, C3 fix review).
+	builtin := func(it slashItem) bool { return it.Builtin && strings.EqualFold(it.Name, name) }
+	if slices.ContainsFunc(m.slashCatalog(), builtin) || !slices.ContainsFunc(m.projectSlash(m.localSlash()), builtin) {
+		return "", false
+	}
+	return name, true
 }
 
 // noAnswerRenameNote is /rename's note when SetTitle did not answer in time
@@ -812,6 +993,11 @@ func (m Model) acceptSlash(i int) Model {
 	if i < 0 || i >= len(items) {
 		return m
 	}
+	return m.acceptSlashRow(items[i])
+}
+
+// acceptSlashRow is acceptSlash for the row it, wherever it came from.
+func (m Model) acceptSlashRow(it slashItem) Model {
 	value := m.input.Value()
 	start, end, typed, ok := slashToken(value, m.composerCursorOffset())
 	if !ok {
@@ -820,7 +1006,7 @@ func (m Model) acceptSlash(i int) Model {
 	if end < len(value) && value[end] == ' ' {
 		end++
 	}
-	ins := "/" + slashAcceptName(items[i], typed) + " "
+	ins := "/" + slashAcceptName(it, typed) + " "
 	next := value[:start] + ins + value[end:]
 	m.input.SetValue(next)
 	m.setComposerCursor(next, start+len(ins))

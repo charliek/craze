@@ -382,9 +382,18 @@ func modeSlashRun(name string, advertised []string) SlashRun {
 // session and the stubs build their catalog through, so none of them derives
 // the inputs its own way. The capabilities are the snapshot's provider's.
 func SlashCatalogFor(snap Snapshot, skills []Skill) SlashCatalog {
+	return SlashCatalogWith(snap, snap.Provider.Capabilities(), skills)
+}
+
+// SlashCatalogWith is SlashCatalogFor under caps rather than the snapshot
+// provider's capabilities: the catalog a client with no catalog of its host's
+// builds itself (the TUI's localSlash, P14), from the capabilities its backend
+// advertised — over a socket, this binary's provider table need not be the
+// host's.
+func SlashCatalogWith(snap Snapshot, caps Capabilities, skills []Skill) SlashCatalog {
 	return BuildSlashCatalog(SlashInputs{
 		Provider:     snap.Provider.Name,
-		Capabilities: snap.Provider.Capabilities(),
+		Capabilities: caps,
 		Modes:        modeIDs(snap.Modes),
 		Commands:     snap.Commands,
 		Plugins:      snap.Plugins,

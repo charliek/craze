@@ -10,27 +10,16 @@ import (
 // provider data lives there.
 func homeDir() string { return agent.HomeDir() }
 
-func skillsToSlash(skills []agent.Skill) []slashItem {
-	out := make([]slashItem, 0, len(skills))
-	for _, sk := range skills {
-		out = append(out, slashItem{Name: sk.Name, Desc: sk.Description, Skill: true})
-	}
-	return out
-}
-
-func (m *Model) applySkills(skills []agent.Skill) {
-	m.skills = skillsToSlash(skills)
-}
-
-// rescanSkills walks the provider's filesystem roots. It runs at Start and
-// on a bare `/`; skills the agent advertises over ACP arrive as
-// available_commands_update and are merged by slashCatalog.
+// rescanSkills walks the provider's filesystem roots for the disk skills the
+// menu lists when it builds its own catalog (localSlash; plan 043 P14). Where
+// the menu draws from the host's catalog the host walks them (its scanner,
+// plan 043 P5) and these are not read. It runs when the session comes up
+// (sessionUp), so they are ready for any moment the menu has no catalog of
+// the host's — before the install, after a snapshot that left it out — when
+// the menu goes over from its host's catalog to its own (recompute), and on a
+// bare `/` while the menu builds its own (updateComposer). Skills the agent
+// advertises over ACP arrive as available_commands_update and are merged by
+// the builder.
 func (m *Model) rescanSkills() {
-	m.applySkills(agent.DiscoverSkills(m.providerValue(), m.cwd, homeDir()))
-}
-
-// scanDiskSkills is the cursor filesystem walk, kept for tests that pin
-// project-beats-home and the plugin skip without constructing a Model.
-func scanDiskSkills(workspace, home string) []slashItem {
-	return skillsToSlash(agent.DiscoverSkills(agent.CursorProvider(), workspace, home))
+	m.skills = agent.DiscoverSkills(m.providerValue(), m.cwd, homeDir())
 }

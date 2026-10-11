@@ -1711,6 +1711,26 @@ directory only when there is none — and on both, `user-invocable: false` in
 the frontmatter hides the skill from the menu the same way it hides it from
 the agent's own catalog.
 
+The menu is drawn from the session's [slash catalog](protocol.md#slash-catalog),
+which the session's host builds and publishes, so every client attached to the
+session starts from the same rows — and the TUI's menu is the one it built
+itself before there was a catalog. What each client shows differs by design:
+a client hides the rows it cannot run and adds rows of its own — the TUI adds
+`/sessions` where it has a session list, and shows `/btw` only on a session
+that answers side questions. The host walks the disk for skills when the
+session starts, when each turn ends (done, cancelled or failed), when the
+agent updates its command list, and when a client attaches to the session.
+**A skill saved while the session sits idle reaches the menu at the next of
+those**, not when you type `/`: let a turn finish, or attach to the session
+from another terminal with `craze attach`, and the menu updates in every
+client. Picking the session you are already in from the
+[session list](#session-list) does not attach again, so it does not pick the
+skill up. A session with no catalog from its host — one served by a craze from
+before the catalog, the moment before the session's catalog arrives, or a
+reconnect whose snapshot could not carry the catalog — gets the menu the TUI
+builds itself, as before: the TUI walks the disk when the session comes up,
+when it goes over to its own menu, and each time a bare `/` is typed.
+
 For Cursor, craze makes up the difference itself: it finds a plugin's
 commands and skills on disk and expands them into the prompt the way
 cursor's own TUI does, so `/watch-pr` and the rest of a plugin's commands

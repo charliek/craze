@@ -40,9 +40,11 @@ func TestTheEngineBackendSaysWhetherTheSessionPublishesSlash(t *testing.T) {
 // TestTheMirrorCarriesTheFoldsSlashCatalog (plan 043 P6): the TUI's mirror
 // reads the slash catalog from its own fold, like every settings section —
 // m.snap.Slash is the last slash section folded, a copy the delta it came in
-// cannot reach, and an empty section clears it. (The menu does not read it
-// yet; plan 043 C3 projects it.) Negative control: a recompute that leaves
-// Slash out of the snapshot it builds fails the first check.
+// cannot reach, and an empty section clears it. (The menu projects it where
+// the backend says the session publishes one, hostSlash; a catalog a
+// snapshot cut is held as none, TestTheMenuOverTheSocketIsTheSameWithAndWithout.)
+// Negative control: a recompute that leaves Slash out of the snapshot it
+// builds fails the first check.
 func TestTheMirrorCarriesTheFoldsSlashCatalog(t *testing.T) {
 	m := sized(t)
 	items := agent.SlashCatalogFor(stubOf(t, m).Snapshot(), []agent.Skill{{Name: "deploy", Description: "ship it"}}).Items

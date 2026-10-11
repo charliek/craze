@@ -24,6 +24,22 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   the alias may resolve to a newer model after OpenRouter moves the router. To
   stay on a numbered model, add it to `models.toml` with its wire id. See [The
   shipped catalog](../reference/configuration.md#the-shipped-catalog).
+- **A skill saved mid-session appears in the `/` menu at the session's next
+  turn end, not when you type `/`.** The session's host now builds the menu
+  (the [slash catalog](../reference/protocol.md#slash-catalog)) and walks the
+  disk for skills itself — at the start, after every turn, when the agent's
+  command list changes, and when a client attaches (`craze attach` from
+  another terminal) — so a bare `/` no longer rescans. A TUI attached to a session served by an older craze keeps
+  rescanning on a bare `/`, as before. See [Slash
+  commands](../reference/tui.md#slash-commands).
+- **For a client reading the session stream:** a delta carrying `commands`
+  or `plugins` now carries the `slash` section beside them (with
+  [`capabilities.slashCatalog`](../reference/protocol.md#capabilities)), a
+  change of the disk skills alone publishes `slash` alone, and an
+  `available_commands_update` identical to the last one publishes nothing — it
+  used to republish `commands` and `plugins` every time. Nothing else moved:
+  `commands` and `plugins` are what they were, the codec versions are
+  unchanged, and a client that ignores `slash` folds the same state.
 - **A native session starts on the first connected provider, in a fixed
   order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta,
   Anthropic, each on its own start model, unless you remembered a model with

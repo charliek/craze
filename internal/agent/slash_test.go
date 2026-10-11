@@ -448,6 +448,14 @@ func TestSlashCatalogForReadsTheSnapshot(t *testing.T) {
 	if slices.Contains(slashNames(SlashCatalogFor(Snapshot{}, nil)), "connect") {
 		t.Fatal("a cursor snapshot listed /connect")
 	}
+	// SlashCatalogWith gates on the capabilities it is handed, not the
+	// snapshot provider's: none here, so native's mode rows go.
+	if !slices.Contains(slashNames(got), "plan") {
+		t.Fatalf("fixture: native's catalog has no /plan: %v", slashNames(got))
+	}
+	if with := slashNames(SlashCatalogWith(snap, Capabilities{}, skills)); slices.Contains(with, "plan") || !slices.Contains(with, "connect") {
+		t.Fatalf("SlashCatalogWith under no capabilities listed %v", with)
+	}
 }
 
 // TestSlashItemHoldsNoReferences is what makes cloneSlash a deep copy (P6):

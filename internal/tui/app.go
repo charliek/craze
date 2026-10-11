@@ -701,7 +701,13 @@ type Model struct {
 	slashTop     int
 	slashKey     string
 	slashHideKey string
-	skills       []slashItem
+	// skills are the disk skills this client found itself (rescanSkills), for
+	// the catalog the menu builds where it has none of its host's (localSlash;
+	// plan 043 P14). slashWasHosted says the menu drew its host's catalog at
+	// the last recompute, so the one that finds it no longer does walks the
+	// disk again (recompute).
+	skills         []agent.Skill
+	slashWasHosted bool
 
 	pickingProvider bool
 	// pickingResume is the resume picker, the other pre-start dialog. It is
@@ -3581,8 +3587,12 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 		// A bare "/" coming under the cursor rescans the disk skills, so a
 		// skill saved since the session started is in the catalog the menu is
 		// about to draw. It is gated on the value changing — a keystroke, not
-		// cursor motion — so the bounded walk runs once per such key.
-		if _, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset()); ok && name == "" {
+		// cursor motion — so the bounded walk runs once per such key; and on
+		// the menu building its own catalog (plan 043 §3.4 D7): where it
+		// draws the host's, the skills are the host's to find, at its next
+		// trigger (a turn's end, a commands update, an attach), and a walk
+		// here would find what nothing reads.
+		if _, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset()); ok && name == "" && !m.slashHosted() {
 			m.rescanSkills()
 		}
 	}
@@ -5341,6 +5351,12 @@ func (m *Model) sessionUp() {
 	if !m.frameStart.IsZero() {
 		m.sessStart = m.frameStart
 	}
+	// The skills the menu lists where it builds its own catalog (localSlash).
+	// Scanned whether or not the host's catalog has arrived (plan 043 §3.4):
+	// one bounded walk per session, so the menu's own catalog is whole at any
+	// moment it has none of the host's — a host from before the catalog, or a
+	// reconnect whose snapshot left the catalog out (A12) — without waiting
+	// for a bare "/".
 	m.rescanSkills()
 }
 

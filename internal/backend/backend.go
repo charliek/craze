@@ -361,6 +361,14 @@ type SessionInfo struct {
 	// a session that is not craze's own and from a host from before the
 	// section: a client then builds its menu as it did without one.
 	SlashCatalog bool
+	// Stop says Stop ends the session (plan 030 §3.6a): true in process,
+	// where it is the engine's close, and over the socket the session
+	// capability stop, as the host sent it — false for a host that answers
+	// session.stop stop_unsupported (an older craze, a TUI-hosted session's
+	// socket). A slash row that requires stop (plan 043 P4) is shown only
+	// where it is true — bar /exit, the TUI's own quit, which detaches where
+	// the host cannot stop the session.
+	Stop bool
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon

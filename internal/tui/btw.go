@@ -86,11 +86,13 @@ const (
 
 // btwBuiltin is /btw's row (plan 040 §3.6): in the slash catalog where the
 // session answers side questions alone (btwOffered), after the mode rows and
-// before /exit (slashCatalog). builtinNamed never names it — like /connect,
-// where it is not offered a plugin's or the agent's /btw is what it always
-// was — so dispatch has its own gate (handleEnter).
+// before /exit. builtinNamed never names it — like /connect, where it is not
+// offered a plugin's or the agent's /btw is what it always was — so dispatch
+// has its own gate (handleEnter).
 //
-// Its name and description are agent's descriptor table's (plan 043 D1).
+// Its name and description are agent's descriptor table's (plan 043 D1),
+// whose row requires aside: the menu shows it where btwOffered says so, and
+// an agent's or a plugin's /btw in its place where it does not (projectSlash).
 var btwBuiltin = tableBuiltin("btw")
 
 // btwOffered reports whether this session has /btw: its backend says it

@@ -6,13 +6,17 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charliek/craze/internal/agent"
 )
 
-// The descriptor table moved to the agent package (plan 043 D1), and the host
-// now builds the catalog a client draws its menu from. These tests hold the
-// table and the builder to what this package dispatches and draws today, so C3
-// can switch the menu to the builder with nothing moving (P14, P16, P20).
+// The descriptor table moved to the agent package (plan 043 D1), the host
+// builds the catalog a client draws its menu from, and the menu here is that
+// catalog projected — the host's, or one built here by the same builder (C3).
+// These tests hold the table to what this package dispatches, and both of the
+// menu's paths to the menu as it was drawn before, so nothing moved (P14, P16,
+// P20).
 
 // TestSlashTableMatchesTheTUIsDispatch is P16's pin, and the rest of each
 // builtin's run against runBuiltin: a row's WhileWorking is what handleEnter
@@ -77,144 +81,231 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 	}
 }
 
-// tuiProjection is what a client that draws the TUI's menu from a catalog
-// does with it, as P4 and P13 lay it down: a /btw row (requires aside) only
-// where the backend serves side questions, /exit always (this client quits
-// on its own whatever the server serves), /sessions — its own row — before
-// /exit where it has a session list, and of each name the first row it shows.
-// It is a test's reading of the rules, for the parity check below; C3 writes
-// the menu's own.
-func tuiProjection(c agent.SlashCatalog, m Model) []slashItem {
-	btw := m.btwOffered()
-	seen := map[string]bool{}
-	var out []slashItem
-	for _, it := range c.Items {
-		if it.Requires == agent.SlashRequiresAside && !btw {
-			continue
+// todaysSlashCatalog is the menu as this package built it before plan 043 C3
+// moved it onto the builder — slashCatalog's code at 5ca125e, frozen here,
+// with m.skills read as the agent.Skill it now is. The parity tests hold both
+// of the menu's paths, the host's catalog and the one built here, to it: to
+// what users had, not only to each other.
+func todaysSlashCatalog(m Model) []slashItem {
+	modes, todos, btw := m.showModes(), m.showTodos(), m.btwOffered()
+	var items []slashItem
+	for _, it := range builtinSlash() {
+		switch it.Name {
+		case "plan", "ask", "agent":
+			if !modes {
+				continue
+			}
+		case "tasks":
+			if !todos {
+				continue
+			}
+		case "exit":
+			if btw {
+				items = append(items, btwBuiltin)
+			}
+			if m.sessions != nil {
+				items = append(items, sessionsBuiltin)
+			}
 		}
-		if it.Source == agent.SlashSourceBuiltin && it.Name == "exit" && m.sessions != nil {
-			out = append(out, sessionsBuiltin)
-			seen[sessionsBuiltin.Name] = true
+		items = append(items, it)
+		if it.Name == "model" && m.connectOffered() {
+			items = append(items, connectBuiltin)
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, it := range items {
+		seen[it.Name] = struct{}{}
+	}
+	add := func(it slashItem) {
+		if !slashNameOK(it.Name) {
+			return
 		}
 		n := strings.ToLower(it.Name)
-		if seen[n] {
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		items = append(items, it)
+	}
+	for _, c := range m.snap.Commands {
+		add(slashItem{Name: c.Name, Desc: sanitizeLine(c.Description)})
+	}
+	for _, p := range m.snap.Plugins {
+		if !slashNameOK(p.Qualified) || !slashNameOK(p.Plugin) {
 			continue
 		}
-		seen[n] = true
-		out = append(out, slashItem{
-			Name: it.Name, Desc: it.Description,
-			Builtin: it.Source == agent.SlashSourceBuiltin, Skill: it.Source == agent.SlashSourceSkill,
-			Plugin: it.Plugin, Qualified: it.Qualified,
-		})
+		add(slashItem{Name: p.Display, Desc: sanitizeLine(p.Description), Plugin: sanitizeLine(p.Plugin), Qualified: sanitizeLine(p.Qualified)})
 	}
-	return out
+	for _, sk := range m.skills {
+		add(slashItem{Name: sk.Name, Desc: sanitizeLine(sk.Description), Skill: true})
+	}
+	return items
 }
 
-// slashInputsOf is the builder's inputs as this model holds them.
-func slashInputsOf(m Model) agent.SlashInputs {
-	skills := make([]agent.Skill, 0, len(m.skills))
-	for _, it := range m.skills {
-		skills = append(skills, agent.Skill{Name: it.Name, Description: it.Desc})
-	}
-	return agent.SlashInputs{
-		Provider:     m.snap.Provider.Name,
-		Capabilities: m.caps(),
-		Modes:        modeIDs(m.snap.Modes),
-		Commands:     m.snap.Commands,
-		Plugins:      m.snap.Plugins,
-		Skills:       skills,
-	}
-}
-
-// rowKey is a menu row as everything downstream reads it: the qualified
-// spelling only through qualifiedAlias, which is the one rule that reads it.
+// rowKey is a menu row as everything downstream reads it — the filter, the
+// accept, the Enter rule, the band and /help: its name, its description bare
+// and labelled, its plugin, its second spelling (only through qualifiedAlias,
+// the one rule that reads it) and its flags.
 func rowKey(it slashItem) string {
 	return strings.Join([]string{it.Name, it.Desc, it.labeledDesc(), it.Plugin, it.qualifiedAlias(),
 		map[bool]string{true: "builtin", false: ""}[it.Builtin], map[bool]string{true: "skill", false: ""}[it.Skill]}, "\x00")
 }
 
-// TestTheBuilderReproducesTheTUIsCatalog is the parity C3 rests on: over the
-// same session — advertised commands, plugin rows, disk skills, names that
-// collide with builtins and with each other, untypable names — the builder's
-// catalog, projected as a client of the TUI's kind would, is the TUI's
-// slashCatalog row for row: on cursor, on a session that answers side
-// questions, on native, with no modes, and with a session list.
-func TestTheBuilderReproducesTheTUIsCatalog(t *testing.T) {
-	commands := []string{"research", "btw", "exit", "help", "sessions", "two words", "Deploy"}
+// sameMenu fails t unless got is want row for row (rowKey), saying what of.
+func sameMenu(t *testing.T, what string, got, want []slashItem) {
+	t.Helper()
+	var g, w []string
+	for _, it := range got {
+		g = append(g, rowKey(it))
+	}
+	for _, it := range want {
+		w = append(w, rowKey(it))
+	}
+	if !slices.Equal(g, w) {
+		t.Fatalf("%s:\n  %s\nwant:\n  %s", what,
+			strings.ReplaceAll(strings.Join(g, "\n  "), "\x00", " | "),
+			strings.ReplaceAll(strings.Join(w, "\n  "), "\x00", " | "))
+	}
+}
+
+// menuSession is one of the sessions the parity test draws the menu over: a
+// Stub (publishing the slash catalog or not) wrapped as the case needs, with
+// or without a session list.
+type menuSession struct {
+	name string
+	// wrap is the session over the Stub (nil: the Stub itself); prep sets the
+	// Stub up before it starts.
+	wrap func(*Stub) agent.Session
+	prep func(*Stub)
+	list bool
+	// commands and entries decorate the session after it starts; skills are
+	// written under .cursor/skills or .grok/skills as the provider walks.
+	commands []string
+	entries  []agent.PluginEntry
+	skills   map[string]string
+}
+
+// startMenuSession starts c's session, publishing the catalog or not, in
+// workspace ws, and decorates it: the agent's commands, the plugin rows the
+// live session's resolver names, and the disk skills — found by this client's
+// own walk of ws where the session publishes no catalog, and handed to the
+// Stub as its host's scan where it does (from skillsWS, a workspace the
+// model never walks, so a skill on the hosted menu can only have come from the
+// catalog).
+func startMenuSession(t *testing.T, c menuSession, publish bool, ws, skillsWS string) Model {
+	t.Helper()
+	stub := NewStub()
+	stub.PublishSlash = publish
+	if c.prep != nil {
+		c.prep(stub)
+	}
+	var sess agent.Session = stub
+	if c.wrap != nil {
+		sess = c.wrap(stub)
+	}
+	cfg := Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Model: "grok", Yolo: true}
+	if c.list {
+		cfg.Sessions = &fakeSessions{}
+	}
+	tm, _ := New(cfg).Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m := startedLikeInit(t, tm.(Model))
+	cmds := make([]agent.CommandInfo, 0, len(c.commands))
+	for _, n := range c.commands {
+		// Descriptions the menu has to fold — a tab, a newline, an escape
+		// sequence, runs of spaces — so the comparison is over DisplayLine's
+		// work and not over strings that are already one clean line.
+		cmds = append(cmds, agent.CommandInfo{Name: n, Description: "advertised\t" + n + "\n\x1b[1mbold\x1b[0m  twice"})
+	}
+	stub.SetCommands(cmds)
+	stub.SetPlugins(agent.ResolvePluginNames(c.entries, c.commands, false))
+	if publish {
+		stub.SetSkills(agent.DiscoverSkills(m.providerValue(), skillsWS, homeDir()))
+	} else {
+		m.rescanSkills()
+	}
+	return applyPending(t, m)
+}
+
+// TestTheMenuIsTheSameWithTheSectionAndWithout is P14's bar (plan 043 §5 C3):
+// over one session's facts — advertised commands, plugin rows (a collision
+// qualified both ways, one named like a builtin, one shadowed by a command),
+// disk skills (one shadowed by a command, one by a plugin row), names that
+// collide with builtins and with each other, untypable names — the menu the
+// host's slash section projects to and the menu built here without one are
+// row for row the menu this package built before the catalog existed: on
+// cursor, on a session that answers side questions, on native, with no modes,
+// with a session list, and on grok, whose skills keep their frontmatter
+// names. The hosted model's own walk finds no skill at all, so the skill rows
+// on its menu came through the section; and each model says which path it
+// drew.
+//
+// Negative controls (each run by hand, each fails here): a projection that
+// ignores requires (every case without side questions gains the builtin /btw
+// over the agent's); one that adds no /sessions row, or adds it without
+// hiding the agent's ("a session list"); one that maps no plugin label (every
+// case).
+func TestTheMenuIsTheSameWithTheSectionAndWithout(t *testing.T) {
+	commands := []string{"research", "btw", "exit", "help", "sessions", "two words", "Deploy", "Plan"}
 	entries := []agent.PluginEntry{
-		pluginEntry("probe-plugin", "probe-echo", "the plugin one"),
+		pluginEntry("probe-plugin", "probe-echo", "the plugin\none"),
 		pluginEntry("helper", "help", "a plugin help"),
 		pluginEntry("alpha", "rescue", "one"),
 		pluginEntry("beta", "rescue", "the other"),
 		pluginEntry("side", "btw", "a plugin btw"),
 		pluginEntry("ops", "deploy", "shadowed by the advertised Deploy"),
 	}
-	// Descriptions the menu has to fold — a newline, a tab, an escape
-	// sequence, runs of spaces — so the comparison is over DisplayLine's work
-	// and not over strings that are already one clean line.
-	entries[0].Description = "the plugin\none"
-	decorate := func(t *testing.T, m Model, stub *Stub) Model {
-		t.Helper()
-		cmds := make([]agent.CommandInfo, 0, len(commands))
-		for _, n := range commands {
-			cmds = append(cmds, agent.CommandInfo{Name: n, Description: "advertised\t" + n + "\n\x1b[1mbold\x1b[0m  twice"})
-		}
-		stub.SetCommands(cmds)
-		stub.SetPlugins(agent.ResolvePluginNames(entries, commands, false))
-		m = republish(t, m)
-		root := filepath.Join(m.cwd, ".cursor", "skills")
-		writeSkillMD(t, filepath.Join(root, "on-disk", "SKILL.md"), "---\nname: on-disk\ndescription: found\tby the   walk\n---\n")
-		writeSkillMD(t, filepath.Join(root, "research", "SKILL.md"), "---\nname: research\ndescription: shadowed\n---\n")
-		writeSkillMD(t, filepath.Join(root, "probe-echo", "SKILL.md"), "---\nname: probe-echo\ndescription: shadowed by the plugin\n---\n")
-		m.rescanSkills()
-		return m
+	cursorSkills := map[string]string{
+		".cursor/skills/on-disk/SKILL.md":    "---\nname: on-disk\ndescription: found\tby the   walk\n---\n",
+		".cursor/skills/research/SKILL.md":   "---\nname: research\ndescription: shadowed\n---\n",
+		".cursor/skills/probe-echo/SKILL.md": "---\nname: probe-echo\ndescription: shadowed by the plugin\n---\n",
+		".agents/skills/fromdir/SKILL.md":    "---\ndescription: named by its directory\n---\n",
 	}
-	for _, tc := range []struct {
-		name  string
-		model func(t *testing.T) Model
-	}{
-		{"cursor", func(t *testing.T) Model {
-			m, stub := slashModel(t, 100, 30)
-			return decorate(t, m, stub)
-		}},
-		{"side questions", func(t *testing.T) Model {
-			m, stub := asideModel(t)
-			return decorate(t, m, stub)
-		}},
-		{"native", func(t *testing.T) Model {
-			stub := nativeStub()
-			isolateSkillsHome(t)
-			return decorate(t, startStub(t, stub, t.TempDir(), 100, 30), stub)
-		}},
-		{"no modes", func(t *testing.T) Model {
-			m, stub := slashModel(t, 100, 30)
-			m = decorate(t, m, stub)
-			m.snap.Modes = nil
-			return m
-		}},
-		{"a session list", func(t *testing.T) Model {
-			m, _, stub := sessModel(t, 100, 30)
-			return decorate(t, m, stub)
-		}},
+	native := func(s *Stub) { s.SetProvider(agent.NativeProvider()) }
+	for _, c := range []menuSession{
+		{name: "cursor"},
+		{name: "side questions", wrap: func(s *Stub) agent.Session { return AsidingStub{Stub: s} }},
+		{name: "native", prep: native},
+		{name: "no modes", prep: func(s *Stub) { s.snap.Modes = nil }},
+		{name: "a session list", list: true},
+		{name: "grok", prep: func(s *Stub) { s.SetProvider(agent.GrokProvider()) },
+			wrap: func(s *Stub) agent.Session { return AsidingStub{Stub: s} },
+			skills: map[string]string{
+				".grok/skills/dir-alpha/SKILL.md":    "---\nname: fm-alpha\ndescription: grok keeps the frontmatter name\n---\n",
+				".agents/skills/agentskill/SKILL.md": "---\nname: agentskill\ndescription: from .agents\n---\n",
+			}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := tc.model(t)
-			want := m.slashCatalog()
-			got := tuiProjection(agent.BuildSlashCatalog(slashInputsOf(m)), m)
-			var w, g []string
+		t.Run(c.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			c.commands, c.entries = commands, entries
+			if c.skills == nil {
+				c.skills = cursorSkills
+			}
+			skillsWS := t.TempDir()
+			for rel, body := range c.skills {
+				writeSkillMD(t, filepath.Join(skillsWS, filepath.FromSlash(rel)), body)
+			}
+			local := startMenuSession(t, c, false, skillsWS, "")
+			hosted := startMenuSession(t, c, true, t.TempDir(), skillsWS)
+			if local.slashHosted() || !hosted.slashHosted() {
+				t.Fatalf("fixture: the local model draws the host's catalog %v, the hosted one %v", local.slashHosted(), hosted.slashHosted())
+			}
+			if len(hosted.skills) != 0 {
+				t.Fatalf("fixture: the hosted model's own walk found %+v", hosted.skills)
+			}
+			want := todaysSlashCatalog(local)
+			sameMenu(t, "the menu built here", local.slashCatalog(), want)
+			sameMenu(t, "the menu the host's section projects to", hosted.slashCatalog(), want)
+			var skills, plugins int
 			for _, it := range want {
-				w = append(w, rowKey(it))
+				if it.Skill {
+					skills++
+				}
+				if it.Plugin != "" {
+					plugins++
+				}
 			}
-			for _, it := range got {
-				g = append(g, rowKey(it))
-			}
-			if !slices.Equal(g, w) {
-				t.Fatalf("the builder's catalog, projected:\n  %s\nthe TUI's:\n  %s",
-					strings.ReplaceAll(strings.Join(g, "\n  "), "\x00", " | "),
-					strings.ReplaceAll(strings.Join(w, "\n  "), "\x00", " | "))
-			}
-			if len(want) < 15 {
-				t.Fatalf("fixture: the TUI's catalog has %d rows; the decoration did not land", len(want))
+			if len(want) < 15 || (c.name != "native" && skills < 2) || plugins < 4 {
+				t.Fatalf("fixture: the menu has %d rows, %d skills, %d plugin rows; the decoration did not land", len(want), skills, plugins)
 			}
 		})
 	}
