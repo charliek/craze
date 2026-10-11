@@ -28,27 +28,31 @@ import (
 // idle grace, which is long enough never to end a fixture. Its id, version
 // and this process's pid are named by placeholder in what it writes
 // (fixtureRunner.hubToWire). A fixture whose host line says hubCreates (22,
-// 26) has a hub that creates sessions, each host it spawns this test binary
-// run as a fake craze serve (spawnedChild, below), and one whose host line
-// carries createOptions (26) a hub that serves it to sessions.createOptions.
+// 26, 32) has a hub that creates sessions, each host it spawns this test
+// binary run as a fake craze serve (spawnedChild, below), one whose host line
+// carries createOptions (26) a hub that serves it to sessions.createOptions,
+// and one whose host line says createTitle (plan 043's 32) a hub whose create
+// takes a title, which the fake craze serve seeds (its --title).
 
 func init() { fixtureHub = startFixtureHub }
 
 // startFixtureHub runs a hub over env and answers its socket and its id, from
 // its ready line; it is stopped — and its Run waited for — when the test ends.
-// A hub that creates answers sessions.createOptions with options, as it
-// stands, when it is not nil (fixture 26); options without creates is the
-// fixture's mistake: an answer is part of what a hub that creates is given
-// (hub.Creates.Options).
-func startFixtureHub(t *testing.T, env rundir.Env, creates bool, options *protocol.CreateOptionsResult) (string, string) {
+// A hub that creates answers sessions.createOptions with serves.options, as
+// it stands, when it is not nil (fixture 26), and takes a create's title when
+// serves.title says so (fixture 32); either without creates is the fixture's
+// mistake: both are part of what a hub that creates is given
+// (hub.Creates.Options, Title).
+func startFixtureHub(t *testing.T, env rundir.Env, serves hubServes) (string, string) {
 	t.Helper()
 	o := hub.Options{
 		Env:       env,
 		Codecs:    protocol.Codecs{Event: agent.EventCodecVersion, Snapshot: transcript.SnapshotVersion},
 		IdleGrace: time.Hour,
 	}
-	if options != nil && !creates {
-		t.Fatal("the fixture's host line names createOptions without hubCreates")
+	creates, options := serves.creates, serves.options
+	if (options != nil || serves.title) && !creates {
+		t.Fatal("the fixture's host line names createOptions or createTitle without hubCreates")
 	}
 	if creates {
 		spawnAsFakeHosts(t, env)
@@ -58,6 +62,7 @@ func startFixtureHub(t *testing.T, env rundir.Env, creates bool, options *protoc
 				_, err := agent.ProviderByName(id)
 				return err == nil
 			},
+			Title: serves.title,
 		}
 		if options != nil {
 			answer := *options

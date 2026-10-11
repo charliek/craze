@@ -5370,10 +5370,10 @@ func indexWriteText(err error) string {
 	return err.Error()
 }
 
-// titleRuneCap is how long a session title may be in the index, which /rename
-// caps a title at before it asks: engine.IndexTitleRunes, the cap every host
-// writes a row's title through (engine.IndexTitleLine), and a test holds the two
-// rules together.
+// titleRuneCap is how long a session title may be in the index:
+// engine.IndexTitleRunes, the cap every host writes a row's title through
+// (engine.IndexTitleLine) and /rename's title is cut to (engine.NormalizeTitle,
+// plan 043 P9); a test holds this package's own sanitizeLine and cap to both.
 const titleRuneCap = engine.IndexTitleRunes
 
 func capRunes(s string, n int) string {

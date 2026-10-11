@@ -207,6 +207,12 @@ func (e *WedgedError) Error() string {
 	return fmt.Sprintf("the hub (pid %d) does not answer, and %s, so it is not replaced", e.PID, e.Why)
 }
 
+// lacksCreateTitle is a hub without the capability createTitle (plan 043
+// P11) — one from before titles — in LacksError's words: craze new --title
+// then says "this hub (craze …) cannot set a title at create", never the
+// hub's unknown_field, and never creates the session untitled.
+const lacksCreateTitle = "set a title at create"
+
 // missing is what have lacks of need, in LacksError's words.
 func missing(have, need protocol.ConnectionCapabilities) []string {
 	var out []string
@@ -217,6 +223,7 @@ func missing(have, need protocol.ConnectionCapabilities) []string {
 	}
 	check(need.SessionCreate, have.SessionCreate, "create sessions")
 	check(need.CreateOptions, have.CreateOptions, lacksCreateOptions)
+	check(need.CreateTitle, have.CreateTitle, lacksCreateTitle)
 	check(need.RosterSubscribe, have.RosterSubscribe, "subscribe to the session roster")
 	check(need.Connect, have.Connect, "connect to a session")
 	check(need.Multiplex, have.Multiplex, "multiplex sessions")

@@ -96,6 +96,15 @@ func sanitizeText(s string) string {
 	return b.String()
 }
 
+// SanitizeText is sanitizeText for a package that must make a string into
+// exactly what a session will store of it (plan 043 P9, review C7):
+// engine.NormalizeTitle, which runs it first, so that the title the hub hashes
+// and indexes, craze serve seeds and the session finally stores — through
+// SetTitle and a new session's seed, both of which run sanitizeText — are one
+// string, byte for byte. On a string it has already scrubbed it is the
+// identity.
+func SanitizeText(s string) string { return sanitizeText(s) }
+
 // sanitizeLine is sanitizeText folded onto one line: every run of whitespace,
 // newlines and tabs included, collapses to a single space and the ends are
 // trimmed. It is what a value has to survive before it can go inside a tag

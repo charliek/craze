@@ -186,12 +186,17 @@ One JSON object per line:
   under another that resolves to the same directory, cursor included even
   though its own `session/load` is permissive across directories.
 - `title` is the session's stored name: the agent's own title, the first
-  line of the first prompt as a fallback, or a `/rename`. `pinned` marks a
-  `/rename`, which always wins over a later agent title.
+  line of the first prompt as a fallback, or a `/rename` — or the title the
+  session was created with ([`craze new --title`](cli.md#craze-new), a
+  [`session.create`](protocol.md#sessioncreate) `title`), written as a
+  `/rename`'s is. `pinned` marks a `/rename` (or that created title), which
+  always wins over a later agent title.
 - A row exists only once there is something to show it for: craze creates
   it on the session's first prompt or its first agent-supplied title,
-  whichever comes first — never merely on start — so a session started and
-  quit without a prompt leaves nothing behind.
+  whichever comes first — never merely on start, unless the session was
+  created with a title, whose row is written as soon as the session has
+  started — so a session started and quit without a prompt or a title leaves
+  nothing behind.
 - The index is capped at 500 rows; a write past the cap drops the oldest
   rows by `updatedAt`.
 - An unknown provider id already in the file (written by a newer craze) is

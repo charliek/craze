@@ -93,3 +93,18 @@ func TestArgsPassOutliveSpawnerOnlyWhenSet(t *testing.T) {
 		t.Fatalf("a spawn not for a reload passes --outlive-spawner: %q", argv)
 	}
 }
+
+// TestArgsPassTheTitleOnlyWhenSet (plan 043 D8): a titled create's spawn —
+// the hub's, craze new --wait's — hands its host --title, spelled
+// --flag=value so a title that looks like a flag stays a value; every other
+// spawn passes none.
+func TestArgsPassTheTitleOnlyWhenSet(t *testing.T) {
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", Title: "-fix the build"}); !slices.Contains(argv, "--title=-fix the build") {
+		t.Fatalf("%q lacks --title=-fix the build", argv)
+	}
+	for _, a := range Args(Spec{HostID: "0123456789ab", Log: "/l", RequestID: "r", RequestHash: "h"}) {
+		if strings.HasPrefix(a, "--title") {
+			t.Fatalf("an untitled spawn passes %s", a)
+		}
+	}
+}

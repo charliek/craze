@@ -188,7 +188,8 @@ type session struct {
 	catalogAbort chan struct{}
 	// titlePinned is /rename's pin: once set, an agent session_info_update no
 	// longer replaces the title. Options.TitlePinned seeds it on a load, so
-	// the pin survives any number of --continues. Guarded by s.mu.
+	// the pin survives any number of --continues, and on a new session
+	// created with a title (newSession, plan 043 P8). Guarded by s.mu.
 	titlePinned bool
 	// replayUser coalesces a replayed main-session user_message_chunk. The
 	// agents split a prompt over several chunks and craze has to draw exactly
@@ -401,8 +402,32 @@ func newSession(opts Options) *session {
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
+	// A new session created with a title (plan 043 D8, P8) is named from
+	// here, and pinned: before Start, so before the engine over this session
+	// is published — the first state and roster row a host serves have it —
+	// and the session/new install keeps it (the install's title rule below).
+	// No delta: none can be committed ahead of the engine's observer, and the
+	// install delta, the first one any client folds, carries it. A load seeds
+	// its row's title in loadSession instead, ahead of its replay bracket.
+	seedNewTitle(&s.snap, &s.titlePinned, opts)
 	s.scanner = newSkillScanner(s.scanSkills, s.applySkills)
 	return s
+}
+
+// seedNewTitle is a NEW session's title seed (plan 043 P8; Options.Title):
+// its title as the ingestion scrub leaves it — the one SetTitle stores — and
+// its pin, when it was built with one; nothing for a load (LoadSessionID),
+// whose seed is its replay's, nor for a session given no title. Both
+// sessions, live and native, call it from their constructors, holding no
+// lock: nothing can reach the session yet.
+func seedNewTitle(snap *Snapshot, pinned *bool, opts Options) {
+	if opts.LoadSessionID != "" {
+		return
+	}
+	if title := sanitizeText(opts.Title); title != "" {
+		snap.Title = title
+		*pinned = opts.TitlePinned
+	}
 }
 
 // provider is the agent behind this session; nil Options.Provider is cursor.
@@ -793,7 +818,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// craze's own --mode/--model tail outranks a mark for its section: it is the
 	// LAST thing craze told the agent, whereas an update that arrived in this
 	// window may be the agent announcing the value it held before.
-	if s.agentWrote.title {
+	//
+	// A PINNED title is kept the same way (plan 043 P8): the title a create
+	// seeded (newSession) — session/new's reply names no session, and
+	// installing its "" over the user's name would drop it from the snapshot
+	// and the install delta alike. (A SetTitle made on the session itself
+	// ahead of the install is kept by the same rule; none comes through the
+	// engine, which refuses a rename while the session starts.) An agent's
+	// title in this window never got past the pin (onUpdate), so what is kept
+	// is the user's.
+	if s.agentWrote.title || s.titlePinned {
 		snap.Title = s.snap.Title
 	}
 	if s.agentWrote.mode && s.opts.Mode == "" {

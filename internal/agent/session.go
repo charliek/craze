@@ -970,6 +970,15 @@ type Options struct {
 	// before the replay. No agent replays a title (plan 013 §2.1), so the
 	// index row craze loaded the id from is the only place a resumed
 	// session's title can come from.
+	//
+	// A NEW session (no LoadSessionID) takes them too (plan 043 D8, P8): a
+	// session created with a title — session.create's, craze serve --title —
+	// is named from the moment it is built, so the very first snapshot,
+	// state and roster row a host serves carry it, before Start has run; its
+	// session/new install keeps a pinned title where it would otherwise
+	// install the reply's none, and the install delta carries it. Pinned,
+	// neither an agent's session_info_update nor native's first-prompt title
+	// replaces it, exactly as after a /rename.
 	Title       string
 	TitlePinned bool
 	// NoPrimary builds the session's event log with no primary send

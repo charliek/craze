@@ -437,6 +437,20 @@ func (s *Stub) SetTitle(cause, title string) error {
 	return nil
 }
 
+// SeedTitle is a session created with a title (plan 043 D8; agent.Options'
+// Title and TitlePinned on a new session): Snapshot.Title, pinned as SetTitle
+// pins it, from before Start — so the first state and roster row an engine
+// over it serves carry it — and said by no delta of its own: an
+// InstallOnStart Stub's install carries it, as the live session's install
+// does. Test set-up, like AgentTitle: it publishes nothing. The fake host's
+// Options.Title is its user (a hub-created host's --title).
+func (s *Stub) SeedTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Title = title
+	s.titlePinned = true
+}
+
 // AgentTitle is a session_info_update: the agent's own title, which a pin from
 // SetTitle refuses. It is how a test reaches the live session's rule without
 // an agent.

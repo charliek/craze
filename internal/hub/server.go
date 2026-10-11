@@ -383,9 +383,12 @@ func (c *conn) hello(req *request) bool {
 	caps := protocol.HubCapabilities()
 	// A hub given no way to start a host creates nothing (Options.Creates),
 	// and one given no answer to sessions.createOptions says nothing of it:
-	// createOptions is omitted when false (plan 036 §3.4).
+	// createOptions is omitted when false (plan 036 §3.4). createTitle is
+	// said only by a hub whose hosts take a title (Creates.Title, plan 043
+	// D8), and omitted otherwise in the same way.
 	caps.SessionCreate = h.cr != nil
 	caps.CreateOptions = h.options() != nil
+	caps.CreateTitle = h.cr != nil && h.cr.o.Title
 	return c.reply(req.id, protocol.HubHelloResult{
 		Protocol: version,
 		Endpoint: protocol.Endpoint{Kind: protocol.EndpointHub, HostID: h.id,

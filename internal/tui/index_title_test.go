@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -15,9 +16,12 @@ import (
 // title with — writes a session-index title through it: the engine's fold is
 // internal/transcript's transcription of ansi.Strip, so it is held here, byte
 // for byte, against what this package's own sanitizeLine and cap make of the
-// same string — the rule /rename still normalises a title with before it asks
+// same string — the rule /rename normalised a title with before it asked
 // (slash.go), and the one every row in the file was written with before the
-// move. The inputs are the sanitize drift guard's (seedSanitizeStrings,
+// move — and so is engine.NormalizeTitle (plan 043 P9), the session's scrub
+// and then the same rule, trimmed after the cut, which /rename and every
+// create's title now go through. The
+// inputs are the sanitize drift guard's (seedSanitizeStrings,
 // randSanitizeString), plus titles long enough to be capped, in runes that
 // are wider than a byte.
 func TestTheEnginesIndexTitleIsTheTUIs(t *testing.T) {
@@ -29,6 +33,15 @@ func TestTheEnginesIndexTitleIsTheTUIs(t *testing.T) {
 		want := capRunes(sanitizeLine(s), titleRuneCap)
 		if got := engine.IndexTitleLine(s); got != want {
 			t.Fatalf("engine.IndexTitleLine(%q) = %q, the TUI's rule %q", s, got, want)
+		}
+		// engine.NormalizeTitle (plan 043 P9), which /rename now folds its
+		// argument through and every create's title goes through: the
+		// session's own ingestion scrub first (review C7: the title is what
+		// the session will store), then this same rule, the ends trimmed
+		// after the cut — and nothing else.
+		norm := strings.TrimSpace(capRunes(sanitizeLine(agent.SanitizeText(s)), titleRuneCap))
+		if got := engine.NormalizeTitle(s); got != norm {
+			t.Fatalf("engine.NormalizeTitle(%q) = %q, the TUI's rule trimmed %q", s, got, norm)
 		}
 	}
 	for _, s := range seedSanitizeStrings() {

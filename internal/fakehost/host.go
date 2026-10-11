@@ -141,6 +141,12 @@ type Options struct {
 	// RequestID and RequestHash are written into a registered Host's entry
 	// (rundir.Entry): the hub's session.create that spawned it. "" for none.
 	RequestID, RequestHash string
+	// Title is the title every incarnation's session is created with (plan
+	// 043 D8; tui.Stub.SeedTitle): named and pinned from before its start, so
+	// its sessions.list row and its install carry it — a spawned host's
+	// --title (RunSpawned), the hub's session.create's. "" names none, the
+	// wire of every fixture from before it.
+	Title string
 }
 
 func (o Options) withDefaults() Options {
@@ -347,6 +353,9 @@ func (h *Host) newIncarnation() error {
 	}
 	if len(h.opts.Plugins) > 0 {
 		stub.SeedPlugins(h.opts.Plugins)
+	}
+	if h.opts.Title != "" {
+		stub.SeedTitle(h.opts.Title)
 	}
 	// Before Start, which reads it for the install (Options.Slash).
 	stub.PublishSlash = h.opts.Slash

@@ -23,10 +23,12 @@ import (
 
 // SpawnArgs is what RunSpawned takes of craze serve's command line, as
 // internal/hostspawn.Args writes it (--flag=value): the host's id, the
-// session's directory, provider, model and effort, and the create's request.
+// session's directory, provider, model and effort, the create's request, and
+// the session's title (plan 043 D8).
 type SpawnArgs struct {
 	HostID, Workspace, Provider, Model, Effort string
 	RequestID, RequestHash                     string
+	Title                                      string
 }
 
 // ParseSpawnArgs reads argv — craze serve's command line, its first word
@@ -53,6 +55,8 @@ func ParseSpawnArgs(argv []string) SpawnArgs {
 			a.RequestID = v
 		case "--request-hash":
 			a.RequestHash = v
+		case "--title":
+			a.Title = v
 		}
 	}
 	return a
@@ -63,7 +67,9 @@ const spawnedVersion = "0.0.0-fakehost"
 
 // RunSpawned runs a fake host for a's command line in this process, as
 // craze serve would run for it: o with a's host id, workspace and request
-// (its session id "session-<hostId>" when o names none), prepared (prepare,
+// (its session id "session-<hostId>" when o names none) and a's title when o
+// names none — the title craze serve would seed, pinned, before it serves
+// (plan 043 P8) — prepared (prepare,
 // when set, before anything can reach it), registered in env and served; its
 // ready line — ok, its host id, socket, session and craze version — written
 // on the spawner's ready pipe (CRAZE_READY_FD) once it is listed; then served
@@ -76,6 +82,9 @@ func RunSpawned(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host), sig
 		return err
 	}
 	o.HostID, o.Workspace, o.RequestID, o.RequestHash = a.HostID, a.Workspace, a.RequestID, a.RequestHash
+	if o.Title == "" {
+		o.Title = a.Title
+	}
 	if o.CrazeSessionID == "" {
 		o.CrazeSessionID = "session-" + a.HostID
 	}

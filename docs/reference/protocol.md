@@ -175,7 +175,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -200,6 +200,14 @@ hub given no answer to it are byte for byte what they were. Absent means an
 older hub (or one that cannot answer): a client makes no call. A client built
 before it reads this `hello` as it always has, because a client ignores a
 result member it does not know ([above](#tolerant-inbound-strict-outbound)).
+
+`createTitle` says the hub's [`session.create`](#sessioncreate) takes a
+`title`, the session's name from its start. It is omitted when `false` in the
+same way: absent on a host and on a hub from before it, which refuses a
+create naming a `title` `unknown_field`. A client with a title to set checks
+it first — `craze new --title` asks the hub for it and reports an older hub
+as one that "cannot set a title at create", never sending the title there and
+never creating the session untitled.
 
 ### Client ids and resume
 
@@ -476,7 +484,7 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
-| `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?` (no `sessionId`, no `commandId`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
+| `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?`, `title?` (no `sessionId`, no `commandId`; `title` where `hello` says `createTitle`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 | `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
@@ -731,7 +739,7 @@ host the hub spawns (`craze serve`, as any launch's), answered **once the
 session has started**.
 
 ```json
-{"jsonrpc":"2.0","id":"2","method":"session.create","params":{"cwd":"/home/me/projects/lumen","prompt":"fix the flaky test","provider":"grok","effort":"high","requestId":"new-9c1f04ab7d2e3a10"}}
+{"jsonrpc":"2.0","id":"2","method":"session.create","params":{"cwd":"/home/me/projects/lumen","prompt":"fix the flaky test","provider":"grok","effort":"high","requestId":"new-9c1f04ab7d2e3a10","title":"Flaky test"}}
 {"jsonrpc":"2.0","id":"2","result":{"session":{"hostId":"0a1b2c3d4e5f","sessionId":"01a0f89a-4db5-7621-8335-63ae8327352e","host":{...},"status":"reachable","approximate":false,"row":{...}},"prompt":"accepted"}}
 ```
 
@@ -750,6 +758,34 @@ setting. No params member names an agent binary: the host finds
 its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's
 `--agent-bin` nor `CRAZE_AGENT_BIN`. `requestId` (1–64 of `[A-Za-z0-9._-]`)
 makes the create idempotent (below).
+
+**`title`** (where the hub's `hello` says `createTitle: true`) is the
+session's name from its start, as a `/rename` would give it: **pinned**, so
+no title the agent sends (`session_info_update`) and no first-prompt title (a
+native session's, the index's fallback) replaces it — only a later
+`session.setTitle` does. Absent, the session starts untitled, as before.
+**Omit it; never send it empty.** The hub normalizes it the way `/rename`
+does, to exactly the string the session stores, the roster shows and the
+session index holds — the same bytes everywhere, and what the create's
+idempotency hash is taken over. In order: escape sequences (7-bit and 8-bit),
+control characters other than newline and tab (a carriage return included),
+the zero-width space (U+200B), the word joiner (U+2060), the byte-order mark
+(U+FEFF) and the bidirectional embeddings, overrides and isolates
+(U+202A–U+202E, U+2066–U+2069) are dropped, and invalid UTF-8 becomes U+FFFD;
+then it is folded onto one line — a newline or tab turned into a space, runs
+of whitespace collapsed to one space — cut to 120 characters (runes), and
+trimmed at both ends. ZWJ and ZWNJ (U+200D, U+200C) and the directional marks
+(U+200E, U+200F) are kept: they are letters, emoji glue and punctuation
+direction, not formatting. A `title` that comes to nothing — `""`, blank, or
+nothing but what is dropped (`"\u200b"`) — is `bad_request`; a long one is
+cut, not refused. The host is handed the normalized title and holds it before
+its session is published: the session's first `sessions.list` row, the
+create's `session` row and its first `session.state` all carry it, and its
+first state delta (the session's install, which every attach folds) restates
+it. Once the session has its id the host writes it to the session index as
+the user's title, pinned, as a `/rename` is (a failed write is the session's
+`indexErr`, as for every index write it makes on its own). A hub from before
+`title` refuses it `unknown_field` — check `createTitle` first.
 
 **What the hub does.** It spawns the host with the session's directory as
 its working directory and the hub's own environment less what is one
@@ -779,7 +815,9 @@ it was lost) or `refused` (the session's refusal, in `promptError`; the
 session runs on, idle).
 
 **Refusals.** Bad params are `bad_request` (`unknown_field` for a member the
-schema does not define). A `cwd` that is no existing directory and a provider
+schema does not define, and for `title` on a hub whose `hello` has no
+`createTitle`; a `title` that normalizes to nothing is `bad_request`, reason
+`bad_request`). A `cwd` that is no existing directory and a provider
 this craze cannot start are `bad_request` too, checked only for a create that
 will start a session: a repeat (below) is answered without them. A host that fails to spawn, or to become ready, is
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
@@ -809,7 +847,14 @@ normalized params — in the hub's memory (an answer kept 10 minutes, at most
 [registry entry](#the-registry) (`requestId`, `requestHash`). A repeat with
 the same params is answered the first create's answer — its failure too —
 or joins it while it runs; with other params it is `bad_request`, reason
-`request_conflict`. A repeat is answered before the directory and the
+`request_conflict`. The `title` is hashed as normalized: a repeat whose title
+normalizes the same (`"  Fix the login bug "` and `"Fix the login bug"`) is
+the same create and joins it; another title, a title where the first create
+had none, or none where it had one, is `request_conflict`. An untitled
+create hashes exactly as it did before `title` existed, so a create retried
+under its `requestId` across an upgrade of the hub — its session started by
+the older hub, whose host's entry carries the older hash — is joined, not
+refused. A repeat is answered before the directory and the
 provider are checked again: a create answered once stays answered, whatever
 the configuration or the file system has become. A waiter that disconnects
 does not cancel the create. A hub that does not remember the id — it
@@ -1240,7 +1285,10 @@ where it serves `session.create`, and the other three are `false` (see [the
 hub's result](#the-hubs-result)). A seventh, `createOptions`, is the hub's
 and **omitted when `false`**: `true` where the hub serves
 [`sessions.createOptions`](#sessionscreateoptions), absent on a host, on an
-older hub and on one given no answer.
+older hub and on one given no answer. An eighth, `createTitle`, is the hub's
+too and omitted when `false` the same way: `true` where its
+[`session.create`](#sessioncreate) takes a `title`, absent on a host and on an
+older hub.
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
@@ -1345,7 +1393,10 @@ not know a reason decides by its code ([Errors and retry](#errors-and-retry));
 the reset reason `hub_closing` ends only a roster subscription, which no older
 client holds. A hub's `capabilities.createOptions` is absent on an older hub
 (and on one given no answer): a client makes no `sessions.createOptions` call
-there, and a client built before the method ignores the member.
+there, and a client built before the method ignores the member. Its
+`capabilities.createTitle` is absent on an older hub, which refuses a create
+naming a `title` `unknown_field`: a client sends no `title` there (and says
+why), and a client built before it ignores the member and sends none.
 
 ## The foreign turn
 
@@ -1995,7 +2046,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is thirty-one scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is thirty-two scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -2060,7 +2111,15 @@ second client whose attach snapshot carries the catalog as it now stands
 with its `qualified` spelling and one shown qualified because a builtin
 holds its bare name, its info document saying `stop`, `aside` and
 `slashCatalog` — whose `plan` row's `setting` and `rename` row's `title`,
-sent as written, change the mode and the title (31).
+sent as written, change the mode and the title (31); and a hub whose
+`session.create` takes a title — its `hello` saying `createTitle: true` — a
+create whose `title` of tabs, runs of spaces, escape sequences, a zero-width
+space and a bidi override is normalized, its `session` row carrying the
+normalized title, its repeat with that title spelt plainly answered the same,
+the same `requestId` with another title and with none refused
+`request_conflict`, a blank title, one of nothing but zero-width and bidi
+runes and (marked `invalid`) an empty one refused `bad_request`, and a titled
+create whose session's start fails, `start_failed` with its cause (32).
 Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
@@ -2076,7 +2135,7 @@ starts with, each as the `plugins` section writes one. The seventeen
 fixtures from before `modelsRefresh` without one are, byte for byte, an older
 host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
-above as it sends or reads it — except a c2s line fixtures 10 and 26 mark
+above as it sends or reads it — except a c2s line fixtures 10, 26 and 32 mark
 `"invalid": true`: deliberately not a well-formed request of a method
 protocol 1 defines with today's params (an unknown method, or a field no
 schema allows), sent as it stands and held to no request schema, since it is
@@ -2103,7 +2162,11 @@ minted) as `cccccccccccc`, its session's incarnation as
 `CREATED-INCARNATION`, and its pid, in the create's result, as `999999999`.
 A `host` line that also carries `createOptions` — a `sessions.createOptions`
 result, written out — has that hub answer the method with it, as it stands,
-at every call (it needs `hubCreates`).
+at every call (it needs `hubCreates`); one that says `createTitle` has a hub
+whose create takes a `title`, which the fake `craze serve` it spawns seeds
+in its session (it needs `hubCreates` too). Without it the hub is one from
+before titles, whose `hello` has no `createTitle`, so every two-socket
+fixture before 32 is, byte for byte, what it was.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
@@ -2386,10 +2449,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1
 
 The hub's result. `hostId`, `crazeVersion` and `pid` are this hub's own.
 `rosterSubscribe`, `sessionCreate`, `connect` and `createOptions` are what
-the recipe uses:
+the recipe uses (`createTitle` says its create would take a `title`, which
+the recipe does not send):
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
 ```
 
 **5. What a create can start.**

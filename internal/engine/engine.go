@@ -249,6 +249,13 @@ type Engine struct {
 	// the worker the observer feeds (index.go). Its mutex is a LEAF and no
 	// write of its ever runs under e.mu.
 	idx *indexWriter
+	// titleMu is a rename's turn (SetTitle, renameTurn; plan 043 P10, review
+	// C3): the session's rename and the index's number for it, together, so
+	// the index ends on the title the session ends on. Taken with no lock of
+	// the engine's held, it is held across the session's SetTitle — its lock
+	// and the outbox's — and the index's leaf mutex, never across e.mu or any
+	// I/O.
+	titleMu sync.Mutex
 
 	mu       sync.Mutex
 	activity Activity
@@ -431,6 +438,13 @@ type hooks struct {
 	// The event log's own seams are internal/agent's, so this is the barrier an
 	// engine test has there; it holds no lock, so a hook may publish.
 	attachSnapshotted func(seq uint64, attempt int)
+	// titleSet runs inside a rename's turn (renameTurn), after the session's
+	// title is set and before the index's number for it is taken, with the
+	// rename's title: where a test parks one rename while another tries for
+	// the turn (review C3). titleTurnTaken runs when a rename finds the turn
+	// held by another, just before it waits for it.
+	titleSet       func(title string)
+	titleTurnTaken func()
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -481,6 +495,12 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		e.fence = f
 	}
 	e.idx = newIndexWriter(opts.Index, craze, sess.Snapshot, e.reportIndexErr)
+	if opts.Index.Title != "" {
+		// The title the session was created with (plan 043 D8, P10): the
+		// first user title, owed to the index from now and held until the
+		// session's id is known (Started → sessionKnown).
+		e.idx.offerUser("", opts.Index.Title)
+	}
 	// The session's clock, not the wall's: the Stub's is injected, and every
 	// golden that shows a time shows one of its. It is read where the session
 	// reads it already — on the goroutine that admits a prompt and the one
@@ -598,6 +618,15 @@ func (e *Engine) Start(ctx context.Context) error {
 // the start's outcome in State.
 func (e *Engine) Started(err error) {
 	defer e.markReady()
+	if err == nil {
+		// The session is up, so it knows its id — a new one's came with
+		// session/new's reply, inside Start — and the user title the index
+		// owes it, the title it was created with, can be written now (plan 043
+		// P10). Deferred after markReady's and
+		// before e.mu's, so it runs with e.mu released and before Ready closes:
+		// the index's leaf mutex is never taken under e.mu.
+		defer e.idx.sessionKnown()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Starting → idle is an activity the fence reads (a queue can only be owed a

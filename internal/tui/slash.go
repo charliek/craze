@@ -666,7 +666,14 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		// The draft is consumed whichever way this goes: the command has been
 		// read, and leaving it in the composer would invite a second run of it.
 		m.input.SetValue("")
-		title := capRunes(sanitizeLine(strings.TrimSpace(args)), titleRuneCap)
+		// The one title normalization craze has (plan 043 P9): what a
+		// session.create's title, craze serve --title and craze new --title
+		// go through too — the session's own ingestion scrub, then this
+		// package's own sanitizeLine and cap, the ends trimmed
+		// (engine.NormalizeTitle) — so a name given here and the same name
+		// given at create are the same title, and the one the session and
+		// its index row end up holding.
+		title := engine.NormalizeTitle(args)
 		if title == "" {
 			m.addError("usage: /rename <title>")
 			return m, nil

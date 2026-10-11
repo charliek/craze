@@ -528,6 +528,11 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// Whatever provider the caller named, this session is the native one, and
 	// every snapshot — one taken before Start included — says so.
 	s.snap.Provider = NativeProvider().Info()
+	// A new session created with a title (plan 043 D8, P8), named and pinned
+	// from here, as the live session's is (live.go's seedNewTitle): the first
+	// snapshot has it, the first prompt does not rename it (prompt's rule:
+	// an untitled, unpinned session only) and the install delta carries it.
+	seedNewTitle(&s.snap, &s.titlePinned, opts)
 	// Beside the log, as on every session. It exists so that a client above the
 	// seam holds one surface whatever the provider is, and it is what the
 	// harness's two blocking tools open against, through the asker this session
@@ -750,18 +755,21 @@ func (s *nativeSession) start(context.Context) error {
 	// rows — which a native session resolves once here and never again (X3).
 	// Without it a client folding the stream would have to call Snapshot() to
 	// learn the session's starting state, which is the gap r23 finding 2 is
-	// about. A new session's install carries no Title section: Start has
-	// nothing to name it with (a load's seeds one, openReplay), and the first
-	// prompt is what gives it one, publishing its own Title delta (plan 024
-	// S1c C8, SF-01, superseding X47's "stays silent"). Event.Mode/Event.Text
-	// stay empty: starting is nobody's agent update.
+	// about. A new session's install carries no Title section when it has no
+	// title: Start has nothing to name it with (a load's seeds one,
+	// openReplay), and the first prompt is what gives it one, publishing its
+	// own Title delta (plan 024 S1c C8, SF-01, superseding X47's "stays
+	// silent"). One created with a title (seedNewTitle, plan 043 P8) — or
+	// renamed before Start — has one, and its install says so, as every
+	// section the install stands on. Event.Mode/Event.Text stay empty:
+	// starting is nobody's agent update.
 	//
 	// Enqueued and not flushed, exactly as the live session's install is: Start
 	// may not wait on the primary's reader, because a caller is allowed not to
 	// be one until Start has returned (Session.Start, r25 finding 1). Every
 	// later settings delta goes through the same outbox behind it, so a client
 	// that folds them is never behind.
-	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked(false))
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked(s.snap.Title != ""))
 	s.mu.Unlock()
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
@@ -776,9 +784,10 @@ func (s *nativeSession) start(context.Context) error {
 // left out). Commands — /compact, the one command native advertises — is
 // carried by both installs, so a client that folds the stream learns the
 // command list from the install on (plan 028 P21). withTitle adds the Title
-// section, which only a load's install carries — "there is no title"
-// included, for a load of an untitled row — because a new session's title is
-// its first prompt's to publish. The Usage section is carried whenever the
+// section, which a load's install always carries — "there is no title"
+// included, for a load of an untitled row — and a new session's only when it
+// has a title (a create's, plan 043 P8), because an untitled new session's
+// title is its first prompt's to publish. The Usage section is carried whenever the
 // session has one, which only a load's does: the Spent its replay ended with
 // (spent, plan 028 §3.14) — a new session, and a load of a stored session
 // with nothing on its path, have spent nothing and say so by no section, as

@@ -78,6 +78,18 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   names no category. It is shown, and is the end of `craze prompt --json`'s
   `message`, but it is craze's: never saved in the session or sent to a model.
   The stop reason is still `refusal`.
+- **`craze new --title <title>`** names a session from its start, pinned as a
+  `/rename` is ([CLI reference](../reference/cli.md#craze-new)); a client of
+  the hub sends `title` with
+  [`session.create`](../reference/protocol.md#sessioncreate) where the hub's
+  `hello` says `createTitle`. A hub still running from before the upgrade
+  cannot: `craze new --title` says `this hub (craze <v>) cannot set a title at
+  create`, exit 1, until that hub has exited idle (no session ends with it).
+  `/rename` and a create's title are normalized alike, to exactly what the
+  session stores: the session index's row now drops what the session's own
+  title always dropped (a zero-width space, a bidi control, a carriage
+  return), so the two agree, and a space the 120-character cut would leave
+  at the end is trimmed.
 
 ## From v0.0.1
 

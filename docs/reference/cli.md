@@ -874,6 +874,7 @@ started over `ssh` — because every session it creates inherits it
 ```bash
 ./bin/craze new "fix the flaky test"
 ./bin/craze new -C ~/projects/lumen --provider grok --effort high "add the ps command"
+./bin/craze new --title "ps command" "add the ps command"
 ./bin/craze new --json
 ```
 
@@ -900,6 +901,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
 | `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
+| `--title <title>` | Name the session from its start, pinned as [`/rename`](tui.md#slash-commands) pins a title: its first row in `craze ps`, the session list and the hub's roster carries it, and no title the agent or the first prompt would give it replaces it (a later `/rename` does). Normalized as `/rename` normalizes one, to exactly what the session stores and the index holds — escape sequences, control characters, the zero-width space, word joiner and byte-order mark, and bidirectional embeddings, overrides and isolates dropped (ZWJ and ZWNJ kept), invalid UTF-8 as U+FFFD, one line with whitespace collapsed, at most 120 characters, the ends trimmed ([`session.create`](protocol.md#sessioncreate) lists it exactly); one that comes to nothing (`--title ""`, blank, only such characters) is a usage error, exit 2. Needs a hub whose create takes a title (below). With `--wait` the host this starts is named the same way |
 | `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
 | `--wait` | Start an unattended session without the hub, send it the prompt and wait for its turn's result ([below](#craze-new-wait)) |
 
@@ -928,7 +930,12 @@ printed is in the [host's log](configuration.md#host-logs). So is a session that
 refused its first prompt: it runs on, idle, and the line says why. A hub from
 before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
 when idle`: it is not replaced, and the next `craze new` after it has gone
-starts this craze's. Each run creates under a request id of its own, and a
+starts this craze's. Likewise `--title` against a running hub from before
+titles (its `hello` has no [`createTitle`](protocol.md#the-hubs-result)) is
+`this hub (craze <v>) cannot set a title at create; it exits when idle`,
+exit 1 (with `--json`, that message as the error object's): nothing is sent
+to it, and no session is created without its title — run it again once that
+hub has exited, or create without `--title` and `/rename` the session. Each run creates under a request id of its own, and a
 connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
@@ -1040,6 +1047,7 @@ the settings it started with.
 | `-C`, `--dir <dir>` | The session's directory (default: the current one) |
 | `--provider <id>` | The session's provider; without it `provider` in `config.toml`, and with none configured exit 1 (`no default provider yet; pass --provider …`) |
 | `--model`, `--effort`, `--fast` / `--no-fast`, `--no-force` | As plain `craze new`'s |
+| `--title <title>` | As plain `craze new`'s: the session's name from its start, pinned, normalized the same way (one that comes to nothing is a usage error). No hub is asked, so no hub's `createTitle` is needed: the host this starts is named directly |
 | `--plan`, `--ask` | Start in plan or ask mode — for a native session, `--ask` refuses edits and the shell, and `--plan` refuses edits but the agent's own plan file and lets the shell through; a task that says "read-only" is a request, not a rule. **The turn ends at the plan, on every provider**: the result is `completed` with the plan (`plan`), the session still in plan mode. A native session accepts its own plan and stops; on cursor and grok craze accepts nothing — it answers the plan cancelled and ends the turn (its stop reason `cancelled`, the plan auto-answered `returned`) — since an ACP agent told its plan is accepted goes on to carry it out. A plain `craze wait` afterwards reports such a turn the same way while its host still holds the turn's events, and `cancelled` once it does not; `craze wait --from <handle>` — the handle `craze send` prints — recognises it whenever its replay is honoured |
 | `--prompt-file <path>` | Read the prompt from this file, `-` for stdin ([The prompt](#the-prompt)) |
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
