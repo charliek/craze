@@ -207,6 +207,7 @@ const maxMessageBytes = 300
 type ProviderError struct {
 	Provider   string // the model table's provider id
 	Model      string // the alias the turn ran on
+	WireModel  string // the model's id at the provider, which an Anthropic 404 names (plan 044 §3.4)
 	Driver     string // the provider's driver: what the adapter's wording of an auth failure turns on
 	StatusCode int    // the HTTP status; 0 for an error with none, such as a stream error event
 	Message    string
@@ -255,6 +256,10 @@ type ProviderError struct {
 func (e *ProviderError) Error() string {
 	head := "harness: provider error"
 	switch {
+	case e.anthropicRefusal():
+		head = fmt.Sprintf("harness: Anthropic refused access to model %q", e.Model)
+	case e.anthropicUnknown():
+		head = fmt.Sprintf("harness: the Anthropic account cannot use %q", e.WireModel)
 	case e.kind == ErrContextTooLarge && e.Compacted:
 		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window even after compacting; start a new session", e.Model)
 	case e.kind == ErrContextTooLarge:
@@ -271,6 +276,25 @@ func (e *ProviderError) Error() string {
 		msg = ": " + e.Message
 	}
 	return fmt.Sprintf("%s (provider %q, model %q%s)%s", head, e.Provider, e.Model, status, msg)
+}
+
+// anthropicRefusal reports whether e is Anthropic's driver refusing the model
+// to a key it accepted (plan 044 §3.4, P27): a 403, Anthropic's
+// permission_error — a model this account or organization may not use, say
+// one that needs data retention it has not agreed to — and not the key's
+// rejection a 401 or another provider's 403 is. Its kind stays ErrAuth, so it
+// is classed and given up on as before; only its words change.
+func (e *ProviderError) anthropicRefusal() bool {
+	return e.Driver == modeltable.DriverAnthropic && e.StatusCode == 403 && e.kind == ErrAuth
+}
+
+// anthropicUnknown reports whether e is Anthropic's driver not serving the
+// model's wire id to this account (P27): a 404, which on Anthropic names the
+// model, so its words name the wire id the account was asked for rather than
+// models.toml, which a model of the account's own list never came from. Its
+// kind stays ErrModelNotFound.
+func (e *ProviderError) anthropicUnknown() bool {
+	return e.Driver == modeltable.DriverAnthropic && e.kind == ErrModelNotFound && e.WireModel != ""
 }
 
 // Unwrap is the error's kind, so errors.Is(err, ErrAuth) works, and the
@@ -318,7 +342,7 @@ func classify(err error, r modeltable.Resolved) error {
 	if errors.As(err, &re) && len(re.Errors) > 0 {
 		err = re.Errors[len(re.Errors)-1]
 	}
-	pe := &ProviderError{Provider: m.Provider, Model: m.Alias, Driver: r.Driver}
+	pe := &ProviderError{Provider: m.Provider, Model: m.Alias, WireModel: m.WireModel, Driver: r.Driver}
 	var fe *llm.FinalError
 	var mse *llm.MidStreamError
 	var fpe *fantasy.ProviderError

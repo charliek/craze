@@ -208,7 +208,8 @@ type Options struct {
 	// values.
 	Child *ChildOptions
 	// NewModel builds a model's client; nil is llm.New, with Auth and
-	// AuthAPIBase as its sign-in (llm.WithSignIn). It is the test seam: a
+	// AuthAPIBase as its sign-in (llm.WithSignIn) and AnthropicAPIBase as
+	// Anthropic's API base (llm.WithAnthropicAPIBase). It is the test seam: a
 	// test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
 	// Auth is the sign-in a model on the ChatGPT plan's driver is funded by
@@ -224,6 +225,14 @@ type Options struct {
 	// model is built (llm.WithSignIn): chatgptauth.APIBase in production —
 	// OpenAI's own, or a test's loopback override — and nil for OpenAI's.
 	AuthAPIBase func() (string, error)
+	// AnthropicAPIBase answers the API base Anthropic's driver sends to, when
+	// a model is built (llm.WithAnthropicAPIBase, plan 044 §3.3, P21): in
+	// production the adapter's reading of messagesapi.BaseURL — Anthropic's
+	// own, or a test's loopback override — and nil for Anthropic's own. Like
+	// AuthAPIBase it reaches every model the default NewModel builds, so a
+	// sub-agent's, and the summarizer's, side question's and wake's requests
+	// on the session's model, go where the session's own do.
+	AnthropicAPIBase func() (string, error)
 	// Getenv looks up the environment variables that hold API keys; nil is
 	// os.Getenv. The ACP child's environment (agent.Options.Env) is not the
 	// harness's, and tests never read the real one (plan 018 §3.5).
@@ -586,13 +595,15 @@ func Open(opts Options) (*Session, error) {
 	}
 	if s.newModel == nil {
 		// A sub-agent is handed its parent's builder (childOpenOptions), so
-		// it builds on the parent's sign-in too.
-		auth, base := opts.Auth, opts.AuthAPIBase
+		// it builds on the parent's sign-in and at the parent's Anthropic
+		// base too.
+		auth, base, anthropicBase := opts.Auth, opts.AuthAPIBase, opts.AnthropicAPIBase
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
-			if auth == nil {
-				return llm.New(r)
+			o := []llm.Option{llm.WithAnthropicAPIBase(anthropicBase)}
+			if auth != nil {
+				o = append(o, llm.WithSignIn(auth, base))
 			}
-			return llm.New(r, llm.WithSignIn(auth, base))
+			return llm.New(r, o...)
 		}
 	}
 	if s.now == nil {

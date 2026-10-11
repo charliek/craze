@@ -339,7 +339,7 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 			b.h.end()
 			_ = b.child.Close()
 			spent, _, _ := obs.totals()
-			text, usage = r.deliverable(b, failedResult(childPanic{value: v}.Error(), obs.lastOutput()), spent)
+			text, usage = r.deliverable(b, failedResult(childPanic{value: v}.Error(), obs.lastOutput()), "", spent)
 			status = SubagentFailed
 		}
 	}()
@@ -370,7 +370,7 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 		Model: red.String(b.ran.Alias), Provider: red.String(b.ran.Provider), WireModel: red.String(b.ran.WireModel),
 		ToolCalls: calls, Steps: steps, Duration: time.Since(b.start), At: r.s.now(),
 	})
-	text, usage = r.deliverable(b, out.result, spent)
+	text, usage = r.deliverable(b, out.result, out.note, spent)
 	return text, usage, out.status
 }
 
@@ -380,11 +380,13 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 // the shared truncator at its limits — the head kept, the whole in a spill
 // file named for the spawning call — and redacted again with a fresh one,
 // spill path and notice included (X14's order), as settle finishes a
-// foreground call's. The usage is what the child's steps were billed for
-// (§3.7), its model's names redacted with the text.
-func (r *subagents) deliverable(b *bgChild, res tool.Result, spent Usage) (string, *tool.ChildUsage) {
+// foreground call's. A completed child's note (completedResult) joins after
+// the cut, as settle adds it. The usage is what the child's steps were billed
+// for (§3.7), its model's names redacted with the text.
+func (r *subagents) deliverable(b *bgChild, res tool.Result, note string, spent Usage) (string, *tool.ChildUsage) {
 	text := r.union(b.child).String(res.Text)
 	text, _ = tool.TruncateRedacted(r.s.base.home, b.res.callID, text, tool.Head, r.union(b.child))
+	text = withNote(text, note)
 	red := r.union(b.child)
 	return red.String(text), &tool.ChildUsage{
 		Provider: red.String(b.ran.Provider), Model: red.String(b.ran.Alias), WireModel: red.String(b.ran.WireModel),

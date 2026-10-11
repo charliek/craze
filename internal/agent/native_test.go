@@ -761,7 +761,13 @@ func TestNativeTurnEndings(t *testing.T) {
 		{name: "thinking then text", step: reply(thoughtParts("hm", "m"), textParts("ok"), finishParts(fantasy.FinishReasonStop)),
 			stop: "end_turn", text: "ok", thought: "hmm"},
 		{name: "max_tokens", step: reply(textParts("cut"), finishParts(fantasy.FinishReasonLength)), stop: "max_tokens", text: "cut"},
-		{name: "refusal", step: reply(textParts("no"), finishParts(fantasy.FinishReasonContentFilter)), stop: "refusal", text: "no"},
+		// Every native refusal ends with the session's own note (plan 044
+		// §3.4): a paragraph after the model's text, or the whole text when
+		// it said nothing. Another driver names no category.
+		{name: "refusal", step: reply(textParts("no"), finishParts(fantasy.FinishReasonContentFilter)), stop: "refusal",
+			text: "no\n\ncraze: the model declined this request (refusal). Switch models with /model, or rephrase."},
+		{name: "a refusal with no text", step: reply(finishParts(fantasy.FinishReasonContentFilter)), stop: "refusal",
+			text: "craze: the model declined this request (refusal). Switch models with /model, or rephrase."},
 		{name: "escapes are stripped", step: answer("\x1b]0;pwned\x07safe", "\x1b[31m text\x1b[0m"),
 			stop: "end_turn", text: "safe text"},
 		// The harness has already cut the message to one line with no control

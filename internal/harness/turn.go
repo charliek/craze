@@ -67,6 +67,13 @@ type Result struct {
 	// steer a step did persist is not here: the model read it, and the
 	// transcript holds it.
 	Unanswered []string
+	// RefusalCategory is, for a turn that ended StopRefusal, the category the
+	// provider gave the refusal ("cyber", …) — Anthropic's driver reports one
+	// (llm.AnthropicFinish), already cut to a short identifier — and "" for
+	// one it gave none, and for every other ending (plan 044 §3.4, P6). The
+	// adapter says it in the note it shows for a refusal; it is the session's
+	// to say, never the transcript's or the model's.
+	RefusalCategory string
 }
 
 // Run sends text as the next user turn and blocks until the turn ends. What
@@ -705,6 +712,7 @@ type turn struct {
 
 	stepped bool   // a step finished
 	stop    string // that step's stop reason
+	refusal string // that step's refusal category, when stop is StopRefusal (refusalOf)
 	usage   Usage  // that step's usage
 	saveErr error  // the first failed append of a finished step
 	badIDs  bool   // a step's tool calls had an unusable provider id (ErrBadToolCalls)
@@ -1288,6 +1296,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 	}
 	open := openCalls(assistant)
 	t.stop = stepStop(step.FinishReason, len(open))
+	t.refusal = refusalOf(t.stop, step)
 	t.usage = *store.UsageOf(step.Usage)
 	t.total = addUsage(t.total, t.usage)
 	done := t.stepDone(step)
@@ -1495,7 +1504,7 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 		// The turn's own sum over every segment's steps (plan 028 §3.11 item
 		// 7): res.TotalUsage covers the last segment's call alone, and a
 		// compaction's usage is on its entry, never here.
-		return Result{StopReason: stop, Usage: t.total}, nil
+		return t.completed(stop), nil
 	}
 
 	// Fantasy discards everything on a cancel or a failure (plan 018 §2.4);
@@ -1528,7 +1537,7 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 		// every segment's steps spent (plan 028 §3.11 item 7, R3-3) — the
 		// last step's alone would drop the steps before a compaction (astra
 		// r1-c11, finding 1).
-		return Result{StopReason: t.stop, Usage: t.total}, nil
+		return t.completed(t.stop), nil
 	case cancelled:
 		return Result{StopReason: StopCancelled}, nil
 	case t.refused:
@@ -1660,6 +1669,30 @@ func stepStop(r fantasy.FinishReason, calls int) string {
 		return StopToolUse
 	}
 	return StopEndTurn
+}
+
+// refusalOf is a finished step's refusal category (Result.RefusalCategory,
+// plan 044 §3.4): read beside its raw finish, from the finish metadata
+// Anthropic's driver leaves on the step (llm.AnthropicFinishOf), which has
+// already cut it to a short identifier or dropped it; "" when stop is not a
+// refusal, or the step's driver names no category.
+func refusalOf(stop string, step fantasy.StepResult) string {
+	if stop != StopRefusal {
+		return ""
+	}
+	f, _ := llm.AnthropicFinishOf(step.ProviderMetadata)
+	return f.RefusalCategory
+}
+
+// completed is the Result of a turn that completed with stop: what every
+// segment's steps spent (plan 028 §3.11 item 7), and, for a refusal, its last
+// step's category.
+func (t *turn) completed(stop string) Result {
+	res := Result{StopReason: stop, Usage: t.total}
+	if stop == StopRefusal {
+		res.RefusalCategory = t.refusal
+	}
+	return res
 }
 
 // streamed is an assistant message built from streamed deltas: the

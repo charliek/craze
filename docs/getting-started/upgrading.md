@@ -32,6 +32,12 @@ is an addition, but the first two change what an existing command does.
 - **`/btw <question>`** asks a side question in a view of its own, without
   adding to the session, on native, Grok and gx
   ([TUI reference](../reference/tui.md#side-questions-btw)).
+- **A native turn the model refuses ends with a note**: `craze: the model
+  declined this request (refusal category: cyber). Switch models with /model,
+  or rephrase.`, after whatever the model wrote — `(refusal)` when the provider
+  names no category. It is shown, and is the end of `craze prompt --json`'s
+  `message`, but it is craze's: never saved in the session or sent to a model.
+  The stop reason is still `refusal`.
 
 ## From v0.0.1
 

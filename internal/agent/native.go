@@ -15,6 +15,7 @@ import (
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
@@ -202,6 +203,11 @@ type nativeSession struct {
 	// slot is still claimed, as on the live session: Interject is refused from
 	// then on, so an interjection can never follow an EventDone.
 	doneEmitted bool
+	// textShown says the claimed turn — a prompt's or a wake's — has shown
+	// text of the main session's own: the refusal note (noteRefusal) is then
+	// a paragraph after it, and otherwise the turn's only text. Each claim
+	// clears it; sink sets it, from the harness's turn with s.mu not held.
+	textShown atomic.Bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
 	// returns, which is what Cancel and Close wait on. turnToken is the
@@ -1059,6 +1065,14 @@ func visibleNativeRows(entries []PluginEntry, rows []PluginCommand) []PluginComm
 	return out
 }
 
+// anthropicAPIBase is the API base a model on Anthropic's driver is built
+// with (harness.Options.AnthropicAPIBase, plan 044 §3.3): Anthropic's own, or
+// the test override CRAZE_TEST_ANTHROPIC_API names in craze's own environment
+// — a loopback http URL, and anything else an error that fails the build
+// (messagesapi.BaseURL) — read at each build, as chatgptauth.APIBase reads
+// the plan's.
+func anthropicAPIBase() (string, error) { return messagesapi.BaseURL(os.Getenv) }
+
 // open resolves everything Start needs and opens the harness, returning it
 // with the model table it was opened on and the directory that was read from
 // (nativeOpened), and the content it read for it. Its errors are already
@@ -1145,6 +1159,14 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	if hopts.Auth == nil {
 		signIn = chatgptauth.Source(hopts.Home)
 		hopts.Auth, hopts.AuthAPIBase = signIn, chatgptauth.APIBase
+	}
+	// Anthropic's API base (plan 044 §3.3, P21), read like the plan's when a
+	// model is built — Anthropic's own, or a test's loopback override, whose
+	// error fails the build rather than falling back to Anthropic — and so
+	// the base of every model this session builds: its sub-agents', and the
+	// one its summarizer, side questions and wakes send on.
+	if hopts.AnthropicAPIBase == nil {
+		hopts.AnthropicAPIBase = anthropicAPIBase
 	}
 	if hopts.Table == nil {
 		// The shipped catalog with the user's files merged over it (plan 031
@@ -2038,6 +2060,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	defer cancel()
 	s.inPrompt = true
 	s.doneEmitted = false
+	s.textShown.Store(false)
 	s.turnCancel = cancel
 	s.turnToken = tok
 	// /compact [focus] is the harness's own turn, never a prompt to the model
@@ -2203,6 +2226,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// Every row the turn left running is closed before its ending goes out,
 	// so no consumer ever sees a turn end with a call still spinning.
 	s.settleTools()
+	if err == nil {
+		s.noteRefusal(res)
+	}
 	var failed error
 	switch {
 	case err != nil:
@@ -2249,6 +2275,35 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason, Unanswered: unanswered}, nil
+}
+
+// noteRefusal shows, for a turn that ended in a refusal, the session's own
+// note saying so (plan 044 §3.4, P6, O5): one EventText after whatever the
+// model said, naming the refusal's category when the provider gave one
+// (Result.RefusalCategory) and what to do. Any native provider's refusal
+// gets it, so it is said in no provider's words. It is the session's, never
+// the model's: the harness has already written the turn, so it is in no
+// transcript and in no request after it, and its stop reason stays refusal.
+func (s *nativeSession) noteRefusal(res harness.Result) {
+	if res.StopReason != harness.StopRefusal {
+		return
+	}
+	s.emit(Event{Type: EventText, Text: refusalNote(res.RefusalCategory, s.textShown.Load())})
+}
+
+// refusalNote is noteRefusal's text: a paragraph of its own after shown text,
+// and the turn's whole text otherwise. category is a short identifier
+// (llm.AnthropicFinish keeps no other), "" for none.
+func refusalNote(category string, afterText bool) string {
+	what := "refusal"
+	if category != "" {
+		what = "refusal category: " + category
+	}
+	note := "craze: the model declined this request (" + what + "). Switch models with /model, or rephrase."
+	if afterText {
+		note = "\n\n" + note
+	}
+	return note
 }
 
 // refsLocked is what a draft invokes, resolved against this session's own
@@ -2407,6 +2462,7 @@ func (s *nativeSession) sink(ev harness.Event) {
 	switch e := ev.(type) {
 	case harness.TextDelta:
 		if t := sanitizeText(e.Text); t != "" {
+			s.textShown.Store(true)
 			s.emit(Event{Type: EventText, Text: t})
 		}
 	case harness.ThoughtDelta:
@@ -3542,10 +3598,29 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 		status = fmt.Sprintf(" (HTTP %d)", pe.StatusCode)
 	}
 	switch {
+	case errors.Is(err, harness.ErrAuth) && pe.Driver == modeltable.DriverAnthropic && pe.StatusCode == 403:
+		// Anthropic's 403 is a model the key may not use, not a key it
+		// rejected (plan 044 §3.4, P27): a model the account or its
+		// organization is not allowed. Its 401 is the key's, below.
+		msg := fmt.Sprintf("native: Anthropic refused access to model %q%s", model, status)
+		if m := sanitizeLine(pe.Message); m != "" {
+			msg += ": " + m
+		}
+		return phrase(msg)
 	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
 		// The plan has no key to check: its 401 is phraseChatGPT's, and any
 		// other refusal it flags is said as the provider's own, below.
 		return phrase(rejectedKeyText(table, pe.Provider, status))
+	case errors.Is(err, harness.ErrModelNotFound) && pe.Driver == modeltable.DriverAnthropic && pe.WireModel != "":
+		// A model of the account's own list, or a seed, that this account
+		// cannot use (P27): models.toml is no advice for a model it never
+		// configured, so the words name the wire id the account was asked
+		// for, and Anthropic's own reason.
+		msg := fmt.Sprintf("native: the Anthropic account cannot use %s (HTTP %d", sanitizeLine(pe.WireModel), pe.StatusCode)
+		if m := sanitizeLine(pe.Message); m != "" {
+			msg += ": " + m
+		}
+		return phrase(msg + ")")
 	case errors.Is(err, harness.ErrModelNotFound):
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
