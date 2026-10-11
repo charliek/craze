@@ -17,11 +17,11 @@
       login covers it — that is the fork's current behaviour, not a craze
       guarantee.
 
-Coming from v0.0.1? Read [Upgrading from v0.0.1](upgrading.md) first.
+Coming from v0.0.1? Read [Upgrading](upgrading.md) first.
 
 ## Install
 
-### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
+### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — v0.0.1 and later
 
 ```bash
 brew install charliek/tap/craze
@@ -31,7 +31,7 @@ Intel macOS (`darwin/amd64`) is cross-compiled and shipped but not tested at
 runtime; treat it as best-effort. Apple Silicon and Linux (amd64/arm64) are
 tested.
 
-### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — available from v0.0.1
+### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — v0.0.1 and later
 
 Add the repo once:
 
@@ -50,7 +50,7 @@ Then:
 sudo apt install craze
 ```
 
-### Direct `.deb` — available from v0.0.1
+### Direct `.deb` — v0.0.1 and later
 
 Download the asset for your architecture from the
 [GitHub Release](https://github.com/charliek/craze/releases) — named
@@ -111,11 +111,16 @@ or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.2
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
 `--model` picks the model to start on (an ACP model id, or a native model
-alias), `--ask` / `--plan` set the session mode.
+alias), `--effort` and `--fast`/`--no-fast` start it at an effort or speed
+setting, `--ask` / `--plan` set the session mode.
 
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
-spinner line, the composer, two status rows, and one row per in-flight
-sub-agent. See the [TUI reference](../reference/tui.md) for keys and cards.
+queued messages, the spinner line, the composer, two status rows, and one row
+per in-flight sub-agent. See the [TUI reference](../reference/tui.md) for keys
+and cards. Two things worth knowing at once: `/btw <question>` asks a side
+question without adding to the session ([where it is
+offered](../reference/tui.md#side-questions-btw)), and `Ctrl+V` pastes an image
+from the clipboard into the composer ([Images](../reference/tui.md#images)).
 
 craze refuses to start the TUI on a non-tty. For a scripted turn, use
 [`craze prompt`](../reference/cli.md#craze-prompt).
@@ -185,6 +190,13 @@ them connected:
     `/connect` stores a key from inside the TUI, and a newly connected provider's
     models are in `/model` at once, and in new sessions). `--model <alias>` starts on one.
 
+    With no `--model` and nothing remembered, a new session starts on the
+    first provider you have connected, in this order: Z.AI Coding Plan,
+    ChatGPT plan, Fireworks, OpenRouter, Meta, each on its own start model
+    ([the table](../reference/configuration.md#the-shipped-catalog)).
+    OpenRouter's models are its `~<family>-latest` routers, so an alias there
+    may resolve to a newer model after OpenRouter updates the router.
+
 `craze auth logout fireworks` removes a stored key. Keys, and the two files you
 can use to change or add models, are in [Native models and
 providers](../reference/configuration.md#native-models-and-providers); the
@@ -201,10 +213,20 @@ them.
 The ordinary `craze` runs the session in a detached host, so closing the terminal
 keeps it running: `craze ps` lists this machine's sessions, `craze attach` (or
 `craze -c`) joins one, `craze new` starts one in the background through the
-per-machine hub, and `/exit` ends one. Detaching, the journal and the control
-socket each have a switch, listed in [Upgrading from v0.0.1](upgrading.md); the
+per-machine hub, and `/exit` ends one. On an empty composer `←` (or
+`/sessions`) opens the [session list](../reference/tui.md#session-list). Other
+tools reach the same sessions: `craze providers` reports which providers can
+start, and `craze bridge` speaks the control protocol over stdio for a client
+that is not a terminal ([CLI reference](../reference/cli.md#craze-providers),
+[`craze bridge`](../reference/cli.md#craze-bridge)). Inside a herdr pane or a
+roost tab craze reports its status to that host ([Host
+status](../reference/configuration.md#host-status)). Detaching, the journal and
+the control socket each have a switch, listed in [Upgrading](upgrading.md); the
 [CLI reference](../reference/cli.md#sessions-outlive-their-terminal) has the
 commands.
+
+To use craze from Claude Code, as a sub-agent that runs a task on another
+model, see [Claude Code sub-agents](claude-code.md).
 
 ## Exit codes
 
@@ -212,11 +234,14 @@ craze exits **nonzero when the session never started** — not logged in to the
 provider, no native credential, or an agent binary (`cursor-agent`, `grok`, `gx`) that would not come up. It still draws the TUI and puts the
 error in the transcript, because that is where you can read it, but the process
 tells a script that nothing ran. An error *during* a session leaves a usable
-craze, so quitting out of one is an ordinary exit 0.
+craze, so quitting out of one is an ordinary exit 0. The commands that wait for
+a turn (`craze wait`, `craze new --wait`, `craze send --wait`) exit with the
+turn's result instead: see [Waiting commands](../reference/cli.md#waiting-commands).
 
 ## Next
 
 - [CLI](../reference/cli.md) — flags for `craze` and `craze prompt`, and `craze auth`
 - [TUI](../reference/tui.md) — keys, cards, slash commands
-- [Upgrading from v0.0.1](upgrading.md) — what changed since the first release
+- [Upgrading](upgrading.md) — what changed since v0.0.1 and since v0.1.0
+- [Claude Code](claude-code.md) — craze sessions as Claude Code sub-agents
 - [Configuration](../reference/configuration.md) — themes and `~/.craze/config.toml`

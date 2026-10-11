@@ -41,7 +41,18 @@ mac-mini) follow the `craze-live-smoke` skill in `.claude/skills/`.
 
 ## Docs
 
-Docs are **not** in the per-commit gate. Run this only when touching `docs/`,
+**Docs change with the code.** A commit that changes user-visible behaviour (a command, flag, output, exit code,
+key, slash command, config key, file, protocol member) updates `docs/reference/` in the same commit, plus the
+overview pages (`docs/index.md`, `docs/getting-started/`, the README's intro and feature sections) when it is a
+headline feature, and `docs/getting-started/upgrading.md` when an existing behaviour changes. Drift tests in
+`make test` enforce the reference pages' coverage: every visible command and its visible flags in `cli.md`
+(`internal/cli/docs_test.go`; hidden commands and flags, deprecated flags and cobra's own `help`/`completion` are
+exempt), every built-in slash command in `tui.md` and every `config.toml` key in `configuration.md`
+(`internal/tui/docs_test.go`), every protocol method, notification, error code (string and JSON-RPC integer) and
+reason in `protocol.md` (`internal/protocol/docs_test.go`). They check presence, not accuracy: describe the change,
+don't just mention it.
+
+Building the docs site is **not** in the per-commit gate. Run this only when touching `docs/`,
 `zensical.toml`, `pyproject.toml`, `uv.lock`, or the docs workflows:
 
 ```shell

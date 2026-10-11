@@ -15,6 +15,13 @@ outlive their terminal](docs/reference/cli.md#sessions-outlive-their-terminal)
 and the [`craze ps`](docs/reference/cli.md#craze-ps) and [`craze
 new`](docs/reference/cli.md#craze-new) reference.
 
+A session can also run **unattended**, for no one at a terminal: `craze new
+--wait` starts one, hands it a task and prints the result, and the [Claude Code
+plugin](#use-craze-from-claude-code) uses it to put a craze session behind a
+Claude Code sub-agent. `/btw <question>` asks a side question in a view of its
+own, without adding to the session (native, Grok and gx). craze is early-stage
+software: v0.1.x is released for Linux and macOS.
+
 ## Install
 
 Either way, to run craze you need one way to reach a model. For the ACP
@@ -29,11 +36,10 @@ sessions, skills) — that is the fork's current behaviour, not a craze
 guarantee. The native provider needs none of them, only an API key or a
 ChatGPT plan sign-in (see [Native provider](#native-provider)).
 
-Upgrading from v0.0.1? See [Upgrading from
-v0.0.1](docs/getting-started/upgrading.md): what changed, and how to turn each
-change off.
+Upgrading? See [Upgrading](docs/getting-started/upgrading.md): what changed
+since v0.0.1 and since v0.1.0, and how to turn each change off.
 
-### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
+### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — v0.0.1 and later
 
 ```shell
 brew install charliek/tap/craze
@@ -43,7 +49,7 @@ Intel macOS (`darwin/amd64`) is cross-compiled and shipped but not tested at
 runtime; treat it as best-effort. Apple Silicon and Linux (amd64/arm64) are
 tested.
 
-### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — available from v0.0.1
+### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — v0.0.1 and later
 
 Add the repo once:
 
@@ -62,7 +68,7 @@ Then:
 sudo apt install craze
 ```
 
-### Direct `.deb` — available from v0.0.1
+### Direct `.deb` — v0.0.1 and later
 
 Download the asset for your architecture from the
 [GitHub Release](https://github.com/charliek/craze/releases) — named
@@ -128,27 +134,53 @@ Without `--provider`, the TUI shows a picker listing `cursor`, `grok`, `gx` — 
 only when a binary for it resolves — and `native`, a provider that cannot start
 dimmed with why (`unavailable`, `needs setup`), preselected to
 `$CRAZE_PROVIDER`, then `provider` in `~/.craze/config.toml`, then cursor.
-`Enter` starts that row; `Esc` starts the preselected default. `--provider`
+`Enter` starts that row; `Esc` starts the preselected default when it can
+start. `--provider`
 skips the picker; `--provider gx` works regardless of whether a binary
 resolves, and fails at spawn if it's missing. The last **successful** Start
 is saved and used next time.
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
 `--model` picks the model to start on (an ACP model id, or a native model
-alias), `--ask` / `--plan` set the session mode, and
-`--agent-bin` (or `CRAZE_AGENT_BIN`) overrides the binary. Cursor looks up
+alias), `--effort` and `--fast` / `--no-fast` start it at an effort or speed
+setting, `--plugin-dir` adds a directory of plugin commands and skills,
+`--ask` / `--plan` set the session mode, and
+`--agent-bin` (or `CRAZE_AGENT_BIN`) overrides the binary. [The flags
+table](docs/reference/cli.md#flags) lists them all. Cursor looks up
 `cursor-agent` then `agent`; Grok looks up `grok` only; gx looks up `gx`
 only.
 
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
-spinner line, the composer, two status rows, and one row per in-flight
-sub-agent.
+queued messages, the spinner line, the composer, two status rows, and one row
+per in-flight sub-agent.
 
 craze exits **nonzero when the session never started** — no login (`agent login`
 or `grok login`), or an agent that would not come up. It still draws the TUI
 and puts the error in the transcript, because that is where you can read it,
 but the process tells a script that nothing ran. An error *during* a session
 leaves a usable craze, so quitting out of one is an ordinary exit 0.
+
+### Driving sessions from scripts
+
+Besides the TUI and `craze prompt --json` (one headless turn), these commands
+work on sessions without a terminal. Each has a section in the [CLI
+reference](docs/reference/cli.md):
+
+- [`craze new`](docs/reference/cli.md#craze-new) starts a session in the
+  background; [`craze new --wait`](docs/reference/cli.md#craze-new-wait) also
+  sends it a task and prints the result
+- [`craze send`](docs/reference/cli.md#craze-send) gives a session its next
+  prompt, loading it again if it has ended
+- [`craze wait`](docs/reference/cli.md#craze-wait) prints a turn's result; the
+  waiting commands exit with its status
+  ([codes](docs/reference/cli.md#waiting-commands))
+- [`craze cancel`](docs/reference/cli.md#craze-cancel) and
+  [`craze stop`](docs/reference/cli.md#craze-stop) cancel a turn or end a session
+- [`craze serve`](docs/reference/cli.md#craze-serve) hosts a session with no
+  terminal, and [`craze bridge`](docs/reference/cli.md#craze-bridge) pumps its
+  control socket over stdio for another program ([protocol](docs/reference/protocol.md))
+- [`craze providers`](docs/reference/cli.md#craze-providers) says which
+  providers can start here
 
 ### Native provider
 
@@ -191,7 +223,7 @@ models and providers](docs/reference/configuration.md#native-models-and-provider
 This repository is also a Claude Code plugin: sub-agents that hand a task to a
 craze session on a native, Grok or Cursor model and return its result, so
 Claude Code can delegate work to those models. It needs **craze 0.2.0 or
-newer** on your `PATH`.
+newer** (the next release) on your `PATH`.
 
 ```text
 /plugin marketplace add charliek/craze
@@ -208,20 +240,25 @@ examples, permissions and the differences from a native sub-agent.
 
 | Key | Action |
 |---|---|
-| `Enter` | send; queue the draft while a turn is running |
+| `Enter` | send; queue the draft while a turn is running; on a draft starting with `!`, run it in your own shell (see [Shell mode](docs/reference/tui.md#shell-mode)) |
 | `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first) |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn and everything queued behind it; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+V`, `Alt+V` | paste the clipboard: an image becomes an `[Image #N]` chip, otherwise its text (see [Images](docs/reference/tui.md#images)) |
+| `Esc` | answer the card on top; close a dialog (`/help` included) or the `/btw` side view; leave the sub-agent view; kill a running `!` command; clear a `!` draft; close the slash menu or the `@` file popup; otherwise cancel the running turn (the transcript says `cancelled`), stop a turn the agent runs on its own (native's wake), or, with nothing running, decline the plan offer |
+| `Ctrl+C` | kill a running `!` command, and nothing else. With none running: cancel the running turn and everything queued behind it; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the `/btw` side view, with no card open, it closes the view |
 | `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
+| `←` on an empty composer, `/sessions` | open the session list: every session on this machine (see [Session list](docs/reference/tui.md#session-list)); only when sessions run in detached hosts, the default |
+| `!command` | run a command in your own shell; its output goes to the agent with your next message |
+| `@path` | mention a file or folder: a popup completes it |
+| `/btw <question>` | ask a side question in a view of its own, not saved (native, Grok, gx); runs mid-turn |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: `↑` reaches the queued messages first and the sub-agent rows when nothing is queued, `↓` the other way round; the selected row carries a `❯` gutter mark; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
-| `Enter` / `Backspace` / `Ctrl+L` on a queued message | edit it in place / cancel it / send it now |
+| `Enter` / `Backspace` / `Ctrl+L` on a queued message | edit it in place / cancel it / send it now; while editing, `Enter` saves, `Esc` restores the draft and `Ctrl+L` saves and sends it now |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
@@ -246,6 +283,10 @@ settled turn. `Esc` cancels the turn and lets the queue continue; `Ctrl+C`
 stops everything. See [docs/reference/tui.md](docs/reference/tui.md) for the
 whole thing.
 
+`--resume` lists the last ten sessions in the workspace. A session started for
+a coding agent (`craze new --wait`) is tagged `sub-agent` and listed after your
+own; `--continue` skips it.
+
 **`Ctrl+G` is BEL.** Some terminals flash or beep when it is pressed. `/theme`
 opens the same picker without the BEL.
 
@@ -253,14 +294,16 @@ opens the same picker without the BEL.
 
 A blocking request from the agent is a card, and the card owns the keyboard and
 the mouse while it is up: `Ctrl+T`, `Ctrl+G`, `Ctrl+O`, the arrows and the wheel
-all do nothing until it is answered. `Ctrl+C` and `Ctrl+D` still work. Cards
-queue, and only the one on top is drawn.
+all do nothing until it is answered. `Ctrl+C` and `Ctrl+D` still work, and so
+does `←`, where there is a [session list](docs/reference/tui.md#session-list):
+it opens the list and leaves the card unanswered. Cards queue, and only the one
+on top is drawn.
 
 | Card | Keys |
 |---|---|
-| permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a` allow once, **`A` allow always**, `n` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
+| permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a`, `y` or `1` allow once, **`A` allow always**, `n`, `r` or `2` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
 | question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. |
-| plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a` accept, `r` reject. `Esc` cancels the turn. |
+| plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a`, `y` or `1` accept, `r`, `n` or `2` reject. `Esc` cancels the turn. |
 
 `Esc` means two different things on purpose. On a question it is *skipped*: the
 agent is told you declined to answer and the turn carries on. On a plan or a
@@ -280,8 +323,9 @@ working, or blocked on a card or an error — to the host, which shows it like
 any other agent's. `host_status = false`, or `--no-host-status`, turns that off.
 
 `Ctrl+G` or `/theme` opens a names-only picker that repaints the live screen as
-the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one
-that was active when the picker opened. `/theme <name>` sets and saves one
+the cursor moves (`↑`/`↓` or `j`/`k`, wrapping); `Enter` keeps the theme and
+saves it, a digit `1`–`9` applies and keeps the theme at that position, and
+`Esc` puts back the one that was active when the picker opened. `/theme <name>` sets and saves one
 directly.
 
 The saved theme lives in `~/.craze/config.toml`. Unrelated keys in that file
@@ -302,8 +346,10 @@ answer).
 Mouse reporting is on by default. The wheel scrolls the transcript three lines
 per notch. A left click picks a row in the model or theme dialog, cycles the
 tasks panel from its header, cycles the mode from the `◆ agent` chip in status
-row 2, opens the model dialog from the model name in status row 1, or opens a
-sub-agent row; inside the sub-agent view, a click on the banner returns.
+row 2, opens the model dialog from the model name in status row 1, opens a
+sub-agent row, accepts a row of the slash menu, or presses `[send now]`,
+`[edit]` or `[cancel]` on the queued message under the pointer; inside the
+sub-agent view, a click on the banner returns.
 
 Dragging over the transcript draws a selection and copies it on release; a
 double-click selects the word under the pointer. The status row says `copied 2
@@ -347,10 +393,13 @@ frame goldens in `internal/tui/testdata/` render against.
   --keys "go<enter><wait:text:TASKS>"
 ```
 
-Flags: `--cols`, `--rows`, `--agent-bin`, `--fake-script` (sets
+Its main flags are `--cols`, `--rows`, `--agent-bin`, `--fake-script` (sets
 `CRAZE_FAKE_SCRIPT` for the child), `--keys`, `--ansi` (print the raw frame with
 a forced true-colour profile), `--theme`, `--no-force`, `--timeout` (per wait,
-default 10s) and `--print-frames` (stream every frame to stderr). There is no
+default 10s) and `--print-frames` (stream every frame to stderr); it also takes
+`--continue`, `--resume`, `--seed-session`, `--freeze`, `--provider` and
+`--plugin-dir`. The [full table](docs/development/testing.md#craze-frame) is in
+the testing guide. There is no
 `--workspace`: `craze frame` runs in the current directory. It never reads
 `~/.craze/config.toml`, so a saved theme cannot reach a golden.
 
@@ -384,10 +433,10 @@ out (the last frame and the wait it was stuck on go to stderr).
 make lint && make test && make test-race && make build && make test-cli
 ```
 
-`make test-cli` runs the Python suite in `tests/cli` under `uv`: `test_prompt.py`
-(the headless `prompt --json` path), `test_frame.py` (`craze frame` through the
-binary, for the same scripts the Go goldens cover) and `test_tui.py` (a real
-PTY). Everything uses `craze-fake-agent`, so no Cursor credentials are needed.
+`make test-cli` runs the Python suite in `tests/cli` under `uv`: among others
+`test_prompt.py` (the headless `prompt --json` path), `test_frame.py` (`craze
+frame` through the binary, for the same scripts the Go goldens cover) and
+`test_tui.py` (a real PTY). Everything uses `craze-fake-agent`, so no Cursor credentials are needed.
 
 `tests/cli/tmux_smoke.py` is the tmux smoke layer: it drives the real binary in
 a real terminal at 100x30 and 80x24, one run per case: every fake script, plus
@@ -411,12 +460,13 @@ Published site: https://charliek.github.io/craze/
 Sources live under `docs/`:
 
 - [Quick Start](docs/getting-started/quick-start.md)
-- [Upgrading from v0.0.1](docs/getting-started/upgrading.md)
+- [Upgrading](docs/getting-started/upgrading.md)
 - [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - [CLI](docs/reference/cli.md)
 - [TUI](docs/reference/tui.md)
 - [Configuration](docs/reference/configuration.md)
-- [Development](docs/development/setup.md)
+- [Protocol](docs/reference/protocol.md)
+- [Development](docs/development/setup.md), [Testing](docs/development/testing.md) and [Architecture](docs/development/architecture.md)
 
 ```shell
 make docs         # same as CI: zensical build --strict
@@ -427,8 +477,9 @@ Documentation is automatically published to GitHub Pages on push to main.
 
 ## Status
 
-POC on Linux and macOS: `craze` opens a TUI; `craze prompt --json` is the headless path.
-Multi-project harness integration is later work.
+Early-stage software, released as v0.1.x for Linux and macOS (Homebrew, apt and
+release archives). `craze` opens a TUI; `craze prompt --json` is the headless
+path, and `craze new --wait` and `craze send` drive sessions from other programs.
 
 ## License
 

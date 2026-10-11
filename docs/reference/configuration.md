@@ -6,7 +6,11 @@ about it in the session index (`~/.craze/sessions.jsonl`) that
 `--continue`, `--resume` and `/rename` use — see [Session
 index](#session-index). Every session also writes a [journal](#session-journal)
 of what happened in it, which can contain secrets and can be turned off.
-Session flags (`--workspace`, `--model`, `--effort`, `--fast` / `--no-fast`,
+`config.toml` also holds the switches `journal`, `control_socket`, `detach`,
+`host_idle_exit`, `terminal_title`, `background` and `host_status`, the
+[`[agents]`](#agent-binaries) table, and the
+[`[compat.claude]`](#claude-content-compatclaude) table that says which of
+Claude's own files a native session reads. Session flags (`--workspace`, `--model`, `--effort`, `--fast` / `--no-fast`,
 `--force`, `--ask` / `--plan`, `--agent-bin`) are per-invocation; the agent
 binary each ACP provider runs can also be set once, in [`[agents]`](#agent-binaries).
 
@@ -116,6 +120,44 @@ the default.
 `craze frame` never reads this file, and never reads `$CRAZE_PROVIDER`. See
 [Testing](../development/testing.md#craze-frame).
 
+## Claude content: `[compat.claude]`
+
+A native session reads the instruction, rule, skill, command, plugin and
+sub-agent persona files in Claude Code's layout (`AGENTS.md` and `CLAUDE.md`,
+`.claude/rules`, `.claude/skills`, `.claude/commands`, `.claude/agents`, and
+the Claude-enabled plugins), so a repository set up for Claude Code behaves the
+same here. The `[compat.claude]` table in `config.toml`
+turns each class off:
+
+```toml
+[compat.claude]
+instructions = true   # AGENTS.md, CLAUDE.md and their companions, rules included
+rules        = true   # .claude/rules, ~/.claude/rules
+skills       = true   # this project's and your own skills
+commands     = true   # this project's and your own commands
+plugins      = true   # what Claude-enabled plugins ship: skills, commands, personas
+agents       = true   # sub-agent personas, from every source
+```
+
+Every key is a bool and defaults to `true`: a key that is absent, whether the
+whole table is missing or only that key, leaves its class on, and so does a
+`config.toml` craze cannot parse. A key written as `false` turns its class off
+even in a table that leaves the others out (`rules = false` alone turns off
+rules and nothing else). `false` stops a native session reading that class. `instructions = false` removes the
+whole instructions section of the prompt, rules included, where `rules =
+false` removes only the rule files. `skills` and `commands` govern this
+project's and your own entries, a plugin's being `plugins`' alone. `agents =
+false` removes the personas from all three of their sources, a plugin's
+included.
+
+A value that is not a bool leaves the class on and adds one line to the
+session's diagnostics: `config.toml compat.claude.<key> is not a bool; leaving
+it on`. These keys fail open, unlike `journal` and `control_socket`: a typo
+must not strip a repository's instructions out of a session. They affect the
+native provider only; cursor and grok read their own files. See [What the
+model is told](tui.md#what-the-model-is-told) and [Slash
+commands](tui.md#slash-commands) for what the classes contribute.
+
 ## Session index
 
 `~/.craze/sessions.jsonl` is the on-disk index behind `--continue`,
@@ -129,8 +171,15 @@ environment variable for it.
 One JSON object per line:
 
 ```json
-{"sessionId":"…","provider":"grok","cwd":"/abs/workspace","title":"fix flaky pty test","pinned":false,"createdAt":"2026-09-15T22:04:11.5Z","updatedAt":"2026-09-16T00:12:03.2Z"}
+{"sessionId":"…","provider":"grok","cwd":"/abs/workspace","title":"fix flaky pty test","pinned":false,"crazeId":"…","createdAt":"2026-09-15T22:04:11.5Z","updatedAt":"2026-09-16T00:12:03.2Z"}
 ```
+
+- `sessionId` is the **provider's** id for the session, and it changes with
+  every load into a new agent session. `crazeId` is craze's own durable id:
+  the engine mints it and carries it back in on every load, so it survives a
+  load and a host restart. A row an older craze wrote has none and gains one
+  on its next write; a newer craze's row is read by an older one, which keeps
+  the key.
 
 - `cwd` is matched by exact string against the workspace's absolute path —
   no symlink resolution — so a session started from one path is not offered
@@ -794,7 +843,8 @@ default_effort = "high"
 A model alias is at most 256 bytes: a `models.toml` with a longer one does not
 load, and says which entry. A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
-[`vision`](#native-vision) and `tool_profile`; `models.toml` also takes
+[`vision`](#native-vision) and [`tool_profile`](#native-tool-profile);
+`models.toml` also takes
 [`[compaction]`](#native-compaction) and
 [`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
 and rewrites `providers.toml` only when you run [`craze auth`](#keys) or
@@ -999,6 +1049,7 @@ craze makes `0700`:
 | `auth/chatgpt.json` | The tokens: access, refresh and id token, and when they expire | **yes** | deleted |
 | `auth/chatgpt.json.lock` | The lock every change of the two files above is made under | no | kept |
 | `chatgpt-models.json` | The account's model list, with the account it belongs to | no | kept |
+| `chatgpt-models.json.lock` | The lock a refresh of the list is made under | no | kept |
 
 Never copy or paste `auth/chatgpt.json`; craze writes it durably (synced to
 disk) and never logs it. Signing out deletes it and keeps the rest, so the
@@ -1292,8 +1343,8 @@ A native model's `vision` key says whether craze may send it images: the
 pictures pasted into the composer (see [Images](tui.md#images)) and the ones
 the `Read` tool returns for an image file. The shipped catalog sets it
 `true` on the models seen to describe a screenshot, and leaves it off on GLM
-5.3 — `glm-5.3`, Z.AI's start model, and `fireworks/glm-5p3`. A model you add
-defaults to `false`.
+5.3 — `glm-5.3`, Z.AI's start model, `fireworks/glm-5p3` and
+`openrouter/glm-latest`. A model you add defaults to `false`.
 
 ```toml
 [models."local/qwen"]
@@ -1313,6 +1364,41 @@ File: <path>]` where the image was; the
 [Images](tui.md#what-the-agent-receives) section of the TUI reference has the
 rest.
 
+## Native tool profile
+
+A native session offers its model a set of tools and a system prompt written
+for them: a **tool profile**. craze ships one, `opencode` (the file tools
+`read`, `write` and `edit`, then `bash`, `grep`, `glob` and the others), and
+it is the default for every model. A model entry in `models.toml` may name a
+profile with `tool_profile`:
+
+```toml
+[models."local/qwen"]
+provider     = "local"
+wire_model   = "qwen3-coder"
+tool_profile = "opencode"    # the only profile there is today; leaving it out is the same
+```
+
+A profile name craze does not know makes the load of `models.toml` fail, with a
+message listing the ones it has (`unknown tool profile "…": want one of "opencode", or
+leave it out for the default`). The profile is fixed when a session opens,
+because the system prompt is frozen for the session, and is recorded in the
+transcript's header: switching with `/model` to a model whose profile differs
+from the session's is refused, and a resumed session keeps the profile it
+started with. With one profile today, the key changes nothing yet.
+
+## Cached results of waiting commands
+
+When a message or plan is longer than `--max-message` allows, [`craze
+wait`](cli.md#craze-wait), `craze new --wait` and `craze send --wait` print the
+head and write the whole result to
+`~/.cache/craze/results/<short>-<inc>-<turn>.md`: `<short>` is the session's
+short id, `<inc>` the last 8 characters of the incarnation the turn ran in
+(turn ids restart with each incarnation) and `<turn>` the turn's id. The files
+are `0600` in a `0700` directory under the process's own `$HOME`, not
+`CRAZE_HOME`, like the rest of `~/.cache/craze`. They are rewritten when the
+same turn is waited on again, and craze does not read them back.
+
 ## Environment
 
 | Variable | Purpose |
@@ -1323,6 +1409,7 @@ rest.
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
+| `CRAZE_HUB_IDLE` | How long [the hub](cli.md#the-hub) waits, with no client and no live host, before it exits: a Go duration (`"30s"`, `"5m"`). Default 60 seconds; a value that is not a positive duration gives the default. Mostly of use in tests |
 | `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
 | `FIREWORKS_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY` / `ZAI_API_KEY` | API keys for the native provider's [shipped providers](#the-shipped-catalog), tried before any inline `api_key`; a value under 8 bytes is skipped with a warning |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |

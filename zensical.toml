@@ -30,7 +30,7 @@ nav = [
   { "Home" = "index.md" },
   { "Getting Started" = [
     { "Quick Start" = "getting-started/quick-start.md" },
-    { "Upgrading from v0.0.1" = "getting-started/upgrading.md" },
+    { "Upgrading" = "getting-started/upgrading.md" },
     { "Claude Code sub-agents" = "getting-started/claude-code.md" },
   ] },
   { "Reference" = [
