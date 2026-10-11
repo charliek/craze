@@ -7,6 +7,9 @@ craze bridge [flags]
 craze attach [flags]
 craze ps [flags]
 craze new [prompt...] [flags]
+craze wait <id> [--from <handle>] [--timeout <d>] [--max-message <n>] [--json]
+craze cancel <id>
+craze stop <id>
 craze serve [flags]
 craze auth login [provider] [--no-browser]
 craze auth logout <provider>
@@ -962,6 +965,179 @@ and the TUI draws the same words as a note in the transcript (`cursor may not
 start here: …`). It is a warning, never a refusal: nothing is stopped, and a
 cursor that can reach the keychain some other way starts as usual.
 
+## craze wait
+
+```bash
+./bin/craze wait 8327352e
+./bin/craze wait 8327352e --timeout 9m --max-message 20000
+./bin/craze wait 8327352e --from 0199c0de-1111-7000-8000-00000000a001.41.turn-3 --json
+```
+
+Follows one turn of a running session and prints its result. The id is any
+form [`craze ps`](#craze-ps) prints, resolved as
+[short session ids](#short-session-ids) are; the session's whole id is what
+goes on the wire.
+
+- **`craze wait <id>`** follows the turn the session is working on — one
+  craze started, or one the agent runs on its own — from where it is when the
+  command attaches, and with nothing running reports the last turn at once. A
+  session that has had no turn is `idle`. Its result is **partial**: what
+  happened before the attach was not seen, so its tool calls, files and time
+  count from what the session still holds, and an idle session's last turn
+  has no stop reason and no `usage` — the session's last usage report need
+  not be that turn's (a turn withdrawn before it opened reports none). It
+  never touches the session: a signal (`Ctrl+C`, `SIGTERM`, `SIGHUP`) exits
+  1, and the turn goes on.
+- **`--from <handle>`** follows exactly the turn or queued prompt a handle
+  names, from the handle's place in the session's stream, so a turn that has
+  ended since is still reported: whole when the handle's place is before the
+  turn began — a queued prompt's, or a turn's that its own command started —
+  and partial when the handle was taken mid-turn (plain `craze wait`'s). A
+  `running` or `needs_input` result prints one (`next:`, or `.handle` with
+  `--json`). A handle is `<incarnation>.<seq>.<target>` — the session's host
+  incarnation, a place in its stream, and `turn-<n>`, `turn-<n>.row-<id>`
+  (a turn that came from a queued prompt), `row-<id>` (a queued prompt) or
+  `foreign-<id>` (a turn the agent ran on its own, its id base64url-encoded)
+  — letters, digits, `.`, `_` and `-` only, so it needs no quoting. A prompt
+  that was queued keeps its `row-<id>` handle once its turn runs: followed
+  from it, the wait follows the prompt into its turn — and on into its next
+  run, should the agent's own turn refuse it and put it back. A turn met
+  mid-way — plain `craze wait`'s, or one picked up again from where the
+  session stands after a reconnect the host could not replay — is named by
+  its `turn-<n>`, since a handle names only what its place in the stream can
+  follow; when that turn came from a queued prompt, the prompt is named
+  beside it (`turn-<n>.row-<id>`), and a wait from the handle still follows
+  the prompt into its next run should the turn be refused. **A handle
+  is ownership**: a signal while `--from` waits cancels its own work and
+  nothing else — a queued prompt is removed (`dropped`), its running turn
+  cancelled by its id (`cancelled`, or whatever it ended as first) — within 2
+  seconds, or exit 1, `cancel sent, not confirmed`; a second signal exits at
+  once, without waiting even for its detach from the session. A turn the
+  agent runs on its own is never cancelled this way, nor is anything in a
+  host that is not the one the turn ran in: a cancel that would land in a
+  restarted host is not sent (exit 1, `the session's host changed …`).
+- **While the command waits for the session to start** (an attach to a
+  session still coming up), a signal ends it at once — exit 1,
+  `interrupted before session <short> answered`, the session untouched — as
+  `--timeout`'s end does (`timed out before session <short> answered`).
+- **As the command exits** it detaches from the session, waiting at most a few
+  seconds for the host's answer (after a signal, what is left of its 2
+  seconds); a signal then ends the detach at once.
+
+```text
+The flaky test raced the cache's eviction; I made eviction wait for readers.
+---
+completed · 27s · 5 tool calls · $0.04 · context 16.6k/272k
+files: stats/core.py
+session 175bfe79 · craze attach --session 175bfe79
+```
+
+The message is the turn's **last assistant message** — the reply after its
+last tool call, thought or plan — and `(no final message)` when the turn wrote
+none: never an earlier turn's. A plan the turn presented follows it, under
+`plan:`. The footer's first line is the status, the turn's time and its tool
+calls, then — for a native session — what the turn cost (`unpriced` when none
+of it had a price; `+` when some did not) and how full the context is. Then,
+each when there is one: `error:` (a failed turn), `stopped:` (a stop other than
+`end_turn`), `files:` (the paths the turn's edits touched), one
+`auto-answered:` line per question or plan craze's approval policy answered,
+`ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
+command to run next for a `running` or `needs_input` result.
+
+| Status | Exit | |
+|--------|------|---|
+| `completed` | 0 | The turn ended `end_turn`, with no error |
+| `idle` | 0 | The session has had no turn |
+| `failed` | 3 | The turn ended with an error, or with a stop other than `end_turn` |
+| `cancelled` | 3 | The turn was cancelled |
+| `dropped` | 3 | The queued prompt was removed before it ran |
+| `needs_input` | 4 | An ask is open that nothing here answers — a permission under `--no-force`, a question or a plan on an interactive host — the turn's own, or, for a queued prompt, the one holding up the turn ahead of it (`blocked by:`). Answer it in `craze attach`, or `craze cancel` or `craze stop` the session; the session is left as it is |
+| `running` | 5 | `--timeout` passed; the turn goes on, and `craze wait <id> --from <handle>` follows it. Nothing looked at once `--timeout` has passed — an ask the turn opened among them — changes this answer |
+
+| Flag | Description |
+|------|-------------|
+| `--from <handle>` | Follow exactly the turn or queued prompt the handle names, from its place in the stream; a signal then cancels it |
+| `--timeout <duration>` | Stop waiting after this long, counted from the command's start (`9m`, `30s`): `running`, exit 5, with a handle. Default: no limit |
+| `--max-message <n>` | Print at most the first `n` characters of the message, then `[… cut: full message in <path>]`, and write the whole result — the message and footer, or the JSON — to `~/.cache/craze/results/<short>-<turn>.md` (`0600`). Default: no limit |
+| `--json` | Print the result as one JSON object on one line |
+
+With `--json`, one object. These keys are always there: `status`, `session`
+(the whole id), `short`, `provider`, `model` and `attach`; and with a turn or a
+queued prompt, `turn` and/or `row`.
+
+| Key | |
+|-----|---|
+| `message`, `toolCalls`, `durationMs`, `files` | On `completed`, `failed`, `cancelled` and `dropped`, always: `""`, `0` and `[]` when there is none |
+| `stopReason`, `error` | How the turn ended; `stopReason` is absent when unknown (a partial result for an idle session) |
+| `plan` | The text of a plan the turn presented, accepted automatically or not |
+| `usage` | The last usage report before the turn's end (native sessions), as the [stream's usage section](protocol.md#usage) carries it: `{contextTokens, contextWindow, turn, session}`. A partial result settled from where the session stands carries only what was seen of the turn itself — none for an idle session's last turn |
+| `autoAnswered` | `[{kind, summary, choice}]`: each question or plan craze's approval policy answered |
+| `ask`, `blockedBy` | `needs_input`: the open ask, `{id, kind, summary}`, and for a queued prompt the turn holding it up |
+| `handle` | `running`, `needs_input`, and a failure with one |
+| `partial` | `true` when some of the turn's events were not seen |
+| `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
+| `messageFile` | `--max-message`'s file, when it cut the message |
+
+A key that does not apply is absent, never `null` or `false`:
+
+```json
+{"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
+```
+
+A dropped connection is redialled and the stream picked up where it was; a
+host that can no longer replay that far answers with where the session stands,
+and the result is then partial. A failure is exit 1 with one line, and with
+`--json` one `{"error":{"message":…}}` object on stdout first — `handle` beside
+it when there is one — as [`craze new`](#craze-new)'s failures are; a usage
+error stays plain (exit 2):
+
+```text
+craze wait: no session <id>
+craze wait: the session has ended (craze send <short> <prompt> reloads it)
+craze wait: interrupted before session <short> answered
+craze wait: timed out before session <short> answered
+craze wait: timed out before the turn could be followed; craze wait <short> --from <handle> follows it
+craze wait: the session ended (craze send <short> <prompt> reloads it) (handle <handle>)
+craze wait: the turn's ending was not observed (handle <handle>)
+craze wait: the session's host changed before the cancel reached it; the turn's ending was not observed (handle <handle>)
+craze wait: lost the connection to session <short>: <reason>; the turn runs on in its host; craze wait <short> --from <handle> follows it
+craze wait: cancel sent, not confirmed; craze wait <short> --from <handle> follows it
+```
+
+`has ended` is an id no running session has, which the session index still
+holds; with `--from`, the handle is named beside it, as it is with every
+failure once there is one. `ended` is the session ending while the command
+waited — a turn the session's close cut short included (its stop reason
+`closing` is the session's end, not the turn failing) — and its handle still
+names the turn. `not observed` is a turn whose end cannot be learnt: its host
+restarted (turn ids start again in a new host, so nothing the new host says is
+taken for the turn's), or the turn ended and others ran since, out of the
+host's reach.
+
+## craze cancel
+
+```bash
+./bin/craze cancel 8327352e
+```
+
+Cancels the turn the session is working on — whoever started it, a turn the
+agent runs on its own included — and prints `cancelled turn-3` (`cancelled`
+alone when no turn of craze's ran: the agent's own turn, or an ask open between
+turns). With nothing running it prints `nothing to cancel`, exit 0. The
+session goes on, and so does its queue: the next queued prompt starts. The id
+is resolved as `craze wait`'s; a failure is exit 1 with one line.
+
+## craze stop
+
+```bash
+./bin/craze stop 8327352e
+```
+
+Ends the session — its turn cancelled, its queue cleared, its host gone — and
+prints `stopped 8327352e` once its host has taken the stop. It stays in the
+session index, to resume. A session a craze TUI hosts cannot be stopped from
+here (exit 1): close it there. The id is resolved as `craze wait`'s.
+
 ## craze auth
 
 ```bash
@@ -1364,3 +1540,20 @@ A usage error never echoes what was typed (a mistyped word may be a pasted key):
 
 `craze frame` uses 2 for a bad key script and 3 for a wait timeout; that
 command is hidden. See [Testing](../development/testing.md#craze-frame).
+
+### Waiting commands
+
+[`craze wait`](#craze-wait) exits with its result's status, so a script can
+branch on the code alone:
+
+| Code | Status | When |
+|------|--------|------|
+| 0 | `completed`, `idle` | The turn ended `end_turn` with no error; `wait` on a session that has had no turn |
+| 1 | — | craze failed: no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal |
+| 2 | — | Usage error |
+| 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing; the queued prompt was removed before it ran |
+| 4 | `needs_input` | An ask is open that nothing here answers |
+| 5 | `running` | `--timeout` passed; the turn goes on (`craze wait <id> --from <handle>` follows it) |
+
+`craze cancel` and `craze stop` exit 0 when they did what they say —
+`nothing to cancel` included — 1 on a failure, and 2 for a usage error.

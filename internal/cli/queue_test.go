@@ -298,6 +298,9 @@ func TestPermissionRejectedBetweenTurnsStillFailsTheRun(t *testing.T) {
 // orders events on its own.
 type stubSession struct {
 	mu sync.Mutex
+	// model is the model the session's snapshot names (CurrentModel), ""
+	// for none.
+	model string
 	// log is the session's event log and closed is its done signal, in the
 	// live session's order: Close closes the signal first, so an emit blocked
 	// on a primary nobody is reading gives its event up instead of waiting for
@@ -612,8 +615,9 @@ func (s *stubSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return agent.Snapshot{
-		ForeignTurn: s.foreign,
-		Subagents:   append([]agent.SubagentInfo(nil), s.subagents...),
+		ForeignTurn:  s.foreign,
+		Subagents:    append([]agent.SubagentInfo(nil), s.subagents...),
+		CurrentModel: s.model,
 	}
 }
 

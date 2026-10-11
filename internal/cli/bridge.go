@@ -176,22 +176,29 @@ const minPartialID = 4
 // or prefix needs minPartialID characters. The hub's session.connect stays
 // exact.
 func matchSession(entries []rundir.Entry, session string) []rundir.Entry {
-	tiers := []func(rundir.Entry) bool{
+	return matchTiers(entries, session,
 		func(e rundir.Entry) bool {
 			return e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session
 		},
 		func(e rundir.Entry) bool { return strings.HasSuffix(e.CrazeSessionID, session) },
 		func(e rundir.Entry) bool { return strings.HasPrefix(e.CrazeSessionID, session) },
 		func(e rundir.Entry) bool { return strings.HasPrefix(e.HostID, session) },
-	}
+	)
+}
+
+// matchTiers is every item the first matching tier names: the first tier is
+// the exact one, and every later one — a suffix or a prefix — needs id to
+// have minPartialID characters. matchSession's loop, shared with the session
+// index's craze ids (resolve.go's matchCrazeID, plan 041 §3.1 "Ids").
+func matchTiers[T any](items []T, id string, tiers ...func(T) bool) []T {
 	for i, tier := range tiers {
-		if i > 0 && len(session) < minPartialID {
+		if i > 0 && len(id) < minPartialID {
 			break
 		}
-		var matches []rundir.Entry
-		for _, e := range entries {
-			if tier(e) {
-				matches = append(matches, e)
+		var matches []T
+		for _, it := range items {
+			if tier(it) {
+				matches = append(matches, it)
 			}
 		}
 		if len(matches) > 0 {

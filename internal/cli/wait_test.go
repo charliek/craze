@@ -1,0 +1,417 @@
+package cli
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/fakehost"
+	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/remote"
+	"github.com/charliek/craze/internal/rundir"
+	"github.com/charliek/craze/internal/sessions"
+)
+
+// craze wait, cancel and stop as commands (wait.go, cancel_stop.go; plan 041
+// §3.1, §7 W1): run in this process through the root command, against the
+// waiter's rig (turnwait_test.go), a fake host, or a real craze serve over
+// the fake ACP agent.
+
+// crazeRun is one craze command line run on a goroutine of its own.
+type crazeRun struct {
+	done           chan struct{}
+	stdout, stderr string
+	code           int
+}
+
+func goCraze(argv ...string) *crazeRun {
+	r := &crazeRun{done: make(chan struct{})}
+	go func() {
+		r.stdout, r.stderr, r.code = executeErr(argv)
+		close(r.done)
+	}()
+	return r
+}
+
+// wait is the run's output and exit code, within stubWatchdog.
+func (r *crazeRun) wait(t *testing.T) (stdout, stderr string, code int) {
+	t.Helper()
+	select {
+	case <-r.done:
+		return r.stdout, r.stderr, r.code
+	case <-time.After(stubWatchdog):
+		t.Fatalf("craze did not return within %v", stubWatchdog)
+		return "", "", 0
+	}
+}
+
+// withWaitSignals hands the waiting commands a signal channel of the test's.
+func withWaitSignals(t *testing.T) chan os.Signal {
+	t.Helper()
+	ch := make(chan os.Signal, 2)
+	prev := waitSignals
+	waitSignals = func() (<-chan os.Signal, func()) { return ch, func() {} }
+	t.Cleanup(func() { waitSignals = prev })
+	return ch
+}
+
+// withAttachedBarrier is each craze wait's attach answered, one receive a
+// run (waitAttachedHook): what a test sends a signal after when it means the
+// wait's, not the attach's.
+func withAttachedBarrier(t *testing.T) func() {
+	t.Helper()
+	ch := make(chan struct{}, 4)
+	prev := waitAttachedHook
+	waitAttachedHook = func() { ch <- struct{}{} }
+	t.Cleanup(func() { waitAttachedHook = prev })
+	return func() {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(stubWatchdog):
+			t.Fatalf("craze wait was not attached within %v", stubWatchdog)
+		}
+	}
+}
+
+// decodeResult is craze wait --json's one object.
+func decodeResult(t *testing.T, stdout string) map[string]any {
+	t.Helper()
+	if strings.Count(stdout, "\n") != 1 || !strings.HasSuffix(stdout, "}\n") {
+		t.Fatalf("--json printed %q, want one object on one line", stdout)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("--json printed %q: %v", stdout, err)
+	}
+	return m
+}
+
+// TestWaitPlainReportsTheLastTurn is §7 W1 3 for a session nothing runs in:
+// plain craze wait reports its last turn at once, partial — and a turn that
+// wrote no text is message "" (plain: `(no final message)`), never the turn
+// before's, for a turn of craze's own and for one the agent ran itself.
+func TestWaitPlainReportsTheLastTurn(t *testing.T) {
+	r := newWaitRig(t, 0, answerTurn(textEv("an earlier reply")), answerTurn(toolEv("t1", "execute", "completed")))
+	r.submit("one")
+	r.waitIdle()
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--json"})
+	if code != 0 {
+		t.Fatalf("craze wait exited %d: %s%s", code, stdout, stderr)
+	}
+	m := decodeResult(t, stdout)
+	if m["status"] != "completed" || m["turn"] != "turn-1" || m["message"] != "an earlier reply" || m["partial"] != true {
+		t.Fatalf("the first turn's result: %v", m)
+	}
+	r.submit("two")
+	waitFor(t, "the second turn's end", func() bool {
+		lt := r.eng.State().LastTurn
+		return lt != nil && lt.TurnID == "turn-2"
+	})
+	stdout, _, code = executeErr([]string{"wait", waitRigShort, "--json"})
+	m = decodeResult(t, stdout)
+	if code != 0 || m["turn"] != "turn-2" || m["message"] != "" || m["toolCalls"] != float64(1) || m["stopReason"] != nil {
+		t.Fatalf("a turn with no text: exit %d, %v", code, m)
+	}
+	stdout, _, code = executeErr([]string{"wait", waitRigShort})
+	if code != 0 || !strings.HasPrefix(stdout, "(no final message)\n---\ncompleted (partial) · ") ||
+		!strings.HasSuffix(stdout, "\nsession 0000a001 · craze attach --session 0000a001\n") {
+		t.Fatalf("plain: exit %d:\n%s", code, stdout)
+	}
+	r.s.setForeign(true)
+	r.s.emit(toolEv("f1", "read", "completed"))
+	r.s.setForeign(false)
+	waitFor(t, "the agent's own turn's end", func() bool {
+		lt := r.eng.State().LastTurn
+		return lt != nil && lt.TurnID == "interject-fallback-1"
+	})
+	stdout, _, code = executeErr([]string{"wait", waitRigShort, "--json"})
+	m = decodeResult(t, stdout)
+	if code != 0 || m["status"] != "completed" || m["turn"] != "interject-fallback-1" || m["message"] != "" {
+		t.Fatalf("the agent's own turn with no text: exit %d, %v", code, m)
+	}
+}
+
+// TestWaitNeverPromptedIsIdle: a session that has had no turn is idle, exit
+// 0, with nothing but the session's facts.
+func TestWaitNeverPromptedIsIdle(t *testing.T) {
+	newWaitRig(t, 0)
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--json"})
+	m := decodeResult(t, stdout)
+	if code != 0 || m["status"] != "idle" || m["turn"] != nil || m["message"] != nil || m["session"] != waitRigID ||
+		m["short"] != waitRigShort || m["attach"] != "craze attach --session 0000a001" {
+		t.Fatalf("craze wait on a session never prompted: exit %d, %v, %s", code, m, stderr)
+	}
+}
+
+// TestWaitTimeoutThenFrom is §7 W1 4 as commands: --timeout on a longer turn
+// is `running`, exit 5, with the handle and the exact command that follows
+// it; `wait --from` that handle after the turn ended reports it (partial:
+// plain wait met it mid-turn).
+func TestWaitTimeoutThenFrom(t *testing.T) {
+	r := newWaitRig(t, 0)
+	g := r.gate()
+	r.script(heldTurn(g, textEv("late"), textEv(" but whole")))
+	r.submit("go")
+	r.waitStarted("turn-1")
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--timeout", "1s"})
+	if code != 5 {
+		t.Fatalf("craze wait --timeout exited %d: %s%s", code, stdout, stderr)
+	}
+	m := regexp.MustCompile(`(?m)^next: craze wait 0000a001 --from (\S+)$`).FindStringSubmatch(stdout)
+	if m == nil || !strings.HasPrefix(stdout, "(no final message)\n---\nrunning (partial) · ") {
+		t.Fatalf("the running result:\n%s", stdout)
+	}
+	h, err := parseHandle(m[1])
+	if err != nil || h.target != (waitTarget{kind: targetTurn, id: "turn-1"}) {
+		t.Fatalf("the handle %q: %+v %v", m[1], h, err)
+	}
+	g.open()
+	r.waitIdle()
+	stdout, stderr, code = executeErr([]string{"wait", waitRigShort, "--from", m[1], "--json"})
+	res := decodeResult(t, stdout)
+	if code != 0 || res["status"] != "completed" || res["message"] != "late but whole" || res["turn"] != "turn-1" ||
+		res["handle"] != nil || res["stopReason"] != "end_turn" {
+		t.Fatalf("craze wait --from after the end: exit %d, %v, %s", code, res, stderr)
+	}
+}
+
+// TestWaitFromOwnsItsTarget is §7 W1 8 through the command: `wait --from`'s
+// signal cancels the handle's turn by its id (cancelled, exit 3); plain
+// `wait`'s is exit 1 and the turn goes on.
+func TestWaitFromOwnsItsTarget(t *testing.T) {
+	r := signalRig(t)
+	sigs := withWaitSignals(t)
+	attached := withAttachedBarrier(t)
+	r.submit("someone else's")
+	r.waitStarted("turn-1")
+
+	plain := goCraze("wait", waitRigShort)
+	attached()
+	sigs <- syscall.SIGTERM
+	stdout, stderr, code := plain.wait(t)
+	// The handle is named once the waiter has met the turn, which the
+	// signal can beat here (TestWaitTurnSignals pins it, with a barrier).
+	if code != 1 || stdout != "" || !regexp.MustCompile(`^craze wait: interrupted; the turn goes on(; craze wait 0000a001 --from \S+ follows it)?\n$`).MatchString(stderr) {
+		t.Fatalf("plain wait's signal: exit %d, %q %q", code, stdout, stderr)
+	}
+	if st := r.eng.State(); st.Turn != "turn-1" || r.s.cancelsReturned() != 0 {
+		t.Fatalf("plain wait touched the session: %+v", st)
+	}
+
+	handle := turnHandle{incarnation: r.eng.State().Incarnation, seq: 0, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	owned := goCraze("wait", waitRigShort, "--from", handle.String(), "--json")
+	attached()
+	sigs <- syscall.SIGINT
+	stdout, stderr, code = owned.wait(t)
+	m := decodeResult(t, stdout)
+	if code != 3 || m["status"] != "cancelled" || m["turn"] != "turn-1" || m["stopReason"] != "cancelled" || stderr != "" {
+		t.Fatalf("wait --from's signal: exit %d, %v, %q", code, m, stderr)
+	}
+	if lt := r.eng.State().LastTurn; lt == nil || lt.Outcome != "cancelled" {
+		t.Fatalf("the turn ended %+v", lt)
+	}
+}
+
+// TestWaitNeedsInputOnAnOpenPermission is §7 W1 6 against a real craze
+// serve: the fake ACP agent's permission script under --no-force parks a
+// permission no client answers; craze wait is needs_input, exit 4, naming
+// the ask, with a handle; a prompt queued behind it, followed from its
+// handle, is needs_input blocked by the turn that holds the ask.
+func TestWaitNeedsInputOnAnOpenPermission(t *testing.T) {
+	env, ws := serveHome(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "permission")
+	srv := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--no-force")
+	e := srv.waitServing(t, env, true)
+	short := psShort(e.CrazeSessionID)
+	promptUnattached(t, e, "run the shell")
+	waitFor(t, "the permission to open", func() bool { return listRow(t, e).PendingAsks == 1 })
+
+	stdout, stderr, code := executeErr([]string{"wait", short, "--json"})
+	m := decodeResult(t, stdout)
+	ask, _ := m["ask"].(map[string]any)
+	if code != 4 || m["status"] != "needs_input" || m["turn"] != "turn-1" || ask["kind"] != "permission" ||
+		ask["summary"] != "Shell" || ask["id"] == "" || m["handle"] == nil || m["message"] != nil {
+		t.Fatalf("craze wait on an open permission: exit %d, %v, %s", code, m, stderr)
+	}
+	stdout, _, code = executeErr([]string{"wait", short})
+	if code != 4 || !strings.Contains(stdout, "\nask: permission Shell (") ||
+		!strings.Contains(stdout, "\nnext: answer it in craze attach --session "+short+" (or craze cancel "+short+", craze stop "+short+"), then craze wait "+short+" --from ") {
+		t.Fatalf("plain needs_input: exit %d:\n%s", code, stdout)
+	}
+
+	// A prompt queued behind the parked turn, and its handle: the row, from
+	// the stream's place once it is queued.
+	c, err := remote.Dial(stepCtx(t), e.Socket, remote.Options{PeerCheck: rundir.DialCheck(os.Geteuid())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	var pr protocol.PromptResult
+	if _, err := c.Command(stepCtx(t), protocol.MethodSessionPrompt, protocol.PromptParams{SessionID: e.CrazeSessionID,
+		Text: "and then this", Mode: protocol.PromptQueue}, &pr, remote.CommandOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := agent.DecodeQueuedPrompt(pr.Queued)
+	if err != nil {
+		t.Fatalf("the prompt was not queued: %+v, %v", pr, err)
+	}
+	var sync protocol.SyncResult
+	if err := c.Call(stepCtx(t), protocol.MethodSessionSync, protocol.SyncParams{SessionID: e.CrazeSessionID}, &sync); err != nil {
+		t.Fatal(err)
+	}
+	inc := listRow(t, e).Incarnation
+	h := turnHandle{incarnation: inc, seq: sync.Seq, target: waitTarget{kind: targetRow, id: row.ID}}
+	stdout, stderr, code = executeErr([]string{"wait", short, "--from", h.String(), "--json"})
+	m = decodeResult(t, stdout)
+	if code != 4 || m["status"] != "needs_input" || m["row"] != row.ID || m["blockedBy"] != "turn-1" || m["turn"] != nil {
+		t.Fatalf("the queued prompt's wait: exit %d, %v, %s", code, m, stderr)
+	}
+}
+
+// TestCancelAndStop is §7 W1 9: cancel and stop take any id craze ps prints
+// — a short id, a prefix — and the full id goes on the wire; cancel with
+// nothing running is `nothing to cancel`, exit 0, and with a turn running
+// cancels it, whoever started it; stop ends the session.
+func TestCancelAndStop(t *testing.T) {
+	r := signalRig(t)
+	for _, id := range []string{waitRigShort, "0199c0de-1111", waitRigID} {
+		stdout, stderr, code := executeErr([]string{"cancel", id})
+		if code != 0 || stdout != "nothing to cancel\n" || stderr != "" {
+			t.Fatalf("craze cancel %s on an idle session: exit %d, %q %q", id, code, stdout, stderr)
+		}
+	}
+	r.submit("someone else's")
+	r.waitStarted("turn-1")
+	stdout, stderr, code := executeErr([]string{"cancel", waitRigShort})
+	if code != 0 || stdout != "cancelled turn-1\n" || stderr != "" {
+		t.Fatalf("craze cancel on a running turn: exit %d, %q %q", code, stdout, stderr)
+	}
+	waitFor(t, "the cancelled ending", func() bool {
+		lt := r.eng.State().LastTurn
+		return lt != nil && lt.Outcome == "cancelled"
+	})
+
+	h := serveFakeHost(t, r.env, fakehost.Options{HostID: "0000000000b2", CrazeSessionID: "0199c0de-2222-7000-8000-00000000b002", Stop: true})
+	stdout, stderr, code = executeErr([]string{"stop", "0000b002"})
+	if code != 0 || stdout != "stopped 0000b002\n" || stderr != "" {
+		t.Fatalf("craze stop: exit %d, %q %q", code, stdout, stderr)
+	}
+	select {
+	case <-h.StopHeard():
+	case <-time.After(stubWatchdog):
+		t.Fatal("the host never heard the stop")
+	}
+}
+
+// TestSessionIdsNoLiveHostServes is §3.1 "Ids": an id no live host serves is
+// `the session has ended` when the session index has its row — craze wait
+// adding how to reload it — and `no session <id>` when it has none; an id
+// several live sessions match names them; none of it is a usage error.
+func TestSessionIdsNoLiveHostServes(t *testing.T) {
+	newWaitRig(t, 0)
+	ended := "0199c0de-3333-7000-8000-00000000c003"
+	now := time.Now()
+	if err := (&sessions.Store{}).Upsert(sessions.Row{SessionID: "prov-3", Provider: "grok", CWD: "/w", CrazeID: ended,
+		CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"wait", "0000c003"}, "craze wait: the session has ended (craze send 0000c003 <prompt> reloads it)\n"},
+		{[]string{"cancel", "0000c003"}, "craze cancel: the session has ended\n"},
+		{[]string{"stop", ended}, "craze stop: the session has ended\n"},
+		{[]string{"wait", "nosuchsession"}, "craze wait: no session nosuchsession\n"},
+		{[]string{"stop", "nosuchsession"}, "craze stop: no session nosuchsession\n"},
+	} {
+		stdout, stderr, code := executeErr(c.argv)
+		if code != 1 || stdout != "" || stderr != c.want {
+			t.Errorf("craze %q: exit %d, %q %q; want %q", c.argv, code, stdout, stderr, c.want)
+		}
+	}
+	// --from's handle, parsed already, is named with the failure (review
+	// round 2, N4): plain, and beside the error in --json's object.
+	h := turnHandle{incarnation: "0199c0de-9999-7000-8000-000000000000", seq: 3, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	ended3 := "the session has ended (craze send 0000c003 <prompt> reloads it)"
+	stdout, stderr, code := executeErr([]string{"wait", "0000c003", "--from", h.String()})
+	if code != 1 || stdout != "" || stderr != "craze wait: "+ended3+" (handle "+h.String()+")\n" {
+		t.Errorf("wait --from an ended session: exit %d, %q %q", code, stdout, stderr)
+	}
+	stdout, stderr, code = executeErr([]string{"wait", "0000c003", "--from", h.String(), "--json"})
+	m := decodeResult(t, stdout)
+	errObj, _ := m["error"].(map[string]any)
+	if code != 1 || errObj["message"] != ended3 || m["handle"] != h.String() || stderr != "craze wait: "+ended3+" (handle "+h.String()+")\n" {
+		t.Errorf("wait --from an ended session --json: exit %d, %v, %q", code, m, stderr)
+	}
+	for _, argv := range [][]string{{"wait"}, {"cancel"}, {"stop"}, {"wait", "a", "b"}, {"wait", waitRigShort, "--from", "garbage"},
+		{"wait", waitRigShort, "--timeout", "-1s"}, {"wait", waitRigShort, "--max-message", "-3"}, {"wait", "../x"}} {
+		stdout, stderr, code := executeErr(argv)
+		if code != 2 || stdout != "" || strings.Count(stderr, "\n") != 1 {
+			t.Errorf("craze %q: exit %d, %q %q; want a usage error", argv, code, stdout, stderr)
+		}
+	}
+}
+
+// TestWaitMaxMessageAndJSONFailures is §7 W1 10: --max-message cuts a long
+// message to its first N characters with the pointer to a file holding the
+// whole result (plain: message and footer; --json: the object), and --json's
+// exit 1 is one {"error": {"message": …}} object — with the handle beside it
+// when there is one — while a usage error stays plain.
+func TestWaitMaxMessageAndJSONFailures(t *testing.T) {
+	r := newWaitRig(t, 0, answerTurn(textEv("0123456789abcdefghij")))
+	r.submit("go")
+	r.waitIdle()
+	path := filepath.Join(r.env.Home, ".cache", "craze", "results", "0000a001-turn-1.md")
+
+	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--max-message", "10"})
+	if code != 0 || !strings.HasPrefix(stdout, "0123456789\n[… cut: full message in "+path+"]\n---\ncompleted (partial) · ") {
+		t.Fatalf("plain --max-message: exit %d, %q %q", code, stdout, stderr)
+	}
+	whole, err := os.ReadFile(path)
+	if err != nil || !strings.HasPrefix(string(whole), "0123456789abcdefghij\n---\ncompleted (partial) · ") {
+		t.Fatalf("the whole result's file: %q, %v", whole, err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("the file's mode: %v %v", st, err)
+	}
+
+	stdout, _, code = executeErr([]string{"wait", waitRigShort, "--max-message", "10", "--json"})
+	m := decodeResult(t, stdout)
+	if code != 0 || m["message"] != "0123456789" || m["messageFile"] != path {
+		t.Fatalf("--json --max-message: exit %d, %v", code, m)
+	}
+	whole, _ = os.ReadFile(path)
+	full := decodeResult(t, string(whole))
+	if full["message"] != "0123456789abcdefghij" || full["messageFile"] != nil {
+		t.Fatalf("the whole JSON result's file: %v", full)
+	}
+	stdout, _, code = executeErr([]string{"wait", waitRigShort, "--max-message", "20", "--json"})
+	if m := decodeResult(t, stdout); code != 0 || m["message"] != "0123456789abcdefghij" || m["messageFile"] != nil {
+		t.Fatalf("a message that fits: %v", m)
+	}
+
+	stdout, stderr, code = executeErr([]string{"wait", "nosuchsession", "--json"})
+	if code != 1 || stdout != `{"error":{"message":"no session nosuchsession"}}`+"\n" || stderr != "craze wait: no session nosuchsession\n" {
+		t.Fatalf("--json's exit 1: %d, %q %q", code, stdout, stderr)
+	}
+	foreign := turnHandle{incarnation: "0199c0de-9999-7000-8000-000000000000", seq: 3, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	stdout, stderr, code = executeErr([]string{"wait", waitRigShort, "--from", foreign.String(), "--json"})
+	m = decodeResult(t, stdout)
+	errObj, _ := m["error"].(map[string]any)
+	if code != 1 || errObj["message"] != "the turn's ending was not observed" || m["handle"] != foreign.String() ||
+		stderr != "craze wait: the turn's ending was not observed (handle "+foreign.String()+")\n" {
+		t.Fatalf("--json's exit 1 with a handle: %d, %v, %q", code, m, stderr)
+	}
+	stdout, stderr, code = executeErr([]string{"wait", "--json"})
+	if code != 2 || stdout != "" || stderr == "" {
+		t.Fatalf("a usage error under --json: %d, %q %q", code, stdout, stderr)
+	}
+}
