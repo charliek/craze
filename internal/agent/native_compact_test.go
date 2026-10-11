@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness"
@@ -368,6 +369,11 @@ func TestNativeCompactedIsTheCompactionEvent(t *testing.T) {
 		if got.Type != want[i].Type || got.Agent != want[i].Agent || !reflect.DeepEqual(got.Compaction, want[i].Compaction) {
 			t.Fatalf("event %d = %s %q %+v, want %s %q %+v", i, got.Type, got.Agent, got.Compaction, want[i].Type, want[i].Agent, want[i].Compaction)
 		}
+		// The wall-clock stamp goes before the leak check: its nanoseconds are
+		// nine arbitrary digits, and one run's "…39.357373737Z" held "373737"
+		// by chance (plan 043, a flake seen in its gate). The stamp is not
+		// what this test pins; the counts are.
+		got.At = time.Time{}
 		body, err := EncodeEvent(got)
 		if err != nil {
 			t.Fatal(err)
