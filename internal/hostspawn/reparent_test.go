@@ -234,8 +234,11 @@ func TestStartReparentedLeavesTheSpawnersTree(t *testing.T) {
 	default:
 		t.Fatal("Done is open with the host gone")
 	}
-	if _, err := rundir.ProcessIdentity(self.PID); !errors.Is(err, rundir.ErrNoProcess) {
-		t.Fatalf("the host's pid after Terminate: %v", err)
+	// Gone means no process, or a zombie its new parent has yet to reap: the
+	// host is no child of this process, and a CI runner's subreaper can take
+	// its time (seen on CI). A zombie is gone by the same rule Exited uses.
+	if id, err := rundir.ProcessIdentity(self.PID); err == nil && !id.Zombie || err != nil && !errors.Is(err, rundir.ErrNoProcess) {
+		t.Fatalf("the host's pid after Terminate: %+v, %v", id, err)
 	}
 }
 
