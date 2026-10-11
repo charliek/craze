@@ -484,12 +484,13 @@ func ErrorNames(err error) (code, typ string) {
 
 // structuredError is the code and type of the structured error in body, a
 // *fantasy.ProviderError's response body: the OpenAI-family envelope,
-// {"error": {"code": …, "type": …}}, which both of craze's drivers speak.
+// {"error": {"code": …, "type": …}}, which the OpenAI-compatible drivers
+// speak, and which craze's own drivers build for their failures (errorBody).
 // body is either that envelope itself — a stream's in-band error event — or,
 // for an HTTP error, the response dumped whole: status line and headers, a
-// blank line, then the body, which may be chunked. A code or type that is
-// not a string (OpenRouter's code is the HTTP status, a number) names
-// nothing, and is "". Anything that does not parse is "", "".
+// blank line, then the body, which may be chunked. A code or type that is not
+// a string (OpenRouter's code is the HTTP status, a number) names nothing, and
+// is "". Anything that does not parse is "", "".
 func structuredError(body []byte) (code, typ string) {
 	if !bytes.HasPrefix(body, []byte("HTTP/")) {
 		code, typ, _ = errorEnvelope(body)
@@ -534,6 +535,25 @@ func errorEnvelope(b []byte) (code, typ string, ok bool) {
 		return "", "", false
 	}
 	return jsonString(env.Error.Code), jsonString(env.Error.Type), true
+}
+
+// errorBody is a failure of one of craze's own drivers as the standard error
+// object, {"error": {"code", "type", "param", "message"}}, an empty member
+// left out: the body errorEnvelope reads its code and type back from.
+func errorBody(code, typ, param, message string) []byte {
+	type object struct {
+		Code    string `json:"code,omitempty"`
+		Type    string `json:"type,omitempty"`
+		Param   string `json:"param,omitempty"`
+		Message string `json:"message,omitempty"`
+	}
+	b, err := json.Marshal(struct {
+		Error object `json:"error"`
+	}{object{Code: code, Type: typ, Param: param, Message: message}})
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // jsonString is raw as a string when it is a JSON string, else "".

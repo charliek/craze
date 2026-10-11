@@ -1,0 +1,145 @@
+{
+  "model": "claude-test-5",
+  "max_tokens": 32000,
+  "stream": true,
+  "thinking": {
+    "type": "adaptive",
+    "display": "summarized",
+    "block_binding": {
+      "prefix_mismatch_behavior": "drop_block"
+    }
+  },
+  "output_config": {
+    "effort": "medium"
+  },
+  "cache_control": {
+    "type": "ephemeral"
+  },
+  "system": [
+    {
+      "type": "text",
+      "text": "You are craze.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a file.",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "description": "the file to read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Which module is this? Read go.mod."
+        }
+      ]
+    }
+  ]
+}
+{
+  "model": "claude-test-5",
+  "max_tokens": 32000,
+  "stream": true,
+  "thinking": {
+    "type": "adaptive",
+    "display": "summarized",
+    "block_binding": {
+      "prefix_mismatch_behavior": "drop_block"
+    }
+  },
+  "output_config": {
+    "effort": "medium"
+  },
+  "cache_control": {
+    "type": "ephemeral"
+  },
+  "system": [
+    {
+      "type": "text",
+      "text": "You are craze.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a file.",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "description": "the file to read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Which module is this? Read go.mod."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "I'll go ahead and read the go.mod file.\n\n",
+          "signature": "CAQS7QQKEAgSGAI4AUIIdGhpbmtpbmcSDPxTgDwUYZHYWfc/2hoMxnQ7WGB+RI8MZQaAIjCfFCtXegMaE6ZBYasZm1P6Agd048Rxg63TCI2HmcCfoSlK88vbXqwECkQThYt1jwwqigQKeSUm1xXEr8JcbK+TX5Ufq1j1HalFxnCLaa3ZT0YbeQemSGiOhfOAm+8AMxASpEavOAwFog/CXR07+s1OodZEIeoFP5Xf+Jwf7YV4LIsojpI3NEOpI878DJ9+4C6nq/Ml5kxQaQA7lg3TtvbqB5WadKxtpu4o78Rm0pTB5d+EdO42D8maYcpPYLk5MdWrAMX2OdJuVLkC5mjkmQO+2PqqedoYxeKnEgMmKZOoBtzHbYiYEIkao60jGOV6tBHYMuqLaqTIvJrT6oC07eqM4Wd3qbdDtlHhb4fdhM1ChsohLasEFSJumK6wSbL0BJYecROnJAGvbbvJBatL3DB/EBY3XFcd+pWNOkgc0RDG5Mbr+IETLnA90nw6GuYu4vhO9/UxGSb+zoczCa+2sKOdjmcVJFCSmRy2IMmNKGqg5UO6PJoK2Di2M17kU2GYGGPBBeENTmOySaQzQej+rm0pQgOl+0iP3Yr8pf1BlFQFo1lJWJ9ni4P0AVcZOzqw+5mHYv6n5ZbgG7RL+/BkqR4Bm3gnx/oflnqwwY90fJnY61syHpHEHK7CAUGJBS0dxxIbWYZXiokHgzTKW6C3jYjmlocAdExN1JiYx2ifoqLLjeA7h4o2ulGiZiQKnFMPLUfslFOdE3Okcatey5a4lgtSFMyKggI6cQqvLIXyk1krBhFaiudasPqPn+N/7+sYAQ=="
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01GzUYQdbrz3Y6pjVvjTYLRj",
+          "name": "read",
+          "input": {
+            "path": "go.mod"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GzUYQdbrz3Y6pjVvjTYLRj",
+          "content": [
+            {
+              "type": "text",
+              "text": "contents of go.mod"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

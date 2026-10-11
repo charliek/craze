@@ -398,7 +398,7 @@ func TestMergeStructuralProblemsStillFail(t *testing.T) {
 	}{
 		{"retired is not a user key", "", "version = 1\n\n[[retired]]\nalias = \"x\"\n", ModelsFile, "", "retired"},
 		{"unknown model key", "", "version = 1\n\n[models.\"acme/fast\"]\ncontxt_window = 1\n", ModelsFile, `models."acme/fast"`, "contxt_window"},
-		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"anthropic\"\n", "", ProvidersFile, "providers.acme", "driver"},
+		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"bedrock\"\n", "", ProvidersFile, "providers.acme", "driver"},
 		// The chatgpt driver with an endpoint of its own, written by the
 		// entry itself: a pair that cannot go together, as openrouter's is
 		// (plan 033 §3.11). Under another id it is dropped with a warning

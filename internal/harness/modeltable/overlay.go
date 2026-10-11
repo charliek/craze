@@ -179,7 +179,9 @@ func overlayProvider(base Provider, o providerOverlay) Provider {
 // replace the shipped list whole, and an explicit empty one means empty
 // (`efforts = []` is no effort control). An efforts override that does not
 // set default_effort keeps the shipped default only if the new list has it,
-// and otherwise clears it. Each cost rate overrides on its own.
+// and otherwise clears it. Each cost rate overrides on its own. An entry that
+// points the model at another provider or wire model makes it another model,
+// so what craze learned of the one it was is forgotten (forgetLearned).
 func overlayModel(base Model, o modelOverlay) Model {
 	m := cloneModel(base)
 	if o.Provider != nil {
@@ -187,6 +189,9 @@ func overlayModel(base Model, o modelOverlay) Model {
 	}
 	if o.WireModel != nil {
 		m.WireModel = *o.WireModel
+	}
+	if m.Provider != base.Provider || m.WireModel != base.WireModel {
+		m.forgetLearned()
 	}
 	if o.Name != nil {
 		m.Name = *o.Name
@@ -277,14 +282,20 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 		}
 		t.NoCatalog = noCatalog
 	} else {
+		// The locked provider's entry loses the keys it may not set first,
+		// each with a warning, so none of them can fail the load below (plan
+		// 044 P22).
+		warnings = append(warnings, lockAnthropic(cat, ppath, &pd)...)
 		if err := checkOverlays(ppath, mpath, &pd, &md); err != nil {
 			return nil, err
 		}
 		c := cat.Clone()
 		disc, discWarnings := withDiscovered(c, dir)
 		warnings = append(warnings, discWarnings...)
+		learned := learnedOf(c) // before the user's files touch an alias
 		t = merge(c, ppath, mpath, &pd, &md)
 		t.discover(disc)
+		t.learned = learned
 		// Every entry of the user's that could not stand was dropped above,
 		// and every shipped entry passed TestShippedCatalog: a failure here is
 		// a bug in the catalog or the merge, reported rather than papered over.
@@ -592,13 +603,21 @@ func (m *merger) provider(id string, o providerOverlay) {
 		m.t.providerOrigins[id] = OriginYours
 		return
 	}
-	if shipped.Driver == DriverChatGPT {
+	switch shipped.Driver {
+	case DriverChatGPT:
 		// The ChatGPT plan's provider is funded by the sign-in and sends its
 		// bearer to OpenAI's fixed endpoint alone (plan 033 §3.11, P37): an
 		// entry may rename it and nothing else, so a key, a variable, an
 		// endpoint or another driver written for it is dropped, each with a
 		// warning, and craze's own is used — an old import's entry too.
 		o = m.signInOverlay(id, o)
+	case DriverAnthropic:
+		// Anthropic's provider sends its key to Anthropic's fixed endpoint
+		// alone (plan 044 P22): LoadWith locked the entry before anything
+		// checked it (lockAnthropic), so it holds a name, variables and a key
+		// at most, and nothing here can restore what it dropped — an old
+		// import's source above all, whose path below would bring the shipped
+		// variables back over an `env_keys = []` (P24).
 	}
 	if deref(o.Source) == legacySource {
 		// An old import's copy of a provider craze now ships (§3.3): only
@@ -646,7 +665,7 @@ func (m *merger) signInOverlay(id string, o providerOverlay) providerOverlay {
 		o.Driver = nil
 	}
 	if o.BaseURL != nil {
-		drop("base_url", `must be absent for driver "chatgpt", whose endpoint is fixed`)
+		drop("base_url", fixedEndpoint(DriverChatGPT))
 		o.BaseURL = nil
 	}
 	if o.EnvKeys != nil {

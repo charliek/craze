@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -15,6 +16,10 @@ import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
+
+	// Anthropic's driver registers its thinking metadata's type with Fantasy
+	// (TestAnthropicThinkingSurvives).
+	_ "github.com/charliek/craze/internal/harness/llm"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite internal/harness/store/testdata/transcript.golden.jsonl")
@@ -336,6 +341,62 @@ func TestReasoningMetadataSurvives(t *testing.T) {
 	} {
 		if !reflect.DeepEqual(got, msg) {
 			t.Errorf("%s:\n got %#v\nwant %#v", name, got, msg)
+		}
+	}
+}
+
+// anthropicThinkingLine is an assistant message as Anthropic's driver leaves
+// one (plan 044 §3.3), in Fantasy's JSON: a signed thinking block and a
+// redacted one, each a reasoning part whose metadata is the driver's
+// craze.anthropic.thinking, then the answer. The type is registered by
+// package llm (messages_adapter.go), which this file imports for it.
+const anthropicThinkingLine = `{"role":"assistant","content":[` +
+	`{"type":"reasoning","data":{"text":"Reading go.mod first.\n\n","provider_options":{"craze.anthropic.thinking":{"type":"craze.anthropic.thinking","data":{"signature":"CAQS7QQKEAgSGAI4AUIIdGhpbmtpbmcS+N/7+sYAQ=="}}}}},` +
+	`{"type":"reasoning","data":{"text":"","provider_options":{"craze.anthropic.thinking":{"type":"craze.anthropic.thinking","data":{"redacted_data":"EuoBCkgIBRABGAIi-opaque=="}}}}},` +
+	`{"type":"text","data":{"text":"The module is craze."}}]}`
+
+// TestAnthropicThinkingSurvives (plan 044 P32): Anthropic's thinking
+// metadata — a signature, a redacted block's data — survives the file and
+// Context, value and type, as the Responses metadata does, so the next
+// request replays the blocks byte for byte; and the file keeps it in
+// Fantasy's typed shape, under the driver's own type, which the line above
+// pins.
+func TestAnthropicThinkingSurvives(t *testing.T) {
+	var msg fantasy.Message
+	if err := json.Unmarshal([]byte(anthropicThinkingLine), &msg); err != nil {
+		t.Fatalf("Fantasy cannot read the driver's metadata (is craze.anthropic.thinking registered?): %v", err)
+	}
+	s := newStore(t, testOptions(t))
+	claude := Model{Provider: "anthropic", Alias: "anthropic/claude-opus-5-5", WireModel: "claude-opus-5-5"}
+	if err := s.AppendUser(user("which module?", claude)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendAssistant(MessageEntry{Message: msg, Model: claude, StopReason: "end_turn"}); err != nil {
+		t.Fatal(err)
+	}
+	tr, err := Load(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]fantasy.Message{
+		"read back":      tr.Entries[1].Message,
+		"store context":  s.Context(claude)[1],
+		"loaded context": tr.Context(claude)[1],
+	} {
+		if !reflect.DeepEqual(got, msg) {
+			t.Errorf("%s:\n got %#v\nwant %#v", name, got, msg)
+		}
+	}
+	raw, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"craze.anthropic.thinking":{"type":"craze.anthropic.thinking","data":{"signature":"CAQS7QQKEAgSGAI4AUIIdGhpbmtpbmcS+N/7+sYAQ=="}}`,
+		`"craze.anthropic.thinking":{"type":"craze.anthropic.thinking","data":{"redacted_data":"EuoBCkgIBRABGAIi-opaque=="}}`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("the file does not keep the metadata as %s:\n%s", want, raw)
 		}
 	}
 }
