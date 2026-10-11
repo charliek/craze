@@ -43,8 +43,10 @@ mac-mini) follow the `craze-live-smoke` skill in `.claude/skills/`.
 
 **Docs change with the code.** A commit that changes user-visible behaviour (a command, flag, output, exit code,
 key, slash command, config key, file, protocol member) updates `docs/reference/` in the same commit, plus the
-overview pages (`docs/index.md`, `docs/getting-started/`, the README's intro and feature sections) when it is a
-headline feature, and `docs/getting-started/upgrading.md` when an existing behaviour changes. Drift tests in
+overview pages (`docs/index.md`, `docs/getting-started/`, and a highlight line in the README) when it is a
+headline feature, and `docs/getting-started/upgrading.md` when an existing behaviour changes. The README is a
+quick overview for a reader: what craze is, highlights, install, a short quick start, the docs index. Detail
+(keys, flags, cards, configuration) lives in `docs/` and the README links to it, never copies it. Drift tests in
 `make test` enforce the reference pages' coverage: every visible command and its visible flags in `cli.md`
 (`internal/cli/docs_test.go`; hidden commands and flags, deprecated flags and cobra's own `help`/`completion` are
 exempt), every built-in slash command in `tui.md` and every `config.toml` key in `configuration.md`

@@ -37,8 +37,8 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one, and
 - **Scripted and background use.** `craze prompt --json` runs one turn;
   `craze new`, `send`, `wait`, `cancel` and `stop` drive sessions without a
   terminal ([CLI reference](reference/cli.md#craze-new)).
-- **Claude Code sub-agents.** A plugin hands a task to a craze session, on any
-  provider, and returns the result ([Claude Code](getting-started/claude-code.md)).
+- **Claude Code sub-agents.** A plugin hands a task to a craze session on a
+  native, Grok or Cursor model, and returns the result ([Claude Code](getting-started/claude-code.md)).
 - **Side questions.** `/btw <question>` asks a quick question without adding to
   the session ([TUI reference](reference/tui.md#side-questions-btw)).
 - **Effort and speed.** `--effort` and `--fast`/`--no-fast` start a model at a

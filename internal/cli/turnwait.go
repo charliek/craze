@@ -1038,21 +1038,25 @@ func (w *turnWaiter) lookReturned(ctx context.Context, turn string) (bool, error
 
 // waitLookingBack sees the returned-plan lookup (returnedPlanOf) about to
 // make its own attach, on the lookup's context: a no-op, and the barrier a
-// test stalls that attach at.
-var waitLookingBack = func(context.Context) {}
+// test stalls that attach at. waitLookedBack sees it read the plan, before it
+// answers: a no-op, and the barrier a test ends the waiter's work at.
+var (
+	waitLookingBack = func(context.Context) {}
+	waitLookedBack  = func(context.Context) {}
+)
 
 // returnedPlanOf is the plan an unattended host returned in turn (X28) of
 // incarnation inc — an automatic plan answer that did not accept, between
 // the turn's started and its ended — read from the session's events as its
 // host still holds them: a connection of its own, attached at the very start
 // of inc's stream (cursor seq 0) and read until it has caught up, within
-// readBound and ctx. Found, it is the plan. Otherwise it is nil, and the
-// error says which: nil is not found — a replay the host refuses (the events
-// evicted), another incarnation's answer, none such in the turn, or no
-// answer within readBound — and ctx's own error is interrupted: the waiter's
-// work ended under the lookup (a signal, --timeout's end), which decides
-// nothing about the plan. No protocol change: an attach with a cursor is
-// what wait --from makes.
+// readBound and ctx. Found while ctx stands, it is the plan. Otherwise it is
+// nil, and the error says which: nil is not found — a replay the host
+// refuses (the events evicted), another incarnation's answer, none such in
+// the turn, or no answer within readBound — and ctx's own error is
+// interrupted: the waiter's work ended under the lookup (a signal,
+// --timeout's end), which decides nothing about the plan, found or not. No
+// protocol change: an attach with a cursor is what wait --from makes.
 func returnedPlanOf(ctx context.Context, e rundir.Entry, sessionID, inc, turn string) (*agent.PlanEvent, error) {
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, readBound)
@@ -1090,6 +1094,15 @@ func returnedPlanOf(ctx context.Context, e rundir.Entry, sessionID, inc, turn st
 			case ev.Type == agent.EventTurn && tu != nil && tu.ID == turn && tu.Phase == agent.TurnEnded:
 				return miss()
 			case in && ev.Type == agent.EventPlan && ev.Plan != nil && ev.Plan.Auto && !ev.Plan.Accepted && ev.Agent == "":
+				waitLookedBack(ctx)
+				if err := parent.Err(); err != nil {
+					// The work ended under the lookup before it answered.
+					// remote's Attach and Next hand over what has arrived
+					// whatever their context, so a lookup the interrupt
+					// cut short — even at its attach — can still read the
+					// plan: interrupted all the same, as a miss then is.
+					return nil, err
+				}
 				return ev.Plan, nil
 			}
 		case remote.KindReady, remote.KindPresence:
