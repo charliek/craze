@@ -135,7 +135,7 @@ Row 2 reads, left to right:
 - the tools in flight, by kind (`2 reads, 1 command`);
 - `⧗ n queued` while messages are [queued](#queued-messages);
 - `← n agents` (`↓ n agents` where `←` opens the session list) counting the
-  running sub-agents;
+  running rows below: sub-agents and [background commands](#background-commands-bash-jobs) alike;
 - `N attached` while another client has the session open.
 
 Narrow, row 2 gives up `N attached` first, then the hint beside the mode, then

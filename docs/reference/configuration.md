@@ -1379,8 +1379,8 @@ wire_model   = "qwen3-coder"
 tool_profile = "opencode"    # the only profile there is today; leaving it out is the same
 ```
 
-A name craze does not have fails the load of `models.toml`, with a message
-listing the ones it has (`unknown tool profile "…": want one of "opencode", or
+A profile name craze does not know makes the load of `models.toml` fail, with a
+message listing the ones it has (`unknown tool profile "…": want one of "opencode", or
 leave it out for the default`). The profile is fixed when a session opens,
 because the system prompt is frozen for the session, and is recorded in the
 transcript's header: switching with `/model` to a model whose profile differs
