@@ -90,6 +90,7 @@ git clone https://github.com/charliek/craze.git
 cd craze
 make build
 ./bin/craze version
+./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
 ```
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
@@ -103,10 +104,13 @@ or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.2
 `PATH`, so drop the `./bin/`.
 
 ```bash
-./bin/craze                      # the TUI, in the current directory
+./bin/craze                      # picker, then the TUI in the current directory
+./bin/craze --provider cursor    # skip the picker (also grok, gx, native)
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse
+./bin/craze --continue           # reload the newest session in this workspace
+./bin/craze --resume             # pick one of the last 10 sessions here
 ```
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
