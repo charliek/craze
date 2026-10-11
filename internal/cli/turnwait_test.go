@@ -251,8 +251,12 @@ type tap struct {
 	hooks []*tapHook
 	// swallowed is every match whose writes never go out.
 	swallowed []string
-	// hold, when set, keeps every dial after the first waiting for it.
-	hold *gate
+	// hold, when set, keeps every dial after the first waiting for it;
+	// redialing is closed when the first such dial starts waiting — the
+	// client has seen its connection go (awaitRedial).
+	hold      *gate
+	redialing chan struct{}
+	redialed  bool
 	// lose is a match a read from the host must not deliver: the read that
 	// holds it closes its connection instead, and lost is closed (loseReply).
 	lose string
@@ -341,7 +345,23 @@ func (tp *tap) swallow(match string) {
 func (tp *tap) holdRedials(g *gate) {
 	tp.mu.Lock()
 	tp.hold = g
+	tp.redialing, tp.redialed = make(chan struct{}), false
 	tp.mu.Unlock()
+}
+
+// awaitRedial waits until the client has begun a redial that holdRedials
+// holds: it has seen its connection go, so nothing it sends from here can
+// go out on the old one.
+func (tp *tap) awaitRedial(t *testing.T) {
+	t.Helper()
+	tp.mu.Lock()
+	ch := tp.redialing
+	tp.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the client never began its redial")
+	}
 }
 
 func (tp *tap) dial(ctx context.Context, path string) (net.Conn, error) {
@@ -349,6 +369,10 @@ func (tp *tap) dial(ctx context.Context, path string) (net.Conn, error) {
 	hold := tp.hold
 	if len(tp.conns) == 0 {
 		hold = nil
+	}
+	if hold != nil && !tp.redialed {
+		tp.redialed = true
+		close(tp.redialing)
 	}
 	tp.mu.Unlock()
 	if hold != nil {

@@ -361,6 +361,10 @@ func TestWaitTurnNeverCancelsAnotherIncarnationsTurn(t *testing.T) {
 	tp.holdRedials(redial)
 	tp.drop()
 	r.srv.SetEngine(engB)
+	// The signal waits until the client has seen the drop (its redial is
+	// held): a cancel written before that went out on the dead connection,
+	// which the tap records though nothing received it (seen on CI).
+	tp.awaitRedial(t)
 	sigs <- syscall.SIGINT
 	// The cancel is on its way, its connection gone: the redial lands on B.
 	select {
