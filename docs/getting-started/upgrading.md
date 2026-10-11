@@ -5,10 +5,11 @@ release, and [from v0.0.1](#from-v001), the first release's.
 
 ## Since v0.1.0
 
-Nothing needs migrating. Every change is an addition, but the first two
-change what an existing command does, and the Anthropic provider takes up an
-`ANTHROPIC_API_KEY` you already export (its opt-out is below); nothing else
-has an opt-out switch.
+Nothing needs migrating. Every change is an addition, but several change what
+an existing command or configuration does — read each item below, which says
+how to keep the old behaviour where you can. In particular, the Anthropic
+provider takes up an `ANTHROPIC_API_KEY` you already export, and a
+`[providers.anthropic]` of your own now overlays craze's Anthropic provider.
 
 - **`craze -c` and `--continue` skip sub-agent sessions.** A session started by
   `craze new --wait` (the Claude Code plugin's) is marked `unattended` in the
