@@ -833,7 +833,10 @@ func TestCtrlYCopiesTheSideAnswer(t *testing.T) {
 	m, _ := asideModel(t)
 	m.input.SetValue("hello")
 	m, _ = press(m, enter())
-	m = applyPending(t, m)
+	// The stub answers on the session's own goroutine, so the reply is waited
+	// for, not drained once: a single applyPending can run before the turn has
+	// published it (seen under a loaded full-package run).
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("echo: hello")))
 	if !paneHas(m.main, "echo: hello") {
 		t.Fatal("fixture: no main reply")
 	}
