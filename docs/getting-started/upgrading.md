@@ -32,8 +32,18 @@ has an opt-out switch.
   an API key ([Anthropic](../reference/configuration.md#anthropic)). An
   `ANTHROPIC_API_KEY` exported in your shell now funds it — and, as every key
   variable craze knows, is kept out of the commands a native session runs and
-  redacted from what they print. To keep an exported key from funding craze,
-  write `env_keys = []` under `[providers.anthropic]` in `providers.toml`.
+  redacted from what they print. A native session started with it fetches the
+  account's model list from Anthropic as it opens (`GET /v1/models`, which
+  costs nothing, at most once a day). To keep an exported key from funding
+  craze, write `env_keys = []` under `[providers.anthropic]` in
+  `providers.toml`.
+- **Sub-agent tier words pick a Claude model on Anthropic.** Under a parent
+  running on Anthropic, an `agent` call or a persona that says `model: haiku`
+  (or `fable`, `opus`, `sonnet`) with no `[subagents.tiers]` entry for it runs
+  on the newest Claude model of that family, where it ran on the parent's own
+  model before; map the word in `[subagents.tiers]` to choose otherwise
+  ([Sub-agent models](../reference/tui.md#sub-agent-models)). Other parents are
+  unchanged.
 - **A `[providers.anthropic]` of your own now overlays craze's Anthropic
   provider**: its `driver` and `base_url` are ignored, each with a warning, and
   its key goes to Anthropic's API. Rename yours (`[providers.my-gateway]`, and

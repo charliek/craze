@@ -1348,7 +1348,9 @@ sign-in. A key is stored as its provider's `api_key` in
 written at `0600`; a provider's environment variable, when it holds a usable
 key, is used before the stored one. **No key is checked with its provider**
 when it is stored — a wrong one shows on first use — and for a key none of the
-three commands makes a network request. What they do to the file is under
+three commands makes a network request, but for one: a key stored for
+Anthropic is followed by the account's model list, fetched with it
+([below](#craze-auth-login)). What they do to the file is under
 [Keys](configuration.md#keys).
 
 The ChatGPT plan (`chatgpt`) takes no key: it is funded by signing in with
@@ -1390,7 +1392,22 @@ FIREWORKS_API_KEY is set in this environment; craze uses it before the stored ke
 
 The second line only when that variable is set. Nothing is saved, and craze
 exits 1, when the key is empty, shorter than 8 bytes, or overlaps craze's
-redaction marker — the error names the rule, never the key. No provider named
+redaction marker — the error names the rule, never the key.
+
+`craze auth login anthropic` then fetches the [Anthropic account's model
+list](configuration.md#anthropic) (`GET /v1/models`, at most 30 seconds) with
+the key that funds Anthropic — the one just saved, or `ANTHROPIC_API_KEY` when
+that variable is set — so the next native session offers the account's models
+from its start:
+
+```text
+Saved the Anthropic key in /home/you/.craze/native/providers.toml.
+Fetched 13 Anthropic models.
+```
+
+A list that cannot be fetched — a key Anthropic rejects, no network — is one
+`note:` on stderr instead, naming the status and never the key; the key stays
+saved, craze exits 0, and a native session fetches the list when it opens. No provider named
 without a terminal, or a name that matches none, is exit 2; the name is not
 repeated back, in case what was typed there was the key. Another provider's
 stored key that cannot be used is kept as it is and named in a note on
@@ -1554,7 +1571,8 @@ Fireworks is still connected through FIREWORKS_API_KEY.
 
 With nothing stored the first line is `No stored Fireworks key.`; the second
 is there only while a variable still funds the provider. No provider named is
-exit 2.
+exit 2. `craze auth logout anthropic` keeps the account's model list: it holds
+no key, and without one it funds nothing.
 
 `craze auth logout chatgpt` signs out of the ChatGPT plan: craze asks ChatGPT
 to revoke the sign-in (waiting at most 10 seconds) and deletes its tokens from

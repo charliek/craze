@@ -86,6 +86,19 @@ var (
 	onLockBusy func()
 )
 
+// SetLockBusyHookForTest sets the hook a fetch calls when it finds the list's
+// lock held — by another host's fetch — before it waits for it, and answers
+// what puts the hook it replaced back. It is for tests in other packages
+// (internal/agent's two hosts opening at once, which must see the second
+// wait on the lock before the first writes); production code never calls
+// it. Set it before any fetch runs and restore it after every one has
+// returned: the hook is read without a lock.
+func SetLockBusyHookForTest(hook func()) (restore func()) {
+	old := onLockBusy
+	onLockBusy = hook
+	return func() { onLockBusy = old }
+}
+
 var (
 	// ErrNoKey is a fetch asked for with no key, or a value too short to be
 	// one (modeltable.MinKeyLen): nothing is sent.

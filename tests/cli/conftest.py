@@ -107,6 +107,14 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     # redacted in its output. Every one goes; a case that wants one sets it.
     for name in catalog_env_names():
         monkeypatch.delenv(name, raising=False)
+    # Anthropic's test override (plan 044 P30) is replaced for every test with
+    # a loopback port nothing serves: a value exported in the developer's
+    # shell -- a live check's logging proxy, which forwards to Anthropic --
+    # never reaches a test's craze, and a case that funds the Anthropic
+    # provider without anthropic_fixture gets a refused connection instead of
+    # reaching Anthropic. A case that wants the fixture sets the variable in
+    # its child's environment (test_anthropic.py).
+    monkeypatch.setenv("CRAZE_TEST_ANTHROPIC_API", "http://127.0.0.1:9")
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the

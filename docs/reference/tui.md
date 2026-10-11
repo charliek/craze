@@ -1415,7 +1415,14 @@ order — the call's own `model`/`effort`, then the persona's, then
 and `model` (on the call, a persona, or `[subagents]`) may also be `inherit`,
 which always means the parent's model. A tier name with no entry in
 `[subagents.tiers]` means the parent's model too, so a persona that says
-`model: opus` still works with no tier map configured at all. Every alias
+`model: opus` still works with no tier map configured at all — except under a
+parent running a Claude model on the [Anthropic](configuration.md#anthropic)
+provider, where the tier names are Claude's own families: there an unmapped
+`fable`, `opus`, `sonnet` or `haiku` runs on the newest model of that family
+the session's model table has (`model: haiku` under Claude Opus 5.5 runs on
+Claude Haiku 5.5), and on the parent's model when it has none.
+`[subagents.tiers]` still wins on every parent, and the `agent` tool's
+description lists only the tiers it maps. Every alias
 named in `[subagents]` or `[subagents.tiers]` should be a model — one craze
 ships or one in `models.toml`; one that is not falls back to the default,
 never stopping the session: silently for a model a release retired, with a
@@ -1985,7 +1992,12 @@ models a key or a sign-in funds without a restart. The TUI asks it to
 in three places: right after `/connect` stores a key, right after a sign-in's
 model list is written (not when the browser's redirect arrives, which is
 earlier), and each time `/model` opens, which also picks up what another
-terminal's `craze auth login` stored. The ask is made with this TUI's craze
+terminal's `craze auth login` stored. The same ask has the session fetch, in
+the background, the [Anthropic account's model list](configuration.md#anthropic)
+when the key that now funds Anthropic has none yet, or one over a day old: an
+Anthropic key `/connect` stores is the key the list is fetched with, and
+`/model` offers craze's own Claude models at once and the account's own once
+the list is written, with no reopening. The ask is made with this TUI's craze
 directory, and the session answers whether it is the one it reads. What the
 notice says depends on the answer:
 

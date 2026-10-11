@@ -159,14 +159,15 @@ func (s *Session) resolveChildEffort(v tableView, alias, callEffort, personaEffo
 
 // resolveModelValue reads one candidate's raw `model` text the way §3.6
 // describes: "inherit" is parentAlias; a recognised tier name maps through
-// the table's tiers, an unmapped one resolving to parentAlias; anything else
+// the table's tiers — an unmapped one is the newest model of its family on an
+// Anthropic parent (tierAlias, plan 044 O6), else parentAlias; anything else
 // is matched as an alias. recognized is false only in the last case, when
 // nothing matches.
 func (v tableView) resolveModelValue(raw, parentAlias string) (alias string, recognized bool) {
 	if strings.EqualFold(raw, "inherit") {
 		return parentAlias, true
 	}
-	if tierAlias, isTier := v.tierAlias(raw); isTier {
+	if tierAlias, isTier := v.tierAlias(raw, parentAlias); isTier {
 		if tierAlias == "" {
 			return parentAlias, true
 		}
@@ -175,22 +176,31 @@ func (v tableView) resolveModelValue(raw, parentAlias string) (alias string, rec
 	return v.matchModelAlias(raw)
 }
 
-// tierAlias is what tier name raw maps to in the table: the mapped alias
-// when [subagents.tiers] has it (case-insensitively, its keys already being
-// lowercase by validateSubagents), else "" with isTier true when raw is one
-// of BuiltinTiers (recognised, but unmapped, so the caller falls back to the
-// parent's model), else isTier false when raw is not a tier name at all.
-func (v tableView) tierAlias(raw string) (alias string, isTier bool) {
+// tierAlias is what tier name raw maps to in the table for a child of
+// parentAlias: the mapped alias when [subagents.tiers] has it
+// (case-insensitively, its keys already being lowercase by
+// validateSubagents) — the user's mapping wins everywhere; else, for one of
+// BuiltinTiers, the newest model of the family it names when the parent runs
+// on the Anthropic provider and the table has one (Table.NewestOfFamily, plan
+// 044 O6: the tier words are Claude's own families, so `model: haiku` under
+// an Opus parent runs on the newest Haiku), and "" otherwise, recognised but
+// unmapped, so the caller falls back to the parent's model, as every other
+// parent always does; else isTier false when raw is not a tier name at all.
+// The agent tool's description still lists [subagents.tiers] alone (P26).
+func (v tableView) tierAlias(raw, parentAlias string) (alias string, isTier bool) {
 	lower := strings.ToLower(raw)
 	if a, ok := v.table.Subagents.Tiers[lower]; ok {
 		return a, true
 	}
-	for _, t := range modeltable.BuiltinTiers {
-		if t == lower {
-			return "", true
+	if !slices.Contains(modeltable.BuiltinTiers, lower) {
+		return "", false
+	}
+	if v.table.Models[parentAlias].Provider == modeltable.AnthropicProvider {
+		if newest, ok := v.table.NewestOfFamily(modeltable.AnthropicProvider, lower); ok {
+			return newest, true
 		}
 	}
-	return "", false
+	return "", true
 }
 
 // matchModelAlias is raw matched against the table's aliases: the view's

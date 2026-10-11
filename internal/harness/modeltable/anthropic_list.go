@@ -187,6 +187,34 @@ func anthropicKeyAtLoad(shipped Provider, pd *providersOverlay) string {
 	return ""
 }
 
+// AnthropicListKey is the key the account's model list is fetched with for t
+// (plan 044 §3.6): the key craze's own Anthropic provider is funded by
+// through getenv (nil is os.Getenv) — the first of its env_keys set to a
+// usable key, env-only keys included, else its stored key, Resolve's rule
+// (resolveKey) and so the key a load binds the list to (anthropicKeyAtLoad)
+// — and false when nothing funds it, or when t has no such provider: none at
+// all, one WithholdFrozen took out, or a provider of the user's own under
+// that id (a table with no catalog, or built in memory; plan 044 X1), whose
+// load reads no list. A provider of the catalog's on another driver is
+// unreachable — the lock (lockAnthropic) keeps the driver — and is refused
+// here all the same: a list is Anthropic's, fetched from Anthropic.
+func (t *Table) AnthropicListKey(getenv func(string) string) (Secret, bool) {
+	p, ok := t.Providers[AnthropicProvider]
+	if !ok || p.Driver != DriverAnthropic {
+		return "", false
+	}
+	switch t.ProviderOrigin(AnthropicProvider) {
+	case OriginShipped, OriginOverridden:
+	default:
+		return "", false
+	}
+	k, err := resolveKey(AnthropicProvider, p, t.envOf(getenv))
+	if err != nil {
+		return "", false
+	}
+	return k, true
+}
+
 // withAnthropicList makes the Anthropic models of cat, the merge's own copy
 // of the catalog, the effective set before the user's files are laid over it
 // (plan 044 §3.5), when cat ships the Anthropic provider on its driver:

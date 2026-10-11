@@ -19,6 +19,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -304,6 +305,10 @@ func TestMain(m *testing.M) {
 	// reaching OpenAI (common.md: fake servers only).
 	_ = os.Setenv(chatgptauth.IssuerEnv, chatgptFence)
 	_ = os.Setenv(chatgptauth.APIEnv, chatgptFence+"/v1")
+	// Anthropic's API (plan 044 P30) the same way: a native session fetches
+	// the account's model list as it opens, and on /connect's or /model's
+	// refresh, whenever a key funds the Anthropic provider.
+	_ = os.Setenv(messagesapi.TestAPIEnv, chatgptFence)
 	// The macOS login session is pinned to the GUI's for the package and
 	// every child it starts, as internal/cli's is (plan 036): the provider
 	// availability check marks cursor unavailable outside it, so a Mac runner

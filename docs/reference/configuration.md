@@ -934,7 +934,10 @@ session, [`/connect`](tui.md#connect) stores a key the same way `login` does.
 No key is checked with its provider when it is stored; a wrong one shows on
 first use, as `native: <Name> rejected the API key (HTTP 401); replace it with
 "craze auth login <id>"`, followed by `, or check` and the provider's key
-variables when it has any. When they write, `login`, `logout` and `/connect`:
+variables when it has any — except that `craze auth login anthropic` then
+fetches the [account's model list](#anthropic), so a key Anthropic rejects is
+a note there and then. When they write, `login`,
+`logout` and `/connect`:
 
 - **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
   `0700`). Comments and layout are not kept — the header they write says so —
@@ -1155,7 +1158,25 @@ another key fetched (before you changed keys, say, or another account's) is
 ignored, and the shipped models stand alone until the current key's list is
 fetched. The key is read when a session loads its models — when it starts,
 and when it loads them again — so a key changed in between binds the list at
-the next load. Where the list is used, it is what `/model` offers:
+the next load.
+
+**When it is fetched.** With the key that funds the provider — an exported
+one included — the list is fetched when [`craze auth login
+anthropic`](cli.md#craze-auth-login) stores a key; when a native session
+opens and the key's list is missing, over a day old or another key's; and
+when the TUI asks a running session to look again — `/connect` after a save,
+`/model` as it opens ([the TUI](tui.md#connect)) — so a key just connected is
+the one fetched with. A session's fetch runs in the background, and sessions
+opening at once on one craze directory make one request between them. A
+session offers a list its own fetch wrote as soon as it is written (after the
+turn, while one runs), and one another session or `craze auth login` wrote at
+its next turn or `/model`. A fetch that fails is a line in the
+session's journal and is tried again no sooner than 30 seconds later for the
+same key; until a list is fetched the shipped models stand alone. A fetch
+writes only a complete list naming at least one model, so a partial or empty
+answer keeps the list there is.
+
+Where the list is used, it is what `/model` offers:
 
 - a shipped model it names keeps craze's settings and price;
 - a shipped model it does not name is not offered (a partial entry of yours

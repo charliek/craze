@@ -398,3 +398,78 @@ name = "Kept"
 		t.Fatalf("carried: Resolve = %+v, %v; want none, as it resolved where it came from", r, err)
 	}
 }
+
+// TestAnthropicListKey (plan 044 §3.6, A5): the key the account's model list
+// is fetched with is the key craze's own Anthropic provider is funded by, as
+// a load binds the list to it — an exported one alone (env-only), the stored
+// one, the exported one over the stored one, the stored one alone under
+// `env_keys = []` — and there is none with nothing funding it. A provider of
+// the user's own named anthropic (plan 044 X1) fetches nothing, whatever
+// funds it, and neither does one WithholdFrozen took out. The guard on the
+// driver, which the lock makes unreachable, is pinned on a table whose
+// shipped provider is set to another driver; the control is the same table
+// on its own driver, which fetches.
+func TestAnthropicListKey(t *testing.T) {
+	cat := testCatalog(t, anthropicCatalog)
+	const stored = "sk-ant-stored-not-a-secret-0004"
+	exported := fakeEnv(map[string]string{"ANTHROPIC_API_KEY": anthropicKey})
+	none := fakeEnv(nil)
+	storedEntry := "version = 1\n\n[providers.anthropic]\napi_key = \"" + stored + "\"\n"
+	for _, tc := range []struct {
+		name, providers string
+		env             func(string) string
+		want            string // "" for none
+	}{
+		{"an exported key alone", "", exported, anthropicKey},
+		{"a stored key alone", storedEntry, none, stored},
+		{"the exported key over the stored one", storedEntry, exported, anthropicKey},
+		{"env_keys = [] with an exported key and none stored", "version = 1\n\n[providers.anthropic]\nenv_keys = []\n", exported, ""},
+		{"env_keys = [] with a stored key", "version = 1\n\n[providers.anthropic]\nenv_keys = []\napi_key = \"" + stored + "\"\n", exported, stored},
+		{"nothing funds it", "", none, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, _ := loadOver(t, cat, tc.providers, "")
+			k, ok := tbl.AnthropicListKey(tc.env)
+			if ok != (tc.want != "") || k.Reveal() != tc.want {
+				t.Fatalf("AnthropicListKey = %t (the key matches: %t); want %t", ok, k.Reveal() == tc.want, tc.want != "")
+			}
+		})
+	}
+
+	t.Run("a provider of the user's own", func(t *testing.T) {
+		const gateway = "version = 1\n\n[providers.anthropic]\ndriver = \"openai-compat\"\nbase_url = \"https://gateway.example/v1\"\napi_key = \"" + stored + "\"\n"
+		off, err := Load(writeFiles(t, gateway, "version = 1\ncatalog = false\ndefault_model = \"claude\"\n\n[models.claude]\nprovider = \"anthropic\"\nwire_model = \"claude-opus-4-5-20251101\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		over, _ := loadOver(t, testCatalog(t, testCatalogV1), gateway, "")
+		mine := anthropicTable() // built in memory, on the anthropic driver
+		for name, tbl := range map[string]*Table{"catalog off": off, "a catalog without the provider": over, "built in memory": mine} {
+			if _, ok := tbl.AnthropicListKey(exported); ok {
+				t.Errorf("%s: a list would be fetched for a provider craze does not ship", name)
+			}
+		}
+	})
+
+	t.Run("withheld", func(t *testing.T) {
+		tbl, _ := loadOver(t, cat, "", "")
+		if _, ok := tbl.AnthropicListKey(exported); !ok {
+			t.Fatal("the control: the exported key fetches nothing")
+		}
+		tbl.WithholdFrozen(exported, func(v string) bool { return v == anthropicKey }, "acme/fast")
+		if _, ok := tbl.AnthropicListKey(exported); ok {
+			t.Fatal("a list would be fetched with a key the session withholds")
+		}
+	})
+
+	t.Run("the driver guard", func(t *testing.T) {
+		tbl, _ := loadOver(t, cat, storedEntry, "")
+		if _, ok := tbl.AnthropicListKey(none); !ok || tbl.ProviderOrigin(AnthropicProvider) != OriginOverridden {
+			t.Fatalf("the control: no key on the shipped provider (origin %q)", tbl.ProviderOrigin(AnthropicProvider))
+		}
+		setProvider(tbl, AnthropicProvider, func(p *Provider) { p.Driver = DriverOpenAICompat })
+		if _, ok := tbl.AnthropicListKey(none); ok {
+			t.Fatal("a list would be fetched for the shipped provider on another driver")
+		}
+	})
+}

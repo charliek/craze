@@ -153,8 +153,17 @@ client — the driver, the fetcher's default — takes Anthropic's origin from
 `CRAZE_TEST_ANTHROPIC_API` when it is set: a loopback `http` URL
 (`http://127.0.0.1:<port>`) to a test's fake server, and nothing else — any
 other value is an error, never ignored, so a test that misnames its fake fails
-instead of sending a key to Anthropic. `internal/anthropicmodels`' `TestMain`
-points it at a loopback port nothing serves.
+instead of sending a key to Anthropic. The `TestMain` of
+`internal/anthropicmodels`, `internal/agent`, `internal/cli` and
+`internal/tui` points it at a loopback port nothing serves — a native session
+fetches the account's list as it opens whenever a key funds Anthropic, and
+`craze auth login anthropic` fetches it too — and so does `tests/cli`'s
+`conftest.py`, for every case, replacing any value exported in your shell (a
+live check's logging proxy, say). A test that wants Anthropic starts a fake
+and points the variable at it: `t.Setenv` in Go, the child's environment in
+`tests/cli`, whose `anthropic_fixture.py` serves the model list's pages and
+scripted Messages streams and records every request
+(`test_anthropic.py`).
 
 To drive a plugin command through the JSON interface:
 
