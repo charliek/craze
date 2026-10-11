@@ -1583,6 +1583,7 @@ auth login chatgpt`, or `not signed in`. It is read from the registration and
 the token file's presence; no token is read, and none is ever printed.
 
 ```text
+Anthropic         anthropic        env ANTHROPIC_API_KEY
 ChatGPT plan      chatgpt          signed in as you@example.com · ChatGPT plan · renews automatically
 Fireworks         fireworks        env FIREWORKS_API_KEY
 Meta              meta             stored key

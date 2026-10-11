@@ -50,7 +50,46 @@ type Catalog struct {
 	// history line, no [[retired]] row, nothing shown for an account that does
 	// not list them. Its zero value is no section.
 	ChatGPT ChatGPTDefaults
+	// Anthropic is [anthropic_defaults] (plan 044 §3.5): craze's own rules
+	// for the Anthropic provider's models, the seeds the catalog ships and
+	// the ones a load learns from the account's list (withAnthropicList). Its
+	// zero value is no section.
+	Anthropic AnthropicDefaults
+
+	// listHidden are the Anthropic models a load took out of its own copy of
+	// the catalog (withAnthropicList), by alias: the seeds the account's list
+	// does not name, and the models the newest-only rule trims. They are no
+	// models of the table, but still models craze knows: what they say of
+	// their identities is in the table's snapshot (learnedOf), and a user's
+	// entry left over for one is ignored without a word (merger.model). nil
+	// for every catalog but such a copy; Clone never copies it.
+	listHidden map[string]Model
 }
+
+// AnthropicDefaults is the catalog's [anthropic_defaults] (plan 044 §3.5).
+type AnthropicDefaults struct {
+	// StartFamily is the Anthropic provider's start (O1): a new session that
+	// reaches the provider in provider_order starts on the newest model of
+	// this family the table has — the account's list's, else the seeds' — so
+	// a new Opus is the start the day the account lists it. "" is no start.
+	// It is the provider's whole start: a [providers.anthropic] start is
+	// refused (validateStarts).
+	StartFamily string
+	// DefaultEffort is the default effort of every Anthropic model that
+	// offers it and sets none of its own, a model only the account's list
+	// names included (D3). "" leaves each model's own.
+	DefaultEffort string
+	// List is which of the effective set's models a table offers (O3, R4):
+	// AnthropicListAll (or "") every one, AnthropicListNewest only the newest
+	// of each family — the trim knob.
+	List string
+}
+
+// The values of [anthropic_defaults] list.
+const (
+	AnthropicListAll    = "all"
+	AnthropicListNewest = "newest"
+)
 
 // ChatGPTDefaults is the catalog's [chatgpt_defaults] (plan 033 §3.11).
 type ChatGPTDefaults struct {
@@ -119,6 +158,15 @@ type catalogDoc struct {
 	// table takes name, efforts, default_effort and tool_profile, and nothing
 	// else (plan 033 §3.11).
 	ChatGPT *catalogChatGPTDoc `toml:"chatgpt_defaults"`
+	// Anthropic is [anthropic_defaults] (plan 044 §3.5), as strictly: its
+	// three keys and nothing else.
+	Anthropic *catalogAnthropicDoc `toml:"anthropic_defaults"`
+}
+
+type catalogAnthropicDoc struct {
+	StartFamily   string `toml:"start_family"`
+	DefaultEffort string `toml:"default_effort"`
+	List          string `toml:"list"`
 }
 
 type catalogChatGPTDoc struct {
@@ -162,6 +210,11 @@ type catalogModelEntry struct {
 	Vision          bool     `toml:"vision"`
 	ToolProfile     string   `toml:"tool_profile"`
 	Cost            *Cost    `toml:"cost"`
+	// Family, Released and Thinking are catalog-only (plan 044 §3.5): what
+	// craze knows of an Anthropic model, which no user file has a key for.
+	Family   string `toml:"family"`
+	Released string `toml:"released"`
+	Thinking string `toml:"thinking"`
 }
 
 // parseCatalog strict-decodes one catalog file. It does not validate the
@@ -194,6 +247,7 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 			ContextWindow: e.ContextWindow, MaxOutputTokens: e.MaxOutputTokens,
 			Efforts: nilIfEmpty(e.Efforts), DefaultEffort: e.DefaultEffort,
 			Vision: e.Vision, ToolProfile: e.ToolProfile, Cost: e.Cost,
+			Family: e.Family, Released: e.Released, Thinking: e.Thinking,
 		}
 	}
 	for _, r := range d.Retired {
@@ -210,6 +264,9 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 			c.ChatGPT.Models[slug] = ChatGPTModelDefaults{Name: e.Name, Efforts: nilIfEmpty(e.Efforts),
 				DefaultEffort: e.DefaultEffort, ToolProfile: e.ToolProfile}
 		}
+	}
+	if a := d.Anthropic; a != nil {
+		c.Anthropic = AnthropicDefaults{StartFamily: a.StartFamily, DefaultEffort: a.DefaultEffort, List: a.List}
 	}
 	return c, nil
 }
@@ -306,6 +363,7 @@ func (c *Catalog) Clone() *Catalog {
 		d.Efforts = slices.Clone(d.Efforts)
 		out.ChatGPT.Models[slug] = d
 	}
+	out.Anthropic = c.Anthropic
 	return out
 }
 
@@ -356,8 +414,8 @@ func hasModel(models map[string]Model, alias string) bool {
 // models.toml entry would; no two aliases share an identity; provider_order
 // and each provider's start are valid (validateStarts, plan 038 §2); the
 // retired aliases are unique, none is a model, and no model's identity is a
-// retired one; and [chatgpt_defaults] is valid (validateChatGPT). Errors are
-// *FileErrors against name.
+// retired one; and [chatgpt_defaults] and [anthropic_defaults] are valid
+// (validateChatGPT, validateAnthropic). Errors are *FileErrors against name.
 func (c *Catalog) validate(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -387,6 +445,9 @@ func (c *Catalog) validate(name string) error {
 		}
 		if m.Source != "" {
 			return at(modelTable(alias), "source", "the catalog has no source")
+		}
+		if key := anthropicOnlyKey(m); key != "" && c.Providers[m.Provider].Driver != DriverAnthropic {
+			return at(modelTable(alias), key, fmt.Sprintf("is for a model of a provider on driver %q, what craze knows of an Anthropic model", DriverAnthropic))
 		}
 		id := identity{m.Provider, m.WireModel}
 		if other, ok := byIdentity[id]; ok {
@@ -418,15 +479,35 @@ func (c *Catalog) validate(name string) error {
 			}
 		}
 	}
-	return c.validateChatGPT(name)
+	if err := c.validateChatGPT(name); err != nil {
+		return err
+	}
+	return c.validateAnthropic(name)
+}
+
+// anthropicOnlyKey is the first catalog-only key of an Anthropic model's that
+// m sets — family, released, thinking — "" for none: keys the catalog sets
+// only on a model of a provider on the anthropic driver.
+func anthropicOnlyKey(m Model) string {
+	switch {
+	case m.Family != "":
+		return "family"
+	case m.Released != "":
+		return "released"
+	case m.Thinking != "":
+		return "thinking"
+	}
+	return ""
 }
 
 // validateStarts checks where a new session with nothing remembered starts
 // (plan 038 §2): provider_order is there and names every provider exactly
 // once and nothing else; and each provider's start — never the ChatGPT
-// plan's, which is [chatgpt_defaults] start — is a non-empty list of models
-// of that provider, each listed once. The order is checked entry by entry,
-// then the providers it misses, sorted; the starts by provider, sorted.
+// plan's, which is [chatgpt_defaults] start, nor Anthropic's, which is the
+// newest model of [anthropic_defaults] start_family (plan 044 §3.5) — is a
+// non-empty list of models of that provider, each listed once. The order is
+// checked entry by entry, then the providers it misses, sorted; the starts by
+// provider, sorted.
 func (c *Catalog) validateStarts(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -456,6 +537,8 @@ func (c *Catalog) validateStarts(name string) error {
 			return at(table, "start", "is for a provider the catalog does not have")
 		case p.Driver == DriverChatGPT:
 			return at(table, "start", "the ChatGPT plan's start is [chatgpt_defaults] start, its account's model slugs")
+		case p.Driver == DriverAnthropic:
+			return at(table, "start", "the Anthropic provider's start is the newest model of [anthropic_defaults] start_family")
 		case len(start) == 0:
 			return at(table, "start", "is empty: list at least one of the provider's models, or leave start out")
 		}

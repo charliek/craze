@@ -238,7 +238,9 @@ func overlayModel(base Model, o modelOverlay) Model {
 //
 // Over a catalog, the ChatGPT plan's models from dir's account-bound list are
 // added to the catalog's copy before the user's files are laid over it
-// (withDiscovered, plan 033 §3.11). Either way, a table with a provider on
+// (withDiscovered, plan 033 §3.11), and the Anthropic account's list, bound
+// to the provider's key, makes the copy's Anthropic models the account's
+// (withAnthropicList, plan 044 §3.5). Either way, a table with a provider on
 // the chatgpt driver keeps dir as the directory whose sign-in funds it.
 func LoadWith(dir string, cat *Catalog) (*Table, error) {
 	if dir == "" {
@@ -292,6 +294,7 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 		c := cat.Clone()
 		disc, discWarnings := withDiscovered(c, dir)
 		warnings = append(warnings, discWarnings...)
+		warnings = append(warnings, withAnthropicList(c, dir, &pd)...)
 		learned := learnedOf(c) // before the user's files touch an alias
 		t = merge(c, ppath, mpath, &pd, &md)
 		t.discover(disc)
@@ -549,8 +552,10 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 }
 
 // startAliases is every provider's start as aliases of a merged table (plan
-// 038 §2.2): each provider's Starts, and the ChatGPT plan's
-// [chatgpt_defaults] start as chatgpt/<slug>, each in order; nil for none.
+// 038 §2.2): each provider's Starts, the ChatGPT plan's [chatgpt_defaults]
+// start as chatgpt/<slug>, and the Anthropic provider's models of
+// [anthropic_defaults] start_family, newest first (anthropicStart, plan 044
+// O1), each in order; nil for none.
 func (c *Catalog) startAliases() map[string][]string {
 	var out map[string][]string
 	add := func(id string, aliases []string) {
@@ -570,6 +575,7 @@ func (c *Catalog) startAliases() map[string][]string {
 		plan = append(plan, ChatGPTAliasPrefix+s)
 	}
 	add(ChatGPTProvider, plan)
+	add(AnthropicProvider, c.anthropicStart())
 	return out
 }
 
@@ -710,13 +716,17 @@ func (m *merger) model(alias string, o modelOverlay) {
 	} else {
 		mod = o.complete()
 	}
+	_, hidden := m.cat.listHidden[alias]
 	if m.retiredID[identity{mod.Provider, mod.WireModel}] {
 		// A dead wire id is dead whoever wrote it (§3.3). For a shipped alias
 		// the shipped definition stays (r2-6); only the user's entry goes.
 		return
 	}
 	if !isShipped && (mod.Provider == "" || mod.WireModel == "") {
-		if !retiredAlias { // a retired alias's leftover override goes silently
+		// A retired alias's leftover override goes silently, as does one of
+		// an Anthropic model the account's list hides (plan 044 §3.5): the
+		// entry stands again when the model is offered again.
+		if !retiredAlias && !hidden {
 			m.warn(&FileError{File: m.mpath, Table: modelTable(alias),
 				Reason: "craze does not ship this model, so its entry needs provider and wire_model"}, "the entry is ignored")
 		}

@@ -24,8 +24,10 @@ version = 1
 # user's starts (plan 038 §2): the first provider here with a key, on the
 # first model of its start that resolves; "eval winner first". It names every
 # provider below exactly once. A user's models.toml provider_order replaces it
-# whole.
-provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta"]
+# whole. Anthropic is last (plan 044 O4, the owner's pin): a machine that
+# funds any other provider starts there; one with only an Anthropic key starts
+# on the newest Opus.
+provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic"]
 
 # ---------------------------------------------------------------------------
 # Retired aliases. A user's entry an old import left for one (source = "gx") is
@@ -150,6 +152,16 @@ start = ["glm-5.3"]
 name = "ChatGPT plan"
 driver = "chatgpt"
 
+# Anthropic's Claude API (plan 044): the Messages API at its fixed endpoint,
+# through craze's own client, funded by an API key. Its entry is locked: a
+# user's providers.toml may rename it and say where its key comes from (name,
+# env_keys, api_key) and nothing else. It has no start key: its start is the
+# newest model of [anthropic_defaults] start_family, below.
+[providers.anthropic]
+name = "Anthropic"
+driver = "anthropic"
+env_keys = ["ANTHROPIC_API_KEY"]
+
 # craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
 # over the account's list: never models of the catalog's, so they need no
 # history line and show nothing for an account that does not list them. start
@@ -181,10 +193,286 @@ start = ["gpt-6.1-sol", "gpt-5.6-sol"]
 [chatgpt_defaults.models."gpt-6-astra"]
 default_effort = "low"
 
+# craze's own rules for the Anthropic provider's models (plan 044 §3.5): the
+# seeds below, and the account's own model list, which craze fetches with the
+# key (GET /v1/models) and caches beside the model files. Where the list was
+# fetched with the key that funds the provider it is authoritative: a seed it
+# names stands as shipped here (the price included), a seed it does not name
+# is hidden, and a model it names that has no seed is offered unpriced, its
+# settings read from the list — so a new Claude model is offered the day the
+# account lists it, and a release adds its seed and price later.
+#
+# start_family: a new session that reaches anthropic in provider_order starts
+# on the newest model of this family (the list's, else the seeds'), O1.
+# default_effort: every Anthropic model that offers it starts at it, the
+# list's included (D3: one rule for the family; Anthropic's own default for
+# some is high).
+# list: "all" offers every model the account lists (O3); "newest" offers only
+# each family's newest, the trim knob for when thirteen feels like too many.
+[anthropic_defaults]
+start_family = "opus"
+default_effort = "medium"
+list = "all"
+
 # ---------------------------------------------------------------------------
 # Models, by alias. Every key but provider and wire_model is optional, as in
 # models.toml; cost is dollars per 1,000,000 tokens. The Z.AI Coding Plan's
 # models are unpriced: a flat-rate plan, like ChatGPT's (plan 038 §2.6).
+
+# Anthropic's models (plan 044 §3.5): one seed for each model the account's
+# GET /v1/models listed on 2026-10-11 (plan 044 research/models-list-
+# 2026-10-11.json), its alias anthropic/<its API id>. name is the list's
+# display_name; context_window its max_input_tokens; max_output_tokens its
+# max_tokens up to 64,000 (a request's ceiling, not the model's); efforts the
+# levels it supports, low to max (Haiku 4.5 has none); vision its
+# image_input, which the four headline models (Opus 5.5, Sonnet 5.5, Haiku
+# 5.5, Fable 5.1) were also seen honouring live, describing an image (P31).
+# family (the list's line), released (the date it was created) and thinking
+# (adaptive where the list says the model takes adaptive thinking, else none)
+# are keys only the catalog has: models.toml cannot set them.
+#
+# Prices are Anthropic's own (platform.claude.com pricing, 2026-10-11): input,
+# output, cache_read the cache hit and cache_write the 5-minute cache write,
+# the only TTL craze asks for. Haiku 5.5 is priced at its prompt-up-to-100K
+# rate: craze has no tiers, so a longer prompt's spend reads low.
+#
+# A new Claude model needs no release to be offered (the account's list does
+# that, unpriced); a release adds its seed here with its price, and a line in
+# testdata/shipped-aliases.txt (RELEASING.md). A seed is never removed without
+# a [[retired]] row.
+
+[models."anthropic/claude-fable-5"]
+provider = "anthropic"
+wire_model = "claude-fable-5"
+name = "Claude Fable 5"
+family = "fable"
+released = "2026-06-07"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-fable-5".cost]
+input = 10.0
+output = 50.0
+cache_read = 1.0
+cache_write = 12.5
+
+[models."anthropic/claude-fable-5-1"]
+provider = "anthropic"
+wire_model = "claude-fable-5-1"
+name = "Claude Fable 5.1"
+family = "fable"
+released = "2026-08-28"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-fable-5-1".cost]
+input = 10.0
+output = 50.0
+cache_read = 0.25
+cache_write = 12.5
+
+[models."anthropic/claude-haiku-4-5-20251001"]
+provider = "anthropic"
+wire_model = "claude-haiku-4-5-20251001"
+name = "Claude Haiku 4.5"
+family = "haiku"
+released = "2025-10-15"
+thinking = "none"
+context_window = 200000
+max_output_tokens = 64000
+vision = true
+
+[models."anthropic/claude-haiku-4-5-20251001".cost]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_write = 1.25
+
+[models."anthropic/claude-haiku-5-5"]
+provider = "anthropic"
+wire_model = "claude-haiku-5-5"
+name = "Claude Haiku 5.5"
+family = "haiku"
+released = "2026-10-07"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-haiku-5-5".cost]
+input = 0.1
+output = 0.5
+cache_read = 0.01
+cache_write = 0.125
+
+[models."anthropic/claude-opus-4-5-20251101"]
+provider = "anthropic"
+wire_model = "claude-opus-4-5-20251101"
+name = "Claude Opus 4.5"
+family = "opus"
+released = "2025-11-24"
+thinking = "none"
+context_window = 200000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high"]
+vision = true
+
+[models."anthropic/claude-opus-4-5-20251101".cost]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+
+[models."anthropic/claude-opus-4-6"]
+provider = "anthropic"
+wire_model = "claude-opus-4-6"
+name = "Claude Opus 4.6"
+family = "opus"
+released = "2026-02-04"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "max"]
+vision = true
+
+[models."anthropic/claude-opus-4-6".cost]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+
+[models."anthropic/claude-opus-4-7"]
+provider = "anthropic"
+wire_model = "claude-opus-4-7"
+name = "Claude Opus 4.7"
+family = "opus"
+released = "2026-04-14"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-opus-4-7".cost]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+
+[models."anthropic/claude-opus-4-8"]
+provider = "anthropic"
+wire_model = "claude-opus-4-8"
+name = "Claude Opus 4.8"
+family = "opus"
+released = "2026-05-28"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-opus-4-8".cost]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+
+[models."anthropic/claude-opus-5"]
+provider = "anthropic"
+wire_model = "claude-opus-5"
+name = "Claude Opus 5"
+family = "opus"
+released = "2026-07-24"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-opus-5".cost]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+
+[models."anthropic/claude-opus-5-5"]
+provider = "anthropic"
+wire_model = "claude-opus-5-5"
+name = "Claude Opus 5.5"
+family = "opus"
+released = "2026-09-21"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-opus-5-5".cost]
+input = 4.0
+output = 20.0
+cache_read = 0.2
+cache_write = 5.0
+
+[models."anthropic/claude-sonnet-4-6"]
+provider = "anthropic"
+wire_model = "claude-sonnet-4-6"
+name = "Claude Sonnet 4.6"
+family = "sonnet"
+released = "2026-02-17"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "max"]
+vision = true
+
+[models."anthropic/claude-sonnet-4-6".cost]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+
+[models."anthropic/claude-sonnet-5"]
+provider = "anthropic"
+wire_model = "claude-sonnet-5"
+name = "Claude Sonnet 5"
+family = "sonnet"
+released = "2026-06-29"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-sonnet-5".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.2
+cache_write = 2.5
+
+[models."anthropic/claude-sonnet-5-5"]
+provider = "anthropic"
+wire_model = "claude-sonnet-5-5"
+name = "Claude Sonnet 5.5"
+family = "sonnet"
+released = "2026-09-28"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-sonnet-5-5".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+cache_write = 2.5
 
 [models."fireworks/deepseek-v4p1-flash"]
 provider = "fireworks"

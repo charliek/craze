@@ -3,6 +3,7 @@ package modeltable
 import (
 	"cmp"
 	"slices"
+	"strings"
 )
 
 // Which models a picker offers, and in what order (plan 031 §3.6, owner
@@ -39,11 +40,14 @@ type Choice struct {
 //
 // The order is the model memory's first — recent, through Recent, so a renamed
 // model keeps its place and a re-pointed alias does not — newest first, each
-// with its rank; then every other model by display name, then alias — but the
-// ChatGPT plan's models, which keep the order of the account's own list
-// (priority, plan 033 §7 A19) as one block, placed by its provider's display
-// name. The ranks count only the models listed, so they run 1, 2, 3… with no
-// gap where an unfunded remembered model was passed over.
+// with its rank; then every other model by display name, then alias — but two
+// blocks, each placed by its provider's display name: the ChatGPT plan's
+// models, which keep the order of the account's own list (priority, plan 033
+// §7 A19), and the Anthropic provider's anthropic/<id> models, newest release
+// first, then alias (plan 044 §3.5, P28: "Anthropic" sorts before every other
+// provider's name today). The ranks count only the models listed,
+// so they run 1, 2, 3… with no gap where an unfunded remembered model was
+// passed over.
 func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, current string) []Choice {
 	listed := func(alias string) bool {
 		if alias == current {
@@ -70,23 +74,41 @@ func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, curren
 		}
 	}
 	slices.SortFunc(rest, func(a, b Choice) int {
-		ka, ra, da := t.sortKey(a)
-		kb, rb, db := t.sortKey(b)
-		return cmp.Or(cmp.Compare(ka, kb), compareBool(da, db), cmp.Compare(ra, rb), cmp.Compare(a.Alias, b.Alias))
+		ka, kb := t.sortKey(a), t.sortKey(b)
+		return cmp.Or(cmp.Compare(ka.key, kb.key), compareBool(ka.block, kb.block), cmp.Compare(ka.rank, kb.rank),
+			newestFirst(ka.released, a.Alias, kb.released, b.Alias))
 	})
 	return append(out, rest...)
+}
+
+// choiceKey is how Choices orders a model among the ones the memory does not
+// hold (sortKey).
+type choiceKey struct {
+	key      string // the display name, or a block's provider's
+	block    bool   // one of a provider's block, after any model of the same name
+	rank     int    // its place in the ChatGPT plan's list
+	released string // its release, for the Anthropic block's newest first
 }
 
 // sortKey is how Choices orders c among the models the memory does not hold:
 // by its display name; a model of the ChatGPT plan's list by its provider's
 // display name instead, and then by its rank in the list, so the plan's
 // models stay one block in the account's own order (discovered says whether
-// c is one).
-func (t *Table) sortKey(c Choice) (key string, rank int, discovered bool) {
+// c is one); and an anthropic/<id> model of the provider on the anthropic
+// driver by its provider's display name too, then by its release, newest
+// first (factsOf), so Anthropic's models are one block, the newest at its
+// top. A model of the user's under another alias on that provider sorts by
+// its name, as the TUI's ordering keeps the block by the alias's prefix
+// (agent.OrderModels), so the two agree.
+func (t *Table) sortKey(c Choice) choiceKey {
+	provider := cmp.Or(t.Providers[c.Provider].Name, c.Provider)
 	if r, ok := t.discovered[c.Alias]; ok {
-		return cmp.Or(t.Providers[c.Provider].Name, c.Provider), r, true
+		return choiceKey{key: provider, block: true, rank: r}
 	}
-	return c.Name, 0, false
+	if strings.HasPrefix(c.Alias, AnthropicAliasPrefix) && t.Providers[c.Provider].Driver == DriverAnthropic {
+		return choiceKey{key: provider, block: true, released: t.factsOf(t.Models[c.Alias]).Released}
+	}
+	return choiceKey{key: c.Name}
 }
 
 // compareBool orders false before true.

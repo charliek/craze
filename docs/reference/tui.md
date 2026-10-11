@@ -350,7 +350,8 @@ it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
 preferred model its account lists, `fireworks/ember-1`,
-`openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, in that order
+`openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
+Claude Opus the Anthropic account lists (at `medium`), in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
 that has a key, with a note. `--model` picks the model for one start — at
@@ -2078,7 +2079,10 @@ no `current` or `recent` tag: the order says it. After the current model come,
 on native, the models you picked most recently in any native session's
 `/model`, newest first (the [model
 memory](configuration.md#model-memory-recentjson)); then any model whose id
-or name contains `grok`; then the rest, each group by name. An ACP provider
+or name contains `grok`; then the rest, each group by name — except that the
+ChatGPT plan's models stay together in the account's own order, and
+Anthropic's together newest first, each block placed by its provider's name
+(so Anthropic's come first among the rest). An ACP provider
 (cursor, grok, gx) has no model memory, so its list starts at the `grok`
 group.
 

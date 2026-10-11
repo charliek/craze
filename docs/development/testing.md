@@ -140,10 +140,21 @@ To check the isolation holds, run the suites with every catalog variable
 exported to a dummy value:
 
 ```bash
-env FIREWORKS_API_KEY=dummy-key-0001 META_API_KEY=dummy-key-0002 \
-    OPENROUTER_API_KEY=dummy-key-0003 ZHIPU_API_KEY=dummy-key-0004 \
-    ZAI_API_KEY=dummy-key-0005 make test test-cli
+env ANTHROPIC_API_KEY=dummy-key-0006 FIREWORKS_API_KEY=dummy-key-0001 \
+    META_API_KEY=dummy-key-0002 OPENROUTER_API_KEY=dummy-key-0003 \
+    ZHIPU_API_KEY=dummy-key-0004 ZAI_API_KEY=dummy-key-0005 make test test-cli
 ```
+
+No test reaches Anthropic's API. A load reads the Anthropic key only to bind
+the account's model list to it (`anthropic-models.json`), through a seam the
+`modeltable` tests replace, and the list's fetcher (`internal/anthropicmodels`)
+fetches through a variable its tests replace. Code that does build the real
+client — the driver, the fetcher's default — takes Anthropic's origin from
+`CRAZE_TEST_ANTHROPIC_API` when it is set: a loopback `http` URL
+(`http://127.0.0.1:<port>`) to a test's fake server, and nothing else — any
+other value is an error, never ignored, so a test that misnames its fake fails
+instead of sending a key to Anthropic. `internal/anthropicmodels`' `TestMain`
+points it at a loopback port nothing serves.
 
 To drive a plugin command through the JSON interface:
 

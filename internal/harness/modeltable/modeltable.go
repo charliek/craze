@@ -239,7 +239,7 @@ type Table struct {
 	// learned is what craze learned of each (provider, wire model) identity —
 	// its catalog's models, and the lists a load adds to its copy — as it
 	// stood before the user's files were laid over it (learnedOf, P11): what
-	// a model is looked up in by its identity (thinkingFor). nil for a table
+	// a model is looked up in by its identity (factsOf). nil for a table
 	// loaded without a catalog or built in memory.
 	learned map[identity]learnedFacts
 	// unkeyed are the variables WithholdFrozen found holding a value a
@@ -298,6 +298,16 @@ type Model struct {
 	// learned, never a key of the user's files: only what craze knows of a
 	// model sets it.
 	Thinking string
+	// Family and Released are what craze knows of an Anthropic model's line
+	// and release (plan 044 §3.5, P11): its family ("opus", "sonnet", …),
+	// which a new session's start and a sub-agent's tier word pick the
+	// newest of, and its release date (YYYY-MM-DD), which orders a family
+	// and the picker's Anthropic block newest first. "" is not known. Like
+	// Thinking they are learned — the catalog's own keys and the account's
+	// list set them, never the user's files — and they follow the model's
+	// identity (Table.factsOf).
+	Family   string
+	Released string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -547,8 +557,11 @@ type modelEntry struct {
 	// model learned from its provider sets it (plan 033 §3.11) — and it is
 	// here so that the conversion from Model still compiles.
 	ParallelToolCalls *bool `toml:"-"`
-	// Thinking is never written either, for the same reason (plan 044 P11).
+	// Thinking, Family and Released are never written either, for the same
+	// reason (plan 044 P11).
 	Thinking string `toml:"-"`
+	Family   string `toml:"-"`
+	Released string `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -1117,6 +1130,12 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	}
 	if r := thinkingProblem(m.Thinking); r != "" {
 		return at("thinking", r)
+	}
+	if r := familyProblem(m.Family); r != "" {
+		return at("family", r)
+	}
+	if r := releasedProblem(m.Released); r != "" {
+		return at("released", r)
 	}
 	return validateCost(file, alias, m.Cost)
 }

@@ -396,11 +396,7 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 	var entries []entry
 	var warnings []string
 	skip := func(i int, slug, reason string) {
-		what := fmt.Sprintf("models[%d]", i)
-		if chatgptSlug.MatchString(slug) {
-			what += fmt.Sprintf(" (%q)", slug)
-		}
-		warnings = append(warnings, fmt.Sprintf("modeltable: %s: %s is skipped: %s", path, what, reason))
+		warnings = append(warnings, skippedEntry(path, i, slug, chatgptSlug, reason))
 	}
 	for i, raw := range doc.Models {
 		var m chatgptModelEntry
@@ -481,6 +477,18 @@ func discoveredModel(m chatgptModelEntry, def ChatGPTModelDefaults) Model {
 		ToolProfile:       def.ToolProfile,
 		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
 	}
+}
+
+// skippedEntry is the warning for entry i of the model list at path, left
+// out for reason: the ChatGPT plan's and the Anthropic account's alike. The
+// entry is named by id too when id matches named, so a warning never shows
+// an id craze could not name.
+func skippedEntry(path string, i int, id string, named *regexp.Regexp, reason string) string {
+	what := fmt.Sprintf("models[%d]", i)
+	if named.MatchString(id) {
+		what += fmt.Sprintf(" (%q)", id)
+	}
+	return fmt.Sprintf("modeltable: %s: %s is skipped: %s", path, what, reason)
 }
 
 // shownText says s is one line of at most max bytes of UTF-8 with no control

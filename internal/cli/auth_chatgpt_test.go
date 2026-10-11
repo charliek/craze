@@ -859,7 +859,7 @@ func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	authNative(t)
 	f := useFakeSignIn(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-5]: ", "1")
+		typeAtPrompt(t, tail, ptmx, "Provider [1-6]: ", "2")
 		typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
 	}, "auth", "login")
 	if err != nil {
@@ -869,7 +869,7 @@ func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	if strings.Contains(got, "API key") {
 		t.Fatalf("a key was asked for:\n%s", got)
 	}
-	for _, want := range []string{"Provider [1-5]: 1\n", redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"} {
+	for _, want := range []string{"Provider [1-6]: 2\n", redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the screen lacks %q:\n%s", want, got)
 		}
@@ -975,9 +975,10 @@ func TestAuthListChatGPTStates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			first := strings.SplitN(stdout, "\n", 2)[0]
-			if want := "ChatGPT plan      chatgpt          " + c.want; first != want {
-				t.Fatalf("the plan's row = %q; want %q", first, want)
+			// The plan's row is the second: Anthropic's sorts first (plan 044).
+			rows := strings.Split(stdout, "\n")
+			if want := "ChatGPT plan      chatgpt          " + c.want; len(rows) < 2 || rows[1] != want {
+				t.Fatalf("the plan's row = %q; want %q", rows, want)
 			}
 			if strings.Contains(stdout, token) {
 				t.Fatal("a token value was listed")

@@ -402,6 +402,17 @@ func modelDisplayName(m ModelInfo) string {
 	return m.ID
 }
 
+// blockPrefix is the alias prefix of the block a native model is listed in,
+// "" for none: the ChatGPT plan's, or Anthropic's (OrderModels).
+func blockPrefix(id string) string {
+	for _, p := range []string{modeltable.ChatGPTAliasPrefix, modeltable.AnthropicAliasPrefix} {
+		if strings.HasPrefix(id, p) {
+			return p
+		}
+	}
+	return ""
+}
+
 func isGrokModel(m ModelInfo) bool {
 	return strings.Contains(strings.ToLower(m.ID), "grok") ||
 		strings.Contains(strings.ToLower(m.Name), "grok")
@@ -420,23 +431,31 @@ func sortModelBucket(ms []ModelInfo) {
 // OrderModels returns advertised models with the current model first, then
 // the remembered ones by rank (ModelInfo.Recent, newest first: plan 031
 // §3.6), then any id/name matching grok, then the rest by display name and
-// id — but the ChatGPT plan's models (modeltable.ChatGPTAliasPrefix), which
-// stay one block, in the order the session listed them: the account's own
-// priority order (plan 033 §3.11, A19), which modeltable.Choices gives them,
-// placed among the rest where Choices placed it, after the models it listed
-// before the block (plan 033 C14r2, V5: sorted by name, the dialog listed
-// Luna, GPT-5.5, Sol, Terra, Astra for astra, sol, terra, luna, gpt-5.5).
-// Only a native session's models carry a rank or the plan's prefix — an ACP
-// provider's never do — so an ACP picker's order is what it always was.
-// Nothing is labelled: the order, and the current model being the
+// id — but two blocks, each kept in the order the session listed it and
+// placed among the rest where modeltable.Choices placed it, after the models
+// it listed before the block: the ChatGPT plan's models
+// (modeltable.ChatGPTAliasPrefix), in the account's own priority order (plan
+// 033 §3.11, A19; C14r2, V5: sorted by name, the dialog listed Luna,
+// GPT-5.5, Sol, Terra, Astra for astra, sol, terra, luna, gpt-5.5), and
+// Anthropic's (modeltable.AnthropicAliasPrefix), newest first (plan 044
+// §3.5, P28). Only a native session's models carry a rank or either prefix
+// — an ACP provider's never do — so an ACP picker's order is what it always
+// was. Nothing is labelled: the order, and the current model being the
 // pre-selected row, say it all (owner, Q4).
 func OrderModels(snap Snapshot) []ModelInfo {
 	models := snapshotModels(snap)
 	if len(models) == 0 {
 		return nil
 	}
-	var cur, recent, grok, rest, plan []ModelInfo
-	planAt := -1 // where the plan's block goes in rest: after the models listed before it
+	var cur, recent, grok, rest []ModelInfo
+	// A block's place in rest — after the models listed before it — and its
+	// models, in the order the session listed them; blocks in the order met.
+	type block struct {
+		at     int
+		models []ModelInfo
+	}
+	var blocks []*block
+	byPrefix := map[string]*block{}
 	seenCurrent := false
 	for _, m := range models {
 		if !seenCurrent && snap.CurrentModel != "" && m.ID == snap.CurrentModel {
@@ -448,11 +467,14 @@ func OrderModels(snap Snapshot) []ModelInfo {
 			recent = append(recent, m)
 			continue
 		}
-		if strings.HasPrefix(m.ID, modeltable.ChatGPTAliasPrefix) {
-			if planAt < 0 {
-				planAt = len(rest)
+		if prefix := blockPrefix(m.ID); prefix != "" {
+			b := byPrefix[prefix]
+			if b == nil {
+				b = &block{at: len(rest)}
+				byPrefix[prefix] = b
+				blocks = append(blocks, b)
 			}
-			plan = append(plan, m)
+			b.models = append(b.models, m)
 			continue
 		}
 		if isGrokModel(m) {
@@ -468,8 +490,10 @@ func OrderModels(snap Snapshot) []ModelInfo {
 	sort.SliceStable(recent, func(i, j int) bool { return recent[i].Recent < recent[j].Recent })
 	sortModelBucket(grok)
 	sortModelBucket(rest)
-	if len(plan) > 0 {
-		rest = slices.Insert(rest, planAt, plan...)
+	// The last met first: a block met later sits at or after an earlier
+	// one's place, which its insertion then leaves where it was.
+	for i := len(blocks) - 1; i >= 0; i-- {
+		rest = slices.Insert(rest, blocks[i].at, blocks[i].models...)
 	}
 	out := make([]ModelInfo, 0, len(models))
 	out = append(out, cur...)

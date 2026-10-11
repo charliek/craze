@@ -12,9 +12,9 @@ import (
 // Anthropic's provider and driver in the table (plan 044 §3.3, §3.5): the
 // driver is the one provider's alone and takes no base URL, that provider's
 // entry is locked once the catalog ships it, env_keys = [] still opts an
-// exported key out, and Resolve says what thinking a request asks for. The
-// shipped catalog does not carry the provider yet, so these run over a small
-// catalog of their own that does.
+// exported key out, and Resolve says what thinking a request asks for. They
+// run over a small catalog of their own, so a change to the shipped seeds
+// changes none of them.
 
 const anthropicCatalog = `version = 1
 provider_order = ["acme", "anthropic"]
@@ -30,7 +30,10 @@ start = ["acme/fast"]
 name = "Anthropic"
 driver = "anthropic"
 env_keys = ["ANTHROPIC_API_KEY"]
-start = ["anthropic/claude-test-5"]
+
+[anthropic_defaults]
+start_family = "test"
+default_effort = "medium"
 
 [models."acme/fast"]
 provider = "acme"
@@ -39,8 +42,10 @@ wire_model = "acme-fast-1"
 [models."anthropic/claude-test-5"]
 provider = "anthropic"
 wire_model = "claude-test-5"
+family = "test"
+released = "2026-01-01"
+thinking = "adaptive"
 efforts = ["low", "medium", "high", "xhigh", "max"]
-default_effort = "medium"
 `
 
 // anthropicKey is a dummy Anthropic key: at least eight bytes, nothing like
@@ -323,40 +328,28 @@ func TestThinkingFollowsTheIdentity(t *testing.T) {
 [models."anthropic/legacy"]
 provider = "anthropic"
 wire_model = "claude-legacy-4"
+thinking = "none"
 
 [models."anthropic/new"]
 provider = "anthropic"
 wire_model = "claude-new-6"
+thinking = "adaptive"
 
 [models."anthropic/legacy-b"]
 provider = "anthropic"
 wire_model = "claude-legacy-3"
+thinking = "none"
 
 [models."anthropic/legacy-c"]
 provider = "anthropic"
 wire_model = "claude-legacy-1"
+thinking = "none"
 
 [models."anthropic/kept"]
 provider = "anthropic"
 wire_model = "claude-legacy-2"
+thinking = "none"
 `)
-	// The catalog has no key for a model's thinking yet: what craze learned
-	// is set on its models as a load would have it.
-	for alias, thinking := range map[string]string{
-		"anthropic/claude-test-5": ThinkingAdaptive,
-		"anthropic/legacy":        ThinkingNone,
-		"anthropic/new":           ThinkingAdaptive,
-		"anthropic/legacy-b":      ThinkingNone,
-		"anthropic/legacy-c":      ThinkingNone,
-		"anthropic/kept":          ThinkingNone,
-	} {
-		m := cat.Models[alias]
-		m.Thinking = thinking
-		cat.Models[alias] = m
-	}
-	if err := cat.validate(CatalogFile); err != nil {
-		t.Fatal(err)
-	}
 	tbl, _ := loadOver(t, cat, "", `version = 1
 
 [models."anthropic/claude-test-5"]

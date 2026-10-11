@@ -95,6 +95,13 @@ There is no refresh between releases.
   removed without retiring it fails. The history is **append-only**: a
   catalog change that deletes a line from it is refused in review (the test
   cannot catch a line deleted in the same commit as the model).
+- **Anthropic** ships a model: add its seed, `[models."anthropic/<id>"]`, with
+  what the account's `GET /v1/models` says of it (name, window, `efforts`,
+  `vision`, `family`, `released`, `thinking`; `max_output_tokens` its
+  `max_tokens` up to 64,000) and its price from Anthropic's pricing page
+  (`cache_write` the five-minute write), and its alias to the history. Until a
+  release does, the account's list offers it unpriced; a seed the account no
+  longer lists is hidden, not removed, so the history needs nothing.
 - **Bump** the ChatGPT plan's `models_client_version` (`[chatgpt_defaults]`)
   only when a model it lists needs a newer one and has been verified live; the
   procedure is the comment above that table in the catalog.
@@ -102,9 +109,11 @@ There is no refresh between releases.
   rejects a malformed catalog (a top-level `default_model` among them: that is
   the user's own pin), a `provider_order` that does not name every provider
   exactly once, a provider `start` that is not that provider's own models, two
-  aliases sharing an identity, a retired alias that is still a model, and a
-  shipped model whose identity is retired. Adding a provider means adding it
-  to `provider_order`; removing a model a `start` names means changing that
+  aliases sharing an identity, a retired alias that is still a model, a
+  shipped model whose identity is retired, an Anthropic seed without its
+  `family`, `released` and `thinking`, and an `[anthropic_defaults]`
+  `start_family` no seed has. Adding a provider means adding it to
+  `provider_order`; removing a model a `start` names means changing that
   `start`.
 
 ## Snapshot / dev versioning

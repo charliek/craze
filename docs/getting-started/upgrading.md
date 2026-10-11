@@ -5,8 +5,10 @@ release, and [from v0.0.1](#from-v001), the first release's.
 
 ## Since v0.1.0
 
-Nothing needs migrating, and nothing here has an opt-out switch: every change
-is an addition, but the first two change what an existing command does.
+Nothing needs migrating. Every change is an addition, but the first two
+change what an existing command does, and the Anthropic provider takes up an
+`ANTHROPIC_API_KEY` you already export (its opt-out is below); nothing else
+has an opt-out switch.
 
 - **`craze -c` and `--continue` skip sub-agent sessions.** A session started by
   `craze new --wait` (the Claude Code plugin's) is marked `unattended` in the
@@ -22,9 +24,20 @@ is an addition, but the first two change what an existing command does.
   stay on a numbered model, add it to `models.toml` with its wire id. See [The
   shipped catalog](../reference/configuration.md#the-shipped-catalog).
 - **A native session starts on the first connected provider, in a fixed
-  order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta, each on
-  its own start model, unless you remembered a model with `/model` or pinned
-  one with `default_model`. `provider_order` in `models.toml` changes the order.
+  order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta,
+  Anthropic, each on its own start model, unless you remembered a model with
+  `/model` or pinned one with `default_model`. `provider_order` in
+  `models.toml` changes the order.
+- **Anthropic is a native provider.** Claude models run on Anthropic's API with
+  an API key ([Anthropic](../reference/configuration.md#anthropic)). An
+  `ANTHROPIC_API_KEY` exported in your shell now funds it — and, as every key
+  variable craze knows, is kept out of the commands a native session runs and
+  redacted from what they print. To keep an exported key from funding craze,
+  write `env_keys = []` under `[providers.anthropic]` in `providers.toml`.
+- **A `[providers.anthropic]` of your own now overlays craze's Anthropic
+  provider**: its `driver` and `base_url` are ignored, each with a warning, and
+  its key goes to Anthropic's API. Rename yours (`[providers.my-gateway]`, and
+  its models' `provider`) to keep a gateway.
 - **New commands:** `craze new --wait`, `craze send`, `craze wait`, `craze
   cancel` and `craze stop` drive sessions from a script or another program
   ([CLI reference](../reference/cli.md#craze-new)); the [Claude

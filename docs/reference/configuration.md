@@ -60,7 +60,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
-| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens), the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
+| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -739,6 +739,7 @@ from, tried in order:
 
 | Provider id | Name | Key variables |
 |-------------|------|---------------|
+| `anthropic` | Anthropic | `ANTHROPIC_API_KEY` ([Anthropic](#anthropic)) |
 | `chatgpt` | ChatGPT plan | none: [signs in with ChatGPT](#the-chatgpt-plan) |
 | `fireworks` | Fireworks | `FIREWORKS_API_KEY` |
 | `meta` | Meta | `META_API_KEY` |
@@ -749,7 +750,8 @@ Its models — aliases, wire model ids, context windows, efforts and costs — a
 in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
 a session's `/model` lists those whose provider has a key ([which models, in
-what order](tui.md#model-dialog)).
+what order](tui.md#model-dialog)). Anthropic's are also the account's own:
+see [Anthropic](#anthropic).
 
 OpenRouter's models are its `~<family>-latest` routers where OpenRouter has
 one: `openrouter/gpt-sol-latest` sends `~openai/gpt-sol-latest`, which
@@ -773,9 +775,11 @@ starts](#model-memory-recentjson)):
 | 3 | `fireworks` | `fireworks/ember-1` |
 | 4 | `openrouter` | `openrouter/gemini-flash-latest` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
+| 6 | `anthropic` | the newest Opus the account lists (`anthropic/claude-opus-5-5` until it lists a newer one), at `medium` |
 
 So a machine with only a Fireworks key starts on `fireworks/ember-1`, one with
-only a Z.AI key on `glm-5.3`, and one signed in to the ChatGPT plan with a
+only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
+`anthropic/claude-opus-5-5`, and one signed in to the ChatGPT plan with a
 Fireworks key as well on the plan's model. `provider_order` in your
 `models.toml` changes the order; `default_model` picks one model outright.
 
@@ -817,8 +821,9 @@ default_effort = "max"        # everything else stays as shipped
 ```
 
 An entry for anything else is yours, and must be complete: a provider needs
-`driver` (`openai-compat`, with a `base_url`, or `openrouter`, without one),
-and a model needs `provider` and `wire_model`:
+`driver` (`openai-compat`, with a `base_url`, or `openrouter`, without one;
+the `chatgpt` and `anthropic` drivers belong to craze's own providers of those
+ids), and a model needs `provider` and `wire_model`:
 
 ```toml
 # providers.toml
@@ -1105,6 +1110,104 @@ A long line `grep` or `read` shortens is redacted, with every value the
 session knows by then, before it is cut, so a value renewed while a search
 runs leaves no piece of itself at the cut.
 
+### Anthropic
+
+The catalog's `anthropic` provider, **Anthropic**, runs Claude models on
+Anthropic's own API (the Messages API) with an API key, billed per token to
+the key's account at Anthropic's prices. Connect it like any key provider:
+export `ANTHROPIC_API_KEY`, or store a key with [`craze auth login
+anthropic`](cli.md#craze-auth-login) or [`/connect`](tui.md#connect).
+
+**Its entry is locked.** A `providers.toml` entry for `anthropic` may set
+`name`, `env_keys` and `api_key`; a `driver`, `base_url` or `source` written
+there is dropped with a warning naming the key, and craze's own driver and
+endpoint are used, so the key goes to Anthropic and nowhere else. The
+`anthropic` driver belongs to this provider alone: an entry of yours that
+names it under another id is dropped with a warning (a load error in a
+[`catalog = false`](#isolated-setups-catalog-false) directory). There, with no
+catalog, a provider of your own named `anthropic` on another driver — a
+gateway of yours, say — is yours. `env_keys = []` is the opt-out from an
+exported `ANTHROPIC_API_KEY`: the variable then funds nothing, and is still
+kept out of the commands a native session runs, as every key variable is
+([Keys](#keys)).
+
+**Its models.** craze ships one for each Claude model the API offered when
+this version was made, each `anthropic/<Anthropic's id>` — Opus 5.5
+(`anthropic/claude-opus-5-5`), 5, 4.8, 4.7, 4.6 and 4.5; Sonnet 5.5, 5 and 4.6;
+Haiku 5.5 and 4.5; Fable 5.1 and 5 — named as Anthropic names them, with their
+context windows, the efforts each takes (`low` to `max`; Haiku 4.5 has no
+effort control) and Anthropic's prices. Each model with effort control starts
+at `medium` (one rule for every Claude model; Anthropic's own default for some
+is `high`), and every one takes images. Every request asks for adaptive
+thinking, shown summarized, except on Opus 4.5 and Haiku 4.5, which take none.
+The output ceiling is 64,000 tokens. Every model but Opus 4.5 and Haiku 4.5,
+whose own maximum is 64,000, allows up to 128,000: set
+[`max_output_tokens`](#native-output-ceiling) for one of those to raise it, never
+past the model's own maximum, which Anthropic refuses.
+
+**The account's model list.** craze also keeps the list of models the key's
+account may use, as Anthropic's API gives it (`GET /v1/models`, which costs
+nothing), in `anthropic-models.json` in the native directory. The list is
+**bound to the key** that fetched it: a session uses it only when that key is
+the one the provider is funded by when the session loads its models — the
+first of its `env_keys` set to a usable key, else its stored key — so a list
+another key fetched (before you changed keys, say, or another account's) is
+ignored, and the shipped models stand alone until the current key's list is
+fetched. The key is read when a session loads its models — when it starts,
+and when it loads them again — so a key changed in between binds the list at
+the next load. Where the list is used, it is what `/model` offers:
+
+- a shipped model it names keeps craze's settings and price;
+- a shipped model it does not name is not offered (a partial entry of yours
+  for one is ignored without a warning, and applies again when the account
+  lists the model);
+- a model it names that this craze does not ship is offered too, as
+  `anthropic/<id>`, named as Anthropic names it, with the window, efforts,
+  image input and thinking the list gives and a ceiling of the model's own
+  limit up to 64,000 — and **no price** (the status row shows its tokens
+  alone) until a craze release adds it;
+- a model the list says is deprecated has ` (deprecated)` after its name;
+- an alias craze has [retired](#retired-models) is never offered again,
+  whatever the list says.
+
+A new session that reaches `anthropic` in the [provider
+order](#the-shipped-catalog) starts on the newest Opus the account lists — so
+a new Opus is the start the day the account lists it — at `medium`. In
+`/model`, Anthropic's models are listed together, placed by the provider's
+name, newest first. The catalog's `[anthropic_defaults]` table holds these
+rules — `start_family` (`opus`), `default_effort` (`medium`) and `list`
+(`all`, every model the account lists; `newest` would offer each family's
+newest alone) — and ships in the binary: it is not a `models.toml` setting,
+and neither are a model's family, release date or thinking, which only craze's
+catalog and the account's list say.
+
+**Its files** are in the native directory, `0600`:
+
+| File | Holds | Secret |
+|------|-------|--------|
+| `anthropic-models.json` | The account's model list, when it was fetched, and the id of the key that fetched it: the first 12 hex digits of the key's SHA-256, never the key | no |
+| `anthropic-models.json.lock` | The lock a fetch of the list is written under | no |
+
+A list craze cannot read is a warning when a session loads its models, and the
+shipped models stand alone until it is fetched again. `craze auth logout
+anthropic` keeps the list: without a key it funds nothing.
+
+**Requests** go to `https://api.anthropic.com` with the key, and nowhere else:
+no redirect is followed. A key Anthropic rejects ends the turn with `native:
+Anthropic rejected the API key (HTTP 401)` and how to replace it; a model the
+key may not use, with `native: Anthropic refused access to model "<alias>"
+(HTTP 403): <Anthropic's reason>`; and a model the account cannot use (a
+listed model needing a setting the account lacks, say), with `native: the
+Anthropic account cannot use <id> (HTTP 404: <Anthropic's reason>)`.
+
+**An older Claude id of your own.** A model you add on the `anthropic`
+provider with an id craze knows — a shipped one, or one the account's list
+names — takes what craze knows of it. One with an id craze has never seen is
+sent adaptive thinking, as every current Claude model takes it; an older
+model that takes none answers every request with an HTTP 400 about the
+thinking field. Use a model `/model` offers instead: those are the ones the
+account lists, and craze knows each.
+
 ### Model memory: `recent.json`
 
 A model or effort you pick in a native session's `/model` is remembered for
@@ -1167,10 +1270,11 @@ on the first of:
    fails for another reason is still used, so the session says why);
 3. for each provider in the provider order — your `provider_order`, else the
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
-   Fireworks, OpenRouter, Meta — that has a key, the provider's start model
-   (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-5.6-sol`
-   that the account lists; `fireworks/ember-1`;
-   `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`);
+   Fireworks, OpenRouter, Meta, Anthropic — that has a key, the provider's
+   start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
+   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/ember-1`;
+   `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
+   Opus the Anthropic account lists);
 4. otherwise the first model, by alias, whose provider has a key — with a note
    saying so.
 
@@ -1315,7 +1419,13 @@ Every key is optional and independent; a model with no `[cost]` table saves
 exactly as it did before this section existed. Shipped models may carry a
 cost of their own; a rate you write for one replaces that rate alone (see
 [How the files merge](#how-the-files-merge)). The Z.AI Coding Plan's models
-carry none, like the ChatGPT plan's: both are flat-rate plans. Each rate is dollars per
+carry none, like the ChatGPT plan's: both are flat-rate plans. Anthropic's
+shipped models carry Anthropic's prices — `cache_read` its cache hit,
+`cache_write` its five-minute cache write, the only one craze asks for — and a
+model only the Anthropic account's list names carries none until a release
+adds it ([Anthropic](#anthropic)). Haiku 5.5 is priced at its rate for
+prompts up to 100,000 tokens: above that Anthropic charges five times as
+much, so a longer prompt's spend on it reads low. Each rate is dollars per
 1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
 that is not a finite number (`nan`, `inf`), is refused at load. There are no
 tiers yet: a tier is per request, and a sub-agent's usage row already sums
@@ -1344,7 +1454,9 @@ pictures pasted into the composer (see [Images](tui.md#images)) and the ones
 the `Read` tool returns for an image file. The shipped catalog sets it
 `true` on the models seen to describe a screenshot, and leaves it off on GLM
 5.3 — `glm-5.3`, Z.AI's start model, `fireworks/glm-5p3` and
-`openrouter/glm-latest`. A model you add defaults to `false`.
+`openrouter/glm-latest`. Every shipped Anthropic model takes images, and a
+model only the Anthropic account's list names takes them when the list says it
+does. A model you add defaults to `false`.
 
 ```toml
 [models."local/qwen"]
@@ -1411,7 +1523,7 @@ same turn is waited on again, and craze does not read them back.
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_HUB_IDLE` | How long [the hub](cli.md#the-hub) waits, with no client and no live host, before it exits: a Go duration (`"30s"`, `"5m"`). Default 60 seconds; a value that is not a positive duration gives the default. Mostly of use in tests |
 | `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
-| `FIREWORKS_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY` / `ZAI_API_KEY` | API keys for the native provider's [shipped providers](#the-shipped-catalog), tried before any inline `api_key`; a value under 8 bytes is skipped with a warning |
+| `ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY` / `ZAI_API_KEY` | API keys for the native provider's [shipped providers](#the-shipped-catalog), tried before any inline `api_key`; a value under 8 bytes is skipped with a warning |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |

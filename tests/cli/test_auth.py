@@ -3,8 +3,8 @@
 The native provider's keys are stored as the inline api_key of their
 providers.toml entry, in the craze directory's native/ (0600), by the real
 binary against a temp CRAZE_HOME (isolate_run_env: every variable the shipped
-catalog names is unset, so its four key providers start unconnected, and
-nobody is signed in to the fifth, the ChatGPT plan). stdin is a
+catalog names is unset, so its five key providers start unconnected, and
+nobody is signed in to the sixth, the ChatGPT plan). stdin is a
 pipe here, never a terminal, so the key is always stdin's first line; the
 no-echo prompt on a terminal is the Go pty test's
 (internal/cli/auth_test.go).
@@ -52,14 +52,15 @@ from siwc_fixture import FULL_SCOPE, IDENTITY_SCOPE, RESOURCE, FakeIssuer
 from sse_fixture import CANARY, UNUSED_ENV_KEY, SSEFixture
 
 SHIPPED_ROWS = [
+    ["Anthropic", "anthropic"],
     ["Fireworks", "fireworks"],
     ["Meta", "meta"],
     ["OpenRouter", "openrouter"],
     ["Z.AI Coding Plan", "zai-coding-plan"],
 ]
 
-# The ChatGPT plan's row, first by name: funded by its sign-in, never a key
-# (plan 033 §3.11), and nobody is signed in here.
+# The ChatGPT plan's row, second by name after Anthropic's (plan 044): funded
+# by its sign-in, never a key (plan 033 §3.11), and nobody is signed in here.
 PLAN_ROW = ["ChatGPT plan", "chatgpt", "not signed in"]
 
 
@@ -134,6 +135,13 @@ def list_rows(stdout: str) -> list[list[str]]:
     return rows
 
 
+def provider_row(stdout: str, provider: str) -> list[str]:
+    """The `craze auth list` row of provider (its id, the second column)."""
+    rows = [row for row in list_rows(stdout) if len(row) > 1 and row[1] == provider]
+    assert len(rows) == 1, stdout
+    return rows[0]
+
+
 def files_holding(root: Path, needle: bytes) -> list[Path]:
     return sorted(p for p in root.rglob("*") if p.is_file() and needle in p.read_bytes())
 
@@ -141,7 +149,8 @@ def files_holding(root: Path, needle: bytes) -> list[Path]:
 def test_login_list_logout(craze_bin: Path) -> None:
     proc = run_craze(craze_bin, "auth", "list")
     assert proc.returncode == 0, proc.stderr
-    assert list_rows(proc.stdout) == [PLAN_ROW] + [row + ["not connected"] for row in SHIPPED_ROWS]
+    unconnected = [row + ["not connected"] for row in SHIPPED_ROWS]
+    assert list_rows(proc.stdout) == unconnected[:1] + [PLAN_ROW] + unconnected[1:]
 
     proc = run_craze(craze_bin, "auth", "login", "fireworks", stdin=CANARY + "\n")
     assert proc.returncode == 0, proc.stderr
@@ -154,12 +163,12 @@ def test_login_list_logout(craze_bin: Path) -> None:
     assert not (craze_home() / "native" / "models.toml").exists()
 
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "stored key"]
+    assert provider_row(proc.stdout, "fireworks") == ["Fireworks", "fireworks", "stored key"]
 
     # An exported variable wins over the stored key, and both commands say so.
     exported = {"FIREWORKS_API_KEY": "sk-exported-not-a-secret-0002"}
     proc = run_craze(craze_bin, "auth", "list", env=exported)
-    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "env FIREWORKS_API_KEY"]
+    assert provider_row(proc.stdout, "fireworks") == ["Fireworks", "fireworks", "env FIREWORKS_API_KEY"]
     proc = run_craze(craze_bin, "auth", "login", "Fireworks", stdin=CANARY + "\n", env=exported)
     assert proc.stdout.endswith(
         "FIREWORKS_API_KEY is set in this environment; craze uses it before the stored key.\n"
@@ -172,13 +181,13 @@ def test_login_list_logout(craze_bin: Path) -> None:
     proc = run_craze(craze_bin, "auth", "logout", "fireworks")
     assert (proc.returncode, proc.stdout) == (0, "No stored Fireworks key.\n")
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "not connected"]
+    assert provider_row(proc.stdout, "fireworks") == ["Fireworks", "fireworks", "not connected"]
 
 
 @pytest.mark.parametrize(
     ("args", "stdin", "code", "says"),
     [
-        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has chatgpt, fireworks, meta, openrouter, zai-coding-plan"),
+        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has anthropic, chatgpt, fireworks, meta, openrouter, zai-coding-plan"),
         (["login", KEY], KEY + "\n", 2, "no such provider"),
         (["login", "fireworks"], "", 1, "no key given; nothing was saved"),
         (["login", "fireworks"], "abc\n", 1, "was not saved: shorter than 8 bytes"),
@@ -232,7 +241,7 @@ def test_symlinked_providers_toml_is_refused(craze_bin: Path, tmp_path: Path) ->
     no_canary("craze auth login meta", "the symlink's target", target.read_text(encoding="utf-8"))
     # Listing still works through the link.
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[2] == ["Meta (mine)", "meta", "not connected"]
+    assert provider_row(proc.stdout, "meta") == ["Meta (mine)", "meta", "not connected"]
 
 
 def test_stored_key_funds_a_native_session(craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture) -> None:
@@ -376,7 +385,7 @@ def plan_row(craze_bin: Path, fake: FakeIssuer) -> list[str]:
     proc = run_craze(craze_bin, "auth", "list", env=plan_env(fake))
     shows(fake, "craze auth list", proc.stdout + proc.stderr)
     assert proc.returncode == 0, fake.masked(proc.stderr)
-    return list_rows(proc.stdout)[0]
+    return provider_row(proc.stdout, "chatgpt")
 
 
 class AuthTerminal:
@@ -569,7 +578,7 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     the model fetch."""
     env = plan_env(issuer)
     proc = run_craze(craze_bin, "auth", "list", env=env)
-    assert list_rows(proc.stdout)[0] == PLAN_ROW
+    assert provider_row(proc.stdout, "chatgpt") == PLAN_ROW
 
     term = AuthTerminal(craze_bin, issuer, "auth", "login", "chatgpt", "--no-browser")
     screen = term.wait_for("Redirect address: ")
@@ -832,7 +841,7 @@ def test_chatgpt_sign_in_refusals(craze_bin: Path, issuer: FakeIssuer, refusal: 
             pytest.fail(f"a refused sign-in was issued {len(issuer.issued)} tokens", pytrace=False)
     assert not (auth_dir() / "chatgpt.json").exists()
     proc = run_craze(craze_bin, "auth", "list", env=plan_env(issuer))
-    assert list_rows(proc.stdout)[0] == PLAN_ROW
+    assert provider_row(proc.stdout, "chatgpt") == PLAN_ROW
     # The outcome in the sign-in log, value-free (plan 034 A10, A11).
     records = assert_signin_log_value_free(issuer, url)
     outcome = {
