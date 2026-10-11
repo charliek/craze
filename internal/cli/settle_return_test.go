@@ -259,19 +259,48 @@ func TestAnInterruptedLookupIsTheInterrupts(t *testing.T) {
 			} else {
 				sigs <- syscall.SIGINT
 			}
-			res, f := w.result(t)
-			if timeout {
-				res = wantResult(t, res, f, statusRunning)
-				if res.Turn != "turn-1" || res.Handle == "" || statusExit(res.Status) != 5 {
-					t.Fatalf("the timed-out lookup: %+v", res)
-				}
-				return
-			}
-			if res != nil || f == nil || f.msg != "interrupted; the turn goes on" || f.handle == "" || !f.follow {
-				t.Fatalf("the signalled lookup: %+v, %+v", res, f)
-			}
+			wantInterrupted(t, timeout, w)
 		})
 	}
+}
+
+// wantInterrupted is the answer to an interrupt that cut the target's
+// returned-plan lookup short (r3, 3): a signal is plain wait's interrupt
+// (exit 1, the turn goes on, with the handle), --timeout's end `running`
+// (exit 5, with the handle) — never `cancelled`, nor the plan the lookup may
+// have read.
+func wantInterrupted(t *testing.T, timeout bool, w *waitRun) {
+	t.Helper()
+	res, f := w.result(t)
+	if timeout {
+		res = wantResult(t, res, f, statusRunning)
+		if res.Turn != "turn-1" || res.Handle == "" || statusExit(res.Status) != 5 {
+			t.Fatalf("the timed-out lookup: %+v", res)
+		}
+		return
+	}
+	if res != nil || f == nil || f.msg != "interrupted; the turn goes on" || f.handle == "" || !f.follow {
+		t.Fatalf("the signalled lookup: %+v, %+v", res, f)
+	}
+}
+
+// pastReturnedPlan is a handle past the returned plan of turn-1, which runs
+// on until the gate it answers opens, then ends cancelled — the cancel the
+// host's return wrote.
+func (r *waitRig) pastReturnedPlan() (*gate, turnHandle) {
+	r.t.Helper()
+	g := r.heldReturn()
+	r.submit("plan it")
+	r.waitStartedPublished("turn-1")
+	r.s.emit(returnedPlanEv())
+	// The handle's cursor: past the plan, the turn running.
+	probe := r.dial(nil)
+	it, err := probe.st.Next(stepCtx(r.t))
+	if err != nil || it.Kind != remote.KindAttached || it.Reply == nil {
+		r.t.Fatalf("the probe's attach: %+v, %v", it, err)
+	}
+	after := it.Reply.After
+	return g, turnHandle{incarnation: after.Incarnation, seq: after.Seq, target: waitTarget{kind: targetTurn, id: "turn-1"}}
 }
 
 // TestAnOwnedWaitSettlesAnInterruptedLookup (r3, 3): wait --from a handle
@@ -282,18 +311,7 @@ func TestAnInterruptedLookupIsTheInterrupts(t *testing.T) {
 // ended.
 func TestAnOwnedWaitSettlesAnInterruptedLookup(t *testing.T) {
 	r := newWaitRig(t, 0)
-	g := r.heldReturn()
-	r.submit("plan it")
-	r.waitStartedPublished("turn-1")
-	r.s.emit(returnedPlanEv())
-	// The handle's cursor: past the plan, the turn running.
-	probe := r.dial(nil)
-	it, err := probe.st.Next(stepCtx(t))
-	if err != nil || it.Kind != remote.KindAttached || it.Reply == nil {
-		t.Fatalf("the probe's attach: %+v, %v", it, err)
-	}
-	after := it.Reply.After
-	h := turnHandle{incarnation: after.Incarnation, seq: after.Seq, target: waitTarget{kind: targetTurn, id: "turn-1"}}
+	g, h := r.pastReturnedPlan()
 	reached := stallLookup(t, false)
 	conn, tp := r.dialTappedFrom(&protocol.Cursor{Incarnation: h.incarnation, Seq: h.seq}, &tap{})
 	sigs := make(chan os.Signal, 1)
@@ -305,5 +323,86 @@ func TestAnOwnedWaitSettlesAnInterruptedLookup(t *testing.T) {
 	wantReturned(t, res, f)
 	if n := len(tp.lines(protocol.MethodSessionCancel)); n != 0 {
 		t.Fatalf("the cleanup sent %d cancels for a turn that had ended", n)
+	}
+}
+
+// interruptAtAnswer ends the waiter's work as the first returned-plan lookup
+// has read the plan, before it answers (waitLookedBack): end — a signal, or
+// --timeout's end — then the lookup's context's end, which the work's
+// brings. A later lookup, a cleanup's own, answers.
+func interruptAtAnswer(t *testing.T, end func()) <-chan struct{} {
+	t.Helper()
+	reached := make(chan struct{})
+	var once sync.Once
+	prev := waitLookedBack
+	waitLookedBack = func(ctx context.Context) {
+		once.Do(func() {
+			close(reached)
+			end()
+			<-ctx.Done()
+		})
+	}
+	t.Cleanup(func() { waitLookedBack = prev })
+	return reached
+}
+
+// TestALookupInterruptedAsItAnswersIsTheInterrupts (r3, 3; the CI flake of
+// TestAnInterruptedLookupIsTheInterrupts/a_signal): the interrupt comes once
+// the lookup has read the returned plan, before it answers — as it does when
+// the lookup's attach, made on the context the interrupt ended, is answered
+// all the same (remote's Attach and Next hand over what has arrived, whatever
+// their context). The work ended under the lookup, so the plan it read
+// decides nothing: plain wait's answers are wantInterrupted's, and so is an
+// owned wait's at --timeout's end; an owned wait's signal is its cleanup's —
+// the lookup made again on the cleanup's context, `completed` with the plan,
+// no cancel, and the detach made — not one that came with a result.
+func TestALookupInterruptedAsItAnswersIsTheInterrupts(t *testing.T) {
+	for _, c := range []struct {
+		name           string
+		owned, timeout bool
+	}{
+		{"plain, a signal", false, false},
+		{"plain, --timeout", false, true},
+		{"owned, a signal", true, false},
+		{"owned, --timeout", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sigs, fire := make(chan os.Signal, 1), make(chan time.Time)
+			reached := interruptAtAnswer(t, func() {
+				if c.timeout {
+					close(fire)
+				} else {
+					sigs <- syscall.SIGINT
+				}
+			})
+			opts := waitOptions{sigs: sigs, timeout: fire}
+			if !c.owned {
+				r := newWaitRig(t, 0, returnedTurn())
+				r.submit("plan it")
+				r.waitIdle()
+				w := goWait(r.dial(nil), waitStart{}, opts)
+				waitReached(t, reached, "the lookup's answer")
+				wantInterrupted(t, c.timeout, w)
+				return
+			}
+			r := newWaitRig(t, 0)
+			g, h := r.pastReturnedPlan()
+			conn, tp := r.dialTappedFrom(&protocol.Cursor{Incarnation: h.incarnation, Seq: h.seq}, &tap{})
+			w := goWait(conn, waitStart{from: &h}, opts)
+			g.open()
+			waitReached(t, reached, "the lookup's answer")
+			if c.timeout {
+				wantInterrupted(t, true, w)
+			} else {
+				res, f := w.result(t)
+				wantReturned(t, res, f)
+				if conn.abandon {
+					t.Fatal("the signal was taken for one that came with the result: the detach was abandoned")
+				}
+			}
+			if n := len(tp.lines(protocol.MethodSessionCancel)); n != 0 {
+				t.Fatalf("the wait sent %d cancels for a turn that had ended", n)
+			}
+		})
 	}
 }
