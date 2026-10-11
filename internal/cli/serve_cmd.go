@@ -240,7 +240,7 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	// attends answers its own questions and plans, and runs no background
 	// work, so each turn is whole when it ends.
 	cmd.Flags().BoolVar(&f.unattended, "unattended", false,
-		"host a session nobody attends: questions answered with their first option, plans accepted, no background work (set by the spawner)")
+		"host a session nobody attends: questions answered with their first option, a plan returned and its turn ended, no background work (set by the spawner)")
 	_ = cmd.Flags().MarkHidden("host-id")
 	_ = cmd.Flags().MarkHidden("no-host-status")
 	_ = cmd.Flags().MarkHidden("request-id")

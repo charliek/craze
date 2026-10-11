@@ -372,12 +372,22 @@ func (r *waitRig) resultsFile(turn string) string {
 // canonical, so on macOS, whose temp directories are reached through /var →
 // /private/var, a path under /private/var — never a join on the unresolved
 // HOME, which names the same file by another path and so never equals the
-// one craze prints (C10).
+// one craze prints (C10). The resolver is the product's own, so its answer is
+// first checked against the location worked out apart from it (C11): HOME,
+// its links resolved, then .cache/craze/results — a product that moved the
+// results elsewhere would otherwise agree with itself.
 func resultsPath(t *testing.T, env rundir.Env, name string) string {
 	t.Helper()
 	dir, err := rundir.ResultsDir(env)
 	if err != nil {
 		t.Fatal(err)
+	}
+	home, err := filepath.EvalSymlinks(env.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".cache", "craze", "results"); dir != want {
+		t.Fatalf("craze's results directory is %s, want %s", dir, want)
 	}
 	return filepath.Join(dir, name)
 }

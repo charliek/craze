@@ -26,9 +26,12 @@ import (
 //
 //   - unattendedPolicy: Interactive false and craze prompt's own approval
 //     policy (headlessApproval, P2) — questions answered with their first
-//     option, plans accepted, permissions allowed under force (the default)
-//     and parked otherwise — so no background child or bash job outlives a
-//     turn, and only a permission under --no-force can leave an ask open.
+//     option, permissions allowed under force (the default) and parked
+//     otherwise — except that an ACP provider's plan is returned and its turn
+//     ended, never accepted (ApprovalReturn, X28; native still accepts, which
+//     ends its turn in plan mode) — so no background child or bash job
+//     outlives a turn, and only a permission under --no-force can leave an
+//     ask open.
 //   - unattendedRecord: its start settings on the session's index row
 //     (sessions.Row.Unattended, P10–P11), which the index keeps set-only and
 //     hands on by craze id, and which craze send passes again when it reloads

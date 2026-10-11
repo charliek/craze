@@ -240,6 +240,16 @@ func TestTheResultsPathIsTheResolvedOne(t *testing.T) {
 	if naive := filepath.Join(home, ".cache", "craze", "results", name); res.MessageFile == naive {
 		t.Fatalf("the file is named through the unresolved HOME %s: the symlink does not reproduce the macOS condition", naive)
 	}
+	// Where it is, worked out apart from craze's resolver (C11): HOME with
+	// every link resolved — the symlink here, and on macOS the temp
+	// directory's own /var — then .cache/craze/results.
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolved, ".cache", "craze", "results", name); res.MessageFile != want {
+		t.Fatalf("the cut result's file is %s, want %s", res.MessageFile, want)
+	}
 }
 
 // TestAReloadsResultIsAFileOfItsOwn (C8, 1): turn ids restart at turn-1 with

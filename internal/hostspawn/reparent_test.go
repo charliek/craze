@@ -39,11 +39,17 @@ const (
 	// created <dir>/up there, and only then reports — so a test makes the
 	// report fail with the host up and announced (C6 r1, 1).
 	holdEnv = "CRAZE_HOSTSPAWN_TEST_HOLD"
+	// markFailEnv makes the intermediate's marking of its descriptors fail
+	// (markCloseOnExec): what it does then, before any host (C11).
+	markFailEnv = "CRAZE_HOSTSPAWN_TEST_MARK_FAIL"
 	// step bounds each wait here.
 	step = 30 * time.Second
 )
 
 func init() {
+	if _, ok := os.LookupEnv(markFailEnv); ok {
+		markCloseOnExec = func(int) error { return errors.New("descriptor 9: refused by the test") }
+	}
 	if dir, ok := os.LookupEnv(holdEnv); ok {
 		ReparentStarted = func(int) {
 			up := filepath.Join(dir, "up")
@@ -261,6 +267,32 @@ func TestCloseOnExecListedMarksWhatItLists(t *testing.T) {
 		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
 			t.Fatalf("descriptor %d after the walk: flags %#x, %v; want close-on-exec", fd, flags, err)
 		}
+	}
+}
+
+// TestAnIntermediateThatCannotKeepItsDescriptorsStartsNoHost (C11): when
+// the intermediate cannot mark the descriptors past the ready pipe
+// close-on-exec (markFailEnv), it starts no host — one that would hold them
+// for its life — and exits 1 with no report: the start fails, no Child, no
+// ready pipe, the intermediate reaped, and no host ever ran (the stand-in
+// host, which says it is up in holdEnv's directory, never did).
+func TestAnIntermediateThatCannotKeepItsDescriptorsStartsNoHost(t *testing.T) {
+	dir := t.TempDir()
+	cmd := fakeHostCmd(t, markFailEnv+"=1", holdEnv+"="+dir)
+	child, r, err := StartReparented(context.Background(), cmd, HostChildEnv, "", "", ReparentSpawn{})
+	if err == nil {
+		_ = r.Close()
+		child.Terminate()
+		t.Fatal("a start whose intermediate could not keep its descriptors from the host succeeded")
+	}
+	if child != nil || r != nil || !strings.Contains(err.Error(), "it exited without a report") {
+		t.Fatalf("StartReparented: %v, %v, %v; want no host reported", child, r, err)
+	}
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 {
+		t.Fatalf("the intermediate's end: %v; want exit 1, reaped", cmd.ProcessState)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "up")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a host ran: %v", err)
 	}
 }
 

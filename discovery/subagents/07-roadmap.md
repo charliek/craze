@@ -11,8 +11,9 @@ decided once T1 is in daily use.
 
 ## T1 — Sub-agents that work
 
-**Commands.** `craze new --wait`, `craze send`, `craze wait`, `craze result`,
-`craze cancel` and `craze stop` (TQ-1), with:
+**Commands.** `craze new --wait`, `craze send`, `craze wait`, `craze cancel`
+and `craze stop` (TQ-1, TD-10; a finished turn's result comes back with
+`craze wait <id> --from <handle>`, not a `craze result` command), with:
 - `--prompt-file`;
 - a JSON result document with distinct exit codes;
 - short ids resolved as `craze attach` resolves them (G9);

@@ -371,7 +371,9 @@ func readReport(ctx context.Context, f *os.File) (g AgentGroup, why string, canc
 // and its fd 3, the ready pipe, passed through; writes the host's pid and
 // start time on the descriptor ReparentEnv named, which the host does not
 // inherit; and exits — 0 once the report is written; 1 when the host could
-// not be started, or not reported: its start time not read, or the report
+// not be started — the descriptors past the ready pipe not all kept from it
+// (closeOnExecInherited, C11) among the reasons, no host started then — or
+// not reported: its start time not read, or the report
 // not written whole — the host is ended then, its whole group, while it is
 // still this process's child (C6 r1, 1), unless the spawn is shared
 // (ReparentSharedEnv=1, C6 r2, 1): a reload's host is left serving, as its
@@ -408,8 +410,13 @@ func reparent(raw string, shared bool) int {
 	// Before anything else, everything this process holds past the ready
 	// pipe — the report pipe, and whatever its spawner was itself handed
 	// open and not close-on-exec (C10) — stays behind when the host is
-	// started (closeOnExecInherited).
-	closeOnExecInherited()
+	// started (closeOnExecInherited). A host that would get them is not
+	// started at all (C11): exit 1, as for a host that cannot be started,
+	// and no report — its spawner's failed start, with nothing to end.
+	if err := closeOnExecInherited(); err != nil {
+		fmt.Fprintln(os.Stderr, "craze: the session host cannot be started: its spawner's descriptors cannot be kept from it:", err)
+		return 1
+	}
 	// Only the ready pipe crosses to the host.
 	syscall.CloseOnExec(fd)
 	report := os.NewFile(uintptr(fd), "craze-reparent")
@@ -471,14 +478,18 @@ func reparent(raw string, shared bool) int {
 // reach the host through the intermediate's exec and be held for the host's
 // whole life — a caller's pipe never seeing its end, a Bash tool's output
 // pipe keeping that call open while the host lives (seen on a CI runner,
-// whose test process held two such pipes). Not fatal: a descriptor that
-// cannot be marked is left as it is, and said on stderr (the spawner's
-// /dev/null, but a person running craze by hand sees it).
-func closeOnExecInherited() {
-	if err := closeOnExecFrom(4); err != nil {
-		fmt.Fprintln(os.Stderr, "craze: the intermediate's descriptors:", err)
-	}
+// whose test process held two such pipes). A descriptor that cannot be
+// marked — or descriptors that cannot be listed at all — is the error, which
+// the intermediate refuses to start a host over (C11: the leak would
+// otherwise go unseen, its stderr the spawner's /dev/null); one that went
+// while it was marked (EBADF, the walk's own directory) is no error.
+func closeOnExecInherited() error {
+	return markCloseOnExec(4)
 }
+
+// markCloseOnExec is closeOnExecFrom: a test's seam, which a test's
+// intermediate sets to fail (the marking refused).
+var markCloseOnExec = closeOnExecFrom
 
 // closeOnExecListed marks close-on-exec each descriptor from first up that
 // dir — /proc/self/fd, /dev/fd — lists for this process. The directory's own
