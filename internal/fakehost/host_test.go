@@ -362,3 +362,76 @@ func TestTheAsideOptIn(t *testing.T) {
 		cancel()
 	}
 }
+
+// TestACreatedTitleIsAnnouncedOnlyByTheFirstIncarnation is review c6 4: a Host
+// created with a title says it as its first incarnation's first event — a
+// title-only delta ahead of the install — and a restart's incarnation, the
+// same durable session coming up again, keeps the title (its install and its
+// row say it) and announces no second creation seed: its first event is its
+// install, as a load's would be. The negative control is the Host created
+// with no title, whose first event is its install in both incarnations.
+func TestACreatedTitleIsAnnouncedOnlyByTheFirstIncarnation(t *testing.T) {
+	// firstEvents is the current incarnation's events up to and including its
+	// install (the delta carrying the commands section), as their titles: a
+	// title-only delta as "seed <title>", the install as "install <title>".
+	firstEvents := func(t *testing.T, h *Host) []string {
+		t.Helper()
+		eng := h.currentEngine()
+		sub, err := eng.Subscribe(agent.SubscribeOptions{After: &agent.Cursor{Incarnation: eng.State().Incarnation}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Close()
+		var out []string
+		for {
+			select {
+			case rec, ok := <-sub.Records():
+				if !ok {
+					t.Fatalf("the subscription ended: %v (read %q)", sub.Err(), out)
+				}
+				ev, err := rec.Event()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ev.Type != agent.EventMeta || ev.State == nil || ev.State.Title == nil {
+					continue
+				}
+				if ev.State.Commands != nil {
+					return append(out, "install "+*ev.State.Title)
+				}
+				out = append(out, "seed "+*ev.State.Title)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no install within 5s (read %q)", out)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		title          string
+		first, restart []string
+	}{
+		{"the created title", []string{"seed the created title", "install the created title"}, []string{"install the created title"}},
+		{"", []string{"install "}, []string{"install "}},
+	} {
+		h, err := New(Options{Title: tc.title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := firstEvents(t, h); !slices.Equal(got, tc.first) {
+			t.Errorf("title %q, the first incarnation: %q, want %q", tc.title, got, tc.first)
+		}
+		if err := h.Restart(); err != nil {
+			t.Fatal(err)
+		}
+		if got := firstEvents(t, h); !slices.Equal(got, tc.restart) {
+			t.Errorf("title %q, after a restart: %q, want %q", tc.title, got, tc.restart)
+		}
+		if got := h.currentEngine().State().Title; got != tc.title {
+			t.Errorf("title %q, after a restart the session is named %q", tc.title, got)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+		cancel()
+	}
+}

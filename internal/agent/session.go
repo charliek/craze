@@ -978,7 +978,9 @@ type Options struct {
 	// session/new install keeps a pinned title where it would otherwise
 	// install the reply's none, and the install delta carries it. Pinned,
 	// neither an agent's session_info_update nor native's first-prompt title
-	// replaces it, exactly as after a /rename.
+	// replaces it, exactly as after a /rename. Its first event says it too
+	// (SeedAnnouncer: engine.New announces it), so a client's fold and every
+	// attach snapshot hold it from the session's first event.
 	Title       string
 	TitlePinned bool
 	// NoPrimary builds the session's event log with no primary send
@@ -1222,6 +1224,28 @@ type SetOutcome struct {
 // session without it is read as time.Now.
 type Clocked interface {
 	Now() time.Time
+}
+
+// SeedAnnouncer is a session built with state its stream has to say before
+// anything else happens (plan 043 D8, branch review B9): a new session created
+// with a title (Options.Title, seedNewTitle), whose snapshot — so every state
+// and roster row — holds the title from its construction, while a client
+// folding the stream, and the engine's model every attach snapshot is cut
+// from, learn the session only from its events. Like Clocked it is optional
+// and found by a type assertion.
+//
+// AnnounceSeed enqueues that state as ONE state delta — a title-only delta,
+// craze's own shape (Event.Text empty: no `title` line, never an agent title
+// in the index), no cause — and reports whether it enqueued one. It is the
+// engine's call (engine.New), once the log has its observer — an event
+// committed before that would reach no model — and before the session's
+// Start, so the delta is the stream's first event and is there whatever the
+// start comes to. It says it once: a second call, a session with no created
+// title, and a load (whose title its replay seeds) enqueue nothing, so an
+// untitled session's stream is exactly what it was. The install delta still
+// restates the title, as every install restates every section.
+type SeedAnnouncer interface {
+	AnnounceSeed() bool
 }
 
 // SubagentCanceller is a session that can stop one of its sub-agents — the

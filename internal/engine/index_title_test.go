@@ -470,3 +470,95 @@ func TestACreatedTitleFailureIsAnIndexErrDelta(t *testing.T) {
 		t.Fatalf("the delta carries %q (cause %q)", last.State.IndexErr, last.Cause)
 	}
 }
+
+// TestACreatedTitleIsTheStreamsFirstEvent is branch review B9, the engine's
+// half: a session built with a title it owes its stream (agent.SeedAnnouncer)
+// is made to say it by New, once the observer is on the log and before
+// Start, and New waits for it — so the model, and every attach snapshot cut
+// from it, hold the title the moment New returns, with nothing started; a
+// start that then fails before any install leaves it there. The negative
+// control is the session with nothing to say: no event at all (the snapshot
+// at seq 0), as before.
+func TestACreatedTitleIsTheStreamsFirstEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name, title string
+		seq         uint64
+	}{{"titled", "the created title", 1}, {"untitled", "", 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFake(t, agent.EventLogOptions{NoPrimary: true})
+			s.seedTitle, s.snap.Title = tc.title, tc.title
+			s.startErr = errors.New("the agent exited before session/new")
+			e, err := newEngine(s, Options{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			snap := func(what string) {
+				t.Helper()
+				a, err := e.Attach(context.Background(), AttachOptions{})
+				if err != nil {
+					t.Fatalf("attach %s: %v", what, err)
+				}
+				a.Sub.Close()
+				if a.Snapshot.Settings.Title != tc.title || a.Snapshot.Seq != tc.seq {
+					t.Fatalf("the snapshot %s says %q at seq %d, want %q at seq %d",
+						what, a.Snapshot.Settings.Title, a.Snapshot.Seq, tc.title, tc.seq)
+				}
+			}
+			snap("before the start")
+			if e.Start(context.Background()) == nil {
+				t.Fatal("the failing start started")
+			}
+			snap("after the failed start")
+			if got := e.State().Title; got != tc.title {
+				t.Fatalf("State's title after the failed start is %q", got)
+			}
+			if s.AnnounceSeed() {
+				t.Fatal("the seed was said twice")
+			}
+		})
+	}
+}
+
+// TestASessionClosedUnderTheConstructionFailsNew is review c6 1: a session
+// closed after the engine's observer is on its log and before its created
+// title is announced refuses the event (the log is closing), and New fails —
+// the barrier's error, agent.ErrLogClosing — rather than hand back an engine
+// whose model never got the title its state shows. The negative control is
+// the same construction with the session left open: New succeeds and the
+// model holds the title.
+func TestASessionClosedUnderTheConstructionFailsNew(t *testing.T) {
+	for _, closed := range []bool{true, false} {
+		name := "left open"
+		if closed {
+			name = "closed under the construction"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newFake(t, agent.EventLogOptions{NoPrimary: true})
+			s.seedTitle, s.snap.Title = "the created title", "the created title"
+			e, err := newEngine(s, Options{}, &hooks{beforeAnnounce: func() {
+				if closed {
+					_ = s.Close()
+				}
+			}})
+			if closed {
+				if err == nil || e != nil || !errors.Is(err, agent.ErrLogClosing) {
+					t.Fatalf("New over a session closed under it: %v, %v; want ErrLogClosing and no engine", e, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			a, err := e.Attach(context.Background(), AttachOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Sub.Close()
+			if a.Snapshot.Settings.Title != "the created title" {
+				t.Fatalf("the model says %q", a.Snapshot.Settings.Title)
+			}
+		})
+	}
+}

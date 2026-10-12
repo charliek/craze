@@ -141,11 +141,14 @@ type Options struct {
 	// RequestID and RequestHash are written into a registered Host's entry
 	// (rundir.Entry): the hub's session.create that spawned it. "" for none.
 	RequestID, RequestHash string
-	// Title is the title every incarnation's session is created with (plan
-	// 043 D8; tui.Stub.SeedTitle): named and pinned from before its start, so
-	// its sessions.list row and its install carry it — a spawned host's
-	// --title (RunSpawned), the hub's session.create's. "" names none, the
-	// wire of every fixture from before it.
+	// Title is the title the session is created with (plan 043 D8): the
+	// first incarnation's session is named and pinned from before its start
+	// and says it as its first event (tui.Stub.SeedTitle, AnnounceSeed), so
+	// its sessions.list row, its stream and its install carry it — a spawned
+	// host's --title (RunSpawned), the hub's session.create's. A restart's
+	// incarnation keeps the title, said by its install alone
+	// (tui.Stub.KeepTitle): it is the same session coming up again, not a new
+	// creation. "" names none, the wire of every fixture from before it.
 	Title string
 }
 
@@ -354,8 +357,20 @@ func (h *Host) newIncarnation() error {
 	if len(h.opts.Plugins) > 0 {
 		stub.SeedPlugins(h.opts.Plugins)
 	}
+	h.mu.Lock()
+	first := h.eng == nil
+	h.mu.Unlock()
 	if h.opts.Title != "" {
-		stub.SeedTitle(h.opts.Title)
+		// The created title is a creation's (review c6 4): only the first
+		// incarnation is the session created with it, and announces it as its
+		// first event (SeedTitle). A later one is the same durable session
+		// coming up again, as a load does: it keeps the title and its pin,
+		// said by its install alone, never a second creation seed.
+		if first {
+			stub.SeedTitle(h.opts.Title)
+		} else {
+			stub.KeepTitle(h.opts.Title)
+		}
 	}
 	// Before Start, which reads it for the install (Options.Slash).
 	stub.PublishSlash = h.opts.Slash
@@ -374,9 +389,6 @@ func (h *Host) newIncarnation() error {
 	if f := h.hooks.session; f != nil {
 		sess = f(stub)
 	}
-	h.mu.Lock()
-	first := h.eng == nil
-	h.mu.Unlock()
 	if first && h.opts.Start != nil {
 		sess = gatedStart{Stub: stub, gate: h.opts.Start}
 	}

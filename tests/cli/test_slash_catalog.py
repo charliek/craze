@@ -228,12 +228,14 @@ def folded_slash(client: Client, until: str, source: str | None = None) -> list[
 def settle(client: Client, quiet: float = 0.5, limit: float = 10.0) -> None:
     """Return once the stream has been quiet for `quiet` seconds.
 
-    This is isolation margin, not a correctness sleep: a skill scan takes about
-    0.1 ms, so half a second is far more than any scan a previous step asked
-    for needs to land. A case calls it before it creates a file, so that a scan
-    still pending from an earlier trigger (the install's, an attach's, a
-    commands update's) cannot find the file and stand in for the trigger under
-    test. It is bounded by `limit`, and reads through the bridge's own reader.
+    This is isolation margin, not a correctness sleep, and not a guarantee: a
+    scan takes about 0.1 ms, so half a second is far more than one needs, but
+    an unchanged scan publishes nothing, so quiet cannot prove none is still
+    pending. A case calls it before it creates a file, which only reduces the
+    chance that a scan an earlier trigger asked for (the install's, an attach's,
+    a commands update's) finds the file and stands in for the trigger under
+    test. The proof that each trigger is necessary is the product negative
+    control, not this. It is bounded by `limit`, and reads through the bridge's own reader.
     """
     deadline = time.monotonic() + limit
     seen = len(client.notes)
@@ -481,9 +483,15 @@ def test_an_idle_skill_arrives_after_an_attach_and_after_a_turn(
     advertises no skills of its own, and does not watch the disk as grok does).
     A SKILL.md created while the session sits idle (a) shows up once another
     client attaches -- an attach scans the disk: the observer attached all along
-    gets a slash-only delta, and the new client's snapshot with that delta
-    holds the row -- and (b) a second one, created later, shows up after a turn
-    of the observer's ends. Both are bounded polls of the stream, never sleeps."""
+    gets a delta listing it, and the new client holds it, whether in its
+    snapshot or in a later delta -- and (b) a
+    second one, created later, shows up after a turn of the observer's ends. Both
+    are bounded, state-based waits on the catalog a client holds (never a delta
+    after a mark, never a sleep), so no schedule of a delayed scan fails it while
+    the product is right. That each trigger is necessary rests on the product
+    negative controls under normal scheduling: with the attach's rescan removed
+    (engine/attach.go) or the turn-end scan request removed (agent/live.go) the
+    case times out waiting for its row."""
     env = hub_env(tmp_path, craze_bin, craze_fake_host_bin, fake_agent_bin)
     work = tmp_path / "work"
     work.mkdir()
@@ -499,34 +507,20 @@ def test_an_idle_skill_arrives_after_an_attach_and_after_a_turn(
     # update asked for land, so none is pending to find the file.
     settle(observer)
     write_skill(roots, "alpha", "The first idle skill")
-    mark = observer.mark()
     second = Client(recipe_procs, env, row)
     second.attach()
-    delta = observer.wait_meta(has_row("alpha", "skill"), "a slash delta listing /alpha", since=mark)
-    # It came through the attach's own scan: after the snapshot the attach took.
-    assert delta["seq"] > second.attached["snapshot"]["seq"], (delta["seq"], second.attached["snapshot"]["seq"])
-    assert sorted(delta["state"]) == ["slash"], sorted(delta["state"])
-    alpha = next(r for r in delta["state"]["slash"]["items"] if r["name"] == "alpha")
+    # State-based waits: a scan still pending from an earlier trigger may find
+    # the file first, so no wait here is relative to a mark. The observer, which
+    # was attached all along, and the second client (snapshot, or a later
+    # delta) both end up holding the row.
+    alpha = next(r for r in folded_slash(observer, "alpha", "skill") if r["name"] == "alpha")
     assert alpha == _skill_row("alpha", "The first idle skill"), alpha
-    # The second client's catalog -- snapshot, then its own deltas -- has it.
     assert any(r["name"] == "alpha" for r in folded_slash(second, "alpha", "skill"))
 
-    # (b) a turn ends. The attach's scan is done once the stream is quiet.
+    # (b) a turn ends.
     settle(observer)
     write_skill(roots, "beta", "The second idle skill")
-    # Nothing has asked for a scan since the file appeared.
-    assert not [m for m in observer.metas() if has_row("beta")(m["state"])]
-    mark = observer.mark()
     reply = observer.request("session.prompt", {"text": "hello", "mode": "queue"})
     assert reply.get("turn") or reply.get("queued"), reply
-    delta = observer.wait_meta(has_row("beta", "skill"), "a slash delta listing /beta", since=mark)
-    assert sorted(delta["state"]) == ["slash"], sorted(delta["state"])
-    # The turn's end is what asked for it: the `done` event precedes the delta.
-    done = observer.wait_note(
-        lambda n: n.get("method") == "event" and n["params"]["event"].get("type") == "done",
-        "the turn's done event",
-        since=mark,
-    )
-    assert done["params"]["seq"] < delta["seq"], (done["params"]["seq"], delta["seq"])
-    items = delta["state"]["slash"]["items"]
+    items = folded_slash(observer, "beta", "skill")
     assert [r["name"] for r in items if r["source"] == "skill"] == ["alpha", "beta"], names(items)

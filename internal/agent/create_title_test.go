@@ -215,3 +215,58 @@ func TestALoadIsNotSeededAsANewSession(t *testing.T) {
 		t.Fatal("a live load is pinned before its Start")
 	}
 }
+
+// TestAnnounceSeedSaysTheCreatedTitleOnce is the session's half of branch
+// review B9 (SeedAnnouncer): a new session created with a title enqueues it
+// as ONE title-only delta when announced — craze's own shape: no Event.Text,
+// no cause, no other section — and a second announce says nothing; live and
+// native alike. The negative controls: a session created with no title, and a
+// load whose row has one (its replay seeds it), announce nothing and enqueue
+// no event at all.
+func TestAnnounceSeedSaysTheCreatedTitleOnce(t *testing.T) {
+	type announcing interface {
+		Session
+		LogOwner
+		SeedAnnouncer
+	}
+	build := func(t *testing.T, provider string, opts Options) announcing {
+		t.Helper()
+		if provider == "native" {
+			return newNativeFixture(t).session(opts)
+		}
+		opts.Workspace, opts.Stderr = t.TempDir(), io.Discard
+		return newTestSession(t, opts)
+	}
+	for _, provider := range []string{"live", "native"} {
+		t.Run(provider, func(t *testing.T) {
+			s := build(t, provider, Options{Title: createdTitle, TitlePinned: true})
+			if !s.AnnounceSeed() {
+				t.Fatal("a titled session announced nothing")
+			}
+			if s.AnnounceSeed() {
+				t.Fatal("a titled session announced twice")
+			}
+			evs := deltaSettled(t, s)
+			if len(evs) != 1 {
+				t.Fatalf("the announce enqueued %d events:\n%s", len(evs), formatEvents(evs))
+			}
+			ev, want := evs[0], createdTitle
+			if ev.Type != EventMeta || ev.Text != "" || ev.Cause != "" || ev.State == nil || ev.State.Title == nil ||
+				*ev.State.Title != want || (*ev.State != StateDelta{Title: ev.State.Title}) {
+				t.Fatalf("the announce is %+v (state %+v), want a title-only delta of %q", ev, ev.State, want)
+			}
+			for name, opts := range map[string]Options{
+				"untitled": {},
+				"a load":   {LoadSessionID: "s-1", Title: "a row's title", TitlePinned: true},
+			} {
+				quiet := build(t, provider, opts)
+				if quiet.AnnounceSeed() {
+					t.Fatalf("%s announced a seed", name)
+				}
+				if evs := deltaSettled(t, quiet); len(evs) != 0 {
+					t.Fatalf("%s enqueued %d events:\n%s", name, len(evs), formatEvents(evs))
+				}
+			}
+		})
+	}
+}

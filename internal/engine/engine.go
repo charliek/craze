@@ -445,6 +445,10 @@ type hooks struct {
 	// held by another, just before it waits for it.
 	titleSet       func(title string)
 	titleTurnTaken func()
+	// beforeAnnounce runs in newEngine once the observer is installed, just
+	// before the session is asked to announce its seed (announceSeed): where a
+	// test closes the session under the construction (review c6 1).
+	beforeAnnounce func()
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -553,11 +557,52 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		"crazeSessionId": craze,
 		"loaded":         opts.CrazeSessionID != "",
 	}})
+	if err := e.announceSeed(); err != nil {
+		return nil, err
+	}
 	e.wg.Add(2)
 	go e.drive()
 	go e.serveSets()
 	go e.idx.serve()
 	return e, nil
+}
+
+// announceSeed has a session built with state its stream must say first — a
+// new session's created title (plan 043 D8, branch review B9) — say it now:
+// the observer is on the log, so the model folds it, and Start has not run,
+// so it is the stream's first event and is there whatever the start comes to.
+// The engine waits for it to be committed, so the model every attach snapshot
+// is cut from — an attach with when: "now" while the start is still running
+// included — holds it before New returns, and so before a host publishes this
+// engine (craze serve's rh.publish). A session with nothing to say says
+// nothing and nothing is waited for: an untitled session's stream is exactly
+// what it was. The wait is one event into a log no turn has written to yet,
+// so it cannot be held by a primary's reader (Flush's caveat); nil done, as
+// for every flush of the engine's own (Flush).
+//
+// It runs before newEngine starts a goroutine, so a barrier that fails — the
+// session closed under the construction, its log refusing the event (Enqueue
+// drops it) and the barrier (ErrLogClosing; review c6 1) — fails New with
+// nothing to release: no driver, no settings worker and no index worker is
+// running yet, and the receipts table, the index writer and the model hold
+// no goroutine of their own. An engine that said it was built over a session
+// whose first event never landed would serve a model without the title its
+// state and roster rows show.
+func (e *Engine) announceSeed() error {
+	a, ok := e.sess.(agent.SeedAnnouncer)
+	if !ok {
+		return nil
+	}
+	if h := e.hooks; h != nil && h.beforeAnnounce != nil {
+		h.beforeAnnounce()
+	}
+	if !a.AnnounceSeed() {
+		return nil
+	}
+	if err := e.log.Flush(context.Background(), nil); err != nil {
+		return fmt.Errorf("engine: the session's first event (its created title) was not committed: %w", err)
+	}
+	return nil
 }
 
 // Session is the session the engine wraps: the raw provider seam, held by a

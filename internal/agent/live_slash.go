@@ -21,8 +21,9 @@ func (s *session) PublishesSlashCatalog() bool { return true }
 
 // RescanSkills is SkillRescanner's: a scan asked for and never waited on. The
 // engine calls it for every attach (engine.Attach), so a client opening an
-// idle session learns of a skill created since the last turn ended — in a
-// delta behind the snapshot it was handed, once the walk is done.
+// idle session learns of a skill created since the last turn ended — in the
+// snapshot it is handed, when the walk is done before that is cut, or in a
+// delta behind it (branch review B6: the order is not promised).
 func (s *session) RescanSkills() { s.scanner.request() }
 
 // walkSkills is one scan's work: the provider's disk skills under cwd and

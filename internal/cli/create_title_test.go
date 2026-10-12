@@ -5,13 +5,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/hub"
+	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/version"
@@ -318,5 +323,156 @@ func TestNewTitleAgainstAnOlderHub(t *testing.T) {
 	_, stderr, code = executeErr([]string{"new", "-C", t.TempDir()})
 	if code != 1 || strings.Contains(stderr, "title") || !strings.Contains(stderr, "cannot be started") {
 		t.Fatalf("an untitled craze new on the older hub: exit %d, stderr %q", code, stderr)
+	}
+}
+
+// gatedAgent is an ACP agent that never answers: it waits for one byte on the
+// FIFO gate — so craze's start sits in initialize for as long as the test
+// wants — and then exits 1, failing that start before session/new, and so
+// before its install.
+const gatedAgent = "#!/bin/sh\nhead -c 1 \"$CRAZE_TEST_START_GATE\" >/dev/null\nexit 1\n"
+
+// TestACreatedTitleIsInAnEarlyAttachSnapshot is branch review B9, on a real
+// craze serve: while a titled session's start is held before its install — an
+// ACP agent that has not answered initialize, a native session whose model
+// table is a FIFO nothing has written — an attach with when: "now" is handed a
+// snapshot that already carries the title, because the session's first event
+// said it (agent.SeedAnnouncer, engine.New). The start then fails, before any
+// install, and the title stays the session's: its row still says it. The
+// negative control is the untitled session over the same held start: its
+// snapshot has no title and no event at all (Seq 0), so a session created
+// without a title publishes nothing it did not before.
+func TestACreatedTitleIsInAnEarlyAttachSnapshot(t *testing.T) {
+	for _, provider := range []string{"cursor", "native"} {
+		for _, title := range []string{"Fix the build", ""} {
+			name := provider + "/untitled"
+			if title != "" {
+				name = provider + "/titled"
+			}
+			t.Run(name, func(t *testing.T) {
+				env, ws := serveHome(t)
+				gate := filepath.Join(t.TempDir(), "gate")
+				argv := []string{"--workspace", ws, "--provider", provider}
+				if provider == "native" {
+					// native's start reads the model table first: a FIFO
+					// there holds it until the test writes to it.
+					dir := filepath.Join(os.Getenv("CRAZE_HOME"), "native")
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					gate = filepath.Join(dir, "models.toml")
+				} else {
+					agentPath := filepath.Join(t.TempDir(), "gated-agent")
+					if err := os.WriteFile(agentPath, []byte(gatedAgent), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("CRAZE_TEST_START_GATE", gate)
+					argv = append(argv, "--agent-bin", agentPath)
+				}
+				if err := syscall.Mkfifo(gate, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if title != "" {
+					argv = append(argv, "--title", title)
+				}
+				// The gate is released once, by the test or by its cleanup
+				// (review c6 3): a failure before the test releases it would
+				// leave native's start parked in its read of the FIFO, which
+				// no SIGTERM ends. Registered before the host starts, and again
+				// once it has — cleanups run last first, so that one releases
+				// the start before the host's own cleanup stops it, and the
+				// stop does not wait out its start.
+				var released sync.Once
+				release := func(within time.Duration) error {
+					err := errors.New("released already")
+					released.Do(func() { err = releaseGate(gate, within) })
+					return err
+				}
+				t.Cleanup(func() { _ = release(gateCleanupWait) })
+				r := runServeIn(t, hostEnv{}, argv...)
+				t.Cleanup(func() { _ = release(gateCleanupWait) })
+				e := r.waitServing(t, env, false)
+				s, err := remote.DialSession(stepCtx(t), e.Socket, remote.SessionOptions{
+					Client:    remote.Options{PeerCheck: rundir.DialCheck(os.Geteuid())},
+					SessionID: e.CrazeSessionID, Provider: e.Provider, Workspace: e.Workspace,
+					When: protocol.WhenNow,
+				})
+				if err != nil {
+					t.Fatalf("dial: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				if err := s.Attach(stepCtx(t)); err != nil {
+					t.Fatalf("attach when now: %v", err)
+				}
+				it, err := s.Read(stepCtx(t))
+				if err != nil || it.Kind != backend.ItemRestore || it.Snapshot == nil {
+					t.Fatalf("the first item: %+v, %v; want a restore", it, err)
+				}
+				snap := it.Snapshot
+				wantSeq := uint64(0)
+				if title != "" {
+					wantSeq = 1
+				}
+				if snap.Settings.Title != title || snap.Seq != wantSeq {
+					t.Fatalf("the early snapshot's title is %q at seq %d, want %q at seq %d", snap.Settings.Title, snap.Seq, title, wantSeq)
+				}
+				if row := listRow(t, e); row.Title != title {
+					t.Fatalf("the row's title is %q, want %q", row.Title, title)
+				}
+
+				// The start fails, before its install: the gate opens on
+				// something no start can use.
+				if err := release(serveStep); err != nil {
+					t.Fatalf("release the start: %v", err)
+				}
+				for {
+					it, err := s.Read(stepCtx(t))
+					if err != nil {
+						t.Fatalf("waiting for the failed start: %v", err)
+					}
+					if it.Kind == backend.ItemReady {
+						if it.Err == nil {
+							t.Fatalf("the held start started: %+v", it)
+						}
+						break
+					}
+				}
+				if row := listRow(t, e); row.Title != title {
+					t.Fatalf("after the failed start the row's title is %q, want %q", row.Title, title)
+				}
+				r.sigs <- syscall.SIGTERM
+				if err := r.result(t, serveStep); err != nil {
+					t.Fatalf("craze serve after SIGTERM: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// gateCleanupWait bounds a cleanup's release of a start gate (releaseGate):
+// by then the start may never have reached the gate, or its reader may be
+// gone with the agent the host's stop ended.
+const gateCleanupWait = 2 * time.Second
+
+// releaseGate writes to the FIFO gate a held start reads — something no start
+// can use, so it fails before its install — and closes it, once a reader has
+// the FIFO open, waiting at most within for one. The open is non-blocking, so
+// it can never hang: with no reader it fails ENXIO, on Linux and macOS alike,
+// and is tried again every few milliseconds until within has passed.
+func releaseGate(gate string, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for {
+		w, err := os.OpenFile(gate, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			_, werr := w.WriteString("x = [\n")
+			return errors.Join(werr, w.Close())
+		}
+		if !errors.Is(err, syscall.ENXIO) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no start opened the gate %s within %v", gate, within)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

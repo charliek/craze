@@ -176,6 +176,9 @@ type nativeSession struct {
 	plugins     []PluginEntry
 	snap        Snapshot
 	titlePinned bool
+	// seedOwed says the session was created with a title its stream has not
+	// said yet (AnnounceSeed, branch review B9), as on the live session.
+	seedOwed bool
 	// loading is a load's (Options.LoadSessionID, plan 028 §3.4): true from
 	// the section that marks the session started — before the title is
 	// seeded and the bracket opens — until the replay's end bracket has gone
@@ -531,8 +534,10 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// A new session created with a title (plan 043 D8, P8), named and pinned
 	// from here, as the live session's is (live.go's seedNewTitle): the first
 	// snapshot has it, the first prompt does not rename it (prompt's rule:
-	// an untitled, unpinned session only) and the install delta carries it.
-	seedNewTitle(&s.snap, &s.titlePinned, opts)
+	// an untitled, unpinned session only), its first event says it once the
+	// engine's observer is on the log (AnnounceSeed, branch review B9), and
+	// the install delta restates it.
+	s.seedOwed = seedNewTitle(&s.snap, &s.titlePinned, opts)
 	// Beside the log, as on every session. It exists so that a client above the
 	// seam holds one surface whatever the provider is, and it is what the
 	// harness's two blocking tools open against, through the asker this session
@@ -540,6 +545,21 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// when H3 gives it one, through this adapter and nowhere else.
 	s.asks = NewAskRegistry(log, s.Now)
 	return s
+}
+
+// AnnounceSeed is the session's SeedAnnouncer (branch review B9), the live
+// session's exactly (live.go's AnnounceSeed): the created title as one
+// title-only delta, once, and nothing for a session with none.
+func (s *nativeSession) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+	return true
 }
 
 func (s *nativeSession) Events() <-chan Event { return s.log.Primary() }

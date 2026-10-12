@@ -191,6 +191,9 @@ type session struct {
 	// the pin survives any number of --continues, and on a new session
 	// created with a title (newSession, plan 043 P8). Guarded by s.mu.
 	titlePinned bool
+	// seedOwed says the session was created with a title its stream has not
+	// said yet (AnnounceSeed, branch review B9). Guarded by s.mu.
+	seedOwed bool
 	// replayUser coalesces a replayed main-session user_message_chunk. The
 	// agents split a prompt over several chunks and craze has to draw exactly
 	// one user block, so the chunks accumulate here and go out as one
@@ -406,10 +409,11 @@ func newSession(opts Options) *session {
 	// here, and pinned: before Start, so before the engine over this session
 	// is published — the first state and roster row a host serves have it —
 	// and the session/new install keeps it (the install's title rule below).
-	// No delta: none can be committed ahead of the engine's observer, and the
-	// install delta, the first one any client folds, carries it. A load seeds
-	// its row's title in loadSession instead, ahead of its replay bracket.
-	seedNewTitle(&s.snap, &s.titlePinned, opts)
+	// No delta here: none can be committed ahead of the engine's observer, so
+	// the stream's says it once the engine has one (AnnounceSeed, branch
+	// review B9), and the install delta restates it. A load seeds its row's
+	// title in loadSession instead, ahead of its replay bracket.
+	s.seedOwed = seedNewTitle(&s.snap, &s.titlePinned, opts)
 	s.scanner = newSkillScanner(s.scanSkills, s.applySkills)
 	return s
 }
@@ -417,17 +421,39 @@ func newSession(opts Options) *session {
 // seedNewTitle is a NEW session's title seed (plan 043 P8; Options.Title):
 // its title as the ingestion scrub leaves it — the one SetTitle stores — and
 // its pin, when it was built with one; nothing for a load (LoadSessionID),
-// whose seed is its replay's, nor for a session given no title. Both
-// sessions, live and native, call it from their constructors, holding no
-// lock: nothing can reach the session yet.
-func seedNewTitle(snap *Snapshot, pinned *bool, opts Options) {
+// whose seed is its replay's, nor for a session given no title. It reports
+// whether it seeded one, which the session's first event then owes
+// (AnnounceSeed). Both sessions, live and native, call it from their
+// constructors, holding no lock: nothing can reach the session yet.
+func seedNewTitle(snap *Snapshot, pinned *bool, opts Options) bool {
 	if opts.LoadSessionID != "" {
-		return
+		return false
 	}
-	if title := sanitizeText(opts.Title); title != "" {
-		snap.Title = title
-		*pinned = opts.TitlePinned
+	title := sanitizeText(opts.Title)
+	if title == "" {
+		return false
 	}
+	snap.Title = title
+	*pinned = opts.TitlePinned
+	return true
+}
+
+// AnnounceSeed is the session's SeedAnnouncer (branch review B9): the title it
+// was created with, as one title-only delta — enqueued with the snapshot's
+// title read in the same section, craze's own shape, no cause — once, and
+// nothing for a session with none. The engine calls it once its observer is
+// on the log, before Start; enqueued and not flushed here, as every delta
+// this session makes before its install is (the engine waits for it).
+func (s *session) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+	return true
 }
 
 // provider is the agent behind this session; nil Options.Provider is cursor.
@@ -481,10 +507,12 @@ func (s *session) Now() time.Time { return time.Now() }
 func (s *session) Asks() *AskRegistry { return s.asks }
 
 var (
-	_ EventSource = (*session)(nil)
-	_ LogOwner    = (*session)(nil)
-	_ Clocked     = (*session)(nil)
-	_ AskSource   = (*session)(nil)
+	_ EventSource   = (*session)(nil)
+	_ LogOwner      = (*session)(nil)
+	_ Clocked       = (*session)(nil)
+	_ AskSource     = (*session)(nil)
+	_ SeedAnnouncer = (*session)(nil)
+	_ SeedAnnouncer = (*nativeSession)(nil)
 )
 
 // Start spawns the agent and sets the session up. Its body is start; what is

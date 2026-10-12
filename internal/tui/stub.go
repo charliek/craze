@@ -140,6 +140,9 @@ type Stub struct {
 	// titlePinned is /rename's pin, as on the live session: once set, a
 	// title the agent produces no longer replaces the user's.
 	titlePinned bool
+	// seedOwed says SeedTitle named the Stub and its stream has not said so
+	// (AnnounceSeed), as on the live session.
+	seedOwed bool
 
 	// inPrompt, doneEmitted and cancelling mirror the live session's turn
 	// state, which is what Interject is decided from.
@@ -440,15 +443,46 @@ func (s *Stub) SetTitle(cause, title string) error {
 // SeedTitle is a session created with a title (plan 043 D8; agent.Options'
 // Title and TitlePinned on a new session): Snapshot.Title, pinned as SetTitle
 // pins it, from before Start — so the first state and roster row an engine
-// over it serves carry it — and said by no delta of its own: an
-// InstallOnStart Stub's install carries it, as the live session's install
-// does. Test set-up, like AgentTitle: it publishes nothing. The fake host's
+// over it serves carry it — and owed to the stream, which says it when the
+// engine announces it (AnnounceSeed), as the live session's does; an
+// InstallOnStart Stub's install restates it. Set before the engine is built,
+// like InstallOnStart: it publishes nothing itself. The fake host's
 // Options.Title is its user (a hub-created host's --title).
 func (s *Stub) SeedTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.Title = title
 	s.titlePinned = true
+	s.seedOwed = title != ""
+}
+
+// KeepTitle is a later incarnation of a session SeedTitle named (review c6 4):
+// the same title and pin, said by the Stub's install (InstallOnStart) as a
+// load's install restates its row's title — and owed by no announce, since
+// this is the session coming up again and not its creation. Test set-up, like
+// SeedTitle: it publishes nothing.
+func (s *Stub) KeepTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Title = title
+	s.titlePinned = true
+	s.seedOwed = false
+}
+
+// AnnounceSeed is the Stub's agent.SeedAnnouncer (branch review B9), the live
+// session's exactly: the title SeedTitle gave it as one title-only delta,
+// once, and nothing for a Stub SeedTitle never named — every Stub but a
+// titled fake host's, so no golden moves.
+func (s *Stub) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", &agent.StateDelta{Title: &title})
+	return true
 }
 
 // AgentTitle is a session_info_update: the agent's own title, which a pin from

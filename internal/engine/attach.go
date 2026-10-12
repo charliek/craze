@@ -137,9 +137,11 @@ func (e *Engine) Attach(ctx context.Context, o AttachOptions) (*Attachment, erro
 	// 043 P5): a client opening an idle session would otherwise see the skills
 	// of the last turn's end, and none created since. Asked for, never waited
 	// on — RescanSkills takes one leaf mutex and returns, and what the scan
-	// finds follows this attach's snapshot as a delta on its subscription — and
-	// before the snapshot, with nothing of the engine's held. A session with no
-	// scan of its own (native, the Stub) is not one.
+	// finds reaches this client in its snapshot or as a delta after it on its
+	// subscription: the scan runs on a goroutine of its own and may finish
+	// before the cut below (branch review B6) — and before the snapshot, with
+	// nothing of the engine's held. A session with no scan of its own (native,
+	// the Stub) is not one.
 	if r, ok := e.sess.(agent.SkillRescanner); ok {
 		r.RescanSkills()
 	}

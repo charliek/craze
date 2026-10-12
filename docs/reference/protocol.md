@@ -779,11 +779,15 @@ trimmed at both ends. ZWJ and ZWNJ (U+200D, U+200C) and the directional marks
 direction, not formatting. A `title` that comes to nothing — `""`, blank, or
 nothing but what is dropped (`"\u200b"`) — is `bad_request`; a long one is
 cut, not refused. The host is handed the normalized title and holds it before
-its session is published: the session's first `sessions.list` row, the
-create's `session` row and its first `session.state` all carry it, and the
-session's install delta carries it too, as does every attach snapshot (the
-install is not necessarily the stream's first delta: an agent's commands update
-can come before it). A roster subscription opened before the create may first receive a
+its session is published, and the session's **first event** says it: a
+title-only state delta (no `text`: it is craze's own title, not the agent's),
+committed before the host serves the session and before its start runs. So
+the session's first `sessions.list` row, the create's `session` row, its
+first `session.state` and **every attach snapshot** carry it — an attach with
+`when: "now"` while the start is still running included, and the stream of a
+session whose start then fails before its install. The session's install
+delta restates it, as every install restates every section. A session created
+without a title has no such event: its stream is what it always was. A roster subscription opened before the create may first receive a
 `connecting` upsert with no `row` (the roster coalesces, so it is not
 guaranteed); every row that describes the session, from
 its first `reachable` one, carries the title. Once the session has its id the host writes it to the session index as
@@ -1721,9 +1725,11 @@ folding the whole stream gives.
   provider's skills on disk at the install, after every turn of craze's ends
   (done, cancelled or failed), at each `available_commands_update`, and at
   each `session.attach`: a skill created while the session sat idle reaches
-  a client as a slash-only delta after the next attach's snapshot, or after
-  the next turn. A native session's skills are plugin rows, found once at its
-  start.
+  a client at the next attach — **in that attach's snapshot or a slash-only
+  delta after it**: the look starts as the attach does, and can finish before
+  the snapshot is cut, so a client must not wait for a delta its snapshot
+  already made unnecessary — or after the next turn. A native session's
+  skills are plugin rows, found once at its start.
 - **The snapshot.** `settings.slash` is the last section a delta carried,
   absent when there is none, and `settings.truncated.slash` says the snapshot
   did not carry it whole. **Truncation never alters an action**: a row whose
