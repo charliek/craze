@@ -104,9 +104,50 @@ import (
 // retained behind it rather than dropped (touch): plan 027 §3.7, SF-15 and
 // SF-16.
 //
+// # The user's title, and why it has a slot of its own
+//
+// A title the USER gave the session — a /rename, or the title it was created
+// with (IndexOptions.Title: session.create's, craze serve --title; plan 043
+// D8) — is written as TitleKindUser, which always wins and pins the row. It
+// cannot ride the agent title's latest-wins field, because it can be owed
+// before there is anything to key a row on: a create's title is known before
+// the session has started, so before session/new has answered with an id. (A
+// rename cannot come that early through the engine, which refuses one while
+// the session starts; the TUI refuses one before the session is ready too,
+// slash.go.) So it has a slot of its own (plan 043 P10), holding the NEWEST
+// user title owed with its sequence number: the create's title is the first,
+// every /rename bumps the number — in the turn that renames the session
+// (Engine.SetTitle's renameTurn), so the numbers follow the order the
+// session's title moved in — and a later one replaces an earlier one in the
+// slot.
+//
+//   - The slot is HELD while nothing is to be gained by trying it: from the
+//     engine's construction until the session has started (Engine.Started
+//     with no error — sessionKnown, the one trigger that fires when the
+//     session's id becomes known), and after an attempt that found no id or
+//     failed, until the next post. A held title is not taken by a pass, so a
+//     failing store is retried once per kick, never in a spin.
+//   - Every user-title write — the worker's, and a /rename's own on its
+//     caller's goroutine — is made under userMu, and only when its number is
+//     newer than the newest that landed (writeUser). userMu is held across the
+//     Upsert, which is what orders them: one never runs beside another, and an
+//     older title that lost the race for it finds a newer one landed and
+//     writes nothing. So the index ends on the newest user title, whichever
+//     goroutine got there first.
+//   - A failure is published as an IndexErr like every event-driven write's
+//     (the worker's report), and the title stays owed for the next post to
+//     retry; a /rename's own failure is still returned to its caller, which
+//     is told (SetTitle), and owes nothing more. At close a title still owed
+//     is attempted once more, held or not, within the same bound as the rest
+//     (finish), and then dropped. No store and an unindexed provider count as
+//     done, as for every write.
+//
 // All of it lives under this file's own mutex, a LEAF: it is taken to merge, to
 // take and to record a result, never across the Upsert itself, and never while
-// e.mu, s.mu, registry.mu or the receipts table's mutex is held.
+// e.mu, s.mu, registry.mu or the receipts table's mutex is held. userMu is not
+// a leaf — it is held across a user title's Upsert — and is taken only by the
+// two user-title writers, before this mutex and never inside it or any lock of
+// the engine's.
 
 // Index is the session index as the engine needs it: one method, the write
 // half of sessions.Store. It is an interface so that a caller which persists
@@ -155,6 +196,14 @@ type IndexOptions struct {
 	// writes none. The index keeps it set-only and hands it on by craze id
 	// (sessions.Store.Upsert), so nil never clears a row's record.
 	Unattended *sessions.Unattended
+	// Title is the title the session was created with (plan 043 D8: craze
+	// serve --title, a session.create's), already normalized
+	// (NormalizeTitle) and pinned in the session itself (agent.Options'
+	// Title and TitlePinned): the index writes it as the user's title, as a
+	// /rename's, once the session's id is known — the user-title slot (the
+	// file's comment). "" — every load, every host but a titled create's —
+	// writes none.
+	Title string
 }
 
 // NewCrazeSessionID mints a durable craze session id: a UUIDv7, as the host
@@ -192,15 +241,31 @@ type indexWork struct {
 	// whose command armed the send-now or re-claimed the turn is the one that
 	// wants to hear about it (r29 finding 4). It travels with seedText.
 	seedCause string
+	// user is the user title this pass is to write (plan 043 P10), its seq 0
+	// for none. Like seed it is never merged here: it is taken out of the
+	// writer's own slot by a pass (take), which holds the slot while the
+	// attempt runs.
+	user userTitle
 }
 
-func (w indexWork) any() bool { return w.touch || w.load || w.seed || w.title != "" }
+// userTitle is one title the user gave the session, numbered in the order
+// they were given (plan 043 P10): the create's (IndexOptions.Title) first,
+// then each /rename. seq 0 is none.
+type userTitle struct {
+	seq   uint64
+	title string
+	// cause is the command that gave it, "" for the create's: a failed
+	// write's IndexErr goes to the client that asked.
+	cause string
+}
+
+func (w indexWork) any() bool { return w.touch || w.load || w.seed || w.title != "" || w.user.seq != 0 }
 
 // mustWrite reports whether this work has to be ATTEMPTED even at close: a
-// seed, an agent title or a loaded-row touch. A plain touch on its own is the
-// one kind that may be dropped there — it records nothing but an UpdatedAt the
-// next run's first write bumps anyway (indexWriter.finish).
-func (w indexWork) mustWrite() bool { return w.seed || w.load || w.title != "" }
+// seed, an agent title, a user title or a loaded-row touch. A plain touch on
+// its own is the one kind that may be dropped there — it records nothing but
+// an UpdatedAt the next run's first write bumps anyway (indexWriter.finish).
+func (w indexWork) mustWrite() bool { return w.seed || w.load || w.title != "" || w.user.seq != 0 }
 
 // indexWriter is the engine's half of the session index: the options, the
 // bookkeeping, the pending work and the one worker goroutine that drains it.
@@ -256,6 +321,23 @@ type indexWriter struct {
 	seedText  string
 	seedCause string
 
+	// The user-title slot (plan 043 P10; the file's comment). userSeq is the
+	// last number handed out; user is the newest user title not yet in the
+	// index (seq 0: none owed); userLanded the number of the newest one that
+	// is — or that counted as done (no store, an unindexed provider). userHeld
+	// says the owed title is not to be taken by a pass: before the session's
+	// id can be known (sessionKnown), while an attempt on it runs, and after
+	// one that did not land, until the next post.
+	userSeq    uint64
+	user       userTitle
+	userLanded uint64
+	userHeld   bool
+	// userMu orders the user-title writes (writeUser): held across the
+	// Upsert, so no two run at once and none older lands after a newer one.
+	// It is taken before mu, never inside it, and never with a lock of the
+	// engine's held.
+	userMu sync.Mutex
+
 	// closeOnce guards the stop signal, so close is idempotent for a caller
 	// that is not Engine.Close's own closeOnce.
 	closeOnce sync.Once
@@ -297,6 +379,10 @@ func (w *indexWriter) post(work indexWork) {
 		return
 	}
 	w.mu.Lock()
+	// Every post is the next chance for a user title an attempt left owed —
+	// no id yet, or a store that failed — so the slot is let go of here: the
+	// kick below makes the pass that retries it (plan 043 P10).
+	w.userHeld = false
 	w.pending.touch = w.pending.touch || work.touch
 	w.pending.load = w.pending.load || work.load
 	if work.title != "" {
@@ -373,12 +459,26 @@ func (w *indexWriter) claimSeedLocked() (cause, prompt string, ok bool) {
 // under one mutex is what makes "a title is never lost behind a touch" hold:
 // both fields are read and cleared together, so a post that lands in between is
 // simply the next pass's work.
-func (w *indexWriter) take() indexWork {
+//
+// The user title owed, when the slot is not held, goes with it, and the slot is
+// held for the attempt: it stays owed — written, it is retired by the write
+// (writeUser) — so a pass that does not land it leaves it for the next post to
+// let go of, rather than for the very next pass to spin on (plan 043 P10).
+func (w *indexWriter) take() indexWork { return w.takeWork(false) }
+
+// takeWork is take; last is finish's — the worker's final attempt — which
+// takes a user title owed even while the slot is held: close drops pending
+// work only after one final attempt (plan 043 P10).
+func (w *indexWriter) takeWork(last bool) indexWork {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	work := w.pending
 	w.pending = indexWork{}
 	work.seedCause, work.seedText, work.seed = w.claimSeedLocked()
+	if w.user.seq != 0 && (last || !w.userHeld) {
+		work.user = w.user
+		w.userHeld = true
+	}
 	return work
 }
 
@@ -516,8 +616,9 @@ func (w *indexWriter) finish(inFlight <-chan struct{}) {
 	}
 	// Taken after the waits, not before: a seed that failed in one of them
 	// leaves the retained opportunity in the slot, and that is exactly the
-	// retry this drain exists to catch.
-	work := w.take()
+	// retry this drain exists to catch. A user title still owed is taken
+	// whether or not its slot is held: this is its one final attempt.
+	work := w.takeWork(true)
 	if !work.mustWrite() {
 		return
 	}
@@ -530,14 +631,15 @@ func (w *indexWriter) finish(inFlight <-chan struct{}) {
 // owed reports whether the worker still has to write, or see written, something
 // before it may exit: work in the slot that is not a plain touch; a retained
 // seed opportunity — owed whether it is waiting for the worker or waiting on an
-// attempt in flight that may yet fail and hand it over; or a seed attempt in
+// attempt in flight that may yet fail and hand it over; a seed attempt in
 // flight on ANY goroutine, with or without an opportunity behind it (plan 027
-// §3.7, SF-15). A plain touch on its own, retained behind a seed or not, is
-// still never owed.
+// §3.7, SF-15); or a user title not yet in the index, held or not (plan 043
+// P10). A plain touch on its own, retained behind a seed or not, is still
+// never owed.
 func (w *indexWriter) owed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.pending.mustWrite() || w.seedNext || w.seeding
+	return w.pending.mustWrite() || w.seedNext || w.seeding || w.user.seq != 0
 }
 
 // activeSeed is the completion of a seed attempt in flight, on whichever
@@ -586,6 +688,17 @@ func (w *indexWriter) runPending(work indexWork) {
 	landed := false
 	if work.seed {
 		landed = w.writeSeed(work.seedCause, work.seedText)
+	}
+	if work.user.seq != 0 {
+		// After the seed, which is what creates a row in the ordinary run, and
+		// before an agent title, which the user's pin then refuses: the order
+		// changes no row — a user title wins over both whenever it lands
+		// (sessions.applyTitle) — only how many writes a pass makes. A user
+		// title that a newer one overtook writes nothing (writeUser); a failure
+		// has been reported by the write itself.
+		if wrote, _ := w.writeUser(work.user, true); wrote {
+			landed = true
+		}
 	}
 	if work.title != "" {
 		landed = w.write("", work.title, sessions.TitleKindAgent)
@@ -752,17 +865,109 @@ func (w *indexWriter) writeSeed(cause, prompt string) (ok bool) {
 // the one index write with somebody to answer. A user title always wins and
 // pins the row, so no agent title this session or a later --continue produces
 // can take the name back.
+//
+// It is the newest user title from here (plan 043 P10): it takes the next
+// number and the slot, replacing a title owed there — the create's, an
+// earlier rename's — and writes it on this goroutine, as it always has,
+// through writeUser, so a write of an older user title running on the worker
+// lands first or not at all. Engine.SetTitle takes the number in its own turn
+// (renameTurn, offerUser) and makes the write with renamed; rename is the two
+// together, for a caller with no session rename to order them with.
 func (w *indexWriter) rename(cause, title string) error {
-	err := w.upsert(cause, title, sessions.TitleKindUser, false)
-	if errors.Is(err, errNoSessionID) {
+	return w.renamed(w.offerUser(cause, title))
+}
+
+// renamed is rename's write, of a title offerUser has numbered: the answer a
+// /rename's caller is given.
+func (w *indexWriter) renamed(u userTitle) error {
+	_, err := w.writeUser(u, false)
+	switch {
+	case errors.Is(err, errNoSessionID):
 		// Not something to tell a user about: the rename itself stands, and
-		// there was simply no row to key it to yet. It is what the TUI's own
-		// writeIndex did with a session that had not learned its id — no error
-		// row, no retry — and a /rename is gated on the session being up in
-		// any case.
+		// there was simply no row to key it to yet. No rename through the
+		// engine meets this — it refuses one while the session starts
+		// (refusalLocked), and a started session has its id — but the writer
+		// keeps such a title owed in the slot, held, written once the id is
+		// known (sessionKnown), rather than drop it as the TUI's own
+		// writeIndex once did.
 		return nil
+	case err != nil:
+		// Told to its caller, which is all a rename's failure ever was: the
+		// title is owed no more (a newer rename may already own the slot), and
+		// what retries it is the user's next /rename.
+		w.mu.Lock()
+		if w.user.seq == u.seq {
+			w.user, w.userHeld = userTitle{}, false
+		}
+		w.mu.Unlock()
 	}
 	return err
+}
+
+// offerUser makes title the newest user title owed (plan 043 P10): the next
+// number, in the slot in place of whatever older one it held, and HELD — its
+// caller attempts it itself (rename), or nothing can be attempted before the
+// session has started (the create's title, Engine construction).
+func (w *indexWriter) offerUser(cause, title string) userTitle {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.userSeq++
+	w.user = userTitle{seq: w.userSeq, title: title, cause: cause}
+	w.userHeld = true
+	return w.user
+}
+
+// sessionKnown is the trigger that fires when the session's id becomes known
+// (plan 043 P10; Engine.Started with no error — a new session learns its id
+// from session/new, inside Start, and a load's comes before it): a user title
+// owed is let go of and the worker kicked to write it. Nothing before plan
+// 043 fired then, because nothing was owed across it. It is the observer's
+// kind of call — the leaf mutex and a non-blocking kick — and is made with no
+// lock of the engine's held.
+func (w *indexWriter) sessionKnown() {
+	w.mu.Lock()
+	w.userHeld = false
+	owed := w.user.seq != 0
+	w.mu.Unlock()
+	if owed {
+		w.kick()
+	}
+}
+
+// writeUser writes u, a user title, as the user's — TitleKindUser, which
+// always wins and pins the row — unless a newer one has landed already: it
+// reports whether it wrote, and what a write that did not land came to (the
+// store's failure, published as well when report says so; errNoSessionID for
+// a session with no id yet, published never). Overtaken, it writes nothing
+// and reports neither.
+//
+// userMu is held across the Upsert (the file's comment): the worker's write
+// and a /rename's on its caller's goroutine take turns, so the newest of
+// them is the last to land — never an older one after it. It is taken with
+// no lock of the engine's held, and before mu.
+//
+// A write that lands retires u from the slot, and every older title owed
+// with it; one that does not leaves the slot as it is — u still owed, held
+// until the next post (or, for a session with no id yet, sessionKnown).
+func (w *indexWriter) writeUser(u userTitle, report bool) (bool, error) {
+	w.userMu.Lock()
+	defer w.userMu.Unlock()
+	w.mu.Lock()
+	overtaken := u.seq <= w.userLanded
+	w.mu.Unlock()
+	if overtaken {
+		return false, nil
+	}
+	if err := w.upsert(u.cause, u.title, sessions.TitleKindUser, report); err != nil {
+		return false, err
+	}
+	w.mu.Lock()
+	w.userLanded = u.seq
+	if w.user.seq <= u.seq {
+		w.user, w.userHeld = userTitle{}, false
+	}
+	w.mu.Unlock()
+	return true, nil
 }
 
 // write is upsert with the failure published as a delta rather than returned,

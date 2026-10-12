@@ -909,7 +909,10 @@ func TestTheCodecsMustBeThisBuilds(t *testing.T) {
 // receipt once its coordinator has the stop — the session's end follows on
 // the stream. On a host whose capability stop is false the refusal,
 // stop_unsupported, is backend.ErrStopUnsupported — a host's answer, never an
-// outcome unknown — and nothing was stopped.
+// outcome unknown — and nothing was stopped. Info().Stop is the capability as
+// each host sent it (plan 043 P4: what a slash row that requires stop is
+// shown by); negative control: sessionInfo leaving Stop unmapped fails the
+// first case.
 func TestStopIsSessionStop(t *testing.T) {
 	t.Run("a host that serves it", func(t *testing.T) {
 		heard := make(chan control.StopRequest, 1)
@@ -922,6 +925,9 @@ func TestStopIsSessionStop(t *testing.T) {
 		eng.Store(h.eng)
 		tp := newTap(t)
 		s, _ := started(t, h, tp, remote.SessionOptions{})
+		if !s.Info().Stop {
+			t.Fatal("a host that serves session.stop: Info().Stop is false")
+		}
 		c := engine.Command{Client: s.ClientID(), ID: "7"}
 		if err := s.Stop(backend.WithEpoch(tctx(t), s.Epoch()), c); err != nil {
 			t.Fatalf("stop: %v", err)
@@ -947,6 +953,9 @@ func TestStopIsSessionStop(t *testing.T) {
 		h := newHost(t)
 		tp := newTap(t)
 		s, _ := started(t, h, tp, remote.SessionOptions{})
+		if s.Info().Stop {
+			t.Fatal("a host without session.stop: Info().Stop is true")
+		}
 		err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "3"})
 		var e *remote.Error
 		if !errors.Is(err, backend.ErrStopUnsupported) || !errors.As(err, &e) || e.Reason != protocol.ReasonStopUnsupported {

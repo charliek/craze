@@ -61,8 +61,11 @@ import (
 //     engine.HostOptions, with agent.Options.NoPrimary: nothing reads a
 //     primary on a host with no client, and with one the 257th unread event
 //     would block the agent. A new session's engine takes the id claimed in
-//     step 3 (engine.Options.MintedCrazeSessionID), then the engine goes to
-//     the socket and the registry entry is rewritten for it (runHost.publish).
+//     step 3 (engine.Options.MintedCrazeSessionID), and a new session given
+//     --title — a session.create's, craze new --wait's — is named by it and
+//     pinned as it is built (plan 043 D8, P8); then the engine goes to the
+//     socket and the registry entry is rewritten for it (runHost.publish), so
+//     the first row any client reads carries the title.
 //  6. Start runs on a goroutine of its own, so a remote client's Start only
 //     observes it. A start that failed leaves the host up, its session listed
 //     and its log open (agent.Options.KeepLogOnFailedStart), its failure
@@ -122,6 +125,13 @@ type serveFlags struct {
 	// spawner went before taking its ready line (announce) — by then another
 	// sender may have found it in the registry and prompted it.
 	outliveSpawner bool
+	// title is --title (hidden): a new session's name from its start (plan
+	// 043 D8) — the hub's session.create's title, or craze new --wait
+	// --title's — normalized here as the spawner normalized it
+	// (createTitle), seeded and pinned in the session before its engine is
+	// published, and written to the index as the user's once the session has
+	// its id. "" for none.
+	title string
 	// ready is the spawner's ready pipe (CRAZE_READY_FD, ready.go), taken
 	// before anything else runs; nil for a host run by hand. Not a flag.
 	ready *readyPipe
@@ -248,8 +258,13 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	_ = cmd.Flags().MarkHidden("hub-pid")
 	cmd.Flags().BoolVar(&f.outliveSpawner, "outlive-spawner", false,
 		"serve on when the spawner goes before taking the ready line (set by the spawner)")
+	// The hub's and craze new --wait's (plan 043 D8): a new session's title
+	// from its start, as session.create's title or craze new --title gave it.
+	cmd.Flags().StringVar(&f.title, "title", "",
+		"name the new session this, from its start, pinned as /rename pins a title (set by the spawner)")
 	_ = cmd.Flags().MarkHidden("unattended")
 	_ = cmd.Flags().MarkHidden("outlive-spawner")
+	_ = cmd.Flags().MarkHidden("title")
 }
 
 // serveSignals is craze serve's signal set, registered for the command's
@@ -305,6 +320,10 @@ func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Si
 	if err != nil {
 		return err
 	}
+	title, err := f.createTitle(cmd)
+	if err != nil {
+		return err
+	}
 	var why bytes.Buffer
 	if !controlSocketOn(&why) {
 		return controlSocketRefusal(why.String())
@@ -318,7 +337,7 @@ func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Si
 	if err != nil {
 		return err
 	}
-	err = serveSession(cmd, f, env, sigs, runEnv, hostID, req, load, out)
+	err = serveSession(cmd, f, env, sigs, runEnv, hostID, req, load, title, out)
 	// A host that never served says why in its log too: a spawned host's
 	// stderr is /dev/null.
 	if err != nil && f.log != "" {
@@ -361,6 +380,27 @@ func (f *serveFlags) request() (hostRequest, error) {
 	return hostRequest{id: f.requestID, hash: f.requestHash}, nil
 }
 
+// createTitle is --title (plan 043 D8, P9): "" when it was not given;
+// otherwise engine.NormalizeTitle's — the hub's own normalization of
+// session.create's title, which it passes on already normalized, so a hub's
+// title comes out the same here (the function is idempotent). One that
+// normalizes to nothing, and one given beside --continue or --load — a title
+// is a new session's; a loaded one keeps its row's — are usage errors,
+// before anything is created.
+func (f *serveFlags) createTitle(cmd *cobra.Command) (string, error) {
+	if f.title == "" && (cmd == nil || !cmd.Flags().Changed("title")) {
+		return "", nil
+	}
+	title := engine.NormalizeTitle(f.title)
+	switch {
+	case title == "":
+		return "", usagef("craze serve: --title is blank once normalized")
+	case f.cont || f.load != "":
+		return "", usagef("craze serve: --title names a new session, not one --continue or --load loads")
+	}
+	return title, nil
+}
+
 // validRequestHash reports whether h is a request hash's form: 1 to 128 of
 // [A-Za-z0-9:._-].
 func validRequestHash(h string) bool {
@@ -392,8 +432,9 @@ func hostLogNamed(env rundir.Env, path, hostID string) error {
 }
 
 // serveSession is serveBody once its log is open, out: the session claimed,
-// bound, built, served and — once asked — stopped.
-func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, hostID string, req hostRequest, load *loadID, out io.Writer) error {
+// bound, built, served and — once asked — stopped. title is --title's,
+// normalized, "" for none (createTitle).
+func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, hostID string, req hostRequest, load *loadID, title string, out io.Writer) error {
 	// The host id first, as runTUI's: the session claims write it into their
 	// lock files. The teardown is deferred from here, so every return after it
 	// releases what was claimed — and, once the socket is bound, closes and
@@ -500,6 +541,13 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, p, row)
 	opts.JournalDir = journalAt
 	opts.NoPrimary = true
+	if title != "" {
+		// A new session created with a title (plan 043 D8, P8): named and
+		// pinned by agent.New, below — before the engine is built over it and
+		// published (rh.publish), so the first state and roster row a client
+		// reads have it — and kept by the session/new install, which says it.
+		opts.Title, opts.TitlePinned = title, true
+	}
 	if f.unattended {
 		unattendedPolicy(&opts)
 	}
@@ -535,6 +583,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	if f.unattended {
 		engOpts.Index.Unattended = f.unattendedRecord()
 	}
+	// The index writes the same title as the user's once the session has its
+	// id (plan 043 P10): the row is pinned to it, as after a /rename.
+	engOpts.Index.Title = title
 	// The model catalog cache (plan 030 §3.14): each catalog the agent
 	// installs is recorded for the session list's /model, off the engine's
 	// locks (catalogRecorder). Closed when this returns, after the stop

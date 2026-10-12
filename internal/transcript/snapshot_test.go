@@ -35,6 +35,7 @@ func sessionScript() []agent.Event {
 			Config:   &agent.ConfigState{Options: cfg},
 			Commands: &agent.CommandsState{Commands: []agent.CommandInfo{{Name: "review"}}},
 			Plugins:  &agent.PluginsState{Plugins: []agent.PluginCommand{{Qualified: "p:x"}}},
+			Slash:    &agent.SlashCatalog{Items: scriptSlash()},
 			SendNow:  &agent.SendNowState{Armed: true, Text: "now", Turn: "turn-1"},
 		}, At: at(1)},
 		{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: "fix <the> tests", Origin: agent.TurnOriginSubmit}, At: at(2)},
@@ -79,6 +80,20 @@ func sessionScript() []agent.Event {
 	})
 }
 
+// scriptSlash is the slash catalog sessionScript's session publishes (plan
+// 043): the builder's own rows over its commands — a mode row unavailable, a
+// requires row, an agent command — and the disk skills given, which
+// laterScript's delta adds one of.
+func scriptSlash(skills ...agent.Skill) []agent.SlashItem {
+	return agent.BuildSlashCatalog(agent.SlashInputs{
+		Provider:     "grok",
+		Capabilities: agent.Capabilities{Modes: true, Todos: true},
+		Modes:        []string{"agent", "plan"},
+		Commands:     []agent.CommandInfo{{Name: "review"}},
+		Skills:       skills,
+	}).Items
+}
+
 // laterScript is what the session does next, sequenced after n events: chunks
 // into the open runs, tool updates old and new, a finish, notes, a delta.
 func laterScript(n int) []agent.Event {
@@ -91,7 +106,8 @@ func laterScript(n int) []agent.Event {
 		{Type: agent.EventTool, Agent: "sub-2", Tool: &agent.ToolEvent{ID: "c9", Status: "pending"}, At: at(45)},
 		{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: "sub-2", Status: agent.SubagentCompleted, EndedAt: at(46)}, SubagentChange: agent.SubagentChangeFinished, At: at(46)},
 		{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-1", Kind: agent.AskPermission, Outcome: agent.AskAnswered, By: agent.AskByClient}, At: at(47)},
-		{Type: agent.EventMeta, State: &agent.StateDelta{Title: strp("renamed"), SendNow: &agent.SendNowState{}, Reason: agent.SendNowWithdrawn}, At: at(48)},
+		{Type: agent.EventMeta, State: &agent.StateDelta{Title: strp("renamed"), SendNow: &agent.SendNowState{}, Reason: agent.SendNowWithdrawn,
+			Slash: &agent.SlashCatalog{Items: scriptSlash(agent.Skill{Name: "deploy", Description: "found by a later scan"})}}, At: at(48)},
 		{Type: agent.EventText, Text: "done", At: at(49)},
 		{Type: agent.EventDone, StopReason: "end_turn", At: at(50)},
 		{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-2", Phase: agent.TurnEnded}, At: at(50)},
@@ -543,7 +559,11 @@ func assertTheWindowIsTight(t *testing.T, what string, full, s *Snapshot, budget
 // to the whole, a snapshot either is refused with ErrSnapshotTooLarge or
 // encodes to exactly the size its window counted, within the budget, with
 // every transcript the window rule's suffix and every windowed one unable to
-// take its next entry; and a larger budget never keeps fewer entries.
+// take its next entry; and a larger budget never keeps fewer entries — but
+// where it carries more of the slash catalog (plan 043 W4: the catalog yields
+// to the budget, so a budget too small for it, and for the mark that says it
+// was left out, spends the room on entries instead), and it never carries
+// less of the catalog than a smaller one.
 func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 	odd := sequenced([]agent.Event{
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t\"<é>\x01\\", Title: "odd"}, At: at(1)},
@@ -572,6 +592,7 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 		"escaped ids":   {odd, Options{}},
 		"session, open": {sessionScript(), Options{}},
 	}
+	sawYield := false
 	for name, sc := range scripts {
 		m := New(sc.o)
 		foldAll(t, m, false, sc.evs...)
@@ -579,8 +600,9 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 		if name == "capped" && (!full.TodosTruncated || len(full.TruncatedQueue) != 1 || !full.Settings.Truncated.Commands || !full.Asks[len(full.Asks)-1].Truncated) {
 			t.Fatalf("capped: the marks are missing: todos %v, queue %v, settings %+v", full.TodosTruncated, full.TruncatedQueue, full.Settings.Truncated)
 		}
-		prev := -1
+		prev, prevLevel := -1, -1
 		refused := 0
+		levels := map[int]bool{}
 		for budget := 1; budget <= len(fb)+64; budget += max(1, len(fb)/200) {
 			s, size, err := m.snapshotSized(budget)
 			if errors.Is(err, ErrSnapshotTooLarge) {
@@ -601,18 +623,38 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 				t.Fatalf("%s: budget %d: the window counted %d, the encoding has %d", name, budget, size, len(b))
 			}
 			assertTheWindowIsTight(t, fmt.Sprintf("%s at %d", name, budget), full, s, budget)
+			// How much of the slash catalog the snapshot carries: none, the
+			// mark that it was left out, or the catalog.
+			level := 0
+			switch {
+			case len(s.Settings.Slash) > 0:
+				level = 2
+			case s.Settings.Truncated.Slash:
+				level = 1
+			}
+			if level < prevLevel {
+				t.Fatalf("%s: a budget of %d carries catalog level %d, a smaller one carried %d", name, budget, level, prevLevel)
+			}
 			// The main transcript is filled first, so a larger budget never
-			// keeps fewer of its entries. The children, filled with what it
-			// leaves, can: one more main entry can leave a child less room.
+			// keeps fewer of its entries beside as much of the catalog. The
+			// children, filled with what it leaves, can: one more main entry
+			// can leave a child less room.
 			kept := len(s.Main.Entries)
-			if kept < prev {
+			if level == prevLevel && kept < prev {
 				t.Fatalf("%s: a budget of %d keeps %d main entries, a smaller one kept %d", name, budget, kept, prev)
 			}
-			prev = kept
+			prev, prevLevel = kept, level
+			levels[level] = true
+		}
+		if levels[2] && len(levels) > 1 {
+			sawYield = true
 		}
 		if refused == 0 || prev < 0 {
 			t.Fatalf("%s: the sweep never crossed the refusal edge (%d refused, last kept %d)", name, refused, prev)
 		}
+	}
+	if !sawYield {
+		t.Fatal("no sweep crossed the slash catalog's yield: the property above was never tried across it")
 	}
 }
 

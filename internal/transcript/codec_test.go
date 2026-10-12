@@ -573,8 +573,22 @@ func pinnedSnapshots() []pinnedSnapshot {
 				`"turn":{"input":10,"output":5,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":20000000,"unpriced":false},` +
 				`"session":{"input":30,"output":15,"reasoning":0,"cacheRead":1000,"cacheCreation":0,"costPicoUsd":60000000,"unpriced":true}}},"main":{}}`},
 		{"the settings' truncation marks", Snapshot{Settings: Settings{Truncated: SettingsTruncated{
-			Title: true, Mode: true, Model: true, Config: true, Commands: true, Plugins: true, SendNow: true}}},
-			`{"version":1,"settings":{"truncated":{"title":true,"mode":true,"model":true,"config":true,"commands":true,"plugins":true,"sendNow":true}},"main":{}}`},
+			Title: true, Mode: true, Model: true, Config: true, Commands: true, Plugins: true, Slash: true, SendNow: true}}},
+			`{"version":1,"settings":{"truncated":{"title":true,"mode":true,"model":true,"config":true,"commands":true,"plugins":true,"slash":true,"sendNow":true}},"main":{}}`},
+		// The slash catalog (plan 043 §3.2): the event codec's own section
+		// shape, {"items":[…]}, beside the commands it was built from, and its
+		// mark when the snapshot dropped a row or cut a description.
+		{"the settings' slash catalog", Snapshot{Settings: Settings{
+			Commands: []agent.CommandInfo{{Name: "review", Description: "look it over"}},
+			Slash: []agent.SlashItem{
+				{Name: "exit", Description: "End this session", Source: agent.SlashSourceBuiltin, Requires: agent.SlashRequiresStop, WhileWorking: true,
+					Run: agent.SlashRun{Kind: agent.SlashRunMethod, Method: agent.SlashMethodStop}},
+				{Name: "review", Description: "look it over", Source: agent.SlashSourceAgent, Run: agent.SlashRun{Kind: agent.SlashRunPrompt, Arg: agent.SlashArgOptional}},
+			},
+			Truncated: SettingsTruncated{Slash: true}}},
+			`{"version":1,"settings":{"commands":{"commands":[{"name":"review","description":"look it over"}]},"slash":{"items":[` +
+				`{"name":"exit","description":"End this session","source":"builtin","requires":"stop","whileWorking":true,"run":{"kind":"method","method":"session.stop"}},` +
+				`{"name":"review","description":"look it over","source":"agent","run":{"kind":"prompt","arg":"optional"}}]},"truncated":{"slash":true}},"main":{}}`},
 		{"one section's truncation mark", Snapshot{Settings: Settings{Commands: []agent.CommandInfo{{Name: "review", Description: "lo"}},
 			Truncated: SettingsTruncated{Commands: true}}},
 			`{"version":1,"settings":{"commands":{"commands":[{"name":"review","description":"lo"}]},"truncated":{"commands":true}},"main":{}}`},

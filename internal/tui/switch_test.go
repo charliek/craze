@@ -1313,7 +1313,7 @@ var (
 		"copyUntil", "cards", "cardMask", "cardMasking", "hiddenRetry", "snap", "queue",
 		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg",
 		"helpTop", "applyGen", "themeSel", "themeNames", "themePrev", "slashSel", "slashTop", "slashKey",
-		"slashHideKey", "skills", "pickingProvider", "pickingResume", "resumeCursor", "resumeWaiting",
+		"slashHideKey", "skills", "slashWasHosted", "pickingProvider", "pickingResume", "resumeCursor", "resumeWaiting",
 		"resumeErr", "providerCursor", "providerErr", "spawnWaiting", "spawnFrom", "todoPlanned", "todoDone",
 		"agentSel", "agentID", "agentStart", "agentDone", "agentFocus", "queueSel", "queueID", "queueFocus",
 		"queueHov", "queueEdit", "queueEditPos", "editDraft", "queueEditCtx", "queueEditVer", "confirm",

@@ -73,8 +73,18 @@ func installFrameSocketHost() { frameSocketHook = buildSocketHost }
 var frameNoPrimary bool
 
 // frameStub is the Stub a golden builder builds: NewStub, or NewStubNoPrimary
-// while the socket run builds its host's session (frameNoPrimary).
-func frameStub() *Stub { return newStub(frameNoPrimary) }
+// while the socket run builds its host's session (frameNoPrimary). It
+// publishes the slash catalog, as every live and native session does (plan
+// 043 C3): the menu and /help of its goldens are the host's section projected
+// (projectSlash), in process and over the socket, and the frames are the ones
+// the menu built here drew before — no golden moved. A golden builder that
+// calls NewStub keeps the menu built here (localSlash), as a host from before
+// the catalog has it.
+func frameStub() *Stub {
+	s := newStub(frameNoPrimary)
+	s.PublishSlash = true
+	return s
+}
 
 // buildFor calls build for a run over tr: NoPrimary for the socket's host
 // (frameNoPrimary), which is false again however build returns — a builder's

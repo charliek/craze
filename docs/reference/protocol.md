@@ -175,7 +175,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -200,6 +200,14 @@ hub given no answer to it are byte for byte what they were. Absent means an
 older hub (or one that cannot answer): a client makes no call. A client built
 before it reads this `hello` as it always has, because a client ignores a
 result member it does not know ([above](#tolerant-inbound-strict-outbound)).
+
+`createTitle` says the hub's [`session.create`](#sessioncreate) takes a
+`title`, the session's name from its start. It is omitted when `false` in the
+same way: absent on a host and on a hub from before it, which refuses a
+create naming a `title` `unknown_field`. A client with a title to set checks
+it first — `craze new --title` asks the hub for it and reports an older hub
+as one that "cannot set a title at create", never sending the title there and
+never creating the session untitled.
 
 ### Client ids and resume
 
@@ -476,7 +484,7 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
-| `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?` (no `sessionId`, no `commandId`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
+| `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?`, `title?` (no `sessionId`, no `commandId`; `title` where `hello` says `createTitle`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 | `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
@@ -731,7 +739,7 @@ host the hub spawns (`craze serve`, as any launch's), answered **once the
 session has started**.
 
 ```json
-{"jsonrpc":"2.0","id":"2","method":"session.create","params":{"cwd":"/home/me/projects/lumen","prompt":"fix the flaky test","provider":"grok","effort":"high","requestId":"new-9c1f04ab7d2e3a10"}}
+{"jsonrpc":"2.0","id":"2","method":"session.create","params":{"cwd":"/home/me/projects/lumen","prompt":"fix the flaky test","provider":"grok","effort":"high","requestId":"new-9c1f04ab7d2e3a10","title":"Flaky test"}}
 {"jsonrpc":"2.0","id":"2","result":{"session":{"hostId":"0a1b2c3d4e5f","sessionId":"01a0f89a-4db5-7621-8335-63ae8327352e","host":{...},"status":"reachable","approximate":false,"row":{...}},"prompt":"accepted"}}
 ```
 
@@ -750,6 +758,42 @@ setting. No params member names an agent binary: the host finds
 its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's
 `--agent-bin` nor `CRAZE_AGENT_BIN`. `requestId` (1–64 of `[A-Za-z0-9._-]`)
 makes the create idempotent (below).
+
+**`title`** (where the hub's `hello` says `createTitle: true`) is the
+session's name from its start, as a `/rename` would give it: **pinned**, so
+no title the agent sends (`session_info_update`) and no first-prompt title (a
+native session's, the index's fallback) replaces it — only a later
+`session.setTitle` does. Absent, the session starts untitled, as before.
+**Omit it; never send it empty.** The hub normalizes it the way `/rename`
+does, to exactly the string the session stores, the roster shows and the
+session index holds — the same bytes everywhere, and what the create's
+idempotency hash is taken over. In order: escape sequences (7-bit and 8-bit),
+control characters other than newline and tab (a carriage return included),
+the zero-width space (U+200B), the word joiner (U+2060), the byte-order mark
+(U+FEFF) and the bidirectional embeddings, overrides and isolates
+(U+202A–U+202E, U+2066–U+2069) are dropped, and invalid UTF-8 becomes U+FFFD;
+then it is folded onto one line — a newline or tab turned into a space, runs
+of whitespace collapsed to one space — cut to 120 characters (runes), and
+trimmed at both ends. ZWJ and ZWNJ (U+200D, U+200C) and the directional marks
+(U+200E, U+200F) are kept: they are letters, emoji glue and punctuation
+direction, not formatting. A `title` that comes to nothing — `""`, blank, or
+nothing but what is dropped (`"\u200b"`) — is `bad_request`; a long one is
+cut, not refused. The host is handed the normalized title and holds it before
+its session is published, and the session's **first event** says it: a
+title-only state delta (no `text`: it is craze's own title, not the agent's),
+committed before the host serves the session and before its start runs. So
+the session's first `sessions.list` row, the create's `session` row, its
+first `session.state` and **every attach snapshot** carry it — an attach with
+`when: "now"` while the start is still running included, and the stream of a
+session whose start then fails before its install. The session's install
+delta restates it, as every install restates every section. A session created
+without a title has no such event: its stream is what it always was. A roster subscription opened before the create may first receive a
+`connecting` upsert with no `row` (the roster coalesces, so it is not
+guaranteed); every row that describes the session, from
+its first `reachable` one, carries the title. Once the session has its id the host writes it to the session index as
+the user's title, pinned, as a `/rename` is (a failed write is the session's
+`indexErr`, as for every index write it makes on its own). A hub from before
+`title` refuses it `unknown_field` — check `createTitle` first.
 
 **What the hub does.** It spawns the host with the session's directory as
 its working directory and the hub's own environment less what is one
@@ -779,7 +823,9 @@ it was lost) or `refused` (the session's refusal, in `promptError`; the
 session runs on, idle).
 
 **Refusals.** Bad params are `bad_request` (`unknown_field` for a member the
-schema does not define). A `cwd` that is no existing directory and a provider
+schema does not define, and for `title` on a hub whose `hello` has no
+`createTitle`; a `title` that normalizes to nothing is `bad_request`, reason
+`bad_request`). A `cwd` that is no existing directory and a provider
 this craze cannot start are `bad_request` too, checked only for a create that
 will start a session: a repeat (below) is answered without them. A host that fails to spawn, or to become ready, is
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
@@ -809,7 +855,14 @@ normalized params — in the hub's memory (an answer kept 10 minutes, at most
 [registry entry](#the-registry) (`requestId`, `requestHash`). A repeat with
 the same params is answered the first create's answer — its failure too —
 or joins it while it runs; with other params it is `bad_request`, reason
-`request_conflict`. A repeat is answered before the directory and the
+`request_conflict`. The `title` is hashed as normalized: a repeat whose title
+normalizes the same (`"  Fix the login bug "` and `"Fix the login bug"`) is
+the same create and joins it; another title, a title where the first create
+had none, or none where it had one, is `request_conflict`. An untitled
+create hashes exactly as it did before `title` existed, so a create retried
+under its `requestId` across an upgrade of the hub — its session started by
+the older hub, whose host's entry carries the older hash — is joined, not
+refused. A repeat is answered before the directory and the
 provider are checked again: a create answered once stays answered, whatever
 the configuration or the file system has become. A waiter that disconnects
 does not cancel the create. A hub that does not remember the id — it
@@ -1240,13 +1293,16 @@ where it serves `session.create`, and the other three are `false` (see [the
 hub's result](#the-hubs-result)). A seventh, `createOptions`, is the hub's
 and **omitted when `false`**: `true` where the hub serves
 [`sessions.createOptions`](#sessionscreateoptions), absent on a host, on an
-older hub and on one given no answer.
+older hub and on one given no answer. An eighth, `createTitle`, is the hub's
+too and omitted when `false` the same way: `true` where its
+[`session.create`](#sessioncreate) takes a `title`, absent on a host and on an
+older hub.
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
 what this host can do — and `rowFacts` and `presence`, the host's too, and
-`modelsRefresh` and `aside`, the session's own:
+`modelsRefresh`, `aside` and `slashCatalog`, the session's own:
 
 | wire name | meaning |
 |---|---|
@@ -1270,6 +1326,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
+| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, gx or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -1313,6 +1370,15 @@ event codec stays at version 1), so an older client attached to a newer host
 keeps the list the info document gave it until it attaches again — what every
 client did before the section existed.
 
+The [slash catalog](#slash-catalog) is announced the same way: where
+`capabilities.slashCatalog` is absent — every older host — a client offers no
+`/` menu from the stream (the TUI builds its own, as it always has). The
+state delta's `slash` section and the snapshot's `settings.slash` are keys an
+older client's decoder skips, so it folds every other section exactly as
+before and the codecs stay at version 1; and the catalog's values are open
+— a client hides a row with a `source`, `requires` or `run` value it does not
+know — so a later host can add one without a version of its own.
+
 Side questions are announced the same way: where `capabilities.aside` is
 absent — cursor, every older host — a client makes no `session.aside` call.
 The `aside` notification goes only to a connection that asked, so a client
@@ -1335,7 +1401,10 @@ not know a reason decides by its code ([Errors and retry](#errors-and-retry));
 the reset reason `hub_closing` ends only a roster subscription, which no older
 client holds. A hub's `capabilities.createOptions` is absent on an older hub
 (and on one given no answer): a client makes no `sessions.createOptions` call
-there, and a client built before the method ignores the member.
+there, and a client built before the method ignores the member. Its
+`capabilities.createTitle` is absent on an older hub, which refuses a create
+naming a `title` `unknown_field`: a client sends no `title` there (and says
+why), and a client built before it ignores the member and sends none.
 
 ## The foreign turn
 
@@ -1534,6 +1603,189 @@ A catalog-only delta prints no `craze prompt --json` line, but takes a `seq`
 like every event. The section is additive: no codec version bump; the method
 that asks for a change now, [`session.models.refresh`](#sessionmodelsrefresh),
 has the capability `modelsRefresh`.
+
+## Slash catalog
+
+A session says which `/` commands it offers, and what running each one does:
+the **slash catalog section**, `{items}`, a state delta section like the
+catalog section — `state.slash` on a `meta` event — and a snapshot's
+`settings.slash`. The host builds it with the same builder the TUI's own menu
+uses, from the session's facts: craze's builtins under the session's gates,
+the agent's advertised commands, the plugin commands and skills craze found,
+and (for cursor, grok and gx) the provider's disk skills. A client renders the
+rows instead of re-deriving the TUI's rules. A session publishes it where
+[`capabilities.slashCatalog`](#capabilities) is `true` — every cursor, grok,
+gx and native session on a host that has it.
+
+```json
+{"type":"meta","state":{"commands":{"commands":[{"name":"research","description":"Agent-advertised command"},{"name":"btw","description":"The agent's own btw"}]},"slash":{"items":[
+  {"name":"help","description":"Keybindings and commands","source":"builtin","whileWorking":true,"run":{"kind":"local","local":"help"}},
+  {"name":"model","description":"Switch model","source":"builtin","run":{"kind":"picker","arg":"optional","argHint":"<model> [effort]","picker":"model"}},
+  {"name":"rename","description":"Rename this session, /rename <title>","source":"builtin","whileWorking":true,"run":{"kind":"method","method":"session.setTitle","param":"title","arg":"required","argHint":"<title>"}},
+  {"name":"plan","description":"Set plan mode","source":"builtin","run":{"kind":"method","method":"session.set","setting":{"kind":"mode","value":"plan"}}},
+  {"name":"ask","description":"Set ask mode","source":"builtin","run":{"kind":"unavailable","reason":"mode ask is not advertised"}},
+  {"name":"btw","description":"Ask a side question (not saved): /btw <question>","source":"builtin","requires":"aside","whileWorking":true,"run":{"kind":"aside","param":"question","arg":"required","argHint":"<question>"}},
+  {"name":"exit","description":"End this session","source":"builtin","requires":"stop","whileWorking":true,"run":{"kind":"method","method":"session.stop"}},
+  {"name":"research","description":"Agent-advertised command","source":"agent","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"btw","description":"The agent's own btw","source":"agent","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"review","description":"Review a pull request","source":"plugin","plugin":"pr-tools","qualified":"pr-tools:review","run":{"kind":"prompt","arg":"optional"}},
+  {"name":"deploy","description":"Ship it to production","source":"skill","run":{"kind":"prompt","arg":"optional"}}
+]}},"at":"2026-01-01T00:00:00Z"}
+```
+
+(An illustration, its rows drawn from the fixtures `30-slash-catalog-acp`
+and `31-slash-catalog-native` — the `ask` row's from a session that does not
+advertise ask mode. A real catalog lists every builtin its session has.)
+
+### The rows
+
+The rows are in the order a menu lists them, and each name appears once —
+case-insensitively, the first source to claim a name keeps it, in the order
+builtins, the agent's commands, plugin rows, disk skills — except that a row
+with `requires` claims no name (below). Each row:
+
+| field | meaning |
+|---|---|
+| `name` | the token without its `/`: one run of characters with no whitespace or control character, what a client matches, accepts and runs the row by. Always present, and never cut |
+| `description` | what the TUI's menu draws for the row, folded onto one line: a builtin's own sentence, or the advertised, plugin or skill description. Absent when there is none |
+| `source` | `builtin` (craze's own), `agent` (a command the agent advertised), `plugin` (a plugin command or skill craze found and expands) or `skill` (a disk skill the agent resolves) |
+| `plugin`, `qualified` | a plugin row's: the plugin it came from, and its `plugin:name` spelling — present only where it differs from `name`, the second spelling the row answers to |
+| `requires` | the session capability the row needs, `stop` or `aside`: show the row only where that capability is `true`. Absent for none |
+| `whileWorking` | `true` where the row runs while a turn is running — craze's or the agent's own (`foreignTurn`) — rather than waiting for the turn to end. Absent is `false`; a `prompt` row leaves it absent, since a prompt queues |
+| `run.kind` | what selecting the row does — the next table |
+| `run.arg` | absent for none (the row takes no argument), `optional` or `required`; `run.argHint` is how to show it (`<title>`) |
+| `run.method` | a `method` row's method: `session.setTitle`, `session.set` or `session.stop` |
+| `run.param` | the parameter the argument fills: `title` (`session.setTitle`), `question` (an `aside` row) |
+| `run.setting` | a `session.set` row's `setting`, sent verbatim: `{kind: "mode", value}`, the mode already resolved to an id the session advertised |
+| `run.picker` | a `picker` row's picker: `model` |
+| `run.local` | a `local` row's action, the client's own: `help`, `clear`, `tasks`, `theme` or `connect` |
+| `run.reason` | why an `unavailable` row cannot run, in the words the TUI refuses it with (`mode ask is not advertised`) |
+
+| `run.kind` | selecting the row |
+|---|---|
+| `prompt` | sends `/name` — or `/qualified` — and the argument, if any, after a space, as a `session.prompt`'s text, which starts a turn or queues as any prompt does. craze expands a plugin row into its file's prompt on the host; an agent command or a skill goes to the agent as typed |
+| `method` | calls `run.method` with its own params plus the client's usual `sessionId` and `commandId`: `session.setTitle` with the argument as `title`; `session.set` with `setting` = `run.setting`; `session.stop` with nothing more |
+| `picker` | opens the client's picker named by `run.picker`. `model`'s lists the info document's `catalogs.models` (and the catalog section's, [live models](#live-models)) and sends `session.set` `{kind: "model"}`; a client that parses `<model> [effort]` may also take the model inline, and one that does not shows only the picker |
+| `aside` | asks a side question, [`session.aside`](#sessionaside), the argument as `question` |
+| `local` | runs the client's own action named by `run.local` — a help view, clearing the client's transcript view, the tasks panel, the theme picker (or `/theme <name>`), storing a provider key. None touches the session, and `connect` stores a key on the machine the client runs on, so a remote client hides it |
+| `unavailable` | nothing: the row cannot run in this session. A client lists it or hides it as it likes, and selecting it reports `run.reason`. The TUI lists the mode rows a session shows modes for, and refuses one the session did not advertise this way |
+
+Every value of `source`, `requires` and the `run` keys is open — a later host
+may add one, and the schema does not close them: **a client hides a row with a
+value it does not know**, and only that row — an unknown `source`, `run.kind`,
+`run.method`, `requires` or `run.arg`, a `run.picker` or `run.local` it has no
+action for; a `run` with no `kind` has a kind the client does not know.
+
+**Malformed rows are dropped individually.** A row a client cannot read — not
+an object, a key of the wrong type (`"name":42`, `"run":5`), a `name` that is
+empty or not one token — is dropped, and only that row: a client never rejects
+the section, still less the event, for one row, and a `slash` or `items` value
+that is not an object or an array is a section with no rows (which still
+replaces the catalog, as `{}` does). A key a client does not know is ignored.
+craze's own decoder does exactly this, so one bad row from a host never ends a
+`craze attach` or a remote TUI's stream; craze itself never writes such a
+row.
+
+### Which rows a client shows
+
+- **`requires`.** A row with `requires` is shown only where that session
+  capability is `true` — `stop` for [`session.stop`](#sessionstop), `aside`
+  for [`session.aside`](#sessionaside). It is always listed, because whether
+  a session is served with them is the host's fact, not the session's.
+- **A `requires` row does not claim its name.** The catalog deduplicates the
+  rows after it as if it were not there, so a client keeps, per name
+  (case-insensitively), **the first row it actually shows**. On cursor
+  (`aside` absent) the builtin `/btw` is hidden and an agent's own `/btw`,
+  listed after it, shows; on grok the builtin shows and the agent's is hidden.
+- **Client rows.** A client may add rows of its own, and **a client row wins
+  over a catalog row with the same name (case-insensitively), which it
+  hides.** The host never lists one: whether a client has a session list is
+  the client's fact. The TUI adds `/sessions`, before `/exit`, where it has a
+  hub session list; without one, an agent's own `/sessions` shows.
+- **`whileWorking`.** While a turn is running — `activity` `working`, or a
+  `foreignTurn` — a client runs only the rows with `whileWorking`, and sends a
+  `prompt` row as it sends any prompt (it queues). The TUI leaves any other
+  builtin in the composer until the turn ends; the host itself refuses
+  nothing for it.
+
+### Carrying it
+
+The section follows the list sections' rules. **Absent** is unchanged;
+**present** replaces the whole catalog; **present and empty** (`{}`) clears it.
+Restoring a snapshot and folding the deltas after it gives the catalog
+folding the whole stream gives.
+
+- **One delta per change.** A delta that carries `commands` or `plugins`
+  always restates `slash` beside them — even when the catalog came out the
+  same, so a client reads the two as one change; a change of the disk skills
+  alone carries `slash` alone; an update that changes nothing publishes
+  nothing. Every install restates it: session/new's, and a load's, stamped
+  `replayed` before the replay's `end`.
+- **Disk skills.** For a cursor, grok or gx session the host looks at the
+  provider's skills on disk at the install, after every turn of craze's ends
+  (done, cancelled or failed), at each `available_commands_update`, and at
+  each `session.attach`: a skill created while the session sat idle reaches
+  a client at the next attach — **in that attach's snapshot or a slash-only
+  delta after it**: the look starts as the attach does, and can finish before
+  the snapshot is cut, so a client must not wait for a delta its snapshot
+  already made unnecessary — or after the next turn. A native session's
+  skills are plugin rows, found once at its start.
+- **The snapshot.** `settings.slash` is the last section a delta carried,
+  absent when there is none, and `settings.truncated.slash` says the snapshot
+  did not carry it whole. **Truncation never alters an action**: a row whose
+  `name`, `source`, `plugin`, `qualified`, `requires` or `run` key other than
+  `argHint` and `reason` is over 262,144 bytes (256 KiB, the snapshot's item
+  cap) is **dropped**, never cut, since a cut name would run a command that
+  does not exist; `description`, `run.argHint` and `run.reason` are cut to
+  their head at that size, as a command's description is; and at most **512**
+  rows are carried. `truncated.slash` is set when a row was dropped or a
+  string cut, and the next section a delta carries clears it. Real catalogs
+  are far inside these bounds.
+- **The catalog yields to the snapshot's budget.** It repeats what the
+  `commands` and `plugins` beside it already carry, so it is never what makes
+  an attach fail: when the snapshot's mandatory state — with the main
+  transcript's newest entry — would not fit its budget with the catalog, the
+  snapshot carries no `settings.slash` and sets `settings.truncated.slash`.
+  **`truncated.slash` with no `slash` means the catalog did not fit**: the
+  client holds no catalog until the next `slash` section a delta carries
+  restates it — at the next change of the session's commands, plugins or disk
+  skills — and meanwhile offers what it would without one (the TUI builds its
+  menu itself). Where even that mark would not fit, it is left out too, and the
+  snapshot is exactly the one a host without the catalog would send; a client
+  then reads it as a session whose catalog is still to come. An attach that
+  would succeed without the catalog always succeeds with it.
+- **The stream** carries the section whole, uncapped, as it carries
+  `commands` and `plugins`: an event over the event log's record limit is
+  [omitted](#cursors-and-resets) like any other, and the client attaches
+  again, its snapshot bounded as above.
+- It is not in `session.state`'s `settings`: the stream and the snapshot are
+  where it is read.
+
+A slash-only delta prints no `craze prompt --json` line, but takes a `seq`
+like every event. The section is additive: no codec version bump, and a
+client that predates it skips the key and folds every other section exactly
+as before — the capability `slashCatalog` is how a client knows to look.
+
+### The menu, as the TUI draws it
+
+How a client matches, completes and runs what is typed is its own; the TUI's
+rules, which a client can follow to feel the same:
+
+- **The token** is the run of non-whitespace characters around the cursor,
+  starting with `/` at the start of the draft or after whitespace (so
+  `foo/bar` and `https://x` are never one). A bare `/` lists every row.
+- **Builtins** (`source` `builtin`) are offered only when the token is the
+  draft's first word and the draft is one line — the only place one runs.
+- **Matching** is case-insensitive, in four groups, each in catalog order:
+  `name` starting with what was typed, then `qualified` starting with it,
+  then `name` containing it, then `qualified` containing it. No fuzzy
+  matching and no cap; the list scrolls.
+- **Accepting** a row (Tab) replaces the token with `/name ` — or
+  `/qualified `, when the typed token holds a `:` and the row has a
+  `qualified` — taking in one space that already followed it.
+- **Enter** on a highlighted row whose name (either spelling) is not yet
+  fully typed accepts it; once the token spells it, Enter runs it (or sends
+  it). A bare `/` accepts the first row.
 
 ## Errors and retry
 
@@ -1804,7 +2056,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-nine scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is thirty-two scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1855,7 +2107,29 @@ own `session.state` reply, then a follow-up carrying the first pair as
 by `session.aside.cancel` — the aside's `aborted`, reason `context`, before
 the cancel's `{}` — and the same cancel again, answered `{}` (28); and a
 session that answers none — cursor's, or an older host's — whose info
-document says no `aside`, refusing both methods `aside_unsupported` (29).
+document says no `aside`, refusing both methods `aside_unsupported` (29); a
+session that publishes the [slash catalog](#slash-catalog) — its info
+document saying `slashCatalog: true`, its attach snapshot carrying
+`settings.slash` — whose agent's commands update is one delta carrying the
+commands and the catalog restated (an agent's own `/help` shadowed by the
+builtin, its own `/btw` listed after the builtin's `requires` row), an
+identical update publishing nothing, a disk skill found by a scan the
+catalog alone (a skill an agent command shadows left out), an identical scan
+nothing — a `session.sync` answering at the seq the two deltas left — and a
+second client whose attach snapshot carries the catalog as it now stands
+(30); and a native session's catalog — `/connect` after `/model`, a plugin row
+with its `qualified` spelling and one shown qualified because a builtin
+holds its bare name, its info document saying `stop`, `aside` and
+`slashCatalog` — whose `plan` row's `setting` and `rename` row's `title`,
+sent as written, change the mode and the title (31); and a hub whose
+`session.create` takes a title — its `hello` saying `createTitle: true` — a
+create whose `title` of tabs, runs of spaces, escape sequences, a zero-width
+space and a bidi override is normalized, its `session` row carrying the
+normalized title, its repeat with that title spelt plainly answered the same,
+the same `requestId` with another title and with none refused
+`request_conflict`, a blank title, one of nothing but zero-width and bidi
+runes and (marked `invalid`) an empty one refused `bad_request`, and a titled
+create whose session's start fails, `start_failed` with its cause (32).
 Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
@@ -1863,12 +2137,15 @@ directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt`, `rowFacts`, `presence`, `modelsRefresh` and `aside` turn on what an older host does not have, and
-`models` gives it a catalog of its own. The seventeen fixtures from before
-`modelsRefresh` without one are, byte for byte, an older host to a newer
-client. `TestWireFixtures` replays
+`startedAt`, `rowFacts`, `presence`, `modelsRefresh`, `aside` and `slash`
+turn on what an older host does not have, `models` gives it a catalog of its
+own, `provider` names the provider its session reports (`native`, say) in
+place of the Stub's own, and `plugins` are the plugin rows its session
+starts with, each as the `plugins` section writes one. The seventeen
+fixtures from before `modelsRefresh` without one are, byte for byte, an older
+host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
-above as it sends or reads it — except a c2s line fixtures 10 and 26 mark
+above as it sends or reads it — except a c2s line fixtures 10, 26 and 32 mark
 `"invalid": true`: deliberately not a well-formed request of a method
 protocol 1 defines with today's params (an unknown method, or a field no
 schema allows), sent as it stands and held to no request schema, since it is
@@ -1895,7 +2172,11 @@ minted) as `cccccccccccc`, its session's incarnation as
 `CREATED-INCARNATION`, and its pid, in the create's result, as `999999999`.
 A `host` line that also carries `createOptions` — a `sessions.createOptions`
 result, written out — has that hub answer the method with it, as it stands,
-at every call (it needs `hubCreates`).
+at every call (it needs `hubCreates`); one that says `createTitle` has a hub
+whose create takes a `title`, which the fake `craze serve` it spawns seeds
+in its session (it needs `hubCreates` too). Without it the hub is one from
+before titles, whose `hello` has no `createTitle`, so every two-socket
+fixture before 32 is, byte for byte, what it was.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
@@ -1922,10 +2203,15 @@ fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
 `hang_next`, `run_stop`, `stage_models` — what the next
 `session.models.refresh` of a `modelsRefresh` host takes up — `hold_aside` —
 the next `session.aside` of an `aside` host parked after its first
-notification, until it is cancelled — and `unlist` — a `--registry` host leaving the
-registry while it keeps serving the connections it has). The binary has no
-flag for the `modelsRefresh` or `aside` opt-ins yet, so its host refuses both
-features as an older host does, and those two ops change nothing there. Its clock, ids, host id, craze version, pid and token source
+notification, until it is cancelled — `set_commands` and `set_skills` — an
+agent's whole command list, `{"commands":[{name, description}]}`, and the
+disk skills a scan found, `{"skills":[{name, description}]}`, which a `slash`
+host publishes as a live session does — and `unlist` — a `--registry` host
+leaving the registry while it keeps serving the connections it has). The
+binary has no flag for the `modelsRefresh`, `aside` or `slash` opt-ins yet,
+so its host refuses the first two features and publishes no slash catalog,
+as an older host does: `stage_models` and `hold_aside` change nothing there,
+and `set_commands` publishes the commands section alone. Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry
 carries its real pid, as every host's does).
@@ -2173,10 +2459,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1
 
 The hub's result. `hostId`, `crazeVersion` and `pid` are this hub's own.
 `rosterSubscribe`, `sessionCreate`, `connect` and `createOptions` are what
-the recipe uses:
+the recipe uses (`createTitle` says its create would take a `title`, which
+the recipe does not send):
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
 ```
 
 **5. What a create can start.**

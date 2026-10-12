@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,10 +27,19 @@ type Skill struct {
 // itself advertises arrive over ACP as available_commands_update and are
 // merged by the slash catalog, not here.
 func DiscoverSkills(p Provider, cwd, home string) []Skill {
-	return walkProviderSkills(p.SkillScan(), cwd, home)
+	return discoverSkills(context.Background(), p, cwd, home)
 }
 
-func walkProviderSkills(scan SkillScan, workspace, home string) []Skill {
+// discoverSkills is DiscoverSkills that gives up when ctx ends: the walk stops
+// at the next directory entry and returns what it had found. The live
+// session's scanner (slash_scan.go) runs it under a context its Close cancels,
+// so a session closing is not left walking a large tree for a result it will
+// drop.
+func discoverSkills(ctx context.Context, p Provider, cwd, home string) []Skill {
+	return walkProviderSkills(ctx, p.SkillScan(), cwd, home)
+}
+
+func walkProviderSkills(ctx context.Context, scan SkillScan, workspace, home string) []Skill {
 	var bases []string
 	seenBase := make(map[string]struct{})
 	for _, base := range []string{workspace, home} {
@@ -51,16 +61,16 @@ func walkProviderSkills(scan SkillScan, workspace, home string) []Skill {
 	nFiles := 0
 	for _, base := range bases {
 		for _, rel := range scan.RelRoots {
-			if nFiles >= maxSkillFiles {
+			if nFiles >= maxSkillFiles || ctx.Err() != nil {
 				return out
 			}
-			walkSkillRoot(filepath.Join(base, rel), scan, &nFiles, seenName, &out)
+			walkSkillRoot(ctx, filepath.Join(base, rel), scan, &nFiles, seenName, &out)
 		}
 	}
 	return out
 }
 
-func walkSkillRoot(root string, scan SkillScan, nFiles *int, seen map[string]struct{}, out *[]Skill) {
+func walkSkillRoot(ctx context.Context, root string, scan SkillScan, nFiles *int, seen map[string]struct{}, out *[]Skill) {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return
@@ -75,7 +85,7 @@ func walkSkillRoot(root string, scan SkillScan, nFiles *int, seen map[string]str
 			}
 			return nil
 		}
-		if *nFiles >= maxSkillFiles {
+		if *nFiles >= maxSkillFiles || ctx.Err() != nil {
 			return fs.SkipAll
 		}
 		if scan.SkipCursorPlugins && isCursorPlugins(path) {

@@ -253,7 +253,7 @@ description: home
 ---
 `)
 	items := scanDiskSkills(ws, home)
-	if len(items) != 1 || items[0].Desc != "project" {
+	if len(items) != 1 || items[0].Description != "project" {
 		t.Fatalf("project should win: %#v", items)
 	}
 }
@@ -312,14 +312,20 @@ func TestScanSkillsSkipsOversize(t *testing.T) {
 	}
 }
 
-func catalogItems(items []slashItem, name string) (slashItem, bool) {
+// scanDiskSkills is the cursor filesystem walk, for the tests that pin
+// project-beats-home and the plugin skip without constructing a Model.
+func scanDiskSkills(workspace, home string) []agent.Skill {
+	return agent.DiscoverSkills(agent.CursorProvider(), workspace, home)
+}
+
+func catalogItems(items []agent.Skill, name string) (agent.Skill, bool) {
 	want := strings.ToLower(name)
 	for _, it := range items {
 		if strings.ToLower(it.Name) == want {
 			return it, true
 		}
 	}
-	return slashItem{}, false
+	return agent.Skill{}, false
 }
 
 // TestSlashCatalogCursorNamesByDirectory pins cursor's verified rule through

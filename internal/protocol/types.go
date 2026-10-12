@@ -168,6 +168,13 @@ type Endpoint struct {
 // served; a newer hello's member reaches an older client, which ignores a
 // result member it does not know (protocol.md, "Tolerant inbound, strict
 // outbound").
+//
+// CreateTitle is plan 043's (D8, P11), omitted when false in the same way:
+// the hub's session.create takes a title, which the session it starts holds
+// from its first row on. A hub from before it refuses a create naming one
+// unknown_field, so a client that has a title to set checks this first —
+// craze new --title asks the hub for it (hub.Ensure), and an older hub is
+// its LacksError, never a refused or silently untitled create.
 type ConnectionCapabilities struct {
 	RosterSubscribe bool `json:"rosterSubscribe"`
 	SessionCreate   bool `json:"sessionCreate"`
@@ -176,6 +183,7 @@ type ConnectionCapabilities struct {
 	Snapshot        bool `json:"snapshot"`
 	AttachWhenNow   bool `json:"attachWhenNow"`
 	CreateOptions   bool `json:"createOptions,omitempty"`
+	CreateTitle     bool `json:"createTitle,omitempty"`
 }
 
 // HostCapabilities is a session host's connection capabilities in protocol
@@ -196,7 +204,9 @@ func HostCapabilities() ConnectionCapabilities {
 // way to spawn a host (internal/hub's Options.Creates, nil only in a test).
 // CreateOptions is false here: the hub sets it in its hello only when it is
 // given an answer to sessions.createOptions (Creates.Options; plan 036
-// §3.4).
+// §3.4). So is CreateTitle: the hub sets it only when the hosts it spawns
+// take a title (Creates.Title; plan 043 D8) — every craze hub's, and no test
+// hub's that does not say so, so no hello from before it moves.
 func HubCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
@@ -371,6 +381,15 @@ type CatalogMode struct {
 // modelsRefresh is: absent is cursor, or an older host, which answers the
 // methods unsupported (aside_unsupported, or unknown_method from a host from
 // before them), and a client then offers no side questions.
+//
+// SlashCatalog is the session's own too (plan 043 P2, D5): true where the
+// session publishes the slash catalog — the state delta's and the snapshot's
+// settings' slash section, every `/` row it offers and what running each
+// means — a live ACP session and a native one, detached or TUI-hosted. It is
+// omitted when false, as aside is: absent is an older host, or a session that
+// is not craze's own (the fake host's by default, so no fixture from before it
+// moves), and a client then offers no `/` menu from the stream. True with no
+// section yet — a session still starting — is a catalog still to come.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -392,6 +411,7 @@ type SessionCapabilities struct {
 	Presence            bool `json:"presence,omitempty"`
 	ModelsRefresh       bool `json:"modelsRefresh,omitempty"`
 	Aside               bool `json:"aside,omitempty"`
+	SlashCatalog        bool `json:"slashCatalog,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -715,6 +735,19 @@ type ConnectParams struct {
 // same params answers the first one's result, or joins it while it runs —
 // across a hub restart too, while its session's host lives — and one with
 // other params is bad_request, reason request_conflict.
+//
+// Title (plan 043 D8) is the session's name from its start, as a /rename
+// would give it — pinned against any title the agent or a first prompt
+// would give it — absent for none; only a hub whose hello says createTitle
+// takes it. The hub normalizes it to exactly what the session will store
+// (engine.NormalizeTitle: the session's ingestion scrub — escape sequences,
+// controls, zero-width and bidi formatting runes dropped, invalid UTF-8 as
+// U+FFFD — then one line, whitespace collapsed, at most 120 runes, the ends
+// trimmed), and one that normalizes to nothing — empty, blank, or nothing but
+// dropped runes — is bad_request: a client with no title omits it. The
+// normalized title is part of the create's identity: a repeat whose title
+// normalizes the same joins it; another title, or a title where the first
+// had none, is request_conflict.
 type CreateParams struct {
 	Cwd            string         `json:"cwd"`
 	Prompt         string         `json:"prompt,omitempty"`
@@ -724,6 +757,7 @@ type CreateParams struct {
 	Fast           *bool          `json:"fast,omitempty"`
 	PermissionMode PermissionMode `json:"permissionMode,omitempty"`
 	RequestID      string         `json:"requestId,omitempty"`
+	Title          string         `json:"title,omitempty"`
 }
 
 // CreateResult is a create that started its session (plan 032 §3.10): the

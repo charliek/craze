@@ -38,8 +38,20 @@ const DefaultSnapshotBytes = 4 << 20
 //     held to the queue's 32 KiB limit);
 //   - every string of every settings section — the title, mode and model, the
 //     config, command and plugin catalogs, the send-now — marking that
-//     section in Settings.Truncated.
+//     section in Settings.Truncated;
+//   - the slash catalog's display text — each row's description, argument
+//     hint and unavailable reason — marking Settings.Truncated.Slash. Its
+//     action fields are never cut (plan 043 P7, capSlash): a row with one over
+//     ItemCap is dropped instead, and so is every row past SlashRows.
 const ItemCap = 256 << 10
+
+// SlashRows is how many rows of the slash catalog a snapshot carries at most
+// (plan 043 P7): a NUMBER of items no per-item cap bounds (ErrSnapshotTooLarge),
+// held here so a catalog of any size cannot alone make every attach fail. A row
+// past it is dropped and Settings.Truncated.Slash set. Real catalogs — a dozen
+// builtins and what the agent, the plugins and the disk skills add — are far
+// inside it.
+const SlashRows = 512
 
 // ErrSnapshotTooLarge is Snapshot's refusal: the mandatory sections with the
 // main transcript's newest entry — or alone, when it holds none — encode to
@@ -171,7 +183,9 @@ type AgentRow struct {
 // where it was cut (ItemCap), so no one oversized string makes every snapshot
 // fail. What can still put the mandatory sections over the budget is an
 // unbounded NUMBER of items — asks, roster rows, todos, queue rows, catalog
-// entries — and that is ErrSnapshotTooLarge, never a drop.
+// entries — and that is ErrSnapshotTooLarge, never a drop; but for the slash
+// catalog, derived from the commands and plugins the settings carry anyway,
+// which is left out, marked, rather than be the cause (cut.snapshot).
 //
 // Under the model's lock it only takes the cut: pointer copies of the entries,
 // the roster and the asks, and each open run's tail (≤ StreamText). Everything
@@ -253,7 +267,43 @@ func (m *Model) snapshotSized(budget int) (*Snapshot, int, error) {
 // snapshot builds the snapshot from a cut, after the lock (see Snapshot).
 // focus is the child whose transcript is filled right after the main
 // transcript's newest entry (SnapshotFor), and "" for Snapshot's order.
+//
+// The slash catalog yields (plan 043 C2, review W4): it is derived from the
+// commands and plugins the settings already carry, so it may never be what
+// makes a snapshot ErrSnapshotTooLarge — an attach that succeeded before the
+// catalog existed must succeed beside it. A cut whose mandatory sections, with
+// the main transcript's newest entry, do not fit the budget with the catalog
+// is cut again without it, settings.truncated.slash saying the catalog was
+// left out: a client has none until the next slash section a delta carries,
+// and offers what it would without one meanwhile (the TUI builds its own). In
+// the one case where even that mark does not fit, it is left out too, and the
+// snapshot is exactly the one a host from before the catalog would have cut
+// for this model. Each attempt is a whole build over the same cut, which no
+// build writes — every cap copies what it cuts (capQueue, capEach, capSlash,
+// the value copies the rest take) — so each attempt sees the cut exactly as
+// the first did; only a refusal for size is retried.
 func (c *cut) snapshot(budget int, focus string) (*Snapshot, int, error) {
+	s, size, err := c.build(budget, focus, c.settings)
+	if !errors.Is(err, ErrSnapshotTooLarge) {
+		return s, size, err
+	}
+	st := c.settings
+	if len(st.Slash) > 0 {
+		st.Slash, st.Truncated.Slash = nil, true
+		if s, size, err = c.build(budget, focus, st); !errors.Is(err, ErrSnapshotTooLarge) {
+			return s, size, err
+		}
+	}
+	if st.Truncated.Slash {
+		st.Truncated.Slash = false
+		return c.build(budget, focus, st)
+	}
+	return s, size, err
+}
+
+// build is one attempt at the snapshot of the cut, with settings as the
+// settings it carries (snapshot).
+func (c *cut) build(budget int, focus string, settings Settings) (*Snapshot, int, error) {
 	s := &Snapshot{
 		Version:     SnapshotVersion,
 		Incarnation: c.incarnation,
@@ -263,7 +313,7 @@ func (c *cut) snapshot(budget int, focus string) (*Snapshot, int, error) {
 		Ended:       c.ended,
 		Turn:        capTurn(c.turn),
 		Replaying:   c.replaying,
-		Settings:    capSettings(c.settings),
+		Settings:    capSettings(settings),
 	}
 	var tc capper
 	s.Todos = capEach(&tc, c.todos, capTodo)
@@ -743,17 +793,29 @@ func capTodo(c *capper, t agent.Todo) agent.Todo {
 
 // capQueue is the queue with each row's Text capped at ItemCap (r5 finding 2),
 // and the ids, in queue order, of the rows cut here or already marked (a
-// model restored from a snapshot that cut them). q is the cut's own copy.
+// model restored from a snapshot that cut them). q, the cut's, is read and
+// never written — a row cut is a copy's, capEach's rule — so every attempt a
+// snapshot makes at one cut (cut.snapshot's retries without the slash
+// catalog) caps the rows as the first did and marks the same ones (plan 043
+// review: an in-place cut left the retry a short row it no longer knew was
+// cut).
 func capQueue(q []agent.QueuedPrompt, marked map[string]bool) ([]agent.QueuedPrompt, []string) {
 	var ids []string
+	out, copied := q, false
 	for i := range q {
 		var c capper
-		q[i].Text = c.str(q[i].Text)
+		text := c.str(q[i].Text)
+		if c.cut {
+			if !copied {
+				out, copied = slices.Clone(q), true
+			}
+			out[i].Text = text
+		}
 		if c.cut || marked[q[i].ID] {
 			ids = append(ids, q[i].ID)
 		}
 	}
-	return q, ids
+	return out, ids
 }
 
 // capSettings is the settings with every string of every section capped at
@@ -793,11 +855,72 @@ func capSettings(s Settings) Settings {
 		return p
 	})
 	t.Plugins = t.Plugins || c.cut
+	var cut bool
+	s.Slash, cut = capSlash(s.Slash)
+	t.Slash = t.Slash || cut
 	c = capper{}
 	sn := &s.SendNow
 	sn.Text, sn.FromRow, sn.Turn = c.str(sn.Text), c.str(sn.FromRow), c.str(sn.Turn)
 	t.SendNow = t.SendNow || c.cut
 	return s
+}
+
+// capSlash is the slash catalog as a snapshot carries it (plan 043 P7), and
+// whether anything was cut or dropped. Truncation never alters an action, the
+// rule the catalog section keeps ("an id cut short would be one no
+// session.set could name"): a row's action fields (slashActionOver) are what a
+// client matches, accepts, runs and dispatches by, so a row with one over
+// ItemCap is dropped whole rather than carried naming a command, a method or
+// a setting that does not exist; its display text — the description, the
+// argument hint and an unavailable row's reason — is carried as its ItemCap
+// head, as a command's description is. Of the rows that survive, the first
+// SlashRows are kept and the rest dropped. The result is a slice of its own:
+// items, the cut's, is read and never written, so a cut can be built from
+// again (snapshot's retry without the catalog).
+//
+// Dropping a row never makes another row of its name stand in for it, but in
+// one case: the catalog lists each name once, except that a requires row
+// claims nothing (agent.SlashItem.Requires), so a later row of a requires
+// row's name would be shown where the requires row was dropped. Every requires
+// row is a builtin near the head of the catalog with short, fixed fields, so
+// neither bound ever reaches one.
+func capSlash(items []agent.SlashItem) ([]agent.SlashItem, bool) {
+	if len(items) == 0 {
+		return nil, false
+	}
+	out := make([]agent.SlashItem, 0, min(len(items), SlashRows))
+	cut := false
+	for _, it := range items {
+		if slashActionOver(it) || len(out) == SlashRows {
+			cut = true
+			continue
+		}
+		var c capper
+		it.Description, it.Run.ArgHint, it.Run.Reason = c.str(it.Description), c.str(it.Run.ArgHint), c.str(it.Run.Reason)
+		cut = cut || c.cut
+		out = append(out, it)
+	}
+	return nilIfEmpty(out), cut
+}
+
+// slashActionOver reports whether one of a slash row's action fields is over
+// ItemCap: every string of the row but its display text (capSlash) — the
+// name, the source, the plugin and its qualified spelling, the requires, and
+// the run's kind, method, param, setting, arg, picker and local action. A
+// string field a SlashItem gains belongs in this list or among capSlash's
+// display text, and TestASlashSnapshotCutsTextAndDropsActions, which fills
+// every string of a row by reflection, fails until it is in one of them.
+func slashActionOver(it agent.SlashItem) bool {
+	r := it.Run
+	for _, s := range [...]string{
+		it.Name, it.Source, it.Plugin, it.Qualified, it.Requires,
+		r.Kind, r.Method, r.Param, r.Setting.Kind, r.Setting.Value, r.Arg, r.Picker, r.Local,
+	} {
+		if len(s) > ItemCap {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------------------------------------------ Restore
@@ -883,6 +1006,9 @@ func Restore(s *Snapshot, o Options) *Model {
 		m.settings.Usage = &c
 	}
 	m.settings.Catalog = cloneCatalog(s.Settings.Catalog)
+	// The slash catalog likewise (plan 043 P6): the restored model's own rows,
+	// so a snapshot its holder goes on writing reaches none of the model's.
+	m.settings.Slash = nilIfEmpty(slices.Clone(s.Settings.Slash))
 	m.queue = nilIfEmpty(slices.Clone(s.Queue))
 	for _, id := range s.TruncatedQueue {
 		if !slices.ContainsFunc(m.queue, func(q agent.QueuedPrompt) bool { return q.ID == id }) {

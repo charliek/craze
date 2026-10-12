@@ -320,6 +320,7 @@
         "config": {"$ref": "#/$defs/config"},
         "commands": {"$ref": "#/$defs/commands"},
         "plugins": {"$ref": "#/$defs/plugins"},
+        "slash": {"$ref": "#/$defs/slash"},
         "sendNow": {"$ref": "#/$defs/sendNow"},
         "usage": {"$ref": "#/$defs/usage"},
         "catalog": {"$ref": "#/$defs/catalog"},
@@ -398,6 +399,56 @@
       "type": "object",
       "properties": {
         "plugins": {"type": "array", "items": {"$ref": "#/$defs/pluginCommand"}}
+      },
+      "additionalProperties": false
+    },
+    "slash": {
+      "description": "The slash catalog section (SlashCatalog; a session whose capabilities.slashCatalog is true): every / row the session offers, in the order a menu lists them, in full; {} for none. A delta that carries commands or plugins restates it beside them, and one that carries it alone is a change of the disk skills the host scanned. Absent from every delta of a session that does not publish it, and never null. Nothing in it is cut: a row's action fields (every key but description, run.argHint and run.reason) are what a client acts on. A decoder reads it row by row: a row that does not match slashItem, or whose name is not one token, is dropped alone, and a slash or items value that is not an object or an array is a section with no rows — never a reason to reject the section or the event. craze writes neither.",
+      "type": "object",
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "#/$defs/slashItem"}}
+      },
+      "additionalProperties": false
+    },
+    "slashItem": {
+      "description": "One slash row: name is the token without its /, always written, never empty and never holding whitespace or a control character (a row whose name is not one token is dropped by a decoder). source is builtin, agent, plugin or skill; plugin and qualified are a plugin row's, qualified only where it differs from name (the second spelling the row answers to); requires is the session capability the row needs (stop or aside), and a client shows the row only where that capability is true — a requires row claims no name, so a client keeps, per name, the first row it shows; whileWorking says the row runs while a turn is running rather than being refused (absent false; a prompt row omits it, it queues). The values of source, requires and every run key are not closed here: a client hides a row with a value it does not know, and a later host may add one.",
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string"},
+        "source": {"type": "string"},
+        "plugin": {"type": "string"},
+        "qualified": {"type": "string"},
+        "requires": {"type": "string"},
+        "whileWorking": {"type": "boolean"},
+        "run": {"$ref": "#/$defs/slashRun"}
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "slashRun": {
+      "description": "What running a slash row does, by kind: prompt (send /name and its argument as a session.prompt's text), method (call method — session.setTitle, session.set or session.stop — the argument filling the param it names, session.set sending setting verbatim), picker (open the picker it names: model), aside (ask a side question, session.aside, the argument filling param), local (the client's own action it names: help, clear, tasks, theme, connect) or unavailable (it cannot run here, and selecting it reports reason). arg is absent for none, optional or required; argHint is how to show it.",
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string"},
+        "method": {"type": "string"},
+        "param": {"type": "string"},
+        "setting": {"$ref": "#/$defs/slashSetting"},
+        "arg": {"type": "string"},
+        "argHint": {"type": "string"},
+        "picker": {"type": "string"},
+        "local": {"type": "string"},
+        "reason": {"type": "string"}
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    "slashSetting": {
+      "description": "session.set's setting object as a method row sends it, verbatim: its kind (mode) and value, a mode already resolved to an id the session advertised.",
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string"},
+        "value": {"type": "string"}
       },
       "additionalProperties": false
     },

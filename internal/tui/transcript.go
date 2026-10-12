@@ -728,12 +728,14 @@ func clampWidth(s string, w int) string {
 // sanitizeLine folds a string onto one line: escape sequences and control
 // characters go, and runs of whitespace collapse. Agent text is already
 // sanitised at ingestion; this keeps titles to one row regardless.
-func sanitizeLine(s string) string {
-	if s == "" {
-		return ""
-	}
-	return strings.Join(strings.Fields(dropControls(ansi.Strip(s))), " ")
-}
+//
+// It is agent.DisplayLine, the one implementation of the rule (plan 043 C1):
+// the slash catalog the host builds folds its descriptions by it, so the menu
+// a remote client draws and the one this TUI draws agree byte for byte. Its
+// ansi.Strip is a transcription of the x/ansi one this function used to call,
+// and TestDisplayLineMatchesTheTUIsAnsiStrip holds the two equal, so a bump of
+// x/ansi that changed ansi.Strip fails the gate rather than splitting them.
+func sanitizeLine(s string) string { return agent.DisplayLine(s) }
 
 // plainLine makes one agent-supplied line safe to draw while keeping its
 // indentation: escape sequences go, tabs become spaces so widths add up.

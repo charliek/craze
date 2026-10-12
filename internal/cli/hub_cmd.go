@@ -74,8 +74,10 @@ func runHub(cmd *cobra.Command, ready *hub.ReadyPipe, sigs <-chan os.Signal) err
 // hubCreates is what the hub's session.create reads of this build (plan 032
 // §3.10): the config file's provider, at each create — the default of a
 // create that names none — and the providers craze can start, by the name
-// --provider takes; and sessions.createOptions' answer (hubCreateOptions,
-// plan 036 §3.4).
+// --provider takes; sessions.createOptions' answer (hubCreateOptions, plan
+// 036 §3.4); and that the hosts it spawns — craze serve, this binary — take
+// a title (craze serve --title, plan 043 D8), which its hello says
+// (createTitle).
 func hubCreates() *hub.Creates {
 	return &hub.Creates{
 		DefaultProvider: tui.ConfigProvider,
@@ -84,6 +86,7 @@ func hubCreates() *hub.Creates {
 			return err == nil
 		},
 		Options: hubCreateOptions,
+		Title:   true,
 	}
 }
 

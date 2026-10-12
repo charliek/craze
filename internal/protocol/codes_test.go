@@ -163,7 +163,7 @@ func TestTheLimits(t *testing.T) {
 		t.Fatalf("HostLimits = %+v", l)
 	}
 	if c := protocol.HostCapabilities(); c.RosterSubscribe || c.SessionCreate || c.Multiplex || c.Connect || !c.Snapshot || !c.AttachWhenNow ||
-		c.CreateOptions {
+		c.CreateOptions || c.CreateTitle {
 		t.Fatalf("HostCapabilities = %+v", c)
 	}
 	// The hub's (plan 032 §3.6, §3.10): the roster subscription, session
@@ -172,9 +172,10 @@ func TestTheLimits(t *testing.T) {
 	// createOptions is never in either static set (plan 036 §3.4): the hub
 	// writes it in its hello only when it is given an answer to
 	// sessions.createOptions, so the six-field hellos of a host and of every
-	// hub without one read exactly as they did.
+	// hub without one read exactly as they did. Nor is createTitle (plan 043
+	// D8): the hub writes it only when its hosts take a title.
 	if c := protocol.HubCapabilities(); !c.RosterSubscribe || !c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow ||
-		c.CreateOptions {
+		c.CreateOptions || c.CreateTitle {
 		t.Fatalf("HubCapabilities = %+v", c)
 	}
 }

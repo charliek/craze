@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,11 @@ import (
 //     AnsweredEarly and Report with s.mu released — each takes a value read
 //     under s.mu a moment earlier — and the registry calls nothing but its log
 //     and its clock, so it can never reach back.
+//   - **s.mu and the skill scanner's mutex are never nested either** (plan 043
+//     P5, slash_scan.go). The session asks for a scan, arms and closes the
+//     scanner with s.mu released, and the scanner holds its own only to read
+//     and write its flags — never across the walk or the apply, which takes
+//     s.mu on the scan's goroutine with the scanner's mutex released.
 type session struct {
 	opts   Options
 	client *acp.Client
@@ -156,6 +162,21 @@ type session struct {
 	plugins         []PluginEntry
 	commandsSeen    bool
 	commandsApplied chan struct{}
+	// skills are the provider's disk skills as the last scan applied found
+	// them, and skillsGen that scan's generation (plan 043 P5, live_slash.go):
+	// what every rebuild of Snapshot.Slash reads, so a commands delta made
+	// while a scan is pending carries the catalog with the skills last known.
+	// skillDir and skillHome are where the scans walk — the session's own
+	// directory and the host's $HOME, both read once by Start. All four are
+	// guarded by s.mu. scanner runs the scans (slash_scan.go); it is built
+	// with the session, armed by Start once the install has published a
+	// catalog, and closed by teardown. skillWalk is the walk itself, nil for
+	// discoverSkills: a test's seam, set before Start and never written again.
+	skills              []Skill
+	skillsGen           uint64
+	skillDir, skillHome string
+	scanner             *skillScanner
+	skillWalk           func(ctx context.Context, p Provider, cwd, home string) []Skill
 	// promptImage is what initialize said of image blocks
 	// (acp.InitializeResult.PromptImage), kept for every prompt's choice
 	// between image blocks and path text (plan 033 §3.4). Written once by
@@ -167,8 +188,12 @@ type session struct {
 	catalogAbort chan struct{}
 	// titlePinned is /rename's pin: once set, an agent session_info_update no
 	// longer replaces the title. Options.TitlePinned seeds it on a load, so
-	// the pin survives any number of --continues. Guarded by s.mu.
+	// the pin survives any number of --continues, and on a new session
+	// created with a title (newSession, plan 043 P8). Guarded by s.mu.
 	titlePinned bool
+	// seedOwed says the session was created with a title its stream has not
+	// said yet (AnnounceSeed, branch review B9). Guarded by s.mu.
+	seedOwed bool
 	// replayUser coalesces a replayed main-session user_message_chunk. The
 	// agents split a prompt over several chunks and craze has to draw exactly
 	// one user block, so the chunks accumulate here and go out as one
@@ -380,7 +405,55 @@ func newSession(opts Options) *session {
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
+	// A new session created with a title (plan 043 D8, P8) is named from
+	// here, and pinned: before Start, so before the engine over this session
+	// is published — the first state and roster row a host serves have it —
+	// and the session/new install keeps it (the install's title rule below).
+	// No delta here: none can be committed ahead of the engine's observer, so
+	// the stream's says it once the engine has one (AnnounceSeed, branch
+	// review B9), and the install delta restates it. A load seeds its row's
+	// title in loadSession instead, ahead of its replay bracket.
+	s.seedOwed = seedNewTitle(&s.snap, &s.titlePinned, opts)
+	s.scanner = newSkillScanner(s.scanSkills, s.applySkills)
 	return s
+}
+
+// seedNewTitle is a NEW session's title seed (plan 043 P8; Options.Title):
+// its title as the ingestion scrub leaves it — the one SetTitle stores — and
+// its pin, when it was built with one; nothing for a load (LoadSessionID),
+// whose seed is its replay's, nor for a session given no title. It reports
+// whether it seeded one, which the session's first event then owes
+// (AnnounceSeed). Both sessions, live and native, call it from their
+// constructors, holding no lock: nothing can reach the session yet.
+func seedNewTitle(snap *Snapshot, pinned *bool, opts Options) bool {
+	if opts.LoadSessionID != "" {
+		return false
+	}
+	title := sanitizeText(opts.Title)
+	if title == "" {
+		return false
+	}
+	snap.Title = title
+	*pinned = opts.TitlePinned
+	return true
+}
+
+// AnnounceSeed is the session's SeedAnnouncer (branch review B9): the title it
+// was created with, as one title-only delta — enqueued with the snapshot's
+// title read in the same section, craze's own shape, no cause — once, and
+// nothing for a session with none. The engine calls it once its observer is
+// on the log, before Start; enqueued and not flushed here, as every delta
+// this session makes before its install is (the engine waits for it).
+func (s *session) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+	return true
 }
 
 // provider is the agent behind this session; nil Options.Provider is cursor.
@@ -434,10 +507,12 @@ func (s *session) Now() time.Time { return time.Now() }
 func (s *session) Asks() *AskRegistry { return s.asks }
 
 var (
-	_ EventSource = (*session)(nil)
-	_ LogOwner    = (*session)(nil)
-	_ Clocked     = (*session)(nil)
-	_ AskSource   = (*session)(nil)
+	_ EventSource   = (*session)(nil)
+	_ LogOwner      = (*session)(nil)
+	_ Clocked       = (*session)(nil)
+	_ AskSource     = (*session)(nil)
+	_ SeedAnnouncer = (*session)(nil)
+	_ SeedAnnouncer = (*nativeSession)(nil)
 )
 
 // Start spawns the agent and sets the session up. Its body is start; what is
@@ -604,8 +679,26 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// ever publishes already carries its plugins; a catalog update that beats
 	// session/new home then has entries to resolve against.
 	plugins := s.discoverPlugins(cwd)
+	// The disk skills, for the same reason and at the same point (plan 043
+	// P5's install trigger): the install's catalog already lists them, so a
+	// client attaching once the session is up sees them in its first snapshot
+	// rather than in a delta a scan sends a moment later. On Start's goroutine
+	// and under no lock, as the plugin scan is; the scanner is not armed yet,
+	// so no other scan can be running. Every later scan is the scanner's.
+	//
+	// The walk is bounded by Start's own context as well as the scanner's
+	// (Close): a tree of ordinary files can take a while to walk — the 256
+	// bound counts SKILL.md candidates only — and a start that was given up
+	// on must end as promptly here as it would in session/new (astra C1).
+	home := HomeDir()
+	skills, err := s.installWalk(ctx, cwd, home)
+	if err != nil {
+		return true, err
+	}
 	s.mu.Lock()
 	s.plugins = plugins
+	s.skills = skills
+	s.skillDir, s.skillHome = cwd, home
 	// An agent that did not say takes none: ACP's baseline is text.
 	s.promptImage, _ = initRes.PromptImage()
 	s.mu.Unlock()
@@ -725,6 +818,9 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		return true, err
 	}
 	if loading {
+		// The load's install has published the catalog (loadSession), and the
+		// end bracket is out: scans may run from here.
+		s.scanner.arm()
 		return false, nil
 	}
 	if s.beforeInstall != nil {
@@ -750,7 +846,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// craze's own --mode/--model tail outranks a mark for its section: it is the
 	// LAST thing craze told the agent, whereas an update that arrived in this
 	// window may be the agent announcing the value it held before.
-	if s.agentWrote.title {
+	//
+	// A PINNED title is kept the same way (plan 043 P8): the title a create
+	// seeded (newSession) — session/new's reply names no session, and
+	// installing its "" over the user's name would drop it from the snapshot
+	// and the install delta alike. (A SetTitle made on the session itself
+	// ahead of the install is kept by the same rule; none comes through the
+	// engine, which refuses a rename while the session starts.) An agent's
+	// title in this window never got past the pin (onUpdate), so what is kept
+	// is the user's.
+	if s.agentWrote.title || s.titlePinned {
 		snap.Title = s.snap.Title
 	}
 	if s.agentWrote.mode && s.opts.Mode == "" {
@@ -775,6 +880,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// against whatever commands survived it, so an update that arrived early
 	// is honoured and one that arrives next redoes the work.
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// And the catalog built from all of it — the modes session/new brought,
+	// the commands and plugin rows just settled, the skills Start scanned —
+	// in the same section, so the install delta restates it (plan 043 P3).
+	s.snap.Slash = SlashCatalogFor(s.snap, s.skills).Items
 	// The install is a change like any other, and it is the first one a client
 	// folding the stream ever sees: without it, everything session/new brought
 	// — the mode, the model, the options, the catalog, the resolved plugins,
@@ -797,6 +906,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// nothing.
 	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// The catalog is published, so a scan's result has something to be
+	// compared against: requests run from here, and one made during Start —
+	// an attach to a host whose session was still starting — runs now.
+	s.scanner.arm()
 	return false, nil
 }
 
@@ -1009,6 +1122,7 @@ func (s *session) installDeltaLocked() *StateDelta {
 		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
 		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
 		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		Slash:    &SlashCatalog{Items: cloneSlash(s.snap.Slash)},
 	}
 }
 
@@ -1106,6 +1220,9 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.SessionID = res.SessionID
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// The catalog over the restored modes and whatever commands the replay
+	// left, with the skills Start scanned (plan 043 P3), restated below.
+	s.snap.Slash = SlashCatalogFor(s.snap, s.skills).Items
 	// This install is UNCONDITIONAL, which is the one place the load path and
 	// the session/new path differ (r27 finding 1). The new-session install keeps
 	// every section the agent wrote before it, because such an update is newer
@@ -1628,12 +1745,22 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		// settlement (plan 021 §3.5) — this session has none of its own any
 		// more.
 		s.emit(Event{Type: EventError, Err: err})
+		// A failed turn may have written a skill before it failed (plan 043
+		// P5): the same trigger as a turn that ended, after its terminal event.
+		s.scanner.request()
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {
 		s.closeInFlightTools(acp.StopCancelled)
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
+	// Every turn of craze's own that ran — done or cancelled here, failed
+	// above — is a trigger for the disk skills (plan 043 P5): a turn is what
+	// writes a SKILL.md. After the terminal event, and asking only: the walk
+	// runs on the scanner's goroutine, so EventDone never waits on it, and
+	// what it finds follows as a delta of its own. A replayed turn never
+	// reaches this function, nor does one the agent ran on its own.
+	s.scanner.request()
 	return Result{StopReason: res.StopReason}, nil
 }
 
@@ -2022,6 +2149,7 @@ func (s *session) Snapshot() Snapshot {
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
+	out.Slash = cloneSlash(s.snap.Slash)
 	out.Config = cloneConfig(s.snap.Config)
 	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
@@ -2281,6 +2409,10 @@ func (s *session) teardown() {
 		close(s.done)
 		client := s.client
 		s.mu.Unlock()
+		// The skill scan in flight is cancelled and every later request
+		// refused; a result already on its way is dropped by applySkills,
+		// which finds s.closed (plan 043 P5).
+		s.scanner.close()
 		// Before the client is torn down and well before the log is closed:
 		// every parked ask ends as closing, and those endings are committed by
 		// the log's own close phases rather than dropped (plan 021 §3.3, X4).
@@ -2926,20 +3058,38 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		}
 		s.emitAll(extras)
 	case acp.UpdateAvailableCommands:
+		commands := commandsFromUpdate(u.AvailableCommands)
 		s.mu.Lock()
-		s.snap.Commands = commandsFromUpdate(u.AvailableCommands)
+		before, beforePlugins := s.snap.Commands, s.snap.Plugins
+		s.snap.Commands = commands
 		// The first update of the session ends the provisional spelling, and
 		// every update re-resolves: a name the agent has taken over must stop
 		// being offered bare the moment it does.
 		first := !s.commandsSeen
 		s.commandsSeen = true
 		s.snap.Plugins = s.resolvePluginsLocked()
-		// Both sections, because both changed: the catalog, and the on-disk
-		// entries resolved against it.
-		s.enqueueDeltaLocked("", Event{}, &StateDelta{
-			Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
-			Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
-		})
+		// ONE delta for whatever this update changed (plan 043 P3): the
+		// catalog and the on-disk entries resolved against it — both, when
+		// either moved, as they have always travelled — and the slash catalog
+		// built from them, with the skills the last scan found. A delta that
+		// carries the commands always restates the slash section too, as an
+		// install does, even when the catalog came out the same: an agent's
+		// own /help whose description changed moves the commands and not the
+		// catalog, which the builtin shadows, and a client must still read the
+		// two as one change (astra C1 H6). An update that changed nothing —
+		// cursor re-sends the catalog it already sent — says nothing at all
+		// (D3).
+		st := &StateDelta{Slash: s.slashChangedLocked()}
+		if !slices.Equal(before, s.snap.Commands) || !slices.Equal(beforePlugins, s.snap.Plugins) {
+			st.Commands = &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)}
+			st.Plugins = &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)}
+			if st.Slash == nil {
+				st.Slash = &SlashCatalog{Items: cloneSlash(s.snap.Slash)}
+			}
+		}
+		if st.Commands != nil || st.Slash != nil {
+			s.enqueueDeltaLocked("", Event{}, st)
+		}
 		if first {
 			// Closed after the rows are resolved AND after the delta that says
 			// so is enqueued, and still before s.mu is released: a prompt
@@ -2953,6 +3103,11 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		}
 		s.mu.Unlock()
 		s.flushDelta()
+		// A new catalog is a trigger for the skills too (plan 043 P5): grok
+		// advertises the skills it has loaded, and one created since the last
+		// scan is as likely to be on disk. Asked for with s.mu released, and
+		// it waits on nothing, so the read loop is never held by a walk.
+		s.scanner.request()
 	case acp.UpdateCurrentMode:
 		if u.CurrentModeID != "" {
 			mode := sanitizeText(u.CurrentModeID)

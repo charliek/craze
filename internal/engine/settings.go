@@ -640,6 +640,17 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 // What retries the write is the next index write of any kind (the next turn's
 // end touches the row, the next prompt seeds it if it never was), or a later
 // /rename with a new command id.
+//
+// # Two renames at once
+//
+// The index must end on the title the session ends on (plan 043 P10, review
+// C3). So the session's rename and the number the index's user-title slot
+// gives it are one turn (renameTurn): two renames take the session's title in
+// the order they take their numbers, and the index — whose writes land newest
+// number last (index.go's writeUser) — ends on the same one. The write itself
+// is made after the turn, outside every lock of the engine's, as before; it
+// takes its turn with the worker's user-title writes, so one of an older title
+// in flight — the title the session was created with — is waited for.
 func (e *Engine) SetTitle(c Command, title string) error {
 	hash := receiptHash("SetTitle", title)
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {
@@ -657,12 +668,38 @@ func (e *Engine) SetTitle(c Command, title string) error {
 		// its own lock held (Begin, ForeignTurn and the admission fence,
 		// engine.go), and this needs to be none of them — it takes the session's
 		// lock and the outbox's, both briefly, and waits on nothing either way.
-		if err := e.sess.SetTitle(c.Cause(), title); err != nil {
+		u, err := e.renameTurn(c.Cause(), title)
+		if err != nil {
 			return err
 		}
-		if err := e.idx.rename(c.Cause(), title); err != nil {
+		if err := e.idx.renamed(u); err != nil {
 			return &indexWriteError{err: err}
 		}
 		return nil
 	})
+}
+
+// renameTurn is a rename's ordered half (SetTitle's "Two renames at once"):
+// the session renamed, then the index's number for it taken, under titleMu,
+// so the numbers follow the order the session's title moved in. titleMu is
+// taken with no lock of the engine's held, and holds only the session's lock
+// and the outbox's (SetTitle on the seam, which waits on nothing) and the
+// index's leaf (offerUser) — never e.mu, and never any I/O.
+func (e *Engine) renameTurn(cause, title string) (userTitle, error) {
+	if !e.titleMu.TryLock() {
+		// Another rename holds the turn: the seam a test forces the two
+		// renames' interleaving at (hooks.titleTurnTaken).
+		if h := e.hooks; h != nil && h.titleTurnTaken != nil {
+			h.titleTurnTaken()
+		}
+		e.titleMu.Lock()
+	}
+	defer e.titleMu.Unlock()
+	if err := e.sess.SetTitle(cause, title); err != nil {
+		return userTitle{}, err
+	}
+	if h := e.hooks; h != nil && h.titleSet != nil {
+		h.titleSet(title)
+	}
+	return e.idx.offerUser(cause, title), nil
 }

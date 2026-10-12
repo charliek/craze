@@ -271,7 +271,8 @@ func (b *engineBackend) LastTurn(ctx context.Context) (*engine.LastTurn, error) 
 // it today (GLM 11). PermissionMode and StartedAt are left unsaid (plan 030
 // §3.7): the engine holds neither, and in process both are the TUI's own —
 // its config's --force, and its own start — which is what the model falls
-// back to for a host that does not say.
+// back to for a host that does not say. Stop is true: in process Stop is the
+// engine's close, which always ends the session.
 func (b *engineBackend) Info() backend.SessionInfo {
 	st := b.eng.State()
 	return backend.SessionInfo{
@@ -286,6 +287,8 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		CatalogRevision:   st.CatalogRevision,
 		ModelsRefresh:     b.eng.RefreshesModels(),
 		Aside:             b.eng.Asides(),
+		SlashCatalog:      b.eng.PublishesSlashCatalog(),
+		Stop:              true,
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,
 	}

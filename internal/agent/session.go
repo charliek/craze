@@ -304,6 +304,19 @@ type StateDelta struct {
 	// change together, on the one update that brings a new catalog.
 	Commands *CommandsState
 	Plugins  *PluginsState
+	// Slash is the session's slash catalog, as Snapshot.Slash now stands
+	// (plan 043 D3): every row, whole, as Commands and Plugins are carried. It
+	// is derived from them, from the modes and from the disk skills the host
+	// scanned, so it travels in the same delta as whichever of those changed
+	// (P3) — and only when the catalog itself differs from the one last said;
+	// a scan that found nothing new says nothing. Every install restates it.
+	//
+	// On the wire it is the state's "slash" section (plan 043 C2,
+	// eventcodec.go's wireSlash), {"items":[…]}: absent untouched, present a
+	// whole replacement, present and empty a catalog cleared (P6). A client
+	// that predates it skips the key, so to it a delta carrying nothing else
+	// is a meta with an empty state, which it folds as no change.
+	Slash *SlashCatalog
 	// SendNow is the engine's armed send-now, in full: nil when this event did
 	// not touch it, Armed true for a send just armed, and a value with Armed
 	// false for one that is gone, with Reason saying why.
@@ -531,6 +544,12 @@ type Snapshot struct {
 	// provider, already resolved to the names the menu and the wire both use,
 	// in discovery order. Cloned by Snapshot.
 	Plugins []PluginCommand
+	// Slash is the session's slash catalog (plan 043 D1): every `/` row it
+	// offers, built by SlashCatalogFor from the sections above and the disk
+	// skills its host scanned, and rebuilt in the locked section that changes
+	// any of them. nil until the session's first install (or a catalog update
+	// before it) builds one. Its own copy, cloned by Snapshot.
+	Slash []SlashItem
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, as the last StateDelta.Usage left
 	// it. nil until a native session's first step — or its load's replay —
@@ -951,6 +970,17 @@ type Options struct {
 	// before the replay. No agent replays a title (plan 013 §2.1), so the
 	// index row craze loaded the id from is the only place a resumed
 	// session's title can come from.
+	//
+	// A NEW session (no LoadSessionID) takes them too (plan 043 D8, P8): a
+	// session created with a title — session.create's, craze serve --title —
+	// is named from the moment it is built, so the very first snapshot,
+	// state and roster row a host serves carry it, before Start has run; its
+	// session/new install keeps a pinned title where it would otherwise
+	// install the reply's none, and the install delta carries it. Pinned,
+	// neither an agent's session_info_update nor native's first-prompt title
+	// replaces it, exactly as after a /rename. Its first event says it too
+	// (SeedAnnouncer: engine.New announces it), so a client's fold and every
+	// attach snapshot hold it from the session's first event.
 	Title       string
 	TitlePinned bool
 	// NoPrimary builds the session's event log with no primary send
@@ -1196,6 +1226,28 @@ type Clocked interface {
 	Now() time.Time
 }
 
+// SeedAnnouncer is a session built with state its stream has to say before
+// anything else happens (plan 043 D8, branch review B9): a new session created
+// with a title (Options.Title, seedNewTitle), whose snapshot — so every state
+// and roster row — holds the title from its construction, while a client
+// folding the stream, and the engine's model every attach snapshot is cut
+// from, learn the session only from its events. Like Clocked it is optional
+// and found by a type assertion.
+//
+// AnnounceSeed enqueues that state as ONE state delta — a title-only delta,
+// craze's own shape (Event.Text empty: no `title` line, never an agent title
+// in the index), no cause — and reports whether it enqueued one. It is the
+// engine's call (engine.New), once the log has its observer — an event
+// committed before that would reach no model — and before the session's
+// Start, so the delta is the stream's first event and is there whatever the
+// start comes to. It says it once: a second call, a session with no created
+// title, and a load (whose title its replay seeds) enqueue nothing, so an
+// untitled session's stream is exactly what it was. The install delta still
+// restates the title, as every install restates every section.
+type SeedAnnouncer interface {
+	AnnounceSeed() bool
+}
+
 // SubagentCanceller is a session that can stop one of its sub-agents — the
 // row whose SubagentInfo.ID is id — and nothing else of the turn (plan 026
 // §3.10): the parent's turn goes on, and its model reads that the user stopped
@@ -1321,6 +1373,37 @@ type AsideResult struct {
 type Asider interface {
 	Asides() bool
 	Aside(ctx context.Context, req AsideRequest, onDelta func(string)) (AsideResult, error)
+}
+
+// SkillRescanner is a session that keeps its slash catalog's disk skills by a
+// scan of its own (plan 043 P5): the live session, whose provider's skills are
+// SKILL.md trees craze finds on disk. RescanSkills asks for a scan and returns
+// at once: it takes one leaf mutex and waits on nothing else — no scan, no
+// lock of the session's, no publish — so a caller may make it from anywhere,
+// the engine's Attach included. What the scan finds is applied later, off the
+// caller's goroutine, and published as a StateDelta.Slash only when the catalog
+// changed. Like Asider it is optional and found by a type assertion; the native
+// session has no disk skills of this kind (its skills are plugin rows) and does
+// not implement it.
+type SkillRescanner interface {
+	RescanSkills()
+}
+
+// SlashCataloger is a session that publishes the slash catalog section (plan
+// 043 P2, D5): Snapshot.Slash built at its install and StateDelta.Slash on
+// every change of it — the live session and the native session, each true
+// from the moment it is built, since each installs a catalog at Start. Its
+// host says so as the session capability slashCatalog, which a client reads
+// before it offers a `/` menu from the stream (the server's info document,
+// internal/control). It is a fact of the session, not of its provider
+// (agent.Capabilities, which TestEveryCapabilityIsOnTheWire forces onto every
+// host's document): a session that is not one of craze's own publishes none.
+// Like Asider it is optional and found by a type assertion, and
+// PublishesSlashCatalog is asked rather than the assertion trusted alone, so
+// a session whose catalog is a choice — the TUI's Stub, which publishes one
+// only when a test or the fake host opts it in — answers for itself.
+type SlashCataloger interface {
+	PublishesSlashCatalog() bool
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

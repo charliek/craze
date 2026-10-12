@@ -67,6 +67,10 @@ func TestEventSchemaCoversTheCodec(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Check(protocol.SchemaEvent+"#", reflect.TypeFor[wireEvent]())
+	// The slash section reads itself row by row (wireSlashIn.UnmarshalJSON),
+	// which makes it a leaf to the walk above: its shape — what the encoder
+	// writes — is held to its $def here, field by field.
+	c.Check(protocol.SchemaEvent+"#/$defs/slash", reflect.TypeFor[wireSlash]())
 	for _, p := range c.Problems() {
 		t.Error(p)
 	}

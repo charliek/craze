@@ -58,6 +58,13 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	if err := f.prompt.check(cmd, newWhat, args); err != nil {
 		return err
 	}
+	// --title as plain craze new takes it (newTitle: the hub's own
+	// normalization), handed to the host this spawns as its --title, which
+	// is what the hub's create hands its own (plan 043 D8).
+	title, err := newTitle(cmd, f)
+	if err != nil {
+		return err
+	}
 	// An explicit --provider by its id alone, as plain craze new checks it
 	// (plan 037 LC-4).
 	provider := strings.TrimSpace(f.provider)
@@ -112,7 +119,7 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
 		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
 	r.session = resultSession{provider: provider, model: flags.model}
-	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true, reparent: true}, true)
+	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true, reparent: true, title: title}, true)
 	if err != nil {
 		return r.failBefore(spawnExit(newWhat, err))
 	}

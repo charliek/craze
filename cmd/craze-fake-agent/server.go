@@ -322,6 +322,47 @@ func (s *server) sendCatalog() {
 	})
 }
 
+// sendDirectedCommands is the SET-COMMANDS directive: a prompt whose text
+// starts "SET-COMMANDS a,b" gets an available_commands_update naming exactly
+// those commands, sent on the read loop before the turn starts. It is how a
+// test makes the agent re-send its catalog mid-session -- changed, or
+// identical to the last one (plan 043 C5). A prompt without the prefix is
+// untouched.
+func (s *server) sendDirectedCommands(text string) {
+	list, ok := strings.CutPrefix(text, "SET-COMMANDS ")
+	if !ok {
+		return
+	}
+	list, _, _ = strings.Cut(list, "\n")
+	var cmds []acp.AvailableCommand
+	for _, name := range strings.Split(strings.TrimSpace(list), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			cmds = append(cmds, acp.AvailableCommand{Name: name, Description: "Agent-advertised command"})
+		}
+	}
+	s.update(s.mainID(), acp.SessionUpdate{
+		SessionUpdate:     acp.UpdateAvailableCommands,
+		AvailableCommands: cmds,
+	})
+}
+
+// sendDirectedTitle is the SET-TITLE directive: a prompt whose text starts
+// "SET-TITLE <text>" gets a session_info_update titled <text>, sent on the
+// read loop before the turn starts -- an agent naming its session, which a
+// pinned title must resist (plan 043 C5). A prompt without the prefix is
+// untouched.
+func (s *server) sendDirectedTitle(text string) {
+	title, ok := strings.CutPrefix(text, "SET-TITLE ")
+	if !ok {
+		return
+	}
+	title, _, _ = strings.Cut(title, "\n")
+	s.update(s.mainID(), map[string]any{
+		"sessionUpdate": acp.UpdateSessionInfo,
+		"title":         strings.TrimSpace(title),
+	})
+}
+
 // releaseLateCatalog is CRAZE_FAKE_LATE_CATALOG's other half: the catalog
 // session/new held back goes out now, on the read loop and before the prompt
 // just read is handled, so craze reads it after the prompt's turn opened and
@@ -517,6 +558,8 @@ func (s *server) onRequest(msg *acp.Message) {
 		s.noteOrder(orderPrompt, "")
 		dumpPrompt(msg.Params)
 		s.releaseLateCatalog()
+		s.sendDirectedCommands(promptText(msg.Params))
+		s.sendDirectedTitle(promptText(msg.Params))
 		if queueScript(s.script) {
 			// The queue scripts hold one record per prompt instead of the
 			// single flag, so a second prompt cancelling the first cannot

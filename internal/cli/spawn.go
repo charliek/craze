@@ -109,6 +109,10 @@ type spawnOptions struct {
 	// prompt commands' relaySignals hurry, so a further signal has its host
 	// sent SIGTERM and left, rather than waited for, as C3's undo is.
 	hurry func() <-chan struct{}
+	// title is the new session's --title (plan 043 D8), normalized: craze
+	// new --wait --title's, as the hub's create passes its own; "" — every
+	// other spawn — passes none.
+	title string
 }
 
 // hostRef is a host a spawn found for its caller: the one it started, which
@@ -207,7 +211,7 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 		unset = []string{envAgentBin}
 	}
 	spec := serveSpec(&opts.flags, opts.load, hostID, logPath)
-	spec.Unattended, spec.OutliveSpawner = opts.unattended, opts.shared
+	spec.Unattended, spec.OutliveSpawner, spec.Title = opts.unattended, opts.shared, opts.title
 	argv, groups := hostspawn.Args(spec), filepath.Join(dir, hostspawn.AgentGroupsName(hostID))
 	var (
 		child *hostspawn.Child

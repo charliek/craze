@@ -480,10 +480,11 @@ func TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown(t *testing.T) {
 // stream, not in its capabilities) and modelsRefresh (plan 034 §3.4:
 // backend.SessionInfo.ModelsRefresh, beside the capabilities) and aside (plan
 // 040 §3.2: the session's own, beside the capabilities as modelsRefresh is)
-// to exactly one agent field.
+// and slashCatalog (plan 043 P2: the session's own too, beside them as
+// backend.SessionInfo.SlashCatalog) to exactly one agent field.
 func TestEveryWireCapabilityComesBack(t *testing.T) {
 	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true, "Presence": true,
-		"ModelsRefresh": true, "Aside": true}
+		"ModelsRefresh": true, "Aside": true, "SlashCatalog": true}
 	wt := reflect.TypeFor[protocol.SessionCapabilities]()
 	at := reflect.TypeFor[agent.Capabilities]()
 	from := map[string]string{} // agent field → wire field

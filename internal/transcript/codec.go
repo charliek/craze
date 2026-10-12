@@ -142,7 +142,16 @@ type wireSettings struct {
 	Config   json.RawMessage `json:"config,omitempty"`
 	Commands json.RawMessage `json:"commands,omitempty"`
 	Plugins  json.RawMessage `json:"plugins,omitempty"`
-	SendNow  json.RawMessage `json:"sendNow,omitempty"`
+	// Slash is the slash catalog in the event codec's own shape (plan 043
+	// §3.2, D4), {"items":[…]}, absent when the model holds none — a session
+	// that does not publish it, or one whose last section was empty — and
+	// never null or {}. It is held to the snapshot's own bounds (capSlash): a
+	// row's action fields are never cut, a row with one over ItemCap is
+	// dropped, at most SlashRows rows are carried, and the whole catalog is
+	// left out when the snapshot would not fit its budget with it
+	// (cut.snapshot), truncated.slash saying so.
+	Slash   json.RawMessage `json:"slash,omitempty"`
+	SendNow json.RawMessage `json:"sendNow,omitempty"`
 	// Usage is the usage section in the event codec's own shape, absent when
 	// the model has none (plan 028 §3.14): never null or {}.
 	Usage json.RawMessage `json:"usage,omitempty"`
@@ -165,6 +174,7 @@ type wireSettingsTruncated struct {
 	Config   bool `json:"config,omitempty"`
 	Commands bool `json:"commands,omitempty"`
 	Plugins  bool `json:"plugins,omitempty"`
+	Slash    bool `json:"slash,omitempty"`
 	SendNow  bool `json:"sendNow,omitempty"`
 }
 
@@ -377,6 +387,11 @@ func encodeSettings(s *Settings) (*wireSettings, error) {
 			return nil, err
 		}
 	}
+	if len(s.Slash) > 0 {
+		if w.Slash, err = agent.EncodeSlashCatalog(&agent.SlashCatalog{Items: s.Slash}); err != nil {
+			return nil, err
+		}
+	}
 	if s.SendNow != (agent.SendNowState{}) {
 		if w.SendNow, err = agent.EncodeSendNowState(&s.SendNow); err != nil {
 			return nil, err
@@ -390,10 +405,10 @@ func encodeSettings(s *Settings) (*wireSettings, error) {
 	}
 	if t := s.Truncated; t != (SettingsTruncated{}) {
 		w.Truncated = &wireSettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
-			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, SendNow: t.SendNow}
+			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, Slash: t.Slash, SendNow: t.SendNow}
 	}
 	if w.Title == "" && w.Mode == "" && w.Model == "" && w.Config == nil && w.Commands == nil &&
-		w.Plugins == nil && w.SendNow == nil && w.Usage == nil && w.Catalog == nil && w.Truncated == nil {
+		w.Plugins == nil && w.Slash == nil && w.SendNow == nil && w.Usage == nil && w.Catalog == nil && w.Truncated == nil {
 		return nil, nil
 	}
 	return w, nil
@@ -775,7 +790,7 @@ func decodeSettings(w *wireSettings) (Settings, error) {
 	s := Settings{Title: w.Title, Mode: w.Mode, Model: w.Model}
 	if t := w.Truncated; t != nil {
 		s.Truncated = SettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
-			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, SendNow: t.SendNow}
+			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, Slash: t.Slash, SendNow: t.SendNow}
 	}
 	c, err := agent.DecodeConfigState(w.Config)
 	if err != nil {
@@ -797,6 +812,13 @@ func decodeSettings(w *wireSettings) (Settings, error) {
 	}
 	if p != nil {
 		s.Plugins = p.Plugins
+	}
+	sl, err := agent.DecodeSlashCatalog(w.Slash)
+	if err != nil {
+		return s, err
+	}
+	if sl != nil {
+		s.Slash = sl.Items
 	}
 	sn, err := agent.DecodeSendNowState(w.SendNow)
 	if err != nil {

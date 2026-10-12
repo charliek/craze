@@ -79,7 +79,7 @@ func filled[T any](t testing.TB) T {
 
 // fullMirrorPrefix is a stream after which every field of the model's Mirror
 // holds something, down to the last nested slice and pointer: every settings
-// section, usage included, full; a queued row; a roster row listing the tools
+// section, usage and the slash catalog included, full; a queued row; a roster row listing the tools
 // it used; a todo list; a turn started; a foreign-turn bracket running; and
 // fully populated tools on main and on a child.
 func fullMirrorPrefix(t testing.TB) []agent.Event {
@@ -87,6 +87,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 	title, mode, model := "a title", "plan", "grok"
 	usage, sendNow := filled[agent.UsageState](t), filled[agent.SendNowState](t)
 	catalog := filled[agent.CatalogState](t)
+	slash := agent.SlashCatalog{Items: filled[[]agent.SlashItem](t)}
 	row := filled[agent.QueuedPrompt](t)
 	row.ID = "q1"
 	child := filled[agent.SubagentInfo](t)
@@ -99,6 +100,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 			Config:   &agent.ConfigState{Options: filled[[]agent.ConfigOption](t)},
 			Commands: &agent.CommandsState{Commands: filled[[]agent.CommandInfo](t)},
 			Plugins:  &agent.PluginsState{Plugins: filled[[]agent.PluginCommand](t)},
+			Slash:    &slash,
 			SendNow:  &sendNow,
 			Usage:    &usage,
 			Catalog:  &catalog,

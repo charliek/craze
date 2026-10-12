@@ -702,6 +702,19 @@ var deltaFields = []deltaField{
 			m.settings.Truncated.SendNow = false
 		}
 	}},
+	// Slash (plan 043 §3.2, P6): the session's slash catalog, a whole
+	// replacement — an empty one clears it — and a copy of the delta's, so the
+	// model holds nothing the event it came from does: one event reaches every
+	// fold that reads the log, and the rows a projection hands out must reach
+	// none of them. A client that predates the section folds it as nothing,
+	// which leaves every other section as this fold leaves it
+	// (TestADecoderThatIgnoresSlashFoldsTheSameState).
+	{name: "Slash", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
+		if st.Slash != nil {
+			m.settings.Slash = nilIfEmpty(slices.Clone(st.Slash.Items))
+			m.settings.Truncated.Slash = false
+		}
+	}},
 	// Usage (plan 028 §3.14, seam 8): a copy, so the model holds nothing the
 	// event it came from does. It has no truncation mark to clear.
 	{name: "Usage", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {

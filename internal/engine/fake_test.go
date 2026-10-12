@@ -62,8 +62,16 @@ type fakeSession struct {
 	titleRelease chan struct{}
 	beginPanic   bool
 	startErr     error
-	clock        func() time.Time
-	closeOnce    sync.Once
+	// noIDYet is a session that learns its id at its start, as a live one
+	// does from session/new (plan 043 P10): Snapshot reports none until a
+	// Start that succeeds.
+	noIDYet bool
+	// seedTitle is a session created with a title (plan 043 D8, branch
+	// review B9): its snapshot's title from construction, said by
+	// AnnounceSeed once, as the live session's is.
+	seedTitle string
+	clock     func() time.Time
+	closeOnce sync.Once
 	// snap is what the settings verbs mutate and Snapshot reports; sets counts
 	// the ones that changed something.
 	snap agent.Snapshot
@@ -202,9 +210,26 @@ func (s *fakeSession) emit(ev agent.Event) {
 	s.log.Publish(context.Background(), s.done, ev)
 }
 
+// AnnounceSeed is the live session's (agent.SeedAnnouncer): seedTitle, as one
+// title-only delta, once.
+func (s *fakeSession) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seedTitle == "" {
+		return false
+	}
+	title := s.seedTitle
+	s.seedTitle = ""
+	s.log.Enqueue(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Title: &title}, At: s.clock()})
+	return true
+}
+
 func (s *fakeSession) Start(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.startErr == nil {
+		s.noIDYet = false
+	}
 	return s.startErr
 }
 
@@ -441,7 +466,9 @@ func (s *fakeSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	out.SessionID = "fake-1"
+	if !s.noIDYet {
+		out.SessionID = "fake-1"
+	}
 	out.ForeignTurn = s.foreign
 	return out
 }

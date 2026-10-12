@@ -198,6 +198,17 @@ type Settings struct {
 	Config             []agent.ConfigOption
 	Commands           []agent.CommandInfo
 	Plugins            []agent.PluginCommand
+	// Slash is the session's slash catalog (plan 043 §3.2, D4): every `/` row
+	// it offers, in the order a menu lists them, as the last slash section a
+	// delta carried left it — replaced whole, and cleared by an empty one
+	// (P6). nil until a delta carries one, which a session that does not
+	// publish the catalog (capabilities.slashCatalog absent) never sends. The
+	// model holds its own copy, and every projection hands out one of its own
+	// (P6): a SlashItem holds only values, so a copy of the slice is a deep
+	// one. A row whose source, run kind, method, requires or local action this
+	// build does not know is kept as it came — hiding it is the client's
+	// (P17), never the fold's.
+	Slash []agent.SlashItem
 	// SendNow is the engine's armed send-now; Armed false means none. A
 	// send_now-origin started ends it too (foldTurn): firing publishes no
 	// delta of its own, so the fold ends the arm on the started that says the
@@ -227,10 +238,16 @@ type Settings struct {
 	Truncated SettingsTruncated
 }
 
-// SettingsTruncated is Settings' truncation mark, one per section.
+// SettingsTruncated is Settings' truncation mark, one per section. Slash's
+// says more than a cut string: the snapshot dropped rows of the catalog (a row
+// with an action field over ItemCap, or past SlashRows) as well as cutting a
+// row's description, argument hint or reason to its head (capSlash), or left
+// the whole catalog out because it did not fit the budget (cut.snapshot) —
+// Slash nil beside the mark.
 type SettingsTruncated struct {
 	Title, Mode, Model        bool
 	Config, Commands, Plugins bool
+	Slash                     bool
 	SendNow                   bool
 }
 
@@ -704,6 +721,10 @@ func (m *Model) cutLocked() cut {
 	}
 	// The catalog likewise, its list included (plan 034 §3.4).
 	c.settings.Catalog = cloneCatalog(m.settings.Catalog)
+	// And the slash catalog (plan 043 P6): State and Snapshot each hand out
+	// rows of their own, and the snapshot's caps (capSlash) drop rows from
+	// the cut's copy, never the model's.
+	c.settings.Slash = slices.Clone(m.settings.Slash)
 	c.todosTruncated = m.todosTruncated
 	if len(m.queueTruncated) > 0 {
 		c.queueTruncated = maps.Clone(m.queueTruncated)

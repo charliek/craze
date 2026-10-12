@@ -176,6 +176,9 @@ type nativeSession struct {
 	plugins     []PluginEntry
 	snap        Snapshot
 	titlePinned bool
+	// seedOwed says the session was created with a title its stream has not
+	// said yet (AnnounceSeed, branch review B9), as on the live session.
+	seedOwed bool
 	// loading is a load's (Options.LoadSessionID, plan 028 §3.4): true from
 	// the section that marks the session started — before the title is
 	// seeded and the bracket opens — until the replay's end bracket has gone
@@ -528,6 +531,13 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// Whatever provider the caller named, this session is the native one, and
 	// every snapshot — one taken before Start included — says so.
 	s.snap.Provider = NativeProvider().Info()
+	// A new session created with a title (plan 043 D8, P8), named and pinned
+	// from here, as the live session's is (live.go's seedNewTitle): the first
+	// snapshot has it, the first prompt does not rename it (prompt's rule:
+	// an untitled, unpinned session only), its first event says it once the
+	// engine's observer is on the log (AnnounceSeed, branch review B9), and
+	// the install delta restates it.
+	s.seedOwed = seedNewTitle(&s.snap, &s.titlePinned, opts)
 	// Beside the log, as on every session. It exists so that a client above the
 	// seam holds one surface whatever the provider is, and it is what the
 	// harness's two blocking tools open against, through the asker this session
@@ -535,6 +545,21 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// when H3 gives it one, through this adapter and nowhere else.
 	s.asks = NewAskRegistry(log, s.Now)
 	return s
+}
+
+// AnnounceSeed is the session's SeedAnnouncer (branch review B9), the live
+// session's exactly (live.go's AnnounceSeed): the created title as one
+// title-only delta, once, and nothing for a session with none.
+func (s *nativeSession) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+	return true
 }
 
 func (s *nativeSession) Events() <-chan Event { return s.log.Primary() }
@@ -709,6 +734,12 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.Modes = nativeModes()
 	s.snap.CurrentMode = nativeCurrentMode(hs.Mode())
 	s.refreshCurrentLocked()
+	// The slash catalog over all of it (plan 043 D2): the commands, the plugin
+	// rows and the modes just installed, and no disk skills — native's skills
+	// are plugin rows, resolved once here (X3), so it never scans and its
+	// catalog never changes after this. Both installs restate it
+	// (installDeltaLocked).
+	s.snap.Slash = SlashCatalogFor(s.snap, nil).Items
 	// The wake worker, in the section that installs the harness it wakes,
 	// so a Close that finds the harness finds the worker to join too
 	// (native_wake.go). It has nothing to do until a background child's
@@ -744,18 +775,21 @@ func (s *nativeSession) start(context.Context) error {
 	// rows — which a native session resolves once here and never again (X3).
 	// Without it a client folding the stream would have to call Snapshot() to
 	// learn the session's starting state, which is the gap r23 finding 2 is
-	// about. A new session's install carries no Title section: Start has
-	// nothing to name it with (a load's seeds one, openReplay), and the first
-	// prompt is what gives it one, publishing its own Title delta (plan 024
-	// S1c C8, SF-01, superseding X47's "stays silent"). Event.Mode/Event.Text
-	// stay empty: starting is nobody's agent update.
+	// about. A new session's install carries no Title section when it has no
+	// title: Start has nothing to name it with (a load's seeds one,
+	// openReplay), and the first prompt is what gives it one, publishing its
+	// own Title delta (plan 024 S1c C8, SF-01, superseding X47's "stays
+	// silent"). One created with a title (seedNewTitle, plan 043 P8) — or
+	// renamed before Start — has one, and its install says so, as every
+	// section the install stands on. Event.Mode/Event.Text stay empty:
+	// starting is nobody's agent update.
 	//
 	// Enqueued and not flushed, exactly as the live session's install is: Start
 	// may not wait on the primary's reader, because a caller is allowed not to
 	// be one until Start has returned (Session.Start, r25 finding 1). Every
 	// later settings delta goes through the same outbox behind it, so a client
 	// that folds them is never behind.
-	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked(false))
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked(s.snap.Title != ""))
 	s.mu.Unlock()
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
@@ -770,9 +804,10 @@ func (s *nativeSession) start(context.Context) error {
 // left out). Commands — /compact, the one command native advertises — is
 // carried by both installs, so a client that folds the stream learns the
 // command list from the install on (plan 028 P21). withTitle adds the Title
-// section, which only a load's install carries — "there is no title"
-// included, for a load of an untitled row — because a new session's title is
-// its first prompt's to publish. The Usage section is carried whenever the
+// section, which a load's install always carries — "there is no title"
+// included, for a load of an untitled row — and a new session's only when it
+// has a title (a create's, plan 043 P8), because an untitled new session's
+// title is its first prompt's to publish. The Usage section is carried whenever the
 // session has one, which only a load's does: the Spent its replay ended with
 // (spent, plan 028 §3.14) — a new session, and a load of a stored session
 // with nothing on its path, have spent nothing and say so by no section, as
@@ -785,6 +820,7 @@ func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
 		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
 		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		Slash:    &SlashCatalog{Items: cloneSlash(s.snap.Slash)},
 	}
 	if withTitle {
 		title := s.snap.Title
@@ -3159,6 +3195,9 @@ func (s *nativeSession) Snapshot() Snapshot {
 	// copy, so handing out the backing array would let a consumer that sorted
 	// or filtered its rows change what a typed name resolves to.
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
+	// The slash catalog likewise (plan 043 P6): a client projecting it into a
+	// menu must not be able to reach the session's own rows.
+	out.Slash = cloneSlash(s.snap.Slash)
 	out.Config = cloneConfig(s.snap.Config)
 	// Cloned for the same reason, and for one of its own: the list the tasks
 	// panel draws is replaced whole by every todo_write (applyTodos), and a
@@ -3174,6 +3213,13 @@ func (s *nativeSession) Snapshot() Snapshot {
 	}
 	return out
 }
+
+var _ SlashCataloger = (*nativeSession)(nil)
+
+// PublishesSlashCatalog is SlashCataloger's: a native session does (plan 043
+// P2) — both of its installs restate the catalog, which never changes after
+// them (it scans no skills of its own; they are plugin rows).
+func (s *nativeSession) PublishesSlashCatalog() bool { return true }
 
 // ForeignTurn is the Session leaf accessor (plan 021 §3.3): true while a wake
 // runs — the one turn native starts without a craze prompt, delivering a

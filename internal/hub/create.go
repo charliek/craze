@@ -37,10 +37,11 @@ import (
 // # Params
 //
 // cwd (absolute, an existing directory), and optionally prompt, provider,
-// model, effort, fast, permissionMode and requestId. They are checked in two
-// steps (C15r, r32 3b): their form first (creator.parse — the shape, an
-// absolute cwd, cleaned, the requestId's syntax, the enums, the prompt's
-// rules), which is all a repeat of a create needs before it is answered; and
+// model, effort, fast, permissionMode, requestId and — on a hub whose hosts
+// take one (Creates.Title) — title. They are checked in two steps (C15r, r32
+// 3b): their form first (creator.parse — the shape, an absolute cwd, cleaned,
+// the requestId's syntax, the enums, the prompt's and the title's rules),
+// which is all a repeat of a create needs before it is answered; and
 // the world as it is now (creator.check — the cwd an existing directory, the
 // provider known, the configured default read) only for a create that will
 // spawn. The provider is the configured default when absent
@@ -49,6 +50,20 @@ import (
 // config.toml has no permission setting. Never an agent binary (SD-16): the
 // host finds its own — CRAZE_AGENT_BIN is not in its environment (ChildEnv),
 // so it is `[agents]` or PATH.
+//
+// The title (plan 043 D8, P9) is the session's name from its start: parse
+// folds it through engine.NormalizeTitle — the one normalization craze serve
+// --title and craze new --title run too, which makes it exactly the title the
+// session will store and its index row hold — and refuses one that comes to
+// nothing (empty, blank, nothing but runes the session's scrub drops)
+// bad_request, so a client with no title omits it.
+// The host is handed the normalized title (--title), seeds and pins it in its
+// session before its engine is published — its first roster row has it — and
+// writes it to the session index as the user's title once the session's id is
+// known (engine's IndexOptions.Title). A hub whose hosts take none
+// (Creates.Title false — a test's) serves none: its hello omits createTitle,
+// and a create naming one is refused unknown_field, as a hub from before it
+// refuses one.
 //
 // # A create, in order (hub.create)
 //
@@ -99,9 +114,11 @@ import (
 // # Idempotency
 //
 // A requestId is kept with a hash of the create's normalized params
-// (createHash) — in memory (createTable: a create in flight never evicted,
-// one done for createKeep, at most createKeepMax of them) and in the new
-// host's registry entry. A request with the id of one in memory and the same
+// (createHash; its title the normalized one, and an untitled create's hash
+// exactly what it was before titles existed, so a create retried across the
+// upgrade of its hub joins its session — plan 043 P1) — in memory
+// (createTable: a create in flight never evicted, one done for createKeep, at
+// most createKeepMax of them) and in the new host's registry entry. A request with the id of one in memory and the same
 // hash joins it — its answer, whether it is done or not; another hash is
 // bad_request, reason request_conflict. One the memory does not hold — this
 // hub restarted since, or forgot it — is looked for in the registry
@@ -144,6 +161,14 @@ type Creates struct {
 	// method: its hello omits createOptions, and the method is refused
 	// unsupported.
 	Options func(logf func(string, ...any)) protocol.CreateOptionsResult
+	// Title says the hosts this hub spawns take a title (craze serve --title,
+	// hostspawn.Spec.Title; plan 043 D8): its hello says createTitle, and a
+	// create may name one. Every craze hub's are (internal/cli's hubCreates);
+	// false is a test's hub whose hosts may not — its hello omits createTitle
+	// and a create naming a title is refused unknown_field, exactly as a hub
+	// from before titles refuses one, so a client's older-hub path can be
+	// driven against the real hub.
+	Title bool
 }
 
 // HostCommand builds a created session's host command, `craze serve …`, from
@@ -337,8 +362,12 @@ type createReq struct {
 	hash     string
 }
 
-// createMembers is every member session.create's params may carry.
+// createMembers is every member session.create's params may carry; and
+// createTitleMember, the one only a hub whose hosts take a title knows
+// (Creates.Title).
 var createMembers = []string{"cwd", "prompt", "provider", "model", "effort", "fast", "permissionMode", "requestId"}
+
+const createTitleMember = "title"
 
 // parse holds raw to session.create's params' form — the schema's rules, and
 // the hub's own: a prompt that is not blank, no control character in a value
@@ -357,7 +386,7 @@ func (cr *creator) parse(raw json.RawMessage) (createReq, *protocol.Error) {
 	}
 	var unknown []string
 	for k := range m {
-		if !slices.Contains(createMembers, k) {
+		if !slices.Contains(createMembers, k) && (k != createTitleMember || !cr.o.Title) {
 			unknown = append(unknown, k)
 		}
 	}
@@ -398,6 +427,10 @@ func (cr *creator) parse(raw json.RawMessage) (createReq, *protocol.Error) {
 		{"model", &q.Model, 256, false},
 		{"effort", &q.Effort, 64, false},
 		{"requestId", &q.RequestID, 0, false},
+		// No cap of its own: NormalizeTitle cuts it to 120 runes below, as
+		// /rename does, rather than refuse a long one; the line limit bounds
+		// what arrives.
+		{createTitleMember, &q.Title, 0, false},
 	} {
 		if perr := str(f.key, f.dst, f.max, f.required); perr != nil {
 			return createReq{}, perr
@@ -429,6 +462,15 @@ func (cr *creator) parse(raw json.RawMessage) (createReq, *protocol.Error) {
 	q.Cwd = filepath.Clean(q.Cwd)
 	if strings.TrimSpace(q.Prompt) == "" && q.Prompt != "" {
 		return createReq{}, badParams("params.prompt is blank: send none instead")
+	}
+	if q.Title != "" {
+		// The one normalization (plan 043 P9), before the hash: two creates
+		// whose titles normalize the same are the same create. A title that
+		// normalizes to nothing was sent and asks for nothing craze can give —
+		// refused, never taken as none ("" itself is refused above).
+		if q.Title = engine.NormalizeTitle(q.Title); q.Title == "" {
+			return createReq{}, badParams("params.title is blank once normalized: send none instead")
+		}
 	}
 	for _, f := range []struct{ key, v string }{{"cwd", q.Cwd}, {"provider", q.Provider}, {"model", q.Model}, {"effort", q.Effort}} {
 		if strings.ContainsFunc(f.v, unicode.IsControl) {
@@ -471,6 +513,14 @@ func (cr *creator) check(p *createReq) *protocol.Error {
 // normalized params — what the client asked for, so the provider as it was
 // sent ("" for the default, whatever the config says by the time it is
 // retried) — as "sha256:<hex>".
+//
+// The title (plan 043 P1) is its normalized form, the LAST member and omitted
+// when there is none, so an untitled create's key is byte for byte the key
+// every hub before titles hashed: a create a hub of that build started — its
+// host's registry entry carrying that hash (--request-hash) — and retried
+// under the same requestId through this hub, after an upgrade, is joined, not
+// refused request_conflict. TestCreateHashOfAnUntitledCreateIsTheLegacyHash
+// pins hashes computed by the code before it.
 func createHash(q protocol.CreateParams) string {
 	key := struct {
 		Cwd            string                  `json:"cwd"`
@@ -480,7 +530,8 @@ func createHash(q protocol.CreateParams) string {
 		Effort         string                  `json:"effort"`
 		Fast           *bool                   `json:"fast"`
 		PermissionMode protocol.PermissionMode `json:"permissionMode"`
-	}{q.Cwd, q.Prompt, q.Provider, q.Model, q.Effort, q.Fast, q.PermissionMode}
+		Title          string                  `json:"title,omitempty"`
+	}{q.Cwd, q.Prompt, q.Provider, q.Model, q.Effort, q.Fast, q.PermissionMode, q.Title}
 	b, _ := json.Marshal(key) // nothing in it fails to encode
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -690,9 +741,12 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 	// HubPID: the host inherits this hub's login session, so a start it words
 	// for macOS's login session names this hub as the one to stop (plan 035
 	// P3).
+	// Title: the normalized one parse settled (plan 043 D8), which the host
+	// normalizes again to the same title (engine.NormalizeTitle is
+	// idempotent) and seeds before its engine is published.
 	spec := hostspawn.Spec{HostID: hostID, Log: logPath, Workspace: q.Cwd, Provider: p.provider, Model: q.Model,
 		Effort: q.Effort, Fast: q.Fast, NoForce: q.PermissionMode == protocol.PermissionPrompt, NoHostStatus: true,
-		HubPID: h.pid}
+		HubPID: h.pid, Title: q.Title}
 	if q.RequestID != "" {
 		spec.RequestID, spec.RequestHash = q.RequestID, p.hash
 	}
@@ -1392,15 +1446,17 @@ var ErrUnanswered = errors.New("hub: the connection ended before the answer")
 // re-encoded (a protocol.CreateResult), within ctx, as List does. A refusal
 // is an error wrapping the hub's *protocol.Error; a connection that ends
 // before the answer, one wrapping ErrUnanswered; a hub whose hello says it
-// creates no session, a *LacksError.
+// creates no session, or — for p with a title — that its create takes none
+// (createTitle, plan 043 P11), a *LacksError, nothing asked: a title is never
+// sent where it would be refused unknown_field, nor dropped.
 func Create(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, error) {
 	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
 		return nil, err
 	}
 	defer hc.close()
-	if !hello.Capabilities.SessionCreate {
-		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: []string{"create sessions"}}
+	if missing := missing(hello.Capabilities, CreateNeed(p)); len(missing) > 0 {
+		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: missing}
 	}
 	res, err := hc.call(protocol.MethodSessionCreate, p)
 	if err != nil {
@@ -1411,4 +1467,11 @@ func Create(ctx context.Context, socket string, who protocol.ClientInfo, p proto
 		return nil, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionCreate, err)
 	}
 	return res, nil
+}
+
+// CreateNeed is what a hub must say in its hello to take p (Ensure's need,
+// and Create's own check): session creation, and — for a create with a
+// title — that its create takes one (createTitle, plan 043 P11).
+func CreateNeed(p protocol.CreateParams) protocol.ConnectionCapabilities {
+	return protocol.ConnectionCapabilities{SessionCreate: true, CreateTitle: p.Title != ""}
 }

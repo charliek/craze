@@ -156,12 +156,18 @@ type Spec struct {
 	// login session can name the hub to stop. An internal flag between the
 	// hub and its hosts, not part of the wire protocol.
 	HubPID int
+	// Title is --title, passed only when set (plan 043 D8): a new session's
+	// name from its start — a session.create's title, or craze new --wait
+	// --title's — already normalized by the spawner (engine.NormalizeTitle),
+	// which the host normalizes again to the same title and seeds, pinned,
+	// before its engine is published.
+	Title string
 }
 
 // Args is craze serve's command line for s: the host's id and log, then every
 // session flag s carries — each only when it says something — and --load,
 // --no-host-status, --unattended, --outlive-spawner, --request-id,
-// --request-hash and --hub-pid.
+// --request-hash, --hub-pid and --title.
 // Every value is spelled --flag=value, so none is read as a flag of its own.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
@@ -212,6 +218,7 @@ func Args(s Spec) []string {
 	if s.HubPID > 0 {
 		argv = append(argv, "--hub-pid="+strconv.Itoa(s.HubPID))
 	}
+	str("title", s.Title)
 	return argv
 }
 

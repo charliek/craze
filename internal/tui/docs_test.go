@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 func docsModuleRoot(t *testing.T) string {
@@ -50,13 +52,19 @@ func mentionsSlash(doc, name string) bool {
 
 // TestTUIReferenceNamesEveryBuiltinSlashCommand keeps docs/reference/tui.md
 // current: every builtin slash command, the conditional /sessions, /connect
-// and /btw included, appears there as `/name` or `/name <args>`.
+// and /btw included, appears there as `/name` or `/name <args>`. The builtins
+// are agent's descriptor table — every row, whatever its gate, which the menu
+// and the catalog a host sends both draw from (plan 043 D1) — and the TUI's
+// own client row, /sessions (P13).
 func TestTUIReferenceNamesEveryBuiltinSlashCommand(t *testing.T) {
 	doc := readDoc(t, "docs", "reference", "tui.md")
-	items := slices.Concat(builtinSlash(), []slashItem{sessionsBuiltin, connectBuiltin, btwBuiltin})
-	for _, it := range items {
-		if !mentionsSlash(doc, it.Name) {
-			t.Errorf("docs/reference/tui.md does not name the builtin slash command `/%s`", it.Name)
+	names := []string{sessionsBuiltin.Name}
+	for _, b := range agent.SlashBuiltins() {
+		names = append(names, b.Item.Name)
+	}
+	for _, name := range names {
+		if !mentionsSlash(doc, name) {
+			t.Errorf("docs/reference/tui.md does not name the builtin slash command `/%s`", name)
 		}
 	}
 }

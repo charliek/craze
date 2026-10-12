@@ -40,7 +40,17 @@
 // control.AsideEachDelta, which every Host uses), and session.aside.cancel
 // served; the hold_aside op parks the next answer after its first piece.
 // Without it, the Host refuses both methods as cursor's host does
-// (aside_unsupported). cmd/craze-fake-host has no flag for it yet.
+// (aside_unsupported). cmd/craze-fake-host has no flag for it yet. Its slash
+// (Options.Slash, plan 043 C2) makes the session the Stub as one that
+// publishes the slash catalog (tui.Stub.PublishSlash):
+// capabilities.slashCatalog, the slash section in the install and so in every
+// attach's snapshot, and the set_commands and set_skills ops publishing a
+// commands update and a scan's result as a live session does. The same line's
+// provider (Options.Provider) names the session's provider in place of the
+// Stub's own, and its plugins (Options.Plugins) are the plugin rows the
+// session starts with — together, a native session's catalog (fixture 31).
+// Without slash the Host publishes no catalog, an older host's wire; the
+// binary has no flag for any of the three.
 //
 // A Host is served on a listener its caller makes, listed nowhere, unless it
 // is registered (Register, plan 032 §3.15): then it is bound and listed in a

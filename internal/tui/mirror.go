@@ -14,10 +14,11 @@ import (
 // the engine's live memory:
 //
 //  1. m.shared, this client's own fold of the stream: the settings (title,
-//     mode, model, config, the catalogs of commands and plugins, the armed
-//     send-now, and — once a native session has reloaded its table — the
-//     models it offers), the todo list, the roster, the ordered tools, the
-//     queue and the agent's own turn (transcript.Model.Mirror);
+//     mode, model, config, the catalogs of commands and plugins, the slash
+//     catalog (plan 043), the armed send-now, and — once a native session
+//     has reloaded its table — the models it offers), the todo list, the
+//     roster, the ordered tools, the queue and the agent's own turn
+//     (transcript.Model.Mirror);
 //  2. Backend.Info(), the session's facts: the provider — by name, for its
 //     local vocabulary; its capabilities come from Info through caps() — the
 //     provider's session id, and the model and mode catalogs, the model
@@ -64,6 +65,18 @@ func (m *Model) recompute() {
 	if c := f.Settings.Catalog; c != nil && c.Revision >= info.CatalogRevision {
 		models = c.Models
 	}
+	// The session's slash catalog (plan 043 P6), the fold's own copy of the
+	// last slash section folded: nil from a session that publishes none
+	// (Info().SlashCatalog false), and until its install. A catalog a snapshot
+	// did not carry whole (truncated.slash: a row dropped, a description cut,
+	// or the whole section left out to fit the budget, A12) is held as none —
+	// it is not the session's menu, and the menu builds its own instead
+	// (hostSlash) until the next slash section restates it and the fold clears
+	// the mark.
+	slash := f.Settings.Slash
+	if f.Settings.Truncated.Slash {
+		slash = nil
+	}
 	snap := agent.Snapshot{
 		Models:       models,
 		Modes:        info.Modes,
@@ -79,6 +92,7 @@ func (m *Model) recompute() {
 		Provider:     providerNamed(info.Provider),
 		ForeignTurn:  f.Turn.Foreign != nil && f.Turn.Foreign.Running,
 		Plugins:      f.Settings.Plugins,
+		Slash:        slash,
 		// The session's usage (plan 028 §3.14): the status row reads it from
 		// the fold like every other settings section.
 		Usage: f.Settings.Usage,
@@ -107,6 +121,19 @@ func (m *Model) recompute() {
 		}
 	}
 	m.snap, m.queue, m.sendNowArmed = snap, queue, armed
+	// The menu leaving its host's catalog for its own (hostSlash): a snapshot
+	// that cut the catalog or left it out — a reconnect's among them — or a
+	// section that cleared it. The bare "/" walks nothing while the host's
+	// catalog is drawn, so the skills this client last walked may predate
+	// ones the menu has been showing from the host's scan; they are walked
+	// again now, synchronously as the bare "/" walks them, so no skill on the
+	// menu or in /help vanishes with the switch (astra C3 T4). A switch to
+	// another session starts this over (withSession).
+	hosted := m.slashHosted()
+	if m.slashWasHosted && !hosted {
+		m.rescanSkills()
+	}
+	m.slashWasHosted = hosted
 	if selected {
 		list := m.dialogModelList()
 		switch {

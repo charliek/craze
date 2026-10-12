@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
@@ -39,6 +40,16 @@ import (
 // session that started and refused its first prompt (the result says so, and
 // the session runs on, idle). With --json every one of those failures also
 // prints one JSON object on stdout (newFailureJSON); usage errors stay plain.
+//
+// --title (plan 043 D8, P11) names the session from its start, pinned as a
+// /rename pins one: normalized here as the hub normalizes it
+// (engine.NormalizeTitle, so a blank one is a usage error before anything is
+// dialled), sent as session.create's title, and needed of the hub — Ensure
+// asks for createTitle as well as sessionCreate (hub.CreateNeed), so a
+// running hub from before titles is LacksError's "cannot set a title at
+// create", exit 1, never the hub's unknown_field and never an untitled
+// session. With --wait it is the spawned host's --title, as the hub's create
+// passes it.
 
 const (
 	// newBudget bounds a craze new: the hub's Ensure, and the create, which
@@ -63,6 +74,8 @@ type newFlags struct {
 	effort                string
 	fast, noFast, noForce bool
 	json                  bool
+	// title is --title (plan 043 D8): the session's name from its start.
+	title string
 
 	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
 	wait       bool
@@ -112,6 +125,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.fast, "fast", false, "start with the fast setting on, where the model offers one")
 	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo: the session's agent asks for permission, and a client answers")
+	cmd.Flags().StringVar(&f.title, "title", "", "name the session this from its start, pinned as /rename pins a title (one line, at most 120 characters)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result) as JSON; with --wait, the result")
 	// --wait (plan 041 §3.2): another path, past the hub — the session's
 	// host spawned here, unattended, sent the prompt and followed to its
@@ -129,6 +143,10 @@ func newNewCmd() *cobra.Command {
 func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	if f.fast && f.noFast {
 		return usagef("craze new: --fast and --no-fast are mutually exclusive")
+	}
+	title, err := newTitle(cmd, f)
+	if err != nil {
+		return err
 	}
 	// An explicit, non-empty --provider is checked here, before anything is
 	// dialled (plan 037 LC-4): by its id alone — no CRAZE_PROVIDER, no
@@ -191,7 +209,7 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 		return fail(err, "%v", err)
 	}
 	p := protocol.CreateParams{Cwd: abs, Prompt: strings.Join(args, " "), Provider: provider,
-		Model: strings.TrimSpace(f.model), Effort: strings.TrimSpace(f.effort), RequestID: id}
+		Model: strings.TrimSpace(f.model), Effort: strings.TrimSpace(f.effort), RequestID: id, Title: title}
 	if strings.TrimSpace(p.Prompt) == "" {
 		p.Prompt = ""
 	}
@@ -245,13 +263,14 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 }
 
 // createThroughHub is p's create through the hub (the file's comment): Ensure,
-// needing sessionCreate, within hubBudget (X34), then the create within ctx;
-// a connection that ended before the answer is tried once more, the same
-// requestId, through Ensure again — and only that.
+// needing sessionCreate — and createTitle for a create with a title
+// (hub.CreateNeed, plan 043 P11) — within hubBudget (X34), then the create
+// within ctx; a connection that ended before the answer is tried once more,
+// the same requestId, through Ensure again — and only that.
 func createThroughHub(ctx context.Context, env rundir.Env, p protocol.CreateParams) (json.RawMessage, error) {
 	for retried := false; ; retried = true {
 		ectx, cancel := context.WithTimeout(ctx, hubBudget)
-		sock, err := hub.Ensure(ectx, env, protocol.ConnectionCapabilities{SessionCreate: true})
+		sock, err := hub.Ensure(ectx, env, hub.CreateNeed(p))
 		cancel()
 		if err != nil {
 			return nil, err
@@ -292,6 +311,22 @@ func newFailureJSON(err error, msg string) []byte {
 		raw = []byte(`{"error":{"message":"craze new failed"}}`)
 	}
 	return raw
+}
+
+// newTitle is --title (plan 043 D8, P9): "" when it was not given, and
+// otherwise engine.NormalizeTitle's — the hub's own normalization, and craze
+// serve --title's, so the title the session ends up with is the one this
+// sends — or, for one that normalizes to nothing, a usage error: a title is
+// omitted, never sent blank.
+func newTitle(cmd *cobra.Command, f *newFlags) (string, error) {
+	if f.title == "" && !cmd.Flags().Changed("title") {
+		return "", nil
+	}
+	title := engine.NormalizeTitle(f.title)
+	if title == "" {
+		return "", usagef("craze new: --title is blank")
+	}
+	return title, nil
 }
 
 // newRequestID is a fresh requestId for one craze new: "new-" and 16 random

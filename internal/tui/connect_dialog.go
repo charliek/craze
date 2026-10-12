@@ -101,10 +101,12 @@ const (
 )
 
 // connectBuiltin is /connect's row: in the slash catalog on a native session
-// alone, right after /model (slashCatalog). builtinNamed never names it — it
-// knows the fixed set, which every provider has — so dispatch has its own
-// gate (handleEnter).
-var connectBuiltin = slashItem{Name: "connect", Desc: "Connect a model provider: store its API key", Builtin: true}
+// alone, right after /model. builtinNamed never names it — it knows the fixed
+// set, which every provider has — so dispatch has its own gate (handleEnter).
+//
+// Its name, description, place and gate are agent's descriptor table's (plan
+// 043 D1); the menu shows it where that gate and dispatchesBuiltin agree.
+var connectBuiltin = tableBuiltin("connect")
 
 // nativeProviderName is the id a native session's snapshot names its
 // provider by.

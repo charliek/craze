@@ -353,6 +353,22 @@ type SessionInfo struct {
 	// the host sent it). False for cursor and from a host from before the
 	// method: a client then offers no /btw and makes no call.
 	Aside bool
+	// SlashCatalog says the session publishes the slash catalog section
+	// (plan 043 P2): the `/` rows it offers, on its stream and in its
+	// snapshot's settings (transcript.Settings.Slash) — a live ACP or native
+	// session, in process (engine.PublishesSlashCatalog) or over the socket
+	// (the session capability slashCatalog, as the host sent it). False for
+	// a session that is not craze's own and from a host from before the
+	// section: a client then builds its menu as it did without one.
+	SlashCatalog bool
+	// Stop says Stop ends the session (plan 030 §3.6a): true in process,
+	// where it is the engine's close, and over the socket the session
+	// capability stop, as the host sent it — false for a host that answers
+	// session.stop stop_unsupported (an older craze, a TUI-hosted session's
+	// socket). A slash row that requires stop (plan 043 P4) is shown only
+	// where it is true — bar /exit, the TUI's own quit, which detaches where
+	// the host cannot stop the session.
+	Stop bool
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon

@@ -259,6 +259,10 @@ func TestInstancesValidate(t *testing.T) {
 		`"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}`
 	optionsHub := theHub
 	optionsHub.Capabilities.CreateOptions = true
+	// A hub whose session.create takes a title (plan 043 D8): every craze
+	// hub's from it on, beside createOptions.
+	titleHub := optionsHub
+	titleHub.Capabilities.CreateTitle = true
 	errResp := func(code protocol.Code, reason protocol.Reason) string {
 		return jsonOf(t, protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`7`),
 			Error: &protocol.Error{Code: protocol.RPCRefused, Message: "refused", Data: protocol.ErrorData{Code: code, Reason: reason}}})
@@ -300,6 +304,11 @@ func TestInstancesValidate(t *testing.T) {
 		{"a hub's hello serving sessions.createOptions", "hello.json", "result", jsonOf(t, optionsHub), true},
 		{"a hub's hello whose createOptions is no boolean", "hello.json", "result",
 			strings.Replace(jsonOf(t, optionsHub), `"createOptions":true`, `"createOptions":"yes"`, 1), false},
+		// createTitle (plan 043 D8, P11): omitted when false, as createOptions
+		// is — the older hub's hello above has neither.
+		{"a hub's hello whose create takes a title", "hello.json", "result", jsonOf(t, titleHub), true},
+		{"a hub's hello whose createTitle is no boolean", "hello.json", "result",
+			strings.Replace(jsonOf(t, titleHub), `"createTitle":true`, `"createTitle":"yes"`, 1), false},
 		{"a hub's hello carrying clientId", "hello.json", "result", with(jsonOf(t, hub), "clientId", `"c-1"`), false},
 		{"a hub's hello carrying resumed", "hello.json", "result", with(jsonOf(t, hub), "resumed", "false"), false},
 		{"a hub's hello carrying retryHorizon", "hello.json", "result",
@@ -426,7 +435,7 @@ func TestInstancesValidate(t *testing.T) {
 		// session.create (plan 032 §3.10).
 		{"session.create, everything", "session.create.json", "params", jsonOf(t, protocol.CreateParams{Cwd: "/work/lumen",
 			Prompt: "fix the build", Provider: "grok", Model: "grok-4.7", Effort: "high", Fast: &instanceTrue,
-			PermissionMode: protocol.PermissionPrompt, RequestID: "new-0a1b.c_d-9"}), true},
+			PermissionMode: protocol.PermissionPrompt, RequestID: "new-0a1b.c_d-9", Title: "the build, fixed"}), true},
 		{"session.create, a directory alone", "session.create.json", "params", `{"cwd":"/work"}`, true},
 		{"session.create, fast off", "session.create.json", "params", `{"cwd":"/work","fast":false}`, true},
 		{"session.create with no directory", "session.create.json", "params", `{"prompt":"hi"}`, false},
@@ -440,6 +449,12 @@ func TestInstancesValidate(t *testing.T) {
 		{"session.create with a permission mode there is none of", "session.create.json", "params", `{"cwd":"/work","permissionMode":"ask"}`, false},
 		{"session.create naming an agent binary", "session.create.json", "params", `{"cwd":"/work","agentBin":"/bin/sh"}`, false},
 		{"session.create naming a session", "session.create.json", "params", `{"cwd":"/work","sessionId":"s"}`, false},
+		// A title at create (plan 043 D8): a string, never empty — a client
+		// with none omits it. The schema says nothing of a blank one, which
+		// the hub refuses once it has normalized it to nothing.
+		{"session.create with a title", "session.create.json", "params", jsonOf(t, protocol.CreateParams{Cwd: "/work", Title: "Fix the login bug"}), true},
+		{"session.create with an empty title", "session.create.json", "params", `{"cwd":"/work","title":""}`, false},
+		{"session.create with a title of a number", "session.create.json", "params", `{"cwd":"/work","title":7}`, false},
 		{"a create's answer", "session.create.json", "result", jsonOf(t, protocol.CreateResult{Session: reachable,
 			Prompt: protocol.CreatePromptAccepted}), true},
 		{"a create's answer, its prompt refused", "session.create.json", "result", jsonOf(t, protocol.CreateResult{Session: reachable,
