@@ -27,7 +27,7 @@ from test_hub import _ps_rows
 from sse_fixture import SSEFixture, write_native_config
 from test_slash_catalog import Client, create_session, hub_bridge, hub_env
 
-TITLE_RAW = "  Fix the\tlogin   bug ​"
+TITLE_RAW = "  Fix the\tlogin   bug \u200b"
 TITLE = "Fix the login bug"
 
 
@@ -134,7 +134,7 @@ def test_create_with_a_title_names_the_session_from_its_start(
         assert (err["data"]["code"], err["data"]["reason"]) == ("bad_request", "request_conflict"), err
 
     # Blank is no title: bad_request, and no session behind it.
-    for id_, blank in ((6, "   "), (7, "​"), (8, "")):
+    for id_, blank in ((6, "   "), (7, "\u200b"), (8, "")):
         err = _error(
             hub, id_, "session.create", {"cwd": str(work), "provider": "grok", "requestId": f"t5-blank-{id_}", "title": blank}
         )
