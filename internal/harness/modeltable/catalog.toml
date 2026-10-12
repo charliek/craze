@@ -609,6 +609,28 @@ input = 0.1
 output = 0.2
 cache_read = 0.002
 
+# Muse Wonder is Meta's most capable model, in preview (plan 045). It is not
+# Meta's start: Spark stays the default, so Wonder is picked with /model or
+# --model. Its window, efforts, vision and price are Meta's docs and live
+# probes on 2026-10-12: the API takes minimal to max and refuses none; Meta
+# names no output limit and accepts any up to the window, so the ceiling is
+# the Muse family's 131072, Spark's. There is no contributor tier. Muse
+# Wonder Full is a Muse Code subscription model, not on the Model API.
+[models."muse-wonder-1.0"]
+provider = "meta"
+wire_model = "muse-wonder-1.0"
+name = "Muse Wonder 1.0 (Meta)"
+context_window = 1048576
+max_output_tokens = 131072
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."muse-wonder-1.0".cost]
+input = 4.0
+output = 20.0
+cache_read = 0.2
+
 # The openrouter/*-latest models are OpenRouter's ~<family>-latest routers:
 # each answers as the newest model of its family, so a release there moves it
 # with no change here. Their window, efforts, vision and price are the

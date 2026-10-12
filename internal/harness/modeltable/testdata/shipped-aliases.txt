@@ -43,3 +43,4 @@ anthropic/claude-opus-5-5
 anthropic/claude-sonnet-4-6
 anthropic/claude-sonnet-5
 anthropic/claude-sonnet-5-5
+muse-wonder-1.0

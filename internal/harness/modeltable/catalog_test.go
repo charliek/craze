@@ -113,7 +113,9 @@ func TestShippedCatalog(t *testing.T) {
 	// read from disk; GLM Latest, GLM 5.3 on OpenRouter, takes text only.
 	// Plan 044 adds the thirteen Anthropic seeds: each takes image input by
 	// the account's list (image_input), and the four headline models were seen
-	// describing an image live before they shipped (P31).
+	// describing an image live before they shipped (P31). Plan 045's Muse
+	// Wonder 1.0 named an image's colour live (MW-7) and read one from disk
+	// through craze.
 	seesImages := map[string]bool{
 		"anthropic/claude-fable-5": true, "anthropic/claude-fable-5-1": true,
 		"anthropic/claude-haiku-4-5-20251001": true, "anthropic/claude-haiku-5-5": true,
@@ -126,6 +128,7 @@ func TestShippedCatalog(t *testing.T) {
 		"fireworks/ember-1": true, "fireworks/glm-5p3-flash": true,
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
 		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
+		"muse-wonder-1.0":                  true,
 		"openrouter/deepseek-flash-latest": true, "openrouter/gemini-flash-latest": true,
 		"openrouter/glm-flash-latest": true, "openrouter/gpt-astra-latest": true,
 		"openrouter/gpt-luna-latest": true, "openrouter/gpt-sol-latest": true,
@@ -239,7 +242,8 @@ func TestShippedCatalogHistory(t *testing.T) {
 // [anthropic_defaults] — the newest Opus to start on (O1), medium effort for
 // every model (D3), every model offered (O3); a key alone starts a session
 // on anthropic/claude-opus-5-5 at medium; and the four headline prices (LF-8,
-// P29: Sonnet 5.5's cache hit is $0.10).
+// P29: Sonnet 5.5's cache hit is $0.10). And plan 045: Muse Wonder 1.0 on
+// Meta, with Spark still Meta's start (the owner's pin).
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -309,6 +313,28 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("%s efforts = %q, want low, high, max", alias, got)
 		}
 	}
+	// Meta's models (plan 045): the two Spark 1.3 tiers and Muse Wonder 1.0,
+	// each on its own wire id. Wonder takes minimal to max (the API refuses
+	// none, MW-6) at Spark's default, high, and its ceiling is the family's
+	// 131072, not the window (D2); the start above stays Spark's contributor.
+	wantMeta := map[string]string{
+		"muse-spark-1.3":             "muse-spark-1.3",
+		"muse-spark-1.3-contributor": "muse-spark-1.3-contributor",
+		"muse-wonder-1.0":            "muse-wonder-1.0",
+	}
+	gotMeta := map[string]string{}
+	for alias, m := range c.Models {
+		if m.Provider == "meta" {
+			gotMeta[alias] = m.WireModel
+		}
+	}
+	if !maps.Equal(gotMeta, wantMeta) {
+		t.Fatalf("Meta's models = %q, want %q", gotMeta, wantMeta)
+	}
+	if m := c.Models["muse-wonder-1.0"]; m.Name != "Muse Wonder 1.0 (Meta)" || m.ContextWindow != 1048576 || m.MaxOutputTokens != 131072 ||
+		!slices.Equal(m.Efforts, []string{"minimal", "low", "medium", "high", "xhigh", "max"}) || m.DefaultEffort != "high" || !m.Vision {
+		t.Errorf("muse-wonder-1.0 = %+v", m)
+	}
 	// The three Fireworks models (§2.5), as verified live.
 	for alias, want := range map[string]struct {
 		wire, name, effort string
@@ -337,6 +363,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"openrouter/mimo-v2.6-pro":         {0.435, 0.87, 0.0036},
 		"openrouter/minimax-m3":            {0.3, 1.2, 0.06},
 		"muse-spark-1.3-contributor":       {0.1, 0.2, 0.002},
+		"muse-wonder-1.0":                  {4.0, 20.0, 0.2},
 	} {
 		cost := c.Models[alias].Cost
 		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil ||
