@@ -139,6 +139,7 @@ const (
 	subagentNoMessage  = "The sub-agent finished without a final message."
 	subagentCutOff     = "(The sub-agent's output was cut off.)"
 	subagentRefused    = "(The sub-agent's model refused to continue.)"
+	subagentRefusedAs  = "(The sub-agent's model refused to continue; refusal category: %s.)" // plan 044 §3.4
 	subagentLooped     = "(The sub-agent was stopped for repeating the same tool call.)"
 	subagentStepLimit  = "(The sub-agent reached its step limit.)"
 	subagentFailed     = "The sub-agent failed: "
@@ -898,6 +899,9 @@ type childCall struct {
 	// background call's acknowledgement, which says the child started; the
 	// child is the session's from then on, not the call's (§3.11).
 	final bool
+	// note is a completed child's note on how it ended (completedResult),
+	// which settle adds after the cut.
+	note string
 }
 
 // openChild is step 5's Open: the child session for h, with the parent's own
@@ -1015,7 +1019,7 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		parentGone: closing || ctx.Err() != nil || isClosed(parent.tools.closing),
 		stopped:    errors.Is(context.Cause(childCtx), errStoppedByUser),
 	}.decide(&obs)
-	c.completed = out.status == SubagentCompleted
+	c.completed, c.note = out.status == SubagentCompleted, out.note
 
 	// Finished says the child has ended and closed: its Close is idempotent,
 	// and the deferred one then does nothing.
@@ -1135,6 +1139,10 @@ func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res
 	}
 	res.Text = r.union(c.child).String(res.Text)
 	res.Text, res.Trunc = tool.TruncateRedacted(r.s.base.home, callID, res.Text, tool.Head, r.union(c.child))
+	// A completed child's note joins after the cut, so the cut never takes it
+	// (completedResult); the truncation's figures and spill file are the
+	// answer's alone.
+	res.Text = withNote(res.Text, c.note)
 	red := r.union(c.child)
 	res.Text, res.Trunc.Spill = red.String(res.Text), red.String(res.Trunc.Spill)
 	if u := res.Child; u != nil {
@@ -1317,9 +1325,12 @@ type subagentOutcome struct {
 }
 
 // decided is an outcome as the parent sees it: the call's result, and the
-// SubagentFinished's status, error and text.
+// SubagentFinished's status, error and text. note is completedResult's note
+// on how a finished child ended, kept apart from the result until the result
+// has been cut (withNote).
 type decided struct {
 	result        tool.Result
+	note          string
 	status        string
 	errText, text string
 }
@@ -1360,7 +1371,8 @@ func (o subagentOutcome) decide(obs *childObserver) decided {
 		obs.mu.Lock()
 		doom := obs.doomStopped
 		obs.mu.Unlock()
-		return decided{result: completedResult(o.res.StopReason, last, doom), status: SubagentCompleted, text: last}
+		result, note := completedResult(o.res, last, doom)
+		return decided{result: result, note: note, status: SubagentCompleted, text: last}
 	case o.parentGone:
 		return decided{result: abortedResult(), status: SubagentCancelled, text: last}
 	case o.stopped && o.err == nil:
@@ -1376,18 +1388,31 @@ func (o subagentOutcome) decide(obs *childObserver) decided {
 	return decided{result: abortedResult(), status: SubagentCancelled, text: last}
 }
 
-// completedResult is a finished child's answer (§3.7): its text, with a note
-// when the turn was cut short rather than finished — cut off, refused, or
+// completedResult is a finished child's answer (§3.7): its text, and a note
+// when the turn was cut short rather than finished — cut off, refused (with
+// the refusal's category when the provider gave one, plan 044 §3.4), or
 // stopped by the doom-loop guard or the step limit, which one said by the
-// guard's own Diag, since both end max_turn_requests — and the fixed text for
-// one that ended with nothing to say. None is an error: the child ran.
-func completedResult(stop, text string, doomStopped bool) tool.Result {
+// guard's own Diag, since both end max_turn_requests — or the fixed text for
+// one that ended with nothing to say and no note. None is an error: the child
+// ran.
+//
+// The note comes back apart from the answer, and joins it only once the
+// answer has been cut to the result's cap (withNote, in settle and
+// deliverable): a long answer is cut to its head, and a note appended before
+// the cut would be cut with it — the parent would read part of an answer with
+// no word that the child was refused, or why (plan 044 C3 review, C3-1). After
+// the cut it ends the result, where an uncut answer's note ends it too, so the
+// parent reads one shape either way: the answer, then how the child ended.
+func completedResult(res Result, text string, doomStopped bool) (tool.Result, string) {
 	var note string
-	switch stop {
+	switch res.StopReason {
 	case StopMaxTokens:
 		note = subagentCutOff
 	case StopRefusal:
 		note = subagentRefused
+		if c := res.RefusalCategory; c != "" {
+			note = fmt.Sprintf(subagentRefusedAs, c)
+		}
 	case StopMaxTurnRequests:
 		note = subagentStepLimit
 		if doomStopped {
@@ -1396,13 +1421,24 @@ func completedResult(stop, text string, doomStopped bool) tool.Result {
 	}
 	switch {
 	case note != "" && strings.TrimSpace(text) == "":
-		return tool.Result{Text: note}
-	case note != "":
-		return tool.Result{Text: text + "\n\n" + note}
+		return tool.Result{}, note
 	case strings.TrimSpace(text) == "":
-		return tool.Result{Text: subagentNoMessage}
+		return tool.Result{Text: subagentNoMessage}, ""
 	}
-	return tool.Result{Text: text}
+	return tool.Result{Text: text}, note
+}
+
+// withNote is a finished child's answer, already cut, with completedResult's
+// note after it — the note alone for an answer with nothing in it — or the
+// answer as it is when there is no note.
+func withNote(text, note string) string {
+	switch {
+	case note == "":
+		return text
+	case strings.TrimSpace(text) == "":
+		return note
+	}
+	return text + "\n\n" + note
 }
 
 // failedResult is a failed child's answer (§3.7): an error, class tool_error,

@@ -292,7 +292,7 @@ func TestNativeFetchedListIsTakenUp(t *testing.T) {
 	}
 	takeStartDelta(t, s.log)
 	s.mu.Lock()
-	refreshed := s.refreshed
+	refreshed := s.planList.done
 	opened := offeredIDs(s.snap.Models)
 	s.mu.Unlock()
 	close(captured)
@@ -821,7 +821,7 @@ func writePlanListOf(t *testing.T, dir, subject, client string, models ...chatgp
 func awaitPlanFetch(t *testing.T, s *nativeSession) {
 	t.Helper()
 	s.mu.Lock()
-	ch := s.refreshed
+	ch := s.planList.done
 	s.mu.Unlock()
 	if ch != nil {
 		await(t, ch, "the plan list's fetch")
@@ -1709,12 +1709,12 @@ func TestNativeCatalogCutNoteIsOneSafeLine(t *testing.T) {
 
 // TestNativeAFailedFetchBacksOff (plan 034 C5r, r12 #3b): a fetch of the
 // plan's model list that fails — the open's, here, against an API that
-// answers every request 503 — starts no other for planListRetryBackoff: a
+// answers every request 503 — starts no other for listRetryBackoff: a
 // refresh asked within it starts none, and still reloads and answers (the
 // list rewritten on disk meanwhile is taken up, applied). Once the backoff
 // has passed on the session's clock, a refresh starts the fetch again. The
 // control: the open's fetch was made and failed, and the later one is made.
-// Negative control: a refreshModelsLocked with no backoff starts a fetch
+// Negative control: a submitListLocked with no backoff starts a fetch
 // within it.
 func TestNativeAFailedFetchBacksOff(t *testing.T) {
 	api, _ := noOpenAI(t)
@@ -1749,7 +1749,7 @@ func TestNativeAFailedFetchBacksOff(t *testing.T) {
 	fetch := func() chan struct{} {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.refreshed
+		return s.planList.done
 	}
 	listRequests := func() int {
 		n := 0
@@ -1771,7 +1771,7 @@ func TestNativeAFailedFetchBacksOff(t *testing.T) {
 
 	// Within the backoff: the list rewritten on disk — another model — is
 	// taken up by the refresh's reload, and no fetch starts.
-	advance(planListRetryBackoff - time.Second)
+	advance(listRetryBackoff - time.Second)
 	m, err := chatgptauth.ReadModels(dir)
 	if err != nil {
 		t.Fatal(err)

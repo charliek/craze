@@ -398,7 +398,7 @@ func TestMergeStructuralProblemsStillFail(t *testing.T) {
 	}{
 		{"retired is not a user key", "", "version = 1\n\n[[retired]]\nalias = \"x\"\n", ModelsFile, "", "retired"},
 		{"unknown model key", "", "version = 1\n\n[models.\"acme/fast\"]\ncontxt_window = 1\n", ModelsFile, `models."acme/fast"`, "contxt_window"},
-		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"anthropic\"\n", "", ProvidersFile, "providers.acme", "driver"},
+		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"bedrock\"\n", "", ProvidersFile, "providers.acme", "driver"},
 		// The chatgpt driver with an endpoint of its own, written by the
 		// entry itself: a pair that cannot go together, as openrouter's is
 		// (plan 033 §3.11). Under another id it is dropped with a warning
@@ -1078,9 +1078,12 @@ model = "acme/big"
 // its default_model is now the owner's own pin (plan 038 §2.3), so it still
 // starts on deepseek and is not named as redundant. The import-era models.toml
 // of an older machine loads to the same models: its retired aliases vanish
-// silently and its retired default_model pins nothing.
+// silently and its retired default_model pins nothing. The models are the
+// catalog alone's, as a load makes them (the Anthropic seeds at
+// [anthropic_defaults]' effort, plan 044 §3.5); Anthropic's provider, which
+// the files predate, is funded by its own key alone.
 func TestOwnerFilesUpgrade(t *testing.T) {
-	cat, err := ShippedCatalog()
+	cat, err := Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1121,15 +1124,22 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 				}
 			}
 			for id, p := range cat.Providers {
-				if p.Driver == DriverChatGPT {
-					continue // signs in: no key, inline or not (plan 033 §3.11)
+				if p.Driver == DriverChatGPT || id == AnthropicProvider {
+					continue // signs in, or postdates the files: no inline key
 				}
 				if tbl.Providers[id].APIKey == "" {
 					t.Errorf("provider %s lost its inline key", id)
 				}
 			}
 			for _, alias := range tbl.Aliases() {
-				if _, err := tbl.Resolve(alias, fakeEnv(nil)); err != nil {
+				_, err := tbl.Resolve(alias, fakeEnv(nil))
+				if tbl.Models[alias].Provider == AnthropicProvider {
+					if !errors.Is(err, ErrNoAPIKey) {
+						t.Errorf("%s: err = %v, want ErrNoAPIKey: no file funds Anthropic", alias, err)
+					}
+					continue
+				}
+				if err != nil {
 					t.Errorf("%s is not funded: %v", alias, err)
 				}
 			}

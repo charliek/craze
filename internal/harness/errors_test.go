@@ -138,6 +138,20 @@ func TestProviderErrorText(t *testing.T) {
 			`harness: the request alone is too large for model "m"'s context window (provider "p", model "m", HTTP 400): too long`},
 		{badToolCalls(store.Model{Provider: "p", Alias: "m", WireModel: "w"}).(*ProviderError),
 			`harness: the provider sent tool calls with missing or repeated ids (provider "p", model "m"): a tool call in the response had an empty or repeated id, so none of the response's tool calls was run`},
+		// Anthropic's 403 is the model refused to an accepted key, and its 404
+		// the wire id the account cannot use (plan 044 §3.4, P27); its 401 is
+		// still the key's. The controls: the same 403 and 404 on another
+		// driver keep the key's and the unknown model's words.
+		{&ProviderError{Provider: "anthropic", Model: "anthropic/m", WireModel: "w", Driver: modeltable.DriverAnthropic, StatusCode: 403, Message: "no access", kind: ErrAuth},
+			`harness: Anthropic refused access to model "anthropic/m" (provider "anthropic", model "anthropic/m", HTTP 403): no access`},
+		{&ProviderError{Provider: "anthropic", Model: "anthropic/m", WireModel: "w", Driver: modeltable.DriverAnthropic, StatusCode: 404, Message: "model: w", kind: ErrModelNotFound},
+			`harness: the Anthropic account cannot use "w" (provider "anthropic", model "anthropic/m", HTTP 404): model: w`},
+		{&ProviderError{Provider: "anthropic", Model: "anthropic/m", WireModel: "w", Driver: modeltable.DriverAnthropic, StatusCode: 401, Message: "bad key", kind: ErrAuth},
+			`harness: the provider rejected the API key (provider "anthropic", model "anthropic/m", HTTP 401): bad key`},
+		{&ProviderError{Provider: "p", Model: "m", WireModel: "w", Driver: modeltable.DriverOpenAICompat, StatusCode: 403, Message: "no access", kind: ErrAuth},
+			`harness: the provider rejected the API key (provider "p", model "m", HTTP 403): no access`},
+		{&ProviderError{Provider: "p", Model: "m", WireModel: "w", Driver: modeltable.DriverOpenAICompat, StatusCode: 404, Message: "model: w", kind: ErrModelNotFound},
+			`harness: the provider does not know the model (provider "p", model "m", HTTP 404): model: w`},
 	}
 	for _, tc := range cases {
 		if got := tc.err.Error(); got != tc.want {

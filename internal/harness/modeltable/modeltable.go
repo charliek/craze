@@ -71,6 +71,14 @@ const (
 	// account's own list (discovered.go).
 	DriverChatGPT = "chatgpt"
 
+	// DriverAnthropic is Anthropic's driver (plan 044 §3.3): the Messages API
+	// at Anthropic's fixed endpoint, funded by an API key, through craze's own
+	// client (package llm/messagesapi). Its one provider is
+	// AnthropicProvider, which takes no base URL (validateProvider), and
+	// whose entry a user's providers.toml may only rename and point at its
+	// key once the catalog ships it (lockAnthropic).
+	DriverAnthropic = "anthropic"
+
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
 	// a file an older craze wrote (source = "gx") still loads — and such an
@@ -228,6 +236,12 @@ type Table struct {
 	// alias is not what it holds (Shadowed; plan 034 C4r4, r15 #3). nil for
 	// none.
 	shadowed map[string]bool
+	// learned is what craze learned of each (provider, wire model) identity —
+	// its catalog's models, and the lists a load adds to its copy — as it
+	// stood before the user's files were laid over it (learnedOf, P11): what
+	// a model is looked up in by its identity (factsOf). nil for a table
+	// loaded without a catalog or built in memory.
+	learned map[identity]learnedFacts
 	// unkeyed are the variables WithholdFrozen found holding a value a
 	// session cannot redact out of what it has already sent: each reads as
 	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's
@@ -278,6 +292,22 @@ type Model struct {
 	// provider sets it (the ChatGPT plan's list, plan 033 C14); no file has a
 	// key for it.
 	ParallelToolCalls *bool
+	// Thinking is the thinking a model on the anthropic driver takes (plan
+	// 044 §3.5, P11): ThinkingAdaptive, ThinkingNone, or "" for not known,
+	// which Resolve resolves (Table.thinkingOf). Like ParallelToolCalls it is
+	// learned, never a key of the user's files: only what craze knows of a
+	// model sets it.
+	Thinking string
+	// Family and Released are what craze knows of an Anthropic model's line
+	// and release (plan 044 §3.5, P11): its family ("opus", "sonnet", …),
+	// which a new session's start and a sub-agent's tier word pick the
+	// newest of, and its release date (YYYY-MM-DD), which orders a family
+	// and the picker's Anthropic block newest first. "" is not known. Like
+	// Thinking they are learned — the catalog's own keys and the account's
+	// list set them, never the user's files — and they follow the model's
+	// identity (Table.factsOf).
+	Family   string
+	Released string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -439,6 +469,12 @@ type Resolved struct {
 	// ParallelToolCalls is the model's Model.ParallelToolCalls, a copy: nil
 	// means the driver's default (plan 033 §3.11).
 	ParallelToolCalls *bool
+	// Thinking is what a request on a model of the anthropic driver asks for
+	// (plan 044 §3.3): ThinkingAdaptive — adaptive thinking, its display and
+	// its block_binding — or ThinkingNone, no thinking field. A model whose
+	// thinking the table does not know is ThinkingAdaptive. "" on every other
+	// driver.
+	Thinking string
 }
 
 // The on-disk shapes Save writes. They are separate from the public types so
@@ -521,6 +557,11 @@ type modelEntry struct {
 	// model learned from its provider sets it (plan 033 §3.11) — and it is
 	// here so that the conversion from Model still compiles.
 	ParallelToolCalls *bool `toml:"-"`
+	// Thinking, Family and Released are never written either, for the same
+	// reason (plan 044 P11).
+	Thinking string `toml:"-"`
+	Family   string `toml:"-"`
+	Released string `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -873,11 +914,11 @@ func validateProvider(file, id string, p Provider) error {
 	if r := driverProblem(p.Driver); r != "" {
 		return at("driver", r)
 	}
-	if p.Driver == DriverChatGPT && id != ChatGPTProvider {
-		// The sign-in funds the one provider made for it (plan 033 §3.11):
-		// a merge drops an entry of the user's that names the driver under
-		// another id, with a warning, rather than let the plan pay for it.
-		return at("driver", fmt.Sprintf("driver %q is craze's own provider %q's alone", DriverChatGPT, ChatGPTProvider))
+	if own := driverOwner(p.Driver); own != "" && id != own {
+		// A merge drops an entry of the user's that names the driver under
+		// another id, with a warning, rather than let the plan or the key pay
+		// for it.
+		return at("driver", fmt.Sprintf("driver %q is craze's own provider %q's alone", p.Driver, own))
 	}
 	if r := baseURLProblem(p.BaseURL); r != "" {
 		return at("base_url", r)
@@ -912,15 +953,29 @@ func validateProvider(file, id string, p Provider) error {
 // naming one, on the ChatGPT plan's provider.
 const signInKeyReason = `must be absent for driver "chatgpt", which is funded by signing in (craze auth login chatgpt), not by a key`
 
+// driverOwner is the id of the one provider craze made driver for, "" for a
+// driver any provider may take: the sign-in funds the ChatGPT plan's provider
+// alone (plan 033 §3.11), and Anthropic's endpoint is fixed, its provider the
+// one craze ships, locked (plan 044 §3.3, lockAnthropic).
+func driverOwner(driver string) string {
+	switch driver {
+	case DriverChatGPT:
+		return ChatGPTProvider
+	case DriverAnthropic:
+		return AnthropicProvider
+	}
+	return ""
+}
+
 // driverProblem is why driver is not one craze has, "" when it is.
 func driverProblem(driver string) string {
 	switch driver {
-	case DriverOpenAICompat, DriverOpenRouter, DriverChatGPT:
+	case DriverOpenAICompat, DriverOpenRouter, DriverChatGPT, DriverAnthropic:
 		return ""
 	case "":
-		return `missing: want "openai-compat", "openrouter" or "chatgpt"`
+		return `missing: want "openai-compat", "openrouter", "chatgpt" or "anthropic"`
 	}
-	return fmt.Sprintf(`unknown driver %q: want "openai-compat", "openrouter" or "chatgpt"`, driver)
+	return fmt.Sprintf(`unknown driver %q: want "openai-compat", "openrouter", "chatgpt" or "anthropic"`, driver)
 }
 
 // baseURLProblem is why a base URL is not one, "" when it is (or is ""). The
@@ -933,19 +988,28 @@ func baseURLProblem(baseURL string) string {
 }
 
 // endpointProblem is why a known driver and a base URL do not go together,
-// "" when they do: openai-compat needs one, openrouter's and chatgpt's are
-// fixed — chatgpt's above all, since its bearer must reach OpenAI's API and
-// nowhere else (plan 033 P37).
+// "" when they do: openai-compat needs one, openrouter's, chatgpt's and
+// anthropic's are fixed — chatgpt's and anthropic's above all, since their
+// credential must reach their own API and nowhere else (plan 033 P37, plan
+// 044 §3.3; a gateway's base_url is future work, D4).
 func endpointProblem(driver, baseURL string) string {
-	switch {
-	case driver == DriverOpenAICompat && baseURL == "":
-		return `missing: driver "openai-compat" needs the endpoint's base URL`
-	case driver == DriverOpenRouter && baseURL != "":
-		return `must be absent for driver "openrouter", whose endpoint is fixed`
-	case driver == DriverChatGPT && baseURL != "":
-		return `must be absent for driver "chatgpt", whose endpoint is fixed`
+	switch driver {
+	case DriverOpenAICompat:
+		if baseURL == "" {
+			return `missing: driver "openai-compat" needs the endpoint's base URL`
+		}
+	case DriverOpenRouter, DriverChatGPT, DriverAnthropic:
+		if baseURL != "" {
+			return fixedEndpoint(driver)
+		}
 	}
 	return ""
+}
+
+// fixedEndpoint is the reason a base URL is refused, or dropped, for a driver
+// whose endpoint is fixed.
+func fixedEndpoint(driver string) string {
+	return fmt.Sprintf("must be absent for driver %q, whose endpoint is fixed", driver)
 }
 
 // envKeysProblem is why an env_keys list is not one, "" when it is.
@@ -1064,6 +1128,15 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	if r := toolProfileProblem(m.ToolProfile); r != "" {
 		return at("tool_profile", r)
 	}
+	if r := thinkingProblem(m.Thinking); r != "" {
+		return at("thinking", r)
+	}
+	if r := familyProblem(m.Family); r != "" {
+		return at("family", r)
+	}
+	if r := releasedProblem(m.Released); r != "" {
+		return at("released", r)
+	}
 	return validateCost(file, alias, m.Cost)
 }
 
@@ -1122,6 +1195,9 @@ func httpURL(s string) bool {
 // list (plan 034 Q16). Choices keeps listing a session's current model all
 // the same (P7).
 //
+// A model on the anthropic driver resolves with the thinking its requests
+// ask for (Resolved.Thinking, thinkingOf; plan 044 §3.5).
+//
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
 func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, error) {
@@ -1178,6 +1254,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		Vision:            m.Vision,
 		ToolProfile:       m.ToolProfile,
 		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
+		Thinking:          t.thinkingOf(m, p),
 	}, nil
 }
 

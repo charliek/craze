@@ -18,8 +18,9 @@ import (
 
 // A running native session takes up models funded while it runs (plan 034
 // §3.4, Q13–Q16), superseding plan 031's P8 for the picker: a key saved, the
-// ChatGPT plan signed in to or out of, or the plan's list fetched again is
-// offered at once, without /exit and craze -c. What does not change mid-session
+// ChatGPT plan signed in to or out of, or the plan's list or the Anthropic
+// account's (plan 044 §3.6) fetched again is offered at once, without /exit
+// and craze -c. What does not change mid-session
 // is P8's other half — the model it runs on keeps the client it built, and the
 // keys it learns are only ever added — and everything the session froze at
 // open: its prompt, its tools and the agent tool's model menu among them, its
@@ -33,13 +34,14 @@ import (
 // — a reload's, and a switch's model memory — and a switch's building of its
 // model's client (harness SetModel; r9 #1). No network, no turn:
 //
-//  1. The five inputs are stat'ed, through their path helpers, before anything
+//  1. The six inputs are stat'ed, through their path helpers, before anything
 //     is read: providers.toml, models.toml, the plan's registration
-//     (auth/chatgpt-client.json), its model list (chatgpt-models.json) and its
-//     sign-in (auth/chatgpt.json, stat only — Resolve reads its state). If none
-//     changed since the last reload that was published — and the list was not
-//     just fetched, nor a shadowing carry just left (reloadLeft), nor either
-//     since the last reload that published (forced) — the answer is
+//     (auth/chatgpt-client.json), its model list (chatgpt-models.json), its
+//     sign-in (auth/chatgpt.json, stat only — Resolve reads its state) and the
+//     Anthropic account's model list (anthropic-models.json, plan 044 §3.6).
+//     If none changed since the last reload that was published — and a list
+//     was not just fetched, nor a shadowing carry just left (reloadLeft), nor
+//     either since the last reload that published (forced) — the answer is
 //     ModelsCurrent.
 //  2. Outside every lock of the adapter's and the harness's: the table is
 //     loaded; the running model's entry is carried into it unchanged (Q16,
@@ -104,10 +106,10 @@ import (
 //     learning (native_keys.go), before the harness's claim (and a wake's
 //     opening);
 //   - RefreshModels (ModelsRefresher), which the wire's session.models.refresh
-//     calls, and which also starts the age- and version-aware fetch of the
-//     plan's list (refreshModelsLocked);
-//   - that fetch's completion, which reloads through the same transaction and
-//     never swaps anything itself;
+//     calls, and which then starts the age-aware fetches of the providers'
+//     lists on the table it read (refreshLists; native_lists.go);
+//   - such a fetch's completion, which reloads through the same transaction
+//     and never swaps anything itself;
 //   - a switch away from a carry that shadowed the files' own entry
 //     (reloadLeft, above);
 //   - a turn's or a load's end, for a reload that was owed.
@@ -120,9 +122,10 @@ const (
 	reloadTurn reloadReason = iota
 	// reloadAsked is RefreshModels (Q14 b).
 	reloadAsked
-	// reloadFetched follows a fetch of the plan's list that wrote one (Q14
-	// c): it reloads even when the stamps match, since a list rewritten within
-	// one tick of the file system's clock could leave them so.
+	// reloadFetched follows a fetch of a provider's list that wrote one (Q14
+	// c; native_lists.go): it reloads even when the stamps match, since a list
+	// rewritten within one tick of the file system's clock could leave them
+	// so.
 	reloadFetched
 	// reloadOwed takes up a reload a turn or a load held back (step 5).
 	reloadOwed
@@ -136,7 +139,7 @@ const (
 )
 
 // unstamped reports whether a reload for r reads the files whatever their
-// stamps say: one following a fetch of the plan's list (reloadFetched) or a
+// stamps say: one following a fetch of a provider's list (reloadFetched) or a
 // switch away from a shadowing carry (reloadLeft). Held back or failed, it
 // makes the reloads after it do the same until one publishes (forced).
 func (r reloadReason) unstamped() bool {
@@ -161,11 +164,21 @@ type modelsWatch struct {
 	// rather than open() loading it from its Home: a reload would replace the
 	// test's table with whatever the directory holds.
 	reloadable bool
-	// stamps are the five inputs as stat'ed before the table published last
+	// stamps are the six inputs as stat'ed before the table published last
 	// was read — the one open() loaded, at first — and read says there is
 	// one.
 	stamps modelStamps
 	read   bool
+	// fresh is the table the latest reload read from the files — published,
+	// owed or neither — with the running model carried in and the withheld
+	// providers taken out: the one RefreshModels asks for the providers'
+	// list fetches on (refreshLists, P23), so a key just saved is the key a
+	// fetch is made with even while a turn holds the reload back. nil until a
+	// reload has read one: the session's own table is then the files' last
+	// reading. freshSeq numbers the readings, 0 being Start's own table: what
+	// a submission of a list fetch is ordered by (submitListLocked).
+	fresh    *modeltable.Table
+	freshSeq uint64
 	// gen numbers the reloads that got as far as a table to publish: the
 	// revision of the list each would publish.
 	gen uint64
@@ -187,9 +200,9 @@ type modelsWatch struct {
 	cut catalogCut
 }
 
-// modelStamps are the five inputs' stamps, in the order modelInputs names
+// modelStamps are the six inputs' stamps, in the order modelInputs names
 // them.
-type modelStamps [5]inputStamp
+type modelStamps [6]inputStamp
 
 // inputStamp is one input's: its fileStamp when it is there, and which of
 // "missing" and "cannot be stat'ed" it is when it is not.
@@ -199,21 +212,24 @@ type inputStamp struct {
 	failed  bool
 }
 
-// modelInputs are the five files a model table depends on, in home: the two
-// the table is read from, and the ChatGPT plan's registration, its model list
+// modelInputs are the six files a model table depends on, in home: the two
+// the table is read from; the ChatGPT plan's registration, its model list
 // and its sign-in, which fund the plan's models (Resolve reads the sign-in's
-// state; a sign-out removes only the last).
-func modelInputs(home string) [5]string {
-	return [5]string{
+// state; a sign-out removes only the last); and the Anthropic account's model
+// list (plan 044 §3.6), which says the Anthropic provider's models — written
+// by a fetch of this session's, another session's or `craze auth login`.
+func modelInputs(home string) [6]string {
+	return [6]string{
 		filepath.Join(home, modeltable.ProvidersFile),
 		filepath.Join(home, modeltable.ModelsFile),
 		chatgptauth.ClientFile(home),
 		chatgptauth.ModelsFile(home),
 		chatgptauth.TokenFile(home),
+		filepath.Join(home, modeltable.AnthropicModelsFile),
 	}
 }
 
-// statModelInputs stamps the five inputs, following a symlink as Load does.
+// statModelInputs stamps the six inputs, following a symlink as Load does.
 func statModelInputs(home string) modelStamps {
 	var out modelStamps
 	for i, path := range modelInputs(home) {
@@ -224,9 +240,15 @@ func statModelInputs(home string) modelStamps {
 }
 
 // reloadModels is one reload (the file's comment), and what it came to. It
-// takes modelsMu, so it must not be called with it — nor s.mu — held.
+// takes modelsMu, so it must not be called with it — nor s.mu — held; one
+// that finds it held waits its turn (reloadQueuedSeam marks the wait).
 func (s *nativeSession) reloadModels(reason reloadReason) ModelsStatus {
-	s.modelsMu.Lock()
+	if !s.modelsMu.TryLock() {
+		if seam := s.reloadQueuedSeam; seam != nil {
+			seam()
+		}
+		s.modelsMu.Lock()
+	}
 	defer s.modelsMu.Unlock()
 	return s.reloadLocked(reason)
 }
@@ -282,6 +304,8 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	current, _ := hs.Current()
 	t.Carry(prev, current)
 	withheld := t.WithholdFrozen(getenv, hs.FrozenKey, current)
+	s.models.fresh = t
+	s.models.freshSeq++
 	keys, err := t.Keys(getenv)
 	if err != nil {
 		// Unreachable for a table Load returned: it refuses an inline key Keys
@@ -573,15 +597,18 @@ func (s *nativeSession) reloadFlushed(reason reloadReason) {
 	}
 }
 
-// RefreshModels is ModelsRefresher (the file's comment, Q14 b): the fetch of
-// the plan's list started in the background when the account is signed in
-// with plan usage — unless one is in flight, or one failed within
-// planListRetryBackoff (refreshModelsLocked) — then the reload, now, which
-// runs and answers whatever became of the fetch. ctx is not read: the reload
-// reads local files and the fetch has its own bound and Close's.
+// RefreshModels is ModelsRefresher (the file's comment, Q14 b): the reload,
+// now, which runs and answers; then the providers' list fetches, started in
+// the background on the table that reload read (refreshLists, plan 044 P23)
+// — so a key /connect saved a moment ago is the key the Anthropic account's
+// list is fetched with — each unless one is in flight or one failed within
+// listRetryBackoff (submitListLocked). A fetch that writes a list reloads
+// again when it ends, and the list it wrote reaches the client on the
+// stream. ctx is not read: the reload reads local files and each fetch has
+// its own bound and Close's.
 func (s *nativeSession) RefreshModels(_ context.Context, nativeDir string) (ModelsRefresh, error) {
 	s.mu.Lock()
-	hs, home, signIn := s.hs, s.home, s.signIn
+	hs, home := s.hs, s.home
 	closed, loading := s.closed, s.loading
 	s.mu.Unlock()
 	switch {
@@ -595,16 +622,47 @@ func (s *nativeSession) RefreshModels(_ context.Context, nativeDir string) (Mode
 		same := SameNativeDir(nativeDir, home)
 		out.SameDir = &same
 	}
-	if fetchesPlanList(signIn) {
-		s.mu.Lock()
-		s.refreshModelsLocked(signIn, hs.Redact)
-		s.mu.Unlock()
-	}
 	out.Status = s.reloadModels(reloadAsked)
 	s.mu.Lock()
 	out.Revision = s.snap.CatalogRevision
 	s.mu.Unlock()
+	s.refreshLists()
 	return out, nil
+}
+
+// refreshLists starts the background fetch of each provider's model list
+// that the session's freshest table asks for (native_lists.go): the plan's
+// for an account signed in with plan usage, the Anthropic account's for the
+// key that table funds craze's own Anthropic provider with. The table is the
+// one the latest reload read (modelsWatch.fresh) — RefreshModels's own, just
+// before this, whether it published or a turn holds it back — else the
+// session's own, and the submissions carry that reading's number: two
+// callers that read two tables submit in the order they read them, whatever
+// order they reach the refreshers in, so an older one never undoes a newer
+// one's request (submitListLocked; C5 review 1). A session with no harness
+// installed yet starts none: its Start does, as it installs one. It takes
+// modelsMu and s.mu in turn, never together, so it must be called with
+// neither held.
+func (s *nativeSession) refreshLists() {
+	s.mu.Lock()
+	hs, home, signIn, table := s.hs, s.home, s.signIn, s.table
+	s.mu.Unlock()
+	if hs == nil {
+		return
+	}
+	s.modelsMu.Lock()
+	getenv, seq := s.models.getenv, s.models.freshSeq
+	if s.models.fresh != nil {
+		table = s.models.fresh
+	}
+	s.modelsMu.Unlock()
+	planFetch := planSource(signIn) // reads the registration: before s.mu
+	anthropicFetch := anthropicSource(table, getenv, home)
+	s.listStage("decided")
+	s.mu.Lock()
+	s.submitListLocked(&s.planList, planFetch, seq, hs.Redact)
+	s.submitListLocked(&s.anthropicList, anthropicFetch, seq, hs.Redact)
+	s.mu.Unlock()
 }
 
 var _ ModelsRefresher = (*nativeSession)(nil)

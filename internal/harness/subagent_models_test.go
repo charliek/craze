@@ -424,3 +424,72 @@ func TestUnknownModelErrorIsAPlainError(t *testing.T) {
 		t.Fatal("the call error wraps modeltable.ErrUnknownModel; it must be its own message")
 	}
 }
+
+// anthropicResolver is resolverSession with Claude models on the Anthropic
+// provider (funded by an inline key) beside the fixture's own: two Haikus,
+// whose aliases sort the other way round from their releases, so the newest
+// is told by its release and not its alias; two Opuses; a Sonnet; and no
+// Fable.
+func anthropicResolver(t *testing.T, tiers map[string]string) *Session {
+	t.Helper()
+	s := resolverSession(t, tiers, "", "", nil)
+	s.table.Providers[modeltable.AnthropicProvider] = modeltable.Provider{Driver: modeltable.DriverAnthropic, APIKey: modeltable.Secret(canaryOther)}
+	for alias, m := range map[string]struct{ family, released string }{
+		"anthropic/claude-haiku-4-5":  {"haiku", "2025-10-01"},
+		"anthropic/claude-haiku-5-5":  {"haiku", "2026-10-07"},
+		"anthropic/claude-opus-4-7":   {"opus", "2026-03-01"},
+		"anthropic/claude-opus-5-5":   {"opus", "2026-09-21"},
+		"anthropic/claude-sonnet-5-5": {"sonnet", "2026-09-28"},
+	} {
+		s.table.Models[alias] = modeltable.Model{Provider: modeltable.AnthropicProvider, WireModel: strings.TrimPrefix(alias, "anthropic/"),
+			Family: m.family, Released: m.released, Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
+	}
+	return s
+}
+
+// TestTierWordsOnAnAnthropicParent (plan 044 O6, A5): an unmapped tier word
+// a child of an Anthropic parent names — the call's, in any case, or a
+// persona's — runs on the newest model of that family (by release, not by
+// alias); a family the table has none of (fable here) is the parent's model,
+// as it always was. The controls: on a parent of another provider every
+// unmapped tier word is still the parent's model, and a [subagents.tiers]
+// mapping wins on an Anthropic parent too. The agent tool's tier line and
+// the unknown-model error list the configured tiers alone (P26): the family
+// rule adds nothing there.
+func TestTierWordsOnAnAnthropicParent(t *testing.T) {
+	const opusParent = "anthropic/claude-opus-4-7"
+	for _, tc := range []struct {
+		name              string
+		tiers             map[string]string
+		call, persona     string
+		parent, wantAlias string
+	}{
+		{name: "haiku on an Opus parent", call: "haiku", parent: opusParent, wantAlias: "anthropic/claude-haiku-5-5"},
+		{name: "opus on an Opus parent is the newest Opus", call: "opus", parent: opusParent, wantAlias: "anthropic/claude-opus-5-5"},
+		{name: "a tier word in capitals", call: "Sonnet", parent: opusParent, wantAlias: "anthropic/claude-sonnet-5-5"},
+		{name: "a persona's tier word", persona: "haiku", parent: opusParent, wantAlias: "anthropic/claude-haiku-5-5"},
+		{name: "a family the table lacks is the parent's", call: "fable", parent: opusParent, wantAlias: opusParent},
+		{name: "control: haiku on a parent of another provider", call: "haiku", parent: "test/a", wantAlias: "test/a"},
+		{name: "control: opus on a parent of another provider", call: "opus", parent: "test/a", wantAlias: "test/a"},
+		{name: "control: the user's mapping wins on an Anthropic parent", tiers: map[string]string{"haiku": "test/b"}, call: "haiku", parent: opusParent, wantAlias: "test/b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := anthropicResolver(t, tc.tiers)
+			var warnings []string
+			alias, err := s.resolveChildModel(s.view(), childModelInput{Call: tc.call, Persona: tc.persona, ParentAlias: tc.parent}, collectWarn(&warnings))
+			if err != nil || alias != tc.wantAlias || len(warnings) != 0 {
+				t.Fatalf("resolveChildModel = %q, %v (warnings %q); want %q", alias, err, warnings, tc.wantAlias)
+			}
+		})
+	}
+
+	s := anthropicResolver(t, nil)
+	red := redact.New(canary, canaryOther)
+	if line := tiersLine(s.table, func(string) bool { return true }, red); line != "" {
+		t.Fatalf("the agent tool's tier line = %q; want none: no tier is configured (P26)", line)
+	}
+	_, err := s.resolveChildModel(s.view(), childModelInput{Call: "bogus", ParentAlias: opusParent}, nil)
+	if err == nil || !strings.Contains(err.Error(), "tiers: none configured") {
+		t.Fatalf("the unknown-model error = %v; want it to list no tier", err)
+	}
+}

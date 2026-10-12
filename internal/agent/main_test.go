@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
@@ -23,5 +24,12 @@ func TestMain(m *testing.M) {
 	for _, name := range names {
 		_ = os.Unsetenv(name)
 	}
+	// Anthropic's API (plan 044 P30) is aimed at a loopback port nothing
+	// serves, for the package: a native session fetches the account's model
+	// list as it opens whenever a key funds the Anthropic provider, and a
+	// test that funds it without starting a fake of its own (t.Setenv over
+	// this) gets a refused connection on this machine instead of reaching
+	// Anthropic.
+	_ = os.Setenv(messagesapi.TestAPIEnv, "http://127.0.0.1:9")
 	os.Exit(m.Run())
 }

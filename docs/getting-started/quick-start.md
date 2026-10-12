@@ -134,11 +134,12 @@ craze refuses to start the TUI on a non-tty. For a scripted turn, use
 The native provider (`--provider native`) runs the agent inside craze itself,
 talking to a model provider's API: there is no agent CLI to install, only an
 API key or a ChatGPT plan sign-in to give it. craze ships a catalog of models
-from four API-key providers, and can also use a ChatGPT plan; it needs one of
+from five API-key providers, and can also use a ChatGPT plan; it needs one of
 them connected:
 
 | Provider | Id for `craze auth` | Or export |
 |----------|---------------------|-----------|
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
 | ChatGPT plan | `chatgpt` | none: `craze auth login chatgpt` signs in with your ChatGPT account |
 | Fireworks | `fireworks` | `FIREWORKS_API_KEY` |
 | Meta | `meta` | `META_API_KEY` |
@@ -196,8 +197,9 @@ them connected:
 
     With no `--model` and nothing remembered, a new session starts on the
     first provider you have connected, in this order: Z.AI Coding Plan,
-    ChatGPT plan, Fireworks, OpenRouter, Meta, each on its own start model
-    ([the table](../reference/configuration.md#the-shipped-catalog)).
+    ChatGPT plan, Fireworks, OpenRouter, Meta, Anthropic, each on its own
+    start model ([the table](../reference/configuration.md#the-shipped-catalog);
+    Anthropic's is the newest Claude Opus your account lists).
     OpenRouter's models are its `~<family>-latest` routers, so an alias there
     may resolve to a newer model after OpenRouter updates the router.
 

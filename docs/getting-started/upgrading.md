@@ -5,8 +5,11 @@ release, and [from v0.0.1](#from-v001), the first release's.
 
 ## Since v0.1.0
 
-Nothing needs migrating, and nothing here has an opt-out switch: every change
-is an addition, but the first two change what an existing command does.
+Nothing needs migrating. Every change is an addition, but several change what
+an existing command or configuration does — read each item below, which says
+how to keep the old behaviour where you can. In particular, the Anthropic
+provider takes up an `ANTHROPIC_API_KEY` you already export, and a
+`[providers.anthropic]` of your own now overlays craze's Anthropic provider.
 
 - **`craze -c` and `--continue` skip sub-agent sessions.** A session started by
   `craze new --wait` (the Claude Code plugin's) is marked `unattended` in the
@@ -22,9 +25,30 @@ is an addition, but the first two change what an existing command does.
   stay on a numbered model, add it to `models.toml` with its wire id. See [The
   shipped catalog](../reference/configuration.md#the-shipped-catalog).
 - **A native session starts on the first connected provider, in a fixed
-  order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta, each on
-  its own start model, unless you remembered a model with `/model` or pinned
-  one with `default_model`. `provider_order` in `models.toml` changes the order.
+  order**: Z.AI Coding Plan, ChatGPT plan, Fireworks, OpenRouter, Meta,
+  Anthropic, each on its own start model, unless you remembered a model with
+  `/model` or pinned one with `default_model`. `provider_order` in
+  `models.toml` changes the order.
+- **Anthropic is a native provider.** Claude models run on Anthropic's API with
+  an API key ([Anthropic](../reference/configuration.md#anthropic)). An
+  `ANTHROPIC_API_KEY` exported in your shell now funds it — and, as every key
+  variable craze knows, is kept out of the commands a native session runs and
+  redacted from what they print. A native session started with it fetches the
+  account's model list from Anthropic as it opens (`GET /v1/models`, which
+  costs nothing, at most once a day). To keep an exported key from funding
+  craze, write `env_keys = []` under `[providers.anthropic]` in
+  `providers.toml`.
+- **Sub-agent tier words pick a Claude model on Anthropic.** Under a parent
+  running on Anthropic, an `agent` call or a persona that says `model: haiku`
+  (or `fable`, `opus`, `sonnet`) with no `[subagents.tiers]` entry for it runs
+  on the newest Claude model of that family, where it ran on the parent's own
+  model before; map the word in `[subagents.tiers]` to choose otherwise
+  ([Sub-agent models](../reference/tui.md#sub-agent-models)). Other parents are
+  unchanged.
+- **A `[providers.anthropic]` of your own now overlays craze's Anthropic
+  provider**: its `driver` and `base_url` are ignored, each with a warning, and
+  its key goes to Anthropic's API. Rename yours (`[providers.my-gateway]`, and
+  its models' `provider`) to keep a gateway.
 - **New commands:** `craze new --wait`, `craze send`, `craze wait`, `craze
   cancel` and `craze stop` drive sessions from a script or another program
   ([CLI reference](../reference/cli.md#craze-new)); the [Claude
@@ -32,6 +56,12 @@ is an addition, but the first two change what an existing command does.
 - **`/btw <question>`** asks a side question in a view of its own, without
   adding to the session, on native, Grok and gx
   ([TUI reference](../reference/tui.md#side-questions-btw)).
+- **A native turn the model refuses ends with a note**: `craze: the model
+  declined this request (refusal category: cyber). Switch models with /model,
+  or rephrase.`, after whatever the model wrote — `(refusal)` when the provider
+  names no category. It is shown, and is the end of `craze prompt --json`'s
+  `message`, but it is craze's: never saved in the session or sent to a model.
+  The stop reason is still `refusal`.
 
 ## From v0.0.1
 

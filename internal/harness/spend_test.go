@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
 )
@@ -333,6 +336,52 @@ func TestReasoningIsPricedAsOutput(t *testing.T) {
 	// 100 input tokens at $1/M, 40 output tokens at $2/M: the 30 of reasoning
 	// are among the 40, never priced a second time.
 	want := Spend{Input: 100, Output: 40, Reasoning: 30, CostPicoUSD: 100*1_000_000 + 40*2_000_000}
+	got := lastSpent(t, ev.list())
+	equal(t, "the turn's spend", got.Turn, want)
+	equal(t, "the session's spend", got.Session, want)
+}
+
+// anthropicCacheReply is a Messages API stream (plan 044 LF-3) whose usage
+// writes 2,000 tokens to the cache and reads 3,000 from it, beside 100
+// uncached input tokens and 50 output tokens, 20 of them thinking.
+const anthropicCacheReply = "event: message_start\n" +
+	`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"wire-a","content":[],"usage":{"input_tokens":100,"cache_creation_input_tokens":2000,"cache_read_input_tokens":3000,"output_tokens":1}}}` + "\n\n" +
+	"event: content_block_start\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+	"event: content_block_delta\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}` + "\n\n" +
+	"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n" +
+	"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":20}}}` + "\n\n" +
+	"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+
+// TestAnthropicCacheWritesArePriced (plan 044 §3.3, A2): a turn on
+// Anthropic's driver — the real adapter, built by llm.New, against a local
+// server — reports the response's cache writes and reads apart from its
+// uncached input, and the session's spend prices each at its own rate, cache
+// writes at cache_write.
+func TestAnthropicCacheWritesArePriced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, anthropicCacheReply)
+	}))
+	t.Cleanup(srv.Close)
+	f := newFixture(t, "http://unused")
+	withCost(f, "test/a", 1, 2, 0.5, 4)
+	opts := f.options()
+	opts.NewModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
+		// The fixture's test/a, priced at rateA, built on Anthropic's driver
+		// at the local server: the session prices it as test/a.
+		r.Driver, r.BaseURL, r.Thinking = modeltable.DriverAnthropic, "", modeltable.ThinkingAdaptive
+		return llm.New(r, llm.WithAnthropicAPIBase(func() (string, error) { return srv.URL, nil }))
+	}
+	s := f.open(opts)
+	var ev events
+	if _, err := s.Run(context.Background(), "hi", ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	u := Usage{Input: 100, Output: 50, Reasoning: 20, CacheRead: 3000, CacheCreation: 2000}
+	want := at(u, rateA)
+	if want.CostPicoUSD != 100*1_000_000+50*2_000_000+3000*500_000+2000*4_000_000 {
+		t.Fatalf("the rule's own sum is %d", want.CostPicoUSD)
+	}
 	got := lastSpent(t, ev.list())
 	equal(t, "the turn's spend", got.Turn, want)
 	equal(t, "the session's spend", got.Session, want)

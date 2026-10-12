@@ -19,6 +19,12 @@
 // provider and no SDK at all — adapted to Fantasy in responses_adapter.go
 // and authenticated by an Auth rather than a key: the sign-in's token source,
 // which the caller hands New with WithSignIn (plan 033 §3.12).
+//
+// A fourth, Anthropic's (modeltable.DriverAnthropic, plan 044 §3.3), is
+// craze's own Messages API client, package messagesapi — again no Fantasy
+// provider and no SDK, so the Anthropic SDK stays out of the binary (owner
+// decision 2) — adapted to Fantasy in messages_adapter.go and funded by a
+// key, at the API base the caller answers with WithAnthropicAPIBase (P21).
 package llm
 
 import (
@@ -32,6 +38,7 @@ import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/openai/openai-go/v3/option"
 )
@@ -58,9 +65,10 @@ var ErrAPIKeyTooShort = errors.New("llm: API key too short to be real")
 type Option func(*options)
 
 type options struct {
-	httpClient *http.Client
-	auth       Auth
-	apiBase    func() (string, error)
+	httpClient    *http.Client
+	auth          Auth
+	apiBase       func() (string, error)
+	anthropicBase func() (string, error)
 }
 
 // WithHTTPClient sends the model's requests through c instead of the SDK's
@@ -83,6 +91,15 @@ func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
 	return func(o *options) { o.auth, o.apiBase = auth, apiBase }
 }
 
+// WithAnthropicAPIBase answers the API base a model on Anthropic's driver
+// sends to (plan 044 §3.3, P21), when the model is built: Anthropic's own,
+// or a test's loopback server (messagesapi.BaseURL, whose error — a test
+// override that is not a loopback URL — fails the build, so the key can
+// never fall back to another host). A nil apiBase is Anthropic's own.
+func WithAnthropicAPIBase(apiBase func() (string, error)) Option {
+	return func(o *options) { o.anthropicBase = apiBase }
+}
+
 // New builds r's language model, wrapped (see wrap.go). This is the one
 // place outside modeltable that reads the key: it goes to the provider's
 // HTTP client, and to the scrubber that keeps it out of the model's errors.
@@ -98,6 +115,9 @@ func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
 // to OpenAI.
 //
 // A key shorter than minKeyLen is refused too (see ErrAPIKeyTooShort).
+//
+// A model on Anthropic's driver is checked for its key the same way, and is
+// craze's own Messages API model (newAnthropic).
 func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	var o options
 	for _, opt := range opts {
@@ -114,15 +134,14 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 		baseURL = openRouterBaseURL
 	case modeltable.DriverChatGPT:
 		return newSignedIn(r, o)
+	case modeltable.DriverAnthropic:
+		return newAnthropic(r, o)
 	default:
 		return nil, unknownDriver(r)
 	}
-	key := strings.TrimSpace(r.APIKey.Reveal())
-	switch {
-	case key == "":
-		return nil, fmt.Errorf("%w for provider %q (model %q)", modeltable.ErrNoAPIKey, r.ProviderID, r.Alias)
-	case len(key) < minKeyLen:
-		return nil, fmt.Errorf("%w: provider %q (model %q) has one under %d bytes", ErrAPIKeyTooShort, r.ProviderID, r.Alias, minKeyLen)
+	key, err := checkedKey(r)
+	if err != nil {
+		return nil, err
 	}
 	scrub := newScrubber(key, o.auth)
 
@@ -158,6 +177,32 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	return wrap(lm, scrub), nil
 }
 
+// checkedKey is r's key, trimmed, refused when there is none
+// (modeltable.ErrNoAPIKey) or it is too short to be real (ErrAPIKeyTooShort).
+func checkedKey(r modeltable.Resolved) (string, error) {
+	key := strings.TrimSpace(r.APIKey.Reveal())
+	switch {
+	case key == "":
+		return "", fmt.Errorf("%w for provider %q (model %q)", modeltable.ErrNoAPIKey, r.ProviderID, r.Alias)
+	case len(key) < minKeyLen:
+		return "", fmt.Errorf("%w: provider %q (model %q) has one under %d bytes", ErrAPIKeyTooShort, r.ProviderID, r.Alias, minKeyLen)
+	}
+	return key, nil
+}
+
+// resolveBase is the API base answer gives r's model when it is built (an
+// option's: WithSignIn's, WithAnthropicAPIBase's), or fallback without one.
+func resolveBase(r modeltable.Resolved, answer func() (string, error), fallback string) (string, error) {
+	if answer == nil {
+		return fallback, nil
+	}
+	base, err := answer()
+	if err != nil {
+		return "", fmt.Errorf("llm: model %q: %w", r.Alias, err)
+	}
+	return base, nil
+}
+
 // newSignedIn is New for the ChatGPT plan's driver (plan 033 §3.12): the
 // Responses model on the sign-in's Auth, at the API base apiBase answers,
 // wrapped as every model is, its scrubber hiding the Auth's token values. The
@@ -168,13 +213,9 @@ func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error
 		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q is funded by signing in to ChatGPT, and no sign-in was given",
 			r.ProviderID, r.Alias, r.Driver)
 	}
-	base := ""
-	if o.apiBase != nil {
-		b, err := o.apiBase()
-		if err != nil {
-			return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
-		}
-		base = b
+	base, err := resolveBase(r, o.apiBase, "")
+	if err != nil {
+		return nil, err
 	}
 	lm, err := newResponsesModel(r, o.auth, base, o.httpClient)
 	if err != nil {
@@ -188,6 +229,28 @@ func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error
 	scrub := newScrubber("", o.auth)
 	scrub.sentinels = append(scrub.sentinels, modeltable.ErrOtherAccount)
 	return wrap(lm, scrub), nil
+}
+
+// newAnthropic is New for Anthropic's driver (plan 044 §3.3): the Messages
+// API model on r's key, checked as New checks any, at the API base the option
+// answers (WithAnthropicAPIBase; Anthropic's own without one), wrapped as
+// every model is, its scrubber hiding the key. Its build errors name the
+// model and the client's refusal (messagesapi.ErrBaseURL among them), never
+// the key.
+func newAnthropic(r modeltable.Resolved, o options) (fantasy.LanguageModel, error) {
+	key, err := checkedKey(r)
+	if err != nil {
+		return nil, err
+	}
+	base, err := resolveBase(r, o.anthropicBase, messagesapi.DefaultBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	lm, err := newMessagesModel(r, key, base, o.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(lm, newScrubber(key, o.auth)), nil
 }
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client
@@ -204,11 +267,17 @@ var openAIEfforts = []openai.ReasoningEffort{
 	openai.ReasoningEffortMax,
 }
 
+// anthropicEfforts are the efforts an Anthropic request can carry
+// (output_config.effort, plan 044 §3.3): the API's levels, which
+// modeltable keeps its own copy of (TestAnthropicEffortsMatchTheTable).
+var anthropicEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 // EffortOptions returns the provider options that ask r's model for effort,
 // for a call's ProviderOptions (fantasy.AgentStreamCall.ProviderOptions):
 // reasoning_effort for the openai-compat driver, OpenRouter's
-// reasoning.effort for openrouter, and the Responses reasoning.effort for
-// chatgpt (responsesOptions, plan 033 §3.9), keyed by the provider id New
+// reasoning.effort for openrouter, the Responses reasoning.effort for
+// chatgpt (responsesOptions, plan 033 §3.9), and output_config.effort for
+// anthropic (anthropicOptions, plan 044 §3.3), keyed by the provider id New
 // named the model's provider with. It returns nil when effort is "", so
 // nothing is sent: the harness passes "" for a model with no effort control.
 //
@@ -242,6 +311,11 @@ func EffortOptions(r modeltable.Resolved, effort string) (fantasy.ProviderOption
 			return nil, fmt.Errorf("llm: model %q: effort %q is not one a ChatGPT plan request can carry", r.Alias, effort)
 		}
 		return fantasy.ProviderOptions{r.ProviderID: &responsesOptions{Effort: effort}}, nil
+	case modeltable.DriverAnthropic:
+		if !slices.Contains(anthropicEfforts, effort) {
+			return nil, fmt.Errorf("llm: model %q: effort %q is not one an Anthropic request can carry", r.Alias, effort)
+		}
+		return fantasy.ProviderOptions{r.ProviderID: &anthropicOptions{Effort: effort}}, nil
 	case modeltable.DriverOpenRouter:
 		// The same body openrouter.ProviderOptions{Reasoning: {Effort}}
 		// produces, spelled through the OpenAI-compatible client's extra

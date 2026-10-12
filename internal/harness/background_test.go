@@ -777,7 +777,9 @@ func TestCleanEmptyWakeSuspends(t *testing.T) {
 // TestBackgroundResultCapped (A13, panel astra r2-10): a background child's
 // 60 KiB answer is cut when it becomes deliverable — the head kept, the whole
 // in a spill file named for the spawning call — since no dispatcher will cut
-// it: delivered into a live step and by a wake alike.
+// it: delivered into a live step and by a wake alike. A child cut short keeps
+// its note through the cut, after the head (plan 044 C3-1), and the spill file
+// holds the answer alone.
 func TestBackgroundResultCapped(t *testing.T) {
 	long := strings.Repeat(strings.Repeat("x", 59)+"\n", 1024) // 60 KiB
 	check := func(t *testing.T, b *bg, text string) {
@@ -827,6 +829,28 @@ func TestBackgroundResultCapped(t *testing.T) {
 		reqs := a.requests("go")
 		check(t, b, lastUser(t, reqs[len(reqs)-1]))
 	})
+	for _, finished := range []fantasy.FinishReason{fantasy.FinishReasonLength, fantasy.FinishReasonStop} {
+		t.Run("a note through the cut, "+string(finished), func(t *testing.T) {
+			b := openBG(t)
+			a := b.routers["test/a"]
+			w := newWorker()
+			a.route("go", callStep(bgPart(t, "a1", "long", "write a lot")), answerWith("started"), answerWith("ok"))
+			a.route("write a lot", w.step(nil, cat(textParts(long), finish(finished))))
+			run(t, b.s, "go")
+			b.finish(t, w)
+			if _, err := b.s.Wake(context.Background(), nil); err != nil {
+				t.Fatal(err)
+			}
+			reqs := a.requests("go")
+			text := lastUser(t, reqs[len(reqs)-1])
+			check(t, b, text)
+			// The control: a child that finished has no note to keep.
+			noted := strings.HasSuffix(text, "\n\n"+subagentCutOff+"\n</subagent_result>")
+			if want := finished == fantasy.FinishReasonLength; noted != want {
+				t.Fatalf("the cut result ends with the cut-off note: %v, want %v:\n%s", noted, want, text[max(0, len(text)-400):])
+			}
+		})
+	}
 }
 
 // TestAgentOutputWait (A13): agent_output waits for a child still running —

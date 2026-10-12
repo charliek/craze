@@ -407,6 +407,50 @@ func TestOrderModelsKeepsThePlansOrder(t *testing.T) {
 	}
 }
 
+// TestOrderModelsKeepsAnthropicsOrder (plan 044 §3.5, P28): Anthropic's
+// models stay one block in the order the session listed them — newest first,
+// which modeltable.Choices gives them — placed where Choices placed it among
+// the rest (after Abc, by the provider's name), beside the ChatGPT plan's
+// block, each where it was listed. The control is the same models with the
+// prefix taken off, which the rest's rule sorts by name.
+func TestOrderModelsKeepsAnthropicsOrder(t *testing.T) {
+	claude := func(id, name string) ModelInfo { return ModelInfo{ID: "anthropic/" + id, Name: name} }
+	snap := Snapshot{
+		CurrentModel: "test/aaa",
+		Models: []ModelInfo{
+			{ID: "test/aaa", Name: "Aaa"},
+			{ID: "test/abc", Name: "Abc"},
+			claude("claude-haiku-5-5", "Claude Haiku 5.5"),
+			claude("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+			claude("claude-opus-5-5", "Claude Opus 5.5"),
+			claude("claude-fable-5-1", "Claude Fable 5.1"),
+			{ID: "chatgpt/gpt-6-astra", Name: "GPT-6-Astra (ChatGPT plan)"},
+			{ID: "chatgpt/gpt-5.5", Name: "GPT-5.5 (ChatGPT plan)"},
+			{ID: "test/zed", Name: "Zed"},
+		},
+	}
+	want := "test/aaa,test/abc,anthropic/claude-haiku-5-5,anthropic/claude-sonnet-5-5,anthropic/claude-opus-5-5," +
+		"anthropic/claude-fable-5-1,chatgpt/gpt-6-astra,chatgpt/gpt-5.5,test/zed"
+	if got := modelIDs(OrderModels(snap)); got != want {
+		t.Fatalf("OrderModels =\n %s\nwant\n %s", got, want)
+	}
+	// Two blocks with nothing between them keep the order they were listed in.
+	adjacent := Snapshot{Models: []ModelInfo{claude("b", "Bbb"), claude("a", "Aaa"), {ID: "chatgpt/x", Name: "X"}, {ID: "test/zed", Name: "Zed"}}}
+	if got := modelIDs(OrderModels(adjacent)); got != "anthropic/b,anthropic/a,chatgpt/x,test/zed" {
+		t.Fatalf("adjacent blocks = %s", got)
+	}
+
+	control := snap
+	control.Models = make([]ModelInfo, len(snap.Models))
+	for i, m := range snap.Models {
+		m.ID = strings.TrimPrefix(m.ID, "anthropic/")
+		control.Models[i] = m
+	}
+	if got := modelIDs(OrderModels(control)); got != "test/aaa,test/abc,claude-fable-5-1,claude-haiku-5-5,claude-opus-5-5,claude-sonnet-5-5,chatgpt/gpt-6-astra,chatgpt/gpt-5.5,test/zed" {
+		t.Fatalf("control: without the prefix the rest sort by name: %s", got)
+	}
+}
+
 func TestEffortOptionPreference(t *testing.T) {
 	vals := []SelectValue{
 		{Value: "low", Name: "Low"},

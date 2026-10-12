@@ -19,7 +19,11 @@ import (
 // provider exactly once and nothing else, each provider's start is models of
 // its own (plan 038 §2), the retired aliases are unique and none is a model,
 // and no model's identity is a retired one. Merged over an empty directory it
-// is a valid Table, with no default model of its own.
+// is a valid Table, with no default model of its own. And plan 044 §3.5's
+// Anthropic rules: its provider takes no endpoint and no start (its start is
+// [anthropic_defaults] start_family's newest), every seed is anthropic/<its
+// wire id> and carries the three catalog-only keys — family, released,
+// thinking — which no other model carries.
 func TestShippedCatalog(t *testing.T) {
 	c, err := shippedCatalog()
 	if err != nil {
@@ -48,6 +52,17 @@ func TestShippedCatalog(t *testing.T) {
 			t.Errorf("%s and %s share the identity %v", alias, other, id)
 		}
 		ids[id] = alias
+		onAnthropic := c.Providers[m.Provider].Driver == DriverAnthropic
+		seed := m.Family != "" && m.Released != "" && m.Thinking != "" && alias == AnthropicAliasPrefix+m.WireModel
+		switch {
+		case onAnthropic && !seed:
+			t.Errorf("Anthropic seed %s = %+v: want anthropic/<wire id> with a family, a release and a thinking", alias, m)
+		case !onAnthropic && anthropicOnlyKey(m) != "":
+			t.Errorf("%s is no Anthropic model but sets %s", alias, anthropicOnlyKey(m))
+		}
+	}
+	if p := c.Providers[AnthropicProvider]; p.Driver != DriverAnthropic || p.BaseURL != "" || c.Starts[AnthropicProvider] != nil {
+		t.Errorf("anthropic = %+v, start %q: want the anthropic driver, no base URL and no start key", p, c.Starts[AnthropicProvider])
 	}
 	if !slices.Equal(slices.Sorted(slices.Values(c.ProviderOrder)), slices.Sorted(maps.Keys(c.Providers))) {
 		t.Errorf("provider_order %q does not name every provider once: %q", c.ProviderOrder, slices.Sorted(maps.Keys(c.Providers)))
@@ -96,7 +111,17 @@ func TestShippedCatalog(t *testing.T) {
 	// OpenRouter *-latest routers (2026-10-09) keep their models' flags, and
 	// DeepSeek Flash Latest and MiMo V2.6 Pro were seen describing an image
 	// read from disk; GLM Latest, GLM 5.3 on OpenRouter, takes text only.
+	// Plan 044 adds the thirteen Anthropic seeds: each takes image input by
+	// the account's list (image_input), and the four headline models were seen
+	// describing an image live before they shipped (P31).
 	seesImages := map[string]bool{
+		"anthropic/claude-fable-5": true, "anthropic/claude-fable-5-1": true,
+		"anthropic/claude-haiku-4-5-20251001": true, "anthropic/claude-haiku-5-5": true,
+		"anthropic/claude-opus-4-5-20251101": true, "anthropic/claude-opus-4-6": true,
+		"anthropic/claude-opus-4-7": true, "anthropic/claude-opus-4-8": true,
+		"anthropic/claude-opus-5": true, "anthropic/claude-opus-5-5": true,
+		"anthropic/claude-sonnet-4-6": true, "anthropic/claude-sonnet-5": true,
+		"anthropic/claude-sonnet-5-5":   true,
 		"fireworks/deepseek-v4p1-flash": true, "fireworks/kimi-k3": true,
 		"fireworks/ember-1": true, "fireworks/glm-5p3-flash": true,
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
@@ -209,7 +234,12 @@ func TestShippedCatalogHistory(t *testing.T) {
 // provider order, each provider's start, the three Fireworks models it adds
 // and the prices it fills. And OpenRouter's models (2026-10-09): each family
 // with a ~<family>-latest router is on it, so a new release needs no catalog
-// change, and the numbered aliases it replaced retire the alias only.
+// change, and the numbered aliases it replaced retire the alias only. And plan
+// 044: the Anthropic provider, last in the order (O4); its thirteen seeds;
+// [anthropic_defaults] — the newest Opus to start on (O1), medium effort for
+// every model (D3), every model offered (O3); a key alone starts a session
+// on anthropic/claude-opus-5-5 at medium; and the four headline prices (LF-8,
+// P29: Sonnet 5.5's cache hit is $0.10).
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -222,7 +252,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("provider %q ships MODEL_API_KEY", id)
 		}
 	}
-	want := map[string]string{"chatgpt": "ChatGPT plan", "fireworks": "Fireworks", "meta": "Meta", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
+	want := map[string]string{"anthropic": "Anthropic", "chatgpt": "ChatGPT plan", "fireworks": "Fireworks", "meta": "Meta", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
 	if !maps.Equal(names, want) {
 		t.Fatalf("providers = %v, want %v", names, want)
 	}
@@ -238,7 +268,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("%s is a shipped model of the ChatGPT plan; its models are the account's own", alias)
 		}
 	}
-	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta"}; !slices.Equal(c.ProviderOrder, want) {
+	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic"}; !slices.Equal(c.ProviderOrder, want) {
 		t.Fatalf("provider_order = %q, want %q", c.ProviderOrder, want)
 	}
 	wantStarts := map[string][]string{
@@ -318,6 +348,57 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	for _, alias := range []string{"glm-5.3", "glm-5.3-flash"} {
 		if cost := c.Models[alias].Cost; cost != nil {
 			t.Errorf("%s is priced (%+v): the coding plan is flat-rate", alias, cost)
+		}
+	}
+	// Anthropic (plan 044): the provider, its defaults, its seeds — the
+	// account's thirteen models of 2026-10-11 — and where a key alone starts.
+	if p := c.Providers[AnthropicProvider]; p.Driver != DriverAnthropic || !slices.Equal(p.EnvKeys, []string{"ANTHROPIC_API_KEY"}) {
+		t.Fatalf("anthropic = %+v, want the anthropic driver on ANTHROPIC_API_KEY", p)
+	}
+	if want := (AnthropicDefaults{StartFamily: "opus", DefaultEffort: "medium", List: AnthropicListAll}); c.Anthropic != want {
+		t.Fatalf("[anthropic_defaults] = %+v, want %+v", c.Anthropic, want)
+	}
+	var seeds []string
+	for alias, m := range c.Models {
+		if m.Provider == AnthropicProvider {
+			seeds = append(seeds, m.WireModel)
+			if strings.HasSuffix(m.WireModel, "-4-5-20251101") || strings.HasSuffix(m.WireModel, "-4-5-20251001") {
+				if m.Thinking != ThinkingNone {
+					t.Errorf("%s thinking = %q: the 4.5 models take no adaptive thinking", alias, m.Thinking)
+				}
+			} else if m.Thinking != ThinkingAdaptive {
+				t.Errorf("%s thinking = %q, want adaptive", alias, m.Thinking)
+			}
+		}
+	}
+	wantSeeds := []string{"claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001", "claude-haiku-5-5",
+		"claude-opus-4-5-20251101", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+		"claude-opus-5-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5"}
+	if slices.Sort(seeds); !slices.Equal(seeds, wantSeeds) {
+		t.Fatalf("Anthropic seeds = %q, want %q", seeds, wantSeeds)
+	}
+	if efforts := c.Models["anthropic/claude-haiku-4-5-20251001"].Efforts; efforts != nil {
+		t.Errorf("Haiku 4.5 efforts = %q, want none: it has no effort control", efforts)
+	}
+	tbl, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := tbl.StartPick(nil, fakeEnv(map[string]string{"ANTHROPIC_API_KEY": anthropicKey}))
+	if err != nil || start != (Start{Alias: "anthropic/claude-opus-5-5", Effort: "medium"}) {
+		t.Fatalf("an Anthropic key alone starts on %+v, %v; want anthropic/claude-opus-5-5 at medium", start, err)
+	}
+	// The headline prices: input, output, cache hit, 5-minute cache write.
+	for alias, want := range map[string][4]float64{
+		"anthropic/claude-opus-5-5":   {4, 20, 0.2, 5},
+		"anthropic/claude-sonnet-5-5": {2, 10, 0.1, 2.5},
+		"anthropic/claude-haiku-5-5":  {0.1, 0.5, 0.01, 0.125},
+		"anthropic/claude-fable-5-1":  {10, 50, 0.25, 12.5},
+	} {
+		cost := c.Models[alias].Cost
+		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil || cost.CacheWrite == nil ||
+			[4]float64{*cost.Input, *cost.Output, *cost.CacheRead, *cost.CacheWrite} != want {
+			t.Errorf("%s cost = %+v, want %v", alias, cost, want)
 		}
 	}
 	// Aliases the owner dropped while their wire ids still answer retire the

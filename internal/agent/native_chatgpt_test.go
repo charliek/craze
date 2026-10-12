@@ -514,7 +514,7 @@ func TestNativeModelsRefreshJournalsNoEchoedToken(t *testing.T) {
 			}
 			jw, inc := journalOf(t, s.log), s.Incarnation()
 			s.mu.Lock()
-			refreshed := s.refreshed
+			refreshed := s.planList.done
 			s.mu.Unlock()
 			if refreshed == nil {
 				t.Fatal("the stale model list started no refresh")
@@ -549,10 +549,10 @@ func TestNativeModelsRefreshNoteIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := fmt.Errorf("chatgptauth: a wrapped failure: %s", planAccess)
-	if got := fmt.Sprint(modelsRefreshNote(err, func(v string) string { return v }).Fields["error"]); !strings.Contains(got, planAccess) {
+	if got := fmt.Sprint(listRefreshNote(diagModelsRefresh, err, func(v string) string { return v }).Fields["error"]); !strings.Contains(got, planAccess) {
 		t.Fatalf("control: the unredacted note = %q", got)
 	}
-	got := fmt.Sprint(modelsRefreshNote(err, s.hs.Redact).Fields["error"])
+	got := fmt.Sprint(listRefreshNote(diagModelsRefresh, err, s.hs.Redact).Fields["error"])
 	if strings.Contains(got, planAccess) || !strings.Contains(got, redact.Marker) {
 		t.Fatalf("the note = %q, want the token redacted", got)
 	}
@@ -597,7 +597,7 @@ func TestNativeModelsRefreshRefetchesAnotherClientVersion(t *testing.T) {
 				t.Fatalf("Start: %v", err)
 			}
 			s.mu.Lock()
-			refreshed := s.refreshed
+			refreshed := s.planList.done
 			s.mu.Unlock()
 			if refreshed == nil {
 				t.Fatal("an account signed in with plan usage started no refresh")

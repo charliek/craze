@@ -658,3 +658,36 @@ func TestChatGPTDefaultsAreStrict(t *testing.T) {
 	c.ProviderOrder = slices.DeleteFunc(c.ProviderOrder, func(id string) bool { return id == ChatGPTProvider })
 	wantFileError(t, c.validate(CatalogFile), CatalogFile, "chatgpt_defaults", "")
 }
+
+// TestParallelToolCallsFollowTheIdentity (plan 044 C2 review r2 b2, P11):
+// what the account's list says of a model's parallel tool calls is learned of
+// its identity, so an entry that points a plan model at another slug forgets
+// it — the driver's default (nil) rather than another model's setting —
+// while an entry that keeps the identity keeps it.
+func TestParallelToolCallsFollowTheIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, entry string
+		want        *bool
+	}{
+		{"pointed at another slug", "wire_model = \"gpt-5.6-sol\"\n", nil},
+		{"renamed", "name = \"Astra\"\n", new(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := signedInDir(t)
+			if err := os.WriteFile(filepath.Join(dir, ModelsFile), []byte("version = 1\n\n[models.\"chatgpt/gpt-6-astra\"]\n"+tc.entry), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tbl, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := tbl.Resolve("chatgpt/gpt-6-astra", fakeEnv(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (r.ParallelToolCalls == nil) != (tc.want == nil) || (r.ParallelToolCalls != nil && *r.ParallelToolCalls != *tc.want) {
+				t.Fatalf("%s: parallel tool calls = %v, want %v", r.WireModel, r.ParallelToolCalls, tc.want)
+			}
+		})
+	}
+}

@@ -56,6 +56,17 @@ func (t *Table) Carry(from *Table, alias string) bool {
 	}
 	acct, _ := from.boundAccount(alias)
 	put(&t.Models, alias, cloneModel(m))
+	// What from learned of the model's identity comes with it, where t
+	// learned nothing of that identity itself, so it resolves as it did.
+	id := identity{m.Provider, m.WireModel}
+	if f, ok := from.learned[id]; ok {
+		if _, has := t.learned[id]; !has {
+			if t.learned == nil {
+				t.learned = make(map[identity]learnedFacts)
+			}
+			t.learned[id] = f
+		}
+	}
 	if from.modelOrigins != nil {
 		put(&t.modelOrigins, alias, from.ModelOrigin(alias))
 	}

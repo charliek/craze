@@ -543,21 +543,26 @@ resend it at all — it watches for the session's end.
 ### `session.models.refresh`
 
 A native session reloads its model table while it runs — a key saved, the
-ChatGPT plan signed in to or out of, the plan's model list fetched again — and
-offers what is funded now, without the client leaving the conversation. It
-does so on its own at every turn's start; this method asks it to now, so an
-idle session picks a new key up at once. A client sends it when it has just
-funded a model — after it saves a key, after a sign-in has written the plan's
-model list — and when it is about to show the list. It also starts the plan's
-model-list fetch in the background when the list is due (by its age, or a
-list fetched for another `client_version`); a list that fetch brings is taken
-up by the session itself and published the same way. In each session one
-fetch runs at a time — a call while one is in flight joins it — and none
-starts within 30 seconds of one that failed, so a client calling one session
-in a loop costs the account at most one request per half minute. The backoff
-is the session's own, not the account's: each session keeps its own, so
-several sessions open at once can each make a request in the same half
-minute. The call itself still reloads and answers.
+ChatGPT plan signed in to or out of, the plan's or the Anthropic account's
+model list fetched again — and offers what is funded now, without the client
+leaving the conversation. It does so on its own at every turn's start; this
+method asks it to now, so an idle session picks a new key up at once. A
+client sends it when it has just funded a model — after it saves a key, after
+a sign-in has written the plan's model list — and when it is about to show
+the list. Once it has reloaded, it also starts, in the background and on the
+table it just read, each provider's model-list fetch that is due: the plan's
+(by its age, or a list fetched for another `client_version`), and the
+Anthropic account's for the key that now funds Anthropic (by its age, or a
+list fetched with another key) — so a key the client just saved is the one
+fetched with. A list a fetch brings is taken up by the session itself and
+published the same way. In each session each provider's fetch runs one at a
+time — a call while one is in flight joins it, and one for another Anthropic
+key is run once it ends — and none starts within 30 seconds of one that
+failed for the same account or key, so a client calling one session in a loop
+costs an account at most one request per half minute. The backoff is the
+session's own, not the account's: each session keeps its own, so several
+sessions open at once can each make a request in the same half minute. The
+call itself still reloads and answers.
 
 It is served where the session capability `modelsRefresh` is `true`: every
 native session, whoever hosts it. Where it is absent — every ACP session, and
@@ -1477,8 +1482,8 @@ version bump and no capability.
 ## Live models
 
 A native session's model list changes while it runs: a key saved, the
-ChatGPT plan signed in to or out of, or the plan's list fetched again is
-offered at once (the model it runs on, and everything it froze at open — its
+ChatGPT plan signed in to or out of, or the plan's or the Anthropic account's
+list fetched again is offered at once (the model it runs on, and everything it froze at open — its
 prompt, its tools, the model-facing `agent` tool's menu, its compaction and
 sub-agent settings — stay as they were). Each change reaches a client as the
 **catalog section**, `{models, revision}`, a state delta section like the

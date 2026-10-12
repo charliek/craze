@@ -196,6 +196,7 @@ func (s *nativeSession) recheckPending() {
 	// this turn. Cancel and Close end it through turnCancel, as a turn's.
 	turnCtx, cancel := context.WithCancel(context.Background())
 	s.claimed, s.inPrompt, s.cancelling, s.doneEmitted = true, true, false, false
+	s.textShown.Store(false)
 	s.released = rel
 	s.turnCancel, s.turnToken = cancel, tok
 	s.wake, s.foreign, s.snap.ForeignTurn = true, true, true
@@ -271,6 +272,11 @@ func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context, open 
 // published (publishOwedSpend), before the kick.
 func (s *nativeSession) endWake(hs *harness.Session, id, reason string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
 	s.settleTools()
+	if err == nil {
+		// A refusal says so inside the brackets, as a prompt's does before
+		// its ending (noteRefusal).
+		s.noteRefusal(res)
+	}
 	s.asks.EndTurn(tok)
 	s.mu.Lock()
 	ended := s.wakeEnded

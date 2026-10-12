@@ -129,3 +129,54 @@ func TestNothingFundedTextNamesTheChatGPTPlan(t *testing.T) {
 		}
 	}
 }
+
+// TestAnthropicAccessTexts is plan 044 P27: on Anthropic's driver a 403 is a
+// model the key may not use — "Anthropic refused access to <model>" with
+// Anthropic's reason — and a 404 a wire id the account cannot use — "the
+// Anthropic account cannot use <wire model>" with its reason — rather than
+// the key's and models.toml's words, while a 401 is still the key's; each
+// keeps its sentinel. The controls: the same 403 and 404 on another driver
+// keep LC-8's and the models.toml words byte for byte.
+func TestAnthropicAccessTexts(t *testing.T) {
+	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
+		"anthropic": {Name: "Anthropic", Driver: modeltable.DriverAnthropic, EnvKeys: []string{"ANTHROPIC_API_KEY"}},
+		"fireworks": {Name: "Fireworks", EnvKeys: []string{"FIREWORKS_API_KEY"}},
+	}}
+	anthropic := func(status int, msg string) *harness.ProviderError {
+		return &harness.ProviderError{Provider: "anthropic", Model: "anthropic/claude-fable-5-1", WireModel: "claude-fable-5-1",
+			Driver: modeltable.DriverAnthropic, StatusCode: status, Message: msg}
+	}
+	other := func(status int, msg string) *harness.ProviderError {
+		return &harness.ProviderError{Provider: "fireworks", Model: "fireworks/m", WireModel: "m",
+			Driver: modeltable.DriverOpenAICompat, StatusCode: status, Message: msg}
+	}
+	for _, tc := range []struct {
+		name string
+		pe   *harness.ProviderError
+		is   error
+		want string
+	}{
+		{"an Anthropic 403", anthropic(403, "This model requires data retention. (request req_1)"), harness.ErrAuth,
+			`native: Anthropic refused access to model "anthropic/claude-fable-5-1" (HTTP 403): This model requires data retention. (request req_1)`},
+		{"an Anthropic 403 with no reason", anthropic(403, ""), harness.ErrAuth,
+			`native: Anthropic refused access to model "anthropic/claude-fable-5-1" (HTTP 403)`},
+		{"an Anthropic 404", anthropic(404, "model: claude-fable-5-1"), harness.ErrModelNotFound,
+			`native: the Anthropic account cannot use claude-fable-5-1 (HTTP 404: model: claude-fable-5-1)`},
+		{"an Anthropic 404 with no reason", anthropic(404, ""), harness.ErrModelNotFound,
+			`native: the Anthropic account cannot use claude-fable-5-1 (HTTP 404)`},
+		{"an Anthropic 401", anthropic(401, "invalid x-api-key"), harness.ErrAuth,
+			`native: Anthropic rejected the API key (HTTP 401); replace it with "craze auth login anthropic", or check ANTHROPIC_API_KEY`},
+		{"another driver's 403 (control)", other(403, "forbidden"), harness.ErrAuth,
+			`native: Fireworks rejected the API key (HTTP 403); replace it with "craze auth login fireworks", or check FIREWORKS_API_KEY`},
+		{"another driver's 404 (control)", other(404, "no such model"), harness.ErrModelNotFound,
+			`native: provider "fireworks" does not serve model "fireworks/m" (HTTP 404); check its wire_model in models.toml`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The kind is the harness's own (classify); the join stands in.
+			got := phraseTurnErrorIn(fmt.Errorf("turn: %w", errors.Join(tc.pe, tc.is)), table)
+			if got.Error() != tc.want || !errors.Is(got, tc.is) {
+				t.Fatalf("phrased %q\nwant    %q", got, tc.want)
+			}
+		})
+	}
+}

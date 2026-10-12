@@ -330,11 +330,7 @@ func toolOutput(r fantasy.ToolResultPart) (responsesapi.Item, string) {
 		return responsesapi.FunctionCallOutput(r.ToolCallID, o.Text), ""
 	}
 	if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](r.Output); ok {
-		text := ""
-		if o.Error != nil {
-			text = o.Error.Error()
-		}
-		return responsesapi.FunctionCallOutput(r.ToolCallID, text), ""
+		return responsesapi.FunctionCallOutput(r.ToolCallID, resultErrorText(o)), ""
 	}
 	if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output); ok {
 		data, err := base64.StdEncoding.DecodeString(o.Data)
@@ -350,11 +346,7 @@ func toolOutput(r fantasy.ToolResultPart) (responsesapi.Item, string) {
 		content = append(content, responsesapi.InputImage(o.MediaType, data))
 		return responsesapi.FunctionCallOutputContent(r.ToolCallID, content...), ""
 	}
-	kind := "none"
-	if r.Output != nil {
-		kind = string(r.Output.GetType())
-	}
-	return responsesapi.FunctionCallOutput(r.ToolCallID, ""), fmt.Sprintf("a tool result of kind %q is sent empty", kind)
+	return responsesapi.FunctionCallOutput(r.ToolCallID, ""), unsentResult(r.Output)
 }
 
 // Stream sends one step. The request is sent when the stream is first read,
@@ -550,7 +542,7 @@ func responsesProviderError(re *responsesapi.Error) *fantasy.ProviderError {
 		Title:              title,
 		Message:            responsesMessage(re),
 		StatusCode:         re.StatusCode,
-		ResponseBody:       responsesErrorBody(re),
+		ResponseBody:       errorBody(cmp.Or(re.Code, re.Reason), re.Type, re.Param, re.Message), // an incomplete response's reason as its code
 		AuthError:          refused,
 		ContextTooLargeErr: re.ContextTooLarge(),
 		TransientError:     re.Transient() && !refused,
@@ -582,68 +574,9 @@ func responsesMessage(re *responsesapi.Error) string {
 	return "the request failed"
 }
 
-// responsesErrorBody is the failure as the standard error object,
-// {"error": {"code", "type", "param", "message"}} — the body ErrorNames reads
-// a failure's code and type from (scrub.go structuredError). An incomplete
-// response's reason stands in its code.
-func responsesErrorBody(re *responsesapi.Error) []byte {
-	type object struct {
-		Code    string `json:"code,omitempty"`
-		Type    string `json:"type,omitempty"`
-		Param   string `json:"param,omitempty"`
-		Message string `json:"message,omitempty"`
-	}
-	b, err := json.Marshal(struct {
-		Error object `json:"error"`
-	}{object{Code: cmp.Or(re.Code, re.Reason), Type: re.Type, Param: re.Param, Message: re.Message}})
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
 // Generate is one step, collected from its stream: the route only streams.
 func (m *responsesModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
-	stream, err := m.Stream(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-	resp := &fantasy.Response{}
-	text := map[string]*strings.Builder{}
-	reasoning := map[string]*strings.Builder{}
-	for part := range stream {
-		switch part.Type {
-		case fantasy.StreamPartTypeWarnings:
-			resp.Warnings = append(resp.Warnings, part.Warnings...)
-		case fantasy.StreamPartTypeTextStart:
-			text[part.ID] = &strings.Builder{}
-		case fantasy.StreamPartTypeTextDelta:
-			if b := text[part.ID]; b != nil {
-				b.WriteString(part.Delta)
-			}
-		case fantasy.StreamPartTypeTextEnd:
-			if b := text[part.ID]; b != nil {
-				resp.Content = append(resp.Content, fantasy.TextContent{Text: b.String()})
-			}
-		case fantasy.StreamPartTypeReasoningStart:
-			reasoning[part.ID] = &strings.Builder{}
-		case fantasy.StreamPartTypeReasoningDelta:
-			if b := reasoning[part.ID]; b != nil {
-				b.WriteString(part.Delta)
-			}
-		case fantasy.StreamPartTypeReasoningEnd:
-			if b := reasoning[part.ID]; b != nil {
-				resp.Content = append(resp.Content, fantasy.ReasoningContent{Text: b.String(), ProviderMetadata: part.ProviderMetadata})
-			}
-		case fantasy.StreamPartTypeToolCall:
-			resp.Content = append(resp.Content, fantasy.ToolCallContent{ToolCallID: part.ID, ToolName: part.ToolCallName, Input: part.ToolCallInput})
-		case fantasy.StreamPartTypeFinish:
-			resp.Usage, resp.FinishReason = part.Usage, part.FinishReason
-		case fantasy.StreamPartTypeError:
-			return nil, part.Error
-		}
-	}
-	return resp, nil
+	return collect(m.Stream(ctx, call))
 }
 
 // errNoObjects is the answer to the object calls, which nothing in craze

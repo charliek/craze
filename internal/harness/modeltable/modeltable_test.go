@@ -650,7 +650,7 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 		{"provider_order twice", func(t *Table) { t.ProviderOrder = []string{"fireworks", "fireworks"} }, ModelsFile, "", "provider_order"},
 		{"provider_order blank", func(t *Table) { t.ProviderOrder = []string{""} }, ModelsFile, "", "provider_order"},
 		{"driver missing", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.Driver = "" }) }, ProvidersFile, fw, "driver"},
-		{"driver unknown", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.Driver = "anthropic" }) }, ProvidersFile, fw, "driver"},
+		{"driver unknown", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.Driver = "bedrock" }) }, ProvidersFile, fw, "driver"},
 		{"base_url missing for openai-compat", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.BaseURL = "" }) }, ProvidersFile, fw, "base_url"},
 		{"base_url not a URL", func(t *Table) {
 			setProvider(t, "fireworks", func(p *Provider) { p.BaseURL = "api.fireworks.example/v1" })

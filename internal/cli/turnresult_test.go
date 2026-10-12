@@ -55,6 +55,37 @@ func TestAccumulatorMessageIsTheLastAssistantEntry(t *testing.T) {
 	}
 }
 
+// TestAccumulatorMessageEndsWithTheRefusalNote (plan 044 §3.4): a native
+// refusal's note is the turn's last text, ahead of its ending, so `craze
+// prompt --json`'s message ends with it — a paragraph after the model's own
+// words, or the whole message when the model said nothing. The control: the
+// same note in a sub-agent's text is not the message.
+func TestAccumulatorMessageEndsWithTheRefusalNote(t *testing.T) {
+	const note = "craze: the model declined this request (refusal category: cyber). Switch models with /model, or rephrase."
+	for _, c := range []struct {
+		name string
+		evs  []agent.Event
+		want string
+	}{
+		{"after the model's text", []agent.Event{
+			{Type: agent.EventText, Text: "I can't"}, {Type: agent.EventText, Text: "\n\n" + note},
+		}, "I can't\n\n" + note},
+		{"alone", []agent.Event{{Type: agent.EventText, Text: note}}, note},
+		{"a sub-agent's (control)", []agent.Event{
+			{Type: agent.EventText, Text: "mine"}, {Type: agent.EventText, Agent: "child-1", Text: "\n\n" + note},
+		}, "mine"},
+	} {
+		a := newTurnAccumulator()
+		for _, ev := range c.evs {
+			a.fold(ev)
+		}
+		a.fold(agent.Event{Type: agent.EventDone, StopReason: "refusal"})
+		if got, _ := a.message(); got != c.want {
+			t.Errorf("%s: message %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestAccumulatorKeepsTheMessagesTail: past resultMessageMax the message is
 // its tail, cut at a rune's start, and messageCut says so; a new entry starts
 // whole again.

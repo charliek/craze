@@ -14,8 +14,10 @@ import (
 // sdkFreePackages are the package patterns, relative to the module root,
 // whose dependencies must not include a provider SDK (owner decision 2:
 // Fantasy is a plain import, but only its OpenAI-compatible provider is
-// linked). The binary joined the list when it first linked the harness,
-// through the native adapter in internal/agent (plan 018 C9).
+// linked; the ChatGPT plan's and Anthropic's drivers are craze's own
+// clients, responsesapi and messagesapi, so Anthropic's driver links no
+// Anthropic SDK either). The binary joined the list when it first linked the
+// harness, through the native adapter in internal/agent (plan 018 C9).
 var sdkFreePackages = []string{
 	"./internal/harness/...",
 	"./cmd/craze",
@@ -45,10 +47,16 @@ func TestNoProviderSDKsLinked(t *testing.T) {
 	}
 	deps := strings.Fields(string(out))
 	// Guard against a vacuous pass: the listing must reach the provider this
-	// package does link.
-	if !slices.Contains(deps, "charm.land/fantasy/providers/openaicompat") {
-		t.Fatalf("go list -deps %s does not include Fantasy's openaicompat provider; the check is not seeing the harness",
-			strings.Join(sdkFreePackages, " "))
+	// package does link, and the client Anthropic's driver runs on (plan 044
+	// §3.3), whose SDK is the one it would otherwise pull in.
+	for _, linked := range []string{
+		"charm.land/fantasy/providers/openaicompat",
+		"github.com/charliek/craze/internal/harness/llm/messagesapi",
+	} {
+		if !slices.Contains(deps, linked) {
+			t.Fatalf("go list -deps %s does not include %s; the check is not seeing the harness",
+				strings.Join(sdkFreePackages, " "), linked)
+		}
 	}
 	var linked []string
 	for _, pkg := range deps {

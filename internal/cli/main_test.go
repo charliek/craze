@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/charliek/craze/internal/chatgptauth"
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/rundir"
@@ -80,6 +81,11 @@ func TestMain(m *testing.M) {
 	// servers only).
 	_ = os.Setenv(chatgptauth.IssuerEnv, chatgptFence)
 	_ = os.Setenv(chatgptauth.APIEnv, chatgptFence+"/v1")
+	// Anthropic's API (plan 044 P30) the same way: `craze auth login
+	// anthropic` and a native session's open fetch the account's model list
+	// whenever a key funds the provider, and a test that funds it without a
+	// fake of its own (t.Setenv over this) gets a refused connection here.
+	_ = os.Setenv(messagesapi.TestAPIEnv, chatgptFence)
 	// The macOS login session is pinned to the GUI's for the package and
 	// every test child it starts (plan 036): the provider availability check
 	// marks cursor unavailable outside it, so on a Mac runner whose session

@@ -1,0 +1,40 @@
+craze's Messages API driver
+===========================
+
+This package, and its Fantasy adapter in the package above it
+(internal/harness/llm/messages_adapter.go), take their design from
+Fantasy's Anthropic language model:
+
+    https://github.com/charmbracelet/fantasy
+    charm.land/fantasy v0.43.2
+    providers/anthropic/anthropic.go and providers/anthropic/error.go
+
+-- the mapping of a conversation's messages to Messages API content blocks
+(toPrompt), of a stream's events to Fantasy stream parts (Stream), and of
+the API's errors to retryable and final failures (toProviderErr). The code
+here is craze's own, written against the standard library rather than the
+Anthropic SDK, and it differs where craze needs it to (plan 044 §3.2-§3.3):
+thinking is always adaptive, summarized, and bound with drop_block behind
+its beta; caching is the system block's breakpoint and the top-level
+automatic one; a thinking block's signature fragments are joined and
+replayed byte for byte; usage is overwritten only by the counts each event
+reports; a tool call is reported at its own block's stop; any break in the
+stream's protocol is an incomplete stream; and the account's model list is
+read here too.
+
+Fantasy is distributed under the Apache License, Version 2.0, with this
+notice:
+
+    Copyright 2025-2026 Charmbracelet, Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.

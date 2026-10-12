@@ -318,12 +318,13 @@ type StateDelta struct {
 	// Catalog is the models the session offers, as Snapshot.Models now
 	// stands, and the list's revision (plan 034 §3.4, Q17): a native session's
 	// reload of its model table while it runs — a key saved, a plan signed in
-	// to or out of, the plan's list fetched again — authored under its lock in
-	// the section that swapped the list. It is never inside a load's replay
-	// bracket: a reload that lands there waits for the end bracket. It carries
-	// the whole list, and its Revision only ever grows within one incarnation;
-	// no ACP session sends one, and a session that has not reloaded has sent
-	// none (its list is the one it started with, revision 0).
+	// to or out of, a provider's model list fetched again — authored under its
+	// lock in the section that swapped the list. It is never inside a load's
+	// replay bracket: a reload that lands there waits for the end bracket. It
+	// carries the whole list, and its Revision only ever grows within one
+	// incarnation; no ACP session sends one, and a session that has not
+	// reloaded has sent none (its list is the one it started with, revision
+	// 0).
 	Catalog *CatalogState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it

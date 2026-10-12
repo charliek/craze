@@ -15,6 +15,7 @@ import (
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
@@ -202,6 +203,11 @@ type nativeSession struct {
 	// slot is still claimed, as on the live session: Interject is refused from
 	// then on, so an interjection can never follow an EventDone.
 	doneEmitted bool
+	// textShown says the claimed turn — a prompt's or a wake's — has shown
+	// text of the main session's own: the refusal note (noteRefusal) is then
+	// a paragraph after it, and otherwise the turn's only text. Each claim
+	// clears it; sink sets it, from the harness's turn with s.mu not held.
+	textShown atomic.Bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
 	// returns, which is what Cancel and Close wait on. turnToken is the
@@ -304,23 +310,32 @@ type nativeSession struct {
 	// unsubscribe ends the harness's subscription to signIn (AddSecrets),
 	// made as the harness opened; Close calls it. nil with no signIn.
 	unsubscribe func()
-	// refreshed is closed when the latest background fetch of the plan's
-	// model list has returned — open's, or one RefreshModels started — nil
-	// when none was started; fetching says one is in flight, so a refresh
-	// asked meanwhile joins it rather than starting a second
-	// (refreshModelsLocked). Fetches run one at a time, so the latest's end
-	// is every one's; Close waits for it, after done has cancelled it.
-	refreshed chan struct{}
-	fetching  bool
-	// fetchFailed is when the latest background fetch of the plan's model
-	// list failed — zero when none has, or the latest succeeded — so a
-	// refresh asked within planListRetryBackoff of it starts no other (plan
-	// 034 C5r, r12 #3b). Under s.mu, as fetching is.
-	fetchFailed time.Time
-	// fetchClock is the clock fetchFailed is read and written on: nil is the
-	// wall clock. **A test seam: nil in production**, set only by a test in
-	// this package before Start.
+	// planList and anthropicList are the background fetches of the ChatGPT
+	// plan's model list and the Anthropic account's, each its own (plan 044
+	// P9, native_lists.go): Start's, and the ones RefreshModels starts. Under
+	// s.mu.
+	planList, anthropicList listRefresher
+	// listWorkers counts every goroutine a refresher has started — each run
+	// of fetches and its cancellation watch — added under s.mu while the
+	// session is not closed (submitListLocked): Close waits for it, after
+	// done has cancelled them, so none outlives the session (C5 review 3).
+	listWorkers sync.WaitGroup
+	// fetchClock is the clock a refresher's backoff is read and written on
+	// (listRefresher.failed): nil is the wall clock. **A test seam: nil in
+	// production**, set only by a test in this package before Start.
 	fetchClock func() time.Time
+	// listSeam runs at a refresher's stages, with no lock held: "decided" in
+	// refreshLists once the sources are made from the table it read and
+	// before they are submitted; "fetched" on the run's goroutine once a
+	// fetch has returned — the list written, if it wrote one — and before its
+	// reload; and "exit" as that goroutine ends, after its done is closed and
+	// its context cancelled, before Close counts it joined. listsJoinSeam runs
+	// in Close just before it waits for the refreshers' goroutines, with no
+	// lock held. **Both are test seams: nil in production**, set only by a
+	// test in this package before Start; listSeam is called from several
+	// goroutines at once.
+	listSeam      func(stage string)
+	listsJoinSeam func()
 
 	// modelsMu serializes the model table's reloads with each other and with
 	// SetModel and SetConfig (native_models.go, plan 034 §3.4): taken with no
@@ -352,6 +367,12 @@ type nativeSession struct {
 	// the table. **A test seam: nil in production**, set only by a test in
 	// this package before Start.
 	reloadSeam func(stage string)
+	// reloadQueuedSeam runs in a reload that finds modelsMu held — by a
+	// switch, or another reload — before it waits its turn, with no lock
+	// held: the one point at which a reload is seen waiting for the lock
+	// rather than not yet at it. **A test seam: nil in production**, set
+	// only by a test in this package before Start.
+	reloadQueuedSeam func()
 	// turnSeam runs in prompt on the turn's goroutine with no lock held:
 	// "started" once the turn's start reload is done and before the harness's
 	// turn begins, "ran" once the harness's turn has returned — no longer
@@ -638,10 +659,13 @@ func (s *nativeSession) start(context.Context) error {
 	// but the hidden ones. Naming ran over every entry, hidden ones included,
 	// so a visible row's spelling never depends on what is hidden.
 	rows := visibleNativeRows(entries, redactNativeRows(content.rows, hs.Redact))
-	// The plan's model list is fetched again in the background only for an
-	// account signed in with plan usage (refreshModelsLocked): read here,
-	// before s.mu, which every Snapshot takes.
-	refresh := fetchesPlanList(opened.signIn)
+	// The providers' model lists fetched again in the background
+	// (native_lists.go): the plan's for an account signed in with plan usage,
+	// the Anthropic account's for the key the table funds craze's own
+	// Anthropic provider with (plan 044 §3.6 b). Made here, before s.mu,
+	// which every Snapshot takes: the first reads the registration's file.
+	planFetch := planSource(opened.signIn)
+	anthropicFetch := anthropicSource(opened.table, opened.getenv, opened.home)
 
 	s.mu.Lock()
 	if s.closed {
@@ -662,9 +686,10 @@ func (s *nativeSession) start(context.Context) error {
 	s.hs = hs
 	s.table, s.home = opened.table, opened.home
 	s.signIn, s.unsubscribe = opened.signIn, opened.unsubscribe
-	if refresh {
-		s.refreshModelsLocked(opened.signIn, hs.Redact)
-	}
+	// Decided on the table the harness opened on: the first reading, before
+	// any reload's (modelsWatch.freshSeq).
+	s.submitListLocked(&s.planList, planFetch, 0, hs.Redact)
+	s.submitListLocked(&s.anthropicList, anthropicFetch, 0, hs.Redact)
 	s.efforts = efforts
 	s.plugins = entries
 	s.snap.Plugins = rows
@@ -700,10 +725,10 @@ func (s *nativeSession) start(context.Context) error {
 		if err := s.load(hs); err != nil {
 			return err
 		}
-		// A reload the replay held back — the plan's list fetched while it
-		// ran, say — is taken up now that the end bracket is out (plan 034
-		// §3.4, A19): after it, never inside it, and before Start returns, so
-		// before any turn.
+		// A reload the replay held back — a provider's model list fetched
+		// while it ran, say — is taken up now that the end bracket is out
+		// (plan 034 §3.4, A19): after it, never inside it, and before Start
+		// returns, so before any turn.
 		s.mu.Lock()
 		owed := s.takeOwedLocked()
 		s.mu.Unlock()
@@ -1059,6 +1084,14 @@ func visibleNativeRows(entries []PluginEntry, rows []PluginCommand) []PluginComm
 	return out
 }
 
+// anthropicAPIBase is the API base a model on Anthropic's driver is built
+// with (harness.Options.AnthropicAPIBase, plan 044 §3.3): Anthropic's own, or
+// the test override CRAZE_TEST_ANTHROPIC_API names in craze's own environment
+// — a loopback http URL, and anything else an error that fails the build
+// (messagesapi.BaseURL) — read at each build, as chatgptauth.APIBase reads
+// the plan's.
+func anthropicAPIBase() (string, error) { return messagesapi.BaseURL(os.Getenv) }
+
 // open resolves everything Start needs and opens the harness, returning it
 // with the model table it was opened on and the directory that was read from
 // (nativeOpened), and the content it read for it. Its errors are already
@@ -1145,6 +1178,14 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	if hopts.Auth == nil {
 		signIn = chatgptauth.Source(hopts.Home)
 		hopts.Auth, hopts.AuthAPIBase = signIn, chatgptauth.APIBase
+	}
+	// Anthropic's API base (plan 044 §3.3, P21), read like the plan's when a
+	// model is built — Anthropic's own, or a test's loopback override, whose
+	// error fails the build rather than falling back to Anthropic — and so
+	// the base of every model this session builds: its sub-agents', and the
+	// one its summarizer, side questions and wakes send on.
+	if hopts.AnthropicAPIBase == nil {
+		hopts.AnthropicAPIBase = anthropicAPIBase
 	}
 	if hopts.Table == nil {
 		// The shipped catalog with the user's files merged over it (plan 031
@@ -1317,7 +1358,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// harness actually opened on as the current one, which for a resume is
 	// the transcript's.
 	current, _ := hs.Current()
-	out := nativeOpened{table: table, home: hopts.Home, choices: table.Choices(recent, getenv, current)}
+	out := nativeOpened{table: table, home: hopts.Home, getenv: unsealed, choices: table.Choices(recent, getenv, current)}
 	if signIn != nil {
 		// Every token value this process mints or adopts from here on is
 		// redacted at once (P19): the source tells its subscribers before it
@@ -1335,115 +1376,6 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	return hs, out, content, nil
 }
 
-// diagModelsRefresh is the journal diag a failed background fetch of the
-// ChatGPT plan's model list is noted as (refreshModelsLocked): its one field,
-// "error", names the endpoint, the status and the code, never a token
-// (chatgptauth's errors repeat only the codes it knows) — and it is redacted
-// by the session's redactor besides (modelsRefreshNote).
-const diagModelsRefresh = "chatgpt_models_refresh"
-
-// modelsRefreshNote is the diag a failed background fetch is journaled as:
-// err's text through the session's redactor, then made one line (plan 033
-// C14r, r12 #1). chatgptauth keeps a server's free text out of its errors and
-// repeats only error codes it knows, so a token reaching err is not expected;
-// the redaction is the journal boundary's own guard, as every other surface
-// the session writes has one, should a wrapped error ever carry one. Redacted
-// first, so the sanitiser's rewriting cannot split a value the redactor would
-// have matched.
-func modelsRefreshNote(err error, redact func(string) string) journal.DiagNote {
-	return journal.DiagNote{Kind: diagModelsRefresh, Fields: map[string]any{"error": sanitizeLine(redact(err.Error()))}}
-}
-
-// fetchesPlanList reports whether the plan's model list is fetched again for
-// src's account (refreshModelsLocked): one signed in with plan usage, since
-// anything else would only fail; false for no src. It reads the
-// registration's file, so its callers read it before s.mu.
-func fetchesPlanList(src *chatgptauth.TokenSource) bool {
-	if src == nil {
-		return false
-	}
-	st, err := chatgptauth.ReadStatus(src.Dir())
-	return err == nil && st.SignedIn && st.PlanUsage
-}
-
-// refreshModelsLocked fetches the ChatGPT plan's model list again in the
-// background when it is over a day old, missing, another account's or
-// fetched with another client_version (plan 033 §3.10, §3.12; plan 034 Q3).
-// Start asks for it, and RefreshModels (plan 034 §3.4, Q14 b), only for an
-// account signed in with plan usage; anything else would only fail. One runs
-// at a time: one asked while another is in flight joins it (fetching), and a
-// closed session starts none. The fetch takes the list's own lock and checks
-// its age again under it, so hosts opening at once fetch it once, bounded by
-// its own timeout. A list it wrote is taken up by a reload of the session's
-// table through the same transaction every reload goes through
-// (native_models.go, Q14 c) — never swapped in here. It writes no sign-in log
-// (no Observe). Close cancels it (done) and waits for it (refreshed). A
-// failure is journaled through redact, the session's redactor
-// (modelsRefreshNote), and starts a backoff: for planListRetryBackoff after a
-// fetch failed, none is started again (plan 034 C5r, r12 #3b) — joining one in
-// flight bounds how many run at once, the backoff how often a client calling
-// session.models.refresh in a loop can make one, while the reload it asks
-// for still runs and answers. A fetch that succeeds, or finds the list
-// current, ends the backoff. s.mu is held: it only starts the goroutine.
-func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact func(string) string) {
-	if s.fetching || s.closed {
-		return
-	}
-	if !s.fetchFailed.IsZero() && s.fetchNow().Sub(s.fetchFailed) < planListRetryBackoff {
-		return
-	}
-	s.fetching = true
-	done := make(chan struct{})
-	s.refreshed = done
-	go func() {
-		defer close(done)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() {
-			select {
-			case <-s.done:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-		fetched, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge, chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()})
-		failed := err != nil && ctx.Err() == nil
-		if failed {
-			s.log.Note(modelsRefreshNote(err, redact))
-		}
-		if fetched && ctx.Err() == nil {
-			s.reloadModels(reloadFetched)
-		}
-		s.mu.Lock()
-		s.fetching = false
-		switch {
-		case failed:
-			s.fetchFailed = s.fetchNow()
-		case err == nil:
-			s.fetchFailed = time.Time{}
-		}
-		s.mu.Unlock()
-	}()
-}
-
-// planListRetryBackoff is how long after a failed fetch of the plan's model
-// list no other is started (refreshModelsLocked; plan 034 C5r, r12 #3b): long
-// enough that a client asking one session in a loop costs the account one
-// request per half minute, short enough that a person retrying after fixing
-// what failed — a network back, a sign-in finished — waits for no more than
-// that. It is per session, as fetchFailed is (plan 034 C4r3, r14 #c): several
-// sessions open at once each keep their own, and can each make a request in
-// the same half minute.
-const planListRetryBackoff = 30 * time.Second
-
-// fetchNow is fetchClock's reading, the wall clock's when it is nil.
-func (s *nativeSession) fetchNow() time.Time {
-	if s.fetchClock != nil {
-		return s.fetchClock()
-	}
-	return time.Now()
-}
-
 // nativeOpened is what open() resolved beside the harness and the content:
 // the model table the harness was opened on, and the Home it was read from —
 // hopts.Home after the seam, the directory the session's model memory is
@@ -1451,6 +1383,11 @@ func (s *nativeSession) fetchNow() time.Time {
 type nativeOpened struct {
 	table *modeltable.Table
 	home  string
+	// getenv is the environment the harness was opened with, before open()
+	// sealed it (Options.Getenv after the seam; nil is os.Getenv): what the
+	// Anthropic account's list is fetched with a key from at Start
+	// (anthropicSource), as each reload reads it (modelsWatch.getenv).
+	getenv func(string) string
 	// signIn and unsubscribe are the session's token source and its
 	// subscription (nativeSession.signIn), nil when the seam handed in an
 	// Auth of its own.
@@ -2038,6 +1975,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	defer cancel()
 	s.inPrompt = true
 	s.doneEmitted = false
+	s.textShown.Store(false)
 	s.turnCancel = cancel
 	s.turnToken = tok
 	// /compact [focus] is the harness's own turn, never a prompt to the model
@@ -2203,6 +2141,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// Every row the turn left running is closed before its ending goes out,
 	// so no consumer ever sees a turn end with a call still spinning.
 	s.settleTools()
+	if err == nil {
+		s.noteRefusal(res)
+	}
 	var failed error
 	switch {
 	case err != nil:
@@ -2249,6 +2190,35 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason, Unanswered: unanswered}, nil
+}
+
+// noteRefusal shows, for a turn that ended in a refusal, the session's own
+// note saying so (plan 044 §3.4, P6, O5): one EventText after whatever the
+// model said, naming the refusal's category when the provider gave one
+// (Result.RefusalCategory) and what to do. Any native provider's refusal
+// gets it, so it is said in no provider's words. It is the session's, never
+// the model's: the harness has already written the turn, so it is in no
+// transcript and in no request after it, and its stop reason stays refusal.
+func (s *nativeSession) noteRefusal(res harness.Result) {
+	if res.StopReason != harness.StopRefusal {
+		return
+	}
+	s.emit(Event{Type: EventText, Text: refusalNote(res.RefusalCategory, s.textShown.Load())})
+}
+
+// refusalNote is noteRefusal's text: a paragraph of its own after shown text,
+// and the turn's whole text otherwise. category is a short identifier
+// (llm.AnthropicFinish keeps no other), "" for none.
+func refusalNote(category string, afterText bool) string {
+	what := "refusal"
+	if category != "" {
+		what = "refusal category: " + category
+	}
+	note := "craze: the model declined this request (" + what + "). Switch models with /model, or rephrase."
+	if afterText {
+		note = "\n\n" + note
+	}
+	return note
 }
 
 // refsLocked is what a draft invokes, resolved against this session's own
@@ -2407,6 +2377,7 @@ func (s *nativeSession) sink(ev harness.Event) {
 	switch e := ev.(type) {
 	case harness.TextDelta:
 		if t := sanitizeText(e.Text); t != "" {
+			s.textShown.Store(true)
 			s.emit(Event{Type: EventText, Text: t})
 		}
 	case harness.ThoughtDelta:
@@ -2660,7 +2631,7 @@ func (s *nativeSession) Close() error {
 		s.closed = true
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
-		worker, unsubscribe, refreshed := s.wakeDone, s.unsubscribe, s.refreshed
+		worker, unsubscribe := s.wakeDone, s.unsubscribe
 		s.mu.Unlock()
 		// The close order, in the one place it is decided (plan 023 §3.5, X10):
 		// the turn's context, then the registry, then the harness, then the
@@ -2714,10 +2685,15 @@ func (s *nativeSession) Close() error {
 		if worker != nil {
 			<-worker
 		}
-		// The model list's background fetch, which done has cancelled.
-		if refreshed != nil {
-			<-refreshed
+		// The model lists' background fetches, which done has cancelled:
+		// every goroutine every provider's refresher started, each run and
+		// its cancellation watch (native_lists.go, plan 044 P9; C5 review 3).
+		// None is added after the section above marked the session closed
+		// (submitListLocked), so this waits for all there will ever be.
+		if seam := s.listsJoinSeam; seam != nil {
+			seam()
 		}
+		s.listWorkers.Wait()
 		// The turn's own ending settled its rows; this settles the rows of
 		// a claim that never opened one. Nothing is published — done is
 		// closed, so every emit is a no-op by now — but a Snapshot taken
@@ -3542,10 +3518,29 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 		status = fmt.Sprintf(" (HTTP %d)", pe.StatusCode)
 	}
 	switch {
+	case errors.Is(err, harness.ErrAuth) && pe.Driver == modeltable.DriverAnthropic && pe.StatusCode == 403:
+		// Anthropic's 403 is a model the key may not use, not a key it
+		// rejected (plan 044 §3.4, P27): a model the account or its
+		// organization is not allowed. Its 401 is the key's, below.
+		msg := fmt.Sprintf("native: Anthropic refused access to model %q%s", model, status)
+		if m := sanitizeLine(pe.Message); m != "" {
+			msg += ": " + m
+		}
+		return phrase(msg)
 	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
 		// The plan has no key to check: its 401 is phraseChatGPT's, and any
 		// other refusal it flags is said as the provider's own, below.
 		return phrase(rejectedKeyText(table, pe.Provider, status))
+	case errors.Is(err, harness.ErrModelNotFound) && pe.Driver == modeltable.DriverAnthropic && pe.WireModel != "":
+		// A model of the account's own list, or a seed, that this account
+		// cannot use (P27): models.toml is no advice for a model it never
+		// configured, so the words name the wire id the account was asked
+		// for, and Anthropic's own reason.
+		msg := fmt.Sprintf("native: the Anthropic account cannot use %s (HTTP %d", sanitizeLine(pe.WireModel), pe.StatusCode)
+		if m := sanitizeLine(pe.Message); m != "" {
+			msg += ": " + m
+		}
+		return phrase(msg + ")")
 	case errors.Is(err, harness.ErrModelNotFound):
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))

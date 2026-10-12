@@ -12,9 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/anthropicmodels"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 )
@@ -25,7 +27,9 @@ import (
 // provider's env_keys. `login` stores one, `logout` removes one, `list` says
 // how each provider is funded. No key is ever checked with its provider (the
 // owner's decision: a bad key shows on first use), so none of the three makes
-// a network request for a key.
+// a network request for a key — but one: storing a key for craze's own
+// Anthropic provider fetches the account's model list with the key that
+// funds it (plan 044 §3.6 a, anthropicList), which shows a refused key then.
 //
 // The ChatGPT plan is the exception (plan 033 §3.13): it is funded by Sign in
 // with ChatGPT and never by a key, so for it `login` runs the sign-in,
@@ -73,6 +77,7 @@ A key is stored in the craze directory's native/providers.toml (0600), which
 craze rewrites whole: comments there are not kept. A provider's environment
 variable (FIREWORKS_API_KEY, say) is used before its stored key. No key is
 checked with its provider when it is stored: a wrong one shows on first use.
+Storing an Anthropic key also fetches the account's model list.
 
 The ChatGPT plan takes no key: "craze auth login chatgpt" signs in with
 ChatGPT in a browser, "craze auth logout chatgpt" signs out, and
@@ -244,8 +249,58 @@ func (a *authRun) login(arg string) error {
 	if p.EnvVar != "" {
 		fmt.Fprintf(a.out, "%s is set in this environment; craze uses it before the stored key.\n", sanitizeLine(p.EnvVar))
 	}
+	if p.ID == modeltable.AnthropicProvider {
+		a.anthropicList()
+	}
 	a.brokenKeyNotes(p.ID)
 	return nil
+}
+
+// anthropicListWait bounds login's fetch of the Anthropic account's model
+// list (plan 044 §3.6 a), the wait for the list's lock included: the Messages
+// API client's own bound on a listing.
+const anthropicListWait = 30 * time.Second
+
+// fetchAnthropicModels fetches the Anthropic account's model list into dir
+// with key — the forced fetch, which never overwrites a list for the same key
+// that landed while it ran — and answers how many models the list holds. A
+// seam: anthropicmodels in craze; a stand-in in this package's tests, which
+// must never reach Anthropic.
+var fetchAnthropicModels = anthropicmodels.Fetch
+
+// anthropicList is login's last step for the Anthropic provider (plan 044
+// §3.6 a): the account's model list fetched now, so the next native session
+// offers the account's models from its start, with the key the provider is
+// funded by — the one just saved, or an exported one ahead of it, the key a
+// session binds the list to (modeltable.Table.AnthropicListKey). It is
+// bounded (anthropicListWait), and says what it fetched on stdout or why it
+// fetched nothing in one note, never failing the login: the key stays saved,
+// and a native session fetches the list when it opens. A table that funds no
+// Anthropic provider of craze's own — a provider of the user's own named
+// anthropic (plan 044 X1) — fetches nothing, and says nothing. No error
+// carries the key (anthropicmodels takes it out).
+func (a *authRun) anthropicList() {
+	table, err := modeltable.Load(a.dir)
+	if err != nil {
+		a.note("the Anthropic model list was not fetched: the model table does not load: " + strings.TrimPrefix(err.Error(), "modeltable: "))
+		return
+	}
+	key, ok := table.AnthropicListKey(a.getenv)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.context(), anthropicListWait)
+	defer cancel()
+	n, err := fetchAnthropicModels(ctx, a.dir, key.Reveal())
+	if err != nil {
+		a.note("the Anthropic model list could not be fetched (" + strings.TrimPrefix(err.Error(), "anthropicmodels: ") + "); a native session fetches it when it opens")
+		return
+	}
+	noun := "models"
+	if n == 1 {
+		noun = "model"
+	}
+	fmt.Fprintf(a.out, "Fetched %d Anthropic %s.\n", n, noun)
 }
 
 // logout is craze auth logout <provider>.
