@@ -163,6 +163,68 @@ def test_native_prompt_model_flag_resolves_alias(
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
+def shipped_meta_home(craze_home: Path, base_url: str) -> None:
+    """A home funding the shipped catalog's Meta provider alone, at the
+    fixture: providers.toml overlays `meta` with the fixture's base_url and an
+    inline canary key (an endpoint change drops the shipped META_API_KEY, so
+    only that key funds it), and there is no models.toml, so the shipped
+    catalog is the table (plan 045 A3)."""
+    native = craze_home / "native"
+    native.mkdir(parents=True, exist_ok=True)
+    os.chmod(native, 0o700)
+    providers = native / "providers.toml"
+    providers.write_text(
+        f'version = 1\n\n[providers.meta]\nbase_url = "{base_url}"\napi_key = "{CANARY}"\n',
+        encoding="utf-8",
+    )
+    os.chmod(providers, 0o600)
+
+
+@pytest.mark.parametrize(
+    ("args", "model", "effort"),
+    [
+        (("--model", "muse-wonder-1.0", "--effort", "max"), "muse-wonder-1.0", "max"),
+        (("--model", "muse-wonder-1.0"), "muse-wonder-1.0", "high"),
+        ((), "muse-spark-1.3-contributor", "high"),
+    ],
+    ids=["wonder-at-max", "wonder-at-its-default", "spark-stays-the-start"],
+)
+def test_native_shipped_meta_models_reach_the_wire(
+    craze_bin: Path,
+    tmp_path: Path,
+    fixture_server: SSEFixture,
+    args: tuple[str, ...],
+    model: str,
+    effort: str,
+) -> None:
+    """Plan 045 A2/A3: the shipped catalog's Meta models, as craze sends them,
+    with no real traffic. Muse Wonder 1.0 goes out on its own wire id with the
+    effort asked for, or its default, high, and the family's 131072 output
+    ceiling; a session that names no model starts on Spark's contributor
+    tier, the owner's pin, with Wonder in the catalog. The ceiling goes out
+    as max_tokens, as for every model on the openai-compat driver."""
+    fixture_server.set_ok(text_parts=["from meta"])
+    craze_home = tmp_path / "craze-home"
+    shipped_meta_home(craze_home, fixture_server.base_url)
+
+    proc = run_native(craze_bin, craze_home, tmp_path, *args, "hi")
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined(events, "text") == "from meta"
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
+    assert fixture_server.requests, "the turn sent no request, so nothing below is checked"
+    for r in fixture_server.requests:
+        assert r.body.get("model") == model
+        assert r.body.get("reasoning_effort") == effort
+        assert r.body.get("max_tokens") == 131072, sorted(r.body)
+    # The inline key funds every request and is printed nowhere. Checked
+    # outside an assert, so a failure never prints what it was handed.
+    if not all(r.authorization == f"Bearer {CANARY}" for r in fixture_server.requests):
+        pytest.fail("a request went out without the inline Meta key as its bearer", pytrace=False)
+    if CANARY in proc.stdout or CANARY in proc.stderr:
+        pytest.fail("the inline Meta key reached stdout or stderr", pytrace=False)
+
+
 def test_native_prompt_reads_the_model_memory_and_never_writes_it(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
 ) -> None:

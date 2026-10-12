@@ -766,6 +766,19 @@ as `openrouter/mimo-v2.6-pro`, uses its numbered id. To stay on one numbered
 model, add it as a model of your own in [`models.toml`](#your-two-files),
 with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 
+Meta's models are Muse Spark 1.3, `muse-spark-1.3` and its cheaper
+contributor tier `muse-spark-1.3-contributor` (Meta's start model), and
+`muse-wonder-1.0`, Muse Wonder 1.0, Meta's most capable model, for long,
+complex coding and agent work. Muse Wonder is in preview at Meta, costs more
+($4 per million input tokens and $20 per million output, against
+Spark 1.3's $1.25 and $4.25), has no contributor tier, and offers effort from
+`minimal` to `max` (default `high`). It is not Meta's start model, so a
+machine with only a Meta key starts on Spark until you pick Wonder: with
+`/model` (which a new session then [remembers](#model-memory-recentjson)),
+`--model muse-wonder-1.0`, a `default_model` pin or a sub-agent's model. Muse
+Wonder Full is a Muse Code subscription model, not on Meta's API, so craze
+does not offer it.
+
 The catalog has no default model. It ranks its providers instead, in
 `provider_order`, and gives each a **start model**: a new session that
 remembers nothing, and has no [`default_model`](#your-two-files) pin of yours
