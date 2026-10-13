@@ -2,6 +2,83 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.1.1 — 2026-10-12
+
+Anthropic joins the native providers, `/btw` asks a side question without
+touching the session, and new commands drive sessions from a script. Nothing in
+`~/.craze` needs migrating, but a few existing behaviours changed: [Upgrading,
+since v0.1.0](docs/getting-started/upgrading.md#since-v010) lists each one and
+how to keep the old behaviour.
+
+### Behaviour changes
+
+- An exported `ANTHROPIC_API_KEY` now funds craze's Anthropic provider, and is
+  kept out of the commands a native session runs. `env_keys = []` under
+  `[providers.anthropic]` in `providers.toml` opts out. A
+  `[providers.anthropic]` of your own now overlays craze's: rename it to keep a
+  gateway.
+- `craze -c` and `--continue` skip sub-agent sessions (those `craze new --wait`
+  starts). `--resume` lists them after your own, tagged `sub-agent`.
+- OpenRouter aliases send OpenRouter's `~family-latest` routers where one
+  exists (`openrouter/gpt-sol-latest`), so an alias moves when OpenRouter moves
+  its router. The numbered aliases they replace are retired; their wire ids
+  still work from `models.toml`.
+- A skill saved mid-session reaches the `/` menu at the next turn end, not when
+  you type `/`.
+
+### The native provider
+
+- **Anthropic**: Claude models on Anthropic's API with an API key
+  (`craze auth login anthropic`, `/connect`, or `ANTHROPIC_API_KEY`). The
+  account's model list is fetched at most once a day, so new Claude models
+  appear without a craze release. It is last in the start order; a session with
+  only an Anthropic key starts on the newest Opus at medium effort.
+- Under an Anthropic parent, a sub-agent's `opus`, `sonnet`, `haiku` or `fable`
+  picks that family's newest Claude model unless `[subagents.tiers]` maps it.
+- **Meta**: Muse Wonder 1.0 (`muse-wonder-1.0`), chosen with `/model`,
+  `--model`, `default_model` or a sub-agent's model. Muse Spark stays Meta's
+  start model.
+- **OpenRouter**: MiMo V2.6 Pro and the `glm-latest` and
+  `deepseek-flash-latest` routers. The start model is
+  `openrouter/gemini-flash-latest`.
+- A turn the model refuses ends with a note naming the refusal category. The
+  note is shown but never saved in the session or sent to a model.
+
+### The terminal UI
+
+- `/btw <question>` asks a side question in a full-window view, mid-turn or
+  idle, without adding to the session; Esc throws it away. Native streams the
+  answer; Grok and gx answer in one piece. Cursor does not offer it.
+
+### Scripting
+
+- `craze new --wait`, `craze send`, `craze wait`, `craze cancel` and
+  `craze stop` start, continue, wait on and stop sessions, with an exit code per
+  outcome. The Claude Code plugin in this repository is built on them; it is
+  supported from v0.2.0.
+- `craze new --title` names a session as it starts. A hub still running from
+  before the upgrade refuses until it exits idle.
+- `craze prompt --effort` and `--fast`/`--no-fast`.
+- The control protocol gains `session.aside` (side questions), the `slash`
+  catalog section and a `title` on `session.create`. All additive: the protocol
+  and codec versions are unchanged.
+
+### Fixes
+
+- `craze wait` no longer reports `completed` when an interrupt or `--timeout`
+  ended the wait before it read a returned plan.
+- craze no longer mistakes a dead host for a live one while another scan is
+  cleaning it up.
+- A title is normalized the same way in the session and in the session index
+  (zero-width spaces, bidi controls and carriage returns are dropped).
+
+### Docs
+
+- The README is now a short overview that links to the docs site. The site
+  gains a [Claude Code sub-agents](docs/getting-started/claude-code.md) page and
+  an Upgrading section for changes since v0.1.0, and tests in `make test` fail
+  when the reference pages fall behind the code.
+
 ## v0.1.0 — 2026-10-05
 
 Two big changes since v0.0.1. craze now has its own agent, the **native**
