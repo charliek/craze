@@ -323,6 +323,74 @@ def test_ps_with_nothing_running(craze_bin: Path, fake_agent_bin: Path, tmp_path
     _cleanup_stops(rec, tmp_path, fake_agent_bin)
 
 
+def _saved_rows(out: bytes) -> list[dict[str, str]]:
+    """craze ps --saved's table, a dict a row by its header's columns."""
+    lines = out.decode().rstrip("\n").split("\n")
+    header = lines[0]
+    assert header.split() == ["SESSION", "PROVIDER", "DIR", "AGE", "TITLE"], header
+    names = header.split()
+    starts = [header.index(n) for n in names]
+    rows = []
+    for line in lines[1:]:
+        cells = [line[s : (starts[i + 1] if i + 1 < len(starts) else None)].strip() for i, s in enumerate(starts)]
+        rows.append(dict(zip(names, cells)))
+    return rows
+
+
+def test_ps_saved_lists_the_index_with_or_without_a_hub(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """Plan 046 B6: `craze ps --saved` lists the session index's saved
+    sessions -- newest first, a legacy row by its provider session id's end,
+    a sub-agent's left out, `-C` one directory's -- reading the index itself
+    when no hub runs (and starting none) or with `--no-hub`, each said on
+    stderr, and through a running hub's sessions.saved otherwise, nothing on
+    stderr; `--json` is the same result byte for byte either way."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    work_a, work_b = tmp_path / "proj-a", tmp_path / "proj-b"
+    work_a.mkdir()
+    work_b.mkdir()
+    rows = [
+        {"sessionId": "p-a", "provider": "cursor", "cwd": str(work_a), "title": "fix the flaky test", "pinned": False,
+         "createdAt": "2026-10-12T09:00:00Z", "updatedAt": "2026-10-12T12:00:00Z",
+         "crazeId": "0192f0aa-2222-7000-8000-0000000aaaa2"},
+        {"sessionId": "grok-session-legacy01", "provider": "grok", "cwd": str(work_b), "title": "", "pinned": False,
+         "createdAt": "2026-10-12T09:00:00Z", "updatedAt": "2026-10-12T11:00:00Z"},
+        {"sessionId": "p-sub", "provider": "cursor", "cwd": str(work_a), "title": "a sub-agent's", "pinned": False,
+         "createdAt": "2026-10-12T09:00:00Z", "updatedAt": "2026-10-12T13:00:00Z",
+         "crazeId": "0192f0aa-3333-7000-8000-000000000sub",
+         "unattended": {"mode": "", "permissionMode": "bypass", "model": "", "effort": ""}},
+    ]
+    (craze_home / "sessions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    want = [("000aaaa2", "cursor", "fix the flaky test"), ("legacy01", "grok", "-")]
+
+    def table(out: subprocess.CompletedProcess[bytes]) -> list[tuple[str, str, str]]:
+        assert out.returncode == 0, out.stderr
+        return [(r["SESSION"], r["PROVIDER"], r["TITLE"]) for r in _saved_rows(out.stdout)]
+
+    out = _ps(craze_bin, None, "--saved")
+    assert out.stderr == b"craze ps: no hub is running; reading the session index directly\n", out.stderr
+    assert table(out) == want, out.stdout
+    assert not list(_hubs(_home()).glob("*.json")), "craze ps --saved started a hub"
+    out = _ps(craze_bin, None, "--saved", "--no-hub", "-C", str(work_b))
+    assert out.stderr == b"craze ps: --no-hub: reading the session index directly\n", out.stderr
+    assert table(out) == want[1:], out.stdout
+    direct = _ps(craze_bin, None, "--saved", "--json", "--no-hub")
+    assert direct.returncode == 0, direct.stderr
+    doc = json.loads(direct.stdout)
+    assert doc["more"] is False and [s["id"] for s in doc["sessions"]] == [rows[0]["crazeId"], "grok:grok-session-legacy01"], doc
+
+    out = _ps(craze_bin, None)  # plain craze ps starts the hub
+    assert out.returncode == 0 and out.stdout == b"no sessions running\n", (out.stdout, out.stderr)
+    rec = _the_hub(_home())
+    out = _ps(craze_bin, None, "--saved")
+    assert out.stderr == b"", out.stderr
+    assert table(out) == want, out.stdout
+    via_hub = _ps(craze_bin, None, "--saved", "--json")
+    assert via_hub.returncode == 0 and via_hub.stderr == b"", via_hub.stderr
+    assert via_hub.stdout == direct.stdout, (via_hub.stdout, direct.stdout)
+    _cleanup_stops(rec, tmp_path, fake_agent_bin)
+
+
 def test_bridge_hub_answers_a_hub_hello(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """`craze bridge --hub` starts the hub and pumps: a hello on stdin is
     answered by the hub itself; stdin's end ends the bridge, exit 0. With

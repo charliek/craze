@@ -2,8 +2,9 @@
 // per user, HOME and CRAZE_HOME namespace that knows every session host on
 // the machine — by reading the registry, which every host already writes
 // (P1) — and that a client asks for the roster, routes through to a session
-// (session.connect), asks to start one (session.create) and asks what it
-// can start (sessions.createOptions). It is `craze hub`, started on demand
+// (session.connect), asks to start one (session.create), asks what it can
+// start (sessions.createOptions) and asks for the saved sessions
+// (sessions.saved). It is `craze hub`, started on demand
 // by Ensure and gone when idle: no client and no live host, after a grace
 // (P12, owner decision 7).
 //
@@ -22,6 +23,9 @@
 //   - options.go: sessions.createOptions — what a create can start, the
 //     CLI's answer (Creates.Options) served — and CreateOptions, a client's
 //     ask for it (craze providers --hub).
+//   - saved.go: sessions.saved — the saved sessions, its params held to
+//     their form and the CLI's answer (Creates.Saved) served — and Saved, a
+//     client's ask for them (craze ps --saved).
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.

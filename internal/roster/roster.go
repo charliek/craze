@@ -30,11 +30,12 @@ type Snapshot struct {
 	// Running is every host the registry lists, in host-id order: this
 	// user's, whatever its CRAZE_HOME (the registry is per HOME).
 	Running []Row
-	// Saved is this CRAZE_HOME's index, newest first, at most savedMax rows:
-	// one row per craze id (its newest), a row with none by its own provider
-	// session id, of a provider craze can resume (the resume picker's rule),
-	// and none a running host serves — a host that does not answer included:
-	// unreachable is never shown as saved.
+	// Saved is this CRAZE_HOME's index, newest first, at most savedMax rows
+	// (SavedSessions, sub-agents' included): one row per craze id (its
+	// newest), a row with none by its own provider session id, of a provider
+	// craze can resume (the resume picker's rule), and none a running host
+	// serves — a host that does not answer included: unreachable is never
+	// shown as saved.
 	Saved []sessions.Row
 	// RegistryErr is why the registry could not be read at the last tick,
 	// nil when it was; Running is then what the last good read listed —

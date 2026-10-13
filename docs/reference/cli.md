@@ -815,6 +815,7 @@ refusing.
 ./bin/craze ps
 ./bin/craze ps --json
 ./bin/craze ps --no-hub
+./bin/craze ps --saved [-C <dir>] [--json] [--no-hub]
 ```
 
 Lists every running craze session of this user on this machine — every live
@@ -848,8 +849,10 @@ sessions running`.
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table |
-| `--no-hub` | Read each session's host directly, without the hub |
+| `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table; with `--saved`, the [`sessions.saved`](protocol.md#sessionssaved) result |
+| `--no-hub` | Read each session's host directly, without the hub; with `--saved`, the session index |
+| `--saved` | List the saved sessions instead — not running, ready to reopen — newest first ([below](#saved-sessions)) |
+| `-C`, `--dir <dir>` | With `--saved`, only the sessions that ran in this directory (made absolute and cleaned, then matched exactly). Without `--saved` it is a usage error, exit 2 |
 
 `--no-hub` — and any failure to have a hub (none could be started, or it did
 not answer within 10 s) — reads each host itself, exactly as the hub would
@@ -863,6 +866,56 @@ craze ps: the hub is not available (<reason>); reading each session's host direc
 With `--json`, that roster's `epoch` is `""` and its `cursor` 0: it is no
 hub's. `craze ps` exits 0 unless that read fails too — the registry cannot be
 read — which is exit 1 with the reason on one line.
+
+### Saved sessions
+
+`craze ps --saved` lists this craze directory's **saved sessions**: those in
+its [session index](configuration.md#session-index) that no running host
+serves — what the [session list](tui.md#session-list)'s saved rows are,
+chosen by the same rule — newest first, at most 200:
+
+```text
+SESSION   PROVIDER  DIR       AGE  TITLE
+4c1d7e90  cursor    ~/proj-a  2h   fix the flaky test
+legacy01  grok      ~/proj-b  3d   -
+```
+
+| Column | |
+|--------|---|
+| `SESSION` | The last eight characters of the session's craze id, as `craze ps` shows a running one; a row from a craze before craze ids shows its provider session id's last eight |
+| `PROVIDER` | The session's provider |
+| `DIR` | The directory it ran in, `~` for `$HOME`; cut from the left on a narrow terminal, as `craze ps`'s is |
+| `AGE` | How long since it was last active, in one unit (`42s`, `5m`, `3h`, `6d`) |
+| `TITLE` | Its title, else `-`: one line, cut with `…` to the terminal's width (100 cells when stdout is not a terminal) |
+
+Only providers this craze can resume are listed, one row per session (its
+newest), and **sub-agents' sessions are left out** (the session list shows
+them, tagged). A session whose host is stopping is listed at once. A session
+whose directory has gone is still listed: nothing is `stat`'ed. With nothing
+saved it prints `no saved sessions`; with more than 200 (the index holds up
+to 500), stderr says `craze ps: more saved sessions than these 200: only the
+newest are listed`.
+
+It lists through a **running** hub's [`sessions.saved`](protocol.md#sessionssaved)
+and never starts one: the index is this craze directory's to read too. With
+no hub running, with `--no-hub`, or when the hub cannot answer — one from an
+older craze refuses the method — it reads the index itself, through the same
+function the hub answers with, and says so on stderr:
+
+```text
+craze ps: no hub is running; reading the session index directly
+craze ps: --no-hub: reading the session index directly
+craze ps: the hub cannot list saved sessions (an older craze's); reading the session index directly
+craze ps: the hub is not available (<reason>); reading the session index directly
+```
+
+`--json` prints the `sessions.saved` result on one line — `{"sessions":[…],
+"more":…}`, each session's `id` what reopens it — byte for byte the same
+through the hub or from the index. An index that cannot be read lists
+nothing, exit 0 — the hub's log says why, or stderr when `craze ps` reads the
+index itself; a registry that cannot be read, or one holding a live host's
+entry that cannot be read, is exit 1 (a running session could not be told
+from a saved one).
 
 ### The hub
 

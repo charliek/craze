@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
+	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 )
@@ -352,12 +353,8 @@ func readFailure(f hostspawn.Failure) spawnFailure {
 // loadArg is the --load a spawn for row passes (plan 030 §3.3, §3.12, R2-6):
 // its craze id, or for a legacy row that has none its provider and its
 // provider's session id — the host gives it its craze id under its own claim.
-func loadArg(row sessions.Row) string {
-	if row.CrazeID != "" {
-		return row.CrazeID
-	}
-	return row.Provider + ":" + row.SessionID
-}
+// It is sessions.saved's id too (roster.SavedID, plan 046 B2): the one rule.
+func loadArg(row sessions.Row) string { return roster.SavedID(row) }
 
 // hostEntry is host id's live registry entry.
 func hostEntry(env rundir.Env, hostID string) (rundir.Entry, bool) {

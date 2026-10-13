@@ -1187,7 +1187,12 @@ it again, `Ctrl+X` stops or closes it, as on any other row.
 
 `Enter` on `▸ saved · N not running` shows the saved sessions: every session
 in the session index that is not running, newest first, at most 50, each
-once — `·`, its title, provider and directory. `Enter` on one resumes it in
+once — `·`, its title, provider and directory. They are chosen as the hub's
+[`sessions.saved`](protocol.md#sessionssaved) and
+[`craze ps --saved`](cli.md#saved-sessions) choose theirs, with sub-agents'
+sessions shown here, tagged; an index row the protocol could not carry — an
+id over 512 bytes, a directory over 4096 bytes or not absolute — is skipped
+as malformed. `Enter` on one resumes it in
 this terminal: a session host is started in the directory the session ran in
 (not this terminal's) and loads it, the hint line saying `resuming <title>…`
 meanwhile, and the screen then shows it as [opening one in

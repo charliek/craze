@@ -180,8 +180,9 @@ func TestTheLimits(t *testing.T) {
 	}
 }
 
-// TestTheMethodTable pins §3.3's method list, the hub's session.create and
-// sessions.createOptions (plan 036 §3.4) last, and which of them a TUI host
+// TestTheMethodTable pins §3.3's method list, the hub's session.create,
+// sessions.createOptions (plan 036 §3.4) and sessions.saved (plan 046 B2)
+// last, and which of them a TUI host
 // answers unsupported, with which reason (X6): each an unsupported reason of
 // the table.
 func TestTheMethodTable(t *testing.T) {
@@ -203,7 +204,8 @@ func TestTheMethodTable(t *testing.T) {
 		"session.state", "session.snapshot", "session.sync", "session.prompt", "session.cancel", "session.disarm",
 		"session.queue.add", "session.queue.edit", "session.queue.remove", "session.queue.clear", "session.set",
 		"session.setTitle", "session.subagent.cancel", "session.stop", "session.models.refresh", "session.aside",
-		"session.aside.cancel", "asks.list", "asks.get", "asks.answer", "session.create", "sessions.createOptions"}
+		"session.aside.cancel", "asks.list", "asks.get", "asks.answer", "session.create", "sessions.createOptions",
+		"sessions.saved"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("methods\n got %v\nwant %v", names, want)
 	}
@@ -216,6 +218,7 @@ func TestTheMethodTable(t *testing.T) {
 		"session.aside.cancel":   protocol.ReasonAsideUnsupported,
 		"session.create":         protocol.ReasonHubOnly,
 		"sessions.createOptions": protocol.ReasonHubOnly,
+		"sessions.saved":         protocol.ReasonHubOnly,
 	}
 	if !maps.Equal(unsupported, wantUnsupported) {
 		t.Fatalf("host-unsupported %v, want %v", unsupported, wantUnsupported)

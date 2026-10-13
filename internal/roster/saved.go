@@ -3,11 +3,15 @@ package roster
 import (
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/paths"
+	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -19,10 +23,9 @@ import (
 type savedRows struct {
 	stamp    indexStamp
 	haveRead bool
-	// candidates is the index as the list offers it, before the running
-	// are taken out: of a provider craze can resume, one row per craze id
-	// (its newest) and every row with none, newest first.
-	candidates []sessions.Row
+	// index is the index as last read, newest first: what SavedSessions
+	// chooses the rows from at every tick.
+	index []sessions.Row
 	// titles is each craze id's newest row's title, whatever its provider:
 	// what a running row shows before its host has answered.
 	titles map[string]string
@@ -30,9 +33,9 @@ type savedRows struct {
 	// session (sessions.Row.Unattended), plan 041 §3.3: what a running row
 	// tags itself by. A craze id with no row is absent.
 	subAgents map[string]bool
-	// rows is candidates less the running, at most savedMax; err is why the
-	// last read failed, nil after a good one (rows are then the last good
-	// read's).
+	// rows is the index's saved sessions less the running (SavedSessions,
+	// sub-agents' included), at most savedMax; err is why the last read
+	// failed, nil after a good one (rows are then the last good read's).
 	rows []sessions.Row
 	err  error
 }
@@ -62,7 +65,7 @@ func stampOf(path string) indexStamp {
 // changed (reread), and the sessions run names taken out (subtract). It says
 // whether the rows, the error, a title or a sub-agent mark changed. A nil
 // index is no saved rows.
-func (s *savedRows) read(index Index, indexPath func() string, max int, run runningSet) bool {
+func (s *savedRows) read(index Index, indexPath func() string, max int, run Running) bool {
 	if index == nil {
 		return false
 	}
@@ -71,9 +74,9 @@ func (s *savedRows) read(index Index, indexPath func() string, max int, run runn
 }
 
 // reread reads the index again when its file has changed since the last good
-// read — a stat otherwise — and says whether the error changed: the
-// candidates' own change shows in the rows (subtract), which the running are
-// not taken out of here; a title or mark that moved is a change too.
+// read — a stat otherwise — and says whether the error changed: the index's
+// own change shows in the rows (subtract), which are not chosen here; a
+// title or mark that moved is a change too.
 func (s *savedRows) reread(index Index, indexPath func() string) bool {
 	if index == nil {
 		return false
@@ -92,7 +95,8 @@ func (s *savedRows) reread(index Index, indexPath func() string) bool {
 	s.err = nil
 	s.stamp, s.haveRead = st, true
 	titles, subAgents := s.titles, s.subAgents
-	s.candidates, s.titles, s.subAgents = candidates(all)
+	s.index = all
+	s.titles, s.subAgents = indexMarks(all)
 	// A title or a mark can move with the saved rows and the running statuses
 	// both unchanged (the session is running, so no saved row shows it), and a
 	// running row is drawn from them: every caller is told, the poller's tick
@@ -100,10 +104,11 @@ func (s *savedRows) reread(index Index, indexPath func() string) bool {
 	return changed || !maps.Equal(titles, s.titles) || !maps.Equal(subAgents, s.subAgents)
 }
 
-// subtract is the candidates less every session run names, at most max: the
-// rows. It says whether they changed.
-func (s *savedRows) subtract(max int, run runningSet) bool {
-	rows := notRunning(s.candidates, run, max)
+// subtract is the index's saved sessions less every session run names, as
+// the list shows them — sub-agents' included, tagged — at most max: the
+// rows (SavedSessions). It says whether they changed.
+func (s *savedRows) subtract(max int, run Running) bool {
+	rows, _ := SavedSessions(s.index, run, SavedQuery{SubAgents: true, Limit: max})
 	if slices.Equal(rows, s.rows) {
 		return false
 	}
@@ -111,24 +116,65 @@ func (s *savedRows) subtract(max int, run runningSet) bool {
 	return true
 }
 
-// candidates is all — the index, newest first — as the list offers it: rows
-// of a provider craze can resume (the resume picker's rule: a provider this
-// build knows and can load), deduplicated by craze id to its newest row, a
-// row with no craze id kept as the row it is (its provider session id names
-// it; a craze id is given it when it is resumed). titles is every craze id's
-// newest title, and subAgents the craze ids whose newest row is marked.
-func candidates(all []sessions.Row) ([]sessions.Row, map[string]string, map[string]bool) {
-	var out []sessions.Row
+// indexMarks is every craze id's newest title in all — the index, newest
+// first — whatever its provider, and the craze ids whose newest row is
+// marked as a sub-agent's session: what a running row shows and tags itself
+// by before its host has answered.
+func indexMarks(all []sessions.Row) (map[string]string, map[string]bool) {
 	titles := map[string]string{}
 	subAgents := map[string]bool{}
+	for _, r := range all {
+		if r.CrazeID == "" {
+			continue
+		}
+		if _, ok := titles[r.CrazeID]; !ok {
+			titles[r.CrazeID] = r.Title
+			if r.Unattended != nil {
+				subAgents[r.CrazeID] = true
+			}
+		}
+	}
+	return titles, subAgents
+}
+
+// SavedQuery is what a listing of the saved sessions keeps (SavedSessions,
+// plan 046 B2): Workspace, when set, only the sessions whose directory is
+// exactly it; SubAgents the sessions a sub-agent ran too (an index row
+// marked Unattended), which are left out otherwise; and at most Limit of
+// them, every one when it is 0.
+type SavedQuery struct {
+	Workspace string
+	SubAgents bool
+	Limit     int
+}
+
+// SavedSessions is the saved sessions of all — the session index, newest
+// first (sessions.Store.All) — that no session run names serves, as every
+// list of them chooses them (plan 046 B2): the session list's saved rows
+// (savedRows, Saved) and the hub's sessions.saved alike, each with its own
+// query. The candidates are the index's rows of a provider craze can resume
+// (the resume picker's rule: a provider this build knows and can load),
+// deduplicated by craze id to its newest such row — carrying the craze id's
+// newest title, whatever that row's provider — and a row with no craze id
+// kept as the row it is (its provider session id names it; a craze id is
+// given it when it is resumed), less every session run names (by craze id,
+// or by its provider and provider session id). A row that does
+// not fit the wire's bounds (savedRowFits) is skipped as malformed, as if
+// the index had no such row. Then, in this order: q.Workspace's filter, the
+// sub-agent filter, the order — UpdatedAt, newest first, ties by SavedID —
+// and q.Limit, more saying the limit left some out: every filter runs before
+// the cut. It reads nothing and stats nothing: a workspace gone is still
+// listed, so a hung filesystem cannot hold a listing.
+func SavedSessions(all []sessions.Row, run Running, q SavedQuery) (rows []sessions.Row, more bool) {
+	titles := map[string]string{}
 	seen := map[string]bool{}
 	for _, r := range all {
+		if !savedRowFits(r) {
+			continue
+		}
 		if r.CrazeID != "" {
 			if _, ok := titles[r.CrazeID]; !ok {
 				titles[r.CrazeID] = r.Title
-				if r.Unattended != nil {
-					subAgents[r.CrazeID] = true
-				}
 			}
 		}
 		if p, err := agent.ProviderByName(r.Provider); err != nil || !p.Resumable() {
@@ -139,40 +185,116 @@ func candidates(all []sessions.Row) ([]sessions.Row, map[string]string, map[stri
 				continue
 			}
 			seen[r.CrazeID] = true
+			r.Title = titles[r.CrazeID]
 		}
-		out = append(out, r)
+		if run.serves(r) {
+			continue
+		}
+		if q.Workspace != "" && r.CWD != q.Workspace {
+			continue
+		}
+		if r.Unattended != nil && !q.SubAgents {
+			continue
+		}
+		rows = append(rows, r)
 	}
-	return out, titles, subAgents
+	slices.SortStableFunc(rows, func(a, b sessions.Row) int {
+		if c := b.UpdatedAt.Compare(a.UpdatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(SavedID(a), SavedID(b))
+	})
+	if q.Limit > 0 && len(rows) > q.Limit {
+		return rows[:q.Limit], true
+	}
+	return rows, false
+}
+
+// SavedID is what reopens a saved session (plan 046 B2): its craze id, or
+// <provider>:<provider session id> for a row with none — the form `craze
+// serve --load` takes.
+func SavedID(r sessions.Row) string {
+	if r.CrazeID != "" {
+		return r.CrazeID
+	}
+	return r.Provider + ":" + r.SessionID
+}
+
+// savedRowFits says an index row fits sessions.saved's bounds (plan 046 B2):
+// its id (and so its craze id) and its provider session id within
+// protocol.SavedIDMax and SavedProviderSessionIDMax bytes, its workspace
+// absolute and within SavedWorkspaceMax bytes, and both its times ones the
+// wire can write in UTC (savedTimeFits). The index is a file a person can
+// edit; a row that does not fit is malformed, and no list offers it.
+func savedRowFits(r sessions.Row) bool {
+	return len(SavedID(r)) <= protocol.SavedIDMax && len(r.SessionID) <= protocol.SavedProviderSessionIDMax &&
+		len(r.CWD) <= protocol.SavedWorkspaceMax && filepath.IsAbs(r.CWD) &&
+		savedTimeFits(r.CreatedAt) && savedTimeFits(r.UpdatedAt)
+}
+
+// savedTimeFits says t, in UTC, is a time JSON can carry: RFC 3339 has four
+// digits of year, and an index time can parse with an offset that carries it
+// past them in UTC (9999-12-31T23:59:59-01:00 is the year 10000), which
+// time.Time's MarshalJSON refuses.
+func savedTimeFits(t time.Time) bool {
+	_, err := t.UTC().MarshalJSON()
+	return err == nil
 }
 
 // legacyKey is an index row's own key, (provider, provider session id): how
 // a row with no craze id is matched against a running session.
 type legacyKey struct{ provider, sessionID string }
 
-// runningSet is every session the running hosts serve, as notRunning takes
-// them out of the saved rows: by craze id, and by (provider, provider session
-// id) for an index row with no craze id.
-type runningSet struct {
+// Running is every session the running hosts serve, as SavedSessions takes
+// them out of the saved: by craze id, and by (provider, provider session id)
+// — an index row's own key, matched whether or not the row has a craze id.
+type Running struct {
 	ids    map[string]bool
 	legacy map[legacyKey]bool
 }
 
-func newRunningSet() runningSet {
-	return runningSet{ids: map[string]bool{}, legacy: map[legacyKey]bool{}}
+func newRunning() Running {
+	return Running{ids: map[string]bool{}, legacy: map[legacyKey]bool{}}
 }
 
 // add names one session as running: its craze id, and its provider and
 // provider session id.
-func (r runningSet) add(crazeID, provider, providerSessionID string) {
+func (r Running) add(crazeID, provider, providerSessionID string) {
 	r.ids[crazeID] = true
 	r.legacy[legacyKey{provider, providerSessionID}] = true
+}
+
+// serves says r names row's session: by its craze id when it has one, or by
+// its provider and provider session id whether or not it has one — two
+// CRAZE_HOMEs' indexes can give one provider session different craze ids,
+// and the registry is the whole HOME's.
+func (r Running) serves(row sessions.Row) bool {
+	if row.CrazeID != "" && r.ids[row.CrazeID] {
+		return true
+	}
+	return r.legacy[legacyKey{row.Provider, row.SessionID}]
+}
+
+// RunningOfEntries is every session the registry's entries name as running
+// (plan 046 B2): a reader's that lists the saved without a roster
+// (sessions.saved, craze ps --saved). A host marked stopping (rundir.Serving)
+// is not counted, so its session is listed saved at once — the roster has
+// dropped it already — rather than in neither list.
+func RunningOfEntries(entries []rundir.Entry) Running {
+	r := newRunning()
+	for _, e := range entries {
+		if rundir.Serving(e) {
+			r.add(e.CrazeSessionID, e.Provider, e.ProviderSessionID)
+		}
+	}
+	return r
 }
 
 // runningOfHosts is every session a listed host serves — named by its
 // registry entry or its last answer, whether or not it answers now: a host
 // that does not answer is unreachable, never saved.
-func runningOfHosts(hosts map[string]*hostState) runningSet {
-	r := newRunningSet()
+func runningOfHosts(hosts map[string]*hostState) Running {
+	r := newRunning()
 	for _, h := range hosts {
 		if h.gone {
 			continue
@@ -187,8 +309,8 @@ func runningOfHosts(hosts map[string]*hostState) runningSet {
 
 // runningOfRows is every session rows serve — named by its host or its last
 // answer, whatever its status — as runningOfHosts names a poller's.
-func runningOfRows(rows []Row) runningSet {
-	r := newRunningSet()
+func runningOfRows(rows []Row) Running {
+	r := newRunning()
 	for _, row := range rows {
 		r.add(row.Host.CrazeSessionID, row.Host.Provider, row.Host.ProviderSessionID)
 		if s := row.Session; s != nil {
@@ -198,24 +320,9 @@ func runningOfRows(rows []Row) runningSet {
 	return r
 }
 
-// notRunning is cands less every session run names, at most max.
-func notRunning(cands []sessions.Row, run runningSet, max int) []sessions.Row {
-	var out []sessions.Row
-	for _, r := range cands {
-		if len(out) == max {
-			break
-		}
-		if r.CrazeID != "" && run.ids[r.CrazeID] || r.CrazeID == "" && run.legacy[legacyKey{r.Provider, r.SessionID}] {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
 // SavesRunning says s lists saved a session one of its running rows serves —
-// a saved row of a running craze id, or a legacy row of a running provider
-// session id: the rule the saved half is taken by (notRunning), checked
+// a saved row of a running craze id, or of a running provider session id:
+// the rule the saved half is taken by (SavedSessions), checked
 // against s's own rows. A poller's Snapshot can: its saved half is taken at
 // its tick, and a host's answer between two ticks can name a session — a
 // provider session id its registry entry does not carry — that the last tick
@@ -223,7 +330,7 @@ func notRunning(cands []sessions.Row, run runningSet, max int) []sessions.Row {
 func (s Snapshot) SavesRunning() bool {
 	run := runningOfRows(s.Running)
 	for _, r := range s.Saved {
-		if r.CrazeID != "" && run.ids[r.CrazeID] || r.CrazeID == "" && run.legacy[legacyKey{r.Provider, r.SessionID}] {
+		if run.serves(r) {
 			return true
 		}
 	}
@@ -234,9 +341,9 @@ func (s Snapshot) SavesRunning() bool {
 // the hub's list roster, whose running rows come from the hub's roster
 // subscription rather than a poll, keeps this CRAZE_HOME's saved rows with
 // it — the poller's rules exactly (savedRows): the index read again only when
-// its file's stamp has moved, its rows those of a provider craze can resume,
-// one per craze id, less every session running, at most savedMax. It is not
-// safe for concurrent use: one goroutine owns it.
+// its file's stamp has moved, its rows SavedSessions' — those of a provider
+// craze can resume, one per craze id, less every session running — at most
+// savedMax. It is not safe for concurrent use: one goroutine owns it.
 type Saved struct {
 	index Index
 	path  func() string

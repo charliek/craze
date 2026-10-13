@@ -31,9 +31,11 @@ import (
 // unsupported, reason host_only — the hub routes by splicing, never method by
 // method (SQ14); session.create, which starts a session in a new host
 // (create.go) — on a hub given the means to (Options.Creates), and refused
-// unsupported on any other; and sessions.createOptions, what a create can
-// start (options.go) — on a hub given its answer (Creates.Options), and
-// refused unsupported on any other.
+// unsupported on any other; sessions.createOptions, what a create can start
+// (options.go) — on a hub given its answer (Creates.Options), and refused
+// unsupported on any other; and sessions.saved, the saved sessions
+// (saved.go) — on a hub given its answer (Creates.Saved), and refused
+// unsupported on any other.
 //
 // Writes: one line at a time (wmu), each bounded — a reply by writeWait, a
 // roster notification by slowWait (conn.notifyLocked) — and every deadline
@@ -328,6 +330,9 @@ func (c *conn) dispatch(line []byte) bool {
 	case req.method == protocol.MethodSessionsCreateOptions && c.s.h.options() != nil:
 		// A hub without the answer falls through to unsupported (options.go).
 		return c.createOptions(req)
+	case req.method == protocol.MethodSessionsSaved && c.s.h.savedAnswer() != nil:
+		// A hub without the answer falls through to unsupported (saved.go).
+		return c.saved(req)
 	case info.SessionScoped:
 		return c.replyErr(req.id, refused(protocol.CodeUnsupported, protocol.ReasonHostOnly,
 			"%s is a session host's: connect to the session (session.connect) and send it there", req.method))

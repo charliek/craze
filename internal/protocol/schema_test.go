@@ -55,6 +55,8 @@ var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodSessionCreate:      {protocol.CreateParams{}, protocol.CreateResult{}},
 	// The hub's (plan 036 §3.4).
 	protocol.MethodSessionsCreateOptions: {protocol.CreateOptionsParams{}, protocol.CreateOptionsResult{}},
+	// The hub's (plan 046 B2).
+	protocol.MethodSessionsSaved: {protocol.SavedParams{}, protocol.SavedResult{}},
 }
 
 // errorResultTypes is the data.result a method's refusal carries beside it,
@@ -437,6 +439,11 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 	if m, ok := protocol.Method(protocol.MethodSessionsCreateOptions); !ok || m.HostUnsupported != protocol.ReasonHubOnly ||
 		m.SessionScoped || m.Mutating || m.Capability != "" {
 		t.Fatalf("sessions.createOptions is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
+	}
+	// So is sessions.saved (plan 046 B2), a read.
+	if m, ok := protocol.Method(protocol.MethodSessionsSaved); !ok || m.HostUnsupported != protocol.ReasonHubOnly ||
+		m.SessionScoped || m.Mutating || m.Capability != "" {
+		t.Fatalf("sessions.saved is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
 	}
 }
 

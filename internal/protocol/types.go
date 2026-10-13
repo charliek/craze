@@ -912,6 +912,80 @@ const (
 	RecentDirMax = 4096
 )
 
+// SavedParams is sessions.saved's params (plan 046 B2): which of the saved
+// sessions to list. Workspace, absent for every workspace, keeps only the
+// sessions whose directory is exactly it: an absolute path, which the hub
+// cleans, at most SavedWorkspaceMax characters. Limit is how many to list
+// at most, SavedLimitMin to SavedLimitMax, absent for SavedLimitDefault.
+// SubAgents, absent for false, lists the sessions a sub-agent ran too
+// (sessions.Row.Unattended), each marked. A member it does not define is
+// unknown_field; a null, a value of another type, a relative workspace and a
+// limit out of range are bad_request. A host answers unsupported, reason
+// hub_only.
+type SavedParams struct {
+	Workspace string `json:"workspace,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	SubAgents bool   `json:"subAgents,omitempty"`
+}
+
+// SavedResult is the saved sessions (plan 046 B2): the hub's session index's
+// sessions that no running host serves, as the session list's saved rows are
+// chosen, filtered by the params, newest first (UpdatedAt, ties by ID), at
+// most the limit. More says there were others the limit, or the result's
+// bound (SavedResultBytesMax), left out. Sessions is always written, [] for
+// none, never null.
+type SavedResult struct {
+	Sessions []SavedSession `json:"sessions"`
+	More     bool           `json:"more"`
+}
+
+// SavedSession is one saved session: ID is what reopens it — its craze
+// session id, or <provider>:<providerSessionId> for an index row with none
+// (an older craze's, which `craze serve --load` takes in the same form) —
+// opaque to a client, at most SavedIDMax bytes. CrazeSessionID is the craze
+// id, absent for such a row. Provider, ProviderSessionID (at most
+// SavedProviderSessionIDMax bytes) and Workspace (absolute, at most
+// SavedWorkspaceMax bytes) are the index row's; Title its craze id's newest
+// title, cut to SavedTitleMax characters, absent for none; CreatedAt and
+// UpdatedAt the row's, in UTC (CreatedAt the zero time for a row that
+// records none). SubAgent, true or absent, marks a session a sub-agent ran,
+// listed only when the params' subAgents asked for them.
+type SavedSession struct {
+	ID                string    `json:"id"`
+	CrazeSessionID    string    `json:"crazeSessionId,omitempty"`
+	Provider          string    `json:"provider"`
+	ProviderSessionID string    `json:"providerSessionId"`
+	Workspace         string    `json:"workspace"`
+	Title             string    `json:"title,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+	SubAgent          bool      `json:"subAgent,omitempty"`
+}
+
+// sessions.saved's bounds (plan 046 B2), which the schema states. An index
+// row over a row bound is skipped as malformed; a title is cut, not
+// skipped, since a title is the user's to edit.
+const (
+	// SavedLimitDefault is the limit of a call that names none; SavedLimitMin
+	// and SavedLimitMax bound one that does.
+	SavedLimitDefault = 50
+	SavedLimitMin     = 1
+	SavedLimitMax     = 200
+	// SavedIDMax bounds a saved session's id, in bytes, and so its craze id;
+	// SavedProviderSessionIDMax its provider session id, in bytes.
+	SavedIDMax                = 512
+	SavedProviderSessionIDMax = 512
+	// SavedWorkspaceMax bounds a saved session's workspace, in bytes, and
+	// the params' workspace, in characters: Linux's PATH_MAX.
+	SavedWorkspaceMax = 4096
+	// SavedTitleMax is the most characters (runes) of a title the result
+	// carries.
+	SavedTitleMax = 120
+	// SavedResultBytesMax bounds the whole result, encoded: the hub drops
+	// trailing sessions, and says more, to keep within it.
+	SavedResultBytesMax = 1 << 20
+)
+
 // ------------------------------------------------------------------ attach
 
 // When is when an attach answers (plan 027 §3.4).

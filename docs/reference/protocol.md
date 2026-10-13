@@ -479,12 +479,13 @@ same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
 The hub serves `hello`, `sessions.list`, `sessions.subscribe`,
-`session.connect`, `session.create` and `sessions.createOptions`; every other
-session-scoped method sent to it is refused `unsupported`, reason
-`host_only`. `session.create` is neither session-scoped (its session does not
-exist until it answers) nor mutating (the hub mints no client ids and keeps no
-command receipts: its idempotency is its own `requestId`).
-Nor is `sessions.createOptions`, an endpoint-level read.
+`session.connect`, `session.create`, `sessions.createOptions` and
+`sessions.saved`; every other session-scoped method sent to it is refused
+`unsupported`, reason `host_only`. `session.create` is neither session-scoped
+(its session does not exist until it answers) nor mutating (the hub mints no
+client ids and keeps no command receipts: its idempotency is its own
+`requestId`). Nor are `sessions.createOptions` and `sessions.saved`,
+endpoint-level reads.
 
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
@@ -516,6 +517,7 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
 | `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?`, `title?` (no `sessionId`, no `commandId`; `title` where `hello` says `createTitle`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 | `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
+| `sessions.saved` | | `workspace?`, `limit?`, `subAgents?` | `sessions[]` (each a `SavedSession`), `more` | the hub's: the saved sessions — not running, each with the `id` that reopens it — see [`sessions.saved`](#sessionssaved); no `hello` capability says it yet, so a hub without it answers `unsupported` (reason `unsupported`, or `unknown_method` from a hub before it); `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
@@ -1011,6 +1013,96 @@ given no answer — says no `createOptions` in its `hello` and answers the
 method `unsupported`, reason `unsupported`. A host answers it `unsupported`,
 reason `hub_only`.
 
+### `sessions.saved`
+
+The hub's: the **saved sessions** — the sessions of the hub's own session
+index (its `CRAZE_HOME`'s `sessions.jsonl`) that no running host serves —
+newest first, each with the `id` that reopens it. It is what a client's
+"resume" list offers; [`craze ps --saved`](cli.md#craze-ps) prints it.
+
+```json
+{"jsonrpc":"2.0","id":"4","method":"sessions.saved","params":{"workspace":"/home/me/projects/lumen","limit":20}}
+{"jsonrpc":"2.0","id":"4","result":{"sessions":[{"id":"0190ab12-cd34-7ef0-8123-456789abcdef","crazeSessionId":"0190ab12-cd34-7ef0-8123-456789abcdef","provider":"cursor","providerSessionId":"7c1f9e2a-55b0-4d8e-9a43-1f0e2d3c4b5a","workspace":"/home/me/projects/lumen","title":"fix the flaky test","createdAt":"2026-10-12T09:00:00Z","updatedAt":"2026-10-12T10:00:00Z"},{"id":"grok:4f1e2d3c","provider":"grok","providerSessionId":"4f1e2d3c","workspace":"/home/me/projects/lumen","createdAt":"2026-10-11T09:00:00Z","updatedAt":"2026-10-11T10:00:00Z"}],"more":false}}
+```
+
+**Params**, each optional; `{}` or none at all lists the 50 newest:
+
+| member | meaning |
+|---|---|
+| `workspace` | only the sessions whose directory is exactly this one: an absolute path (the hub cleans it first), at most 4096 characters |
+| `limit` | the most sessions to list, an integer from 1 to 200; 50 when absent |
+| `subAgents` | `true` lists the sessions a sub-agent ran too (an [unattended](cli.md#craze-new-wait) session: `craze new --wait`'s, `craze send`'s reload of one), each marked `subAgent: true`; absent or `false` leaves them out |
+
+A member it does not define is `bad_request`, reason `unknown_field`. A
+`null` (the params or a member), a member given twice, a member of another
+type, an empty or relative `workspace` and a `limit` outside 1–200 (a
+fraction, an exponent such as `1e2`, or a string included) are
+`bad_request`.
+
+**Which sessions.** The session list's own choice of its saved rows — one
+function computes both:
+
+1. Only providers this craze can resume (`cursor`, `grok`, `gx`, `native`).
+2. One per craze id: its newest row, carrying the craze id's newest title. An
+   index row from a craze before craze ids (no `crazeId`) is listed as the
+   row it is, by its provider and provider session id.
+3. Less every running session: every live host in the
+   [registry](#the-registry) — the whole `$HOME`'s, whatever namespace
+   started it — counts by its craze id and by its provider and provider
+   session id, and a row is running when either matches (another craze
+   directory's index can have given the same provider session another craze
+   id). **A host whose entry is marked `stopping` is not counted**, so a
+   stopped session is listed saved as soon as it leaves the roster, never in
+   neither list.
+
+Then, in this order: the `workspace` filter (an exact match on the row's
+directory); the sub-agent filter; newest first by `updatedAt`, ties by `id`;
+and the limit. Every filter runs before the cut: `more` is `true` when
+sessions the filters kept were left out, by the limit or by the result's
+bound. No workspace is `stat`'ed, so a
+hung filesystem cannot stall a listing, and a session whose directory has
+gone is still listed (a reopen refuses it).
+
+**`SavedSession`:**
+
+| member | |
+|---|---|
+| `id` | what reopens it, opaque to a client: its craze session id, or `<provider>:<providerSessionId>` for a row with none — the form `craze serve --load` takes. At most 512 bytes |
+| `crazeSessionId?` | its craze session id; absent for a row with none |
+| `provider` | its provider id |
+| `providerSessionId` | the provider's id for its last agent session; at most 512 bytes |
+| `workspace` | the directory it ran in, absolute, as its index row holds it; at most 4096 bytes |
+| `title?` | its craze id's newest title, cut to 120 characters (the index is a file a person can edit); absent for none |
+| `createdAt`, `updatedAt` | its index row's times, in UTC; `createdAt` is `0001-01-01T00:00:00Z` for a row that records none |
+| `subAgent?` | `true` for a sub-agent's session, listed only when `subAgents` asked for them; absent otherwise |
+
+**Bounds.** An index row over a bound — its id or provider session id over
+512 bytes, its workspace over 4096 bytes or not absolute — or with a time
+that cannot be written in UTC with a four-digit year
+(`9999-12-31T23:59:59-01:00` is the year 10000 in UTC) is malformed and
+skipped, as if the index had no such line (an older row of the same craze id
+may then stand for it). The bounds are bytes; the [schema](#the-published-schema)'s
+`maxLength`, which counts characters (JSON Schema cannot count bytes), states
+a weaker one. The whole result is at most 1 MiB: the hub drops trailing
+sessions to keep within it, and says `more`.
+
+**An index or registry it cannot read.** An index that cannot be read is
+answered as [`sessions.createOptions`](#sessionscreateoptions) answers one:
+no sessions, `[]`, and the hub's log says why. A registry that cannot be read
+is refused `unavailable`, reason `host_unreachable` — listing without taking
+the running out would offer a running session as saved — and so is a registry
+holding a live host's entry that cannot be read (its session cannot be
+named), as [`session.create`](#sessioncreate) refuses one; the hub's log says
+why (the refusal names no path).
+
+Every call reads the index and the registry again; nothing is cached.
+
+**Refusals.** No connection capability says the hub serves it in this
+release: a client asks, and takes `unsupported` — reason `unsupported` from a
+hub given no answer, `unknown_method` (`-32601`) from a hub from before the
+method — as a hub that cannot. A host answers it `unsupported`, reason
+`hub_only`.
+
 ## Notifications
 
 A notification has no `id` and carries its subscription id in `params` — an
@@ -1457,6 +1549,10 @@ there, and a client built before the method ignores the member. Its
 `capabilities.createTitle` is absent on an older hub, which refuses a create
 naming a `title` `unknown_field`: a client sends no `title` there (and says
 why), and a client built before it ignores the member and sends none.
+`sessions.saved` has no capability of its own in this release: an older hub
+answers it `unsupported`, reason `unknown_method`, which a client takes as a
+hub that cannot list the saved sessions (`craze ps --saved` then reads the
+index itself).
 
 ## The foreign turn
 
@@ -2097,8 +2193,8 @@ Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
 schema does not describe, or vice versa, fails the build — the hub's
-`session.create` and `sessions.createOptions` among them, which a host answers
-`unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
+`session.create`, `sessions.createOptions` and `sessions.saved` among them,
+which a host answers `unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
 hand-shaped wire structs get the same treatment in `internal/agent`
 (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
 (`TestSnapshotSchemaCoversTheCodec`), since this package cannot import

@@ -165,6 +165,15 @@ type Creates struct {
 	// method: its hello omits createOptions, and the method is refused
 	// unsupported.
 	Options func(logf func(string, ...any)) protocol.CreateOptionsResult
+	// Saved is sessions.saved's answer (saved.go; plan 046 B2): the saved
+	// sessions of this hub's own session index that no running host serves,
+	// as q keeps them — q held to the method's form already (its workspace
+	// absolute and cleaned, its limit in range, the default filled in) —
+	// computed afresh at each call, its trouble said through logf, the hub's
+	// own log; or the refusal that answers the call instead. nil is a hub
+	// that does not serve the method: it refuses it unsupported, reason
+	// unsupported.
+	Saved func(q protocol.SavedParams, logf func(string, ...any)) (protocol.SavedResult, *protocol.Error)
 	// Title says the hosts this hub spawns take a title (craze serve --title,
 	// hostspawn.Spec.Title; plan 043 D8): its hello says createTitle, and a
 	// create may name one. Every craze hub's are (internal/cli's hubCreates);
