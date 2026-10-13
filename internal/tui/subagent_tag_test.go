@@ -64,9 +64,9 @@ func TestResumePickerTagSurvivesALongTitle(t *testing.T) {
 func TestSessionsListTagsSavedSubAgentRowsOnly(t *testing.T) {
 	a, s, p, q := newLane(t, "a", "alpha"), newLane(t, "s", "sierra"), newLane(t, "p", "papa"), newLane(t, "q", "quebec")
 	r, _ := laneModel(t, a, map[string][]*laneBackend{})
-	sub := savedLane(s, "the delegated one")
+	sub := savedLane(s, "delegated")
 	sub.Unattended = &sessions.Unattended{PermissionMode: sessions.PermissionBypass}
-	person := savedLane(p, "the person's one")
+	person := savedLane(p, "person's one")
 	// A running session whose newest index row is marked is tagged; one with
 	// no index row yet (IndexSubAgent false) is not.
 	runningSub := laneRow(q, "session q", time.Minute)
@@ -74,14 +74,14 @@ func TestSessionsListTagsSavedSubAgentRowsOnly(t *testing.T) {
 	r.openSavedList([]roster.Row{laneRow(a, "session a", time.Minute), runningSub}, sub, person)
 	view := plainView(r.m)
 
-	marked := lineWith(t, view, "the delegated one")
-	if !strings.Contains(marked, "the delegated one"+strings.Repeat(" ", 0)) || !strings.Contains(marked, subAgentTag) {
+	marked := lineWith(t, view, "delegated")
+	if !strings.Contains(marked, "delegated"+strings.Repeat(" ", 0)) || !strings.Contains(marked, subAgentTag) {
 		t.Fatalf("the saved sub-agent row has no tag: %q", marked)
 	}
-	if strings.Index(marked, subAgentTag) < strings.Index(marked, "the delegated one") {
+	if strings.Index(marked, subAgentTag) < strings.Index(marked, "delegated") {
 		t.Fatalf("the tag is not after the title: %q", marked)
 	}
-	if plain := lineWith(t, view, "the person's one"); strings.Contains(plain, subAgentTag) {
+	if plain := lineWith(t, view, "person's one"); strings.Contains(plain, subAgentTag) {
 		t.Fatalf("an unmarked saved row carries the tag: %q", plain)
 	}
 	if running := lineWith(t, view, "session a"); strings.Contains(running, subAgentTag) {

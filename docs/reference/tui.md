@@ -520,8 +520,12 @@ Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks`, `/clear` and
 `/rename` run immediately even mid-turn, and so does `/btw` where it is offered
 — it opens the [side view](#side-questions-btw) beside the running turn rather
 than behind it — and `/sessions` where there is a [session list](#session-list).
-The ones that need the agent (`/model`, `/plan`, …) keep today's refusal, and
-`/connect` is refused with a line while work runs. A slash line the agent advertises is
+The ones that need the agent (`/model`, `/plan`, `/ask`, `/agent`, …) are
+refused while a turn runs — yours or one the agent started on its own — with one
+error row in the transcript, `Finish or stop the running work first, then
+/model.` (naming the command you typed); the draft stays in the composer, so
+`Enter` runs it once the work is done. `/connect` is refused with the same line.
+Clicking the model in the status row still opens the model box mid-turn. A slash line the agent advertises is
 ordinary text and queues like any other message.
 
 The queue holds 32 messages of up to 32 KiB each. Past either bound the
@@ -1043,8 +1047,12 @@ first line), **idle** (the first line of its last reply, or `waiting for a
 prompt`), **unreachable** (`?`: its host is registered and not answering) —
 then `▸ saved · N not running`, collapsed. Within a group the row that
 changed state most recently is first. Each row reads: state glyph, title, what
-it wants, provider, directory (`· here` for the session you came from), and
-how long it has been in its state. A sub-agent's session, running or saved, carries
+it wants, provider, model, directory (`· here` for the session you came from),
+and how long it has been in its state. The model column is the running
+session's current model id, 20 cells wide and cut with `…` where it is longer;
+a saved row records no model and leaves it blank. It is drawn only when the
+terminal is 100 columns or wider, and below that it is dropped entirely, so
+the title, what it wants and the directory keep the room. A sub-agent's session, running or saved, carries
 the same dim `sub-agent` tag after its title. A session run by an older craze is listed
 with what that craze reports, and its version on the row (`· craze 0.0.9`).
 A host that has not answered yet is drawn with the working rows, `Starting…`

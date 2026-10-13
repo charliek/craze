@@ -274,7 +274,10 @@ type sessRow struct {
 	// session names none of its own (sessTitle).
 	indexTitle string
 	provider   string
-	workspace  string
+	// model is a running session's current model id, sanitised; a saved row
+	// records none and draws blank (plan 046 A1).
+	model     string
+	workspace string
 	// since is when the row entered its state (a saved row: its last use).
 	since time.Time
 	ref   roster.Ref
@@ -1193,6 +1196,7 @@ func sessRunningRow(r roster.Row, here sessKey) sessRow {
 			row.workspace = s.Workspace
 		}
 		own = s.Title
+		row.model = sanitizeLine(s.Model)
 		if !s.RowFacts && r.Version != "" {
 			// An older host (no rowFacts, §3.8): listed with what S2's row
 			// has, and its craze version in the row's note.
@@ -1538,14 +1542,28 @@ const (
 	sessProviderCols = 8
 	sessAgeCols      = 5
 	sessFixedCols    = sessMarkCols + sessGlyphCols + 2*sessGapCols + sessProviderCols + sessAgeCols
+	// sessModelCols is the model column's width (plan 046 A1): drawn after
+	// the provider only when the list is sessModelMinCols wide, dropped
+	// entirely below that — the first column to go.
+	sessModelCols    = 20
+	sessModelMinCols = 100
 	// sessNoteMinWant is the fewest cells what a row wants keeps beside an
 	// older host's note; narrower, the note goes.
 	sessNoteMinWant = 8
 )
 
+// sessModelWidth is the model column's cells at width: none below
+// sessModelMinCols.
+func sessModelWidth(width int) int {
+	if width >= sessModelMinCols {
+		return sessModelCols
+	}
+	return 0
+}
+
 // sessColumns is the three shared columns' widths at width.
 func sessColumns(width int, showDir bool) (title, want, dir int) {
-	rest := max(0, width-sessFixedCols)
+	rest := max(0, width-sessFixedCols-sessModelWidth(width))
 	if showDir {
 		dir = rest * 18 / 100
 	}
@@ -1796,6 +1814,10 @@ func (m Model) sessRowView(r sessRow, selected bool) string {
 		segs = append(segs, seg{padCells(r.want, wW), wantSt})
 	}
 	segs = append(segs, seg{"  ", none}, seg{padCells(r.provider, sessProviderCols), styleFG(th.Provider)})
+	if mw := sessModelWidth(m.width); mw > 0 {
+		// The column's last cell is its gap to the next column.
+		segs = append(segs, seg{padCells(r.model, mw-1) + " ", styleFG(th.Dim)})
+	}
 	if showDir {
 		dir := workspaceName(r.workspace)
 		if r.workspace == "" {
