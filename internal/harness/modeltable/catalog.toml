@@ -120,9 +120,19 @@ base_url = "https://api.fireworks.ai/inference/v1"
 env_keys = ["FIREWORKS_API_KEY"]
 start = ["fireworks/ember-1"]
 
+# Meta on its Responses API (2026-10-13, plan 047 D14): its encrypted
+# reasoning is replayed across a turn's tool steps, where Chat Completions
+# redacts it for an API key (MR-2/4/14), and prompt_cache_key caches the
+# session's prompt (MR-6). Switched once plan 047's live checks (L1-L8) and its
+# before/after comparison on Spark's contributor tier (D16) passed. To go back
+# to Chat Completions (D15), a user's providers.toml writes [providers.meta]
+# with driver = "openai-compat", base_url = "https://api.meta.ai/v1" and
+# env_keys = ["META_API_KEY"] (or an api_key) together, since another driver
+# takes neither the shipped endpoint nor its variable; an entry an old gx
+# import marked source = "gx" must drop that mark, or its driver is ignored.
 [providers.meta]
 name = "Meta"
-driver = "openai-compat"
+driver = "openai-responses"
 base_url = "https://api.meta.ai/v1"
 env_keys = ["META_API_KEY"]
 start = ["muse-spark-1.3-contributor"]

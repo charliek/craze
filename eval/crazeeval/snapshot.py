@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from crazeeval import paths
-from crazeeval.config import EvalModel, snapshot_hash
+from crazeeval.config import EvalModel, catalog_on, shipped_providers, snapshot_hash, yields_to_catalog
 from crazeeval.keys import LOCKED
 
 MODELS_DEV_URL = "https://models.dev/api.json"
@@ -54,6 +54,8 @@ def build_snapshot(
     grok_dir = Path(grok_dir or paths.OWNER_GROK)
     cm = _load(craze_dir / "models.toml").get("models") or {}
     cp = _load(craze_dir / "providers.toml").get("providers") or {}
+    shipped = shipped_providers()
+    catalog = catalog_on(craze_dir)
     gx_models: dict = {}
     gx_providers: dict = {}
     # providers.toml deep-merges over config.toml (gx's user layer).
@@ -80,6 +82,13 @@ def build_snapshot(
             cprov = {}
         elif em.provider not in cp:
             raise KeyError(f"{key}: provider {em.provider!r} not in the owner's providers.toml")
+        elif yields_to_catalog(em.provider, cp[em.provider], shipped, catalog):
+            # An old gx import's entry for a provider craze ships, with the catalog on
+            # (craze's legacySource rule): craze takes only its key, never its driver or
+            # base_url, so neither is the owner's here; the craze home takes the shipped
+            # driver (homes), and the route the shipped endpoint (keys). With the catalog
+            # off it is the owner's own entry, kept whole below.
+            cprov = {}
         else:
             cprov = take(cp[em.provider], CRAZE_PROVIDER_FIELDS)
         if em.gx not in gx_models:

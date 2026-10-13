@@ -243,7 +243,9 @@ func TestShippedCatalogHistory(t *testing.T) {
 // every model (D3), every model offered (O3); a key alone starts a session
 // on anthropic/claude-opus-5-5 at medium; and the four headline prices (LF-8,
 // P29: Sonnet 5.5's cache hit is $0.10). And plan 045: Muse Wonder 1.0 on
-// Meta, with Spark still Meta's start (the owner's pin).
+// Meta, with Spark still Meta's start (the owner's pin). And plan 047 D14:
+// Meta on its Responses API (driver openai-responses), at its own endpoint and
+// variable.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -262,6 +264,9 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	if c.Providers["chatgpt"].Driver != DriverChatGPT {
 		t.Fatalf("chatgpt's driver = %q", c.Providers["chatgpt"].Driver)
+	}
+	if p := c.Providers["meta"]; p.Driver != DriverOpenAIResponses || p.BaseURL != "https://api.meta.ai/v1" || !slices.Equal(p.EnvKeys, []string{"META_API_KEY"}) {
+		t.Fatalf("meta = %+v, want driver %q at https://api.meta.ai/v1 on META_API_KEY", p, DriverOpenAIResponses)
 	}
 	wantDefaults := ChatGPTDefaults{Start: []string{"gpt-6.1-sol", "gpt-5.6-sol"}, startSet: true, ModelsClientVersion: "0.160.0", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
 	if !reflect.DeepEqual(c.ChatGPT, wantDefaults) {

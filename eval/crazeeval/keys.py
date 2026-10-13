@@ -18,6 +18,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from crazeeval import paths
+from crazeeval.config import catalog_on, shipped_providers, yields_to_catalog
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
@@ -233,6 +234,22 @@ def locked_entry(name: str, entry: Mapping | None) -> dict:
     }
 
 
+def legacy_entry(entry: Mapping, shipped: Mapping) -> dict:
+    """An old gx import's entry for a provider craze ships, as craze reads it with its
+    catalog on (its legacySource rule): the catalog's driver and endpoint, the catalog's
+    env_keys followed by any of the entry's the catalog lacks, and the entry's api_key."""
+    env_keys = list(shipped.get("env_keys") or [])
+    for name in entry.get("env_keys") or []:
+        if name not in env_keys:
+            env_keys.append(name)
+    out: dict = {"driver": shipped.get("driver", ""), "env_keys": env_keys}
+    if shipped.get("base_url"):
+        out["base_url"] = shipped["base_url"]
+    if "api_key" in entry:
+        out["api_key"] = entry["api_key"]
+    return out
+
+
 def load_providers(
     path: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -240,12 +257,18 @@ def load_providers(
 ) -> tuple[dict[str, Provider], KeyRing]:
     """Read the owner's providers.toml (read-only) into a route table and a key ring. A
     provider craze locks (Anthropic) is read as craze reads it, present in the file or
-    not (locked_entry)."""
-    path = path or paths.OWNER_CRAZE_NATIVE / "providers.toml"
+    not (locked_entry), and so is an old gx import's entry for a provider craze ships
+    while the catalog is on (legacy_entry): its upstream is craze's shipped endpoint, not
+    the URL the import wrote."""
+    path = Path(path or paths.OWNER_CRAZE_NATIVE / "providers.toml")
     env = os.environ if env is None else env
     with open(path, "rb") as f:
         doc = tomllib.load(f)
     entries = dict(doc.get("providers") or {})
+    shipped, catalog = shipped_providers(), catalog_on(path.parent)
+    for name, entry in list(entries.items()):
+        if name not in LOCKED and yields_to_catalog(name, entry, shipped, catalog):
+            entries[name] = legacy_entry(entry, shipped[name])
     for name in LOCKED:
         entries[name] = locked_entry(name, entries.get(name))
     table: dict[str, Provider] = {}

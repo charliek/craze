@@ -42,7 +42,7 @@ def _ledger_path(a) -> Path:
 def cmd_run(a) -> int:
     from crazeeval import keys as keymod
     from crazeeval.batch import BatchConfig, run_batch
-    from crazeeval.config import HARNESSES, load_models, load_snapshot
+    from crazeeval.config import HARNESSES, load_models, load_snapshot, snapshot_base_url
     from crazeeval.pricing import load_prices
     from crazeeval.sandbox import Toolchains, bwrap_available
     from crazeeval.tasks import load_tasks, select_tasks
@@ -93,7 +93,9 @@ def cmd_run(a) -> int:
         if em.provider not in providers or keyring.key_for(em.provider) is None:
             print(f"{em.key}: provider {em.provider!r} has no route or no key", file=sys.stderr)
             return 2
-        snap_base = snap.model(em.key)["craze_provider"].get("base_url", "").rstrip("/")
+        # The endpoint craze uses by the snapshot, the catalog's for an old gx import's
+        # entry, as the route's is (keys.load_providers).
+        snap_base = snapshot_base_url(snap.model(em.key)["craze_provider"], em.provider)
         if snap_base and snap_base != providers[em.provider].base_url:
             print(f"{em.key}: the owner's base URL for {em.provider} differs from the config snapshot's; re-snapshot",
                   file=sys.stderr)

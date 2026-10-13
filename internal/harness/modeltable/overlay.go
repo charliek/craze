@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -670,11 +671,43 @@ func (m *merger) provider(id string, o providerOverlay) {
 		m.warn(err, "craze's shipped driver and base_url are used")
 		o.Driver, o.BaseURL = nil, nil
 		p = overlayProvider(shipped, o)
-	} else if r := redundantProvider(shipped, o); r != "" {
-		m.redundant(&FileError{File: m.ppath, Table: providerTable(id), Reason: r})
+	} else {
+		if r := redundantProvider(shipped, o); r != "" {
+			m.redundant(&FileError{File: m.ppath, Table: providerTable(id), Reason: r})
+		}
+		m.unfundedDriver(id, shipped, o, p)
 	}
 	m.t.Providers[id] = p
 	m.t.providerOrigins[id] = OriginOverridden
+}
+
+// unfundedDriver warns when o, an entry for a shipped provider, moves it to
+// another driver and so — by design, the shipped variables belonging to the
+// shipped driver's endpoint (overlayProvider) — takes none of its env_keys,
+// while writing no env_keys and no api_key of its own: the load stands, but
+// nothing funds the provider (plan 047 C7 review). That is the upgrade a
+// user's own driver = "openai-compat" for Meta met when Meta's shipped driver
+// became openai-responses: before, it inherited META_API_KEY. An explicit
+// env_keys, even an empty one, is the user's own choice and is not warned
+// about. The warning names the provider and the variables, never a value.
+func (m *merger) unfundedDriver(id string, shipped Provider, o providerOverlay, p Provider) {
+	if o.Driver == nil || p.Driver == shipped.Driver || len(shipped.EnvKeys) == 0 {
+		return // not a driver change, or one that had nothing to inherit
+	}
+	if len(p.EnvKeys) != 0 || p.APIKey != "" || o.EnvKeys != nil {
+		return // funded, or an env_keys of the user's own, even an empty one
+	}
+	add := "env_keys naming the variable that holds its key"
+	if p.BaseURL == shipped.BaseURL {
+		names := make([]string, len(shipped.EnvKeys))
+		for i, n := range shipped.EnvKeys {
+			names[i] = strconv.Quote(n)
+		}
+		add = "env_keys = [" + strings.Join(names, ", ") + "]"
+	}
+	m.warn(&FileError{File: m.ppath, Table: providerTable(id), Key: "env_keys",
+		Reason: fmt.Sprintf("missing: driver %q is not craze's shipped driver for this provider, so the entry takes none of its key variables, and it has no api_key", p.Driver)},
+		fmt.Sprintf("nothing funds %s until you add %s, or store a key with \"craze auth login %s\"", id, add, id))
 }
 
 // signInOverlay is o, an entry of the user's for the ChatGPT plan's shipped

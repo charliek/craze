@@ -168,7 +168,10 @@ def shipped_meta_home(craze_home: Path, base_url: str) -> None:
     fixture: providers.toml overlays `meta` with the fixture's base_url and an
     inline canary key (an endpoint change drops the shipped META_API_KEY, so
     only that key funds it), and there is no models.toml, so the shipped
-    catalog is the table (plan 045 A3)."""
+    catalog is the table (plan 045 A3). The entry writes no driver, so Meta
+    keeps its shipped one, openai-responses (plan 047 D14), which the
+    fixture's loopback IP base_url satisfies: its requests go to
+    <base>/responses, answered by the fixture's Responses mode."""
     native = craze_home / "native"
     native.mkdir(parents=True, exist_ok=True)
     os.chmod(native, 0o700)
@@ -198,15 +201,19 @@ def test_native_shipped_meta_models_reach_the_wire(
     model: str,
     effort: str,
 ) -> None:
-    """Plan 045 A2/A3: the shipped catalog's Meta models, as craze sends them,
-    with no real traffic. Muse Wonder 1.0 goes out on its own wire id with the
-    effort asked for, or its default, high, and the family's 131072 output
-    ceiling; a session that names no model starts on Spark's contributor
-    tier, the owner's pin, with Wonder in the catalog. The ceiling goes out
-    as max_tokens, as for every model on the openai-compat driver. Spark 1.3
+    """Plan 045 A2/A3, plan 047 A13: the shipped catalog's Meta models, as
+    craze sends them, with no real traffic. Meta's shipped driver is
+    openai-responses (plan 047 D14), so every request goes to the fixture's
+    Responses mode, POST <base>/responses, with the key route's body. Muse
+    Wonder 1.0 goes out on its own wire id with the effort asked for, or its
+    default, high, as reasoning.effort, and the family's 131072 output ceiling
+    as max_output_tokens; a session that names no model starts on Spark's
+    contributor tier, the owner's pin, with Wonder in the catalog. Spark 1.3
     takes max (plan 047 D6, A6): --effort max reaches the wire as
-    reasoning_effort max, where a level the model does not list would be
-    noted and the session would start at its default."""
+    reasoning.effort max, where a level the model does not list would be
+    noted and the session would start at its default. Every request also
+    carries the session's id as prompt_cache_key, store false, and every tool
+    a plain function (no namespace), and none of Chat Completions' members."""
     fixture_server.set_ok(text_parts=["from meta"])
     craze_home = tmp_path / "craze-home"
     shipped_meta_home(craze_home, fixture_server.base_url)
@@ -217,10 +224,20 @@ def test_native_shipped_meta_models_reach_the_wire(
     assert joined(events, "text") == "from meta"
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
     assert fixture_server.requests, "the turn sent no request, so nothing below is checked"
+    ids = native_session_ids(craze_home)
+    assert len(ids) == 1, ids
     for r in fixture_server.requests:
-        assert r.body.get("model") == model
-        assert r.body.get("reasoning_effort") == effort
-        assert r.body.get("max_tokens") == 131072, sorted(r.body)
+        b = r.body
+        assert r.responses and r.path == "/v1/responses", r.path
+        assert b.get("model") == model
+        assert b.get("reasoning") == {"effort": effort, "summary": "auto"}, b.get("reasoning")
+        assert b.get("max_output_tokens") == 131072, sorted(b)
+        assert b.get("prompt_cache_key") == ids[0], (b.get("prompt_cache_key"), ids)
+        assert b.get("store") is False, b.get("store")
+        assert b.get("tools"), "the request named no tools, so the tool shape below is unchecked"
+        assert all(plain_function_tool(t) for t in b["tools"]), b["tools"]
+        for absent in ("messages", "max_tokens", "reasoning_effort"):
+            assert absent not in b, absent
     # The inline key funds every request and is printed nowhere. Checked
     # outside an assert, so a failure never prints what it was handed.
     if not all(r.authorization == f"Bearer {CANARY}" for r in fixture_server.requests):
@@ -229,22 +246,17 @@ def test_native_shipped_meta_models_reach_the_wire(
         pytest.fail("the inline Meta key reached stdout or stderr", pytrace=False)
 
 
-def responses_meta_home(craze_home: Path, base_url: str) -> None:
-    """A home funding the shipped catalog's Meta provider alone on the
-    openai-responses driver at the fixture (plan 047 D13): the override the
-    plan's live checks run, driver and base_url written together. env_keys is
-    not written, so the endpoint change drops the shipped META_API_KEY and the
-    inline canary is the one key; there is no models.toml, so the shipped
-    catalog is the table."""
-    native = craze_home / "native"
-    native.mkdir(parents=True, exist_ok=True)
-    os.chmod(native, 0o700)
-    providers = native / "providers.toml"
-    providers.write_text(
-        f'version = 1\n\n[providers.meta]\ndriver = "openai-responses"\nbase_url = "{base_url}"\napi_key = "{CANARY}"\n',
-        encoding="utf-8",
+def plain_function_tool(tool: dict) -> bool:
+    """Whether tool is a Responses API function tool as the key route sends it
+    (plan 047 MR-9): type function with its own top-level name and parameters,
+    and no Chat Completions "function" wrapper, namespace or nested tools."""
+    return (
+        tool.get("type") == "function"
+        and isinstance(tool.get("name"), str)
+        and bool(tool["name"])
+        and isinstance(tool.get("parameters"), dict)
+        and not {"function", "namespace", "tools"} & tool.keys()
     )
-    os.chmod(providers, 0o600)
 
 
 def native_session_ids(craze_home: Path) -> list[str]:
@@ -253,13 +265,14 @@ def native_session_ids(craze_home: Path) -> list[str]:
     return sorted(p.stem.rsplit("_", 1)[1] for p in (craze_home / "native" / "sessions").rglob("*.jsonl"))
 
 
-def test_native_responses_tool_loop_on_the_meta_override(
+def test_native_responses_tool_loop_on_the_shipped_meta(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
 ) -> None:
-    """Plan 047 A12, D13: a two-step tool turn on the shipped Meta provider
-    overridden onto the openai-responses driver, against the fixture's
-    Responses mode. Every request goes to <base>/responses with the inline key
-    as its bearer and no session-id header, and its body is the key route's:
+    """Plan 047 A12, D13, D14: a two-step tool turn on the shipped Meta
+    provider, on its shipped openai-responses driver (shipped_meta_home writes
+    none), against the fixture's Responses mode. Every request goes to
+    <base>/responses with the inline key as its bearer and no session-id
+    header, and its body is the key route's:
     Wonder's wire id, effort max, the 131072 ceiling as max_output_tokens, the
     session's id as a prompt_cache_key constant over the turn, store false,
     and every tool a plain function. The second request replays the first
@@ -268,7 +281,7 @@ def test_native_responses_tool_loop_on_the_meta_override(
     result, in that order. The key is printed nowhere."""
     ws = tool_workspace(tmp_path)
     craze_home = tmp_path / "craze-home"
-    responses_meta_home(craze_home, fixture_server.base_url)
+    shipped_meta_home(craze_home, fixture_server.base_url)
     rs_id = "rs_6acd987e3:rs_01a1331bc4"
     fixture_server.set_script(
         [
@@ -306,7 +319,7 @@ def test_native_responses_tool_loop_on_the_meta_override(
         for absent in ("messages", "max_tokens", "reasoning_effort", "temperature"):
             assert absent not in b, absent
         assert "read" in r.tool_names, r.tool_names
-        assert all(t.get("type") == "function" and "namespace" not in t and "tools" not in t for t in b["tools"]), b["tools"]
+        assert all(plain_function_tool(t) for t in b["tools"]), b["tools"]
         assert "session-id" not in r.headers, sorted(r.headers)
     assert not any(i.get("type") == "reasoning" for i in reqs[0].input), reqs[0].input
 

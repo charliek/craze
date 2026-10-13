@@ -781,6 +781,16 @@ machine with only a Meta key starts on Spark until you pick Wonder: with
 Wonder Full is a Muse Code subscription model, not on Meta's API, so craze
 does not offer it.
 
+Meta's provider speaks Meta's Responses API, through the
+[`openai-responses` driver](#the-responses-api-driver), not Chat Completions.
+On Chat Completions Meta withholds a model's reasoning from an API key, so
+every step of a tool loop reasoned from scratch. On the Responses API craze
+gets each step's reasoning back encrypted and replays it on the next request,
+so a tool loop keeps its reasoning. It also sends the session's id as
+`prompt_cache_key`, without which Meta caches nothing. To put Meta back on
+Chat Completions, see [Going back to Chat
+Completions](#going-back-to-chat-completions).
+
 The catalog has no default model. It ranks its providers instead, in
 `provider_order`, and gives each a **start model**: a new session that
 remembers nothing, and has no [`default_model`](#your-two-files) pin of yours
@@ -1260,20 +1270,9 @@ account lists, and craze knows each.
 
 The `openai-responses` driver speaks the OpenAI Responses API
 (`POST <base_url>/responses`) with an API key, through craze's own client. It
-is tested against Meta's Responses API. Any provider of yours may use it: give
-it a `base_url`, and fund it as any key provider, from `env_keys` or an inline
-`api_key`. The shipped providers keep their own drivers (Meta's is still
-`openai-compat`, Chat Completions), so trying Meta on it is an override that
-writes all three keys, since a `driver` change drops the shipped `base_url`
-and `env_keys` ([how the files merge](#how-the-files-merge)):
-
-```toml
-# providers.toml
-[providers.meta]
-driver   = "openai-responses"
-base_url = "https://api.meta.ai/v1"
-env_keys = ["META_API_KEY"]
-```
+is tested against Meta's Responses API, and the shipped `meta` provider uses
+it. Any provider of yours may use it too: give it a `base_url`, and fund it as
+any key provider, from `env_keys` or an inline `api_key`.
 
 **Where the key may go.** The driver sends a static key, so its `base_url`
 must be `https`, on any host, or plain `http` only to a loopback IP address
@@ -1281,7 +1280,13 @@ must be `https`, on any host, or plain `http` only to a loopback IP address
 `localhost`), with no user name or password, query or fragment. Anything else
 stops the load, naming `providers.toml`, the provider and `base_url`; the
 client checks the same rule again for every model it builds. No redirect is
-followed, so the key reaches that endpoint and nowhere else.
+followed, so the key reaches that endpoint and nowhere else. The rule holds
+for Meta's provider too: a `[providers.meta]` entry that writes a `base_url`
+and no `driver`, such as a gateway's, sends Responses requests there, and a
+plain `http` one to anything but a loopback IP address is dropped with a
+warning, Meta's own endpoint used instead. To send Meta's requests to a Chat
+Completions endpoint of your own, write `driver = "openai-compat"` beside its
+`base_url`.
 
 **What it sends.** Every request is whole (`store: false`, so the provider
 keeps nothing between requests) and streamed, with the system prompt as
@@ -1306,14 +1311,58 @@ ceiling ends the turn as on Chat Completions, stopped at `max_tokens` with the
 answer so far, and a tool call cut off mid-arguments is not run; one stopped by
 the provider's content filter ends as a refusal.
 
-**Going back.** To leave the driver, write the provider's Chat Completions
-`driver`, `base_url` and `env_keys` instead (for Meta, `driver =
-"openai-compat"` with the same `base_url` and `env_keys`), or delete your
-entry for a shipped provider. A session recorded on either driver resumes on
-the other: the encrypted reasoning never goes to Chat Completions (a step's
-reasoning goes there as an empty `reasoning_content`, which Meta accepts), Chat
-Completions reasoning never goes to the Responses API, and every tool call
-keeps its result.
+#### Going back to Chat Completions
+
+To run Meta on Chat Completions, as craze did before, write its Chat
+Completions driver, endpoint and key variable together:
+
+```toml
+# providers.toml
+[providers.meta]
+driver   = "openai-compat"
+base_url = "https://api.meta.ai/v1"
+env_keys = ["META_API_KEY"]
+```
+
+If your `providers.toml` already has a `[providers.meta]` entry, add these
+keys to it. If that entry says `source = "gx"`, also remove that line, or set
+`source = "manual"`. Otherwise craze still ignores the entry's `driver` and
+`base_url` (see below).
+
+Write `driver` and `base_url` together. A `driver` that differs from the
+shipped one drops the shipped `base_url` ([how the files
+merge](#how-the-files-merge)), so `driver = "openai-compat"` written alone is
+dropped with a warning, and Meta stays on the Responses API.
+
+Write `env_keys` too, unless the entry has an inline `api_key` (the one `craze
+auth login meta` stores) to fund it. A different driver does not take the
+shipped `META_API_KEY` either. An entry with neither still loads on Chat
+Completions, but nothing funds Meta: each session start, and `craze auth
+list`, warns `[providers.meta] env_keys: missing` and says to add `env_keys =
+["META_API_KEY"]` or store a key. Before this release, such an entry took
+`META_API_KEY` from the shipped provider, since its driver was the shipped
+one. The same warning applies to any shipped provider whose driver you change
+without giving it a key.
+
+Delete the entry, or its `driver`, `base_url` and `env_keys`, to follow
+craze's driver again. The same applies to a provider of yours: write its Chat
+Completions `driver` and `base_url` instead.
+
+A `[providers.meta]` entry an old craze's gx import wrote, marked `source =
+"gx"`, does not hold Meta on Chat Completions, even though it says `driver =
+"openai-compat"`. Such an entry [yields to the catalog](#files-from-an-older-craze):
+craze takes its `api_key` and any `env_keys` variable the catalog lacks, and
+ignores its `driver` and `base_url`, so Meta moves to the Responses API with
+the rest. A `driver` you wrote yourself, in an entry with no `source` or with
+`source = "manual"`, is kept.
+
+A session recorded on either driver resumes on the other. The encrypted
+reasoning never goes to Chat Completions: a step's reasoning goes there as an
+empty `reasoning_content`, which Meta accepts. Chat Completions reasoning never
+goes to the Responses API, and every tool call keeps its result. A running
+session goes on with the client its model was built with: the new driver
+reaches it when it next builds one, in a new or resumed session or at a switch
+to another model.
 
 ### Model memory: `recent.json`
 
@@ -1506,8 +1555,8 @@ never rewrites it.
 The [ChatGPT plan](#the-chatgpt-plan)'s models are the exception: no ceiling
 is sent to them, since ChatGPT plan requests refuse one, but the ceiling
 (32,000, or the quarter of the window) still sizes their compaction. On the
-[`openai-responses` driver](#the-responses-api-driver) the ceiling is
-`max_output_tokens`.
+[`openai-responses` driver](#the-responses-api-driver), Meta's among them, the
+ceiling is `max_output_tokens`.
 
 ## Native compaction
 
