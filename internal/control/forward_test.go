@@ -403,14 +403,19 @@ func TestAnEndedSubscriptionsBlockedEventStaysUnsent(t *testing.T) {
 
 // TestABarrierAwaitsAClosingAttachment (A12; §3.7, astra r2 15, r3 15): a
 // command commits its event N; a concurrent detach makes the attachment
-// closing before N is forwarded; the command's barrier, still waiting, is
-// released by the detach's reply — the attachment's terminal acknowledgement
-// — and so the command's reply follows the detach's, and N, which the client
-// asked no longer to be sent, never comes.
+// closing and stops its forwarder's pushes before N is forwarded; the
+// command's barrier, still waiting, is released by the detach's reply — the
+// attachment's terminal acknowledgement — and so the command's reply follows
+// the detach's, and N, which the client asked no longer to be sent, never
+// comes.
 func TestABarrierAwaitsAClosingAttachment(t *testing.T) {
 	gate := newForwardGate()
-	parked := newSignal()
-	h := newHost(t, withOnClose(gate.open), withHooks(control.TestHooks{BeforeForward: gate.hook, BarrierWaits: parked.fire}))
+	parked, detaching := newSignal(), newSignal()
+	h := newHost(t, withOnClose(gate.open), withHooks(control.TestHooks{
+		BeforeForward: gate.hook,
+		BarrierWaits:  parked.fire,
+		Detaching:     func(string) { detaching.fire(0) },
+	}))
 	a := h.dial()
 	a.sayHello(nil)
 	r := a.attach(attachParams(h))
@@ -424,6 +429,12 @@ func TestABarrierAwaitsAClosingAttachment(t *testing.T) {
 	// The detach makes the attachment closing: the barrier wakes, and waits
 	// on, for N or the terminal acknowledgement.
 	parked.await(t, "the barrier to wait on a closing attachment")
+	// The closing is the detach's claim, under conn.mu; the cancel that stops
+	// the forwarder's pushes follows it, outside. A forwarder let go between
+	// the two queues N ahead of the detach's reply — a legitimate order,
+	// nothing of the attachment follows its reply, but not this test's path —
+	// so it is let go only once its pushes are stopped.
+	detaching.await(t, "the detach to stop the forwarder's pushes")
 	gate.open()
 
 	ok[protocol.Empty](t, a.reply(detach))
