@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,9 @@ import (
 	"github.com/charliek/craze/internal/version"
 )
 
+// craze new --load (plan 046 B6) reopens a saved session through the same hub
+// instead: reopen.go.
+//
 // craze new (plan 032 §3.12, P8): a session started in the background, through
 // the per-machine hub — hub.Ensure finds it or starts one that can create
 // sessions — by its session.create, under a requestId of this run's own. It
@@ -38,7 +42,10 @@ import (
 // started rather than start a second (protocol.md: a create is retried only
 // under its own requestId). Any refusal is the hub's words, exit 1; so is a
 // session that started and refused its first prompt (the result says so, and
-// the session runs on, idle). With --json every one of those failures also
+// the session runs on, idle). A spawn_failed from a hub of another craze
+// version — one still running from before an upgrade that removed its binary
+// — gains how to stop that hub, by its pid from its hello (plan 046 U2,
+// newFailure). With --json every one of those failures also
 // prints one JSON object on stdout (newFailureJSON); usage errors stay plain.
 //
 // --title (plan 043 D8, P11) names the session from its start, pinned as a
@@ -76,6 +83,9 @@ type newFlags struct {
 	json                  bool
 	// title is --title (plan 043 D8): the session's name from its start.
 	title string
+	// load is --load (plan 046 B6): a saved session to reopen through the
+	// hub instead of a new one (reopen.go's runNewLoad).
+	load string
 
 	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
 	wait       bool
@@ -97,7 +107,8 @@ func newNewCmd() *cobra.Command {
 		Long: "craze new starts a session in its own host, through the per-machine hub (started on " +
 			"demand), in the current directory or -C's, and returns once it has started: its id and " +
 			"directory, and — given a PROMPT — whether its first prompt was taken. The session runs on; " +
-			"craze attach, the session list (←) and craze ps find it. Without --provider the hub's " +
+			"craze attach, the session list (←) and craze ps find it. With --load it brings back a saved " +
+			"session instead (craze ps --saved lists them), or answers the one running it already. Without --provider the hub's " +
 			"configured default (config.toml's provider) starts it. With --wait it starts an unattended " +
 			"session itself, without the hub — questions answered with their first option; a plan ends its " +
 			"turn and comes back in the result (cursor, grok and gx are never told it was accepted) — " +
@@ -105,6 +116,9 @@ func newNewCmd() *cobra.Command {
 			"craze wait prints one; craze send continues the session.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("load") {
+				return runNewLoad(cmd, f, args)
+			}
 			if f.wait {
 				sigs, stop := waitSignals()
 				defer stop()
@@ -126,7 +140,9 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo: the session's agent asks for permission, and a client answers")
 	cmd.Flags().StringVar(&f.title, "title", "", "name the session this from its start, pinned as /rename pins a title (one line, at most 120 characters)")
-	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result) as JSON; with --wait, the result")
+	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result, or with --load session.reopen's) as JSON; with --wait, the result")
+	cmd.Flags().StringVar(&f.load, "load", "", "reopen this saved session through the hub instead of starting one: an id craze ps --saved prints, "+
+		"or a whole craze or provider session id; it waits for the session's start and sends no prompt")
 	// --wait (plan 041 §3.2): another path, past the hub — the session's
 	// host spawned here, unattended, sent the prompt and followed to its
 	// turn's end.
@@ -167,16 +183,7 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// as cli.md's "--json failures" promises, and so must a result that
 	// cannot be written.
 	ignoreSIGPIPE()
-	// fail is every exit-1 path before the session started (SF-124, plan 035
-	// P5): the stderr line as ever and, under --json, one JSON object on
-	// stdout first (newFailureJSON).
-	fail := func(err error, format string, args ...any) error {
-		msg := fmt.Sprintf(format, args...)
-		if f.json {
-			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
-		}
-		return exitf(1, "craze new: %s", msg)
-	}
+	fail := newFail(out, f.json)
 	dir := f.dir
 	if dir == "" {
 		wd, err := os.Getwd()
@@ -227,9 +234,9 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	env := rundir.ProcessEnv()
 	ctx, cancel := context.WithTimeout(context.Background(), newBudget)
 	defer cancel()
-	raw, err := createThroughHub(ctx, env, p)
+	raw, hello, err := createThroughHub(ctx, env, p)
 	if err != nil {
-		return fail(err, "%s", newFailure(err))
+		return fail(err, "%s", newFailure(err, hello))
 	}
 	var res protocol.CreateResult
 	if err := json.Unmarshal(raw, &res); err != nil {
@@ -266,31 +273,54 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 // needing sessionCreate — and createTitle for a create with a title
 // (hub.CreateNeed, plan 043 P11) — within hubBudget (X34), then the create
 // within ctx; a connection that ended before the answer is tried once more,
-// the same requestId, through Ensure again — and only that.
-func createThroughHub(ctx context.Context, env rundir.Env, p protocol.CreateParams) (json.RawMessage, error) {
+// the same requestId, through Ensure again — and only that. It answers too the
+// hello of the hub that took the create's own connection (plan 046 U2), for
+// newFailure — not Ensure's, whose hub may have ended and another bound the
+// socket since: the zero value when the create got no hello.
+func createThroughHub(ctx context.Context, env rundir.Env, p protocol.CreateParams) (json.RawMessage, protocol.HubHelloResult, error) {
 	for retried := false; ; retried = true {
 		ectx, cancel := context.WithTimeout(ctx, hubBudget)
 		sock, err := hub.Ensure(ectx, env, hub.CreateNeed(p))
 		cancel()
 		if err != nil {
-			return nil, err
+			return nil, protocol.HubHelloResult{}, err
 		}
-		raw, err := hub.Create(ctx, sock, newClient, p)
+		raw, hello, err := hub.CreateHello(ctx, sock, newClient, p)
 		if err == nil || retried || !errors.Is(err, hub.ErrUnanswered) || ctx.Err() != nil {
-			return raw, err
+			return raw, hello, err
 		}
 	}
 }
 
-// newFailure is a failed create in craze new's words: the hub's own message
-// for its refusal — a start that failed carries its cause in it — and an
-// older hub said as Ensure says it; anything else as it is, on one line.
-func newFailure(err error) string {
+// newFailure is a failed hub request in craze new's words: the hub's own
+// message for its refusal — a start that failed carries its cause in it — and
+// an older hub said as Ensure says it; anything else as it is, on one line.
+// A refusal hub.UpgradeRemedy finds may be an upgrade's — a spawn_failed from
+// a hub, as hello says it, of another craze version — gains that remedy after
+// a "; " (plan 046 U2): the hub's pid, both versions and how to stop it.
+func newFailure(err error, hello protocol.HubHelloResult) string {
+	msg := err.Error()
 	var perr *protocol.Error
 	if errors.As(err, &perr) {
-		return sanitizeLine(perr.Message)
+		msg = perr.Message
 	}
-	return sanitizeLine(err.Error())
+	if remedy := hub.UpgradeRemedy(err, hello); remedy != "" {
+		msg += "; " + remedy
+	}
+	return sanitizeLine(msg)
+}
+
+// newFail is craze new's fail, writing to out: every exit-1 path before the
+// session started (SF-124, plan 035 P5) — the stderr line as ever and, under
+// --json (asJSON), one JSON object on stdout first (newFailureJSON).
+func newFail(out io.Writer, asJSON bool) func(err error, format string, args ...any) error {
+	return func(err error, format string, args ...any) error {
+		msg := fmt.Sprintf(format, args...)
+		if asJSON {
+			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
+		}
+		return exitf(1, "craze new: %s", msg)
+	}
 }
 
 // newFailureJSON is a failed craze new's one JSON object (SF-124, plan 035

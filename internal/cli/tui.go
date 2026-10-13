@@ -260,6 +260,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		rh.ctl = serveControl(runEnv, hostID, indexCWD, f.force, diag.craze())
 	}
 	cfg.OnEngine = rh.onEngine
+	// Its quit marks the registry entry stopping before the engine closes
+	// (plan 046 B4): no roster lists the session from then on. A no-op with
+	// no socket.
+	cfg.OnQuit = rh.markStopping
 	// The count of clients attached to the session it hosts, its own seat
 	// included (plan 032 §3.14): nil with no socket.
 	cfg.LocalPresence = rh.ctl.localPresence()

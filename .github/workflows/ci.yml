@@ -48,9 +48,11 @@ jobs:
     # and have fewer cores, and macos-latest (arm64) is the slower of the two.
     # The frame goldens now run three ways — gateSync, async, and over the
     # socket (plan 027 C29) — and macos-latest's test job measured 16-17m
-    # against the old 20m ceiling, so 30 keeps the same generous-but-bounded
-    # intent for the new one.
-    timeout-minutes: 30
+    # against the old 20m ceiling, so 30 kept the same generous-but-bounded
+    # intent. By 2026-10 it measured 17-25m, and a slow macos runner (every
+    # package ~1.5-1.75x its usual -race time; internal/tui alone ~22m) hit
+    # 30 with nothing hung (plan 046, PR #104's push run on 3d98169): 40.
+    timeout-minutes: 40
     # The native harness's grep and glob tools run ripgrep found on PATH
     # (plan 019 §3.9, D-41), and their tests skip when it is missing, so a
     # laptop without rg still passes. Here that skip would be a quiet pass on

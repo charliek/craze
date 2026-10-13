@@ -155,6 +155,7 @@ var (
 var (
 	hostsRead    = rundir.Hosts
 	hostsScan    = rundir.HostsScan
+	hostEntry    = rundir.HostEntry
 	sweepOrphans = rundir.SweepOrphans
 )
 
@@ -180,9 +181,10 @@ type Options struct {
 	// speaking on Stderr.
 	OpenLog func(path string) (io.Writer, func(), error)
 	// Creates is what session.create needs (create.go), and
-	// sessions.createOptions (options.go): nil — a test's hub alone —
-	// creates nothing, and its hello says sessionCreate false and omits
-	// createOptions.
+	// sessions.createOptions (options.go), sessions.saved (saved.go) and
+	// session.reopen (reopen.go): nil — a test's hub alone — creates
+	// nothing, and its hello says sessionCreate false and omits
+	// createOptions and reopen.
 	Creates *Creates
 	// IdleGrace is the idle exit's grace; 0 is DefaultIdleGrace.
 	IdleGrace time.Duration
@@ -241,6 +243,15 @@ type hooks struct {
 	// rosterPaused is told, on the poll's goroutine, each time a Pause has
 	// taken effect: the poll asks no host until the next Resume.
 	rosterPaused func()
+	// rosterAttempting is told, on the poll's goroutine, each attempt as it
+	// starts, with its host's id — after the round's registry read, before
+	// the attempt's goroutine exists (roster.HubOptions.Attempting): where a
+	// test puts what must happen between the two (plan 046 B4).
+	rosterAttempting func(hostID string)
+	// rosterResult is told, on the poll's goroutine, each attempt's result
+	// once the poll has taken it — its entry read again — and before the
+	// Snapshot that follows is published (roster.HubOptions.Applied).
+	rosterResult func(hostID string, err error)
 	// subscribed runs between a subscription's registration and its reply's
 	// write; subscriptions is told, on the connection's goroutine, how many
 	// subscriptions the connection holds once it has registered a new one.
@@ -661,6 +672,14 @@ func (h *hub) pollHosts() ([]rundir.Entry, error) {
 	h.sayRead(h.life.setHosts(entries, err))
 	h.life.wakeLoop()
 	return entries, err
+}
+
+// pollEntry is the roster's single-entry read (roster.HubOptions.Entry): one
+// host's registry entry read again after an attempt that would move its row,
+// to learn whether the host has begun to stop (plan 046 B4). It is no
+// registry read of the idle rule's: it takes no lock and sweeps nothing.
+func (h *hub) pollEntry(id string) (rundir.Entry, bool, error) {
+	return hostEntry(h.o.Env, id)
 }
 
 // sayRead logs what a registry read had to say (setHostsLocked), if anything.

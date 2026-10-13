@@ -21,6 +21,9 @@ and want one fast, scriptable front end for several of them.
   agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
 - **Sessions that outlive the terminal**: `craze ps`, `craze attach`,
   `craze new`. [Sessions](docs/reference/cli.md#sessions-outlive-their-terminal)
+- **Resume a saved session through the hub**: `craze ps --saved` and
+  `craze new --load`, and the same for a hub client such as shed on a phone.
+  [`craze new --load`](docs/reference/cli.md#craze-new-load)
 - **Scripting**: `craze new --wait`, `craze send` and `craze wait` run a task
   and print the result. [`craze new`](docs/reference/cli.md#craze-new),
   [`craze wait`](docs/reference/cli.md#craze-wait)

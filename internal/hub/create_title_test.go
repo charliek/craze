@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"syscall"
@@ -317,7 +318,7 @@ func TestAHubWhoseHostsTakeNoTitleRefusesOne(t *testing.T) {
 	_, err := Create(ctx, sock, protocol.ClientInfo{Kind: "test"}, protocol.CreateParams{Cwd: work, Title: "A title"})
 	var lacks *LacksError
 	if !errors.As(err, &lacks) || !slices.Equal(lacks.Missing, []string{"set a title at create"}) ||
-		!strings.Contains(err.Error(), "cannot set a title at create; it exits when idle") {
+		err.Error() != lacksWords(lacks.Version, "set a title at create", os.Getpid()) {
 		t.Fatalf("Create of a titled session on a hub that takes none = %v; want LacksError", err)
 	}
 	if n := s.count(); n != 0 {
@@ -347,7 +348,7 @@ func TestEnsureReportsAHubThatTakesNoTitle(t *testing.T) {
 	}
 	_, err := ensure(t, env, need)
 	var lacks *LacksError
-	if !errors.As(err, &lacks) || err.Error() != "this hub (craze 0.9.1) cannot set a title at create; it exits when idle" {
+	if !errors.As(err, &lacks) || err.Error() != lacksWords("0.9.1", "set a title at create", 1) {
 		t.Fatalf("Ensure for a titled create = %v; want the older hub reported", err)
 	}
 	if !alive(t, pid) {

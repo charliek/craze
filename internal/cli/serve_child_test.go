@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/sessions"
@@ -77,6 +79,12 @@ const (
 	// re-executes as craze too, and a hub the test did not mean to create
 	// with never runs the binary as a host.
 	cliChildHubHosts = "CRAZE_CLI_TEST_HUB_HOSTS"
+	// cliChildHubRowGates, with cliChildHubHosts, is a comma-separated list
+	// of row-gate FIFOs (cliChildRowGate) for the hosts a craze hub child
+	// spawns, in order: the n-th host is held at the n-th, "" for none —
+	// two reopens' hosts both held once they have read their row, before
+	// either claims it (plan 046 C7 review).
+	cliChildHubRowGates = "CRAZE_CLI_TEST_HUB_ROW_GATES"
 	// cliChildSpawnHosts makes a craze child — craze new --wait run in a
 	// process of its own — spawn its hosts as this test binary run as craze
 	// serve (hostspawn.Command; without it a child would run the test binary
@@ -103,6 +111,11 @@ const (
 	// line has gone out whole (serveAnnounced): what the test waits for
 	// before it gives up on an intermediate that never reported.
 	cliChildAnnounced = "CRAZE_CLI_TEST_ANNOUNCED"
+	// cliChildLoadTimeout is a Go duration: the child's ACP session/load
+	// deadline (acp.SetLoadSessionTimeout) in place of its 90 s — a hub's
+	// reopen whose load outlasts it, with no real wait (plan 046 B9 (x)).
+	// Carried on to the hosts a hub child spawns, as every variable is.
+	cliChildLoadTimeout = "CRAZE_CLI_TEST_LOAD_TIMEOUT"
 )
 
 // The child's watchdog (plan 030 C5r): a child of the test binary can park —
@@ -240,6 +253,14 @@ func init() {
 			}
 		}
 	}
+	if v, ok := os.LookupEnv(cliChildLoadTimeout); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			fmt.Fprintln(os.Stderr, "craze test child: bad", cliChildLoadTimeout, v)
+			os.Exit(97)
+		}
+		acp.SetLoadSessionTimeout(d)
+	}
 	if path, ok := os.LookupEnv(cliChildAnnounced); ok {
 		_ = os.Unsetenv(cliChildAnnounced)
 		serveAnnounced = func(err error) {
@@ -263,6 +284,24 @@ func init() {
 	if _, ok := os.LookupEnv(cliChildHubHosts); ok {
 		_ = os.Unsetenv(cliChildHubHosts)
 		hub.HostCommand = childHostCommand
+	}
+	if v, ok := os.LookupEnv(cliChildHubRowGates); ok {
+		_ = os.Unsetenv(cliChildHubRowGates)
+		gates := strings.Split(v, ",")
+		var mu sync.Mutex
+		spawned := 0
+		next := hub.HostCommand
+		hub.HostCommand = func(argv []string) (*exec.Cmd, error) {
+			cmd, err := next(argv)
+			mu.Lock()
+			n := spawned
+			spawned++
+			mu.Unlock()
+			if err == nil && n < len(gates) && gates[n] != "" {
+				cmd.Env = append(cmd.Env, cliChildRowGate+"="+gates[n])
+			}
+			return cmd, err
+		}
 	}
 	if _, ok := os.LookupEnv(cliChildSpawnHosts); ok {
 		_ = os.Unsetenv(cliChildSpawnHosts)

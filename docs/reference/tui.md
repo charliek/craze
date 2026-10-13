@@ -1069,7 +1069,8 @@ The header counts what needs you, what is working, what failed and what is
 idle, dropping counts from the right as the terminal narrows. Rows are grouped
 by state — **needs you** (an open permission, question or plan, with what it
 is about), **working** (what it is doing: the running tool, `Responding`,
-`Thinking`, or `Starting…`/`Loading…`/`Closing…`), **failed** (the error's
+`Thinking`, or `Starting…`/`Loading…`, and `Closing…` for a session an older
+craze serves, below), **failed** (the error's
 first line), **idle** (the first line of its last reply, or `waiting for a
 prompt`), **unreachable** (`?`: its host is registered and not answering) —
 then `▸ saved · N not running`, collapsed. Within a group the row that
@@ -1083,8 +1084,15 @@ the title, what it wants and the directory keep the room. A sub-agent's session,
 the same dim `sub-agent` tag after its title. A session run by an older craze is listed
 with what that craze reports, and its version on the row (`· craze 0.0.9`).
 A host that has not answered yet is drawn with the working rows, `Starting…`
-or `Connecting…`. With no other session the list says `No other sessions.
-Type a prompt below to start one.` It needs 40×10; smaller, it says so.
+or `Connecting…`. A session that is stopped — closed with `Ctrl+X`, `craze
+stop`, another client's stop, a signal, its host's idle exit, or its own TUI's
+quit — leaves the list at the roster's next round, within about a second,
+without showing `Closing…` first: its host marks itself stopping before the
+stop goes ahead, and the row going is the feedback. Its session is a saved row
+from then on. A session served by a craze from before this marking still shows
+`Closing…` until its host has exited. With no other session the list says
+`No other sessions. Type a prompt below to start one.` It needs 40×10;
+smaller, it says so.
 
 The running rows come from this machine's [hub](cli.md#the-hub), started when
 the list opens if none runs: the list draws at once and the hub's rows follow,
@@ -1179,7 +1187,14 @@ it again, `Ctrl+X` stops or closes it, as on any other row.
 
 `Enter` on `▸ saved · N not running` shows the saved sessions: every session
 in the session index that is not running, newest first, at most 50, each
-once — `·`, its title, provider and directory. `Enter` on one resumes it in
+once — `·`, its title, provider and directory. They are chosen as the hub's
+[`sessions.saved`](protocol.md#sessionssaved) and
+[`craze ps --saved`](cli.md#saved-sessions) choose theirs, with sub-agents'
+sessions shown here, tagged. A session is shown by its newest index row,
+the one a resume loads, and only when that row can be resumed: one whose
+newest row is of a provider this craze does not know (a newer craze's), or
+one the protocol could not carry — an id over 512 bytes, a directory over
+4096 bytes or not absolute — is not shown at all, never by an older row. `Enter` on one resumes it in
 this terminal: a session host is started in the directory the session ran in
 (not this terminal's) and loads it, the hint line saying `resuming <title>…`
 meanwhile, and the screen then shows it as [opening one in

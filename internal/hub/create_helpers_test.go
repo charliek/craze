@@ -77,6 +77,9 @@ func init() {
 		os.Exit(97)
 	}
 	a := fakehost.ParseSpawnArgs(argv)
+	if a.Load != "" {
+		runLoadChild(a, mode) // never returns
+	}
 	if hang, ok := strings.CutPrefix(mode, "hang"); ok {
 		if rest, ok := strings.CutPrefix(hang, ",ignoreterm"); ok {
 			signal.Ignore(syscall.SIGTERM)
@@ -100,23 +103,7 @@ func init() {
 	case mode == "fail":
 		o.Start = func(context.Context) error { return errors.New(failCause + "\nand a second line") }
 	case strings.HasPrefix(mode, "gate:"):
-		dir := strings.TrimPrefix(mode, "gate:")
-		o.Start = func(ctx context.Context) error {
-			_ = os.WriteFile(filepath.Join(dir, "waiting"), []byte(a.HostID), 0o600)
-			for {
-				if b, err := os.ReadFile(filepath.Join(dir, "go")); err == nil {
-					if strings.TrimSpace(string(b)) == "ok" {
-						return nil
-					}
-					return errors.New(failCause)
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(10 * time.Millisecond):
-				}
-			}
-		}
+		o.Start = gatedStart(strings.TrimPrefix(mode, "gate:"), a.HostID)
 	case mode == "exit":
 		os.Exit(3)
 	case mode == "notok":
@@ -135,6 +122,28 @@ func init() {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// gatedStart is a fake host's start that waits for <dir>/go — "ok" starts
+// it, anything else fails it with failCause — having written <dir>/waiting
+// (the host's id) first.
+func gatedStart(dir, hostID string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_ = os.WriteFile(filepath.Join(dir, "waiting"), []byte(hostID), 0o600)
+		for {
+			if b, err := os.ReadFile(filepath.Join(dir, "go")); err == nil {
+				if strings.TrimSpace(string(b)) == "ok" {
+					return nil
+				}
+				return errors.New(failCause)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
 }
 
 // startRecordedAgent starts a `sleep` leading a process group of its own and
@@ -206,6 +215,14 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 	if err != nil {
 		t.Fatal(err)
 	}
+	return hostsAsChildrenOf(t, env, exe, mode)
+}
+
+// hostsAsChildrenOf is hostsAsChildren with exe as every host command's path:
+// this test binary, or a link to it that a test removes and restores (plan
+// 046 U1, upgrade_test.go).
+func hostsAsChildrenOf(t *testing.T, env rundir.Env, exe string, mode func(n int) string) *spawned {
+	t.Helper()
 	// A starved child takes its time to come up: the bounds on its answer
 	// and its dial are the test's step, as every wait of these tests.
 	setVar(t, &hostspawn.ReadyWait, step)
@@ -218,11 +235,7 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 			return nil, err
 		}
 		s.mu.Lock()
-		n := len(s.cmds)
-		cmd := exec.Command(exe, "-test.run=^$")
-		cmd.Env = append(os.Environ(), "HOME="+env.Home, "CRAZE_HOME="+env.CrazeDir, "CRAZE_RUNTIME_DIR="+env.CrazeRuntimeDir,
-			serveTestChild+"="+mode(n), serveTestArgv+"="+string(b), hubTestParent+"="+strconv.Itoa(os.Getpid()))
-		cmd.Stderr = os.Stderr
+		cmd := hostChildCmd(exe, env, mode(len(s.cmds)), b)
 		s.cmds = append(s.cmds, cmd)
 		s.argv = append(s.argv, slices.Clone(argv))
 		s.mu.Unlock()
@@ -246,6 +259,18 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 		_ = stillThere(t, pids)
 	})
 	return s
+}
+
+// hostChildCmd is this test binary, exe, to be run as a fake craze serve
+// (serveTestChild) in mode, its command line argv (JSON), in the test's
+// environment plus env's HOME, CRAZE_HOME and runtime base, so it is listed
+// where the test's hub looks.
+func hostChildCmd(exe string, env rundir.Env, mode string, argv []byte) *exec.Cmd {
+	cmd := exec.Command(exe, "-test.run=^$")
+	cmd.Env = append(os.Environ(), "HOME="+env.Home, "CRAZE_HOME="+env.CrazeDir, "CRAZE_RUNTIME_DIR="+env.CrazeRuntimeDir,
+		serveTestChild+"="+mode, serveTestArgv+"="+string(argv), hubTestParent+"="+strconv.Itoa(os.Getpid()))
+	cmd.Stderr = os.Stderr
+	return cmd
 }
 
 // creates is session.create's options for a test's hub: def is the
@@ -329,11 +354,17 @@ func createOn(t *testing.T, c *client, params any) protocol.Response {
 // readAnswer does, later.
 func (c *client) sendCreate(t *testing.T, params any) {
 	t.Helper()
+	c.send(t, protocol.MethodSessionCreate, params)
+}
+
+// send writes method with params on c, its answer left for readAnswer.
+func (c *client) send(t *testing.T, method string, params any) {
+	t.Helper()
 	c.id++
-	req := map[string]any{"jsonrpc": "2.0", "id": c.id, "method": protocol.MethodSessionCreate, "params": params}
+	req := map[string]any{"jsonrpc": "2.0", "id": c.id, "method": method, "params": params}
 	_ = c.nc.SetWriteDeadline(time.Now().Add(step))
 	if err := protocol.WriteLine(c.nc, req); err != nil {
-		t.Fatalf("session.create: write: %v", err)
+		t.Fatalf("%s: write: %v", method, err)
 	}
 	_ = c.nc.SetWriteDeadline(time.Time{})
 }

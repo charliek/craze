@@ -221,7 +221,8 @@ them.
 The ordinary `craze` runs the session in a detached host, so closing the terminal
 keeps it running: `craze ps` lists this machine's sessions, `craze attach` (or
 `craze -c`) joins one, `craze new` starts one in the background through the
-per-machine hub, and `/exit` ends one. On an empty composer `←` (or
+per-machine hub, `craze ps --saved` and `craze new --load` find and bring back
+one whose host has gone, and `/exit` ends one. On an empty composer `←` (or
 `/sessions`) opens the [session list](../reference/tui.md#session-list). Other
 tools reach the same sessions: `craze providers` reports which providers can
 start, and `craze bridge` speaks the control protocol over stdio for a client

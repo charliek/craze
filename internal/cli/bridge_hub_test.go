@@ -3,9 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -72,5 +75,52 @@ func TestBridgeHubPumpsTheHubsHello(t *testing.T) {
 	}
 	if errBuf.Len() != 0 {
 		t.Fatalf("stderr %q", errBuf.String())
+	}
+}
+
+// craze bridge --hub --no-start (plan 046 B5, SF-152): attach to a running
+// hub only. No hub is exit 3, the one bridge error that is not 1; the flag
+// without --hub is exit 1 like every other bridge error.
+
+func TestBridgeNoStartNeedsHub(t *testing.T) {
+	serveHome(t)
+	stdout, stderr, code := executeErr([]string{"bridge", "--no-start"})
+	if code != 1 || stdout != "" || stderr != "craze bridge: --no-start needs --hub\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// TestBridgeNoStartWithNoHubExitsThree: with --no-start and no hub, exit 3
+// and the one line. The control is the same run without --no-start, which
+// goes through Ensure (a bridge error, exit 1).
+func TestBridgeNoStartWithNoHubExitsThree(t *testing.T) {
+	serveHome(t)
+	stdout, stderr, code := executeErr([]string{"bridge", "--hub", "--no-start"})
+	if code != 3 || stdout != "" || stderr != "craze bridge: no hub is running\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if _, _, code := executeErr([]string{"bridge", "--hub"}); code != 1 {
+		t.Fatalf("without --no-start: exit %d, want 1", code)
+	}
+}
+
+// TestDiagnoseExitThreeIsOnlyNoHubRunning: every other bridge error, an
+// exitError of another code included, still exits 1.
+func TestDiagnoseExitThreeIsOnlyNoHubRunning(t *testing.T) {
+	bridge := newBridgeCmd()
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{errNoHubRunning, 3},
+		{fmt.Errorf("wrapped: %w", errNoHubRunning), 3},
+		{bridgeErrorf("no hub is running"), 1},
+		{bridgeErrorf("no hub: %v", hub.ErrNoHub), 1},
+		{&exitError{code: 3, msg: "craze bridge: something else"}, 1},
+		{errors.New("unknown flag"), 1},
+	} {
+		if _, code := diagnose(bridge, c.err); code != c.want {
+			t.Errorf("%v: exit %d, want %d", c.err, code, c.want)
+		}
 	}
 }

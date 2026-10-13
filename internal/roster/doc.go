@@ -33,6 +33,16 @@
 // reconnection and backoff are the roster's alone. A host gone from the
 // registry has its connection closed.
 //
+// A host whose registry entry is marked stopping (rundir.Serving; plan 046
+// B4, #93) is gone too, at the round that reads the mark, and for good. And
+// a host whose row an attempt would move — another row, or no answer — and,
+// on the hub's roster, every host that answered, has its entry read again
+// first (rundir.HostEntry, outside every lock but the file's own): an entry
+// missing or marked stopping makes the host gone in that very round, and for
+// good, so a stop whose mark lands between a round's registry read and its
+// attempt is not published as the host's change. A host gone for good is
+// remembered until the registry has not listed it for a minute.
+//
 // The poller hands the list a Snapshot through a latest-value slot of one
 // (Updates): replaced, never waited on. Close cancels the attempts in flight
 // — the roster's context closes their connections — takes their results,

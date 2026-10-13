@@ -81,7 +81,7 @@ func (c Config) launching() Config {
 		return c
 	}
 	c.Session, c.NewSession, c.LoadSession = nil, nil, nil
-	c.ClaimSession, c.OnEngine = nil, nil
+	c.ClaimSession, c.OnEngine, c.OnQuit = nil, nil, nil
 	c.LocalPresence = nil
 	c.SessionIndex = nil
 	c.CrazeSessionID = ""

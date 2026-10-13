@@ -266,7 +266,9 @@ func TestProvidersHubOfAnOlderHub(t *testing.T) {
 	creates.Options = nil
 	inProcessHub(t, env, creates)
 	stdout, stderr, code := executeErr([]string{"providers", "--hub"})
-	want := "craze providers: this hub (craze " + version.Version + ") cannot list what it can create; it exits when idle\n"
+	// The hub runs in this process: its pid is the test's.
+	want := fmt.Sprintf("craze providers: this hub (craze %s) cannot list what it can create; it exits once no session "+
+		"runs and no client is connected, or stop it now with kill %d (no session ends)\n", version.Version, os.Getpid())
 	if code != 1 || stdout != "" || stderr != want {
 		t.Fatalf("craze providers --hub of an older hub: exit %d, stdout %q, stderr %q; want %q", code, stdout, stderr, want)
 	}

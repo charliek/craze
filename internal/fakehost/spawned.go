@@ -23,12 +23,15 @@ import (
 
 // SpawnArgs is what RunSpawned takes of craze serve's command line, as
 // internal/hostspawn.Args writes it (--flag=value): the host's id, the
-// session's directory, provider, model and effort, the create's request, and
-// the session's title (plan 043 D8).
+// session's directory, provider, model and effort, the create's request, the
+// session's title (plan 043 D8), and the saved session a load names (--load,
+// plan 046 B3: a hub's session.reopen) — which RunSpawned does not act on: a
+// test's spawned host claims it, or answers held, itself.
 type SpawnArgs struct {
 	HostID, Workspace, Provider, Model, Effort string
 	RequestID, RequestHash                     string
 	Title                                      string
+	Load                                       string
 }
 
 // ParseSpawnArgs reads argv — craze serve's command line, its first word
@@ -57,6 +60,8 @@ func ParseSpawnArgs(argv []string) SpawnArgs {
 			a.RequestHash = v
 		case "--title":
 			a.Title = v
+		case "--load":
+			a.Load = v
 		}
 	}
 	return a
@@ -77,6 +82,21 @@ const spawnedVersion = "0.0.0-fakehost"
 // sigs, when it unlists and closes. An error is a host that never served,
 // whose ready line said why.
 func RunSpawned(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host), sigs <-chan os.Signal) error {
+	return RunSpawnedWith(a, env, o, prepare, sigs, SpawnHooks{})
+}
+
+// SpawnHooks are the points of a spawned Host's stop a test holds
+// (RunSpawnedWith; plan 046's reopen tests): each nil in production use.
+type SpawnHooks struct {
+	// Stopping runs once the Host's stop is heard — a session.stop, or SIGTERM
+	// or SIGINT — and its entry marked, when it marks one (StoppingMark),
+	// before it closes and unlists itself: a host held marked, or (with no
+	// mark) refusing every attach closing, while it is still listed.
+	Stopping func()
+}
+
+// RunSpawnedWith is RunSpawned with hooks in its stop (SpawnHooks).
+func RunSpawnedWith(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host), sigs <-chan os.Signal, hooks SpawnHooks) error {
 	ready, err := takeReady()
 	if err != nil {
 		return err
@@ -115,6 +135,14 @@ func RunSpawned(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host), sig
 		case sig := <-sigs:
 			done = sig == syscall.SIGTERM || sig == syscall.SIGINT
 		}
+	}
+	if o.StoppingMark {
+		// A real host's stop marks its entry first thing (plan 046 B4): a
+		// session.stop's mark is written already, a signal's is here.
+		_ = reg.MarkStopping()
+	}
+	if hooks.Stopping != nil {
+		hooks.Stopping()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

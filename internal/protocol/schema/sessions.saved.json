@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.saved.json",
+  "title": "sessions.saved",
+  "description": "The hub's (plan 046 B2): the saved sessions — the sessions of the hub's own session index that no running host serves, chosen as the session list chooses its saved rows — each with the id that reopens it. One per craze id: its newest row — the row a load of it loads — listed only when it is of a provider craze can resume and well-formed, so a craze id whose newest row is not is not listed at all, never by an older row; a row with none by its own provider session id, on the same terms; less every session a live host in the registry serves (by craze id, and by provider and provider session id whether or not the row has a craze id), a host marked stopping excepted, so a stopping session is listed saved at once. Then, in this order: the workspace filter (an exact match on the row's directory), the sub-agent filter (excluded unless subAgents), newest first by updatedAt (ties by id), and the limit. No workspace is stat'ed. An index row over a row bound (each in bytes), whose craze id is not a token a load takes, whose directory is not absolute, or whose time cannot be written in UTC, is malformed. A read: neither session-scoped nor mutating; every call reads the index and the registry again. Bad params are bad_request (an unknown member, reason unknown_field); an index that cannot be read answers no sessions (the hub logs why); a registry that cannot be read, or a live host's entry in it, is unavailable, reason host_unreachable. A member given twice is bad_request. A host answers unsupported, reason hub_only; a hub that cannot answer it refuses it unsupported, reason unsupported (or unknown_method, a hub from before it).",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "workspace": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/", "description": "Only the sessions whose directory is exactly this one: an absolute path, which the hub cleans first. Absent for every directory."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "The most sessions to list; absent for 50. Written as an integer: the hub refuses a fraction or an exponent (50.0, 1e2), which JSON Schema's integer admits."},
+        "subAgents": {"type": "boolean", "description": "List the sessions a sub-agent ran too, each marked subAgent; absent for false, which leaves them out."}
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/savedSession"}, "maxItems": 200, "description": "The saved sessions, newest first by updatedAt, ties by id: at most the limit, and at most 1 MiB in all (protocol.SavedResultBytesMax), the hub dropping trailing sessions to keep within it. [] for none, and when the index cannot be read."},
+        "more": {"type": "boolean", "description": "There were other saved sessions the params' filters kept that the limit, or the 1 MiB bound, left out."}
+      },
+      "required": ["sessions", "more"],
+      "additionalProperties": false
+    },
+    "savedSession": {
+      "description": "One saved session, from its index row.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 512, "description": "What reopens it, opaque to a client: its craze session id, or <provider>:<providerSessionId> for an index row with none (an older craze's) — the form craze serve --load takes. At most 512 bytes: the hub skips a longer row; maxLength, which counts characters (JSON Schema cannot count bytes), is a weaker bound than the hub's."},
+        "crazeSessionId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]{1,128}$", "description": "Its craze session id; absent for an index row with none. A token a load takes: [A-Za-z0-9._-], 1 to 128 bytes, never . or .. (which the pattern admits); the hub skips a row whose craze id is not one, as malformed."},
+        "provider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Its provider id (cursor, grok, native): one this craze can resume."},
+        "providerSessionId": {"type": "string", "minLength": 1, "maxLength": 512, "description": "The provider's id for its last agent session. At most 512 bytes: the hub skips a longer row; maxLength counts characters, a weaker bound."},
+        "workspace": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/", "description": "The directory it ran in, absolute, as its index row holds it; not checked to exist still. At most 4096 bytes: the hub skips a longer row; maxLength counts characters, a weaker bound."},
+        "title": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Its newest row's title, cut to 120 characters; absent for none."},
+        "createdAt": {"$ref": "event.json#/$defs/time", "description": "When its index row was created, in UTC; the zero time (0001-01-01T00:00:00Z) for a row that records none. A row whose time cannot be written in UTC with a four-digit year is skipped as malformed."},
+        "updatedAt": {"$ref": "event.json#/$defs/time", "description": "When it was last active, as its index row says, in UTC."},
+        "subAgent": {"type": "boolean", "const": true, "description": "A sub-agent ran it: listed only when the params' subAgents asked for them. Absent otherwise."}
+      },
+      "required": ["id", "provider", "providerSessionId", "workspace", "createdAt", "updatedAt"],
+      "additionalProperties": false
+    }
+  }
+}

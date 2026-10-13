@@ -128,7 +128,8 @@ type ReparentSpawn struct {
 // — in either wait — is a start that failed (abandon): the intermediate is
 // killed and reaped, the ready pipe closed, and the host, reported or found
 // in the registry, ended — or, shared, left serving. A ctx that ended is the
-// error's cause.
+// error's cause. An intermediate that cannot be started because cmd's
+// executable is gone from its path is an *ExecutableGoneError, as StartCmd's.
 func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log string, rs ReparentSpawn) (*Child, *os.File, error) {
 	r, w, err := Pipe()
 	if err != nil {
@@ -163,7 +164,7 @@ func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log str
 	if err != nil {
 		_ = r.Close()
 		_ = pr.Close()
-		return nil, nil, err
+		return nil, nil, startError(cmd, err)
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -250,7 +251,9 @@ func StartReparented(ctx context.Context, cmd *exec.Cmd, marker, groups, log str
 	case cancelled:
 		return abandon(nil, fmt.Errorf("its start was abandoned: %w", ctx.Err()))
 	case why != "":
-		return abandon(nil, fmt.Errorf("its intermediate reported no host (%s)", why))
+		// The intermediate execs the same path: one an upgrade removed in
+		// between is told apart as StartCmd's own start is (startError).
+		return abandon(nil, startError(cmd, fmt.Errorf("its intermediate reported no host (%s)", why)))
 	}
 	select {
 	case <-exited:

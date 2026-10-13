@@ -145,6 +145,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		claimSession:    m.claimSession,
 		refuseLoad:      m.refuseLoad,
 		onEngine:        m.onEngine,
+		onQuit:          m.onQuit,
 		localPresence:   m.localPresence, // the host TUI's server's count, for its life (presence.go)
 		hostAttached:    m.hostAttached,
 		providerLocked:  m.providerLocked,

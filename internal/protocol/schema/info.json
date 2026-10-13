@@ -126,7 +126,7 @@
       "additionalProperties": false
     },
     "connectionCapabilities": {
-      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true; createOptions is absent. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create; createOptions true where it serves sessions.createOptions, and absent otherwise; createTitle true where its session.create takes a title, and absent otherwise.",
+      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true; createOptions is absent. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create; createOptions true where it serves sessions.createOptions, and absent otherwise; createTitle true where its session.create takes a title, and absent otherwise; reopen true where it serves sessions.saved and session.reopen both, and absent otherwise.",
       "type": "object",
       "properties": {
         "rosterSubscribe": {"type": "boolean"},
@@ -136,7 +136,8 @@
         "snapshot": {"type": "boolean"},
         "attachWhenNow": {"type": "boolean"},
         "createOptions": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.createOptions. Absent — false — on a host, on a hub from before it existed, and on one given no answer to it: a client makes no call."},
-        "createTitle": {"type": "boolean", "description": "The hub's, omitted when false: its session.create takes a title. Absent — false — on a host and on a hub from before it existed, which refuses a create naming one unknown_field: a client that has a title to set checks it first."}
+        "createTitle": {"type": "boolean", "description": "The hub's, omitted when false: its session.create takes a title. Absent — false — on a host and on a hub from before it existed, which refuses a create naming one unknown_field: a client that has a title to set checks it first."},
+        "reopen": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.saved and session.reopen both, a client's resume of a saved session. Absent — false — on a host, on a hub from before it existed and on one given no answer to either: a client hides its resume entry."}
       },
       "required": ["rosterSubscribe", "sessionCreate", "multiplex", "connect", "snapshot", "attachWhenNow"],
       "additionalProperties": false

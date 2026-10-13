@@ -66,8 +66,9 @@
 //
 // A server built with Options.Stop serves session.stop (plan 030 §3.6a): for
 // the first stop it raises a close fence over attach reservations (a new
-// attach is refused closing), queues the receipt, {}, and only then hands the
-// stop to the host's coordinator, so the receipt precedes everything the stop
+// attach is refused closing), tells Options.StopAccepted — the host marks its
+// registry entry stopping (plan 046 B4) — queues the receipt, {}, and only
+// then hands the stop to the host's coordinator, so the receipt precedes everything the stop
 // puts on its connection; every later stop is answered {} and joins it. It
 // never stops anything itself: the coordinator closes the engine — which ends
 // every connection as above — and then the server. A server without it

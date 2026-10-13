@@ -905,6 +905,11 @@ func signalName(sig os.Signal) string {
 // stop is the stop sequence (plan 030 §3.6a), run once, on craze serve's own
 // goroutine, after the first stop request:
 //
+//  0. the registry entry is marked stopping (plan 046 B4), before anything
+//     else of the stop can be observed, so no roster lists the host from
+//     here: a signal's, the idle exit's and a lost socket's mark — a
+//     session.stop's was written before its receipt was queued
+//     (control.Options.StopAccepted), and this is then a no-op;
 //  1. the stop's cause is noted in the session's journal (a host_stop diag):
 //     a session.stop's, a signal's, the idle exit's, a lost socket's — the
 //     one record of why a host ended that is not a connection's;
@@ -936,6 +941,8 @@ func signalName(sig os.Signal) string {
 // Every request after the first has joined this one; runServe returns once it
 // is done, and the process exits 0.
 func (h *serveHost) stop() {
+	teardownStep("stopping")
+	h.rh.markStopping()
 	cause := h.lc.cause()
 	fmt.Fprintf(h.log, "craze serve: stopping: %s\n", cause)
 	h.eng.Note(journal.DiagNote{Kind: journal.DiagHostStop, Fields: map[string]any{"cause": cause}})

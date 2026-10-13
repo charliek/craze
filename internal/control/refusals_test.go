@@ -109,6 +109,8 @@ func TestEveryRefusalPath(t *testing.T) {
 		protocol.MethodSessionConnect:        protocol.ReasonHubOnly,
 		protocol.MethodSessionCreate:         protocol.ReasonHubOnly,
 		protocol.MethodSessionsCreateOptions: protocol.ReasonHubOnly,
+		protocol.MethodSessionsSaved:         protocol.ReasonHubOnly,
+		protocol.MethodSessionReopen:         protocol.ReasonHubOnly,
 	} {
 		refusedWith(t, c.call(method, map[string]any{"anything": true}), protocol.RPCRefused, protocol.CodeUnsupported, reason)
 	}

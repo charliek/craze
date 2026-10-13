@@ -132,7 +132,7 @@ func classifyTable() []classifyCase {
 // checked against its code's row. A code not listed here has exactly one
 // reason, the code itself ("every other code | the code itself").
 var wireReasons = map[string][]string{
-	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
+	"not_accepting": {"not_accepting", "not_in_turn", "start_failed", "not_resumable"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
 	"unavailable": {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
 		"closing", "spawn_failed", "host_unreachable"},
@@ -238,6 +238,8 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 		// The hub's (plan 032 §3.15): no engine is involved in any of them.
 		"host_only": true, "connect_not_first": true, "ambiguous_session": true, "already_subscribed": true,
 		"request_conflict": true, "spawn_failed": true, "host_unreachable": true,
+		// The hub's session.reopen (plan 046 B3): no engine is involved.
+		"not_resumable": true,
 	}
 	produced := map[string]bool{}
 	for _, tc := range classifyTable() {

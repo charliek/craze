@@ -75,7 +75,11 @@ import (
 //     line is read (hostspawn.ReadReady). A host that does not start, or does
 //     not answer ok, is unavailable, reason spawn_failed — the host
 //     terminated (Settle, Terminate) and reaped once it exits; one stuck in
-//     an uninterruptible wait through both graces is left as it is.
+//     an uninterruptible wait through both graces is left as it is. A host
+//     that cannot be started because this hub's own craze is gone from its
+//     path — an upgrade removed it — is the same refusal in words that say
+//     so and name this hub's pid to stop, and the hub serves on
+//     (launchRefusal, plan 046 U1).
 //  2. The hub dials it as a client of its own and attaches with when: ready
 //     (remote.Session.Start), waiting for the session's start at most
 //     createStartWait: a start that fails, or that takes longer, is
@@ -161,6 +165,25 @@ type Creates struct {
 	// method: its hello omits createOptions, and the method is refused
 	// unsupported.
 	Options func(logf func(string, ...any)) protocol.CreateOptionsResult
+	// Saved is sessions.saved's answer (saved.go; plan 046 B2): the saved
+	// sessions of this hub's own session index that no running host serves,
+	// as q keeps them — q held to the method's form already (its workspace
+	// absolute and cleaned, its limit in range, the default filled in) —
+	// computed afresh at each call, its trouble said through logf, the hub's
+	// own log; or the refusal that answers the call instead. nil is a hub
+	// that does not serve the method: it refuses it unsupported, reason
+	// unsupported.
+	Saved func(q protocol.SavedParams, logf func(string, ...any)) (protocol.SavedResult, *protocol.Error)
+	// Reopen resolves session.reopen's id (reopen.go; plan 046 B3) against
+	// this hub's own session index, read afresh at each call: the session to
+	// ensure is running (Reopening), or the refusal that answers the reopen
+	// instead — unknown_session for an id no row has — its trouble said
+	// through logf, the hub's own log. It stats nothing: the spawn path
+	// checks the world (Reopening.Runnable), a join does not. nil is a hub
+	// that does not serve the method: it refuses it unsupported, reason
+	// unsupported, and its hello omits reopen, which a hub says only when it
+	// serves sessions.saved too (Saved).
+	Reopen func(id string, logf func(string, ...any)) (Reopening, *protocol.Error)
 	// Title says the hosts this hub spawns take a title (craze serve --title,
 	// hostspawn.Spec.Title; plan 043 D8): its hello says createTitle, and a
 	// create may name one. Every craze hub's are (internal/cli's hubCreates);
@@ -299,7 +322,10 @@ type createCall struct {
 // createAnswer is a create's answer: its result, or its refusal.
 type createAnswer struct {
 	res *protocol.CreateResult
-	err *protocol.Error
+	// reopened is a reopen's result (reopen.go), which runs through the same
+	// call machinery; nil for a create's.
+	reopened *protocol.ReopenResult
+	err      *protocol.Error
 }
 
 // wait is a waiter's wait for c: its answer, or false once the teardown has
@@ -640,16 +666,9 @@ func conflict(id string) *protocol.Error {
 // cannot be read, or a live host whose entry cannot be — which may be the
 // one — refuses the create unavailable, reason host_unreachable.
 func (cr *creator) registered(id string) (rundir.Entry, bool, *protocol.Error) {
-	entries, unreadable, err := hostsScan(cr.h.o.Env)
-	if err != nil {
-		cr.h.logf("session.create %s: the registry cannot be read (%v): refused", id, err)
-		return rundir.Entry{}, false, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
-			"the registry of session hosts cannot be read, so whether a create of requestId %s started a session already cannot be known: try again", id)
-	}
-	if len(unreadable) > 0 {
-		cr.h.logf("session.create %s: the registry entries of live hosts %v cannot be read: refused", id, unreadable)
-		return rundir.Entry{}, false, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
-			"the registry entry of a live session host cannot be read, so whether a create of requestId %s started a session already cannot be known: try again", id)
+	entries, perr := cr.h.liveHosts("session.create "+id, "a create of requestId "+id+" started a session already")
+	if perr != nil {
+		return rundir.Entry{}, false, perr
 	}
 	own := filepath.Dir(cr.h.sock)
 	var found rundir.Entry
@@ -663,6 +682,26 @@ func (cr *creator) registered(id string) (rundir.Entry, bool, *protocol.Error) {
 		}
 	}
 	return found, ok, nil
+}
+
+// liveHosts is the registry's live hosts (hostsScan), read by a search whose
+// miss must be proven — a create's requestId (registered), a reopen's holder
+// (reopening.scan): a registry that cannot be read, or a live host's entry in
+// it (which may be the one sought), is unavailable, reason host_unreachable,
+// since whether sought cannot be known; tag names the search in the log.
+func (h *hub) liveHosts(tag, sought string) ([]rundir.Entry, *protocol.Error) {
+	entries, unreadable, err := hostsScan(h.o.Env)
+	if err != nil {
+		h.logf("%s: the registry cannot be read (%v): refused", tag, err)
+		return nil, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
+			"the registry of session hosts cannot be read, so whether %s cannot be known: try again", sought)
+	}
+	if len(unreadable) > 0 {
+		h.logf("%s: the registry entries of live hosts %v cannot be read: refused", tag, unreadable)
+		return nil, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
+			"the registry entry of a live session host cannot be read, so whether %s cannot be known: try again", sought)
+	}
+	return entries, nil
 }
 
 // newCallLocked is a create in flight, kept under its requestId when it has
@@ -750,36 +789,11 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 	if q.RequestID != "" {
 		spec.RequestID, spec.RequestHash = q.RequestID, p.hash
 	}
-	cmd, err := hostCommand(hostspawn.Args(spec))
-	if err != nil {
-		h.logf("%s: %v", tag, err)
-		return createRefusal(spawnFailed("the session host cannot be started: %v", err))
-	}
-	environ := cmd.Env
-	if environ == nil {
-		environ = os.Environ()
-	}
-	wd, _ := os.Getwd()
-	cmd.Env = ChildEnv(environ, wd)
-	cmd.Dir = q.Cwd
-	host, r, err := h.cr.launch(cmd, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
-	if errors.Is(err, errLaunchClosing) {
-		h.logf("%s: %v", tag, err)
-		return createRefusal(closingErr())
-	}
-	if err != nil {
-		// Its error names the executable's path: the hub's log's alone.
-		h.logf("%s: start the session host: %v", tag, err)
-		return createRefusal(spawnFailed("the session host cannot be started"))
+	host, line, refusal := h.launchReady(ctx, tag, spec, q.Cwd, "a "+p.provider+" session")
+	if refusal != nil {
+		return createRefusal(refusal)
 	}
 	defer h.cr.launches.Done()
-	child := host.child
-	h.logf("%s: host %s (pid %d) started for a %s session in %s; its log: %s", tag, hostID, child.PID(), p.provider, q.Cwd, logPath)
-	line, failure, why := hostspawn.ReadReady(ctx, r)
-	_ = r.Close()
-	if failure != 0 {
-		return h.notReady(tag, host, failure, why)
-	}
 	if !line.OK {
 		// The host said why itself and is exiting: the grace to, and ended if
 		// it takes longer. A new session is never another host's (held).
@@ -793,31 +807,78 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 		h.logf("%s: host %s's ready line names host %q", tag, hostID, line.HostID)
 		return createRefusal(spawnFailed("the session host answered for another host"))
 	}
-	sess, err := createDial(ctx, line.Socket, line.CrazeSessionID)
-	if err != nil {
-		h.logf("%s: host %s cannot be dialled: %v", tag, hostID, err)
-		if ctx.Err() != nil {
-			return createRefusal(closingErr())
-		}
-		h.abandonHost(host, line.Socket, line.CrazeSessionID)
-		return createRefusal(spawnFailed("the session host cannot be reached"))
+	at, refusal := h.startSpawned(ctx, tag, host, line, q.Prompt, createStartWait, time.Time{})
+	if refusal != nil {
+		return createRefusal(refusal)
 	}
-	at := h.attend(ctx, sess, q.Prompt, time.Now().Add(createStartWait))
-	switch at.kind {
-	case attendCut:
-		return createRefusal(closingErr())
-	case attendStartFailed, attendStartTimeout:
-		h.logf("%s: host %s: the session did not start: %s; stopping it", tag, hostID, at.cause)
-		h.abandonHost(host, line.Socket, line.CrazeSessionID)
-		return createRefusal(startFailed(at.cause))
-	case attendLost:
-		h.logf("%s: host %s went before its session started: %v; stopping it", tag, hostID, at.err)
-		h.abandonHost(host, line.Socket, line.CrazeSessionID)
-		return createRefusal(spawnFailed("the session host went before its session started"))
-	}
-	row := h.createdRow(ctx, tag, hostID, line, child.PID(), at.version)
+	row := h.createdRow(ctx, tag, hostID, line, host.child.PID(), at.version)
 	h.logf("%s: host %s serving session %s, started; prompt %s", tag, hostID, line.CrazeSessionID, at.prompt)
 	return createAnswer{res: &protocol.CreateResult{Session: row, Prompt: at.prompt, PromptError: at.promptErr}}
+}
+
+// startSpawned is the start of host, which this hub spawned and whose ready
+// line (line) is ok and names it: its session dialled and attended (attend)
+// within bound from the dial's end — cut to until when that comes first, the
+// dial bounded by it too (startWindow; zero for none) — prompt sent once it is
+// up, when there is one — and what that came to; or the refusal that answers
+// instead: closing for a start the teardown cut, and on any other failure the
+// host stopped (abandonHost), as a spawner stops its own. A create's start
+// (bound createStartWait, no until) and a reopen's spawn's (reopenStartWait,
+// until the reopen's own deadline) alike.
+func (h *hub) startSpawned(ctx context.Context, tag string, host *ownedHost, line hostspawn.ReadyLine, prompt string, bound time.Duration, until time.Time) (attendance, *protocol.Error) {
+	dctx, cancel := ctxUntil(ctx, until)
+	sess, err := createDial(dctx, line.Socket, line.CrazeSessionID)
+	cancel()
+	if err != nil {
+		h.logf("%s: host %s cannot be dialled: %v", tag, line.HostID, err)
+		if ctx.Err() != nil {
+			return attendance{}, closingErr()
+		}
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
+		return attendance{}, spawnFailed("the session host cannot be reached")
+	}
+	deadline, within := startWindow(bound, until)
+	at := h.attend(ctx, sess, prompt, deadline, within)
+	switch at.kind {
+	case attendCut:
+		return at, closingErr()
+	case attendStartFailed, attendStartTimeout:
+		h.logf("%s: host %s: the session did not start: %s; stopping it", tag, line.HostID, at.cause)
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
+		return at, startFailed(at.cause)
+	case attendLost, attendClosing:
+		h.logf("%s: host %s went before its session started: %v; stopping it", tag, line.HostID, at.err)
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
+		return at, spawnFailed("the session host went before its session started")
+	}
+	return at, nil
+}
+
+// ctxUntil is ctx bounded by until too, when until is set: a start's dial
+// within a reopen's deadline (startSpawned, reopening.join).
+func ctxUntil(ctx context.Context, until time.Time) (context.Context, context.CancelFunc) {
+	if until.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, until)
+}
+
+// startWindow is a start's deadline from now — bound, or until when that
+// comes first (zero: none) — and the bound a start past it is said not to
+// have started within: bound itself, or what was left of until, to the
+// second (to the millisecond under a second), 0 once until has passed.
+func startWindow(bound time.Duration, until time.Time) (time.Time, time.Duration) {
+	deadline := time.Now().Add(bound)
+	if until.IsZero() || !until.Before(deadline) {
+		return deadline, bound
+	}
+	left := max(0, time.Until(until))
+	if left >= time.Second {
+		left = left.Round(time.Second)
+	} else {
+		left = left.Round(time.Millisecond)
+	}
+	return until, left
 }
 
 // join is a create of requestId id that a previous hub started (the file's
@@ -837,7 +898,7 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 		return createRefusal(refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
 			"the session a create of requestId %s started cannot be reached", id))
 	}
-	at := h.attend(ctx, sess, "", time.Now().Add(createStartWait))
+	at := h.attend(ctx, sess, "", time.Now().Add(createStartWait), createStartWait)
 	switch at.kind {
 	case attendCut:
 		return createRefusal(closingErr())
@@ -847,7 +908,7 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 			h.logf("%s: host %s: session.stop: %v", tag, e.HostID, err)
 		}
 		return createRefusal(startFailed(at.cause))
-	case attendLost:
+	case attendLost, attendClosing:
 		h.logf("%s: host %s went before its session started: %v", tag, e.HostID, at.err)
 		return createRefusal(refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
 			"the session a create of requestId %s started went before it started", id))
@@ -859,6 +920,48 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 		PromptError: "the create was answered by another hub, which this one never heard from"}}
 }
 
+// launchReady launches spec's host (craze serve, hostspawn.Args) in dir, its
+// working directory — in the environment contract's environment (ChildEnv),
+// through the launch's reservation (creator.launch) — and reads its ready
+// line (hostspawn.ReadReady): the host and its line, for a caller that drops
+// the reservation (h.cr.launches.Done) once it is done with the host; or the
+// refusal that answers the launch, the reservation already dropped — a
+// command that cannot be built or started (launchRefusal: the hub's craze
+// gone from its path among them), a hub closing, and a host that gave no
+// usable line (notReady: ended and reaped). what says what the host is for,
+// in the hub's log.
+func (h *hub) launchReady(ctx context.Context, tag string, spec hostspawn.Spec, dir, what string) (*ownedHost, hostspawn.ReadyLine, *protocol.Error) {
+	cmd, err := hostCommand(hostspawn.Args(spec))
+	if err != nil {
+		h.logf("%s: %v", tag, err)
+		return nil, hostspawn.ReadyLine{}, spawnFailed("the session host cannot be started: %v", err)
+	}
+	environ := cmd.Env
+	if environ == nil {
+		environ = os.Environ()
+	}
+	wd, _ := os.Getwd()
+	cmd.Env = ChildEnv(environ, wd)
+	cmd.Dir = dir
+	host, r, err := h.cr.launch(cmd, filepath.Join(filepath.Dir(spec.Log), hostspawn.AgentGroupsName(spec.HostID)), spec.Log)
+	if errors.Is(err, errLaunchClosing) {
+		h.logf("%s: %v", tag, err)
+		return nil, hostspawn.ReadyLine{}, closingErr()
+	}
+	if err != nil {
+		return nil, hostspawn.ReadyLine{}, h.launchRefusal(tag, err)
+	}
+	h.logf("%s: host %s (pid %d) started for %s in %s; its log: %s", tag, spec.HostID, host.child.PID(), what, dir, spec.Log)
+	line, failure, why := hostspawn.ReadReady(ctx, r)
+	_ = r.Close()
+	if failure != 0 {
+		ans := h.notReady(tag, host, failure, why)
+		h.cr.launches.Done()
+		return nil, hostspawn.ReadyLine{}, ans.err
+	}
+	return host, line, nil
+}
+
 // notReady is a spawned host that gave no usable ready line (failure, why):
 // ended — and reaped once it exits; its agents' record read once (ownedHost)
 // — and a
@@ -868,10 +971,10 @@ func (h *hub) notReady(tag string, host *ownedHost, failure hostspawn.Failure, w
 	child := host.child
 	switch failure {
 	case hostspawn.Cancelled:
-		// Launched as the teardown cut it: ended and reaped here, its
-		// agents' record with it, rather than left to find its ready pipe
-		// gone (r41 4).
-		h.logf("%s: host pid %d: cut by the teardown before it was ready; ending it", tag, child.PID())
+		// Launched as the teardown cut it — or, a reopen's, as its deadline
+		// passed: ended and reaped here, its agents' record with it, rather
+		// than left to find its ready pipe gone (r41 4).
+		h.logf("%s: host pid %d: given up on before it was ready (the teardown's cut, or its reopen's deadline); ending it", tag, child.PID())
 		host.terminate()
 		return createRefusal(closingErr())
 	case hostspawn.Exited:
@@ -1134,6 +1237,11 @@ const (
 	attendLost
 	// attendCut: the teardown cut the create.
 	attendCut
+	// attendClosing: the attach was refused closing — the host is stopping
+	// its session (a session.stop accepted, or its idle exit deciding) — before
+	// the session was up (err). A create takes it as attendLost; a reopen as
+	// a holder on its way out, to wait for (reopen.go).
+	attendClosing
 )
 
 // attendance is what attend came to.
@@ -1162,8 +1270,9 @@ type attendance struct {
 // the list's dispatch drains it: a start that publishes more than the
 // stream's queue holds before its ready would otherwise wait for a reader.
 // The session's row is not read here: on a connection of its own, after this
-// (freshRow).
-func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, deadline time.Time) attendance {
+// (freshRow). bound is what a start past deadline says it did not start
+// within: a create's createStartWait, a reopen's start budget (plan 046 B3).
+func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, deadline time.Time, bound time.Duration) attendance {
 	dctx, stopDrain := context.WithCancel(context.Background())
 	drained := make(chan struct{})
 	go func() {
@@ -1200,7 +1309,11 @@ func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, de
 			return attendance{kind: attendCut}
 		case timedOut:
 			return attendance{kind: attendStartTimeout,
-				cause: fmt.Sprintf("the session did not start within %s", createStartWait)}
+				cause: fmt.Sprintf("the session did not start within %s", bound)}
+		}
+		var re *remote.Error
+		if errors.As(err, &re) && re.Reason == protocol.ReasonClosing {
+			return attendance{kind: attendClosing, err: err}
 		}
 		return attendance{kind: attendLost, err: err}
 	}
@@ -1356,17 +1469,44 @@ func freshRow(ctx context.Context, socket, sid string) (json.RawMessage, string,
 // version is the host's craze from the create's own hello, the read's when it
 // has one.
 func (h *hub) createdRow(ctx context.Context, tag, hostID string, line hostspawn.ReadyLine, pid int, version string) protocol.RosterRow {
+	row, _ := h.sessionRow(ctx, tag, hostID, line, pid, version, false)
+	return row
+}
+
+// sessionRow is createdRow's row; with exact, a reopen's (plan 046 B3), the
+// row of session line.CrazeSessionID or none: a fresh row of another session
+// — the host's one row, which createdRow takes when none names the session —
+// or a registry entry of the host's naming another session (or none yet)
+// makes it false, the host no longer serving the session the start was
+// waited for: a TUI-hosted session's engine can change between the start and
+// the reads, and a reopen answers the session it was asked for or none. The
+// approximate row built when the fresh read fails names the session too, or
+// is false the same way.
+func (h *hub) sessionRow(ctx context.Context, tag, hostID string, line hostspawn.ReadyLine, pid int, version string, exact bool) (protocol.RosterRow, bool) {
 	raw, v, readAt, err := createRowRead(ctx, line.Socket, line.CrazeSessionID)
 	if err != nil {
 		h.logf("%s: host %s: its row cannot be read (%v): answered approximate", tag, hostID, err)
 	} else if v != "" {
 		version = v
 	}
+	if exact && err == nil {
+		var probe struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(raw, &probe) != nil || probe.SessionID != line.CrazeSessionID {
+			h.logf("%s: host %s serves session %q now, not %s", tag, hostID, probe.SessionID, line.CrazeSessionID)
+			return protocol.RosterRow{}, false
+		}
+	}
 	e := rundir.Entry{Protocol: protocol.ProtocolVersion, HostID: hostID, PID: pid, Socket: line.Socket,
 		CrazeSessionID: line.CrazeSessionID}
 	if entries, err := hostsRead(h.o.Env); err == nil {
 		for _, x := range entries {
 			if x.HostID == hostID {
+				if exact && x.CrazeSessionID != line.CrazeSessionID {
+					h.logf("%s: host %s's entry names session %q now, not %s", tag, hostID, x.CrazeSessionID, line.CrazeSessionID)
+					return protocol.RosterRow{}, false
+				}
 				e = x
 				break
 			}
@@ -1389,7 +1529,7 @@ func (h *hub) createdRow(ctx context.Context, tag, hostID string, line hostspawn
 		row = protocol.RosterRow{HostID: hostID, SessionID: line.CrazeSessionID, Status: protocol.RosterReachable, Approximate: true,
 			Host: protocol.RosterHost{PID: pid, Protocol: protocol.ProtocolVersion, Ready: true}}
 	}
-	return row
+	return row, true
 }
 
 // ---------------------------------------------------------------- answers
@@ -1450,23 +1590,33 @@ var ErrUnanswered = errors.New("hub: the connection ended before the answer")
 // (createTitle, plan 043 P11), a *LacksError, nothing asked: a title is never
 // sent where it would be refused unknown_field, nor dropped.
 func Create(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, error) {
+	res, _, err := CreateHello(ctx, socket, who, p)
+	return res, err
+}
+
+// CreateHello is Create, answering also the hello of the hub that took the
+// create's connection (plan 046 U2): the hub whose refusal a client explains,
+// which may not be the one an earlier Ensure met — a hub can end and another
+// bind the same socket in between. The hello is the zero value when the
+// connection never got one.
+func CreateHello(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, protocol.HubHelloResult, error) {
 	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
-		return nil, err
+		return nil, protocol.HubHelloResult{}, err
 	}
 	defer hc.close()
 	if missing := missing(hello.Capabilities, CreateNeed(p)); len(missing) > 0 {
-		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: missing}
+		return nil, hello, lacking(hello.Endpoint, missing)
 	}
 	res, err := hc.call(protocol.MethodSessionCreate, p)
 	if err != nil {
-		return nil, err
+		return nil, hello, err
 	}
 	var check protocol.CreateResult
 	if err := json.Unmarshal(res, &check); err != nil {
-		return nil, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionCreate, err)
+		return nil, hello, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionCreate, err)
 	}
-	return res, nil
+	return res, hello, nil
 }
 
 // CreateNeed is what a hub must say in its hello to take p (Ensure's need,

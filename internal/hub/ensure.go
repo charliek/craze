@@ -66,14 +66,33 @@ import (
 // no hub unless the test installs Command: Ensure is ErrNoHub there before it
 // reads anything (§3.18's leak guard).
 func Ensure(ctx context.Context, env rundir.Env, need protocol.ConnectionCapabilities) (string, error) {
+	sock, _, err := EnsureHello(ctx, env, need)
+	return sock, err
+}
+
+// EnsureHello is Ensure, answering also the hello of the hub it answers (plan
+// 046 U2): the hub's craze version and pid, which a client names when that
+// hub's refusal may be an upgrade's (UpgradeRemedy). With an error the hello
+// is the zero value.
+func EnsureHello(ctx context.Context, env rundir.Env, need protocol.ConnectionCapabilities) (string, protocol.HubHelloResult, error) {
 	if Command == nil && testing.Testing() {
-		return "", ErrNoHub
+		return "", protocol.HubHelloResult{}, ErrNoHub
 	}
 	ns, err := rundir.Namespace(env.CrazeDir)
 	if err != nil {
-		return "", err
+		return "", protocol.HubHelloResult{}, err
 	}
 	e := &ensurer{env: env, ns: ns, need: need}
+	sock, err := e.ensure(ctx)
+	if err != nil {
+		return sock, protocol.HubHelloResult{}, err
+	}
+	return sock, e.hello, nil
+}
+
+// ensure is Ensure's rounds, steps 1–4: the socket of the hub found or
+// started — its hello then e.hello — or why there is none.
+func (e *ensurer) ensure(ctx context.Context) (string, error) {
 	retried := false
 	for {
 		sock, err := e.attempt(ctx)
@@ -183,17 +202,32 @@ var (
 )
 
 // LacksError is a hub that answered, and cannot do what the caller needs: an
-// older craze, which Ensure does not use and does not replace — it exits
-// when idle, and the next Ensure after that starts this craze's.
+// older craze, which Ensure does not use and does not replace — it exits once
+// no session runs and no client is connected, and the next Ensure after that
+// starts this craze's; or, stopped now by its pid, it ends alone, every
+// session running on (plan 046 U3).
 type LacksError struct {
-	// Version is the hub's craze version (its hello's endpoint).
+	// Version is the hub's craze version and PID its pid (its hello's
+	// endpoint): 0 for none, when the error names no kill.
 	Version string
+	PID     int
 	// Missing is what it cannot do, in words: "create sessions", …
 	Missing []string
 }
 
 func (e *LacksError) Error() string {
-	return fmt.Sprintf("this hub (craze %s) cannot %s; it exits when idle", e.Version, strings.Join(e.Missing, " or "))
+	msg := fmt.Sprintf("this hub (craze %s) cannot %s; it exits once no session runs and no client is connected",
+		e.Version, strings.Join(e.Missing, " or "))
+	if e.PID > 0 {
+		msg += fmt.Sprintf(", or stop it now with kill %d (no session ends)", e.PID)
+	}
+	return msg
+}
+
+// lacking is the LacksError of the hub whose hello's endpoint is ep, which
+// cannot do missing.
+func lacking(ep protocol.Endpoint, missing []string) *LacksError {
+	return &LacksError{Version: ep.CrazeVersion, PID: ep.PID, Missing: missing}
 }
 
 // WedgedError is a hub that does not answer and is not replaced (P17): its
@@ -213,6 +247,11 @@ func (e *WedgedError) Error() string {
 // hub's unknown_field, and never creates the session untitled.
 const lacksCreateTitle = "set a title at create"
 
+// lacksReopen is a hub without the capability reopen (plan 046 B7) — one from
+// before sessions.saved and session.reopen — in LacksError's words: craze new
+// --load then says "this hub (craze …) cannot reopen a saved session".
+const lacksReopen = "reopen a saved session"
+
 // missing is what have lacks of need, in LacksError's words.
 func missing(have, need protocol.ConnectionCapabilities) []string {
 	var out []string
@@ -224,6 +263,7 @@ func missing(have, need protocol.ConnectionCapabilities) []string {
 	check(need.SessionCreate, have.SessionCreate, "create sessions")
 	check(need.CreateOptions, have.CreateOptions, lacksCreateOptions)
 	check(need.CreateTitle, have.CreateTitle, lacksCreateTitle)
+	check(need.Reopen, have.Reopen, lacksReopen)
 	check(need.RosterSubscribe, have.RosterSubscribe, "subscribe to the session roster")
 	check(need.Connect, have.Connect, "connect to a session")
 	check(need.Multiplex, have.Multiplex, "multiplex sessions")
@@ -269,6 +309,8 @@ type ensurer struct {
 	env  rundir.Env
 	ns   string
 	need protocol.ConnectionCapabilities
+	// hello is the hello of the hub last found (use): EnsureHello's.
+	hello protocol.HubHelloResult
 }
 
 // attempt is steps 1–3 once.
@@ -357,8 +399,9 @@ func (e *ensurer) use(sock, wantID string, res protocol.HubHelloResult) (string,
 		return "", false, fmt.Errorf("the hub (craze %s) chose protocol %d, which this craze does not speak", res.Endpoint.CrazeVersion, res.Protocol)
 	}
 	if m := missing(res.Capabilities, e.need); len(m) > 0 {
-		return "", false, &LacksError{Version: res.Endpoint.CrazeVersion, Missing: m}
+		return "", false, lacking(res.Endpoint, m)
 	}
+	e.hello = res
 	return sock, true, nil
 }
 

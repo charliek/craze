@@ -62,7 +62,25 @@ type Entry struct {
 	// the file — when the host could not read it, or wrote none (an older
 	// craze). Added after the original members, like RequestID.
 	PIDStart uint64 `json:"pidStart,omitempty"`
+	// Stopping says the host has begun to stop (plan 046 B4, #93): written
+	// by the host itself (Host.MarkStopping), synchronously, before anything
+	// of its stop can be observed — before a session.stop's receipt is
+	// queued, first thing in a signal's, idle exit's or lost socket's stop
+	// sequence, before a TUI-hosted quit closes its engine — and kept by
+	// every later rewrite until the entry is unlinked. A roster no longer
+	// lists the host (Serving). false — and absent from the file — while
+	// the host serves, and on every host from a craze before it. Added after
+	// the original members, like RequestID.
+	Stopping bool `json:"stopping,omitempty"`
 }
+
+// Serving says a roster lists e's host (plan 046 B4): every live host but
+// one that has marked itself stopping (Entry.Stopping). It is the one rule
+// every reader that lists running sessions from the registry applies — the
+// roster's poll (the hub's, the session list's own, hub.Direct's) and the
+// session list's seed — so a stopped session leaves every list at once, and
+// no list shows a host on its way out.
+func Serving(e Entry) bool { return !e.Stopping }
 
 // ErrClosed is Update on a closed Host.
 var ErrClosed = errors.New("rundir: the host is closed")
@@ -91,6 +109,11 @@ type Host struct {
 	entry    Entry
 	entryID  FileID
 	hasEntry bool
+	// stopping says MarkStopping was called (plan 046 B4), whether or not
+	// its mark could be written: from then on no rewrite brings back an
+	// entry gone from its name, and every rewrite of the host's own entry
+	// writes it marked.
+	stopping bool
 }
 
 // entryName and lockName are the host's files in the registry directory.
@@ -113,7 +136,8 @@ func (h *Host) lockName() string  { return h.id + ".lock" }
 //  4. its (dev, ino) is recorded, and it is chmod-ed 0600;
 //  5. the registry entry is written (0600) and its (dev, ino) recorded.
 //
-// entry's Protocol, HostID, PID and Socket are Bind's to fill. Its RequestID
+// entry's Protocol, HostID, PID and Socket are Bind's to fill, and its
+// Stopping is cleared (MarkStopping's alone). Its RequestID
 // and RequestHash — a hub-created host's create request (plan 032 §3.10) —
 // are the caller's, given here or never: every rewrite keeps them (Update). A
 // failure part way unwinds what was built, identity-checked, and returns the
@@ -191,6 +215,8 @@ func (h *Host) bind(entry Entry) error {
 	entry.HostID = h.id
 	entry.PID = os.Getpid()
 	entry.Socket = h.socket
+	// A host is bound serving: only MarkStopping marks it.
+	entry.Stopping = false
 	return h.writeEntry(entry)
 }
 
@@ -308,9 +334,16 @@ func (h *Host) Entry() Entry {
 // becomes ready, and when it changes — and records the new file's identity.
 // Protocol, HostID, PID and Socket are kept as Bind wrote them, as are
 // RequestID and RequestHash — the request that made a host is fixed for its
-// life — and PIDStart, its pid's start. After Close it returns ErrClosed and writes nothing. The new file's
-// identity is taken from the descriptor it was written through, before the
-// rename, so a rename that succeeds always records the file it installed.
+// life — and PIDStart, its pid's start. Stopping is MarkStopping's alone: a
+// rewrite before it writes the entry unmarked, whatever fn says, and once
+// MarkStopping has been called — its own write landed or not — a rewrite
+// writes the host's own entry marked, and writes nothing (answering nil) when
+// the entry is gone from its name or another file is there now: a stopping
+// host's entry is never brought back, unmarked or marked, by a rewrite queued
+// before its stop (plan 046 B4). After Close it returns ErrClosed and writes
+// nothing. The new file's identity is taken from the descriptor it was
+// written through, before the rename, so a rename that succeeds always
+// records the file it installed.
 func (h *Host) Update(fn func(*Entry)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -321,7 +354,71 @@ func (h *Host) Update(fn func(*Entry)) error {
 	fn(&e)
 	e.Protocol, e.HostID, e.PID, e.Socket = h.entry.Protocol, h.entry.HostID, h.entry.PID, h.entry.Socket
 	e.RequestID, e.RequestHash, e.PIDStart = h.entry.RequestID, h.entry.RequestHash, h.entry.PIDStart
+	e.Stopping = h.stopping
+	if h.stopping {
+		if own, err := h.ownEntryLocked(); !own {
+			return err
+		}
+	}
 	return h.writeEntry(e)
+}
+
+// MarkStopping rewrites the registry entry with Stopping set (plan 046 B4,
+// #93): the host has begun to stop, and from the rewrite's return every
+// reader of the registry reads it so, and no roster lists the host
+// (Serving). It is synchronous — the rewrite is done, under the lock every
+// rewrite takes, when it returns, never queued behind a host's own writer —
+// so a caller that marks before it makes its stop observable (a
+// session.stop's receipt, an engine's close) has the mark ahead of it.
+//
+// The host is stopping from the call on, whatever becomes of the write
+// (Host.stopping): every later rewrite writes the entry marked, and none
+// brings back an entry gone from its name (Update). It is idempotent: an
+// entry already marked is not written again. It marks only the host's own
+// entry: a registry entry gone from its name, or another file there now
+// (Lost: a host stopping because it was lost), is left as it is — no roster
+// lists a host whose entry is gone, and a file that is not the host's is not
+// its to write. "Own" is the (dev, ino) the host's last write recorded,
+// checked before the write's rename and not atomically with it: it holds
+// against craze's own writers — the only other one that touches a host's
+// entry name is a sweep, which unlinks the entry of a host whose lock is free
+// (a dead one), and no second host ever has the same id — not against an
+// outside writer replacing the file between the check and the rename, nor
+// one that unlinks it and makes another that is given the same inode. After
+// Close it returns ErrClosed and writes nothing; on a failed rewrite the
+// entry is as it was, unmarked, and a later call — or any later rewrite —
+// tries again; a caller logs the error and stops all the same.
+func (h *Host) MarkStopping() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return ErrClosed
+	}
+	h.stopping = true
+	if h.entry.Stopping {
+		return nil
+	}
+	if own, err := h.ownEntryLocked(); !own {
+		return err
+	}
+	e := h.entry
+	e.Stopping = true
+	return h.writeEntry(e)
+}
+
+// ownEntryLocked says the registry entry at its name is still the file the
+// host's last write installed ((dev, ino), looked up relative to the held
+// registry directory): false, with no error, when it is gone or another file
+// is there; false and the error when it cannot be looked up. h.mu is held.
+func (h *Host) ownEntryLocked() (bool, error) {
+	st, err := h.hosts.lstat(h.entryName())
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("rundir: stat the registry entry: %w", err)
+	}
+	return h.hasEntry && idOfStat(&st) == h.entryID, nil
 }
 
 // Lost reports why the host can no longer be found where it registered — its

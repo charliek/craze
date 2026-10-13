@@ -91,6 +91,23 @@ A notification has no `id`:
 
 Clients send no notifications in protocol 1.
 
+### Ordering and limits
+
+A **host** answers requests as each finishes, not in the order they were
+sent, so a client matches a reply to its request by `id`. It admits at most 16
+requests per connection: a request keeps its slot until its reply has been
+written to the socket, and the host stops reading the connection while 16
+are admitted and unwritten, so a peer that sends and never reads stalls at
+16. Across all of a host's connections at most 64 mutating commands run at
+once; one past that is refused `unavailable`, reason `busy`, and is not run
+and not stored, so the client resends the same `commandId`.
+
+The **hub** answers in order: it reads a line, answers it and only then reads
+the next, on each connection. A request that takes long — a
+[`session.create`](#sessioncreate) or a [`session.reopen`](#sessionreopen),
+which hold their connection until they answer — delays every later request on
+that connection, so a client sends each on a connection of its own.
+
 ### Tolerant inbound, strict outbound
 
 - A host **refuses** a params field it does not know: `-32602`, reason
@@ -113,7 +130,13 @@ swallowed option can make a client believe it took effect (shed's own rule:
 `hello` opens the connection. A method protocol 1 does not know is refused
 `-32601`, reason `unknown_method`, whether or not `hello` has run yet — that
 check comes first. Any method protocol 1 *does* know, sent before `hello`, is
-refused `bad_request`, reason `hello_required`.
+refused `bad_request`, reason `hello_required`. A second `hello` on a
+connection is refused `bad_request`, reason `bad_request` (a connection is
+bound once), by a host and by a hub alike.
+
+A host that is not yet serving a session — it has started, but its engine is
+not up — answers `hello` `unavailable`, reason `not_ready` ("the host is not
+serving a session yet; retry"); a client retries it a moment later.
 
 ```json
 {"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}
@@ -175,7 +198,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -191,6 +214,12 @@ reached through the splice; `multiplex` is `false` because one connection
 carries the roster or one spliced session, never several. `sessionCreate` is
 `true` only on a hub that serves `session.create` — `false` on a hub from
 before it existed: a client checks it, never the hub's version.
+
+A hub closes a connection that has not said `hello` within **5 seconds**,
+unanswered. A hub that has decided to close answers `hello` `unavailable`,
+reason `closing` ("the hub is closing") and ends the connection, which is the
+answer a client takes for no hub at all. A hub keeps at most 256 connections;
+one past that is closed as it is accepted, unanswered.
 
 `createOptions` says the hub serves
 [`sessions.createOptions`](#sessionscreateoptions), what a create can start.
@@ -208,6 +237,14 @@ create naming a `title` `unknown_field`. A client with a title to set checks
 it first — `craze new --title` asks the hub for it and reports an older hub
 as one that "cannot set a title at create", never sending the title there and
 never creating the session untitled.
+
+`reopen` says the hub serves both [`sessions.saved`](#sessionssaved) and
+[`session.reopen`](#sessionreopen): a client's whole resume of a saved
+session — the list, and bringing one back. It is omitted when `false` in the
+same way: absent on a host, on a hub from before the two methods, and on one
+given no answer to either. A client hides its resume entry without it, and
+`craze new --load` reports such a hub as one that "cannot reopen a saved
+session".
 
 ### Client ids and resume
 
@@ -334,8 +371,9 @@ applies it only if it has folded no later turn since, by `turnId`.
 
 The hub learns hosts from the machine's registry (see [The
 registry](#the-registry)) and reads each one's own `sessions.list`; it lists
-every live host that has a craze session id, keyed by host id, in host-id
-order. It polls as the session list does — a round at most every second that
+every live host that has a craze session id and is not stopping (its entry's
+`stopping`, below), keyed by host id, in host-id order. It polls as the
+session list does — a round at most every second that
 reads the registry (sweeping hosts that died, so a crashed host's row leaves
 within one round) and asks every host, eight at a time, 500 ms each, over a
 connection it keeps — but only while someone wants the roster: a
@@ -425,6 +463,35 @@ each case the client subscribes again: after `slow_consumer` or `omitted` it
 may on the same connection, and reads `truncated` from the new reply; after
 `hub_closing`, on a new one, the new hub's `epoch` reseeding it.
 
+**A stopped session leaves at once.** A host marks its registry entry
+`stopping` before anything of its stop can be seen: before a
+[`session.stop`](#sessionstop)'s receipt is sent, first thing when a signal,
+its idle exit or a lost socket stops it, and before a TUI-hosted session's
+quit closes its engine. A round of the hub's poll whose registry read
+follows the mark does not list the host, and nor does a round whose attempt
+at the host follows it and is answered, or fails where the host was
+reachable: the hub reads the host's entry again before it takes such a
+result, and drops a host whose entry is gone or says `stopping`, for good.
+So nothing the hub sees of the host after its mark is published as the
+host's row, and once a round of its poll has read the mark, the host is
+removed and not listed again. Both are best effort, as the mark is: a mark
+the host cannot write (its failure is logged, and the stop goes on), or an
+entry the hub cannot read back (it keeps the host as it stood), leaves the
+host listed until its entry is gone. The residual is what the hub had seen
+*before* the mark: `roster` notifications composed from that — one already
+being written to a subscriber, and changes already waiting for the ones
+after it — may still reach the subscriber after the receipt, and may carry
+the host's row, before the notification that removes it. No time bound is
+promised for them: a subscriber that reads slowly receives them late (a
+notification's write may block for up to 10 s before the subscription is
+reset). Nor is any order promised between lines on different connections —
+a subscriber reads the roster on its own connection, and the receipt
+arrives on the stopping client's — and none ever was. A host from a craze
+before the mark writes none: its row can be upserted, closing or
+unreachable, for a second or more after its receipt, until its host has
+exited. The session list's own poll and `craze ps --no-hub` keep the same
+promise.
+
 On one connection, the lines that carry the roster's cursor — `roster`
 notifications and `sessions.list` replies — are written in the order their
 roster was taken: a cursor never goes back from one line to the next. A
@@ -449,12 +516,15 @@ same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
 The hub serves `hello`, `sessions.list`, `sessions.subscribe`,
-`session.connect`, `session.create` and `sessions.createOptions`; every other
-session-scoped method sent to it is refused `unsupported`, reason
-`host_only`. `session.create` is neither session-scoped (its session does not
-exist until it answers) nor mutating (the hub mints no client ids and keeps no
-command receipts: its idempotency is its own `requestId`).
-Nor is `sessions.createOptions`, an endpoint-level read.
+`session.connect`, `session.create`, `sessions.createOptions`,
+`sessions.saved` and `session.reopen`; every other session-scoped method sent
+to it is refused `unsupported`, reason `host_only`. `session.create` is
+neither session-scoped (its session does not exist until it answers) nor
+mutating (the hub mints no client ids and keeps no command receipts: its
+idempotency is its own `requestId`). Nor is `session.reopen`, which names a
+saved session no host serves until it answers, and whose retry safety is the
+session's claim. Nor are `sessions.createOptions` and `sessions.saved`,
+endpoint-level reads.
 
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
@@ -465,7 +535,7 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `session.attach` | | `cursor?`, `when?`, `budget?` | `subscription`, `session`, `ready`, `after`, `snapshot?`, `reset?` | see [Attach, resume and snapshots](#attach-resume-and-snapshots) |
 | `session.detach` | | `subscription` | `{}` | ends this connection's attachment; the reply is its terminal acknowledgement |
 | `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings`, `lastTurn?` | a read, not a cut of the stream; `lastTurn` is [the last turn](#the-last-turn)'s ending |
-| `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot, main or one child's, no subscription |
+| `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot of the whole session with one sub-agent's entries budgeted first, no subscription |
 | `session.sync` | | — | `seq` | the reply barrier with no command ([below](#the-reply-barrier)) |
 | `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`) | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone |
 | `session.cancel` | ✓ | `turnId?` | `outcome`, `turn`, `reported` | with no `turnId`, cancels **the current turn** — craze's own or the agent's, whichever holds the session when the host validates the call (see [The foreign turn](#the-foreign-turn)); a named turn that is not current is `stale_turn` |
@@ -486,6 +556,8 @@ Nor is `sessions.createOptions`, an endpoint-level read.
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
 | `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?`, `title?` (no `sessionId`, no `commandId`; `title` where `hello` says `createTitle`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 | `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
+| `sessions.saved` | | `workspace?`, `limit?`, `subAgents?` | `sessions[]` (each a `SavedSession`), `more` | the hub's, where its `hello` says `reopen: true`: the saved sessions — not running, each with the `id` that reopens it — see [`sessions.saved`](#sessionssaved); a hub without it answers `unsupported` (reason `unsupported`, or `unknown_method` from a hub before it); `unsupported` on a host, reason `hub_only` |
+| `session.reopen` | | `id` (a `sessions.saved` id; no `sessionId`, no `commandId`) | `session` (a roster row), `joined` | the hub's, where its `hello` says `reopen: true`: a saved session ensured running — joined where a host serves it, loaded in a host the hub starts otherwise — answered once its start is done; see [`session.reopen`](#sessionreopen); a hub without it answers `unsupported` (reason `unsupported`, or `unknown_method` from a hub before it); `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
@@ -540,6 +612,9 @@ then on a `session.attach` on any connection is `unavailable`, reason
 `closing`, so a client that reads the receipt and attaches is never
 half-attached to a session on its way out; an attachment that was already
 made (pending, live or closing) goes on to the session's end like any other.
+And before the receipt is sent the host has marked its registry entry
+`stopping` ([The registry](#the-registry)), so the hub's roster lists it no
+more ([The hub's roster](#the-hubs-roster)).
 
 Any client may stop the session, and a stop while one is under way — from
 another client, or the same `commandId` resent — is answered `{}` too and
@@ -721,9 +796,19 @@ reads the aside's line, before the aside starts. It is served, and refused
 Returns one bounded snapshot with no subscription — the same codec and
 windowing an attach's own snapshot uses (newest entries first, up to the
 budget, with an omitted-entry ledger telling a client what it is missing).
-`agentId` names a running sub-agent's own transcript instead of the main
-one; an unknown id is `unknown_subagent`. `budget.snapshotBytes` defaults to
-4 MiB and is capped at 8 MiB regardless of what is asked.
+The result is always the whole snapshot — the main transcript and every
+sub-agent's, in the codec an attach's snapshot uses, restorable as any other.
+`agentId` changes only who gets the room first: the mandatory sections, then
+the main transcript's newest entry (so the snapshot restores exactly as any
+other, and is refused for size exactly when the same snapshot without
+`agentId` would be), then the named sub-agent's entries, newest first, then
+what remains of the main transcript's, then every other sub-agent's in the
+order they were created. A sub-agent the roster names that has no transcript
+of its own (a cursor task) has nothing to put first, and the answer is the
+plain snapshot. An id that neither a sub-agent transcript nor a roster row
+names is `unknown_subagent`; an empty `agentId` is the plain snapshot.
+`budget.snapshotBytes` defaults to 4 MiB and is capped at 8 MiB regardless of
+what is asked.
 
 This is deliberately **not** a page API over older history. An entry's id
 names the event that created it, not its latest contents — a tool entry is
@@ -828,7 +913,12 @@ schema does not define, and for `title` on a hub whose `hello` has no
 `bad_request`). A `cwd` that is no existing directory and a provider
 this craze cannot start are `bad_request` too, checked only for a create that
 will start a session: a repeat (below) is answered without them. A host that fails to spawn, or to become ready, is
-`unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
+`unavailable`, reason `spawn_failed` — the hub has ended it. A host that
+cannot be started because the hub's own craze is gone from its path (an
+upgrade removed it) is the same refusal, its message naming that path and the
+hub's pid to stop — `this hub's craze (<path>) was replaced by an upgrade:
+stop this hub with kill <pid> (no session ends) and run this again` — and the
+hub serves on: a client shows the message as it is. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
 host's first error line. For a start that failed because its agent exited
@@ -973,6 +1063,300 @@ given no answer — says no `createOptions` in its `hello` and answers the
 method `unsupported`, reason `unsupported`. A host answers it `unsupported`,
 reason `hub_only`.
 
+### `sessions.saved`
+
+The hub's: the **saved sessions** — the sessions of the hub's own session
+index (its `CRAZE_HOME`'s `sessions.jsonl`) that no running host serves —
+newest first, each with the `id` that reopens it. It is what a client's
+"resume" list offers; [`craze ps --saved`](cli.md#craze-ps) prints it.
+
+```json
+{"jsonrpc":"2.0","id":"4","method":"sessions.saved","params":{"workspace":"/home/me/projects/lumen","limit":20}}
+{"jsonrpc":"2.0","id":"4","result":{"sessions":[{"id":"0190ab12-cd34-7ef0-8123-456789abcdef","crazeSessionId":"0190ab12-cd34-7ef0-8123-456789abcdef","provider":"cursor","providerSessionId":"7c1f9e2a-55b0-4d8e-9a43-1f0e2d3c4b5a","workspace":"/home/me/projects/lumen","title":"fix the flaky test","createdAt":"2026-10-12T09:00:00Z","updatedAt":"2026-10-12T10:00:00Z"},{"id":"grok:4f1e2d3c","provider":"grok","providerSessionId":"4f1e2d3c","workspace":"/home/me/projects/lumen","createdAt":"2026-10-11T09:00:00Z","updatedAt":"2026-10-11T10:00:00Z"}],"more":false}}
+```
+
+**Params**, each optional; `{}` or none at all lists the 50 newest:
+
+| member | meaning |
+|---|---|
+| `workspace` | only the sessions whose directory is exactly this one: an absolute path (the hub cleans it first), at most 4096 characters |
+| `limit` | the most sessions to list, an integer from 1 to 200; 50 when absent |
+| `subAgents` | `true` lists the sessions a sub-agent ran too (an [unattended](cli.md#craze-new-wait) session: `craze new --wait`'s, `craze send`'s reload of one), each marked `subAgent: true`; absent or `false` leaves them out |
+
+A member it does not define is `bad_request`, reason `unknown_field`. A
+`null` (the params or a member), a member given twice, a member of another
+type, an empty or relative `workspace` and a `limit` outside 1–200 (a
+fraction, an exponent such as `1e2`, or a string included) are
+`bad_request`.
+
+**Which sessions.** The session list's own choice of its saved rows — one
+function computes both:
+
+1. One per craze id: its newest row, whatever it is — the row a load of the
+   craze id loads (`craze serve --load` and [`session.reopen`](#sessionreopen)
+   take the newest row carrying it). An index row from a craze before craze
+   ids (no `crazeId`) is the row it is, by its provider and provider session
+   id.
+2. That row is listed only when it can be resumed: of a provider this craze
+   can resume (`cursor`, `grok`, `gx`, `native`), and within the bounds
+   below. A craze id whose newest row cannot be — a newer craze's row of a
+   provider this one does not know, a malformed row — is not listed at all,
+   never by an older row a load would not take.
+3. Less every running session: every live host in the
+   [registry](#the-registry) — the whole `$HOME`'s, whatever namespace
+   started it — counts by its craze id and by its provider and provider
+   session id, and a row is running when either matches (another craze
+   directory's index can have given the same provider session another craze
+   id). **A host whose entry is marked `stopping` is not counted**, so a
+   stopped session is listed saved as soon as it leaves the roster, never in
+   neither list.
+
+Then, in this order: the `workspace` filter (an exact match on the row's
+directory); the sub-agent filter; newest first by `updatedAt`, ties by `id`;
+and the limit. Every filter runs before the cut: `more` is `true` when
+sessions the filters kept were left out, by the limit or by the result's
+bound. No workspace is `stat`'ed, so a
+hung filesystem cannot stall a listing, and a session whose directory has
+gone is still listed (a reopen refuses it).
+
+**`SavedSession`:**
+
+| member | |
+|---|---|
+| `id` | what reopens it, opaque to a client: its craze session id, or `<provider>:<providerSessionId>` for a row with none — the form `craze serve --load` takes. At most 512 bytes |
+| `crazeSessionId?` | its craze session id, a token a load takes: `[A-Za-z0-9._-]`, at most 128 bytes, never `.` or `..`; absent for a row with none |
+| `provider` | its provider id |
+| `providerSessionId` | the provider's id for its last agent session; at most 512 bytes |
+| `workspace` | the directory it ran in, absolute, as its index row holds it; at most 4096 bytes |
+| `title?` | its newest row's title, cut to 120 characters (the index is a file a person can edit); absent for none |
+| `createdAt`, `updatedAt` | its index row's times, in UTC; `createdAt` is `0001-01-01T00:00:00Z` for a row that records none |
+| `subAgent?` | `true` for a sub-agent's session, listed only when `subAgents` asked for them; absent otherwise |
+
+**Bounds.** An index row over a bound — its craze id not a token a load
+takes (above: `craze serve --load` claims the session by it, and a craze id
+with a `:` would read as another row's legacy key), its id or provider
+session id over 512 bytes, its workspace over 4096 bytes or not absolute —
+or with a time
+that cannot be written in UTC with a four-digit year
+(`9999-12-31T23:59:59-01:00` is the year 10000 in UTC) is malformed: not
+listed, and a craze id whose newest row it is not listed at all. The bounds
+are bytes; the [schema](#the-published-schema)'s
+`maxLength`, which counts characters (JSON Schema cannot count bytes), states
+a weaker one. The whole result is at most 1 MiB: the hub drops trailing
+sessions to keep within it, and says `more`.
+
+**An index or registry it cannot read.** An index that cannot be read is
+answered as [`sessions.createOptions`](#sessionscreateoptions) answers one:
+no sessions, `[]`, and the hub's log says why. A registry that cannot be read
+is refused `unavailable`, reason `host_unreachable` — listing without taking
+the running out would offer a running session as saved — and so is a registry
+holding a live host's entry that cannot be read (its session cannot be
+named), as [`session.create`](#sessioncreate) refuses one; the hub's log says
+why (the refusal names no path).
+
+Every call reads the index and the registry again; nothing is cached.
+
+**Refusals.** The connection capability `reopen` says the hub serves it, and
+[`session.reopen`](#sessionreopen) too: a client checks it, and hides its
+resume entry without it. A hub that cannot answer it refuses it
+`unsupported` — reason `unsupported` from a hub given no answer,
+`unknown_method` (`-32601`) from a hub from before the method. A host answers
+it `unsupported`, reason `hub_only`.
+
+### `session.reopen`
+
+The hub's, where its `hello` says `reopen: true`: **ensure a saved session is
+running**. Its `id` is a [`sessions.saved`](#sessionssaved) id. If a host
+already serves the session, the hub joins it. Otherwise it starts a host that
+loads the session (`craze serve --load`). Either way it answers once the
+session's start is done. [`craze new --load`](cli.md#craze-new-load) asks for
+one.
+
+```json
+{"jsonrpc":"2.0","id":"5","method":"session.reopen","params":{"id":"0190ab12-cd34-7ef0-8123-456789abcdef"}}
+{"jsonrpc":"2.0","id":"5","result":{"session":{"hostId":"3c4d5e6f7a8b","sessionId":"0190ab12-cd34-7ef0-8123-456789abcdef","host":{...},"status":"reachable","approximate":false,"row":{...}},"joined":false}}
+```
+
+**Params.** `id` is required: a non-empty string of at most 512 bytes, as
+`sessions.saved` gave it — the craze session id, or
+`<provider>:<providerSessionId>` for an index row with none. It is opaque to
+a client. A member the schema does not define is `bad_request`, reason
+`unknown_field`. A `null` (the params or `id`), a member given twice, an `id`
+of another type, and an empty or oversized `id` are `bad_request`. There is
+no `requestId` (below).
+
+**The result.** `session` is the session's roster row, read fresh from its
+host once the hub has let go of it, as [`session.create`](#sessioncreate)
+reads one. It is approximate as any roster row is, and also when that fresh
+read fails: the reopen is still a success, and `session` is the row the hub
+builds from the registry, `row` absent. Treat such a row as a create's. A
+legacy id's session carries the craze id its host gave it. **Bind to its
+`hostId`**: that is where [`session.connect`](#the-hub-splice) reaches the
+session. `joined` is `true` when a host already served the session and the
+hub joined it, and `false` when the hub started a host to load it.
+
+**What the hub does.** The reopen is admitted as a create is: it counts
+against the 16 creates in flight (`unavailable`, reason `busy`, past them),
+it keeps the hub from its idle exit, and a hub tearing down refuses it
+`closing`. It then runs on a goroutine of its own, so a waiter that
+disconnects does not cancel it.
+
+1. **Resolve.** The `id` is looked up in the hub's own session index (its
+   `CRAZE_HOME`'s `sessions.jsonl`) to the row a load of it loads, as `craze
+   serve --load` looks one up: a craze id names its newest row,
+   `<provider>:<providerSessionId>` the row of that key. A legacy key whose
+   row has since been given a craze id (a host loaded it, and minted one)
+   resolves to that craze id and its newest row. An id no row has is
+   `unknown_session`. That row decides, as it decides whether
+   `sessions.saved` lists the session: one of a provider this craze cannot
+   resume, or malformed, is `not_accepting`, reason `not_resumable` (`that
+   session's provider "<id>" is not one this craze can resume`, `that
+   session's index row is malformed`) — never reopened in an older row's
+   place — and so is an index the hub cannot read. Nothing is `stat`'ed
+   here.
+2. **Find the holder.** One host serves a session: the one holding its
+   claim ([the session lock](#the-session-lock-sq16)), which every loader
+   takes before it loads the session. (A TUI-hosted session whose claim
+   could not take its lock file runs unclaimed.) The hub reads the
+   [registry](#the-registry), the whole `$HOME`'s, whatever namespace
+   started the host, for a live host serving the session: by its craze id, or
+   by its provider and provider session id (best effort: an entry carries the
+   latter only once its engine is ready, and the claim catches what this
+   misses). A registry it cannot read, or a live host's entry in it, is
+   `unavailable`, reason `host_unreachable`: whether a host serves the
+   session cannot be known. Of several hosts, the hub joins one serving it
+   before it waits for one on its way out, and waits for one it has looked
+   past (below) only when there is no other; of several alike, the newest.
+   No wait ends on a host the hub would not join.
+   - **A host serving it** is joined: dialled, attached with `when: "ready"`
+     and no prompt, and its start waited for (below). A host the hub joins
+     is **never the hub's to stop**. Whatever its start comes to — a start
+     that failed or ran past the budget, a lost connection, a teardown — the
+     hub sends it no `session.stop` and no signal: another client may be
+     attached to it. A start that failed is `not_accepting`, reason
+     `start_failed`, its `data.cause` the host's first error line; a host
+     that cannot be reached is `unavailable`, reason `host_unreachable`.
+     `joined` is `true`. The answer names the session it was asked for: a
+     host that no longer serves it when the hub reads its row — a TUI-hosted
+     session whose engine changed meanwhile, its row or its registry entry
+     naming another session, or an attach refused `unknown_session` — is not
+     the answer, and the hub looks again (below). Found again with its entry
+     as it was then (its rewrite not landed yet), it is waited for, as a
+     holder is, until that entry changes or its process has gone; it is
+     never joined again on the same entry.
+   - **A host on its way out** is waited for until its process has gone,
+     and the hub then looks again. That is a host whose entry is marked
+     [`stopping`](#the-registry), one whose attach is refused `unavailable`,
+     reason `closing` (a stop the hub raced, or a host from before the mark,
+     which never writes one), and one that cannot be dialled, or whose
+     connection is lost, once its entry has gone or is marked. A stopping
+     host unlinks its entry before it releases the session's claim, so
+     neither the mark nor the entry's absence says the session can be loaded
+     again; the process having gone does. An attach refused `closing` while
+     the host's entry still serves the session, unmarked, may be only an idle
+     check's (the host deciding whether to stay, which it may): the hub
+     tries that host again once it has waited a poll (20 ms) for it — and so
+     again, a poll later, when that host then cannot be dialled or its
+     connection is lost (a host from before the mark closes its socket
+     before it unlinks its entry), never `host_unreachable` for it.
+   - **No host** means a spawn. The hub first checks the session's workspace
+     is still a directory: one that is not is `not_accepting`, reason
+     `not_resumable` (`that session ran in <dir>, which is no longer a
+     directory`). It then spawns `craze serve --load <id>` with the
+     workspace as its working directory, as `craze send` reloads a session:
+     a person's session with the plain defaults, a sub-agent's (unattended)
+     session with its recorded mode, permission mode, model and effort, and
+     `--unattended`. Never `--provider`, `--workspace` or `--title`: the row
+     decides where and as what the session runs. The host's ready line
+     decides what follows:
+     - `ok`: the session's own host. Its start is waited for (below), and a
+       start that fails or runs past the budget stops it, as a create stops
+       its own; so does its row naming another session, and the hub looks
+       again. `joined` is `false`.
+     - `held`: another loader holds the session's claim (another reopen,
+       another hub, the session list, `craze send`, a direct `craze serve
+       --load`). This host exits by itself, and the holder is never touched.
+       The hub waits until the holder's registry entry serves the session
+       (it joins it) or the holder's process has gone (it spawns again).
+     - refused because the session index was busy or changed: `unavailable`,
+       reason `busy`. Any other refusal of the session (no such row any more,
+       a row that cannot run where it ran) is `not_accepting`, reason
+       `not_resumable`, in the host's words.
+     - any other not-ok line, or none: `unavailable`, reason `spawn_failed`.
+       A host that cannot be started because the hub's own craze is gone from
+       its path is `spawn_failed` too, in words naming the remedy, as for a
+       create.
+   - **Waiting** for holders may take 20 s in all — only the time spent
+     waiting counts, not a join's or a spawn's own — and a reopen spawns at
+     most 3 hosts. A holder still there when the 20 s are spent is
+     `unavailable`, reason `busy`: `that session is held by host <hostId>
+     (pid <pid>), which has not finished stopping; try again`. So is a
+     holder alive with no entry serving the session for that long (one whose
+     control socket never bound, say), and a host found again as it was
+     when it no longer served the session (`…, which is still moving to
+     another session; try again`). A fourth spawn wanted, and a
+     fourth host found no longer serving the session (each host counted
+     once, however often it is found), are `busy` too: `that session
+     changed hands <n> times while the hub reopened it; try again`.
+3. **The workspace on a join.** A host found serving the session is joined
+   even if the session's directory has since gone: only a spawn checks it.
+
+**Budgets.** A reopen takes at most **180 s** from its admission. Within
+that, the waits for holders take at most 20 s in all, each spawn's ready line
+10 s, each dial its own 5 s, and each start — the agent's `initialize`, which
+has no deadline of its own, its `session/load` (bounded by craze's ACP client
+at 90 s, past which the start fails) and the catalog's wait — at most **150
+s** from its dial, every one of them cut to what is left of the 180 s. A
+start past its 150 s is `not_accepting`, reason `start_failed`, `data.cause`
+`the session did not start within 2m30s`. A reopen whose 180 s pass before
+the session is running is `unavailable`, reason `busy`: `that session was
+not running within the reopen's 3m0s; try again` (a host it started for it
+stopped, a host it joined left alone). Two things are not bounded: the index
+read and the workspace's `stat`, as a create's are not. A client allows **at
+least 200 s** for the answer.
+
+**One short connection per reopen.** The hub answers a connection's
+requests in order, and a reopen holds its connection until it answers. A
+client sends each reopen on a connection of its own, as it sends a create,
+and never on the connection that holds its roster subscription.
+
+**Retry by session.** `session.reopen` means "ensure this session is
+running": its safety comes from the session's claim, not from a request id
+(the one exception is a TUI-hosted session running unclaimed, above).
+Two reopens at once — on one hub, on two hubs, or racing any other loader,
+by the same id or by a legacy id and its craze id — end on **one host**: the
+loser's spawn is answered `held`, and it joins the winner. A client that lost
+an answer (its connection dropped, its deadline passed) sends the same `{id}`
+again on a fresh connection and ends on whatever host serves the session
+then. So across tries the `hostId` and `joined` may differ (the first try's
+host may have idled out meanwhile), and a try sent after the session was
+explicitly stopped reopens it again, by design: a client stops retrying when
+its user cancels.
+
+**Idle.** A reopened host follows the normal idle rules. Once no client is
+attached it exits after `host_idle_exit` idle — at most 5 minutes while the
+session has had no prompt from craze since it loaded (its replay is not one),
+as a create with no prompt does. A reopen nobody then attaches to is gone
+again within those minutes.
+
+**Refusals**, in sum:
+
+| answer | when | a client |
+|---|---|---|
+| `unknown_session` | no index row has the id (it was evicted, or never there) | final: drop the row |
+| `not_accepting`, reason `not_resumable` | the workspace is no longer a directory; the session's newest row is of a provider this craze cannot resume, or malformed; the index cannot be read; the host refused the session | final: drop the row |
+| `not_accepting`, reason `start_failed` | the session's start failed, or ran past its budget; `data.cause` says why | final: show the cause |
+| `unavailable`, reason `busy` | a holder did not finish stopping within 20 s; the session kept changing hands (a fourth spawn wanted, or a fourth host found no longer serving it); the reopen's 180 s passed before the session was running; a host's index was busy or changed; 16 creates and reopens in flight | transient: offer to retry |
+| `unavailable`, reason `closing` | the hub is tearing down | transient: offer to retry |
+| `unavailable`, reason `host_unreachable` | the registry cannot be read, or the host serving the session cannot be reached | show the message |
+| `unavailable`, reason `spawn_failed` | the host could not be spawned, or did not become ready | show the message |
+| `bad_request` | bad params | a client bug |
+
+A host answers `session.reopen` `unsupported`, reason `hub_only`. A hub that
+cannot answer it refuses it `unsupported`, reason `unsupported`, and one from
+before it `unknown_method` (`-32601`): check `reopen` in its `hello` first,
+and hide the resume entry without it.
+
 ## Notifications
 
 A notification has no `id` and carries its subscription id in `params` — an
@@ -1072,7 +1456,7 @@ while one has not yet fully ended is `bad_request`, reason
 |---|---|
 | `cursor?` | `{incarnation, seq}` — where the client already is. Absent asks for a snapshot |
 | `when?` | `"ready"` (default) or `"now"` |
-| `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum; `snapshotBytes` is capped at 8 MiB |
+| `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum (4,096 items and 32 MiB; an absent member is the host's default, 1,024 items and 8 MiB); `snapshotBytes` is capped at 8 MiB |
 
 The item/byte budget bounds what the log holds for this subscription that
 its forwarder has not yet taken: a live record that would take it past
@@ -1305,7 +1689,9 @@ and **omitted when `false`**: `true` where the hub serves
 older hub and on one given no answer. An eighth, `createTitle`, is the hub's
 too and omitted when `false` the same way: `true` where its
 [`session.create`](#sessioncreate) takes a `title`, absent on a host and on an
-older hub.
+older hub. A ninth, `reopen`, is the hub's and omitted when `false` too:
+`true` where the hub serves both [`sessions.saved`](#sessionssaved) and
+[`session.reopen`](#sessionreopen).
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
@@ -1322,7 +1708,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `effort` | the provider has an effort/thinking-level setting |
 | `fastToggle` | the provider has a fast-mode toggle |
 | `subagentRows` | sub-agent rows are reported at all |
-| `subagentTranscript` | a sub-agent's own transcript can be read (`session.snapshot{agentId}`) |
+| `subagentTranscript` | a sub-agent's own transcript can be put first in a snapshot (`session.snapshot{agentId}`) |
 | `todos` | the provider reports a todo list |
 | `askCards` | the provider can ask permission/question cards |
 | `planCards` | the provider can ask plan-approval cards |
@@ -1419,6 +1805,10 @@ there, and a client built before the method ignores the member. Its
 `capabilities.createTitle` is absent on an older hub, which refuses a create
 naming a `title` `unknown_field`: a client sends no `title` there (and says
 why), and a client built before it ignores the member and sends none.
+`sessions.saved` has no capability of its own in this release: an older hub
+answers it `unsupported`, reason `unknown_method`, which a client takes as a
+hub that cannot list the saved sessions (`craze ps --saved` then reads the
+index itself).
 
 ## The foreign turn
 
@@ -1623,6 +2013,14 @@ replay, or a document read before a delta and folded after it never brings
 back a list the session has moved past — a model a reload took away never
 reappears. A new incarnation is a new session: its snapshot replaces the
 fold, and revisions start again from `0`.
+
+**Revisions may skip.** Within one incarnation a revision — the catalog
+section's and the info document's `catalogs.revision` alike — only grows, but
+a client must not expect every number: a native session numbers each reload of
+its list as the reload starts, and a reload overtaken by a later one publishes
+nothing under its number. A reader also sees only the revisions after it
+attached. A client compares revisions (higher wins, the same revision is the
+same list) and never counts them or treats a gap as a lost update.
 
 A catalog-only delta prints no `craze prompt --json` line, but takes a `seq`
 like every event. The section is additive: no codec version bump; the method
@@ -1879,6 +2277,15 @@ unanswered **must not retry that create automatically unless it reuses its
 first create started (or joins its start if it is still running), while a new
 id is a new create, and can start a second session.
 
+**A reopen, sent again.** [`session.reopen`](#sessionreopen) has no request
+id: its safety is the session's claim, which lets one host serve a session at
+a time, and every reopen joins that host (a TUI-hosted session running
+unclaimed excepted). A client that lost a reopen's
+answer sends the same `{id}` again, once, on a fresh connection; the host id
+and `joined` may differ from the first try's. Its `not_accepting` refusals
+(`not_resumable`, `start_failed`) are final for that session, not "try
+later": nothing is resent under them.
+
 ### The reason table
 
 Every reason a host or the hub sends, grouped by its one code — a reason is
@@ -1887,7 +2294,7 @@ client never mistakes one for a host's own answer — no host ever sends them.
 
 | code | reasons a host or the hub sends |
 |---|---|
-| `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed` |
+| `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed`; the hub's `not_resumable` |
 | `aborted` | `command_aborted`, `set_outcome_unknown`, `bad_catalog`, `context` |
 | `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `aside_busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |
@@ -1929,7 +2336,7 @@ craze's own codes directly and does not need this table.
 | `unknown_ask` | `UnknownApproval` | craze's "ask" is shed's "approval" |
 | `already_submitted` | `AlreadySubmitted` | |
 | `already_resolved` | `AlreadyResolved` | |
-| `not_accepting` | `NotAccepting` | did not run — a gate refusal; `protocol.Retry` is true, and craze resends the **same** `commandId`, which is exactly `NotAccepting`'s own posture: "not yet, try later" |
+| `not_accepting` | `NotAccepting` | did not run — a gate refusal; `protocol.Retry` is true, and craze resends the **same** `commandId`, which is exactly `NotAccepting`'s own posture: "not yet, try later". A `session.reopen`'s `not_resumable` and `start_failed` are the exception: final for that session ([its refusals](#sessionreopen)) |
 | `foreign_turn` | `NotAccepting` | "the session will not take this send-now right now" is exactly `NotAccepting`'s posture, but unlike `not_accepting` and `in_progress`, `protocol.Retry` is **false**: retrying under the same `commandId` after the foreign turn ends replays the stored `foreign_turn` refusal rather than trying again, so a later attempt needs a **new** `commandId` |
 | `in_progress` | `NotAccepting` | did not run under a new attempt — it is this command's own attempt, still running; `protocol.Retry` is true (mandatory: it is the safe way to learn the answer). A resend of a command still running reads the same way to a caller: "not yet, try later" |
 | `stale_model` | `NotAccepting` | did not run — refused before the provider was ever asked, because the session had already left the model the change was bound to. `protocol.Retry` is true: craze resends the **same** `commandId` once the session is back on that model, judged fresh, never as a replay. This is not an argument error — `NotAccepting`'s "will not take this right now" is the closer shed posture, and it is the closest fit shed has, not an exact one: a shed caller should still consult craze's own `data.code` (and `protocol.Retry`) rather than assume shed's `NotAccepting` alone carries the "resend once the model comes back" rule |
@@ -2059,8 +2466,8 @@ Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
 schema does not describe, or vice versa, fails the build — the hub's
-`session.create` and `sessions.createOptions` among them, which a host answers
-`unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
+`session.create`, `sessions.createOptions` and `sessions.saved` among them,
+which a host answers `unsupported`, reason `hub_only`, like `session.connect`. The event and snapshot codecs' own
 hand-shaped wire structs get the same treatment in `internal/agent`
 (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
 (`TestSnapshotSchemaCoversTheCodec`), since this package cannot import
@@ -2246,7 +2653,9 @@ notification, until it is cancelled — `set_commands` and `set_skills` — an
 agent's whole command list, `{"commands":[{name, description}]}`, and the
 disk skills a scan found, `{"skills":[{name, description}]}`, which a `slash`
 host publishes as a live session does — and `unlist` — a `--registry` host
-leaving the registry while it keeps serving the connections it has). The
+leaving the registry while it keeps serving the connections it has — and
+`mark_stopping` — a `--registry` host's entry marked `stopping` while it
+serves on). The
 binary has no flag for the `modelsRefresh`, `aside` or `slash` opt-ins yet,
 so its host refuses the first two features and publishes no slash catalog,
 as an older host does: `stage_models` and `hold_aside` change nothing there,
@@ -2499,10 +2908,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1
 The hub's result. `hostId`, `crazeVersion` and `pid` are this hub's own.
 `rosterSubscribe`, `sessionCreate`, `connect` and `createOptions` are what
 the recipe uses (`createTitle` says its create would take a `title`, which
-the recipe does not send):
+the recipe does not send; `reopen` is what [the reopen cell](#reopening-a-saved-session-in-the-recipe)
+uses):
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"dev","pid":5150},"capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}
 ```
 
 **5. What a create can start.**
@@ -2676,6 +3086,102 @@ fake host whose ready line never came is ended, and a fake host always
 unlists itself before the cleanup looks. `host_cleanup` is the backstop: it
 stops a hub or host a failed run leaves.
 
+### Reopening a saved session in the recipe
+
+A client's resume of a saved session — [`sessions.saved`](#sessionssaved)
+and [`session.reopen`](#sessionreopen) — is tested the same way, in a run of
+its own. `tests/cli/test_client_recipe.py`'s second test is its executable
+form. The environment is the recipe's with one change: the fake agent's
+script is `grok-load`, which answers every `session/load` by replaying a
+short transcript (and refuses `session/new`, so this run creates nothing). A
+session index holding one saved grok session is seeded before the first
+bridge starts the hub.
+
+**1 and 2.** Run the recipe's steps 1 and 2, then change the script and seed
+the index:
+
+```sh
+R=/tmp/craze-recipe
+sed -i.bak 's/CRAZE_FAKE_SCRIPT=grok-echo /CRAZE_FAKE_SCRIPT=grok-load /' "$R/clean"
+printf '%s\n' '{"sessionId":"recipe-saved","provider":"grok","cwd":"/tmp/craze-recipe/work","title":"a saved session","pinned":false,"createdAt":"2026-10-12T09:00:00Z","updatedAt":"2026-10-12T10:00:00Z","crazeId":"0192f0aa-6666-7000-8000-0000000reopen"}' > "$R/craze-home/sessions.jsonl"
+```
+
+**3. Bridge A, and what is saved.** The hub's `hello` says `reopen`, and
+`sessions.saved` lists the seeded session, its `id` its craze id:
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" a craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/a.in"
+"$R/reply" a 1 | grep -F '"reopen":true'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"sessions.saved","params":{}}' >> "$R/a.in"
+"$R/reply" a 2
+```
+
+```json
+{"jsonrpc":"2.0","id":2,"result":{"sessions":[{"id":"0192f0aa-6666-7000-8000-0000000reopen","crazeSessionId":"0192f0aa-6666-7000-8000-0000000reopen","provider":"grok","providerSessionId":"recipe-saved","workspace":"/tmp/craze-recipe/work","title":"a saved session","createdAt":"2026-10-12T09:00:00Z","updatedAt":"2026-10-12T10:00:00Z"}],"more":false}}
+```
+
+**4. Reopen it, on a connection of its own.** Bridge B says `hello` and
+sends `session.reopen`. The hub starts a host that loads the session and
+answers once its start is done, `joined` `false`; `host-id` keeps the answer
+row's host id, where the session is reached. The bridge's stdin then ends:
+one short connection per reopen.
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" b craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/b.in"
+"$R/reply" b 1
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"session.reopen","params":{"id":"0192f0aa-6666-7000-8000-0000000reopen"}}' >> "$R/b.in"
+"$R/reply" b 2 200
+"$R/reply" b 2 | grep -o '"session":{"hostId":"[0-9a-f]*"' | cut -d'"' -f6 > "$R/host-id"
+"$R/reply" b 2 | grep -F '"joined":false'
+```
+
+**5. Running, it is no longer saved; reopened again, it is joined.** On
+bridge A `sessions.saved` is now `{"sessions":[],"more":false}`. Bridge C's
+reopen of the same id answers `joined` `true`, the same `hostId`, and starts
+nothing.
+
+```sh
+R=/tmp/craze-recipe
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"sessions.saved","params":{}}' >> "$R/a.in"
+"$R/reply" a 3
+"$R/start" c craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/c.in"
+"$R/reply" c 1
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"session.reopen","params":{"id":"0192f0aa-6666-7000-8000-0000000reopen"}}' >> "$R/c.in"
+"$R/reply" c 2 200 | grep -F "\"hostId\":\"$(cat "$R/host-id")\"" | grep -F '"joined":true'
+```
+
+**6. Reach it by the answer's host id.** Bridge D connects to the host the
+answer named, says `hello` to it, attaches, and polls `session.snapshot` for
+the replayed answer:
+
+```sh
+R=/tmp/craze-recipe
+"$R/start" d craze bridge --hub
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/d.in"
+"$R/reply" d 1
+printf '{"jsonrpc":"2.0","id":2,"method":"session.connect","params":{"sessionId":"%s"}}\n' "$(cat "$R/host-id")" >> "$R/d.in"
+"$R/reply" d 2
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"recipe"}}}' >> "$R/d.in"
+"$R/reply" d 3
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"session.attach","params":{"sessionId":"0192f0aa-6666-7000-8000-0000000reopen"}}' >> "$R/d.in"
+"$R/reply" d 4
+"$R/poll" d 10 '"kind":"assistant","text":"the workspace holds main.py and README.md"' session.snapshot '{"sessionId":"0192f0aa-6666-7000-8000-0000000reopen"}'
+```
+
+**7. Cleanup**, as the recipe's step 10, on bridge D: `session.stop` with
+`commandId` `"1"`, the `await` for `"reason":"session_closed"`, then
+`"$R/cleanup"`.
+
+A client that adopts reopen does what this run does: it checks `reopen` in
+the hub's `hello`; it sends each reopen on a short connection of its own,
+allowing at least 200 s for the answer; and it binds the session to the
+answer row's `hostId`.
+
 ## Reaching a host
 
 A host's socket lives in a **runtime namespace**, and everything a resolver
@@ -2773,12 +3279,13 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `ready` | Whether the engine has started |
 | `requestId`, `requestHash` | Only on a host the hub's [`session.create`](#sessioncreate) spawned, and absent otherwise: the create's `requestId` and its params' hash, fixed for the host's life — what a restarted hub joins a retried create by |
 | `pidStart` | The host process's start as its kernel records it, which the host reads of itself as it binds — on Linux clock ticks since boot (`/proc/<pid>/stat` field 22), on macOS microseconds since the epoch — fixed for the host's life: with `pid`, what tells the host from a later process given its pid, so a `craze new --wait` that never heard from the host it started ends that host and no other process. Absent when the host could not read it, and on hosts from crazes that predate it |
+| `stopping` | `true` once the host has begun to stop, and absent before. The host writes it itself, before anything of its stop can be seen — before a `session.stop`'s receipt is sent, first thing when a signal, its idle exit or a lost socket stops it, before a TUI-hosted session's quit closes its engine — and every later rewrite keeps it until the entry is unlinked as the host exits. Best effort: a mark the host cannot write is logged, and the stop goes on. A roster lists no stopping host (the hub's, the session list's own, `craze ps`); a resolver that finds a session to connect to may still find it while it exits, a session on its way out. Never written by hosts from crazes that predate it, which leave their entry as it was until they exit |
 
 This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
 session, so none of them is ever renamed or removed; members may be added
-(`requestId`, `requestHash` and `pidStart` were), and a reader ignores those it
-does not know.
+(`requestId`, `requestHash`, `pidStart` and `stopping` were), and a reader
+ignores those it does not know.
 
 The socket writes an initial entry at bind time, before any engine is
 attached (`crazeSessionId`, `provider` and the rest of the identity still
@@ -2793,7 +3300,9 @@ queued, but drops one whose engine has since been superseded — so it may
 never be written at all — and until a rewrite lands, or, if it fails, until
 the next one for that engine succeeds, the entry can still describe the
 previous engine, or, before the first engine is attached, the empty
-bind-time entry. A resolver treats the
+bind-time entry. The `stopping` mark is the exception: the host writes it
+directly, done before the step it precedes goes ahead — never queued behind
+those rewrites — and every rewrite after it keeps it. A resolver treats the
 entry as a pointer to a socket, not as the engine's live identity: `hello`
 and `sessions.list`, answered by the socket itself once dialed, are what
 actually says which engine is live.

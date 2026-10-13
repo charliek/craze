@@ -1296,7 +1296,7 @@ var (
 		"clock", "paintEveryEvent", "frozen", "frameStart", "terminalTitle", "lastTitle", "term", "shell",
 		"owner", "exit",
 		"host", "lastHost", "viewer", "sessionIndex", "crazeID", "resume", "loadSession", "claimSession",
-		"refuseLoad", "onEngine", "providerLocked", "persistProvider", "fallbackDefault", "pickedExplicit",
+		"refuseLoad", "onEngine", "onQuit", "providerLocked", "persistProvider", "fallbackDefault", "pickedExplicit",
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",

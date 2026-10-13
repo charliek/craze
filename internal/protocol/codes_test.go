@@ -38,7 +38,7 @@ func TestRetryIsTheFourCodesNothingRan(t *testing.T) {
 // have no code; and the lookups answer from the table.
 func TestTheReasonTableIsExhaustive(t *testing.T) {
 	shared := map[protocol.Code][]protocol.Reason{
-		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed"},
+		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed", "not_resumable"},
 		protocol.CodeAborted:      {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
 		protocol.CodeUnavailable: {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
 			"closing", "spawn_failed", "host_unreachable"},
@@ -180,8 +180,9 @@ func TestTheLimits(t *testing.T) {
 	}
 }
 
-// TestTheMethodTable pins §3.3's method list, the hub's session.create and
-// sessions.createOptions (plan 036 §3.4) last, and which of them a TUI host
+// TestTheMethodTable pins §3.3's method list, the hub's session.create,
+// sessions.createOptions (plan 036 §3.4), sessions.saved (plan 046 B2) and
+// session.reopen (plan 046 B3) last, and which of them a TUI host
 // answers unsupported, with which reason (X6): each an unsupported reason of
 // the table.
 func TestTheMethodTable(t *testing.T) {
@@ -203,7 +204,8 @@ func TestTheMethodTable(t *testing.T) {
 		"session.state", "session.snapshot", "session.sync", "session.prompt", "session.cancel", "session.disarm",
 		"session.queue.add", "session.queue.edit", "session.queue.remove", "session.queue.clear", "session.set",
 		"session.setTitle", "session.subagent.cancel", "session.stop", "session.models.refresh", "session.aside",
-		"session.aside.cancel", "asks.list", "asks.get", "asks.answer", "session.create", "sessions.createOptions"}
+		"session.aside.cancel", "asks.list", "asks.get", "asks.answer", "session.create", "sessions.createOptions",
+		"sessions.saved", "session.reopen"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("methods\n got %v\nwant %v", names, want)
 	}
@@ -216,6 +218,8 @@ func TestTheMethodTable(t *testing.T) {
 		"session.aside.cancel":   protocol.ReasonAsideUnsupported,
 		"session.create":         protocol.ReasonHubOnly,
 		"sessions.createOptions": protocol.ReasonHubOnly,
+		"sessions.saved":         protocol.ReasonHubOnly,
+		"session.reopen":         protocol.ReasonHubOnly,
 	}
 	if !maps.Equal(unsupported, wantUnsupported) {
 		t.Fatalf("host-unsupported %v, want %v", unsupported, wantUnsupported)

@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from conftest import REMOVED_CONFIG_ENV, both_modes, host_env_names  # noqa: F401
+from conftest import REMOVED_CONFIG_ENV, _argv, both_modes, host_env_names, marker_pids  # noqa: F401
 from test_tui import PTYCraze, _wait_entry, _wait_fake_gone, _wait_glob, quit_craze
 
 WAIT = 10.0
@@ -325,7 +325,7 @@ def test_bridge_stdout_write_failure_exits_one_not_a_signal(
     _wait_fake_gone(fake_agent_bin)
 
 
-def _popen_hub_bridge(craze_bin: Path, home: Path) -> subprocess.Popen:
+def _popen_hub_bridge(craze_bin: Path, home: Path, *flags: str) -> subprocess.Popen:
     """A long-lived `craze bridge --hub` for the TUI at HOME home: the test's
     environment otherwise, so the hub it starts carries the test's marker
     (conftest.marker_pids) and host_cleanup stops it."""
@@ -333,7 +333,7 @@ def _popen_hub_bridge(craze_bin: Path, home: Path) -> subprocess.Popen:
     env["HOME"] = str(home)
     env.pop("CRAZE_HOME", None)
     return subprocess.Popen(
-        [str(craze_bin), "bridge", "--hub"],
+        [str(craze_bin), "bridge", "--hub", *flags],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -414,3 +414,56 @@ def test_bridge_exits_once_its_reader_goes_away(
 
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)
+
+
+def _hub_files(home: Path) -> list[Path]:
+    """Everything a hub leaves in its namespace's registry directory: the
+    record and the lifetime lock hub.Ensure creates (hubs/<ns>.json, .lock)."""
+    return sorted((home / ".cache" / "craze" / "hubs").glob("*"))
+
+
+def test_bridge_no_start_without_hub_exits_one(craze_bin: Path, tmp_path: Path) -> None:
+    """plan 046 B-2: --no-start is valid only with --hub; alone it is a bridge
+    error like every other, exit 1."""
+    home = tmp_path / "home"
+    result = _run_bridge(craze_bin, home, ["--no-start"])
+    assert result.returncode == 1, result
+    assert result.stdout == b"", result.stdout
+    assert result.stderr == b"craze bridge: --no-start needs --hub\n", result.stderr
+
+
+def test_bridge_no_start_with_no_hub_exits_three_and_starts_none(craze_bin: Path, tmp_path: Path) -> None:
+    """plan 046 B-2 (SF-152): --hub --no-start with no hub running is exit 3
+    and the one line, and starts no hub: no hub record or lock, no process
+    carrying this test's marker (hub.Ensure would have started one). The
+    negative controls: without the exit-3 carve-out this is exit 1; with
+    Ensure in place of Find a hub is started and its files exist."""
+    home = tmp_path / "home"
+    runtime = os.environ["CRAZE_RUNTIME_DIR"]
+    result = _run_bridge(craze_bin, home, ["--hub", "--no-start"], CRAZE_RUNTIME_DIR=runtime)
+    time.sleep(0.5)  # a started hub would have written its record by now
+    assert _hub_files(home) == [], _hub_files(home)
+    assert not any(_argv(pid)[1:2] == ["hub"] for pid in marker_pids()), "a hub process was started"
+    assert result.returncode == 3, result
+    assert result.stdout == b"", result.stdout
+    assert result.stderr == b"craze bridge: no hub is running\n", result.stderr
+
+
+def test_bridge_no_start_splices_a_running_hub(craze_bin: Path, tmp_path: Path) -> None:
+    """plan 046 B-2: with a hub running, --no-start splices exactly as --hub
+    does: the hub's own hello answers on stdout."""
+    first = _popen_hub_bridge(craze_bin, tmp_path)  # starts the hub
+    try:
+        _send(first, _hello("hub"))
+        assert json.loads(_recv_line(first, timeout=3 * WAIT))["result"]["endpoint"]["kind"] == "hub"
+        second = _popen_hub_bridge(craze_bin, tmp_path, "--no-start")
+        try:
+            _send(second, _hello("hub"))
+            reply = json.loads(_recv_line(second, timeout=3 * WAIT))
+            assert reply["result"]["endpoint"]["kind"] == "hub", reply
+        finally:
+            second.stdin.close()
+            assert second.wait(timeout=WAIT) == 0
+    finally:
+        first.stdin.close()
+        first.wait(timeout=WAIT)

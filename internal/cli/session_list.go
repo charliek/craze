@@ -49,11 +49,13 @@ var (
 // subscription's — the hub of this HOME and CRAZE_HOME (the launcher's env,
 // the process's), started on demand — or, when the hub cannot be had, the
 // list's own poller's over this user's registry; its saved rows the index of
-// this CRAZE_HOME's, only the providers this build knows offered. A row the
-// hub lists carries no socket: Open, Stop and Cancel resolve it from the
-// registry when they act (entryOf).
+// this CRAZE_HOME's, read whole — roster.SavedSessions offers only the
+// providers this build can resume, after it has taken each craze id's newest
+// title from every row, as the hub's sessions.saved does (savedSessions). A
+// row the hub lists carries no socket: Open, Stop and Cancel resolve it from
+// the registry when they act (entryOf).
 func (s sessionList) Roster() tui.SessionRoster {
-	return hub.Roster(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+	return hub.Roster(s.l.env, &sessions.Store{})
 }
 
 // errNotReachable is a running row acted on whose host the registry no longer

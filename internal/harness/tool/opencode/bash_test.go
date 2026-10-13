@@ -2634,8 +2634,8 @@ func TestBashAbandonedStartsLeakOneEach(t *testing.T) {
 // leader here is a stub whose exit the test announces itself, late in the
 // shutdown, while the output never closes; the signals go to a real
 // TERM-ignoring shell in a session of its own, which SIGKILL ends. Were the
-// drain to restart the clock, each case would take 1.5 s longer than its
-// bound.
+// drain to restart the clock, each case would end a 2 s drain after the
+// leader's exit, 0.7–0.8 s past its bound.
 func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -2662,6 +2662,10 @@ func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 			g := &group{cmd: cmd, pid: cmd.Process.Pid, exited: make(chan struct{}), release: make(chan struct{}), reaped: make(chan struct{})}
 			ctx, cancel := context.WithCancelCause(context.Background())
 			closing := make(chan struct{})
+			// The clock starts before any timer is armed: took is then never
+			// less than exitAt, however late this goroutine runs after arming
+			// the leader's exit.
+			began := time.Now()
 			switch {
 			case tc.closeAt < 0:
 				cancel(tool.ErrClosing)
@@ -2675,7 +2679,6 @@ func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 				close(g.exited)
 				close(g.reaped)
 			})
-			began := time.Now()
 			why, _ := g.supervise(ctx, closing, time.Hour, nil, make(chan struct{}), nil)
 			took := time.Since(began)
 			if why != endAbort {

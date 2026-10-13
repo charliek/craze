@@ -62,7 +62,7 @@ func CreateOptions(ctx context.Context, socket string, who protocol.ClientInfo) 
 	}
 	defer hc.close()
 	if !hello.Capabilities.CreateOptions {
-		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: []string{lacksCreateOptions}}
+		return nil, lacking(hello.Endpoint, []string{lacksCreateOptions})
 	}
 	res, err := hc.call(protocol.MethodSessionsCreateOptions, protocol.CreateOptionsParams{})
 	if err != nil {

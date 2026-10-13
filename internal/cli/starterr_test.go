@@ -330,7 +330,7 @@ func TestNewSaysTheAgentsWordsThroughAHub(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = createThroughHub(stepCtx(t), env, protocol.CreateParams{Cwd: ws, Provider: "cursor", RequestID: id})
+			_, _, err = createThroughHub(stepCtx(t), env, protocol.CreateParams{Cwd: ws, Provider: "cursor", RequestID: id})
 			var perr *protocol.Error
 			if !errors.As(err, &perr) || perr.Data.Code != protocol.CodeNotAccepting || perr.Data.Reason != protocol.ReasonStartFailed {
 				t.Fatalf("the create: %v, want refused start_failed (hub log: %s)", err, hubLog(env)())

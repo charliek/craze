@@ -161,8 +161,11 @@ choice is `detachOn` in `internal/cli/launch.go`. See
 registry that every host already writes, so it knows each running session
 without being told. A client asks it for the roster (`sessions.list`), routes
 through it to a session (`session.connect`: it splices the connection to the
-session's host and steps out), asks it to start a session (`session.create`)
-and asks what can start (`sessions.createOptions`). `craze ps`, `craze new`,
+session's host and steps out), asks it to start a session (`session.create`),
+asks what can start (`sessions.createOptions`), asks for the saved
+sessions (`sessions.saved`) and asks to bring one back (`session.reopen`:
+it joins the host serving the session, or spawns one that loads it, the
+session's claim deciding between racing loaders). `craze ps`, `craze new`,
 `craze providers --hub` and the TUI's session list use it. It starts on
 demand, holds no session state, and exits once no client and no live host
 remain (60 seconds by default, `CRAZE_HUB_IDLE`); killing it loses nothing,

@@ -200,6 +200,19 @@ type Config struct {
 	// new session's craze id and rewrites the host's registry entry (plan 027
 	// §3.8–§3.9).
 	OnEngine func(*engine.Engine)
+	// OnQuit is told the program is ending, before the session's engine is
+	// closed for it (plan 046 B4, #93): a quit craze asked for — Ctrl+D,
+	// /exit, a second Ctrl+C, the list's quit — first thing in the command
+	// that closes the engine, and Run's exit tail, which every exit reaches
+	// (a signal's and a recovered panic's included), before it closes the
+	// engine. It may be called more than once, so it must be idempotent; it
+	// runs off the Update goroutine and may block briefly (a file's rewrite).
+	// Never for an engine a picker replaces: the program goes on. nil calls
+	// nothing — every test Config, every golden, the frame runner and the
+	// launch flow; internal/cli's TUI-hosted run marks its registry entry
+	// stopping (rundir.Host.MarkStopping), so no roster lists the session
+	// from then on.
+	OnQuit func()
 	// ClaimSession claims the row the resume picker is about to load, before
 	// anything is built (plan 027 §3.9, SQ16): it answers the row's durable
 	// craze id — a legacy row is given one first — and a release for the claim
@@ -315,7 +328,7 @@ func (c Config) viewing() Config {
 		return c
 	}
 	c.Session, c.NewSession, c.LoadSession, c.Resume = nil, nil, nil, nil
-	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
+	c.ClaimSession, c.RefuseLoad, c.OnEngine, c.OnQuit = nil, nil, nil, nil
 	c.LocalPresence = nil
 	c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
 	c.StartCheck = nil
@@ -730,8 +743,9 @@ type Model struct {
 	resumeErr     string
 	// refuseLoad is Config.RefuseLoad, which both pickers ask.
 	refuseLoad func(agent.Provider) error
-	// onEngine is Config.OnEngine.
+	// onEngine is Config.OnEngine, and onQuit Config.OnQuit.
 	onEngine        func(*engine.Engine)
+	onQuit          func()
 	providerLocked  bool
 	persistProvider bool
 	fallbackDefault bool
@@ -1781,6 +1795,7 @@ func New(cfg Config) Model {
 		claimSession:    cfg.ClaimSession,
 		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
+		onQuit:          cfg.OnQuit,
 		localPresence:   cfg.LocalPresence,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
@@ -2019,8 +2034,9 @@ func runErrAfterHangup(err error, hungUp bool) error {
 }
 
 // finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
-// is cleared, the terminal's colours are reset, the host hub releases, and the
-// session closes — a session list's roster still open, and any backend a
+// is cleared, the terminal's colours are reset, Config.OnQuit is told (plan 046
+// B4: a TUI-hosted session's registry entry says stopping), the host hub
+// releases, and the session closes — a session list's roster still open, and any backend a
 // switch retired whose close has not run, closed just before it (plan 030).
 // p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
 // own handler) and on a recovered panic, and every one of them lands here.
@@ -2057,6 +2073,13 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// this also covers a final that is not a Model. The terminal gets its own
 	// colours back on every exit path — before the engine's Close, which may block.
 	m.term.reset()
+	// The host this process serves says it is stopping (Config.OnQuit), before
+	// anything of the session is closed: SIGTERM, SIGHUP and a recovered panic
+	// reach only this, and a quit craze asked for has said it already (it is
+	// idempotent).
+	if m.onQuit != nil {
+		m.onQuit()
+	}
 	// The same reasoning, and the same shared pointer: this is the only place
 	// SIGTERM, SIGHUP and a recovered panic reach, and none of them ran
 	// requestQuit. A quit craze asked for has already done this, and a second
@@ -4477,6 +4500,9 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 // with it. The queue is left alone: the model is on its way out with it, and
 // clearing it would only restart the tick chain.
 //
+// Before all of it, the command tells Config.OnQuit (plan 046 B4): a
+// TUI-hosted session's registry entry says stopping before its engine closes.
+//
 // The host is released first, exactly as finishRun orders it (plan 015 §3.2):
 // the close may block, and a pane that is never released stays showing craze's
 // last state. It also means the cancelled cards the close produces are never
@@ -4503,7 +4529,14 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	eng := m.eng
 	h := m.host
 	sh := m.shell
+	onQuit := m.onQuit
 	return m, func() tea.Msg {
+		// The host this process serves says it is stopping before anything
+		// else of the quit (Config.OnQuit): no roster lists the session from
+		// here, its engine's close included.
+		if onQuit != nil {
+			onQuit()
+		}
 		// The user's command goes first and craze waits for it: this is the
 		// quit Ctrl+D, /exit and the second Ctrl+C all reach, and nothing the
 		// composer started may outlive the program that started it. The wait is

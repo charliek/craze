@@ -64,7 +64,11 @@
 // registry exactly as a craze host is — its socket in the runtime tree, its
 // entry and lifetime lock in the cache tree — so a hub finds it, and several
 // Hosts with ids of their own (Options.HostID, CrazeSessionID) are listed
-// side by side; the unlist op takes it out of the registry again (Unlist).
+// side by side; the unlist op takes it out of the registry again (Unlist),
+// and the mark_stopping op marks its entry stopping while it serves on
+// (MarkStopping, plan 046 B4). With Options.StoppingMark (and Stop) its
+// session.stop marks the entry before the receipt, as a real host's does;
+// without, it writes no mark, as a host from before plan 046.
 // cmd/craze-fake-host's --registry, --host-id and --session-id are the same,
 // and the wire fixtures' runner registers a two-socket fixture's Host for the
 // hub — the real internal/hub, in process — it runs in front of it

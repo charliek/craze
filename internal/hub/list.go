@@ -192,7 +192,9 @@ var directBudget time.Duration
 
 // Direct is the roster a hub would answer, read with no hub: one run of the
 // hub's own poll (roster.OpenHub) over env's registry — rundir.Hosts, which
-// sweeps the dead — asking every host once, as who, by the poll's own budgets
+// sweeps the dead; a host marked stopping is not listed (rundir.Serving), and
+// one that answered is read again first, as the hub's own poll does (plan
+// 046 B4) — asking every host once, as who, by the poll's own budgets
 // and cap. It answers once every host that can be listed has been heard from
 // (an answer, or a failure) or ctx ends, the hosts not heard from by then
 // listed as they stand (connecting). Its rows are built and bounded as the
@@ -210,6 +212,7 @@ func Direct(ctx context.Context, env rundir.Env, who protocol.ClientInfo) (proto
 	changed := make(chan struct{}, 1)
 	p := roster.OpenHub(roster.HubOptions{
 		Hosts: func() ([]rundir.Entry, error) { return hostsRead(env) },
+		Entry: func(id string) (rundir.Entry, bool, error) { return hostEntry(env, id) },
 		Publish: func(s roster.Snapshot) {
 			mu.Lock()
 			latest, have = s, true

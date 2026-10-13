@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -37,8 +38,11 @@ import (
 //  4. tui.Run hands every engine it installs to runHost.onEngine: the server
 //     serves it, a new session's id is claimed, and the registry entry is
 //     rewritten — again once the engine is ready.
-//  5. tui.Run returns after its exit tail has closed the engine, whose end
-//     closes each connection once what it admitted is written (X16 4). Then
+//  5. tui.Run's quit marks the registry entry stopping before it closes the
+//     engine (tui.Config.OnQuit, runHost.markStopping; plan 046 B4), so no
+//     roster lists the session from then on. tui.Run returns after its exit
+//     tail has closed the engine, whose end closes each connection once what
+//     it admitted is written (X16 4). Then
 //     runHost.close, before craze's deferred stderr is flushed — so a flush
 //     that blocks cannot hold the socket or a claim, and the teardown's own
 //     warnings are flushed — and deferred too, so every return after step 1
@@ -78,6 +82,11 @@ var teardownStep = func(string) {}
 // hostClose is controlHost.close's Host.Close: a seam for the test of a
 // teardown warning, (*rundir.Host).Close in production.
 var hostClose = (*rundir.Host).Close
+
+// hostMarkStopping is controlHost.markStopping's Host.MarkStopping: a seam
+// for the tests of a mark that fails (the stop goes on) and of the mark's
+// order, (*rundir.Host).MarkStopping in production.
+var hostMarkStopping = (*rundir.Host).MarkStopping
 
 // controlSocketOn is whether this run serves a control socket (plan 027 §4
 // item 6). Either switch turns it off and neither can turn it on against the
@@ -144,6 +153,16 @@ func (r *runHost) publish(eng *engine.Engine) <-chan struct{} {
 		return nil
 	}
 	return r.ctl.track(eng, st)
+}
+
+// markStopping marks the served socket's registry entry stopping
+// (controlHost.markStopping; plan 046 B4), when there is a socket: craze
+// serve's stop sequence first thing, and a TUI-hosted run's quit before its
+// engine closes (tui.Config.OnQuit). Idempotent.
+func (r *runHost) markStopping() {
+	if r.ctl != nil {
+		r.ctl.markStopping()
+	}
 }
 
 // close is the run's teardown: the socket first (controlHost.close), then
@@ -294,33 +313,39 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostR
 		return nil, err
 	}
 	h := &controlHost{
-		host: host,
-		// No Log: nothing may reach the terminal while the TUI owns it, and
-		// each connection's note reaches the session's journal through the
-		// engine (control_conn) — a headless host's too, whose log would
-		// only repeat it.
-		server: control.New(control.Options{
-			PeerCheck:      rundir.PeerCheck(os.Geteuid()),
-			HostID:         hostID,
-			Workspace:      workspace,
-			PermissionMode: permissionMode(force),
-			StartedAt:      started,
-			Stop:           stop,
-			// Every craze host's row carries the row facts (plan 030 §3.8),
-			// a TUI-hosted one's too: another craze's session list reads
-			// them the same way.
-			RowFacts: true,
-			// And every one counts its attached clients for them (plan 032
-			// §3.14): the TUI-hosted one its own TUI among them.
-			Presence:    true,
-			LocalClient: local,
-		}),
+		host:       host,
 		diag:       diag,
 		update:     host.Update,
 		wake:       make(chan struct{}, 1),
 		stop:       make(chan struct{}),
 		writerDone: make(chan struct{}),
 	}
+	opts := control.Options{
+		PeerCheck:      rundir.PeerCheck(os.Geteuid()),
+		HostID:         hostID,
+		Workspace:      workspace,
+		PermissionMode: permissionMode(force),
+		StartedAt:      started,
+		Stop:           stop,
+		// Every craze host's row carries the row facts (plan 030 §3.8), a
+		// TUI-hosted one's too: another craze's session list reads them the
+		// same way.
+		RowFacts: true,
+		// And every one counts its attached clients for them (plan 032
+		// §3.14): the TUI-hosted one its own TUI among them.
+		Presence:    true,
+		LocalClient: local,
+	}
+	if stop != nil {
+		// A session.stop marks the entry stopping before its receipt is
+		// queued (plan 046 B4): no client reads the receipt before every
+		// reader of the registry reads the host as stopping.
+		opts.StopAccepted = h.markStopping
+	}
+	// No Log: nothing may reach the terminal while the TUI owns it, and each
+	// connection's note reaches the session's journal through the engine
+	// (control_conn) — a headless host's too, whose log would only repeat it.
+	h.server = control.New(opts)
 	if local {
 		// Before Serve, so the TUI hears every change from the first.
 		h.presence = make(chan int, 1)
@@ -473,6 +498,22 @@ func (h *controlHost) writeLoop() {
 				r.landed.land()
 			}
 		}
+	}
+}
+
+// markStopping marks the registry entry stopping (plan 046 B4, #93): the host
+// has begun to stop, and from here no roster lists it. It is synchronous — a
+// direct rewrite (rundir.Host.MarkStopping), never queued for the writer,
+// whose later rewrites keep the mark — so it is done before whatever its
+// caller makes observable next: a session.stop's receipt
+// (control.Options.StopAccepted), the stop sequence's fence and engine close
+// (serveHost.stop), a TUI-hosted quit's engine close (runHost.markStopping).
+// Idempotent: a host marked already writes nothing. Best effort: a failure is
+// one line on diag and the stop goes on — the host then leaves the roster as
+// a host from before it did, when its entry is unlinked.
+func (h *controlHost) markStopping() {
+	if err := hostMarkStopping(h.host); err != nil && !errors.Is(err, rundir.ErrClosed) {
+		fmt.Fprintf(h.diag, "craze: control socket registry entry not marked stopping: %v\n", err)
 	}
 }
 
@@ -809,9 +850,9 @@ func refusal(err error) string {
 		}
 		return "that session is already running (pid " + pid + ")"
 	case errors.Is(err, atomicfile.ErrLockBusy):
-		return "the session index is busy — try again"
+		return hostspawn.IndexBusy
 	case errors.Is(err, sessions.ErrNotInIndex):
-		return "the session index changed — try again"
+		return hostspawn.IndexChanged
 	}
 	return err.Error()
 }

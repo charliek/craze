@@ -782,7 +782,7 @@ func TestAttendPromptOutcomes(t *testing.T) {
 			if tc.submit != nil {
 				f.submit = tc.submit
 			}
-			at := h.attend(context.Background(), f, tc.prompt, far())
+			at := h.attend(context.Background(), f, tc.prompt, far(), createStartWait)
 			if at.kind != attendStarted || at.prompt != tc.want || at.promptErr != tc.wantErr {
 				t.Fatalf("attend came to %+v, want %s (%q)", at, tc.want, tc.wantErr)
 			}
@@ -797,8 +797,11 @@ func TestAttendPromptOutcomes(t *testing.T) {
 }
 
 // TestAttendStartOutcomes: a start that fails is its first error line; one
-// past its deadline the bound's words; one cut by the hub's teardown is cut;
-// one whose connection went is lost. Each closes at once, sending nothing.
+// past its deadline the words of the bound it was given — a create's 60 s, a
+// reopen's start budget (plan 046 B3) — one cut by the hub's teardown is
+// cut; an attach refused closing is closing (a reopen's holder on its way
+// out); one whose connection went is lost. Each closes at once, sending
+// nothing.
 func TestAttendStartOutcomes(t *testing.T) {
 	h := &hub{}
 	for _, tc := range []struct {
@@ -806,29 +809,36 @@ func TestAttendStartOutcomes(t *testing.T) {
 		start    func(context.Context) error
 		ctx      func() context.Context
 		deadline time.Duration
+		bound    time.Duration
 		want     attendKind
 		cause    string
 	}{
 		{"failed", func(context.Context) error { return &remote.StartError{Text: "\n agent missing \nmore"} },
-			context.Background, step, attendStartFailed, "agent missing"},
+			context.Background, step, createStartWait, attendStartFailed, "agent missing"},
 		{"over its bound", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
-			context.Background, 50 * time.Millisecond, attendStartTimeout, "the session did not start within 1m0s"},
+			context.Background, 50 * time.Millisecond, createStartWait, attendStartTimeout, "the session did not start within 1m0s"},
+		{"over a reopen's bound", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
+			context.Background, 50 * time.Millisecond, 150 * time.Second, attendStartTimeout, "the session did not start within 2m30s"},
 		{"cut", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
 			func() context.Context {
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()
 				return ctx
-			}, step, attendCut, ""},
+			}, step, createStartWait, attendCut, ""},
+		{"refused closing", func(context.Context) error {
+			return &remote.Error{RPC: protocol.RPCRefused, Code: protocol.CodeUnavailable, Reason: protocol.ReasonClosing, Message: "the session is closing"}
+		},
+			context.Background, step, createStartWait, attendClosing, ""},
 		{"lost", func(context.Context) error {
 			return errors.New("remote: the stream ended before the session was ready")
 		},
-			context.Background, step, attendLost, ""},
+			context.Background, step, createStartWait, attendLost, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeCreated()
 			f.start = tc.start
 			f.submit = func(context.Context) error { t.Error("a prompt was sent to a session that did not start"); return nil }
-			at := h.attend(tc.ctx(), f, "hi", time.Now().Add(tc.deadline))
+			at := h.attend(tc.ctx(), f, "hi", time.Now().Add(tc.deadline), tc.bound)
 			if at.kind != tc.want || at.cause != tc.cause {
 				t.Fatalf("attend came to %+v, want kind %d cause %q", at, tc.want, tc.cause)
 			}
@@ -865,7 +875,9 @@ func TestCreateClient(t *testing.T) {
 	older := runIn(t, testEnv(t), nil)
 	_, err = Create(ctx, older.line(t).Socket, who, protocol.CreateParams{Cwd: "/"})
 	var lacks *LacksError
-	if !errors.As(err, &lacks) || err.Error() != "this hub (craze "+lacks.Version+") cannot create sessions; it exits when idle" {
+	// The hub runs in this process: its pid, from its hello, is the test's.
+	if !errors.As(err, &lacks) || lacks.PID != os.Getpid() || err.Error() != "this hub (craze "+lacks.Version+") cannot create sessions; "+
+		"it exits once no session runs and no client is connected, or stop it now with kill "+strconv.Itoa(os.Getpid())+" (no session ends)" {
 		t.Fatalf("Create of a hub that creates nothing = %v", err)
 	}
 

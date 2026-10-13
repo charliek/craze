@@ -22,8 +22,9 @@ against a model provider's API or a ChatGPT plan, and needs no other CLI (see
 Early-stage software: v0.1.x is released (Homebrew, apt and release archives)
 for Linux and macOS. `craze` opens a TUI; `craze prompt --json` is the headless
 path. Sessions run in a detached host and outlive the
-terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one, and
-`craze new` starts one in the background through the per-machine hub (see the
+terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
+`craze new` starts one in the background through the per-machine hub, and
+`craze new --load` brings a saved one back through it (see the
 [CLI reference](reference/cli.md#sessions-outlive-their-terminal)).
 
 ## What it does
@@ -34,6 +35,10 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one, and
 - **Sessions that outlive the terminal.** A detached host keeps the agent
   running; `craze ps`, `craze attach` and `craze -c` rejoin it
   ([CLI reference](reference/cli.md#sessions-outlive-their-terminal)).
+- **Resume through the hub.** `craze ps --saved` lists the saved sessions and
+  `craze new --load` reopens one; a hub client such as shed does the same over
+  [`session.reopen`](reference/protocol.md#sessionreopen)
+  ([CLI reference](reference/cli.md#craze-new-load)).
 - **Scripted and background use.** `craze prompt --json` runs one turn;
   `craze new`, `send`, `wait`, `cancel` and `stop` drive sessions without a
   terminal ([CLI reference](reference/cli.md#craze-new)).

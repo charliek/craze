@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -188,7 +189,8 @@ func TestCreateOptionsClient(t *testing.T) {
 	older := runWith(t, testEnv(t), quiet(), creates("cursor"))
 	_, err = CreateOptions(ctx, older.line(t).Socket, who)
 	var lacks *LacksError
-	if !errors.As(err, &lacks) || err.Error() != "this hub (craze "+lacks.Version+") cannot list what it can create; it exits when idle" {
+	// The hub runs in this process: its pid is the test's.
+	if !errors.As(err, &lacks) || err.Error() != lacksWords(lacks.Version, "list what it can create", os.Getpid()) {
 		t.Fatalf("CreateOptions of a hub that cannot answer it = %v", err)
 	}
 }
@@ -235,7 +237,8 @@ func TestFindNeverStartsAHub(t *testing.T) {
 		writeRecord(t, env, rundir.HubRecord{HubID: hubID, PID: pid, StartToken: token(t, pid), Socket: d.path})
 		_, err := find(t, env, needOptions)
 		var lacks *LacksError
-		if !errors.As(err, &lacks) || err.Error() != "this hub (craze 0.9.1) cannot list what it can create; it exits when idle" {
+		// The pid is its hello's (hubResult's 1), not its record's.
+		if !errors.As(err, &lacks) || err.Error() != lacksWords("0.9.1", "list what it can create", 1) {
 			t.Fatalf("Find of an older hub = %v; want it reported", err)
 		}
 		if sock, err := find(t, env, protocol.ConnectionCapabilities{}); err != nil || sock != d.path {

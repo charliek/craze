@@ -3,6 +3,7 @@ package fakehost
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -336,5 +337,68 @@ func TestUnlistTakesAHostOutOfTheRegistry(t *testing.T) {
 	t.Cleanup(func() { _ = other.Close(context.Background()) })
 	if err := other.Unlist(); err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("unlist of a Host never registered: %v", err)
+	}
+}
+
+// TestAStopMarksTheEntryWithStoppingMark (plan 046 B4): a registered Host
+// built with Stop and StoppingMark has its entry marked stopping by the time
+// its session.stop's receipt is read, as a real host's; one built without
+// writes no mark — an older host's registry, the control — while the
+// mark_stopping op marks either, with no stop. A Host never registered cannot
+// be marked.
+func TestAStopMarksTheEntryWithStoppingMark(t *testing.T) {
+	for _, mark := range []bool{true, false} {
+		t.Run(fmt.Sprintf("StoppingMark %v", mark), func(t *testing.T) {
+			env := fixtureRegistry(t)
+			h, err := New(Options{Stop: true, StoppingMark: mark})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reg, err := h.Register(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serveFixtureHost(t, h, reg.Listener(), reg)
+			nc, err := net.Dial("unix", reg.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = nc.Close() }()
+			lr := protocol.NewLineReader(nc, protocol.OutboundLineMax)
+			call := func(id int, method, params string) string {
+				t.Helper()
+				if err := protocol.WriteLine(nc, protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(strconv.Itoa(id)),
+					Method: method, Params: json.RawMessage(params)}); err != nil {
+					t.Fatal(err)
+				}
+				line, err := lr.ReadLine()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(line)
+			}
+			call(1, protocol.MethodHello, `{"protocols":[1],"client":{"kind":"test"}}`)
+			if got := call(2, protocol.MethodSessionStop, `{"sessionId":"`+h.SessionID()+`","commandId":"1"}`); !strings.Contains(got, `"result":{}`) {
+				t.Fatalf("session.stop: %s", got)
+			}
+			e, ok, err := rundir.HostEntry(env, h.HostID())
+			if err != nil || !ok || e.Stopping != mark {
+				t.Fatalf("at the receipt the entry is %+v (ok %v, %v), want stopping %v", e, ok, err, mark)
+			}
+			if err := h.Do(json.RawMessage(`{"name":"mark_stopping"}`)); err != nil {
+				t.Fatal(err)
+			}
+			if e, _, _ := rundir.HostEntry(env, h.HostID()); !e.Stopping {
+				t.Fatalf("after mark_stopping the entry is %+v", e)
+			}
+		})
+	}
+	other, err := New(Options{HostID: standInHostID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close(context.Background()) })
+	if err := other.MarkStopping(); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("mark_stopping of a Host never registered: %v", err)
 	}
 }

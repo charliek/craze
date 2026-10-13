@@ -183,3 +183,59 @@ reconnect, no reseed, no flicker after backgrounding).
 5. Acceptance is shed's bar: start craze in a roost tab, then from the Flutter
    desktop build and the phone read the transcript, send a prompt, cancel,
    answer a permission and a question.
+
+## Resuming a saved session (plan 046 B10; shed's work, not done in craze)
+
+craze's hub serves `sessions.saved` (the saved sessions, each with the id that
+reopens it) and `session.reopen` ("ensure this saved session is running")
+from plan 046 on; its `hello` says so with the connection capability
+`reopen`. Closes craze#88 on craze's side. To adopt it, shed:
+
+1. Reads `reopen` in `ConnCapabilities` (`wire.rs`), beside `createOptions`,
+   and hides the resume entry when it is absent: an older hub refuses both
+   methods (`unsupported`, or `unknown_method` from one before them).
+2. Adds `AgentSource::saved(workspace?)` (`sessions.saved {workspace?}`; its
+   `limit` 1–200, default 50; sub-agents' sessions left out unless
+   `subAgents`) and `AgentSource::reopen(id)` (`session.reopen {id}`), routed
+   through the eager, user-action dial, the same as create: a listing needs a
+   hub, so it may start one. The `id` is opaque: send it back exactly as
+   `sessions.saved` gave it (a craze id, or `<provider>:<providerSessionId>`
+   for a row from before craze ids).
+3. Opens **one short connection per reopen**, as it does per create: a hub
+   answers a connection's requests in order, and a reopen holds its
+   connection until its answer — up to 180 s.
+4. Allows a deadline of **at least 200 s** for the answer (the hub's own bound
+   is 180 s; the start alone may take 150 s, the agent's load 90 s of it).
+5. Binds `open` to the answer row's **host id** (`session.hostId`), and
+   connects there (`session.connect`). An approximate answer row (its fresh
+   read failed) is treated as create's held row: the session exists; read it
+   again from the roster.
+6. Classifies outcomes by `data.code` and `data.reason`:
+
+   | Outcome | What the client does |
+   |---|---|
+   | Connection lost, deadline passed, or failure to redial (an unknown outcome) | Resend the same `{id}` on a fresh connection, once. A second unknown is shown as unknown. |
+   | `unavailable/busy` or `unavailable/closing` | Transient. Offer retry, no automatic loop. |
+   | `unavailable/host_unreachable` or `unavailable/spawn_failed` | Show the message. |
+   | `unknown_session` or `not_accepting/not_resumable` | Final. Drop the row from the saved list. |
+   | `not_accepting/start_failed` | Final. Show the cause (`data.cause`). |
+   | A malformed success | Treat as unknown. |
+
+   A resend is safe: the hub's retry safety is the session's claim (one
+   host serves a session, and every reopen joins it — a TUI-hosted session
+   whose claim could not take its lock file is the exception, and runs
+   unclaimed), not a request id.
+   The host id and `joined` may differ across tries, and a try sent after the
+   session was stopped reopens it again: the client stops retrying when its
+   user cancels.
+7. Extends its hermetic recipe cells (`crates/shed-craze/src/testing.rs`):
+   seed `sessions.jsonl` in the recipe's `CRAZE_HOME`, run the fake agent
+   with `CRAZE_FAKE_SCRIPT=grok-load`, and reopen through the real hub —
+   craze's own cell is `tests/cli/test_client_recipe.py`'s
+   `test_a_client_reopens_a_saved_session`, written out step by step in
+   `docs/reference/protocol.md`'s "Reopening a saved session in the recipe".
+
+shed's docs then drop the limits they name: "a client resume needs a hub call
+of its own" (`docs/discovery/craze-lane.md`) and "a saved session cannot be
+resumed from the desktop (craze#88)" (`docs/desktop/agent-lanes.md`). The
+phone takes it through the pinned shed rev.

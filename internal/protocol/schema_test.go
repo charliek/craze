@@ -55,6 +55,10 @@ var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodSessionCreate:      {protocol.CreateParams{}, protocol.CreateResult{}},
 	// The hub's (plan 036 §3.4).
 	protocol.MethodSessionsCreateOptions: {protocol.CreateOptionsParams{}, protocol.CreateOptionsResult{}},
+	// The hub's (plan 046 B2).
+	protocol.MethodSessionsSaved: {protocol.SavedParams{}, protocol.SavedResult{}},
+	// The hub's (plan 046 B3).
+	protocol.MethodSessionReopen: {protocol.ReopenParams{}, protocol.ReopenResult{}},
 }
 
 // errorResultTypes is the data.result a method's refusal carries beside it,
@@ -438,6 +442,17 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 		m.SessionScoped || m.Mutating || m.Capability != "" {
 		t.Fatalf("sessions.createOptions is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
 	}
+	// So is sessions.saved (plan 046 B2), a read.
+	if m, ok := protocol.Method(protocol.MethodSessionsSaved); !ok || m.HostUnsupported != protocol.ReasonHubOnly ||
+		m.SessionScoped || m.Mutating || m.Capability != "" {
+		t.Fatalf("sessions.saved is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
+	}
+	// So is session.reopen (plan 046 B3): no commandId — its retry safety is
+	// the session's claim, not a command id.
+	if m, ok := protocol.Method(protocol.MethodSessionReopen); !ok || m.HostUnsupported != protocol.ReasonHubOnly ||
+		m.SessionScoped || m.Mutating || m.Capability != "" {
+		t.Fatalf("session.reopen is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
+	}
 }
 
 // TestScopedAndMutatingMethodsCarryTheirIds: a session-scoped method's
@@ -452,9 +467,12 @@ func TestScopedAndMutatingMethodsCarryTheirIds(t *testing.T) {
 			name, opts, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
 			fields[name] = !strings.Contains(opts, "omit")
 		}
-		// session.create is the scoped names' one exception (plan 032
-		// §3.10): its session does not exist until it answers.
-		wantScoped := m.Name != protocol.MethodHello && !strings.HasPrefix(m.Name, "sessions.") && m.Name != protocol.MethodSessionCreate
+		// session.create and session.reopen are the scoped names' two
+		// exceptions: create's session does not exist until it answers (plan
+		// 032 §3.10), and reopen names a saved session by its sessions.saved
+		// id, which no host serves until it answers (plan 046 B3).
+		wantScoped := m.Name != protocol.MethodHello && !strings.HasPrefix(m.Name, "sessions.") &&
+			m.Name != protocol.MethodSessionCreate && m.Name != protocol.MethodSessionReopen
 		if m.SessionScoped != wantScoped {
 			t.Errorf("%s: SessionScoped %v, want %v", m.Name, m.SessionScoped, wantScoped)
 		}

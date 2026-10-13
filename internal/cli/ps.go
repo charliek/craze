@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
@@ -68,6 +71,8 @@ const psNoSessions = "no sessions running"
 type psFlags struct {
 	json  bool
 	noHub bool
+	saved bool
+	dir   string
 }
 
 func newPsCmd() *cobra.Command {
@@ -78,14 +83,24 @@ func newPsCmd() *cobra.Command {
 		Long: "craze ps lists every running craze session of this user on this machine, from the " +
 			"per-machine hub (started on demand): its id, state, provider, model, directory, how " +
 			"long it has been in that state, and its title. --no-hub reads each session's host " +
-			"directly instead.",
+			"directly instead. --saved lists the saved sessions instead — this craze directory's " +
+			"sessions that no host runs — through a running hub, or from the session index with none.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if f.dir != "" && !f.saved {
+				return usagef("craze ps: -C/--dir needs --saved")
+			}
+			if f.saved {
+				return runPsSaved(cmd, *f)
+			}
 			return runPs(cmd, *f)
 		},
 	}
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's roster (sessions.list's result) as JSON")
 	cmd.Flags().BoolVar(&f.noHub, "no-hub", false, "read each session's host directly, without the hub")
+	cmd.Flags().BoolVar(&f.saved, "saved", false, "list the saved sessions — not running, ready to reopen — newest first "+
+		"(with --json, sessions.saved's result; with --no-hub, read from the session index)")
+	cmd.Flags().StringVarP(&f.dir, "dir", "C", "", "with --saved, only the sessions that ran in this directory")
 	return cmd
 }
 
@@ -238,24 +253,35 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 // psDir is the DIR column's index.
 const psDir = 4
 
-// psTable is rows as craze ps prints them: psNoSessions for none (cut to a
-// terminal's width, as every line is); otherwise
-// a header and a row a session, each column as wide as its widest cell and
-// two spaces apart, the title last, cut with an ellipsis — to psTitleCells
+// psTable is rows as craze ps prints them (psTableOf), psNoSessions for none.
+func psTable(rows []psRow, width int) string {
+	cells := make([][]string, len(rows))
+	for i := range rows {
+		cells[i] = rows[i].cells[:]
+	}
+	return psTableOf(psHeader[:], cells, psDir, psNoSessions, width)
+}
+
+// psTableOf is a table as craze ps prints one: none for no rows (cut to a
+// terminal's width, as every line is); otherwise header and a line a row,
+// each column as wide as its widest cell and two spaces apart, the title
+// last, cut with an ellipsis — to psTitleCells
 // when width is 0 (no terminal), and on a terminal to what is left of its
 // width, no line ever wider than it (r24 1): when what is left is under
-// psTitleMin, the DIR column gives cells back first, down to psDirMin, its
-// paths cut from the left so their ends stay; a terminal too narrow for the
-// other columns has every line cut to its width.
-func psTable(rows []psRow, width int) string {
+// psTitleMin, the DIR column (index dir) gives cells back first, down to
+// psDirMin, its paths cut from the left so their ends stay; a terminal too
+// narrow for the other columns has every line cut to its width. Every row
+// has header's columns.
+func psTableOf(header []string, rows [][]string, dir int, none string, width int) string {
 	if len(rows) == 0 {
-		return psClip(psNoSessions, width) + "\n"
+		return psClip(none, width) + "\n"
 	}
-	var widths [6]int
+	last := len(header) - 1
+	widths := make([]int, last)
 	for i := range widths {
-		widths[i] = ansi.StringWidth(psHeader[i])
+		widths[i] = ansi.StringWidth(header[i])
 		for _, r := range rows {
-			widths[i] = max(widths[i], ansi.StringWidth(r.cells[i]))
+			widths[i] = max(widths[i], ansi.StringWidth(r[i]))
 		}
 	}
 	titleMax := psTitleCells
@@ -266,36 +292,36 @@ func psTable(rows []psRow, width int) string {
 		}
 		titleMax = width - used
 		if short := psTitleMin - titleMax; short > 0 {
-			give := max(min(short, widths[psDir]-psDirMin), 0)
-			widths[psDir] -= give
+			give := max(min(short, widths[dir]-psDirMin), 0)
+			widths[dir] -= give
 			titleMax += give
 		}
 	}
 	var b strings.Builder
-	line := func(cells [7]string) {
+	line := func(cells []string) {
 		var l strings.Builder
 		for i, w := range widths {
 			cell := cells[i]
-			if i == psDir {
+			if i == dir {
 				cell = psCutLeft(cell, w)
 			}
 			l.WriteString(cell)
 			l.WriteString(strings.Repeat(" ", w-ansi.StringWidth(cell)+2))
 		}
-		title := cells[6]
+		title := cells[last]
 		if ansi.StringWidth(title) > titleMax {
 			title = ""
 			if titleMax > 0 {
-				title = ansi.Truncate(cells[6], titleMax, "…")
+				title = ansi.Truncate(cells[last], titleMax, "…")
 			}
 		}
 		l.WriteString(title)
 		b.WriteString(strings.TrimRight(psClip(l.String(), width), " "))
 		b.WriteByte('\n')
 	}
-	line(psHeader)
+	line(header)
 	for _, r := range rows {
-		line(r.cells)
+		line(r)
 	}
 	return b.String()
 }
@@ -378,4 +404,169 @@ func psAge(now, since time.Time) string {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}
 	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+}
+
+// craze ps --saved (plan 046 B6): the saved sessions — this CRAZE_HOME's
+// session index's sessions that no running host serves — newest first, at
+// most psSavedLimit, sub-agents' left out: a running hub's sessions.saved
+// (hub.Find, needing the capability reopen — which says a hub serves
+// sessions.saved and session.reopen both — and never starting a hub, since
+// the index is this process's to read too), else — no hub running, --no-hub,
+// a hub without reopen (an older craze's, Find's LacksError), or any other
+// failure of the hub's path, as plain craze ps falls back on one — the same
+// function the hub's answer is (savedSessions) over the index directly, and
+// stderr says so. It fails, exit 1, only when the path it took last fails
+// too: the registry cannot be read.
+
+const (
+	// psSavedLimit is how many saved sessions craze ps --saved asks for: the
+	// method's most.
+	psSavedLimit = protocol.SavedLimitMax
+	// psNoSaved is what craze ps --saved prints when nothing is saved.
+	psNoSaved = "no saved sessions"
+)
+
+// psSavedHeader is craze ps --saved's header row.
+var psSavedHeader = []string{"SESSION", "PROVIDER", "DIR", "AGE", "TITLE"}
+
+// psSavedDir is craze ps --saved's DIR column's index.
+const psSavedDir = 2
+
+// runPsSaved is craze ps --saved (the comment above).
+func runPsSaved(cmd *cobra.Command, f psFlags) error {
+	env := rundir.ProcessEnv()
+	stderr := errWriter(cmd)
+	q := protocol.SavedParams{Limit: psSavedLimit}
+	if f.dir != "" {
+		abs, err := filepath.Abs(f.dir)
+		if err != nil {
+			return exitf(1, "craze ps: %s: %s", sanitizeLine(f.dir), sanitizeLine(err.Error()))
+		}
+		q.Workspace = abs
+	}
+	var (
+		raw json.RawMessage
+		res protocol.SavedResult
+	)
+	if f.noHub {
+		fmt.Fprintln(stderr, "craze ps: --no-hub: reading the session index directly")
+	} else {
+		var err error
+		raw, res, err = psSavedFromHub(env, q)
+		if err != nil {
+			raw = nil
+			fmt.Fprintf(stderr, "craze ps: %s; reading the session index directly\n", psSavedWhy(err))
+		}
+	}
+	if raw == nil {
+		var perr *protocol.Error
+		res, perr = savedSessions(env, q, func(format string, args ...any) {
+			fmt.Fprintf(stderr, "craze ps: %s\n", sanitizeLine(fmt.Sprintf(format, args...)))
+		})
+		if perr != nil {
+			return exitf(1, "craze ps: %s", sanitizeLine(perr.Message))
+		}
+	}
+	out := cmd.OutOrStdout()
+	if f.json {
+		if raw == nil {
+			// As the hub writes it (protocol.MarshalLine), byte for byte.
+			b, err := protocol.MarshalLine(res)
+			if err != nil {
+				return exitf(1, "craze ps: %v", err)
+			}
+			raw = bytes.TrimSuffix(b, []byte{'\n'})
+		}
+		_, err := fmt.Fprintf(out, "%s\n", raw)
+		return err
+	}
+	if res.More {
+		fmt.Fprintf(stderr, "craze ps: more saved sessions than these %d: only the newest are listed\n", len(res.Sessions))
+	}
+	_, err := io.WriteString(out, psTableOf(psSavedHeader, psSavedRows(res, env.Home, time.Now()), psSavedDir, psNoSaved, psWidth(out)))
+	return err
+}
+
+// psSavedFromHub is a running hub's saved sessions: Find (never a start),
+// then its sessions.saved, within hubBudget — the result as the hub wrote
+// it, and decoded.
+func psSavedFromHub(env rundir.Env, q protocol.SavedParams) (json.RawMessage, protocol.SavedResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
+	defer cancel()
+	sock, err := hub.Find(ctx, env, hub.ReopenNeed())
+	if err != nil {
+		return nil, protocol.SavedResult{}, err
+	}
+	raw, err := hub.Saved(ctx, sock, psClient, q)
+	if err != nil {
+		return nil, protocol.SavedResult{}, err
+	}
+	var res protocol.SavedResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, protocol.SavedResult{}, err
+	}
+	return raw, res, nil
+}
+
+// psSavedWhy is why craze ps --saved reads the index itself, in its words:
+// no hub running (hub.ErrNoHub, Find's answer for none); a hub that cannot
+// answer sessions.saved — one whose hello lacks reopen (Find's LacksError: a
+// craze from before it), or one that refuses the method unsupported all the
+// same; or anything else of the hub's path, as plain craze ps says it.
+func psSavedWhy(err error) string {
+	if errors.Is(err, hub.ErrNoHub) {
+		return "no hub is running"
+	}
+	if _, ok := errors.AsType[*hub.LacksError](err); ok {
+		return "the hub cannot list saved sessions (an older craze's)"
+	}
+	if pe, ok := errors.AsType[*protocol.Error](err); ok && pe.Data.Code == protocol.CodeUnsupported {
+		return "the hub cannot list saved sessions (an older craze's)"
+	}
+	return fmt.Sprintf("the hub is not available (%s)", sanitizeLine(err.Error()))
+}
+
+// psSavedRows is res's saved sessions as craze ps --saved prints them, in
+// res's order (newest first): SESSION the craze id's last psShortID
+// characters — a row with none, its provider session id's, which can be any
+// string, so counted in runes (psShortRunes) — PROVIDER, DIR
+// with home as ~, AGE since its last activity, and TITLE, "-" for none.
+// Every cell is one line, its escape sequences and controls gone.
+func psSavedRows(res protocol.SavedResult, home string, now time.Time) [][]string {
+	rows := make([][]string, 0, len(res.Sessions))
+	for _, s := range res.Sessions {
+		id := s.CrazeSessionID
+		if id == "" {
+			id = s.ProviderSessionID
+		}
+		cells := []string{
+			psLine(psShortRunes(id)),
+			psLine(s.Provider),
+			psLine(psTilde(home, s.Workspace)),
+			psAge(now, s.UpdatedAt),
+			psLine(s.Title),
+		}
+		for i, c := range cells {
+			if c == "" {
+				cells[i] = psNone
+			}
+		}
+		rows = append(rows, cells)
+	}
+	return rows
+}
+
+// psShortRunes is psShort counted in runes: id's last psShortID characters,
+// never a cut inside one — a provider session id is the provider's, and need
+// not be ASCII as a craze id is.
+func psShortRunes(id string) string {
+	n := 0
+	for i := len(id); i > 0; {
+		_, size := utf8.DecodeLastRuneInString(id[:i])
+		i -= size
+		if n++; n == psShortID {
+			return id[i:]
+		}
+	}
+	return id
 }

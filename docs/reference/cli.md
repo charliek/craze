@@ -561,6 +561,7 @@ the client's job, not this command's.
 |------|-------------|
 | `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one running session) |
 | `--hub` | Relay to this machine's [hub](#the-hub) instead, starting it when none runs. Not with `--session` |
+| `--no-start` | With `--hub` only: attach to a hub that is already running and never start one. With none running it exits 3 (`craze bridge: no hub is running`). Without `--hub` it is a bridge error, exit 1 (`craze bridge: --no-start needs --hub`) |
 
 `--session`'s id is resolved against the registry under the bridge
 process's own `$HOME` (`~/.cache/craze/hosts/*.json`; see
@@ -590,7 +591,9 @@ Within the deciding tier, two different sessions are ambiguous and refused
 several fields counts once. A provider session id must be given whole: its
 shape is the agent's. A suffix or a prefix needs **at least four
 characters**; a shorter one matches nothing (`no session <id>`). The hub's
-`session.connect` stays exact: the roster gives it whole ids.
+`session.connect` stays exact: the roster gives it whole ids. [`craze new
+--load`](#craze-new-load) resolves a saved session's id against the session
+index by tiers of the same kind.
 
 **The pump** (roost's bridge rules):
 
@@ -607,7 +610,7 @@ characters**; a shorter one matches nothing (`no session <id>`). The hub's
   socket (a file, a terminal, a TCP socket) is not looked at.
 - The socket's own EOF ends the pump and exits 0.
 
-**The error contract: every failure is one line on stderr, exit 1.** That
+**The error contract: every failure is one line on stderr, exit 1** (the one exception, `--hub --no-start` with no hub running, exits 3; see below). That
 covers every failure *before* the pump starts — resolving the target,
 dialing, the peer check — and "nothing on stdout" is true only for those:
 flag parsing is included, so a stray removed config-file environment
@@ -634,18 +637,28 @@ own `$HOME`). The same pump and the same error contract apply; the client
 says `hello` to the hub and then reads the [roster](protocol.md#the-hubs-roster)
 or splices itself to a session with
 [`session.connect`](protocol.md#the-hub-splice). Plain `craze bridge` is
-unchanged. Its own failures:
+unchanged. **`--hub --no-start`** attaches to a running hub only and never
+starts one, so a caller asking "is there a hub to reach?" does not create the
+very hub it is asking about. With a hub it splices exactly as `--hub` does;
+with none it prints `craze bridge: no hub is running` and exits **3**, the one
+bridge failure that is not 1. A hub that is running but does not answer
+(wedged) is ended, as everywhere, and nothing replaces it, so the answer is
+the same: no hub is running. A wedged hub that cannot be ended (its start
+token unreadable, or the signal refused) is a failure like any other: exit 1. Its own failures:
 
 ```text
 craze bridge: --hub and --session cannot be used together: the hub's session.connect names the session
 craze bridge: no hub: <reason>
+craze bridge: no hub is running
+craze bridge: --no-start needs --hub
 craze bridge: the hub is unreachable: <reason>
 ```
 
 | Code | When |
 |------|------|
 | 0 | The socket closed cleanly (the session ended, or the far side hung up) |
-| 1 | Every failure above: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
+| 1 | Every failure above but `no hub is running`: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
+| 3 | `--hub --no-start` and no hub is running (a wedged hub, ended, counts as none) |
 | 127 | Not `craze bridge`'s own exit: what an SSH client sees when the far end's shell falls off the published binary ladder (see [Protocol reference](protocol.md#ssh-exec-what-a-client-may-assume)) without ever reaching a `craze` to exec |
 
 ## craze attach
@@ -804,6 +817,7 @@ refusing.
 ./bin/craze ps
 ./bin/craze ps --json
 ./bin/craze ps --no-hub
+./bin/craze ps --saved [-C <dir>] [--json] [--no-hub]
 ```
 
 Lists every running craze session of this user on this machine — every live
@@ -837,8 +851,10 @@ sessions running`.
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table |
-| `--no-hub` | Read each session's host directly, without the hub |
+| `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table; with `--saved`, the [`sessions.saved`](protocol.md#sessionssaved) result |
+| `--no-hub` | Read each session's host directly, without the hub; with `--saved`, the session index |
+| `--saved` | List the saved sessions instead — not running, ready to reopen — newest first ([below](#saved-sessions)) |
+| `-C`, `--dir <dir>` | With `--saved`, only the sessions that ran in this directory (made absolute and cleaned, then matched exactly). Without `--saved` it is a usage error, exit 2 |
 
 `--no-hub` — and any failure to have a hub (none could be started, or it did
 not answer within 10 s) — reads each host itself, exactly as the hub would
@@ -852,6 +868,63 @@ craze ps: the hub is not available (<reason>); reading each session's host direc
 With `--json`, that roster's `epoch` is `""` and its `cursor` 0: it is no
 hub's. `craze ps` exits 0 unless that read fails too — the registry cannot be
 read — which is exit 1 with the reason on one line.
+
+### Saved sessions
+
+`craze ps --saved` lists this craze directory's **saved sessions**: those in
+its [session index](configuration.md#session-index) that no running host
+serves — what the [session list](tui.md#session-list)'s saved rows are,
+chosen by the same rule — newest first, at most 200:
+
+```text
+SESSION   PROVIDER  DIR       AGE  TITLE
+4c1d7e90  cursor    ~/proj-a  2h   fix the flaky test
+legacy01  grok      ~/proj-b  3d   -
+```
+
+| Column | |
+|--------|---|
+| `SESSION` | The last eight characters of the session's craze id, as `craze ps` shows a running one; a row from a craze before craze ids shows its provider session id's last eight |
+| `PROVIDER` | The session's provider |
+| `DIR` | The directory it ran in, `~` for `$HOME`; cut from the left on a narrow terminal, as `craze ps`'s is |
+| `AGE` | How long since it was last active, in one unit (`42s`, `5m`, `3h`, `6d`) |
+| `TITLE` | Its title, else `-`: one line, cut with `…` to the terminal's width (100 cells when stdout is not a terminal) |
+
+One row per session, its newest — the row a reopen loads — listed only
+when its provider is one this craze can resume (a session whose newest row is
+a newer craze's, of a provider this one does not know, is not listed at all)
+and the row is well-formed (a hand-edited row whose craze id is not one a load
+takes — `[A-Za-z0-9._-]`, at most 128 bytes — is not:
+[bounds](protocol.md#sessionssaved)), and **sub-agents' sessions are left out** (the session list shows
+them, tagged). A session whose host is stopping is listed at once. A session
+whose directory has gone is still listed: nothing is `stat`'ed. With nothing
+saved it prints `no saved sessions`; with more than 200 (the index holds up
+to 500), stderr says `craze ps: more saved sessions than these 200: only the
+newest are listed`.
+
+It lists through a **running** hub's [`sessions.saved`](protocol.md#sessionssaved)
+and never starts one: the index is this craze directory's to read too. It
+asks only a hub whose `hello` says [`reopen`](protocol.md#the-hubs-result) —
+the capability that says a hub can list saved sessions and
+[reopen](#craze-new-load) them. With no hub running, with `--no-hub`, or when
+the hub cannot answer — one from an older craze, whose `hello` lacks
+`reopen` — it reads the index itself, through the same function the hub
+answers with, and says so on stderr:
+
+```text
+craze ps: no hub is running; reading the session index directly
+craze ps: --no-hub: reading the session index directly
+craze ps: the hub cannot list saved sessions (an older craze's); reading the session index directly
+craze ps: the hub is not available (<reason>); reading the session index directly
+```
+
+`--json` prints the `sessions.saved` result on one line — `{"sessions":[…],
+"more":…}`, each session's `id` what reopens it — byte for byte the same
+through the hub or from the index. An index that cannot be read lists
+nothing, exit 0 — the hub's log says why, or stderr when `craze ps` reads the
+index itself; a registry that cannot be read, or one holding a live host's
+entry that cannot be read, is exit 1 (a running session could not be told
+from a saved one).
 
 ### The hub
 
@@ -867,7 +940,11 @@ one finds it. A hub that does not answer is replaced.
 It **exits by itself 60 seconds after the last host has gone and the last
 client has disconnected** — one nobody ever connected to included — and
 while any session runs it stays. Killing it loses nothing: hosts run on
-without it, and the next `craze ps` starts another.
+without it, and the next `craze ps` starts another. A hub that outlives an
+upgrade which removed its craze (Linuxbrew) cannot start sessions: its
+refusal names its pid to `kill` (for an older craze's hub, `craze new` adds
+it), and it serves on until then ([Upgrading while sessions
+run](../getting-started/upgrading.md#upgrading-while-sessions-run)).
 
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
@@ -884,6 +961,7 @@ started over `ssh` — because every session it creates inherits it
 ./bin/craze new -C ~/projects/lumen --provider grok --effort high "add the ps command"
 ./bin/craze new --title "ps command" "add the ps command"
 ./bin/craze new --json
+./bin/craze new --load 4c1d7e90
 ```
 
 Starts a session in the background — in its own host, through the hub's
@@ -910,8 +988,9 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
 | `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
 | `--title <title>` | Name the session from its start, pinned as [`/rename`](tui.md#slash-commands) pins a title: every row that describes it carries it from the first one — in `craze ps`, the session list and the hub's roster (a roster subscription opened before the create may first receive a `connecting` placeholder with no row yet, before the titled `reachable` row), and no title the agent or the first prompt would give it replaces it (a later `/rename` does). Normalized as `/rename` normalizes one, to exactly what the session stores and the index holds — escape sequences, control characters, the zero-width space, word joiner and byte-order mark, and bidirectional embeddings, overrides and isolates dropped (ZWJ and ZWNJ kept), invalid UTF-8 as U+FFFD, one line with whitespace collapsed, at most 120 characters, the ends trimmed ([`session.create`](protocol.md#sessioncreate) lists it exactly); one that comes to nothing (`--title ""`, blank, only such characters) is a usage error, exit 2. Needs a hub whose create takes a title (below). With `--wait` the host this starts is named the same way |
-| `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
+| `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome; with `--load`, `session.reopen`'s) on one line |
 | `--wait` | Start an unattended session without the hub, send it the prompt and wait for its turn's result ([below](#craze-new-wait)) |
+| `--load <id>` | Reopen a saved session through the hub instead of starting one ([below](#craze-new-load)): an id [`craze ps --saved`](#saved-sessions) prints, or a whole one |
 
 `--timeout`, `--max-message`, `--prompt-file`, `--remove-prompt-file`,
 `--plan` and `--ask` are `--wait`'s alone: without it each is a usage error
@@ -937,13 +1016,30 @@ login keychain is locked. / Run security unlock-keychain and try again.` for
 printed is in the [host's log](configuration.md#host-logs). So is a session that started and
 refused its first prompt: it runs on, idle, and the line says why. A hub from
 before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
-when idle`: it is not replaced, and the next `craze new` after it has gone
-starts this craze's. Likewise `--title` against a running hub from before
+once no session runs and no client is connected, or stop it now with kill
+<pid> (no session ends)`: it is not replaced, and the next `craze new` after
+it has gone starts this craze's. Likewise `--title` against a running hub from before
 titles (its `hello` has no [`createTitle`](protocol.md#the-hubs-result)) is
-`this hub (craze <v>) cannot set a title at create; it exits when idle`,
-exit 1 (with `--json`, that message as the error object's): nothing is sent
+`this hub (craze <v>) cannot set a title at create; it exits once no session
+runs and no client is connected, or stop it now with kill <pid> (no session
+ends)`, exit 1 (with `--json`, that message as the error object's): nothing is sent
 to it, and no session is created without its title — run it again once that
-hub has exited, or create without `--title` and `/rename` the session. Each run creates under a request id of its own, and a
+hub has exited or been stopped, or create without `--title` and `/rename` the session.
+
+A hub whose craze an upgrade removed (Linuxbrew deletes the old version's
+directory) cannot start the session's host, and says so: `this hub's craze
+(<path>) was replaced by an upgrade: stop this hub with kill <pid> (no session
+ends) and run this again`; it goes on serving until you do. A hub of another
+craze version than this one that cannot start the host — an older hub says
+only `the session host cannot be started` — gets the way out added after its
+words, from its `hello`: `; the hub (pid <pid>) runs craze <v> and this is
+craze <this>: if craze was upgraded, stop that hub with kill <pid> (no
+session ends) and run this again`. That addition is the stderr line's alone:
+with `--json` the object is the hub's error as it sent it. See [Upgrading
+while sessions
+run](../getting-started/upgrading.md#upgrading-while-sessions-run).
+
+Each run creates under a request id of its own, and a
 connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
@@ -1002,6 +1098,84 @@ craze prompt: cursor may not start here: this craze runs outside the macOS login
 and the TUI draws the same words as a note in the transcript (`cursor may not
 start here: …`). It is a warning, never a refusal: nothing is stopped, and a
 cursor that can reach the keychain some other way starts as usual.
+
+### craze new --load
+
+```bash
+./bin/craze ps --saved
+./bin/craze new --load 4c1d7e90
+./bin/craze new --load 0190ab12-cd34-7ef0-8123-456789abcdef --json
+```
+
+Brings back a [saved session](#saved-sessions) — one whose host has gone (an
+idle exit, a reboot, a closed terminal) — through the hub's
+[`session.reopen`](protocol.md#sessionreopen), and returns once its start
+is done:
+
+```text
+reopened 4c1d7e90 in ~/projects/lumen
+```
+
+The session is loaded in a host of its own (`craze serve --load`), in the
+directory it ran in and with the provider it ran with, as the session list
+resumes one. When a host serves the session already — another client
+reopened it, or it never stopped — the hub joins that host instead, starts
+nothing and says so:
+
+```text
+already running 4c1d7e90 in ~/projects/lumen
+```
+
+Either way the session then runs as any detached session does: `craze
+attach`, `craze send`, the session list and `craze ps` find it, and with
+nobody attached its host idles out (within 5 minutes while it has had no new
+prompt). It sends no prompt: `craze send` it one.
+
+**The id.** It is resolved against this craze directory's session index —
+running sessions included, so a reopen of one says `already running` — with
+the [short session ids](#short-session-ids)' tiers, the first that matches
+deciding:
+
+1. an exact id: a craze session id, a provider session id, or
+   `<provider>:<providerSessionId>` (the `id` `craze ps --saved --json`
+   prints for a row from a craze before craze ids);
+2. a craze session id's **end** — `craze ps --saved`'s `SESSION` — or, for a
+   row with no craze id, its provider session id's end (what `SESSION` shows
+   for one);
+3. a craze session id's beginning.
+
+A suffix or a prefix needs at least four characters. Two sessions in the
+deciding tier are refused, exit 1, naming them (`craze new: 2 saved sessions
+match 1111: aaaa1111 (cursor, /w), bbbb1111 (grok, /v)`); none is `craze
+new: no saved session <id> (craze ps --saved lists them)`, exit 1. The whole
+id goes to the hub.
+
+`--json` is the only other flag it takes: it prints `session.reopen`'s
+result — `{"session": <roster row>, "joined": …}` — on one line. Like plain
+`craze new`, it never reads stdin. A prompt, and `--prompt-file`,
+`--provider`, `--model`, `--effort`, `--fast`, `--no-fast`, `--no-force`,
+`--title`, `-C`/`--dir`, `--wait`, `--plan`, `--ask`,
+`--timeout` and `--max-message`, are usage errors, exit 2 (`craze new: --load
+does not take --provider: a reopened session keeps its own`): a reopened
+session keeps its own directory, provider and settings.
+
+It waits up to **4 minutes** for the hub's answer (the hub's own bound is
+180 s). A refusal is the hub's words on one line, exit 1: a session whose
+directory has gone (`that session ran in <dir>, which is no longer a
+directory`), one whose start failed (`the session did not start: …`, its
+host's error), one still held by a host that has not finished stopping
+(`that session is held by host <id> (pid <pid>), which has not finished
+stopping; try again`). With `--json` each failure is one JSON object, as
+plain `craze new`'s are. A connection to the hub that ends before the answer
+is tried once more with the same id: a reopen is safe to send again, and ends
+on whatever host serves the session then.
+
+A running hub from before reopen (its `hello` has no
+[`reopen`](protocol.md#the-hubs-result)) is `this hub (craze <v>) cannot
+reopen a saved session; it exits once no session runs and no client is
+connected, or stop it now with kill <pid> (no session ends)`, exit 1: nothing
+is sent to it. A `spawn_failed` from a hub of another craze version gets the
+same upgrade remedy as plain `craze new`'s.
 
 ### craze new --wait
 
@@ -1744,7 +1918,8 @@ recent: /home/you/projects/shed
 would be the very ssh-born hub it is asking about. With none running it says
 `no hub is running` and exits 1 (`craze ps` starts one). A hub from an older
 craze, which cannot answer, is reported (`this hub (craze …) cannot list what
-it can create; it exits when idle`), exit 1, and left to exit when idle.
+it can create; it exits once no session runs and no client is connected, or
+stop it now with kill <pid> (no session ends)`), exit 1, and left running.
 
 `craze providers` exits 0 whenever it answered, whatever the states say; 1 on
 an error, `--hub` with no hub to ask included; and 2 for an argument or a
