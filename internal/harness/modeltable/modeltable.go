@@ -35,6 +35,7 @@ import (
 	"maps"
 	"math"
 	"math/big"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -80,6 +81,16 @@ const (
 	// whose entry a user's providers.toml may only rename and point at its
 	// key once the catalog ships it (lockAnthropic).
 	DriverAnthropic = "anthropic"
+
+	// DriverOpenAIResponses is the OpenAI Responses API funded by an API key
+	// (plan 047 D13), through craze's own client (package
+	// llm/responsesapi, its key route): the provider's base_url, which it
+	// needs, and its env_keys or api_key, as openai-compat's are. It sends a
+	// static key, so its base_url is stricter than openai-compat's
+	// (endpointProblem, P25): https on any host, or http only to a loopback
+	// IP literal. No provider owns it. It is tested against Meta's Responses
+	// API (the plan's live facts, MR-1…16).
+	DriverOpenAIResponses = "openai-responses"
 
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
@@ -1032,12 +1043,12 @@ func driverOwner(driver string) string {
 // driverProblem is why driver is not one craze has, "" when it is.
 func driverProblem(driver string) string {
 	switch driver {
-	case DriverOpenAICompat, DriverOpenRouter, DriverChatGPT, DriverAnthropic:
+	case DriverOpenAICompat, DriverOpenAIResponses, DriverOpenRouter, DriverChatGPT, DriverAnthropic:
 		return ""
 	case "":
-		return `missing: want "openai-compat", "openrouter", "chatgpt" or "anthropic"`
+		return `missing: want "openai-compat", "openai-responses", "openrouter", "chatgpt" or "anthropic"`
 	}
-	return fmt.Sprintf(`unknown driver %q: want "openai-compat", "openrouter", "chatgpt" or "anthropic"`, driver)
+	return fmt.Sprintf(`unknown driver %q: want "openai-compat", "openai-responses", "openrouter", "chatgpt" or "anthropic"`, driver)
 }
 
 // baseURLProblem is why a base URL is not one, "" when it is (or is ""). The
@@ -1050,7 +1061,8 @@ func baseURLProblem(baseURL string) string {
 }
 
 // endpointProblem is why a known driver and a base URL do not go together,
-// "" when they do: openai-compat needs one, openrouter's, chatgpt's and
+// "" when they do: openai-compat needs one, openai-responses needs one it may
+// send a static key to (keyEndpointProblem), openrouter's, chatgpt's and
 // anthropic's are fixed — chatgpt's and anthropic's above all, since their
 // credential must reach their own API and nowhere else (plan 033 P37, plan
 // 044 §3.3; a gateway's base_url is future work, D4).
@@ -1060,12 +1072,45 @@ func endpointProblem(driver, baseURL string) string {
 		if baseURL == "" {
 			return `missing: driver "openai-compat" needs the endpoint's base URL`
 		}
+	case DriverOpenAIResponses:
+		return keyEndpointProblem(baseURL)
 	case DriverOpenRouter, DriverChatGPT, DriverAnthropic:
 		if baseURL != "" {
 			return fixedEndpoint(driver)
 		}
 	}
 	return ""
+}
+
+// keyEndpointProblem is why baseURL is not one the openai-responses driver
+// may send its key to, "" when it is (plan 047 D13, P25): https on any host,
+// or http only to a loopback IP literal — 127.0.0.0/8 or ::1, never a name
+// such as localhost, which a resolver could answer with another host — and
+// with no user info, query or fragment, which a key or another origin could
+// ride in. It is the rule the driver's client holds every request to as well
+// (responsesapi's key route), so a file that loads is one the client
+// accepts. The value is not echoed.
+func keyEndpointProblem(baseURL string) string {
+	if baseURL == "" {
+		return `missing: driver "openai-responses" needs the endpoint's base URL`
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Hostname() == "" {
+		return `must be a plain https URL for driver "openai-responses", with no user info, query or fragment`
+	}
+	switch {
+	case u.Scheme == "https":
+	case u.Scheme == "http" && loopbackIP(u.Hostname()):
+	default:
+		return `must be https for driver "openai-responses", which sends its key there; http is allowed only to a loopback IP address (127.0.0.1 or [::1])`
+	}
+	return ""
+}
+
+// loopbackIP reports whether host is an IP literal in 127.0.0.0/8 or ::1.
+func loopbackIP(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // fixedEndpoint is the reason a base URL is refused, or dropped, for a driver

@@ -841,9 +841,11 @@ default_effort = "max"        # everything else stays as shipped
 ```
 
 An entry for anything else is yours, and must be complete: a provider needs
-`driver` (`openai-compat`, with a `base_url`, or `openrouter`, without one;
-the `chatgpt` and `anthropic` drivers belong to craze's own providers of those
-ids), and a model needs `provider` and `wire_model`:
+`driver` (`openai-compat`, the Chat Completions API, with a `base_url`;
+`openai-responses`, the [Responses API with a key](#the-responses-api-driver),
+with a `base_url`; or `openrouter`, without one; the `chatgpt` and `anthropic`
+drivers belong to craze's own providers of those ids), and a model needs
+`provider` and `wire_model`:
 
 ```toml
 # providers.toml
@@ -1254,6 +1256,65 @@ model that takes none answers every request with an HTTP 400 about the
 thinking field. Use a model `/model` offers instead: those are the ones the
 account lists, and craze knows each.
 
+### The Responses API driver
+
+The `openai-responses` driver speaks the OpenAI Responses API
+(`POST <base_url>/responses`) with an API key, through craze's own client. It
+is tested against Meta's Responses API. Any provider of yours may use it: give
+it a `base_url`, and fund it as any key provider, from `env_keys` or an inline
+`api_key`. The shipped providers keep their own drivers (Meta's is still
+`openai-compat`, Chat Completions), so trying Meta on it is an override that
+writes all three keys, since a `driver` change drops the shipped `base_url`
+and `env_keys` ([how the files merge](#how-the-files-merge)):
+
+```toml
+# providers.toml
+[providers.meta]
+driver   = "openai-responses"
+base_url = "https://api.meta.ai/v1"
+env_keys = ["META_API_KEY"]
+```
+
+**Where the key may go.** The driver sends a static key, so its `base_url`
+must be `https`, on any host, or plain `http` only to a loopback IP address
+(`127.0.0.1` or another `127.x.x.x`, or `[::1]`, never a name such as
+`localhost`), with no user name or password, query or fragment. Anything else
+stops the load, naming `providers.toml`, the provider and `base_url`; the
+client checks the same rule again for every model it builds. No redirect is
+followed, so the key reaches that endpoint and nowhere else.
+
+**What it sends.** Every request is whole (`store: false`, so the provider
+keeps nothing between requests) and streamed, with the system prompt as
+`instructions`, images as `input_image` data URLs, every tool a plain
+function, and:
+
+- the model's effort as `reasoning.effort`, and a request for the reasoning's
+  encrypted content, which is replayed on the next request to the same
+  provider and wire model, so a tool loop keeps its reasoning;
+- the [output ceiling](#native-output-ceiling) as `max_output_tokens`;
+- the session's id as `prompt_cache_key`, on every request a session sends —
+  each step, `/btw`, the summarizer — and each sub-agent's own id on its own,
+  since Meta caches nothing without a key.
+
+**Failures.** A rejected key (HTTP 401 or 403) ends the turn with `native:
+<provider> rejected the API key` and how to replace it, after one request; a
+404 says the provider does not serve the model's `wire_model`; a 400 is not
+retried. A 429 or a 5xx, and a rate limit or server error inside the stream,
+are retried before any output, honouring the provider's `Retry-After`. An
+answer that has begun is never retried. A response cut short by the output
+ceiling ends the turn as on Chat Completions, stopped at `max_tokens` with the
+answer so far, and a tool call cut off mid-arguments is not run; one stopped by
+the provider's content filter ends as a refusal.
+
+**Going back.** To leave the driver, write the provider's Chat Completions
+`driver`, `base_url` and `env_keys` instead (for Meta, `driver =
+"openai-compat"` with the same `base_url` and `env_keys`), or delete your
+entry for a shipped provider. A session recorded on either driver resumes on
+the other: the encrypted reasoning never goes to Chat Completions (a step's
+reasoning goes there as an empty `reasoning_content`, which Meta accepts), Chat
+Completions reasoning never goes to the Responses API, and every tool call
+keeps its result.
+
 ### Model memory: `recent.json`
 
 A model or effort you pick in a native session's `/model` is remembered for
@@ -1444,7 +1505,9 @@ never rewrites it.
 
 The [ChatGPT plan](#the-chatgpt-plan)'s models are the exception: no ceiling
 is sent to them, since ChatGPT plan requests refuse one, but the ceiling
-(32,000, or the quarter of the window) still sizes their compaction.
+(32,000, or the quarter of the window) still sizes their compaction. On the
+[`openai-responses` driver](#the-responses-api-driver) the ceiling is
+`max_output_tokens`.
 
 ## Native compaction
 

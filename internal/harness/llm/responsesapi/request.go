@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -29,8 +31,9 @@ type Request struct {
 	// Input is the conversation, in order: the route keeps nothing between
 	// requests (store false), so every request carries all of it.
 	Input []Item
-	// Tools are the function tools, sent inside one namespace (Namespace).
-	// With none, tool_choice and parallel_tool_calls are not sent either.
+	// Tools are the function tools, sent inside one namespace (Namespace) on
+	// the ChatGPT route and as plain functions on the key route. With none,
+	// tool_choice and parallel_tool_calls are not sent either.
 	Tools []Tool
 	// ToolChoice is "auto" (and "" means it), "none", "required", or a tool's
 	// name.
@@ -40,9 +43,19 @@ type Request struct {
 	// Effort is reasoning.effort; "" sends reasoning with its summary alone,
 	// for a model with no effort control.
 	Effort string
-	// Headers are the request's own HTTP headers — session-id, the session's
-	// id, which gives the server its cache affinity (P18). The client's own
-	// headers (protectedHeaders) are never taken from here.
+	// MaxOutputTokens is max_output_tokens, the call's output ceiling (D-74),
+	// sent on the key route alone (MR-8), and there only when above 0. The
+	// ChatGPT route refuses the field with a 400, so it never goes there.
+	MaxOutputTokens int64
+	// CacheKey is prompt_cache_key, the session's id, sent on the key route
+	// alone, and there only when not "": the route caches nothing without it
+	// (MR-6). The ChatGPT route's cache affinity is its session-id header
+	// instead, and the server replaces a prompt_cache_key there.
+	CacheKey string
+	// Headers are the request's own HTTP headers — on the ChatGPT route
+	// session-id, the session's id, which gives the server its cache affinity
+	// (P18). The client's own headers (protectedHeaders) are never taken
+	// from here.
 	Headers map[string]string
 	// UserAgent overrides the client's User-Agent for this request.
 	UserAgent string
@@ -56,26 +69,35 @@ type Tool struct {
 	Parameters  map[string]any
 }
 
-// wireRequest is the body, field for field. Its tags are the whole of what
-// craze sends: never max_output_tokens (a 400 on this route; D-74's ceiling
-// is the harness's compaction reserve alone here), temperature, top_p,
-// top_logprobs, service_tier (not applied on this route), previous_response_id
-// (nothing is stored), prompt_cache_key (the server replaces it; session-id
-// does its work), prompt_cache_retention, metadata, user, truncation,
-// background, conversation, max_tool_calls, moderation, multi_agent, prompt or
-// safety_identifier — the fields the route's preview limitations list as
-// unsupported, or that it ignores (plan 033 §3.9).
+// wireRequest is the body, field for field, on either route. Its tags are the
+// whole of what craze sends: never temperature, top_p, top_logprobs,
+// service_tier (not applied on the ChatGPT route), previous_response_id
+// (nothing is stored), prompt_cache_retention, metadata, user, truncation,
+// background, conversation, max_tool_calls, moderation, multi_agent, prompt
+// or safety_identifier — the fields the ChatGPT route's preview limitations
+// list as unsupported, or that it ignores (plan 033 §3.9).
+//
+// What differs is the route's (body). Tools is the ChatGPT route's one
+// namespace ([]wireNamespace), or the key route's plain top-level functions
+// ([]wireFunction; MR-9: Meta prefixes a namespace onto the call's name).
+// MaxOutputTokens, the call's output ceiling (MR-8), and PromptCacheKey, the
+// session's id (MR-6), are the key route's alone: the ChatGPT route refuses
+// max_output_tokens with a 400 (D-74's ceiling is the harness's compaction
+// reserve alone there) and replaces prompt_cache_key (session-id does its
+// work), so they stay empty and unsent there.
 type wireRequest struct {
-	Model             string          `json:"model"`
-	Instructions      string          `json:"instructions,omitempty"`
-	Input             []Item          `json:"input"`
-	Store             bool            `json:"store"`
-	Stream            bool            `json:"stream"`
-	Include           []string        `json:"include"`
-	Reasoning         wireReasoning   `json:"reasoning"`
-	Tools             []wireNamespace `json:"tools,omitempty"`
-	ToolChoice        any             `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Model             string        `json:"model"`
+	Instructions      string        `json:"instructions,omitempty"`
+	Input             []Item        `json:"input"`
+	Store             bool          `json:"store"`
+	Stream            bool          `json:"stream"`
+	Include           []string      `json:"include"`
+	Reasoning         wireReasoning `json:"reasoning"`
+	Tools             any           `json:"tools,omitempty"`
+	ToolChoice        any           `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
+	MaxOutputTokens   int64         `json:"max_output_tokens,omitempty"`
+	PromptCacheKey    string        `json:"prompt_cache_key,omitempty"`
 }
 
 // wireReasoning asks for the reasoning summary on every request ("auto": the
@@ -103,9 +125,17 @@ type wireFunction struct {
 	Strict      bool           `json:"strict"`
 }
 
-// Body is the request's JSON body: store false, stream true, the encrypted
-// reasoning included, and nothing the route rejects (wireRequest).
-func (r Request) Body() ([]byte, error) {
+// Body is the request's JSON body on the ChatGPT route: store false, stream
+// true, the encrypted reasoning included, and nothing the route rejects
+// (wireRequest) — MaxOutputTokens and CacheKey among them, whatever they
+// hold.
+func (r Request) Body() ([]byte, error) { return r.body(RouteChatGPT) }
+
+// body is the request's JSON body on route: the ChatGPT route's (Body), or
+// the key route's — the same body but for its tools, which are plain
+// functions, its replayed calls, which carry no namespace, and its output
+// ceiling and cache key (wireRequest).
+func (r Request) body(route Route) ([]byte, error) {
 	if strings.TrimSpace(r.Model) == "" {
 		return nil, errors.New("responsesapi: the request names no model")
 	}
@@ -121,20 +151,49 @@ func (r Request) Body() ([]byte, error) {
 	if w.Input == nil {
 		w.Input = []Item{}
 	}
-	if len(r.Tools) > 0 {
-		fns := make([]wireFunction, 0, len(r.Tools))
-		for _, t := range r.Tools {
-			params := t.Parameters
-			if params == nil {
-				params = map[string]any{"type": "object", "properties": map[string]any{}}
-			}
-			fns = append(fns, wireFunction{Type: "function", Name: t.Name, Description: t.Description, Parameters: params})
+	fns := make([]wireFunction, 0, len(r.Tools))
+	for _, t := range r.Tools {
+		params := t.Parameters
+		if params == nil {
+			params = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		w.Tools = []wireNamespace{{Type: "namespace", Name: Namespace, Description: namespaceDescription, Tools: fns}}
+		fns = append(fns, wireFunction{Type: "function", Name: t.Name, Description: t.Description, Parameters: params})
+	}
+	switch route {
+	case RouteChatGPT:
+		if len(fns) > 0 {
+			w.Tools = []wireNamespace{{Type: "namespace", Name: Namespace, Description: namespaceDescription, Tools: fns}}
+		}
+	case RouteKey:
+		w.Input = plainCalls(w.Input)
+		w.PromptCacheKey = r.CacheKey
+		if r.MaxOutputTokens > 0 {
+			w.MaxOutputTokens = r.MaxOutputTokens
+		}
+		if len(fns) > 0 {
+			w.Tools = fns
+		}
+	default:
+		return nil, fmt.Errorf("responsesapi: unknown route %d", route)
+	}
+	if len(fns) > 0 {
 		w.ToolChoice = toolChoice(r.ToolChoice)
 		w.ParallelToolCalls = r.ParallelToolCalls
 	}
 	return encode(w)
+}
+
+// plainCalls is input with each function call marked to go without a
+// namespace, as the key route's tools have none (MR-9): a copy, so the
+// caller's items are as they were.
+func plainCalls(input []Item) []Item {
+	out := slices.Clone(input)
+	for i := range out {
+		if out[i].kind == functionCall {
+			out[i].plain = true
+		}
+	}
+	return out
 }
 
 // toolChoice is tool_choice's value: a mode as itself, a tool's name as the
@@ -179,6 +238,7 @@ type Item struct {
 	callID    string
 	name      string
 	arguments string
+	plain     bool // a function call sent with no namespace: the key route's (plainCalls)
 }
 
 type itemKind int
@@ -206,7 +266,8 @@ func Reasoning(id string, summary []string, encrypted string) Item {
 }
 
 // FunctionCall is a call the model made, replayed with its call_id, in
-// Namespace; arguments "" is sent as "{}".
+// Namespace on the ChatGPT route and with none on the key route; arguments ""
+// is sent as "{}".
 func FunctionCall(callID, name, arguments string) Item {
 	return Item{kind: functionCall, callID: callID, name: name, arguments: arguments}
 }
@@ -252,13 +313,17 @@ func (it Item) MarshalJSON() ([]byte, error) {
 		if args == "" {
 			args = "{}"
 		}
+		ns := Namespace
+		if it.plain {
+			ns = "" // the key route's: no namespace at all (plainCalls)
+		}
 		return encode(struct {
 			Type      string `json:"type"`
 			CallID    string `json:"call_id"`
 			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
+			Namespace string `json:"namespace,omitempty"`
 			Arguments string `json:"arguments"`
-		}{"function_call", it.callID, it.name, Namespace, args})
+		}{"function_call", it.callID, it.name, ns, args})
 	case functionCallOutput:
 		return encode(struct {
 			Type   string `json:"type"`
