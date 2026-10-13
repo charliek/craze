@@ -366,7 +366,7 @@ func normalizeIdent(s string) string {
 
 func snapshotModels(snap Snapshot) []ModelInfo {
 	if len(snap.Models) > 0 {
-		return append([]ModelInfo(nil), snap.Models...)
+		return CloneModels(snap.Models)
 	}
 	for _, c := range snap.Config {
 		if c.Category != "model" {

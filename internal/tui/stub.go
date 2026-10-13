@@ -131,6 +131,15 @@ type Stub struct {
 	// InstallOnStart.
 	PublishSlash bool
 
+	// PublishEffortFacts makes the Stub a session that states every model's
+	// effort facts (plan 047 D2): agent.EffortFactser says so — so a host
+	// over it says capabilities.effortFacts — and the models SetModels and
+	// StageModels give it carry whatever facts they are given. Off — every
+	// Stub, unless a test or the fake host opts in, whatever provider it
+	// names — it says no such thing, so no golden and no wire fixture from
+	// before it moves. Set before Start.
+	PublishEffortFacts bool
+
 	// Replay is the transcript Start hands back before the session is up, as
 	// a loaded session's replay does. Start emits agent.EventReplay{start},
 	// then each of these with Replayed set, then agent.EventReplay{end} —
@@ -351,7 +360,7 @@ func (s *Stub) SetSubagents(subs []agent.SubagentInfo) {
 func (s *Stub) SetModels(models []agent.ModelInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.snap.Models = append([]agent.ModelInfo(nil), models...)
+	s.snap.Models = agent.CloneModels(models)
 }
 
 // SetTodos replaces Snapshot.Todos. It publishes nothing (plan 027 §3.13):
@@ -1430,7 +1439,7 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	out.Models = append([]agent.ModelInfo(nil), s.snap.Models...)
+	out.Models = agent.CloneModels(s.snap.Models)
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
 	out.Plugins = append([]agent.PluginCommand(nil), s.snap.Plugins...)

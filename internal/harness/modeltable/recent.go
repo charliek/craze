@@ -247,11 +247,7 @@ func remember(dir string, e RecentEntry, now time.Time, io recentIO) error {
 		io.afterRead()
 	}
 	e.At = now.UTC().Truncate(time.Second)
-	list := append([]RecentEntry{e}, slices.DeleteFunc(read, func(o RecentEntry) bool { return o.Alias == e.Alias })...)
-	if len(list) > RecentCap {
-		list = list[:RecentCap]
-	}
-	b, err := json.MarshalIndent(recentDoc{Version: Version, Recent: list}, "", "  ")
+	b, err := json.MarshalIndent(recentDoc{Version: Version, Recent: WithNewest(read, e)}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("modeltable: %w", err)
 	}
@@ -259,6 +255,25 @@ func remember(dir string, e RecentEntry, now time.Time, io recentIO) error {
 		return fmt.Errorf("modeltable: %w", err)
 	}
 	return nil
+}
+
+// WithNewest is recent with e made its newest entry, as Remember writes it:
+// e first, any other entry for its alias gone, at most RecentCap entries.
+// recent is not written to. A native session ranks the models it offers by
+// the list a write of its own leaves (plan 047 D2), without reading the file
+// back.
+func WithNewest(recent []RecentEntry, e RecentEntry) []RecentEntry {
+	out := make([]RecentEntry, 0, min(len(recent)+1, RecentCap))
+	out = append(out, e)
+	for _, o := range recent {
+		if len(out) == RecentCap {
+			break
+		}
+		if o.Alias != e.Alias {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // Recent is the model memory as t has it: each entry that still names one of
@@ -275,7 +290,7 @@ func (t *Table) Recent(recent []RecentEntry) []RecentEntry {
 	var out []RecentEntry
 	seen := make(map[string]bool, len(recent))
 	for _, e := range recent {
-		alias, ok := t.recentAlias(e)
+		alias, ok := t.RecentAlias(e)
 		if !ok || seen[alias] {
 			continue
 		}
@@ -286,9 +301,14 @@ func (t *Table) Recent(recent []RecentEntry) []RecentEntry {
 	return out
 }
 
-// recentAlias is the alias e names in t (Recent's rule), and whether it names
-// one.
-func (t *Table) recentAlias(e RecentEntry) (string, bool) {
+// RecentAlias is the alias e names in t (Recent's rule), and whether it names
+// one: e's own alias while that alias is still a model with e's identity
+// (provider, wire model); else the first alias in sorted order with that
+// identity — a renamed model; else none — an alias re-pointed at another
+// model, or a model gone. Recent applies it to every entry of the file; a
+// native session applies it to the choices it confirmed itself, when it takes
+// up another table (plan 047 D1), so the two follow one rule.
+func (t *Table) RecentAlias(e RecentEntry) (string, bool) {
 	id := identity{e.Provider, e.WireModel}
 	same := func(alias string) bool {
 		m, ok := t.Models[alias]
@@ -427,13 +447,54 @@ func (t *Table) offeredEffort(alias, effort string) string {
 	return ""
 }
 
+// SwitchEffort is the effort a native session's switch to alias lands on
+// (plan 047 D1, owner pin O2), the first of:
+//
+//  1. memory[alias], the session's own last confirmed effort on alias, when
+//     the session confirmed one (the memory view: its choices made since it
+//     opened, which the file may not hold yet, or at all) — while alias's
+//     model still offers it, and otherwise its default_effort;
+//  2. the effort recent remembers for it (RememberedEffort): a reading of
+//     recent.json made now, so another craze's choice is seen;
+//  3. alias's default_effort;
+//  4. "", for a model with no effort control.
+//
+// It never carries the effort the session is on over to another model. A
+// switch to the model the session is already on is not one of these: it keeps
+// its effort (harness.Session.SetModelEffort). memory and recent are not
+// written to; a nil memory is a session that confirmed nothing.
+func (t *Table) SwitchEffort(recent []RecentEntry, memory map[string]string, alias string) string {
+	return t.switchEffort(t.rememberedEfforts(recent), memory, alias)
+}
+
+// rememberedEfforts is the effort recent remembers for each alias it names in
+// t (through Recent): one reading, for a list of models judged together.
+func (t *Table) rememberedEfforts(recent []RecentEntry) map[string]string {
+	entries := t.Recent(recent)
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		out[e.Alias] = e.Effort
+	}
+	return out
+}
+
+// switchEffort is SwitchEffort with recent already read (rememberedEfforts).
+func (t *Table) switchEffort(remembered, memory map[string]string, alias string) string {
+	def := t.Models[alias].DefaultEffort
+	if e, ok := memory[alias]; ok {
+		return cmp.Or(t.offeredEffort(alias, e), def)
+	}
+	return cmp.Or(t.offeredEffort(alias, remembered[alias]), def)
+}
+
 // RememberedEffort is the effort recent remembers for alias, through Recent —
 // so a renamed model's memory is found under its new alias — when alias's
 // model still offers it; "" otherwise, which leaves the session at the model's
 // default_effort. It is for a new session started on an explicit model (--model,
 // or plan 030's list): the flag picks the model, and the memory still picks
-// its effort (plan 031 P6). A resume never takes it — the transcript's effort
-// is the conversation's own.
+// its effort (plan 031 P6); and for a switch, after the session's own memory
+// view (SwitchEffort, plan 047 D1). A resume never takes it — the
+// transcript's effort is the conversation's own.
 func (t *Table) RememberedEffort(recent []RecentEntry, alias string) string {
 	for _, e := range t.Recent(recent) {
 		if e.Alias == alias {

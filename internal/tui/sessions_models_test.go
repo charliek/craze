@@ -582,10 +582,10 @@ func TestTheNativeSeam(t *testing.T) {
 	dir := nativeHome(t, "")
 	// Only alpha's provider has a key: beta, unfunded, is not offered.
 	got, err := nativeModelChoices(dir, os.Getenv)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("the choices %v, %v; want %v", got, err, want)
 	}
-	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md != (agent.ModelInfo{ID: "alpha", Name: "Alpha One"}) {
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || !agent.EqualModels([]agent.ModelInfo{md}, []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}) {
 		t.Fatalf("an unfunded default: %+v, %v; want alpha, the first funded", md, err)
 	}
 	// The seam's environment is the one it is given, not the process's.
@@ -596,7 +596,7 @@ func TestTheNativeSeam(t *testing.T) {
 		return ""
 	}
 	got, err = nativeModelChoices(dir, funded)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("both funded, the choices %v, %v; want %v", got, err, want)
 	}
 	if md, err := nativeDefaultModel(dir, funded); err != nil || md.ID != "beta" {
@@ -621,14 +621,14 @@ func TestTheNativeSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = nativeModelChoices(dir, funded)
-	if want := []agent.ModelInfo{{ID: "beta", Name: "Beta", Recent: 1}, {ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "beta", Name: "Beta", Recent: 1}, {ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("remembered, the choices %v, %v; want %v", got, err, want)
 	}
-	if md, err := nativeDefaultModel(dir, funded); err != nil || md != (agent.ModelInfo{ID: "beta", Name: "Beta"}) {
+	if md, err := nativeDefaultModel(dir, funded); err != nil || !agent.EqualModels([]agent.ModelInfo{md}, []agent.ModelInfo{{ID: "beta", Name: "Beta"}}) {
 		t.Fatalf("remembered and funded, the default: %+v, %v; want beta", md, err)
 	}
 	got, err = nativeModelChoices(dir, os.Getenv)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("remembered but unfunded, the choices %v, %v; want %v (no gap in the ranks)", got, err, want)
 	}
 	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md.ID != "alpha" {

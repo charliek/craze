@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"slices"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -53,7 +52,7 @@ type stubModels struct {
 func (s *Stub) StageModels(models []agent.ModelInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.models.staged, s.models.isStaged = slices.Clone(models), true
+	s.models.staged, s.models.isStaged = agent.CloneModels(models), true
 }
 
 // SetNativeDir is the native directory the session reads its models from, as
@@ -124,7 +123,7 @@ func (s *Stub) applyStagedModelsLocked() {
 	s.snap.CatalogRevision++
 	s.models.staged, s.models.isStaged, s.models.pending = nil, false, false
 	s.enqueueDeltaLocked("", &agent.StateDelta{Catalog: &agent.CatalogState{
-		Models: slices.Clone(s.snap.Models), Revision: s.snap.CatalogRevision,
+		Models: agent.CloneModels(s.snap.Models), Revision: s.snap.CatalogRevision,
 	}})
 }
 

@@ -769,7 +769,9 @@ with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 Meta's models are Muse Spark 1.3, `muse-spark-1.3` and its cheaper
 contributor tier `muse-spark-1.3-contributor` (Meta's start model), and
 `muse-wonder-1.0`, Muse Wonder 1.0, Meta's most capable model, for long,
-complex coding and agent work. Muse Wonder is in preview at Meta, costs more
+complex coding and agent work. Spark 1.3 offers effort from `minimal` to
+`max`; its contributor tier from `minimal` to `xhigh`, since Meta documents
+`max` for Spark 1.3 and Wonder only. Both default to `high`. Muse Wonder is in preview at Meta, costs more
 ($4 per million input tokens and $20 per million output, against
 Spark 1.3's $1.25 and $4.25), has no contributor tier, and offers effort from
 `minimal` to `max` (default `high`). It is not Meta's start model, so a
@@ -864,7 +866,9 @@ default_effort = "high"
 ```
 
 A model alias is at most 256 bytes: a `models.toml` with a longer one does not
-load, and says which entry. A model's other optional keys are documented below:
+load, and says which entry. A model's `efforts` list at most 8 levels, each at
+most 32 bytes and one printable line (no newline, control or bidi character);
+one past those does not load either, naming the entry and the key. A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 [`vision`](#native-vision) and [`tool_profile`](#native-tool-profile);
 `models.toml` also takes
@@ -912,7 +916,8 @@ store a key with [`/connect`](tui.md#connect).
 stops a native session, naming the file, the table and the key: TOML syntax,
 a key craze does not know, a `version` other than 1, an inline key that
 cannot be one (below), or a value no entry could hold (an unknown driver, a
-negative window, an effort listed twice, a `default_effort` outside the
+negative window, an effort listed twice, more than 8 efforts or one over 32
+bytes or not one printable line, a `default_effort` outside the
 `efforts` the same entry lists, a cost out of range, a provider listed twice in
 `provider_order`). What an entry gets wrong only against the catalog is
 dropped with a warning at session start, naming
@@ -1279,10 +1284,31 @@ switch (`/model`, the model dialog, or an attached client's switch) or an
 effort change on the current model (which makes that model the newest, even if
 `/model` was never used) — once it has taken, recording the model and the
 effort the session is then on. `--model`, `craze
-prompt`, a resume and a sub-agent's model never write it. A session reads it
-once, when it starts: a switch changes where the next session starts, and the
-order the next session's `/model` lists models in — the remembered ones right
-after the current one, newest first — not the running one's.
+prompt`, a resume and a sub-agent's model never write it. A session's writes
+land in the order its switches took, so the file's newest entry is its newest
+choice; one an older switch would write after a newer one is skipped.
+
+**Who reads it.** A session reads it when it starts — where it starts, and
+the order its `/model` lists models in, the remembered ones right after the
+current one, newest first — and every switch reads it again for the effort the
+switch lands on. A switch to a model lands on the effort last used on it: the
+one this session last set on that model (which the session holds whether or
+not the file could be written, and judges as the file's entries are judged:
+a model a release renames keeps it under its new alias, and an alias pointed
+at another model does not inherit it), else the one this file remembers for it, else
+the model's `default_effort` — never the effort the session was on. A
+remembered effort the model no longer offers is its default. Asking for the
+model you are already on keeps its current effort. Each switch or
+effort change also ranks the running session's own list again, the model
+switched to first, so its `/model` shows the new order and which effort each
+model would land on; a choice another craze writes is seen by the next switch
+to that model, but by the list only when the session next reloads its models
+(after a key is saved or a sign-in, say). A reload ranks the list by the file
+as it is then: when a write failed (its note says so), or was still pending
+when the reload read the file, that model's place in the list can lag until
+your next switch — the effort a switch to it lands on is still the one you
+set in this session. `/model X <effort>` still picks a
+level directly. See [Effort on a switch](tui.md#effort-on-a-switch).
 
 **Two sessions at once.** Every write reads, changes and replaces the file
 under a lock beside it, `recent.json.lock`, so two sessions switching at the

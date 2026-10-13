@@ -42,6 +42,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/charliek/craze/internal/atomicfile"
@@ -107,6 +109,17 @@ const (
 	// alias comes near it: the catalog's are short, and a ChatGPT plan slug
 	// is at most 64 bytes.
 	MaxAliasLen = 256
+
+	// MaxEfforts is the most effort levels a model lists, and MaxEffortLen
+	// the longest one, in bytes (plan 047 D2, P6): the bounds a native
+	// session's catalog holds a model's effort facts to — its levels, its
+	// default and its switch effort — wherever the catalog travels. Load
+	// refuses a model past either, as it refuses an empty or repeated level,
+	// and a level that is not one printable line. No shipped model comes
+	// near them: the most levels any lists is seven, the ChatGPT plan's
+	// whole vocabulary.
+	MaxEfforts   = 8
+	MaxEffortLen = 32
 )
 
 // toolProfiles are the names a model's tool_profile may give, the default
@@ -1022,17 +1035,40 @@ func envKeysProblem(names []string) string {
 	return ""
 }
 
-// effortsProblem is why an efforts list is not one, "" when it is.
+// effortsProblem is why an efforts list is not one, "" when it is: more than
+// MaxEfforts levels, or a level that is empty, listed twice, longer than
+// MaxEffortLen bytes or not one printable line (EffortLevelProblem).
 func effortsProblem(efforts []string) string {
+	if len(efforts) > MaxEfforts {
+		return fmt.Sprintf("lists %d levels; a model lists at most %d", len(efforts), MaxEfforts)
+	}
 	seen := make(map[string]bool, len(efforts))
 	for i, e := range efforts {
-		if strings.TrimSpace(e) == "" {
-			return fmt.Sprintf("entry %d is empty", i+1)
+		if r := EffortLevelProblem(e); r != "" {
+			return fmt.Sprintf("entry %d %s", i+1, r)
 		}
 		if seen[e] {
 			return fmt.Sprintf("%q is listed twice", e)
 		}
 		seen[e] = true
+	}
+	return ""
+}
+
+// EffortLevelProblem is why level cannot be an effort level, "" when it can
+// (plan 047 P6): it is empty, longer than MaxEffortLen bytes, or not one
+// printable line — invalid UTF-8, or holding a rune that is not printable (a
+// control, a line or paragraph separator, a format character such as a bidi
+// override). The words complete "entry N …" in a load's refusal, and a
+// native session's catalog holds what it publishes to the same rule.
+func EffortLevelProblem(level string) string {
+	switch {
+	case strings.TrimSpace(level) == "":
+		return "is empty"
+	case len(level) > MaxEffortLen:
+		return fmt.Sprintf("is %d bytes; an effort level is at most %d", len(level), MaxEffortLen)
+	case !utf8.ValidString(level) || strings.ContainsFunc(level, func(r rune) bool { return !unicode.IsPrint(r) }):
+		return "is not one printable line"
 	}
 	return ""
 }

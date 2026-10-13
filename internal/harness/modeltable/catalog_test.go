@@ -335,6 +335,17 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		!slices.Equal(m.Efforts, []string{"minimal", "low", "medium", "high", "xhigh", "max"}) || m.DefaultEffort != "high" || !m.Vision {
 		t.Errorf("muse-wonder-1.0 = %+v", m)
 	}
+	// Spark's efforts (plan 047 D6, O3): Spark 1.3 takes max, as Meta's docs
+	// say; its contributor tier stays at minimal to xhigh (no evidence that
+	// max does more there, SM-4). Both at high.
+	for alias, want := range map[string][]string{
+		"muse-spark-1.3":             {"minimal", "low", "medium", "high", "xhigh", "max"},
+		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+	} {
+		if m := c.Models[alias]; !slices.Equal(m.Efforts, want) || m.DefaultEffort != "high" {
+			t.Errorf("%s efforts %q at %q; want %q at high", alias, m.Efforts, m.DefaultEffort, want)
+		}
+	}
 	// The three Fireworks models (§2.5), as verified live.
 	for alias, want := range map[string]struct {
 		wire, name, effort string

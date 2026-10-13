@@ -367,11 +367,30 @@ the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
 
-The memory is read once, when the session starts, so a switch changes where
-the *next* session starts, not what the running one offers. It lives in
+The memory is read when the session starts — which models its list puts
+first, and where it starts — and again by each switch, for the effort it
+lands on (below). A switch also moves the model up the running session's own
+list at once, as well as the next session's. It lives in
 `recent.json` beside the model files; see [Model
 memory](configuration.md#model-memory-recentjson) for the file, who writes it,
 and what happens when two sessions switch at once.
+
+#### Effort on a switch
+
+A native switch to a model — `/model X`, a pick in the [model
+dialog](#model-dialog), or an attached client's switch — lands on the
+**effort last used on X**, else X's `default_effort`; it never carries the
+effort you were on over to another model. So Muse Wonder at `max`, then
+`/model anthropic/claude-opus-5-5`, runs Opus at its own `medium` (or at the
+level you last used on Opus), and switching back to Wonder finds `max` again.
+"Last used" is, in order: the last effort this session set on X; else the
+one the model memory remembers for X, read at the switch, so a choice made in
+another craze since counts; else X's default. A remembered level X no longer
+offers is its default. Asking for the model you are already on keeps its
+effort. `/model X <effort>` still sets a level directly, as two steps: the
+switch, then the effort. A model with no effort control has none either way.
+ACP providers (cursor, grok, gx) are unchanged: their effort is whatever the
+agent's option says after the switch.
 
 #### What the model is told
 
@@ -2159,8 +2178,8 @@ too, [at once](#connect): opening `/model` asks
 the session to take up whatever was funded since it opened, and the list the
 box shows is the session's, re-drawn when it changes. An ACP provider's dialog
 never has the row, and never asks. A model you pick in this session moves up in
-the *next* session's list; this one's order is read again when the session next
-reloads for another reason, such as a key or a sign-in. A typed `/model <alias>` naming a model the list
+this session's list at once — the switch republishes the list, ranked again —
+and in the next session's. A typed `/model <alias>` naming a model the list
 leaves out fails as an unknown model does; `--model <alias>` at start still
 resolves against every model craze knows, and refuses one whose provider has
 no key, saying how to give it one.
@@ -2201,7 +2220,8 @@ shown only when it is on.
 
 `/model <id>` and `/model <id> <effort>` still work without opening the
 dialog; a bare effort word is not a shorthand (`/model high` looks for a model
-named `high`). `/model <id> <effort>` resolves the model first — matched against the
+named `high`). On native, `/model <id>` alone lands on the effort last used on
+that model, else its default ([Effort on a switch](#effort-on-a-switch)). `/model <id> <effort>` resolves the model first — matched against the
 model list without reading any catalog — and then checks the effort word
 against the **destination** model's catalog, so `/model grok-4.6 high` typed
 while on composer-2.5 (which has no effort) still lands on grok-4.6 instead

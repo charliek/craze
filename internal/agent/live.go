@@ -2145,7 +2145,7 @@ func (s *session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	out.Models = append([]ModelInfo(nil), s.snap.Models...)
+	out.Models = CloneModels(s.snap.Models)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)

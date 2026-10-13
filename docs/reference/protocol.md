@@ -1261,7 +1261,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
 | `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok` or `gx` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name,recent?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
+| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -1278,6 +1278,15 @@ A native session's catalog carries the ranks (from the fake host's
 
 ```json
 "catalogs":{"models":[{"id":"muse-spark-1.3-contributor","name":"Muse Spark 1.3 Contributor (Meta)","recent":1},{"id":"fireworks/kimi-k3","name":"Kimi K3 (Fireworks)","recent":2},{"id":"fireworks/deepseek-v4p1-flash","name":"DeepSeek V4.1 Flash (Fireworks)"}],"modes":[…]}
+```
+
+and, where its capabilities say `effortFacts`, every model's effort facts —
+here Muse Wonder, last used at `max`, a model whose switch lands on its
+default, and one with no effort control (from the fake host's
+`33-model-efforts` fixture):
+
+```json
+"catalogs":{"models":[{"id":"muse-wonder-1.0","name":"Muse Wonder 1.0 (Meta)","recent":1,"efforts":["minimal","low","medium","high","xhigh","max"],"defaultEffort":"high","switchEffort":"max"},{"id":"glm-5.3","name":"GLM 5.3 (Z.AI)","efforts":["low","high","max"],"defaultEffort":"max","switchEffort":"max"},{"id":"other/plain","name":"Plain (no effort control)"}],"modes":[…]}
 ```
 
 ## Capabilities
@@ -1302,7 +1311,7 @@ older hub.
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
 what this host can do — and `rowFacts` and `presence`, the host's too, and
-`modelsRefresh`, `aside` and `slashCatalog`, the session's own:
+`modelsRefresh`, `aside`, `slashCatalog` and `effortFacts`, the session's own:
 
 | wire name | meaning |
 |---|---|
@@ -1327,6 +1336,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
 | `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, gx or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
+| `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -1355,7 +1365,11 @@ the row facts), `capabilities.presence` is absent (and so are the row's
 the info document's `permissionMode` and `startedAt` and
 the state's and row's `lastTurn` are simply not there — a
 client falls back to what it did before each existed, and the schema, closed
-as it is, describes every one of them as optional. A catalog model's `recent`
+as it is, describes every one of them as optional. A catalog model's effort
+facts are optional the same way: where `capabilities.effortFacts` is absent —
+every ACP session, every older host — no model carries `efforts`,
+`defaultEffort` or `switchEffort`, and a client falls back to what it did
+before them, the current model's levels from its effort option alone. A catalog model's `recent`
 is optional the same way, except that its absence is ordinary on any host —
 the model is not remembered — so a catalog with no ranks at all, an ACP
 provider's or an older host's, is listed after the current model in the
@@ -1564,7 +1578,9 @@ the session offers now, in the picker's order, and the list's revision:
 ```
 
 - Each model is the info document's catalog model: `id` and `name` always,
-  `recent` its rank and absent for a model not remembered. The list has
+  `recent` its rank and absent for a model not remembered, and its effort
+  facts (`efforts`, `defaultEffort`, `switchEffort`) where the session
+  capability `effortFacts` is `true`. The list has
   bounds of its own, which the session keeps where it builds the list — so
   `catalogs.models` keeps them too, and the section fits every record limit
   and every snapshot budget whatever the owner's model files say: at most
@@ -1572,12 +1588,20 @@ the session offers now, in the picker's order, and the list's revision:
   each `name` at most **128** bytes, a longer one cut on a character boundary
   and ended with `…`; and a model whose `id` would be over **256** bytes is not
   offered at all, since an id is never cut — one cut short would be one no
-  `session.set` could name. The session says on its diagnostics, once and
-  without the text, what the bounds cut. Real tables are far inside them.
+  `session.set` could name; a model's effort facts at most **8** levels of at
+  most **32** bytes each (the model files refuse more as they load), or none.
+  The session says on its diagnostics, once and without the text, what the
+  bounds cut. Real tables are far inside them.
 - `revision` is always written. It is `0` for the list a session started
   with, and only ever grows within one incarnation, in `seq` order. A change
   found while a turn runs (a `pending` refresh) is published once that turn
   has ended, and none is ever published inside a load's replay bracket.
+- A native session also publishes the section in the same delta as a model
+  switch or an effort change it confirmed, beside its `model` and `config`
+  sections, whenever that changed any model's rank or effort facts: the model
+  switched to ranks first, and its row's `switchEffort` is the effort it was
+  left at — the same models, at the next revision. A change that changes no
+  row publishes no section.
 - No ACP session publishes one, and neither does a native session before its
   first change: the key is **absent** then — never `null`, never `{}` — and
   the list is the info document's.
@@ -2129,7 +2153,14 @@ normalized title, its repeat with that title spelt plainly answered the same,
 the same `requestId` with another title and with none refused
 `request_conflict`, a blank title, one of nothing but zero-width and bidi
 runes and (marked `invalid`) an empty one refused `bad_request`, and a titled
-create whose session's start fails, `start_failed` with its cause (32).
+create whose session's start fails, `start_failed` with its cause (32); and
+a session that states its models' effort facts — its info document saying
+`effortFacts: true`, its `catalogs.models` carrying each model's `efforts`,
+`defaultEffort` and `switchEffort`, and one with no effort control carrying
+none — whose `session.models.refresh` takes up a list with other ranks and
+switch efforts, its `catalog` delta, the `sessions.list` row, a second
+client's attach reply and snapshot and its `session.state` all carrying the
+new facts (33).
 Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
@@ -2137,9 +2168,10 @@ directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt`, `rowFacts`, `presence`, `modelsRefresh`, `aside` and `slash`
-turn on what an older host does not have, `models` gives it a catalog of its
-own, `provider` names the provider its session reports (`native`, say) in
+`startedAt`, `rowFacts`, `presence`, `modelsRefresh`, `aside`, `slash` and
+`effortFacts` turn on what an older host does not have, `models` gives it a
+catalog of its own (each model written as the catalog section writes one,
+its effort facts included), `provider` names the provider its session reports (`native`, say) in
 place of the Stub's own, and `plugins` are the plugin rows its session
 starts with, each as the `plugins` section writes one. The seventeen
 fixtures from before `modelsRefresh` without one are, byte for byte, an older

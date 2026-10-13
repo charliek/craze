@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
@@ -77,7 +78,8 @@ type fixtureLine struct {
 // plan 031's model catalog (Options.Models), plan 032's presence
 // (Options.Presence), plan 034's models refresh (Options.ModelsRefresh,
 // NativeDir), plan 040's side questions (Options.Aside) and plan 043's slash
-// catalog (Options.Slash, Provider, Plugins) — and, in a two-socket fixture,
+// catalog (Options.Slash, Provider, Plugins) and plan 047's effort facts
+// (Options.EffortFacts) — and, in a two-socket fixture,
 // what its hub serves (hubCreates, plan 036's createOptions, plan 043's
 // createTitle).
 type fixtureHost struct {
@@ -108,6 +110,9 @@ type fixtureHost struct {
 	Slash    bool            `json:"slash,omitempty"`
 	Provider string          `json:"provider,omitempty"`
 	Plugins  []fixturePlugin `json:"plugins,omitempty"`
+	// EffortFacts is plan 047's (Options.EffortFacts): a session that states
+	// every model's effort facts, which Models then carry.
+	EffortFacts bool `json:"effortFacts,omitempty"`
 	// CreateOptions is the hub's, in a two-socket fixture whose hub creates
 	// (hubCreates): the answer it serves to sessions.createOptions (plan 036
 	// §3.4; hub.Creates.Options), as it stands, at every call. nil is a hub
@@ -129,7 +134,7 @@ func (fh *fixtureHost) options() Options {
 	}
 	var models []agent.ModelInfo
 	for _, m := range fh.Models {
-		models = append(models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
+		models = append(models, control.ModelInfo(m))
 	}
 	var plugins []agent.PluginCommand
 	for _, p := range fh.Plugins {
@@ -137,7 +142,7 @@ func (fh *fixtureHost) options() Options {
 	}
 	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts,
 		Presence: fh.Presence, Models: models, ModelsRefresh: fh.ModelsRefresh, NativeDir: fh.NativeDir, Aside: fh.Aside,
-		Slash: fh.Slash, Provider: fh.Provider, Plugins: plugins}
+		Slash: fh.Slash, Provider: fh.Provider, Plugins: plugins, EffortFacts: fh.EffortFacts}
 }
 
 // fixturePlugin is a host line's plugin row, agent.PluginCommand field for

@@ -40,16 +40,17 @@ func modelRanks(ms []ModelInfo) []string {
 // nokey/d, remembered but unfunded, is passed over with no gap in the ranks
 // and not offered at all — then the rest by name; the model it starts on,
 // the newest funded remembered one, is the dialog's first row, and no row
-// carries a label (the names are the table's own).
+// carries a label (the names are the table's own). Every row states its
+// effort facts (plan 047 D2): its levels, its default and its switch effort.
 func TestNativeAdvertisesConnectedModelsInMemoryOrder(t *testing.T) {
 	f := newNativeFixture(t)
 	seedMemory(t, f.dir, "other/c@", "nokey/d@", "test/b@medium") // oldest first
 	s := f.started(Options{})
 	snap := s.Snapshot()
 	want := []ModelInfo{
-		{ID: "test/b", Name: "Model B", Recent: 1},
+		{ID: "test/b", Name: "Model B", Recent: 1, Efforts: []string{"medium", "high"}, DefaultEffort: "medium", SwitchEffort: "medium"},
 		{ID: "other/c", Name: "other/c", Recent: 2},
-		{ID: "test/a", Name: "Model A"},
+		{ID: "test/a", Name: "Model A", Efforts: []string{"low", "high"}, DefaultEffort: "high", SwitchEffort: "high"},
 	}
 	if !reflect.DeepEqual(snap.Models, want) {
 		t.Fatalf("Models =\n%+v\nwant\n%+v", snap.Models, want)
@@ -62,12 +63,14 @@ func TestNativeAdvertisesConnectedModelsInMemoryOrder(t *testing.T) {
 	}
 }
 
-// TestNativeOrderIsTheStartsOwn (§3.4, §3.6): the order is judged once, at
-// start. A switch made in the session is remembered, but the session's own
-// list keeps the ranks it started with — the dialog puts the model it is now
-// on first whatever its rank — and the next session is the one that offers
-// the new order. A resume orders its picker by the memory too, read when it
-// starts, while its model stays the transcript's.
+// TestNativeOrderIsTheStartsOwn (§3.4, §3.6; plan 047 D2): the order is
+// judged at start, from the memory then. A switch made in the session is
+// remembered, and the session's own list is ranked again in the switch's own
+// delta — its models unchanged, the model switched to first, the rest after
+// it by their ranks (it used to keep the start's ranks until a reload, P1) —
+// and the next session offers the same order. A resume orders its picker by
+// the memory too, read when it starts, while its model stays the
+// transcript's.
 func TestNativeOrderIsTheStartsOwn(t *testing.T) {
 	f := newNativeFixture(t)
 	ws := t.TempDir()
@@ -77,15 +80,21 @@ func TestNativeOrderIsTheStartsOwn(t *testing.T) {
 	if got := modelRanks(before); !slices.Equal(got, []string{"other/c#1", "test/a#2", "test/b"}) {
 		t.Fatalf("at start the list is %v", got)
 	}
+	deltaSettled(t, s)
 	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
 		t.Fatal(err)
 	}
 	snap := s.Snapshot()
-	if !reflect.DeepEqual(snap.Models, before) {
-		t.Fatalf("a switch changed the session's own list:\n%+v\nwas\n%+v", snap.Models, before)
+	if got := modelRanks(snap.Models); !slices.Equal(got, []string{"test/b#1", "other/c#2", "test/a#3"}) {
+		t.Fatalf("after the switch the session's own list is %v; want test/b ranked first", got)
 	}
-	if got := modelRanks(OrderModels(snap)); !slices.Equal(got, []string{"test/b", "other/c#1", "test/a#2"}) {
-		t.Fatalf("after the switch the dialog's order is %v; want the current model first, then the start's ranks", got)
+	if got := modelRanks(OrderModels(snap)); !slices.Equal(got, []string{"test/b#1", "other/c#2", "test/a#3"}) {
+		t.Fatalf("after the switch the dialog's order is %v; want the current model first, then the new ranks", got)
+	}
+	evs := deltaSettled(t, s)
+	if len(evs) != 1 || evs[0].State == nil || evs[0].State.Model == nil || evs[0].State.Catalog == nil ||
+		!EqualModels(evs[0].State.Catalog.Models, snap.Models) || evs[0].State.Catalog.Revision != snap.CatalogRevision {
+		t.Fatalf("the switch published %d events; want one delta carrying the model and the list it ranked again: %+v", len(evs), evs)
 	}
 	f.models["test/b"].push(answer("ok"))
 	if _, err := s.Prompt(context.Background(), "hi"); err != nil {

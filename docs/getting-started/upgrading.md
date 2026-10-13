@@ -1,7 +1,34 @@
 # Upgrading
 
-Two sections: [since v0.1.0](#since-v010), the changes after the second
-release, and [from v0.0.1](#from-v001), the first release's.
+Three sections: [since v0.1.1](#since-v011), the changes after the third
+release; [since v0.1.0](#since-v010), the second release's; and [from
+v0.0.1](#from-v001), the first release's.
+
+## Since v0.1.1
+
+Nothing needs migrating.
+
+- **A native `/model` switch no longer carries the effort over.** `/model X`
+  — typed, picked in the model dialog, or an attached client's switch — lands
+  on the effort you last used on X, else X's `default_effort`, where it used
+  to keep the effort you were on whenever X offered it: Muse Wonder at `max`,
+  then `/model anthropic/claude-opus-5-5`, now runs Opus at its own `medium`
+  rather than `max`. To keep a level across a switch, name it:
+  `/model anthropic/claude-opus-5-5 max`. Switching to the model you are on
+  keeps its effort, and ACP providers are unchanged. See [Effort on a
+  switch](../reference/tui.md#effort-on-a-switch).
+- **A native session's `/model` list is ranked again at every switch**, the
+  model switched to moving up at once rather than in the next session.
+- **For a client reading the session stream:** a native session's catalog
+  models carry `efforts`, `defaultEffort` and `switchEffort`, and its info
+  document says [`capabilities.effortFacts`](../reference/protocol.md#capabilities);
+  a switch or an effort change that changes them publishes the `catalog`
+  section in the same delta as its `model` and `config` sections. Nothing
+  else moved: a client that ignores the new members folds the same state.
+- **`muse-spark-1.3` offers `max`.** Its contributor tier stays at `minimal`
+  to `xhigh`.
+- **A `models.toml` model with more than 8 efforts, or one over 32 bytes or
+  not one printable line, no longer loads**; it names the entry and the key.
 
 ## Since v0.1.0
 

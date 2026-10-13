@@ -333,6 +333,52 @@ func TestTheSlashOptIn(t *testing.T) {
 	}
 }
 
+// TestTheEffortFactsOptIn (plan 047 D2): Options.EffortFacts makes every
+// incarnation's session one that states its models' effort facts, whatever
+// else it is — beside modelsRefresh and aside, beside Start, and a restart's
+// incarnation too — and its catalog carries the facts Options.Models gives
+// it; a Host without it states none, even one naming the native provider (the
+// capability is the session's, not its provider's), as every fixture from
+// before it records. Negative control: a newIncarnation that takes the
+// capability from Options.Provider fails the native-without-it case.
+func TestTheEffortFactsOptIn(t *testing.T) {
+	facts := []agent.ModelInfo{{ID: "m", Name: "M", Efforts: []string{"low", "max"}, DefaultEffort: "low", SwitchEffort: "max"}}
+	for _, o := range []Options{{}, {Provider: "native"}, {EffortFacts: true, Models: facts}, {EffortFacts: true, Provider: "native", Models: facts},
+		{EffortFacts: true, Aside: true, ModelsRefresh: true}, {EffortFacts: true, Start: func(context.Context) error { return nil }}} {
+		h, err := New(o)
+		if err != nil {
+			t.Fatalf("%+v: %v", o, err)
+		}
+		check := func(what string) {
+			t.Helper()
+			eng := h.currentEngine()
+			select {
+			case <-eng.Ready():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: the session never came up", what)
+			}
+			if got := eng.PublishesEffortFacts(); got != o.EffortFacts {
+				t.Errorf("effortFacts %v, provider %q, %s: the session states facts %v", o.EffortFacts, o.Provider, what, got)
+			}
+			if o.Models != nil && !agent.EqualModels(h.currentStub().Snapshot().Models, o.Models) {
+				t.Errorf("%s: the catalog is %+v, want %+v", what, h.currentStub().Snapshot().Models, o.Models)
+			}
+		}
+		check("the first incarnation")
+		if o.Start == nil {
+			if err := h.Restart(); err != nil {
+				t.Fatal(err)
+			}
+			check("after a restart")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+		cancel()
+	}
+}
+
 // TestTheAsideOptIn (plan 040 §3.8): Options.Aside is refused beside
 // Options.Start, as ModelsRefresh is — gatedStart embeds the Stub, so its
 // session would answer no side questions — and goes with ModelsRefresh: the

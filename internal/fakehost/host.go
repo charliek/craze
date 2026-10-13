@@ -128,6 +128,14 @@ type Options struct {
 	// incarnation's session starts with (tui.Stub.SeedPlugins), carried by its
 	// install as a native session's are. Empty, the Stub has none.
 	Plugins []agent.PluginCommand
+	// EffortFacts is plan 047's opt-in (D2): every incarnation's session is
+	// the Stub as one that states every model's effort facts
+	// (tui.Stub.PublishEffortFacts) — capabilities.effortFacts in the info
+	// document — its catalog's models (Models, and what stage_models stages)
+	// carrying the efforts, defaultEffort and switchEffort they are given.
+	// Off, the Host says nothing of them, an older host's or an ACP
+	// session's wire — every fixture from before it, byte for byte.
+	EffortFacts bool
 
 	// Start, when set, is the first incarnation's start (plan 032 §3.10's
 	// tests): the Host serves its engine before the start has run — a
@@ -374,6 +382,7 @@ func (h *Host) newIncarnation() error {
 	}
 	// Before Start, which reads it for the install (Options.Slash).
 	stub.PublishSlash = h.opts.Slash
+	stub.PublishEffortFacts = h.opts.EffortFacts
 	var sess agent.Session = stub
 	if h.opts.ModelsRefresh {
 		stub.SetNativeDir(h.opts.NativeDir)
@@ -1191,7 +1200,7 @@ func (h *Host) do(p opParams) error {
 	case "stage_models":
 		models := make([]agent.ModelInfo, len(p.Models))
 		for i, m := range p.Models {
-			models[i] = agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent}
+			models[i] = control.ModelInfo(m)
 		}
 		h.StageModels(models)
 	case "hold_aside":

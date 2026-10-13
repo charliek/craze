@@ -190,7 +190,10 @@ func nativeModelChoices(dir string, getenv func(string) string) ([]agent.ModelIn
 	}
 	out := make([]agent.ModelInfo, 0, len(choices))
 	for _, c := range choices {
-		out = append(out, agent.ModelInfo{ID: c.Alias, Name: nativeModelName(c.Name, c.Alias), Recent: c.Recent})
+		// The effort facts as Choices states them (plan 047 D2): the levels the
+		// list's /effort offers for the model chosen (D5).
+		out = append(out, agent.ModelInfo{ID: c.Alias, Name: nativeModelName(c.Name, c.Alias), Recent: c.Recent,
+			Efforts: slices.Clone(c.Efforts), DefaultEffort: c.DefaultEffort, SwitchEffort: c.SwitchEffort})
 	}
 	return out, nil
 }

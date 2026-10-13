@@ -17,19 +17,29 @@ import (
 // It is the rule every picker of native models goes through: a session's own
 // /model (the advertised list, internal/agent's native adapter, computed when
 // the session starts and again whenever it reloads its table — plan 034
-// §3.4; a switch alone does not reorder it) and plan 030's session list
-// (§3.12, with no current model). The order is the whole of how a picker says
-// what is recent: no label (owner, Q4).
+// §3.4 — and its order and facts again, over the same models, after every
+// switch or effort change it confirms: Relist, plan 047 D2) and plan 030's
+// session list (§3.12, with no current model). The order is the whole of how
+// a picker says what is recent: no label (owner, Q4).
 
 // Choice is one model a picker offers: its alias, its display name (the
 // table's name, or the alias when it has none), its provider, and its rank in
 // the model memory — 1 for the newest remembered model the list offers, 2 for
 // the next, and so on; 0 for a model the memory does not hold.
+//
+// Efforts, DefaultEffort and SwitchEffort are its effort facts (plan 047 D2):
+// the levels it offers in the table's order (none for a model with no effort
+// control), its default_effort, and the effort a switch to it would land on
+// (Table.SwitchEffort) — so a picker can show a model's levels, and which
+// one it would be at, before it is chosen.
 type Choice struct {
-	Alias    string
-	Name     string
-	Provider string
-	Recent   int
+	Alias         string
+	Name          string
+	Provider      string
+	Recent        int
+	Efforts       []string
+	DefaultEffort string
+	SwitchEffort  string
 }
 
 // Choices is the models a picker offers from t, in order (plan 031 §3.6): every
@@ -48,29 +58,66 @@ type Choice struct {
 // provider's name today). The ranks count only the models listed,
 // so they run 1, 2, 3… with no gap where an unfunded remembered model was
 // passed over.
+//
+// Each choice's effort facts are the table's, its switch effort judged with
+// recent and no memory view: what a switch made by a session that has
+// confirmed nothing yet would land on (SessionChoices).
 func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, current string) []Choice {
-	listed := func(alias string) bool {
+	return t.SessionChoices(recent, nil, getenv, current)
+}
+
+// SessionChoices is Choices for a session whose memory view is memory — the
+// alias → effort of every switch and effort change it has confirmed (plan
+// 047 D1) — which each choice's switch effort is judged with
+// (Table.SwitchEffort). memory is not written to.
+func (t *Table) SessionChoices(recent []RecentEntry, memory map[string]string, getenv func(string) string, current string) []Choice {
+	return t.choices(recent, memory, func(alias string) bool {
 		if alias == current {
 			return true
 		}
 		_, err := t.Resolve(alias, getenv)
 		return err == nil
+	})
+}
+
+// Relist is the choices of exactly aliases — the models a session's list
+// offers now — in Choices' order, each with its rank in recent and its
+// effort facts judged with recent and memory (plan 047 D2): what a native
+// session publishes after a switch or an effort change it confirmed, with
+// the list's members unchanged, since nothing is resolved — which models are
+// funded is a reload's to judge, never a switch's. An alias t does not have
+// is left out. aliases, recent and memory are not written to.
+func (t *Table) Relist(aliases []string, recent []RecentEntry, memory map[string]string) []Choice {
+	set := make(map[string]bool, len(aliases))
+	for _, a := range aliases {
+		set[a] = true
 	}
+	return t.choices(recent, memory, func(alias string) bool { return set[alias] })
+}
+
+// choices is the list of the models listed says are offered, in Choices'
+// order, ranked by recent, their facts judged with recent and memory.
+func (t *Table) choices(recent []RecentEntry, memory map[string]string, listed func(alias string) bool) []Choice {
 	out := make([]Choice, 0, len(t.Models))
 	seen := make(map[string]bool, len(t.Models))
-	for _, e := range t.Recent(recent) {
+	entries := t.Recent(recent)
+	remembered := make(map[string]string, len(entries))
+	for _, e := range entries {
+		remembered[e.Alias] = e.Effort
+	}
+	for _, e := range entries {
 		if !listed(e.Alias) {
 			continue
 		}
 		seen[e.Alias] = true
-		c := t.choice(e.Alias)
+		c := t.choice(e.Alias, remembered, memory)
 		c.Recent = len(out) + 1
 		out = append(out, c)
 	}
 	var rest []Choice
 	for _, alias := range t.Aliases() {
 		if !seen[alias] && listed(alias) {
-			rest = append(rest, t.choice(alias))
+			rest = append(rest, t.choice(alias, remembered, memory))
 		}
 	}
 	slices.SortFunc(rest, func(a, b Choice) int {
@@ -122,8 +169,14 @@ func compareBool(a, b bool) int {
 	return 1
 }
 
-// choice is alias's Choice with no rank: t has alias.
-func (t *Table) choice(alias string) Choice {
+// choice is alias's Choice with no rank, its effort facts judged with the
+// efforts the memory remembers by alias (rememberedEfforts) and the memory
+// view: t has alias.
+func (t *Table) choice(alias string, remembered, memory map[string]string) Choice {
 	m := t.Models[alias]
-	return Choice{Alias: alias, Name: cmp.Or(m.Name, alias), Provider: m.Provider}
+	return Choice{
+		Alias: alias, Name: cmp.Or(m.Name, alias), Provider: m.Provider,
+		Efforts: slices.Clone(m.Efforts), DefaultEffort: m.DefaultEffort,
+		SwitchEffort: t.switchEffort(remembered, memory, alias),
+	}
 }

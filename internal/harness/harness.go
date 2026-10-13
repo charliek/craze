@@ -375,9 +375,11 @@ type Session struct {
 	// does not price with it, when it first counts it (spend.go, plan 034
 	// §3.4) — a resumed transcript's usage on a model no longer listed, say.
 	openTable *modeltable.Table
-	// setModelBuilt runs in SetModel once the new model's client is built and
-	// before the switch is installed, with no lock held: the window a SetTable
-	// can land in (plan 034 §3.4, A24). **A test seam: nil in production**,
+	// setModelBuilt runs in SetModel and SetModelEffort (setModel) once the
+	// new model's client is built and before the switch — the model and its
+	// effort, together — is installed, with no lock held: the window a
+	// SetTable can land in (plan 034 §3.4, A24), and the one before which
+	// Current still answers the old model at the old effort (plan 047 D1). **A test seam: nil in production**,
 	// set only by a test in this package before the switch.
 	setModelBuilt func()
 	// asideRead runs in Aside between its reading of the turn link and its
@@ -808,9 +810,12 @@ func withEffort(m model, effort string) (model, error) {
 	return m, nil
 }
 
-// carriedEffort is the effort a switch to r's model lands on: the current
-// one when the new model lists it, otherwise its default_effort, otherwise
-// none (plan 018 §3.7).
+// carriedEffort is the effort a model carried from another lands on: the
+// current one when the new model lists it, otherwise its default_effort,
+// otherwise none (plan 018 §3.7). It is how the conversation's own model is
+// carried — a resume onto an explicit --model (resume.go) and the compaction
+// model (autocompact.go) keep the session's effort, deliberately — and
+// SetModel's rule; a person's switch is SetModelEffort's (plan 047 D1).
 func carriedEffort(current string, r modeltable.Resolved) string {
 	if slices.Contains(r.Efforts, current) {
 		return current
@@ -818,12 +823,39 @@ func carriedEffort(current string, r modeltable.Resolved) string {
 	return r.DefaultEffort
 }
 
+// offeredOrDefault is effort when r's model lists it, otherwise its
+// default_effort, otherwise none: SetModelEffort's landing for another model.
+// An effort the model does not offer — it no longer lists it, or a stale
+// memory named it — is never an error.
+func offeredOrDefault(effort string, r modeltable.Resolved) string {
+	if effort != "" && slices.Contains(r.Efforts, effort) {
+		return effort
+	}
+	return r.DefaultEffort
+}
+
 // SetModel switches the session to alias for the next turn, keeping the
-// current effort when the new model lists it (carriedEffort). The client is
-// built now, so an unknown alias or a missing key fails here and leaves the
-// current model in place. A turn already running finishes on its own model.
-// Switching to the current alias rebuilds its client from the table, which
-// is how a turn picks up a key that was just exported.
+// current effort when the new model lists it (carriedEffort). It is
+// SetModelEffort with the carry for its effort; see there for everything
+// else.
+func (s *Session) SetModel(alias string) error {
+	return s.setModel(alias, carriedEffort)
+}
+
+// SetModelEffort switches the session to alias for the next turn at effort
+// (plan 047 D1): effort when the new model lists it, otherwise its
+// default_effort, otherwise none — never an error for an effort the model
+// does not offer. Switching to the alias the session is on keeps the effort
+// it is at (the re-key below: carriedEffort, so a model whose table no
+// longer lists that effort lands on its default) whatever effort says. The
+// model and its effort are installed in one locked section, so Current never
+// answers the new model at the effort it was not switched to, and a switch
+// that fails leaves both as they were.
+//
+// The client is built now, so an unknown alias or a missing key fails here
+// and leaves the current model in place. A turn already running finishes on
+// its own model. Switching to the current alias rebuilds its client from the
+// table, which is how a turn picks up a key that was just exported.
 //
 // A model whose tool profile is not the session's is refused with
 // ErrProfileMismatch: the tools and the system prompt were fixed at Open
@@ -842,7 +874,15 @@ func carriedEffort(current string, r modeltable.Resolved) string {
 // new one — so a model the new table no longer has is refused as unknown, and
 // the session never runs on a model its table does not list. A second swap
 // inside the second build refuses the switch (errTableChanged).
-func (s *Session) SetModel(alias string) error {
+func (s *Session) SetModelEffort(alias, effort string) error {
+	return s.setModel(alias, func(_ string, r modeltable.Resolved) string { return offeredOrDefault(effort, r) })
+}
+
+// setModel is the switch SetModel and SetModelEffort share: landing is the
+// effort a switch to another alias lands on, given the effort the session is
+// at and the new model's resolution, judged in the section that installs it.
+// The same alias is the re-key, which keeps the current effort.
+func (s *Session) setModel(alias string, landing func(current string, r modeltable.Resolved) string) error {
 	for attempt := 0; ; attempt++ {
 		s.mu.Lock()
 		table, closed := s.table, s.closed
@@ -881,7 +921,11 @@ func (s *Session) SetModel(alias string) error {
 			}
 			return errTableChanged
 		}
-		if m, err = withEffort(m, carriedEffort(s.cur.effort, m.r)); err != nil {
+		effort := carriedEffort(s.cur.effort, m.r)
+		if m.r.Alias != s.cur.r.Alias {
+			effort = landing(s.cur.effort, m.r)
+		}
+		if m, err = withEffort(m, effort); err != nil {
 			s.mu.Unlock()
 			return err
 		}

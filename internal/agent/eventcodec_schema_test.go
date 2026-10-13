@@ -16,6 +16,7 @@ import (
 
 	"github.com/kaptinlin/jsonschema"
 
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -244,15 +245,37 @@ func wireParams(t *testing.T, v any) json.RawMessage {
 	return json.RawMessage(strings.TrimSuffix(string(b), "\n"))
 }
 
-// TestTheCatalogBoundsAreTheSchemas (plan 034 C5r, r12 #6): event.json states
-// the catalog's bounds the native session holds its list to (boundCatalog),
-// number for number — the list's maxItems, an id's and a name's maxLength —
-// so what a session publishes and what a client may assume are one set.
-// (maxLength counts characters, a bound in bytes no looser.)
+// TestTheCatalogBoundsAreTheSchemas (plan 034 C5r, r12 #6; plan 047 P6):
+// event.json states the catalog's bounds the native session holds its list
+// to (boundCatalog), number for number — the list's maxItems, an id's and a
+// name's maxLength, and a model's effort facts: its levels' maxItems and
+// each level's, the default's and the switch effort's maxLength
+// (modeltable.MaxEfforts, MaxEffortLen) — and info.json's catalog model
+// states the effort facts' bounds too, so what a session publishes and what
+// a client may assume are one set. (maxLength counts characters, a bound in
+// bytes no looser.) Negative control: an efforts maxItems of 9 in event.json
+// fails it.
 func TestTheCatalogBoundsAreTheSchemas(t *testing.T) {
-	b, err := protocol.SchemaFile(protocol.SchemaEvent)
-	if err != nil {
-		t.Fatal(err)
+	type length struct {
+		MaxLength int `json:"maxLength"`
+	}
+	type facts struct {
+		Efforts struct {
+			MaxItems int    `json:"maxItems"`
+			Items    length `json:"items"`
+		} `json:"efforts"`
+		DefaultEffort length `json:"defaultEffort"`
+		SwitchEffort  length `json:"switchEffort"`
+	}
+	schema := func(name string, v any) {
+		t.Helper()
+		b, err := protocol.SchemaFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, v); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var doc struct {
 		Defs struct {
@@ -267,23 +290,39 @@ func TestTheCatalogBoundsAreTheSchemas(t *testing.T) {
 				Properties struct {
 					ID   struct{ MaxLength int } `json:"id"`
 					Name struct{ MaxLength int } `json:"name"`
+					facts
 				} `json:"properties"`
 			} `json:"catalogModel"`
 		} `json:"$defs"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil {
-		t.Fatal(err)
+	schema(protocol.SchemaEvent, &doc)
+	var info struct {
+		Defs struct {
+			Model struct {
+				Properties facts `json:"properties"`
+			} `json:"model"`
+		} `json:"$defs"`
 	}
-	for _, c := range []struct {
+	schema(protocol.SchemaInfo, &info)
+	type bound struct {
 		what      string
 		got, want int
-	}{
-		{"catalog.models.maxItems", doc.Defs.Catalog.Properties.Models.MaxItems, catalogModelsMax},
-		{"catalogModel.id.maxLength", doc.Defs.CatalogModel.Properties.ID.MaxLength, catalogIDMax},
-		{"catalogModel.name.maxLength", doc.Defs.CatalogModel.Properties.Name.MaxLength, catalogNameMax},
-	} {
+	}
+	bounds := []bound{
+		{"event.json's catalog.models.maxItems", doc.Defs.Catalog.Properties.Models.MaxItems, catalogModelsMax},
+		{"event.json's catalogModel.id.maxLength", doc.Defs.CatalogModel.Properties.ID.MaxLength, catalogIDMax},
+		{"event.json's catalogModel.name.maxLength", doc.Defs.CatalogModel.Properties.Name.MaxLength, catalogNameMax},
+	}
+	for file, f := range map[string]facts{"event.json's catalogModel": doc.Defs.CatalogModel.Properties.facts, "info.json's model": info.Defs.Model.Properties} {
+		bounds = append(bounds,
+			bound{file + ".efforts.maxItems", f.Efforts.MaxItems, modeltable.MaxEfforts},
+			bound{file + ".efforts.items.maxLength", f.Efforts.Items.MaxLength, modeltable.MaxEffortLen},
+			bound{file + ".defaultEffort.maxLength", f.DefaultEffort.MaxLength, modeltable.MaxEffortLen},
+			bound{file + ".switchEffort.maxLength", f.SwitchEffort.MaxLength, modeltable.MaxEffortLen})
+	}
+	for _, c := range bounds {
 		if c.got != c.want {
-			t.Errorf("event.json's %s is %d; the session holds the list to %d", c.what, c.got, c.want)
+			t.Errorf("%s is %d; the session holds the list to %d", c.what, c.got, c.want)
 		}
 	}
 }
