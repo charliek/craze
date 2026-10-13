@@ -113,6 +113,69 @@ Nothing needs migrating.
   price as they did, while each of its own long Haiku 5.5 steps now reads at
   the tier, so its spend can rise on a resume. See [Long-context
   pricing](../reference/configuration.md#long-context-pricing).
+- **A typed `/model`, `/plan`, `/ask` or `/agent` mid-turn now says why it
+  did nothing.** While a turn runs, a slash builtin that needs the agent used
+  to do nothing at all; it now adds one error row, `Finish or stop the running
+  work first, then /model.` (the same line `/connect` shows), and the draft
+  stays in the composer. Nothing runs differently: the builtins that run
+  mid-turn (`/exit`, `/help`, `/theme`, `/tasks`, `/clear`, `/rename`, `/btw`)
+  still do. See [Queued messages](../reference/tui.md#queued-messages).
+- **The session list shows each running session's model at 100 columns and
+  wider.** A 20-cell column after the provider, cut with `…`, blank on saved
+  rows. At narrower terminals nothing changes. At 100 columns the title, what
+  it wants and the directory each give up some width to make room. See
+  [Session list](../reference/tui.md#session-list).
+- **Reasons, fixes and notes wrap instead of being cut short.** The provider
+  dialog's reason and fix each wrap over up to two rows, so a fix naming
+  `config.toml` shows its whole path and the box can be a row or two taller
+  than before (it still keeps one height as the cursor moves). The session
+  list's hint line wraps a note — a failed start's names the host's log —
+  over up to three rows, taken from the list while it shows, and
+  `/provider`'s refusal wraps over up to three rows under the candidates, its
+  fix included. A path wider than a row is broken after a `/`, never in the
+  middle of a name (also `/connect`'s `Stored in` line). Anything still too
+  long is cut short with `…`. See [Provider
+  states](../reference/tui.md#provider-states) and [Session
+  list](../reference/tui.md#session-list).
+- **A stopped session leaves the roster at once.** Its host marks itself
+  stopping before anything of the stop can be seen — before a stop's receipt,
+  or before a signal's, an idle exit's or its own TUI's quit goes ahead — and
+  the hub's roster, the session list and `craze ps` list it no more: it is
+  gone at the roster's next round, and nothing the hub sees of it after the
+  mark reaches a roster subscriber — it used to be listed, closing or
+  unreachable, for about a second after the stop's receipt. Notifications
+  composed from what the hub saw before the mark may still arrive after the
+  receipt, as late as a slow subscriber reads them, and may still carry the
+  session; no time bound is promised for them, and lines on different
+  connections were never ordered against each other. Once the hub's next
+  read sees the mark, the session is removed and not listed again. (The mark
+  is best effort: a host that cannot write it, or a hub that cannot read it
+  back, leaves the row until the host's entry is gone, as before.) So the
+  session list no longer shows `Closing…` on a stopped row: the row
+  going is the feedback, and the session is a saved row from then on. This
+  holds for sessions whose host started after the upgrade; a host from an
+  earlier release writes no mark, and its stop looks as it did. For a reader
+  of the registry, an entry gains a `stopping` member. See [The hub's
+  roster](../reference/protocol.md#the-hubs-roster) and [Session
+  list](../reference/tui.md#session-list).
+- **A saved session can be brought back through the hub.** `craze ps --saved`
+  lists the sessions saved in the session index that no host runs, and `craze
+  new --load <id>` reopens one in a host of its own (`reopened <id> in
+  <dir>`), or answers `already running` when a host serves it already. A
+  client of the hub (shed, a phone) does the same with
+  [`sessions.saved`](../reference/protocol.md#sessionssaved) and
+  [`session.reopen`](../reference/protocol.md#sessionreopen) where the hub's
+  `hello` says `reopen`. A hub still running from before the upgrade cannot:
+  `craze new --load` says `this hub (craze <v>) cannot reopen a saved session;
+  it exits once no session runs and no client is connected, or stop it now
+  with kill <pid> (no session ends)`, exit 1 (no session ends with it), and
+  `craze ps --saved` reads the session index itself. See [`craze new
+  --load`](../reference/cli.md#craze-new-load).
+- **The session list shows a saved session by its newest row only.** A
+  session whose newest index row is of a provider this craze does not know (a
+  newer craze's) used to be offered by an older row, which its resume would
+  then not load; it is no longer offered at all. See [Saved
+  sessions](../reference/tui.md#saved-sessions).
 
 ## Since v0.1.0
 
@@ -204,69 +267,6 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   title always dropped (a zero-width space, a bidi control, a carriage
   return), so the two agree, and a space the 120-character cut would leave
   at the end is trimmed.
-- **A typed `/model`, `/plan`, `/ask` or `/agent` mid-turn now says why it
-  did nothing.** While a turn runs, a slash builtin that needs the agent used
-  to do nothing at all; it now adds one error row, `Finish or stop the running
-  work first, then /model.` (the same line `/connect` shows), and the draft
-  stays in the composer. Nothing runs differently: the builtins that run
-  mid-turn (`/exit`, `/help`, `/theme`, `/tasks`, `/clear`, `/rename`, `/btw`)
-  still do. See [Queued messages](../reference/tui.md#queued-messages).
-- **The session list shows each running session's model at 100 columns and
-  wider.** A 20-cell column after the provider, cut with `…`, blank on saved
-  rows. At narrower terminals nothing changes. At 100 columns the title, what
-  it wants and the directory each give up some width to make room. See
-  [Session list](../reference/tui.md#session-list).
-- **Reasons, fixes and notes wrap instead of being cut short.** The provider
-  dialog's reason and fix each wrap over up to two rows, so a fix naming
-  `config.toml` shows its whole path and the box can be a row or two taller
-  than before (it still keeps one height as the cursor moves). The session
-  list's hint line wraps a note — a failed start's names the host's log —
-  over up to three rows, taken from the list while it shows, and
-  `/provider`'s refusal wraps over up to three rows under the candidates, its
-  fix included. A path wider than a row is broken after a `/`, never in the
-  middle of a name (also `/connect`'s `Stored in` line). Anything still too
-  long is cut short with `…`. See [Provider
-  states](../reference/tui.md#provider-states) and [Session
-  list](../reference/tui.md#session-list).
-- **A stopped session leaves the roster at once.** Its host marks itself
-  stopping before anything of the stop can be seen — before a stop's receipt,
-  or before a signal's, an idle exit's or its own TUI's quit goes ahead — and
-  the hub's roster, the session list and `craze ps` list it no more: it is
-  gone at the roster's next round, and nothing the hub sees of it after the
-  mark reaches a roster subscriber — it used to be listed, closing or
-  unreachable, for about a second after the stop's receipt. Notifications
-  composed from what the hub saw before the mark may still arrive after the
-  receipt, as late as a slow subscriber reads them, and may still carry the
-  session; no time bound is promised for them, and lines on different
-  connections were never ordered against each other. Once the hub's next
-  read sees the mark, the session is removed and not listed again. (The mark
-  is best effort: a host that cannot write it, or a hub that cannot read it
-  back, leaves the row until the host's entry is gone, as before.) So the
-  session list no longer shows `Closing…` on a stopped row: the row
-  going is the feedback, and the session is a saved row from then on. This
-  holds for sessions whose host started after the upgrade; a host from an
-  earlier release writes no mark, and its stop looks as it did. For a reader
-  of the registry, an entry gains a `stopping` member. See [The hub's
-  roster](../reference/protocol.md#the-hubs-roster) and [Session
-  list](../reference/tui.md#session-list).
-- **A saved session can be brought back through the hub.** `craze ps --saved`
-  lists the sessions saved in the session index that no host runs, and `craze
-  new --load <id>` reopens one in a host of its own (`reopened <id> in
-  <dir>`), or answers `already running` when a host serves it already. A
-  client of the hub (shed, a phone) does the same with
-  [`sessions.saved`](../reference/protocol.md#sessionssaved) and
-  [`session.reopen`](../reference/protocol.md#sessionreopen) where the hub's
-  `hello` says `reopen`. A hub still running from before the upgrade cannot:
-  `craze new --load` says `this hub (craze <v>) cannot reopen a saved session;
-  it exits once no session runs and no client is connected, or stop it now
-  with kill <pid> (no session ends)`, exit 1 (no session ends with it), and
-  `craze ps --saved` reads the session index itself. See [`craze new
-  --load`](../reference/cli.md#craze-new-load).
-- **The session list shows a saved session by its newest row only.** A
-  session whose newest index row is of a provider this craze does not know (a
-  newer craze's) used to be offered by an older row, which its resume would
-  then not load; it is no longer offered at all. See [Saved
-  sessions](../reference/tui.md#saved-sessions).
 
 ## From v0.0.1
 

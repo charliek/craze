@@ -167,13 +167,14 @@ terminal flake) shipped in Plan 037 (C4, C6 and C3) and are deleted per this
 file's own rule; see `12`, Plan 037. SF-144 (the "Stored in" path wrapped
 mid-word) shipped in Plan 046 (C2) and is deleted likewise; SF-146 is re-scoped
 to its part (b), its part (a) having shipped in Plan 046 (C1); see `12`, Plan
-046. SF-145–SF-150 stay open.
+046. SF-147 (the catalog revision may skip) shipped in Plan 046 (C8) as a
+sentence in `protocol.md`'s "Live models" and is deleted likewise. SF-145,
+SF-146 and SF-148–SF-150 stay open.
 
 | id | what | why it is open | where | size |
 |---|---|---|---|---|
 | SF-145 | **The TUI's busy-port text duplicates the CLI's `listenerMissing`.** Both `internal/cli/auth_chatgpt.go` and `internal/tui/connect_signin.go` define a `listenerMissing`. | Plan 034 X28, as SF-143: one text in one place (a shared helper both import) so the two cannot drift. | `internal/cli/auth_chatgpt.go`, `internal/tui/connect_signin.go` | S |
 | SF-146 | **An open `/model` box does not get its connect row back after an outside sign-out.** The box asks for its connect row once, as it opens (`askConnectRow`), and keeps that answer for its opening; nothing tells an open box about a `craze auth logout` run elsewhere. Part (a), `/model` mid-turn ignored silently, shipped in Plan 046 (C1): a visible refusal row. | Plan 046 A3 dropped it: noticing an outside `craze auth logout` while the box is open would need a watch on `providers.toml`, and closing and reopening the box asks again. | `internal/tui/connect_dialog.go` (`askConnectRow`), `model_dialog.go` | S |
-| SF-147 | **`protocol.md` could say that catalog revisions may skip.** `catalogs.revision` and the catalog section's revision are monotonic only: a client must not expect every number. | Plan 034's session, as SF-143: a docs sentence, no code. | `docs/reference/protocol.md` (the catalog section) | S |
 | SF-148 | **Per-provider cached model lists in `sessions.createOptions`.** SD-45 keeps the create sheet to provider, directory and first prompt, so the answer carries no model list; a client that wants to preselect a model before the session exists has nothing to show. | Plan 036 §4 and §9 (a non-goal there): needs a decision on what is cached, where (the hub's namespace) and how stale it may be; additive on the wire (the result's unknown members are ignored). | `internal/protocol` (`CreateOptionsResult`); `internal/hub`; `06` item on the create sheet | M |
 | SF-149 | **An account probe for cursor and grok.** A resolved binary on a logged-out account reads `ready` and fails at the first prompt. | Plan 036 §4 and §9 (a non-goal there): the probe would run a real agent command per check (cost, time, a login prompt), against `createOptions`' rule that availability is advisory and cheap. | `internal/cli/availability.go` | M |
 | SF-150 | **A dialog layer in `sessionsView`, if other dialogs ever need to open over the list.** The pre-session `/connect` closes the list and reopens it (Plan 036 decision 11, design (a)), restoring its input, selection and provider. | Plan 036 §4 and §9: not needed by the one dialog that exists; revisit when a second one has to open over the list. | `internal/tui` (`sessionsView`, `connect_pre.go`) | M |
@@ -193,11 +194,13 @@ are deleted from the sections above, each with a note (`12`, Plan 037). Each
 `where` was re-checked against the tree after C7.
 
 SF-154 (the clipped reason, fix and hint lines) shipped in Plan 046 (C2) and is
-deleted per this file's own rule; see `12`, Plan 046.
+deleted per this file's own rule; see `12`, Plan 046. SF-152 (the find-only
+`craze bridge --hub`, now `--no-start`) and SF-162 (upgrade while detached
+hosts or the hub are alive) shipped in Plan 046 (C4, C5; the live half is
+`12`'s V-C) and are deleted likewise.
 
 | id | what | why it is open | where | size |
 |---|---|---|---|---|
-| SF-152 | **A find-only `craze bridge --hub` for eager clients** (attach to a running hub, never start one; a distinct exit when none runs). Cross-reference SF-126 (obsolete, deleted) and SF-130. | Reserved: from the shed S3b session (session-control backlog). Shed cites it as a follow-up, not a dependency. | `internal/cli/bridge.go` (`runBridgeHub`), `docs/reference/cli.md` (bridge exit codes) | S |
 | SF-153 | **Plain `craze prompt` ends no turn with a newline** (`echo: firstecho: second` with `--follow-up`). | V2's parity harness pins plain-mode output and must stay 103/103; a fix needs the owner to move that pin (live-cli LC-7). | `internal/cli/prompt.go` (`writeEvent`) | S |
 | SF-155 | **CLI help and error text consistency**: Ctrl-C at `auth login` exits silently (LC-9), `attach --help` omits Ctrl+C/D (LC-11), help omissions including `auth logout chatgpt` and prompt stdin (LC-12), raw error texts (LC-13), the model-not-found advice (LC-16), `--theme` help names `~/.craze` (LM-5), `--force` help names cursor's flag only (CLI-U12 remainder). | Polish; each still says what went wrong. | `internal/cli/auth.go`, `internal/cli/tui.go` (`themeFlagUsage`), `internal/cli/attach.go`, `internal/cli/prompt.go`, `internal/cli/sessionflags.go:47`, `internal/harness/errors.go` | S |
 | SF-156 | **Log which runtime base was skipped, and why**, when `$XDG_RUNTIME_DIR` is unusable and sockets fall back to `/run/user/<uid>/craze` (LC-15). | Diagnosability only. | `internal/rundir/rundir.go` (the base candidates, lines 8-12) | S |
@@ -206,7 +209,6 @@ deleted per this file's own rule; see `12`, Plan 046.
 | SF-159 | **Colour residuals after SF-142's fix**: correct SF-142's old "border" note (colour C5), remove the dead `DiffAddBG`/`DiffDelBG` slots (C7), retune the light presets' truecolor contrast (C8, owner design). | Not defects; pre-existing palette choices. | `internal/tui/theme.go:104,111,158-159` | S |
 | SF-160 | **Release text hygiene**: drop the "available from v0.0.1" install headings after the release (R7), the CHANGELOG v0.0.1 date (R8), RELEASING.md's `v0.0.1` example and first-release line, the fake-host mention, and the `ci.yml` snapshot comment (R9). | Harmless, not false. | `README.md:36,46,65`, `docs/getting-started/quick-start.md:24,34,53`, `CHANGELOG.md:5`, `RELEASING.md:8,225`, `.github/workflows/ci.yml:174-193,219-221` | S |
 | SF-161 | **Ship LICENSE, README and shell completions in archives, the .deb and the brew formula** (R10). | Polish; CI asserts exactly one file per archive. | `.goreleaser.yaml:27-32`, `.github/workflows/ci.yml:243-253` | S-M |
-| SF-162 | **Upgrade while detached hosts or the hub are alive**: an old host or hub against a new client, and a deleted Cellar path that a running TUI re-execs (R16, U10). | Not verified; the first release with hosts means the next upgrade is the first to hit it. | `internal/hostspawn/spawn.go:80`, `internal/hub/ensure.go:416`, `internal/hostspawn/ready.go` | M |
 | SF-163 | **`CRAZE_CONFIG` tripwire: remove it a release after the switch, and name the rename** when `filepath.Base($CRAZE_CONFIG) != "config.toml"` (U2). | The message is clear; `paths.go` says to remove it later. | `internal/paths/paths.go:37,174-190` | S |
 | ~~SF-164~~ | **Withdrawn: N1 is fixed in C6** (panel X-18). The number is not reused. | — | — | — |
 | SF-165 | **Native defence in depth**: a second redact/sanitize pass on non-task tool-row fields (native/X15); strip whole ANSI sequences before `oneLine` in provider errors (native/ESC). | A key split by a zero-width character could be rejoined onto a row; a `[2J` leftover. | `internal/agent/native_tools.go:216-268`, `internal/harness/errors.go:348,378-396` | S |
@@ -231,7 +233,7 @@ deleted per this file's own rule; see `12`, Plan 046.
 | SF-184 | **Three test-shape notes from Plan 037's reviews.** (a) SF-151's retry predicate is a start-time EPERM errno; Go's fork/exec error does not name the failing syscall, so it cannot prove TIOCSCTTY specifically (X15); (b) the cli F3 late-alive warning fails under `pytest -W error`, which the repo's config does not set (X15); (c) the ANSI256 case of `TestThemeLegibleAtEveryDepth` does not itself assert indexed SGR, so a helper switched to a global truecolor style would pass it (the band tests and `TestNearest256` pin the 256-colour path, X18). | Recorded, accepted at review; none is a defect today. | `internal/harness/tool/opencode/bash_test.go` (`TestBashNoControllingTerminal`), `tests/cli` (F3), `internal/tui/theme_test.go` | S |
 | SF-185 | **A keycap emoji renders with a stray cell in the composer.** `1️⃣` (`1` U+FE0F U+20E3) typed into the composer shows as `1️e⃣`: an extra cell between the variation selector and the combining keycap. The bytes tmux sends are right, and `a3aa101` shows the same, so it predates SF-40's grapheme-cluster replay (Plan 037 V5). | A width/rendering quirk of the composer's textarea with a multi-rune grapheme; what is submitted was not checked. Polish. | `internal/tui/composer.go` (the pinned bubbles textarea) | S |
 
-33 rows (SF-152 through SF-185; SF-164 is withdrawn and not counted).
+31 rows still open (SF-153 through SF-185; SF-152 and SF-162 shipped in Plan 046; SF-164 is withdrawn and not counted).
 
 ## Plan 038 — start defaults
 
@@ -261,6 +263,28 @@ These rows are what other clients and providers still owe.
 | SF-192 | **A relay (S7) must decide `session.aside` in its capability allow-list.** It mutates nothing but spends money outside any turn. | Only with S7 (`07`, S7). | `07` S7; `02` security posture | S |
 | SF-193 | **The frozen-key refusal is checked per model `Stream`, not per HTTP send.** The ChatGPT Responses client retries a 401 internally after refreshing its credentials (`internal/harness/llm/responsesapi/client.go` `send`), so a key learned into the frozen prompt during that refresh still goes out on the retried request. Turns (`refusalGate`) and side questions (`asideGate`) share it. | Found by the Plan 040 C2 review (astra r2): pre-existing for turns, not introduced by the aside. The fix is a refusal check the client consults before each send, or no internal retry while frozen. | `internal/harness/turn.go` (`refusalGate`), `internal/harness/aside.go` (`asideGate`), `internal/harness/llm/responsesapi/client.go` | S |
 | SF-194 | **Two idle spend reports can sample usage out of their `Seq` order.** An idle report numbered first can read the store after a later-numbered one, so while a turn is mid-step the shown session spend can step back until that turn's own next report. | Accepted at the Plan 040 C2 review (astra r2): transient and self-correcting; a strict order needs one lock across computing and publishing every report. | `internal/harness/spend.go` (`IdleSpent`, `spentAt`), `internal/agent/native.go` (`spent`) | S |
+
+## Plan 046 — reopen through the hub
+
+Rows Plan 046 found and did not do (`12`, Plan 046). SF-195–SF-201 were found
+while executing; SF-202–SF-206 are the plan's future work; SF-207 is a flake
+seen once.
+
+| id | what | why it is open | where | size |
+|---|---|---|---|---|
+| SF-195 | **`session.create`'s params and `session.connect`'s `connectParams` accept a member given twice** (decoding into a map keeps the last). `sessions.saved` has refused it since Plan 046 C6 (`params.X is given more than once`). | Plan 046 X10: the same hole in two older methods; refusing changes what an existing (odd) client's request means. | `internal/hub/create.go` (the params parse), `internal/hub/splice.go` (`connectParams`) | S |
+| SF-196 | **`craze ps` run right after `craze new` can miss the new session for up to a second while another client holds a roster subscription.** The open poll run is already complete, so `await` answers with the last round, which predates the create. Seen on the mac-mini during V-C; a test that reopens and then lists must poll. | Plan 046 progress note: a fix is a fresh round on demand for a read that follows a create the hub itself answered. | `internal/hub/roster.go` (acquire, await) | S |
+| SF-197 | **The TUI list's own poller still reads `rundir.Hosts`**, so a live host whose registry entry is unreadable is not listed and its session can show as a saved row there (a resume of it then hits `held`). The hub's `sessions.saved` fails closed (`host_unreachable`) instead. | Plan 046 C6 (X10): kept by choice, so the list does not flap on a transient read error. | `internal/tui` (the list poller), `internal/rundir` (`Hosts`, `HostsScan`) | S |
+| SF-198 | **The in-process TUI proceeds unclaimed when its session claim fails to take its lock file** (pre-existing, found by C7's astra review). A later repair of the lock tree lets a hub reopen claim and start the same session while the TUI's engine also runs it: two engines for one session. `protocol.md` names the exception. | Plan 046 C7 r1: refusing to start on a lock error changes the TUI's start; the fallback was a deliberate choice. | `internal/cli/serve.go` (the claim fallback near `ensure`'s skipped-claim record) | M |
+| SF-199 | **A hung filesystem blocks a create's or a reopen's index read and workspace `stat` on its goroutine, with no bound.** Sixteen such requests exhaust the hub's admission (`busy`). | Plan 046 C7 r2: create's accepted precedent, kept; the registry reads share the exposure. | `internal/hub/create.go`, `internal/hub/reopen.go` | M |
+| SF-200 | **`creator.run` has no deferred `endCreate` or panic recovery**, so a panic in a create or reopen run leaves the admission count unbalanced (pre-existing). | Plan 046 C7 r1: found by review; cutting waiters unanswered on a panic is the same gap. | `internal/hub/create.go` (`creator.run`) | S |
+| SF-201 | **`craze wait <id>` on a session reopened by `craze new --load` reports `(no final message)` and `idle`**, although the session row's `lastReply` carries the replayed last reply. `craze wait` documents that with nothing running it "reports its last turn at once"; a loaded session's replayed last turn is not reported. Seen in V-B's live cursor reopen (2026-10-13, the reply was `ok`). | Not a regression of Plan 046: the same `craze serve --load` path as any resume. | `internal/cli/wait.go`; the load's replayed turn | S |
+| SF-202 | **shed and shed-mobile adopt `sessions.saved` and `session.reopen`** (B10): a short connection per reopen, at least 200 s for the answer, the `reopen` capability checked first. | Plan 046 B10, R1, R2: shed's side of the work. | `docs/reference/protocol.md` (`session.reopen`) | M |
+| SF-203 | **A prompt on reopen.** `session.reopen` and `craze new --load` start the host and send nothing. | Plan 046 future work: needs the create's `requestId` and prompt rules carried over. | `internal/hub/reopen.go` | M |
+| SF-204 | **A model and a last reply on saved rows.** `sessions.saved` rows carry what the index records; the model and the last reply need the index to record them. | Plan 046 future work. | `internal/sessions`, `internal/hub/roster.go` (`SavedSessions`) | M |
+| SF-205 | **S4c: listing saved sessions across machines.** | Plan 046 future work; `07`, S4c. | `07` S4c | L |
+| SF-206 | **The TUI's `spawnHost` could adopt `hostspawn.AwaitHolder`** (the stopping-aware wait the hub's reopen uses). | Plan 046 C7 (X11): not adopted, as Rendezvous' 5 s bound and error mapping differ. | `internal/tui` (`spawnHost`), `internal/hostspawn/holder.go` | M |
+| SF-207 | **`TestAHostDyingBetweenBindAndIdentity` failed once** (`listed [], want 000000000008 alone`) while three gates ran at once. Not reproduced: starve 5% x20, contend x25 and the whole package under contention all passed. | Plan 046 progress: if it recurs, look at the first-attempt path (a failed first attempt puts the host in backoff, and the round completes with no row). | `internal/hub/roster_test.go` | S |
 
 ## Plan 025 — effort and speed per provider
 

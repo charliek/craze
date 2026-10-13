@@ -5915,3 +5915,69 @@ the shipped default: delete the line to follow the rank.
   on ubuntu and macOS (test, cli) with lint, build and release-snapshot, and
   the Docs PR Build; CodeRabbit posted no actionable comments. On main,
   `fb684d1`'s CI and Documentation (build and deploy) runs passed.
+
+## Plan 046 — reopen a saved session through the hub
+
+Plan 046 makes a saved session something a hub client can bring back, and
+closes the gaps v0.1.1's live passes found around it (GitHub #88, #89, #93).
+Two PRs; the plan lives outside the repo, and its execution amendments (X1–X15,
+in the plan folder's `progress.md`) are the truth.
+
+**PR 1 — #102, merged as feb382c (2026-10-13).** TUI polish: the session list's
+model column and a visible refusal for `/model` and the other agent-bound
+builtins typed mid-turn (C1), and wrapped reasons, fixes and notes with paths
+broken at a `/` (C2). Review found, and the PR fixed, a real bug in
+`internal/harness`: `Close` cancelled the children before the parent turn, so
+a closing session could send one more model request (the Close order is now
+mark closed, cancel the turn, cancel asides, seal, signal children, close the
+channel; X8). It also fixed a test race in `craze wait` (`waitStarted` read the
+turn before it was published). SF-128, SF-144 and SF-154 shipped.
+
+**PR 2 — `feature/plan-046-reopen-via-hub`.**
+
+- **C3 — a stopping host is marked before its stop is seen (#93).** The host
+  writes `stopping` in its registry entry before a stop's receipt, a signal's
+  exit, an idle exit or its TUI's quit goes ahead; the hub's roster, the list
+  and `craze ps` drop the row at once (X5–X7).
+- **C4 — `craze bridge --hub --no-start` (SF-152).** Attach to a running hub,
+  never start one; a distinct exit when none runs.
+- **C5 — the upgrade remedy (SF-162, U1–U6).** A hub, `craze new` and a running
+  TUI name the way out of an upgrade that removed the craze they run (`kill
+  <pid>`, no session ends); `upgrading.md` gains "Upgrading while sessions run"
+  (X4).
+- **C6 — `sessions.saved` and `craze ps --saved`.** The saved sessions no host
+  runs, from the hub's index, with `hello`'s `reopen` capability (X9, X10).
+- **C7 — `session.reopen` and `craze new --load`.** Ensure a saved session is
+  running: join the host that serves it, wait for a stopping holder to finish,
+  or start a host to load it, within 180 s (X11–X15).
+- **C8 — this record, and docs.** #89's items 4 and 5 and SF-147 in
+  `protocol.md`; SF-152, SF-162 and SF-147 closed in `13`, SF-195–SF-207 added.
+
+**Decisions that came out of execution.**
+
+- **The newest index row per craze id decides** both the saved listing and a
+  reopen (X12, amending X9): a session whose newest row is of a provider this
+  craze does not know is not offered by an older row, and a reopen of it is
+  `not_resumable`.
+- **A reopen's answer always names the requested session** (X12): a host found
+  serving another session is looked past (and a host the reopen itself started
+  that turns out to serve another is stopped, X13), never answered as the row.
+- **The holder allowance counts only time spent waiting** (X12): a reopen waits
+  up to 20 s in total for a stopping holder to finish, charged as it waits, not
+  from the wall clock; moves and spawns are capped at three each (`busy`, "changed
+  hands 3 times").
+- **A `closing` refusal from a host that is still serving is retried a poll
+  later** (X15): the idle-check fence refuses an attach `closing` for an
+  instant, and only a stopping mark, a vanished entry or a dead process makes a
+  host permanently leaving.
+- A piped stdin prompt is not read by `new --load`: plain `craze new` never reads
+  stdin (X12, finding 6 skipped).
+- The index read and the workspace `stat` stay unbounded on a hung filesystem,
+  as a create's are (SF-199).
+
+**Not done, and where it went.** `13`'s "Plan 046" section: SF-195–SF-201 (found
+while executing: duplicate members in two older methods, a roster staleness
+after `craze new`, the TUI list's registry read, the TUI's unclaimed fallback,
+unbounded index reads, `creator.run`'s panic safety, `craze wait` on a loaded
+session) and SF-202–SF-207 (shed's adoption, a prompt on reopen, a model and
+last reply on saved rows, S4c, the TUI's `spawnHost`, a hub flake seen once).

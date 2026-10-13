@@ -91,6 +91,23 @@ A notification has no `id`:
 
 Clients send no notifications in protocol 1.
 
+### Ordering and limits
+
+A **host** answers requests as each finishes, not in the order they were
+sent, so a client matches a reply to its request by `id`. It admits at most 16
+requests per connection: a request keeps its slot until its reply has been
+written to the socket, and the host stops reading the connection while 16
+are admitted and unwritten, so a peer that sends and never reads stalls at
+16. Across all of a host's connections at most 64 mutating commands run at
+once; one past that is refused `unavailable`, reason `busy`, and is not run
+and not stored, so the client resends the same `commandId`.
+
+The **hub** answers in order: it reads a line, answers it and only then reads
+the next, on each connection. A request that takes long — a
+[`session.create`](#sessioncreate) or a [`session.reopen`](#sessionreopen),
+which hold their connection until they answer — delays every later request on
+that connection, so a client sends each on a connection of its own.
+
 ### Tolerant inbound, strict outbound
 
 - A host **refuses** a params field it does not know: `-32602`, reason
@@ -113,7 +130,13 @@ swallowed option can make a client believe it took effect (shed's own rule:
 `hello` opens the connection. A method protocol 1 does not know is refused
 `-32601`, reason `unknown_method`, whether or not `hello` has run yet — that
 check comes first. Any method protocol 1 *does* know, sent before `hello`, is
-refused `bad_request`, reason `hello_required`.
+refused `bad_request`, reason `hello_required`. A second `hello` on a
+connection is refused `bad_request`, reason `bad_request` (a connection is
+bound once), by a host and by a hub alike.
+
+A host that is not yet serving a session — it has started, but its engine is
+not up — answers `hello` `unavailable`, reason `not_ready` ("the host is not
+serving a session yet; retry"); a client retries it a moment later.
 
 ```json
 {"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}
@@ -191,6 +214,12 @@ reached through the splice; `multiplex` is `false` because one connection
 carries the roster or one spliced session, never several. `sessionCreate` is
 `true` only on a hub that serves `session.create` — `false` on a hub from
 before it existed: a client checks it, never the hub's version.
+
+A hub closes a connection that has not said `hello` within **5 seconds**,
+unanswered. A hub that has decided to close answers `hello` `unavailable`,
+reason `closing` ("the hub is closing") and ends the connection, which is the
+answer a client takes for no hub at all. A hub keeps at most 256 connections;
+one past that is closed as it is accepted, unanswered.
 
 `createOptions` says the hub serves
 [`sessions.createOptions`](#sessionscreateoptions), what a create can start.
@@ -506,7 +535,7 @@ endpoint-level reads.
 | `session.attach` | | `cursor?`, `when?`, `budget?` | `subscription`, `session`, `ready`, `after`, `snapshot?`, `reset?` | see [Attach, resume and snapshots](#attach-resume-and-snapshots) |
 | `session.detach` | | `subscription` | `{}` | ends this connection's attachment; the reply is its terminal acknowledgement |
 | `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings`, `lastTurn?` | a read, not a cut of the stream; `lastTurn` is [the last turn](#the-last-turn)'s ending |
-| `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot, main or one child's, no subscription |
+| `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot of the whole session with one sub-agent's entries budgeted first, no subscription |
 | `session.sync` | | — | `seq` | the reply barrier with no command ([below](#the-reply-barrier)) |
 | `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`) | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone |
 | `session.cancel` | ✓ | `turnId?` | `outcome`, `turn`, `reported` | with no `turnId`, cancels **the current turn** — craze's own or the agent's, whichever holds the session when the host validates the call (see [The foreign turn](#the-foreign-turn)); a named turn that is not current is `stale_turn` |
@@ -767,9 +796,19 @@ reads the aside's line, before the aside starts. It is served, and refused
 Returns one bounded snapshot with no subscription — the same codec and
 windowing an attach's own snapshot uses (newest entries first, up to the
 budget, with an omitted-entry ledger telling a client what it is missing).
-`agentId` names a running sub-agent's own transcript instead of the main
-one; an unknown id is `unknown_subagent`. `budget.snapshotBytes` defaults to
-4 MiB and is capped at 8 MiB regardless of what is asked.
+The result is always the whole snapshot — the main transcript and every
+sub-agent's, in the codec an attach's snapshot uses, restorable as any other.
+`agentId` changes only who gets the room first: the mandatory sections, then
+the main transcript's newest entry (so the snapshot restores exactly as any
+other, and is refused for size exactly when the same snapshot without
+`agentId` would be), then the named sub-agent's entries, newest first, then
+what remains of the main transcript's, then every other sub-agent's in the
+order they were created. A sub-agent the roster names that has no transcript
+of its own (a cursor task) has nothing to put first, and the answer is the
+plain snapshot. An id that neither a sub-agent transcript nor a roster row
+names is `unknown_subagent`; an empty `agentId` is the plain snapshot.
+`budget.snapshotBytes` defaults to 4 MiB and is capped at 8 MiB regardless of
+what is asked.
 
 This is deliberately **not** a page API over older history. An entry's id
 names the event that created it, not its latest contents — a tool entry is
@@ -1414,7 +1453,7 @@ while one has not yet fully ended is `bad_request`, reason
 |---|---|
 | `cursor?` | `{incarnation, seq}` — where the client already is. Absent asks for a snapshot |
 | `when?` | `"ready"` (default) or `"now"` |
-| `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum; `snapshotBytes` is capped at 8 MiB |
+| `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum (4,096 items and 32 MiB; an absent member is the host's default, 1,024 items and 8 MiB); `snapshotBytes` is capped at 8 MiB |
 
 The item/byte budget bounds what the log holds for this subscription that
 its forwarder has not yet taken: a live record that would take it past
@@ -1666,7 +1705,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `effort` | the provider has an effort/thinking-level setting |
 | `fastToggle` | the provider has a fast-mode toggle |
 | `subagentRows` | sub-agent rows are reported at all |
-| `subagentTranscript` | a sub-agent's own transcript can be read (`session.snapshot{agentId}`) |
+| `subagentTranscript` | a sub-agent's own transcript can be put first in a snapshot (`session.snapshot{agentId}`) |
 | `todos` | the provider reports a todo list |
 | `askCards` | the provider can ask permission/question cards |
 | `planCards` | the provider can ask plan-approval cards |
@@ -1971,6 +2010,14 @@ replay, or a document read before a delta and folded after it never brings
 back a list the session has moved past — a model a reload took away never
 reappears. A new incarnation is a new session: its snapshot replaces the
 fold, and revisions start again from `0`.
+
+**Revisions may skip.** Within one incarnation a revision — the catalog
+section's and the info document's `catalogs.revision` alike — only grows, but
+a client must not expect every number: a native session numbers each reload of
+its list as the reload starts, and a reload overtaken by a later one publishes
+nothing under its number. A reader also sees only the revisions after it
+attached. A client compares revisions (higher wins, the same revision is the
+same list) and never counts them or treats a gap as a lost update.
 
 A catalog-only delta prints no `craze prompt --json` line, but takes a `seq`
 like every event. The section is additive: no codec version bump; the method
