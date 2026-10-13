@@ -2039,7 +2039,8 @@ func TestBackgroundWorkerPanicFailsTheChild(t *testing.T) {
 // TestBackgroundRegistrationRacesClose (astra r15; §3.8's protocol, a
 // background call's): a Close that has sealed the registry before a
 // background call registers aborts the call — no child opens, no worker
-// starts, and nothing is left registered, held or to be reported — and one
+// starts, and nothing is left registered, held or to be reported, and the
+// turn, cancelled before the seal, ends there with no further request — and one
 // that seals right after the call launched its worker joins it: Close returns
 // only once the worker has settled its child and published its result, which
 // it then reports.
@@ -2055,7 +2056,20 @@ func TestBackgroundRegistrationRacesClose(t *testing.T) {
 		// waiting on it, held.
 		goOn := sync.OnceFunc(func() { close(proceed) })
 		defer goOn()
-		b.routers["test/a"].route("go", callStep(bgPart(t, "a1", "scan", "child one")), answerWith("never"))
+		// Close is held once it has sealed the registry, before it signals a
+		// child or closes the tools' closing channel. Its turn is cancelled by
+		// then (Session.signalClose), but a background call reads nothing of
+		// its context before it registers, so the seal is the only thing that
+		// can refuse the call.
+		sealed, resume := make(chan struct{}), make(chan struct{})
+		b.s.subs.seams.sealed = func() {
+			close(sealed)
+			<-resume
+		}
+		letClose := sync.OnceFunc(func() { close(resume) })
+		defer letClose()
+		a := b.routers["test/a"]
+		a.route("go", callStep(bgPart(t, "a1", "scan", "child one")), answerWith("never"))
 		finished := make(chan tool.Result, 1)
 		var ev events
 		out := start(context.Background(), b.s, "go", func(e Event) {
@@ -2065,17 +2079,9 @@ func TestBackgroundRegistrationRacesClose(t *testing.T) {
 			}
 		})
 		await(t, acquired, "the background call holding its slot, about to register")
-		// Close is held on the session's lock once it has sealed the registry
-		// and before it signals anything — the turn, the tools' closing — so
-		// the seal is the only thing that can refuse the call. A child that
-		// opened would wait on the same lock.
-		b.s.mu.Lock()
-		unlock := sync.OnceFunc(b.s.mu.Unlock)
-		defer unlock()
 		closed := make(chan error, 1)
 		go func() { closed <- b.s.Close() }()
-		waitFor(t, func() bool { return waitingOnMutexIn("harness.(*Session).signalClose(", "harness.(*Session).Close(") },
-			"Close, the registry sealed, waiting to signal")
+		await(t, sealed, "Close, the registry sealed")
 		goOn()
 		res := await(t, finished, "the call's result")
 		if res.Class != tool.ClassAborted || res.Text != tool.AbortedText {
@@ -2088,10 +2094,17 @@ func TestBackgroundRegistrationRacesClose(t *testing.T) {
 			t.Fatalf("%d children opened, %d results recorded; want none", len(b.kids.all()), results)
 		}
 		settled(t, b.s)
-		unlock()
-		if got := await(t, out, "the turn"); got.err != nil {
-			t.Fatalf("Run = %+v, %v", got.res, got.err)
+		// The aborted call ended the turn's step with Close still held at its
+		// seal: the turn, cancelled before the seal, ends there and asks the
+		// model nothing more (§3.8: a refusal the seal makes reaches a step
+		// boundary that finds the turn cancelled).
+		if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopCancelled {
+			t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
 		}
+		if n := len(a.requests("go")); n != 1 {
+			t.Fatalf("the turn sent %d requests; want 1, none after Close began", n)
+		}
+		letClose()
 		if err := await(t, closed, "Close"); err != nil {
 			t.Fatal(err)
 		}

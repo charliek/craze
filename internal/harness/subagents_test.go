@@ -175,6 +175,9 @@ type worker struct {
 	// notify, when set, is sent the worker once it has reached: how a test
 	// waits for any n of several workers without knowing which.
 	notify chan<- *worker
+	// ctx is the step's context, set before reached is closed: a child's own
+	// request's, derived from its parent turn's when the child is a call's.
+	ctx context.Context
 }
 
 func newWorker() *worker {
@@ -204,6 +207,7 @@ func (w *worker) step(before, after []fantasy.StreamPart) step {
 				return
 			}
 		}
+		w.ctx = ctx
 		close(w.reached)
 		if w.notify != nil {
 			w.notify <- w
@@ -681,7 +685,7 @@ func TestAgentSlotReleasedOnEveryPath(t *testing.T) {
 		var child *Session
 		s.subs.seams.open = func(o Options) (*Session, error) {
 			go func() { closed <- s.Close() }()
-			<-s.tools.closing // closeChildren has latched the registered handle
+			<-s.tools.closing // Close has latched the registered handle (signalClose)
 			c, err := Open(o)
 			child = c
 			return c, err
@@ -888,6 +892,106 @@ func TestCloseJoinsChildren(t *testing.T) {
 	if got := await(t, out, "the closed turn"); got.err != nil || got.res.StopReason != StopCancelled {
 		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
 	}
+}
+
+// TestCloseCancelsTheTurnBeforeItsChildren (§3.8; the macOS CI flake of
+// TestCloseJoinsChildren): a child Close ends answers its call aborted, which
+// ends the parent's step, so Close cancels the parent's turn before it
+// signals any child — a turn still live at that boundary went on to its next
+// request, the model called by a session that was closing. As Close is about
+// to signal each child, both children's contexts, derived from the turn's,
+// are already done, which nothing but the turn's cancel can have done by
+// then; and the turn ends cancelled, having sent the one request it was
+// scripted.
+func TestCloseCancelsTheTurnBeforeItsChildren(t *testing.T) {
+	f := newRouted(t)
+	s := f.open(f.options())
+	a := f.routers["test/a"]
+	w1, w2 := newWorker(), newWorker()
+	a.route("fan out", callStep(agentPart(t, "a1", task("first", "child one")), agentPart(t, "a2", task("second", "child two"))))
+	a.route("child one", w1.step(openText("one"), finishText()))
+	a.route("child two", w2.step(openText("two"), finishText()))
+	// On Close's goroutine, which is this one; the workers' contexts were set
+	// before they reached.
+	var early []string
+	s.subs.seams.signalling = func(id string) {
+		if w1.ctx.Err() == nil || w2.ctx.Err() == nil {
+			early = append(early, id)
+		}
+	}
+	var ev events
+	out := start(context.Background(), s, "fan out", ev.sink)
+	await(t, w1.reached, "the first child mid-step")
+	await(t, w2.reached, "the second child mid-step")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(early) != 0 {
+		t.Fatalf("Close signalled %v while a child's context, derived from the turn's, was live: the turn was not cancelled first", early)
+	}
+	if got := await(t, out, "the closed turn"); got.err != nil || got.res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+	}
+	if n := len(a.requests("fan out")); n != 1 {
+		t.Fatalf("the parent's turn sent %d requests; want 1, none after Close began", n)
+	}
+	for _, callID := range []string{"t1.1.1", "t1.1.2"} {
+		if res := callResult(t, ev.list(), callID); res.Class != tool.ClassAborted {
+			t.Fatalf("call %s = %+v; want aborted", callID, res)
+		}
+	}
+	settled(t, s)
+}
+
+// TestCloseCancelsTheTurnBeforeItSeals (§3.8; astra's review of the fix
+// above): the seal refuses a call about to register, which answers aborted
+// and can end the parent's step just as a signalled child's can, so the turn
+// is cancelled before the seal too. The call holds its slot, about to
+// register; Close is held once it has sealed the registry while the call goes
+// on — refused, no child opened — and the turn reaches its step boundary and
+// returns: cancelled, having sent its one request.
+func TestCloseCancelsTheTurnBeforeItSeals(t *testing.T) {
+	f := newRouted(t)
+	s := f.open(f.options())
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	a.route("go", callStep(agentPart(t, "a1", task("late", "never registers"))))
+	acquired, proceed := make(chan struct{}), make(chan struct{})
+	s.subs.seams.acquired = func(tool.SubagentCall) {
+		close(acquired)
+		<-proceed
+	}
+	// A failure must not leave the call, and so the turn, held.
+	goOn := sync.OnceFunc(func() { close(proceed) })
+	defer goOn()
+	var (
+		ev  events
+		out <-chan outcome
+		got outcome
+	)
+	// Close runs on this goroutine, so the seam's await may fail the test.
+	s.subs.seams.sealed = func() {
+		goOn()
+		got = await(t, out, "the turn, Close held at its seal")
+	}
+	out = start(context.Background(), s, "go", ev.sink)
+	await(t, acquired, "the call holding its slot, about to register")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil || got.res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+	}
+	if n := len(a.requests("go")); n != 1 {
+		t.Fatalf("the turn sent %d requests; want 1, none after Close began", n)
+	}
+	if res := callResult(t, ev.list(), "t1.1.1"); res.Class != tool.ClassAborted {
+		t.Fatalf("the call = %+v; want aborted", res)
+	}
+	if len(k.all()) != 0 || len(of[SubagentStarted](ev.list())) != 0 {
+		t.Fatal("a child opened after Close had sealed the registry")
+	}
+	settled(t, s)
 }
 
 // TestCloseMidFanOutSettles (A7): Close while four children hold every slot

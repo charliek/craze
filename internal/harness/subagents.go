@@ -234,10 +234,12 @@ type subagents struct {
 // the child's Open, to know a call is waiting for a slot or holds one, to see
 // the child session a call opened, to act the instant the child's Run has
 // returned and again once its end is latched, to hold a call in its
-// retirement, and to act as its last word begins. returned and ended are a
-// background child's too, on its worker (runToEnd): there, returned holds the
-// worker before anything of its settlement — the outcome, the finish, the
-// result, its publication — so a test can hold a worker Close must join.
+// retirement, and to act as its last word begins — and two points outside
+// any call, to hold a Close once it has sealed the registry and as it signals
+// each child. returned and ended are a background child's too, on its worker
+// (runToEnd): there, returned holds the worker before anything of its
+// settlement — the outcome, the finish, the result, its publication — so a
+// test can hold a worker Close must join.
 type subagentSeams struct {
 	open     func(Options) (*Session, error) // opens a child; nil is Open
 	waiting  func(tool.SubagentCall)         // the call found no free slot and is about to wait for one
@@ -261,6 +263,12 @@ type subagentSeams struct {
 	// stopWaiting: a bash_stop call has stopped its job and is about to wait
 	// for it, holding no lock.
 	stopWaiting func(id string)
+	// sealed: Close has sealed the registry and signalled no child yet;
+	// signalling: Close is about to signal child id (closeChildren). Both on
+	// Close's goroutine, holding no lock, before the session's closing channel
+	// is closed.
+	sealed     func()
+	signalling func(id string)
 }
 
 // turnLink is what a call needs of the turn it runs in: the turn's locked
@@ -412,9 +420,10 @@ func (r *subagents) setMode(mode string, set func(string)) {
 	}
 }
 
-// closeChildren is Close's first act (§3.8, panel P3): seal the registry and
-// copy its handles under regMu, then, outside it and without waiting, signal
-// each child's closing. A nil runner has no children.
+// closeChildren is Close's act on its sub-agents (§3.8, panel P3), made once
+// the session's own turn is cancelled (Session.signalClose): seal the registry
+// and copy its handles under regMu, then, outside it and without waiting,
+// signal each child's closing. A nil runner has no children.
 func (r *subagents) closeChildren() {
 	if r == nil {
 		return
@@ -426,7 +435,13 @@ func (r *subagents) closeChildren() {
 		handles = append(handles, h)
 	}
 	r.regMu.Unlock()
+	if r.seams.sealed != nil {
+		r.seams.sealed()
+	}
 	for _, h := range handles {
+		if r.seams.signalling != nil {
+			r.seams.signalling(h.id)
+		}
 		h.signalClose()
 	}
 }
@@ -529,13 +544,14 @@ func (h *childHandle) session() *Session {
 // cancel or a Close, which outrank it, or an earlier stop's, whose cause
 // stands (§3.10: a stop racing the finish is harmless).
 //
-// Against Close: Close signals every registered child's closing, a cancel of
-// the same context with tool.ErrClosing, and whichever of the two causes
-// reaches the context first, the child is aborted — decide reads the handle's
-// closing latch as the parent gone, and settle, the call's last act, reads it
-// again. A stop during a Close returns nil, or ErrNoSuchSubagent once the
-// child's end is latched; either is right, and neither changes what the call
-// answers.
+// Against Close: Close cancels its own turn, which reaches a foreground child
+// through its call's context, and then signals every registered child's
+// closing, a cancel of the child's context with tool.ErrClosing; whichever
+// cause reaches the context first, the stop or Close's, the child is aborted
+// — decide reads the call's context done, or the handle's closing latch, as
+// the parent gone, and settle, the call's last act, reads them again. A stop
+// during a Close returns nil, or ErrNoSuchSubagent once the child's end is
+// latched; either is right, and neither changes what the call answers.
 //
 // A child still opening is registered already, and a stop reaches the context
 // its turn will run under, though no client knows its id yet (SubagentStarted
