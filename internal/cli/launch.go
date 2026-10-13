@@ -18,6 +18,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -703,7 +704,11 @@ func (e *hostStartError) Unwrap() error { return e.err }
 // before it was ready for a reason of its own, its socket not bound among
 // them (spawnNotReady) — a start failure naming its log and the opt-out,
 // which runs the session inside craze as before, from a picker too: choosing
-// again would not change it (astra r7-c4 2).
+// again would not change it (astra r7-c4 2). A host that could not be
+// started because this craze's own executable is gone from its path — an
+// upgrade removed it (hostspawn.ExecutableGoneError) — is that start failure
+// in words that say what to do instead (plan 046 U4): this craze cannot
+// start another host, and the one now installed can.
 func launchFailure(err error) error {
 	var se *spawnError
 	if errors.As(err, &se) && (se.kind == spawnRefused || se.kind == spawnHeld) {
@@ -712,6 +717,10 @@ func launchFailure(err error) error {
 			msg = "craze: " + rest
 		}
 		return &tui.Refusal{Err: &launchError{msg: msg, err: err}}
+	}
+	var gone *hostspawn.ExecutableGoneError
+	if errors.As(err, &gone) {
+		return &launchError{msg: fmt.Sprintf("craze was upgraded or removed since this craze started (%s is gone): quit and start craze again", gone.Path), err: err}
 	}
 	return optOut(err)
 }

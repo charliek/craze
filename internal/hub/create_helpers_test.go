@@ -206,6 +206,14 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 	if err != nil {
 		t.Fatal(err)
 	}
+	return hostsAsChildrenOf(t, env, exe, mode)
+}
+
+// hostsAsChildrenOf is hostsAsChildren with exe as every host command's path:
+// this test binary, or a link to it that a test removes and restores (plan
+// 046 U1, upgrade_test.go).
+func hostsAsChildrenOf(t *testing.T, env rundir.Env, exe string, mode func(n int) string) *spawned {
+	t.Helper()
 	// A starved child takes its time to come up: the bounds on its answer
 	// and its dial are the test's step, as every wait of these tests.
 	setVar(t, &hostspawn.ReadyWait, step)

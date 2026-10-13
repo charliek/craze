@@ -46,6 +46,11 @@ const ReadyLineMax = 64 << 10
 // could not come up, which names its log. The spawner takes a line only when
 // it carries everything its branch needs (ReadyLine.invalid), and ignores a
 // member it does not know.
+//
+// Compatibility (plan 046 U5, SD-47): the line is only ever extended — a
+// member added, never one removed, renamed or given another meaning — because
+// an old spawner reads the new binary's line: a hub that outlives an upgrade
+// which replaced craze in place spawns the new craze's hosts.
 type ReadyLine struct {
 	OK             bool       `json:"ok"`
 	HostID         string     `json:"hostId,omitempty"`

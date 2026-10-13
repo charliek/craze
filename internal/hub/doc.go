@@ -28,6 +28,9 @@
 //   - ensure.go: Ensure, a client's find-or-start (and the wedged hub's
 //     replacement, P17), Find, the find that never starts one, and Command,
 //     the spawn seam.
+//   - upgrade.go: a hub that outlives an upgrade (plan 046 §3.C) — its answer
+//     naming the remedy when its own craze is gone from its path, and
+//     UpgradeRemedy, a client's words for an older hub that cannot say it.
 //   - dialer.go: Dialer, internal/remote's dial for a client that reaches
 //     its session through the hub, which brings a dead hub back.
 //   - list.go: the roster read once (craze ps) — List from a hub, and

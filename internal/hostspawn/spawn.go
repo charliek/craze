@@ -52,8 +52,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -92,6 +94,42 @@ var Command = func(argv []string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	return exec.Command(exe, argv...), nil
+}
+
+// ExecutableGoneError is a start that failed because the executable it was
+// to run is no longer at its path (plan 046 U1): craze upgraded or removed
+// after this process started — a Linuxbrew upgrade deletes the old versioned
+// directory, and Linux's os.Executable() still names it (Go trims /proc's
+// " (deleted)"), so Command re-executes a path that is gone. It is reported
+// only when the start failed and a stat of the command's path itself says it
+// does not exist (startError): a host starts with Setsid, so os/exec skips
+// its own check of cmd.Dir, and a vanished working directory fails the start
+// with the very same ENOENT — the path's stat is what tells the two apart.
+// Err is the start's own error.
+type ExecutableGoneError struct {
+	Path string
+	Err  error
+}
+
+func (e *ExecutableGoneError) Error() string {
+	return "craze at " + e.Path + " is gone: it was upgraded or removed after this process started"
+}
+
+func (e *ExecutableGoneError) Unwrap() error { return e.Err }
+
+// startError is cmd's failed start, err, classified: an *ExecutableGoneError
+// when cmd's path is absolute and a stat of it says it does not exist now
+// (ExecutableGoneError's rule); err as it is otherwise. A relative path is
+// resolved against cmd.Dir, which may itself be what vanished, so it is never
+// classified.
+func startError(cmd *exec.Cmd, err error) error {
+	if !filepath.IsAbs(cmd.Path) {
+		return err
+	}
+	if _, serr := os.Stat(cmd.Path); errors.Is(serr, fs.ErrNotExist) {
+		return &ExecutableGoneError{Path: cmd.Path, Err: err}
+	}
+	return err
 }
 
 // Pipe is the ready pipe's constructor, os.Pipe: a seam for the test that
@@ -169,6 +207,13 @@ type Spec struct {
 // --no-host-status, --unattended, --outlive-spawner, --request-id,
 // --request-hash, --hub-pid and --title.
 // Every value is spelled --flag=value, so none is read as a flag of its own.
+//
+// Compatibility (plan 046 U5, SD-47): craze serve's flags are only ever
+// added, never renamed, removed or given another meaning, because an old
+// spawner drives the new binary's hosts — a hub (or a TUI) that outlives an
+// upgrade which replaced craze in place re-executes the new craze with the
+// command line it builds here. A flag a newer craze no longer needs stays
+// accepted.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
 	str := func(name, v string) {
@@ -281,7 +326,9 @@ func Start(argv, unset []string, groups, log string) (*Child, *os.File, error) {
 // ReadyFDEnv=3 and marker=1 in its environment, and one goroutine waits for
 // it. The environment is cmd.Env, or this process's own when that is nil,
 // less any ReadyFDEnv or marker already in it; cmd.Dir is the caller's. groups
-// and log are the child's record of its agents and its log, "" for none.
+// and log are the child's record of its agents and its log, "" for none. A
+// start that fails because cmd's executable is gone from its path is an
+// *ExecutableGoneError.
 func StartCmd(cmd *exec.Cmd, marker, groups, log string) (*Child, *os.File, error) {
 	r, w, err := Pipe()
 	if err != nil {
@@ -302,7 +349,7 @@ func StartCmd(cmd *exec.Cmd, marker, groups, log string) (*Child, *os.File, erro
 	_ = w.Close()
 	if err != nil {
 		_ = r.Close()
-		return nil, nil, err
+		return nil, nil, startError(cmd, err)
 	}
 	c := &Child{cmd: cmd, pid: cmd.Process.Pid, groups: groups, log: log, done: make(chan struct{})}
 	go func() {

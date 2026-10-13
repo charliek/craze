@@ -2,7 +2,40 @@
 
 Three sections: [since v0.1.1](#since-v011), the changes after the third
 release; [since v0.1.0](#since-v010), the second release's; and [from
-v0.0.1](#from-v001), the first release's.
+v0.0.1](#from-v001), the first release's. Whatever the version, [upgrading
+while sessions run](#upgrading-while-sessions-run) says what an upgrade does
+to the hub and the sessions already running.
+
+## Upgrading while sessions run
+
+Sessions run on through an upgrade: each keeps the craze it started with, and
+so does the per-machine [hub](#the-hub) until it exits by itself. What a hub
+from before the upgrade can still do depends on how the upgrade replaces
+craze:
+
+- **macOS (Homebrew) and apt: nothing to do.** The new craze takes the old
+  one's place at the same path, so the old hub starts the new craze's
+  sessions.
+- **Linuxbrew, or any install that removes the old binary:** a hub from before
+  this release cannot start sessions after the upgrade — the craze it runs
+  them with is gone. `craze new` says the session host cannot be started and
+  names that hub's pid: `the session host cannot be started; the hub (pid
+  <pid>) runs craze <old> and this is craze <new>: if craze was upgraded, stop
+  that hub with kill <pid> (no session ends) and run this again`. `kill` it:
+  every session runs on, and the next command starts the new craze's hub.
+- **From this release on, the hub says so itself** — `this hub's craze
+  (<path>) was replaced by an upgrade: stop this hub with kill <pid> (no
+  session ends) and run this again` — and goes on serving its clients and the
+  sessions it lists until you stop it. A TUI left running from before the
+  upgrade cannot start a session either, and says `craze was upgraded or
+  removed since this craze started (<path> is gone): quit and start craze
+  again`.
+
+A running hub too old for what a command needs (`craze new --title` against a
+hub from before titles) now ends its refusal with the same way out: `this hub
+(craze <v>) cannot …; it exits once no session runs and no client is
+connected, or stop it now with kill <pid> (no session ends)`, where it used to
+end `it exits when idle`.
 
 ## Since v0.1.1
 

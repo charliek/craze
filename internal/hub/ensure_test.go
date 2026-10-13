@@ -237,7 +237,9 @@ func TestEnsureReportsAnOlderHub(t *testing.T) {
 	writeRecord(t, env, rundir.HubRecord{HubID: hubID, PID: pid, StartToken: token(t, pid), Socket: d.path})
 	_, err := ensure(t, env, protocol.ConnectionCapabilities{SessionCreate: true})
 	var lacks *LacksError
-	if !errors.As(err, &lacks) || err.Error() != "this hub (craze 0.9.1) cannot create sessions; it exits when idle" {
+	// The pid is its hello's (hubResult's 1): the hub's own, which the
+	// record's may not be.
+	if !errors.As(err, &lacks) || lacks.PID != 1 || err.Error() != lacksWords("0.9.1", "create sessions", 1) {
 		t.Fatalf("Ensure for a create = %v; want the older hub reported", err)
 	}
 	if n := d.accepted.Load(); n != 1 {

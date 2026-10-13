@@ -861,7 +861,12 @@ schema does not define, and for `title` on a hub whose `hello` has no
 `bad_request`). A `cwd` that is no existing directory and a provider
 this craze cannot start are `bad_request` too, checked only for a create that
 will start a session: a repeat (below) is answered without them. A host that fails to spawn, or to become ready, is
-`unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
+`unavailable`, reason `spawn_failed` — the hub has ended it. A host that
+cannot be started because the hub's own craze is gone from its path (an
+upgrade removed it) is the same refusal, its message naming that path and the
+hub's pid to stop — `this hub's craze (<path>) was replaced by an upgrade:
+stop this hub with kill <pid> (no session ends) and run this again` — and the
+hub serves on: a client shows the message as it is. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
 host's first error line. For a start that failed because its agent exited

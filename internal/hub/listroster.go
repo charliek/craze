@@ -651,8 +651,8 @@ func subscribeOn(c *hubConn, socket string) (protocol.SessionsSubscribeResult, e
 		return protocol.SessionsSubscribeResult{}, err
 	}
 	if !hello.Capabilities.RosterSubscribe {
-		return protocol.SessionsSubscribeResult{}, &LacksError{Version: hello.Endpoint.CrazeVersion,
-			Missing: missing(hello.Capabilities, protocol.ConnectionCapabilities{RosterSubscribe: true})}
+		return protocol.SessionsSubscribeResult{}, lacking(hello.Endpoint,
+			missing(hello.Capabilities, protocol.ConnectionCapabilities{RosterSubscribe: true}))
 	}
 	b, err := c.call(protocol.MethodSessionsSubscribe, protocol.SessionsSubscribeParams{})
 	if err != nil {

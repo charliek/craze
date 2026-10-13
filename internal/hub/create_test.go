@@ -865,7 +865,9 @@ func TestCreateClient(t *testing.T) {
 	older := runIn(t, testEnv(t), nil)
 	_, err = Create(ctx, older.line(t).Socket, who, protocol.CreateParams{Cwd: "/"})
 	var lacks *LacksError
-	if !errors.As(err, &lacks) || err.Error() != "this hub (craze "+lacks.Version+") cannot create sessions; it exits when idle" {
+	// The hub runs in this process: its pid, from its hello, is the test's.
+	if !errors.As(err, &lacks) || lacks.PID != os.Getpid() || err.Error() != "this hub (craze "+lacks.Version+") cannot create sessions; "+
+		"it exits once no session runs and no client is connected, or stop it now with kill "+strconv.Itoa(os.Getpid())+" (no session ends)" {
 		t.Fatalf("Create of a hub that creates nothing = %v", err)
 	}
 

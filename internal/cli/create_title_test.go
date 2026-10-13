@@ -312,7 +312,9 @@ func TestNewTitleAgainstAnOlderHub(t *testing.T) {
 	}
 	t.Cleanup(func() { hub.Command = prev })
 	stdout, stderr, code := executeErr([]string{"new", "-C", t.TempDir(), "--title", "A title"})
-	want := "craze new: this hub (craze " + version.Version + ") cannot set a title at create; it exits when idle\n"
+	// The hub runs in this process: its pid is the test's.
+	want := fmt.Sprintf("craze new: this hub (craze %s) cannot set a title at create; it exits once no session runs "+
+		"and no client is connected, or stop it now with kill %d (no session ends)\n", version.Version, os.Getpid())
 	if code != 1 || stdout != "" || stderr != want {
 		t.Fatalf("craze new --title of an older hub: exit %d, stdout %q, stderr %q; want %q", code, stdout, stderr, want)
 	}

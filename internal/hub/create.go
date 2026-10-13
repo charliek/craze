@@ -75,7 +75,11 @@ import (
 //     line is read (hostspawn.ReadReady). A host that does not start, or does
 //     not answer ok, is unavailable, reason spawn_failed — the host
 //     terminated (Settle, Terminate) and reaped once it exits; one stuck in
-//     an uninterruptible wait through both graces is left as it is.
+//     an uninterruptible wait through both graces is left as it is. A host
+//     that cannot be started because this hub's own craze is gone from its
+//     path — an upgrade removed it — is the same refusal in words that say
+//     so and name this hub's pid to stop, and the hub serves on
+//     (launchRefusal, plan 046 U1).
 //  2. The hub dials it as a client of its own and attaches with when: ready
 //     (remote.Session.Start), waiting for the session's start at most
 //     createStartWait: a start that fails, or that takes longer, is
@@ -768,9 +772,7 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 		return createRefusal(closingErr())
 	}
 	if err != nil {
-		// Its error names the executable's path: the hub's log's alone.
-		h.logf("%s: start the session host: %v", tag, err)
-		return createRefusal(spawnFailed("the session host cannot be started"))
+		return createRefusal(h.launchRefusal(tag, err))
 	}
 	defer h.cr.launches.Done()
 	child := host.child
@@ -1450,23 +1452,33 @@ var ErrUnanswered = errors.New("hub: the connection ended before the answer")
 // (createTitle, plan 043 P11), a *LacksError, nothing asked: a title is never
 // sent where it would be refused unknown_field, nor dropped.
 func Create(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, error) {
+	res, _, err := CreateHello(ctx, socket, who, p)
+	return res, err
+}
+
+// CreateHello is Create, answering also the hello of the hub that took the
+// create's connection (plan 046 U2): the hub whose refusal a client explains,
+// which may not be the one an earlier Ensure met — a hub can end and another
+// bind the same socket in between. The hello is the zero value when the
+// connection never got one.
+func CreateHello(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, protocol.HubHelloResult, error) {
 	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
-		return nil, err
+		return nil, protocol.HubHelloResult{}, err
 	}
 	defer hc.close()
 	if missing := missing(hello.Capabilities, CreateNeed(p)); len(missing) > 0 {
-		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: missing}
+		return nil, hello, lacking(hello.Endpoint, missing)
 	}
 	res, err := hc.call(protocol.MethodSessionCreate, p)
 	if err != nil {
-		return nil, err
+		return nil, hello, err
 	}
 	var check protocol.CreateResult
 	if err := json.Unmarshal(res, &check); err != nil {
-		return nil, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionCreate, err)
+		return nil, hello, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionCreate, err)
 	}
-	return res, nil
+	return res, hello, nil
 }
 
 // CreateNeed is what a hub must say in its hello to take p (Ensure's need,

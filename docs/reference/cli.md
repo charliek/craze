@@ -878,7 +878,11 @@ one finds it. A hub that does not answer is replaced.
 It **exits by itself 60 seconds after the last host has gone and the last
 client has disconnected** — one nobody ever connected to included — and
 while any session runs it stays. Killing it loses nothing: hosts run on
-without it, and the next `craze ps` starts another.
+without it, and the next `craze ps` starts another. A hub that outlives an
+upgrade which removed its craze (Linuxbrew) cannot start sessions: its
+refusal names its pid to `kill` (for an older craze's hub, `craze new` adds
+it), and it serves on until then ([Upgrading while sessions
+run](../getting-started/upgrading.md#upgrading-while-sessions-run)).
 
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
@@ -948,13 +952,30 @@ login keychain is locked. / Run security unlock-keychain and try again.` for
 printed is in the [host's log](configuration.md#host-logs). So is a session that started and
 refused its first prompt: it runs on, idle, and the line says why. A hub from
 before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
-when idle`: it is not replaced, and the next `craze new` after it has gone
-starts this craze's. Likewise `--title` against a running hub from before
+once no session runs and no client is connected, or stop it now with kill
+<pid> (no session ends)`: it is not replaced, and the next `craze new` after
+it has gone starts this craze's. Likewise `--title` against a running hub from before
 titles (its `hello` has no [`createTitle`](protocol.md#the-hubs-result)) is
-`this hub (craze <v>) cannot set a title at create; it exits when idle`,
-exit 1 (with `--json`, that message as the error object's): nothing is sent
+`this hub (craze <v>) cannot set a title at create; it exits once no session
+runs and no client is connected, or stop it now with kill <pid> (no session
+ends)`, exit 1 (with `--json`, that message as the error object's): nothing is sent
 to it, and no session is created without its title — run it again once that
-hub has exited, or create without `--title` and `/rename` the session. Each run creates under a request id of its own, and a
+hub has exited or been stopped, or create without `--title` and `/rename` the session.
+
+A hub whose craze an upgrade removed (Linuxbrew deletes the old version's
+directory) cannot start the session's host, and says so: `this hub's craze
+(<path>) was replaced by an upgrade: stop this hub with kill <pid> (no session
+ends) and run this again`; it goes on serving until you do. A hub of another
+craze version than this one that cannot start the host — an older hub says
+only `the session host cannot be started` — gets the way out added after its
+words, from its `hello`: `; the hub (pid <pid>) runs craze <v> and this is
+craze <this>: if craze was upgraded, stop that hub with kill <pid> (no
+session ends) and run this again`. That addition is the stderr line's alone:
+with `--json` the object is the hub's error as it sent it. See [Upgrading
+while sessions
+run](../getting-started/upgrading.md#upgrading-while-sessions-run).
+
+Each run creates under a request id of its own, and a
 connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
@@ -1755,7 +1776,8 @@ recent: /home/you/projects/shed
 would be the very ssh-born hub it is asking about. With none running it says
 `no hub is running` and exits 1 (`craze ps` starts one). A hub from an older
 craze, which cannot answer, is reported (`this hub (craze …) cannot list what
-it can create; it exits when idle`), exit 1, and left to exit when idle.
+it can create; it exits once no session runs and no client is connected, or
+stop it now with kill <pid> (no session ends)`), exit 1, and left running.
 
 `craze providers` exits 0 whenever it answered, whatever the states say; 1 on
 an error, `--hub` with no hub to ask included; and 2 for an argument or a
