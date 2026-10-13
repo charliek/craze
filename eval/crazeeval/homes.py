@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import tomli_w
 
 from crazeeval import paths
-from crazeeval.config import EvalModel, Snapshot
+from crazeeval.config import EvalModel, Snapshot, shipped_driver
 from crazeeval.keys import ANTHROPIC, ANTHROPIC_DRIVER
 
 H = paths.SANDBOX_HOME
@@ -41,6 +41,8 @@ def _write(p: Path, text: str, mode: int = 0o644) -> None:
 # craze's override of the Anthropic API's origin (internal/harness/llm/messagesapi:
 # TestAPIEnv), and the API version every Messages request names (APIVersion).
 ANTHROPIC_API_ENV = "CRAZE_TEST_ANTHROPIC_API"
+# craze's OpenRouter driver (modeltable DriverOpenRouter): its endpoint is fixed.
+OPENROUTER_DRIVER = "openrouter"
 ANTHROPIC_VERSION = "2023-06-01"
 
 
@@ -81,7 +83,16 @@ def _craze_provider(m: dict, em: EvalModel, base_url: str) -> dict:
         # entry to take it from (craze refuses a provider with none). The route reaches
         # craze as CRAZE_TEST_ANTHROPIC_API (craze_env).
         return {"driver": ANTHROPIC_DRIVER, "api_key": paths.DUMMY_KEY}
-    return {"driver": m["craze_provider"].get("driver", "openai-compat"), "base_url": base_url, "api_key": paths.DUMMY_KEY}
+    # The snapshot's recorded driver: the owner's own, or for an old gx import's entry,
+    # whose driver craze ignores, the catalog's as the snapshot froze it (craze plan 047
+    # D14: Meta's openai-responses). An entry that names none runs on the one craze ships.
+    driver = m["craze_provider"].get("driver") or shipped_driver(em.provider)
+    if driver == OPENROUTER_DRIVER:
+        # craze's openrouter driver has a fixed endpoint and refuses a base_url, so no
+        # home can point it at the proxy's route.
+        raise ValueError(f"{em.key}: craze's {OPENROUTER_DRIVER!r} driver has a fixed endpoint, so its craze home "
+                         "cannot point at the eval's proxy; OpenRouter is not an eval target")
+    return {"driver": driver, "base_url": base_url, "api_key": paths.DUMMY_KEY}
 
 
 def _write_craze_native(crazedir: Path, models: dict, providers: dict) -> None:

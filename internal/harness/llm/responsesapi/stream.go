@@ -42,6 +42,17 @@ const (
 	// Completed: the response completed (Usage). It is the last event, and
 	// the only success.
 	Completed
+	// ItemCut: an output item the response stopped in the middle of (Index,
+	// Item: its type, its id, and a function call's call id — or, for one
+	// whose end said status "incomplete", that end), its content
+	// incomplete. It is reported only on the key route, for a response cut
+	// short by the output ceiling or the content filter (Error.CutShort),
+	// just before the stream ends with that *Error: every item the reader has
+	// not been told of yet — a done one as ItemDone, one still streaming as
+	// ItemCut — in output_index order, so a reader closing what was cut never
+	// puts a later item before an earlier one (plan 047 C6, review F1). A
+	// function call never announced, its call id unknown, is passed over.
+	ItemCut
 )
 
 // SummarySeparator joins a reasoning item's summary parts in its
@@ -74,6 +85,10 @@ type OutputItem struct {
 	EncryptedContent string
 	// CallID, Name, Namespace and Arguments are a function call's.
 	CallID, Name, Namespace, Arguments string
+	// Status is the item's status as its event gave it: "in_progress",
+	// "completed" or "incomplete" (an item cut short), "" when it gave none.
+	// The key route holds an item that ended incomplete (ItemCut).
+	Status string
 }
 
 // Usage is what a response reported it used, as it reported it. Input
@@ -101,17 +116,25 @@ type Usage struct {
 // twice. (When the deltas are not a prefix of the item's text, which no
 // server should send, the deltas stand: they are what was shown.)
 type Stream struct {
-	ctx  context.Context
-	body io.ReadCloser
-	sse  *sseReader
+	ctx   context.Context
+	body  io.ReadCloser
+	sse   *sseReader
+	route Route // the client's: what the failures it reports are judged by (Error.Route)
 
 	items map[int]*itemState // every index seen
 	held  map[int]OutputItem // finished items waiting for a lower index to finish
-	next  int                // the lowest index not yet reported done
-	queue []Event            // events made and not yet read
-	cur   Event
-	err   error
-	ended bool
+	// unfinished are the key route's items whose end said status
+	// "incomplete" (plan 047 C6, review F2): streamed in part, never
+	// reported done — a cut (cut) reports them as cut, and only a response
+	// that completes all the same reports them done (response.completed).
+	// Until then they hold back every higher index, as an item still
+	// streaming does.
+	unfinished map[int]OutputItem
+	next       int     // the lowest index not yet reported done
+	queue      []Event // events made and not yet read
+	cur        Event
+	err        error
+	ended      bool
 }
 
 type itemState struct {
@@ -131,11 +154,12 @@ type itemState struct {
 
 func newStream(ctx context.Context, resp *http.Response) *Stream {
 	return &Stream{
-		ctx:   ctx,
-		body:  resp.Body,
-		sse:   newSSEReader(resp.Body),
-		items: map[int]*itemState{},
-		held:  map[int]OutputItem{},
+		ctx:        ctx,
+		body:       resp.Body,
+		sse:        newSSEReader(resp.Body),
+		items:      map[int]*itemState{},
+		held:       map[int]OutputItem{},
+		unfinished: map[int]OutputItem{},
 	}
 }
 
@@ -339,10 +363,21 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		case "reasoning":
 			s.rest(st, idx, ReasoningDelta, strings.Join(item.Summary, SummarySeparator))
 		}
+		if s.route == RouteKey && item.Status == "incomplete" {
+			// The item ended cut short — a call's arguments partial, say
+			// (review F2): never reported done while the response may yet
+			// be cut, so a call is never one to run or replay.
+			s.unfinished[idx] = item
+			return
+		}
 		s.held[idx] = item
 		s.release(false)
 
 	case "response.completed":
+		// A response that completes reports every item done, an unfinished
+		// one too, as it always has.
+		maps.Copy(s.held, s.unfinished)
+		clear(s.unfinished)
 		s.release(true)
 		var u Usage
 		if w.Response != nil {
@@ -352,7 +387,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		s.ended = true
 
 	case "response.failed", "response.incomplete":
-		e := &Error{Event: typ}
+		e := &Error{Event: typ, Route: s.route}
 		if r := w.Response; r != nil {
 			if r.Error != nil {
 				e.setError(r.Error)
@@ -365,10 +400,13 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 				e.Usage = &u
 			}
 		}
+		if e.CutShort() {
+			s.cut()
+		}
 		s.fail(e)
 
 	case "error":
-		e := &Error{Event: typ}
+		e := &Error{Event: typ, Route: s.route}
 		if w.Error != nil {
 			e.setError(w.Error)
 		} else {
@@ -453,6 +491,33 @@ func (s *Stream) release(all bool) {
 	}
 }
 
+// cut reports, in output_index order, every item a response cut short left
+// unreported (ItemCut): one done and held behind a lower index that was still
+// streaming, as ItemDone; one whose end said it was incomplete (unfinished),
+// and one still streaming, as ItemCut. A function call never announced
+// (waiting for its call id) was never begun for the reader, and is passed
+// over.
+func (s *Stream) cut() {
+	for _, idx := range slices.Sorted(maps.Keys(s.items)) {
+		if idx < s.next {
+			continue // reported already: release reports in order
+		}
+		if item, ok := s.held[idx]; ok {
+			delete(s.held, idx)
+			s.emit(Event{Kind: ItemDone, Index: idx, Item: item})
+			continue
+		}
+		if item, ok := s.unfinished[idx]; ok {
+			delete(s.unfinished, idx)
+			s.emit(Event{Kind: ItemCut, Index: idx, Item: item})
+			continue
+		}
+		if st := s.items[idx]; !st.done && !st.waiting {
+			s.emit(Event{Kind: ItemCut, Index: idx, Item: OutputItem{Type: st.typ, ID: st.id, CallID: st.callID}})
+		}
+	}
+}
+
 // wireEvent is a stream event's data: the fields of every event type craze
 // reads, each type using its own. The type itself is read apart, first
 // (read), and not again here: an event whose type is no string, placed by
@@ -504,6 +569,7 @@ type wireItem struct {
 	Name             string `json:"name"`
 	Namespace        string `json:"namespace"`
 	Arguments        string `json:"arguments"`
+	Status           string `json:"status"`
 }
 
 // UnmarshalJSON reads an item's type first, and its other fields only for
@@ -538,6 +604,7 @@ func (w *wireItem) output() OutputItem {
 		Name:             w.Name,
 		Namespace:        w.Namespace,
 		Arguments:        w.Arguments,
+		Status:           w.Status,
 	}
 	var text strings.Builder
 	for _, c := range w.Content {

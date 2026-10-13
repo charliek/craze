@@ -27,6 +27,9 @@ TASKS_DIR = EVAL_DIR / "tasks"
 FIXTURES_DIR = EVAL_DIR / "fixtures"
 PRICES_FILE = EVAL_DIR / "prices.toml"
 MODELS_FILE = EVAL_DIR / "models.toml"
+# craze's shipped model catalog (read, never written): what craze itself uses for a
+# provider the owner's files leave to it (config.shipped_providers).
+CRAZE_CATALOG = REPO_ROOT / "internal/harness/modeltable/catalog.toml"
 
 HOME = Path.home()
 CACHE_DIR = Path(os.environ.get("CRAZEEVAL_CACHE_DIR", HOME / ".cache/crazeeval"))

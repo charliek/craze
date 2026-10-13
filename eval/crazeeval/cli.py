@@ -93,11 +93,13 @@ def cmd_run(a) -> int:
         if em.provider not in providers or keyring.key_for(em.provider) is None:
             print(f"{em.key}: provider {em.provider!r} has no route or no key", file=sys.stderr)
             return 2
-        snap_base = snap.model(em.key)["craze_provider"].get("base_url", "").rstrip("/")
-        if snap_base and snap_base != providers[em.provider].base_url:
-            print(f"{em.key}: the owner's base URL for {em.provider} differs from the config snapshot's; re-snapshot",
-                  file=sys.stderr)
-            return 2
+    # The snapshot freezes each route: a driver or endpoint that moved since -- the
+    # owner's entry, or the catalog an old gx import's entry is read through -- stops
+    # the run.
+    if problems := keymod.route_problems(models, snap, providers):
+        for line in problems:
+            print(line, file=sys.stderr)
+        return 2
     label = a.label or "batch"
     out = Path(a.out) if a.out else paths.runs_dir() / f"{label}-{_stamp()}"
     caps = {}

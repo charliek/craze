@@ -71,6 +71,27 @@ Nothing needs migrating.
   else moved: a client that ignores the new members folds the same state.
 - **`muse-spark-1.3` offers `max`.** Its contributor tier stays at `minimal`
   to `xhigh`.
+- **Native Meta models now use Meta's Responses API.** The shipped `meta`
+  provider moved from Chat Completions to the [`openai-responses`
+  driver](../reference/configuration.md#the-responses-api-driver). On Chat
+  Completions Meta withholds a model's reasoning from an API key, so every
+  step of a tool loop reasoned from scratch; on the Responses API craze replays
+  each step's encrypted reasoning on the next request, and sends the session's
+  id as `prompt_cache_key`, so Meta caches the session's prompt. In our
+  comparison on `muse-spark-1.3-contributor` (9 tasks, 3 runs each) it passed
+  as many tasks as Chat Completions at about 0.6 times the median spend per
+  run. A session recorded on Chat Completions resumes on it. To go back, write
+  `[providers.meta]` with `driver = "openai-compat"`, `base_url =
+  "https://api.meta.ai/v1"` and `env_keys = ["META_API_KEY"]`. `env_keys` may
+  be left out if the entry has an inline `api_key`. If the entry says `source =
+  "gx"` (an old gx import wrote it), remove that line or set `source =
+  "manual"`, since craze ignores such an entry's driver. An entry you wrote
+  with `driver = "openai-compat"` and no `env_keys` or `api_key` no longer
+  takes `META_API_KEY`: it still loads, with a warning to add `env_keys`. One
+  with a `base_url` and no `driver` now sends Responses requests to that URL,
+  so add `driver = "openai-compat"` to keep a Chat Completions endpoint. See
+  [Going back to Chat
+  Completions](../reference/configuration.md#going-back-to-chat-completions).
 - **A `models.toml` model with more than 8 efforts, or one over 32 bytes or
   not one printable line, no longer loads**; it names the entry and the key.
 - **`/effort` in a session.** A bare `/effort` opens a picker of the current

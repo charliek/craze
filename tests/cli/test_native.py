@@ -168,7 +168,10 @@ def shipped_meta_home(craze_home: Path, base_url: str) -> None:
     fixture: providers.toml overlays `meta` with the fixture's base_url and an
     inline canary key (an endpoint change drops the shipped META_API_KEY, so
     only that key funds it), and there is no models.toml, so the shipped
-    catalog is the table (plan 045 A3)."""
+    catalog is the table (plan 045 A3). The entry writes no driver, so Meta
+    keeps its shipped one, openai-responses (plan 047 D14), which the
+    fixture's loopback IP base_url satisfies: its requests go to
+    <base>/responses, answered by the fixture's Responses mode."""
     native = craze_home / "native"
     native.mkdir(parents=True, exist_ok=True)
     os.chmod(native, 0o700)
@@ -198,15 +201,19 @@ def test_native_shipped_meta_models_reach_the_wire(
     model: str,
     effort: str,
 ) -> None:
-    """Plan 045 A2/A3: the shipped catalog's Meta models, as craze sends them,
-    with no real traffic. Muse Wonder 1.0 goes out on its own wire id with the
-    effort asked for, or its default, high, and the family's 131072 output
-    ceiling; a session that names no model starts on Spark's contributor
-    tier, the owner's pin, with Wonder in the catalog. The ceiling goes out
-    as max_tokens, as for every model on the openai-compat driver. Spark 1.3
+    """Plan 045 A2/A3, plan 047 A13: the shipped catalog's Meta models, as
+    craze sends them, with no real traffic. Meta's shipped driver is
+    openai-responses (plan 047 D14), so every request goes to the fixture's
+    Responses mode, POST <base>/responses, with the key route's body. Muse
+    Wonder 1.0 goes out on its own wire id with the effort asked for, or its
+    default, high, as reasoning.effort, and the family's 131072 output ceiling
+    as max_output_tokens; a session that names no model starts on Spark's
+    contributor tier, the owner's pin, with Wonder in the catalog. Spark 1.3
     takes max (plan 047 D6, A6): --effort max reaches the wire as
-    reasoning_effort max, where a level the model does not list would be
-    noted and the session would start at its default."""
+    reasoning.effort max, where a level the model does not list would be
+    noted and the session would start at its default. Every request also
+    carries the session's id as prompt_cache_key, store false, and every tool
+    a plain function (no namespace), and none of Chat Completions' members."""
     fixture_server.set_ok(text_parts=["from meta"])
     craze_home = tmp_path / "craze-home"
     shipped_meta_home(craze_home, fixture_server.base_url)
@@ -217,16 +224,260 @@ def test_native_shipped_meta_models_reach_the_wire(
     assert joined(events, "text") == "from meta"
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
     assert fixture_server.requests, "the turn sent no request, so nothing below is checked"
+    ids = native_session_ids(craze_home)
+    assert len(ids) == 1, ids
     for r in fixture_server.requests:
-        assert r.body.get("model") == model
-        assert r.body.get("reasoning_effort") == effort
-        assert r.body.get("max_tokens") == 131072, sorted(r.body)
+        b = r.body
+        assert r.responses and r.path == "/v1/responses", r.path
+        assert b.get("model") == model
+        assert b.get("reasoning") == {"effort": effort, "summary": "auto"}, b.get("reasoning")
+        assert b.get("max_output_tokens") == 131072, sorted(b)
+        assert b.get("prompt_cache_key") == ids[0], (b.get("prompt_cache_key"), ids)
+        assert b.get("store") is False, b.get("store")
+        assert b.get("tools"), "the request named no tools, so the tool shape below is unchecked"
+        assert all(plain_function_tool(t) for t in b["tools"]), b["tools"]
+        for absent in ("messages", "max_tokens", "reasoning_effort"):
+            assert absent not in b, absent
     # The inline key funds every request and is printed nowhere. Checked
     # outside an assert, so a failure never prints what it was handed.
     if not all(r.authorization == f"Bearer {CANARY}" for r in fixture_server.requests):
         pytest.fail("a request went out without the inline Meta key as its bearer", pytrace=False)
     if CANARY in proc.stdout or CANARY in proc.stderr:
         pytest.fail("the inline Meta key reached stdout or stderr", pytrace=False)
+
+
+def plain_function_tool(tool: dict) -> bool:
+    """Whether tool is a Responses API function tool as the key route sends it
+    (plan 047 MR-9): type function with its own top-level name and parameters,
+    and no Chat Completions "function" wrapper, namespace or nested tools."""
+    return (
+        tool.get("type") == "function"
+        and isinstance(tool.get("name"), str)
+        and bool(tool["name"])
+        and isinstance(tool.get("parameters"), dict)
+        and not {"function", "namespace", "tools"} & tool.keys()
+    )
+
+
+def native_session_ids(craze_home: Path) -> list[str]:
+    """The id of every native transcript under craze_home, read from its
+    name (<stamp>_<id>.jsonl)."""
+    return sorted(p.stem.rsplit("_", 1)[1] for p in (craze_home / "native" / "sessions").rglob("*.jsonl"))
+
+
+def test_native_responses_tool_loop_on_the_shipped_meta(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 047 A12, D13, D14: a two-step tool turn on the shipped Meta
+    provider, on its shipped openai-responses driver (shipped_meta_home writes
+    none), against the fixture's Responses mode. Every request goes to
+    <base>/responses with the inline key as its bearer and no session-id
+    header, and its body is the key route's:
+    Wonder's wire id, effort max, the 131072 ceiling as max_output_tokens, the
+    session's id as a prompt_cache_key constant over the turn, store false,
+    and every tool a plain function. The second request replays the first
+    step's reasoning item -- Meta's colon id and its encrypted content -- with
+    the commentary message (no phase, no id), the call (no namespace) and its
+    result, in that order. The key is printed nowhere."""
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    shipped_meta_home(craze_home, fixture_server.base_url)
+    rs_id = "rs_6acd987e3:rs_01a1331bc4"
+    fixture_server.set_script(
+        [
+            Step(
+                text=("I'll read notes.txt.",),
+                calls=(ToolCall("call_01", "read", '{"filePath":"notes.txt"}'),),
+                sealed=(rs_id, "sealed-step-one"),
+            ),
+            answer("Its first word is alpha."),
+        ]
+    )
+    proc = run_native(
+        craze_bin, craze_home, ws, "--model", "muse-wonder-1.0", "--effort", "max", "what is in notes.txt?", timeout=30
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined(events, "text").endswith("Its first word is alpha."), joined(events, "text")
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    rows = last_tools(events)
+    assert [(r["name"], r["status"]) for r in rows] == [("read", "completed")], rows
+
+    reqs = fixture_server.requests
+    assert len(reqs) == 2 and all(r.responses for r in reqs), [r.path for r in reqs]
+    ids = native_session_ids(craze_home)
+    assert len(ids) == 1, ids
+    for r in reqs:
+        b = r.body
+        assert r.path == "/v1/responses", r.path
+        assert b.get("model") == "muse-wonder-1.0"
+        assert b.get("reasoning") == {"effort": "max", "summary": "auto"}, b.get("reasoning")
+        assert b.get("max_output_tokens") == 131072, sorted(b)
+        assert b.get("prompt_cache_key") == ids[0], (b.get("prompt_cache_key"), ids)
+        assert b.get("store") is False and b.get("stream") is True
+        assert b.get("include") == ["reasoning.encrypted_content"]
+        for absent in ("messages", "max_tokens", "reasoning_effort", "temperature"):
+            assert absent not in b, absent
+        assert "read" in r.tool_names, r.tool_names
+        assert all(plain_function_tool(t) for t in b["tools"]), b["tools"]
+        assert "session-id" not in r.headers, sorted(r.headers)
+    assert not any(i.get("type") == "reasoning" for i in reqs[0].input), reqs[0].input
+
+    replay = reqs[1].input
+    kinds = [(i.get("type"), i.get("role")) for i in replay]
+    at = {
+        "reasoning": next(n for n, i in enumerate(replay) if i.get("type") == "reasoning"),
+        "said": kinds.index(("message", "assistant")),
+        "call": kinds.index(("function_call", None)),
+        "result": kinds.index(("function_call_output", None)),
+    }
+    assert at["reasoning"] < at["said"] < at["call"] < at["result"], kinds
+    assert replay[at["reasoning"]] == {"type": "reasoning", "id": rs_id, "summary": [], "encrypted_content": "sealed-step-one"}
+    said = replay[at["said"]]
+    assert "phase" not in said and "id" not in said, said
+    assert replay[at["call"]] == {"type": "function_call", "call_id": "call_01", "name": "read", "arguments": '{"filePath":"notes.txt"}'}
+    result = replay[at["result"]]
+    assert result.get("call_id") == "call_01" and "alpha" in str(result.get("output")), result
+    # The key: the bearer of every request, and printed nowhere. Checked
+    # outside an assert, so a failure never prints what it was handed.
+    if not all(r.authorization == f"Bearer {CANARY}" for r in reqs):
+        pytest.fail("a request went out without the inline key as its bearer", pytrace=False)
+    if CANARY in proc.stdout or CANARY in proc.stderr:
+        pytest.fail("the inline key reached stdout or stderr", pytrace=False)
+
+
+def test_native_responses_turn_on_a_provider_of_ones_own(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 047 D13: a provider of one's own on the openai-responses driver (a
+    catalog = false home) runs a text turn: the reasoning's summary streams as
+    thought, the text as text, and the turn ends end_turn. A model with no
+    effort sends reasoning's summary alone, the default ceiling (32000) as
+    max_output_tokens, and the session's id as prompt_cache_key all the
+    same."""
+    fixture_server.set_ok(text_parts=["hello ", "from responses"], reasoning_parts=["thinking it over"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url, driver="openai-responses")
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined(events, "text") == "hello from responses"
+    assert joined(events, "thought") == "thinking it over"
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
+    (req,) = fixture_server.requests
+    assert req.responses, req.path
+    assert req.body.get("model") == "fixture-wire-model"
+    assert req.body.get("reasoning") == {"summary": "auto"}, req.body.get("reasoning")
+    assert req.body.get("max_output_tokens") == 32000, sorted(req.body)
+    assert req.body.get("prompt_cache_key") == native_session_ids(craze_home)[0]
+    if CANARY in proc.stdout or CANARY in proc.stderr:
+        pytest.fail("the inline key reached stdout or stderr", pytrace=False)
+
+
+def test_native_responses_refuses_plain_http_to_a_name(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 047 P25: the openai-responses driver sends its key only over https,
+    or plain http to a loopback IP literal. Pointed at the fixture by the name
+    localhost over plain http, the session refuses to start, naming
+    providers.toml's base_url, and the fixture -- which the name would have
+    reached -- sees no request. The control is every other test here, which
+    reaches the same fixture at 127.0.0.1."""
+    fixture_server.set_ok(text_parts=["never"])
+    craze_home = tmp_path / "craze-home"
+    by_name = fixture_server.base_url.replace("127.0.0.1", "localhost")
+    write_native_config(craze_home / "native", by_name, driver="openai-responses")
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi")
+    assert proc.returncode != 0, proc.stdout
+    out = proc.stdout + proc.stderr
+    assert "base_url" in out and "openai-responses" in out, out
+    assert fixture_server.requests == [], fixture_server.requests
+    if CANARY in out:
+        pytest.fail("the inline key reached stdout or stderr", pytrace=False)
+
+
+@pytest.mark.parametrize("mode", ["unauthorized", "servererror"])
+def test_native_responses_canary_never_leaks(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, mode: str
+) -> None:
+    """test_native_canary_never_leaks on the openai-responses driver: a 401 or a
+    500 echoing the Authorization header into its standard error object never
+    has the key reach stdout or stderr. A 401 is sent once (the key's answer);
+    a 500 is tried again before failing, its message scrubbed."""
+    fixture_server.set_unauthorized() if mode == "unauthorized" else fixture_server.set_server_error()
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url, driver="openai-responses")
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi", timeout=15)
+    reqs = fixture_server.requests
+    assert reqs and all(r.responses for r in reqs), [r.path for r in reqs]
+    assert any(CANARY in r.authorization for r in reqs), "the wire never carried the key, so its absence proves nothing"
+    if CANARY in proc.stdout or CANARY in proc.stderr:
+        pytest.fail("the key reached stdout or stderr", pytrace=False)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    errors = [e for e in parse_events(proc.stdout) if e.get("type") == "error"]
+    assert errors, proc.stdout
+    if mode == "unauthorized":
+        assert len(reqs) == 1, len(reqs)
+        assert "rejected the API key (HTTP 401)" in errors[0]["message"], errors[0]
+    else:
+        assert len(reqs) > 1, len(reqs)
+        assert "[redacted]" in errors[0]["message"], errors[0]
+
+
+@pytest.mark.parametrize("driver", ["openai-compat", "openai-responses"])
+def test_native_cut_mid_call_leaves_no_pending_row_on_both_drivers(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, driver: str
+) -> None:
+    """Plan 047 C6: test_native_max_tokens_mid_call_leaves_no_pending_row on
+    both drivers. A response cut by the output ceiling while a call's
+    arguments stream -- Chat Completions' finish_reason "length", the
+    Responses API's response.incomplete for max_output_tokens with the call
+    never done -- ends the turn max_tokens with no error: the row opened
+    pending and closed failed, in the words the harness hands the model, the
+    cut call never ran, and nothing asked again."""
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url, driver=driver)
+    fixture_server.set_script([call_step("read", '{"filePath":"not', call_id="cut-off", finish="length")])
+
+    proc = run_native(craze_bin, craze_home, ws, "go", timeout=60)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "max_tokens"}, events[-3:]
+    assert not any(e.get("type") == "error" for e in events), events
+    rows = [e for e in events if e.get("type") == "tool"]
+    assert [r["status"] for r in rows] == ["pending", "failed"], rows
+    assert "output token limit" in rows[-1]["output"]["content"], rows[-1]
+    assert len(fixture_server.requests) == 1
+    assert fixture_server.requests[0].responses == (driver == "openai-responses")
+
+
+@pytest.mark.parametrize("driver", ["openai-compat", "openai-responses"])
+@pytest.mark.parametrize(("finish", "stop"), [("length", "max_tokens"), ("content_filter", "refusal")])
+def test_native_cut_answer_keeps_its_text_on_both_drivers(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, driver: str, finish: str, stop: str
+) -> None:
+    """Plan 047 C6: an answer cut short by the output ceiling or the content
+    filter keeps its text so far and ends the turn max_tokens or refusal, with
+    no error, on Chat Completions and on the Responses API alike -- where the
+    message is never done and response.incomplete names max_output_tokens or
+    content_filter. `craze prompt` exits 1, as for any stop but end_turn."""
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url, driver=driver)
+    fixture_server.set_script([answer("The answer ", "begins", finish=finish)])
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "go")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    # A refusal's text is followed by craze's own note saying so.
+    assert joined(events, "text").startswith("The answer begins"), events
+    assert not any(e.get("type") == "error" for e in events), events
+    done = without_seq(events, events[-1])
+    assert done.get("type") == "done" and done.get("stopReason") == stop, events[-3:]
+    assert len(fixture_server.requests) == 1
 
 
 def test_native_prompt_reads_the_model_memory_and_never_writes_it(

@@ -1,0 +1,123 @@
+{
+  "model": "muse-wonder-1.0",
+  "instructions": "You are craze.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read README.md and give me its first line."
+        }
+      ]
+    }
+  ],
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "name": "read_file",
+      "description": "Read a file.",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "the file to read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false
+    }
+  ],
+  "tool_choice": "auto",
+  "max_output_tokens": 131072,
+  "prompt_cache_key": "0199c0de-session"
+}
+{
+  "model": "muse-wonder-1.0",
+  "instructions": "You are craze.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read README.md and give me its first line."
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_6acd987e3:rs_01a1331bc4",
+      "summary": [],
+      "encrypted_content": "sealed-1426"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "I'll read README.md."
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_01",
+      "name": "read_file",
+      "arguments": "{\"path\":\"README.md\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_01",
+      "output": "contents of README.md"
+    }
+  ],
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "name": "read_file",
+      "description": "Read a file.",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "the file to read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false
+    }
+  ],
+  "tool_choice": "auto",
+  "max_output_tokens": 131072,
+  "prompt_cache_key": "0199c0de-session"
+}

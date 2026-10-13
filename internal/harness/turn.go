@@ -887,7 +887,7 @@ func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Mes
 	c := fantasy.AgentStreamCall{
 		Prompt:          text,
 		Messages:        history,
-		ProviderOptions: t.model.effortOpts,
+		ProviderOptions: requestOptions(t.model, t.store.ID()),
 		Headers:         requestHeaders(t.model.r, t.store.ID()),
 		// The step allowance is the turn's, not the segment's (plan 028
 		// §3.11 item 8): a segment may make what earlier ones left of it.
@@ -951,12 +951,26 @@ func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Mes
 // Every other driver gets none (nil): Fantasy's OpenAI-compatible client sends
 // whatever headers a call carries, and a session's id is nothing another
 // provider asked for — and a request change there is the eval's to measure
-// first (D-69).
+// first (D-69). The openai-responses driver gets the session's id in its body
+// instead, as prompt_cache_key (requestOptions).
 func requestHeaders(r modeltable.Resolved, sessionID string) map[string]string {
 	if r.Driver != modeltable.DriverChatGPT || sessionID == "" {
 		return nil
 	}
 	return map[string]string{"session-id": sessionID}
+}
+
+// requestOptions are the provider options every request on m carries, set
+// wherever requestHeaders are: m's effort options and, for the
+// openai-responses driver, the session's id as the request's prompt cache
+// key — that route caches nothing without one (plan 047 D12, P20, MR-6) —
+// in a fresh copy for each call (llm.WithCacheKey), built for a model with no
+// effort too, so m's own options, which a turn, its summaries, its side
+// questions and its sub-agents' models are built from, are never changed. A
+// sub-agent child sends its own id, as it does session-id. Every other driver
+// gets m's options as they are.
+func requestOptions(m model, sessionID string) fantasy.ProviderOptions {
+	return llm.WithCacheKey(m.r, m.effortOpts, sessionID)
 }
 
 // halted is the turn's own stop condition, checked after every step

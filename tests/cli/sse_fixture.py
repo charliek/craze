@@ -19,6 +19,22 @@ The tool-call deltas (plan 019 C11) are the same wire, one step further: a
 fragments keyed by index, which is what makes a tool loop scriptable from
 here at all -- see Step and set_script.
 
+A Responses mode (plan 047 D13): a request to POST <base>/responses -- what
+the openai-responses driver sends, through craze's own Responses client
+(internal/harness/llm/responsesapi, its key route) -- is answered on the
+Responses wire instead, from the same Steps: each item's
+response.output_item.added and .done, a message's text as
+response.output_text.delta, a call's arguments as
+response.function_call_arguments.delta, and response.completed carrying the
+whole output again with the usage, in the shapes Meta's Responses API was seen
+to send (plan 047's live facts MR-2, MR-3, MR-5, MR-10): a reasoning item's
+encrypted content null at its start and whole at its end, a colon in its id, a
+message with a phase. A Step's sealed is the reasoning item it answers with --
+its id and its encrypted content -- which is what a later request must replay;
+its reasoning texts become the item's summary parts. A request to any other
+path is answered on Chat Completions, as before. Either way the request is
+recorded with its headers.
+
 Canary handling: SSEFixture's error modes echo the request's Authorization
 header into the response body, the way a real provider's 401 sometimes does
 (internal/harness/llm/wrap_test.go's TestWrap_401EchoesAuthorizationIsScrubbed).
@@ -35,7 +51,7 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import zip_longest
 from pathlib import Path
@@ -59,21 +75,40 @@ class RecordedRequest:
     path: str
     authorization: str
     body: dict
+    # Every header the request carried, names lower-cased.
+    headers: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def responses(self) -> bool:
+        """Whether this was a Responses request (POST <base>/responses)."""
+        return self.path.rstrip("/").endswith("/responses")
 
     @property
     def messages(self) -> list[dict]:
-        """The conversation this request carried, as the wire spells it."""
+        """The conversation this request carried, as the Chat Completions
+        wire spells it."""
         msgs = self.body.get("messages")
         return msgs if isinstance(msgs, list) else []
 
     @property
+    def input(self) -> list[dict]:
+        """The conversation a Responses request carried: its input items."""
+        items = self.body.get("input")
+        return items if isinstance(items, list) else []
+
+    @property
     def tool_names(self) -> list[str]:
-        """The tool ids offered on this request, in the order they were sent."""
+        """The tool ids offered on this request, in the order they were sent:
+        each a Chat Completions function's, or a Responses function's own."""
         names = []
         for t in self.body.get("tools") or []:
-            fn = t.get("function") if isinstance(t, dict) else None
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function")
             if isinstance(fn, dict) and isinstance(fn.get("name"), str):
                 names.append(fn["name"])
+            elif t.get("type") == "function" and isinstance(t.get("name"), str):
+                names.append(t["name"])
         return names
 
 
@@ -125,6 +160,11 @@ class Step:
     # look equally (and unrealistically) small regardless of how much
     # history it actually carries.
     usage: tuple[int, int] | None = None
+    # sealed is the Responses mode's reasoning item: (its id, its encrypted
+    # content), streamed with the content null at the item's start and whole
+    # at its end, as Meta sends it; None sends one only when reasoning has
+    # text. Chat Completions has no such item and ignores it.
+    sealed: tuple[str, str] | None = None
 
     def finish_reason(self) -> str:
         if self.finish:
@@ -188,8 +228,17 @@ def user_prompt(request: RecordedRequest) -> str:
     sent it. A sub-agent's first user message is the task its parent gave it
     (plan 026 §3.2), so this is how a child's requests are told apart from its
     parent's and from its siblings'. A mode's reminder follows the prompt, and
-    a tool result is a message of its own role, so neither is ever first.
+    a tool result is a message of its own role, so neither is ever first. A
+    Responses request's is its first user message item's first input_text.
     """
+    if request.responses:
+        for item in request.input:
+            if item.get("type") == "message" and item.get("role") == "user":
+                content = item.get("content")
+                if isinstance(content, list):
+                    return next((p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "input_text"), "")
+                return ""
+        return ""
     for msg in request.messages:
         if msg.get("role") != "user":
             continue
@@ -287,7 +336,8 @@ class SSEFixture:
                 except json.JSONDecodeError:
                     body = {"_unparsed": raw.decode("utf-8", "replace")}
                 auth = self.headers.get("Authorization", "")
-                record = RecordedRequest(self.path, auth, body)
+                headers = {k.lower(): v for k, v in self.headers.items()}
+                record = RecordedRequest(self.path, auth, body, headers)
                 with fixture._lock:
                     routes = list(fixture._routes)
                 # Which route owns the request is decided outside the lock,
@@ -320,7 +370,7 @@ class SSEFixture:
                     if step is None:
                         self._reply_exhausted(n)
                     else:
-                        self._reply_ok(step)
+                        self._reply_ok(_responses_body(step, n) if record.responses else _sse_body(step))
                 elif mode == "unauthorized":
                     self._reply_error(401, auth)
                 elif mode == "servererror":
@@ -328,8 +378,7 @@ class SSEFixture:
                 else:  # pragma: no cover - a test bug, not a fixture behaviour
                     raise AssertionError(f"sse_fixture: unknown mode {mode!r}")
 
-            def _reply_ok(self, step: Step) -> None:
-                payload = _sse_body(step)
+            def _reply_ok(self, payload: bytes) -> None:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(payload)))
@@ -557,11 +606,80 @@ def _sse_body(step: Step) -> bytes:
     return out.encode("utf-8")
 
 
+def _responses_event(kind: str, payload: dict) -> str:
+    return f"event: {kind}\ndata: {json.dumps({'type': kind, **payload})}\n\n"
+
+
+# _CUT_REASONS are the Responses API's incomplete_details.reason for a Step
+# whose Chat Completions finish says the response was cut short.
+_CUT_REASONS = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+
+def _responses_body(step: Step, n: int) -> bytes:
+    """step on the Responses wire, as Meta streams it (plan 047 MR-10): each
+    output item's added and done events -- the reasoning item's encrypted
+    content null at its start, whole at its end; a message's text in deltas;
+    a call's arguments in two fragments -- then response.completed with the
+    whole output again and the usage. A "length" or "content_filter" finish
+    cuts the response instead: its last item never gets its done event, and
+    response.incomplete names max_output_tokens or content_filter. Ids carry
+    the request's index n, so no two responses share one.
+    """
+    events = [_responses_event("response.created", {"response": {"id": f"resp_{n}", "status": "in_progress", "output": []}})]
+    items: list[tuple[dict, dict, list[tuple[str, dict]]]] = []
+    if step.sealed is not None or step.reasoning:
+        rs_id, sealed = step.sealed if step.sealed is not None else (f"rs_{n}:rs_{n}r", f"sealed-{n}")
+        start = {"type": "reasoning", "id": rs_id, "status": "in_progress", "summary": [], "encrypted_content": None}
+        end = {**start, "status": "completed", "encrypted_content": sealed,
+               "summary": [{"type": "summary_text", "text": r} for r in step.reasoning]}
+        items.append((start, end, [("response.reasoning_summary_text.delta", {"summary_index": i, "delta": r}) for i, r in enumerate(step.reasoning)]))
+    if step.text:
+        start = {"type": "message", "id": f"rs_{n}m", "role": "assistant", "phase": "commentary", "status": "in_progress", "content": []}
+        end = {**start, "status": "completed",
+               "content": [{"type": "output_text", "text": "".join(step.text), "annotations": [], "logprobs": []}]}
+        items.append((start, end, [("response.output_text.delta", {"content_index": 0, "delta": t}) for t in step.text]))
+    for c in step.calls:
+        start = {"type": "function_call", "id": f"fc_{n}_{c.id}", "call_id": c.id, "name": c.name, "arguments": "", "status": "in_progress"}
+        end = {**start, "arguments": c.arguments, "status": "completed"}
+        half = len(c.arguments) // 2
+        frags = [f for f in (c.arguments[:half], c.arguments[half:]) if f]
+        items.append((start, end, [("response.function_call_arguments.delta", {"delta": f}) for f in frags]))
+
+    cut = _CUT_REASONS.get(step.finish_reason())
+    output: list[dict] = []
+    for index, (start, end, deltas) in enumerate(items):
+        events.append(_responses_event("response.output_item.added", {"output_index": index, "item": start}))
+        for kind, payload in deltas:
+            events.append(_responses_event(kind, {"output_index": index, "item_id": start["id"], **payload}))
+        if cut and index == len(items) - 1:
+            break  # the item the response was cut in: never done
+        events.append(_responses_event("response.output_item.done", {"output_index": index, "item": end}))
+        output.append(end)
+
+    prompt_tokens, completion_tokens = step.usage if step.usage is not None else (5, 2)
+    usage = {
+        "input_tokens": prompt_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": completion_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    response = {"id": f"resp_{n}", "store": False, "output": output, "usage": usage}
+    if cut:
+        response.update(status="incomplete", incomplete_details={"reason": cut})
+        events.append(_responses_event("response.incomplete", {"response": response}))
+    else:
+        response.update(status="completed")
+        events.append(_responses_event("response.completed", {"response": response}))
+    return "".join(events).encode("utf-8")
+
+
 def write_native_config(
     native_dir: Path,
     base_url: str,
     api_key: str = CANARY,
     *,
+    driver: str = "openai-compat",
     provider_id: str = "fixture",
     alias: str = "fixture-model",
     wire_model: str = "fixture-wire-model",
@@ -584,6 +702,9 @@ def write_native_config(
     compaction" behaviour; a case that wants a small test window for
     compaction sets it and leaves [compaction]'s own settings (threshold_percent
     85, tail_tokens 20000) at their defaults.
+
+    driver is the provider's driver: openai-compat (Chat Completions, the
+    default) or openai-responses (the fixture's Responses mode).
     """
     native_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(native_dir, 0o700)
@@ -592,7 +713,7 @@ def write_native_config(
         "version = 1\n"
         "\n"
         f"[providers.{provider_id}]\n"
-        'driver = "openai-compat"\n'
+        f'driver = "{driver}"\n'
         f'base_url = "{base_url}"\n'
         f'env_keys = ["{UNUSED_ENV_KEY}"]\n'
         f'api_key = "{api_key}"\n'

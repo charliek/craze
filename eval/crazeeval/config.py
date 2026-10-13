@@ -12,6 +12,47 @@ from crazeeval import paths
 
 HARNESSES = ("craze", "gx", "opencode", "codex")
 
+# The source craze's former gx importer wrote on every entry it made (craze's
+# modeltable legacySource): such an entry for a provider craze ships yields to the
+# catalog, lending only its key, so its driver and base_url are not craze's.
+LEGACY_SOURCE = "gx"
+
+
+def shipped_providers(path: Path | None = None) -> dict[str, dict]:
+    """craze's shipped catalog's ``[providers]`` (``paths.CRAZE_CATALOG``), each entry
+    as craze ships it: its ``driver``, ``base_url``, ``env_keys`` and the rest."""
+    with open(path or paths.CRAZE_CATALOG, "rb") as f:
+        return dict(tomllib.load(f).get("providers") or {})
+
+
+def catalog_on(craze_dir: Path) -> bool:
+    """Whether craze merges its shipped catalog under the files in ``craze_dir``: unless
+    its ``models.toml`` says ``catalog = false`` (craze's modeltable LoadWith), when the two
+    files are the whole table and every entry, an old gx import's too, is the owner's own."""
+    p = Path(craze_dir) / "models.toml"
+    if not p.exists():
+        return True
+    with open(p, "rb") as f:
+        return tomllib.load(f).get("catalog") is not False
+
+
+def yields_to_catalog(provider: str, entry: dict, shipped: dict, catalog: bool) -> bool:
+    """Whether the owner's provider entry is an old gx import's that craze reads through
+    its catalog (its legacySource rule): marked ``source = "gx"``, for a provider craze
+    ships, with the catalog on. craze then takes only its key and any ``env_keys`` names
+    the catalog lacks, never its driver or ``base_url``."""
+    return catalog and entry.get("source") == LEGACY_SOURCE and provider in shipped
+
+
+def shipped_driver(provider: str, path: Path | None = None) -> str:
+    """The driver craze ships for ``provider``: what craze uses when the owner's entry
+    names none, or is an old gx import's. ValueError for a provider craze does not ship,
+    which must name its own."""
+    driver = (shipped_providers(path).get(provider) or {}).get("driver")
+    if not driver:
+        raise ValueError(f"craze ships no provider {provider!r}, so its entry must name a driver")
+    return driver
+
 
 @dataclass(frozen=True)
 class EvalModel:

@@ -386,7 +386,7 @@ func (s *Session) askAside(ctx context.Context, ag fantasy.Agent, m model, messa
 	call := fantasy.AgentStreamCall{
 		Prompt:          prompt,
 		Messages:        messages,
-		ProviderOptions: m.effortOpts,
+		ProviderOptions: requestOptions(m, s.store.ID()),
 		Headers:         requestHeaders(m.r, s.store.ID()),
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&used),

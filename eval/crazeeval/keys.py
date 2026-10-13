@@ -18,6 +18,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from crazeeval import paths
+from crazeeval.config import catalog_on, shipped_providers, yields_to_catalog
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
@@ -233,6 +234,41 @@ def locked_entry(name: str, entry: Mapping | None) -> dict:
     }
 
 
+def legacy_entry(entry: Mapping, shipped: Mapping) -> dict:
+    """An old gx import's entry for a provider craze ships, as craze reads it with its
+    catalog on (its legacySource rule): the catalog's driver and endpoint, the catalog's
+    env_keys followed by any of the entry's the catalog lacks, and the entry's api_key."""
+    env_keys = list(shipped.get("env_keys") or [])
+    for name in entry.get("env_keys") or []:
+        if name not in env_keys:
+            env_keys.append(name)
+    out: dict = {"driver": shipped.get("driver", ""), "env_keys": env_keys}
+    if shipped.get("base_url"):
+        out["base_url"] = shipped["base_url"]
+    if "api_key" in entry:
+        out["api_key"] = entry["api_key"]
+    return out
+
+
+def route_problems(models, snap, providers: Mapping[str, "Provider"]) -> list[str]:
+    """Why a run's routes are not its config snapshot's: one line per model whose
+    snapshot records a ``driver`` or ``base_url`` that the route craze would take now
+    (``providers``, from load_providers) does not match -- the owner's entry changed
+    since, or, for an entry craze reads through its catalog (an old gx import's), the
+    catalog did. Each says to re-run ``snapshot-config``. A field the snapshot does not
+    record (craze's locked provider, an entry that names none) is not compared."""
+    out = []
+    for em in models:
+        recorded = snap.model(em.key)["craze_provider"]
+        route = providers[em.provider]
+        moved = [field for field, now in (("driver", route.driver), ("base_url", route.base_url))
+                 if recorded.get(field) and recorded[field].rstrip("/") != now]
+        if moved:
+            out.append(f"{em.key}: the route craze takes for {em.provider} now ({' and '.join(moved)}) differs "
+                       "from the config snapshot's; re-run snapshot-config")
+    return out
+
+
 def load_providers(
     path: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -240,12 +276,18 @@ def load_providers(
 ) -> tuple[dict[str, Provider], KeyRing]:
     """Read the owner's providers.toml (read-only) into a route table and a key ring. A
     provider craze locks (Anthropic) is read as craze reads it, present in the file or
-    not (locked_entry)."""
-    path = path or paths.OWNER_CRAZE_NATIVE / "providers.toml"
+    not (locked_entry), and so is an old gx import's entry for a provider craze ships
+    while the catalog is on (legacy_entry): its upstream is craze's shipped endpoint, not
+    the URL the import wrote."""
+    path = Path(path or paths.OWNER_CRAZE_NATIVE / "providers.toml")
     env = os.environ if env is None else env
     with open(path, "rb") as f:
         doc = tomllib.load(f)
     entries = dict(doc.get("providers") or {})
+    shipped, catalog = shipped_providers(), catalog_on(path.parent)
+    for name, entry in list(entries.items()):
+        if name not in LOCKED and yields_to_catalog(name, entry, shipped, catalog):
+            entries[name] = legacy_entry(entry, shipped[name])
     for name in LOCKED:
         entries[name] = locked_entry(name, entries.get(name))
     table: dict[str, Provider] = {}

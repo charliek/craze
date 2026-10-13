@@ -54,6 +54,10 @@ type Error struct {
 	// Header is an HTTP failure's response headers (Retry-After among them);
 	// nil for a failure inside the stream.
 	Header http.Header
+	// Route is the route that reported the failure, which Final and
+	// Transient judge it by: the ChatGPT route's codes mean nothing on the
+	// key route, and its rate limit is not final there (plan 047 D12, P18).
+	Route Route
 }
 
 // maxMessage bounds Error.Message: one line of display text, not a page.
@@ -106,11 +110,45 @@ var transientCodes = map[string]bool{
 	"api_error":                              true,
 }
 
+// cutReasons are the incomplete_details reasons for which the key route ends
+// a response as a finish rather than a failure (plan 047 C6): the output
+// ceiling and the content filter, Chat Completions' "length" and
+// "content_filter".
+var cutReasons = map[string]bool{"max_output_tokens": true, "content_filter": true}
+
+// CutShort reports whether the failure is a response the key route ends as a
+// finish, keeping what it said: response.incomplete for a reason cutReasons
+// names. Its stream reported every item it had not yet, in order (ItemCut).
+// Never on the ChatGPT route, whose requests carry no ceiling: every
+// incomplete response is a failure there.
+func (e *Error) CutShort() bool {
+	return e.Route == RouteKey && e.Event == "response.incomplete" && cutReasons[e.Reason]
+}
+
+// keyTransientCodes are the codes and types the key route may try again
+// before any output when they arrive inside the stream (plan 047 D12): a
+// server's own fault or a rate limit, as Fantasy's TransientStreamErrorTypes
+// lists them, and OpenAI's rate_limit_exceeded, the code the standard error
+// object gives a 429.
+var keyTransientCodes = map[string]bool{
+	"server_error":        true,
+	"internal_error":      true,
+	"overloaded_error":    true,
+	"api_error":           true,
+	"rate_limit_error":    true,
+	"rate_limit_exceeded": true,
+}
+
 // Final reports whether the failure must never be retried (plan 033 §3.9):
-// every 429 and every 400 — the same body would be refused again — and the
-// codes OpenAI's docs say not to repeat (finalCodes, and every
-// chatpass_v2_* code), in a status or inside the stream alike.
+// on the ChatGPT route, every 429 and every 400 — the same body would be
+// refused again — and the codes OpenAI's docs say not to repeat (finalCodes,
+// and every chatpass_v2_* code), in a status or inside the stream alike. On
+// the key route nothing is final in this sense (plan 047 D12): a refusal is
+// left to its status, as on Chat Completions, and a rate limit is retried.
 func (e *Error) Final() bool {
+	if e.Route == RouteKey {
+		return false
+	}
 	if e.StatusCode == http.StatusTooManyRequests || e.StatusCode == http.StatusBadRequest {
 		return true
 	}
@@ -118,11 +156,23 @@ func (e *Error) Final() bool {
 }
 
 // Transient reports whether the failure may be tried again before any
-// output: a 503 (direct routing unavailable, or a usage check that could not
-// run), or a code or type transientCodes names. Other HTTP statuses are left
-// to the caller's own rule for them (Fantasy retries 408, 409 and 5xx). A
-// final failure is never transient.
+// output. On the ChatGPT route: a 503 (direct routing unavailable, or a
+// usage check that could not run), or a code or type transientCodes names;
+// other HTTP statuses are left to the caller's own rule for them (Fantasy
+// retries 408, 409 and 5xx), and a final failure is never transient. On the
+// key route (plan 047 D12): a 429 or a 5xx, and inside the stream a code or
+// type keyTransientCodes names; never another status — a 401 above all,
+// whatever its body says, since the same key would be refused again.
 func (e *Error) Transient() bool {
+	if e.Route == RouteKey {
+		switch {
+		case e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= http.StatusInternalServerError:
+			return true
+		case e.StatusCode != 0:
+			return false
+		}
+		return keyTransientCodes[e.Code] || keyTransientCodes[e.Type]
+	}
 	if e.Final() {
 		return false
 	}

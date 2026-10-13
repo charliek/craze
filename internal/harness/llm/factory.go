@@ -25,6 +25,11 @@
 // provider and no SDK, so the Anthropic SDK stays out of the binary (owner
 // decision 2) — adapted to Fantasy in messages_adapter.go and funded by a
 // key, at the API base the caller answers with WithAnthropicAPIBase (P21).
+//
+// A fifth, the Responses API with an API key (modeltable.DriverOpenAIResponses,
+// plan 047 D12, D13), is package responsesapi again, on its key route: the
+// same adapter as the ChatGPT plan's, at the provider's base_url, funded by
+// its key (newKeyResponses).
 package llm
 
 import (
@@ -117,7 +122,9 @@ func WithAnthropicAPIBase(apiBase func() (string, error)) Option {
 // A key shorter than minKeyLen is refused too (see ErrAPIKeyTooShort).
 //
 // A model on Anthropic's driver is checked for its key the same way, and is
-// craze's own Messages API model (newAnthropic).
+// craze's own Messages API model (newAnthropic); so is a model on the
+// openai-responses driver, which is craze's own Responses model on its key
+// route, at its base URL (newKeyResponses).
 func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	var o options
 	for _, opt := range opts {
@@ -136,6 +143,8 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 		return newSignedIn(r, o)
 	case modeltable.DriverAnthropic:
 		return newAnthropic(r, o)
+	case modeltable.DriverOpenAIResponses:
+		return newKeyResponses(r, o)
 	default:
 		return nil, unknownDriver(r)
 	}
@@ -253,6 +262,29 @@ func newAnthropic(r modeltable.Resolved, o options) (fantasy.LanguageModel, erro
 	return wrap(lm, newScrubber(key, o.auth)), nil
 }
 
+// newKeyResponses is New for the openai-responses driver (plan 047 D13): the
+// Responses model on the key route (newKeyResponsesModel), on r's key,
+// checked as New checks any, at r's base URL — which the model table held to
+// the route's rule at load, and the client holds to it again here
+// (responsesapi.ErrKeyBaseURL), so the key never reaches another origin —
+// wrapped as every model is, its scrubber hiding the key. Its build errors
+// name the provider and the model, never the key.
+func newKeyResponses(r modeltable.Resolved, o options) (fantasy.LanguageModel, error) {
+	key, err := checkedKey(r)
+	if err != nil {
+		return nil, err
+	}
+	base := strings.TrimSpace(r.BaseURL)
+	if base == "" {
+		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q needs a base URL", r.ProviderID, r.Alias, r.Driver)
+	}
+	lm, err := newKeyResponsesModel(r, key, base, o.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(lm, newScrubber(key, o.auth)), nil
+}
+
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client
 // can send (openaicompat PrepareCallFunc); it fails a request with any other.
 // They are also the ChatGPT plan's Responses route's own list (plan 033
@@ -276,10 +308,13 @@ var anthropicEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 // for a call's ProviderOptions (fantasy.AgentStreamCall.ProviderOptions):
 // reasoning_effort for the openai-compat driver, OpenRouter's
 // reasoning.effort for openrouter, the Responses reasoning.effort for
-// chatgpt (responsesOptions, plan 033 §3.9), and output_config.effort for
-// anthropic (anthropicOptions, plan 044 §3.3), keyed by the provider id New
-// named the model's provider with. It returns nil when effort is "", so
-// nothing is sent: the harness passes "" for a model with no effort control.
+// chatgpt and openai-responses (responsesOptions, plan 033 §3.9, plan 047
+// D13), and output_config.effort for anthropic (anthropicOptions, plan 044
+// §3.3), keyed by the provider id New named the model's provider with. It
+// returns nil when effort is "", so nothing is sent: the harness passes ""
+// for a model with no effort control. A request on openai-responses carries
+// more than its effort: WithCacheKey builds each request's options from
+// these.
 //
 // An effort the model does not list is an error rather than a silent no-op,
 // as is one the OpenAI-compatible client cannot send, so a bad switch fails
@@ -309,6 +344,14 @@ func EffortOptions(r modeltable.Resolved, effort string) (fantasy.ProviderOption
 		// is codex's multi-agent mode, not a request value (plan 033 §3.9).
 		if !slices.Contains(openAIEfforts, openai.ReasoningEffort(effort)) {
 			return nil, fmt.Errorf("llm: model %q: effort %q is not one a ChatGPT plan request can carry", r.Alias, effort)
+		}
+		return fantasy.ProviderOptions{r.ProviderID: &responsesOptions{Effort: effort}}, nil
+	case modeltable.DriverOpenAIResponses:
+		// The same seven as the ChatGPT plan's route: the Responses API's
+		// own reasoning.effort values. A provider may accept fewer (Meta
+		// refuses none, MR-7); its models' efforts lists say which.
+		if !slices.Contains(openAIEfforts, openai.ReasoningEffort(effort)) {
+			return nil, fmt.Errorf("llm: model %q: effort %q is not one a Responses request can carry", r.Alias, effort)
 		}
 		return fantasy.ProviderOptions{r.ProviderID: &responsesOptions{Effort: effort}}, nil
 	case modeltable.DriverAnthropic:

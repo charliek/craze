@@ -217,37 +217,39 @@ default_effort = ""
 // the shipped base_url only when the driver stays the shipped one, and an
 // entry that changes the endpoint without writing env_keys does not inherit
 // the shipped ones — an exported ACME_API_KEY must never reach the user's
-// own endpoint.
+// own endpoint. A driver change that leaves the provider with no variable and
+// no key is warned about (plan 047 C7 review): nothing funds it.
 func TestMergeProviderDependentFields(t *testing.T) {
 	cat := testCatalog(t, testCatalogV1)
 	env := fakeEnv(map[string]string{"ACME_API_KEY": "exported-acme-0001", "ROUTER_API_KEY": "exported-router-01", "MY_KEY": "my-own-key-0001"})
 	for _, tc := range []struct {
 		name, entry string
 		want        Provider
-		key         string // the key acme/big resolves to, "" for none
+		key         string     // the key acme/big resolves to, "" for none
+		warn        [][]string // wantWarnings' substrings, one list per warning
 	}{
 		{"a key only inherits everything", `api_key = "stored-key-0001"`,
 			Provider{Name: "Acme", Driver: DriverOpenAICompat, BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_API_KEY"}, APIKey: "stored-key-0001", Source: SourceManual},
-			"exported-acme-0001"},
+			"exported-acme-0001", nil},
 		{"a name only", `name = "Acme Corp"`,
 			Provider{Name: "Acme Corp", Driver: DriverOpenAICompat, BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_API_KEY"}, Source: SourceManual},
-			"exported-acme-0001"},
+			"exported-acme-0001", nil},
 		{"another base_url drops the shipped variables", `base_url = "https://proxy.example/v1"`,
 			Provider{Name: "Acme", Driver: DriverOpenAICompat, BaseURL: "https://proxy.example/v1", Source: SourceManual},
-			""},
+			"", nil},
 		{"another base_url with its own variables", "base_url = \"https://proxy.example/v1\"\nenv_keys = [\"MY_KEY\"]",
 			Provider{Name: "Acme", Driver: DriverOpenAICompat, BaseURL: "https://proxy.example/v1", EnvKeys: []string{"MY_KEY"}, Source: SourceManual},
-			"my-own-key-0001"},
+			"my-own-key-0001", nil},
 		{"the same base_url written keeps them", `base_url = "https://api.acme.example/v1"`,
 			Provider{Name: "Acme", Driver: DriverOpenAICompat, BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_API_KEY"}, Source: SourceManual},
-			"exported-acme-0001"},
+			"exported-acme-0001", nil},
 		{"driver openrouter alone drops base_url and variables", `driver = "openrouter"`,
 			Provider{Name: "Acme", Driver: DriverOpenRouter, Source: SourceManual},
-			""},
+			"", [][]string{{"[providers.acme] env_keys", `driver "openrouter"`, "nothing funds acme", "env_keys naming the variable", `"craze auth login acme"`}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl, _ := loadOver(t, cat, "version = 1\n\n[providers.acme]\n"+tc.entry+"\n", "")
-			wantWarnings(t, tbl)
+			wantWarnings(t, tbl, tc.warn...)
 			if got := tbl.Providers["acme"]; !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("acme = %+v, want %+v", got, tc.want)
 			}
