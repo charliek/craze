@@ -5,18 +5,25 @@ the run's target model, points at the proxy route and holds only the dummy key. 
 of the owner's files is read or written. A craze home's models.toml says
 ``catalog = false`` (craze plan 031 P10): craze ships a model catalog and merges it
 under the user's files, which would otherwise add every shipped model to the run.
+
+An Anthropic model (craze plan 047 D11) is the exception to "the files point at the
+route": craze's Anthropic endpoint is fixed, so its route reaches craze as
+``CRAZE_TEST_ANTHROPIC_API`` in the run's environment instead (anthropic_api).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import tomli_w
 
 from crazeeval import paths
 from crazeeval.config import EvalModel, Snapshot
+from crazeeval.keys import ANTHROPIC, ANTHROPIC_DRIVER
 
 H = paths.SANDBOX_HOME
 
@@ -31,12 +38,49 @@ def _write(p: Path, text: str, mode: int = 0o644) -> None:
 
 # -- craze ------------------------------------------------------------------------
 
+# craze's override of the Anthropic API's origin (internal/harness/llm/messagesapi:
+# TestAPIEnv), and the API version every Messages request names (APIVersion).
+ANTHROPIC_API_ENV = "CRAZE_TEST_ANTHROPIC_API"
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def anthropic_api(base_url: str) -> str:
+    """``CRAZE_TEST_ANTHROPIC_API`` for an Anthropic proxy route (``…/<host>/v1``).
+
+    craze reads it as the API's origin (messagesapi.BaseURL): an ``http`` URL on a
+    loopback IP literal -- not a name -- with no user, query or fragment; any other value
+    fails the session, never ignored. Its path is kept, and craze's client adds
+    ``/v1/messages`` and ``/v1/models`` itself, so the route's own ``/v1`` comes off
+    here: ``…/r/<token>/api.anthropic.com/v1`` becomes ``…/r/<token>/api.anthropic.com``.
+    """
+    u = urlsplit(base_url)
+    try:
+        loopback = ipaddress.ip_address(u.hostname or "").is_loopback
+    except ValueError:
+        loopback = False
+    if (u.scheme != "http" or not loopback or u.username is not None or u.query or u.fragment
+            or not u.path.endswith("/v1")):
+        raise ValueError("an Anthropic route for craze must be http://<loopback IP>:<port>/.../v1")
+    return base_url[: -len("/v1")]
+
+
+def craze_env(em: EvalModel, base_url: str) -> dict[str, str]:
+    """The run's variables for craze beyond CRAZE_HOME: the Anthropic route, for an
+    Anthropic model only."""
+    return {ANTHROPIC_API_ENV: anthropic_api(base_url)} if em.provider == ANTHROPIC else {}
+
 
 def _craze_model(m: dict, em: EvalModel) -> dict:
     return {**m["craze"], "default_effort": em.effort}
 
 
-def _craze_provider(m: dict, base_url: str) -> dict:
+def _craze_provider(m: dict, em: EvalModel, base_url: str) -> dict:
+    if em.provider == ANTHROPIC:
+        # craze's own Anthropic provider: no base_url, which craze refuses for its fixed
+        # endpoint, and the driver named, since a `catalog = false` table has no shipped
+        # entry to take it from (craze refuses a provider with none). The route reaches
+        # craze as CRAZE_TEST_ANTHROPIC_API (craze_env).
+        return {"driver": ANTHROPIC_DRIVER, "api_key": paths.DUMMY_KEY}
     return {"driver": m["craze_provider"].get("driver", "openai-compat"), "base_url": base_url, "api_key": paths.DUMMY_KEY}
 
 
@@ -63,21 +107,25 @@ def craze_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict
         "subagents": {"model": em.craze},
         "models": {em.craze: entry},
     }
-    providers = {"version": 1, "providers": {em.provider: _craze_provider(m, base_url)}}
+    providers = {"version": 1, "providers": {em.provider: _craze_provider(m, em, base_url)}}
     _write_craze_native(home / ".craze", models, providers)
-    return {"CRAZE_HOME": f"{H}/.craze"}
+    return {"CRAZE_HOME": f"{H}/.craze", **craze_env(em, base_url)}
 
 
-def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_urls: dict[str, str]) -> None:
+def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_urls: dict[str, str]) -> dict[str, str]:
     """A CRAZE_HOME for the standalone proxy (the live smoke): several models, the
-    first the default, each provider pointing at its proxy route."""
+    first the default, each provider pointing at its proxy route. Returns the variables
+    craze also needs (craze_env: the Anthropic route), for the caller to export."""
     models = {"version": 1, "default_model": ems[0].craze, "models": {}}
     providers: dict = {"version": 1, "providers": {}}
+    env: dict[str, str] = {}
     for em in ems:
         m = snap.model(em.key)
         models["models"][em.craze] = _craze_model(m, em)
-        providers["providers"][em.provider] = _craze_provider(m, base_urls[em.provider])
+        providers["providers"][em.provider] = _craze_provider(m, em, base_urls[em.provider])
+        env.update(craze_env(em, base_urls[em.provider]))
     _write_craze_native(Path(crazedir), models, providers)
+    return env
 
 
 # -- gx ---------------------------------------------------------------------------
@@ -93,6 +141,12 @@ def gx_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict[st
         "api_key": paths.DUMMY_KEY,
         "api_backend": m["gx_provider"].get("api_backend", "chat_completions"),
     }
+    if em.provider == ANTHROPIC:
+        # gx speaks the Messages API as its "messages" backend (its user guide, custom
+        # models), and sends Anthropic's version header only as an extra header. The
+        # proxy drops gx's own credential header and sets x-api-key.
+        provider["api_backend"] = "messages"
+        provider["extra_headers"] = {"anthropic-version": ANTHROPIC_VERSION}
     doc = {
         # Web tools off (plan 029 §3.1.4): web_search and web_fetch, and the hosted
         # search lane; image/video tools would call api.x.ai.

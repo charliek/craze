@@ -21,9 +21,20 @@ from crazeeval import paths
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
+# Anthropic's Messages API (craze plan 044, plan 047 D11). craze's own provider of that
+# id is locked (plan 044 P22): the owner's entry holds a name, env_keys and an api_key
+# at most, and craze takes its driver, its endpoint and -- unless the entry writes
+# env_keys, even an empty list -- its variable from the catalog. These are the
+# catalog's (internal/harness/modeltable/catalog.toml [providers.anthropic]); the route's
+# path keeps the API's /v1, which craze's client adds itself (homes.anthropic_api).
+ANTHROPIC = "anthropic"
+ANTHROPIC_DRIVER = "anthropic"
+ANTHROPIC_BASE = "https://api.anthropic.com/v1"
+LOCKED = {ANTHROPIC: {"driver": ANTHROPIC_DRIVER, "base_url": ANTHROPIC_BASE, "env_keys": ["ANTHROPIC_API_KEY"]}}
+
 # The upstreams the eval may reach (plan 029 §3.1.2); openrouter is here for
 # completeness only -- no eval target is served there.
-EVAL_PROVIDERS = ("meta", "zai-coding-plan", "fireworks", "openrouter")
+EVAL_PROVIDERS = ("meta", "zai-coding-plan", "fireworks", "openrouter", ANTHROPIC)
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,12 @@ class Provider:
             host=u.netloc,
             prefix=u.path.strip("/"),
         )
+
+    @property
+    def messages(self) -> bool:
+        """Anthropic's Messages API: the key goes in ``x-api-key``, not a bearer, and the
+        route forwards ``POST …/messages`` (and ``GET …/models``) only."""
+        return self.driver == ANTHROPIC_DRIVER
 
 
 class KeyRing:
@@ -202,20 +219,39 @@ def resolve_key(entry: Mapping, env: Mapping[str, str]) -> tuple[str | None, lis
     return chosen, candidates
 
 
+def locked_entry(name: str, entry: Mapping | None) -> dict:
+    """The owner's entry for a provider craze locks, as craze reads it: the catalog's
+    driver and endpoint whatever the entry says, its own api_key, and its env_keys when
+    it writes them (an empty list included), else the catalog's."""
+    entry = dict(entry or {})
+    shipped = LOCKED[name]
+    return {
+        "driver": shipped["driver"],
+        "base_url": shipped["base_url"],
+        "env_keys": entry["env_keys"] if "env_keys" in entry else list(shipped["env_keys"]),
+        **({"api_key": entry["api_key"]} if "api_key" in entry else {}),
+    }
+
+
 def load_providers(
     path: Path | None = None,
     env: Mapping[str, str] | None = None,
     only: tuple[str, ...] = EVAL_PROVIDERS,
 ) -> tuple[dict[str, Provider], KeyRing]:
-    """Read the owner's providers.toml (read-only) into a route table and a key ring."""
+    """Read the owner's providers.toml (read-only) into a route table and a key ring. A
+    provider craze locks (Anthropic) is read as craze reads it, present in the file or
+    not (locked_entry)."""
     path = path or paths.OWNER_CRAZE_NATIVE / "providers.toml"
     env = os.environ if env is None else env
     with open(path, "rb") as f:
         doc = tomllib.load(f)
+    entries = dict(doc.get("providers") or {})
+    for name in LOCKED:
+        entries[name] = locked_entry(name, entries.get(name))
     table: dict[str, Provider] = {}
     chosen: dict[str, str] = {}
     extra: list[str] = []
-    for name, entry in (doc.get("providers") or {}).items():
+    for name, entry in entries.items():
         key, candidates = resolve_key(entry, env)
         extra.extend(candidates)
         if name not in only:

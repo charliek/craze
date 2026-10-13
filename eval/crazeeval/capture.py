@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from crazeeval.pricing import Usage, usage_any, usage_from_chat, usage_from_responses
+from crazeeval.pricing import Usage, usage_any, usage_from_chat, usage_from_messages, usage_from_responses
 
 CAPTURE_PLAIN = "capture.jsonl"
 CAPTURE_GZ = "capture.jsonl.gz"
@@ -75,13 +75,28 @@ class CaptureWriter:
 # -- SSE -----------------------------------------------------------------------
 
 
-ACCOUNTING_TYPES = {"response.created", "response.completed", "response.incomplete", "response.failed", "response.done"}
+# The Messages API's message_start carries the served model and the input and cache
+# counts under ``message.usage`` (not a top-level ``usage``), so it is named here.
+ACCOUNTING_TYPES = {"response.created", "response.completed", "response.incomplete", "response.failed", "response.done",
+                    "message_start", "message_delta"}
 SEP = re.compile(rb"\r?\n\r?\n")
 
 
 def _accounting(obj: Any) -> bool:
     """An event the proxy needs for usage and the served model, kept past any bound."""
     return isinstance(obj, dict) and (obj.get("usage") is not None or obj.get("type") in ACCOUNTING_TYPES)
+
+
+def merge_counts(into: dict | None, counts: Any) -> dict | None:
+    """A Messages usage object with ``counts`` laid over it, count by count: a count the
+    event did not report (absent, or null) keeps the earlier value -- the way craze's
+    client merges them (messagesapi Usage.merge). message_start's usage, then each
+    message_delta's: cumulative counts, overwritten, never summed."""
+    if not isinstance(counts, dict):
+        return into
+    out = dict(into or {})
+    out.update({k: v for k, v in counts.items() if v is not None})
+    return out
 
 
 class SSEParser:
@@ -167,6 +182,10 @@ class SSEParser:
             key = obj.get("type") if isinstance(obj.get("type"), str) else None
             idx = self._acc_slots.get(key)
             if idx is not None and idx < len(self.events):
+                if key == "message_delta":
+                    # Folded, not replaced: a later delta that leaves a count out
+                    # keeps the earlier delta's (merge_counts).
+                    obj = {**obj, "usage": merge_counts(self.events[idx].get("usage"), obj.get("usage"))}
                 self.events[idx] = obj
             else:
                 self._acc_slots[key] = len(self.events)
@@ -255,16 +274,34 @@ def read_capture(path_or_dir: Path) -> list[dict]:
 
 
 def usage_and_model(response: dict | None) -> tuple[Usage | None, str | None]:
-    """The reported usage and the served model of one captured response."""
+    """The reported usage and the served model of one captured response.
+
+    A Messages API stream's usage is message_start's, with each message_delta's counts
+    laid over it (merge_counts), and counts only once both arrived: a stream cut before
+    its message_delta reported its input but not its output, so it has no usage and
+    keeps its reservation, like any stream whose usage never came."""
     if not response:
         return None, None
     usage: Usage | None = None
     model: str | None = None
     if "events" in response:
+        started = delta = False
+        counts: dict | None = None
         for ev in response["events"]:
             if not isinstance(ev, dict):
                 continue
             t = ev.get("type")
+            if t == "message_start":
+                msg = ev.get("message")
+                if isinstance(msg, dict):
+                    model = msg.get("model") or model
+                    if isinstance(msg.get("usage"), dict):
+                        counts, started = merge_counts(counts, msg["usage"]), True
+                continue
+            if t == "message_delta":
+                if isinstance(ev.get("usage"), dict):
+                    counts, delta = merge_counts(counts, ev["usage"]), True
+                continue
             if isinstance(t, str) and t.startswith("response."):
                 r = ev.get("response")
                 if isinstance(r, dict):
@@ -277,11 +314,16 @@ def usage_and_model(response: dict | None) -> tuple[Usage | None, str | None]:
             u = usage_from_chat(ev.get("usage"))
             if u is not None:
                 usage = u
+        if started and delta:
+            usage = usage_from_messages(counts)
         return usage, model
     body = response.get("body")
     if isinstance(body, dict):
         model = body.get("model")
-        usage = usage_any(body.get("usage"))
+        if body.get("type") == "message":  # a Messages API response, not streamed
+            usage = usage_from_messages(body.get("usage"))
+        else:
+            usage = usage_any(body.get("usage"))
     return usage, model
 
 
@@ -311,6 +353,8 @@ def response_tool_calls(response: dict | None) -> list[dict]:
                         items = [i for i in (r.get("output") or []) if isinstance(i, dict)]
             calls.extend(_responses_items(items))
             return calls
+        if any(e.get("type") in ("message_start", "content_block_start") for e in events):
+            return _messages_stream_calls(events)
         acc: dict[tuple[int, int], dict] = {}
         order: list[tuple[int, int]] = []
         for e in events:
@@ -343,6 +387,9 @@ def response_tool_calls(response: dict | None) -> list[dict]:
     if isinstance(body, dict):
         if isinstance(body.get("output"), list):
             return _responses_items([i for i in body["output"] if isinstance(i, dict)])
+        if body.get("type") == "message" and isinstance(body.get("content"), list):
+            return [{"id": b.get("id"), "name": b.get("name", ""), "arguments": b.get("input")}
+                    for b in body["content"] if isinstance(b, dict) and b.get("type") == "tool_use"]
         for ch in body.get("choices") or []:
             msg = (ch or {}).get("message") or {}
             for tc in msg.get("tool_calls") or []:
@@ -351,6 +398,26 @@ def response_tool_calls(response: dict | None) -> list[dict]:
                     {"id": tc.get("id"), "name": fn.get("name", ""), "arguments": _parse_args(fn.get("arguments"))}
                 )
     return calls
+
+
+def _messages_stream_calls(events: list[dict]) -> list[dict]:
+    """A Messages API stream's tool_use blocks, by index: each block's start names the
+    call, and its input_json_delta fragments are its arguments."""
+    blocks: dict[Any, dict] = {}
+    for e in events:
+        t = e.get("type")
+        if t == "content_block_start":
+            b = e.get("content_block") or {}
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                blocks[e.get("index")] = {"id": b.get("id"), "name": b.get("name", ""), "json": "", "input": b.get("input")}
+        elif t == "content_block_delta":
+            d = e.get("delta") or {}
+            cur = blocks.get(e.get("index"))
+            if cur is not None and isinstance(d, dict) and d.get("type") == "input_json_delta" \
+                    and isinstance(d.get("partial_json"), str):
+                cur["json"] += d["partial_json"]
+    return [{"id": b["id"], "name": b["name"], "arguments": _parse_args(b["json"]) if b["json"] else b["input"]}
+            for b in blocks.values()]
 
 
 def _responses_items(items: Iterable[dict]) -> list[dict]:
@@ -405,6 +472,9 @@ def request_effort(request: Any) -> dict:
                 out[f"reasoning.{k}"] = r[k]
     if "thinking" in request:
         out["thinking"] = request["thinking"]
+    oc = request.get("output_config")  # the Messages API's effort
+    if isinstance(oc, dict) and "effort" in oc:
+        out["output_config.effort"] = oc["effort"]
     return out
 
 
@@ -445,6 +515,8 @@ def classify(record: dict, calls: list[dict] | None = None) -> str:
         if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str):
             system = m["content"]
             break
+    if not system and isinstance(req.get("system"), (str, list)):  # the Messages API's top-level system
+        system = content_text(req["system"])
     if AUX_PROMPT_RE.search(last_user[:4000]) or AUX_PROMPT_RE.search(system[:2000]):
         return "aux"
     if isinstance(req.get("instructions"), str) and AUX_PROMPT_RE.search(req["instructions"][:2000]):
@@ -528,7 +600,8 @@ def content_text(c) -> str:
 
 def tool_results(records: list[dict]) -> dict[str, str]:
     """call id -> the result text the harness sent back to the model (the first time):
-    a chat ``tool`` message or a Responses ``*_call_output`` item in a later request.
+    a chat ``tool`` message, a Responses ``*_call_output`` item or a Messages
+    ``tool_result`` block in a later request.
     A call with no entry here never had its result sent -- it was only attempted."""
     out: dict[str, str] = {}
     for r in records:
@@ -538,6 +611,11 @@ def tool_results(records: list[dict]) -> dict[str, str]:
         for m in req.get("messages") or []:
             if isinstance(m, dict) and m.get("role") == "tool" and m.get("tool_call_id"):
                 out.setdefault(m["tool_call_id"], content_text(m.get("content")))
+            elif isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), list):
+                # The Messages API: a user turn's tool_result blocks.
+                for b in m["content"]:
+                    if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
+                        out.setdefault(b["tool_use_id"], content_text(b.get("content")))
         items = req.get("input")
         if isinstance(items, list):
             for it in items:
@@ -599,7 +677,7 @@ def metrics(records: list[dict]) -> dict:
         "tool_calls": 0,
         "exec_calls": 0,
         "write_calls": 0,
-        "tokens": {"input": 0, "cached": 0, "output": 0, "reasoning": 0},
+        "tokens": {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "reasoning": 0},
         "cost": 0.0,
         "list_cost": 0.0,
         "usage_missing": 0,

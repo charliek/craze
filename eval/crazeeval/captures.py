@@ -32,7 +32,9 @@ from crazeeval.config import load_models
 from crazeeval.packet import attempt_dir
 from crazeeval.report import iter_results
 
-CONVERSATION_KEYS = {"messages", "input", "tools", "instructions"}
+# What a request sends as its conversation, tools and system prompt, never a parameter:
+# ``system`` is the Messages API's top-level system prompt.
+CONVERSATION_KEYS = {"messages", "input", "tools", "instructions", "system"}
 DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b|\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b")
 GIT_RE = re.compile(r"git status|current branch|\bbranch:|recent commits|## [\w./-]+\.\.\.", re.I)
 OS_RE = re.compile(r"\blinux\b|\bdarwin\b|operating system|\bplatform\b", re.I)
@@ -49,11 +51,14 @@ def _turns(req: dict) -> list[dict]:
 
 
 def system_text(req: dict) -> str:
-    """Everything a request sends as its system prompt: ``instructions`` (Responses)
-    and every system/developer message."""
+    """Everything a request sends as its system prompt: ``instructions`` (Responses),
+    the top-level ``system`` (Messages: a string or a list of text blocks) and every
+    system/developer message."""
     parts = []
     if isinstance(req.get("instructions"), str):
         parts.append(req["instructions"])
+    if isinstance(req.get("system"), (str, list)):
+        parts.append(content_text(req["system"]))
     parts += [content_text(m.get("content")) for m in _turns(req) if m.get("role") in ("system", "developer")]
     return "\n\n".join(p for p in parts if p)
 
@@ -142,7 +147,9 @@ def effective_effort(eff: dict) -> str:
     """One comparable string from a request's reasoning controls."""
     if not eff:
         return "(none)"
-    for k in ("reasoning_effort", "reasoning.effort"):
+    # The effort before the thinking mode: with adaptive thinking, the Messages API's
+    # effort (output_config.effort) is what tells two harnesses apart.
+    for k in ("reasoning_effort", "reasoning.effort", "output_config.effort"):
         if k in eff:
             return str(eff[k])
     if "thinking" in eff:

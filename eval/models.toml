@@ -8,7 +8,8 @@
 #              by `crazeeval snapshot-config`).
 # opencode     <provider>/<model> in opencode's own ids (its built-in providers).
 # codex        the wire model, only where the provider serves the Responses API
-#              (Meta, Fireworks; Z.AI does not -- §2.6). Absent = codex does not run.
+#              (Meta, Fireworks; Z.AI and Anthropic do not -- §2.6). Absent = codex does
+#              not run.
 # codex_provider  the provider id in the generated codex config.
 
 [models."muse-spark-1.3"]
@@ -29,6 +30,18 @@ craze = "muse-spark-1.3-contributor"
 gx = "muse-spark-1.3-contributor"
 opencode = "meta/muse-spark-1.3-contributor"
 codex = "muse-spark-1.3-contributor"
+codex_provider = "meta"
+
+# Meta's most capable model, in preview (craze plan 045): set like Spark, at craze's
+# default effort, high.
+[models."muse-wonder-1.0"]
+provider = "meta"
+wire_model = "muse-wonder-1.0"
+effort = "high"
+craze = "muse-wonder-1.0"
+gx = "muse-wonder-1.0"
+opencode = "meta/muse-wonder-1.0"
+codex = "muse-wonder-1.0"
 codex_provider = "meta"
 
 [models."glm-5.3"]
@@ -68,3 +81,32 @@ gx = "fireworks/deepseek-v4p1-flash"
 opencode = "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash"
 codex = "accounts/fireworks/models/deepseek-v4p1-flash"
 codex_provider = "fireworks"
+
+# Anthropic's Messages API (craze plan 044; plan 047 D11). effort is craze's default for
+# every Claude model that offers it ([anthropic_defaults] default_effort, medium). gx
+# speaks the Messages API (api_backend "messages", homes.gx_home), so it runs; codex
+# does not (no Responses API). The craze home reaches the proxy through
+# CRAZE_TEST_ANTHROPIC_API (homes.anthropic_api); see RUNBOOK §3.
+[models."anthropic/claude-opus-5-5"]
+provider = "anthropic"
+wire_model = "claude-opus-5-5"
+effort = "medium"
+craze = "anthropic/claude-opus-5-5"
+gx = "anthropic/claude-opus-5-5"
+opencode = "anthropic/claude-opus-5-5"
+
+[models."anthropic/claude-sonnet-5-5"]
+provider = "anthropic"
+wire_model = "claude-sonnet-5-5"
+effort = "medium"
+craze = "anthropic/claude-sonnet-5-5"
+gx = "anthropic/claude-sonnet-5-5"
+opencode = "anthropic/claude-sonnet-5-5"
+
+[models."anthropic/claude-haiku-5-5"]
+provider = "anthropic"
+wire_model = "claude-haiku-5-5"
+effort = "medium"
+craze = "anthropic/claude-haiku-5-5"
+gx = "anthropic/claude-haiku-5-5"
+opencode = "anthropic/claude-haiku-5-5"

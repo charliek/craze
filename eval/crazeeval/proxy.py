@@ -3,14 +3,17 @@
 Routes are ``/r/<token>/<upstream-host>/<upstream-path-prefix>/<endpoint>``: the
 upstream host stays visible in every base URL a harness is given, and ``<token>`` is
 a random per-run value that stops working when the run ends. The proxy is the only
-holder of provider keys; it replaces ``Authorization`` on the way out and refuses any
-request that carries a loaded key -- raw, in any decoded JSON string, or in the body
-it would actually forward. It forwards only ``POST …/chat/completions``, ``POST
-…/responses`` and ``GET …/models``, enforces the run's target-model allowlist and the
-budget (one completion per request; reserve against the largest output limit before
-forwarding, reconcile after), streams responses to the harness with every loaded
-key redacted (headers and body, keys split across chunks included), and journals
-every request to the run's capture as it happens, scrubbed.
+holder of provider keys; it sets the credential on the way out (``Authorization:
+Bearer``, or ``x-api-key`` for Anthropic's Messages API) and refuses any request that
+carries a loaded key -- raw, in any decoded JSON string, in its path, query or any
+header, or in the body it would actually forward -- and scrubs every refusal message.
+It forwards only ``POST …/chat/completions``, ``POST …/responses`` and ``GET
+…/models`` (Anthropic: ``POST …/messages`` and ``GET …/models``), enforces the run's
+target-model allowlist and the budget (one completion per request; no content the
+body's size cannot bound; reserve against the largest output limit before forwarding,
+reconcile after), streams responses to the harness with every loaded key redacted
+(headers and body, keys split across chunks included), and journals every request to
+the run's capture as it happens, scrubbed.
 
 Each forwarded request's upstream exchange runs in a task of its own from the first
 byte (review r1-c1 finding 8): a harness that hangs up -- before or after the
@@ -45,21 +48,27 @@ from crazeeval.pricing import (
     multi_completion,
     request_max_tokens,
     reservation,
+    unbounded_input,
 )
 
 ALLOWED_ENDPOINTS = {("POST", "/chat/completions"), ("POST", "/responses"), ("GET", "/models")}
+# Anthropic's route (craze plan 047 D11): the Messages API and the model list, nothing
+# else -- so every POST it forwards is a Messages request, accounted as one.
+MESSAGES_ENDPOINTS = {("POST", "/messages"), ("GET", "/models")}
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "trailers",
     "transfer-encoding", "upgrade",
 }
 # Never forwarded upstream: hop-by-hop, framing, encoding (aiohttp decompresses and
-# re-frames), and every credential header (the proxy sets Authorization itself).
+# re-frames), and every credential header (the proxy sets the credential itself). Every
+# other header -- anthropic-version and anthropic-beta among them -- passes through.
 REQUEST_DROP = HOP_BY_HOP | {
     "host", "content-length", "content-encoding", "accept-encoding",
     "authorization", "x-api-key", "api-key", "cookie",
 }
-RESPONSE_DROP = HOP_BY_HOP | {"content-length", "content-encoding", "set-cookie", "authorization", "www-authenticate"}
+RESPONSE_DROP = HOP_BY_HOP | {"content-length", "content-encoding", "set-cookie", "authorization", "x-api-key",
+                              "www-authenticate"}
 BODY_CAPTURE_LIMIT = 32 * 1024 * 1024
 # How long the proxy keeps reading an upstream stream after the harness hung up on
 # it, so its usage still arrives (a title call cut off when the harness exits).
@@ -80,6 +89,7 @@ UPSTREAM_NOT_ALLOWED = "upstream-not-allowed"
 BAD_JSON = "bad-json"
 BAD_LIMIT = "bad-output-limit"
 MULTI_COMPLETION = "multi-completion"
+UNBOUNDED_INPUT = "unbounded-input"
 NO_KEY = "no-key"
 EXPIRED = "expired-token"
 
@@ -347,8 +357,10 @@ class Proxy:
         with open(self._refusal_log, "a", encoding="utf-8") as f:
             f.write(self.keyring.scrub(json.dumps(rec, default=str)) + "\n")
 
-    @staticmethod
-    def _error(status: int, reason: str, message: str) -> web.Response:
+    def _error(self, status: int, reason: str, message: str) -> web.Response:
+        """Every refusal the harness sees: its message scrubbed of every loaded key, here,
+        whatever built it (review c4c5 finding 4)."""
+        message = self.keyring.scrub(message)
         return web.json_response(
             {"error": {"message": f"crazeeval proxy: {message}", "type": reason, "code": reason}}, status=status
         )
@@ -414,6 +426,13 @@ class Proxy:
             "query": request.query_string or "",
             "request_content_type": request.headers.get("Content-Type"),
         }
+        # A loaded key in the path, the query or any header -- x-api-key and
+        # Authorization among them -- is a key exposure before anything else is decided,
+        # so no later refusal can echo it (review c4c5 finding 4). The dummy key is not a
+        # loaded one.
+        header_blob = "\n".join(f"{k}: {v}" for k, v in request.headers.items())
+        if any(self.keyring.contains_key(part) for part in (request.path, request.query_string, header_blob)):
+            return self._key_exposure(route, rec, b"")
         provider = self._match_provider(host, rest)
         if provider is None:
             rec["path"] = "/" + rest
@@ -423,11 +442,10 @@ class Proxy:
         # One normal form for every later decision (review r1-c1 finding 10).
         endpoint = raw_endpoint.rstrip("/") or "/"
         rec["path"] = endpoint
-        if (request.method, endpoint) not in ALLOWED_ENDPOINTS:
+        if (request.method, endpoint) not in (MESSAGES_ENDPOINTS if provider.messages else ALLOWED_ENDPOINTS):
             return self._refuse(route, rec, 403, PATH_NOT_ALLOWED, f"{request.method} {raw_endpoint} is not forwarded")
         body = await request.read()
-        header_blob = "\n".join(f"{k}: {v}" for k, v in request.headers.items())
-        if any(self.keyring.contains_key(part) for part in (body, request.path, request.query_string, header_blob)):
+        if self.keyring.contains_key(body):
             return self._key_exposure(route, rec, body)
         key = self.keyring.key_for(provider.name)
         if not key:
@@ -456,6 +474,14 @@ class Proxy:
             price = self.prices.get(model)
             if price is None:
                 return self._refuse(route, rec, 403, MODEL_UNPRICED, f"model {model!r} has no price")
+            # The reservation bounds input by the body's bytes: content the provider
+            # fetches or expands itself would pass it (review c4c5 finding 3).
+            why = unbounded_input(payload)
+            if why is not None:
+                route.flags.add(UNBOUNDED_INPUT)
+                return self._refuse(route, rec, 403, UNBOUNDED_INPUT,
+                                    f"{why}: its billed input is not bounded by the request's size, so no "
+                                    "reservation can cover it")
             multi = multi_completion(payload)
             if multi is not None:
                 return self._refuse(route, rec, 400, MULTI_COMPLETION, f"{multi} must be 1")
@@ -501,7 +527,10 @@ class Proxy:
             return self._refuse(route, rec, 403, EXPIRED, "this route closed")
 
         headers = {k: v for k, v in request.headers.items() if k.lower() not in REQUEST_DROP}
-        headers["Authorization"] = f"Bearer {key}"
+        if provider.messages:
+            headers["x-api-key"] = key  # Anthropic takes no bearer
+        else:
+            headers["Authorization"] = f"Bearer {key}"
         if fwd_body is not None:
             headers["Content-Type"] = request.headers.get("Content-Type", "application/json")
         url = self._upstream_url(provider, endpoint, request.query_string)

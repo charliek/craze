@@ -217,8 +217,10 @@ def cmd_proxy(a) -> int:
         info = {"port": proxy.port, "run_id": a.run_id, "models": [em.wire_model for em in ems], "base_urls": urls,
                 "dummy_key": paths.DUMMY_KEY, "capture": str(out / "capture.jsonl")}
         if a.craze_home:
-            craze_home_multi(Path(a.craze_home), ems, snap, urls)
+            env = craze_home_multi(Path(a.craze_home), ems, snap, urls)
             info["craze_home"] = str(Path(a.craze_home))
+            if env:
+                info["craze_env"] = env  # export these for craze too (an Anthropic model's route)
         (out / "proxy.json").write_text(json.dumps(info, indent=2) + "\n")
         print(json.dumps(info, indent=2), flush=True)
         stop = asyncio.Event()

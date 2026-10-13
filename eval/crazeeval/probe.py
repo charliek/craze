@@ -72,6 +72,17 @@ print(json.dumps(out))
 '''
 
 
+def probe_env(home: Path, em: EvalModel, snap: Snapshot) -> dict[str, str]:
+    """Every harness's home and variables for ``em``, exactly as a run would set them,
+    on a placeholder route shaped like a real one: loopback http, ending in the API's
+    ``/v1`` (an Anthropic route must, for craze's override: homes.anthropic_api)."""
+    env: dict[str, str] = {}
+    for h, fn in HOMES.items():
+        if em.supports(h):
+            env.update(fn(home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}/v1"))
+    return env
+
+
 async def run_probe(out: Path, tc: Toolchains, keyring: keymod.KeyRing, snap: Snapshot, em: EvalModel,
                     craze_bin: Path | None, cache: Path | None = None) -> dict:
     out.mkdir(parents=True, exist_ok=True)
@@ -81,11 +92,7 @@ async def run_probe(out: Path, tc: Toolchains, keyring: keymod.KeyRing, snap: Sn
     shutil.rmtree(home, ignore_errors=True)
     shutil.copytree(craze_template(cache=cache), ws, symlinks=True)
     home.mkdir(parents=True)
-    # Every harness's variables, exactly as a run would set them.
-    env: dict[str, str] = {}
-    for h, fn in HOMES.items():
-        if em.supports(h):
-            env.update(fn(home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}"))
+    env = probe_env(home, em, snap)
     (home / "probe.py").write_text(PROBE_SCRIPT)
     tools = {"craze", "grok", "opencode", "node"} if craze_bin else {"grok", "opencode", "node"}
     # A stand-in proxy on a Unix socket: the relay must reach it and nothing else.

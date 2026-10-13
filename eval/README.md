@@ -137,12 +137,19 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 ### Keys
 
 - The proxy loads each provider's key from the owner's `~/.craze/native/providers.toml`
-  with craze's rule: the first non-empty `env_keys` variable, else `api_key`.
+  with craze's rule: the first non-empty `env_keys` variable, else `api_key`. Anthropic's
+  provider is read as craze reads its locked entry: the endpoint
+  (`https://api.anthropic.com/v1`) is craze's whatever the entry says, and its variable is
+  craze's `ANTHROPIC_API_KEY` unless the entry writes `env_keys` (an empty list included),
+  so an exported `ANTHROPIC_API_KEY` funds the eval exactly when it would fund craze. The
+  entry may be missing altogether.
 - It keeps keys in memory only (`KeyRing`, whose `repr` shows none) and puts one in
-  `Authorization` on the way out.
+  `Authorization` on the way out -- in `x-api-key` for Anthropic, which takes no bearer.
 - It **refuses to forward** any request that carries a loaded key in its raw body, in any
   decoded JSON string (a key sent `\u`-escaped), in the body it would actually forward
-  (after usage injection re-serialises it), or in its path, query or headers. The run is
+  (after usage injection re-serialises it), or in its path, query or headers -- the path,
+  query and headers checked before anything else is decided, so no other refusal can echo
+  a key. Every refusal message the harness sees is scrubbed of every key too. The run is
   then marked `key-exposure`, and `proxy.key_exposure_refusals` in `result.json` counts
   the refusals.
 - Responses reach the harness **redacted**: a header or HTTP reason phrase holding a key
@@ -169,20 +176,48 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
   initializers in trusted test directories replaced, agent `TestMain` rejected, every
   expected test id required to pass) and every scoring run is isolated from every other;
   in-process forgery by submitted code is accepted for non-adversarial agents.
+- Anthropic (craze plan 047 D11): a 1-hour cache write (2× input) would be priced as a
+  5-minute one (1.25×) -- craze asks for none, and the capture keeps `message_start`'s
+  `cache_creation.ephemeral_1h_input_tokens` for a check (RUNBOOK §3). And the API adds a
+  tool-use system prompt of a few hundred tokens the body does not carry, so a tiny
+  request's input could pass its byte count; an agent's request bodies are many times
+  that. Likewise an inline image is billed by its pixels, not its bytes: a pathologically
+  compressible one (a blank 1-bit PNG) could carry more tokens than bytes, at most the
+  provider's per-image cap (an image is scaled down past it); no task sends images.
 
 ### What the proxy forwards
 
 - **Allowed requests:** `POST …/chat/completions`, `POST …/responses` and `GET …/models`,
   only to the upstreams in the route table (`meta`, `zai-coding-plan`, `fireworks`,
-  `openrouter`, each a host plus a path prefix).
+  `openrouter`, each a host plus a path prefix). Anthropic's route
+  (`api.anthropic.com/v1`) forwards `POST …/messages` and `GET …/models` and nothing else,
+  and no other route forwards `…/messages`. Every header but the credential ones passes
+  through -- `anthropic-version` and `anthropic-beta` among them.
 - **Refused and recorded:** anything else, a model other than the run's target, a wire
   model missing from `prices.toml`, more than one completion (`n` or `best_of` other than
   1), an unusable output limit, and a request whose route closed while its body was being
-  read (checked again just before admission, with no await in between). Refusals are
+  read (checked again just before admission, with no await in between). So is
+  **content the body's size cannot bound** (`unbounded-input`, also a run flag): the
+  reservation counts one input token per body byte, which holds for text, tool definitions
+  and inline base64 images, but not for what the provider fetches or expands itself -- a
+  Messages `source` of type `url` or `file`, any `file_id`, an `image_url`/`input_image`
+  that is not a `data:` URL, a chat `file` or Responses `input_file`, a base64 `document`
+  (a PDF is billed per page as an image and its text), a hosted fetching tool (web search
+  or fetch, file search, MCP), `mcp_servers` or chat's `web_search_options`. Every route
+  is checked for every API's shapes. Refusals are
   recorded in the capture; unattributable ones go to `<batch>/proxy-refusals.jsonl`.
 - **Streaming:** SSE passes through unbuffered. When a streaming chat request lacks
   `stream_options.include_usage`, the proxy adds it and records `usage_injected`.
-  Responses-API streams report usage from `response.completed`.
+  Responses-API streams report usage from `response.completed`. A Messages-API stream's
+  usage is `message_start`'s, with each `message_delta`'s counts laid over it count by
+  count (they are cumulative: overwritten, never summed), and counts only once both
+  arrived -- a stream cut before its `message_delta` keeps its reservation. Its
+  `input_tokens` excludes the cache, so the record's `input` is `input_tokens +
+  cache_read_input_tokens + cache_creation_input_tokens`, `cached` the cache reads and
+  `cache_write` the cache writes (present only when non-zero; absent means 0).
+  `message_start` and `message_delta` are accounting events: past the parser's bounds they
+  are kept, repeated deltas folded count by count. Its tool calls are its `tool_use`
+  blocks, and a later request's `tool_result` blocks their results.
 - **Headers:** only `content-type` is ever written. Redirects are not followed, and
   hop-by-hop and `Content-Encoding` headers are dropped.
 - **Capture:** a journal. A forwarded request writes a `start` line (the request) before
@@ -209,7 +244,10 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
   both think they have headroom.
 - **Reservation:** before forwarding, the proxy reserves the request's **byte count** as
   input tokens (an upper bound: a byte-level tokenizer emits at most one token per byte) at
-  the uncached price plus the **largest** of `max_tokens`, `max_completion_tokens` and
+  the dearest input price -- the uncached one, or the cache-write one where that is higher
+  (Anthropic's 5-minute write is 1.25× input) -- and, for a model with a long-context tier
+  (Haiku 5.5) whose body is over the threshold, at the dearer tier's rates, plus the
+  **largest** of `max_tokens`, `max_completion_tokens` and
   `max_output_tokens` at the output price. A request that names no limit is reserved at
   the **model's maximum output** -- the largest of every limit that applies: the owner's
   craze `max_output_tokens`, gx `max_completion_tokens` and the snapshot's models.dev
@@ -217,8 +255,12 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
   forwarded unchanged (the proxy never adds a limit). Only one completion per request is admitted.
   At Kimi K3's ledger price an unbounded request reserves about $2.95 of output, so a Kimi
   run needs `--run-cap` above the $3 default.
-- **Reconciliation:** after the request, the reservation is replaced by the reported usage.
-  A request whose usage never arrives (a disconnect, an error) keeps its reservation.
+- **Reconciliation:** after the request, the reservation is replaced by the reported usage:
+  uncached input, cache reads, cache writes and output each at its own ledger price, at
+  the tier the request's whole prompt (uncached, cache reads and writes together) falls
+  in -- over `long_context_above`, the long-context rates for every token; exactly the
+  threshold is base. A request whose usage never arrives (a disconnect, an error) keeps
+  its reservation.
 - **Drains:** when a harness hangs up on a stream, the proxy reads the rest of the upstream
   stream (up to 2 min, bounded by the run's close) so the usage still arrives. This
   happens with opencode's and gx's title calls when the harness exits, and with codex,
@@ -241,11 +283,11 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 
 ## Config
 
-- `models.toml`: the six eval models. Each entry has its provider, its wire model, its one
+- `models.toml`: the eval models. Each entry has its provider, its wire model, its one
   pinned reasoning effort, and each harness's id for it. The `craze` and `gx` aliases are
   kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
   so a renamed or retired alias has to be changed in both places. codex runs only where the provider
-  serves `/responses` (Meta, Fireworks).
+  serves `/responses` (Meta, Fireworks; not Z.AI or Anthropic).
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
   - It copies the target definitions from the owner's craze and gx tables into
@@ -271,9 +313,9 @@ The generated homes, per harness:
 
 | harness | home | notes |
 |---|---|---|
-| craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort. `models.toml` says `catalog = false` (craze plan 031 P10): craze ships a model catalog and merges it under the user's files, which would add every shipped model — funded by the proxy provider's dummy key — to the run and to the agent tool's description, changing the frozen prompt; with it off the two files are the whole table. `crazeeval proxy --craze-home` writes it too. |
-| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. |
-| opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan` and `fireworks-ai` providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
+| craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort. `models.toml` says `catalog = false` (craze plan 031 P10): craze ships a model catalog and merges it under the user's files, which would add every shipped model — funded by the proxy provider's dummy key — to the run and to the agent tool's description, changing the frozen prompt; with it off the two files are the whole table. `crazeeval proxy --craze-home` writes it too. **Anthropic:** craze's endpoint is fixed, so the provider entry is `driver = "anthropic"` and the dummy key, no `base_url` (craze refuses one; a `catalog = false` table must name the driver), and the run's environment carries `CRAZE_TEST_ANTHROPIC_API`, the route without its `/v1`: craze keeps the override's path and adds `/v1/messages` itself, and takes only an `http` URL on a loopback IP literal. `crazeeval proxy --craze-home` prints it as `craze_env`. |
+| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. **Anthropic:** gx's `messages` backend, with `anthropic-version` as an extra header (gx sends it no other way); the proxy drops gx's own credential header and sets `x-api-key`. |
+| opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan`, `fireworks-ai` and `anthropic` (Messages) providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
 | codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |
 
 **codex model metadata (a recorded limitation).** codex knows only its bundled OpenAI
