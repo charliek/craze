@@ -120,7 +120,8 @@ func Execute() {
 }
 
 // diagnose is what Execute prints (one line, or none) and the code it exits
-// with, for ranCmd's error: craze bridge's own contract (bridgeLine, exit 1)
+// with, for ranCmd's error: craze bridge's own contract (bridgeLine, exit 1;
+// exit 3 for errNoHubRunning alone)
 // for every error that reaches it once the ran command is bridge's — flag
 // parsing, an extra argument, and the root's shared PersistentPreRunE (a
 // stray removed config-file variable in an SSH environment) included, since bridge defines
@@ -129,6 +130,9 @@ func Execute() {
 // exit 1 with the error printed as it is.
 func diagnose(ranCmd *cobra.Command, err error) (line string, code int) {
 	if ranCmd != nil && ranCmd.Name() == "bridge" {
+		if errors.Is(err, errNoHubRunning) {
+			return bridgeLine(err), errNoHubRunning.code
+		}
 		return bridgeLine(err), 1
 	}
 	var ee *exitError

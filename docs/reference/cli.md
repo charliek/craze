@@ -561,6 +561,7 @@ the client's job, not this command's.
 |------|-------------|
 | `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one running session) |
 | `--hub` | Relay to this machine's [hub](#the-hub) instead, starting it when none runs. Not with `--session` |
+| `--no-start` | With `--hub` only: attach to a hub that is already running and never start one. With none running it exits 3 (`craze bridge: no hub is running`). Without `--hub` it is a bridge error, exit 1 (`craze bridge: --no-start needs --hub`) |
 
 `--session`'s id is resolved against the registry under the bridge
 process's own `$HOME` (`~/.cache/craze/hosts/*.json`; see
@@ -607,7 +608,7 @@ characters**; a shorter one matches nothing (`no session <id>`). The hub's
   socket (a file, a terminal, a TCP socket) is not looked at.
 - The socket's own EOF ends the pump and exits 0.
 
-**The error contract: every failure is one line on stderr, exit 1.** That
+**The error contract: every failure is one line on stderr, exit 1** (the one exception, `--hub --no-start` with no hub running, exits 3; see below). That
 covers every failure *before* the pump starts — resolving the target,
 dialing, the peer check — and "nothing on stdout" is true only for those:
 flag parsing is included, so a stray removed config-file environment
@@ -634,18 +635,28 @@ own `$HOME`). The same pump and the same error contract apply; the client
 says `hello` to the hub and then reads the [roster](protocol.md#the-hubs-roster)
 or splices itself to a session with
 [`session.connect`](protocol.md#the-hub-splice). Plain `craze bridge` is
-unchanged. Its own failures:
+unchanged. **`--hub --no-start`** attaches to a running hub only and never
+starts one, so a caller asking "is there a hub to reach?" does not create the
+very hub it is asking about. With a hub it splices exactly as `--hub` does;
+with none it prints `craze bridge: no hub is running` and exits **3**, the one
+bridge failure that is not 1. A hub that is running but does not answer
+(wedged) is ended, as everywhere, and nothing replaces it, so the answer is
+the same: no hub is running. A wedged hub that cannot be ended (its start
+token unreadable, or the signal refused) is a failure like any other: exit 1. Its own failures:
 
 ```text
 craze bridge: --hub and --session cannot be used together: the hub's session.connect names the session
 craze bridge: no hub: <reason>
+craze bridge: no hub is running
+craze bridge: --no-start needs --hub
 craze bridge: the hub is unreachable: <reason>
 ```
 
 | Code | When |
 |------|------|
 | 0 | The socket closed cleanly (the session ended, or the far side hung up) |
-| 1 | Every failure above: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
+| 1 | Every failure above but `no hub is running`: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
+| 3 | `--hub --no-start` and no hub is running (a wedged hub, ended, counts as none) |
 | 127 | Not `craze bridge`'s own exit: what an SSH client sees when the far end's shell falls off the published binary ladder (see [Protocol reference](protocol.md#ssh-exec-what-a-client-may-assume)) without ever reaching a `craze` to exec |
 
 ## craze attach

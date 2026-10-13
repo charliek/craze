@@ -49,21 +49,25 @@ func bridgeErrorf(format string, args ...any) error {
 
 func newBridgeCmd() *cobra.Command {
 	var session string
-	var toHub bool
+	var toHub, noStart bool
 	cmd := &cobra.Command{
 		Use:   "bridge",
 		Short: "Pump bytes between stdin/stdout and a running craze session's control socket",
 		Long: "craze bridge is a pure byte pump for an SSH client: it " +
 			"resolves the one running craze session (or --session's), dials its control " +
 			"socket, and relays stdin/stdout to it verbatim. With --hub it relays to this " +
-			"machine's hub instead, starting it if none runs. It speaks no protocol itself.",
+			"machine's hub instead, starting it if none runs (--no-start: only a running one, " +
+			"else exit 3). It speaks no protocol itself.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if noStart && !toHub {
+				return bridgeErrorf("--no-start needs --hub")
+			}
 			if toHub {
 				if cmd.Flags().Changed("session") {
 					return bridgeErrorf("--hub and --session cannot be used together: the hub's session.connect names the session")
 				}
-				return runBridgeHub(cmd)
+				return runBridgeHub(cmd, noStart)
 			}
 			return runBridge(cmd, session, cmd.Flags().Changed("session"))
 		},
@@ -72,8 +76,16 @@ func newBridgeCmd() *cobra.Command {
 		"a craze session id, provider session id, or host id (default: the one running session)")
 	cmd.Flags().BoolVar(&toHub, "hub", false,
 		"relay to this machine's hub (started if none runs) instead of a session's host")
+	cmd.Flags().BoolVar(&noStart, "no-start", false,
+		"with --hub, relay only to a hub that is already running; none is exit 3 (never starts one)")
 	return cmd
 }
+
+// errNoHubRunning is craze bridge --hub --no-start with no hub to attach to
+// (plan 046 B5, SF-152): the one bridge error that exits 3 rather than 1, so
+// a caller can tell "nothing to attach to" from a failure. diagnose matches
+// it by identity, never by its text.
+var errNoHubRunning = &exitError{code: 3, msg: bridgePrefix + "no hub is running"}
 
 // runBridgeHub is craze bridge --hub (plan 032 §3.12, P8): the hub of this
 // HOME's namespace, found or started (hub.Ensure, within hubBudget: no hub
@@ -81,9 +93,23 @@ func newBridgeCmd() *cobra.Command {
 // and the same pump. The client says its own hello to the hub — and then
 // sessions.list, sessions.subscribe or session.connect — as it would on the
 // hub's socket itself; the bridge parses nothing.
-func runBridgeHub(cmd *cobra.Command) error {
+//
+// noStart (--no-start) finds the hub and never starts one (hub.Find): none
+// running, a wedged one included (Find ends it, and nothing replaces it), is
+// errNoHubRunning.
+func runBridgeHub(cmd *cobra.Command, noStart bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
-	sock, err := hub.Ensure(ctx, rundir.ProcessEnv(), protocol.ConnectionCapabilities{})
+	var sock string
+	var err error
+	if noStart {
+		sock, err = hub.Find(ctx, rundir.ProcessEnv(), protocol.ConnectionCapabilities{})
+		if errors.Is(err, hub.ErrNoHub) {
+			cancel()
+			return errNoHubRunning
+		}
+	} else {
+		sock, err = hub.Ensure(ctx, rundir.ProcessEnv(), protocol.ConnectionCapabilities{})
+	}
 	cancel()
 	if err != nil {
 		return bridgeErrorf("no hub: %v", err)
