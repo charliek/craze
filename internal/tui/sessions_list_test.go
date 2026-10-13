@@ -327,7 +327,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 		}
 		assertFrameGolden(t, "sessions"+suffix, size.cols, size.rows, plainView(m),
 			[]string{" sessions  9 running", "needs you 2 ", "permission: cargo test -p r", "✳ ", "Starting…",
-				"error: 402 Payment Required", "unreachable 1 ", "not answering", "craze 0.0.9", "craze · h", "▸ saved · 3 not running"},
+				"error: 402 Payment Required", "unreachable 1 ", "not answering", "craze 0.0.9", "· here", "▸ saved · 3 not running"},
 			[]string{"agents"})
 
 		dirs, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
@@ -980,7 +980,7 @@ func TestSessionsEndedRowOutlivesItsHost(t *testing.T) {
 		}
 	}
 	view := plainView(m)
-	for _, want := range []string{"· write the v0.1.0 rel", "ended", "craze · h"} {
+	for _, want := range []string{"· write the v0.1.0 rel", "ended", "· here"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("the list after the host left lacks %q:\n%s", want, view)
 		}

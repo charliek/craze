@@ -1,7 +1,7 @@
  sessions  9 running                             ! 3 need you   ✳ 2 working   ✗ 1 failed   ○ 2 idle 
                                                                                                     
 needs you 3 ────────────────────────────────────────────────────────────────────────────────────────
-❯ ! write the v0.1.0 rel…  question: Pick one            native                      craze · h…   1m
+❯ ! write the v0.1.0 rel…  question: Pick one            native                      cr… · here   1m
   ! fix the roost tab re…  permission: cargo test -p r…  grok    grok-4.6            roost        2m
   ! add persistence to t…  question: Which storage?      native  anthropic/claude-o… lumen       14m
                                                                                                     

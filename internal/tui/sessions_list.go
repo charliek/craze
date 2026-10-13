@@ -64,6 +64,8 @@ const (
 	sessUntitled    = "new session"
 	sessUnreachNote = "that session is not answering"
 	sessOlderNote   = "that session runs in an older craze; close it there"
+	// sessHereSuffix marks the row of the session in this directory.
+	sessHereSuffix = " · here"
 )
 
 // sessListState is the list: whether it is open and everything it shows.
@@ -1850,8 +1852,14 @@ func (m Model) sessRowView(r sessRow, selected bool) string {
 		if r.workspace == "" {
 			dir = ""
 		}
+		// The session of this directory keeps its " · here" whole: the
+		// directory's name is clipped first, while it keeps a cell and its
+		// ellipsis.
 		if r.here {
-			dir += " · here"
+			if hw := lipgloss.Width(sessHereSuffix); dW >= hw+2 {
+				dir = clampWidth(dir, dW-hw)
+			}
+			dir += sessHereSuffix
 		}
 		segs = append(segs, seg{padCells(dir, dW), styleFG(th.Dim)})
 	}
