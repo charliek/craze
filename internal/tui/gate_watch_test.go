@@ -175,6 +175,7 @@ var gateDigestSkips = map[string]string{
 	"sessionIndex": "the index store",
 	"clock":        "a function",
 	"onEngine":     "a function",
+	"onQuit":       "a function",
 	"newSession":   "a function",
 	"loadSession":  "a function",
 	"spawnNew":     "a function",

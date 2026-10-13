@@ -116,6 +116,11 @@ func RunSpawned(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host), sig
 			done = sig == syscall.SIGTERM || sig == syscall.SIGINT
 		}
 	}
+	if o.StoppingMark {
+		// A real host's stop marks its entry first thing (plan 046 B4): a
+		// session.stop's mark is written already, a signal's is here.
+		_ = reg.MarkStopping()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = h.Close(ctx)

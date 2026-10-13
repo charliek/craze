@@ -477,12 +477,19 @@ func (s orderSession) Close() error {
 // and the session that swap builds logs its close as "sess close picked".
 func exitTailModel(t *testing.T) (Model, *orderLog, orderWriter) {
 	t.Helper()
+	return exitTailModelWith(t, false)
+}
+
+// exitTailModelWith is exitTailModel whose Config.OnQuit, when onQuit, logs
+// "on quit".
+func exitTailModelWith(t *testing.T, onQuit bool) (Model, *orderLog, orderWriter) {
+	t.Helper()
 	isolateSkillsHome(t)
 	log := &orderLog{}
 	w := orderWriter{log: log}
 	stub := NewStub()
 	t.Cleanup(func() { _ = stub.Close() })
-	m := New(Config{
+	cfg := Config{
 		Session: orderSession{Stub: stub, log: log},
 		NewSession: func(p agent.Provider) agent.Session {
 			picked := NewStub()
@@ -492,7 +499,11 @@ func exitTailModel(t *testing.T) (Model, *orderLog, orderWriter) {
 		},
 		Theme:     "tokyo-night",
 		Workspace: t.TempDir(),
-	})
+	}
+	if onQuit {
+		cfg.OnQuit = func() { log.add("on quit") }
+	}
+	m := New(cfg)
 	m.term = newTerminalColors(w)
 	m.term.apply(m.theme)
 	m.lastTitle = "✦ craze"
@@ -742,19 +753,30 @@ func TestFramePanicClosesThePickedSession(t *testing.T) {
 // what a quit does to each can be ordered against the other.
 func quitModel(t *testing.T) (Model, *orderLog, *orderHost) {
 	t.Helper()
+	return quitModelWith(t, false)
+}
+
+// quitModelWith is quitModel whose Config.OnQuit, when onQuit, logs "on
+// quit".
+func quitModelWith(t *testing.T, onQuit bool) (Model, *orderLog, *orderHost) {
+	t.Helper()
 	isolateSkillsHome(t)
 	log := &orderLog{}
 	stub := NewStub()
 	t.Cleanup(func() { _ = stub.Close() })
 	h := &orderHost{log: log}
-	m := New(Config{
+	cfg := Config{
 		Session:   orderSession{Stub: stub, log: log},
 		Theme:     "tokyo-night",
 		Workspace: t.TempDir(),
 		Model:     "grok",
 		Yolo:      true,
 		Host:      h,
-	})
+	}
+	if onQuit {
+		cfg.OnQuit = func() { log.add("on quit") }
+	}
+	m := New(cfg)
 	m = deliver(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	return deliver(t, m, startedMsg{}), log, h
 }
@@ -929,4 +951,62 @@ func TestHostStatusNoIdleBeforeAFiredSendNow(t *testing.T) {
 	m = pumpSettled(t, m)
 	assertStatuses(t, rec, workingStatus(), idleStatus(host.DetailStop))
 	assertPrompts(t, sess, "go", "PINEAPPLE")
+}
+
+// TestOnQuitIsToldBeforeTheSessionCloses (plan 046 B4): Config.OnQuit — a
+// TUI-hosted session's stopping mark — is told before the session is first
+// closed, and before anything else of the quit: first in the quit command
+// craze runs for Ctrl+D or /exit, and in the exit tail, which a signal or a
+// recovered panic reaches alone, right after the terminal's reset. It is the
+// TUI's, not the session's: a picker's swap keeps it. The negative control is
+// a quit with no OnQuit, whose log says nothing of it.
+func TestOnQuitIsToldBeforeTheSessionCloses(t *testing.T) {
+	for _, quit := range []string{"ctrl+d", "/exit"} {
+		t.Run("the quit command, "+quit, func(t *testing.T) {
+			m, log, h := quitModelWith(t, true)
+			var cmd tea.Cmd
+			if quit == "/exit" {
+				m.input.SetValue("/exit")
+				var tm tea.Model
+				tm, cmd = m.Update(enter())
+				m = tm.(Model)
+			} else {
+				var tm tea.Model
+				tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				m = tm.(Model)
+			}
+			log.events = nil
+			if msg := handlerMsg(cmd); msg != (tea.QuitMsg{}) {
+				t.Fatalf("the quit command returned %T, want tea.QuitMsg", msg)
+			}
+			if len(log.events) == 0 || log.events[0] != "on quit" {
+				t.Fatalf("the quit command's first act is not OnQuit: %q", log.events)
+			}
+			if sessAt := slices.Index(log.events, "sess close"); sessAt < 0 || sessAt < slices.Index(log.events, "on quit") {
+				t.Fatalf("the session closed before OnQuit was told: %q", log.events)
+			}
+			_, _ = finishRun(io.Discard, m, m, h)
+		})
+	}
+	t.Run("the exit tail alone", func(t *testing.T) {
+		m, log, w := exitTailModelWith(t, true)
+		_, _ = finishRun(w, nil, m, &orderHost{log: log})
+		assertOrder(t, log, "term reset", "on quit", "host close", "sess close")
+	})
+	t.Run("after a picker's swap", func(t *testing.T) {
+		initial, log, w := exitTailModelWith(t, true)
+		updated, _ := initial.confirmProvider(agent.GrokProvider(), true)
+		log.events = nil
+		final := updated.(Model)
+		if final.onQuit == nil {
+			t.Fatal("the swap dropped OnQuit")
+		}
+		_, _ = finishRun(w, final, final, &orderHost{log: log})
+		assertOrder(t, log, "title clear", "term reset", "on quit", "host close", "sess close picked")
+	})
+	t.Run("no OnQuit (the control)", func(t *testing.T) {
+		m, log, w := exitTailModelWith(t, false)
+		_, _ = finishRun(w, nil, m, &orderHost{log: log})
+		assertOrder(t, log, "term reset", "host close", "sess close")
+	})
 }

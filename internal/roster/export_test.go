@@ -25,13 +25,14 @@ var DialUnix = dialUnix
 
 // TestOptions are the seams a test sets (options'); a zero field is
 // production's, except that there is no registry, index file or peer check
-// of the process's: Hosts is the registry, IndexPath "" when nil, and the
-// test's hosts, this process's own, are not peer-checked unless Check says
-// how.
+// of the process's: Hosts is the registry, Entry its single-entry read (nil:
+// the host found in a read of Hosts), IndexPath "" when nil, and the test's
+// hosts, this process's own, are not peer-checked unless Check says how.
 type TestOptions struct {
 	Ticks      <-chan time.Time
 	Now        func() time.Time
 	Hosts      func() ([]rundir.Entry, error)
+	Entry      func(hostID string) (rundir.Entry, bool, error)
 	Dial       func(ctx context.Context, path string) (net.Conn, error)
 	Check      func(*net.UnixConn) error
 	IndexPath  func() string
@@ -48,6 +49,10 @@ func OpenForTest(index Index, to TestOptions) *Roster {
 	o := defaults(rundir.Env{})
 	o.ticks = to.Ticks
 	o.hosts = to.Hosts
+	o.entry = to.Entry
+	if o.entry == nil {
+		o.entry = entryIn(to.Hosts)
+	}
 	o.indexPath = func() string { return "" }
 	if to.Now != nil {
 		o.now = to.Now

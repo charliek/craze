@@ -562,6 +562,20 @@ func (r *registry) install(t *testing.T) {
 		}
 		return slices.Clone(r.hosts), nil
 	})
+	// The roster's single-entry read reads the same list.
+	setVar(t, &hostEntry, func(_ rundir.Env, id string) (rundir.Entry, bool, error) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.err != nil {
+			return rundir.Entry{}, false, r.err
+		}
+		for _, e := range r.hosts {
+			if e.HostID == id {
+				return e, true, nil
+			}
+		}
+		return rundir.Entry{}, false, nil
+	})
 }
 
 // list makes the registry list hosts; fail makes it fail.

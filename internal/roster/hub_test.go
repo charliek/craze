@@ -54,6 +54,7 @@ func newHubRigWith(t *testing.T, g *registry, tweak func(*roster.HubOptions)) *h
 			rg.reads.Add(1)
 			return g.read()
 		},
+		Entry: g.entry,
 		Publish: func(s roster.Snapshot) {
 			rg.mu.Lock()
 			rg.snaps = append(rg.snaps, s)

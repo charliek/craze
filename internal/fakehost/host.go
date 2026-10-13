@@ -61,6 +61,16 @@ type Options struct {
 	// exactly, with a duplicate stop or a refused attach before it. Off,
 	// session.stop is refused unsupported, reason stop_unsupported.
 	Stop bool
+	// StoppingMark is plan 046's opt-in (B4, #93), with Stop: a registered
+	// Host's first accepted session.stop marks its registry entry stopping
+	// before its receipt is queued (control.Options.StopAccepted,
+	// rundir.Host.MarkStopping), as a real host's does, and a spawned Host
+	// (RunSpawned) marks it before it closes on a signal too. Off, the Host
+	// writes no mark — a host from a craze before plan 046, whose stop a
+	// roster sees only as its row's change and its entry's unlink — and its
+	// registry entry is exactly what it was. MarkStopping (the mark_stopping
+	// op) marks it with no stop, either way.
+	StoppingMark bool
 	// PermissionMode is the info document's permissionMode; "" leaves it
 	// out.
 	PermissionMode protocol.PermissionMode
@@ -330,6 +340,9 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 	}
 	if o.Stop {
 		co.Stop = h.stopRequested
+		if o.StoppingMark {
+			co.StopAccepted = h.stopAccepted
+		}
 	}
 	if o.StartedAt {
 		co.StartedAt = h.clk.now()
@@ -645,7 +658,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // cancel mid-answer (fixture 28). Plan 043 adds set_commands (SetCommands)
 // and set_skills (SetSkills): an agent's commands update and a skill scan's
 // result, which a Host built with Options.Slash publishes as a live session
-// does (fixture 30). Do is what runs an
+// does (fixture 30). Plan 046 adds mark_stopping (MarkStopping): a
+// registered Host's registry entry marked stopping while it serves on, for
+// the roster's and a reopen's tests. Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -988,6 +1003,34 @@ func (h *Host) Unlist() error {
 	return reg.Close()
 }
 
+// MarkStopping is the mark_stopping op (plan 046 B4): a registered Host's
+// registry entry marked stopping (rundir.Host.MarkStopping), as a real host's
+// is once it has begun to stop — with no stop run, so a test holds a host
+// that every reader of the registry reads as stopping while it still serves.
+// Idempotent; a Host never registered is an error.
+func (h *Host) MarkStopping() error {
+	h.mu.Lock()
+	reg := h.reg
+	h.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("fakehost: mark_stopping: host %s is not registered", h.opts.HostID)
+	}
+	return reg.MarkStopping()
+}
+
+// stopAccepted is control.Options.StopAccepted for a Host built with
+// Options.StoppingMark: a registered Host's entry is marked stopping before
+// its stop's receipt is queued, as a real host's is. Unregistered, there is
+// no entry to mark.
+func (h *Host) stopAccepted() {
+	h.mu.Lock()
+	reg := h.reg
+	h.mu.Unlock()
+	if reg != nil {
+		_ = reg.MarkStopping()
+	}
+}
+
 // stopRequested is the fixtures' coordinator (control.StopFunc, with
 // Options.Stop): it records the stop the server handed it — once, the
 // server's own rule — and returns, the sequence left to RunStop.
@@ -1191,6 +1234,8 @@ func (h *Host) do(p opParams) error {
 		return h.RunStop()
 	case "unlist":
 		return h.Unlist()
+	case "mark_stopping":
+		return h.MarkStopping()
 	case "spawn_subagent":
 		h.SpawnSubagent(p.ID)
 	case "oversized_event":

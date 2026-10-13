@@ -28,12 +28,16 @@ import (
 //  1. a close fence of the stop's own goes up over attach reservations
 //     (FenceAttaches), never to be released: a stop is one way. From here a
 //     new session.attach is refused unavailable, reason closing;
-//  2. the receipt {} is queued (conn.stopReceipt), outside the writer budget
+//  2. Options.StopAccepted, when set, is told: the host marks its registry
+//     entry stopping (plan 046 B4), synchronously;
+//  3. the receipt {} is queued (conn.stopReceipt), outside the writer budget
 //     (outbox.admit): it never waits for room;
-//  3. the request is handed to Options.Stop, the host's coordinator.
+//  4. the request is handed to Options.Stop, the host's coordinator.
 //
 // So the fence is up before the receipt can be read — a client that reads it
-// and attaches, on any connection, is refused closing, never half-attached.
+// and attaches, on any connection, is refused closing, never half-attached —
+// and so is the host's stopping mark: a roster round that reads the registry
+// after the receipt does not list the host.
 // The receipt is queued before the coordinator hears of the stop, so it
 // precedes, on its connection, every line the stop goes on to cause there —
 // the closing records the engine's close commits, and reset{session_closed} —
@@ -216,6 +220,12 @@ func (c *conn) sessionStop(b *bound, info protocol.MethodInfo, req *request) out
 		// Never released: a stop is one way. Up before the receipt is
 		// queued, and so before it can be read.
 		_, _ = c.srv.FenceAttaches()
+		// The host's mark (Options.StopAccepted): the registry says the
+		// host is stopping before the receipt can be read, so no roster
+		// round that reads the registry after it lists the host.
+		if f := c.srv.opts.StopAccepted; f != nil {
+			f()
+		}
 		if h := c.srv.hooks.beforeReply; h != nil {
 			h(req.method)
 		}

@@ -810,3 +810,44 @@ func TestStateAndRowsCarryTheLastTurn(t *testing.T) {
 		t.Fatalf("with %s running: state %+v on %q, row %+v", second, st.LastTurn, st.Turn, r.LastTurn)
 	}
 }
+
+// TestTheStopIsMarkedBeforeItsReceipt (plan 046 B4, #93): the first stop the
+// server accepts is told to Options.StopAccepted — the host's registry mark —
+// once its close fence is up and before its receipt is queued or its
+// coordinator hears of it; a later stop tells it nothing. The schedule is
+// forced: StopAccepted is held, and while it is held an attach on another
+// connection is refused closing (the fence is up), the stopping client has
+// no receipt to read, and the coordinator has heard nothing. The negative
+// control is the same read once StopAccepted returns: the receipt is there.
+func TestTheStopIsMarkedBeforeItsReceipt(t *testing.T) {
+	var calls atomic.Int32
+	gate := newHoldOnce()
+	accepted := func() {
+		calls.Add(1)
+		gate.hold()
+	}
+	h, co := newStopHost(t, func(c *hostConfig) { c.opts.StopAccepted = accepted }, withOnClose(gate.release))
+	a := h.dial()
+	a.sayHello(nil)
+	b := h.dial()
+	b.sayHello(nil)
+
+	stop := a.stop(h, a.cmd())
+	await(t, gate.arrived, "the stop's mark")
+	refusedWith(t, b.call(protocol.MethodSessionAttach, attachParams(h)), protocol.RPCRefused, protocol.CodeUnavailable, protocol.ReasonClosing)
+	_ = a.nc.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if line, err := a.lr.ReadLine(); err == nil {
+		t.Fatalf("the receipt was written before the mark returned: %s", line)
+	} else if ne := (interface{ Timeout() bool })(nil); !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("read while the mark is held: %v", err)
+	}
+	co.none(t)
+
+	gate.release()
+	ok[protocol.Empty](t, a.reply(stop))
+	co.next(t)
+	ok[protocol.Empty](t, b.call(protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(h), CommandID: b.cmd()}))
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("StopAccepted was told %d times, want once", n)
+	}
+}

@@ -195,6 +195,27 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   long is cut short with `…`. See [Provider
   states](../reference/tui.md#provider-states) and [Session
   list](../reference/tui.md#session-list).
+- **A stopped session leaves the roster at once.** Its host marks itself
+  stopping before anything of the stop can be seen — before a stop's receipt,
+  or before a signal's, an idle exit's or its own TUI's quit goes ahead — and
+  the hub's roster, the session list and `craze ps` list it no more: it is
+  gone at the roster's next round, and nothing the hub sees of it after the
+  mark reaches a roster subscriber — it used to be listed, closing or
+  unreachable, for about a second after the stop's receipt. Notifications
+  composed from what the hub saw before the mark may still arrive after the
+  receipt, as late as a slow subscriber reads them, and may still carry the
+  session; no time bound is promised for them, and lines on different
+  connections were never ordered against each other. Once the hub's next
+  read sees the mark, the session is removed and not listed again. (The mark
+  is best effort: a host that cannot write it, or a hub that cannot read it
+  back, leaves the row until the host's entry is gone, as before.) So the
+  session list no longer shows `Closing…` on a stopped row: the row
+  going is the feedback, and the session is a saved row from then on. This
+  holds for sessions whose host started after the upgrade; a host from an
+  earlier release writes no mark, and its stop looks as it did. For a reader
+  of the registry, an entry gains a `stopping` member. See [The hub's
+  roster](../reference/protocol.md#the-hubs-roster) and [Session
+  list](../reference/tui.md#session-list).
 
 ## From v0.0.1
 

@@ -141,20 +141,25 @@ type Host struct {
 	Provider          string
 	Workspace         string
 	Ready             bool
+	// Stopping is the entry's stopping mark (rundir.Entry.Stopping, plan 046
+	// B4): the host has begun to stop. The poll lists no such host
+	// (rundir.Serving), so a row it publishes never has it; a reader that
+	// builds a Host from an entry of its own read (HostOf) can.
+	Stopping bool
 }
 
 // HostOf is e's host.
 func HostOf(e rundir.Entry) Host {
 	return Host{ID: e.HostID, PID: e.PID, Socket: e.Socket, StartedAt: e.StartedAt, Protocol: e.Protocol,
 		CrazeSessionID: e.CrazeSessionID, ProviderSessionID: e.ProviderSessionID, Incarnation: e.Incarnation,
-		Provider: e.Provider, Workspace: e.Workspace, Ready: e.Ready}
+		Provider: e.Provider, Workspace: e.Workspace, Ready: e.Ready, Stopping: e.Stopping}
 }
 
 // Entry is h as a registry entry: what a dial and a stop name a host by.
 func (h Host) Entry() rundir.Entry {
 	return rundir.Entry{Protocol: protocol.ProtocolVersion, HostID: h.ID, PID: h.PID, Socket: h.Socket,
 		StartedAt: h.StartedAt, CrazeSessionID: h.CrazeSessionID, ProviderSessionID: h.ProviderSessionID,
-		Incarnation: h.Incarnation, Provider: h.Provider, Workspace: h.Workspace, Ready: h.Ready}
+		Incarnation: h.Incarnation, Provider: h.Provider, Workspace: h.Workspace, Ready: h.Ready, Stopping: h.Stopping}
 }
 
 // Ref names one session of the list for tui.Sessions' Open and Stop: a
@@ -287,6 +292,10 @@ const (
 	backoffMax = 30 * time.Second
 	// savedMax is how many saved rows a Snapshot carries.
 	savedMax = 50
+	// departedKeep is how long a host gone for good (poller.departed) is
+	// remembered once the registry no longer lists it: far longer than a
+	// stopping host takes to exit, its last rewrite included.
+	departedKeep = time.Minute
 )
 
 // TickEvery is how often a round runs: the registry read, and every host
@@ -307,8 +316,11 @@ type options struct {
 	ticks <-chan time.Time
 	// now is the clock the backoff is kept on.
 	now func() time.Time
-	// hosts lists the registry (rundir.Hosts over the roster's env).
+	// hosts lists the registry (rundir.Hosts over the roster's env), and
+	// entry reads one host's entry again (rundir.HostEntry): a host whose row
+	// has just moved, to learn whether it has begun to stop (plan 046 B4).
 	hosts func() ([]rundir.Entry, error)
+	entry func(hostID string) (rundir.Entry, bool, error)
 	// dial opens a host's socket, and check vets its peer before a byte is
 	// written (rundir.DialCheck).
 	dial  dialFunc
@@ -349,6 +361,7 @@ func defaults(env rundir.Env) options {
 		backoffMin: backoffMin, backoffMax: backoffMax, savedMax: savedMax,
 		now:       time.Now,
 		hosts:     func() ([]rundir.Entry, error) { return rundir.Hosts(env) },
+		entry:     func(id string) (rundir.Entry, bool, error) { return rundir.HostEntry(env, id) },
 		dial:      dialUnix,
 		check:     rundir.DialCheck(os.Geteuid()),
 		indexPath: paths.SessionsPath,
@@ -408,6 +421,12 @@ type HubOptions struct {
 	// takes (plan 032 §3.5) — rundir.Hosts at its heart, which sweeps the
 	// dead, so a crashed host leaves at the next round.
 	Hosts func() ([]rundir.Entry, error)
+	// Entry reads one host's registry entry again, by its id — the hub's
+	// own single-entry read (rundir.HostEntry at its heart): what the poll
+	// reads of a host whose row has just moved, to learn whether it has
+	// begun to stop (plan 046 B4). ok false is no such entry. nil finds the
+	// host in a read of Hosts instead.
+	Entry func(hostID string) (rundir.Entry, bool, error)
 	// Publish is handed every Snapshot, in order, on the poller's goroutine:
 	// it must not block, and must not call back into the roster but for
 	// Resume and Pause. No slot is filled (Updates only closes, at Close).
@@ -421,14 +440,17 @@ type HubOptions struct {
 	// (production's is rundir.DialCheck); Budget replaces both shares of an
 	// attempt's budget (dialBudget, listBudget); Attempting is told each
 	// attempt as the poller starts it, on its goroutine, before the
-	// Snapshot that follows is published; Paused once a Pause has taken
-	// effect, on its goroutine.
+	// Snapshot that follows is published; Applied each attempt's result once
+	// the poller has taken it, on its goroutine, before the Snapshot that
+	// follows is published; Paused once a Pause has taken effect, on its
+	// goroutine.
 	Ticks      <-chan time.Time
 	Now        func() time.Time
 	Dial       func(ctx context.Context, path string) (net.Conn, error)
 	Check      func(*net.UnixConn) error
 	Budget     time.Duration
 	Attempting func(hostID string)
+	Applied    func(hostID string, err error)
 	Paused     func()
 }
 
@@ -442,6 +464,10 @@ type HubOptions struct {
 func OpenHub(o HubOptions) *Roster {
 	opts := defaults(rundir.Env{})
 	opts.hosts, opts.publish, opts.hub = o.Hosts, o.Publish, true
+	opts.entry = o.Entry
+	if opts.entry == nil {
+		opts.entry = entryIn(o.Hosts)
+	}
 	opts.indexPath = func() string { return "" }
 	if o.Client.Kind != "" {
 		opts.client = o.Client
@@ -458,8 +484,26 @@ func OpenHub(o HubOptions) *Roster {
 	if o.Budget > 0 {
 		opts.dialBudget, opts.listBudget = o.Budget, o.Budget
 	}
-	opts.attempting, opts.paused = o.Attempting, o.Paused
+	opts.attempting, opts.applied, opts.paused = o.Attempting, o.Applied, o.Paused
 	return open(nil, opts)
+}
+
+// entryIn is a single-entry read made of a whole read of the registry: the
+// host's entry in hosts' list, ok false when it lists none. A read that fails
+// is the error.
+func entryIn(hosts func() ([]rundir.Entry, error)) func(string) (rundir.Entry, bool, error) {
+	return func(id string) (rundir.Entry, bool, error) {
+		entries, err := hosts()
+		if err != nil {
+			return rundir.Entry{}, false, err
+		}
+		for _, e := range entries {
+			if e.HostID == id {
+				return e, true, nil
+			}
+		}
+		return rundir.Entry{}, false, nil
+	}
 }
 
 func open(index Index, o options) *Roster {
@@ -470,7 +514,8 @@ func open(index Index, o options) *Roster {
 	// little. An empty registry and an empty index change nothing, and a list
 	// that waited for a change to draw would draw nothing — not even that
 	// nothing runs — until one came (C12r2, r27-pr2 2).
-	p := &poller{r: r, o: o, hosts: map[string]*hostState{}, results: make(chan result, o.maxInFlight), dirty: true}
+	p := &poller{r: r, o: o, hosts: map[string]*hostState{}, departed: map[string]time.Time{},
+		results: make(chan result, o.maxInFlight), dirty: true}
 	if !o.hub {
 		// The list's roster is one run, open from the start.
 		p.run, p.active = 1, true
@@ -579,9 +624,17 @@ type result struct {
 // poller is the roster's one goroutine: it owns every hostState, starts the
 // attempts and takes their results, and publishes.
 type poller struct {
-	r        *Roster
-	o        options
-	hosts    map[string]*hostState
+	r     *Roster
+	o     options
+	hosts map[string]*hostState
+	// departed is every host gone for good (plan 046 B4), by when a registry
+	// read last listed it: one seen stopping — its entry marked in a
+	// registry read, or in the read again after an attempt (leaving) — or
+	// whose entry that read again found missing. Host ids are never reused,
+	// so no later read brings one back, whatever it says of it. One the
+	// registry has not listed for departedKeep is dropped from it: by then
+	// its host has long finished exiting.
+	departed map[string]time.Time
 	results  chan result
 	inFlight int
 	// attempts counts the attempts' goroutines until each has finished,
@@ -700,10 +753,19 @@ func (p *poller) tick() {
 // attempt's result. An entry that names another craze session than before is
 // a host whose row is not yet read: what it said of the last session is
 // dropped, and it is Connecting until an attempt made for the new one comes
-// back (r19 2).
+// back (r19 2). A host whose entry is marked stopping (rundir.Serving, plan
+// 046 B4), or that is gone for good already (departed), is not listed: it
+// goes as a host gone from the registry does.
 func (p *poller) reconcile(entries []rundir.Entry) {
+	now := p.o.now()
 	listed := make(map[string]bool, len(entries))
+	read := make(map[string]bool, len(entries))
 	for _, e := range entries {
+		read[e.HostID] = true
+		if _, gone := p.departed[e.HostID]; gone || !rundir.Serving(e) {
+			p.departed[e.HostID] = now
+			continue
+		}
 		listed[e.HostID] = true
 		h := p.hosts[e.HostID]
 		switch {
@@ -729,6 +791,11 @@ func (p *poller) reconcile(entries []rundir.Entry) {
 		}
 		h.conn.close()
 		delete(p.hosts, id)
+	}
+	for id, at := range p.departed {
+		if !read[id] && now.Sub(at) > departedKeep {
+			delete(p.departed, id)
+		}
 	}
 }
 
@@ -865,7 +932,19 @@ func pick(rows protocol.SessionsListResult, e rundir.Entry) int {
 // apply takes one attempt's result: an answer keeps its connection and
 // resets the backoff; a failure marks the host unreachable and doubles it;
 // either, made for a session the host's entry no longer names, is not
-// taken.
+// taken. A result that would move the host's row — its status, version or
+// session — and, on the hub's roster, every answer, are taken only once the
+// host's entry, read again (leaving), says the host is still there and not
+// stopping (plan 046 B4): otherwise the host is gone in this round, as if the
+// registry no longer listed it, so that a host that began to stop after the
+// round's registry read — its stop's receipt sent, or its engine closing —
+// is never published again. The hub's roster reads every answer's entry
+// again, not only a move's, because every answer moves what the hub may
+// publish: its row's JSON value, and its read time, which decides whether
+// the hub publishes the row fresh — a decision the hub makes when it
+// publishes, later than this. That is one small read (rundir.HostEntry: a
+// walk of the registry's path and one O_NOFOLLOW open of the entry) per
+// host per round.
 func (p *poller) apply(res result) {
 	if h := p.o.applied; h != nil {
 		defer h(res.hostID, res.err)
@@ -887,6 +966,22 @@ func (p *poller) apply(res result) {
 		// again at once — launch, after this: the attempt started a round
 		// before the one whose registry read named the new session.
 		h.conn = res.conn
+		return
+	}
+	var s *Session
+	if res.err == nil {
+		s = sessionOf(res.row)
+	}
+	if (p.o.hub && res.err == nil || p.moves(h, res, s)) && p.leaving(res.hostID) {
+		res.conn.close()
+		h.conn.close()
+		delete(p.hosts, res.hostID)
+		p.dirty = true
+		// Its session is no longer running: the saved rows have it back now,
+		// not at the next tick.
+		if p.r.index != nil {
+			p.saved.subtract(p.o.savedMax, runningOfHosts(p.hosts))
+		}
 		return
 	}
 	if p.o.hub && h.doneRun != h.startRun {
@@ -917,11 +1012,41 @@ func (p *poller) apply(res result) {
 		h.version = res.version
 		p.dirty = true
 	}
-	s := sessionOf(res.row)
 	if h.status != Reachable || !h.session.equal(s) {
 		h.status, h.session = Reachable, s
 		p.dirty = true
 	}
+}
+
+// moves says that taking res, whose answer decodes as s (nil for a failure),
+// would change what h's row says: a failure where h is not unreachable, or an
+// answer where h is not reachable, or one with another version or session.
+// (On the hub's roster every answer is read again for, moves or not: apply.)
+func (p *poller) moves(h *hostState, res result, s *Session) bool {
+	if res.err != nil {
+		return h.status != Unreachable
+	}
+	return h.status != Reachable || res.version != "" && res.version != h.version || !h.session.equal(s)
+}
+
+// leaving reads host id's registry entry again (options.entry, a single
+// entry's read) after an attempt that would move its row, and says the host
+// is gone in this round: its entry is missing — the host has unregistered —
+// or marked stopping. Either way it is gone for good (departed): a live
+// host's entry is never missing — every rewrite is a rename over the name,
+// and only the host's exit, or a sweep of a dead host, unlinks it — and host
+// ids are never reused, so no later read may list it again. A read that
+// fails says nothing: the host is taken as it was before plan 046.
+func (p *poller) leaving(id string) bool {
+	e, ok, err := p.o.entry(id)
+	switch {
+	case err != nil:
+		return false
+	case !ok || !rundir.Serving(e):
+		p.departed[id] = p.o.now()
+		return true
+	}
+	return false
 }
 
 // backoff is the wait after n failures in a row: backoffMin, doubling, at

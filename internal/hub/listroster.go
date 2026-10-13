@@ -805,13 +805,17 @@ type hubRow struct {
 }
 
 // seed is the first Snapshot's rows: every host the registry lists,
-// connecting — a host as the poller's first Snapshot has it — and the saved
-// rows less those (roster.Saved).
+// connecting — a host as the poller's first Snapshot has it, so none marked
+// stopping (rundir.Serving, plan 046 B4) — and the saved rows less those
+// (roster.Saved): a stopping host's session is a saved row at once.
 func (l *listRows) seed() {
 	entries, err := l.hosts()
 	l.regErr = err
 	l.remember(entries, err)
 	for _, e := range entries {
+		if !rundir.Serving(e) {
+			continue
+		}
 		l.rows[e.HostID] = hubRow{row: roster.Row{Host: roster.HostOf(e), Status: roster.Connecting}, bodiless: true}
 	}
 	l.saved.Read(l.running())

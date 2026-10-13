@@ -49,6 +49,10 @@ type registry struct {
 	mu      sync.Mutex
 	entries []rundir.Entry
 	hosts   map[string]*fakehost.Host
+	// rereads counts the single-entry reads (entry), and hold, when set,
+	// is run by each before it reads: a test's barrier.
+	rereads int
+	hold    func(id string)
 }
 
 func newRegistry(t *testing.T) *registry {
@@ -119,6 +123,46 @@ func (g *registry) read() ([]rundir.Entry, error) {
 	return slices.Clone(g.entries), nil
 }
 
+// entry is the registry's single-entry read (TestOptions.Entry): host id's
+// entry, ok false when it is not listed.
+func (g *registry) entry(id string) (rundir.Entry, bool, error) {
+	g.mu.Lock()
+	g.rereads++
+	hold := g.hold
+	g.mu.Unlock()
+	if hold != nil {
+		hold(id)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, e := range g.entries {
+		if e.HostID == id {
+			return e, true, nil
+		}
+	}
+	return rundir.Entry{}, false, nil
+}
+
+// rereadCount is how many single-entry reads there were.
+func (g *registry) rereadCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.rereads
+}
+
+// markStopping marks host id's entry stopping (rundir.Entry.Stopping), as
+// the host's own rundir.Host.MarkStopping would; unmark takes the mark off
+// again, which no real host does.
+func (g *registry) markStopping(id string, stopping bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := range g.entries {
+		if g.entries[i].HostID == id {
+			g.entries[i].Stopping = stopping
+		}
+	}
+}
+
 // testClock is the roster's clock, moved by hand.
 type testClock struct {
 	mu sync.Mutex
@@ -167,6 +211,7 @@ func newRig(t *testing.T, g *registry, index roster.Index, tweak func(*roster.Te
 		Ticks:   rg.ticks,
 		Now:     rg.clk.now,
 		Hosts:   g.read,
+		Entry:   g.entry,
 		Ticked:  func() { rg.ticked <- struct{}{} },
 		Applied: func(id string, err error) { rg.applied <- applied{id, err} },
 	}

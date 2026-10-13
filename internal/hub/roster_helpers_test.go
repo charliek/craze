@@ -246,6 +246,7 @@ func memSocket(id string) string { return "mem:" + id }
 func installMem(t *testing.T, hk *hooks, m *memHosts) {
 	t.Helper()
 	setVar(t, &hostsRead, m.read)
+	setVar(t, &hostEntry, m.entry)
 	hk.rosterDial = m.dial
 	hk.rosterCheck = nil
 }
@@ -327,6 +328,15 @@ func (m *memHosts) read(rundir.Env) ([]rundir.Entry, error) {
 	}
 	slices.SortFunc(out, func(a, b rundir.Entry) int { return strings.Compare(a.HostID, b.HostID) })
 	return out, nil
+}
+
+// entry is the hub's single-entry read of the memory registry (hostEntry):
+// host id's entry, ok false once it is removed.
+func (m *memHosts) entry(_ rundir.Env, id string) (rundir.Entry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[id]
+	return e, ok, nil
 }
 
 func (m *memHosts) readCount() int {

@@ -79,6 +79,16 @@ type Options struct {
 	// StopFunc for what the server does before it calls it, and what it must
 	// not do.
 	Stop StopFunc
+	// StopAccepted is told the first session.stop the server accepts, once
+	// its close fence is up and before its receipt is queued (stop.go; plan
+	// 046 B4): the host marks its registry entry stopping here
+	// (rundir.Host.MarkStopping), so that no client can read the receipt
+	// before every reader of the registry reads the host as stopping. It
+	// runs at most once, on the stop's handler goroutine, only with Stop
+	// set; it may block for a file's rewrite, and must not wait on the
+	// engine, the stream or any connection, nor call into the server. nil
+	// is nothing — the fake host by default, an older host's registry.
+	StopAccepted func()
 	// PermissionMode is the info document's permissionMode (plan 030 §3.7,
 	// SF-60): bypass for a host that spawned its agent with --force, prompt
 	// for --no-force. "" leaves it out, which is an older host's document.

@@ -334,8 +334,9 @@ applies it only if it has folded no later turn since, by `turnId`.
 
 The hub learns hosts from the machine's registry (see [The
 registry](#the-registry)) and reads each one's own `sessions.list`; it lists
-every live host that has a craze session id, keyed by host id, in host-id
-order. It polls as the session list does — a round at most every second that
+every live host that has a craze session id and is not stopping (its entry's
+`stopping`, below), keyed by host id, in host-id order. It polls as the
+session list does — a round at most every second that
 reads the registry (sweeping hosts that died, so a crashed host's row leaves
 within one round) and asks every host, eight at a time, 500 ms each, over a
 connection it keeps — but only while someone wants the roster: a
@@ -424,6 +425,35 @@ reset the subscriber does not read within 10 s closes the connection. In
 each case the client subscribes again: after `slow_consumer` or `omitted` it
 may on the same connection, and reads `truncated` from the new reply; after
 `hub_closing`, on a new one, the new hub's `epoch` reseeding it.
+
+**A stopped session leaves at once.** A host marks its registry entry
+`stopping` before anything of its stop can be seen: before a
+[`session.stop`](#sessionstop)'s receipt is sent, first thing when a signal,
+its idle exit or a lost socket stops it, and before a TUI-hosted session's
+quit closes its engine. A round of the hub's poll whose registry read
+follows the mark does not list the host, and nor does a round whose attempt
+at the host follows it and is answered, or fails where the host was
+reachable: the hub reads the host's entry again before it takes such a
+result, and drops a host whose entry is gone or says `stopping`, for good.
+So nothing the hub sees of the host after its mark is published as the
+host's row, and once a round of its poll has read the mark, the host is
+removed and not listed again. Both are best effort, as the mark is: a mark
+the host cannot write (its failure is logged, and the stop goes on), or an
+entry the hub cannot read back (it keeps the host as it stood), leaves the
+host listed until its entry is gone. The residual is what the hub had seen
+*before* the mark: `roster` notifications composed from that — one already
+being written to a subscriber, and changes already waiting for the ones
+after it — may still reach the subscriber after the receipt, and may carry
+the host's row, before the notification that removes it. No time bound is
+promised for them: a subscriber that reads slowly receives them late (a
+notification's write may block for up to 10 s before the subscription is
+reset). Nor is any order promised between lines on different connections —
+a subscriber reads the roster on its own connection, and the receipt
+arrives on the stopping client's — and none ever was. A host from a craze
+before the mark writes none: its row can be upserted, closing or
+unreachable, for a second or more after its receipt, until its host has
+exited. The session list's own poll and `craze ps --no-hub` keep the same
+promise.
 
 On one connection, the lines that carry the roster's cursor — `roster`
 notifications and `sessions.list` replies — are written in the order their
@@ -540,6 +570,9 @@ then on a `session.attach` on any connection is `unavailable`, reason
 `closing`, so a client that reads the receipt and attaches is never
 half-attached to a session on its way out; an attachment that was already
 made (pending, live or closing) goes on to the session's end like any other.
+And before the receipt is sent the host has marked its registry entry
+`stopping` ([The registry](#the-registry)), so the hub's roster lists it no
+more ([The hub's roster](#the-hubs-roster)).
 
 Any client may stop the session, and a stop while one is under way — from
 another client, or the same `commandId` resent — is answered `{}` too and
@@ -2246,7 +2279,9 @@ notification, until it is cancelled — `set_commands` and `set_skills` — an
 agent's whole command list, `{"commands":[{name, description}]}`, and the
 disk skills a scan found, `{"skills":[{name, description}]}`, which a `slash`
 host publishes as a live session does — and `unlist` — a `--registry` host
-leaving the registry while it keeps serving the connections it has). The
+leaving the registry while it keeps serving the connections it has — and
+`mark_stopping` — a `--registry` host's entry marked `stopping` while it
+serves on). The
 binary has no flag for the `modelsRefresh`, `aside` or `slash` opt-ins yet,
 so its host refuses the first two features and publishes no slash catalog,
 as an older host does: `stage_models` and `hold_aside` change nothing there,
@@ -2773,12 +2808,13 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `ready` | Whether the engine has started |
 | `requestId`, `requestHash` | Only on a host the hub's [`session.create`](#sessioncreate) spawned, and absent otherwise: the create's `requestId` and its params' hash, fixed for the host's life — what a restarted hub joins a retried create by |
 | `pidStart` | The host process's start as its kernel records it, which the host reads of itself as it binds — on Linux clock ticks since boot (`/proc/<pid>/stat` field 22), on macOS microseconds since the epoch — fixed for the host's life: with `pid`, what tells the host from a later process given its pid, so a `craze new --wait` that never heard from the host it started ends that host and no other process. Absent when the host could not read it, and on hosts from crazes that predate it |
+| `stopping` | `true` once the host has begun to stop, and absent before. The host writes it itself, before anything of its stop can be seen — before a `session.stop`'s receipt is sent, first thing when a signal, its idle exit or a lost socket stops it, before a TUI-hosted session's quit closes its engine — and every later rewrite keeps it until the entry is unlinked as the host exits. Best effort: a mark the host cannot write is logged, and the stop goes on. A roster lists no stopping host (the hub's, the session list's own, `craze ps`); a resolver that finds a session to connect to may still find it while it exits, a session on its way out. Never written by hosts from crazes that predate it, which leave their entry as it was until they exit |
 
 This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
 session, so none of them is ever renamed or removed; members may be added
-(`requestId`, `requestHash` and `pidStart` were), and a reader ignores those it
-does not know.
+(`requestId`, `requestHash`, `pidStart` and `stopping` were), and a reader
+ignores those it does not know.
 
 The socket writes an initial entry at bind time, before any engine is
 attached (`crazeSessionId`, `provider` and the rest of the identity still
@@ -2793,7 +2829,9 @@ queued, but drops one whose engine has since been superseded — so it may
 never be written at all — and until a rewrite lands, or, if it fails, until
 the next one for that engine succeeds, the entry can still describe the
 previous engine, or, before the first engine is attached, the empty
-bind-time entry. A resolver treats the
+bind-time entry. The `stopping` mark is the exception: the host writes it
+directly, done before the step it precedes goes ahead — never queued behind
+those rewrites — and every rewrite after it keeps it. A resolver treats the
 entry as a pointer to a socket, not as the engine's live identity: `hello`
 and `sessions.list`, answered by the socket itself once dialed, are what
 actually says which engine is live.

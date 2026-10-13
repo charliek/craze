@@ -2,6 +2,7 @@ package rundir
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -75,6 +76,41 @@ func HostsScan(env Env) ([]Entry, []string, error) {
 		}
 	}
 	return live, unreadable, nil
+}
+
+// HostEntry is one host's registry entry, hosts/<hostID>.json, read by its id
+// (plan 046 B4): what a roster reads again of a host whose row has just moved,
+// to learn whether the host has since begun to stop (Entry.Stopping) or left
+// the registry. ok is false — and err nil — when there is no such entry: the
+// host has unregistered (its stop unlinks its entry), was swept, or never
+// registered, or the registry tree does not exist yet. Unlike Hosts it is one
+// read and nothing more: it takes no lock and sweeps nothing, so a dead
+// host's stale entry reads as it stands, for Hosts' next scan to sweep. The
+// registry tree is walked and validated as for Hosts, and the entry opened
+// O_NOFOLLOW, a regular file; one that cannot be read, or names another host,
+// is an error, as is a host id that is not one.
+func HostEntry(env Env, hostID string) (Entry, bool, error) {
+	if !ValidHostID(hostID) {
+		return Entry{}, false, fmt.Errorf("rundir: host id %q is not 12 lowercase hex digits", hostID)
+	}
+	hosts, err := env.cacheDir(hostsName, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Entry{}, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	defer func() { _ = hosts.close() }()
+	e, err := readEntry(hosts, hostID+".json")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return Entry{}, false, nil
+	case err != nil:
+		return Entry{}, false, err
+	case e.HostID != hostID:
+		return Entry{}, false, fmt.Errorf("rundir: %s names host %q", hosts.join(hostID+".json"), e.HostID)
+	}
+	return e, true, nil
 }
 
 // probeState is what one registry entry's check came to.

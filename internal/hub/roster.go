@@ -27,7 +27,15 @@ import (
 // flight, 500 ms each (connect + hello + list), kept connections, backoff —
 // keeping each row's JSON value and with no index. Its registry read is the
 // hub's own (hub.pollHosts: rundir.Hosts, which sweeps the dead, so a crashed
-// host's row leaves at the next round; the idle rule takes the same read). It
+// host's row leaves at the next round; the idle rule takes the same read).
+// A host whose entry says it is stopping is not listed (rundir.Serving), and
+// a host whose attempt was answered, or whose row a failed attempt would move,
+// is read again first (hub.pollEntry): gone in that round when its entry is
+// missing or stopping (plan 046 B4), so
+// a stopped session leaves at once and nothing the poll sees of it after its
+// stopping mark is published as its row — but for what was already composed,
+// or pending, from what the poll saw before the mark: that can reach a
+// subscriber after the stop's receipt, with no time bound (protocol.md). It
 // polls only while a run is open, and one is open while there is demand: a
 // subscription, or a sessions.list or sessions.subscribe waiting for its
 // answer. The first demand after none opens a new run (Resume), the last
@@ -182,15 +190,18 @@ func newRoster(h *hub) *rosterState {
 		rs.now = h.hk.rosterNow
 	}
 	rs.p = roster.OpenHub(roster.HubOptions{
-		Hosts:   h.pollHosts,
-		Publish: rs.apply,
-		Client:  hubClient(h.version),
-		Ticks:   h.hk.rosterTicks,
-		Now:     h.hk.rosterNow,
-		Dial:    h.hk.rosterDial,
-		Check:   h.hk.rosterCheck,
-		Budget:  h.hk.rosterBudget,
-		Paused:  h.hk.rosterPaused,
+		Hosts:      h.pollHosts,
+		Entry:      h.pollEntry,
+		Publish:    rs.apply,
+		Client:     hubClient(h.version),
+		Ticks:      h.hk.rosterTicks,
+		Now:        h.hk.rosterNow,
+		Dial:       h.hk.rosterDial,
+		Check:      h.hk.rosterCheck,
+		Budget:     h.hk.rosterBudget,
+		Paused:     h.hk.rosterPaused,
+		Attempting: h.hk.rosterAttempting,
+		Applied:    h.hk.rosterResult,
 	})
 	return rs
 }
