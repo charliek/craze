@@ -280,6 +280,6 @@ func TestFrameGoldenSessionsOverACard(t *testing.T) {
 	}
 	m = listSnap(t, m, snap)
 	assertFrameGolden(t, "sessions-over-card-100x30", 100, 30, plainView(m),
-		[]string{"! 3 need you", "needs you 3 ", "question: Pick one", "craze · here", "✳ "},
+		[]string{"! 3 need you", "needs you 3 ", "question: Pick one", "· here", "✳ "},
 		[]string{"question 1/2", "Responding"})
 }

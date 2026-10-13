@@ -267,14 +267,17 @@ func richSnapshot(home string, here sessKey) roster.Snapshot {
 	return roster.Snapshot{
 		Running: []roster.Row{
 			answered("roost", "fix the roost tab rename", "grok", ws("roost"), 2*time.Minute, func(s *roster.Session) {
+				s.Model = "grok-4.6"
 				s.Activity, s.PendingAsks = engine.ActivityWorking, 1
 				s.HeadAsk = &roster.HeadAsk{ID: "ask-1", Kind: "permission", Label: "permission Shell", Summary: "cargo test -p roost-ipc"}
 			}),
 			answered("lumen", "add persistence to the reading list", "native", ws("lumen"), 14*time.Minute, func(s *roster.Session) {
+				s.Model = "anthropic/claude-opus-4.8-thinking-max" // longer than the column: clipped with …
 				s.PendingAsks = 1
 				s.HeadAsk = &roster.HeadAsk{ID: "ask-2", Kind: "question", Label: "question", Summary: "Which storage?"}
 			}),
 			answered("queue", "move queue edits onto remote.Session", "cursor", ws("craze"), 12*time.Minute, func(s *roster.Session) {
+				s.Model = "composer-2"
 				s.Activity, s.Doing = engine.ActivityWorking, "go test ./internal/remote/..."
 			}),
 			answeredInc(here.id, here.inc, "write the v0.1.0 release notes", "native", ws("craze"), time.Minute, func(s *roster.Session) {
@@ -324,7 +327,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 		}
 		assertFrameGolden(t, "sessions"+suffix, size.cols, size.rows, plainView(m),
 			[]string{" sessions  9 running", "needs you 2 ", "permission: cargo test -p r", "✳ ", "Starting…",
-				"error: 402 Payment Required", "unreachable 1 ", "not answering", "craze 0.0.9", "craze · h", "▸ saved · 3 not running"},
+				"error: 402 Payment Required", "unreachable 1 ", "not answering", "craze 0.0.9", "· here", "▸ saved · 3 not running"},
 			[]string{"agents"})
 
 		dirs, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
@@ -385,7 +388,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 		older("bump", "bump the deps", "native", ws("spendwise"), func(s *roster.Session) { s.Activity = engine.ActivityError }),
 	}})
 	assertFrameGolden(t, "sessions-older-host-100x30", 100, 30, plainView(m),
-		[]string{"permission: Shell · craze 0.0.9", "Working · craze 0.0.9", "error · craze 0.0.9", "waiting for a prompt · craze 0.0.9"}, nil)
+		[]string{"permission: S… · craze 0.0.9", "Working · craze 0.0.9", "error · craze 0.0.9", "waiting for a… · craze 0.0.9"}, nil)
 }
 
 // TestSessionsListIsAbsentWithoutASessionList (§3.9's last paragraph):
@@ -977,7 +980,7 @@ func TestSessionsEndedRowOutlivesItsHost(t *testing.T) {
 		}
 	}
 	view := plainView(m)
-	for _, want := range []string{"· write the v0.1.0 release no", "ended", "craze · here"} {
+	for _, want := range []string{"· write the v0.1.0 rel", "ended", "· here"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("the list after the host left lacks %q:\n%s", want, view)
 		}

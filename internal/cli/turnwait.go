@@ -433,6 +433,7 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 			return
 		}
 		w.item(op, p)
+		waitTaken(p)
 	}
 	for !w.done() {
 		if w.unsettled != nil {
@@ -525,9 +526,15 @@ func (w *turnWaiter) buffering() bool { return w.submitted != nil }
 // reply on until the events it wants ahead of it have been buffered.
 var waitBuffered = func(pumped) {}
 
+// waitTaken sees each item the waiter's loop has folded (item), once it has:
+// a no-op, and the barrier a test ends --timeout after (timeoutAt) once the
+// waiter has met its target — its attachment's reply folded.
+var waitTaken = func(pumped) {}
+
 // timeoutAt is --timeout's channel for a deadline (zero: none) and what
-// stops its timer.
-func timeoutAt(deadline time.Time) (<-chan time.Time, func()) {
+// stops its timer. A variable only so a test can end --timeout when it means
+// to, not when a wall clock does.
+var timeoutAt = func(deadline time.Time) (<-chan time.Time, func()) {
 	if deadline.IsZero() {
 		return nil, func() {}
 	}

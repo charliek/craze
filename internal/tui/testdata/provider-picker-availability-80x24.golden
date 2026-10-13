@@ -2,14 +2,14 @@
                                                                                 
                                                                                 
                                                                                 
-                                                                                
              ╭────────────────────────────────────────────────────╮             
              │provider                                            │             
              │> cursor                       unavailable · default│             
              │  grok                                              │             
              │  native                                 needs setup│             
              │cursor-agent not found on PATH                      │             
-             │install cursor-agent, or set [agents].cursor in ~/.…│             
+             │install cursor-agent, or set [agents].cursor in     │             
+             │~/.craze/config.toml                                │             
              │↑↓ · tab · enter starts · esc uses default          │             
              ╰────────────────────────────────────────────────────╯             
                                                                                 

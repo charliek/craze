@@ -202,6 +202,7 @@ var goldenManifest = map[string]goldenRuns{
 	"sessions-dirs-100x30":                   inprocOnly,
 	"sessions-dirs-80x24":                    inprocOnly,
 	"sessions-empty-80x24":                   inprocOnly,
+	"sessions-hint-wrapped-80x24":            inprocOnly,
 	"sessions-new-100x30":                    inprocOnly,
 	"sessions-new-80x24":                     inprocOnly,
 	"sessions-new-at-100x30":                 inprocOnly,
@@ -217,6 +218,7 @@ var goldenManifest = map[string]goldenRuns{
 	"sessions-new-fast-80x24":                inprocOnly,
 	"sessions-new-model-100x30":              inprocOnly,
 	"sessions-new-model-80x24":               inprocOnly,
+	"sessions-new-provider-refused-80x24":    inprocOnly,
 	"sessions-new-settings-100x30":           inprocOnly,
 	"sessions-new-settings-80x24":            inprocOnly,
 	"sessions-new-slash-100x30":              inprocOnly,
@@ -552,8 +554,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 139 || inprocAlone != 46 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 139 and 46 (A8)", both, inprocAlone)
+	if both != 139 || inprocAlone != 48 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 139 and 48 (A8)", both, inprocAlone)
 	}
 }
 

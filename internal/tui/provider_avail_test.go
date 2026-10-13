@@ -48,6 +48,16 @@ func availFixture() []ProviderAvail {
 // availRefusalOf is the refusal the picker shows for the fixture's cursor.
 const availCursorRefusal = "can't start cursor: " + availCursorReason + " — " + availCursorFix
 
+// providerAnyNotReady says some row of the startup picker is not ready.
+func (m Model) providerAnyNotReady() bool {
+	for _, p := range m.providers {
+		if !m.providerChoice(p).a.ready() {
+			return true
+		}
+	}
+	return false
+}
+
 // availPickerConfig is a startup picker's Config — the default def, the
 // built-in rows, sessions built by build — whose Availability answers avail
 // and counts its calls in calls.
@@ -135,12 +145,14 @@ func TestFrameGoldenProviderPickerAvailability(t *testing.T) {
 // TestProviderPickerDrawsTheStates (A5's style test, which the ANSI-stripped
 // goldens cannot be): a row that is not ready is drawn in the dim colour — on
 // the selection band when the cursor is on it — and a ready row in the
-// foreground; its tag is its state word, then `default`. The two detail lines
-// (X22) are the selected row's reason and its fix, dim, held blank — never
-// dropped — on a ready row; a refusal takes the first, in the error colour,
-// with its own fix under it, whichever row the cursor is on; a refusal with
-// no fix (the command line's) leaves the second blank. With every row ready
-// the box is today's: no detail lines.
+// foreground; its tag is its state word, then `default`. The detail lines
+// (X22, plan 046 A4) are the selected row's reason and its fix, dim, each
+// wrapped — cursor's fix over two rows, its config path whole — and held
+// blank — never dropped — on a ready row; a refusal takes the first, in the
+// error colour, with its own fix under it, whichever row the cursor is on; a
+// refusal with no fix (the command line's) wraps over the rows and leaves the
+// rest blank. The box keeps one height through all of it. With every row
+// ready the box is today's: no detail lines.
 func TestProviderPickerDrawsTheStates(t *testing.T) {
 	log := &builtLog{}
 	cfg := availPickerConfig(t, agent.CursorProvider(), availFixture, nil, log.build)
@@ -156,9 +168,9 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 	dim, errSt := styleFG(th.Dim), styleFG(th.Err)
 	inner, budget := m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder
 	body := m.providerDialogBody(inner, budget)
-	// title, cursor, grok, native, the reason, the fix, the footer
-	if len(body) != 7 {
-		t.Fatalf("%d body rows, want 7:\n%s", len(body), plain(strings.Join(body, "\n")))
+	// title, cursor, grok, native, the reason, the fix's two rows, the footer
+	if len(body) != 8 {
+		t.Fatalf("%d body rows, want 8:\n%s", len(body), plain(strings.Join(body, "\n")))
 	}
 	cursorRow, grokRow, nativeRow := body[1], body[2], body[3]
 	if want := styleFG(th.Dim).Background(th.SelectionBG).Render(plain(cursorRow)); cursorRow != want {
@@ -174,33 +186,46 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 		strings.TrimSpace(plain(grokRow)) != "grok" {
 		t.Errorf("the tags: %q, %q, %q", plain(cursorRow), plain(grokRow), plain(nativeRow))
 	}
-	lines := func(m Model, how, first, fix string) {
+	lines := func(m Model, how string, want ...string) {
 		t.Helper()
+		if m.lay.Dialog.H != dialogBorder+budget {
+			t.Errorf("%s: the box is %d rows, want %d", how, m.lay.Dialog.H, dialogBorder+budget)
+		}
 		body := m.providerDialogBody(inner, budget)
-		if len(body) != 7 || body[4] != first || body[5] != fix {
-			t.Errorf("%s: %d rows, the detail lines\n got %q\n     %q\nwant %q\n     %q", how, len(body),
-				plain(body[min(4, len(body)-1)]), plain(body[min(5, len(body)-1)]), plain(first), plain(fix))
+		if len(body) != 8 || !slices.Equal(body[4:7], want) {
+			got := make([]string, 0, 3)
+			for _, l := range body[min(4, len(body)):min(7, len(body))] {
+				got = append(got, plain(l))
+			}
+			wantPlain := make([]string, 0, len(want))
+			for _, l := range want {
+				wantPlain = append(wantPlain, plain(l))
+			}
+			t.Errorf("%s: %d rows, the detail lines\n got %q\nwant %q", how, len(body), got, wantPlain)
 		}
 	}
-	lines(m, "on cursor", dim.Render(clampWidth(availCursorReason, inner)), dim.Render(clampWidth(availCursorFix, inner)))
+	const fix1, fix2 = "install cursor-agent, or set [agents].cursor in", "~/.craze/config.toml"
+	lines(m, "on cursor", dim.Render(availCursorReason), dim.Render(fix1), dim.Render(fix2))
 	onGrok, _ := press(m, tea.KeyMsg{Type: tea.KeyDown})
-	lines(onGrok, "on grok, ready", "", "")
+	lines(onGrok, "on grok, ready", "", "", "")
 	onNative, _ := press(onGrok, tea.KeyMsg{Type: tea.KeyDown})
-	lines(onNative, "on native", dim.Render(clampWidth(availNativeReason, inner)), dim.Render(clampWidth(availNativeFix, inner)))
+	lines(onNative, "on native", dim.Render(availNativeReason), dim.Render(availNativeFix), "")
 
 	// A refusal takes the first line, in the error colour, its fix under it —
 	// cursor's, refused by Esc while the cursor is on grok.
 	refusedHead := "can't start cursor: " + availCursorReason
 	next, _ := press(m, enter())
-	lines(next, "Enter on cursor", errSt.Render(clampWidth(refusedHead, inner)), dim.Render(clampWidth(availCursorFix, inner)))
+	lines(next, "Enter on cursor", errSt.Render(refusedHead), dim.Render(fix1), dim.Render(fix2))
 	if next.providerErr != availCursorRefusal {
 		t.Errorf("the refusal kept is %q, want it whole: %q", next.providerErr, availCursorRefusal)
 	}
 	next, _ = press(onGrok, tea.KeyMsg{Type: tea.KeyEsc})
-	lines(next, "Esc from grok", errSt.Render(clampWidth(refusedHead, inner)), dim.Render(clampWidth(availCursorFix, inner)))
-	// The command line's refusal has no fix: the second line is blank.
+	lines(next, "Esc from grok", errSt.Render(refusedHead), dim.Render(fix1), dim.Render(fix2))
+	// The command line's refusal has no fix: it wraps over two rows, the
+	// third blank.
 	next, _ = press(onNative, enter())
-	lines(next, "the command line's refusal", errSt.Render(clampWidth(cmdRefusal, inner)), "")
+	lines(next, "the command line's refusal", errSt.Render("craze: --agent-bin cannot be used with provider"),
+		errSt.Render("native, which runs inside craze"), "")
 
 	// Every row ready: the box is exactly what it is with no availability.
 	ready := availPicker(t, availPickerConfig(t, agent.CursorProvider(), func() []ProviderAvail {
@@ -212,39 +237,50 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 	}
 }
 
-// TestProviderPickerFixLineGoesFirst (X22): short of height, the box gives
-// up the fix line before the footer and before any list row, then keeps the
-// first detail line as it keeps the error row — over the footer, never over
-// the last list row — and the window keeps the cursor's row.
+// TestProviderPickerFixLineGoesFirst (X22, plan 046 A4): short of height,
+// the box gives up the fix lines — all of them at once — before the footer
+// and before any list row, then keeps the first detail line as it keeps the
+// error row — over the footer, never over the last list row — and the window
+// keeps the cursor's row. The fixture's detail lines are three rows at 80
+// columns: one for a reason, two for cursor's fix, which names its config
+// path whole.
 func TestProviderPickerFixLineGoesFirst(t *testing.T) {
 	log := &builtLog{}
 	m := availPicker(t, availPickerConfig(t, agent.CursorProvider(), availFixture, nil, log.build), 80, 24)
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp}) // native, the last row
+	inner := dialogMaxWidth - dialogBorder
+	if all, heads := m.providerDetailRows(inner); all != 3 || heads != 1 {
+		t.Fatalf("fixture: the detail lines are %d rows, %d of them first parts; want 3 and 1", all, heads)
+	}
 	for budget, want := range map[int]struct {
-		shown             int
-		line, fix, footer bool
+		shown, detail int
+		footer        bool
 	}{
 		2: {shown: 1},
-		3: {shown: 1, line: true},
-		4: {shown: 1, line: true, footer: true},
-		5: {shown: 2, line: true, footer: true},
-		6: {shown: 3, line: true, footer: true},
-		7: {shown: 3, line: true, fix: true, footer: true},
+		3: {shown: 1, detail: 1},
+		4: {shown: 1, detail: 1, footer: true},
+		5: {shown: 2, detail: 1, footer: true},
+		6: {shown: 3, detail: 1, footer: true},
+		7: {shown: 3, detail: 1, footer: true},
+		8: {shown: 3, detail: 3, footer: true},
 	} {
-		top, shown, footer := m.providerDialogPlan(budget)
-		line, fix := m.providerLineShown(budget), m.providerFixShown(budget)
-		if shown != want.shown || line != want.line || fix != want.fix || footer != want.footer {
-			t.Errorf("budget %d: shown %d line %v fix %v footer %v, want %+v", budget, shown, line, fix, footer, want)
+		top, shown, footer := m.providerDialogPlan(inner, budget)
+		detail := m.providerDetailShown(inner, budget)
+		if shown != want.shown || detail != want.detail || footer != want.footer {
+			t.Errorf("budget %d: shown %d detail %d footer %v, want %+v", budget, shown, detail, footer, want)
 		}
 		if m.providerCursor < top || m.providerCursor >= top+shown {
 			t.Errorf("budget %d: the window [%d,%d) lost the cursor", budget, top, top+shown)
 		}
-		body := m.providerDialogBody(dialogMaxWidth-dialogBorder, budget)
+		body := m.providerDialogBody(inner, budget)
 		if len(body) > budget {
 			t.Errorf("budget %d: %d rows", budget, len(body))
 		}
-		if fix && strings.TrimSpace(plain(body[len(body)-2])) == "" {
-			t.Errorf("budget %d: the fix line is blank on native", budget)
+		if detail > 0 && plain(body[1+shown]) != availNativeReason {
+			t.Errorf("budget %d: the first detail line is %q on native", budget, plain(body[1+shown]))
+		}
+		if detail == 3 && plain(body[2+shown]) != availNativeFix {
+			t.Errorf("budget %d: the fix line is %q on native", budget, plain(body[2+shown]))
 		}
 	}
 }
@@ -941,10 +977,10 @@ func TestCompletePopupKeepsARefusalsLine(t *testing.T) {
 	p.refuse("can't start a: gone")
 	for rows, want := range map[int]completeShape{
 		1: {shown: 1},
-		2: {shown: 1, note: true},
-		3: {shown: 2, note: true},
+		2: {shown: 1, note: 1},
+		3: {shown: 2, note: 1},
 	} {
-		if got := p.shape(rows); got != want {
+		if got := p.shape(40, rows); got != want {
 			t.Errorf("%d rows: %+v, want %+v", rows, got, want)
 		}
 	}
@@ -953,7 +989,7 @@ func TestCompletePopupKeepsARefusalsLine(t *testing.T) {
 		t.Fatalf("the view: %q", lines)
 	}
 	p.key(tea.KeyMsg{Type: tea.KeyDown})
-	if p.refused() || p.shape(3).note {
+	if p.refused() || p.shape(40, 3).note != 0 {
 		t.Fatal("the next key left the refusal")
 	}
 }

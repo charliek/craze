@@ -428,9 +428,10 @@ func TestProviderPickerErrorRowNeverTakesTheLastListRow(t *testing.T) {
 		4: {shown: 1, err: true, footer: true},
 		5: {shown: 2, err: true, footer: true},
 	} {
-		top, shown, footer := m.providerDialogPlan(budget)
-		if shown != want.shown || footer != want.footer || m.providerLineShown(budget) != want.err {
-			t.Fatalf("budget %d: shown %d footer %v err %v, want %+v", budget, shown, footer, m.providerLineShown(budget), want)
+		inner := dialogMaxWidth - dialogBorder
+		top, shown, footer := m.providerDialogPlan(inner, budget)
+		if err := m.providerDetailShown(inner, budget) > 0; shown != want.shown || footer != want.footer || err != want.err {
+			t.Fatalf("budget %d: shown %d footer %v err %v, want %+v", budget, shown, footer, err, want)
 		}
 		if m.providerCursor < top || m.providerCursor >= top+shown {
 			t.Fatalf("budget %d: the window [%d,%d) lost the cursor", budget, top, top+shown)
@@ -976,7 +977,7 @@ func TestProviderPickerShortBudgetKeepsTheSelectedRow(t *testing.T) {
 			// that still drops one: a squeeze with and without the footer, and
 			// a window of one row and of two.
 			for budget := 2; budget <= 4; budget++ {
-				top, shown, footer := m.providerDialogPlan(budget)
+				top, shown, footer := m.providerDialogPlan(dialogMaxWidth-dialogBorder, budget)
 				if shown <= 0 || shown >= len(m.providers) {
 					t.Fatalf("fixture: budget %d is not a squeeze (top %d, shown %d)", budget, top, shown)
 				}
@@ -1015,7 +1016,7 @@ func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 	}
 	// Two borders, the title, two rows and the footer.
 	m.lay.Dialog.H = dialogBorder + 4
-	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
 	if top != 1 || shown != 2 {
 		t.Fatalf("fixture: the squeezed box draws rows [%d,%d), want [1,3)", top, top+shown)
 	}
@@ -1054,7 +1055,7 @@ func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 func TestProviderPickerWindowDoesNotScrollWhenEverythingFits(t *testing.T) {
 	for _, def := range []agent.Provider{agent.CursorProvider(), agent.GxProvider()} {
 		m := newPickerRows(t, def, agent.Providers())
-		top, shown, footer := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+		top, shown, footer := m.providerDialogPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
 		if top != 0 || shown != len(m.providers) || !footer {
 			t.Fatalf("%s default: top %d, shown %d, footer %v — want the whole list from row 0", def.Name(), top, shown, footer)
 		}

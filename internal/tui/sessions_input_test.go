@@ -414,10 +414,25 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 	}
 }
 
-// sessHint is the list's hint line.
+// sessHint is the list's hint line: its rows under the footer's last rule —
+// one, or a note's wrapped rows (plan 046 A4) — joined by a space.
 func sessHint(m Model) string {
+	rows := sessHintLines(m)
+	return strings.Join(rows, " ")
+}
+
+// sessHintLines is the hint line's rows as drawn, trimmed.
+func sessHintLines(m Model) []string {
 	rows := strings.Split(plainView(m), "\n")
-	return strings.TrimSpace(rows[len(rows)-1])
+	i := len(rows) - 1
+	for i > 0 && strings.Trim(rows[i-1], "─") != "" {
+		i--
+	}
+	out := make([]string, 0, len(rows)-i)
+	for _, r := range rows[i:] {
+		out = append(out, strings.TrimSpace(r))
+	}
+	return out
 }
 
 // TestTheRuleNamesTheTarget (§3.13, decision 8): with no token the selected

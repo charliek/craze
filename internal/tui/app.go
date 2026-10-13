@@ -3806,6 +3806,8 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		// purpose too: /model or /plan into it would land on a session
 		// that is busy.
 		if (m.status == statusWorking || m.snap.ForeignTurn) && !runsWhileWorking(name) {
+			// The draft stays in the composer; one error row says why.
+			m.addError(busyRefusalText(name))
 			return m, nil
 		}
 		return m.runBuiltin(name, args)
@@ -3822,8 +3824,8 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 // runsWhileWorking names the builtins that do not need the agent and are
-// therefore answered mid-turn rather than refused. The rest keep today's
-// silent refusal.
+// therefore answered mid-turn rather than refused. The rest are refused
+// with an error row (busyRefusalText).
 func runsWhileWorking(name string) bool {
 	switch name {
 	case "exit", "help", "theme", "tasks", "clear", "rename":

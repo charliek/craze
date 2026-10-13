@@ -84,7 +84,7 @@ const (
 	// provider has no key (plan 031 §3.6).
 	connectRowText = "Connect a provider…"
 	// connectBusyText is /connect refused while work runs (§3.9, R1).
-	connectBusyText = "Finish or stop the running work first, then /connect."
+	connectBusyText = busyRefusalPrefix + "/connect."
 	// connectBusySaveText is the same refusal at the save: work that started
 	// while the box was open. The key stays in the field for a later Enter.
 	connectBusySaveText = "Finish or stop the running work first, then press enter to save."
@@ -839,4 +839,13 @@ func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
 	}
 	m.cdlg.sel = plan.top + row
 	return m.pickConnectProvider()
+}
+
+const busyRefusalPrefix = "Finish or stop the running work first, then "
+
+// busyRefusalText is the error row a typed command gets while work runs and
+// the command cannot go then (plan 046 A2): /connect's refusal and every
+// builtin outside runsWhileWorking share it.
+func busyRefusalText(name string) string {
+	return busyRefusalPrefix + "/" + name + "."
 }

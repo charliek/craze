@@ -216,10 +216,25 @@ func (r *waitRig) waitAttached(n int) {
 	})
 }
 
-// waitStarted waits for the engine to run turn.
+// waitStarted waits for the engine to run turn. The engine runs it — State's
+// Turn — before its started is published (the log's drainer, later), so an
+// attach right after may still find the session idle: its started then
+// reaches the waiter on the stream (waitStartedInSnapshot).
 func (r *waitRig) waitStarted(turn string) {
 	r.t.Helper()
 	waitFor(r.t, "the turn to start", func() bool { return r.eng.State().Turn == turn })
+}
+
+// waitStartedInSnapshot waits for turn to run in the session's model, which
+// every attach cuts its snapshot from: an attach from here on — the turn
+// still held — meets it running, mid-turn (plainStart: partial).
+func (r *waitRig) waitStartedInSnapshot(turn string) {
+	r.t.Helper()
+	r.waitStarted(turn)
+	waitFor(r.t, "the turn running in the snapshot", func() bool {
+		snap, err := r.eng.TranscriptSnapshot("", 0)
+		return err == nil && snap.Turn.ID == turn
+	})
 }
 
 // waitQueued waits for the engine's queue to hold n rows.
@@ -858,7 +873,7 @@ func TestWaitTurnSignals(t *testing.T) {
 	t.Run("plain wait never cancels", func(t *testing.T) {
 		r := signalRig(t)
 		r.submit("someone else's")
-		r.waitStarted("turn-1")
+		r.waitStartedInSnapshot("turn-1")
 		// Attached mid-turn: the snapshot shows turn-1 running.
 		conn, tp := r.dialTapped()
 		sigs := make(chan os.Signal, 2)

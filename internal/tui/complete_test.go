@@ -418,7 +418,7 @@ func TestThePopupIsUpWhileTheCursorIsInAToken(t *testing.T) {
 	if _, handled := popKey(&p, keyOf(tea.KeyDown)); handled {
 		t.Fatal("a closed popup took ↓")
 	}
-	if p.height(10) != 0 || p.view(Preset("dark"), 40, 10) != "" {
+	if p.height(40, 10) != 0 || p.view(Preset("dark"), 40, 10) != "" {
 		t.Fatal("a closed popup draws something")
 	}
 }
@@ -595,7 +595,7 @@ func TestATitleAndANoteAreOneLineEach(t *testing.T) {
 	synced(&p, "@x", completeEnv{})
 	v := p.view(Preset("dark"), 40, 10)
 	lines := strings.Split(v, "\n")
-	if h := p.height(10); h != 2 || len(lines) != h {
+	if h := p.height(40, 10); h != 2 || len(lines) != h {
 		t.Fatalf("height %d, drawn %d lines:\n%s", h, len(lines), plain(v))
 	}
 	if strings.Contains(v, "pwned") || strings.Contains(v, "\x1b]") || strings.Contains(v, "\x07") {
@@ -727,8 +727,8 @@ func TestThePopupDrawsItsColumns(t *testing.T) {
 			t.Fatalf("line %d is %d cells wide, want 60: %q", i, w, l)
 		}
 	}
-	if p.height(20) != 4 {
-		t.Fatalf("height %d, want 4", p.height(20))
+	if p.height(60, 20) != 4 {
+		t.Fatalf("height %d, want 4", p.height(60, 20))
 	}
 	// The note's tone is its colour.
 	th := Preset("dark")
@@ -787,7 +787,7 @@ func TestTheWindowShowsEightRowsAndCountsTheRest(t *testing.T) {
 		if got := trimmed(popupText(p, 40, rows)); !slices.Equal(got, want) {
 			t.Fatalf("%s:\n%s\nwant:\n%s", label, strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
-		if h := p.height(rows); h != len(want) {
+		if h := p.height(40, rows); h != len(want) {
 			t.Fatalf("%s: height %d, want %d", label, h, len(want))
 		}
 	}
@@ -853,7 +853,7 @@ func TestTheCountLineCountsWhatTheSourceLeftOut(t *testing.T) {
 		if got := trimmed(popupText(p, 40, rows)); !slices.Equal(got, want) {
 			t.Fatalf("%s:\n%s\nwant:\n%s", label, strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
-		if h := p.height(rows); h != len(want) {
+		if h := p.height(40, rows); h != len(want) {
 			t.Fatalf("%s: height %d, want %d", label, h, len(want))
 		}
 	}
@@ -885,8 +885,8 @@ func TestAPopupWithNothingToOfferSaysWhy(t *testing.T) {
 	if got := trimmed(popupText(p, 40, 10)); !slices.Equal(got, []string{"  nothing matches"}) {
 		t.Fatalf("drawn %q", got)
 	}
-	if p.height(10) != 1 {
-		t.Fatalf("height %d", p.height(10))
+	if p.height(40, 10) != 1 {
+		t.Fatalf("height %d", p.height(40, 10))
 	}
 }
 

@@ -1307,17 +1307,34 @@ func (s *Session) redactor() *redact.Replacer {
 // killed at once, not given its grace, so Close returns within the tools'
 // close bound — about 3 s — even after a cancel (plan 019 §3.9, §7.7).
 //
-// A session's sub-agents are told first (plan 026 §3.8, panel P3): Close
-// seals the runner's registry, so no child registers after it, and signals
-// every registered child's closing — the child's own cancel with
-// tool.ErrClosing and its own closing channel, without waiting for either —
-// before it cancels and joins its own turn. A cause is fixed by the first
-// cancel, and the adapter's Close cancels the turn ordinarily before it calls
-// this one, which reaches a child through its context first; without the
-// signal the child's closing channel would stay open until the child itself
-// closed, after its commands had had their grace. The children are joined by
-// the join of the turn: an agent call returns only once its child has run and
-// closed, and the turn only once its calls have.
+// A session's sub-agents are told before it joins its turn (plan 026 §3.8,
+// panel P3): Close seals the runner's registry, so no child registers after
+// it, and signals every registered child's closing — the child's own cancel
+// with tool.ErrClosing and its own closing channel, without waiting for
+// either. A cause is fixed by the first cancel, and the adapter's Close
+// cancels the turn ordinarily before it calls this one, which reaches a child
+// through its context first; without the signal the child's closing channel
+// would stay open until the child itself closed, after its commands had had
+// their grace. The children are joined by the join of the turn: an agent call
+// returns only once its child has run and closed, and the turn only once its
+// calls have.
+//
+// The session's own turn is cancelled before all of that (signalClose): the
+// seal refuses a call about to register, the signal ends a running child, and
+// the closing channel ends a call waiting on it, each answering its call
+// aborted, which can end the turn's step — and a turn still live at that
+// step's boundary went on to its next request, the model called again by a
+// session that was closing, with the aborted results. Cancelled first, the
+// turn's context is done before anything else Close does can end a call of
+// the turn: before the seal, which a refused registration reads under the
+// same lock, and before any foreground child's context, which is derived
+// from the turn's, and a context is marked done before its cancel reaches the
+// contexts derived from it. A background child's context is not the turn's:
+// it ends only at its handle's signal, which follows the cancel too. So every
+// result Close causes reaches a step boundary that
+// finds the turn cancelled (halted), and no request follows it. (Marking the
+// session closed, which comes before the cancel, ends no call: only the
+// session's own methods read it.)
 //
 // Background children (plan 026 §3.11) are signalled with the rest, and
 // joined after the turn: Close cancels the session's background context, then
@@ -1331,7 +1348,6 @@ func (s *Session) redactor() *redact.Replacer {
 // and joined before the transcript closes; it writes nothing there either way.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
-		s.subs.closeChildren()
 		if done := s.signalClose(); done != nil {
 			<-done
 		}
@@ -1351,19 +1367,31 @@ func (s *Session) Close() error {
 	return s.closeErr
 }
 
-// signalClose is the first half of Close, and does not wait (plan 026 §3.8):
-// the session is marked closed, so no turn begins from here; a live turn is
-// cancelled with tool.ErrClosing; and the tools' closing channel is closed,
-// which reaches a call whose turn was already cancelled for another reason.
-// It returns the live turn's done channel, which Close waits on, or nil when
-// no turn was running — read in the same critical section that marks the
-// session closed, so a turn cannot begin between the two (begin checks closed
-// under the same lock, and registers its cancel there).
+// signalClose is the first half of Close, and does not wait (plan 026 §3.8),
+// in this order (see Close for why): the session is marked closed, so no turn
+// begins from here; a live turn is cancelled with tool.ErrClosing, and every
+// side question with it; the runner's registry is sealed, so no child or
+// background child registers and no job is reserved from here, and every
+// child it holds is signalled (closeChildren); and, last, the tools' closing
+// channel is closed, which reaches a call whose turn was already cancelled for
+// another reason. It returns the live turn's done channel, which Close waits
+// on, or nil when no turn was running — read in the same critical section that
+// marks the session closed, so a turn cannot begin between the two (begin
+// checks closed under the same lock, and registers its cancel there).
 //
-// It is idempotent and safe from any goroutine, and takes no lock but s.mu,
-// briefly: a parent's Close calls it on each of its children, through their
-// registry handles, while the children's own turns may still be running, and
-// the runner's deferred Close of each child calls it again.
+// Nothing registers unsignalled: a registration and the seal share the
+// registry's lock, so a child is either registered before the seal, and
+// among the handles it signals, or refused; one still opening is held to the
+// signal by its handle's latch (attachChild). A job reserved before the seal
+// can still start after it: it was counted then, its command sees the closing
+// channel, and Close joins it with the background children (closeBackground).
+//
+// It is idempotent and safe from any goroutine, and holds no two locks at
+// once: s.mu, briefly, then the registry's, briefly, then each child handle's
+// and each child's own s.mu, one at a time. A parent's Close calls it on each
+// of its children, through their registry handles, while the children's own
+// turns may still be running, and the runner's deferred Close of each child
+// calls it again; a child has no runner, and seals and signals nothing.
 func (s *Session) signalClose() (done chan struct{}) {
 	s.mu.Lock()
 	s.closed = true
@@ -1378,6 +1406,7 @@ func (s *Session) signalClose() (done chan struct{}) {
 	for _, c := range sides {
 		c(errClosing)
 	}
+	s.subs.closeChildren()
 	s.tools.close()
 	return done
 }
