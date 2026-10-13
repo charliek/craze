@@ -335,6 +335,17 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		!slices.Equal(m.Efforts, []string{"minimal", "low", "medium", "high", "xhigh", "max"}) || m.DefaultEffort != "high" || !m.Vision {
 		t.Errorf("muse-wonder-1.0 = %+v", m)
 	}
+	// Spark's efforts (plan 047 D6, O3): Spark 1.3 takes max, as Meta's docs
+	// say; its contributor tier stays at minimal to xhigh (no evidence that
+	// max does more there, SM-4). Both at high.
+	for alias, want := range map[string][]string{
+		"muse-spark-1.3":             {"minimal", "low", "medium", "high", "xhigh", "max"},
+		"muse-spark-1.3-contributor": {"minimal", "low", "medium", "high", "xhigh"},
+	} {
+		if m := c.Models[alias]; !slices.Equal(m.Efforts, want) || m.DefaultEffort != "high" {
+			t.Errorf("%s efforts %q at %q; want %q at high", alias, m.Efforts, m.DefaultEffort, want)
+		}
+	}
 	// The three Fireworks models (§2.5), as verified live.
 	for alias, want := range map[string]struct {
 		wire, name, effort string
@@ -427,6 +438,32 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			[4]float64{*cost.Input, *cost.Output, *cost.CacheRead, *cost.CacheWrite} != want {
 			t.Errorf("%s cost = %+v, want %v", alias, cost, want)
 		}
+	}
+	// Haiku 5.5's long-context tier (plan 047 D10, LC-1…3, re-checked
+	// 2026-10-13): above 100,000 prompt tokens, input, output, cache hit and
+	// 5-minute write at 0.5, 2.5, 0.05 and 0.625. No other shipped model has
+	// a tier.
+	for alias, m := range c.Models {
+		cost := m.Cost
+		if alias != "anthropic/claude-haiku-5-5" {
+			if cost != nil && (cost.LongContextAbove != nil || cost.LongContext != nil) {
+				t.Errorf("%s has a long-context tier (above %d): only Haiku 5.5 does", alias, deref(cost.LongContextAbove))
+			}
+			continue
+		}
+		l := cost.LongContext
+		if cost.LongContextAbove == nil || *cost.LongContextAbove != 100_000 || l == nil ||
+			l.Input == nil || l.Output == nil || l.CacheRead == nil || l.CacheWrite == nil ||
+			[4]float64{*l.Input, *l.Output, *l.CacheRead, *l.CacheWrite} != [4]float64{0.5, 2.5, 0.05, 0.625} {
+			t.Errorf("%s tier: above %v at %v; want above 100000 at [0.5 2.5 0.05 0.625]", alias, deref(cost.LongContextAbove),
+				[4]float64{deref(l.Input), deref(l.Output), deref(l.CacheRead), deref(l.CacheWrite)})
+		}
+	}
+	if r, ok := tbl.Price(AnthropicProvider, "claude-haiku-5-5"); !ok || r != (Rates{
+		Input: 100_000, Output: 500_000, CacheRead: 10_000, CacheWrite: 125_000, LongContextAbove: 100_000,
+		LongContext: TierRates{Input: 500_000, Output: 2_500_000, CacheRead: 50_000, CacheWrite: 625_000},
+	}) {
+		t.Errorf("Haiku 5.5 prices at %+v, %v", r, ok)
 	}
 	// Aliases the owner dropped while their wire ids still answer retire the
 	// alias only (plan 031 X6): a hand entry pointing at the live id stays the

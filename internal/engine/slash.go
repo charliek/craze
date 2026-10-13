@@ -15,3 +15,14 @@ func (e *Engine) PublishesSlashCatalog() bool {
 	c, ok := e.sess.(agent.SlashCataloger)
 	return ok && c.PublishesSlashCatalog()
 }
+
+// PublishesEffortFacts reports whether the session states every model's
+// effort facts (plan 047 D2, P3): it is an agent.EffortFactser whose
+// PublishesEffortFacts says so — the native session. Like
+// PublishesSlashCatalog it is a property of the session the engine was built
+// over, fixed for the engine's life — the session capability effortFacts on
+// the wire, and the TUI's in-process Info alike — and it waits on nothing.
+func (e *Engine) PublishesEffortFacts() bool {
+	c, ok := e.sess.(agent.EffortFactser)
+	return ok && c.PublishesEffortFacts()
+}

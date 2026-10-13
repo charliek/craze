@@ -438,7 +438,7 @@ func TestSpendIsUnchangedAcrossASwap(t *testing.T) {
 	s := f.open(f.options())
 	f.models["test/a"].push(answerWith("priced"))
 	run(t, s, "spend something")
-	turn, before := s.spend(1)
+	turn, before, _ := s.spend(1)
 	if before.CostPicoUSD == 0 || before.Unpriced {
 		t.Fatalf("control: the spend before the swap is %+v; want it priced", before)
 	}
@@ -452,7 +452,7 @@ func TestSpendIsUnchangedAcrossASwap(t *testing.T) {
 	if slices.Contains(aliasesOf(s), "test/a") {
 		t.Fatal("premise: the new table still lists test/a")
 	}
-	turnAfter, after := s.spend(1)
+	turnAfter, after, _ := s.spend(1)
 	if after != before || turnAfter != turn {
 		t.Fatalf("spend after the swap = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
 	}
@@ -489,7 +489,7 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		}
 		f.models["test/e"].push(answerWith("priced"))
 		run(t, s, "spend on e")
-		turn, before := s.spend(1)
+		turn, before, _ := s.spend(1)
 		if before.CostPicoUSD == 0 || before.Unpriced {
 			t.Fatalf("control: the spend on test/e is %+v; want it priced", before)
 		}
@@ -502,7 +502,7 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		if slices.Contains(aliasesOf(s), "test/e") {
 			t.Fatal("premise: the last table still lists test/e")
 		}
-		if turnAfter, after := s.spend(1); after != before || turnAfter != turn {
+		if turnAfter, after, _ := s.spend(1); after != before || turnAfter != turn {
 			t.Fatalf("spend after the drop = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
 		}
 	})
@@ -516,7 +516,7 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		s := f.open(f.options())
 		f.models["test/a"].push(answerWith("at the old rates"))
 		run(t, s, "spend on a")
-		turn, before := s.spend(1)
+		turn, before, _ := s.spend(1)
 		if before.CostPicoUSD == 0 || before.Unpriced {
 			t.Fatalf("control: the spend on test/a is %+v; want it priced", before)
 		}
@@ -526,7 +526,7 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		if err := s.SetTable(tableFrom(t, providers, priced(models, "test/a", 20, 80)), nil); err != nil {
 			t.Fatal(err)
 		}
-		if turnAfter, after := s.spend(1); after != before || turnAfter != turn {
+		if turnAfter, after, _ := s.spend(1); after != before || turnAfter != turn {
 			t.Fatalf("spend after the new rates = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
 		}
 		if err := s.SetModel("test/a"); err != nil {
@@ -534,7 +534,7 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		}
 		f.models["test/a"].push(answerWith("at the new rates"))
 		run(t, s, "spend on a again")
-		second, total := s.spend(2)
+		second, total, _ := s.spend(2)
 		if second.CostPicoUSD != 10*turn.CostPicoUSD || total.CostPicoUSD != before.CostPicoUSD+second.CostPicoUSD {
 			t.Fatalf("the turn under the new table cost %d (session %d); want ten times the first's %d, added to it",
 				second.CostPicoUSD, total.CostPicoUSD, turn.CostPicoUSD)
@@ -615,7 +615,7 @@ func TestABackgroundChildsUsageIsPricedAtItsOwnTable(t *testing.T) {
 		if !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: oneStep(1)}}) {
 			t.Fatalf("the wake's entry carries %+v; want the child's one row", e.SubagentUsage)
 		}
-		_, session := b.s.spend(2)
+		_, session, _ := b.s.spend(2)
 		if want := costAt(oneStep(1), r1); session.CostPicoUSD != want {
 			t.Fatalf("the session cost %d; want %d, the child's usage at the rates it was opened under", session.CostPicoUSD, want)
 		}
@@ -647,7 +647,7 @@ func TestABackgroundChildsUsageIsPricedAtItsOwnTable(t *testing.T) {
 		if e.Message.Role != fantasy.MessageRoleTool || !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: oneStep(2)}}) {
 			t.Fatalf("the result's entry (%s) carries %+v; want the tool entry, both children merged in one row", e.Message.Role, e.SubagentUsage)
 		}
-		_, session := b.s.spend(2)
+		_, session, _ := b.s.spend(2)
 		if want := costAt(oneStep(1), r1) + costAt(oneStep(1), r2); session.CostPicoUSD != want {
 			t.Fatalf("the session cost %d; want %d: the background child's usage at its rates, the foreground child's at the new", session.CostPicoUSD, want)
 		}
@@ -720,7 +720,7 @@ func TestABackgroundChildsPriceFollowsItsRedactedRow(t *testing.T) {
 		if e.Message.Role != role || !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: redact.Marker, Usage: oneStep(1)}}) {
 			t.Fatalf("premise: the result's entry (%s) carries %+v; want the child's one row, its wire id redacted", e.Message.Role, e.SubagentUsage)
 		}
-		_, session := b.s.spend(2)
+		_, session, _ := b.s.spend(2)
 		u := oneStep(1)
 		if want := u.Input*r.Input + u.Output*r.Output + u.CacheRead*r.CacheRead + u.CacheCreation*r.CacheWrite; want == 0 || session.CostPicoUSD != want {
 			t.Fatalf("the session cost %d; want %d, the child's usage at the rates it was opened under", session.CostPicoUSD, want)

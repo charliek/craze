@@ -375,7 +375,7 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	// Every finished step is followed by what the session has spent (plan 028
 	// §3.14) — in a session that is not a sub-agent (P33).
 	if !s.child {
-		t.spent = func(d StepDone) Spent { return s.stepSpent(number, m, d) }
+		t.spent = func(d StepDone) (Spent, []Diag) { return s.stepSpent(number, m, d) }
 	}
 	// The session's todo store reaches this turn's sink only through here
 	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
@@ -759,7 +759,8 @@ type turn struct {
 	// stop condition compactionDue reports; stepStarted clears it. spent is
 	// what a finished step reports after its StepDone (Session.stepSpent,
 	// spend.go): the step noted when no append wrote it, and the Spent it
-	// leaves; nil for a sub-agent, which reports none (plan 028 P33). total is
+	// leaves, with the diags it reports after it; nil for a sub-agent, which
+	// reports none (plan 028 P33). total is
 	// every StepDone's usage summed over every segment, what a completed or
 	// limited turn returns (R3-3) — never one call's TotalUsage.
 	// retainedReminder is the variant of the last reminder entry in the
@@ -780,7 +781,7 @@ type turn struct {
 	// so the ErrContextTooLarge it may still end with says "even after
 	// compacting" (classify, C9c item 4).
 	compactCheck        func() bool
-	spent               func(StepDone) Spent
+	spent               func(StepDone) (Spent, []Diag)
 	compactDue          bool
 	stepBase            int
 	turnFirstRequest    bool
@@ -1385,13 +1386,18 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 // stepReport emits a finished step's StepDone and, in a session that is not
 // a sub-agent, the Spent it leaves right after it (plan 028 §3.14): a step no
 // append wrote — a failed save, ids refused, nothing to write — is noted as
-// observed and unsaved first, so the session's spend still counts it. mu is
+// observed and unsaved first, so the session's spend still counts it — and
+// the diags that Spent reports, after it (DiagLongContextMalformed). mu is
 // held; spent takes the session's and the store's locks under it, as the
 // mid-turn check does (midTurnDue).
 func (t *turn) stepReport(done StepDone) {
 	t.emit(done)
 	if t.spent != nil {
-		t.emit(t.spent(done))
+		sp, diags := t.spent(done)
+		t.emit(sp)
+		for _, d := range diags {
+			t.emit(d)
+		}
 	}
 }
 

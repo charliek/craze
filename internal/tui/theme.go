@@ -460,13 +460,9 @@ func (m Model) themeDialogBody(inner, budget int) []string {
 }
 
 // themeDialogPlan is the window onto the name list and whether the footer
-// survived: title + list + footer, with the list giving its rows up one at a
-// time and the footer only once even one list row no longer fits. The renderer
-// and the hit-tester both take it.
+// survived (dialogListPlan). The renderer and the hit-tester both take it.
 func (m Model) themeDialogPlan(budget int) (top, shown int, footer bool) {
-	list := min(max(budget-2, 0), len(m.themeNames))
-	top, shown = dialogListWindow(len(m.themeNames), m.themeSel, list)
-	return top, shown, budget >= 2
+	return dialogListPlan(len(m.themeNames), m.themeSel, budget)
 }
 
 // themeDialogClick picks the name under the pointer and keeps it, which is

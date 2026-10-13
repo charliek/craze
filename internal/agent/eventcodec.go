@@ -725,11 +725,16 @@ type wireCatalog struct {
 
 // wireModelInfo is ModelInfo, field for field in the same order, so it
 // converts by a plain conversion. Its shape is the info document's catalog
-// model (info.json's model): id and name always written, recent absent for 0.
+// model (info.json's model): id and name always written, recent absent for 0,
+// and the effort facts (plan 047 D2) each absent when empty — every ACP
+// session's, and every older host's.
 type wireModelInfo struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Recent int    `json:"recent,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Recent        int      `json:"recent,omitempty"`
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"defaultEffort,omitempty"`
+	SwitchEffort  string   `json:"switchEffort,omitempty"`
 }
 
 // The three list sections. Each keeps its slice under a key of its own rather

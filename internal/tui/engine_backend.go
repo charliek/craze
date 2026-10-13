@@ -288,6 +288,7 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		ModelsRefresh:     b.eng.RefreshesModels(),
 		Aside:             b.eng.Asides(),
 		SlashCatalog:      b.eng.PublishesSlashCatalog(),
+		EffortFacts:       b.eng.PublishesEffortFacts(),
 		Stop:              true,
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,

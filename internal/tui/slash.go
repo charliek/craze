@@ -216,7 +216,9 @@ func (m Model) slashHosted() bool {
 //     (btwOffered), requires "stop" where Stop ends it (stopOffered) — bar
 //     the builtin /exit, which always shows: it is this client's own quit
 //     (requestQuit), which detaches where the host cannot stop the session
-//     (stopquit.go), so the menu lists it as it always has.
+//     (stopquit.go), so the menu lists it as it always has — and requires
+//     "effort" where the current model has an effort option, or a model
+//     switch of this client's is pending (effortClaimed, plan 047 D4).
 //   - Of each name, case-insensitively, the first row shown is kept (plan 043
 //     A1): a hidden row claims nothing, so a cursor session's menu shows an
 //     agent's own /btw where the builtin's is hidden.
@@ -233,7 +235,8 @@ func (m Model) slashHosted() bool {
 // line as the band needs them, which a catalog the builder made already is
 // (DisplayLine is idempotent) and one from a host that did not is made here.
 func (m Model) projectSlash(rows []agent.SlashItem) []slashItem {
-	btw, stop, list := m.btwOffered(), m.stopOffered(), m.sessions != nil
+	gates := slashGates{btw: m.btwOffered(), stop: m.stopOffered(), effort: m.effortClaimed()}
+	list := m.sessions != nil
 	out := make([]slashItem, 0, len(rows)+1)
 	seen := make(map[string]struct{}, len(rows)+1)
 	if list {
@@ -241,7 +244,7 @@ func (m Model) projectSlash(rows []agent.SlashItem) []slashItem {
 	}
 	placed := !list
 	for _, it := range rows {
-		if !m.slashRowRuns(it, btw, stop) {
+		if !m.slashRowRuns(it, gates) {
 			continue
 		}
 		n := strings.ToLower(it.Name)
@@ -276,11 +279,17 @@ func menuRow(it agent.SlashItem) slashItem {
 	return row
 }
 
+// slashGates is what a row's Requires can name, as this client reads it,
+// read once per catalog by projectSlash: btwOffered, stopOffered and
+// effortClaimed.
+type slashGates struct {
+	btw, stop, effort bool
+}
+
 // slashRowRuns reports whether this client shows catalog row it — whether it
 // knows everything the row says and could run it (projectSlash's first two
-// rules). btw and stop are btwOffered and stopOffered, read once per catalog
-// by the caller.
-func (m Model) slashRowRuns(it agent.SlashItem, btw, stop bool) bool {
+// rules), under the gates its Requires names.
+func (m Model) slashRowRuns(it agent.SlashItem, g slashGates) bool {
 	if !slashNameOK(it.Name) {
 		return false
 	}
@@ -304,11 +313,15 @@ func (m Model) slashRowRuns(it agent.SlashItem, btw, stop bool) bool {
 	case agent.SlashRequiresStop:
 		// /exit is this client's own quit, offered whatever the host serves
 		// (projectSlash); any other row that needs session.stop is not.
-		if !stop && (it.Source != agent.SlashSourceBuiltin || !strings.EqualFold(it.Name, "exit")) {
+		if !g.stop && (it.Source != agent.SlashSourceBuiltin || !strings.EqualFold(it.Name, "exit")) {
 			return false
 		}
 	case agent.SlashRequiresAside:
-		if !btw {
+		if !g.btw {
+			return false
+		}
+	case agent.SlashRequiresEffort:
+		if !g.effort {
 			return false
 		}
 	default:
@@ -323,13 +336,14 @@ func (m Model) stopOffered() bool { return m.eng != nil && m.info().Stop }
 
 // dispatchesBuiltin reports whether handleEnter runs a builtin named name as
 // craze's own rather than sending it to the agent: the fixed set (builtinNamed),
-// /btw — whose row requires aside, and handleEnter's gate is the same fact —
-// and /connect on a native session. A builtin row of any other name is one a
+// /btw and /effort — whose rows require aside and effort, and handleEnter's
+// gates are the same facts (btwOffered, effortClaimed; plan 047 D4) — and
+// /connect on a native session. A builtin row of any other name is one a
 // later host added, and Enter would send it as text, so the menu does not
 // offer it.
 func (m Model) dispatchesBuiltin(name string) bool {
 	switch name = strings.ToLower(name); name {
-	case btwBuiltin.Name:
+	case btwBuiltin.Name, effortBuiltin.Name:
 		return true
 	case connectBuiltin.Name:
 		return m.connectOffered()
@@ -356,7 +370,7 @@ func slashRunKnown(r agent.SlashRun) bool {
 			return true
 		}
 	case agent.SlashRunPicker:
-		return r.Picker == "model"
+		return r.Picker == "model" || r.Picker == "effort"
 	case agent.SlashRunLocal:
 		switch r.Local {
 		case "help", "clear", "tasks", "theme", "connect":
@@ -623,7 +637,8 @@ func (m Model) renamed(title, cause string) Model {
 
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	// Every branch consumes the draft — clearing it, replacing it, or sending
-	// it — so the menu that draft opened goes with it.
+	// it — so the menu that draft opened goes with it. (An /effort level that
+	// names nothing keeps its draft for the user to correct, runEffort.)
 	m.resetSlash()
 	switch name {
 	case "help":
@@ -738,6 +753,10 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.applyModelEffort(id, effortArg)
+	case "effort":
+		// Reached where the session has an effort option alone (handleEnter;
+		// plan 047 D4).
+		return m.runEffort(args)
 	case "plan", "ask", "agent":
 		m.input.SetValue("")
 		if !m.showModes() {

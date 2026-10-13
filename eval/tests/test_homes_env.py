@@ -23,6 +23,7 @@ FAKE = {
     "zai-coding-plan": "zk-FAKE-zai-1a2b3c4d5e6f7a8b",
     "fireworks": "fw_FAKE_fireworks_9e8d7c6b5a4f",
     "openrouter": "sk-or-FAKE-0f1e2d3c4b5a6978",
+    "anthropic": "sk-ant-FAKE-anthropic-5d4c3b2a1f0e",
 }
 
 
@@ -45,12 +46,18 @@ def owner_tree(tmp: Path) -> tuple[Path, Path]:
     for name, url in prov_urls.items():
         pl += [f"[providers.{name}]", 'driver = "openai-compat"', f'base_url = "{url}"', 'env_keys = ["NOPE_KEY_VAR"]',
                f'api_key = "{FAKE[name]}"', ""]
+    # craze's locked Anthropic provider: the owner's entry holds a key and nothing else.
+    pl += ["[providers.anthropic]", f'api_key = "{FAKE["anthropic"]}"', ""]
     (craze / "providers.toml").write_text("\n".join(pl))
     gl = []
     for name, url in prov_urls.items():
         gl += [f'[model_providers."{name}"]', f'base_url = "{url}"', f'api_key = "{FAKE[name]}"',
                'env_key = "SOME_KEY"', 'api_backend = "chat_completions"',
                f'[model_providers."{name}".extra_headers]', f'x-secret = "{FAKE[name]}"', ""]
+    # gx on Anthropic, as its user guide sets it up: the key in an extra header.
+    gl += ['[model_providers."anthropic"]', 'base_url = "https://api.anthropic.com/v1"', 'api_backend = "messages"',
+           '[model_providers."anthropic".extra_headers]', f'x-api-key = "{FAKE["anthropic"]}"',
+           'anthropic-version = "2023-06-01"', ""]
     for em in models.values():
         gl += [f'[model."{em.gx}"]', f'model = "{em.wire_model}"', f'model_provider = "{em.provider}"',
                f'api_key = "{FAKE[em.provider]}"', 'env_key = "ANOTHER_KEY"', 'reasoning_effort = "low"',
@@ -86,7 +93,7 @@ def test_no_generated_home_holds_a_key(tmp_path):
             if not em.supports(h):
                 continue
             home = homes_root / h / em.slug
-            base = f"http://127.0.0.1:9999/r/{'a' * 32}/host/prefix"
+            base = f"http://127.0.0.1:9999/r/{'a' * 32}/host/v1"
             env = fn(home, em, snap, base)
             files = generated_files(home)
             assert files
@@ -140,7 +147,7 @@ def test_child_environment_is_built_from_nothing(tmp_path, monkeypatch):
             if not em.supports(name):
                 continue
             home = tmp_path / "e" / name / em.slug
-            env = runner.home(home, em, snap, "http://127.0.0.1:1/r/t/h/p")
+            env = runner.home(home, em, snap, "http://127.0.0.1:1/r/t/h/v1")
             spec = SandboxSpec(workspace=tmp_path, ws_inside="/sandbox/work/x", home=home, tools=set(runner.tools), env=env)
             child = build_env(spec)
             for k, v in child.items():

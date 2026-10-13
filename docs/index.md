@@ -42,7 +42,10 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one, and
 - **Side questions.** `/btw <question>` asks a quick question without adding to
   the session ([TUI reference](reference/tui.md#side-questions-btw)).
 - **Effort and speed.** `--effort` and `--fast`/`--no-fast` start a model at a
-  chosen setting ([CLI reference](reference/cli.md#flags)).
+  chosen setting ([CLI reference](reference/cli.md#flags)); in a session,
+  `/effort` changes it from a picker of the current model's levels, and on
+  native the model dialog shows each model's levels as you highlight it
+  ([TUI reference](reference/tui.md#effort)).
 - **Native start models.** A new native session starts on the first provider
   you have connected, in the order Z.AI, ChatGPT plan, Fireworks, OpenRouter,
   Meta ([Configuration](reference/configuration.md#the-shipped-catalog)).

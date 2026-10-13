@@ -145,6 +145,39 @@ Per-harness support limits to know about before adding a model:
 - **Z.AI** (`zai-coding-plan`) has no Responses API, so codex never runs on it, and it's a
   flat coding-plan subscription: `zero_rated = true` in `prices.toml`, $0 against the
   budget cap, with its list-equivalent price reported alongside for comparison.
+- **Anthropic** (`anthropic`: Opus, Sonnet and Haiku 5.5; craze plan 047 D11) speaks the
+  Messages API, and each model runs at craze's default effort for Claude, `medium`.
+  - *The key.* The proxy reads it as craze does: craze's provider is locked, so the
+    owner's `[providers.anthropic]` holds a key and, at most, `env_keys`. With no
+    `env_keys` written, an exported `ANTHROPIC_API_KEY` wins over the stored key -- check
+    which account that is before a campaign. The route is `api.anthropic.com/v1`; it
+    forwards only `POST …/messages` and `GET …/models`, with the key in `x-api-key`.
+  - *craze* reaches the route through `CRAZE_TEST_ANTHROPIC_API` in the run's environment,
+    set to the route without its `/v1` (craze keeps the path and adds `/v1/messages`); the
+    generated `providers.toml` names `driver = "anthropic"` and no `base_url`. A live smoke
+    through `crazeeval proxy --craze-home` must export the `craze_env` it prints.
+  - *opencode* uses its built-in `anthropic` provider; *gx* its `messages` backend
+    (`api_backend = "messages"`, which its user guide documents). gx on Anthropic is not
+    yet verified live: smoke it before a batch, and drop its `gx` ids from `models.toml`
+    if it cannot run. *codex* does not run (no Responses API).
+  - *snapshot-config* needs the owner's gx config to name the models: a
+    `[model_providers.anthropic]` with `base_url = "https://api.anthropic.com/v1"` and
+    `api_backend = "messages"`, and a `[model."anthropic/claude-…-5-5"]` per model naming it
+    (`model = "claude-…-5-5"`); and, until follow-up SF-a (§2), craze entries for the
+    aliases in the owner's `models.toml`.
+  - *Accounting.* Cache reads are priced at `cached_input`, cache writes
+    (`cache_creation_input_tokens`) at `cache_write`, the 5-minute write -- the only TTL
+    craze asks for. A 1-hour write costs 2× input and would be priced as a 5-minute one, so
+    before a batch, check one smoke capture's `message_start` events for
+    `cache_creation.ephemeral_1h_input_tokens`: if any harness reports non-zero, add a
+    1-hour rate first. Haiku 5.5's long-context tier is in `prices.toml`
+    (`long_context_above`). A stream cut before its `message_delta` keeps its reservation.
+    A request whose billed input its size cannot bound -- a document or image by URL or
+    Files API id, a base64 PDF, a hosted fetching tool -- is refused as `unbounded-input`
+    on every route (the run's `proxy.flags` say so): no reservation could cover it.
+- **Muse Wonder** (`muse-wonder-1.0`, Meta's preview flagship) is set like Spark, at
+  `high`. It costs 40× contributor's input and 100× its output, so smoke it on one task and
+  budget from that run, not from contributor's.
 - If a provider offers two tiers of what's functionally the same served model (plan 029's
   Meta case: `muse-spark-1.3` and a much cheaper `muse-spark-1.3-contributor`), and a
   baseline run shows the same served model id and near-identical objective counts across
@@ -166,10 +199,12 @@ $0.011–0.017/run (craze $0.014) — `prices.toml` prices the full muse-spark-1
 roughly 12–20× higher per token, so budget around $0.15–0.18/run if you use that tier
 instead of the contributor one; Kimi K3 ran $0.13–0.14/run, roughly 10× deepseek's rate
 (its baseline needed a $6 run cap and was descoped to two harnesses on cost grounds alone
-— see §7). `crazeeval run` refuses to start a batch
-whose projected cost — the median cost per run of that model so far, or `prices.toml`'s
-`prior_run_cost` with none yet — would pass the budget cap, so a badly underpriced new
-model surfaces as a refusal before it burns money, not after.
+— see §7); `prices.toml`'s `prior_run_cost` for Wonder and the Claude models is
+contributor's median scaled by each one's prices, the arithmetic beside each entry.
+`crazeeval run` refuses to start a batch whose projected cost — the median cost per run
+of that model so far, or `prices.toml`'s `prior_run_cost` with none yet — would pass the
+budget cap, so a badly underpriced new model surfaces as a refusal before it burns money,
+not after.
 
 ## 4. Adding a task
 

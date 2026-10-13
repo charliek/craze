@@ -18,6 +18,12 @@ import (
 
 var _ agent.SlashCataloger = (*Stub)(nil)
 
+var _ agent.EffortFactser = (*Stub)(nil)
+
+// PublishesEffortFacts is agent.EffortFactser's: PublishEffortFacts, which is
+// set before Start and never after, so the read takes no lock (plan 047 D2).
+func (s *Stub) PublishesEffortFacts() bool { return s.PublishEffortFacts }
+
 // PublishesSlashCatalog is agent.SlashCataloger's: PublishSlash, which is set
 // before Start and never after, so the read takes no lock.
 func (s *Stub) PublishesSlashCatalog() bool { return s.PublishSlash }

@@ -367,11 +367,30 @@ the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
 
-The memory is read once, when the session starts, so a switch changes where
-the *next* session starts, not what the running one offers. It lives in
+The memory is read when the session starts — which models its list puts
+first, and where it starts — and again by each switch, for the effort it
+lands on (below). A switch also moves the model up the running session's own
+list at once, as well as the next session's. It lives in
 `recent.json` beside the model files; see [Model
 memory](configuration.md#model-memory-recentjson) for the file, who writes it,
 and what happens when two sessions switch at once.
+
+#### Effort on a switch
+
+A native switch to a model — `/model X`, a pick in the [model
+dialog](#model-dialog), or an attached client's switch — lands on the
+**effort last used on X**, else X's `default_effort`; it never carries the
+effort you were on over to another model. So Muse Wonder at `max`, then
+`/model anthropic/claude-opus-5-5`, runs Opus at its own `medium` (or at the
+level you last used on Opus), and switching back to Wonder finds `max` again.
+"Last used" is, in order: the last effort this session set on X; else the
+one the model memory remembers for X, read at the switch, so a choice made in
+another craze since counts; else X's default. A remembered level X no longer
+offers is its default. Asking for the model you are already on keeps its
+effort. `/model X <effort>` still sets a level directly, as two steps: the
+switch, then the effort. A model with no effort control has none either way.
+ACP providers (cursor, grok, gx) are unchanged: their effort is whatever the
+agent's option says after the switch.
 
 #### What the model is told
 
@@ -528,7 +547,7 @@ Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks`, `/clear` and
 `/rename` run immediately even mid-turn, and so does `/btw` where it is offered
 — it opens the [side view](#side-questions-btw) beside the running turn rather
 than behind it — and `/sessions` where there is a [session list](#session-list).
-The ones that need the agent (`/model`, `/plan`, `/ask`, `/agent`, …) are
+The ones that need the agent (`/model`, `/effort`, `/plan`, `/ask`, `/agent`, …) are
 refused while a turn runs — yours or one the agent started on its own — with one
 error row in the transcript, `Finish or stop the running work first, then
 /model.` (naming the command you typed); the draft stays in the composer, so
@@ -1369,7 +1388,20 @@ listed once what you type is the start of its name and of no other command —
 ❯ /effort  effort for new sessions  default
 ```
 
-- **`/effort`** offers `default`, `low`, `medium`, `high` and `xhigh`.
+- **`/effort`** offers `default` and the levels of the model new sessions
+  start on. On native that is that model's levels — the chosen model's,
+  read from its model table (a typed `/model SPARK` resolved as `--model`
+  resolves it); the start model's for `/provider native` and `/model
+  default`; and, when you have not picked one, those of the session you came
+  from's model, as that session states them or, where it states none (an
+  older host), read from the table — `default` alone for a model with no
+  effort control. The table is read again at each opening of the list and
+  each choice of model, since the start model follows the [model
+  memory](configuration.md#model-memory-recentjson). On an ACP provider
+  (cursor, grok, gx), whose levels are known only once a session runs, it
+  offers every level: `default`, `minimal`, `low`, `medium`, `high`, `xhigh`
+  and `max` (and so does native for the moment between a choice of model and
+  its table being read).
 - **`/fast`** offers `default`, `on` and `off`.
 
 `default` clears the setting: the model's own. Choosing works as it does for
@@ -1377,13 +1409,16 @@ listed once what you type is the start of its name and of no other command —
 highlighted value, the one in use is marked `current` — and `/effort high` or
 `/fast off` typed in full does the same without the popup; a value not offered
 is refused on the hint line. A choice lasts as the provider and model do, until
-you change it or craze quits; choosing a provider does not reset it. The rule
-over the input appends it — `new session → ~/projects/lumen · cursor · Grok ·
-high · fast`, or `· no fast` with fast mode off — and says nothing while both
-are `default`.
+you change it or craze quits; choosing a provider or a model does not reset
+it. The rule over the input appends it — `new session → ~/projects/lumen ·
+cursor · Grok · high · fast`, or `· no fast` with fast mode off — and says
+nothing while both are `default`. An effort kept from before you chose a model
+that does not offer it is still passed to the new session, but the rule and the
+hint line say so — `· max (not offered)` — and the popup marks nothing
+`current`.
 
-The values are not checked against the provider or model here: the new
-session's host applies them as it starts, before its first prompt, exactly as
+Beyond what is offered, the values are not checked against the provider or
+model here: the new session's host applies them as it starts, before its first prompt, exactly as
 it applies [`--effort` and `--fast`](cli.md#flags) — the effort matched
 against the levels its model offers (an exact id, then an id or a name, case
 folded). One that matches nothing — `xhigh` where a model stops at `high`, or
@@ -1669,11 +1704,16 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/btw <question>` | Ask a side question, not saved — [native, Grok and gx only](#side-questions-btw); runs mid-turn |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
+| `/effort` | Change the current model's [effort](#effort): a picker, or `/effort <level>` — only where the current model has an effort control |
 
 `/plan`, `/ask` and `/agent` are in the menu only when the session advertises
 modes, and on a session that does not offer the one typed, `Enter` says `mode
 <name> is not advertised`. `/tasks` is in the menu only when the agent reports
-a task list.
+a task list. `/effort` is in the menu only while the current model has an
+effort control (its effort option), so it comes and goes as you switch
+models; anywhere else it is not craze's, and an agent's or a plugin's own
+`/effort` shows and runs in its place. It is listed after `/exit`, so `/e`
+still selects `/exit` and `/ef` selects `/effort`.
 
 `/theme <name>` applies and saves a preset by name, in any case, with `_` or
 `-` between words. It also takes the spellings `tokyo`, `tokyonight`,
@@ -2159,18 +2199,37 @@ too, [at once](#connect): opening `/model` asks
 the session to take up whatever was funded since it opened, and the list the
 box shows is the session's, re-drawn when it changes. An ACP provider's dialog
 never has the row, and never asks. A model you pick in this session moves up in
-the *next* session's list; this one's order is read again when the session next
-reloads for another reason, such as a key or a sign-in. A typed `/model <alias>` naming a model the list
+this session's list at once — the switch republishes the list, ranked again —
+and in the next session's. A typed `/model <alias>` naming a model the list
 leaves out fails as an unknown model does; `--model <alias>` at start still
 resolves against every model craze knows, and refuses one whose provider has
 no key, saying how to give it one.
 
-The dialog does not rebuild itself for the model under the cursor: the tabs
-on screen are the current model's, and highlighting another model in the list
-never previews its options. A choice made on a tab still travels with a model
-switch in the same `Enter` when the destination model offers that option and
-value; after the switch, the new model's own tabs are edited by reopening
-`/model`, which then shows exactly them.
+**The effort row follows the highlight on native.** A native session states
+every model's effort levels in its model list (the session capability
+[`effortFacts`](protocol.md#capabilities)), so its `effort` row is the
+highlighted model's: its levels, in the catalog's order, and bracketed — on
+the current model, the effort the session is at; on any other, the effort a
+switch to it would land on ([Effort on a switch](#effort-on-a-switch): your
+last choice on it, else its default), else its default, else nothing. A model
+with no effort control has no `effort` row while it is highlighted (and the
+footer names no tab); if the row had the focus, the focus goes back to the
+list. A level you choose is kept while you move the cursor: a model that
+offers it shows it again, and one that does not shows its own value meanwhile.
+A model list the session publishes while the box is open (another switch, a
+reload) moves every row you have not touched to its new value. While a
+`/model` switch you made has not landed yet, the box opens on the model you
+asked for and its row is that model's levels, as its facts state them; `Enter`
+then sends that row's effort for it, after the switch lands, so the switch
+ends on the effort the box showed.
+
+On an ACP provider (cursor, grok, gx), and against a host from before
+`effortFacts`, the dialog does not rebuild itself for the model under the
+cursor: the tabs on screen are the current model's, and highlighting another
+model in the list never previews its options. A choice made on a tab still
+travels with a model switch in the same `Enter` when the destination model
+offers that option and value; after the switch, the new model's own tabs are
+edited by reopening `/model`, which then shows exactly them.
 
 The list and each tab are focus targets, and the one the keys are on carries
 a `> ` gutter and the selection background — so exactly one row looks active,
@@ -2186,12 +2245,17 @@ any other tab has no footer of old to keep and falls back to `tab options`
 once the tabs' names do not fit. Typing filters the list whatever has focus.
 
 `Tab`/`Shift+Tab` move focus between the list and the tabs; `←`/`→` change
-the focused tab's value; clicking a model row picks it and applies the dialog,
-as `Enter` does, and clicking a tab focuses it. `Enter` closes the
+the focused tab's value (on an `effort` row with nothing bracketed, `→` picks
+its first level and `←` its last); clicking a model row picks it and applies
+the dialog, as `Enter` does, and clicking a tab focuses it. `Enter` closes the
 dialog and applies model, then each **changed** tab, in catalog order, each
 as its own step — a tab the user never moved is left alone: it always shows
 its option's live value (tracking a delta that lands while the box is open),
-and nothing is sent for it. A note is written for every step that lands, and
+and nothing is sent for it. On native, a switch also sends the `effort` row
+as it showed it for the model switched to, chosen or not — so the session
+lands on the effort the box showed, even if another craze process has
+remembered another one for that model since — and sends no effort when the
+row bracketed nothing. A note is written for every step that lands, and
 for one that could not be — the model changed under it, the destination
 model has no such option, or does not offer that value — never an error row
 for those; an actual failure is still named in an error row instead of
@@ -2201,9 +2265,11 @@ shown only when it is on.
 
 `/model <id>` and `/model <id> <effort>` still work without opening the
 dialog; a bare effort word is not a shorthand (`/model high` looks for a model
-named `high`). `/model <id> <effort>` resolves the model first — matched against the
+named `high`). On native, `/model <id>` alone lands on the effort last used on
+that model, else its default ([Effort on a switch](#effort-on-a-switch)). `/model <id> <effort>` resolves the model first — matched against the
 model list without reading any catalog — and then checks the effort word
-against the **destination** model's catalog, so `/model grok-4.6 high` typed
+against the **destination** model's catalog — as `/effort`'s word is: the
+level's id, in any case, else its name — so `/model grok-4.6 high` typed
 while on composer-2.5 (which has no effort) still lands on grok-4.6 instead
 of being read as an unknown model. There is no full-width picker band and no
 `Ctrl+M` binding; the only band left under the transcript is the slash menu.
@@ -2214,6 +2280,54 @@ digit `1`–`9` applies the theme at that position and keeps it at once, and
 `Esc` or a click outside reverts to the theme that was active when it opened. A card arriving from the agent
 closes any dialog — the model dialog applies nothing, the theme dialog
 reverts.
+
+## Effort
+
+`/effort` changes the current model's effort; it is in the menu wherever the
+current model has an effort control (an effort option), on every provider.
+
+A bare `/effort` opens a small box over the transcript, titled `effort ·
+<model>`, listing that model's levels in its own order, the cursor on the one
+in use:
+
+```text
+╭────────────────────────────────────────────────────╮
+│effort · Alpha One                                  │
+│> low                                        current│
+│  high                                       default│
+│↑↓ · enter · esc                                    │
+╰────────────────────────────────────────────────────╯
+```
+
+The level in use is marked `current`; on native, which states each model's
+default, the model's default is marked `default` (an ACP agent names none).
+`↑`/`↓` move, `Enter` applies the level under the cursor (a click on a row
+applies it too), and `Esc` or a click outside closes the box with no change.
+The box draws from the session as it is: if the current model changes while
+it is open, it lists the new model's levels — keeping the cursor on its level
+where the new model offers it, else on the one in use — and applies to that
+model.
+
+`/effort <level>` applies a level directly, matched as `--effort` is at a
+session's start: the level's id exactly, else its id in any case (`/effort
+HIGH`), else its name (`/effort high` takes a level the agent calls `High`
+whatever its id) — and sent as the agent's own id. `default` is reserved: it
+is the model's default, on native only, decided before any level is matched
+(a level an agent spells `default` is reached through the picker). Elsewhere,
+and for a word that names no level, the line is refused with an error row
+naming the levels — `no effort nope: one of default, low, high` — and stays
+in the composer for you to correct.
+
+Either way the change goes through the same setting as `/model <id>
+<effort>`'s effort step, bound to the model it was chosen for: if the session
+has moved to another model by the time it is sent, nothing is sent and a note
+says `effort not applied: the model changed`. Status row 1 shows the new
+effort once it lands. On native the choice is remembered for that model, as a
+choice in `/model` is ([Effort on a switch](#effort-on-a-switch)). Like
+`/model`, it needs the agent, so it is refused while a turn runs. It is also
+refused while a `/model` switch you made has not landed yet — `The model is
+still switching to <model>; /effort once it has.` — since until it lands the
+levels the session holds are still the old model's.
 
 ## Help dialog
 

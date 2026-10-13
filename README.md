@@ -28,6 +28,8 @@ and want one fast, scriptable front end for several of them.
   [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - **`/btw` side questions**: ask without adding to the session.
   [Side questions](docs/reference/tui.md#side-questions-btw)
+- **`/effort`**: change the current model's effort in a session, from a picker
+  or as `/effort high`. [Effort](docs/reference/tui.md#effort)
 - **Themes**: seven presets, set from `Ctrl+G` or `/theme`.
   [Configuration](docs/reference/configuration.md)
 - **`craze prompt`**: one headless turn, optionally as JSON.

@@ -103,7 +103,9 @@ type modelOverlay struct {
 	Source          *string   `toml:"source"`
 	// Cost's rates are pointers already: each one the file writes overrides
 	// the shipped rate on its own, and one it leaves out keeps the shipped
-	// rate (an inherited rate cannot be cleared).
+	// rate (an inherited rate cannot be cleared). long_context_above and the
+	// long-context table's rates merge the same way, and
+	// long_context_above = 0 turns a shipped tier off (overlayModel).
 	Cost *Cost `toml:"cost"`
 }
 
@@ -179,9 +181,12 @@ func overlayProvider(base Provider, o providerOverlay) Provider {
 // replace the shipped list whole, and an explicit empty one means empty
 // (`efforts = []` is no effort control). An efforts override that does not
 // set default_effort keeps the shipped default only if the new list has it,
-// and otherwise clears it. Each cost rate overrides on its own. An entry that
-// points the model at another provider or wire model makes it another model,
-// so what craze learned of the one it was is forgotten (forgetLearned).
+// and otherwise clears it. Each cost rate overrides on its own, and so do
+// long_context_above and each long-context rate (plan 047 D10); an entry that
+// writes long_context_above = 0 and no long-context table of its own turns
+// the shipped tier off, its table going with it. An entry that points the
+// model at another provider or wire model makes it another model, so what
+// craze learned of the one it was is forgotten (forgetLearned).
 func overlayModel(base Model, o modelOverlay) Model {
 	m := cloneModel(base)
 	if o.Provider != nil {
@@ -225,6 +230,20 @@ func overlayModel(base Model, o modelOverlay) Model {
 		m.Cost.Output = cmp.Or(clonePtr(c.Output), m.Cost.Output)
 		m.Cost.CacheRead = cmp.Or(clonePtr(c.CacheRead), m.Cost.CacheRead)
 		m.Cost.CacheWrite = cmp.Or(clonePtr(c.CacheWrite), m.Cost.CacheWrite)
+		m.Cost.LongContextAbove = cmp.Or(clonePtr(c.LongContextAbove), m.Cost.LongContextAbove)
+		switch l := c.LongContext; {
+		case l != nil:
+			if m.Cost.LongContext == nil {
+				m.Cost.LongContext = &LongContextCost{}
+			}
+			lc := m.Cost.LongContext
+			lc.Input = cmp.Or(clonePtr(l.Input), lc.Input)
+			lc.Output = cmp.Or(clonePtr(l.Output), lc.Output)
+			lc.CacheRead = cmp.Or(clonePtr(l.CacheRead), lc.CacheRead)
+			lc.CacheWrite = cmp.Or(clonePtr(l.CacheWrite), lc.CacheWrite)
+		case c.LongContextAbove != nil && *c.LongContextAbove == 0:
+			m.Cost.LongContext = nil // the tier turned off: its shipped rates go with it
+		}
 	}
 	m.Source = sourceOrManual(deref(o.Source))
 	return m
@@ -765,7 +784,9 @@ func (m *merger) model(alias string, o modelOverlay) {
 }
 
 // sameAsShippedModel reports whether every field o writes (source aside)
-// equals the shipped value (plan 031 §3.3).
+// equals the shipped value (plan 031 §3.3): the cost's rates, its
+// long_context_above and its long-context rates each on their own (plan 047
+// D10).
 func sameAsShippedModel(s Model, o modelOverlay) bool {
 	if differs(o.Provider, s.Provider) || differs(o.WireModel, s.WireModel) ||
 		differs(o.Name, s.Name) || differs(o.ContextWindow, s.ContextWindow) ||
@@ -781,9 +802,27 @@ func sameAsShippedModel(s Model, o modelOverlay) bool {
 	if s.Cost != nil {
 		sc = *s.Cost
 	}
-	rate := func(u, v *float64) bool { return u == nil || (v != nil && *u == *v) }
-	return rate(o.Cost.Input, sc.Input) && rate(o.Cost.Output, sc.Output) &&
-		rate(o.Cost.CacheRead, sc.CacheRead) && rate(o.Cost.CacheWrite, sc.CacheWrite)
+	if !writesShipped(o.Cost.Input, sc.Input) || !writesShipped(o.Cost.Output, sc.Output) ||
+		!writesShipped(o.Cost.CacheRead, sc.CacheRead) || !writesShipped(o.Cost.CacheWrite, sc.CacheWrite) ||
+		!writesShipped(o.Cost.LongContextAbove, sc.LongContextAbove) {
+		return false
+	}
+	ol := o.Cost.LongContext
+	if ol == nil {
+		return true
+	}
+	var sl LongContextCost
+	if sc.LongContext != nil {
+		sl = *sc.LongContext
+	}
+	return writesShipped(ol.Input, sl.Input) && writesShipped(ol.Output, sl.Output) &&
+		writesShipped(ol.CacheRead, sl.CacheRead) && writesShipped(ol.CacheWrite, sl.CacheWrite)
+}
+
+// writesShipped reports whether a key the user's entry may write, written,
+// equals the shipped value: true when it is left out.
+func writesShipped[T comparable](written, shipped *T) bool {
+	return written == nil || (shipped != nil && *written == *shipped)
 }
 
 // defaultModel is the user's default_model — their pin (plan 038 §2.3) — when

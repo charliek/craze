@@ -37,6 +37,11 @@ const (
 	// shaped so EffortOption finds it: a select whose id says effort, in the
 	// thought_level category ACP agents put their effort control in.
 	nativeEffortID = "effort"
+	// NativeEffortID is nativeEffortID for a client: the id the model dialog
+	// presents a native session's effort under even while its current model
+	// has no effort option (plan 047 D3, P7), so a choice made for another
+	// model is keyed as the option it will set.
+	NativeEffortID = nativeEffortID
 	// nativeTitleRuneCap is how long the title derived from the first prompt
 	// may be: the same cap the TUI puts on an index title, so the two agree.
 	nativeTitleRuneCap = 120
@@ -166,6 +171,26 @@ type nativeSession struct {
 	// option is rebuilt from them whenever the current model or effort
 	// changes.
 	efforts map[string][]string
+	// confirmed is the session's memory view (plan 047 D1, P2;
+	// native_memory.go): the switches and effort changes it confirmed, newest
+	// first, one per alias, each naming its model as recent.json does — by
+	// alias and identity — with the effort and its number, added in the
+	// section that confirms it (announce) and remapped onto each table a
+	// reload installs (remapConfirmed) — never read back from the file,
+	// which a write outside s.mu and modelsMu (remember, under memMu) brings
+	// up to date later, or not at all when it fails. A switch lands on its effort before anything
+	// recent.json says, so A → B → A in one session finds A's last effort
+	// whatever the file holds yet. memSeq numbers the confirmations, in the
+	// order they took, so their writes land in that order (remember). recent
+	// is the model memory as this session ranks its list by: recent.json as
+	// Start or the last reload read it, with every confirmation since made
+	// its newest entry (modeltable.WithNewest) — what the file holds once the
+	// writes land, without reading it back. All three under
+	// s.mu; written only by the setters, which hold modelsMu too, and by
+	// Start and a reload's step 6, which does too.
+	confirmed []confirmed
+	memSeq    uint64
+	recent    []modeltable.RecentEntry
 	// plugins is every content entry the scan at Start found, hidden ones
 	// included, and snap.Plugins is the resolved row for each one that is not
 	// hidden (§3.2). Both are set once, in Start, and never change: native
@@ -384,6 +409,21 @@ type nativeSession struct {
 	// seam: nil in production**, set only by a test in this package before
 	// Start.
 	turnSeam func(stage string)
+
+	// memMu serializes the model memory's writes (remember, plan 047 D1),
+	// and guards memWritten, the confirmation number (memSeq) of the latest
+	// one written or tried: a write of an older confirmation, which reached
+	// it after a newer one, is skipped, so recent.json's newest entry is the
+	// session's newest choice. A leaf, never held with s.mu or modelsMu: it
+	// is held across one bounded write of the file (modeltable.Remember) and
+	// its note.
+	memMu      sync.Mutex
+	memWritten uint64
+	// memWriteSeam runs in remember with memMu held, once the write is
+	// decided on and before recent.json is written: the window in which the
+	// file does not hold the session's newest choice yet. **A test seam: nil
+	// in production**, set only by a test in this package before the switch.
+	memWriteSeam func()
 
 	// asides counts the side questions running (native_aside.go, plan 040
 	// §3.4), the harness's call and the publication after it: each is added
@@ -716,6 +756,7 @@ func (s *nativeSession) start(context.Context) error {
 	s.submitListLocked(&s.planList, planFetch, 0, hs.Redact)
 	s.submitListLocked(&s.anthropicList, anthropicFetch, 0, hs.Redact)
 	s.efforts = efforts
+	s.recent = opened.recent
 	s.plugins = entries
 	s.snap.Plugins = rows
 	s.snap.Models = infos
@@ -1264,7 +1305,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// Resolved the way every provider's --model is (MatchModel's
 		// normalisation), so an alias typed with spaces or capitals, or a
 		// model's display name, still finds it.
-		alias, err := MatchModel(Snapshot{Models: tableModels(table)}, s.opts.Model)
+		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
 			return nil, nativeOpened{}, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
 		}
@@ -1394,7 +1435,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// harness actually opened on as the current one, which for a resume is
 	// the transcript's.
 	current, _ := hs.Current()
-	out := nativeOpened{table: table, home: hopts.Home, getenv: unsealed, choices: table.Choices(recent, getenv, current)}
+	out := nativeOpened{table: table, home: hopts.Home, getenv: unsealed, choices: table.Choices(recent, getenv, current), recent: recent}
 	if signIn != nil {
 		// Every token value this process mints or adopts from here on is
 		// redacted at once (P19): the source tells its subscribers before it
@@ -1433,8 +1474,9 @@ type nativeOpened struct {
 	// the table's models whose provider has a key, plus the model the
 	// session runs on (P7), the remembered ones first, by rank, then the
 	// rest by name (modeltable.Table.Choices). It is computed at start, from
-	// the memory read at start (§3.4): a switch made in this session does not
-	// reorder it. A reload of the table computes it again, the memory with it
+	// the memory read at start (§3.4); a switch made in this session ranks
+	// the same models again, and their effort facts with them (relistLocked,
+	// plan 047 D2). A reload of the table computes it again, the memory with it
 	// (native_models.go, plan 034 §3.4): a provider connected while the
 	// session runs is offered from then on; and a switch away from a model
 	// the table no longer funds — kept listed only while the session ran on
@@ -1443,6 +1485,10 @@ type nativeOpened struct {
 	// snapshot), as an unknown alias always was; --model still resolves
 	// against the whole table (tableModels).
 	choices []modeltable.Choice
+	// recent is the model memory the choices were ranked by, read once in
+	// open(): what the session ranks its list by until a reload reads it
+	// again (nativeSession.recent).
+	recent []modeltable.RecentEntry
 }
 
 // diagResumeEmpty is the journal diag a load that opened empty is noted as
@@ -1703,10 +1749,15 @@ func nativeCurrentMode(mode string) string {
 // settings.catalog — so it is where the list is held to the catalog's bounds
 // (boundCatalog; current is the model the session runs on), and it answers
 // what they cut.
+//
+// Each model carries its effort facts as the choice states them (plan 047
+// D2): its levels, its default and its switch effort, verbatim — they are
+// values a session.set names — and held to their bounds there too.
 func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, catalogCut) {
 	infos := make([]ModelInfo, 0, len(choices))
 	for _, c := range choices {
-		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
+		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent,
+			Efforts: slices.Clone(c.Efforts), DefaultEffort: c.DefaultEffort, SwitchEffort: c.SwitchEffort})
 	}
 	return boundCatalog(infos, current)
 }
@@ -1715,6 +1766,15 @@ func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, cata
 // sorted, each named by its table name (sanitized: it is text from a file the
 // owner edits by hand) or its alias. The ids stay as the table spells them,
 // because they go back to SetModel verbatim.
+// MatchNativeModel is raw, a model as --model names it, resolved against every
+// model of table the way a native session's start resolves --model:
+// MatchModel over the table's aliases and names. The session list resolves
+// a typed /model by it too (plan 047 D5), so it finds the model a session
+// started from it runs.
+func MatchNativeModel(table *modeltable.Table, raw string) (string, error) {
+	return MatchModel(Snapshot{Models: tableModels(table)}, raw)
+}
+
 func tableModels(table *modeltable.Table) []ModelInfo {
 	out := make([]ModelInfo, 0, len(table.Models))
 	for _, alias := range table.Aliases() {
@@ -1774,6 +1834,13 @@ func nativeEffortOption(levels []string, current string) *ConfigOption {
 		Current:      current,
 		SelectValues: values,
 	}
+}
+
+// NativeEffortOption is nativeEffortOption for a client: the option a native
+// model with levels advertises, which the model dialog presents another
+// model's levels as (plan 047 D3); nil for no levels.
+func NativeEffortOption(levels []string, current string) *ConfigOption {
+	return nativeEffortOption(levels, current)
 }
 
 // startSettings is --effort and --fast/--no-fast on a native session (plan
@@ -2749,8 +2816,16 @@ func (s *nativeSession) Close() error {
 // model and the snapshot shows the new one at once. The harness builds the
 // new model's client now, so an unknown alias or a missing key fails here
 // and leaves the current model in place. A switch that took is announced
-// (announceCurrent), because the new model can bring or take away the effort
+// (announce), because the new model can bring or take away the effort
 // option, and then remembered for the next session (remember, plan 031 §3.4).
+//
+// The switch lands on the effort the session last confirmed on that model
+// (its memory view), else the one recent.json remembers for it — read now, so
+// a choice another craze made since is seen — else the model's default; it
+// never carries the effort it is on over (plan 047 D1, owner pin O2:
+// modeltable.Table.SwitchEffort). The model and that effort are installed by
+// the harness together (harness.Session.SetModelEffort). A switch to the
+// model the session is on keeps its effort.
 //
 // The list it matches against, the harness's switch and the announcement are
 // one modelsMu section (native_models.go, plan 034 §3.4, A24): no reload of
@@ -2772,35 +2847,52 @@ func (s *nativeSession) Close() error {
 // A switch away from a carry that stood over another entry of the files' own
 // (modeltable.Table.Shadowed) — another ChatGPT account's model under the
 // same alias, after a sign-in to it, or the alias's efforts or price changed
-// in models.toml — also reads the files again, in the same modelsMu section
-// (reloadLeft; plan 034 C4r4, r15 #3): the carry was there only for the
-// client the session ran on, and the files' entry it stood over, which no
-// stamp says is new, is what the list offers from then on, and what a switch
-// back builds. Under a turn's claim that reload is owed to the turn's end, as
-// any reload is.
+// in models.toml — also reads the files again (reloadLeft; plan 034 C4r4,
+// r15 #3): the carry was there only for the client the session ran on, and
+// the files' entry it stood over, which no stamp says is new, is what the
+// list offers from then on, and what a switch back builds. Under a turn's
+// claim that reload is owed to the turn's end, as any reload is.
+//
+// That reload runs in the switch's own modelsMu section, so no other switch
+// can land between the two and build a model from the carry the reload is
+// there to retire (C1 final review 1) — and so before the switch's memory is
+// written (remember, after the section, memMu alone). It is handed the
+// switch's own entry, the session's newest confirmation by construction (no
+// other setter can run under modelsMu), and ranks by recent.json with that
+// entry made its newest (modeltable.WithNewest), as the file will be once
+// the write lands: the list it publishes ranks the model switched to first,
+// as the switch's own delta did (C1 review F2). A write that then fails
+// leaves the list ranking it as the session does; later reloads rank by the
+// file, which lags (native_memory.go).
 func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
 	s.modelsMu.Lock()
 	sw, err := s.setModelLocked(cause, modelID)
 	if err == nil && sw.left {
-		s.reloadLocked(reloadLeft)
+		s.reloadLocked(reloadLeft, &sw.entry)
 	}
 	s.modelsMu.Unlock()
 	if err != nil {
 		return SetOutcome{}, err
 	}
-	s.remember(sw.hs, sw.table, sw.home, sw.model, sw.effort)
+	s.remember(sw)
 	return SetOutcome{Value: sw.model, Ticket: sw.ticket}, nil
 }
 
 // switched is what a switch SetModel or SetConfig made confirmed — the model
-// and effort the harness holds now, and the delta's ticket — and the harness,
+// and effort the harness holds now, the delta's ticket and the
+// confirmation's number (seq, the memory view's memSeq) — and the harness,
 // table and home its memory is written with (remember), outside modelsMu.
 type switched struct {
 	model, effort string
 	ticket        *Ticket
-	hs            *harness.Session
-	table         *modeltable.Table
-	home          string
+	seq           uint64
+	// entry is the confirmation as recent.json records it (announce): what
+	// remember writes, and what a reload in the switch's own section ranks
+	// first (reloadLeft).
+	entry modeltable.RecentEntry
+	hs    *harness.Session
+	table *modeltable.Table
+	home  string
 	// left says the switch left a carry that shadowed the files' own entry
 	// (SetModel's comment): the files are read again (reloadLeft).
 	left bool
@@ -2828,13 +2920,25 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 	if seam != nil {
 		seam()
 	}
+	// The effort the switch lands on (plan 047 D1): the memory view's, else
+	// recent.json's read now — local, under modelsMu as a reload's reading
+	// of it is, and outside s.mu — else the default. The harness applies it
+	// in the section that installs the model, judged against the model it
+	// built: an effort that model no longer offers is its default.
+	s.mu.Lock()
+	var memory map[string]string
+	if e, ok := confirmedEffort(s.confirmed, alias); ok {
+		memory = map[string]string{alias: e}
+	}
+	s.mu.Unlock()
+	landing := sw.table.SwitchEffort(modeltable.ReadRecent(sw.home), memory, alias)
 	// The running model asked for again, and no longer resolved by the
 	// table — the carry — is no switch (SetModel's comment): the harness is
 	// not asked, and its client stays. Resolved, it is built again, as any
-	// switch is.
+	// switch is, at the effort it is on (the harness's re-key).
 	drop := ""
 	if alias != current || s.resolvesLocked(sw.table, current) {
-		if err := sw.hs.SetModel(alias); err != nil {
+		if err := sw.hs.SetModelEffort(alias, landing); err != nil {
 			return switched{}, phraseSetupError(err, sw.table, alias)
 		}
 		if alias != current && !s.resolvesLocked(sw.table, current) {
@@ -2846,7 +2950,7 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a
 	// canonical id, so the value that was asked for and the value the delta
 	// carries are not always the same string (SetOutcome).
-	if sw.model, sw.effort, sw.ticket, err = s.announce(cause, drop); err != nil {
+	if err = s.announce(cause, drop, &sw); err != nil {
 		return switched{}, err
 	}
 	return sw, nil
@@ -2869,55 +2973,65 @@ func (s *nativeSession) resolvesLocked(table *modeltable.Table, alias string) bo
 	return err == nil
 }
 
-// withoutChoice is list without alias's row, the model memory's ranks after
-// it moved up one, so they still run 1, 2, 3… (modeltable.Choices); false, and
-// nil, when list has no such row. list is not written to.
-func withoutChoice(list []ModelInfo, alias string) ([]ModelInfo, bool) {
-	i := slices.IndexFunc(list, func(m ModelInfo) bool { return m.ID == alias })
-	if i < 0 {
-		return nil, false
+// relistLocked is list ranked again and its effort facts judged again (plan
+// 047 D2) — by the session's model memory as its own confirmations leave it
+// (s.recent) and its memory view (memoryView(s.confirmed)) — with its models
+// unchanged:
+// modeltable.Table.Relist over the session's table, the list's own, then
+// held to the catalog's bounds as every list is (choiceInfos), current the
+// model the session runs on. Nothing is resolved: which models are funded is
+// a reload's to judge. s.mu is held.
+func (s *nativeSession) relistLocked(list []ModelInfo, current string) []ModelInfo {
+	ids := make([]string, len(list))
+	for i, m := range list {
+		ids[i] = m.ID
 	}
-	rank := list[i].Recent
-	out := make([]ModelInfo, 0, len(list)-1)
-	for j, m := range list {
-		if j == i {
-			continue
-		}
-		if rank > 0 && m.Recent > rank {
-			m.Recent--
-		}
-		out = append(out, m)
-	}
-	return out, true
+	infos, _ := choiceInfos(s.table.Relist(ids, s.recent, memoryView(s.confirmed)), current)
+	return infos
 }
 
 // remember records a model or effort switch this session made, as the newest
-// entry of its model memory (plan 031 §3.4): alias and effort are the values
-// announceCurrent confirmed — the model the harness is now on and the effort
-// it now has — and the entry names the model by its identity in table, the
-// session's own (r2-5). It is written in home, the directory the harness was
-// opened with, never paths.NativeDir() read again.
+// entry of its model memory (plan 031 §3.4): sw's model and effort are the
+// values announce confirmed — the model the harness is now on and the effort
+// it now has — and the entry names the model by its identity in sw's table,
+// the session's own (r2-5). It is written in sw's home, the directory the
+// harness was opened with, never paths.NativeDir() read again.
 //
-// It runs after the announcement and outside s.mu: the file is locked and
-// written (modeltable.Remember), and another craze holding the lock can keep
-// it waiting for up to modeltable.RecentLockWait, which the engine's settings
-// worker then waits too. Nothing here can undo the switch, which has already
-// taken and been announced: a failure is one note naming the file and the
-// reason, never a key, redacted and sanitized as every native note is.
+// It runs after the announcement and outside s.mu and modelsMu: the file is
+// locked and written (modeltable.Remember), and another craze holding the
+// lock can keep it waiting for up to modeltable.RecentLockWait, which the
+// engine's settings worker then waits too. Nothing here can undo the switch,
+// which has already taken and been announced — and which the memory view
+// holds for this session whatever the file says (plan 047 D1): a failure is
+// one note naming the file and the reason, never a key, redacted and
+// sanitized as every native note is.
+//
+// The writes land in the order their switches were confirmed (plan 047 P2):
+// memMu serializes them, and one whose confirmation (sw.seq) is older than
+// the last one written or tried — two setters that confirmed in one order
+// and reached here in the other — is skipped, so the file's newest entry is
+// the session's newest choice.
 //
 // Only the two setters call it: a switch a person made (the TUI's /model, a
 // client's set, which come here through the engine). --model, `craze prompt`,
 // a resume and a sub-agent's model never do.
-func (s *nativeSession) remember(hs *harness.Session, table *modeltable.Table, home, alias, effort string) {
-	m, ok := table.Models[alias]
-	if home == "" || !ok {
+func (s *nativeSession) remember(sw switched) {
+	if _, ok := sw.table.Models[sw.model]; sw.home == "" || !ok {
 		// Neither happens to a session Start opened: its Home is checked
 		// there, and the harness switches only to an alias of this table.
 		return
 	}
-	e := modeltable.RecentEntry{Alias: alias, Provider: m.Provider, WireModel: m.WireModel, Effort: effort}
-	if err := modeltable.Remember(home, e, s.Now()); err != nil {
-		s.note(nativeSafe{red: hs.Redact}.line("not saving the model choice: " + err.Error()))
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
+	if sw.seq <= s.memWritten {
+		return
+	}
+	s.memWritten = sw.seq
+	if seam := s.memWriteSeam; seam != nil {
+		seam()
+	}
+	if err := modeltable.Remember(sw.home, sw.entry, s.Now()); err != nil {
+		s.note(nativeSafe{red: sw.hs.Redact}.line("not saving the model choice: " + err.Error()))
 	}
 }
 
@@ -2953,25 +3067,41 @@ func (s *nativeSession) remember(hs *harness.Session, table *modeltable.Table, h
 // stopped admitting, so the setter answers "closed" rather than a success
 // whose delta went nowhere.
 func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *Ticket, err error) {
-	return s.announce(cause, "")
+	var sw switched
+	err = s.announce(cause, "", &sw)
+	return sw.model, sw.effort, sw.ticket, err
 }
 
-// announce is announceCurrent for a switch that leaves drop — the model it
-// switched away from — unfunded (resolvesLocked; "" for none): in the same
-// section, and the same delta, drop's row leaves the list, at the next
-// revision (plan 034 C4r, r9 #1), so no client is offered a model the session
-// would refuse to switch back to, mid-turn included — the delta is the
-// switch's, said when the switch is. A drop that is the current model, or no
-// row of the list, changes nothing. The revision is the reloads' generation
+// announce is announceCurrent for a switch or an effort change a setter
+// confirmed, filling in sw's model, effort, ticket and confirmation number,
+// and for one that leaves drop — the model it switched away from — unfunded
+// (resolvesLocked; "" for none).
+//
+// The confirmation is the memory view's (plan 047 D1, P2), in this section:
+// it becomes the newest of s.confirmed — the model by its alias and identity
+// in the session's table, the effort confirmed, its number the next memSeq
+// (sw.seq, the order remember writes in) — and s.recent gains it as its
+// newest entry, so the next switch to the model lands on that effort
+// whatever the file says by then, and the list ranks it first.
+//
+// The list is published again in the same section, and the same delta, as
+// the model and config sections, whenever the confirmation changed any of its
+// models' ranks or effort facts (plan 047 D2, P1: relistLocked) — so a client
+// never shows a switch effort or a rank the session no longer holds — and
+// without drop's row, so no client is offered a model the session would
+// refuse to switch back to, mid-turn included (plan 034 C4r, r9 #1): the
+// delta is the switch's, said when the switch is. A drop that is the current
+// model, or no row of the list, takes nothing out. A list that comes out the
+// same is not published. The revision is the reloads' generation
 // (native_models.go), taken under modelsMu, which the setters hold.
-func (s *nativeSession) announce(cause, drop string) (model, effort string, t *Ticket, err error) {
+func (s *nativeSession) announce(cause, drop string, sw *switched) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return "", "", nil, fmt.Errorf("agent: session closed")
+		return fmt.Errorf("agent: session closed")
 	}
 	s.refreshCurrentLocked()
-	model = s.snap.CurrentModel
+	model, effort := s.snap.CurrentModel, ""
 	for _, opt := range s.snap.Config {
 		if opt.ID == nativeEffortID {
 			effort = opt.Current
@@ -2982,15 +3112,24 @@ func (s *nativeSession) announce(cause, drop string) (model, effort string, t *T
 		Model:  &model,
 		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
 	}
+	s.memSeq++
+	m := s.table.Models[model] // the harness runs on a model of this table
+	c := confirmed{entry: modeltable.RecentEntry{Alias: model, Provider: m.Provider, WireModel: m.WireModel, Effort: effort}, seq: s.memSeq}
+	s.confirmed = withConfirmed(s.confirmed, c)
+	s.recent = modeltable.WithNewest(s.recent, c.entry)
+	list := s.snap.Models
 	if drop != "" && drop != model {
-		if infos, ok := withoutChoice(s.snap.Models, drop); ok {
-			s.models.gen++
-			s.snap.Models, s.snap.CatalogRevision = infos, s.models.gen
-			delta.Catalog = &CatalogState{Models: slices.Clone(infos), Revision: s.models.gen}
-			s.catalogQueued = true
-		}
+		list = slices.DeleteFunc(slices.Clone(list), func(m ModelInfo) bool { return m.ID == drop })
 	}
-	return model, effort, s.enqueueDeltaLocked(cause, Event{}, delta), nil
+	if infos := s.relistLocked(list, model); !EqualModels(infos, s.snap.Models) {
+		s.models.gen++
+		s.snap.Models, s.snap.CatalogRevision = infos, s.models.gen
+		delta.Catalog = &CatalogState{Models: CloneModels(infos), Revision: s.models.gen}
+		s.catalogQueued = true
+	}
+	sw.model, sw.effort, sw.seq, sw.entry = model, effort, s.memSeq, c.entry
+	sw.ticket = s.enqueueDeltaLocked(cause, Event{}, delta)
+	return nil
 }
 
 // enqueueDeltaLocked is live.go's, for this session: one EventMeta carrying st,
@@ -3111,7 +3250,7 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel 
 	if err != nil {
 		return SetOutcome{}, err
 	}
-	s.remember(sw.hs, sw.table, sw.home, sw.model, sw.effort)
+	s.remember(sw)
 	return SetOutcome{Value: sw.effort, Ticket: sw.ticket}, nil
 }
 
@@ -3148,8 +3287,7 @@ func (s *nativeSession) setConfigLocked(cause, value, forModel string) (switched
 	// default, and what the harness resolved it to is what the delta carries
 	// (SetOutcome, r23 finding 4) — and what the memory records, with the
 	// model it was set on.
-	var err error
-	if sw.model, sw.effort, sw.ticket, err = s.announceCurrent(cause); err != nil {
+	if err := s.announce(cause, "", &sw); err != nil {
 		return switched{}, err
 	}
 	return sw, nil
@@ -3189,7 +3327,7 @@ func (s *nativeSession) Snapshot() Snapshot {
 	// grok child's.
 	out.Tools = s.toolRows()
 	out.Subagents = s.rosterRows()
-	out.Models = append([]ModelInfo(nil), s.snap.Models...)
+	out.Models = CloneModels(s.snap.Models)
 	// Cloned as the live session clones it (live.go): the menu reads the rows
 	// off a snapshot and the expansion lookup is built from the session's own
 	// copy, so handing out the backing array would let a consumer that sorted
@@ -3215,6 +3353,13 @@ func (s *nativeSession) Snapshot() Snapshot {
 }
 
 var _ SlashCataloger = (*nativeSession)(nil)
+
+var _ EffortFactser = (*nativeSession)(nil)
+
+// PublishesEffortFacts is EffortFactser's: a native session states every
+// model's effort facts in every list it publishes (plan 047 D2) — Start's,
+// each reload's and each switch's.
+func (s *nativeSession) PublishesEffortFacts() bool { return true }
 
 // PublishesSlashCatalog is SlashCataloger's: a native session does (plan 043
 // P2) — both of its installs restate the catalog, which never changes after

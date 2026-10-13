@@ -103,13 +103,13 @@ func (m *Model) Mirror() Mirror {
 }
 
 // cloneCatalog is a catalog section the caller owns, its list included; nil
-// for nil (plan 034 §3.4). A ModelInfo holds only values, so one copy of the
-// list owns it whole.
+// for nil (plan 034 §3.4). A ModelInfo holds its effort levels in a slice
+// (plan 047 D2), so each model is copied with its own (agent.CloneModels).
 func cloneCatalog(c *agent.CatalogState) *agent.CatalogState {
 	if c == nil {
 		return nil
 	}
-	return &agent.CatalogState{Models: slices.Clone(c.Models), Revision: c.Revision}
+	return &agent.CatalogState{Models: agent.CloneModels(c.Models), Revision: c.Revision}
 }
 
 // cloneOptions is a config catalog the caller owns: each option, and each

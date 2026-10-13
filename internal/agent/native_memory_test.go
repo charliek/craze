@@ -56,13 +56,17 @@ func effortOf(snap Snapshot) string {
 	return ""
 }
 
-// TestNativeSwitchesAreRemembered (A1): each model switch and each effort
-// change a session makes is remembered, newest first, one entry per model,
-// with the model's identity in the session's table and the effort the harness
-// confirmed after the change — a model switch carries the effort over when the
-// new model has it (test/a's high on test/b) and lands on the new model's
-// default otherwise (none on other/c, then medium on test/b); and the next
-// session with no --model starts on the newest of them at its effort.
+// TestNativeSwitchesAreRemembered (A1; plan 047 D1): each model switch and
+// each effort change a session makes is remembered, newest first, one entry
+// per model, with the model's identity in the session's table and the effort
+// the harness confirmed after the change. A model switch lands on the effort
+// last used on the new model, else its default — never the effort it was on:
+// test/a's high does not carry to test/b, which lands on its medium though it
+// offers high; other/c has none; back on test/b it is test/b's own medium,
+// raised to high by an effort change; and test/a then lands on its own low,
+// set before it was left, and test/b on its high. The same model asked for
+// again keeps its effort. The next session with no --model starts on the
+// newest of them at its effort.
 func TestNativeSwitchesAreRemembered(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -71,10 +75,14 @@ func TestNativeSwitchesAreRemembered(t *testing.T) {
 		want          []string
 	}{
 		{model: "Model A", want: []string{"test/a@high"}}, // the current one, by name
-		{model: "test/b", want: []string{"test/b@high", "test/a@high"}},
-		{model: "other/c", want: []string{"other/c@", "test/b@high", "test/a@high"}},
-		{model: "test/b", want: []string{"test/b@medium", "other/c@", "test/a@high"}},
-		{effort: "high", want: []string{"test/b@high", "other/c@", "test/a@high"}},
+		{effort: "low", want: []string{"test/a@low"}},
+		{model: "test/b", want: []string{"test/b@medium", "test/a@low"}},
+		{model: "other/c", want: []string{"other/c@", "test/b@medium", "test/a@low"}},
+		{model: "test/b", want: []string{"test/b@medium", "other/c@", "test/a@low"}},
+		{effort: "high", want: []string{"test/b@high", "other/c@", "test/a@low"}},
+		{model: "test/b", want: []string{"test/b@high", "other/c@", "test/a@low"}}, // the same model keeps its effort
+		{model: "test/a", want: []string{"test/a@low", "test/b@high", "other/c@"}},
+		{model: "test/b", want: []string{"test/b@high", "test/a@low", "other/c@"}},
 	} {
 		var err error
 		if step.effort != "" {
@@ -104,6 +112,9 @@ func TestNativeSwitchesAreRemembered(t *testing.T) {
 	}
 	if got := memoryOf(t, f.dir); len(got) != 3 || got[0] != "test/b@high" {
 		t.Fatalf("a refused switch changed the memory: %v", got)
+	}
+	if snap := s.Snapshot(); snap.CurrentModel != "test/b" || effortOf(snap) != "high" {
+		t.Fatalf("a refused switch moved the session: %s at %q", snap.CurrentModel, effortOf(snap))
 	}
 
 	next := f.started(Options{})
@@ -352,7 +363,7 @@ func TestNativeTwoSessionsSwitchingAtOnce(t *testing.T) {
 	}
 	got := memoryOf(t, f.dir)
 	slices.Sort(got)
-	if want := []string{"other/c@", "test/b@high"}; !slices.Equal(got, want) {
+	if want := []string{"other/c@", "test/b@medium"}; !slices.Equal(got, want) {
 		t.Fatalf("after two sessions switched at once the memory is %v; want both %v", got, want)
 	}
 }

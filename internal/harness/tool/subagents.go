@@ -116,10 +116,13 @@ type Usage struct {
 // model table's provider id and alias and the provider's wire id, as the
 // transcript names a model — so the parent's step records it per model
 // (subagent_usage) and a child that ran on another model than its parent is
-// priced at its own model's rate (plan 026 §3.7).
+// priced at its own model's rate (plan 026 §3.7). LongContext is the part of
+// Usage its requests were billed at a long-context price tier for, each
+// request classified before the sum (plan 047 D10): the row's subset.
 type ChildUsage struct {
 	Provider, Model, WireModel string
 	Usage                      Usage
+	LongContext                Usage
 }
 
 // The scopes a Persona comes from. The first three are the adapter's sources

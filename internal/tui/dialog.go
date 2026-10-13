@@ -48,6 +48,8 @@ const (
 	dialogResume
 	// dialogConnect is /connect (connect_dialog.go, plan 031 §3.9).
 	dialogConnect
+	// dialogEffort is /effort's picker (effort_picker.go, plan 047 D4).
+	dialogEffort
 )
 
 // rect is the modal layer's box in screen cells: the outer rectangle, borders
@@ -134,6 +136,8 @@ func (m Model) dialogBody(inner, budget int) []string {
 		return m.resumeDialogBody(inner, budget)
 	case dialogConnect:
 		return m.connectDialogBody(inner, budget)
+	case dialogEffort:
+		return m.effortPickerBody(inner, budget)
 	}
 	return nil
 }
@@ -227,6 +231,16 @@ func dialogListWindow(n, sel, rows int) (top, shown int) {
 		top = n - shown
 	}
 	return max(top, 0), shown
+}
+
+// dialogListPlan is a picker's window onto a list of n rows with the cursor on
+// sel, and whether its footer survived, in a box of title + list + footer
+// budget rows tall: the list gives its rows up one at a time, and the footer
+// goes only once even one list row no longer fits. The theme picker and
+// /effort's take it.
+func dialogListPlan(n, sel, budget int) (top, shown int, footer bool) {
+	top, shown = dialogListWindow(n, sel, min(max(budget-2, 0), n))
+	return top, shown, budget >= 2
 }
 
 // dialogWrap is s word-wrapped to inner cells — a box's inner width, a hint

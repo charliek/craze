@@ -607,6 +607,25 @@ func (m *Model) foldedSettings() transcript.Settings {
 	return m.shared.Mirror().Settings
 }
 
+// configModel is the model whose catalog m.snap.Config is (plan 047 C2
+// review F1). The model overlay (requestModel) shows the model this client
+// asked for from the moment it asks, but the config stays the fold's — the
+// model the session was on — until the switch's own delta, which carries the
+// new model and its catalog together, is folded. So while a switch of this
+// client's is pending the two name different models, and the catalog is the
+// fold's model's, not the one the status row shows.
+func (m Model) configModel() string {
+	if m.ov.model.set && m.shared != nil {
+		return m.foldedSettings().Model
+	}
+	return m.snap.CurrentModel
+}
+
+// modelPending reports whether a model switch of this client's is shown and
+// not yet folded: m.snap.CurrentModel is the model asked for, and m.snap.Config
+// still another model's (configModel).
+func (m Model) modelPending() bool { return m.snap.CurrentModel != m.configModel() }
+
 // refuseModel is model request gen refused, or answered with nothing the
 // session could read: its own entry goes, and nothing is put back (SF-38).
 func (m *Model) refuseModel(gen int) {

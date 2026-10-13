@@ -747,6 +747,12 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		next := m.sessNativeDefault(msg)
 		sync := next.syncSessInput()
 		return next, sync, true
+	case sessNativeLevelsMsg:
+		// A native model's effort levels (plan 047 D5), the pick's
+		// like its default.
+		next := m.sessNativeLevels(msg)
+		sync := next.syncSessInput()
+		return next, sync, true
 	case sessActionMsg:
 		if !l.open || msg.gen != l.gen {
 			return m, nil, true

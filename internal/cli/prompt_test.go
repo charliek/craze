@@ -470,3 +470,55 @@ func TestPromptStartSettingsReachTheAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestPlainPromptPutsAParagraphBreakBetweenTextRuns (plan 047 D7): plain
+// output separates a text run that starts after a top-level non-todo tool, a
+// non-empty thought or a turn's done from the output so far by a blank line,
+// adding only the newlines missing; a child's events set no boundary and its
+// text is not written; --json is the events as they are. Negative control:
+// the cases fail if runBoundary is never consulted (no breaks) or an empty
+// chunk consumes the boundary.
+func TestPlainPromptPutsAParagraphBreakBetweenTextRuns(t *testing.T) {
+	text := func(s string) agent.Event { return agent.Event{Type: agent.EventText, Text: s} }
+	child := func(ev agent.Event) agent.Event { ev.Agent = "sub-1"; return ev }
+	tool := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "c1", ToolName: "Shell"}}
+	todo := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "c2", ToolName: "updateTodos"}}
+	thought := agent.Event{Type: agent.EventThought, Text: "hmm"}
+	done := agent.Event{Type: agent.EventDone}
+	for _, tc := range []struct {
+		name   string
+		events []agent.Event
+		want   string
+	}{
+		{"nothing before the first text", []agent.Event{tool, text("a")}, "a"},
+		{"a tool between texts", []agent.Event{text("a"), tool, text("b")}, "a\n\nb"},
+		{"a thought between texts", []agent.Event{text("a"), thought, text("b")}, "a\n\nb"},
+		{"a turn boundary", []agent.Event{text("a"), done, text("b")}, "a\n\nb"},
+		{"no boundary, no break", []agent.Event{text("a"), text("b")}, "ab"},
+		{"one trailing newline", []agent.Event{text("a\n"), tool, text("b")}, "a\n\nb"},
+		{"two trailing newlines", []agent.Event{text("a\n\n"), tool, text("b")}, "a\n\nb"},
+		{"a chunk starting with a newline", []agent.Event{text("a"), tool, text("\nb")}, "a\n\nb"},
+		{"a chunk starting with two", []agent.Event{text("a"), tool, text("\n\nb")}, "a\n\nb"},
+		{"one trailing and a leading newline", []agent.Event{text("a\n"), tool, text("\nb")}, "a\n\nb"},
+		{"an empty chunk keeps the boundary", []agent.Event{text("a"), tool, text(""), text("b")}, "a\n\nb"},
+		{"empty chunks at the start", []agent.Event{tool, text(""), text("a")}, "a"},
+		{"an empty thought is no boundary", []agent.Event{text("a"), {Type: agent.EventThought}, text("b")}, "ab"},
+		{"a todo tool is no boundary", []agent.Event{text("a"), todo, text("b")}, "ab"},
+		{"a child's events set none", []agent.Event{text("a"), child(tool), child(thought), child(done), text("b")}, "ab"},
+		{"a child's text is not written", []agent.Event{text("a"), tool, child(text("zz")), text("b")}, "a\n\nb"},
+		{"several boundaries, one break", []agent.Event{text("a"), tool, thought, done, text("b")}, "a\n\nb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			o := &promptOpts{stdout: &out}
+			for _, ev := range tc.events {
+				if err := o.writeEvent(ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out.String() != tc.want {
+				t.Fatalf("output %q; want %q", out.String(), tc.want)
+			}
+		})
+	}
+}

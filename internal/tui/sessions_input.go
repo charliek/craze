@@ -218,11 +218,14 @@ func (m *Model) syncSessInput() tea.Cmd {
 	if !in.on {
 		return nil
 	}
+	// The levels /effort offers for the native model new sessions start on,
+	// read where nothing states them yet (plan 047 D5).
+	levels := m.askNativeLevels()
 	if in.dispatching != 0 {
 		// Starting: the input is not edited, and no popup opens over it
 		// until the dispatch answers (dispatch.go).
 		in.closePopups()
-		return nil
+		return levels
 	}
 	v := in.ti.Value()
 	lead, hasLead := sessLeadToken(v)
@@ -242,7 +245,7 @@ func (m *Model) syncSessInput() tea.Cmd {
 	in.at.setSource(m.sessAtSource())
 	at := in.at.sync(v, cur, env)
 	in.cmd.setSource(m.sessCmdSourceNow())
-	return tea.Batch(at, in.cmd.sync(v, cur, env))
+	return tea.Batch(levels, at, in.cmd.sync(v, cur, env))
 }
 
 // sessStatDir is a path token's directory, if it names one that is there.

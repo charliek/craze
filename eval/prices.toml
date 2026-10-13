@@ -3,6 +3,13 @@
 #
 # input / cached_input / output are the LEDGER prices: conservative, and what counts
 # against the budget cap. list_* are the published prices, reported beside them.
+# cache_write (optional, default 0) is a cache write's price: the Messages API's
+# cache_creation_input_tokens (Anthropic's 5-minute write), the only provider that
+# reports one. long_context_above with a [models."<id>".long_context] table (input,
+# cached_input, cache_write and output, all required; list_* default to them) is a
+# long-context tier: a request whose prompt -- uncached input, cache reads and cache
+# writes together -- is over the threshold pays the tier's rates for every token of it;
+# exactly the threshold is base (craze plan 047 D10).
 # zero_rated models (the Z.AI coding plan, a flat subscription) cost $0 against the
 # cap; their list_* are a list-equivalent (Fireworks GLM 5.3) that is reported only.
 # prior_run_cost is the pinned per-run estimate `crazeeval run` uses for a model with
@@ -30,6 +37,26 @@ list_cached_input = 0.10
 list_output = 0.20
 prior_run_cost = 0.08
 source = "mindstudio.ai, eesel.ai (contributor tier)"
+
+# prior_run_cost below (Wonder and the Claude models) is contributor's median craze run,
+# $0.014 (eval/results/2026-09-plan029/summary.json: 122013 input and 5818.5 output
+# tokens), scaled by the per-token price ratio at that run's token mix, every input token
+# at the dearer of the input and cache-write rates (no cache-read discount):
+#   ratio = (122013 x in + 5818.5 x out) / (122013 x 0.10 + 5818.5 x 0.20)
+#         = (122013 x in + 5818.5 x out) / 13365
+# rounded up to the cent.
+
+[models."muse-wonder-1.0"]
+# craze's catalog price (Meta's Model API, craze plan 045, 2026-10-12). Wonder:
+# (122013 x 4.00 + 5818.5 x 20.0) / 13365 = 604422 / 13365 = 45.22; 0.014 x 45.22 = 0.633.
+input = 4.0
+cached_input = 0.2
+output = 20.0
+list_input = 4.0
+list_cached_input = 0.2
+list_output = 20.0
+prior_run_cost = 0.64
+source = "craze catalog.toml (Meta Model API pricing, plan 045, 2026-10-12)"
 
 [models."glm-5.3"]
 zero_rated = true
@@ -73,3 +100,55 @@ list_cached_input = 0.006
 list_output = 1.20
 prior_run_cost = 0.35
 source = "docs.fireworks.ai/serverless/pricing"
+
+# Anthropic (craze catalog.toml, Anthropic's own prices, platform.claude.com pricing,
+# 2026-10-11; Haiku's tier re-checked 2026-10-13): cached_input is the cache hit,
+# cache_write the 5-minute cache write -- the only TTL craze asks for. A 1-hour write
+# (2x input) would be priced here as a 5-minute one: see RUNBOOK §3.
+
+[models."claude-opus-5-5"]
+# (122013 x 5.00 + 5818.5 x 20.0) / 13365 = 726435 / 13365 = 54.35; 0.014 x 54.35 = 0.761.
+input = 4.0
+cached_input = 0.2
+cache_write = 5.0
+output = 20.0
+list_input = 4.0
+list_cached_input = 0.2
+list_cache_write = 5.0
+list_output = 20.0
+prior_run_cost = 0.77
+source = "craze catalog.toml (platform.claude.com pricing, 2026-10-11)"
+
+[models."claude-sonnet-5-5"]
+# (122013 x 2.50 + 5818.5 x 10.0) / 13365 = 363217.5 / 13365 = 27.18; 0.014 x 27.18 = 0.380.
+input = 2.0
+cached_input = 0.1
+cache_write = 2.5
+output = 10.0
+list_input = 2.0
+list_cached_input = 0.1
+list_cache_write = 2.5
+list_output = 10.0
+prior_run_cost = 0.39
+source = "craze catalog.toml (platform.claude.com pricing, 2026-10-11)"
+
+[models."claude-haiku-5-5"]
+# (122013 x 0.125 + 5818.5 x 0.50) / 13365 = 18160.9 / 13365 = 1.359; 0.014 x 1.359 = 0.019.
+# That run's requests average ~12k prompt tokens, well under the tier's threshold.
+input = 0.1
+cached_input = 0.01
+cache_write = 0.125
+output = 0.5
+list_input = 0.1
+list_cached_input = 0.01
+list_cache_write = 0.125
+list_output = 0.5
+long_context_above = 100000
+prior_run_cost = 0.02
+source = "craze catalog.toml (platform.claude.com pricing, 2026-10-11; long context re-checked 2026-10-13)"
+
+[models."claude-haiku-5-5".long_context]
+input = 0.5
+cached_input = 0.05
+cache_write = 0.625
+output = 2.5

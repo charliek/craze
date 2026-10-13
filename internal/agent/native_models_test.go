@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -934,7 +935,8 @@ func TestNativeLeavingACarryOffersTheOtherAccountsModel(t *testing.T) {
 //     delta keeps it, r9 #1): after the switch away it is no longer offered,
 //     and a switch back is refused;
 //   - a switch away while a turn holds the claim: the reload is owed, the
-//     list unchanged mid-turn, and taken up at the turn's end — read
+//     list mid-turn only the switch's own (ranked again, the carry's levels
+//     still test/a's: plan 047 D2), and taken up at the turn's end — read
 //     whatever the stamps say — after its EventDone.
 //
 // Negative controls: a switch away that does not read the files again keeps
@@ -1016,15 +1018,23 @@ func TestNativeLeavingACarryOffersTheFilesEntry(t *testing.T) {
 		if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
 			t.Fatalf("a switch away mid-turn: %v", err)
 		}
-		if snap := s.Snapshot(); snap.CatalogRevision != rev {
-			t.Fatalf("the switch away mid-turn published revision %d (was %d); want the reload owed to the turn's end", snap.CatalogRevision, rev)
+		// The switch's own delta ranks the list again (plan 047 D2), one
+		// revision on; the files' reading it owes waits for the turn's end, so
+		// test/a's row still states the carry's levels, not the files' max.
+		snap := s.Snapshot()
+		if snap.CatalogRevision != rev+1 || !slices.Equal(rowEfforts(t, snap.Models, "test/a"), []string{"low", "high"}) {
+			t.Fatalf("mid-turn the list is at revision %d (was %d), test/a's levels %v; want the switch's own list, the carry's low, high",
+				snap.CatalogRevision, rev, rowEfforts(t, snap.Models, "test/a"))
 		}
+		rev = snap.CatalogRevision
+		_ = deltaSettled(t, s)
 		close(h.release)
 		if o := await(t, out, "the turn"); o.err != nil {
 			t.Fatalf("the turn: %v", o.err)
 		}
-		if snap := s.Snapshot(); snap.CatalogRevision <= rev {
-			t.Fatalf("after the turn the list is at revision %d; want the owed reload's, past %d", snap.CatalogRevision, rev)
+		if snap := s.Snapshot(); snap.CatalogRevision <= rev || !slices.Equal(rowEfforts(t, snap.Models, "test/a"), []string{"max"}) {
+			t.Fatalf("after the turn the list is at revision %d, test/a's levels %v; want the owed reload's, past %d, the files' max",
+				snap.CatalogRevision, rowEfforts(t, snap.Models, "test/a"), rev)
 		}
 		evs := deltaSettled(t, s)
 		done, cat := eventIndex(evs, func(ev Event) bool { return ev.Type == EventDone }), eventIndex(evs, hasCatalog)
@@ -1043,11 +1053,13 @@ func TestNativeLeavingACarryOffersTheFilesEntry(t *testing.T) {
 // TestNativeLeavingACarryThatShadowsNothingReadsNothing (plan 034 C4r4): a
 // carry that is the files' own entry — the running model's, carried by a
 // refresh that took up a key saved for another provider — stood over
-// nothing, so a switch away from it reads no file and publishes no list: the
-// switch's delta is the model's and its options alone. The control: the
-// refresh did carry it (a reload published). Negative control: a switch
-// away that reads the files again on leaving any carry reaches the reload's
-// "stamped" stage and publishes a catalog.
+// nothing, so a switch away from it reads no file and publishes no reload's
+// list: the switch's delta is the model's, its options and the list it
+// already offered, ranked again (plan 047 D2) — the same models, one
+// revision on, and nothing after it. The control: the refresh did carry it
+// (a reload published). Negative control: a switch away that reads the files
+// again on leaving any carry reaches the reload's "stamped" stage and
+// publishes a second catalog.
 func TestNativeLeavingACarryThatShadowsNothingReadsNothing(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -1071,12 +1083,27 @@ func TestNativeLeavingACarryThatShadowsNothingReadsNothing(t *testing.T) {
 	if read.Load() {
 		t.Fatal("the switch away from a carry that shadowed nothing read the files again")
 	}
-	if snap := s.Snapshot(); snap.CatalogRevision != rev {
-		t.Fatalf("the list moved to revision %d (was %d); want it as it was", snap.CatalogRevision, rev)
+	snap := s.Snapshot()
+	if snap.CatalogRevision != rev+1 {
+		t.Fatalf("the list moved to revision %d (was %d); want the switch's own, one on", snap.CatalogRevision, rev)
 	}
-	if cats := catalogsOf(deltaSettled(t, s)); len(cats) != 0 {
-		t.Fatalf("the switch published %+v; want no catalog", cats)
+	cats := catalogsOf(deltaSettled(t, s))
+	if len(cats) != 1 || cats[0].Revision != rev+1 || !slices.Equal(offeredIDs(cats[0].Models), offeredIDs(snap.Models)) ||
+		cats[0].Models[0].ID != "nokey/d" || cats[0].Models[0].Recent != 1 {
+		t.Fatalf("the switch published %+v; want one catalog, the list it offered ranked again with nokey/d first", cats)
 	}
+}
+
+// rowEfforts is the levels models' row for id states (plan 047 D2).
+func rowEfforts(t *testing.T, models []ModelInfo, id string) []string {
+	t.Helper()
+	for _, m := range models {
+		if m.ID == id {
+			return m.Efforts
+		}
+	}
+	t.Fatalf("%s is not offered: %v", id, offeredIDs(models))
+	return nil
 }
 
 // TestNativeAFailedReadOnLeavingACarryStaysOwed (A20, A24; plan 034 C4r5,
@@ -1528,13 +1555,19 @@ func TestNativeAWakesCatalogLandsOutsideItsBracket(t *testing.T) {
 // ellipsis; a model whose id is over catalogIDMax left off (one at it kept);
 // the list to its first catalogModelsMax models, the running model kept in
 // the last place when its own is past the cut — and counts each, leaving
-// the list it was handed as it was. Its worst case — every id and name at
-// its bound in characters JSON writes as six bytes — encodes to about 1.2
-// MiB. Negative controls: a bound that does not cut names, keeps an over-long
-// id, does not cap the list or lets the cap take the running model fails it.
+// the list it was handed as it was. A model whose effort facts break their
+// bounds (plan 047 P6: more than modeltable.MaxEfforts levels, a level, a
+// default or a switch effort over modeltable.MaxEffortLen bytes or not one
+// printable line) is offered without them, and counted; one at the bounds
+// keeps them. Its worst case — every id and name at its bound in
+// characters JSON writes as six bytes, every effort fact in the ones it
+// writes as two — encodes to about 1.5 MiB, under the 4 MiB default snapshot
+// budget. Negative controls: a bound that does not
+// cut names, keeps an over-long id, does not cap the list, lets the cap take
+// the running model or keeps facts past their bounds fails it.
 func TestTheCatalogIsHeldToItsBounds(t *testing.T) {
 	small := []ModelInfo{{ID: "a", Name: "A", Recent: 1}, {ID: "b", Name: "B"}}
-	if got, cut := boundCatalog(small, "b"); !slices.Equal(got, small) || cut != (catalogCut{}) {
+	if got, cut := boundCatalog(small, "b"); !EqualModels(got, small) || cut != (catalogCut{}) {
 		t.Fatalf("control: a list within its bounds came back %+v, cut %+v", got, cut)
 	}
 
@@ -1547,7 +1580,7 @@ func TestTheCatalogIsHeldToItsBounds(t *testing.T) {
 	infos = append(infos, ModelInfo{ID: "running", Name: "Running"})
 	handed := slices.Clone(infos)
 	got, cut := boundCatalog(infos, "running")
-	if !slices.Equal(infos, handed) {
+	if !EqualModels(infos, handed) {
 		t.Fatal("boundCatalog changed the list it was handed")
 	}
 	if want := (catalogCut{names: 1, ids: 1, over: 603 - catalogModelsMax}); cut != want {
@@ -1572,18 +1605,81 @@ func TestTheCatalogIsHeldToItsBounds(t *testing.T) {
 		t.Fatalf("the last row is %q; want the running model, kept past the cut", last.ID)
 	}
 
+	level := strings.Repeat("<", modeltable.MaxEffortLen)
+	levels := slices.Repeat([]string{level}, modeltable.MaxEfforts)
+	for i := range levels {
+		levels[i] = level[:len(level)-1] + string(rune('a'+i)) // distinct, as a table's are
+	}
+	over := strings.Repeat("x", modeltable.MaxEffortLen+1)
+	facts := []ModelInfo{
+		{ID: "at-bounds", Name: "At", Efforts: levels, DefaultEffort: levels[0], SwitchEffort: levels[1]},
+		{ID: "too-many", Name: "Many", Efforts: append(slices.Clone(levels), "one-more"), DefaultEffort: "one-more"},
+		{ID: "long-level", Name: "Long", Efforts: []string{"low", over}, DefaultEffort: "low"},
+		{ID: "long-switch", Name: "Switch", Efforts: []string{"low"}, SwitchEffort: over},
+		{ID: "two-lines", Name: "Lines", Efforts: []string{"lo\nw"}},
+		{ID: "no-facts", Name: "None"},
+	}
+	handedFacts := CloneModels(facts)
+	got, cut = boundCatalog(facts, "")
+	if !EqualModels(facts, handedFacts) {
+		t.Fatal("boundCatalog changed the facts of the list it was handed")
+	}
+	if cut != (catalogCut{efforts: 4}) || len(got) != len(facts) {
+		t.Fatalf("the facts' cut is %+v over %d models; want 4 models offered without their facts, all 6 offered", cut, len(got))
+	}
+	if !EqualModels(got[:1], facts[:1]) || !EqualModels(got[5:], facts[5:]) {
+		t.Fatalf("facts at their bounds were cut: %+v", got)
+	}
+	for _, m := range got[1:5] {
+		if m.Efforts != nil || m.DefaultEffort != "" || m.SwitchEffort != "" {
+			t.Fatalf("%s is offered with facts past their bounds: %+v", m.ID, m)
+		}
+	}
+
+	// The worst case, as the codec writes it (no HTML escaping), every value
+	// exactly at its bound (C1 review F4): an id of catalogIDMax bytes and a
+	// name of catalogNameMax bytes — kept whole, not cut — of a control
+	// character, which JSON writes as six bytes (\u0001; the bounds hold an
+	// id to its bytes alone, and a name is sanitized only before it gets
+	// here); every effort fact a level of exactly MaxEffortLen quotes and
+	// backslashes, the most a printable level can grow (two bytes each: a
+	// level is valid UTF-8 with no control, separator or format character,
+	// so nothing in it escapes to more); the largest rank and revision.
+	escaped := func(i int) string {
+		b := []byte(strings.Repeat(`"`, modeltable.MaxEffortLen))
+		for j := range 3 {
+			if i&(1<<j) != 0 {
+				b[len(b)-1-j] = '\\'
+			}
+		}
+		return string(b)
+	}
+	worstLevels := make([]string, modeltable.MaxEfforts)
+	for i := range worstLevels {
+		worstLevels[i] = escaped(i)
+	}
 	worst := make([]ModelInfo, catalogModelsMax+10)
 	for i := range worst {
-		worst[i] = ModelInfo{ID: strings.Repeat("<", catalogIDMax), Name: strings.Repeat("<", catalogNameMax+1), Recent: i + 1}
+		worst[i] = ModelInfo{ID: strings.Repeat("\x01", catalogIDMax), Name: strings.Repeat("\x01", catalogNameMax), Recent: math.MaxInt,
+			Efforts: slices.Clone(worstLevels), DefaultEffort: worstLevels[0], SwitchEffort: worstLevels[modeltable.MaxEfforts-1]}
 	}
-	bounded, _ := boundCatalog(worst, "")
-	body, err := EncodeCatalogState(&CatalogState{Models: bounded, Revision: 1 << 40})
+	bounded, cut := boundCatalog(worst, "")
+	if cut.efforts != 0 || cut.names != 0 || len(bounded) != catalogModelsMax || len(bounded[0].Efforts) != modeltable.MaxEfforts ||
+		len(bounded[0].Name) != catalogNameMax || len(bounded[0].ID) != catalogIDMax {
+		t.Fatalf("control: the worst case's values, at their bounds, were cut (%+v)", cut)
+	}
+	body, err := EncodeCatalogState(&CatalogState{Models: bounded, Revision: math.MaxUint64})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(body); n > 5<<18 {
-		t.Fatalf("the worst bounded list encodes to %d bytes, over 1.25 MiB", n)
+	// About 3 KiB a model: the id 256 × 6 and the name 128 × 6, eight levels
+	// and two more efforts of 32 × 2 and their quotes, a 19-digit rank, and
+	// the keys — about 1.5 MiB in all.
+	n := len(body)
+	if n > 7<<18 || n >= 4<<20 {
+		t.Fatalf("the worst bounded list encodes to %d bytes, over 1.75 MiB (the default snapshot budget is 4 MiB)", n)
 	}
+	t.Logf("the worst bounded list encodes to %d bytes", n)
 }
 
 // TestNativeCatalogBoundsAreSaidOnce (plan 034 C5r, r12 #6): a model whose

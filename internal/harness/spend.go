@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"fmt"
 	"slices"
 
 	"charm.land/fantasy"
@@ -39,6 +40,33 @@ import (
 // Every usage is priced by its own model's (provider, wire model), whatever
 // alias it names (modeltable.Table.Price, R2-7); one with no price marks the
 // sum Unpriced and adds its tokens and no cost.
+//
+// A price can have a long-context tier (plan 047 D10): a request whose prompt
+// — its input, cache reads and cache writes — is above the price's threshold
+// is priced at the tier's rates, every token of it, and one at the threshold
+// or below at the base rates. A tier is per request, so each request is
+// classified when its usage arrives, before anything sums it (longOf), by
+// the price that usage will be charged at:
+//
+//   - an assistant entry is one request, classified when the spend prices it,
+//     by the price it records for the entry (prices) — nothing is persisted;
+//   - a usage that sums requests — a subagent_usage row, a compaction entry,
+//     a background child's carried usage, the unsaved usage of a step's rows
+//     or of a compaction — carries its long-context subset beside it: the sum
+//     of the usage of its long requests, classified one by one where they ran
+//     (a child's observer, a compaction's attempts), persisted on a row
+//     (store.ModelUsage.LongContext) and a compaction entry
+//     (store.Compaction.LongContext), summed and subtracted with the totals.
+//
+// Such a usage is priced as two: its subset at the tier's rates and the rest
+// at the base rates, each token counted once. A subset that is not inside its
+// usage — a field above the usage's, or one below 0 — is not trusted: the
+// whole usage is priced at the base rates, and the first report that counts a
+// persisted one says so (DiagLongContextMalformed). A transcript written
+// before the subset existed has none, and prices as it always did. A resumed
+// session prices the subsets its transcript holds with the table it loaded,
+// as it prices everything else (Replay): the same as the live session for as
+// long as the configuration is the same.
 //
 // A usage is priced at the time of use, and keeps that price (plan 034 §3.4,
 // A23; C4r, r9 #5): the first time a Spent counts it — the one after the
@@ -82,6 +110,8 @@ import (
 type unsavedUsage struct {
 	turn  int
 	usage store.Usage
+	// long is the part of usage priced at the long-context tier (above).
+	long store.Usage
 	// price is m's rates as the session's table had them when the usage was
 	// noted (the time of use, above).
 	price priced
@@ -89,15 +119,24 @@ type unsavedUsage struct {
 
 // noteUnsaved records usage the session was billed for in turn, on m, that no
 // entry holds, so its spend still counts it, priced now (the time of use). A
-// usage of nothing records nothing.
-func (s *Session) noteUnsaved(turn int, m store.Model, u store.Usage) {
+// usage of nothing records nothing. long is u's long-context subset when u
+// sums requests that were classified where they ran (a sub-agent row, a
+// compaction's attempts), and nil when u is one request's, classified here by
+// the price it is noted with.
+func (s *Session) noteUnsaved(turn int, m store.Model, u store.Usage, long *store.Usage) {
 	if u == (store.Usage{}) {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := pricer{table: s.table, opened: s.openTable}
-	s.unsaved = append(s.unsaved, unsavedUsage{turn: turn, usage: u, price: p.lookup(m)})
+	x := unsavedUsage{turn: turn, usage: u, price: p.lookup(m)}
+	if long != nil {
+		x.long = *long
+	} else {
+		x.long = x.price.longOf(u)
+	}
+	s.unsaved = append(s.unsaved, x)
 }
 
 // usageKey names one priced usage (Session.prices): the entry that holds it
@@ -119,9 +158,11 @@ type rowKey struct {
 }
 
 // carriedUsage is one background sub-agent's usage as its result was
-// delivered, and the price its child was opened under (bgResult.price).
+// delivered, its long-context subset (classified by its observer, at price),
+// and the price its child was opened under (bgResult.price).
 type carriedUsage struct {
 	usage store.Usage
+	long  store.Usage
 	price priced
 }
 
@@ -158,17 +199,28 @@ func (s *Session) priceAt(table *modeltable.Table, m store.Model) priced {
 	return p.lookup(m)
 }
 
+// priceNow is m's identity's rates as a usage of it is priced now, under the
+// session's current table: what a compaction classifies its attempts by.
+func (s *Session) priceNow(m store.Model) priced {
+	s.mu.Lock()
+	table := s.table
+	s.mu.Unlock()
+	return s.priceAt(table, m)
+}
+
 // stepSpent is the Spent after turn's step d, which ran on m: the step
 // first noted as observed and unsaved when no append wrote it — its usage on
 // its model, and each of its sub-agents' rows on the row's model (the rows
 // StepDone reports whether or not the step was saved, plan 026 §3.7) — then
-// the session's spend as it now is. The turn calls it under its lock (the
-// turn's spent), after the step's StepDone.
-func (s *Session) stepSpent(turn int, m model, d StepDone) Spent {
+// the session's spend as it now is, and the diags of what it distrusted
+// (spent). The turn calls it under its lock (the turn's spent), after the
+// step's StepDone. The step's own usage is one request, classified as it is
+// noted; each row carries its subset.
+func (s *Session) stepSpent(turn int, m model, d StepDone) (Spent, []Diag) {
 	if !d.Saved {
-		s.noteUnsaved(turn, store.Model{Provider: d.Provider, Alias: d.Model, WireModel: d.WireModel}, d.Usage)
+		s.noteUnsaved(turn, store.Model{Provider: d.Provider, Alias: d.Model, WireModel: d.WireModel}, d.Usage, nil)
 		for _, row := range d.SubagentUsage {
-			s.noteUnsaved(turn, rowModel(row), row.Usage)
+			s.noteUnsaved(turn, rowModel(row), row.Usage, &row.LongContext)
 		}
 	}
 	return s.spent(turn, m.r)
@@ -179,8 +231,10 @@ func (s *Session) stepSpent(turn int, m model, d StepDone) Spent {
 // size (§3.7) and that model's window. Its Seq is taken first, before
 // anything is read (plan 040 §3.4; nextSeqLocked): turn and next are the
 // caller's own — a turn's, or a Replay's read before it — so nothing the
-// report is built from was read before it.
-func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
+// report is built from was read before it. The diags report each usage on
+// the path whose long-context subset this report was the first to distrust
+// (spend); the caller emits them after the Spent.
+func (s *Session) spent(turn int, next modeltable.Resolved) (Spent, []Diag) {
 	s.mu.Lock()
 	seq := s.nextSeqLocked()
 	s.mu.Unlock()
@@ -189,10 +243,10 @@ func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
 
 // spentAt is spent with its Seq already taken, by a caller that read turn and
 // next in the same section of mu that took it (idleSpent).
-func (s *Session) spentAt(seq uint64, turn int, next modeltable.Resolved) Spent {
+func (s *Session) spentAt(seq uint64, turn int, next modeltable.Resolved) (Spent, []Diag) {
 	tokens, _ := s.contextTokensOn(next)
-	inTurn, session := s.spend(turn)
-	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session, Seq: seq}
+	inTurn, session, diags := s.spend(turn)
+	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session, Seq: seq}, diags
 }
 
 // nextSeqLocked numbers a report about to be built (Spent.Seq) and settles
@@ -253,7 +307,12 @@ func (s *Session) idleSpent(owed bool) (Spent, bool) {
 	if seam := s.idleSpentRead; seam != nil {
 		seam()
 	}
-	return s.spentAt(seq, turns, next), true
+	sp, diags := s.spentAt(seq, turns, next)
+	// No turn's sink is there to take a diag: the session's own is (Options.Sink).
+	for _, d := range diags {
+		s.subs.emit(d)
+	}
+	return sp, true
 }
 
 // spend is turn's spend and the session's, by the rule above: every usage on
@@ -261,14 +320,21 @@ func (s *Session) idleSpent(owed bool) (Spent, bool) {
 // each at its price at the time of use — the one recorded when it was first
 // counted, or, for a usage counted now for the first time, the session's
 // table's (the open-time table's for an identity it does not price),
-// recorded here. It takes the store's lock and then the session's, one at a
-// time: the walk holds neither, and under the session's only the prices not
-// yet recorded are read, a few identities per call.
-func (s *Session) spend(turn int) (inTurn, session Spend) {
+// recorded here — its long-context subset at the price's tier rates. It
+// takes the store's lock and then the session's, one at a time: the walk
+// holds neither, and under the session's only the prices not yet recorded
+// are read, a few identities per call. diags are the usages on the path
+// whose subset this call was the first to find malformed (distrusted).
+func (s *Session) spend(turn int) (inTurn, session Spend, diags []Diag) {
 	type use struct {
-		key    usageKey
-		row    *rowKey // the subagent_usage row's, nil for an entry's own usage
-		usage  store.Usage
+		key   usageKey
+		where rowKey // the usage's entry and model, as a row would name it
+		row   bool   // a subagent_usage row's, not an entry's own usage
+		usage store.Usage
+		// long is the persisted long-context subset of a usage that sums
+		// requests (a row, a compaction); nil for an assistant entry's, one
+		// request, classified below by its recorded price.
+		long   *store.Usage
 		inTurn bool
 	}
 	tr := s.store.Transcript()
@@ -278,13 +344,27 @@ func (s *Session) spend(turn int) (inTurn, session Spend) {
 	for i := range path {
 		e := &path[i]
 		turns.read(e)
-		entryUsage(e, func(m store.Model, u store.Usage, row bool) {
-			x := use{key: usageKey{entry: e.ID, provider: m.Provider, wireModel: m.WireModel}, usage: u, inTurn: turns.turn == turn}
-			if row {
-				x.row = &rowKey{entry: e.ID, provider: m.Provider, alias: m.Alias, wireModel: m.WireModel}
+		entryUsage(e, func(m store.Model, u store.Usage, long *store.Usage, row bool) {
+			x := use{
+				key:   usageKey{entry: e.ID, provider: m.Provider, wireModel: m.WireModel},
+				where: rowKey{entry: e.ID, provider: m.Provider, alias: m.Alias, wireModel: m.WireModel},
+				row:   row, usage: u, inTurn: turns.turn == turn,
+			}
+			if long != nil {
+				l := *long // a copy: the walk keeps nothing of the transcript's
+				x.long = &l
 			}
 			uses = append(uses, x)
 		})
+	}
+
+	// A usage whose subset is malformed is priced at base (above); each
+	// persisted one is reported once, by the first call that meets it.
+	// An empty subset is never malformed: a row or an entry with no long
+	// request, or written before subsets existed, prices as it always did.
+	malformed := make([]bool, len(uses))
+	for i, u := range uses {
+		malformed[i] = u.long != nil && *u.long != (store.Usage{}) && !within(u.usage, *u.long)
 	}
 
 	s.mu.Lock()
@@ -301,78 +381,155 @@ func (s *Session) spend(turn int) (inTurn, session Spend) {
 			s.prices[u.key] = pr
 		}
 		prices[i] = pr
-		if u.row != nil {
-			carried[i] = slices.Clone(s.carried[*u.row])
+		if u.row {
+			carried[i] = slices.Clone(s.carried[u.where])
+		}
+		if malformed[i] && !s.distrusted[u.where] {
+			if s.distrusted == nil {
+				s.distrusted = make(map[rowKey]bool)
+			}
+			s.distrusted[u.where] = true
+			diags = append(diags, malformedDiag(u.where, u.row, u.usage, *u.long))
 		}
 	}
 	unsaved := slices.Clone(s.unsaved)
 	s.mu.Unlock()
 
 	for i, u := range uses {
+		// The usage's long-context subset: its own when it carries one, an
+		// assistant entry's classified by its price, and none when it cannot
+		// be trusted — the whole usage at base, carried parts included.
+		var long store.Usage
+		switch {
+		case malformed[i]:
+		case u.long != nil:
+			long = *u.long
+		default:
+			long = prices[i].longOf(u.usage)
+		}
 		// A row's carried usages at their children's rates, and the rest of
 		// the row at its own price (above). Carried usages are the row's by
 		// construction (commit hands carry what the entry's rows were merged
-		// from); ones that would not fit inside it are not trusted, and the
-		// whole row is priced as one.
-		rest := u.usage
+		// from); ones that would not fit inside it — their totals, or their
+		// subsets inside its subset, leaving a rest whose subset is inside it
+		// — are not trusted, and the whole row is priced as one.
+		rest, restLong := u.usage, long
 		parts := carried[i]
-		if !holds(rest, parts) {
+		if !holds(rest, restLong, parts, malformed[i]) {
 			parts = nil
 		}
 		for _, c := range parts {
-			session.add(c.usage, c.price.rates, c.price.ok)
-			if u.inTurn {
-				inTurn.add(c.usage, c.price.rates, c.price.ok)
+			cl := c.long
+			if malformed[i] {
+				cl = store.Usage{}
 			}
-			rest = subUsage(rest, c.usage)
+			session.add(c.usage, cl, c.price)
+			if u.inTurn {
+				inTurn.add(c.usage, cl, c.price)
+			}
+			rest, restLong = subUsage(rest, c.usage), subUsage(restLong, cl)
 		}
-		session.add(rest, prices[i].rates, prices[i].ok)
+		session.add(rest, restLong, prices[i])
 		if u.inTurn {
-			inTurn.add(rest, prices[i].rates, prices[i].ok)
+			inTurn.add(rest, restLong, prices[i])
 		}
 	}
 	for _, u := range unsaved {
-		session.add(u.usage, u.price.rates, u.price.ok)
+		// Built in memory, inside its usage by construction: one that is
+		// not is priced at base all the same.
+		long := u.long
+		if !within(u.usage, long) {
+			long = store.Usage{}
+		}
+		session.add(u.usage, long, u.price)
 		if u.turn == turn {
-			inTurn.add(u.usage, u.price.rates, u.price.ok)
+			inTurn.add(u.usage, long, u.price)
 		}
 	}
-	return inTurn, session
+	return inTurn, session, diags
+}
+
+// malformedDiag is the DiagLongContextMalformed of the usage at where: an
+// entry's subagent_usage row, or a compaction entry's usage (row false).
+func malformedDiag(where rowKey, row bool, u, long store.Usage) Diag {
+	kind := "compaction"
+	if row {
+		kind = "subagent_usage"
+	}
+	return Diag{Kind: DiagLongContextMalformed, Fields: map[string]string{
+		"entry": where.entry, "usage_of": kind,
+		"provider": where.provider, "model": where.alias, "wire_model": where.wireModel,
+		"usage":        usageFields(u),
+		"long_context": usageFields(long),
+	}}
+}
+
+// usageFields is u as a diag field states a usage.
+func usageFields(u store.Usage) string {
+	return fmt.Sprintf("input=%d output=%d reasoning=%d cache_read=%d cache_creation=%d",
+		u.Input, u.Output, u.Reasoning, u.CacheRead, u.CacheCreation)
 }
 
 // entryUsage hands visit each usage e holds by the rule, with the model that
-// prices it and whether it is a subagent_usage row: an assistant entry's own
-// usage on its model; each subagent_usage row of a message entry of any role
-// on the row's model; a compaction entry's usage — every attempt's — on the
-// model its summarizer ran on. A tool entry carries no usage of its own (only
-// rows), a user entry none, and a change, a resume, a reminder or a newer
-// craze's entry nothing.
-func entryUsage(e *store.Entry, visit func(m store.Model, u store.Usage, row bool)) {
+// prices it, its long-context subset when it sums requests, and whether it is
+// a subagent_usage row: an assistant entry's own usage on its model, one
+// request with no subset (nil); each subagent_usage row of a message entry of
+// any role on the row's model, with the row's subset; a compaction entry's
+// usage — every attempt's — on the model its summarizer ran on, with the
+// entry's subset. A tool entry carries no usage of its own (only rows), a user
+// entry none, and a change, a resume, a reminder or a newer craze's entry
+// nothing.
+func entryUsage(e *store.Entry, visit func(m store.Model, u store.Usage, long *store.Usage, row bool)) {
 	switch e.Type {
 	case store.TypeCompaction:
 		if e.Usage != nil {
-			visit(e.Model, *e.Usage, false)
+			visit(e.Model, *e.Usage, &e.Compaction.LongContext, false)
 		}
 	case store.TypeMessage:
 		if e.Message.Role == fantasy.MessageRoleAssistant && e.Usage != nil {
-			visit(e.Model, *e.Usage, false)
+			visit(e.Model, *e.Usage, nil, false)
 		}
-		for _, row := range e.SubagentUsage {
-			visit(rowModel(row), row.Usage, true)
+		for i := range e.SubagentUsage {
+			row := &e.SubagentUsage[i]
+			visit(rowModel(*row), row.Usage, &row.LongContext, true)
 		}
 	}
 }
 
-// holds reports whether parts, summed, fit inside row field by field: what a
-// row's carried usages must do, being what it was merged from.
-func holds(row store.Usage, parts []carriedUsage) bool {
+// holds reports whether parts, summed, fit inside row and its subset rowLong
+// field by field — what a row's carried usages must do, being what it was
+// merged from — each part's subset inside its own usage, and leaving a rest
+// whose subset is inside it. With malformed set the subsets are not used
+// (spend prices the row at base), and only the totals must fit.
+func holds(row, rowLong store.Usage, parts []carriedUsage, malformed bool) bool {
+	if malformed {
+		rowLong = store.Usage{}
+	}
 	for _, c := range parts {
-		row = subUsage(row, c.usage)
-		if row.Input < 0 || row.Output < 0 || row.Reasoning < 0 || row.CacheRead < 0 || row.CacheCreation < 0 {
+		long := c.long
+		if malformed {
+			long = store.Usage{}
+		} else if !within(c.usage, long) {
+			return false
+		}
+		row, rowLong = subUsage(row, c.usage), subUsage(rowLong, long)
+		if negative(row) || negative(rowLong) {
 			return false
 		}
 	}
-	return true
+	return within(row, rowLong)
+}
+
+// within reports whether long is a subset of u: no field of it below 0 or
+// above u's. What every long-context subset must be to be trusted.
+func within(u, long store.Usage) bool {
+	return !negative(long) && long.Input <= u.Input && long.Output <= u.Output &&
+		long.Reasoning <= u.Reasoning && long.CacheRead <= u.CacheRead && long.CacheCreation <= u.CacheCreation
+}
+
+// negative reports whether any field of u is below 0.
+func negative(u store.Usage) bool {
+	return u.Input < 0 || u.Output < 0 || u.Reasoning < 0 || u.CacheRead < 0 || u.CacheCreation < 0
 }
 
 // subUsage is a less b, field by field.
@@ -409,6 +566,18 @@ type priced struct {
 	ok    bool
 }
 
+// longOf is the long-context subset of u, the usage of one request (plan 047
+// D10): all of it when p's tier prices its prompt — its input, cache reads
+// and cache writes, every token it sent — as long, and none otherwise, so a
+// prompt of exactly the threshold is base and one token more is long. With
+// no price, or no tier, nothing is long.
+func (p priced) longOf(u store.Usage) store.Usage {
+	if p.ok && p.rates.LongPrompt(u.Input+u.CacheRead+u.CacheCreation) {
+		return u
+	}
+	return store.Usage{}
+}
+
 // lookup is m's identity's rates, and whether the table prices it.
 func (p *pricer) lookup(m store.Model) priced {
 	key := [2]string{m.Provider, m.WireModel}
@@ -427,20 +596,28 @@ func (p *pricer) lookup(m store.Model) priced {
 	return pr
 }
 
-// add adds u to sp: its tokens always, and, when it is priced at r, its cost
+// add adds u to sp: its tokens always, once, and, when p prices it, its cost
 // — input, output (reasoning inside it, never priced again), cache reads and
-// cache writes each at its rate. A usage with no price and something in it
-// marks sp Unpriced.
-func (sp *Spend) add(u store.Usage, r modeltable.Rates, priced bool) {
+// cache writes each at its rate: long, u's long-context subset, at p's tier
+// rates, and the rest of u at its base rates (plan 047 D10). The caller hands
+// a subset inside u (within) or none. A usage with no price and something in
+// it marks sp Unpriced.
+func (sp *Spend) add(u, long store.Usage, p priced) {
 	sp.Input += u.Input
 	sp.Output += u.Output
 	sp.Reasoning += u.Reasoning
 	sp.CacheRead += u.CacheRead
 	sp.CacheCreation += u.CacheCreation
 	switch {
-	case priced:
-		sp.CostPicoUSD += u.Input*r.Input + u.Output*r.Output + u.CacheRead*r.CacheRead + u.CacheCreation*r.CacheWrite
+	case p.ok:
+		sp.CostPicoUSD += cost(subUsage(u, long), p.rates.Base()) + cost(long, p.rates.Long())
 	case u != (store.Usage{}):
 		sp.Unpriced = true
 	}
+}
+
+// cost is u at r: input, output (reasoning inside it), cache reads and cache
+// writes, each at its rate, in picodollars.
+func cost(u store.Usage, r modeltable.TierRates) int64 {
+	return u.Input*r.Input + u.Output*r.Output + u.CacheRead*r.CacheRead + u.CacheCreation*r.CacheWrite
 }

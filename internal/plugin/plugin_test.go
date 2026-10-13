@@ -22,7 +22,7 @@ import (
 const minCraze = "0.2.0"
 
 // wantAgents are the agents plan 041 §3.6 lists.
-var wantAgents = []string{"astra", "cursor", "delegate", "grok", "muse", "sol"}
+var wantAgents = []string{"astra", "cursor", "delegate", "grok", "muse", "sol", "wonder"}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()

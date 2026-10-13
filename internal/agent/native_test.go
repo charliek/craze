@@ -510,12 +510,17 @@ func ptr[T any](v T) *T { return &v }
 // a prompt gives it one. With no memory the models are in the table's name
 // order, which is the name as the table spells it: test/b's, which starts with
 // an escape before it is sanitized, sorts first (the dialog orders by what it
-// draws, agent.OrderModels).
+// draws, agent.OrderModels). Each states its effort facts (plan 047 D2):
+// with nothing remembered, a switch to it lands on its default.
 func TestNativeStart(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	snap := s.Snapshot()
-	want := []ModelInfo{{ID: "test/b", Name: "Model B"}, {ID: "test/a", Name: "Model A"}, {ID: "other/c", Name: "other/c"}}
+	want := []ModelInfo{
+		{ID: "test/b", Name: "Model B", Efforts: []string{"medium", "high"}, DefaultEffort: "medium", SwitchEffort: "medium"},
+		{ID: "test/a", Name: "Model A", Efforts: []string{"low", "high"}, DefaultEffort: "high", SwitchEffort: "high"},
+		{ID: "other/c", Name: "other/c"},
+	}
 	if !reflect.DeepEqual(snap.Models, want) {
 		t.Fatalf("Models = %+v, want %+v", snap.Models, want)
 	}
@@ -1341,9 +1346,11 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 	}
 	snap := s.Snapshot()
 	opt := EffortOption(snap)
-	if snap.CurrentModel != "test/b" || opt == nil || opt.Current != "high" ||
+	if snap.CurrentModel != "test/b" || opt == nil || opt.Current != "medium" ||
 		!reflect.DeepEqual(opt.SelectValues, []SelectValue{{Value: "medium", Name: "medium"}, {Value: "high", Name: "high"}}) {
-		// "high" is kept: test/b lists it too (plan 018 §3.7).
+		// test/b's default, medium: a switch lands on the remembered effort,
+		// else the default, and nothing is remembered (plan 047 D1) — not
+		// test/a's high, which test/b lists too.
 		t.Fatalf("after SetModel: current %q, effort %+v", snap.CurrentModel, opt)
 	}
 	meta := ofType(deltaSettled(t, s), EventMeta)

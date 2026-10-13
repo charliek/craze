@@ -394,6 +394,20 @@ func StoredValues(dir string) ([]string, error) {
 	return r.values(), nil
 }
 
+// StoredSubject is the account subject in dir's token file: the sign-in's
+// identity, without a secret. No file is no subject and no error; like
+// StoredValues it never refreshes a token, touches the network or the lock.
+func StoredSubject(dir string) (string, error) {
+	r, _, err := readRecord(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return r.Subject, nil
+}
+
 // MarkNoticeShown records that the one-time plan-usage notice was shown for
 // dir's registration (plan 033 §3.13). With no registration it does nothing.
 func MarkNoticeShown(ctx context.Context, dir string) error {

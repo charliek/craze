@@ -1,7 +1,85 @@
 # Upgrading
 
-Two sections: [since v0.1.0](#since-v010), the changes after the second
-release, and [from v0.0.1](#from-v001), the first release's.
+Three sections: [since v0.1.1](#since-v011), the changes after the third
+release; [since v0.1.0](#since-v010), the second release's; and [from
+v0.0.1](#from-v001), the first release's.
+
+## Since v0.1.1
+
+Nothing needs migrating.
+
+- **Plain `craze prompt` puts a blank line between text runs.** Text that
+  follows a tool call, a thought or the end of a turn (a `--follow-up`'s
+  reply, for one) used to run on from the text before it, as in
+  `…first reply…second reply`; it now starts a paragraph. A script that
+  split plain output on the old run-on must expect the break. `--json`
+  events, `--wait` messages and the exclusion of sub-agent text are unchanged.
+  See [craze prompt](../reference/cli.md#craze-prompt).
+- **A `craze:wonder` Claude Code preset** runs the native `muse-wonder-1.0`
+  at its default effort, for hard tasks. See [Claude
+  Code](claude-code.md#the-agents).
+
+- **A native `/model` switch no longer carries the effort over.** `/model X`
+  — typed, picked in the model dialog, or an attached client's switch — lands
+  on the effort you last used on X, else X's `default_effort`, where it used
+  to keep the effort you were on whenever X offered it: Muse Wonder at `max`,
+  then `/model anthropic/claude-opus-5-5`, now runs Opus at its own `medium`
+  rather than `max`. To keep a level across a switch, name it:
+  `/model anthropic/claude-opus-5-5 max`. Switching to the model you are on
+  keeps its effort, and ACP providers are unchanged. See [Effort on a
+  switch](../reference/tui.md#effort-on-a-switch).
+- **A native session's `/model` list is ranked again at every switch**, the
+  model switched to moving up at once rather than in the next session.
+- **For a client reading the session stream:** a native session's catalog
+  models carry `efforts`, `defaultEffort` and `switchEffort`, and its info
+  document says [`capabilities.effortFacts`](../reference/protocol.md#capabilities);
+  a switch or an effort change that changes them publishes the `catalog`
+  section in the same delta as its `model` and `config` sections. Nothing
+  else moved: a client that ignores the new members folds the same state.
+- **`muse-spark-1.3` offers `max`.** Its contributor tier stays at `minimal`
+  to `xhigh`.
+- **A `models.toml` model with more than 8 efforts, or one over 32 bytes or
+  not one printable line, no longer loads**; it names the entry and the key.
+- **`/effort` in a session.** A bare `/effort` opens a picker of the current
+  model's levels; `/effort <level>` sets one. It is listed after `/exit`, so
+  `/e` still selects `/exit`, and only where the current model has an effort
+  control: anywhere else an agent's or a plugin's own `/effort` is what runs,
+  as before. Like `/model`, it is refused while a turn runs. See
+  [Effort](../reference/tui.md#effort).
+- **The native model dialog's effort row follows the highlighted model**: its
+  levels, on the effort a switch to it would land on, and no row for a model
+  with no effort control. A switch from the dialog now sends the effort the
+  row showed for that model, so it lands where the box said even if another
+  craze process remembered another effort since. ACP providers' dialogs are
+  unchanged. See [Model dialog](../reference/tui.md#model-dialog).
+- **The session list's `/effort` offers real levels**: on native the chosen
+  model's (`default` alone for one with no effort control), on an ACP
+  provider `minimal` and `max` too; a value outside them is refused, and an
+  effort the newly chosen model does not offer is shown `(not offered)` on the
+  rule. See [Effort and fast mode](../reference/tui.md#effort-and-fast-mode).
+- **`/model <id> <effort>` matches the effort word as `--effort` does**: the
+  level's id exactly, then in any case, then its name — so a level the agent
+  calls `High` under another id is taken as `high` — where it compared the id
+  in any case alone. A word that names two levels is now refused as
+  `--effort` refuses it.
+- **For a client reading the session stream:** the slash catalog gains a
+  builtin `effort` row, `requires: "effort"` and `run.picker: "effort"`; a
+  client that does not know `requires: "effort"` hides it, as it hides any
+  row with a value it does not know. See [Slash
+  catalog](../reference/protocol.md#slash-catalog).
+- **Spend on long Haiku 5.5 prompts now prices Anthropic's higher tier.** A
+  request whose prompt — input, cache reads and cache writes — is over 100,000
+  tokens is priced at Haiku 5.5's long-context rates, five times the base
+  ones, where it read at the base rates and so read low. Each request is
+  priced on its own, a sub-agent's and a compaction's included. A
+  `models.toml` cost can set a tier of its own with `long_context_above` and a
+  `[models."<alias>".cost.long_context]` table, or turn Haiku's off with
+  `long_context_above = 0`. Transcripts gain an optional `long_context` beside
+  a sub-agent's usage row and a compaction's usage, which an older craze
+  ignores. In a session written before this, sub-agent rows and compactions
+  price as they did, while each of its own long Haiku 5.5 steps now reads at
+  the tier, so its spend can rise on a resume. See [Long-context
+  pricing](../reference/configuration.md#long-context-pricing).
 
 ## Since v0.1.0
 

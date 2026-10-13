@@ -328,6 +328,18 @@ type CatalogModel struct {
 	// on an older host's. A client lists the remembered models right after
 	// the current one, by rank.
 	Recent int `json:"recent,omitempty"`
+	// Efforts, DefaultEffort and SwitchEffort are the model's effort facts
+	// (plan 047 D2), stated where the session capability effortFacts is
+	// true (a native session): the levels it offers, in order — absent for
+	// a model with no effort control — its default effort, and the effort a
+	// switch to it lands on (the session's own last choice on it, else the
+	// model memory's, else the default). At most 8 levels, each at most 32
+	// bytes. Absent for every ACP provider's model and on an older host. A
+	// client reads the current model's effort from its effort option, never
+	// from this row.
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"defaultEffort,omitempty"`
+	SwitchEffort  string   `json:"switchEffort,omitempty"`
 }
 
 // CatalogMode is one mode a session.set of kind mode can name.
@@ -390,6 +402,15 @@ type CatalogMode struct {
 // is not craze's own (the fake host's by default, so no fixture from before it
 // moves), and a client then offers no `/` menu from the stream. True with no
 // section yet — a session still starting — is a catalog still to come.
+//
+// EffortFacts is the session's own too (plan 047 D2, P3): true where every
+// model of the session's catalog states its effort facts — catalogs.models
+// and the catalog section's models carry efforts, defaultEffort and
+// switchEffort, and a model with no effort control lists none — a native
+// session, detached or TUI-hosted. It is omitted when false, as slashCatalog
+// is: absent is an ACP session, an older host, or a session that is not
+// craze's own (the fake host's by default), and a client then shows only the
+// current model's levels, from its effort option, as before.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -412,6 +433,7 @@ type SessionCapabilities struct {
 	ModelsRefresh       bool `json:"modelsRefresh,omitempty"`
 	Aside               bool `json:"aside,omitempty"`
 	SlashCatalog        bool `json:"slashCatalog,omitempty"`
+	EffortFacts         bool `json:"effortFacts,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document

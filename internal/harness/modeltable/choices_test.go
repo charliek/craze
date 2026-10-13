@@ -26,12 +26,14 @@ func choiceAliases(cs []Choice) []string {
 // TestChoicesOffersConnectedProvidersOnly (Q4): with no memory and no current
 // model, the list is every model whose provider has a key and nothing of the
 // one that has none, by display name — here the alias, as none has a name —
-// with no rank; each Choice carries its provider and a display name.
+// with no rank; each Choice carries its provider and a display name, and its
+// effort facts (plan 047 D2): its levels, its default, and with nothing
+// remembered a switch effort that is the default.
 func TestChoicesOffersConnectedProvidersOnly(t *testing.T) {
 	got := recentTable().Choices(nil, fundedEnv("p", "q"), "")
 	want := []Choice{
-		{Alias: "p/default", Name: "p/default", Provider: "p"},
-		{Alias: "p/effort", Name: "p/effort", Provider: "p"},
+		{Alias: "p/default", Name: "p/default", Provider: "p", Efforts: []string{"low", "high"}, DefaultEffort: "low", SwitchEffort: "low"},
+		{Alias: "p/effort", Name: "p/effort", Provider: "p", Efforts: []string{"low", "medium", "xhigh"}, DefaultEffort: "medium", SwitchEffort: "medium"},
 		{Alias: "q/plain", Name: "q/plain", Provider: "q"},
 		{Alias: "q/twin-a", Name: "q/twin-a", Provider: "q"},
 		{Alias: "q/twin-b", Name: "q/twin-b", Provider: "q"},

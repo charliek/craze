@@ -1311,7 +1311,7 @@ var (
 		"tombstone", "started", "replaying", "replayFolded", "paintNow", "sel", "pressed", "clickPos", "clickAt",
 		"clicks", "copyNote",
 		"copyUntil", "cards", "cardMask", "cardMasking", "hiddenRetry", "snap", "queue",
-		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg",
+		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg", "edlg",
 		"helpTop", "applyGen", "themeSel", "themeNames", "themePrev", "slashSel", "slashTop", "slashKey",
 		"slashHideKey", "skills", "slashWasHosted", "pickingProvider", "pickingResume", "resumeCursor", "resumeWaiting",
 		"resumeErr", "providerCursor", "providerErr", "spawnWaiting", "spawnFrom", "todoPlanned", "todoDone",

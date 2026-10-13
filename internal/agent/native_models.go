@@ -88,8 +88,9 @@ import (
 // the list, in the switch's own delta (r9 #1). A switch away from a carry
 // that stood over another entry of the files' own (modeltable.Table.Shadowed:
 // another account's model under its alias, other efforts, no entry at all)
-// reloads, in the same modelsMu section, whatever the stamps say
-// (reloadLeft; plan 034 C4r4, r15 #3): nothing changed on disk — the files'
+// reloads, in the same modelsMu section, whatever the stamps say, ranking
+// the switch first though its write is still to come (reloadLeft; plan 034
+// C4r4, r15 #3; plan 047 C1 review F2): nothing changed on disk — the files'
 // entry was there all along, under the carry — so no stamp would ever take it
 // up, and the list would go on without it (or with the carry's) until some
 // other file moved. Under a turn's claim that reload is owed, as any is, and
@@ -250,11 +251,15 @@ func (s *nativeSession) reloadModels(reason reloadReason) ModelsStatus {
 		s.modelsMu.Lock()
 	}
 	defer s.modelsMu.Unlock()
-	return s.reloadLocked(reason)
+	return s.reloadLocked(reason, nil)
 }
 
-// reloadLocked is reloadModels with modelsMu held.
-func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
+// reloadLocked is reloadModels with modelsMu held. newest is the switch's
+// own confirmation for the one reload a switch makes in its own section
+// (reloadLeft, SetModel): the session's newest confirmation, whose write is
+// still to come, ranked as the file will rank it once it lands. Every other
+// reload passes nil and ranks by the file alone.
+func (s *nativeSession) reloadLocked(reason reloadReason, newest *modeltable.RecentEntry) ModelsStatus {
 	// An unstamped reading is owed from here until a reload publishes
 	// (forced): whatever stops this one — a load's bracket, a turn's claim,
 	// a Load that fails — leaves it for the next.
@@ -263,6 +268,11 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	}
 	s.mu.Lock()
 	hs, home, prev := s.hs, s.home, s.table
+	// The session's own confirmations (plan 047 D1; native_memory.go): the
+	// list's ranks and switch efforts are judged with them, and they are
+	// remapped onto the table this reload installs. Added to only by the
+	// setters, which wait on modelsMu, so they hold until it publishes.
+	confs := slices.Clone(s.confirmed)
 	closed, loading := s.closed, s.loading
 	if !closed && loading {
 		// Step 4: the load's end bracket takes it up (start).
@@ -313,7 +323,25 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		s.noteReloadFailed(hs, err)
 		return ModelsFailed
 	}
-	infos, cut := choiceInfos(t.Choices(modeltable.ReadRecent(home), getenv, current), current)
+	// The model memory the list is ranked by is the file as it is now — with
+	// a switch's own confirmation made its newest, for the reload that switch
+	// makes in its own section before its write (reloadLeft; newest), so its
+	// list ranks the model switched to first (C1 review F2). Any other write
+	// that failed, or is still pending when a reload reads the file, is not
+	// in it, and the list then ranks that model as the file does until the
+	// next switch — a lag of the rank alone, accepted: the model's switch
+	// effort is this session's own choice whatever the file says (the
+	// confirmations, below), and a failed write is said in its note. The
+	// confirmations are remapped onto t by the file's own rule
+	// (remapConfirmed; C1 review F1): a renamed model keeps its effort under
+	// its new alias, an alias re-pointed at another model, or a model gone,
+	// loses it.
+	recent := modeltable.ReadRecent(home)
+	if newest != nil {
+		recent = modeltable.WithNewest(recent, *newest)
+	}
+	confs = remapConfirmed(t, confs)
+	infos, cut := choiceInfos(t.SessionChoices(recent, memoryView(confs), getenv, current), current)
 	efforts := make(map[string][]string, len(t.Models))
 	for alias, m := range t.Models {
 		efforts[alias] = slices.Clone(m.Efforts)
@@ -393,12 +421,12 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		s.mu.Unlock()
 		return ModelsFailed
 	}
-	s.table, s.efforts = t, efforts
+	s.table, s.efforts, s.recent, s.confirmed = t, efforts, recent, confs
 	s.snap.Models, s.snap.CatalogRevision = infos, gen
 	s.reloadOwed = false
 	before := s.snap.Config
 	s.refreshCurrentLocked()
-	delta := &StateDelta{Catalog: &CatalogState{Models: append([]ModelInfo(nil), infos...), Revision: gen}}
+	delta := &StateDelta{Catalog: &CatalogState{Models: CloneModels(infos), Revision: gen}}
 	if !configEqual(before, s.snap.Config) {
 		delta.Config = &ConfigState{Options: cloneConfig(s.snap.Config)}
 	}
@@ -436,12 +464,20 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 //     would be past the cut): a picker always has the current model's row to
 //     select (plan 031 P7). 512 is the hub roster's row bound, and far above
 //     any real table — the shipped catalog and the plan's list together are
-//     a few dozen.
+//     a few dozen;
+//   - a model's effort facts (plan 047 D2, P6) to at most
+//     modeltable.MaxEfforts levels of at most modeltable.MaxEffortLen bytes,
+//     each one printable line, its default and switch effort the same: a
+//     model whose facts break them is offered with none. The model table
+//     refuses such a model as it loads (modeltable.EffortLevelProblem), and
+//     the provider lists' levels are fixed vocabularies, so this too is a
+//     defence for a table built otherwise.
 //
-// Within them the list encodes to at most about 1.2 MiB — every id and name
-// at its bound in characters JSON escapes to six bytes — under the 8 MiB
-// record limit and the 4 MiB default snapshot budget. What a cut took is said
-// once, value-free (noteCatalogCut).
+// Within them the list encodes to at most about 1.5 MiB — every id and name
+// at its bound in characters JSON escapes to six bytes, every effort fact in
+// quotes and backslashes, the most a printable level can grow — under the 8
+// MiB record limit and the 4 MiB default snapshot budget. What a cut took is
+// said once, value-free (noteCatalogCut).
 const (
 	catalogNameMax   = 128
 	catalogIDMax     = modeltable.MaxAliasLen
@@ -449,8 +485,9 @@ const (
 )
 
 // catalogCut counts what boundCatalog cut: names shortened, models left off
-// for an id over the bound, and models left off past the list's bound.
-type catalogCut struct{ names, ids, over int }
+// for an id over the bound, models left off past the list's bound, and
+// models offered without effort facts that broke theirs.
+type catalogCut struct{ names, ids, over, efforts int }
 
 // boundCatalog is infos within the catalog's bounds (above), current the
 // model the session runs on, and what it cut. infos is not changed.
@@ -480,8 +517,33 @@ func boundCatalog(infos []ModelInfo, current string) ([]ModelInfo, catalogCut) {
 			out[i].Name = truncateUTF8(out[i].Name, catalogNameMax)
 			cut.names++
 		}
+		if !effortFactsBounded(out[i]) {
+			out[i].Efforts, out[i].DefaultEffort, out[i].SwitchEffort = nil, "", ""
+			cut.efforts++
+		}
 	}
 	return out, cut
+}
+
+// effortFactsBounded reports whether m's effort facts are within the
+// catalog's bounds (plan 047 P6): at most modeltable.MaxEfforts levels, and
+// every level, the default and the switch effort a value
+// modeltable.EffortLevelProblem takes ("" for the last two: none).
+func effortFactsBounded(m ModelInfo) bool {
+	if len(m.Efforts) > modeltable.MaxEfforts {
+		return false
+	}
+	for _, e := range m.Efforts {
+		if modeltable.EffortLevelProblem(e) != "" {
+			return false
+		}
+	}
+	for _, e := range []string{m.DefaultEffort, m.SwitchEffort} {
+		if e != "" && modeltable.EffortLevelProblem(e) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // noteCatalogCut says what the catalog's bounds cut from the list a reload —
@@ -517,6 +579,10 @@ func (s *nativeSession) noteCatalogCut(hs *harness.Session, home string, cut cat
 	}
 	if cut.over > 0 {
 		parts = append(parts, fmt.Sprintf("%s past the first %d, not offered", models(cut.over), catalogModelsMax))
+	}
+	if cut.efforts > 0 {
+		parts = append(parts, fmt.Sprintf("%s with effort levels past theirs (at most %d, each at most %d bytes), offered without them",
+			models(cut.efforts), modeltable.MaxEfforts, modeltable.MaxEffortLen))
 	}
 	s.note(nativeSafe{red: hs.Redact}.line("the model list this session offers is held to its bounds: " + strings.Join(parts, "; ") +
 		" — see " + filepath.Join(home, modeltable.ModelsFile)))

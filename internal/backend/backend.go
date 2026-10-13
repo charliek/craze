@@ -361,6 +361,16 @@ type SessionInfo struct {
 	// a session that is not craze's own and from a host from before the
 	// section: a client then builds its menu as it did without one.
 	SlashCatalog bool
+	// EffortFacts says every model of Models, and of every catalog section the
+	// stream carries, states its effort facts (plan 047 D2: agent.ModelInfo's
+	// Efforts, DefaultEffort and SwitchEffort, a model with no effort control
+	// listing none) — a native session, in process
+	// (engine.PublishesEffortFacts) or over the socket (the session
+	// capability effortFacts, as the host sent it). False for an ACP session,
+	// a session that is not craze's own and a host from before the facts: a
+	// client then knows only the current model's levels, from its effort
+	// option.
+	EffortFacts bool
 	// Stop says Stop ends the session (plan 030 §3.6a): true in process,
 	// where it is the engine's close, and over the socket the session
 	// capability stop, as the host sent it — false for a host that answers

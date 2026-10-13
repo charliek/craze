@@ -1,4 +1,4 @@
-"""A fake upstream (three providers on one loopback server) and a proxy wired to it."""
+"""A fake upstream (four providers on one loopback server) and a proxy wired to it."""
 
 from __future__ import annotations
 
@@ -18,13 +18,54 @@ from crazeeval.proxy import Proxy
 ZAI_KEY = "zk-TEST-zai-7d1f0c2b9e4a4f5f8a1b"
 META_KEY = "mk-TEST-meta-3c9e81aa04d74c1c9f2e"
 FW_KEY = "fw_TEST_fireworks_5b2d77e0c1f94e2a"
-KEYS = {"zai-coding-plan": ZAI_KEY, "meta": META_KEY, "fireworks": FW_KEY}
+ANT_KEY = "sk-ant-TEST-anthropic-8e2f4a6c1b3d5e7f"
+KEYS = {"zai-coding-plan": ZAI_KEY, "meta": META_KEY, "fireworks": FW_KEY, "anthropic": ANT_KEY}
 
 PROVIDERS = {
     "zai-coding-plan": Provider.from_url("zai-coding-plan", "openai-compat", "https://api.z.ai/api/coding/paas/v4"),
     "meta": Provider.from_url("meta", "openai-compat", "https://api.meta.ai/v1"),
     "fireworks": Provider.from_url("fireworks", "openai-compat", "https://api.fireworks.ai/inference/v1"),
+    "anthropic": Provider.from_url("anthropic", "anthropic", "https://api.anthropic.com/v1"),
 }
+
+# One Messages exchange (Anthropic): message_start's counts, then message_delta's
+# cumulative output. The prompt was 1200 uncached + 50000 cache reads + 3000 cache writes.
+MSG_START_USAGE = {"input_tokens": 1200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 50000,
+                   "output_tokens": 1, "cache_creation": {"ephemeral_5m_input_tokens": 3000, "ephemeral_1h_input_tokens": 0},
+                   "service_tier": "standard"}
+MSG_DELTA_USAGE = {"output_tokens": 800, "output_tokens_details": {"thinking_tokens": 120}}
+
+
+def messages_events(model: str, start_usage: dict | None = None, deltas: list | None = None, cut: bool = False) -> list:
+    """A Messages API stream: text, a tool_use block whose input arrives in two
+    input_json_delta fragments, then each message_delta usage in ``deltas`` (default
+    MSG_DELTA_USAGE) and message_stop -- or, with ``cut``, nothing after the text."""
+    evs = [
+        {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
+                                              "content": [], "stop_reason": None,
+                                              "usage": MSG_START_USAGE if start_usage is None else start_usage}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "ping"},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Running the tests."}},
+    ]
+    if cut:
+        return evs
+    evs += [
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"command": '}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '"go test ./..."}'}},
+        {"type": "content_block_stop", "index": 1},
+    ]
+    for u in [MSG_DELTA_USAGE] if deltas is None else deltas:
+        evs.append({"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": u})
+    return evs + [{"type": "message_stop"}]
+
+
+def sse_named(objs) -> bytes:
+    """SSE the way the Messages API writes it: an ``event:`` line before each ``data:``."""
+    return b"".join(f"event: {o['type']}\ndata: {json.dumps(o)}\n\n".encode() for o in objs)
 
 
 def keyring() -> KeyRing:
@@ -71,6 +112,8 @@ class Upstream:
             await asyncio.sleep(payload["delay_headers"])
         if request.path.endswith("/responses"):
             return await self._responses(request, payload)
+        if request.path.endswith("/messages"):
+            return await self._messages(request, payload)
         if payload.get("reason_key") and self.echo_key:
             # An error whose HTTP reason phrase echoes the key.
             return web.Response(status=400, reason=f"Bad key {self.echo_key}", text="{}")
@@ -128,6 +171,22 @@ class Upstream:
             "choices": [{"message": {"role": "assistant", "content": "hello"}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 10},
         })
+
+    async def _messages(self, request, payload):
+        model = payload.get("model")
+        if not payload.get("stream"):
+            return web.json_response({
+                "id": "msg_2", "type": "message", "role": "assistant", "model": model,
+                "content": [{"type": "text", "text": "OK"},
+                            {"type": "tool_use", "id": "toolu_9", "name": "read", "input": {"path": "a.go"}}],
+                "stop_reason": "end_turn", "usage": {**MSG_START_USAGE, "output_tokens": 7},
+            })
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream; charset=utf-8"})
+        await resp.prepare(request)
+        evs = messages_events(model, deltas=payload.get("test_deltas"), cut=bool(payload.get("test_cut")))
+        await resp.write(sse_named(evs))
+        await resp.write_eof()  # a cut stream simply ends: no message_delta, no message_stop
+        return resp
 
     async def _responses(self, request, payload):
         resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})

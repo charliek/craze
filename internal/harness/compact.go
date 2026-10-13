@@ -184,10 +184,10 @@ func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus,
 // Spent it leaves (spend.go, plan 028 §3.14): turn's spend and the session's,
 // and the context the next request sends to fit's model. One whose entry
 // could not be written (*errCompactionSaveFailed) first has its attempts'
-// usage — its Compacted{ended}'s, every attempt's — noted as observed and
-// unsaved on m, so the spend still counts what no entry holds. A panic from
-// the summarizer or the sink is propagated, as compactRun propagates it, with
-// no Spent after its ended.
+// usage — its Compacted{ended}'s, every attempt's, with its long-context
+// subset — noted as observed and unsaved on m, so the spend still counts what
+// no entry holds. A panic from the summarizer or the sink is propagated, as
+// compactRun propagates it, with no Spent after its ended.
 func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, sent int64, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	if emit == nil {
 		emit = func(Event) {}
@@ -204,9 +204,13 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 	})
 	if ended != nil {
 		if errors.As(err, new(*errCompactionSaveFailed)) {
-			s.noteUnsaved(turn, m.id(), ended.Usage)
+			s.noteUnsaved(turn, m.id(), ended.Usage, &ended.LongContext)
 		}
-		emit(s.spent(turn, fit))
+		sp, diags := s.spent(turn, fit)
+		emit(sp)
+		for _, d := range diags {
+			emit(d)
+		}
 	}
 	return res, err
 }
@@ -250,9 +254,13 @@ func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolv
 
 	var (
 		reply   string
-		usage   store.Usage
+		usage   billed
 		lastErr error
 	)
+	// Each attempt is one request, classified as long-context or not by m's
+	// price as the session's spend will charge it (plan 047 D10): the table
+	// cannot change while a compaction runs, which holds the session.
+	price := s.priceNow(m.id())
 	// endedSent is whether Compacted{ended} has gone to the sink: set before
 	// the sink is called, so an ended the sink panicked while handling
 	// counts as sent (review r2 minor 3).
@@ -287,7 +295,7 @@ func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolv
 			func() {
 				defer func() { _ = recover() }() // r, not the sink's, is what propagates
 				emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before,
-					Err: fmt.Sprintf("panic: %v", r), Usage: usage})
+					Err: fmt.Sprintf("panic: %v", r), Usage: usage.usage, LongContext: usage.long})
 			}()
 		}
 		panic(r)
@@ -320,7 +328,7 @@ attempts:
 		} else {
 			out, u, err = s.summarizeAligned(ctx, m, history, focus, red)
 		}
-		usage = addUsage(usage, u)
+		usage.add(u, price)
 		if ctx.Err() != nil {
 			return s.compactCancelled(ctx, m, turn, reason, command, usage, before, emit)
 		}
@@ -396,14 +404,14 @@ func (s *Session) backoff(ctx context.Context, d time.Duration) bool {
 // compactCancelled is compact's return once ctx has ended (item 8): a
 // failure entry only if some attempt was billed, and the caller's own
 // cancellation either way.
-func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reason, command string, usage store.Usage, before int64, emit func(Event)) (CompactResult, error) {
-	if usage != (store.Usage{}) {
+func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reason, command string, usage billed, before int64, emit func(Event)) (CompactResult, error) {
+	if usage.usage != (store.Usage{}) {
 		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, ctx.Err().Error(), emit); err != nil {
-			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage.usage, LongContext: usage.long})
 			return CompactResult{}, &errCompactionSaveFailed{err}
 		}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: "cancelled", Usage: usage})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: "cancelled", Usage: usage.usage, LongContext: usage.long})
 	return CompactResult{}, ctx.Err()
 }
 
@@ -415,15 +423,15 @@ func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reaso
 // Compacted{ended} with the refusal's own text, which names no key. It
 // returns ErrStoredKeyFrozen, which every caller stops on: the turn ends with
 // the refusal (stopBeforeRequest), and a manual /compact returns it.
-func (s *Session) compactRefused(m model, turn int, reason, command string, usage store.Usage, before int64, emit func(Event)) (CompactResult, error) {
+func (s *Session) compactRefused(m model, turn int, reason, command string, usage billed, before int64, emit func(Event)) (CompactResult, error) {
 	msg := cleanErrorText(ErrStoredKeyFrozen)
-	if usage != (store.Usage{}) {
+	if usage.usage != (store.Usage{}) {
 		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg, emit); err != nil {
-			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage.usage, LongContext: usage.long})
 			return CompactResult{}, &errCompactionSaveFailed{err}
 		}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage.usage, LongContext: usage.long})
 	return CompactResult{}, ErrStoredKeyFrozen
 }
 
@@ -432,22 +440,22 @@ func (s *Session) compactRefused(m model, turn int, reason, command string, usag
 // Compacted{ended, Err} by way of the caller (compact itself has no defer:
 // every return path here emits it explicitly, since Go has no single exit
 // point worth deferring around without hiding what each path carries).
-func (s *Session) compactFailed(m model, turn int, reason, command string, usage store.Usage, before int64, cause error, emit func(Event)) (CompactResult, error) {
+func (s *Session) compactFailed(m model, turn int, reason, command string, usage billed, before int64, cause error, emit func(Event)) (CompactResult, error) {
 	msg := s.redactor().String(cleanErrorText(cause))
 	if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg, emit); err != nil {
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage.usage, LongContext: usage.long})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage.usage, LongContext: usage.long})
 	return CompactResult{}, cause
 }
 
 // compactSucceeded writes the segment then the compaction entry (§3.10,
 // §3.2) and emits Compacted{ended} with the estimated token counts.
-func (s *Session) compactSucceeded(m model, turn int, reason, command string, usage store.Usage, before int64, firstKeptID string, k int, steps []store.Step, reply string, emit func(Event)) (CompactResult, error) {
+func (s *Session) compactSucceeded(m model, turn int, reason, command string, usage billed, before int64, firstKeptID string, k int, steps []store.Step, reply string, emit func(Event)) (CompactResult, error) {
 	n, err := s.nextSegmentNumber()
 	if err != nil {
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage.usage, LongContext: usage.long})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
 	segName := store.SegmentName(n)
@@ -472,19 +480,20 @@ func (s *Session) compactSucceeded(m model, turn int, reason, command string, us
 		Reason:      reason,
 		Command:     command,
 		Segment:     segName,
+		LongContext: usage.long,
 	}
 	c.TokensBefore = before
 	tail := tailMessages(steps, k)
 	summaryMsg := summaryMessage(store.SegmentDir(s.store.Path()), c)
 	c.TokensAfter = s.estimateContext(append([]fantasy.Message{summaryMsg}, tail...))
 
-	id, err := s.store.AppendCompaction(turn, m.id(), usage, c)
+	id, err := s.store.AppendCompaction(turn, m.id(), usage.usage, c)
 	if err != nil {
 		s.diagUnsaved(emit, turn, reason, usage, err)
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage.usage, LongContext: usage.long})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter, Usage: usage})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter, Usage: usage.usage, LongContext: usage.long})
 	return CompactResult{EntryID: id, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter}, nil
 }
 
@@ -494,9 +503,9 @@ func (s *Session) compactSucceeded(m model, turn int, reason, command string, us
 // (review r1-c9 finding 7: a no-op here would silently drop the diagnostic
 // on every failure-entry append failure, not only the successful-summary
 // one).
-func (s *Session) appendCompactionFailure(m model, turn int, reason, command string, usage store.Usage, msg string, emit func(Event)) (string, error) {
-	c := store.Compaction{Reason: reason, Command: command, Error: msg}
-	id, err := s.store.AppendCompaction(turn, m.id(), usage, c)
+func (s *Session) appendCompactionFailure(m model, turn int, reason, command string, usage billed, msg string, emit func(Event)) (string, error) {
+	c := store.Compaction{Reason: reason, Command: command, Error: msg, LongContext: usage.long}
+	id, err := s.store.AppendCompaction(turn, m.id(), usage.usage, c)
 	if err != nil {
 		s.diagUnsaved(emit, turn, reason, usage, err)
 		return "", err
@@ -508,13 +517,13 @@ func (s *Session) appendCompactionFailure(m model, turn int, reason, command str
 // (§3.8 item 6, §3.14): an append that failed. It is not a Compacted event —
 // callers emit that themselves — but Diag, the harness's plain journal
 // channel (DiagSaveFailed's sibling).
-func (s *Session) diagUnsaved(emit func(Event), turn int, reason string, usage store.Usage, cause error) {
+func (s *Session) diagUnsaved(emit func(Event), turn int, reason string, usage billed, cause error) {
 	emit(Diag{Kind: DiagCompactionUnsaved, Fields: map[string]string{
-		"turn":   strconv.Itoa(turn),
-		"reason": reason,
-		"error":  s.redactor().String(cause.Error()),
-		"usage": fmt.Sprintf("input=%d output=%d reasoning=%d cache_read=%d cache_creation=%d",
-			usage.Input, usage.Output, usage.Reasoning, usage.CacheRead, usage.CacheCreation),
+		"turn":         strconv.Itoa(turn),
+		"reason":       reason,
+		"error":        s.redactor().String(cause.Error()),
+		"usage":        usageFields(usage.usage),
+		"long_context": usageFields(usage.long),
 	}})
 }
 
@@ -694,6 +703,21 @@ func quotaExhausted(pe *ProviderError) bool {
 // budget refusal).
 func cleanErrorText(cause error) string {
 	return oneLine(cause.Error(), maxMessageBytes)
+}
+
+// billed is what a compaction's summarizer requests were billed (plan 028
+// §3.8): every attempt's usage summed, and the long-context subset of that sum
+// (spend.go, plan 047 D10) — the usage of the attempts whose prompt was above
+// the model's threshold, each classified on its own before it was added, so
+// two short attempts whose sum would be long stay base.
+type billed struct {
+	usage, long store.Usage
+}
+
+// add adds one attempt's usage u, classified by price.
+func (b *billed) add(u store.Usage, price priced) {
+	b.usage = addUsage(b.usage, u)
+	b.long = addUsage(b.long, price.longOf(u))
 }
 
 // addUsage is a plus b, field by field: the summed usage of every

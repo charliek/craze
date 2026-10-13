@@ -19,6 +19,7 @@ from pathlib import Path
 
 from crazeeval import paths
 from crazeeval.config import EvalModel, snapshot_hash
+from crazeeval.keys import LOCKED
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 
@@ -73,9 +74,14 @@ def build_snapshot(
             raise ValueError(f"{key}: craze provider {centry.get('provider')!r} != eval provider {em.provider!r}")
         if centry.get("wire_model") != em.wire_model:
             raise ValueError(f"{key}: craze wire model {centry.get('wire_model')!r} != {em.wire_model!r}")
-        if em.provider not in cp:
+        if em.provider in LOCKED:
+            # craze's locked provider (Anthropic): its driver and endpoint are craze's own,
+            # whatever the owner's entry says, and it may have no entry (an env-only key).
+            cprov = {}
+        elif em.provider not in cp:
             raise KeyError(f"{key}: provider {em.provider!r} not in the owner's providers.toml")
-        cprov = take(cp[em.provider], CRAZE_PROVIDER_FIELDS)
+        else:
+            cprov = take(cp[em.provider], CRAZE_PROVIDER_FIELDS)
         if em.gx not in gx_models:
             raise KeyError(f"{key}: gx alias {em.gx!r} not in the owner's gx model tables")
         gentry = take(gx_models[em.gx], GX_MODEL_FIELDS)

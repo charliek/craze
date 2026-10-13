@@ -58,21 +58,23 @@ func slashRow(t *testing.T, c SlashCatalog, name string) SlashItem {
 
 // TestBuiltinSlashNamesAreTheReservedTen is P12: the reserved set is exactly
 // today's ten, in today's order, so the plugin resolver qualifies exactly the
-// names it always has — and /btw and /connect are not among them.
+// names it always has — and /btw, /connect and /effort (plan 047 D4) are not
+// among them.
 func TestBuiltinSlashNamesAreTheReservedTen(t *testing.T) {
 	want := []string{"help", "model", "clear", "tasks", "theme", "rename", "plan", "ask", "agent", "exit"}
 	if got := BuiltinSlashNames(); !slices.Equal(got, want) {
 		t.Fatalf("reserved names %v, want %v", got, want)
 	}
-	// A plugin /btw stays bare, as it always has; a plugin /help does not.
+	// A plugin /btw stays bare, as it always has, and so does a plugin
+	// /effort; a plugin /help does not.
 	rows := ResolvePluginNames([]PluginEntry{
-		{Plugin: "side", Name: "btw"}, {Plugin: "side", Name: "connect"}, {Plugin: "helper", Name: "help"},
+		{Plugin: "side", Name: "btw"}, {Plugin: "side", Name: "connect"}, {Plugin: "side", Name: "effort"}, {Plugin: "helper", Name: "help"},
 	}, nil, false)
 	var display []string
 	for _, r := range rows {
 		display = append(display, r.Display)
 	}
-	if want := []string{"btw", "connect", "helper:help"}; !slices.Equal(display, want) {
+	if want := []string{"btw", "connect", "effort", "helper:help"}; !slices.Equal(display, want) {
 		t.Fatalf("plugin rows %v, want %v", display, want)
 	}
 }
@@ -95,6 +97,7 @@ func TestSlashBuiltinTableIsNormative(t *testing.T) {
 		{Name: "agent", Description: "Set agent mode", Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodSet, Setting: SlashSetting{Kind: "mode", Value: "agent"}}},
 		{Name: "btw", Description: "Ask a side question (not saved): /btw <question>", Requires: SlashRequiresAside, Run: SlashRun{Kind: SlashRunAside, Param: "question", Arg: SlashArgRequired, ArgHint: "<question>"}, WhileWorking: true},
 		{Name: "exit", Description: "End this session", Requires: SlashRequiresStop, Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodStop}, WhileWorking: true},
+		{Name: "effort", Description: "Change the current model's effort", Requires: SlashRequiresEffort, Run: SlashRun{Kind: SlashRunPicker, Picker: "effort", Arg: SlashArgOptional, ArgHint: "<level>"}},
 	}
 	for i := range want {
 		want[i].Source = SlashSourceBuiltin
@@ -139,8 +142,9 @@ func TestSlashMethodsAreTheProtocols(t *testing.T) {
 // TestSlashCatalogBuiltinGates is the TUI's builtin order under every gate:
 // the mode rows only where modes are shown (the capability AND a list), /tasks
 // only with a tasks panel, /connect only on native and right after /model,
-// /btw always (its Requires is the client's to read, P4) and /sessions never
-// (P13).
+// /btw always (its Requires is the client's to read, P4), /effort always and
+// last, after /exit (its Requires is the client's reading of the snapshot,
+// plan 047 D4) and /sessions never (P13).
 func TestSlashCatalogBuiltinGates(t *testing.T) {
 	noModes := cursorInputs()
 	noModes.Modes = nil
@@ -154,12 +158,12 @@ func TestSlashCatalogBuiltinGates(t *testing.T) {
 		in   SlashInputs
 		want string
 	}{
-		{"cursor", cursorInputs(), "help,model,clear,tasks,theme,rename,plan,ask,agent,btw,exit"},
-		{"native adds connect after model", native, "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit"},
-		{"no modes advertised", noModes, "help,model,clear,tasks,theme,rename,btw,exit"},
-		{"modes not shown by the provider", modesOff, "help,model,clear,tasks,theme,rename,btw,exit"},
-		{"no tasks panel", noTodos, "help,model,clear,theme,rename,plan,ask,agent,btw,exit"},
-		{"the zero inputs", SlashInputs{}, "help,model,clear,theme,rename,btw,exit"},
+		{"cursor", cursorInputs(), "help,model,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort"},
+		{"native adds connect after model", native, "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort"},
+		{"no modes advertised", noModes, "help,model,clear,tasks,theme,rename,btw,exit,effort"},
+		{"modes not shown by the provider", modesOff, "help,model,clear,tasks,theme,rename,btw,exit,effort"},
+		{"no tasks panel", noTodos, "help,model,clear,theme,rename,plan,ask,agent,btw,exit,effort"},
+		{"the zero inputs", SlashInputs{}, "help,model,clear,theme,rename,btw,exit,effort"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := BuildSlashCatalog(tc.in)
@@ -332,18 +336,19 @@ func TestSlashCatalogFirstClaimWins(t *testing.T) {
 		}
 	})
 	t.Run("a row with requires claims nothing", func(t *testing.T) {
-		// /btw and /exit are listed for every session, and the client decides
-		// whether to show them (P4). What follows them keeps its place: a
-		// client that shows the builtin hides it, one that does not shows it
-		// — the TUI's menu today with and without side questions.
+		// /btw, /exit and /effort are listed for every session, and the
+		// client decides whether to show them (P4; plan 047 D4). What follows
+		// them keeps its place: a client that shows the builtin hides it, one
+		// that does not shows it — the TUI's menu today with and without side
+		// questions, and with and without an effort option.
 		in := cursorInputs()
-		in.Commands = []CommandInfo{{Name: "btw", Description: "the agent's btw"}, {Name: "exit", Description: "the agent's exit"}}
+		in.Commands = []CommandInfo{{Name: "btw", Description: "the agent's btw"}, {Name: "exit", Description: "the agent's exit"}, {Name: "Effort", Description: "the agent's effort"}}
 		in.Plugins = []PluginCommand{{Plugin: "side", Bare: "btw", Display: "btw", Qualified: "side:btw"}}
 		c := BuildSlashCatalog(in)
-		if got := strings.Join(slashNames(c), ","); got != "help,model,clear,tasks,theme,rename,plan,ask,agent,btw,exit,btw,exit" {
+		if got := strings.Join(slashNames(c), ","); got != "help,model,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort,btw,exit,Effort" {
 			t.Fatalf("catalog %s", got)
 		}
-		if got := nonBuiltinNames(c); !slices.Equal(got, []string{"btw", "exit"}) {
+		if got := nonBuiltinNames(c); !slices.Equal(got, []string{"btw", "exit", "Effort"}) {
 			t.Fatalf("the agent's rows after the requires rows: %v (the plugin's btw loses to the agent's)", got)
 		}
 	})

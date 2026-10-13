@@ -343,7 +343,7 @@
       "additionalProperties": false
     },
     "catalog": {
-      "description": "The catalog section (CatalogState; native only, absent for every ACP session, for a native session until it first reloads its model table, and never null or {}): every model the session offers now, in the picker's order, and the revision of that list, always written. The revision only ever grows within one incarnation, and a client never applies a revision lower than the one it holds: an older list never replaces a newer one, whatever order a reconnect or a replay brings them in. The session holds the list to these bounds where it builds it, the info document's catalogs.models with it: at most 512 models, in the picker's order with the running model among them; each name at most 128 bytes, cut with an ellipsis; a model whose id would be over 256 bytes is not offered, an id never cut.",
+      "description": "The catalog section (CatalogState; native only, absent for every ACP session, for a native session until it first reloads its model table, and never null or {}): every model the session offers now, in the picker's order, and the revision of that list, always written. The revision only ever grows within one incarnation, and a client never applies a revision lower than the one it holds: an older list never replaces a newer one, whatever order a reconnect or a replay brings them in. The session holds the list to these bounds where it builds it, the info document's catalogs.models with it: at most 512 models, in the picker's order with the running model among them; each name at most 128 bytes, cut with an ellipsis; a model whose id would be over 256 bytes is not offered, an id never cut; a model's effort facts at most 8 levels of at most 32 bytes each, or none.",
       "type": "object",
       "properties": {
         "models": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/catalogModel"}},
@@ -353,12 +353,15 @@
       "additionalProperties": false
     },
     "catalogModel": {
-      "description": "One model the session offers: the info document's catalog model (info.json's model), id and name always written, recent its rank in the native provider's model memory and absent for a model not remembered.",
+      "description": "One model the session offers: the info document's catalog model (info.json's model), id and name always written, recent its rank in the native provider's model memory and absent for a model not remembered, and its effort facts where the session capability effortFacts is true — efforts, the levels it offers in order, absent for a model with no effort control; defaultEffort; and switchEffort, the effort a switch to it lands on — each absent otherwise.",
       "type": "object",
       "properties": {
         "id": {"type": "string", "maxLength": 256},
         "name": {"type": "string", "maxLength": 128},
-        "recent": {"type": "integer", "minimum": 1}
+        "recent": {"type": "integer", "minimum": 1},
+        "efforts": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 32}},
+        "defaultEffort": {"type": "string", "minLength": 1, "maxLength": 32},
+        "switchEffort": {"type": "string", "minLength": 1, "maxLength": 32}
       },
       "required": ["id", "name"],
       "additionalProperties": false
@@ -411,7 +414,7 @@
       "additionalProperties": false
     },
     "slashItem": {
-      "description": "One slash row: name is the token without its /, always written, never empty and never holding whitespace or a control character (a row whose name is not one token is dropped by a decoder). source is builtin, agent, plugin or skill; plugin and qualified are a plugin row's, qualified only where it differs from name (the second spelling the row answers to); requires is the session capability the row needs (stop or aside), and a client shows the row only where that capability is true — a requires row claims no name, so a client keeps, per name, the first row it shows; whileWorking says the row runs while a turn is running rather than being refused (absent false; a prompt row omits it, it queues). The values of source, requires and every run key are not closed here: a client hides a row with a value it does not know, and a later host may add one.",
+      "description": "One slash row: name is the token without its /, always written, never empty and never holding whitespace or a control character (a row whose name is not one token is dropped by a decoder). source is builtin, agent, plugin or skill; plugin and qualified are a plugin row's, qualified only where it differs from name (the second spelling the row answers to); requires is what the row needs: the session capability stop or aside, or effort, the client's own reading of the snapshot (an effort option for the current model); a client shows the row only where that is true — a requires row claims no name, so a client keeps, per name, the first row it shows; whileWorking says the row runs while a turn is running rather than being refused (absent false; a prompt row omits it, it queues). The values of source, requires and every run key are not closed here: a client hides a row with a value it does not know, and a later host may add one.",
       "type": "object",
       "properties": {
         "name": {"type": "string", "minLength": 1},

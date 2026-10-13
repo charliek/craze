@@ -50,7 +50,14 @@
 // Stub's own, and its plugins (Options.Plugins) are the plugin rows the
 // session starts with — together, a native session's catalog (fixture 31).
 // Without slash the Host publishes no catalog, an older host's wire; the
-// binary has no flag for any of the three.
+// binary has no flag for any of the three. Its effortFacts
+// (Options.EffortFacts, plan 047 D2) makes the session the Stub as one that
+// states every model's effort facts (tui.Stub.PublishEffortFacts):
+// capabilities.effortFacts, and the efforts, defaultEffort and switchEffort
+// the line's models — and what stage_models stages — carry (fixture 33).
+// Without it the Host says nothing of them, whatever provider it names, as
+// an ACP session's host or an older one does; the binary has no flag for it
+// either.
 //
 // A Host is served on a listener its caller makes, listed nowhere, unless it
 // is registered (Register, plan 032 §3.15): then it is bound and listed in a

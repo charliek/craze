@@ -582,10 +582,10 @@ func TestTheNativeSeam(t *testing.T) {
 	dir := nativeHome(t, "")
 	// Only alpha's provider has a key: beta, unfunded, is not offered.
 	got, err := nativeModelChoices(dir, os.Getenv)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("the choices %v, %v; want %v", got, err, want)
 	}
-	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md != (agent.ModelInfo{ID: "alpha", Name: "Alpha One"}) {
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || !agent.EqualModels([]agent.ModelInfo{md}, []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}) {
 		t.Fatalf("an unfunded default: %+v, %v; want alpha, the first funded", md, err)
 	}
 	// The seam's environment is the one it is given, not the process's.
@@ -596,7 +596,7 @@ func TestTheNativeSeam(t *testing.T) {
 		return ""
 	}
 	got, err = nativeModelChoices(dir, funded)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("both funded, the choices %v, %v; want %v", got, err, want)
 	}
 	if md, err := nativeDefaultModel(dir, funded); err != nil || md.ID != "beta" {
@@ -621,14 +621,14 @@ func TestTheNativeSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = nativeModelChoices(dir, funded)
-	if want := []agent.ModelInfo{{ID: "beta", Name: "Beta", Recent: 1}, {ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "beta", Name: "Beta", Recent: 1}, {ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("remembered, the choices %v, %v; want %v", got, err, want)
 	}
-	if md, err := nativeDefaultModel(dir, funded); err != nil || md != (agent.ModelInfo{ID: "beta", Name: "Beta"}) {
+	if md, err := nativeDefaultModel(dir, funded); err != nil || !agent.EqualModels([]agent.ModelInfo{md}, []agent.ModelInfo{{ID: "beta", Name: "Beta"}}) {
 		t.Fatalf("remembered and funded, the default: %+v, %v; want beta", md, err)
 	}
 	got, err = nativeModelChoices(dir, os.Getenv)
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !agent.EqualModels(got, want) {
 		t.Fatalf("remembered but unfunded, the choices %v, %v; want %v (no gap in the ranks)", got, err, want)
 	}
 	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md.ID != "alpha" {
@@ -799,8 +799,10 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "on", "off"}) {
 		t.Fatalf("/fast lists %v", got)
 	}
+	// On an ACP provider (cursor, here) every level craze's providers name
+	// (plan 047 D5).
 	mm, _ = typeList(t, m, "/effort ")
-	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "low", "medium", "high", "xhigh"}) {
+	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"}) {
 		t.Fatalf("/effort lists %v", got)
 	}
 	if it := cmdItem(t, mm, "default"); it.Note != sessCurrentNote || it.Detail != sessSettingDetail {
@@ -813,9 +815,9 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 	if got := cmdItems(mm); !slices.Equal(got, []string{"xhigh"}) {
 		t.Fatalf("/effort x lists %v", got)
 	}
-	mm, _ = typeList(t, m, "/effort max")
-	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort max: one of default, low, medium, high, xhigh" {
-		t.Fatalf("/effort max: %+v", p.ans)
+	mm, _ = typeList(t, m, "/effort huge")
+	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort huge: one of default, minimal, low, medium, high, xhigh, max" {
+		t.Fatalf("/effort huge: %+v", p.ans)
 	}
 }
 
@@ -905,8 +907,8 @@ func TestChoosingEffortAndFast(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ line, note string }{
-		{"/effort max", "no effort max: one of default, low, medium, high, xhigh"},
-		{"/effort ", "/effort needs a value: default, low, medium, high, xhigh"},
+		{"/effort huge", "no effort huge: one of default, minimal, low, medium, high, xhigh, max"},
+		{"/effort ", "/effort needs a value: default, minimal, low, medium, high, xhigh, max"},
 		{"/fast maybe", "no fast maybe: one of default, on, off"},
 		{"/fast ", "/fast needs a value: default, on, off"},
 	} {

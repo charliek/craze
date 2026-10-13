@@ -186,8 +186,9 @@ def shipped_meta_home(craze_home: Path, base_url: str) -> None:
         (("--model", "muse-wonder-1.0", "--effort", "max"), "muse-wonder-1.0", "max"),
         (("--model", "muse-wonder-1.0"), "muse-wonder-1.0", "high"),
         ((), "muse-spark-1.3-contributor", "high"),
+        (("--model", "muse-spark-1.3", "--effort", "max"), "muse-spark-1.3", "max"),
     ],
-    ids=["wonder-at-max", "wonder-at-its-default", "spark-stays-the-start"],
+    ids=["wonder-at-max", "wonder-at-its-default", "spark-stays-the-start", "spark-1.3-at-max"],
 )
 def test_native_shipped_meta_models_reach_the_wire(
     craze_bin: Path,
@@ -202,7 +203,10 @@ def test_native_shipped_meta_models_reach_the_wire(
     effort asked for, or its default, high, and the family's 131072 output
     ceiling; a session that names no model starts on Spark's contributor
     tier, the owner's pin, with Wonder in the catalog. The ceiling goes out
-    as max_tokens, as for every model on the openai-compat driver."""
+    as max_tokens, as for every model on the openai-compat driver. Spark 1.3
+    takes max (plan 047 D6, A6): --effort max reaches the wire as
+    reasoning_effort max, where a level the model does not list would be
+    noted and the session would start at its default."""
     fixture_server.set_ok(text_parts=["from meta"])
     craze_home = tmp_path / "craze-home"
     shipped_meta_home(craze_home, fixture_server.base_url)

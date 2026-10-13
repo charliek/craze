@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -503,6 +504,56 @@ type ModelInfo struct {
 	// the remembered models after the current one, by rank. On the wire it is
 	// the catalog model's "recent", absent for 0.
 	Recent int
+	// Efforts, DefaultEffort and SwitchEffort are the model's effort facts
+	// (plan 047 D2), which a native session states for every model it offers
+	// (EffortFactser; the session capability effortFacts): the levels it
+	// offers, in the table's order — none for a model with no effort control
+	// — its default effort, and the effort a switch to it would land on (the
+	// session's own last choice on it, else the model memory's, else the
+	// default: modeltable.Table.SwitchEffort). An ACP provider's models carry
+	// none: its levels exist only for its current model, in its config
+	// option. A client reads the current model's effort from the session's
+	// effort option, never from its row. At most 8 levels of at most 32
+	// bytes each (modeltable.MaxEfforts, MaxEffortLen), held where the list
+	// is built (boundCatalog). On the wire they are the catalog model's
+	// "efforts", "defaultEffort" and "switchEffort", each absent when empty.
+	//
+	// Efforts is a slice, so a ModelInfo is not a value to copy whole:
+	// CloneModelInfo and CloneModels are how a list is handed on.
+	Efforts       []string
+	DefaultEffort string
+	SwitchEffort  string
+}
+
+// CloneModelInfo is m with its own Efforts, so a holder of the copy cannot
+// reach the original's levels.
+func CloneModelInfo(m ModelInfo) ModelInfo {
+	m.Efforts = slices.Clone(m.Efforts)
+	return m
+}
+
+// CloneModels is models deep-copied (plan 047 P5): a new list, each model's
+// Efforts its own — what every snapshot, delta, info document and fold hands
+// out, so a consumer that sorts a list or edits a row's levels changes
+// nothing of the session's. An empty list is nil, as append(nil, …) makes it.
+func CloneModels(models []ModelInfo) []ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]ModelInfo, len(models))
+	for i, m := range models {
+		out[i] = CloneModelInfo(m)
+	}
+	return out
+}
+
+// EqualModels reports whether a and b are the same list: the same models in
+// the same order, each with the same facts.
+func EqualModels(a, b []ModelInfo) bool {
+	return slices.EqualFunc(a, b, func(x, y ModelInfo) bool {
+		return x.ID == y.ID && x.Name == y.Name && x.Recent == y.Recent && slices.Equal(x.Efforts, y.Efforts) &&
+			x.DefaultEffort == y.DefaultEffort && x.SwitchEffort == y.SwitchEffort
+	})
 }
 
 type ModeInfo struct {
@@ -1404,6 +1455,22 @@ type SkillRescanner interface {
 // only when a test or the fake host opts it in — answers for itself.
 type SlashCataloger interface {
 	PublishesSlashCatalog() bool
+}
+
+// EffortFactser is a session whose model list states every model's effort
+// facts (plan 047 D2, P3): ModelInfo.Efforts, DefaultEffort and SwitchEffort
+// on every row of Snapshot.Models and of every StateDelta.Catalog, a model
+// with no effort control listing none — the native session, true from the
+// moment it is built. Its host says so as the session capability
+// effortFacts, and a client that reads it can show a model's levels before
+// it is chosen; without it a row's empty facts mean nothing, and a client
+// falls back to the current model's effort option alone. Like
+// SlashCataloger it is a fact of the session, not of its provider: the TUI's
+// Stub, which can name the native provider, states facts only when a test or
+// the fake host opts it in, and PublishesEffortFacts is asked rather than
+// the assertion trusted alone.
+type EffortFactser interface {
+	PublishesEffortFacts() bool
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

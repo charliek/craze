@@ -149,8 +149,10 @@ type Prompted struct {
 // Usage, on a live ended one, is what the compaction's summarizer requests
 // were billed, every attempt summed — on its model, the entry's — whether or
 // not an entry holds it: it is how a sub-agent's compactions reach what its
-// parent is told the child spent (§3.17, P19). A replayed one carries none: a
-// replay spends nothing.
+// parent is told the child spent (§3.17, P19). LongContext is the part of it
+// billed at the model's long-context tier, each attempt classified before the
+// sum (plan 047 D10), which a sub-agent's row carries on. A replayed one
+// carries neither: a replay spends nothing.
 type Compacted struct {
 	Phase        string
 	Reason       string
@@ -158,6 +160,7 @@ type Compacted struct {
 	TokensAfter  int64
 	Err          string
 	Usage        Usage
+	LongContext  Usage
 }
 
 // A Compacted's phases.
@@ -316,8 +319,16 @@ const (
 	// DiagCompactionUnsaved: a compaction's entry could not be appended, so
 	// no entry holds what its summarizer requests spent (plan 028 §3.8, §3.14):
 	// Fields name the turn, the reason, the error and the usage, which is
-	// observed and unsaved.
+	// observed and unsaved, and its long-context subset (plan 047 D10).
 	DiagCompactionUnsaved = "compaction_unsaved"
+	// DiagLongContextMalformed: a usage on the transcript's path — a
+	// subagent_usage row, or a compaction entry's — carries a long-context
+	// subset that is not inside it (plan 047 D10): a field above the usage's,
+	// or below 0. The spend does not trust it and prices the whole usage at
+	// its model's base rates. Fields name the entry, which usage
+	// ("subagent_usage" or "compaction"), its model, the usage and the
+	// subset. One per such usage, from the first report that counts it.
+	DiagLongContextMalformed = "long_context_malformed"
 )
 
 // SubagentStarted reports that the agent call CallID (its ToolStarted.ID)

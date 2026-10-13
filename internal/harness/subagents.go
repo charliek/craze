@@ -937,6 +937,7 @@ func (r *subagents) openChild(v tableView, h *childHandle, call tool.SubagentCal
 		BaseSystem: parent.system, BaseProfile: parent.tools.profile, top: parent.base.top,
 		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
 		learned: parent.tools.learnedKeys(), dropEnv: parent.tools.credentialNames(),
+		priceFallback: parent.openTable,
 	}))
 }
 
@@ -1005,7 +1006,10 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	// Started's prompt unless the parent learned a key in that window, which
 	// this one is redacted of and Started's is not.
 	prompt := r.union(child).String(call.Prompt)
-	var obs childObserver
+	// The child's requests are classified by the price the parent's spend
+	// will charge its row at (plan 047 D10): the table the call read, which
+	// no swap changes while the parent's turn runs.
+	obs := childObserver{price: parent.priceAt(c.view.table, ran)}
 	res, runErr := runTurn(childCtx, child, prompt, func(ev Event) {
 		obs.observe(ev)
 		link.sink(SubagentEvent{ID: h.id, Event: ev})
@@ -1040,7 +1044,7 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	// Finished says the child has ended and closed: its Close is idempotent,
 	// and the deferred one then does nothing.
 	_ = child.Close()
-	usage, calls, steps := obs.totals()
+	usage, long, calls, steps := obs.totals()
 	red = r.union(child)
 	link.emit(SubagentFinished{
 		ID: h.id, Status: out.status, Error: red.String(out.errText), Text: red.String(out.text), Usage: usage,
@@ -1051,10 +1055,8 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	// ended: the parent's step records it per model (§3.7). The model names
 	// are the child's; settle redacts them with the text, and the dispatcher
 	// again with the rest.
-	out.result.Child = &tool.ChildUsage{Provider: ran.Provider, Model: ran.Alias, WireModel: ran.WireModel, Usage: tool.Usage{
-		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
-		CacheRead: usage.CacheRead, CacheCreation: usage.CacheCreation,
-	}}
+	out.result.Child = &tool.ChildUsage{Provider: ran.Provider, Model: ran.Alias, WireModel: ran.WireModel,
+		Usage: toolUsage(usage), LongContext: toolUsage(long)}
 	return out.result
 }
 
@@ -1162,8 +1164,7 @@ func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res
 	red := r.union(c.child)
 	res.Text, res.Trunc.Spill = red.String(res.Text), red.String(res.Trunc.Spill)
 	if u := res.Child; u != nil {
-		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-			WireModel: red.String(u.WireModel), Usage: u.Usage}
+		res.Child = renamed(u, red)
 	}
 	if c.h == nil {
 		return res
@@ -1265,6 +1266,12 @@ type childObserver struct {
 	calls       int
 	steps       int
 	doomStopped bool // the doom-loop guard ended the child's turn
+	// long is the part of usage billed at a long-context tier (plan 047
+	// D10): each step one request, classified by price — the rates its row
+	// will be charged at (the runner's) — and each compaction's subset as the
+	// child classified its attempts.
+	long  Usage
+	price priced
 }
 
 // observe takes one of the child's events.
@@ -1288,6 +1295,7 @@ func (o *childObserver) observe(ev Event) {
 		// counts them all, however the child's turn then ended (panel P6).
 		o.steps++
 		o.usage = addUsage(o.usage, e.Usage)
+		o.long = addUsage(o.long, o.price.longOf(e.Usage))
 		if strings.TrimSpace(o.cur.String()) != "" {
 			o.last = o.cur.String()
 		}
@@ -1306,6 +1314,7 @@ func (o *childObserver) observe(ev Event) {
 			o.cur.Reset()
 		case CompactionEnded:
 			o.usage = addUsage(o.usage, e.Usage)
+			o.long = addUsage(o.long, e.LongContext)
 		}
 	}
 }
@@ -1323,11 +1332,12 @@ func (o *childObserver) lastOutput() string {
 	return o.last
 }
 
-// totals are the usage, tool calls and steps observed.
-func (o *childObserver) totals() (Usage, int, int) {
+// totals are the usage, its long-context subset, tool calls and steps
+// observed.
+func (o *childObserver) totals() (usage, long Usage, calls, steps int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.usage, o.calls, o.steps
+	return o.usage, o.long, o.calls, o.steps
 }
 
 // subagentOutcome is how the child's turn ended, and what cut it short.

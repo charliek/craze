@@ -406,7 +406,7 @@ func (s *Session) Info() backend.SessionInfo {
 	s.mu.Lock()
 	info := s.info
 	s.mu.Unlock()
-	info.Models = slices.Clone(info.Models)
+	info.Models = agent.CloneModels(info.Models)
 	info.Modes = slices.Clone(info.Modes)
 	return info
 }
@@ -1054,13 +1054,16 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		ModelsRefresh:     p.Capabilities.ModelsRefresh,
 		Aside:             p.Capabilities.Aside,
 		SlashCatalog:      p.Capabilities.SlashCatalog,
+		EffortFacts:       p.Capabilities.EffortFacts,
 		Stop:              p.Capabilities.Stop,
 		RetryHorizon:      retryHorizon(p.RetryHorizon),
 		PermissionMode:    permissionMode(p.PermissionMode),
 		StartedAt:         p.StartedAt,
 	}
 	for _, m := range p.Catalogs.Models {
-		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
+		// Every field, the effort facts (plan 047 D2) with their own levels.
+		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent,
+			Efforts: slices.Clone(m.Efforts), DefaultEffort: m.DefaultEffort, SwitchEffort: m.SwitchEffort})
 	}
 	for _, m := range p.Catalogs.Modes {
 		info.Modes = append(info.Modes, agent.ModeInfo{ID: m.ID, Name: m.Name, Description: m.Description})
@@ -1088,10 +1091,11 @@ func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
 // cancel, approvals, historyCursor and stop are the protocol's own, stated for
 // every host, and rowFacts the host's (what its sessions.list row carries,
 // plan 030 §3.8), each with no agent field — stop goes to
-// backend.SessionInfo.Stop (sessionInfo, plan 043 P4); modelsRefresh, aside
-// and slashCatalog are the session's, and go to
-// backend.SessionInfo.ModelsRefresh, Aside and SlashCatalog instead
-// (sessionInfo, plan 034 §3.4, plan 040 §3.7, plan 043 P2).
+// backend.SessionInfo.Stop (sessionInfo, plan 043 P4); modelsRefresh, aside,
+// slashCatalog and effortFacts are the session's, and go to
+// backend.SessionInfo.ModelsRefresh, Aside, SlashCatalog and EffortFacts
+// instead (sessionInfo, plan 034 §3.4, plan 040 §3.7, plan 043 P2, plan 047
+// D2).
 func capabilities(c protocol.SessionCapabilities) agent.Capabilities {
 	return agent.Capabilities{
 		Interject:           c.Interject,

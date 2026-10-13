@@ -30,6 +30,7 @@ as the prompt.
 | `craze:sol` | native `chatgpt/gpt-6.1-sol`, effort high | hard coding, debugging and review |
 | `craze:astra` | native `chatgpt/gpt-6-astra`, effort high | the hardest design and review questions |
 | `craze:muse` | native `muse-spark-1.3-contributor` | routine, bounded tasks, cheaply |
+| `craze:wonder` | native `muse-wonder-1.0`, effort high | hard tasks, at about three times Spark's price per token |
 | `craze:grok` | grok `grok-4.7`, effort high | Grok's own agent |
 | `craze:cursor` | cursor `composer-2.5` | Cursor's agent |
 

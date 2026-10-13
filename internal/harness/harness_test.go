@@ -114,8 +114,12 @@ func effortOf(t *testing.T, call fantasy.Call, provider string) string {
 	return string(*opts.ReasoningEffort)
 }
 
-// Effort across a model switch: kept when the new model lists it, else the
-// new model's default, else none (plan 018 §3.7).
+// Effort across a carried model switch: kept when the new model lists it,
+// else the new model's default, else none (plan 018 §3.7) — SetModel's rule,
+// carriedEffort, which a resume onto an explicit model and the compaction
+// model still take (resume.go, autocompact.go). A person's switch through
+// the native adapter is SetModelEffort's instead (plan 047 D1;
+// setmodeleffort_test.go).
 func TestSetModelCarriesEffort(t *testing.T) {
 	cases := []struct {
 		from, fromEffort string

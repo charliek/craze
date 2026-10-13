@@ -769,7 +769,9 @@ with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 Meta's models are Muse Spark 1.3, `muse-spark-1.3` and its cheaper
 contributor tier `muse-spark-1.3-contributor` (Meta's start model), and
 `muse-wonder-1.0`, Muse Wonder 1.0, Meta's most capable model, for long,
-complex coding and agent work. Muse Wonder is in preview at Meta, costs more
+complex coding and agent work. Spark 1.3 offers effort from `minimal` to
+`max`; its contributor tier from `minimal` to `xhigh`, since Meta documents
+`max` for Spark 1.3 and Wonder only. Both default to `high`. Muse Wonder is in preview at Meta, costs more
 ($4 per million input tokens and $20 per million output, against
 Spark 1.3's $1.25 and $4.25), has no contributor tier, and offers effort from
 `minimal` to `max` (default `high`). It is not Meta's start model, so a
@@ -864,7 +866,9 @@ default_effort = "high"
 ```
 
 A model alias is at most 256 bytes: a `models.toml` with a longer one does not
-load, and says which entry. A model's other optional keys are documented below:
+load, and says which entry. A model's `efforts` list at most 8 levels, each at
+most 32 bytes and one printable line (no newline, control or bidi character);
+one past those does not load either, naming the entry and the key. A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 [`vision`](#native-vision) and [`tool_profile`](#native-tool-profile);
 `models.toml` also takes
@@ -883,7 +887,9 @@ store a key with [`/connect`](tui.md#connect).
   value, not "unset".
 - **Cost, rate by rate.** Each `[cost]` rate you write replaces the shipped
   rate on its own; one you leave out keeps it. An inherited rate cannot be
-  cleared.
+  cleared. A [long-context tier](#long-context-pricing) merges the same way —
+  `long_context_above` and each `[cost.long_context]` rate on its own — and
+  `long_context_above = 0` turns a shipped tier off, its rates with it.
 - **Efforts and the default effort.** An `efforts` list without a
   `default_effort` keeps the shipped default if the new list has it, and
   otherwise the model has none.
@@ -912,7 +918,8 @@ store a key with [`/connect`](tui.md#connect).
 stops a native session, naming the file, the table and the key: TOML syntax,
 a key craze does not know, a `version` other than 1, an inline key that
 cannot be one (below), or a value no entry could hold (an unknown driver, a
-negative window, an effort listed twice, a `default_effort` outside the
+negative window, an effort listed twice, more than 8 efforts or one over 32
+bytes or not one printable line, a `default_effort` outside the
 `efforts` the same entry lists, a cost out of range, a provider listed twice in
 `provider_order`). What an entry gets wrong only against the catalog is
 dropped with a warning at session start, naming
@@ -1279,10 +1286,31 @@ switch (`/model`, the model dialog, or an attached client's switch) or an
 effort change on the current model (which makes that model the newest, even if
 `/model` was never used) — once it has taken, recording the model and the
 effort the session is then on. `--model`, `craze
-prompt`, a resume and a sub-agent's model never write it. A session reads it
-once, when it starts: a switch changes where the next session starts, and the
-order the next session's `/model` lists models in — the remembered ones right
-after the current one, newest first — not the running one's.
+prompt`, a resume and a sub-agent's model never write it. A session's writes
+land in the order its switches took, so the file's newest entry is its newest
+choice; one an older switch would write after a newer one is skipped.
+
+**Who reads it.** A session reads it when it starts — where it starts, and
+the order its `/model` lists models in, the remembered ones right after the
+current one, newest first — and every switch reads it again for the effort the
+switch lands on. A switch to a model lands on the effort last used on it: the
+one this session last set on that model (which the session holds whether or
+not the file could be written, and judges as the file's entries are judged:
+a model a release renames keeps it under its new alias, and an alias pointed
+at another model does not inherit it), else the one this file remembers for it, else
+the model's `default_effort` — never the effort the session was on. A
+remembered effort the model no longer offers is its default. Asking for the
+model you are already on keeps its current effort. Each switch or
+effort change also ranks the running session's own list again, the model
+switched to first, so its `/model` shows the new order and which effort each
+model would land on; a choice another craze writes is seen by the next switch
+to that model, but by the list only when the session next reloads its models
+(after a key is saved or a sign-in, say). A reload ranks the list by the file
+as it is then: when a write failed (its note says so), or was still pending
+when the reload read the file, that model's place in the list can lag until
+your next switch — the effort a switch to it lands on is still the one you
+set in this session. `/model X <effort>` still picks a
+level directly. See [Effort on a switch](tui.md#effort-on-a-switch).
 
 **Two sessions at once.** Every write reads, changes and replaces the file
 under a lock beside it, `recent.json.lock`, so two sessions switching at the
@@ -1462,13 +1490,10 @@ carry none, like the ChatGPT plan's: both are flat-rate plans. Anthropic's
 shipped models carry Anthropic's prices — `cache_read` its cache hit,
 `cache_write` its five-minute cache write, the only one craze asks for — and a
 model only the Anthropic account's list names carries none until a release
-adds it ([Anthropic](#anthropic)). Haiku 5.5 is priced at its rate for
-prompts up to 100,000 tokens: above that Anthropic charges five times as
-much, so a longer prompt's spend on it reads low. Each rate is dollars per
-1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
-that is not a finite number (`nan`, `inf`), is refused at load. There are no
-tiers yet: a tier is per request, and a sub-agent's usage row already sums
-many requests, so a per-request price cannot be recovered from it.
+adds it ([Anthropic](#anthropic)). Haiku 5.5 also has a long-context tier,
+below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
+rate outside that range, or one that is not a finite number (`nan`, `inf`), is
+refused at load.
 
 craze prices a usage record by **identity** — the model's `(provider, wire
 model)` pair — never by the alias it happened to run under, since a resumed
@@ -1485,6 +1510,65 @@ is simply unpriced — its usage is still counted in tokens, but adds no cost.
 The `cost` table is your own entry in `models.toml`, the same as
 [`[compaction]`](#native-compaction) above: craze reads it and never rewrites
 it.
+
+### Long-context pricing
+
+A model's `cost` may have one price tier for long prompts: a request whose
+prompt is over `long_context_above` tokens is priced at the
+`[models."<alias>".cost.long_context]` rates instead, every token of it.
+
+```toml
+[models."anthropic/claude-haiku-5-5".cost]
+input              = 0.1
+output             = 0.5
+cache_read         = 0.01
+cache_write        = 0.125
+long_context_above = 100000   # a prompt over this many tokens is long
+
+[models."anthropic/claude-haiku-5-5".cost.long_context]
+input       = 0.5    # the rates a long request pays, $ per 1,000,000 tokens
+output      = 2.5
+cache_read  = 0.05
+cache_write = 0.625
+```
+
+- **The prompt** is everything the request sent: its input, cache reads and
+  cache writes together. Exactly `long_context_above` tokens is not long;
+  one more is.
+- **Each request is priced on its own**, as Anthropic bills it: one step of a
+  turn, one attempt of a compaction, one request of a sub-agent or of a
+  [side question](tui.md#side-questions-btw). A long request pays the long
+  rates even when part of its prompt is a cache hit, and the requests before
+  and after it keep their own prices. craze classifies each request as its
+  usage arrives, so a sub-agent's spend and a compaction's are priced request
+  by request though they are reported as one sum.
+- **The keys.** `long_context_above` is a whole number of tokens; above 0 it
+  needs the `long_context` table with `input` and `output` at least, and the
+  table needs it. It is at most the model's `context_window` when the model
+  declares one. Each `long_context` rate is optional and in the same range as
+  the base rates. One the merged table leaves out — left out by your entry
+  and, on a shipped model, by the shipped tier — falls back to the model's
+  base rate for it, never to 0: a tier with `input` and `output` alone prices
+  a long request's cache reads and writes at the base `cache_read` and
+  `cache_write`. A problem names the model, the table and the key.
+- **On a shipped model** the keys are an overlay like the rates: a
+  `long_context` rate you write replaces that rate alone, and
+  `long_context_above = 0` turns the tier off, so every request is priced at
+  the base rates.
+
+The shipped catalog gives a tier to Haiku 5.5 alone — the rates above, which
+are Anthropic's for prompts over 100,000 tokens. Every other shipped Anthropic
+model takes its whole context window at its standard price.
+
+A session's transcript keeps what it needs to price the tier again on a
+resume: the part of a sub-agent's usage row, and of a compaction's usage,
+that came from long requests. A resumed session prices it with the table it
+loads, so its spend matches the live session's while the prices are
+unchanged. A transcript from before the tier existed has no such parts, so its
+sub-agent rows and compactions price as they did; its own steps are priced one
+by one like any other, so a long Haiku 5.5 step there now reads at the tier. If
+that part is ever larger than the usage it belongs to, or below 0, craze
+does not trust it and prices that usage at the base rates.
 
 ## Native vision
 

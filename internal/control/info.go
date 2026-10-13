@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -22,8 +23,9 @@ import (
 // rowFacts (§3.8), one that counts its clients presence (plan 032 §3.14), one
 // whose session can take up models modelsRefresh (plan 034 §3.4), one whose
 // session answers side questions aside (plan 040 §3.2) and one whose session
-// publishes the slash catalog slashCatalog (plan 043 P2), each omitted while
-// false. TestEveryCapabilityIsOnTheWire
+// publishes the slash catalog slashCatalog (plan 043 P2) and one whose
+// session states every model's effort facts effortFacts (plan 047 D2), each
+// omitted while false. TestEveryCapabilityIsOnTheWire
 // holds every agent.Capabilities field to a wire name here and in the schema,
 // so a field added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
@@ -114,19 +116,37 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	// its `/` menu from them; left out for one that does not — a session that
 	// is not craze's own, the fake host's by default — and by an older host.
 	info.Capabilities.SlashCatalog = eng.PublishesSlashCatalog()
+	// effortFacts is the session's too (plan 047 D2, P3): every model of its
+	// catalogs states its effort facts; left out for one that does not — an
+	// ACP session, the fake host's by default — and by an older host.
+	info.Capabilities.EffortFacts = eng.PublishesEffortFacts()
 	if ready {
 		// The list as the session offers it now, with its revision, read in
 		// the one State: a native session's reload swaps both in one locked
 		// section (plan 034 §3.4), so they always describe one list.
 		info.Catalogs.Revision = st.CatalogRevision
 		for _, m := range st.Models {
-			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name, Recent: m.Recent})
+			info.Catalogs.Models = append(info.Catalogs.Models, CatalogModel(m))
 		}
 		for _, m := range st.Modes {
 			info.Catalogs.Modes = append(info.Catalogs.Modes, protocol.CatalogMode{ID: m.ID, Name: m.Name, Description: m.Description})
 		}
 	}
 	return info, st, ready
+}
+
+// CatalogModel is m as the info document's catalogs.models carries it: every
+// field, the effort facts (plan 047 D2) with their own copy of the levels.
+func CatalogModel(m agent.ModelInfo) protocol.CatalogModel {
+	return protocol.CatalogModel{ID: m.ID, Name: m.Name, Recent: m.Recent,
+		Efforts: slices.Clone(m.Efforts), DefaultEffort: m.DefaultEffort, SwitchEffort: m.SwitchEffort}
+}
+
+// ModelInfo is CatalogModel's inverse: a catalog model of the wire's — an
+// info document's, a fixture's — as agent's, its levels its own.
+func ModelInfo(m protocol.CatalogModel) agent.ModelInfo {
+	return agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent,
+		Efforts: slices.Clone(m.Efforts), DefaultEffort: m.DefaultEffort, SwitchEffort: m.SwitchEffort}
 }
 
 // headAsk is the head open ask, nil when none is open.
