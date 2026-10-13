@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -78,6 +79,56 @@ func withAttachedBarrier(t *testing.T) func() {
 			t.Fatalf("craze wait was not attached within %v", stubWatchdog)
 		}
 	}
+}
+
+// withTimeoutAfterTheAttach hands a waiting command's --timeout (timeoutAt) a
+// channel of the test's: attached is each waiter's attachment reply folded
+// (waitTaken) — its target met — one receive a run, and fire ends --timeout.
+// Its wall clock decides nothing then: one a loaded runner runs past before
+// the reply is folded is a wait with no target (exit 1). fire may be called
+// more than once. A test that starts a command registers its join (joinAt)
+// after this, so a failure ends the command before the hooks are restored.
+func withTimeoutAfterTheAttach(t *testing.T) (attached, fire func()) {
+	t.Helper()
+	ch, taken := make(chan time.Time), make(chan struct{}, 4)
+	var once sync.Once
+	prevAt, prevTaken := timeoutAt, waitTaken
+	timeoutAt = func(deadline time.Time) (<-chan time.Time, func()) {
+		if deadline.IsZero() {
+			return nil, func() {}
+		}
+		return ch, func() {}
+	}
+	waitTaken = func(p pumped) {
+		if p.err == nil && p.it.Kind == remote.KindAttached {
+			select {
+			case taken <- struct{}{}:
+			default:
+			}
+		}
+	}
+	t.Cleanup(func() { timeoutAt, waitTaken = prevAt, prevTaken })
+	return func() {
+		t.Helper()
+		select {
+		case <-taken:
+		case <-time.After(stubWatchdog):
+			t.Fatalf("craze wait did not fold its attachment within %v", stubWatchdog)
+		}
+	}, func() { once.Do(func() { close(ch) }) }
+}
+
+// joinAt ends run when the test does — fire, then wait for its exit — before
+// the cleanups registered earlier (withTimeoutAfterTheAttach's restore of the
+// hooks the command reads) run: cleanups run last-registered first.
+func joinAt(t *testing.T, run *crazeRun, fire func()) {
+	t.Cleanup(func() {
+		fire()
+		select {
+		case <-run.done:
+		case <-time.After(stubWatchdog):
+		}
+	})
 }
 
 // decodeResult is craze wait --json's one object.
@@ -153,14 +204,20 @@ func TestWaitNeverPromptedIsIdle(t *testing.T) {
 // TestWaitTimeoutThenFrom is §7 W1 4 as commands: --timeout on a longer turn
 // is `running`, exit 5, with the handle and the exact command that follows
 // it; `wait --from` that handle after the turn ended reports it (partial:
-// plain wait met it mid-turn).
+// plain wait met it mid-turn — its attach's snapshot shows it running, and
+// --timeout ends once the waiter has folded that).
 func TestWaitTimeoutThenFrom(t *testing.T) {
 	r := newWaitRig(t, 0)
 	g := r.gate()
 	r.script(heldTurn(g, textEv("late"), textEv(" but whole")))
 	r.submit("go")
-	r.waitStarted("turn-1")
-	stdout, stderr, code := executeErr([]string{"wait", waitRigShort, "--timeout", "1s"})
+	r.waitStartedInSnapshot("turn-1")
+	attached, fire := withTimeoutAfterTheAttach(t)
+	run := goCraze("wait", waitRigShort, "--timeout", "1h")
+	joinAt(t, run, fire)
+	attached()
+	fire()
+	stdout, stderr, code := run.wait(t)
 	if code != 5 {
 		t.Fatalf("craze wait --timeout exited %d: %s%s", code, stdout, stderr)
 	}
