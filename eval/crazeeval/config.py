@@ -44,19 +44,6 @@ def yields_to_catalog(provider: str, entry: dict, shipped: dict, catalog: bool) 
     return catalog and entry.get("source") == LEGACY_SOURCE and provider in shipped
 
 
-def snapshot_base_url(craze_provider: dict, provider: str) -> str:
-    """The endpoint craze sends ``provider``'s requests to, by a snapshot's provider entry:
-    its own ``base_url``, else -- an entry that names none, or an old gx import's, which
-    the snapshot keeps without one -- the catalog's, when the entry keeps craze's shipped
-    driver; "" when there is none. What the proxy's upstream route must be (cli)."""
-    if craze_provider.get("base_url"):
-        return craze_provider["base_url"].rstrip("/")
-    shipped = shipped_providers().get(provider) or {}
-    if craze_provider.get("driver", shipped.get("driver")) != shipped.get("driver"):
-        return ""
-    return (shipped.get("base_url") or "").rstrip("/")
-
-
 def shipped_driver(provider: str, path: Path | None = None) -> str:
     """The driver craze ships for ``provider``: what craze uses when the owner's entry
     names none, or is an old gx import's. ValueError for a provider craze does not ship,

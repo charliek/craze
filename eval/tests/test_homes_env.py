@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 
 from crazeeval import paths
-from crazeeval.config import EvalModel, Snapshot, catalog_on, load_models, shipped_driver, snapshot_base_url
+from crazeeval.config import EvalModel, Snapshot, catalog_on, load_models, shipped_driver
 from crazeeval.homes import HOMES, craze_home_multi, generated_files
-from crazeeval.keys import KeyRing, load_providers
+from crazeeval.keys import KeyRing, load_providers, route_problems
 from crazeeval.runners import RUNNERS
 from crazeeval.sandbox import SandboxSpec, build_env, env_problems
 from crazeeval.snapshot import build_snapshot
@@ -174,12 +174,14 @@ def test_crazes_catalog_ships_meta_on_the_responses_api():
 def test_a_gx_imports_meta_entry_gives_crazes_shipped_driver(tmp_path):
     """An old gx import's entry (``source = "gx"``) for a provider craze ships yields to
     craze's catalog (its legacySource rule): craze takes its key and ignores its driver
-    and base_url. So the snapshot keeps neither, and Meta's craze home names the driver
-    craze ships, openai-responses, not the import's openai-compat. The other providers'
+    and base_url. So the snapshot records the catalog's driver and endpoint instead, as
+    the catalog resolves them at snapshot time (frozen: test_a_later_catalog_change_
+    is_refused_at_run_time), and Meta's craze home names the driver craze ships,
+    openai-responses, not the import's openai-compat. The other providers'
     hand-written entries are kept as written."""
     snap = fake_snapshot(tmp_path, marked("gx"))
     for key in ("muse-spark-1.3-contributor", "muse-wonder-1.0"):
-        assert snap.model(key)["craze_provider"] == {}, key
+        assert snap.model(key)["craze_provider"] == SHIPPED_META, key
         assert home_driver(tmp_path / key, snap, key) == "openai-responses"
     assert snap.model("glm-5.3")["craze_provider"] == {"driver": "openai-compat",
                                                         "base_url": "https://api.z.ai/api/coding/paas/v4"}
@@ -247,6 +249,9 @@ def test_an_openrouter_target_is_refused_before_its_home(tmp_path):
 
 
 OLD_GATEWAY = "https://old-gateway.example/v1"
+# The route craze's catalog gives Meta: what a snapshot records for an old gx import's
+# Meta entry.
+SHIPPED_META = {"driver": "openai-responses", "base_url": "https://api.meta.ai/v1"}
 
 
 def gx_meta(text: str) -> str:
@@ -266,7 +271,8 @@ def test_with_the_catalog_off_a_gx_entry_is_the_owners_own(tmp_path):
     """With ``catalog = false`` craze keeps the owner's entries whole, an old gx import's
     included (its legacySource rule needs the catalog), so the snapshot keeps the entry's
     driver and base_url, the home names its driver and the route goes to its URL. The
-    control is the same tree with the catalog on, where all three are craze's shipped."""
+    control is the same tree with the catalog on, where all three are craze's shipped.
+    Either way the run's check finds the route the snapshot recorded."""
     on, off = tmp_path / "on", tmp_path / "off"
     for d in (on, off):
         craze, grok = owner_tree(d)
@@ -282,18 +288,19 @@ def test_with_the_catalog_off_a_gx_entry_is_the_owners_own(tmp_path):
             assert home_driver(d, snap, "muse-wonder-1.0") == "openai-compat"
             assert (table["meta"].driver, table["meta"].base_url) == ("openai-compat", OLD_GATEWAY)
         else:
-            assert cprov == {}
+            assert cprov == SHIPPED_META
             assert home_driver(d, snap, "muse-wonder-1.0") == "openai-responses"
             assert (table["meta"].driver, table["meta"].base_url) == ("openai-responses", "https://api.meta.ai/v1")
-        # The run's check (cli): the snapshot's endpoint is the route's.
-        assert snapshot_base_url(cprov, "meta") == table["meta"].base_url
+        # The run's check (cli): the snapshot's route is the route's.
+        assert route_problems(list(load_models().values()), snap, table) == [], d
 
 
 def test_a_gx_entrys_route_is_crazes_shipped_endpoint(tmp_path):
     """The proxy's upstream for an old gx import's entry of a provider craze ships is
     the endpoint craze itself uses, the catalog's, not the URL the import wrote; its key
     is chosen as craze chooses it: the catalog's variables first, then the entry's own
-    names, then its api_key. A hand-written entry's URL is still its own."""
+    names, then its api_key. A hand-written entry's URL is still its own, and the run's
+    check holds a snapshot of it to that URL."""
     craze, _ = owner_tree(tmp_path)
     (craze / "providers.toml").write_text(gx_meta((craze / "providers.toml").read_text()))
     table, ring = load_providers(craze / "providers.toml", env={})
@@ -312,9 +319,110 @@ def test_a_gx_entrys_route_is_crazes_shipped_endpoint(tmp_path):
     (craze / "providers.toml").write_text(text)
     table, _ = load_providers(craze / "providers.toml", env={})
     assert (table["meta"].driver, table["meta"].base_url) == ("openai-compat", OLD_GATEWAY)
-    assert snapshot_base_url({"driver": "openai-compat", "base_url": OLD_GATEWAY}, "meta") == OLD_GATEWAY
-    assert snapshot_base_url({}, "meta") == "https://api.meta.ai/v1"
-    assert snapshot_base_url({"driver": "openai-compat"}, "meta") == ""  # another driver: no shipped endpoint
+    wonder = [load_models()["muse-wonder-1.0"]]
+    hand = Snapshot(dir=tmp_path, config={"models": {"muse-wonder-1.0": {
+        "craze_provider": {"driver": "openai-compat", "base_url": OLD_GATEWAY}}}}, hash="t")
+    assert route_problems(wonder, hand, table) == []
+    shipped = Snapshot(dir=tmp_path, config={"models": {"muse-wonder-1.0": {"craze_provider": SHIPPED_META}}}, hash="t")
+    assert route_problems(wonder, shipped, table) == [
+        "muse-wonder-1.0: the route craze takes for meta now (driver and base_url) differs from the config "
+        "snapshot's; re-run snapshot-config"]
+
+
+def test_a_later_catalog_change_is_refused_at_run_time(tmp_path, monkeypatch):
+    """The snapshot freezes the route of an old gx import's entry: after craze's catalog
+    moves Meta (another driver, another endpoint), the snapshot still records the route it
+    was taken with, its craze home still names that driver, and the run's check refuses
+    the run, naming what moved and saying to re-run snapshot-config. A hand-written
+    entry's route does not follow the catalog, so the same change leaves its snapshot
+    good. The control: before the change, both pass."""
+    craze, grok = owner_tree(tmp_path / "owner")
+    hand_text = (craze / "providers.toml").read_text()
+    models = list(load_models().values())
+
+    def taken(text: str, name: str) -> tuple[Snapshot, dict]:
+        (craze / "providers.toml").write_text(text)
+        snap = Snapshot(dir=tmp_path, config=build_snapshot(load_models(), craze_dir=craze, grok_dir=grok), hash=name)
+        return snap, load_providers(craze / "providers.toml", env={})[0]
+
+    gx_snap, table = taken(marked("gx")(hand_text), "gx")
+    assert gx_snap.model("muse-wonder-1.0")["craze_provider"] == SHIPPED_META
+    assert route_problems(models, gx_snap, table) == []
+    hand_snap, hand_table = taken(hand_text, "hand")
+    hand_cprov = hand_snap.model("muse-wonder-1.0")["craze_provider"]
+    assert hand_cprov == {"driver": "openai-compat", "base_url": "https://api.meta.ai/v1"}
+    assert route_problems(models, hand_snap, hand_table) == []
+
+    # A later craze release moves Meta.
+    cat = paths.CRAZE_CATALOG.read_text()
+    meta = '[providers.meta]\nname = "Meta"\ndriver = "openai-responses"\nbase_url = "https://api.meta.ai/v1"\n'
+    assert meta in cat
+    moved = tmp_path / "catalog.toml"
+    moved.write_text(cat.replace(meta, meta.replace("openai-responses", "openai-compat").replace("/v1", "/v2"), 1))
+    monkeypatch.setattr(paths, "CRAZE_CATALOG", moved)
+    assert shipped_driver("meta") == "openai-compat"
+
+    (craze / "providers.toml").write_text(marked("gx")(hand_text))
+    table = load_providers(craze / "providers.toml", env={})[0]
+    assert (table["meta"].driver, table["meta"].base_url) == ("openai-compat", "https://api.meta.ai/v2")
+    assert gx_snap.model("muse-wonder-1.0")["craze_provider"] == SHIPPED_META
+    assert home_driver(tmp_path / "frozen", gx_snap, "muse-wonder-1.0") == "openai-responses"
+    problems = route_problems(models, gx_snap, table)
+    assert problems == [f"{k}: the route craze takes for meta now (driver and base_url) differs from the config "
+                        "snapshot's; re-run snapshot-config" for k in ("muse-spark-1.3", "muse-spark-1.3-contributor",
+                                                                     "muse-wonder-1.0")], problems
+    # A hand-written entry's route is its own: the catalog change does not touch it.
+    (craze / "providers.toml").write_text(hand_text)
+    hand_table = load_providers(craze / "providers.toml", env={})[0]
+    assert hand_snap.model("muse-wonder-1.0")["craze_provider"] == hand_cprov
+    assert route_problems(models, hand_snap, hand_table) == []
+
+
+def test_run_refuses_a_snapshot_whose_route_moved(tmp_path, monkeypatch, capsys):
+    """``crazeeval run`` itself: with an old gx import's Meta entry snapshotted, and craze's
+    catalog moving Meta since, the run stops before anything is set up (exit 2), saying
+    to re-run snapshot-config. The control: with the catalog the snapshot was taken
+    with, the run gets past the check (to the toolchains, stopped here)."""
+    import crazeeval.keys as keymod
+    import crazeeval.sandbox as sandbox
+    from crazeeval.cli import main
+
+    craze, grok = owner_tree(tmp_path / "owner")
+    (craze / "providers.toml").write_text(marked("gx")((craze / "providers.toml").read_text()))
+    snapdir = tmp_path / "snap"
+    snapdir.mkdir()
+    (snapdir / "config.json").write_text(json.dumps(build_snapshot(load_models(), craze_dir=craze, grok_dir=grok)))
+    (snapdir / "opencode-models.json").write_text("{}")
+    fake_bin = tmp_path / "craze"
+    fake_bin.write_text("")
+    owner_routes = keymod.load_providers
+
+    class PastTheCheck(Exception):
+        pass
+
+    def toolchains(*a, **k):
+        raise PastTheCheck
+
+    monkeypatch.setattr(sandbox, "bwrap_available", lambda: True)
+    monkeypatch.setattr(sandbox.Toolchains, "resolve", classmethod(lambda cls, *a, **k: toolchains()))
+    monkeypatch.setattr(keymod, "load_providers", lambda *a, **k: owner_routes(craze / "providers.toml", env={}))
+    argv = ["run", "--harness", "craze", "--model", "muse-wonder-1.0", "--craze-bin", str(fake_bin),
+            "--config", str(snapdir), "--out", str(tmp_path / "out"), "--tasks", "split:smoke"]
+    with pytest.raises(PastTheCheck):
+        main(argv)
+
+    cat = paths.CRAZE_CATALOG.read_text()
+    moved = tmp_path / "catalog.toml"
+    moved.write_text(cat.replace('driver = "openai-responses"\nbase_url = "https://api.meta.ai/v1"',
+                                 'driver = "openai-compat"\nbase_url = "https://api.meta.ai/v2"', 1))
+    assert moved.read_text() != cat
+    monkeypatch.setattr(paths, "CRAZE_CATALOG", moved)
+    capsys.readouterr()
+    assert main(argv) == 2
+    err = capsys.readouterr().err
+    assert "muse-wonder-1.0: the route craze takes for meta now (driver and base_url)" in err, err
+    assert "re-run snapshot-config" in err, err
+    assert not (tmp_path / "out").exists()
 
 
 def test_child_environment_is_built_from_nothing(tmp_path, monkeypatch):

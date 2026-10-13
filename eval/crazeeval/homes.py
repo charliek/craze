@@ -83,9 +83,9 @@ def _craze_provider(m: dict, em: EvalModel, base_url: str) -> dict:
         # entry to take it from (craze refuses a provider with none). The route reaches
         # craze as CRAZE_TEST_ANTHROPIC_API (craze_env).
         return {"driver": ANTHROPIC_DRIVER, "api_key": paths.DUMMY_KEY}
-    # The owner's own driver, else -- an entry that names none, or an old gx import's,
-    # whose driver craze ignores (snapshot) -- the one craze ships for the provider, as
-    # craze itself would run it: Meta's openai-responses (craze plan 047 D14).
+    # The snapshot's recorded driver: the owner's own, or for an old gx import's entry,
+    # whose driver craze ignores, the catalog's as the snapshot froze it (craze plan 047
+    # D14: Meta's openai-responses). An entry that names none runs on the one craze ships.
     driver = m["craze_provider"].get("driver") or shipped_driver(em.provider)
     if driver == OPENROUTER_DRIVER:
         # craze's openrouter driver has a fixed endpoint and refuses a base_url, so no

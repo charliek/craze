@@ -250,6 +250,25 @@ def legacy_entry(entry: Mapping, shipped: Mapping) -> dict:
     return out
 
 
+def route_problems(models, snap, providers: Mapping[str, "Provider"]) -> list[str]:
+    """Why a run's routes are not its config snapshot's: one line per model whose
+    snapshot records a ``driver`` or ``base_url`` that the route craze would take now
+    (``providers``, from load_providers) does not match -- the owner's entry changed
+    since, or, for an entry craze reads through its catalog (an old gx import's), the
+    catalog did. Each says to re-run ``snapshot-config``. A field the snapshot does not
+    record (craze's locked provider, an entry that names none) is not compared."""
+    out = []
+    for em in models:
+        recorded = snap.model(em.key)["craze_provider"]
+        route = providers[em.provider]
+        moved = [field for field, now in (("driver", route.driver), ("base_url", route.base_url))
+                 if recorded.get(field) and recorded[field].rstrip("/") != now]
+        if moved:
+            out.append(f"{em.key}: the route craze takes for {em.provider} now ({' and '.join(moved)}) differs "
+                       "from the config snapshot's; re-run snapshot-config")
+    return out
+
+
 def load_providers(
     path: Path | None = None,
     env: Mapping[str, str] | None = None,
