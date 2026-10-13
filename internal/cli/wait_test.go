@@ -43,11 +43,18 @@ func goCraze(argv ...string) *crazeRun {
 // wait is the run's output and exit code, within stubWatchdog.
 func (r *crazeRun) wait(t *testing.T) (stdout, stderr string, code int) {
 	t.Helper()
+	return r.within(t, stubWatchdog)
+}
+
+// within is the run's output and exit code, within d: wait's, for a run whose
+// hub and host start take their time on a loaded machine.
+func (r *crazeRun) within(t *testing.T, d time.Duration) (stdout, stderr string, code int) {
+	t.Helper()
 	select {
 	case <-r.done:
 		return r.stdout, r.stderr, r.code
-	case <-time.After(stubWatchdog):
-		t.Fatalf("craze did not return within %v", stubWatchdog)
+	case <-time.After(d):
+		t.Fatalf("craze did not return within %v", d)
 		return "", "", 0
 	}
 }

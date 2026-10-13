@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.reopen.json",
+  "title": "session.reopen",
+  "description": "The hub's (plan 046 B3): ensure the saved session id names is running. The hub resolves id against its own session index to the row a load of it loads — a craze id's newest row (unknown_session when no row has the id; not_accepting, reason not_resumable, when that row is of a provider this craze cannot resume, or malformed, never an older row in its place) — then looks in the registry — the whole $HOME's, any namespace — for a host serving the session: one serving it is joined (joined true; the hub never stops or signals a host it joined, whatever its start comes to), one marked stopping (or whose attach is refused closing) is waited for until its process has gone — one refused closing with its entry unmarked, perhaps only an idle check's, tried again once the hub has waited a poll (20 ms), and with none the hub spawns craze serve --load in the session's workspace (joined false) — the workspace no longer a directory is not_accepting, reason not_resumable. Concurrent reopens, and a reopen racing any other loader, end on one host: the session's claim lets one load it, and every other joins that one (a TUI-hosted session whose claim could not take its lock file runs unclaimed). The answer names the session asked for: a host found no longer serving it when its row is read is looked past — stopped, if the hub spawned it — and, found again with its entry as it was, waited for as a holder is until that entry changes, only when no other host serves the session (one serving it is joined first, one on its way out waited for first); no wait ends on a host the hub would not join. It answers once the session's start is done: the session as the roster lists it, read fresh. Neither session-scoped nor mutating, with no requestId: a reopen sent again after its answer was lost ends on whatever host serves the session then, so across tries the host id and joined may differ, and one sent after the session was stopped reopens it. Budgets: 180 s in all from admission, past which the reopen is unavailable, reason busy; holders waited for at most 20 s in all (only the time spent waiting counts), at most 3 spawns and at most 3 hosts looked past, each counted once; each spawn's ready line 10 s; each start at most 150 s from its dial; each cut to what is left of the 180 s. A client allows at least 200 s and uses one short connection per reopen: a hub's answers on a connection are in order. Bad params are bad_request (an unknown member, reason unknown_field); a session that cannot be loaded here is not_accepting, reason not_resumable; a start that fails or does not end in time is not_accepting, reason start_failed, data.cause the host's first error line; a holder that has not finished stopping within the holder allowance, a session that kept changing hands, a reopen whose 180 s passed, a host's transient refusal (its index busy or changed) and more than 16 creates and reopens in flight are unavailable, reason busy; a host that fails to spawn or to become ready is unavailable, reason spawn_failed; a host that cannot be reached, a registry that cannot be read, or a live host's entry in it, is unavailable, reason host_unreachable; a hub tearing down, unavailable, reason closing. A host answers unsupported, reason hub_only; the connection capability reopen says a hub serves it and sessions.saved both, and a hub that cannot answer it refuses it unsupported, reason unsupported (or unknown_method, a hub from before it).",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 512, "description": "The saved session to ensure is running: a sessions.saved id, opaque to a client — its craze session id, or <provider>:<providerSessionId> for an index row with none. At most 512 bytes; maxLength, which counts characters (JSON Schema cannot count bytes), is a weaker bound than the hub's."}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "session": {"$ref": "info.json#/$defs/rosterRow", "description": "The session's roster row, its row read fresh from its host once the hub let go of it: approximate as any roster row's is, and true also when that fresh read fails — the reopen is a success all the same, and this is the row the hub builds from the registry, row absent (session.create's rule). A legacy id's session carries the craze id its host gave it. Bind to its hostId."},
+        "joined": {"type": "boolean", "description": "true: a host served the session already, and the hub joined it; false: the hub started a host to load it. Across retries it may differ."}
+      },
+      "required": ["session", "joined"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -247,10 +248,12 @@ func TestTheHubServesSavedSessions(t *testing.T) {
 		savedRow("c-big", "cursor", strings.Repeat("s", protocol.SavedProviderSessionIDMax+1), ws, "oversized", 2*time.Minute),
 		savedRow("", "grok", "p-2", ws, "two", 3*time.Minute),
 	)
+	// reopen (plan 046 B1): the hub serves sessions.saved and session.reopen
+	// both.
 	want := protocol.HubCapabilities()
-	want.CreateOptions, want.CreateTitle = true, true
+	want.CreateOptions, want.CreateTitle, want.Reopen = true, true, true
 	if hello := hubHello(t, sock); hello.Capabilities != want {
-		t.Fatalf("the hub's hello %+v, want %+v: no capability says sessions.saved in this release", hello.Capabilities, want)
+		t.Fatalf("the hub's hello %+v, want %+v", hello.Capabilities, want)
 	}
 	saved := func(q protocol.SavedParams) (protocol.SavedResult, error) {
 		t.Helper()
@@ -419,21 +422,44 @@ func TestPsSavedThroughTheHub(t *testing.T) {
 	}
 }
 
-// TestPsSavedOfAnOlderHub (B-5): a running hub that cannot answer
-// sessions.saved — the real hub given this build's answers less Saved, as a
-// hub from before the method refuses it unsupported — is said on stderr, and
-// craze ps --saved reads the index itself, exit 0.
+// TestPsSavedOfAnOlderHub (B-5, plan 046 B6's gate): craze ps --saved lists
+// through a hub only when its hello says reopen. A running hub without it —
+// the real hub given this build's answers less Saved (a hub from before the
+// method), or less Reopen alone (a hub that answers sessions.saved but whose
+// hello cannot say reopen) — is said on stderr, and craze ps --saved reads the
+// index itself, exit 0. The second is the gate's negative control: that hub
+// would answer sessions.saved, and is never asked (its log names no call).
 func TestPsSavedOfAnOlderHub(t *testing.T) {
-	env, all, _ := psSavedMachine(t)
-	creates := hubCreates()
-	creates.Saved = nil
-	inProcessHub(t, env, creates)
-	stdout, stderr, code := executeErr([]string{"ps", "--saved"})
-	if code != 0 || stderr != "craze ps: the hub cannot list saved sessions (an older craze's); reading the session index directly\n" {
-		t.Fatalf("craze ps --saved of an older hub exited %d, stderr %q", code, stderr)
-	}
-	if got := savedTable(t, stdout); fmt.Sprint(got) != fmt.Sprint(all) {
-		t.Fatalf("craze ps --saved of an older hub printed\n%s\nwant rows %q", stdout, all)
+	for _, tc := range []struct {
+		name string
+		edit func(*hub.Creates)
+	}{
+		{"no sessions.saved", func(c *hub.Creates) { c.Saved = nil }},
+		{"no session.reopen", func(c *hub.Creates) { c.Reopen = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, all, _ := psSavedMachine(t)
+			creates := hubCreates()
+			tc.edit(creates)
+			var asked atomic.Bool
+			if saved := creates.Saved; saved != nil {
+				creates.Saved = func(q protocol.SavedParams, logf func(string, ...any)) (protocol.SavedResult, *protocol.Error) {
+					asked.Store(true)
+					return saved(q, logf)
+				}
+			}
+			inProcessHub(t, env, creates)
+			stdout, stderr, code := executeErr([]string{"ps", "--saved"})
+			if code != 0 || stderr != "craze ps: the hub cannot list saved sessions (an older craze's); reading the session index directly\n" {
+				t.Fatalf("craze ps --saved of an older hub exited %d, stderr %q", code, stderr)
+			}
+			if got := savedTable(t, stdout); fmt.Sprint(got) != fmt.Sprint(all) {
+				t.Fatalf("craze ps --saved of an older hub printed\n%s\nwant rows %q", stdout, all)
+			}
+			if asked.Load() {
+				t.Fatal("craze ps --saved asked sessions.saved of a hub whose hello does not say reopen")
+			}
+		})
 	}
 }
 
@@ -477,25 +503,29 @@ func TestPsSavedEdges(t *testing.T) {
 	}
 }
 
-// TestSavedSessionsReadTheWholeIndex (C6 review): the index is read whole,
-// so a craze id's newest title is its newest row's even when that row's
-// provider is one this build does not know (a newer craze's) — through the
-// real Store, the case roster's TestSavedSessionsCandidates pins on the
-// function alone — and that row itself is never offered.
+// TestSavedSessionsReadTheWholeIndex (C6 review; C7 review, item 9): the
+// index is read whole, through the real Store, so a craze id's newest row is
+// its newest whatever its provider: one whose newest row is of a provider this
+// build does not know (a newer craze's) is not offered — never by its older
+// cursor row, which a load of the id would not take — and one whose newest row
+// is cursor's is offered by it, its title its own; a craze id of only an
+// unknown provider's rows is not offered either.
 func TestSavedSessionsReadTheWholeIndex(t *testing.T) {
 	env, _ := serveHome(t)
 	ws := filepath.Join(env.Home, "a")
 	writeSavedIndex(t,
 		savedRow("c-7", "nosuch", "p-9", ws, "renamed elsewhere", time.Minute),
 		savedRow("c-7", "cursor", "p-7b", ws, "older title", 2*time.Minute),
-		savedRow("c-8", "nosuch", "p-8", ws, "a newer craze's", 3*time.Minute),
+		savedRow("c-9", "cursor", "p-9b", ws, "the newest title", 3*time.Minute),
+		savedRow("c-9", "nosuch", "p-9a", ws, "an older craze's title", 4*time.Minute),
+		savedRow("c-8", "nosuch", "p-8", ws, "a newer craze's", 5*time.Minute),
 	)
 	res, perr := savedSessions(env, protocol.SavedParams{}, noLog(t))
 	if perr != nil || len(res.Sessions) != 1 {
-		t.Fatalf("savedSessions = %+v, %v; want c-7 alone", res, perr)
+		t.Fatalf("savedSessions = %+v, %v; want c-9 alone", res, perr)
 	}
-	if s := res.Sessions[0]; s.ID != "c-7" || s.Provider != "cursor" || s.ProviderSessionID != "p-7b" || s.Title != "renamed elsewhere" {
-		t.Fatalf("c-7 listed %+v; want its cursor row carrying its newest title", s)
+	if s := res.Sessions[0]; s.ID != "c-9" || s.Provider != "cursor" || s.ProviderSessionID != "p-9b" || s.Title != "the newest title" {
+		t.Fatalf("c-9 listed %+v; want its newest row, its own title", s)
 	}
 }
 

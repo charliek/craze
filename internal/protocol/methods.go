@@ -79,6 +79,18 @@ const MethodSessionsCreateOptions = "sessions.createOptions"
 // it, refuses it unsupported (reason unsupported, or unknown_method).
 const MethodSessionsSaved = "sessions.saved"
 
+// MethodSessionReopen is the hub's (plan 046 B3): "ensure this saved session
+// is running" — the session a sessions.saved id names joined where a host
+// serves it already, or loaded in a host the hub spawns (craze serve --load),
+// answered once its start is done. Like session.create it is neither
+// session-scoped (it names a saved session, not a served one) nor mutating
+// (no commandId: its retry safety is by session — at most one host serves a
+// session, its claim's — not by a command id). A host answers it unsupported,
+// reason hub_only; the connection capability reopen says a hub serves it and
+// sessions.saved both, and a hub given no way to resolve one, and one from
+// before it, refuses it unsupported (reason unsupported, or unknown_method).
+const MethodSessionReopen = "session.reopen"
+
 // The notifications (plan 027 §3.3; plan 032 §3.6; plan 040 §3.2). Each
 // carries its subscription id — an attachment's, from a host, or the roster
 // subscription's, from the hub — or, for aside, its aside id.
@@ -141,8 +153,8 @@ type MethodInfo struct {
 	// answers it unsupported, whatever its params, and "" for a method every
 	// host serves. The method is the hub's (sessions.subscribe,
 	// roster_unsupported: rosterSubscribe is false; session.connect,
-	// session.create, sessions.createOptions and sessions.saved, hub_only,
-	// X6) — which no host serves — or one a host serves only where
+	// session.create, sessions.createOptions, sessions.saved and
+	// session.reopen, hub_only, X6) — which no host serves — or one a host serves only where
 	// Capability says so (session.stop, stop_unsupported;
 	// session.models.refresh, models_refresh_unsupported; session.aside and
 	// session.aside.cancel, aside_unsupported). Such a method's schema is
@@ -208,10 +220,12 @@ var methods = []MethodInfo{
 	{Name: MethodSessionCreate, HostUnsupported: ReasonHubOnly},
 	{Name: MethodSessionsCreateOptions, HostUnsupported: ReasonHubOnly},
 	{Name: MethodSessionsSaved, HostUnsupported: ReasonHubOnly},
+	{Name: MethodSessionReopen, HostUnsupported: ReasonHubOnly},
 }
 
 // Methods is every method protocol 1 names, in §3.3's order, the hub's
-// session.create, sessions.createOptions and sessions.saved last.
+// session.create, sessions.createOptions, sessions.saved and session.reopen
+// last.
 func Methods() []MethodInfo { return slices.Clone(methods) }
 
 // Method is name's place on the wire, and false for a name protocol 1 does

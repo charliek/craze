@@ -1,6 +1,7 @@
 package roster
 
 import (
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -152,40 +153,31 @@ type SavedQuery struct {
 // first (sessions.Store.All) — that no session run names serves, as every
 // list of them chooses them (plan 046 B2): the session list's saved rows
 // (savedRows, Saved) and the hub's sessions.saved alike, each with its own
-// query. The candidates are the index's rows of a provider craze can resume
-// (the resume picker's rule: a provider this build knows and can load),
-// deduplicated by craze id to its newest such row — carrying the craze id's
-// newest title, whatever that row's provider — and a row with no craze id
-// kept as the row it is (its provider session id names it; a craze id is
-// given it when it is resumed), less every session run names (by craze id,
-// or by its provider and provider session id). A row that does
-// not fit the wire's bounds (savedRowFits) is skipped as malformed, as if
-// the index had no such row. Then, in this order: q.Workspace's filter, the
-// sub-agent filter, the order — UpdatedAt, newest first, ties by SavedID —
-// and q.Limit, more saying the limit left some out: every filter runs before
-// the cut. It reads nothing and stats nothing: a workspace gone is still
-// listed, so a hung filesystem cannot hold a listing.
+// query. One row per craze id: its newest, whatever it is — the row a load
+// of the craze id loads (craze serve --load takes the newest row carrying
+// it, sessions.Store.ByCrazeID, and session.reopen resolves its id to the
+// same row) — offered only when that row can be resumed (Unresumable: a
+// provider this build can load, the wire's bounds), so a craze id whose
+// newest row cannot be is not offered at all, never by an older row a load
+// would not take; and a row with no craze id kept as the row it is (its
+// provider session id names it; a craze id is given it when it is resumed),
+// offered on the same terms. Less every session run names (by craze id, or by
+// its provider and provider session id). Then, in this order: q.Workspace's
+// filter, the sub-agent filter, the order — UpdatedAt, newest first, ties by
+// SavedID — and q.Limit, more saying the limit left some out: every filter
+// runs before the cut. It reads nothing and stats nothing: a workspace gone
+// is still listed, so a hung filesystem cannot hold a listing.
 func SavedSessions(all []sessions.Row, run Running, q SavedQuery) (rows []sessions.Row, more bool) {
-	titles := map[string]string{}
 	seen := map[string]bool{}
 	for _, r := range all {
-		if !savedRowFits(r) {
-			continue
-		}
-		if r.CrazeID != "" {
-			if _, ok := titles[r.CrazeID]; !ok {
-				titles[r.CrazeID] = r.Title
-			}
-		}
-		if p, err := agent.ProviderByName(r.Provider); err != nil || !p.Resumable() {
-			continue
-		}
 		if r.CrazeID != "" {
 			if seen[r.CrazeID] {
 				continue
 			}
 			seen[r.CrazeID] = true
-			r.Title = titles[r.CrazeID]
+		}
+		if Unresumable(r) != "" {
+			continue
 		}
 		if run.serves(r) {
 			continue
@@ -210,6 +202,22 @@ func SavedSessions(all []sessions.Row, run Running, q SavedQuery) (rows []sessio
 	return rows, false
 }
 
+// Unresumable says why a saved session's deciding row — a craze id's newest
+// row, or a row with no craze id — can be neither listed saved
+// (SavedSessions) nor reopened (session.reopen), "" when it can be: its
+// provider one this build knows and can load (the resume picker's rule), and
+// the row within the wire's bounds (savedRowFits; the index is a file a
+// person can edit). In words a refusal carries.
+func Unresumable(r sessions.Row) string {
+	if p, err := agent.ProviderByName(r.Provider); err != nil || !p.Resumable() {
+		return fmt.Sprintf("that session's provider %q is not one this craze can resume", r.Provider)
+	}
+	if !savedRowFits(r) {
+		return "that session's index row is malformed"
+	}
+	return ""
+}
+
 // SavedID is what reopens a saved session (plan 046 B2): its craze id, or
 // <provider>:<provider session id> for a row with none — the form `craze
 // serve --load` takes.
@@ -221,13 +229,17 @@ func SavedID(r sessions.Row) string {
 }
 
 // savedRowFits says an index row fits sessions.saved's bounds (plan 046 B2):
-// its id (and so its craze id) and its provider session id within
-// protocol.SavedIDMax and SavedProviderSessionIDMax bytes, its workspace
-// absolute and within SavedWorkspaceMax bytes, and both its times ones the
-// wire can write in UTC (savedTimeFits). The index is a file a person can
-// edit; a row that does not fit is malformed, and no list offers it.
+// its craze id, when it has one, a token a load takes (rundir.ValidToken, as
+// craze serve --load's claim checks it: [A-Za-z0-9._-], 1 to 128 bytes — one
+// that is not could be read as another session's id, a legacy key's colon
+// among them); its id and its provider session id within protocol.SavedIDMax
+// and SavedProviderSessionIDMax bytes, its workspace absolute and within
+// SavedWorkspaceMax bytes, and both its times ones the wire can write in UTC
+// (savedTimeFits). The index is a file a person can edit; a row that does not
+// fit is malformed, and no list offers it.
 func savedRowFits(r sessions.Row) bool {
-	return len(SavedID(r)) <= protocol.SavedIDMax && len(r.SessionID) <= protocol.SavedProviderSessionIDMax &&
+	return (r.CrazeID == "" || rundir.ValidToken(r.CrazeID)) &&
+		len(SavedID(r)) <= protocol.SavedIDMax && len(r.SessionID) <= protocol.SavedProviderSessionIDMax &&
 		len(r.CWD) <= protocol.SavedWorkspaceMax && filepath.IsAbs(r.CWD) &&
 		savedTimeFits(r.CreatedAt) && savedTimeFits(r.UpdatedAt)
 }

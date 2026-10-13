@@ -175,6 +175,11 @@ type Endpoint struct {
 // unknown_field, so a client that has a title to set checks this first —
 // craze new --title asks the hub for it (hub.Ensure), and an older hub is
 // its LacksError, never a refused or silently untitled create.
+//
+// Reopen is plan 046's (B1), omitted when false in the same way: the hub
+// serves sessions.saved and session.reopen both — a client's resume of a
+// saved session. A client hides its resume entry without it, and craze new
+// --load asks the hub for it (hub.Ensure): an older hub is its LacksError.
 type ConnectionCapabilities struct {
 	RosterSubscribe bool `json:"rosterSubscribe"`
 	SessionCreate   bool `json:"sessionCreate"`
@@ -184,6 +189,7 @@ type ConnectionCapabilities struct {
 	AttachWhenNow   bool `json:"attachWhenNow"`
 	CreateOptions   bool `json:"createOptions,omitempty"`
 	CreateTitle     bool `json:"createTitle,omitempty"`
+	Reopen          bool `json:"reopen,omitempty"`
 }
 
 // HostCapabilities is a session host's connection capabilities in protocol
@@ -206,7 +212,9 @@ func HostCapabilities() ConnectionCapabilities {
 // given an answer to sessions.createOptions (Creates.Options; plan 036
 // §3.4). So is CreateTitle: the hub sets it only when the hosts it spawns
 // take a title (Creates.Title; plan 043 D8) — every craze hub's, and no test
-// hub's that does not say so, so no hello from before it moves.
+// hub's that does not say so, so no hello from before it moves. So is Reopen:
+// the hub sets it only when it is given the answers to both sessions.saved and
+// session.reopen (Creates.Saved and Creates.Reopen; plan 046 B1).
 func HubCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
@@ -943,7 +951,8 @@ type SavedResult struct {
 // session id, or <provider>:<providerSessionId> for an index row with none
 // (an older craze's, which `craze serve --load` takes in the same form) —
 // opaque to a client, at most SavedIDMax bytes. CrazeSessionID is the craze
-// id, absent for such a row. Provider, ProviderSessionID (at most
+// id — a token a load takes (rundir.ValidToken: [A-Za-z0-9._-], at most 128
+// bytes) — absent for such a row. Provider, ProviderSessionID (at most
 // SavedProviderSessionIDMax bytes) and Workspace (absolute, at most
 // SavedWorkspaceMax bytes) are the index row's; Title its craze id's newest
 // title, cut to SavedTitleMax characters, absent for none; CreatedAt and
@@ -985,6 +994,35 @@ const (
 	// trailing sessions, and says more, to keep within it.
 	SavedResultBytesMax = 1 << 20
 )
+
+// ReopenParams is session.reopen's params (plan 046 B3): ID, the saved
+// session to ensure is running — a sessions.saved id (SavedSession.ID: its
+// craze session id, or <provider>:<providerSessionId> for an index row with
+// none), opaque to a client, at most ReopenIDMax bytes. A member it does not
+// define is unknown_field; a null, a value of another type, a member given
+// twice, and an empty or oversized id are bad_request. A host answers
+// unsupported, reason hub_only.
+type ReopenParams struct {
+	ID string `json:"id"`
+}
+
+// ReopenResult is a saved session running (plan 046 B3): the session as the
+// hub's roster lists it, read fresh from its host — approximate as any roster
+// row's is, and true also when that read fails (the row is then the
+// registry's, row absent: create's rule) — and Joined, true when a host
+// served the session already and the hub joined it, false when the hub
+// started a host to load it. Its retry safety is by session: a reopen sent
+// again after its answer was lost ends on whatever host serves the session
+// then, so across tries the host id and Joined may differ. A failure is no
+// result but a refusal.
+type ReopenResult struct {
+	Session RosterRow `json:"session"`
+	Joined  bool      `json:"joined"`
+}
+
+// ReopenIDMax bounds session.reopen's id, in bytes: sessions.saved's id
+// bound (SavedIDMax).
+const ReopenIDMax = SavedIDMax
 
 // ------------------------------------------------------------------ attach
 

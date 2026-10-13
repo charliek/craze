@@ -290,6 +290,10 @@ func TestInstancesValidate(t *testing.T) {
 	// hub's from it on, beside createOptions.
 	titleHub := optionsHub
 	titleHub.Capabilities.CreateTitle = true
+	// A hub serving sessions.saved and session.reopen (plan 046 B1): every
+	// craze hub's from it on.
+	reopenHub := titleHub
+	reopenHub.Capabilities.Reopen = true
 	errResp := func(code protocol.Code, reason protocol.Reason) string {
 		return jsonOf(t, protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`7`),
 			Error: &protocol.Error{Code: protocol.RPCRefused, Message: "refused", Data: protocol.ErrorData{Code: code, Reason: reason}}})
@@ -336,6 +340,10 @@ func TestInstancesValidate(t *testing.T) {
 		{"a hub's hello whose create takes a title", "hello.json", "result", jsonOf(t, titleHub), true},
 		{"a hub's hello whose createTitle is no boolean", "hello.json", "result",
 			strings.Replace(jsonOf(t, titleHub), `"createTitle":true`, `"createTitle":"yes"`, 1), false},
+		// reopen (plan 046 B1): omitted when false, as createTitle is.
+		{"a hub's hello serving reopen", "hello.json", "result", jsonOf(t, reopenHub), true},
+		{"a hub's hello whose reopen is no boolean", "hello.json", "result",
+			strings.Replace(jsonOf(t, reopenHub), `"reopen":true`, `"reopen":"yes"`, 1), false},
 		{"a hub's hello carrying clientId", "hello.json", "result", with(jsonOf(t, hub), "clientId", `"c-1"`), false},
 		{"a hub's hello carrying resumed", "hello.json", "result", with(jsonOf(t, hub), "resumed", "false"), false},
 		{"a hub's hello carrying retryHorizon", "hello.json", "result",
@@ -576,6 +584,12 @@ func TestInstancesValidate(t *testing.T) {
 			savedWith(func(r *protocol.SavedResult) { r.Sessions[1].ID = "" }), false},
 		{"a saved session with an empty craze id", "sessions.saved.json", "result",
 			strings.Replace(jsonOf(t, saved), `"id":"grok:prov-2",`, `"id":"grok:prov-2","crazeSessionId":"",`, 1), false},
+		{"a saved session's craze id at its bound", "sessions.saved.json", "result",
+			savedWith(func(r *protocol.SavedResult) { r.Sessions[0].CrazeSessionID = strings.Repeat("c", 128) }), true},
+		{"a saved session's craze id over its bound", "sessions.saved.json", "result",
+			savedWith(func(r *protocol.SavedResult) { r.Sessions[0].CrazeSessionID = strings.Repeat("c", 129) }), false},
+		{"a saved session's craze id that no load takes", "sessions.saved.json", "result",
+			savedWith(func(r *protocol.SavedResult) { r.Sessions[0].CrazeSessionID = "cursor:p-b" }), false},
 		{"a saved session with a relative workspace", "sessions.saved.json", "result",
 			savedWith(func(r *protocol.SavedResult) { r.Sessions[0].Workspace = "projects/lumen" }), false},
 		{"a saved session's id at its bound", "sessions.saved.json", "result",
@@ -600,6 +614,25 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(jsonOf(t, saved), `,"updatedAt":"2026-09-25T10:30:45.123456789Z"`, ``, 1), false},
 		{"a saved session whose time is no string", "sessions.saved.json", "result",
 			strings.Replace(jsonOf(t, saved), `"updatedAt":"2026-09-25T10:30:45.123456789Z"`, `"updatedAt":1790000000`, 1), false},
+
+		// session.reopen (plan 046 B3).
+		{"session.reopen of a craze id", "session.reopen.json", "params", jsonOf(t, protocol.ReopenParams{ID: "0190ab12-cd34-7ef0-8123-456789abcdef"}), true},
+		{"session.reopen of a legacy row's id", "session.reopen.json", "params", `{"id":"grok:prov-2"}`, true},
+		{"session.reopen with no id", "session.reopen.json", "params", `{}`, false},
+		{"session.reopen with an empty id", "session.reopen.json", "params", `{"id":""}`, false},
+		{"session.reopen with a null id", "session.reopen.json", "params", `{"id":null}`, false},
+		{"session.reopen with an id of a number", "session.reopen.json", "params", `{"id":7}`, false},
+		{"session.reopen with an unknown member", "session.reopen.json", "params", `{"id":"s","requestId":"r-1"}`, false},
+		{"session.reopen's id at its bound", "session.reopen.json", "params", jsonOf(t, protocol.ReopenParams{ID: strings.Repeat("i", protocol.ReopenIDMax)}), true},
+		{"session.reopen's id over its bound", "session.reopen.json", "params", jsonOf(t, protocol.ReopenParams{ID: strings.Repeat("i", protocol.ReopenIDMax+1)}), false},
+		{"a reopen's answer, started", "session.reopen.json", "result", jsonOf(t, protocol.ReopenResult{Session: reachable}), true},
+		{"a reopen's answer, joined", "session.reopen.json", "result", jsonOf(t, protocol.ReopenResult{Session: reachable, Joined: true}), true},
+		{"a reopen's answer with no joined", "session.reopen.json", "result", without(jsonOf(t, protocol.ReopenResult{Session: reachable}), "joined"), false},
+		{"a reopen's answer with no session", "session.reopen.json", "result", `{"joined":true}`, false},
+		{"a reopen's answer with a prompt outcome", "session.reopen.json", "result",
+			with(jsonOf(t, protocol.ReopenResult{Session: reachable}), "prompt", `"none"`), false},
+		{"a reopen's answer with a host's row for its session", "session.reopen.json", "result",
+			`{"session":` + jsonOf(t, row) + `,"joined":false}`, false},
 
 		{"session.attach with a cursor, now, a budget", "session.attach.json", "params", jsonOf(t, protocol.AttachParams{SessionID: "s",
 			Cursor: &protocol.Cursor{Incarnation: "inc-1", Seq: 42}, When: protocol.WhenNow, Budget: &protocol.AttachBudget{MaxItems: 64}}), true},
@@ -836,6 +869,8 @@ func TestInstancesValidate(t *testing.T) {
 		inst{"a create reusing its request id", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonRequestConflict), true},
 		inst{"a host that never started", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonSpawnFailed), true},
 		inst{"a host the hub could not dial", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonHostUnreachable), true},
+		inst{"a saved session that cannot be reopened", "envelope.json", "response", errResp(protocol.CodeNotAccepting, protocol.ReasonNotResumable), true},
+		inst{"not_resumable under a code it is not", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonNotResumable), false},
 		inst{"host_unreachable under a code it is not", "envelope.json", "response", errResp(protocol.CodeFailed, protocol.ReasonHostUnreachable), false},
 		inst{"a roster notification", "envelope.json", "notification", jsonOf(t, protocol.Notification{JSONRPC: protocol.JSONRPCVersion,
 			Method: protocol.NotifyRoster, Params: json.RawMessage(jsonOf(t, change))}), true},

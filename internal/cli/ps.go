@@ -409,14 +409,14 @@ func psAge(now, since time.Time) string {
 // craze ps --saved (plan 046 B6): the saved sessions — this CRAZE_HOME's
 // session index's sessions that no running host serves — newest first, at
 // most psSavedLimit, sub-agents' left out: a running hub's sessions.saved
-// (hub.Find: a listing never starts a hub, since the index is this
-// process's to read too), else — no hub running, --no-hub, or a hub that
-// cannot answer it — the same function the hub's answer is (savedSessions)
-// over the index directly, and stderr says so. In this release no
-// capability says a hub serves sessions.saved, so any failure of the hub's
-// path is the fallback's cue, as plain craze ps's is; a hub from before the
-// method refuses it unsupported. It fails, exit 1, only when the path it
-// took last fails too: the registry cannot be read.
+// (hub.Find, needing the capability reopen — which says a hub serves
+// sessions.saved and session.reopen both — and never starting a hub, since
+// the index is this process's to read too), else — no hub running, --no-hub,
+// a hub without reopen (an older craze's, Find's LacksError), or any other
+// failure of the hub's path, as plain craze ps falls back on one — the same
+// function the hub's answer is (savedSessions) over the index directly, and
+// stderr says so. It fails, exit 1, only when the path it took last fails
+// too: the registry cannot be read.
 
 const (
 	// psSavedLimit is how many saved sessions craze ps --saved asks for: the
@@ -493,7 +493,7 @@ func runPsSaved(cmd *cobra.Command, f psFlags) error {
 func psSavedFromHub(env rundir.Env, q protocol.SavedParams) (json.RawMessage, protocol.SavedResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
 	defer cancel()
-	sock, err := hub.Find(ctx, env, protocol.ConnectionCapabilities{})
+	sock, err := hub.Find(ctx, env, hub.ReopenNeed())
 	if err != nil {
 		return nil, protocol.SavedResult{}, err
 	}
@@ -510,12 +510,15 @@ func psSavedFromHub(env rundir.Env, q protocol.SavedParams) (json.RawMessage, pr
 
 // psSavedWhy is why craze ps --saved reads the index itself, in its words:
 // no hub running (hub.ErrNoHub, Find's answer for none); a hub that cannot
-// answer sessions.saved — one from before it, or given no answer — which
-// refuses it unsupported; or anything else of the hub's path, as plain
-// craze ps says it.
+// answer sessions.saved — one whose hello lacks reopen (Find's LacksError: a
+// craze from before it), or one that refuses the method unsupported all the
+// same; or anything else of the hub's path, as plain craze ps says it.
 func psSavedWhy(err error) string {
 	if errors.Is(err, hub.ErrNoHub) {
 		return "no hub is running"
+	}
+	if _, ok := errors.AsType[*hub.LacksError](err); ok {
+		return "the hub cannot list saved sessions (an older craze's)"
 	}
 	if pe, ok := errors.AsType[*protocol.Error](err); ok && pe.Data.Code == protocol.CodeUnsupported {
 		return "the hub cannot list saved sessions (an older craze's)"

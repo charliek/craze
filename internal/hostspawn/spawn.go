@@ -3,8 +3,10 @@
 // §3.16, so a spawner other than craze's own launcher — the hub — can use it):
 // the host's command line (Args), its start (Start), its ready line
 // (ReadReady), its end (Child.Terminate, Child.Settle) and the last resort
-// for the agents it leaves (KillRecordedAgents), and the rendezvous with the
-// holder of a session the host could not claim (Rendezvous). What a failure
+// for the agents it leaves (KillRecordedAgents), the rendezvous with the
+// holder of a session the host could not claim (Rendezvous), and the wait for
+// a holder that may be stopping to settle (AwaitHolder, holder.go: plan 046
+// B3, the hub's session.reopen). What a failure
 // means, and what is said of it, is the caller's. It imports neither a client
 // package (internal/cli, internal/tui) nor the hub: they build on it.
 //

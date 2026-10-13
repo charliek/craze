@@ -3,10 +3,10 @@
 // the machine — by reading the registry, which every host already writes
 // (P1) — and that a client asks for the roster, routes through to a session
 // (session.connect), asks to start one (session.create), asks what it can
-// start (sessions.createOptions) and asks for the saved sessions
-// (sessions.saved). It is `craze hub`, started on demand
-// by Ensure and gone when idle: no client and no live host, after a grace
-// (P12, owner decision 7).
+// start (sessions.createOptions), asks for the saved sessions
+// (sessions.saved) and asks to bring one back (session.reopen). It is `craze
+// hub`, started on demand by Ensure and gone when idle: no client and no live
+// host, after a grace (P12, owner decision 7).
 //
 // The pieces:
 //
@@ -26,6 +26,10 @@
 //   - saved.go: sessions.saved — the saved sessions, its params held to
 //     their form and the CLI's answer (Creates.Saved) served — and Saved, a
 //     client's ask for them (craze ps --saved).
+//   - reopen.go: session.reopen — a saved session ensured running: joined
+//     where a host serves it, loaded in a host the hub spawns otherwise,
+//     through the create's call machinery and one holder-resolution loop —
+//     and Reopen, a client's ask (craze new --load).
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.

@@ -1190,9 +1190,11 @@ in the session index that is not running, newest first, at most 50, each
 once — `·`, its title, provider and directory. They are chosen as the hub's
 [`sessions.saved`](protocol.md#sessionssaved) and
 [`craze ps --saved`](cli.md#saved-sessions) choose theirs, with sub-agents'
-sessions shown here, tagged; an index row the protocol could not carry — an
-id over 512 bytes, a directory over 4096 bytes or not absolute — is skipped
-as malformed. `Enter` on one resumes it in
+sessions shown here, tagged. A session is shown by its newest index row,
+the one a resume loads, and only when that row can be resumed: one whose
+newest row is of a provider this craze does not know (a newer craze's), or
+one the protocol could not carry — an id over 512 bytes, a directory over
+4096 bytes or not absolute — is not shown at all, never by an older row. `Enter` on one resumes it in
 this terminal: a session host is started in the directory the session ran in
 (not this terminal's) and loads it, the hint line saying `resuming <title>…`
 meanwhile, and the screen then shows it as [opening one in

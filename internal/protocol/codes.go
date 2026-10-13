@@ -224,6 +224,13 @@ const (
 	// hub that cannot read its registry, so it reaches no host: refused a
 	// session.connect, a sessions.list and a sessions.subscribe.
 	ReasonHostUnreachable Reason = "host_unreachable"
+	// ReasonNotResumable is a session.reopen (plan 046 B3) of a saved session
+	// that cannot be loaded again here, under not_accepting: its workspace is
+	// no longer a directory, its provider is not one this craze can resume,
+	// or the host the hub spawned to load it refused it — no such row any
+	// more, a row that cannot run where it ran — in that host's words.
+	// Choosing the same session again does not change it.
+	ReasonNotResumable Reason = "not_resumable"
 )
 
 // The client-side reasons (plan 027 §3.2): a client names these outcomes
@@ -269,6 +276,7 @@ var reasons = []ReasonInfo{
 	{ReasonNotAccepting, CodeNotAccepting, true, false},
 	{ReasonNotInTurn, CodeNotAccepting, true, false},
 	{ReasonStartFailed, CodeNotAccepting, false, false},
+	{ReasonNotResumable, CodeNotAccepting, false, false},
 
 	{ReasonCommandAborted, CodeAborted, true, false},
 	{ReasonSetOutcomeUnknown, CodeAborted, true, false},

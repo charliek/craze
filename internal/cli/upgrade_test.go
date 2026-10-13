@@ -28,9 +28,9 @@ import (
 // kill the words name is the hub's alone.
 const staleHubPID = 4242
 
-// staleHubThen plays env's running hub — craze v, its hello's pid staleHubPID —
-// whose every session.create is refused unavailable, reason spawn_failed, in
-// msg: its record where Ensure looks, its start token dropped (as
+// staleHubThen plays env's running hub — craze v, its hello's pid staleHubPID,
+// saying reopen — whose every session.create and session.reopen is refused
+// unavailable, reason spawn_failed, in msg: its record where Ensure looks, its start token dropped (as
 // inProcessHub's: a hub whose identity cannot be verified is never
 // signalled), and a socket answering each connection's hello and creates.
 // Ensure must find it: one it would spawn instead fails the test.
@@ -66,9 +66,11 @@ func staleHubThen(t *testing.T, env rundir.Env, v, then, msg string) {
 	if err := os.WriteFile(lock.RecordPath(), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	caps := protocol.HubCapabilities()
+	caps.Reopen = true
 	hello := protocol.HubHelloResult{Protocol: protocol.ProtocolVersion,
 		Endpoint:     protocol.Endpoint{Kind: protocol.EndpointHub, HostID: lock.ID(), CrazeVersion: v, PID: staleHubPID},
-		Capabilities: protocol.HubCapabilities(), Limits: protocol.HostLimits()}
+		Capabilities: caps, Limits: protocol.HostLimits()}
 	later := hello
 	if then != "" {
 		later.Endpoint.CrazeVersion, later.Endpoint.PID = then, staleHubPID+1
@@ -99,7 +101,7 @@ func staleHubThen(t *testing.T, env rundir.Env, v, then, msg string) {
 					switch req.Method {
 					case protocol.MethodHello:
 						resp.Result, _ = json.Marshal(hello)
-					case protocol.MethodSessionCreate:
+					case protocol.MethodSessionCreate, protocol.MethodSessionReopen:
 						resp.Error = &protocol.Error{Code: -32000, Message: msg,
 							Data: protocol.ErrorData{Code: protocol.CodeUnavailable, Reason: protocol.ReasonSpawnFailed}}
 					default:
@@ -126,9 +128,11 @@ func staleHubThen(t *testing.T, env rundir.Env, v, then, msg string) {
 // re-executing a craze an upgrade removed, says no more than that — gets
 // craze new's remedy after its words: the hub's pid from its hello, both
 // versions and the kill, exit 1; with --json the stdout object is still the
-// wire's error, whole, and stderr says the same line. The negative controls:
-// a hub of this craze's version (one that has U1, and says it itself) and a
-// later hub's own U1 answer get nothing added.
+// wire's error, whole, and stderr says the same line. craze new --load says
+// it for a reopen refused the same way (plan 046 B6), by the hello of the
+// reopen's own connection. The negative controls: a hub of this craze's
+// version (one that has U1, and says it itself) and a later hub's own U1
+// answer get nothing added.
 func TestNewNamesTheRemedyForAnOlderHub(t *testing.T) {
 	const plain = "the session host cannot be started"
 	remedy := fmt.Sprintf("; the hub (pid %d) runs craze 0.1.0 and this is craze %s: if craze was upgraded, "+
@@ -164,6 +168,22 @@ func TestNewNamesTheRemedyForAnOlderHub(t *testing.T) {
 			if code != 1 || stderr != tc.want || json.Unmarshal([]byte(stdout), &got) != nil ||
 				got.Error.Message != tc.msg || got.Error.Data.Reason != protocol.ReasonSpawnFailed {
 				t.Fatalf("craze new --json: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+			}
+		})
+		// craze new --load, against a hub of its own: Ensure's connection is
+		// that hub's first (the replaced case's older hub), the reopen's its
+		// second.
+		t.Run(tc.name+", --load", func(t *testing.T) {
+			_, env := providersHubMachine(t)
+			then := ""
+			if tc.name == "a hub replaced after Ensure" {
+				then = version.Version
+			}
+			staleHubThen(t, env, tc.version, then, tc.msg)
+			writeSavedIndex(t, savedRow("0199c0de-aaaa-7000-8000-0000aaaa1111", "cursor", "s-a", env.Home, "", 0))
+			stdout, stderr, code := loadIn(noStdin(), "aaaa1111")
+			if code != 1 || stdout != "" || stderr != tc.want {
+				t.Fatalf("craze new --load: exit %d, stdout %q, stderr %q; want exit 1 and %q", code, stdout, stderr, tc.want)
 			}
 		})
 	}

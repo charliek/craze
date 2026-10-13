@@ -21,9 +21,10 @@ import (
 // the hub still imports neither the providers nor the index. A hub whose
 // Saved is nil, or that has no Creates at all, serves no such method — it
 // falls through to the dispatch's unsupported, reason unsupported — and a
-// host answers it unsupported, reason hub_only. No connection capability
-// says a hub serves it yet: a client asks, and takes unsupported (or a hub
-// from before it, unknown_method) as a hub that cannot.
+// host answers it unsupported, reason hub_only. The connection capability
+// reopen says a hub serves it and session.reopen both (plan 046 B1); a client
+// that asks a hub without it takes unsupported (or, a hub from before it,
+// unknown_method) as a hub that cannot.
 
 // savedAnswer is the answer sessions.saved takes, nil for a hub that does
 // not serve it (the file's comment).

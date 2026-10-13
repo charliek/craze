@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -849,9 +850,9 @@ func refusal(err error) string {
 		}
 		return "that session is already running (pid " + pid + ")"
 	case errors.Is(err, atomicfile.ErrLockBusy):
-		return "the session index is busy — try again"
+		return hostspawn.IndexBusy
 	case errors.Is(err, sessions.ErrNotInIndex):
-		return "the session index changed — try again"
+		return hostspawn.IndexChanged
 	}
 	return err.Error()
 }

@@ -249,6 +249,24 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   of the registry, an entry gains a `stopping` member. See [The hub's
   roster](../reference/protocol.md#the-hubs-roster) and [Session
   list](../reference/tui.md#session-list).
+- **A saved session can be brought back through the hub.** `craze ps --saved`
+  lists the sessions saved in the session index that no host runs, and `craze
+  new --load <id>` reopens one in a host of its own (`reopened <id> in
+  <dir>`), or answers `already running` when a host serves it already. A
+  client of the hub (shed, a phone) does the same with
+  [`sessions.saved`](../reference/protocol.md#sessionssaved) and
+  [`session.reopen`](../reference/protocol.md#sessionreopen) where the hub's
+  `hello` says `reopen`. A hub still running from before the upgrade cannot:
+  `craze new --load` says `this hub (craze <v>) cannot reopen a saved session;
+  it exits once no session runs and no client is connected, or stop it now
+  with kill <pid> (no session ends)`, exit 1 (no session ends with it), and
+  `craze ps --saved` reads the session index itself. See [`craze new
+  --load`](../reference/cli.md#craze-new-load).
+- **The session list shows a saved session by its newest row only.** A
+  session whose newest index row is of a provider this craze does not know (a
+  newer craze's) used to be offered by an older row, which its resume would
+  then not load; it is no longer offered at all. See [Saved
+  sessions](../reference/tui.md#saved-sessions).
 
 ## From v0.0.1
 

@@ -77,9 +77,11 @@ func runHub(cmd *cobra.Command, ready *hub.ReadyPipe, sigs <-chan os.Signal) err
 // --provider takes; sessions.createOptions' answer (hubCreateOptions, plan
 // 036 §3.4); sessions.saved's (savedSessions over the process's registry and
 // its CRAZE_HOME's index — the hub's own — its log lines named for the
-// method, plan 046 B2); and that the hosts it spawns — craze serve, this
-// binary — take a title (craze serve --title, plan 043 D8), which its hello
-// says (createTitle).
+// method, plan 046 B2); session.reopen's resolution of a saved session's id
+// against that index (reopenTarget, plan 046 B3), which with sessions.saved's
+// answer makes its hello say reopen; and that the hosts it spawns — craze
+// serve, this binary — take a title (craze serve --title, plan 043 D8), which
+// its hello says (createTitle).
 func hubCreates() *hub.Creates {
 	return &hub.Creates{
 		DefaultProvider: tui.ConfigProvider,
@@ -93,7 +95,8 @@ func hubCreates() *hub.Creates {
 				logf(protocol.MethodSessionsSaved+": "+format, args...)
 			})
 		},
-		Title: true,
+		Reopen: reopenTarget,
+		Title:  true,
 	}
 }
 

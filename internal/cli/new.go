@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,9 @@ import (
 	"github.com/charliek/craze/internal/version"
 )
 
+// craze new --load (plan 046 B6) reopens a saved session through the same hub
+// instead: reopen.go.
+//
 // craze new (plan 032 §3.12, P8): a session started in the background, through
 // the per-machine hub — hub.Ensure finds it or starts one that can create
 // sessions — by its session.create, under a requestId of this run's own. It
@@ -79,6 +83,9 @@ type newFlags struct {
 	json                  bool
 	// title is --title (plan 043 D8): the session's name from its start.
 	title string
+	// load is --load (plan 046 B6): a saved session to reopen through the
+	// hub instead of a new one (reopen.go's runNewLoad).
+	load string
 
 	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
 	wait       bool
@@ -100,7 +107,8 @@ func newNewCmd() *cobra.Command {
 		Long: "craze new starts a session in its own host, through the per-machine hub (started on " +
 			"demand), in the current directory or -C's, and returns once it has started: its id and " +
 			"directory, and — given a PROMPT — whether its first prompt was taken. The session runs on; " +
-			"craze attach, the session list (←) and craze ps find it. Without --provider the hub's " +
+			"craze attach, the session list (←) and craze ps find it. With --load it brings back a saved " +
+			"session instead (craze ps --saved lists them), or answers the one running it already. Without --provider the hub's " +
 			"configured default (config.toml's provider) starts it. With --wait it starts an unattended " +
 			"session itself, without the hub — questions answered with their first option; a plan ends its " +
 			"turn and comes back in the result (cursor, grok and gx are never told it was accepted) — " +
@@ -108,6 +116,9 @@ func newNewCmd() *cobra.Command {
 			"craze wait prints one; craze send continues the session.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("load") {
+				return runNewLoad(cmd, f, args)
+			}
 			if f.wait {
 				sigs, stop := waitSignals()
 				defer stop()
@@ -129,7 +140,9 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo: the session's agent asks for permission, and a client answers")
 	cmd.Flags().StringVar(&f.title, "title", "", "name the session this from its start, pinned as /rename pins a title (one line, at most 120 characters)")
-	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result) as JSON; with --wait, the result")
+	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result, or with --load session.reopen's) as JSON; with --wait, the result")
+	cmd.Flags().StringVar(&f.load, "load", "", "reopen this saved session through the hub instead of starting one: an id craze ps --saved prints, "+
+		"or a whole craze or provider session id; it waits for the session's start and sends no prompt")
 	// --wait (plan 041 §3.2): another path, past the hub — the session's
 	// host spawned here, unattended, sent the prompt and followed to its
 	// turn's end.
@@ -170,16 +183,7 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// as cli.md's "--json failures" promises, and so must a result that
 	// cannot be written.
 	ignoreSIGPIPE()
-	// fail is every exit-1 path before the session started (SF-124, plan 035
-	// P5): the stderr line as ever and, under --json, one JSON object on
-	// stdout first (newFailureJSON).
-	fail := func(err error, format string, args ...any) error {
-		msg := fmt.Sprintf(format, args...)
-		if f.json {
-			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
-		}
-		return exitf(1, "craze new: %s", msg)
-	}
+	fail := newFail(out, f.json)
 	dir := f.dir
 	if dir == "" {
 		wd, err := os.Getwd()
@@ -304,6 +308,19 @@ func newFailure(err error, hello protocol.HubHelloResult) string {
 		msg += "; " + remedy
 	}
 	return sanitizeLine(msg)
+}
+
+// newFail is craze new's fail, writing to out: every exit-1 path before the
+// session started (SF-124, plan 035 P5) — the stderr line as ever and, under
+// --json (asJSON), one JSON object on stdout first (newFailureJSON).
+func newFail(out io.Writer, asJSON bool) func(err error, format string, args ...any) error {
+	return func(err error, format string, args ...any) error {
+		msg := fmt.Sprintf(format, args...)
+		if asJSON {
+			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
+		}
+		return exitf(1, "craze new: %s", msg)
+	}
 }
 
 // newFailureJSON is a failed craze new's one JSON object (SF-124, plan 035

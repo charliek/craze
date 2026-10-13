@@ -539,3 +539,125 @@ def test_a_client_against_a_real_hub(
             break
         time.sleep(0.05)
     assert not left, f"the recipe's cleanup left: {left}"
+
+
+# The reopen cell's saved session (protocol.md's "Reopening a saved session"):
+# a grok session's index row, seeded before the hub starts.
+SAVED_ID = "0192f0aa-6666-7000-8000-0000000reopen"
+SAVED_ROW = {
+    "sessionId": "recipe-saved",
+    "provider": "grok",
+    "title": "a saved session",
+    "pinned": False,
+    "createdAt": "2026-10-12T09:00:00Z",
+    "updatedAt": "2026-10-12T10:00:00Z",
+    "crazeId": SAVED_ID,
+}
+
+
+def _replayed(result: dict) -> bool:
+    """A session.snapshot whose main transcript holds the fake agent's
+    replayed answer (grok-load's): the load's replay reached the session."""
+    entries = result["snapshot"].get("main", {}).get("entries", [])
+    return any(e.get("kind") == "assistant" and e.get("text") == "the workspace holds main.py and README.md" for e in entries)
+
+
+def test_a_client_reopens_a_saved_session(
+    craze_bin: Path, craze_fake_host_bin: Path, fake_agent_bin: Path, tmp_path: Path, recipe_procs: Procs
+) -> None:
+    """protocol.md's reopen cell (plan 046 B10), the recipe a client such as
+    shed copies: the same environment but for the fake agent's script,
+    grok-load (every session/load answered, replaying a short transcript),
+    and a session index seeded with one saved grok session. The hub's hello
+    says reopen; sessions.saved lists the session; session.reopen on a short
+    connection of its own starts its host, joined false; sessions.saved then
+    lists nothing; session.reopen again, on another, joins it, joined true,
+    the same host; the answer row's host id is where the client connects, and
+    the session's replayed transcript is there. Then the recipe's cleanup."""
+    # 1. The environment, the reopen cell's: the fake agent's script grok-load.
+    path_dir = private_path(tmp_path / "path", craze_bin, craze_fake_host_bin)
+    env = {**recipe_env(path_dir), "CRAZE_FAKE_SCRIPT": "grok-load"}
+    recipe_craze = os.path.join(os.path.realpath(path_dir), "craze")
+
+    # 2. config.toml as the recipe's, and the seeded index.
+    craze_home = Path(env["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(
+        f'provider = "grok"\nhost_idle_exit = "30s"\n\n[agents]\ngrok = "{fake_agent_bin}"\n', encoding="utf-8"
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    row = {**SAVED_ROW, "cwd": str(work)}
+    (craze_home / "sessions.jsonl").write_text(json.dumps(row, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    # 3. Bridge A's hello: a hub that can reopen.
+    a = recipe_procs.bridge(env)
+    hello = a.call(1, "hello", HELLO, timeout=HUB_START_WAIT)
+    assert hello["capabilities"].get("reopen") is True, hello["capabilities"]
+    hub_pid = hello["endpoint"]["pid"]
+    assert _program(hub_pid) == recipe_craze, conftest._argv(hub_pid)
+
+    # 4. The saved sessions: the seeded one, its id the craze id.
+    saved = a.call(2, "sessions.saved", {})
+    assert saved == {
+        "sessions": [
+            {
+                "id": SAVED_ID,
+                "crazeSessionId": SAVED_ID,
+                "provider": "grok",
+                "providerSessionId": "recipe-saved",
+                "workspace": str(work),
+                "title": "a saved session",
+                "createdAt": "2026-10-12T09:00:00Z",
+                "updatedAt": "2026-10-12T10:00:00Z",
+            }
+        ],
+        "more": False,
+    }, saved
+
+    # 5. Reopen it, on a connection of its own (bridge B): a host started.
+    b = recipe_procs.bridge(env)
+    assert b.call(1, "hello", HELLO)["capabilities"].get("reopen") is True
+    reopened = b.call(2, "session.reopen", {"id": SAVED_ID}, timeout=CREATE_WAIT)
+    assert reopened["joined"] is False, reopened
+    host_id, session_id = reopened["session"]["hostId"], reopened["session"]["sessionId"]
+    assert session_id == SAVED_ID and reopened["session"]["host"]["provider"] == "grok", reopened
+    host_pid = reopened["session"]["host"]["pid"]
+    assert _program(host_pid) == recipe_craze, conftest._argv(host_pid)
+    assert b.close() == 0, b.stderr.read_text(encoding="utf-8")
+
+    # 6. Running, it is no longer saved.
+    assert a.call(3, "sessions.saved", {}) == {"sessions": [], "more": False}
+
+    # 7. Reopened again, on another connection (bridge C): joined, the same host.
+    c = recipe_procs.bridge(env)
+    c.call(1, "hello", HELLO)
+    again = c.call(2, "session.reopen", {"id": SAVED_ID}, timeout=CREATE_WAIT)
+    assert again["joined"] is True and again["session"]["hostId"] == host_id, again
+    assert c.close() == 0, c.stderr.read_text(encoding="utf-8")
+
+    # 8. Connect to the answer row's host and read the replayed transcript.
+    d = recipe_procs.bridge(env)
+    d.call(1, "hello", HELLO)
+    assert d.call(2, "session.connect", {"sessionId": host_id}) == {}
+    assert d.call(3, "hello", HELLO)["endpoint"]["hostId"] == host_id
+    assert d.call(4, "session.attach", {"sessionId": session_id})["session"]["sessionId"] == session_id
+    d.poll("session.snapshot", {"sessionId": session_id}, _replayed, "the replayed answer", WAIT)
+
+    # 9. Cleanup: stop the session, wait for its end to reach D, then end
+    # every process of the recipe's and the hub, as the recipe does.
+    assert d.call(5, "session.stop", {"sessionId": session_id, "commandId": "1"}) == {}
+    d.wait_for(_session_closed, "reset{session_closed}")
+    assert d.close() == 0, d.stderr.read_text(encoding="utf-8")
+    assert a.close() == 0, a.stderr.read_text(encoding="utf-8")
+    hubs = Path(env["HOME"]) / ".cache" / "craze" / "hubs"
+    assert _program(hub_pid) == recipe_craze, conftest._argv(hub_pid)
+    os.kill(hub_pid, signal.SIGTERM)
+    deadline = time.monotonic() + WAIT
+    while True:
+        left = conftest._stray_processes(str(fake_agent_bin))
+        left += [str(p) for p in conftest._registry_files(tmp_path)] + [str(p) for p in hubs.glob("*.json")]
+        if not left or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    assert not left, f"the reopen cell's cleanup left: {left}"
