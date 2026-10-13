@@ -707,23 +707,20 @@ func withoutModelOptions(cfg []ConfigOption, model string) []ConfigOption {
 }
 
 // MatchEffortValue is raw, an effort word as the user typed it, spelled the way
-// opt offers it: matched without regard to case or surrounding space, and
-// answered in the agent's own spelling, which is what craze sends back. ok is
-// false when there is no option, or it offers no such value.
+// opt offers it: matched as --effort is at a session's start (effortValue; plan
+// 047 D4) — surrounding space dropped, then the value whose id is raw exactly,
+// else the one whose id is raw in any case, else the one whose name is, the
+// first rule that matches anything deciding and having to match exactly one
+// value — and answered in the agent's own spelling, the value's id, which is
+// what craze sends back. ok is false when there is no option, it offers no
+// such value, or the word names more than one.
 func MatchEffortValue(opt *ConfigOption, raw string) (string, bool) {
-	if opt == nil {
-		return "", false
-	}
 	want := strings.TrimSpace(raw)
-	if want == "" {
+	if opt == nil || want == "" {
 		return "", false
 	}
-	for _, v := range opt.SelectValues {
-		if strings.EqualFold(v.Value, want) {
-			return v.Value, true
-		}
-	}
-	return "", false
+	v, why := effortValue(opt, want)
+	return v, why == ""
 }
 
 func splitLastToken(s string) (rest, last string) {

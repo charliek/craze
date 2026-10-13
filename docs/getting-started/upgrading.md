@@ -29,6 +29,33 @@ Nothing needs migrating.
   to `xhigh`.
 - **A `models.toml` model with more than 8 efforts, or one over 32 bytes or
   not one printable line, no longer loads**; it names the entry and the key.
+- **`/effort` in a session.** A bare `/effort` opens a picker of the current
+  model's levels; `/effort <level>` sets one. It is listed after `/exit`, so
+  `/e` still selects `/exit`, and only where the current model has an effort
+  control: anywhere else an agent's or a plugin's own `/effort` is what runs,
+  as before. Like `/model`, it is refused while a turn runs. See
+  [Effort](../reference/tui.md#effort).
+- **The native model dialog's effort row follows the highlighted model**: its
+  levels, on the effort a switch to it would land on, and no row for a model
+  with no effort control. A switch from the dialog now sends the effort the
+  row showed for that model, so it lands where the box said even if another
+  craze process remembered another effort since. ACP providers' dialogs are
+  unchanged. See [Model dialog](../reference/tui.md#model-dialog).
+- **The session list's `/effort` offers real levels**: on native the chosen
+  model's (`default` alone for one with no effort control), on an ACP
+  provider `minimal` and `max` too; a value outside them is refused, and an
+  effort the newly chosen model does not offer is shown `(not offered)` on the
+  rule. See [Effort and fast mode](../reference/tui.md#effort-and-fast-mode).
+- **`/model <id> <effort>` matches the effort word as `--effort` does**: the
+  level's id exactly, then in any case, then its name — so a level the agent
+  calls `High` under another id is taken as `high` — where it compared the id
+  in any case alone. A word that names two levels is now refused as
+  `--effort` refuses it.
+- **For a client reading the session stream:** the slash catalog gains a
+  builtin `effort` row, `requires: "effort"` and `run.picker: "effort"`; a
+  client that does not know `requires: "effort"` hides it, as it hides any
+  row with a value it does not know. See [Slash
+  catalog](../reference/protocol.md#slash-catalog).
 
 ## Since v0.1.0
 

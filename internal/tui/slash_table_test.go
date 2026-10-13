@@ -29,6 +29,9 @@ import (
 //     (TestASideQuestionOpensMidTurnAndStreams).
 //   - /connect does not: runBuiltin opens it through openConnect, which
 //     refuses busy work with connectBusyText.
+//   - /effort does not either (plan 047 D4): handleEnter dispatches it as a
+//     builtin where the session has an effort option, under the same busy
+//     refusal as /model.
 //   - /sessions is this client's own row and is not in the table (P13).
 func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 	run := map[string]agent.SlashRun{
@@ -44,6 +47,7 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 		"agent":   {Kind: agent.SlashRunMethod, Method: agent.SlashMethodSet},
 		"btw":     {Kind: agent.SlashRunAside, Param: "question"}, // openBtw
 		"exit":    {Kind: agent.SlashRunMethod, Method: agent.SlashMethodStop},
+		"effort":  {Kind: agent.SlashRunPicker, Picker: "effort"}, // runEffort: openEffortPicker, or /effort <level>
 	}
 	var names []string
 	for _, b := range agent.SlashBuiltins() {
@@ -56,7 +60,7 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 		switch it.Name {
 		case btwBuiltin.Name:
 			want = true
-		case connectBuiltin.Name:
+		case connectBuiltin.Name, effortBuiltin.Name:
 			want = false
 		default:
 			if !builtinNamed(it.Name) {
@@ -83,9 +87,11 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 
 // todaysSlashCatalog is the menu as this package built it before plan 043 C3
 // moved it onto the builder — slashCatalog's code at 5ca125e, frozen here,
-// with m.skills read as the agent.Skill it now is. The parity tests hold both
-// of the menu's paths, the host's catalog and the one built here, to it: to
-// what users had, not only to each other.
+// with m.skills read as the agent.Skill it now is — plus the one builtin
+// added since, /effort after /exit where the current model has an effort
+// option (plan 047 D4). The parity tests hold both of the menu's paths, the
+// host's catalog and the one built here, to it: to what users had, not only
+// to each other.
 func todaysSlashCatalog(m Model) []slashItem {
 	modes, todos, btw := m.showModes(), m.showTodos(), m.btwOffered()
 	var items []slashItem
@@ -110,6 +116,9 @@ func todaysSlashCatalog(m Model) []slashItem {
 		items = append(items, it)
 		if it.Name == "model" && m.connectOffered() {
 			items = append(items, connectBuiltin)
+		}
+		if it.Name == "exit" && m.effortOffered() {
+			items = append(items, effortBuiltin)
 		}
 	}
 	seen := map[string]struct{}{}

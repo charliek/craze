@@ -1,7 +1,6 @@
               ╭──────────────────────────────────────────────────────────────────────╮              
               │help                                                                  │              
-              │  esc, ←            return from a sub-agent                          ▲│              
-              │  ↑ ↓ pgup pgdn     scroll inside a sub-agent                         │              
+              │  ↑ ↓ pgup pgdn     scroll inside a sub-agent                        ▲│              
               │  tab, shift+tab    switch sub-agent while in the view                │              
               │  click the model   model dialog, from status row 1                   │              
               │selection and clipboard                                               │              
@@ -19,6 +18,7 @@
               │  /ask              Set ask mode                                      │              
               │  /agent            Set agent mode                                    │              
               │  /exit             End this session                                  │              
+              │  /effort           Change the current model's effort                 │              
               │this session's commands                                               │              
               │  /research         Agent-advertised command                          │              
               │↑↓ · pgup/pgdn · esc closes                                           │              

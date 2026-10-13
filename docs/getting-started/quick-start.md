@@ -121,10 +121,12 @@ setting, `--ask` / `--plan` set the session mode.
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
 queued messages, the spinner line, the composer, two status rows, and one row
 per in-flight sub-agent. See the [TUI reference](../reference/tui.md) for keys
-and cards. Two things worth knowing at once: `/btw <question>` asks a side
+and cards. Three things worth knowing at once: `/btw <question>` asks a side
 question without adding to the session ([where it is
-offered](../reference/tui.md#side-questions-btw)), and `Ctrl+V` pastes an image
-from the clipboard into the composer ([Images](../reference/tui.md#images)).
+offered](../reference/tui.md#side-questions-btw)), `/effort` changes the
+current model's effort — a picker of its levels, or `/effort high`
+([Effort](../reference/tui.md#effort)) — and `Ctrl+V` pastes an image from the
+clipboard into the composer ([Images](../reference/tui.md#images)).
 
 craze refuses to start the TUI on a non-tty. For a scripted turn, use
 [`craze prompt`](../reference/cli.md#craze-prompt).

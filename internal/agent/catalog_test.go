@@ -647,11 +647,24 @@ func TestMatchModelEffort(t *testing.T) {
 	}
 }
 
-// TestMatchEffortValue is the candidate judged against a catalog: any case and
-// surrounding space, answered in the agent's own spelling, and nothing when
-// there is no option or it offers no such value.
+// TestMatchEffortValue is the candidate judged against a catalog as --effort
+// is at start (plan 047 D4): any case and surrounding space, by id first and
+// by name after — an exact id before a case-folded one, a case-folded id
+// before a name — answered in the agent's own spelling, the value's id; and
+// nothing when there is no option, it offers no such value, or the word names
+// two. Negative control: the id-only match it replaced fails "High" on
+// budget_high.
 func TestMatchEffortValue(t *testing.T) {
 	opt := &ConfigOption{ID: "reasoning", Type: "select", SelectValues: []SelectValue{{Value: "high"}, {Value: "Max"}}}
+	named := &ConfigOption{ID: "effort", Type: "select", SelectValues: []SelectValue{
+		{Value: "budget_low", Name: "Low"}, {Value: "budget_high", Name: "High"},
+	}}
+	crossed := &ConfigOption{ID: "effort", Type: "select", SelectValues: []SelectValue{
+		{Value: "high", Name: "Low"}, {Value: "low", Name: "High"},
+	}}
+	twice := &ConfigOption{ID: "effort", Type: "select", SelectValues: []SelectValue{
+		{Value: "a", Name: "Same"}, {Value: "b", Name: "same"},
+	}}
 	for _, tc := range []struct {
 		opt  *ConfigOption
 		raw  string
@@ -664,6 +677,12 @@ func TestMatchEffortValue(t *testing.T) {
 		{opt, "low", "", false},
 		{opt, " ", "", false},
 		{nil, "high", "", false},
+		{named, "High", "budget_high", true},
+		{named, "high", "budget_high", true},
+		{named, "BUDGET_LOW", "budget_low", true},
+		{crossed, "high", "high", true},
+		{crossed, "LOW", "low", true},
+		{twice, "same", "", false},
 	} {
 		if got, ok := MatchEffortValue(tc.opt, tc.raw); got != tc.want || ok != tc.ok {
 			t.Errorf("%q → %q %v, want %q %v", tc.raw, got, ok, tc.want, tc.ok)

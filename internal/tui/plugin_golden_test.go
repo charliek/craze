@@ -46,14 +46,15 @@ func TestFrameGoldenPluginMenu(t *testing.T) {
 		absent []string
 	}{
 		// The end of the list, where craze's own rows are: the fake's 24
-		// advertised commands and the ten builtins come first, so five pages
-		// down is where the four plugin rows are. probe-echo and probe-skill
-		// are unique, so they are offered bare with their plugin as the label;
-		// rescue is not, so both halves of it are qualified.
+		// advertised commands and the eleven builtins (/effort, plan 047 D4,
+		// among them) come first, so five pages down is where the four plugin
+		// rows are. probe-echo and probe-skill are unique, so they are offered
+		// bare with their plugin as the label; rescue is not, so both halves of
+		// it are qualified.
 		{"plugin-open", slashCatalogLanded + strings.Repeat("<pgdn>", 5),
 			[]string{
 				"/probe-echo", "(probe-plugin)", "/probe-skill",
-				"/alpha:rescue", "/beta:rescue", "38/38 ▲",
+				"/alpha:rescue", "/beta:rescue", "39/39 ▲",
 			},
 			[]string{"/help", "▼"}},
 		// The qualified-prefix bucket: neither displayed name starts with

@@ -37,6 +37,11 @@ const (
 	// shaped so EffortOption finds it: a select whose id says effort, in the
 	// thought_level category ACP agents put their effort control in.
 	nativeEffortID = "effort"
+	// NativeEffortID is nativeEffortID for a client: the id the model dialog
+	// presents a native session's effort under even while its current model
+	// has no effort option (plan 047 D3, P7), so a choice made for another
+	// model is keyed as the option it will set.
+	NativeEffortID = nativeEffortID
 	// nativeTitleRuneCap is how long the title derived from the first prompt
 	// may be: the same cap the TUI puts on an index title, so the two agree.
 	nativeTitleRuneCap = 120
@@ -1300,7 +1305,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// Resolved the way every provider's --model is (MatchModel's
 		// normalisation), so an alias typed with spaces or capitals, or a
 		// model's display name, still finds it.
-		alias, err := MatchModel(Snapshot{Models: tableModels(table)}, s.opts.Model)
+		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
 			return nil, nativeOpened{}, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
 		}
@@ -1761,6 +1766,15 @@ func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, cata
 // sorted, each named by its table name (sanitized: it is text from a file the
 // owner edits by hand) or its alias. The ids stay as the table spells them,
 // because they go back to SetModel verbatim.
+// MatchNativeModel is raw, a model as --model names it, resolved against every
+// model of table the way a native session's start resolves --model:
+// MatchModel over the table's aliases and names. The session list resolves
+// a typed /model by it too (plan 047 D5), so it finds the model a session
+// started from it runs.
+func MatchNativeModel(table *modeltable.Table, raw string) (string, error) {
+	return MatchModel(Snapshot{Models: tableModels(table)}, raw)
+}
+
 func tableModels(table *modeltable.Table) []ModelInfo {
 	out := make([]ModelInfo, 0, len(table.Models))
 	for _, alias := range table.Aliases() {
@@ -1820,6 +1834,13 @@ func nativeEffortOption(levels []string, current string) *ConfigOption {
 		Current:      current,
 		SelectValues: values,
 	}
+}
+
+// NativeEffortOption is nativeEffortOption for a client: the option a native
+// model with levels advertises, which the model dialog presents another
+// model's levels as (plan 047 D3); nil for no levels.
+func NativeEffortOption(levels []string, current string) *ConfigOption {
+	return nativeEffortOption(levels, current)
 }
 
 // startSettings is --effort and --fast/--no-fast on a native session (plan

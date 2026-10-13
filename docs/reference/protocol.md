@@ -1650,6 +1650,7 @@ gx and native session on a host that has it.
   {"name":"ask","description":"Set ask mode","source":"builtin","run":{"kind":"unavailable","reason":"mode ask is not advertised"}},
   {"name":"btw","description":"Ask a side question (not saved): /btw <question>","source":"builtin","requires":"aside","whileWorking":true,"run":{"kind":"aside","param":"question","arg":"required","argHint":"<question>"}},
   {"name":"exit","description":"End this session","source":"builtin","requires":"stop","whileWorking":true,"run":{"kind":"method","method":"session.stop"}},
+  {"name":"effort","description":"Change the current model's effort","source":"builtin","requires":"effort","run":{"kind":"picker","arg":"optional","argHint":"<level>","picker":"effort"}},
   {"name":"research","description":"Agent-advertised command","source":"agent","run":{"kind":"prompt","arg":"optional"}},
   {"name":"btw","description":"The agent's own btw","source":"agent","run":{"kind":"prompt","arg":"optional"}},
   {"name":"review","description":"Review a pull request","source":"plugin","plugin":"pr-tools","qualified":"pr-tools:review","run":{"kind":"prompt","arg":"optional"}},
@@ -1674,14 +1675,14 @@ with `requires` claims no name (below). Each row:
 | `description` | what the TUI's menu draws for the row, folded onto one line: a builtin's own sentence, or the advertised, plugin or skill description. Absent when there is none |
 | `source` | `builtin` (craze's own), `agent` (a command the agent advertised), `plugin` (a plugin command or skill craze found and expands) or `skill` (a disk skill the agent resolves) |
 | `plugin`, `qualified` | a plugin row's: the plugin it came from, and its `plugin:name` spelling — present only where it differs from `name`, the second spelling the row answers to |
-| `requires` | the session capability the row needs, `stop` or `aside`: show the row only where that capability is `true`. Absent for none |
+| `requires` | what the row needs: the session capability `stop` or `aside` — show the row only where that capability is `true` — or `effort`, the client's own reading of the session's state: show the row only while the current model has an effort option (a `config` option the client reads as the effort, as the TUI's status row does). Absent for none |
 | `whileWorking` | `true` where the row runs while a turn is running — craze's or the agent's own (`foreignTurn`) — rather than waiting for the turn to end. Absent is `false`; a `prompt` row leaves it absent, since a prompt queues |
 | `run.kind` | what selecting the row does — the next table |
 | `run.arg` | absent for none (the row takes no argument), `optional` or `required`; `run.argHint` is how to show it (`<title>`) |
 | `run.method` | a `method` row's method: `session.setTitle`, `session.set` or `session.stop` |
 | `run.param` | the parameter the argument fills: `title` (`session.setTitle`), `question` (an `aside` row) |
 | `run.setting` | a `session.set` row's `setting`, sent verbatim: `{kind: "mode", value}`, the mode already resolved to an id the session advertised |
-| `run.picker` | a `picker` row's picker: `model` |
+| `run.picker` | a `picker` row's picker: `model` or `effort` |
 | `run.local` | a `local` row's action, the client's own: `help`, `clear`, `tasks`, `theme` or `connect` |
 | `run.reason` | why an `unavailable` row cannot run, in the words the TUI refuses it with (`mode ask is not advertised`) |
 
@@ -1689,7 +1690,7 @@ with `requires` claims no name (below). Each row:
 |---|---|
 | `prompt` | sends `/name` — or `/qualified` — and the argument, if any, after a space, as a `session.prompt`'s text, which starts a turn or queues as any prompt does. craze expands a plugin row into its file's prompt on the host; an agent command or a skill goes to the agent as typed |
 | `method` | calls `run.method` with its own params plus the client's usual `sessionId` and `commandId`: `session.setTitle` with the argument as `title`; `session.set` with `setting` = `run.setting`; `session.stop` with nothing more |
-| `picker` | opens the client's picker named by `run.picker`. `model`'s lists the info document's `catalogs.models` (and the catalog section's, [live models](#live-models)) and sends `session.set` `{kind: "model"}`; a client that parses `<model> [effort]` may also take the model inline, and one that does not shows only the picker |
+| `picker` | opens the client's picker named by `run.picker`. `model`'s lists the info document's `catalogs.models` (and the catalog section's, [live models](#live-models)) and sends `session.set` `{kind: "model"}`; a client that parses `<model> [effort]` may also take the model inline, and one that does not shows only the picker. `effort`'s lists the current model's effort option's values and sends `session.set` `{kind: "config", id, value, forModel}` for that option, bound to the current model; a client may take the level inline (`<level>`), and with [`effortFacts`](#capabilities) may read `default` as the model's `defaultEffort` |
 | `aside` | asks a side question, [`session.aside`](#sessionaside), the argument as `question` |
 | `local` | runs the client's own action named by `run.local` — a help view, clearing the client's transcript view, the tasks panel, the theme picker (or `/theme <name>`), storing a provider key. None touches the session, and `connect` stores a key on the machine the client runs on, so a remote client hides it |
 | `unavailable` | nothing: the row cannot run in this session. A client lists it or hides it as it likes, and selecting it reports `run.reason`. The TUI lists the mode rows a session shows modes for, and refuses one the session did not advertise this way |
@@ -1712,15 +1713,20 @@ row.
 
 ### Which rows a client shows
 
-- **`requires`.** A row with `requires` is shown only where that session
-  capability is `true` — `stop` for [`session.stop`](#sessionstop), `aside`
-  for [`session.aside`](#sessionaside). It is always listed, because whether
-  a session is served with them is the host's fact, not the session's.
+- **`requires`.** A row with `requires` is shown only where what it names is
+  true — the session capability `stop` for [`session.stop`](#sessionstop),
+  `aside` for [`session.aside`](#sessionaside), and `effort` while the
+  current model has an effort option, which the client reads from the
+  session's `config` and which changes with the model. It is always listed,
+  because whether a session is served with `stop` and `aside` is the host's
+  fact, not the session's, and whether its current model has an effort
+  option changes without the catalog changing.
 - **A `requires` row does not claim its name.** The catalog deduplicates the
   rows after it as if it were not there, so a client keeps, per name
   (case-insensitively), **the first row it actually shows**. On cursor
   (`aside` absent) the builtin `/btw` is hidden and an agent's own `/btw`,
   listed after it, shows; on grok the builtin shows and the agent's is hidden.
+  The same for `/effort` on a model with and without an effort option.
 - **Client rows.** A client may add rows of its own, and **a client row wins
   over a catalog row with the same name (case-insensitively), which it
   hides.** The host never lists one: whether a client has a session list is

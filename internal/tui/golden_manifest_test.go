@@ -96,6 +96,7 @@ var goldenManifest = map[string]goldenRuns{
 	"diff-80x24":                             bothTransports,
 	"diff-expanded-120x40":                   bothTransports,
 	"echo-80x24":                             bothTransports,
+	"effort-picker-100x30":                   bothTransports,
 	"grok-ask-100x30":                        bothTransports,
 	"grok-ask-80x24":                         bothTransports,
 	"grok-echo-100x30":                       bothTransports,
@@ -146,6 +147,8 @@ var goldenManifest = map[string]goldenRuns{
 	"native-menu-100x30":                     bothTransports,
 	"native-model-dialog-100x30":             bothTransports,
 	"native-model-dialog-connected-100x30":   bothTransports,
+	"native-model-dialog-highlight-100x30":   bothTransports,
+	"native-model-dialog-no-effort-100x30":   bothTransports,
 	"native-live-model-dialog-100x30":        bothTransports,
 	"native-mode-100x30":                     bothTransports,
 	"native-plan-denied-100x30":              bothTransports,
@@ -238,6 +241,7 @@ var goldenManifest = map[string]goldenRuns{
 	"shell-row-100x30":                       bothTransports,
 	"slash-accept-100x30":                    bothTransports,
 	"slash-click-100x30":                     bothTransports,
+	"slash-effort-100x30":                    bothTransports,
 	"slash-crop-80x12":                       bothTransports,
 	"slash-mid-80x24":                        bothTransports,
 	"slash-multiline-desc-100x30":            bothTransports,
@@ -525,8 +529,11 @@ func transportList(set map[frameTransport]bool) string {
 // `N attached` chip (C18, presence-100x30), plan 033's five composer image
 // chips (C2, composer-image-*) and its six frames of /connect's ChatGPT
 // sign-in (C16, native-connect-signin-*), and plan 034's `/model` after a key
-// saved live (C6, native-live-model-dialog), and plan 040's four of the side
-// view (C4: btw-* and native-btw), under both — 139 in all.
+// saved live (C6, native-live-model-dialog), plan 040's four of the side
+// view (C4: btw-* and native-btw), and plan 047's four of C2 — native's model
+// dialog with a highlighted model's effort row and with a model that has
+// none, the /effort picker and the slash menu on `/ef` — under both — 143 in
+// all.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -554,8 +561,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 139 || inprocAlone != 48 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 139 and 48 (A8)", both, inprocAlone)
+	if both != 143 || inprocAlone != 48 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 143 and 48 (A8)", both, inprocAlone)
 	}
 }
 

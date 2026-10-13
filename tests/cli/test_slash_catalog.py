@@ -72,6 +72,10 @@ _BTW = {"name": "btw", "description": "Ask a side question (not saved): /btw <qu
         "run": {"kind": "aside", "param": "question", "arg": "required", "argHint": "<question>"}}
 _EXIT = {"name": "exit", "description": "End this session", "source": "builtin", "requires": "stop",
          "whileWorking": True, "run": {"kind": "method", "method": "session.stop"}}
+# /effort (plan 047 D4): listed for every session, after /exit; `requires`
+# effort is the client's own reading of the snapshot (an effort option).
+_EFFORT = {"name": "effort", "description": "Change the current model's effort", "source": "builtin",
+           "requires": "effort", "run": {"kind": "picker", "arg": "optional", "argHint": "<level>", "picker": "effort"}}
 
 
 def _mode_row(name: str, value: str) -> dict:
@@ -265,9 +269,10 @@ def test_attach_snapshot_carries_the_acp_catalog(
 ) -> None:
     """T1 (ACP): an attach over the real socket to a fake-grok session hands the
     client the catalog -- builtins in the TUI's order under the session's gates
-    (modes the agent advertised, `btw` and `exit` for the session's `aside` and
-    `stop`), then the agent's own command from its available_commands_update,
-    then the disk skill under the session's `.grok/skills` -- and the session
+    (modes the agent advertised; `btw`, `exit` and `effort` for the session's
+    `aside`, `stop` and effort option), then the agent's own command from its
+    available_commands_update, then the disk skill under the session's
+    `.grok/skills` -- and the session
     info says `slashCatalog` is true. The exact rows are the contract a remote
     client renders, so they are compared whole, not by name."""
     env = hub_env(tmp_path, craze_bin, craze_fake_host_bin, fake_agent_bin)
@@ -295,6 +300,7 @@ def test_attach_snapshot_carries_the_acp_catalog(
         _mode_row("agent", "default"),
         _BTW,
         _EXIT,
+        _EFFORT,
         _agent_row("research"),
         _skill_row("deploy", "Ship it to production"),
     ]
@@ -343,6 +349,7 @@ def test_attach_snapshot_carries_the_native_catalog(
         _mode_row("agent", "agent"),
         _BTW,
         _EXIT,
+        _EFFORT,
         # native's own command: it advertises /compact itself, as an agent row.
         {"name": "compact", "description": "Summarize the conversation so far to free context; /compact <what to keep>",
          "source": "agent", "run": {"kind": "prompt", "arg": "optional"}},

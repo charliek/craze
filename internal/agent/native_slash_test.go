@@ -12,7 +12,8 @@ import (
 // TestNativeInstallsCarryTheSlashCatalog is D2 and P3 for native: no scan —
 // it is not a SkillRescanner, its skills are plugin rows — and both of its
 // installs, a new session's and a load's, restate the catalog built from what
-// they installed: /connect after /model, the modes, /compact, the plugin rows.
+// they installed: /connect after /model, the modes, /effort after /exit,
+// /compact, the plugin rows.
 // The snapshot hands out a copy of its own (P6).
 func TestNativeInstallsCarryTheSlashCatalog(t *testing.T) {
 	ws := t.TempDir()
@@ -37,7 +38,7 @@ func TestNativeInstallsCarryTheSlashCatalog(t *testing.T) {
 	if st := install.State; st.Slash == nil || !slices.Equal(st.Slash.Items, want.Items) || !slices.Equal(snap.Slash, want.Items) {
 		t.Fatalf("the install delta's catalog %+v, the snapshot's %+v, want %+v", install.State.Slash, snap.Slash, want.Items)
 	}
-	if got := strings.Join(slashNames(want), ","); got != "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,compact,ship" {
+	if got := strings.Join(slashNames(want), ","); got != "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort,compact,ship" {
 		t.Fatalf("native's catalog is %s", got)
 	}
 	snap.Slash[0].Description = "changed"

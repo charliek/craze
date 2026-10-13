@@ -15,14 +15,14 @@
                                                                                                     
                                                                                                     
                                                                                                     
-  /tasks            Tasks panel: compact, expanded, hidden                                   11/34 ▲
+  /tasks            Tasks panel: compact, expanded, hidden                                   11/35 ▲
   /theme            Theme picker, or /theme <name>                                                  
   /rename           Rename this session, /rename <title>                                            
   /plan             Set plan mode                                                                   
   /ask              Set ask mode                                                                    
   /agent            Set agent mode                                                                  
   /exit             End this session                                                                
-❯ /alpha-review     Review the working tree and report the findings worth acting on before the ne… ▼
+❯ /effort           Change the current model's effort                                              ▼
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ /                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────

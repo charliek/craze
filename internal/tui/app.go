@@ -644,6 +644,8 @@ type Model struct {
 	dialog  dialogKind
 	mdlg    modelDialog
 	helpTop int
+	// edlg is /effort's picker's own state (effort_picker.go, plan 047 D4).
+	edlg effortPicker
 	// cdlg is the /connect dialog's own state (connect_dialog.go, plan 031
 	// §3.9), the session's like every dialog's, so a switch clears it and its
 	// key field with it. connSeq numbers every opening of that dialog, of its
@@ -3165,6 +3167,8 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 		return m.resumeDialogClick(i)
 	case dialogConnect:
 		return m.connectDialogClick(i)
+	case dialogEffort:
+		return m.effortPickerClick(i)
 	}
 	return m, nil
 }
@@ -3251,6 +3255,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleResumeDialogKey(msg)
 	case dialogConnect:
 		return m.handleConnectDialogKey(msg)
+	case dialogEffort:
+		return m.handleEffortPickerKey(msg)
 	}
 
 	// The confirm line is a question with two answers: Enter confirms, Esc
@@ -3800,8 +3806,10 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
 	// and holding it until the turn ends would be surprising. The ones that
-	// do need the agent keep today's refusal.
-	if ok && name != "" && builtinNamed(name) {
+	// do need the agent keep today's refusal. /effort is one of them where
+	// the session has an effort option (plan 047 D4); anywhere else it goes
+	// to the agent below as the text it is.
+	if ok && name != "" && (builtinNamed(name) || name == effortBuiltin.Name && m.effortClaimed()) {
 		// A turn the agent runs on its own is a running turn for this
 		// purpose too: /model or /plan into it would land on a session
 		// that is busy.

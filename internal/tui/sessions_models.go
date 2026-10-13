@@ -46,14 +46,20 @@ import (
 //     another provider still starts the model's own.
 //   - Typed in full, `/provider <id>` and `/model <id>` do the same with no
 //     popup; any other `/…` line is a prompt like any other (X152).
-//   - `/effort` (default, low, medium, high, xhigh) and `/fast` (default, on,
-//     off) set the effort and fast mode new sessions start at (plan 032
-//     §3.11, C17) the same way — a popup of values, or typed in full — and
-//     last as the pick does. `default` clears the setting: the model's own.
-//     Neither is checked against a provider here: a host's start matches the
-//     value against what the model offers, and notes it when nothing does.
-//     They are revealed by prefix, never listed by a bare `/`
-//     (sessCmdRevealed).
+//   - `/effort` and `/fast` (default, on, off) set the effort and fast mode
+//     new sessions start at (plan 032 §3.11, C17) the same way — a popup of
+//     values, or typed in full — and last as the pick does. `default` clears
+//     the setting: the model's own. /effort offers what the model new
+//     sessions start on has (plan 047 D5, sessEffortOffered): on native
+//     `default` and that model's levels, read from its table — the start
+//     model's when none was chosen — and on an ACP provider, whose levels
+//     are known only once a session runs, default, minimal, low, medium,
+//     high, xhigh and max. A value typed is taken only from what is offered.
+//     An effort kept from before a later choice of model that does not offer
+//     it is still passed on — the host's start matches the value against what
+//     the model offers, and notes it when nothing does — and the rule says
+//     it is not offered. They are revealed by prefix, never listed by a bare
+//     `/` (sessCmdRevealed).
 
 // The list's commands.
 const (
@@ -83,9 +89,12 @@ func sessCmdRevealed(cmd, word string) bool {
 }
 
 // The values /effort and /fast offer, `default` (sessDefaultModel's word)
-// first: the setting cleared.
+// first: the setting cleared. sessEffortLevels is /effort's on an ACP
+// provider (plan 047 D5), and on native while the levels of the model new
+// sessions start on are not known (sessEffortOffered): every level craze's
+// providers name.
 var (
-	sessEffortLevels = []string{sessDefaultModel, "low", "medium", "high", "xhigh"}
+	sessEffortLevels = []string{sessDefaultModel, "minimal", "low", "medium", "high", "xhigh", "max"}
 	sessFastValues   = []string{sessDefaultModel, sessFastOn, sessFastOff}
 )
 
@@ -115,6 +124,9 @@ const (
 	sessEffortTitle    = "effort for new sessions"
 	sessFastTitle      = "fast mode for new sessions"
 	sessSettingDetail  = "the model's own"
+	// sessNotOffered follows an effort the model new sessions start on does
+	// not offer, on the rule and the hint line (plan 047 D5, P9).
+	sessNotOffered = " (not offered)"
 )
 
 // sessProviderDetail is each provider's line in /provider's list (the
@@ -151,6 +163,38 @@ type sessPick struct {
 	// which is taken only while no later choice has replaced it.
 	seq       uint64
 	resolving bool
+	// levels are the effort levels of the native model new sessions start on
+	// (plan 047 D5), as its table states them (sessLevels).
+	levels sessLevels
+}
+
+// sessLevels is the effort levels of one native model — model, as new
+// sessions from the list name it ("" native's start model) — read from its
+// table off the Update (askNativeLevels), or with native's default
+// (sessNativeDefaultMsg): known once the read has answered and the table
+// offers the model, none for a model with no effort control. alias is the
+// model the read resolved model to — the start model, for "" — the levels'
+// provenance. asked says a read for model is in flight or has answered, in
+// the list opening numbered opening, so each model is read once per opening while
+// it is the one new sessions start on: what "" names follows the model
+// memory, which a session can move while the list is shut, so every opening
+// reads again (C2 fix review 3). gen numbers the reads, and only the answer
+// to the latest is taken. A choice of model or provider keeps gen and
+// nothing else, so it reads again too.
+type sessLevels struct {
+	model   string
+	alias   string
+	levels  []string
+	known   bool
+	asked   bool
+	gen     uint64
+	opening uint64
+}
+
+// answers reports whether lv states the levels of model, as new sessions
+// name it, for the list opening numbered opening.
+func (lv sessLevels) answers(model string, opening uint64) bool {
+	return lv.known && lv.model == model && lv.opening == opening
 }
 
 // sessNativeDefaultMsg is native's default model, read for /provider native
@@ -160,6 +204,17 @@ type sessNativeDefaultMsg struct {
 	seq, gen uint64
 	model    agent.ModelInfo
 	err      error
+}
+
+// sessNativeLevelsMsg is the effort levels of native model model — alias, as
+// the read resolved it — read off the Update for read gen (nativeModelLevels,
+// plan 047 D5); ok false when the table does not offer the model.
+type sessNativeLevelsMsg struct {
+	gen    uint64
+	model  string
+	alias  string
+	levels []string
+	ok     bool
 }
 
 // ------------------------------------------------------------ Plan 031's seam
@@ -219,7 +274,48 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 	if err != nil {
 		return agent.ModelInfo{}, err
 	}
-	return agent.ModelInfo{ID: alias, Name: nativeModelName(table.Models[alias].Name, alias)}, nil
+	// Its levels, as Choices states them (plan 047 D5): what /effort offers
+	// for it.
+	md := table.Models[alias]
+	return agent.ModelInfo{ID: alias, Name: nativeModelName(md.Name, alias), Efforts: slices.Clone(md.Efforts)}, nil
+}
+
+// nativeModelLevels is the effort levels of native model model — named as
+// --model names it, and resolved as a native session's start resolves
+// --model (agent.MatchNativeModel), so `SPARK` is spark (plan 047 C2 review
+// F4) — as the list's /model offers it (Table.Choices, plan 047 D2, D5); of
+// the start model (nativeDefaultModel's) for ""; and false when the table
+// does not offer that model: unfunded, or not in it. alias is the model it
+// resolved model to. It reads the disk, and is called off the Update.
+func nativeModelLevels(dir string, getenv func(string) string, model string) (alias string, levels []string, ok bool) {
+	table, err := modeltable.Load(dir)
+	if err != nil {
+		return "", nil, false
+	}
+	recent := modeltable.ReadRecent(dir)
+	if model == "" {
+		alias, _, err = table.StartModel(recent, getenv)
+	} else {
+		alias, err = agent.MatchNativeModel(table, model)
+	}
+	if err != nil {
+		return "", nil, false
+	}
+	for _, c := range table.Choices(recent, getenv, "") {
+		if c.Alias == alias {
+			return alias, c.Efforts, true
+		}
+	}
+	return alias, nil, false
+}
+
+// readNativeLevels reads the levels of native model model ("" the start
+// model's) off the Update, for read gen.
+func readNativeLevels(gen uint64, dir string, getenv func(string) string, model string) tea.Cmd {
+	return func() tea.Msg {
+		alias, levels, ok := nativeModelLevels(dir, getenv, model)
+		return sessNativeLevelsMsg{gen: gen, model: model, alias: alias, levels: levels, ok: ok}
+	}
 }
 
 // errNativeNothingFunded is what the list says when not one native model's
@@ -298,13 +394,17 @@ func (m Model) sessNewModels() []agent.ModelInfo {
 
 // sessNewSettings is the effort and fast mode new sessions start at, as the
 // rule and the hint line append them to the provider and model: ` · <effort>`
-// when /effort set one, ` · fast` or ` · no fast` when /fast did — nothing
-// for either left to the model's own, so a list where neither was chosen
-// draws what it always drew.
+// when /effort set one — ` · <effort> (not offered)` when the model they
+// start on does not offer it (plan 047 D5, P9) — ` · fast` or ` · no fast`
+// when /fast did — nothing for either left to the model's own, so a list
+// where neither was chosen draws what it always drew.
 func (m Model) sessNewSettings() string {
 	var b strings.Builder
 	if e := m.sessPick.effort; e != "" {
 		b.WriteString(" · " + sanitizeLine(e))
+		if !slices.Contains(m.sessEffortOffered(), e) {
+			b.WriteString(sessNotOffered)
+		}
 	}
 	if f := m.sessPick.fast; f != nil {
 		if *f {
@@ -320,6 +420,72 @@ func (m Model) sessNewSettings() string {
 // provider, the model and the settings, as the rule names them.
 func (m Model) sessUseNote() string {
 	return sessUseNotePrefix + m.sessNewProvider() + " · " + m.sessNewModel() + m.sessNewSettings()
+}
+
+// sessEffortOffered is what /effort offers for the model new sessions start
+// on (plan 047 D5), `default` first: on native that model's levels — those the
+// session the list came from states for its current model (effort facts),
+// when no model was picked, else those read from native's table
+// (sessPick.levels, askNativeLevels) — and every level (sessEffortLevels) on
+// an ACP provider, whose levels are known only once a session runs, or while
+// native's are being read.
+func (m Model) sessEffortOffered() []string {
+	id, ok := m.sessNativeTarget()
+	if !ok {
+		return sessEffortLevels
+	}
+	if levels, ok := m.sessOriginLevels(id); ok {
+		return append([]string{sessDefaultModel}, levels...)
+	}
+	if lv := m.sessPick.levels; lv.answers(id, m.sessList.gen) {
+		return append([]string{sessDefaultModel}, lv.levels...)
+	}
+	return sessEffortLevels
+}
+
+// sessNativeTarget is the native model new sessions from the list start on,
+// as they name it (sessNewModelID; "" native's start model), and false when
+// they run another provider or native's default is still being read.
+func (m Model) sessNativeTarget() (string, bool) {
+	if p, ok := m.sessNewProviderOf(); !ok || !isNative(p) || m.sessPick.resolving {
+		return "", false
+	}
+	return m.sessNewModelID(), true
+}
+
+// sessOriginLevels is model id's levels as the session the list came from
+// states them (effort facts), when no model was picked — new sessions then
+// start on that session's model — and false where it states none: an ACP or
+// older native host, an unstarted session, a model it does not list.
+func (m Model) sessOriginLevels(id string) ([]string, bool) {
+	if m.sessPick.modelSet || id == "" || !m.effortFacts() {
+		return nil, false
+	}
+	md, ok := m.listedModel(id)
+	return md.Efforts, ok
+}
+
+// askNativeLevels is the read of the levels of the native model new sessions
+// start on (plan 047 D5; C2 review F5), when nothing else states them: off
+// the Update, once per model and list opening while it is that model, its
+// answer taken only while it is the latest read (sessNativeLevels).
+// syncSessInput asks it at every sync — the list's opening, every choice —
+// so an origin no facts speak for, a typed model and the start model are
+// each read, and read again at the next opening or choice.
+func (m *Model) askNativeLevels() tea.Cmd {
+	id, ok := m.sessNativeTarget()
+	if !ok {
+		return nil
+	}
+	if _, ok := m.sessOriginLevels(id); ok {
+		return nil
+	}
+	lv := &m.sessPick.levels
+	if lv.asked && lv.model == id && lv.opening == m.sessList.gen {
+		return nil
+	}
+	*lv = sessLevels{model: id, asked: true, gen: lv.gen + 1, opening: m.sessList.gen}
+	return readNativeLevels(lv.gen, m.nativeDir, m.nativeEnv, id)
 }
 
 // sessEffortLabel and sessFastLabel are /effort's and /fast's current value
@@ -406,9 +572,10 @@ type sessCmdSource struct {
 	modelLabel string
 	// effort and fast are /effort's and /fast's current values, as their
 	// rows note them and their values mark them (sessEffortLabel,
-	// sessFastLabel).
+	// sessFastLabel); efforts is what /effort offers (sessEffortOffered).
 	effort    string
 	fast      string
+	efforts   []string
 	starter   SessionStarter
 	nativeDir string
 	nativeEnv func(string) string
@@ -430,7 +597,7 @@ func (s sessCmdSource) complete(q completeQuery) completeAnswer {
 	case sessCmdModel:
 		return s.modelValues(q, arg)
 	case sessCmdEffort:
-		return sessSettingValues(sessCmdEffort, sessEffortTitle, sessEffortLevels, s.effort, arg)
+		return sessSettingValues(sessCmdEffort, sessEffortTitle, s.efforts, s.effort, arg)
 	case sessCmdFast:
 		return sessSettingValues(sessCmdFast, sessFastTitle, sessFastValues, s.fast, arg)
 	}
@@ -468,8 +635,9 @@ func (s sessCmdSource) commands(prefix string) completeAnswer {
 
 // sessSettingValues is /effort's or /fast's list (cmd's): its values whose
 // names start with arg, case folded — `default`, the model's own, first — the
-// one new sessions use marked `current`. They are offered whatever the
-// provider: a host matches the value against what its model offers.
+// one new sessions use marked `current`: none, when that is a value not
+// offered (plan 047 D5). A host matches the value against what its model
+// offers.
 func sessSettingValues(cmd, title string, values []string, current, arg string) completeAnswer {
 	fold := strings.ToLower(arg)
 	ans := completeAnswer{Title: title}
@@ -654,6 +822,7 @@ func (m Model) sessCmdSourceNow() sessCmdSource {
 	return sessCmdSource{
 		choices: m.sessProviderChoices(), availSrc: src, provider: p, provOK: ok, provLabel: m.sessNewProvider(),
 		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), effort: sessEffortLabel(m.sessPick), fast: sessFastLabel(m.sessPick),
+		efforts: m.sessEffortOffered(),
 		starter: st, nativeDir: m.nativeDir, nativeEnv: m.nativeEnv, now: m.now(), frozen: m.frozen,
 	}
 }
@@ -709,8 +878,9 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 // when the list's latest availability answer says it cannot start, plan 036
 // §3.3, and the pre-session connect dialog opened on native needing setup,
 // §3.6); the model id as typed, which the next start applies as --model
-// would; or one of /effort's or /fast's values, case folded, as /provider
-// takes only a provider it lists. ok false: not one of them.
+// would; or one of the values /effort or /fast offers (sessEffortOffered,
+// plan 047 D5), case folded, as /provider takes only a provider it lists. ok
+// false: not one of them.
 func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 	name, args, ok := parseSlashLine(line)
 	if !ok {
@@ -750,7 +920,7 @@ func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 		next, cmd := m.sessPickModel(args, args)
 		return next, cmd, true
 	case sessCmdEffort, sessCmdFast:
-		values := sessEffortLevels
+		values := m.sessEffortOffered()
 		if name == sessCmdFast {
 			values = sessFastValues
 		}
@@ -823,7 +993,8 @@ func (m Model) sessProviderChoice(p agent.Provider) (provChoice, bool) {
 // what new sessions use.
 func (m Model) sessPickProvider(p agent.Provider) (Model, tea.Cmd) {
 	seq := m.sessPick.seq + 1
-	m.sessPick = sessPick{prov: p, provSet: true, modelSet: true, seq: seq, effort: m.sessPick.effort, fast: m.sessPick.fast}
+	m.sessPick = sessPick{prov: p, provSet: true, modelSet: true, seq: seq, effort: m.sessPick.effort, fast: m.sessPick.fast,
+		levels: sessLevels{gen: m.sessPick.levels.gen}}
 	m.sessList.in.set("", 0)
 	var read tea.Cmd
 	if isNative(p) {
@@ -840,6 +1011,9 @@ func (m Model) sessPickProvider(p agent.Provider) (Model, tea.Cmd) {
 // name ("" the provider's default) — and on the provider it was chosen for,
 // which the pick now holds, so the model never follows the list onto another
 // session's provider. A native default still being read is no longer wanted.
+// On native the model's effort levels are read from its table off the Update
+// as the input syncs (askNativeLevels, plan 047 D5) — the start model's for
+// the default — and /effort offers every level until they are back.
 func (m Model) sessPickModel(id, name string) (Model, tea.Cmd) {
 	if !m.sessPick.provSet {
 		if p, ok := m.sessNewProviderOf(); ok {
@@ -852,10 +1026,30 @@ func (m Model) sessPickModel(id, name string) (Model, tea.Cmd) {
 	}
 	m.sessPick.model, m.sessPick.modelName, m.sessPick.modelSet = id, name, true
 	m.sessPick.resolving = false
+	// A choice of model — the one already chosen, `default` again among them
+	// — reads its levels again (C2 fix review 3).
+	m.sessPick.levels = sessLevels{gen: m.sessPick.levels.gen}
 	m.sessPick.seq++
 	m.sessList.in.set("", 0)
 	m.sessNote(m.sessUseNote(), sessNoteOK)
 	return m, m.syncSessInput()
+}
+
+// sessNativeLevels is a read of a native model's levels answering
+// (askNativeLevels, plan 047 D5): taken only while it is the latest read, of
+// the model new sessions still start on. The hint line says again what new
+// sessions use, since an effort kept from before may now be one the model
+// does not offer.
+func (m Model) sessNativeLevels(msg sessNativeLevelsMsg) Model {
+	lv := &m.sessPick.levels
+	if lv.gen != msg.gen || lv.model != msg.model {
+		return m
+	}
+	lv.alias, lv.levels, lv.known = msg.alias, msg.levels, msg.ok
+	if m.sessList.open && m.sessList.noteKind == sessNoteOK && strings.HasPrefix(m.sessList.note, sessUseNotePrefix) {
+		m.sessNote(m.sessUseNote(), sessNoteOK)
+	}
+	return m
 }
 
 // sessPickSetting is /effort's or /fast's choice (kind's; plan 032 C17): new
@@ -894,6 +1088,10 @@ func (m Model) sessNativeDefault(msg sessNativeDefaultMsg) Model {
 	pk.resolving = false
 	if msg.err == nil {
 		pk.model, pk.modelName = msg.model.ID, msg.model.Name
+		// Its levels, which /effort offers (plan 047 D5): read, so none is
+		// asked for.
+		pk.levels = sessLevels{model: msg.model.ID, alias: msg.model.ID, levels: msg.model.Efforts, known: true, asked: true,
+			gen: pk.levels.gen + 1, opening: msg.gen}
 	}
 	if !m.sessList.open || m.sessList.gen != msg.gen {
 		return m

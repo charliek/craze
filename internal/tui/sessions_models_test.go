@@ -799,8 +799,10 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "on", "off"}) {
 		t.Fatalf("/fast lists %v", got)
 	}
+	// On an ACP provider (cursor, here) every level craze's providers name
+	// (plan 047 D5).
 	mm, _ = typeList(t, m, "/effort ")
-	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "low", "medium", "high", "xhigh"}) {
+	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"}) {
 		t.Fatalf("/effort lists %v", got)
 	}
 	if it := cmdItem(t, mm, "default"); it.Note != sessCurrentNote || it.Detail != sessSettingDetail {
@@ -813,9 +815,9 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 	if got := cmdItems(mm); !slices.Equal(got, []string{"xhigh"}) {
 		t.Fatalf("/effort x lists %v", got)
 	}
-	mm, _ = typeList(t, m, "/effort max")
-	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort max: one of default, low, medium, high, xhigh" {
-		t.Fatalf("/effort max: %+v", p.ans)
+	mm, _ = typeList(t, m, "/effort huge")
+	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort huge: one of default, minimal, low, medium, high, xhigh, max" {
+		t.Fatalf("/effort huge: %+v", p.ans)
 	}
 }
 
@@ -905,8 +907,8 @@ func TestChoosingEffortAndFast(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ line, note string }{
-		{"/effort max", "no effort max: one of default, low, medium, high, xhigh"},
-		{"/effort ", "/effort needs a value: default, low, medium, high, xhigh"},
+		{"/effort huge", "no effort huge: one of default, minimal, low, medium, high, xhigh, max"},
+		{"/effort ", "/effort needs a value: default, minimal, low, medium, high, xhigh, max"},
 		{"/fast maybe", "no fast maybe: one of default, on, off"},
 		{"/fast ", "/fast needs a value: default, on, off"},
 	} {

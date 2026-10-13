@@ -138,7 +138,7 @@ func TestTheSideQuestionIsOfferedOnlyWhereTheSessionAnswersOne(t *testing.T) {
 
 	m, _ := asideModel(t)
 	got := names(m)
-	if want := []string{"help", "model", "clear", "tasks", "theme", "rename", "plan", "ask", "agent", "btw", "exit"}; !slices.Equal(got, want) {
+	if want := []string{"help", "model", "clear", "tasks", "theme", "rename", "plan", "ask", "agent", "btw", "exit", "effort"}; !slices.Equal(got, want) {
 		t.Fatalf("the builtins are %v, want %v", got, want)
 	}
 	if !helpHas(m, "/btw") || !helpHas(m, "side questions") || !helpHas(m, "/btw question") {

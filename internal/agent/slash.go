@@ -37,11 +37,14 @@ type SlashItem struct {
 	// spelling the row answers to (the TUI's qualifiedAlias). Both are "" on
 	// every other row.
 	Plugin, Qualified string
-	// Requires is the session capability the row needs, "" for none:
-	// SlashRequiresStop or SlashRequiresAside. Those are facts of the server a
-	// client is attached through, which this package cannot see (P4), so the
-	// row is always listed and a client shows it only where the capability is
-	// true.
+	// Requires is what the row needs, "" for none: SlashRequiresStop,
+	// SlashRequiresAside or SlashRequiresEffort. Stop and aside are session
+	// capabilities, facts of the server a client is attached through, which
+	// this package cannot see (P4); effort is the client's own reading of the
+	// session's snapshot — the session advertises an effort option for its
+	// current model (EffortOption is not nil; plan 047 D4, P8), which changes
+	// with the model. So the row is always listed, and a client shows it only
+	// where what it requires is true.
 	//
 	// A row with Requires never claims its name: the rows after it are
 	// deduplicated as if it were not there. A client that shows it hides any
@@ -71,10 +74,10 @@ type SlashRun struct {
 	// Arg says whether the row takes an argument: SlashArgNone (""),
 	// SlashArgOptional or SlashArgRequired. ArgHint is how to show it.
 	Arg, ArgHint string
-	// Picker names the picker a SlashRunPicker row opens ("model"); Local the
-	// client's own action a SlashRunLocal row runs ("help", "clear", "tasks",
-	// "theme", "connect"). A client dispatches on these and never on the
-	// row's name (P17).
+	// Picker names the picker a SlashRunPicker row opens ("model", "effort");
+	// Local the client's own action a SlashRunLocal row runs ("help",
+	// "clear", "tasks", "theme", "connect"). A client dispatches on these and
+	// never on the row's name (P17).
 	Picker, Local string
 	// Reason is why a SlashRunUnavailable row cannot run, in the words the
 	// TUI has always refused it with ("mode ask is not advertised").
@@ -130,9 +133,12 @@ const (
 	SlashMethodSet      = "session.set"
 	SlashMethodStop     = "session.stop"
 
-	// The session capabilities a row can require (SlashItem.Requires).
-	SlashRequiresStop  = "stop"
-	SlashRequiresAside = "aside"
+	// What a row can require (SlashItem.Requires): the session capabilities
+	// stop and aside, and effort, the client's reading of the snapshot (an
+	// effort option for the current model).
+	SlashRequiresStop   = "stop"
+	SlashRequiresAside  = "aside"
+	SlashRequiresEffort = "effort"
 )
 
 // slashGate is when a builtin is listed at all: always, or only where the
@@ -168,14 +174,17 @@ type slashBuiltinRow struct {
 // moves (P20). It moved here from the TUI (plan 043 D1) so a host can describe
 // the menu to a client that is not the TUI.
 //
+// /effort (plan 047 D4) is last, after /exit, so `/e` still selects /exit
+// and `/ef` /effort. It is not reserved: where the session has no effort
+// option the row is hidden, and an agent's or a plugin's /effort shows.
+//
 // /sessions is not here (P13): whether a client has a hub list is the
 // client's fact, and the TUI adds that row itself.
 //
 // WhileWorking is real dispatch (P16; internal/tui's handleEnter and
 // runsWhileWorking): true for exit, help, theme, tasks, clear, rename and
-// btw, false for model, the modes and connect — which the TUI refuses busy
-// with a line of its own. TestSlashTableMatchesTheTUIsDispatch holds it to
-// the TUI.
+// btw, false for model, the modes, connect and effort — which the TUI
+// refuses busy. TestSlashTableMatchesTheTUIsDispatch holds it to the TUI.
 var slashBuiltinTable = []slashBuiltinRow{
 	{item: SlashItem{Name: "help", Description: "Keybindings and commands",
 		Run: SlashRun{Kind: SlashRunLocal, Local: "help"}, WhileWorking: true}, reserved: true},
@@ -198,6 +207,8 @@ var slashBuiltinTable = []slashBuiltinRow{
 		Run: SlashRun{Kind: SlashRunAside, Param: "question", Arg: SlashArgRequired, ArgHint: "<question>"}, WhileWorking: true}},
 	{item: SlashItem{Name: "exit", Description: "End this session", Requires: SlashRequiresStop,
 		Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodStop}, WhileWorking: true}, reserved: true},
+	{item: SlashItem{Name: "effort", Description: "Change the current model's effort", Requires: SlashRequiresEffort,
+		Run: SlashRun{Kind: SlashRunPicker, Picker: "effort", Arg: SlashArgOptional, ArgHint: "<level>"}}},
 }
 
 func init() {
@@ -241,8 +252,9 @@ func SlashBuiltins() []SlashBuiltin {
 // in the menu and expanded by craze in `craze prompt` — the same name meaning
 // two things.
 //
-// /btw and /connect are not reserved, as they never were: each is a builtin
-// only where the session has it, and a plugin's /btw stays bare.
+// /btw and /connect are not reserved, as they never were, nor is /effort
+// (plan 047 D4): each is a builtin only where the session has it, and a
+// plugin's /btw or /effort stays bare.
 func BuiltinSlashNames() []string {
 	out := make([]string, 0, len(slashBuiltinTable))
 	for _, b := range slashBuiltinTable {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -112,10 +113,35 @@ const (
 
 // modelTab is one row under the model list: an option the current catalog
 // advertises, what the row calls it, and its role.
+//
+// follows marks the effort tab of a session that states its models' effort
+// facts (plan 047 D3; Model.effortFacts): it is the effort of the model the
+// dialog would apply to (dialogDestination), not the current model's alone —
+// the session's own option while that is the current model, and otherwise an
+// option made of the highlighted model's levels (effortFactsTab). Its seed,
+// the value it shows untouched (live), may be nothing at all, and a choice
+// the user made on it is kept while they move to a model that does not offer
+// it (repaired, shown).
 type modelTab struct {
-	opt   agent.ConfigOption
-	label string
-	role  tabRole
+	opt     agent.ConfigOption
+	label   string
+	role    tabRole
+	follows bool
+}
+
+// live is the value the tab shows while the user has not touched it: its
+// option's current value, or its first when the agent named one it does not
+// offer — but on a tab that follows the highlight, the value that model
+// would be at (its option's Current, effortFactsTab's preselection) or
+// nothing bracketed when it has none (plan 047 D3).
+func (t modelTab) live() string {
+	if t.follows {
+		if offers(&t.opt, t.opt.Current) {
+			return t.opt.Current
+		}
+		return ""
+	}
+	return currentOrFirst(&t.opt)
 }
 
 func (t modelTab) focus() dialogFocus { return dialogFocus(t.opt.ID) }
@@ -214,7 +240,79 @@ func tabLabel(opt agent.ConfigOption) string {
 // modelDialogTabs is the tab list over this model's snapshot, derived each
 // time it is read — at render, at a key, at a click — so it is always the
 // current model's catalog and never one captured when the box opened.
-func (m Model) modelDialogTabs() []modelTab { return catalogTabs(m.snap) }
+//
+// On a session that states its models' effort facts (plan 047 D3) the effort
+// tab is the one model the dialog would apply to has (effortFactsTabs): the
+// highlighted model's levels as the cursor moves, and none for a model
+// without. Without facts — an ACP session, an older host — the tabs are the
+// current model's catalog, as they always were.
+func (m Model) modelDialogTabs() []modelTab {
+	tabs := catalogTabs(m.snap)
+	if !m.effortFacts() {
+		return tabs
+	}
+	// The current model here is the one the catalog is (configModel): while
+	// a switch of this client's is pending the row the box opens on is the
+	// model asked for, whose own levels the facts state, and the effort
+	// option is still the old model's (plan 047 C2 review F1).
+	return effortFactsTabs(tabs, m.configModel(), m.dialogDestination())
+}
+
+// dialogDestination is the model Enter would bind the dialog's steps to
+// (applyModelDialog's forModel): the highlighted model, or the current one
+// when no model row is highlighted — a filter that matches nothing, or the
+// connect row — as the session states it in its list (an ID alone when the
+// list does not hold it).
+func (m Model) dialogDestination() agent.ModelInfo {
+	if list := m.dialogModelList(); m.mdlg.sel >= 0 && m.mdlg.sel < len(list) {
+		return list[m.mdlg.sel]
+	}
+	if md, ok := m.listedModel(m.snap.CurrentModel); ok {
+		return md
+	}
+	return agent.ModelInfo{ID: m.snap.CurrentModel}
+}
+
+// effortFactsTabs is tabs (catalogTabs over the current model's catalog) with
+// the effort tab made dest's (plan 047 D3): the session's own effort option
+// while dest is the current model, which says the effort the session is at;
+// for another model an option of dest's levels (effortFactsTab), presented
+// under the id the current model's option has — native's effort id when it
+// has none (P7) — so a choice is keyed as the option it will set; and no
+// effort tab at all for a model with no levels. The tab keeps its place
+// among the others, and comes last when the current model has none.
+func effortFactsTabs(tabs []modelTab, current string, dest agent.ModelInfo) []modelTab {
+	tabs = slices.Clone(tabs)
+	at := slices.IndexFunc(tabs, func(t modelTab) bool { return t.role == roleEffort })
+	switch {
+	case dest.ID == current && at >= 0:
+		tabs[at].follows = true
+	case dest.ID != current && len(dest.Efforts) > 0 && at >= 0:
+		tabs[at] = effortFactsTab(tabs[at].opt.ID, dest)
+	case dest.ID != current && len(dest.Efforts) > 0:
+		tabs = append(tabs, effortFactsTab(agent.NativeEffortID, dest))
+	case at >= 0:
+		tabs = slices.Delete(tabs, at, at+1)
+	}
+	return tabs
+}
+
+// effortFactsTab is model md's effort as a tab under option id: the option
+// native advertises for its levels (agent.NativeEffortOption), in the
+// catalog's order, preselected on the effort a switch to it would land on
+// (SwitchEffort), else its default, else nothing (plan 047 D3). md has
+// levels.
+func effortFactsTab(id string, md agent.ModelInfo) modelTab {
+	opt := *agent.NativeEffortOption(md.Efforts, "")
+	opt.ID = id
+	for _, pre := range []string{md.SwitchEffort, md.DefaultEffort} {
+		if pre != "" && offers(&opt, pre) {
+			opt.Current = pre
+			break
+		}
+	}
+	return modelTab{opt: opt, label: "effort", role: roleEffort, follows: true}
+}
 
 // tabIndex is the tab f names, or -1 — for focusList among others, since no
 // tab has an empty id.
@@ -228,17 +326,18 @@ func tabIndex(tabs []modelTab, f dialogFocus) int {
 }
 
 // repaired is the dialog made consistent with the tabs the catalog advertises
-// now. A delta can arrive while the box is open — another client's model
-// change brings another model's catalog, or the agent moves an option — so the
-// option the focused tab set can be gone, an option's live value can have
-// moved, and a chosen value can be one its option no longer offers. The focus
-// then goes back to the list; a tab the user has not touched takes its
-// option's live value (currentOrFirst), whatever it was showing; and a touched
-// tab whose value its option no longer offers takes it too, and is untouched
-// again — what it showed was the user's choice, and that choice is gone, so
-// the value it falls back to is nobody's choice and must not be sent. A value
-// chosen for an option that has gone is kept, and counts again if the option
-// comes back offering it.
+// now — and, for the effort tab of a session with effort facts, with the
+// model the cursor is on (plan 047 D3). A delta can arrive while the box is
+// open — another client's model change brings another model's catalog, or the
+// agent moves an option — so the option the focused tab set can be gone, an
+// option's live value can have moved, and a chosen value can be one its option
+// no longer offers. The focus then goes back to the list; a tab the user has
+// not touched takes its option's live value (currentOrFirst), whatever it was
+// showing; and a touched tab whose value its option no longer offers takes it
+// too, and is untouched again — what it showed was the user's choice, and that
+// choice is gone, so the value it falls back to is nobody's choice and must
+// not be sent. A value chosen for an option that has gone is kept, and counts
+// again if the option comes back offering it.
 //
 // It acts on the mirror the model draws, not on every catalog the session
 // passed through: recompute runs once the event is folded, and a repair is
@@ -250,6 +349,13 @@ func tabIndex(tabs []modelTab, f dialogFocus) int {
 // to that model and re-judged on the latest catalog before it goes
 // (runModelApply). The repair happens when a snapshot without the option IS
 // observed.
+//
+// A tab that follows the highlight (modelTab.follows) is not untouched by a
+// model that does not offer its choice: the choice is kept, and the row
+// shows that model's own value instead (shown) until the cursor reaches a
+// model that offers it again (plan 047 D3, P7). A model with no levels has
+// no effort tab, which hands the focus back to the list as any tab's going
+// does.
 func (d modelDialog) repaired(tabs []modelTab) modelDialog {
 	if tabIndex(tabs, d.focus) < 0 {
 		d.focus = focusList
@@ -257,10 +363,12 @@ func (d modelDialog) repaired(tabs []modelTab) modelDialog {
 	var chosen map[string]string
 	var touched map[string]bool
 	for _, t := range tabs {
-		id, live := t.opt.ID, currentOrFirst(&t.opt)
+		id, live := t.opt.ID, t.live()
 		v, ok := d.chosen[id]
 		switch {
 		case ok && d.touched[id] && offers(&t.opt, v):
+			continue
+		case t.follows && d.touched[id]:
 			continue
 		case ok && !d.touched[id] && v == live:
 			continue
@@ -284,6 +392,18 @@ func (d modelDialog) repaired(tabs []modelTab) modelDialog {
 		d.touched = touched
 	}
 	return d
+}
+
+// shown is the value tab t's row shows: the value chosen on it — but on a tab
+// that follows the highlight, a choice the highlighted model does not offer
+// is kept unshown, and the row shows that model's own value (live) instead
+// (plan 047 D3).
+func (d modelDialog) shown(t modelTab) string {
+	v := d.chosen[t.opt.ID]
+	if t.follows && !offers(&t.opt, v) {
+		return t.live()
+	}
+	return v
 }
 
 // choose is the dialog with one tab's value picked by the user, and the tab
@@ -462,9 +582,11 @@ func (m Model) openModelDialog() Model {
 	ti := m.dialogInput()
 	ti.CharLimit = 64
 	// Every tab starts on its option's current value: repaired seeds a tab
-	// that has none, and at open that is all of them.
+	// that has none, and at open that is all of them. The tabs are read off
+	// the new dialog, whose cursor is on the current model.
 	m.connSeq++
-	m.mdlg = modelDialog{filter: ti, gen: m.connSeq}.repaired(m.modelDialogTabs())
+	m.mdlg = modelDialog{filter: ti, gen: m.connSeq}
+	m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
 	m.dialog = dialogModel
 	return m
 }
@@ -530,6 +652,9 @@ func (m Model) closeDialog(revert bool) Model {
 	case dialogHelp:
 		m.dialog = dialogNone
 		m.helpTop = 0
+	case dialogEffort:
+		m.dialog = dialogNone
+		m.edlg = effortPicker{}
 	case dialogProvider:
 		// The picker is not dismissed without starting: Esc and a click
 		// outside go through confirmProvider instead.
@@ -608,6 +733,10 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			delta = -1
 		}
 		m.mdlg.sel = (m.mdlg.sel + delta + n) % n
+		// The effort tab of a session with effort facts is the highlighted
+		// model's (plan 047 D3), so the dialog is repaired to the tabs the
+		// cursor now stands on.
+		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
 		return m, nil
 	case tea.KeyLeft, tea.KeyRight:
 		delta := 1
@@ -623,6 +752,8 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if n := m.modelListRows(m.dialogModelList()); m.mdlg.sel >= n {
 		m.mdlg.sel = max(n-1, 0)
 	}
+	// The filter moves the cursor's model as ↑/↓ do.
+	m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
 	return m, cmd
 }
 
@@ -635,19 +766,22 @@ func cycleFocus(all []dialogFocus, cur dialogFocus, delta int) dialogFocus {
 	return all[0]
 }
 
-// moveDialogValue steps the focused tab along its advertised values.
+// moveDialogValue steps the focused tab along its advertised values, from
+// the one its row shows. A row with nothing bracketed — the effort of a
+// model with no default and no memory (plan 047 D3) — steps onto its first
+// value with →, its last with ←.
 func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 	i := tabIndex(tabs, m.mdlg.focus)
 	if i < 0 {
 		return m
 	}
 	opt := &tabs[i].opt
-	idx := 0
-	for j, v := range opt.SelectValues {
-		if v.Value == m.mdlg.chosen[opt.ID] {
-			idx = j
-			break
-		}
+	cur := m.mdlg.shown(tabs[i])
+	idx := slices.IndexFunc(opt.SelectValues, func(v agent.SelectValue) bool { return v.Value == cur })
+	if idx < 0 && delta < 0 {
+		// From nothing bracketed, ← lands on the last value (→ on the first,
+		// from -1).
+		idx = 0
 	}
 	n := len(opt.SelectValues)
 	m.mdlg = m.mdlg.choose(opt.ID, opt.SelectValues[(idx+delta+n)%n].Value)
@@ -697,8 +831,27 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		// Only a tab the user moved is a change to make: an untouched one is
 		// on its option's live value, and sending it would at best repeat that
 		// value and at worst send back one a delta has since replaced.
+		//
+		// But for the effort tab of a session with effort facts on a switch
+		// (plan 047 D3): Enter sends the value the row showed for the model it
+		// switches to — the user's choice, or that model's preselection — so
+		// what the session lands on is what the box showed, whatever another
+		// process has since written to the model memory. On the model the
+		// session's catalog is (configModel) it is sent only as the user's
+		// choice, as every tab is. A model this client's switch is still
+		// moving to is a destination too (C2 fix review 1): its row is its
+		// preselection, not a live value, so it is sent — bound to it, behind
+		// that switch in this client's line (chainLock), with no second model
+		// step: the switch ahead of it already moves the session there, and a
+		// switch refused makes the step the stale note rather than a retry.
 		v := d.chosen[t.opt.ID]
-		if !d.touched[t.opt.ID] || v == "" {
+		send := d.touched[t.opt.ID] && v != ""
+		if t.follows {
+			v = d.shown(t)
+			chose := d.touched[t.opt.ID] && offers(&t.opt, d.chosen[t.opt.ID])
+			send = v != "" && (chose || forModel != m.configModel())
+		}
+		if !send {
 			continue
 		}
 		// A moved tab is sent even on the value its option shows. What the
@@ -1026,19 +1179,15 @@ func (st applyStep) resolveOn(dest []modelTab, model string) (applyStep, bool) {
 }
 
 // valueOn is the step's value as the option to spells it, if it offers one.
-// Effort is matched without regard to case, as `/model`'s effort word is
-// (agent.MatchEffortValue); fast by what the value means, since what the user
-// picked is on or off and each model spells its own two values; everything
-// else exactly as the agent advertised it.
+// Effort is matched as `/model`'s effort word and `/effort`'s are
+// (agent.MatchEffortValue: the id exactly, then in any case, then the name);
+// fast by what the value means, since what the user picked is on or off and
+// each model spells its own two values; everything else exactly as the agent
+// advertised it.
 func (st applyStep) valueOn(to *agent.ConfigOption) (string, bool) {
 	switch st.role {
 	case roleEffort:
-		for _, v := range to.SelectValues {
-			if strings.EqualFold(v.Value, st.value) {
-				return v.Value, true
-			}
-		}
-		return "", false
+		return agent.MatchEffortValue(to, st.value)
 	case roleFast:
 		srcOff, srcOn, srcOK := agent.FastOnOff(&st.opt)
 		dstOff, dstOn, dstOK := agent.FastOnOff(to)
@@ -1289,7 +1438,7 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		rows = append(rows, m.dialogRow(text, tag, p.top+i == d.sel, d.focus == focusList, inner))
 	}
 	for _, t := range p.tabs[:p.rows.tabs] {
-		rows = append(rows, m.dialogValueRow(t.label, &t.opt, d.chosen[t.opt.ID], d.focus == t.focus(), inner, t.valueName()))
+		rows = append(rows, m.dialogValueRow(t.label, &t.opt, d.shown(t), d.focus == t.focus(), inner, t.valueName()))
 	}
 	if p.rows.footer {
 		hint := modelDialogHintAt(p.tabs, inner)

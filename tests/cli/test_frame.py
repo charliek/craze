@@ -175,14 +175,15 @@ CASES = [
     ),
     # 009 §3.4: the slash band through the command. The catalog lands after
     # session/new replies, so the script waits on the entry only `/zulu`
-    # matches and then backs out to the bare token the ten builtins and the
-    # fake's 24 commands both answer.
+    # matches and then backs out to the bare token the eleven builtins (the
+    # fixture's effort option adds /effort, plan 047 D4) and the fake's 24
+    # commands both answer.
     (
         "commands",
         100,
         30,
         "<wait:idle>/zulu<wait:text:zulu-tool><backspace><backspace><backspace><backspace>",
-        ["❯ /help", "/model            Switch model", "1/34", "▼"],
+        ["❯ /help", "/model            Switch model", "1/35", "▼"],
     ),
 ]
 
