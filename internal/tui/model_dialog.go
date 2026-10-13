@@ -821,11 +821,11 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	m = m.closeDialog(false)
 
 	var steps []applyStep
-	forModel := m.snap.CurrentModel
+	forModel, moves := m.snap.CurrentModel, false
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
 		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
-		forModel = id
+		forModel, moves = id, true
 	}
 	for _, t := range tabs {
 		// Only a tab the user moved is a change to make: an untouched one is
@@ -836,20 +836,25 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		// (plan 047 D3): Enter sends the value the row showed for the model it
 		// switches to — the user's choice, or that model's preselection — so
 		// what the session lands on is what the box showed, whatever another
-		// process has since written to the model memory. On the model the
-		// session's catalog is (configModel) it is sent only as the user's
-		// choice, as every tab is. A model this client's switch is still
-		// moving to is a destination too (C2 fix review 1): its row is its
-		// preselection, not a live value, so it is sent — bound to it, behind
-		// that switch in this client's line (chainLock), with no second model
-		// step: the switch ahead of it already moves the session there, and a
-		// switch refused makes the step the stale note rather than a retry.
+		// process has since written to the model memory. Every model step
+		// this apply sends is such a switch — the model the session's catalog
+		// still is (configModel) among them, picked back while this client's
+		// switch away from it is pending: that switch lands first, and the
+		// one back lands on the memory's effort, not the one the row showed
+		// (branch review 1). On the current model with nothing pending it is
+		// sent only as the user's choice, as every tab is. A model this
+		// client's switch is still moving to is a destination too (C2 fix
+		// review 1): its row is its preselection, not a live value, so it is
+		// sent — bound to it, behind that switch in this client's line
+		// (chainLock), with no second model step: the switch ahead of it
+		// already moves the session there, and a switch refused makes the
+		// step the stale note rather than a retry.
 		v := d.chosen[t.opt.ID]
 		send := d.touched[t.opt.ID] && v != ""
 		if t.follows {
 			v = d.shown(t)
 			chose := d.touched[t.opt.ID] && offers(&t.opt, d.chosen[t.opt.ID])
-			send = v != "" && (chose || forModel != m.configModel())
+			send = v != "" && (chose || moves || forModel != m.configModel())
 		}
 		if !send {
 			continue

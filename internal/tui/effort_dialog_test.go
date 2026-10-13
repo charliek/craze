@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
@@ -316,6 +317,63 @@ func TestTheDialogLandsOnTheEffortItShowedOverARealSession(t *testing.T) {
 		t.Fatalf("the session is on %s at %+v; want Alpha Two at the max the dialog showed", snap.CurrentModel, opt)
 	}
 	if got := texts(m, entryNote); !slices.Equal(got, []string{"model → alpha/two", "effort → max"}) {
+		t.Fatalf("notes %q", got)
+	}
+}
+
+// TestASwitchBackFromAPendingSwitchLandsOnTheShownEffort (branch review 1): a
+// real native session started on Alpha One with --effort low, which the model
+// memory remembers at high. /model alpha/two is issued and held; the dialog,
+// reopened, still has Alpha One's catalog, so Alpha One's row shows the low it
+// is at. Picked untouched, the apply switches back to it — the switch to Alpha
+// Two lands first, and the one back reads the memory's high — and sends the
+// low it showed after it, so Alpha One ends at low. Negative control: the
+// old condition, which sends an untouched effort only for a model other than
+// the catalog's, leaves Alpha One at high.
+func TestASwitchBackFromAPendingSwitchLandsOnTheShownEffort(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	dir, getenv := connectFixture(t, nil)
+	table := nativeEffortTable()
+	at := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	one := table.Models["alpha/one"]
+	if err := modeltable.Remember(dir, modeltable.RecentEntry{Alias: "alpha/one", Provider: one.Provider, WireModel: one.WireModel, Effort: "high"}, at); err != nil {
+		t.Fatal(err)
+	}
+	tweak := nativeSessionTweak(dir, table, &nativeScriptedModel{provider: "alpha", wire: "wire-one"})
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), Model: "alpha/one", Effort: "low", Interactive: true},
+		func(o *harness.Options) {
+			tweak(o)
+			o.Getenv = nativePickerEnv
+			o.Now = func() time.Time { return at }
+		})
+	t.Cleanup(func() { _ = sess.Close() })
+	tm, _ := New(Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}).
+		Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m := applyPending(t, startedLikeInit(t, tm.(Model)))
+	if opt := agent.EffortOption(m.snap); m.snap.CurrentModel != "alpha/one" || opt == nil || opt.Current != "low" {
+		t.Fatalf("fixture: the session is on %s at %+v; want Alpha One at low", m.snap.CurrentModel, opt)
+	}
+
+	m, held := typeCommand(t, m, "/model alpha/two")
+	if !m.modelPending() {
+		t.Fatal("fixture: the switch to Alpha Two is not pending")
+	}
+	m = openDialog(t, m)
+	m = highlight(t, m, "alpha/one")
+	if got := effortRow(t, m); got != "  effort  [low]  high" {
+		t.Fatalf("Alpha One's row, its switch away pending: %q", got)
+	}
+	m, applied := press(m, enter())
+	// The dialog's chain runs behind the held switch, so running it runs the
+	// switch first (chainLock); the switch's own command then answers.
+	m = drainCmd(t, m, applied)
+	m = applyPending(t, drainCmd(t, m, held))
+	snap := sess.Snapshot()
+	if opt := agent.EffortOption(snap); snap.CurrentModel != "alpha/one" || opt == nil || opt.Current != "low" {
+		t.Fatalf("the session is on %s at %+v; want Alpha One at the low the dialog showed", snap.CurrentModel, opt)
+	}
+	if got := texts(m, entryNote); !slices.Equal(got, []string{"model → alpha/one", "effort → low"}) {
 		t.Fatalf("notes %q", got)
 	}
 }
