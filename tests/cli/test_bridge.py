@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from conftest import REMOVED_CONFIG_ENV, both_modes, host_env_names, marker_pids  # noqa: F401
+from conftest import REMOVED_CONFIG_ENV, _argv, both_modes, host_env_names, marker_pids  # noqa: F401
 from test_tui import PTYCraze, _wait_entry, _wait_fake_gone, _wait_glob, quit_craze
 
 WAIT = 10.0
@@ -443,17 +443,10 @@ def test_bridge_no_start_with_no_hub_exits_three_and_starts_none(craze_bin: Path
     result = _run_bridge(craze_bin, home, ["--hub", "--no-start"], CRAZE_RUNTIME_DIR=runtime)
     time.sleep(0.5)  # a started hub would have written its record by now
     assert _hub_files(home) == [], _hub_files(home)
-    assert not any(" hub" in _cmdline(pid) for pid in marker_pids()), "a hub process was started"
+    assert not any(_argv(pid)[1:2] == ["hub"] for pid in marker_pids()), "a hub process was started"
     assert result.returncode == 3, result
     assert result.stdout == b"", result.stdout
     assert result.stderr == b"craze bridge: no hub is running\n", result.stderr
-
-
-def _cmdline(pid: int) -> str:
-    try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-    except OSError:
-        return ""
 
 
 def test_bridge_no_start_splices_a_running_hub(craze_bin: Path, tmp_path: Path) -> None:
