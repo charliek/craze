@@ -39,6 +39,8 @@ const (
 )
 
 type promptOpts struct {
+	// plain is the plain output's paragraph state (writeEvent).
+	plain     plainRuns
 	workspace string
 	model     string
 	effort    string
@@ -899,11 +901,55 @@ func (o *promptOpts) writeEvent(ev agent.Event) error {
 	if o.json {
 		return encodeEvent(o.stdout, ev)
 	}
+	if runBoundary(ev) {
+		o.plain.boundary()
+	}
 	if ev.Type == agent.EventText && ev.Agent == "" {
-		_, err := io.WriteString(o.stdout, ev.Text)
+		_, err := io.WriteString(o.stdout, o.plain.text(ev.Text))
 		return err
 	}
 	return nil
+}
+
+// plainRuns puts the paragraph breaks into plain (non --json) output (plan
+// 047 D7): a text run that starts after a boundary (runBoundary) is separated
+// from the output so far by a blank line, however the previous run ended.
+type plainRuns struct {
+	// written says some text went out; ends is its last two bytes.
+	written bool
+	ends    [2]byte
+	// fresh says a boundary passed since the last text.
+	fresh bool
+}
+
+func (p *plainRuns) boundary() { p.fresh = true }
+
+// text is s with the newlines its run's start is owed in front of it. An
+// empty chunk is not a run's first text: it is returned as it is, and the
+// boundary stays pending.
+func (p *plainRuns) text(s string) string {
+	if s == "" {
+		return s
+	}
+	if p.fresh && p.written {
+		have := 0 // the newlines the output and the chunk already supply
+		switch {
+		case p.ends[1] == '\n' && p.ends[0] == '\n':
+			have = 2
+		case p.ends[1] == '\n':
+			have = 1
+		}
+		for i := 0; i < len(s) && s[i] == '\n' && have < 2; i++ {
+			have++
+		}
+		s = strings.Repeat("\n", 2-have) + s
+	}
+	p.fresh = false
+	p.written = true
+	for i := 0; i < len(s); i++ {
+		p.ends[0], p.ends[1] = p.ends[1], s[i]
+	}
+	return s
 }
 
 // drainSubagents reads what the children were still writing as the run ended.

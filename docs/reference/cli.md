@@ -422,6 +422,14 @@ Without `--json`, only the **main session's** assistant text is written to
 stdout — a sub-agent's text is never printed, so a piped reply stays the
 agent's own answer.
 
+The text of each run is a paragraph of its own. A run that starts after a
+tool call, a thought or the end of a turn is separated from the output so far
+by a blank line, however the earlier text ended: nothing is added at the start
+of the output or after a blank line, one newline after text ending in one, and
+two otherwise (a chunk that begins with newlines supplies its own). A
+sub-agent's tool calls and thoughts never start a run. `--json` events are
+unchanged.
+
 ### `--follow-up` is the queue
 
 Every `--follow-up` is queued before the first turn and sent one per settled

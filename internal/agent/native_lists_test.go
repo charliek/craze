@@ -16,6 +16,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/anthropicmodels"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -908,5 +909,109 @@ func TestNativeAForcedFetchNeverOverwritesANewerList(t *testing.T) {
 	}
 	if n, _ := listRequests(api, listKeyA); n != 3 {
 		t.Fatalf("%d model list requests; want the two forced fetches' and the session's", n)
+	}
+}
+
+// TestNativeAFailedPlanFetchBacksOffForItsAccount (plan 047 D8): the ChatGPT
+// plan's list id is the signed-in account's, so a fetch the API refuses
+// starts a backoff for that account alone. Account A's open fetch fails, and a
+// refresh within the backoff fetches nothing; account B, signed in meanwhile,
+// is fetched at once, within A's backoff; B's own failure then backs B off.
+// Negative control: with the id "" for every account, B's refresh is held back
+// by A's failure and the request count stays at one.
+func TestNativeAFailedPlanFetchBacksOffForItsAccount(t *testing.T) {
+	api, _ := noOpenAI(t)
+	refuse := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"refused","message":"refused"}}`)
+	}
+	api.queue(refuse, refuse, refuse, refuse)
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	dir := filepath.Join(home, "native")
+	writePlanAccount(t, dir)
+	writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+	staleModels(t, dir)
+	s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
+		o.Getenv = func(string) string { return "" }
+	})
+	closeAtCleanup(t, s)
+	var (
+		clockMu sync.Mutex
+		now     = time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	)
+	s.fetchClock = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	awaitPlanFetch(t, s)
+	modelRequests := func() int {
+		n := 0
+		for _, r := range api.requests() {
+			if strings.HasSuffix(r.path, "/models") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := modelRequests(); n != 1 {
+		t.Fatalf("%d model list requests after the open; want A's one", n)
+	}
+	refresh(t, s, "")
+	awaitPlanFetch(t, s)
+	if n := modelRequests(); n != 1 {
+		t.Fatalf("%d model list requests for A within its backoff; want none more", n)
+	}
+
+	if err := signInOf(dir, otherSubject, otherClient, otherAccess, otherRefresh, "inc-2"); err != nil {
+		t.Fatal(err)
+	}
+	refresh(t, s, "")
+	awaitPlanFetch(t, s)
+	if n := modelRequests(); n != 2 {
+		t.Fatalf("%d model list requests after B signed in; want B's at once, within A's backoff", n)
+	}
+	refresh(t, s, "")
+	awaitPlanFetch(t, s)
+	if n := modelRequests(); n != 2 {
+		t.Fatalf("%d model list requests for B within its own backoff; want none more", n)
+	}
+}
+
+// TestPlanSourceIDIsTheStoredAccounts (plan 047 D8): planSource names the list
+// for the account in the stored sign-in — two accounts, two ids, each 12 hex
+// digits and never the subject — and a directory with no stored sign-in has
+// the id "". Negative control: the constant "" id fails the distinct-ids
+// check.
+func TestPlanSourceIDIsTheStoredAccounts(t *testing.T) {
+	noOpenAI(t)
+	idOf := func(subject string) string {
+		dir := t.TempDir()
+		writePlanAccount(t, dir)
+		if err := writePlanTokensOf(dir, subject, planClient, planAccess, planRefresh, "inc-1", 1); err != nil {
+			t.Fatal(err)
+		}
+		src := planSource(chatgptauth.Source(dir))
+		if src == nil {
+			t.Fatalf("no plan source for subject %q", subject)
+		}
+		return src.id()
+	}
+	a, b := idOf(planSubject), idOf(otherSubject)
+	if len(a) != 12 || len(b) != 12 || a == b || strings.Contains(a, planSubject) {
+		t.Fatalf("ids %q and %q; want two distinct 12-hex-digit ids", a, b)
+	}
+	if again := idOf(planSubject); again != a {
+		t.Fatalf("one account's id changed: %q then %q", a, again)
+	}
+	noRecord := t.TempDir()
+	writePlanAccount(t, noRecord) // a registration, no token file
+	if none := planAccountID(noRecord); none != "" {
+		t.Fatalf("a directory with no stored sign-in has id %q; want \"\"", none)
 	}
 }

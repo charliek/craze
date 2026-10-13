@@ -489,6 +489,8 @@ def test_follow_up_queue_silent_in_plain_mode(
     assert "queue" not in proc.stdout
     assert "echo: one" in proc.stdout
     assert "two" in proc.stdout
+    # The turn boundary between the two replies is a paragraph break (D7).
+    assert "echo: one\n\necho: two" in proc.stdout, proc.stdout
 
 
 def test_grok_interject_fallback_is_waited_out(

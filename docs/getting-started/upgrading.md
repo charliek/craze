@@ -8,6 +8,17 @@ v0.0.1](#from-v001), the first release's.
 
 Nothing needs migrating.
 
+- **Plain `craze prompt` puts a blank line between text runs.** Text that
+  follows a tool call, a thought or the end of a turn (a `--follow-up`'s
+  reply, for one) used to run on from the text before it, as in
+  `…first reply…second reply`; it now starts a paragraph. A script that
+  split plain output on the old run-on must expect the break. `--json`
+  events, `--wait` messages and the exclusion of sub-agent text are unchanged.
+  See [craze prompt](../reference/cli.md#craze-prompt).
+- **A `craze:wonder` Claude Code preset** runs the native `muse-wonder-1.0`
+  at its default effort, for hard tasks. See [Claude
+  Code](claude-code.md#the-agents).
+
 - **A native `/model` switch no longer carries the effort over.** `/model X`
   — typed, picked in the model dialog, or an attached client's switch — lands
   on the effort you last used on X, else X's `default_effort`, where it used

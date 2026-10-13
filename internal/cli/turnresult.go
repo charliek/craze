@@ -103,6 +103,26 @@ func (a *turnAccumulator) start(at time.Time) { a.startAt = at }
 // end is the turn's ending: its time.
 func (a *turnAccumulator) end(at time.Time) { a.endAt = at }
 
+// runBoundary reports whether ev ends the assistant text run before it: a
+// top-level (Agent == "") non-todo tool event, a non-empty thought (an empty
+// chunk opens nothing in the transcript, appendStream), or the wire's own
+// done. A child's events never are one. turnAccumulator splits on it, and so
+// does plain `craze prompt`'s paragraph break (plan 047 D7): one predicate.
+func runBoundary(ev agent.Event) bool {
+	if ev.Agent != "" {
+		return false
+	}
+	switch ev.Type {
+	case agent.EventThought:
+		return ev.Text != ""
+	case agent.EventTool:
+		return ev.Tool != nil && !ev.Tool.IsTodoTool()
+	case agent.EventDone:
+		return true
+	}
+	return false
+}
+
 // fold applies one event of the turn's range.
 func (a *turnAccumulator) fold(ev agent.Event) {
 	if ev.Agent != "" || ev.Type == agent.EventSubagent {
@@ -110,20 +130,15 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// session only).
 		return
 	}
+	if runBoundary(ev) {
+		a.split()
+	}
 	switch ev.Type {
 	case agent.EventText:
 		a.text(ev.Text)
-	case agent.EventThought:
-		// An empty chunk opens nothing in the transcript (appendStream).
-		if ev.Text != "" {
-			a.split()
-		}
 	case agent.EventTool:
 		if ev.Tool == nil {
 			return
-		}
-		if !ev.Tool.IsTodoTool() {
-			a.split()
 		}
 		a.tool(*ev.Tool)
 	case agent.EventPlan:
@@ -167,8 +182,6 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		if ev.Err != nil && ev.Err.Error() != "" {
 			a.split()
 		}
-	case agent.EventDone:
-		a.split()
 	case agent.EventAsk:
 		// An answered question's or plan's ending draws its outcome note.
 		if u := ev.Ask; u != nil && u.Outcome == agent.AskAnswered && u.Kind != agent.AskPermission {

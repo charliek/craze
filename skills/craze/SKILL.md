@@ -1,6 +1,6 @@
 ---
 name: craze
-description: How to hand work to other models through craze from Claude Code. Use it when the user asks to delegate, offload or get a second opinion from a native (craze's own agent), Grok or Cursor model, to run several models on a task in parallel, to continue or watch a craze session, or to review with another model. Covers the craze:delegate agent and its presets (sol, astra, muse, grok, cursor), the craze new --wait, send, wait, cancel and stop commands, statuses, exit codes, handles, follow-ups, craze attach, and the permission allow-list. Needs craze 0.2.0 or newer.
+description: How to hand work to other models through craze from Claude Code. Use it when the user asks to delegate, offload or get a second opinion from a native (craze's own agent), Grok or Cursor model, to run several models on a task in parallel, to continue or watch a craze session, or to review with another model. Covers the craze:delegate agent and its presets (sol, astra, muse, wonder, grok, cursor), the craze new --wait, send, wait, cancel and stop commands, statuses, exit codes, handles, follow-ups, craze attach, and the permission allow-list. Needs craze 0.2.0 or newer.
 ---
 
 # Delegating to other models with craze
@@ -17,6 +17,7 @@ Dispatch them with the Agent tool, `subagent_type` `craze:<name>`. The prompt is
 | `craze:sol` | native `chatgpt/gpt-6.1-sol`, effort high | hard coding, debugging, review |
 | `craze:astra` | native `chatgpt/gpt-6-astra`, effort high | the hardest design and review questions |
 | `craze:muse` | native `muse-spark-1.3-contributor` | routine, bounded tasks, cheaply |
+| `craze:wonder` | native `muse-wonder-1.0`, effort high | hard tasks, at about three times Spark's price per token |
 | `craze:grok` | grok `grok-4.7`, effort high | Grok's own agent |
 | `craze:cursor` | cursor `composer-2.5` | Cursor's agent |
 

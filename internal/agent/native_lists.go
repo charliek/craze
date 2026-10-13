@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"time"
 
 	"github.com/charliek/craze/internal/anthropicmodels"
@@ -244,10 +246,16 @@ func listRefreshNote(kind string, err error, redact func(string) string) journal
 // planList is the ChatGPT plan's model list for the session's sign-in
 // (chatgptauth.RefreshModels, plan 033 §3.10): fetched again when it is over
 // a day old, missing, another account's or fetched with another
-// client_version. A session has one token source, so one id.
-type planList struct{ src *chatgptauth.TokenSource }
+// client_version. Its id is the sign-in's account (plan 047 D8): the first 12
+// hex digits of the SHA-256 of the stored subject, as an Anthropic list's is
+// of its key, so a failed fetch backs off only its own account; "" when no
+// sign-in is stored.
+type planList struct {
+	src     *chatgptauth.TokenSource
+	account string
+}
 
-func (planList) id() string   { return "" }
+func (p planList) id() string { return p.account }
 func (planList) diag() string { return diagModelsRefresh }
 
 func (p planList) fetch(ctx context.Context) (bool, error) {
@@ -257,7 +265,8 @@ func (p planList) fetch(ctx context.Context) (bool, error) {
 // planSource is the plan's list for src's account when it is fetched in the
 // background: for an account signed in with plan usage, since anything else
 // would only fail; nil otherwise, and for no src. It reads the
-// registration's file, so its callers make it before s.mu.
+// registration's and the stored sign-in's files (no refresh, no network), so
+// its callers make it before s.mu.
 func planSource(src *chatgptauth.TokenSource) listSource {
 	if src == nil {
 		return nil
@@ -265,7 +274,19 @@ func planSource(src *chatgptauth.TokenSource) listSource {
 	if st, err := chatgptauth.ReadStatus(src.Dir()); err != nil || !st.SignedIn || !st.PlanUsage {
 		return nil
 	}
-	return planList{src}
+	return planList{src, planAccountID(src.Dir())}
+}
+
+// planAccountID is the id of the account signed in to dir: the first 12 hex
+// digits of the SHA-256 of the stored subject, read without a refresh or a
+// request. "" when no sign-in is stored or it cannot be read.
+func planAccountID(dir string) string {
+	subject, err := chatgptauth.StoredSubject(dir)
+	if err != nil || subject == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(subject))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // anthropicList is the Anthropic account's model list for key, in the
