@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -227,13 +229,156 @@ func dialogListWindow(n, sel, rows int) (top, shown int) {
 	return max(top, 0), shown
 }
 
-// dialogWrap is s word-wrapped to the box's inner width, a word longer than
-// the width — a path, a command — broken where it must be.
+// dialogWrap is s word-wrapped to inner cells — a box's inner width, a hint
+// line's — at spaces and after a hyphen, as ansi.Wordwrap wraps. A word wider
+// than a row is broken where it must be: a path (a word with a "/" in it)
+// after the last "/" that fits on its row — so a path is read off whole,
+// segment by segment (SF-144) — and anywhere else, or where no "/" fits, at
+// the width itself, mid-word. Widths are cells: a wide rune is two.
 func dialogWrap(s string, inner int) []string {
 	if inner <= 0 {
 		return []string{s}
 	}
-	return strings.Split(ansi.Hardwrap(ansi.Wordwrap(s, inner, ""), inner, true), "\n")
+	if !hasLongPath(s, inner) {
+		return strings.Split(ansi.Hardwrap(ansi.Wordwrap(s, inner, ""), inner, true), "\n")
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		out = append(out, wrapPathPara(para, inner)...)
+	}
+	return out
+}
+
+// hasLongPath says some word of s is a path wider than inner cells: the one
+// thing dialogWrap breaks other than ansi.Wordwrap would.
+func hasLongPath(s string, inner int) bool {
+	return slices.ContainsFunc(strings.Fields(s), func(w string) bool { return isLongPath(w, inner) })
+}
+
+func isLongPath(w string, inner int) bool {
+	return strings.Contains(w, "/") && ansi.StringWidth(w) > inner
+}
+
+// wrapPathPara is dialogWrap's one paragraph with a path in it wider than a
+// row: the text around each such path wrapped as ansi.Wordwrap wraps it, and
+// the path placed by pathCut — its first piece on the row before it when
+// one fits there, the text after it going on from its last piece's row.
+func wrapPathPara(para string, inner int) []string {
+	var out []string
+	cur := "" // the row being filled: none yet, or a path's last piece
+	// wrapText wraps text on from cur, settling every row but the last.
+	wrapText := func(text string) {
+		if text == "" {
+			return
+		}
+		rows := strings.Split(ansi.Hardwrap(ansi.Wordwrap(cur+text, inner, ""), inner, true), "\n")
+		out = append(out, rows[:len(rows)-1]...)
+		cur = rows[len(rows)-1]
+	}
+	rest := para
+	for rest != "" {
+		start, end, ok := nextLongPath(rest, inner)
+		if !ok {
+			break
+		}
+		// The text before the path, less the spaces that separate the two.
+		text := strings.TrimRight(rest[:start], " ")
+		sep := rest[len(text):start]
+		wrapText(text)
+		path := rest[start:end]
+		rest = rest[end:]
+		if cur != "" {
+			// The path's first piece goes on the row before it when one fits
+			// in what the row has left; else the path starts a row of its
+			// own.
+			if room := inner - ansi.StringWidth(cur) - ansi.StringWidth(sep); room > 0 {
+				if piece, ok := pathCut(path, room); ok {
+					cur += sep + piece
+					path = path[len(piece):]
+				}
+			}
+			out = append(out, cur)
+			cur = ""
+		}
+		for ansi.StringWidth(path) > inner {
+			piece, ok := pathCut(path, inner)
+			if !ok {
+				// No "/" fits: cut at the width (at least one grapheme, so a
+				// rune wider than the row still moves on).
+				if piece = ansi.Truncate(path, inner, ""); piece == "" {
+					piece = firstGrapheme(path)
+				}
+			}
+			out = append(out, piece)
+			path = path[len(piece):]
+		}
+		cur = path
+	}
+	wrapText(rest)
+	if cur != "" || len(out) == 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// nextLongPath is where the first word of s that is a path wider than inner
+// cells starts and ends, as byte offsets into s.
+func nextLongPath(s string, inner int) (start, end int, ok bool) {
+	for i := 0; i < len(s); {
+		if s[i] == ' ' {
+			i++
+			continue
+		}
+		j := i + strings.IndexByte(s[i:], ' ')
+		if j < i {
+			j = len(s)
+		}
+		if isLongPath(s[i:j], inner) {
+			return i, j, true
+		}
+		i = j
+	}
+	return 0, 0, false
+}
+
+// pathCut is the longest piece of path that ends in a "/" and fits in room
+// cells — false when none does. A "/" the path opens with is no place to cut:
+// a row holding it alone has read nothing off.
+func pathCut(path string, room int) (string, bool) {
+	fit := ansi.Truncate(path, room, "")
+	if k := strings.LastIndexByte(fit, '/'); k > 0 {
+		return fit[:k+1], true
+	}
+	return "", false
+}
+
+// firstGrapheme is s's first grapheme cluster.
+func firstGrapheme(s string) string {
+	g, _, _, _ := uniseg.FirstGraphemeClusterInString(s, -1)
+	return g
+}
+
+// capRows is rows cut to at most n, the last one kept ending in "…" when any
+// were cut, within inner cells (plan 046 A4: a wrapped part that runs past
+// its rows says so).
+func capRows(rows []string, n, inner int) []string {
+	if n <= 0 {
+		return nil
+	}
+	if len(rows) <= n {
+		return rows
+	}
+	out := slices.Clone(rows[:n])
+	out[n-1] = ellipsize(out[n-1], inner)
+	return out
+}
+
+// ellipsize is s ending in "…", within inner cells.
+func ellipsize(s string, inner int) string {
+	if ansi.StringWidth(s)+1 <= inner {
+		return s + "…"
+	}
+	return ansi.Truncate(s, max(0, inner-1), "") + "…"
 }
 
 // dialogInput is a dialog's one-line field — the model dialog's filter,

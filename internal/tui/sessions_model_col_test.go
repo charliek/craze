@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // TestSessionsListModelColumn (plan 046 A1): a running row's model is a 20-cell
@@ -37,9 +39,55 @@ func TestSessionsListModelColumn(t *testing.T) {
 			t.Fatalf("%d cols: row is %d cells wide", c.cols, w)
 		}
 	}
-	saved := sessRow{saved: true, provider: "native", title: "t"}
+	// A saved row comes from the index, which records no model: its model
+	// column's cells — the 20 after the 8-cell provider — are blank, where the
+	// running row's carry the model.
+	saved := sessSavedRow(sessions.Row{CrazeID: "c1", Provider: "native", SessionID: "s1", Title: "t", CWD: "/w"})
+	if saved.model != "" {
+		t.Fatalf("sessSavedRow model %q", saved.model)
+	}
 	m, _, _ := sessModel(t, 100, 30)
-	if got := plain(m.sessRowView(saved, false)); strings.Contains(got, "…") && strings.Contains(got, "claude") {
-		t.Fatalf("a saved row shows a model: %q", got)
+	modelCells := func(line string) string {
+		r := []rune(plain(line))
+		at := strings.Index(string(r), "native")
+		if at < 0 {
+			t.Fatalf("no provider in %q", string(r))
+		}
+		at = len([]rune(string(r)[:at])) + 8
+		return string(r[at : at+sessModelCols])
+	}
+	if got := modelCells(m.sessRowView(row, false)); !strings.HasPrefix(got, "anthropic/claude-") {
+		t.Fatalf("the running row's model cells are %q", got)
+	}
+	if got := modelCells(m.sessRowView(saved, false)); strings.TrimSpace(got) != "" {
+		t.Fatalf("a saved row's model cells are %q, want blank", got)
+	}
+}
+
+// TestTheSelectedRowOutlivesTheMoreMarkers (plan 046 C2 review): a wrapped
+// note can leave the list two rows at 40x10, and the window there is the
+// selected row and one neighbour. The `↑ more above` and `↓ more below`
+// markers take an edge row each, so they must not take the selected one.
+func TestTheSelectedRowOutlivesTheMoreMarkers(t *testing.T) {
+	m, _, _ := sessModel(t, 40, 10)
+	var lines []sessLine
+	for i := range 12 {
+		lines = append(lines, sessLine{kind: sessLineRow, row: sessRow{
+			key: sessKey{id: fmt.Sprintf("r%02d", i)}, title: fmt.Sprintf("row-%02d", i), provider: "native",
+		}})
+	}
+	for _, sel := range []int{0, 1, 5, 10, 11} {
+		m.sessList.sel = lines[sel].row.key
+		for _, n := range []int{2, 3, 4} {
+			out := m.sessBody(lines, n)
+			want := fmt.Sprintf("row-%02d", sel)
+			found := false
+			for _, l := range out {
+				found = found || strings.Contains(plain(l), want)
+			}
+			if !found {
+				t.Fatalf("sel %d, %d rows: the selected row is not shown: %q", sel, n, out)
+			}
+		}
 	}
 }

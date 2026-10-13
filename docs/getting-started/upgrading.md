@@ -105,6 +105,18 @@ provider takes up an `ANTHROPIC_API_KEY` you already export, and a
   rows. At narrower terminals nothing changes. At 100 columns the title, what
   it wants and the directory each give up some width to make room. See
   [Session list](../reference/tui.md#session-list).
+- **Reasons, fixes and notes wrap instead of being cut short.** The provider
+  dialog's reason and fix each wrap over up to two rows, so a fix naming
+  `config.toml` shows its whole path and the box can be a row or two taller
+  than before (it still keeps one height as the cursor moves). The session
+  list's hint line wraps a note — a failed start's names the host's log —
+  over up to three rows, taken from the list while it shows, and
+  `/provider`'s refusal wraps over up to three rows under the candidates, its
+  fix included. A path wider than a row is broken after a `/`, never in the
+  middle of a name (also `/connect`'s `Stored in` line). Anything still too
+  long is cut short with `…`. See [Provider
+  states](../reference/tui.md#provider-states) and [Session
+  list](../reference/tui.md#session-list).
 
 ## From v0.0.1
 

@@ -939,31 +939,47 @@ func (p completePopup) choose(verb completeVerb, it completeItem) completeChoice
 
 // completeShape is how the popup fills the rows it is given: the title rule,
 // the candidate rows shown, the line under them that counts the rest, and a
-// refusal's line under everything (refuse).
+// refusal's rows under everything (refuse).
 type completeShape struct {
 	title bool
 	shown int
 	more  bool
-	note  bool
+	note  int
 }
 
-// shape fits the popup into at most rows lines. Its natural shape is the title
-// rule (when the source gave a title), up to completeMaxRows candidates — or
-// one line saying why there are none — and, when the candidates do not all
-// fit, the line that counts the rest. Short of room the title goes first,
-// then candidate rows, the count line kept while there are two lines to share.
-// A refusal (refuse) keeps its line while one candidate row is left beside
-// it: it is what the user just did.
-func (p completePopup) shape(rows int) completeShape {
+// completeNoteMaxRows is the most rows a refusal's note wraps over (plan 046
+// A4): its fix is the actionable half, and is not to be clipped off.
+const completeNoteMaxRows = 3
+
+// shape fits the popup into at most rows lines of width cells: the one layout
+// both height and view take, so the rows the owner lays out and the rows it
+// draws cannot disagree. Its natural shape is the title rule (when the source
+// gave a title), up to completeMaxRows candidates — or one line saying why
+// there are none — and, when the candidates do not all fit, the line that
+// counts the rest. Short of room the title goes first, then candidate rows,
+// the count line kept while there are two lines to share. A refusal (refuse)
+// keeps its rows — the note wrapped at the width, up to completeNoteMaxRows,
+// the last ending in "…" where it is cut — while one candidate row is left
+// beside them: it is what the user just did.
+func (p completePopup) shape(width, rows int) completeShape {
 	if p.refused() && rows >= 2 {
-		s := p.listShape(rows - 1)
-		s.note = s.shown > 0
+		n := min(len(p.noteRows(width)), completeNoteMaxRows, rows-1)
+		s := p.listShape(rows - n)
+		if s.shown > 0 {
+			s.note = n
+		}
 		return s
 	}
 	return p.listShape(rows)
 }
 
-// listShape is shape without a refusal's line.
+// noteRows is the refusal's note wrapped as the popup draws it: under its
+// gutter-wide indent, at width.
+func (p completePopup) noteRows(width int) []string {
+	return dialogWrap(p.ans.Note, max(1, width-completeGutterCols))
+}
+
+// listShape is shape without a refusal's rows.
 func (p completePopup) listShape(rows int) completeShape {
 	if !p.open || rows <= 0 {
 		return completeShape{}
@@ -1001,16 +1017,13 @@ func (s completeShape) lines() int {
 	if s.more {
 		n++
 	}
-	if s.note {
-		n++
-	}
-	return n
+	return n + s.note
 }
 
-// height is how many lines the popup takes given at most rows: 0 while it is
-// closed. The owner lays out that many above its input and hands the same
-// number to view.
-func (p completePopup) height(rows int) int { return p.shape(rows).lines() }
+// height is how many lines the popup takes given at most rows of width
+// cells: 0 while it is closed. The owner lays out that many above its input
+// and hands the same width and number to view.
+func (p completePopup) height(width, rows int) int { return p.shape(width, rows).lines() }
 
 // view is the popup in at most rows lines of exactly width cells: the title
 // rule, the window of candidates — the gutter's ❯ on the selected one — and
@@ -1018,7 +1031,7 @@ func (p completePopup) height(rows int) int { return p.shape(rows).lines() }
 // window has reached the bottom (so the count line does not come and go as
 // the selection scrolls, and the popup's height never changes under it).
 func (p completePopup) view(th Theme, width, rows int) string {
-	s := p.shape(rows)
+	s := p.shape(width, rows)
 	if s.lines() == 0 || width <= 0 {
 		return ""
 	}
@@ -1063,9 +1076,10 @@ func (p completePopup) view(th Theme, width, rows int) string {
 		}
 		out = append(out, padRow(renderSegs(width, seg{line, styleFG(th.Dim)}), width))
 	}
-	if s.note {
-		// A refusal (refuse): under everything, in the error colour.
-		out = append(out, padRow(renderSegs(width, seg{"  " + p.ans.Note, styleFG(th.Err)}), width))
+	// A refusal (refuse): under everything, in the error colour, over the
+	// rows shape gave it.
+	for _, l := range capRows(p.noteRows(width), s.note, max(1, width-completeGutterCols)) {
+		out = append(out, padRow(renderSegs(width, seg{"  " + l, styleFG(th.Err)}), width))
 	}
 	return strings.Join(out, "\n")
 }

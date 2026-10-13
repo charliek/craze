@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"strings"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -321,18 +320,6 @@ func (m Model) providerChoice(p agent.Provider) provChoice {
 	return provChoice{p: p, a: m.provAvail[p.Name()]}
 }
 
-// providerAnyNotReady says some row of the startup picker is not ready: its
-// detail line's row is then kept whatever the selection, so the box does not
-// change height as the cursor moves.
-func (m Model) providerAnyNotReady() bool {
-	for _, p := range m.providers {
-		if !m.providerChoice(p).a.ready() {
-			return true
-		}
-	}
-	return false
-}
-
 // pickerRows settles the picker's list, and tui.New is its only caller: the
 // rows are the caller's availability-filtered list — or the built-in
 // non-optional set when it is empty, which keeps a hand-built Config hermetic —
@@ -515,10 +502,10 @@ func (m Model) providerMoved() Model {
 }
 
 // providerDialogPlan is the window onto the row list and whether the footer
-// survived: title + rows + footer, with the list giving its rows up one at a
-// time and the footer going only once even one row no longer fits. The
-// renderer and the hit-tester both take it, so the two cannot disagree about
-// which rows the frame is showing.
+// survived: title + rows + detail lines + footer, with the list giving its
+// rows up one at a time and the footer going only once even one row no longer
+// fits. The renderer and the hit-tester both take it, so the two cannot
+// disagree about which rows the frame is showing.
 //
 // The window follows providerCursor instead of always starting at row 0. A box
 // that truncated from the bottom would draw the top of the list while the keys
@@ -527,25 +514,13 @@ func (m Model) providerMoved() Model {
 // default at the last index is what makes that reachable, but the arithmetic is
 // the same one row or ten.
 //
-// A refusal's error row is laid out the way the resume picker's is: under the
-// list and above the footer, and a short box keeps it over the footer but never
-// over the last list row. With no refusal the plan is exactly what it was.
-//
-// With a row that is not ready (plan 036 §3.3, X22) that row is the first of
-// two detail lines, both kept whatever the selection so the box keeps one
-// height as the cursor moves: the refusal, else the selected row's reason,
-// else blank; then the fix that goes with it, else blank. A short box gives
-// the fix line up first — before the footer and any list row — and keeps the
-// first line as it keeps the error row. With every row ready it is the error
-// row alone, as ever.
-func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
-	rows := budget - 1
-	if m.providerLineShown(budget) {
-		rows--
-	}
-	if m.providerFixShown(budget) {
-		rows--
-	}
+// The detail lines under the list (providerDetailShown) are laid out the way
+// the resume picker's error row is: under the list and above the footer, a
+// short box keeping their first row over the footer but never over the last
+// list row. With no refusal and every row ready there are none, and the plan
+// is exactly what it was.
+func (m Model) providerDialogPlan(inner, budget int) (top, shown int, footer bool) {
+	rows := budget - 1 - m.providerDetailShown(inner, budget)
 	footer = rows >= 2
 	if footer {
 		rows--
@@ -556,26 +531,114 @@ func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
 	return top, shown, footer
 }
 
-// providerLineShown is whether the row under the list is drawn — the error
-// row, or the first detail line it shares with it — and fits the budget: the
-// title, one list row and itself.
-func (m Model) providerLineShown(budget int) bool {
-	return (m.providerErr != "" || m.providerBack.text != "" || m.providerAnyNotReady()) && budget >= 3
+// providerPartRows is the most rows each part of the picker's detail lines
+// wraps over (plan 046 A4): the first — a reason, a refusal, what the connect
+// dialog came to — and the fix under it; four rows at most in all.
+const providerPartRows = 2
+
+// providerDetail is one thing the picker's detail lines can show, wrapped at
+// the box's inner width: its first part and the fix that goes with it, each at
+// most providerPartRows rows, a part cut short ending in "…" — and the colour
+// each is drawn in.
+type providerDetail struct {
+	head, fix     []string
+	headSt, fixSt lipgloss.Style
 }
 
-// providerFixShown is whether the second detail line — the fix — is drawn:
-// with a row that is not ready, or what the connect dialog came to (it wraps
-// onto this line), and only when the whole box fits beside it (the title,
-// every row, the first line and the footer), since it is the first row a
-// short box gives up (plan 036 X22).
-func (m Model) providerFixShown(budget int) bool {
-	return (m.providerAnyNotReady() || m.providerBack.text != "") && budget >= len(m.providers)+4
+func (d providerDetail) rows() int { return len(d.head) + len(d.fix) }
+
+// providerPart is s wrapped at inner as a detail line's part: at most
+// providerPartRows rows, the last ending in "…" where it runs on.
+func providerPart(s string, inner int) []string {
+	if s == "" {
+		return nil
+	}
+	return capRows(dialogWrap(s, inner), providerPartRows, inner)
+}
+
+// providerDetailNow is what the detail lines show now: the refusal in the
+// error colour and the fix that goes with it, dim; else what the pre-session
+// connect dialog came to as it came back (plan 036 §3.6) — `connected …` in
+// the ok colour, a failure in the error colour — one text wrapped over both
+// parts' rows; else, on a row that is not ready, its reason and its fix, dim;
+// else nothing — the rows are held for the next one.
+func (m Model) providerDetailNow(inner int) (providerDetail, bool) {
+	dim := styleFG(m.theme.Dim)
+	if m.providerErr != "" {
+		head, fix := m.providerRefusalLines()
+		return providerDetail{head: providerPart(head, inner), fix: providerPart(fix, inner),
+			headSt: styleFG(m.theme.Err), fixSt: dim}, true
+	}
+	if b := m.providerBack; b.text != "" {
+		st := m.sessNoteStyle(b.kind)
+		all := capRows(dialogWrap(b.text, inner), 2*providerPartRows, inner)
+		cut := min(len(all), providerPartRows)
+		return providerDetail{head: all[:cut], fix: all[cut:], headSt: st, fixSt: st}, true
+	}
+	if n := len(m.providers); n > 0 && m.providerCursor >= 0 && m.providerCursor < n {
+		if c := m.providerChoice(m.providers[m.providerCursor]); !c.a.ready() {
+			return providerDetail{head: providerPart(c.a.reason(), inner), fix: providerPart(c.a.fix(), inner),
+				headSt: dim, fixSt: dim}, true
+		}
+	}
+	return providerDetail{}, false
+}
+
+// providerDetailRows is the detail lines' height at inner (plan 046 A4): the
+// most rows any of them wraps to — what shows now, every row's reason and
+// fix, and each row's availability refusal — and, of those, the most the
+// first part takes alone, which is what a short box keeps once the fixes have
+// gone. So neither the cursor nor an availability refusal moves the box. A
+// refusal known only once it is asked — the command line's (refuseLoad,
+// asked of a choice and of nothing else), a spawn's its host refused — and
+// what the connect dialog came to count while they show. Both are 0 with no
+// refusal and every row ready: the box is the list alone, as ever.
+func (m Model) providerDetailRows(inner int) (all, heads int) {
+	take := func(d providerDetail) {
+		all, heads = max(all, d.rows()), max(heads, len(d.head))
+	}
+	if d, ok := m.providerDetailNow(inner); ok {
+		take(d)
+	}
+	for _, p := range m.providers {
+		c := m.providerChoice(p)
+		if c.a.ready() {
+			continue
+		}
+		fix := providerPart(c.a.fix(), inner)
+		take(providerDetail{head: providerPart(c.a.reason(), inner), fix: fix})
+		if c.verdict() == availRefuse {
+			take(providerDetail{head: providerPart(availRefusalHead(p, c.a), inner), fix: fix})
+		}
+	}
+	return all, heads
+}
+
+// providerDetailShown is how many detail rows the box draws at inner within
+// budget: every one when the whole box fits beside them (the title, every
+// row, the detail lines and the footer); else the first parts' alone, since
+// the fixes are the first rows a short box gives up (plan 036 X22), all of
+// them at once; else the first row alone, kept over the footer but never over
+// the last list row — the title, one list row and itself — and none below
+// that.
+func (m Model) providerDetailShown(inner, budget int) int {
+	all, heads := m.providerDetailRows(inner)
+	n := len(m.providers)
+	switch {
+	case all == 0 || budget < 3:
+		return 0
+	case budget >= n+all+2:
+		return all
+	case budget >= n+heads+2:
+		return heads
+	}
+	return 1
 }
 
 // providerRefusalLines is the refusal as the detail lines draw it (X22): a
 // row's availability refusal — providerErr is that row's whole refusal —
 // split into `can't start <label>: <reason>` and its fix; any other — the
-// command line's, a spawn's — is its first line alone. providerErr itself
+// command line's, a spawn's — is its first part alone. providerErr itself
 // stays whole.
 func (m Model) providerRefusalLines() (head, fix string) {
 	for _, p := range m.providers {
@@ -586,39 +649,34 @@ func (m Model) providerRefusalLines() (head, fix string) {
 	return sanitizeLine(m.providerErr), ""
 }
 
-// providerLines are the rows under the list (providerDialogPlan): the
-// refusal in the error colour and the fix that goes with it, dim; else what
-// the pre-session connect dialog came to as it came back (plan 036 §3.6) —
-// `connected …` in the ok colour, a failure in the error colour — wrapped
-// over both rows, the second cut short when it runs on; else, on a row that
-// is not ready, its reason and its fix, dim; else nothing — the rows are held
-// for the next one.
-func (m Model) providerLines(inner int) (first, fix string) {
-	dim := styleFG(m.theme.Dim)
-	if m.providerErr != "" {
-		head, f := m.providerRefusalLines()
-		if f != "" {
-			fix = dim.Render(clampWidth(f, inner))
-		}
-		return styleFG(m.theme.Err).Render(clampWidth(head, inner)), fix
+// providerLines are the detail lines (providerDetailNow) in rows rows
+// (providerDetailShown): the first part and its fix when every row is drawn,
+// the first part alone when the fix has been given up — its last row ending in
+// "…" when even that is cut — and blank rows under them to the height the box
+// keeps.
+func (m Model) providerLines(inner, rows int) []string {
+	if rows <= 0 {
+		return nil
 	}
-	if b := m.providerBack; b.text != "" {
-		st := m.sessNoteStyle(b.kind)
-		lines := dialogWrap(b.text, inner)
-		if len(lines) > 1 {
-			fix = st.Render(clampWidth(strings.Join(lines[1:], " "), inner))
-		}
-		return st.Render(clampWidth(lines[0], inner)), fix
-	}
-	if n := len(m.providers); n > 0 && m.providerCursor >= 0 && m.providerCursor < n {
-		if c := m.providerChoice(m.providers[m.providerCursor]); !c.a.ready() {
-			if f := c.a.fix(); f != "" {
-				fix = dim.Render(clampWidth(f, inner))
+	out := make([]string, 0, rows)
+	if d, ok := m.providerDetailNow(inner); ok {
+		if all, _ := m.providerDetailRows(inner); rows >= all {
+			for _, l := range d.head {
+				out = append(out, d.headSt.Render(l))
 			}
-			return dim.Render(clampWidth(c.a.reason(), inner)), fix
+			for _, l := range d.fix {
+				out = append(out, d.fixSt.Render(l))
+			}
+		} else {
+			for _, l := range capRows(d.head, rows, inner) {
+				out = append(out, d.headSt.Render(l))
+			}
 		}
 	}
-	return "", ""
+	for len(out) < rows {
+		out = append(out, "")
+	}
+	return out
 }
 
 // providerTag is the tag column of p's row, whose label is text: the state
@@ -647,7 +705,7 @@ func (m Model) providerTag(c provChoice, text string, inner int) string {
 // row cannot carry both. A row that is not ready is drawn dim, its state in
 // its tag (plan 036 §3.3).
 func (m Model) providerDialogBody(inner, budget int) []string {
-	top, shown, footer := m.providerDialogPlan(budget)
+	top, shown, footer := m.providerDialogPlan(inner, budget)
 	rows := []string{m.dialogTitle(providerDialogTitle, inner)}
 	for i := top; i < top+shown; i++ {
 		c := m.providerChoice(m.providers[i])
@@ -656,13 +714,7 @@ func (m Model) providerDialogBody(inner, budget int) []string {
 		text := c.p.DisplayName()
 		rows = append(rows, m.dialogRowDim(text, m.providerTag(c, text, inner), i == m.providerCursor, true, !c.a.ready(), inner))
 	}
-	if m.providerLineShown(budget) {
-		first, fix := m.providerLines(inner)
-		rows = append(rows, first)
-		if m.providerFixShown(budget) {
-			rows = append(rows, fix)
-		}
-	}
+	rows = append(rows, m.providerLines(inner, m.providerDetailShown(inner, budget))...)
 	if footer {
 		rows = append(rows, m.dialogFooter(providerDialogHint, inner))
 	}
@@ -670,7 +722,7 @@ func (m Model) providerDialogBody(inner, budget int) []string {
 }
 
 func (m Model) providerDialogClick(i int) (tea.Model, tea.Cmd) {
-	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
 	row := i - 1 // the title row
 	if row < 0 || row >= shown {
 		return m, nil

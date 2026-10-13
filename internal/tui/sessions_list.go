@@ -1577,7 +1577,7 @@ func sessColumns(width int, showDir bool) (title, want, dir int) {
 // (§3.13) the footer is the input's: the rule naming where a new session
 // would run, the input, the rule and the hint line, and the input's popup —
 // the `@` one or the `/` one — while it is up, sits between the list and that
-// rule, the list keeping at least sessBodyMinRows.
+// rule. sessRegions lays it out.
 func (m Model) sessionsView() string {
 	w, h := m.width, m.height
 	if w < sessMinCols || h < sessMinRows {
@@ -1585,30 +1585,54 @@ func (m Model) sessionsView() string {
 	}
 	lines := m.sessLines()
 	in := m.sessList.in
-	footer := sessFooterRows
-	if in.on {
-		footer = sessInputRows
-	}
-	avail := h - sessHeaderRows - footer
-	pop := 0
-	popup, up := in.popup()
-	if in.on && up {
-		pop = popup.height(max(0, avail-sessBodyMinRows))
-	}
+	reg := m.sessRegions(lines)
 	rows := make([]string, 0, h)
 	rows = append(rows, padRow(m.sessHeaderRow(lines), w), padRow("", w))
-	for _, ln := range m.sessBody(lines, avail-pop) {
+	for _, ln := range m.sessBody(lines, reg.body) {
 		rows = append(rows, padRow(ln, w))
 	}
-	if pop > 0 {
-		rows = append(rows, popup.view(m.theme, w, pop))
+	if reg.pop > 0 {
+		popup, _ := in.popup()
+		rows = append(rows, popup.view(m.theme, w, reg.pop))
 	}
 	if in.on {
 		rows = append(rows, padRow(m.sessTargetRule(w), w), padRow(m.sessInputRow(w), w))
 	}
 	rows = append(rows, padRow(styleFG(m.theme.Rule).Render(strings.Repeat("─", w)), w))
-	rows = append(rows, padRow(m.sessHintRow(lines), w))
+	for _, ln := range reg.hint {
+		rows = append(rows, padRow(ln, w))
+	}
 	return strings.Join(rows, "\n")
+}
+
+// sessRegions is how the list's screen shares the rows the header and the
+// footer leave (plan 046 A4): the list's (body), the input popup's (pop), and
+// the hint line's rows — one, or a note wrapped over up to sessNoteMaxRows.
+// The popup takes its rows first, the list keeping sessBodyMinRows (its shape
+// squeezes its title, then its rows); a note's rows past its first come out
+// of what the list has left, never below sessBodyMinRows either, and a note
+// with no more room is cut to it, ending in "…". The three always add up to
+// the screen: body + pop + len(hint) = height - the header - the footer's
+// other rows.
+type sessRegions struct {
+	body, pop int
+	hint      []string
+}
+
+func (m Model) sessRegions(lines []sessLine) sessRegions {
+	in := m.sessList.in
+	footer := sessFooterRows
+	if in.on {
+		footer = sessInputRows
+	}
+	avail := m.height - sessHeaderRows - footer
+	var r sessRegions
+	if popup, up := in.popup(); in.on && up {
+		r.pop = popup.height(m.width, max(0, avail-sessBodyMinRows))
+	}
+	r.hint = m.sessHintRows(lines, 1+max(0, avail-r.pop-sessBodyMinRows))
+	r.body = avail - r.pop - (len(r.hint) - 1)
+	return r
 }
 
 // sessHeaderRow is ` sessions  N running` and, right-aligned, the counts —
@@ -1703,11 +1727,14 @@ func (m Model) sessBody(lines []sessLine, n int) []string {
 	for i := off; i < end; i++ {
 		out = append(out, m.sessLineView(lines[i], i == sel && m.sessSelectable(lines[i])))
 	}
+	// The more-above/below markers take an edge row, never the selected one:
+	// in a 2-row body (a wrapped note at 40x10) the window is the selected row
+	// and one neighbour, and both markers would otherwise cover it.
 	dim := styleFG(m.theme.Dim)
-	if n > 1 && off > 0 {
+	if n > 1 && off > 0 && off != sel {
 		out[0] = renderSegs(m.width, seg{"    ↑ more above", dim})
 	}
-	if n > 1 && len(lines) > end {
+	if n > 1 && len(lines) > end && end-1 != sel {
 		out[len(out)-1] = renderSegs(m.width, seg{"    ↓ more below", dim})
 	}
 	for len(out) < n {
@@ -1850,9 +1877,40 @@ func rightCells(s string, w int) string {
 	return strings.Repeat(" ", max(0, w-lipgloss.Width(s))) + s
 }
 
-// sessHintRow is the hint line: a Ctrl+C window's, an armed close's, the
-// note, the `@` popup's keys while it is up, the input's while something is
-// typed (sessInputHint), or the keys the selected line takes.
+// sessNoteMaxRows is the most rows a note on the hint line wraps over (plan
+// 046 A4): a failed start's names the host's log, which is what to read next.
+const sessNoteMaxRows = 3
+
+// sessHintRows is the hint line as drawn, in at most room rows: a note
+// wrapped at the width under its one-cell lead — up to sessNoteMaxRows and
+// room, the last ending in "…" where it is cut — and anything else on one
+// row (sessHintRow). The one precedence, for the rows the line takes and the
+// rows it draws.
+func (m Model) sessHintRows(lines []sessLine, room int) []string {
+	l := m.sessList
+	if l.note == "" || m.sessCtrlCOpen() || !l.armed.zero() {
+		// A Ctrl+C window's hint, or an armed close's, is said over a note.
+		return []string{m.sessHintRow(lines)}
+	}
+	inner := max(1, m.width-1)
+	wrapped := capRows(dialogWrap(l.note, inner), max(1, min(sessNoteMaxRows, room)), inner)
+	st := m.sessNoteStyle(l.noteKind)
+	rows := make([]string, len(wrapped))
+	for i, ln := range wrapped {
+		rows[i] = renderSegs(m.width, seg{" ", lipgloss.NewStyle()}, seg{ln, st})
+	}
+	return rows
+}
+
+// sessCtrlCOpen says a first Ctrl+C's window is open: a second quits.
+func (m Model) sessCtrlCOpen() bool {
+	return !m.ctrlCDeadline.IsZero() && m.now().Before(m.ctrlCDeadline)
+}
+
+// sessHintRow is the hint line on one row: a Ctrl+C window's, an armed
+// close's, the note (sessHintRows wraps it), the `@` popup's keys while it is
+// up, the input's while something is typed (sessInputHint), or the keys the
+// selected line takes.
 func (m Model) sessHintRow(lines []sessLine) string {
 	th := m.theme
 	key := func(k string) seg { return seg{k, styleFG(th.Accent)} }
@@ -1860,7 +1918,7 @@ func (m Model) sessHintRow(lines []sessLine) string {
 	lead := seg{" ", lipgloss.NewStyle()}
 	l := m.sessList
 	switch {
-	case !m.ctrlCDeadline.IsZero() && m.now().Before(m.ctrlCDeadline):
+	case m.sessCtrlCOpen():
 		return renderSegs(m.width, lead, key("ctrl+c"), txt(" again quits craze; every session keeps running"))
 	case !l.armed.zero():
 		return renderSegs(m.width, lead, seg{"ctrl+x", styleFG(th.Err).Bold(true)},

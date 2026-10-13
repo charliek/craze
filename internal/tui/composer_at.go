@@ -208,7 +208,7 @@ func (m Model) composerAtLoaded(msg completeLoadedMsg) (Model, tea.Cmd) {
 // band is the popup's or empty, esc's hide included, never the menu's.
 func (m Model) overlayBandRows() int {
 	if m.composerAtShown() {
-		return m.composerAt.height(composerAtRows)
+		return m.composerAt.height(m.width, composerAtRows)
 	}
 	if m.composerAtHolds() {
 		return 0

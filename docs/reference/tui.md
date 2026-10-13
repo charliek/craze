@@ -41,35 +41,43 @@ row that cannot start:
 │  grok                                              │
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
-│install cursor-agent, or set [agents].cursor in /ho…│
+│install cursor-agent, or set [agents].cursor in     │
+│/home/you/.craze/config.toml                        │
 │↑↓ · tab · enter starts · esc uses default          │
 ╰────────────────────────────────────────────────────╯
 ```
 
-- The fix line names the config file by its absolute path, which the box's
-  fixed width cuts short (`/ho…`); `craze providers` prints it whole.
+- The fix names the config file by its absolute path, whole: it wraps onto a
+  row of its own, and a path wider than the box is broken after a `/`, never
+  in the middle of a name.
 - A row that is not ready is dimmed, and its tag says its state —
   `unavailable` or `needs setup` — before `default`. When the box is too narrow
   for both, `default` is dropped first.
-- Two lines under the list say why the selected row cannot start and, under
-  that, what to do about it, as `craze providers` would. They are kept, blank
-  on a ready row, whenever any row is not ready, so the box keeps its height
-  as the cursor moves. In a short terminal the second line goes first, before
-  the key hint and any row. With every row ready the dialog looks exactly as
-  it always has.
+- The lines under the list say why the selected row cannot start and, under
+  that, what to do about it, as `craze providers` would. Each wraps over up to
+  two rows, and one that runs longer is cut short with `…`, so there are at
+  most four. The box keeps as many as the longest reason, fix or refusal of
+  any row needs — blank on a ready row — whenever any row is not ready, so
+  it keeps its height as the cursor moves and when a refusal shows. In a
+  short terminal the fix rows go first, all of them, before the key hint and
+  any row; then the reason's second row (the first then ends in `…`). With
+  every row ready the dialog looks exactly as it always has.
 - `Enter` on a row that cannot start — or `Esc`, or a click outside the box,
-  when the default cannot start — does not start it: the first line becomes
+  when the default cannot start — does not start it: the reason becomes
   `can't start cursor: <reason>` in red, with that provider's fix under it,
   and the dialog stays open for another choice. Moving the cursor clears it.
   A refusal of the command line's (above) is checked first, and takes the
-  first line alone.
+  reason's rows alone, with no fix under it. It is known only once it is
+  asked, so when it needs more rows than the box keeps, the box grows by them
+  while it shows; so does what `/connect` came to (below).
 - `native` with no model provider that has a key (`needs setup`) is not
   refused: picking it — `Enter` on its row, or `Esc` or a click outside the
   box when it is the default — opens [`/connect`](#connect)'s dialog over the
   picker, where a key is stored or the ChatGPT plan signed in to without
   leaving craze (see [Before any session](#connect)). Its fix line says so:
   `pick it to connect one, or run "craze auth login"`. Every way out of the
-  dialog comes back to the picker, with what came of it on the first line —
+  dialog comes back to the picker, with what came of it on the lines under
+  the list, wrapped over up to four rows —
   `connected <provider>: it can be picked now`, or why not — and the states
   checked again; when native can start now the cursor moves onto it, and
   `Enter` starts it. Nothing starts on its own.
@@ -1101,7 +1109,13 @@ start:
 The hint line under the list names what the selected row takes (`enter
 open`, `enter resume`, `enter back to it`, `ctrl+x stop` or `close`), and
 says what a key came to: `stopped: <title>`, `closed: <title>`, `could not
-stop <title>: …`. The mouse does nothing in the list.
+stop <title>: …`. A note longer than the line — a failed start's names the
+session host's log, which is what to read next — wraps over up to three rows,
+a path broken after a `/`, never in the middle of a name. The list gives up
+those rows while the note shows, keeping at least two of its own (and the
+`@` or `/` popup keeps its rows); a note with no more room is cut short with
+`…`. An armed close's hint, and a first `Ctrl+C`'s, are said over a note, on
+one row. The mouse does nothing in the list.
 
 ### Opening a session in place
 
@@ -1290,7 +1304,9 @@ nothing.
   `needs setup`) for its note. `Tab` or `Enter` on one does not choose it:
   the input and the provider new sessions run stay as they were, and the
   popup says `can't start <provider>: <reason> — <fix>` in red under the list
-  until the next key. `native` needing setup is the exception: `Tab`,
+  until the next key, wrapped over up to three rows so the fix shows whole (a
+  longer one is cut short with `…`; it keeps its rows while one candidate row
+  is left beside it). `native` needing setup is the exception: `Tab`,
   `Enter` or a typed `/provider native` opens [`/connect`](#connect)'s dialog
   in place of the list ([Before any session](#connect)), and every way out of
   it brings the list back as it was — what you had typed, the selected row,
@@ -1847,7 +1863,8 @@ no provider has one ([below](#connect)).
   other provider's key field — and `Esc` closes.
 - **Step two, `<Name> API key`**, is a masked field: what you type or paste is
   drawn as `•`, never as text. Under it, where the key is stored — `Stored in
-  ~/.craze/native/providers.toml.`, or wherever this TUI's `CRAZE_HOME` puts it —
+  ~/.craze/native/providers.toml.`, or wherever this TUI's `CRAZE_HOME` puts it,
+  a path wider than the box broken after a `/` —
   and, when one of the provider's variables is set in this TUI's environment,
   `<VAR> is set in this environment; craze uses it before the stored key.`
   A terminal paste and `Ctrl+V` both land in the field and nowhere else: a

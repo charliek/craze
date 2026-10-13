@@ -945,8 +945,8 @@ func TestAtFilesHandsThePopupItsBestAndCountsTheRest(t *testing.T) {
 		return lines[len(lines)-1]
 	}
 	// The title rule (files in w), eight rows and the count line.
-	if l := last(); l != "  ↓ 142 more" || p.height(20) != 10 {
-		t.Fatalf("at the top: %q, height %d", l, p.height(20))
+	if l := last(); l != "  ↓ 142 more" || p.height(40, 20) != 10 {
+		t.Fatalf("at the top: %q, height %d", l, p.height(40, 20))
 	}
 	popKey(&p, keyOf(tea.KeyUp)) // wraps to the last of the 100
 	if l := last(); l != "  ↓ 50 more" {
@@ -954,8 +954,8 @@ func TestAtFilesHandsThePopupItsBestAndCountsTheRest(t *testing.T) {
 	}
 	// Narrowed until everything fits: no count line.
 	synced(&p, "@f149", env)
-	if got := popupNames(p); !slices.Equal(got, []string{"f149.go"}) || p.height(20) != 2 {
-		t.Fatalf("@f149: %q, height %d", got, p.height(20))
+	if got := popupNames(p); !slices.Equal(got, []string{"f149.go"}) || p.height(40, 20) != 2 {
+		t.Fatalf("@f149: %q, height %d", got, p.height(40, 20))
 	}
 }
 
