@@ -374,6 +374,9 @@ type Session struct {
 	// fixed at Open: spend prices a usage whose identity the current table
 	// does not price with it, when it first counts it (spend.go, plan 034
 	// §3.4) — a resumed transcript's usage on a model no longer listed, say.
+	// A sub-agent's is its parent's (ChildOptions.priceFallback): it prices
+	// nothing itself, and classifies its compactions' requests by the price
+	// its parent's spend will charge them at (plan 047 D10).
 	openTable *modeltable.Table
 	// setModelBuilt runs in SetModel and SetModelEffort (setModel) once the
 	// new model's client is built and before the switch — the model and its
@@ -447,6 +450,11 @@ type Session struct {
 	// spend prices them at those rates, never at the table's when the result
 	// arrived. One per delivered result that spent anything.
 	carried map[rowKey][]carriedUsage
+	// distrusted are the usages on the path whose long-context subset spend
+	// found malformed and priced at base (plan 047 D10): each is reported
+	// once, by the first report that counts it, as a
+	// DiagLongContextMalformed.
+	distrusted map[rowKey]bool
 
 	// sides are the side questions running (aside.go, plan 040 §3.4), each
 	// one's cancel by a number of its own (sideNext): signalClose cancels
@@ -591,6 +599,9 @@ func Open(opts Options) (*Session, error) {
 		matchModel:         opts.MatchModel,
 		warn:               opts.Warn,
 		now:                opts.Now,
+	}
+	if child != nil && child.priceFallback != nil {
+		s.openTable = child.priceFallback
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv

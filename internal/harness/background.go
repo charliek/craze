@@ -333,13 +333,15 @@ func (r *subagents) work(b *bgChild) {
 // recover, so this is the sink's or the runner's — fails the child, with what
 // it spent: a panic on a goroutine nobody recovers would end the process.
 func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, status string) {
-	var obs childObserver
+	// Its requests are classified by the rates its usage carries (b.price,
+	// plan 047 D10).
+	obs := childObserver{price: b.price}
 	defer func() {
 		if v := recover(); v != nil {
 			b.h.end()
 			_ = b.child.Close()
-			spent, _, _ := obs.totals()
-			text, usage = r.deliverable(b, failedResult(childPanic{value: v}.Error(), obs.lastOutput()), "", spent)
+			spent, long, _, _ := obs.totals()
+			text, usage = r.deliverable(b, failedResult(childPanic{value: v}.Error(), obs.lastOutput()), "", spent, long)
 			status = SubagentFailed
 		}
 	}()
@@ -363,14 +365,14 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 		stopped:    errors.Is(context.Cause(b.ctx), errStoppedByUser),
 	}.decide(&obs)
 	_ = b.child.Close()
-	spent, calls, steps := obs.totals()
+	spent, long, calls, steps := obs.totals()
 	red := r.union(b.child)
 	r.emit(SubagentFinished{
 		ID: b.h.id, Status: out.status, Error: red.String(out.errText), Text: red.String(out.text), Usage: spent,
 		Model: red.String(b.ran.Alias), Provider: red.String(b.ran.Provider), WireModel: red.String(b.ran.WireModel),
 		ToolCalls: calls, Steps: steps, Duration: time.Since(b.start), At: r.s.now(),
 	})
-	text, usage = r.deliverable(b, out.result, out.note, spent)
+	text, usage = r.deliverable(b, out.result, out.note, spent, long)
 	return text, usage, out.status
 }
 
@@ -382,16 +384,16 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 // spill path and notice included (X14's order), as settle finishes a
 // foreground call's. A completed child's note (completedResult) joins after
 // the cut, as settle adds it. The usage is what the child's steps were billed
-// for (§3.7), its model's names redacted with the text.
-func (r *subagents) deliverable(b *bgChild, res tool.Result, note string, spent Usage) (string, *tool.ChildUsage) {
+// for (§3.7), with its long-context subset (plan 047 D10), its model's names
+// redacted with the text.
+func (r *subagents) deliverable(b *bgChild, res tool.Result, note string, spent, long Usage) (string, *tool.ChildUsage) {
 	text := r.union(b.child).String(res.Text)
 	text, _ = tool.TruncateRedacted(r.s.base.home, b.res.callID, text, tool.Head, r.union(b.child))
 	text = withNote(text, note)
 	red := r.union(b.child)
 	return red.String(text), &tool.ChildUsage{
 		Provider: red.String(b.ran.Provider), Model: red.String(b.ran.Alias), WireModel: red.String(b.ran.WireModel),
-		Usage: tool.Usage{Input: spent.Input, Output: spent.Output, Reasoning: spent.Reasoning,
-			CacheRead: spent.CacheRead, CacheCreation: spent.CacheCreation},
+		Usage: toolUsage(spent), LongContext: toolUsage(long),
 	}
 }
 
@@ -627,8 +629,7 @@ func (r *subagents) deliver(got []taken) *batch {
 			blocks[i] = resultBlock(t.id, t.typ, t.status, red.String(t.text))
 		}
 		if u := t.usage; u != nil {
-			named := &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-				WireModel: red.String(u.WireModel), Usage: u.Usage}
+			named := renamed(u, red)
 			usages = append(usages, named)
 			if out.names == nil {
 				out.names = make(map[string]usageNames, len(got))
@@ -687,8 +688,9 @@ func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool, na
 			if u := res.usage; u != nil && u.Usage != (tool.Usage{}) {
 				if n, ok := named(res); ok {
 					rows = append(rows, carriedRow{
-						key:   rowKey{entry: entry, provider: n.provider, alias: n.alias, wireModel: n.wireModel},
-						usage: carriedUsage{usage: storeUsage(u.Usage), price: res.price},
+						key: rowKey{entry: entry, provider: n.provider, alias: n.alias, wireModel: n.wireModel},
+						usage: carriedUsage{usage: storeUsage(u.Usage), long: storeUsage(u.LongContext),
+							price: res.price},
 					})
 				}
 			}
@@ -785,8 +787,7 @@ func (r *subagents) Output(ctx context.Context, call tool.OutputCall) tool.Resul
 	red := r.union(nil)
 	res.Text = red.String(res.Text)
 	if u := res.Child; u != nil {
-		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-			WireModel: red.String(u.WireModel), Usage: u.Usage}
+		res.Child = renamed(u, red)
 	}
 	return res
 }
@@ -970,8 +971,7 @@ func (r *subagents) undelivered(t taken) SubagentUndelivered {
 	red := r.union(nil)
 	var usages []*tool.ChildUsage
 	if u := t.usage; u != nil {
-		usages = append(usages, &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-			WireModel: red.String(u.WireModel), Usage: u.Usage})
+		usages = append(usages, renamed(u, red))
 	}
 	return SubagentUndelivered{ID: red.String(t.id), Type: red.String(t.typ), Usage: mergeUsage(usages)}
 }

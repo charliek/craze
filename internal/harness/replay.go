@@ -103,7 +103,11 @@ func (s *Session) Replay(sink func(Event)) error {
 		s.mu.Lock()
 		turn, next := s.turns, s.cur.r
 		s.mu.Unlock()
-		sink(s.spent(turn, next))
+		sp, diags := s.spent(turn, next)
+		sink(sp)
+		for _, d := range diags {
+			sink(d)
+		}
 	}
 	return nil
 }

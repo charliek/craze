@@ -1548,9 +1548,10 @@ them, and shows it as a read-out.
 - Tokens are as the provider billed them: `input` is the uncached input, and
   `reasoning` is part of `output`, never counted twice. `costPicoUsd` is the
   priced part's cost in **picodollars** (10⁻¹² US dollars: `$1` is
-  `1000000000000`), exact. `unpriced: true` says some usage in the sum had no
-  price in craze's model table: its tokens are counted and it added no cost,
-  so the cost is a floor.
+  `1000000000000`), exact, each request at its own price tier when its model
+  has one ([long-context pricing](configuration.md#long-context-pricing)).
+  `unpriced: true` says some usage in the sum had no price in craze's model
+  table: its tokens are counted and it added no cost, so the cost is a floor.
 - Every key is always present, a `0` and a `false` included.
 
 A report comes after every step, every compaction that ran, and once at the

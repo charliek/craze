@@ -77,6 +77,14 @@ const (
 // Command is what a person typed (/compact …), on a manual compaction only.
 // TokensBefore and TokensAfter are the context's size in tokens before it and
 // after, estimated (plan 028 §3.7).
+//
+// LongContext is the part of the entry's Usage its attempts were billed at a
+// long-context price tier for (plan 047 D10): each attempt is one request,
+// classified on its own before the attempts were summed, as a sub-agent
+// row's subset is (ModelUsage.LongContext). It is additive and omitted when
+// zero, so an older craze ignores it and an entry without it is written byte
+// for byte as before; it is kept as written, and the spend distrusts one that
+// is not inside the usage.
 type Compaction struct {
 	Summary      string
 	FirstKeptID  string
@@ -86,6 +94,7 @@ type Compaction struct {
 	Command      string
 	Segment      string
 	Error        string
+	LongContext  Usage
 }
 
 // Succeeded reports whether c is a success: a summary the context starts from.
@@ -222,11 +231,22 @@ func UsageOf(u fantasy.Usage) *Usage {
 // it (plan 026 §3.7). A child can run on another model than its parent, whose
 // model stamps the entry, so its usage is kept apart, per model, rather than
 // folded into a plain usage the parent's rate would price.
+//
+// LongContext is the part of Usage its requests were billed at a long-context
+// price tier for (plan 047 D10): the sum of the usage of every request whose
+// prompt was above its model's long_context_above, each request classified
+// as its usage arrived, before anything was summed — the sum alone could not
+// tell which requests were long. It is additive and omitted when zero, so a
+// row with no long request is written byte for byte as before and an older
+// craze reading one with it ignores the key; a row written before it prices
+// as before. The store keeps it as written: a subset that is not inside
+// Usage is the spend's to distrust.
 type ModelUsage struct {
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	WireModel string `json:"wire_model"`
-	Usage     Usage  `json:"usage"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	WireModel   string `json:"wire_model"`
+	Usage       Usage  `json:"usage"`
+	LongContext Usage  `json:"long_context,omitzero"`
 }
 
 // Todo is one item of a session's todo list as a tool entry records it (plan
@@ -481,7 +501,8 @@ func decodeVariant(raw json.RawMessage) (string, error) {
 // compactionLine is a compaction entry on disk (plan 028 §3.2): the turn, the
 // summary or the error, where the tail starts, the size before and after, the
 // reason, a manual one's command, the model as a message entry names it, the
-// usage, and the segment. The optional ones are omitted when empty.
+// usage and its long-context subset (plan 047 D10), and the segment. The
+// optional ones are omitted when empty.
 type compactionLine struct {
 	envelope
 	Turn         int    `json:"turn"`
@@ -495,6 +516,7 @@ type compactionLine struct {
 	Model        string `json:"model"`
 	WireModel    string `json:"wire_model"`
 	Usage        Usage  `json:"usage"`
+	LongContext  Usage  `json:"long_context,omitzero"`
 	Segment      string `json:"segment,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
@@ -516,6 +538,7 @@ type compactionFields struct {
 	Model        json.RawMessage `json:"model"`
 	WireModel    json.RawMessage `json:"wire_model"`
 	Usage        json.RawMessage `json:"usage"`
+	LongContext  json.RawMessage `json:"long_context"`
 	Segment      json.RawMessage `json:"segment"`
 	Error        json.RawMessage `json:"error"`
 }
@@ -546,6 +569,7 @@ func decodeCompaction(line []byte, e *Entry) error {
 		{"model", f.Model, true, &e.Model.Alias},
 		{"wire_model", f.WireModel, true, &e.Model.WireModel},
 		{"usage", f.Usage, true, &u},
+		{"long_context", f.LongContext, false, &e.Compaction.LongContext},
 		{"segment", f.Segment, false, &e.Compaction.Segment},
 		{"error", f.Error, false, &e.Compaction.Error},
 	} {
@@ -756,6 +780,7 @@ func encodeEntry(e Entry) ([]byte, error) {
 			Model:        e.Model.Alias,
 			WireModel:    e.Model.WireModel,
 			Usage:        *e.Usage,
+			LongContext:  c.LongContext,
 			Segment:      c.Segment,
 			Error:        c.Error,
 		})

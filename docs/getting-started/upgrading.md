@@ -56,6 +56,19 @@ Nothing needs migrating.
   client that does not know `requires: "effort"` hides it, as it hides any
   row with a value it does not know. See [Slash
   catalog](../reference/protocol.md#slash-catalog).
+- **Spend on long Haiku 5.5 prompts now prices Anthropic's higher tier.** A
+  request whose prompt — input, cache reads and cache writes — is over 100,000
+  tokens is priced at Haiku 5.5's long-context rates, five times the base
+  ones, where it read at the base rates and so read low. Each request is
+  priced on its own, a sub-agent's and a compaction's included. A
+  `models.toml` cost can set a tier of its own with `long_context_above` and a
+  `[models."<alias>".cost.long_context]` table, or turn Haiku's off with
+  `long_context_above = 0`. Transcripts gain an optional `long_context` beside
+  a sub-agent's usage row and a compaction's usage, which an older craze
+  ignores. In a session written before this, sub-agent rows and compactions
+  price as they did, while each of its own long Haiku 5.5 steps now reads at
+  the tier, so its spend can rise on a resume. See [Long-context
+  pricing](../reference/configuration.md#long-context-pricing).
 
 ## Since v0.1.0
 

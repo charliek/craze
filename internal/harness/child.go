@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -95,6 +96,14 @@ type ChildOptions struct {
 	// parent's current table, which may no longer name a variable the parent
 	// still treats as a credential. Set by the runner alone.
 	dropEnv []string
+	// priceFallback is the table the parent opened with (its openTable),
+	// which the child's own is in turn: what a usage of an identity its table
+	// does not price is priced by. A child prices nothing itself, but it
+	// classifies each of its compactions' requests as long-context or not by
+	// a model's price (plan 047 D10), and that must be the price its parent's
+	// spend will charge the child's usage at — the parent's view of the
+	// table, with the parent's fallback. Set by the runner alone.
+	priceFallback *modeltable.Table
 	// Mode is the parent's mode when the child opens; Options.Mode is not
 	// read for a child. SetMode on a child is ErrChildMode (§3.5).
 	Mode string

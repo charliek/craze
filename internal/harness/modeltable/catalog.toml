@@ -233,8 +233,14 @@ list = "all"
 #
 # Prices are Anthropic's own (platform.claude.com pricing, 2026-10-11): input,
 # output, cache_read the cache hit and cache_write the 5-minute cache write,
-# the only TTL craze asks for. Haiku 5.5 is priced at its prompt-up-to-100K
-# rate: craze has no tiers, so a longer prompt's spend reads low.
+# the only TTL craze asks for. Haiku 5.5 alone has a long-context tier
+# (platform.claude.com/docs/en/about-claude/pricing, "Long context pricing",
+# re-checked 2026-10-13): a request whose prompt — input, cache reads and
+# cache writes together — is over 100,000 tokens pays input 0.50, output 2.50,
+# cache hit 0.05 and 5-minute write 0.625 for every token of it, and one of
+# 100,000 or fewer the rates above. Each request is priced on its own. Every
+# other Claude model here takes its whole context window at its standard
+# price.
 #
 # A new Claude model needs no release to be offered (the account's list does
 # that, unpriced); a release adds its seed here with its price, and a line in
@@ -311,6 +317,13 @@ input = 0.1
 output = 0.5
 cache_read = 0.01
 cache_write = 0.125
+long_context_above = 100000
+
+[models."anthropic/claude-haiku-5-5".cost.long_context]
+input = 0.5
+output = 2.5
+cache_read = 0.05
+cache_write = 0.625
 
 [models."anthropic/claude-opus-4-5-20251101"]
 provider = "anthropic"

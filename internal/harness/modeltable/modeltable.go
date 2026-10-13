@@ -331,11 +331,38 @@ type Model struct {
 
 // Cost is one model's [models."<alias>".cost] section (plan 028 §3.14): each
 // rate is $ per 1,000,000 tokens, nil when the file leaves that key out —
-// every key is independently optional, and there are no tiers (PD21).
-// Validate checks a set rate is not negative and not more than
-// MaxCostPerMillion. Output carries reasoning too (§2.2): a provider's
-// reasoning tokens are billed as output, never split out.
+// every key is independently optional. Validate checks a set rate is not
+// negative and not more than MaxCostPerMillion. Output carries reasoning too
+// (§2.2): a provider's reasoning tokens are billed as output, never split
+// out.
+//
+// It has one optional price tier (plan 047 D10): a request whose prompt — its
+// input, cache reads and cache writes together — is above LongContextAbove
+// tokens is priced at LongContext's rates instead, every token of it; one at
+// the threshold or below at the four rates above. Each request is priced on
+// its own. LongContextAbove is long_context_above, nil when the file leaves
+// it out, and 0 is no tier: what a user's file writes to turn a shipped tier
+// off. LongContext is the [models."<alias>".cost.long_context] table, nil
+// when there is none. Validate checks that the two come together (a
+// threshold above 0 needs the table, with input and output at least, and the
+// table needs the threshold) and that the threshold is at most the model's
+// context_window when it declares one.
 type Cost struct {
+	Input            *float64         `toml:"input,omitempty"`
+	Output           *float64         `toml:"output,omitempty"`
+	CacheRead        *float64         `toml:"cache_read,omitempty"`
+	CacheWrite       *float64         `toml:"cache_write,omitempty"`
+	LongContextAbove *int64           `toml:"long_context_above,omitempty"`
+	LongContext      *LongContextCost `toml:"long_context,omitempty"`
+}
+
+// LongContextCost is a model's [models."<alias>".cost.long_context] table
+// (plan 047 D10): the rates a request whose prompt is above the cost's
+// long_context_above is priced at, $ per 1,000,000 tokens, each nil when the
+// file leaves it out and each in the base rates' range. A rate the merged
+// table leaves out is priced at the model's base rate for that field
+// (ratesFromCost), never at 0.
+type LongContextCost struct {
 	Input      *float64 `toml:"input,omitempty"`
 	Output     *float64 `toml:"output,omitempty"`
 	CacheRead  *float64 `toml:"cache_read,omitempty"`
@@ -350,13 +377,24 @@ const MaxCostPerMillion = 10000.0
 
 // Clone is c with pointers of its own, nil when c is nil: changing the
 // clone's rates through its pointers never changes c's (a merge that carries c
-// forward must not alias the table it carries it from).
+// forward must not alias the table it carries it from). The long-context
+// table is copied too.
 func (c *Cost) Clone() *Cost {
 	if c == nil {
 		return nil
 	}
 	return &Cost{Input: clonePtr(c.Input), Output: clonePtr(c.Output),
-		CacheRead: clonePtr(c.CacheRead), CacheWrite: clonePtr(c.CacheWrite)}
+		CacheRead: clonePtr(c.CacheRead), CacheWrite: clonePtr(c.CacheWrite),
+		LongContextAbove: clonePtr(c.LongContextAbove), LongContext: c.LongContext.Clone()}
+}
+
+// Clone is l with pointers of its own, nil when l is nil.
+func (l *LongContextCost) Clone() *LongContextCost {
+	if l == nil {
+		return nil
+	}
+	return &LongContextCost{Input: clonePtr(l.Input), Output: clonePtr(l.Output),
+		CacheRead: clonePtr(l.CacheRead), CacheWrite: clonePtr(l.CacheWrite)}
 }
 
 // Subagents is one Table's [subagents] section (plan 026 §3.6): what a
@@ -787,9 +825,20 @@ func (t *Table) encodeModels() ([]byte, error) {
 			return nil, fmt.Errorf("modeltable: encoding: %w", err)
 		}
 		if cost != nil {
+			// The long-context table likewise goes at its own full path
+			// (plan 047 D10), after the rates: a copy without it is encoded
+			// first, so the table's own Cost is never written to.
+			rates := *cost
+			rates.LongContext = nil
 			fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id, "cost"})
-			if err := toml.NewEncoder(&buf).Encode(cost); err != nil {
+			if err := toml.NewEncoder(&buf).Encode(rates); err != nil {
 				return nil, fmt.Errorf("modeltable: encoding: %w", err)
+			}
+			if cost.LongContext != nil {
+				fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id, "cost", "long_context"})
+				if err := toml.NewEncoder(&buf).Encode(cost.LongContext); err != nil {
+					return nil, fmt.Errorf("modeltable: encoding: %w", err)
+				}
 			}
 		}
 	}
@@ -1173,35 +1222,96 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	if r := releasedProblem(m.Released); r != "" {
 		return at("released", r)
 	}
-	return validateCost(file, alias, m.Cost)
+	if err := validateCost(file, alias, m.Cost); err != nil {
+		return err
+	}
+	return validateTier(file, alias, m)
 }
 
-// validateCost checks c's set rates (plan 028 §3.14): each, when set, is a
-// finite number, not negative and not more than MaxCostPerMillion. NaN is
-// refused by name, because it compares false with both ends of the range
-// (TOML spells it `nan`). c is nil for a model with no [cost] table, which is
-// always valid. Checked in a fixed field order so the same table always
-// reports the same problem first.
+// validateCost checks c's set values on their own (plan 028 §3.14, plan 047
+// D10): each rate, the long-context table's included, when set, is a finite
+// number, not negative and not more than MaxCostPerMillion, and
+// long_context_above is not negative. NaN is refused by name, because it
+// compares false with both ends of the range (TOML spells it `nan`). c is nil
+// for a model with no [cost] table, which is always valid. Checked in a fixed
+// field order so the same table always reports the same problem first. It is
+// what a user's entry must pass alone, before anything is merged
+// (checkModelOverlay); how the tier's keys go together is validateTier's,
+// on the merged model.
 func validateCost(file, alias string, c *Cost) error {
 	if c == nil {
 		return nil
 	}
-	at := func(key string, v float64) error {
-		return &FileError{File: file, Table: toml.Key{"models", alias, "cost"}.String(), Key: key,
-			Reason: fmt.Sprintf("%v is out of range: want a rate in dollars per 1,000,000 tokens from 0 to %v", v, MaxCostPerMillion)}
+	if err := validateRates(file, costTable(alias), c.Input, c.Output, c.CacheRead, c.CacheWrite); err != nil {
+		return err
 	}
+	if c.LongContextAbove != nil && *c.LongContextAbove < 0 {
+		return &FileError{File: file, Table: costTable(alias), Key: "long_context_above",
+			Reason: fmt.Sprintf("%d is negative: want the prompt size, in tokens, above which the long-context rates apply, or 0 for none", *c.LongContextAbove)}
+	}
+	if l := c.LongContext; l != nil {
+		return validateRates(file, longContextTable(alias), l.Input, l.Output, l.CacheRead, l.CacheWrite)
+	}
+	return nil
+}
+
+// validateRates checks the four rates of the cost table at table, in order.
+func validateRates(file, table string, input, output, cacheRead, cacheWrite *float64) error {
 	for _, f := range []struct {
 		key string
 		v   *float64
-	}{{"input", c.Input}, {"output", c.Output}, {"cache_read", c.CacheRead}, {"cache_write", c.CacheWrite}} {
+	}{{"input", input}, {"output", output}, {"cache_read", cacheRead}, {"cache_write", cacheWrite}} {
 		if f.v == nil {
 			continue
 		}
 		if math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0 || *f.v > MaxCostPerMillion {
-			return at(f.key, *f.v)
+			return &FileError{File: file, Table: table, Key: f.key,
+				Reason: fmt.Sprintf("%v is out of range: want a rate in dollars per 1,000,000 tokens from 0 to %v", *f.v, MaxCostPerMillion)}
 		}
 	}
 	return nil
+}
+
+// validateTier checks how m's long-context tier goes together (plan 047
+// D10), on the model as merged — a user's entry may set the threshold over a
+// shipped table, or a rate over a shipped threshold: a threshold above 0
+// needs a [models."<alias>".cost.long_context] table setting input and output
+// at least; the table needs a threshold above 0; and the threshold is at most
+// the model's context_window when it declares one, since no prompt above the
+// window is ever sent. Each refusal names the model's cost table.
+func validateTier(file, alias string, m Model) error {
+	c := m.Cost
+	if c == nil {
+		return nil
+	}
+	above := deref(c.LongContextAbove)
+	at := func(table, key, reason string) error {
+		return &FileError{File: file, Table: table, Key: key, Reason: reason}
+	}
+	switch {
+	case above > 0 && c.LongContext == nil:
+		return at(costTable(alias), "long_context_above",
+			fmt.Sprintf("is %d, but %s is missing: write the rates a longer prompt is priced at, input and output at least", above, longContextTable(alias)))
+	case above > 0 && c.LongContext.Input == nil:
+		return at(longContextTable(alias), "input", "missing: a long-context tier needs its input rate")
+	case above > 0 && c.LongContext.Output == nil:
+		return at(longContextTable(alias), "output", "missing: a long-context tier needs its output rate")
+	case above == 0 && c.LongContext != nil:
+		return at(costTable(alias), "long_context_above",
+			fmt.Sprintf("missing or 0, but %s is set: write the prompt size, in tokens, above which its rates apply", longContextTable(alias)))
+	case m.ContextWindow > 0 && above > int64(m.ContextWindow):
+		return at(costTable(alias), "long_context_above",
+			fmt.Sprintf("%d is above the model's context_window, %d: no prompt could reach it", above, m.ContextWindow))
+	}
+	return nil
+}
+
+// costTable and longContextTable name a model's two cost tables as a
+// FileError locates them.
+func costTable(alias string) string { return toml.Key{"models", alias, "cost"}.String() }
+
+func longContextTable(alias string) string {
+	return toml.Key{"models", alias, "cost", "long_context"}.String()
 }
 
 func httpURL(s string) bool {
@@ -1488,8 +1598,43 @@ func (t *Table) Aliases() []string {
 // int64 (PD22): $1 per 1,000,000 tokens is 1,000,000 p$/token. Each is the
 // model's Cost rate rounded to the nearest picodollar exactly once, by
 // ratesFromCost; a rate the Cost left unset is 0.
+//
+// LongContextAbove and LongContext are the cost's one tier (plan 047 D10):
+// the threshold, 0 for no tier, and the rates a request whose prompt is
+// above it is priced at (LongPrompt), a rate the tier leaves out being the
+// base one; zero when there is no tier.
 type Rates struct {
 	Input, Output, CacheRead, CacheWrite int64
+	LongContextAbove                     int64
+	LongContext                          TierRates
+}
+
+// TierRates are the four per-token rates one tier prices a request's usage
+// at, in picodollars, as Rates' own are.
+type TierRates struct {
+	Input, Output, CacheRead, CacheWrite int64
+}
+
+// LongPrompt reports whether a request whose prompt — input, cache reads and
+// cache writes, every token it sent — is prompt tokens is priced at the long
+// rates: above the threshold, never at it. With no tier none is.
+func (r Rates) LongPrompt(prompt int64) bool {
+	return r.LongContextAbove > 0 && prompt > r.LongContextAbove
+}
+
+// Base is the rates a request at or below the threshold is priced at.
+func (r Rates) Base() TierRates {
+	return TierRates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+}
+
+// Long is the rates a request above the threshold is priced at: the
+// long-context table's, or, with no tier, the base rates — so usage a
+// transcript recorded as long is priced as any other once the tier is gone.
+func (r Rates) Long() TierRates {
+	if r.LongContextAbove <= 0 {
+		return r.Base()
+	}
+	return r.LongContext
 }
 
 // identity is (provider, wire model): what Table prices by (R2-7), because a
@@ -1517,7 +1662,8 @@ func (t *Table) Price(provider, wireModel string) (Rates, bool) {
 // warn is one line per identity where two or more priced aliases disagree on
 // the configured cost, naming every alias whose cost differs from the one
 // used — the table's existing warning channel, appended by load. The
-// comparison is of the Cost as written, all four keys, not of the rounded
+// comparison is of the Cost as written, every key — the four rates, and the
+// long-context threshold and table (plan 047 D10) — not of the rounded
 // Rates: two prices the owner wrote differently are a conflict even when
 // both round to the same picodollars (0.0000001 and 0.0000002 are both 0
 // p$/token), and so is a key one alias sets and the other leaves out. An
@@ -1561,13 +1707,29 @@ func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn 
 }
 
 // sameAs reports whether c and o configure the same cost: each of the four
-// keys is left out of both, or set in both to the same value. Neither is nil
-// here (pricedIdentities only compares models that have a Cost).
+// rates and long_context_above is left out of both, or set in both to the
+// same value, and so is the long-context table, rate by rate (plan 047 D10).
+// Neither is nil here (pricedIdentities only compares models that have a
+// Cost).
 func (c *Cost) sameAs(o *Cost) bool {
-	same := func(a, b *float64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
-	return same(c.Input, o.Input) && same(c.Output, o.Output) &&
-		same(c.CacheRead, o.CacheRead) && same(c.CacheWrite, o.CacheWrite)
+	return samePtr(c.Input, o.Input) && samePtr(c.Output, o.Output) &&
+		samePtr(c.CacheRead, o.CacheRead) && samePtr(c.CacheWrite, o.CacheWrite) &&
+		samePtr(c.LongContextAbove, o.LongContextAbove) && c.LongContext.sameAs(o.LongContext)
 }
+
+// sameAs is Cost.sameAs for the long-context table, either of which may be
+// nil: a table one cost has and the other does not differs.
+func (l *LongContextCost) sameAs(o *LongContextCost) bool {
+	if l == nil || o == nil {
+		return l == nil && o == nil
+	}
+	return samePtr(l.Input, o.Input) && samePtr(l.Output, o.Output) &&
+		samePtr(l.CacheRead, o.CacheRead) && samePtr(l.CacheWrite, o.CacheWrite)
+}
+
+// samePtr reports whether a and b are both left out, or both set to the same
+// value.
+func samePtr[T comparable](a, b *T) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
 // sortedIdentities returns m's keys in a deterministic order (by provider,
 // then wire model), so pricedIdentities' warnings are stable from one load
@@ -1588,13 +1750,41 @@ func sortedIdentities[V any](m map[identity]V) []identity {
 
 // ratesFromCost rounds c's set rates to picodollars per token exactly once
 // (PD22). c is never nil: callers only call it for a Model whose Cost is set.
+//
+// Its tier is the cost's when the threshold is above 0 and the long-context
+// table is set, which Validate requires of each other; otherwise there is
+// none (plan 047 D10). A tier rate the merged table leaves out is the base
+// rate for that field (orBase): a tier written with input and output alone
+// prices a long request's cache reads and writes at the base rates, never at
+// 0, which would under-report what was spent. The fallback is resolved here
+// alone: the Cost keeps what was written, so sameAs, the same-as-shipped
+// check and the conflict warning compare that.
 func ratesFromCost(c *Cost) Rates {
-	return Rates{
+	r := Rates{
 		Input:      picodollarsPerToken(c.Input),
 		Output:     picodollarsPerToken(c.Output),
 		CacheRead:  picodollarsPerToken(c.CacheRead),
 		CacheWrite: picodollarsPerToken(c.CacheWrite),
 	}
+	if above, l := deref(c.LongContextAbove), c.LongContext; above > 0 && l != nil {
+		r.LongContextAbove = above
+		r.LongContext = TierRates{
+			Input:      picodollarsPerToken(orBase(l.Input, c.Input)),
+			Output:     picodollarsPerToken(orBase(l.Output, c.Output)),
+			CacheRead:  picodollarsPerToken(orBase(l.CacheRead, c.CacheRead)),
+			CacheWrite: picodollarsPerToken(orBase(l.CacheWrite, c.CacheWrite)),
+		}
+	}
+	return r
+}
+
+// orBase is a tier's rate for one field: the one written, or, left out, the
+// base rate for it — itself nil, and so 0, when that is left out too.
+func orBase(tier, base *float64) *float64 {
+	if tier != nil {
+		return tier
+	}
+	return base
 }
 
 // picodollarsPerToken rounds a $-per-1,000,000-token rate to the nearest

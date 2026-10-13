@@ -887,7 +887,9 @@ store a key with [`/connect`](tui.md#connect).
   value, not "unset".
 - **Cost, rate by rate.** Each `[cost]` rate you write replaces the shipped
   rate on its own; one you leave out keeps it. An inherited rate cannot be
-  cleared.
+  cleared. A [long-context tier](#long-context-pricing) merges the same way —
+  `long_context_above` and each `[cost.long_context]` rate on its own — and
+  `long_context_above = 0` turns a shipped tier off, its rates with it.
 - **Efforts and the default effort.** An `efforts` list without a
   `default_effort` keeps the shipped default if the new list has it, and
   otherwise the model has none.
@@ -1488,13 +1490,10 @@ carry none, like the ChatGPT plan's: both are flat-rate plans. Anthropic's
 shipped models carry Anthropic's prices — `cache_read` its cache hit,
 `cache_write` its five-minute cache write, the only one craze asks for — and a
 model only the Anthropic account's list names carries none until a release
-adds it ([Anthropic](#anthropic)). Haiku 5.5 is priced at its rate for
-prompts up to 100,000 tokens: above that Anthropic charges five times as
-much, so a longer prompt's spend on it reads low. Each rate is dollars per
-1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
-that is not a finite number (`nan`, `inf`), is refused at load. There are no
-tiers yet: a tier is per request, and a sub-agent's usage row already sums
-many requests, so a per-request price cannot be recovered from it.
+adds it ([Anthropic](#anthropic)). Haiku 5.5 also has a long-context tier,
+below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
+rate outside that range, or one that is not a finite number (`nan`, `inf`), is
+refused at load.
 
 craze prices a usage record by **identity** — the model's `(provider, wire
 model)` pair — never by the alias it happened to run under, since a resumed
@@ -1511,6 +1510,65 @@ is simply unpriced — its usage is still counted in tokens, but adds no cost.
 The `cost` table is your own entry in `models.toml`, the same as
 [`[compaction]`](#native-compaction) above: craze reads it and never rewrites
 it.
+
+### Long-context pricing
+
+A model's `cost` may have one price tier for long prompts: a request whose
+prompt is over `long_context_above` tokens is priced at the
+`[models."<alias>".cost.long_context]` rates instead, every token of it.
+
+```toml
+[models."anthropic/claude-haiku-5-5".cost]
+input              = 0.1
+output             = 0.5
+cache_read         = 0.01
+cache_write        = 0.125
+long_context_above = 100000   # a prompt over this many tokens is long
+
+[models."anthropic/claude-haiku-5-5".cost.long_context]
+input       = 0.5    # the rates a long request pays, $ per 1,000,000 tokens
+output      = 2.5
+cache_read  = 0.05
+cache_write = 0.625
+```
+
+- **The prompt** is everything the request sent: its input, cache reads and
+  cache writes together. Exactly `long_context_above` tokens is not long;
+  one more is.
+- **Each request is priced on its own**, as Anthropic bills it: one step of a
+  turn, one attempt of a compaction, one request of a sub-agent or of a
+  [side question](tui.md#side-questions-btw). A long request pays the long
+  rates even when part of its prompt is a cache hit, and the requests before
+  and after it keep their own prices. craze classifies each request as its
+  usage arrives, so a sub-agent's spend and a compaction's are priced request
+  by request though they are reported as one sum.
+- **The keys.** `long_context_above` is a whole number of tokens; above 0 it
+  needs the `long_context` table with `input` and `output` at least, and the
+  table needs it. It is at most the model's `context_window` when the model
+  declares one. Each `long_context` rate is optional and in the same range as
+  the base rates. One the merged table leaves out — left out by your entry
+  and, on a shipped model, by the shipped tier — falls back to the model's
+  base rate for it, never to 0: a tier with `input` and `output` alone prices
+  a long request's cache reads and writes at the base `cache_read` and
+  `cache_write`. A problem names the model, the table and the key.
+- **On a shipped model** the keys are an overlay like the rates: a
+  `long_context` rate you write replaces that rate alone, and
+  `long_context_above = 0` turns the tier off, so every request is priced at
+  the base rates.
+
+The shipped catalog gives a tier to Haiku 5.5 alone — the rates above, which
+are Anthropic's for prompts over 100,000 tokens. Every other shipped Anthropic
+model takes its whole context window at its standard price.
+
+A session's transcript keeps what it needs to price the tier again on a
+resume: the part of a sub-agent's usage row, and of a compaction's usage,
+that came from long requests. A resumed session prices it with the table it
+loads, so its spend matches the live session's while the prices are
+unchanged. A transcript from before the tier existed has no such parts, so its
+sub-agent rows and compactions price as they did; its own steps are priced one
+by one like any other, so a long Haiku 5.5 step there now reads at the tier. If
+that part is ever larger than the usage it belongs to, or below 0, craze
+does not trust it and prices that usage at the base rates.
 
 ## Native vision
 

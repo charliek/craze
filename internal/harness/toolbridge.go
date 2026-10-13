@@ -571,7 +571,8 @@ func subagentUsage(calls []*toolCall, written func(*toolCall) bool) []store.Mode
 }
 
 // mergeUsage is children's usage as rows per model (subagentUsage), in the
-// order each model first appears; a child that spent nothing adds no row, and
+// order each model first appears, each row's long-context subset the sum of
+// its children's (plan 047 D10); a child that spent nothing adds no row, and
 // no row at all is nil.
 func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 	var rows []store.ModelUsage
@@ -587,9 +588,8 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 			rows = append(rows, store.ModelUsage{Provider: ch.Provider, Model: ch.Model, WireModel: ch.WireModel})
 			i = len(rows) - 1
 		}
-		r := &rows[i].Usage
-		r.Input, r.Output, r.Reasoning = r.Input+u.Input, r.Output+u.Output, r.Reasoning+u.Reasoning
-		r.CacheRead, r.CacheCreation = r.CacheRead+u.CacheRead, r.CacheCreation+u.CacheCreation
+		rows[i].Usage = addUsage(rows[i].Usage, u)
+		rows[i].LongContext = addUsage(rows[i].LongContext, storeUsage(ch.LongContext))
 	}
 	return rows
 }
@@ -597,6 +597,19 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 // storeUsage is a sub-agent's usage in the store's shape, field for field.
 func storeUsage(u tool.Usage) store.Usage {
 	return store.Usage{Input: u.Input, Output: u.Output, Reasoning: u.Reasoning, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation}
+}
+
+// toolUsage is storeUsage's inverse: a usage in the tool package's shape.
+func toolUsage(u store.Usage) tool.Usage {
+	return tool.Usage{Input: u.Input, Output: u.Output, Reasoning: u.Reasoning, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation}
+}
+
+// renamed is u, every field kept — its usage and long-context subset among
+// them — with the model's names redacted by red: a copy, never u itself.
+func renamed(u *tool.ChildUsage, red *redact.Replacer) *tool.ChildUsage {
+	c := *u
+	c.Provider, c.Model, c.WireModel = red.String(u.Provider), red.String(u.Model), red.String(u.WireModel)
+	return &c
 }
 
 // pairable reports whether calls can be answered pairably: every provider

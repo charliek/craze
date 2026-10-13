@@ -206,7 +206,7 @@ func (s *Session) Aside(ctx context.Context, prior []AsidePair, question string,
 	var used Usage
 	for attempt := 1; ; attempt++ {
 		text, u, delivered, toolCall, err := s.askAside(sideCtx, ag, m, messages, prompt, onText)
-		s.noteUnsaved(asideTurn, m.id(), u)
+		s.noteUnsaved(asideTurn, m.id(), u, nil) // one request
 		used = addUsage(used, u)
 		switch {
 		case err == nil && strings.TrimSpace(text) == "" && toolCall:
