@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -529,16 +530,25 @@ func TestReopenWaitsOutAHeldStoppingHolder(t *testing.T) {
 // and answers a new host. Marked by then, its entry is never joined again;
 // unmarked, it is on its way out only tentatively (an idle check's fence
 // refuses attaches closing too, and lifts: TestAClosingRefusalIsTriedAgain),
-// so it is joined again each time the reopen has waited a poll — here, held
-// until it has been twice — and goes all the same.
+// so it is joined again once the reopen has waited a poll. That join's dial
+// fails, or its connection is lost, its entry still listed and unmarked — a
+// host from before the mark closes its server before it unlinks its entry
+// (forced through the dial, the host held until the reopen waits after it,
+// not timed): a host that refused closing and now cannot be reached is on its
+// way out tentatively again, waited for, never host_unreachable, and the
+// answer is a new host all the same once it goes.
 func TestAJoinRefusedClosingWaits(t *testing.T) {
 	setVar(t, &reopenHolderWait, step)
 	for _, tc := range []struct {
 		name string
 		mark string
+		// lost: the join again is dialled, and its connection lost before
+		// its attach is answered, rather than its dial failing.
+		lost bool
 	}{
-		{"stopped after the scan", ",mark"},
-		{"a host from before the mark", ""},
+		{"stopped after the scan", ",mark", false},
+		{"a host from before the mark", "", false},
+		{"a host from before the mark, its connection lost", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := testEnv(t)
@@ -550,6 +560,14 @@ func TestAJoinRefusedClosingWaits(t *testing.T) {
 			// The waits' time runs on their polls (loopHooks.tick): a
 			// tentative mark's poll passes at a wait's second poll, never at
 			// its first, however late.
+			var dials atomic.Int64
+			// unmarked: the entry listed, unmarked, as the failure was
+			// injected; injected: the failure is; waiting closes at the
+			// reopen's first poll after it — its wait begun, the holder still
+			// held at its stop.
+			var unmarked, injected atomic.Bool
+			waiting := make(chan struct{})
+			var waitingOnce sync.Once
 			c := countLoop(t, loopHooks{tick: rendezvousPoll, joining: func(e rundir.Entry) {
 				if joined.Add(1) != 1 {
 					return
@@ -560,8 +578,31 @@ func TestAJoinRefusedClosingWaits(t *testing.T) {
 				}
 				stopErr <- stopCreated(e.Socket, e.CrazeSessionID)
 				awaitFile(filepath.Join(stop, "stopping"))
+			}, polled: func() {
+				if injected.Load() {
+					waitingOnce.Do(func() { close(waiting) })
+				}
 			}})
 			if tc.mark == "" {
+				// Its second dial — the join again — fails, or its connection
+				// is lost, its entry still listed, unmarked: its server
+				// closed, its entry not yet unlinked.
+				setVar(t, &createDial, func(ctx context.Context, socket, sid string) (createdSession, error) {
+					if socket != holder.socket || dials.Add(1) != 2 {
+						return dialCreated(ctx, socket, sid)
+					}
+					e, listed, err := rundir.HostEntry(env, holder.id)
+					unmarked.Store(err == nil && listed && !e.Stopping)
+					if !tc.lost {
+						injected.Store(true)
+						return nil, fmt.Errorf("dial unix %s: connect: connection refused", socket)
+					}
+					sess, err := dialCreated(ctx, socket, sid)
+					if err != nil {
+						return nil, err
+					}
+					return lostStart{sess, &injected}, nil
+				})
 				// Stopped before the reopen: its entry unmarked, every attach
 				// refused closing.
 				stopHolder(t, holder)
@@ -577,7 +618,13 @@ func TestAJoinRefusedClosingWaits(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.mark == "" {
-				waitFor(t, "the unmarked holder joined again", func() bool { return c.joins.Load() >= 2 })
+				select {
+				case <-waiting:
+				case o := <-ch:
+					t.Fatalf("the reopen answered at the injected failure, never waiting: %+v %v", o.resp.Error, o.err)
+				case <-time.After(step):
+					t.Fatal("the reopen never waited after the injected failure")
+				}
 			}
 			pending(t, ch, "while the holder stops")
 			if s.count() != 0 {
@@ -590,9 +637,13 @@ func TestAJoinRefusedClosingWaits(t *testing.T) {
 				t.Fatalf("the reopen answered %+v after %d spawns; the closing holder was %s", res, s.count(), holder.id)
 			}
 			// Marked: waited for, never joined again — one join, the refused
-			// one. Unmarked: joined again, each time after a slept poll.
-			if n := c.joins.Load(); (tc.mark != "" && n != 1) || (tc.mark == "" && (n < 2 || c.slept.Load() < n-1)) {
-				t.Fatalf("the closing holder was joined %d times, after %d slept polls", n, c.slept.Load())
+			// one. Unmarked: joined again after a slept poll, that join's
+			// failure injected with its entry listed, unmarked — then waited
+			// for, and joined again a poll later as long as it is listed.
+			if n := c.joins.Load(); (tc.mark != "" && n != 1) ||
+				(tc.mark == "" && (n < 2 || c.slept.Load() < 1 || dials.Load() < 2 || !unmarked.Load() || !injected.Load())) {
+				t.Fatalf("the closing holder was joined %d times (%d dials, the failure injected %v, its entry unmarked then %v), after %d slept polls",
+					n, dials.Load(), injected.Load(), unmarked.Load(), c.slept.Load())
 			}
 		})
 	}
@@ -1255,6 +1306,18 @@ func closingOnce(t *testing.T, closing func(socket string) bool) {
 	})
 }
 
+// lostStart is a created session whose connection is lost before its attach
+// is answered, reached saying so (reached).
+type lostStart struct {
+	createdSession
+	reached *atomic.Bool
+}
+
+func (l lostStart) Start(context.Context) error {
+	l.reached.Store(true)
+	return io.ErrUnexpectedEOF
+}
+
 // closingStart is a created session whose attach is refused closing.
 type closingStart struct{ createdSession }
 
@@ -1300,6 +1363,63 @@ func TestAClosingRefusalIsTriedAgain(t *testing.T) {
 	}
 	if exists(filepath.Join(watch, "stopped")) || exists(filepath.Join(watch, "signalled")) || j.child.Exited() {
 		t.Fatal("J, looked past, was stopped, signalled or has gone")
+	}
+}
+
+// TestAPassingFailureAfterClosingIsTriedAgain (C7 soak fix review, item 1):
+// a host that refused closing — an idle check's fence — and whose join again
+// then fails once in passing (its dial, or its connection lost before its
+// attach is answered) while its entry still serves the session, unmarked, is
+// on its way out tentatively again, never for good: a poll later it is joined
+// again, and, having stayed, it is the answer, joined — never the holder
+// allowance's busy saying it has not finished stopping. Three scans, three
+// joins, a slept poll before each join again.
+func TestAPassingFailureAfterClosingIsTriedAgain(t *testing.T) {
+	setVar(t, &reopenHolderWait, 500*time.Millisecond)
+	setVar(t, &reopenWait, 10*time.Second)
+	for _, lost := range []bool{false, true} {
+		name := "its dial fails once"
+		if lost {
+			name = "its connection is lost once"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := testEnv(t)
+			ws := t.TempDir()
+			h := startHolder(t, env, "s-1", ws, "ok", false)
+			var dials atomic.Int64
+			var reached atomic.Bool
+			setVar(t, &createDial, func(ctx context.Context, socket, sid string) (createdSession, error) {
+				if socket != h.socket {
+					return dialCreated(ctx, socket, sid)
+				}
+				n := dials.Add(1)
+				if n == 2 && !lost {
+					return nil, fmt.Errorf("dial unix %s: hello: i/o timeout", socket)
+				}
+				sess, err := dialCreated(ctx, socket, sid)
+				switch {
+				case err != nil:
+					return nil, err
+				case n == 1:
+					return closingStart{sess}, nil
+				case n == 2:
+					return lostStart{sess, &reached}, nil
+				}
+				return sess, nil
+			})
+			c := countLoop(t, loopHooks{tick: rendezvousPoll})
+			_, s, sock := reopenHub(t, env, nil, newTargets(plainTarget("s-1", ws)), always("ok"))
+			resp := reopenID(t, sock, "s-1")
+			if resp.Error != nil {
+				t.Fatalf("refused %q after %d scans and %d joins", resp.Error.Message, c.scans.Load(), c.joins.Load())
+			}
+			res := reopened(t, resp)
+			if !res.Joined || res.Session.HostID != h.id || res.Session.SessionID != "s-1" || s.count() != 0 || dials.Load() != 3 ||
+				c.scans.Load() != 3 || c.joins.Load() != 3 || c.slept.Load() != 2 || lost != reached.Load() {
+				t.Fatalf("answered %+v after %d dials, %d scans, %d joins, %d slept polls, %d spawns (the lost connection reached %v); want H (%s) joined after 3 of each, 2 slept polls",
+					res.Session, dials.Load(), c.scans.Load(), c.joins.Load(), c.slept.Load(), s.count(), reached.Load(), h.id)
+			}
+		})
 	}
 }
 

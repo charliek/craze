@@ -1255,7 +1255,10 @@ disconnects does not cancel it.
      again; the process having gone does. An attach refused `closing` while
      the host's entry still serves the session, unmarked, may be only an idle
      check's (the host deciding whether to stay, which it may): the hub
-     tries that host again once it has waited a poll (20 ms) for it.
+     tries that host again once it has waited a poll (20 ms) for it — and so
+     again, a poll later, when that host then cannot be dialled or its
+     connection is lost (a host from before the mark closes its socket
+     before it unlinks its entry), never `host_unreachable` for it.
    - **No host** means a spawn. The hub first checks the session's workspace
      is still a directory: one that is not is `not_accepting`, reason
      `not_resumable` (`that session ran in <dir>, which is no longer a

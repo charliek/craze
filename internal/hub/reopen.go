@@ -104,7 +104,9 @@ import (
 //     stopping by then, else tentatively, tried again once the reopen has
 //     waited rendezvousPoll (reopening.leaving); waited for, then a again.
 //     So is a dial or a connection lost whose entry has since gone or been
-//     marked stopping, for good. Any other failure
+//     marked stopping, for good; and one of a host that refused this reopen
+//     an attach closing (a host from before the mark closes its server
+//     before it unlinks its entry), tentatively again. Any other failure
 //     is the answer, the host left exactly as it is — never a session.stop,
 //     never a signal: a start that failed or ran past the budget is
 //     not_accepting, reason start_failed; a host that cannot be reached
@@ -619,9 +621,11 @@ func (r *reopening) spent() createAnswer {
 // holder on its way out (a dial or a connection lost, or an attach refused
 // closing, whose entry has since gone or been marked stopping: for good), or
 // tentatively so (an attach refused closing, its entry serving the session
-// still, unmarked: leaving), for the loop to wait for; or a host that no longer serves the session (an attach refused
-// unknown_session, an entry naming another session, a row of another
-// session), for the loop to look past. A deadline that passes during it is
+// still, unmarked; a dial or a connection lost of a host that refused one
+// before: leaving), for the loop to wait for; or a host
+// that no longer serves the session (an attach refused unknown_session, an
+// entry naming another session, a row of another session), for the loop to
+// look past. A deadline that passes during it is
 // spent. Whatever its start comes to, a joined host is never this hub's to
 // stop: no session.stop, no signal, on any branch.
 func (r *reopening) join(e rundir.Entry) holderLook {
@@ -630,6 +634,12 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 	dctx, cancel := ctxUntil(r.ctx, r.deadline)
 	sess, err := createDial(dctx, e.Socket, e.CrazeSessionID)
 	cancel()
+	// closing says the host has refused this reopen an attach closing: its
+	// dial failing, or its connection lost, now may be its stop — a host from
+	// before the mark closes its server before it unlinks its entry — or a
+	// passing failure of a host that stayed: on its way out tentatively
+	// again, never host_unreachable, and never for good on that alone.
+	_, closing := r.leaving[e.HostID]
 	if err != nil {
 		h.logf("%s: host %s cannot be dialled: %v", r.tag, e.HostID, err)
 		switch leaving, moved := r.whereNow(e); {
@@ -641,6 +651,8 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 			return r.surelyLeaving(e)
 		case moved:
 			return lookPast(e)
+		case closing:
+			return r.tentativelyLeaving(e)
 		}
 		return answered(createRefusal(refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
 			"the host serving that session (%s) cannot be reached", e.HostID)))
@@ -660,12 +672,9 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 		}
 		// Its entry serving the session still, unmarked: a stop — a host's
 		// from before the mark — or only an idle check's fence, which lifts
-		// if the host stays. On its way out tentatively (leaving): tried
-		// again once the reopen has waited a poll.
+		// if the host stays.
 		h.logf("%s: host %s refused the attach closing, its entry unmarked: trying it again in a poll", r.tag, e.HostID)
-		r.leaving[e.HostID] = leavingMark{waited: r.waited()}
-		holder := hostspawn.HolderOfEntry(e)
-		return holderLook{await: &holder}
+		return r.tentativelyLeaving(e)
 	case attendStartFailed, attendStartTimeout:
 		// Never stopped: it is not this hub's, and another client may be
 		// attached to it, or about to be.
@@ -688,6 +697,8 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 			return r.surelyLeaving(e)
 		case moved:
 			return lookPast(e)
+		case closing:
+			return r.tentativelyLeaving(e)
 		}
 		return answered(createRefusal(refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
 			"the host serving that session (%s) went before the session started", e.HostID)))
@@ -709,6 +720,17 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 func (r *reopening) surelyLeaving(e rundir.Entry) holderLook {
 	r.leaving[e.HostID] = leavingMark{sure: true}
 	holder := leavingHolder(e)
+	return holderLook{await: &holder}
+}
+
+// tentativelyLeaving is the holderLook of host e found on its way out, but
+// not for certain — an attach refused closing, its entry serving the session
+// still, unmarked; or, once it has, its dial or connection lost — held so
+// from now (leaving), for the loop to wait a poll for it, then try it again:
+// it goes (its process, or its entry, gone), or it stays and is joined.
+func (r *reopening) tentativelyLeaving(e rundir.Entry) holderLook {
+	r.leaving[e.HostID] = leavingMark{waited: r.waited()}
+	holder := hostspawn.HolderOfEntry(e)
 	return holderLook{await: &holder}
 }
 
