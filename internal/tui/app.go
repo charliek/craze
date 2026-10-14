@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -1943,6 +1944,13 @@ func Run(cfg Config) (Result, error) {
 	prevOut := setClipboardOut(out)
 	defer setClipboardOut(prevOut)
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(out)}
+	if term.IsTerminal(os.Stdin.Fd()) {
+		// The terminal bubbletea would read anyway (this is its own test,
+		// tea.go), with Shift+Enter made a newline on the way in
+		// (shiftEnterInput). Without a terminal on stdin bubbletea opens
+		// /dev/tty itself, and Shift+Enter there stays as bubbletea reads it.
+		opts = append(opts, tea.WithInput(&shiftEnterInput{f: os.Stdin}))
+	}
 	if !cfg.NoMouse {
 		// Cell motion, not all motion: the quieter mode reports a drag once per
 		// cell rather than per pixel, which is all the selection needs.
