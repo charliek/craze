@@ -27,6 +27,16 @@ import (
 // channel it closed.
 const logWatchdog = 10 * time.Second
 
+// journalWatchdog bounds a wait for the journal writer, which includes the
+// writer's own file I/O: the file's create, its writes, an fsync (F_FULLFSYNC
+// on darwin) and its close. It is still a liveness bound, so a deadlock still
+// fails, but how long that I/O takes is the disk's to decide, not the log's:
+// a shared macOS runner's disk can stall it for seconds, and APFS holds
+// metadata calls (the create's mkdir and open) behind an fsync in flight.
+// logWatchdog was too short there, most likely for a writer still in its
+// fsync (CI run 38515025614).
+const journalWatchdog = time.Minute
+
 // writerFrame is the journal writer's function, as runtime.Stack prints its
 // frame, for the leak checks that count it by run frame. Owner goroutines are
 // counted differently: see ownerCreated below.
@@ -295,11 +305,11 @@ func newTestJournalWith(t testing.TB, edit func(*journal.Options)) (*journal.Wri
 	return w, inc
 }
 
-// writerExited waits, up to the watchdog, for w's writer goroutine to finish
-// after its Close. WaitFlushed for a seq never reached returns ErrClosed
-// exactly when the writer has finished.
+// writerExited waits, up to journalWatchdog, for w's writer goroutine to
+// finish after its Close. WaitFlushed for a seq never reached returns
+// ErrClosed exactly when the writer has finished.
 func writerExited(w *journal.Writer) error {
-	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	ctx, cancel := context.WithTimeout(context.Background(), journalWatchdog)
 	defer cancel()
 	return w.WaitFlushed(ctx, journal.MaxSeq)
 }
@@ -343,7 +353,7 @@ func closeLog(t testing.TB, l *EventLog, w *journal.Writer) {
 // sleep waiting for the writer's 250 ms timer.
 func flushThrough(t *testing.T, w *journal.Writer, seq uint64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	ctx, cancel := context.WithTimeout(context.Background(), journalWatchdog)
 	defer cancel()
 	if err := w.WaitFlushed(ctx, seq); err != nil {
 		t.Fatalf("waiting for the journal to reach seq %d: %v", seq, err)
@@ -1504,8 +1514,11 @@ func TestEventLogAResumeGivesUpOnAJournalThatNeverCatchesUp(t *testing.T) {
 			publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
 		}
 		// The journal is closed under the session: what it has is on disk, and
-		// nothing published from here on will ever be.
-		if err := w.Close(context.Background()); err != nil {
+		// nothing published from here on will ever be. Close waits only 500 ms
+		// for the writer, which a slow disk outlasts (journalWatchdog), so a
+		// stalled Close is a writer still finishing; writerExited is the join,
+		// and it reports a writer that failed.
+		if err := w.Close(context.Background()); err != nil && !errors.Is(err, journal.ErrStalled) {
 			t.Fatal(err)
 		}
 		if err := writerExited(w); !errors.Is(err, journal.ErrClosed) {
@@ -2463,7 +2476,7 @@ func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
 	// not the scheduler has run them yet. The writer is still counted by its
 	// run frame, present only once the scheduler has run it, so this waits
 	// for it to flush first.
-	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	ctx, cancel := context.WithTimeout(context.Background(), journalWatchdog)
 	defer cancel()
 	if err := w.WaitFlushed(ctx, 300); err != nil {
 		t.Fatal(err)

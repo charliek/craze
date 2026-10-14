@@ -48,6 +48,11 @@ Nothing needs migrating.
   split plain output on the old run-on must expect the break. `--json`
   events, `--wait` messages and the exclusion of sub-agent text are unchanged.
   See [craze prompt](../reference/cli.md#craze-prompt).
+- **Shift+Enter starts a new line in Ghostty and Roost.** Those terminals
+  send Shift+Enter as a sequence of its own, which craze used to drop, so the
+  key did nothing; it is now the composer's newline, as `Alt+Enter` and
+  `Ctrl+J` are. Terminals that send Shift+Enter as a bare `Enter` still send
+  the message. See [Keys](../reference/tui.md#keys).
 - **A `craze:wonder` Claude Code preset** runs the native `muse-wonder-1.0`
   at its default effort, for hard tasks. See [Claude
   Code](claude-code.md#the-agents).

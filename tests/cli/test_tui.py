@@ -478,6 +478,43 @@ def test_tui_composer_at_mentions_a_file(
     _wait_fake_gone(fake_agent_bin)
 
 
+def test_tui_shift_enter_is_a_newline(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
+) -> None:
+    """Shift+Enter as Ghostty and Roost send it (xterm's `ESC[27;2;13~`, which
+    bubbletea v1 has no key for) and as the kitty keyboard protocol spells it
+    (`ESC[13;2u`) is the composer's newline: the agent receives each pair of
+    lines as one prompt, joined by a newline, exactly. A Shift+Enter dropped
+    would send `alphabravo`, one taken for Enter `alpha` and `bravo` apart.
+    In both modes: it is the terminal craze reads.
+    """
+    prompts = tmp_path / "prompts.jsonl"
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, env_extra={"CRAZE_FAKE_DUMP_PROMPTS": str(prompts)}
+    ) as tui:
+        # Up: the status row counts the session's elapsed time.
+        tui.wait_contains("│ 0m")
+        for first, second, seq in (
+            (b"alpha", b"bravo", b"\x1b[27;2;13~"),
+            (b"charlie", b"delta", b"\x1b[13;2u"),
+        ):
+            tui.write(first)
+            tui.write(seq)
+            tui.write(second + b"\r")
+            tui.wait_contains("echo: " + first.decode())
+        # Turns run in order, so by this echo every prompt before it is in.
+        tui.write(b"done\r")
+        tui.wait_contains("echo: done")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    sent = [
+        "".join(block.get("text", "") for block in entry["prompt"])
+        for entry in map(json.loads, prompts.read_text(encoding="utf-8").splitlines())
+        if "prompt" in entry
+    ]
+    assert sent == ["alpha\nbravo", "charlie\ndelta", "done"], sent
+
+
 def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")

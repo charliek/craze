@@ -57,7 +57,9 @@ func newComposer(th Theme) textarea.Model {
 	ta.SetHeight(1)
 
 	km := textarea.DefaultKeyMap
-	km.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
+	// Shift+Enter is not named here: bubbletea v1 has no such key, and the
+	// terminal's Shift+Enter arrives as ctrl+j (shiftEnterInput).
+	km.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
 	km.DeleteCharacterForward = key.NewBinding(key.WithKeys("delete"))
 	// ctrl+t is the tasks panel, not transpose; ctrl+d is left unbound so it
 	// quits rather than deleting forward.
@@ -116,9 +118,10 @@ func composerPrompt(line int) string {
 	return "  "
 }
 
+// isNewlineKey is alt+enter or ctrl+j. Shift+Enter, where the terminal tells
+// it from Enter, reaches bubbletea as ctrl+j already (shiftEnterInput).
 func isNewlineKey(msg tea.KeyMsg) bool {
-	s := msg.String()
-	return s == "shift+enter" || s == "alt+enter" || msg.Type == tea.KeyCtrlJ
+	return msg.String() == "alt+enter" || msg.Type == tea.KeyCtrlJ
 }
 
 // composerInner is the cell width one input row has for text, which is what
