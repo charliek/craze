@@ -115,7 +115,8 @@ func TestShippedCatalog(t *testing.T) {
 	// the account's list (image_input), and the four headline models were seen
 	// describing an image live before they shipped (P31). Plan 045's Muse
 	// Wonder 1.0 named an image's colour live (MW-7) and read one from disk
-	// through craze.
+	// through craze. Gemini 4 Argon on OpenRouter (2026-10-13) described an
+	// image read from disk through craze.
 	seesImages := map[string]bool{
 		"anthropic/claude-fable-5": true, "anthropic/claude-fable-5-1": true,
 		"anthropic/claude-haiku-4-5-20251001": true, "anthropic/claude-haiku-5-5": true,
@@ -129,10 +130,11 @@ func TestShippedCatalog(t *testing.T) {
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
 		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
 		"muse-wonder-1.0":                  true,
-		"openrouter/deepseek-flash-latest": true, "openrouter/gemini-flash-latest": true,
-		"openrouter/glm-flash-latest": true, "openrouter/gpt-astra-latest": true,
-		"openrouter/gpt-luna-latest": true, "openrouter/gpt-sol-latest": true,
-		"openrouter/mimo-v2.6-pro": true, "openrouter/minimax-m3": true,
+		"openrouter/deepseek-flash-latest": true, "openrouter/gemini-4-argon": true,
+		"openrouter/gemini-flash-latest": true, "openrouter/glm-flash-latest": true,
+		"openrouter/gpt-astra-latest": true, "openrouter/gpt-luna-latest": true,
+		"openrouter/gpt-sol-latest": true, "openrouter/mimo-v2.6-pro": true,
+		"openrouter/minimax-m3": true,
 	}
 	for alias := range seesImages {
 		if md, ok := tbl.Models[alias]; !ok || !md.Vision {
@@ -245,7 +247,7 @@ func TestShippedCatalogHistory(t *testing.T) {
 // P29: Sonnet 5.5's cache hit is $0.10). And plan 045: Muse Wonder 1.0 on
 // Meta, with Spark still Meta's start (the owner's pin). And plan 047 D14:
 // Meta on its Responses API (driver openai-responses), at its own endpoint and
-// variable.
+// variable. And Gemini 4 Argon on OpenRouter (2026-10-13), on its numbered id.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -290,9 +292,11 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
 	}
 	// OpenRouter's models and their wire ids: a family's router where
-	// OpenRouter has one, the numbered id where it does not (MiMo, MiniMax).
+	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon,
+	// MiMo, MiniMax).
 	wantOpenRouter := map[string]string{
 		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
+		"openrouter/gemini-4-argon":        "google/gemini-4-argon",
 		"openrouter/gemini-flash-latest":   "~google/gemini-flash-latest",
 		"openrouter/glm-flash-latest":      "~z-ai/glm-flash-latest",
 		"openrouter/glm-latest":            "~z-ai/glm-latest",
@@ -317,6 +321,12 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		if got := c.Models[alias].Efforts; !slices.Equal(got, []string{"low", "high", "max"}) {
 			t.Errorf("%s efforts = %q, want low, high, max", alias, got)
 		}
+	}
+	// Gemini 4 Argon: its supported_efforts at OpenRouter's default, medium,
+	// and a ceiling every endpoint takes (its Vertex endpoints' 65536).
+	if m := c.Models["openrouter/gemini-4-argon"]; m.Name != "Gemini 4 Argon (OpenRouter)" || m.ContextWindow != 1048576 || m.MaxOutputTokens != 65536 ||
+		!slices.Equal(m.Efforts, []string{"low", "medium", "high"}) || m.DefaultEffort != "medium" || !m.Vision {
+		t.Errorf("openrouter/gemini-4-argon = %+v", m)
 	}
 	// Meta's models (plan 045): the two Spark 1.3 tiers and Muse Wonder 1.0,
 	// each on its own wire id. Wonder takes minimal to max (the API refuses
@@ -373,6 +383,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"fireworks/glm-5p3-flash":          {0.15, 0.5, 0.03},
 		"fireworks/qwen3p8-max":            {2.0, 6.0, 0.25},
 		"openrouter/deepseek-flash-latest": {0.016, 0.6, 0.005},
+		"openrouter/gemini-4-argon":        {2.0, 10.0, 0.1},
 		"openrouter/gemini-flash-latest":   {0.75, 3.75, 0.075},
 		"openrouter/glm-flash-latest":      {0.032, 0.72, 0.01},
 		"openrouter/glm-latest":            {0.039, 4.8, 0.038},

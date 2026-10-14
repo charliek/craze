@@ -96,12 +96,14 @@ func TestAManualCompactionLeavesNoNumberGap(t *testing.T) {
 // --- A15: TestSummarizerRequestIsTheLastRequestPlusThePrompt -----------
 
 // redirect sends every request to target, whatever host the client aimed
-// at: how a test reaches a local server from the openrouter driver, whose
-// endpoint is fixed (mirrors llm's own factory_test.go, unexported there).
+// at, noting that host in X-Original-Host: how a test reaches a local server
+// from the openrouter driver, whose endpoint is fixed (mirrors llm's own
+// factory_test.go, unexported there).
 type redirectRT struct{ target *url.URL }
 
 func (rt redirectRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
+	r.Header.Set("X-Original-Host", req.URL.Host)
 	r.URL.Scheme, r.URL.Host, r.Host = rt.target.Scheme, rt.target.Host, rt.target.Host
 	return http.DefaultTransport.RoundTrip(r)
 }

@@ -44,3 +44,4 @@ anthropic/claude-sonnet-4-6
 anthropic/claude-sonnet-5
 anthropic/claude-sonnet-5-5
 muse-wonder-1.0
+openrouter/gemini-4-argon
