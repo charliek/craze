@@ -771,6 +771,29 @@ input = 2.0
 output = 10.0
 cache_read = 0.1
 
+# Gemini 4 Argon, Google's flagship reasoning model, released 2026-10-13. Its
+# family has no router: ~google/gemini-pro-latest still answers as Gemini 3.1
+# Pro Preview, so it is on its numbered id. Its ceiling is 65536, what its
+# Vertex endpoints take (AI Studio's take more), so a request may go to any of
+# them. Efforts are its supported_efforts, at OpenRouter's default; its price
+# is the model list's, the standard tier (AI Studio's flex tier is cheaper,
+# both priority tiers dearer). Seen live through craze on 2026-10-13: a tool
+# loop, and an image read from disk described.
+[models."openrouter/gemini-4-argon"]
+provider = "openrouter"
+wire_model = "google/gemini-4-argon"
+name = "Gemini 4 Argon (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 65536
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+vision = true
+
+[models."openrouter/gemini-4-argon".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+
 # OpenRouter lists no reasoning_effort for MiMo (its endpoints take only
 # reasoning on or off), so, like MiniMax M3, it offers no efforts. No
 # ~family-latest router exists for it, or for MiniMax. Seen live through craze

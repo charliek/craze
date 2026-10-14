@@ -766,6 +766,15 @@ as `openrouter/mimo-v2.6-pro`, uses its numbered id. To stay on one numbered
 model, add it as a model of your own in [`models.toml`](#your-two-files),
 with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 
+`openrouter/gemini-4-argon` is Gemini 4 Argon, Google's flagship reasoning
+model, for complex coding and long agent work. It takes images, offers effort
+`low`, `medium` (its default) and `high`, and costs $2 per million input
+tokens and $10 per million output, against Gemini Flash Latest's $0.75 and
+$3.75. OpenRouter's Gemini Pro router does not point at it yet, so it is on
+its numbered id. It is not OpenRouter's start model: pick it with `/model`,
+`--model openrouter/gemini-4-argon`, a `default_model` pin or a sub-agent's
+model.
+
 Meta's models are Muse Spark 1.3, `muse-spark-1.3` and its cheaper
 contributor tier `muse-spark-1.3-contributor` (Meta's start model), and
 `muse-wonder-1.0`, Muse Wonder 1.0, Meta's most capable model, for long,
