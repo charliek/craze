@@ -2,6 +2,86 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.2.0 — 2026-10-14
+
+Effort becomes a control of its own on native models (`/effort`, and a switch
+lands on the model's own effort), Meta's models move to its Responses API at
+about 0.6 times the spend, saved sessions reopen through the hub, and Gemini 4
+Argon joins OpenRouter. This is the release the repository's Claude Code plugin
+needs (craze 0.2.0 or newer). Nothing in `~/.craze` needs migrating, but several
+existing behaviours changed: [Upgrading, since
+v0.1.1](docs/getting-started/upgrading.md#since-v011) lists each one and how to
+keep the old behaviour.
+
+### Behaviour changes
+
+- A native `/model` switch lands on the effort you last used on that model, else
+  its `default_effort`, instead of carrying the current effort over. Name a
+  level to keep one: `/model anthropic/claude-opus-5-5 max`.
+- Native Meta models use Meta's Responses API (the new `openai-responses`
+  driver): craze replays each step's encrypted reasoning and Meta caches the
+  session's prompt. On `muse-spark-1.3-contributor` it passed as many tasks as
+  Chat Completions at about 0.6 times the median spend per run. A
+  `[providers.meta]` with `driver = "openai-compat"` goes back; an entry of your
+  own with a `base_url` and no `driver` now sends Responses requests.
+- Haiku 5.5 requests whose prompt is over 100,000 tokens are priced at
+  Anthropic's long-context rates, so their spend no longer reads low.
+- Plain `craze prompt` puts a blank line between text runs; `--json` is
+  unchanged.
+- A stopped session leaves the roster, the session list and `craze ps` at once,
+  with no `Closing…` row (for hosts started after the upgrade).
+- `/model <id> <effort>` matches the effort word as `--effort` does, and refuses
+  a word that names two levels. A `models.toml` model with more than 8 efforts,
+  or an effort that is not one short printable line, no longer loads.
+- The session list offers a saved session by its newest row only.
+
+### The native provider
+
+- **OpenRouter**: Gemini 4 Argon (`openrouter/gemini-4-argon`), with efforts,
+  vision and its price. Gemini Flash Latest stays the start model.
+- **Meta**: `muse-spark-1.3` offers `max`.
+- The `openai-responses` driver serves any Responses API endpoint with an API
+  key, and a `models.toml` cost can carry a long-context tier
+  (`long_context_above`, `[models."<alias>".cost.long_context]`).
+
+### The terminal UI
+
+- `/effort` opens a picker of the current model's levels; `/effort <level>` sets
+  one. The model dialog's effort row follows the highlighted model, and the
+  session list's `/effort` offers the chosen model's real levels.
+- Shift+Enter starts a new line in Ghostty and Roost.
+- A `/model`, `/plan`, `/ask` or `/agent` typed mid-turn says why it did
+  nothing, and the draft stays.
+- The session list shows each running session's model at 100 columns and wider.
+- Reasons, fixes and notes wrap instead of being cut short, and a long path
+  breaks after a `/`.
+
+### Sessions and scripting
+
+- `craze ps --saved` lists saved sessions no host runs, and
+  `craze new --load <id>` reopens one in a host of its own. A hub client does the
+  same with `sessions.saved` and `session.reopen`.
+- `craze bridge --hub --no-start` attaches to a running hub and never starts one
+  (exit 3 when none runs).
+- When an upgrade replaced its binary, a hub from before says how to stop it
+  (`kill <pid>`; no session ends), and `craze new` explains an older hub's
+  refusal.
+- The Claude Code plugin gains a `craze:wonder` preset (`muse-wonder-1.0`).
+- The control protocol gains effort facts on native catalog models
+  (`capabilities.effortFacts`), the slash catalog's builtin `effort` row,
+  `stopping` on a registry entry, and the two saved-session methods. All
+  additive: the protocol and codec versions are unchanged.
+
+### Fixes
+
+- A closing native session cancels its own turn before its sub-agents, so it no
+  longer asks the model once more with their aborted results.
+- A model-dialog switch sends the effort the dialog showed, even when another
+  craze process changed the remembered effort since.
+- A failed ChatGPT-plan model list fetch backs off only that account.
+- The session list keeps ` · here` whole and shortens the directory's name
+  instead.
+
 ## v0.1.1 — 2026-10-12
 
 Anthropic joins the native providers, `/btw` asks a side question without

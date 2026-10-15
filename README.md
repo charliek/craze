@@ -82,7 +82,7 @@ More in the [Quick Start](docs/getting-started/quick-start.md).
 
 This repository is also a Claude Code plugin: sub-agents that hand a task to a
 craze session on a native, Grok or Cursor model and return its result. It needs
-craze 0.2.0 or newer (the next release) on your `PATH`.
+craze 0.2.0 or newer on your `PATH`.
 
 ```text
 /plugin marketplace add charliek/craze
