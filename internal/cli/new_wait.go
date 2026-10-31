@@ -36,7 +36,8 @@ import (
 // prompt was sent, a signal stops the session the command spawned and reports
 // it `cancelled` (exit 3), and --timeout's end stops it too (exit 1); a
 // provider that cannot start is exit 1 with the host's words. The session
-// runs on once its turn ends, for craze send to continue.
+// runs on once its turn ends, for craze send to continue, unless
+// --exit-after-turn ends it with its result (promptJob.endWithTurn).
 
 // newWhat names craze new in its lines.
 const newWhat = "craze new"
@@ -55,6 +56,9 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return usagef("craze new: --timeout must not be negative")
 	case f.maxMessage < 0:
 		return usagef("craze new: --max-message must not be negative")
+	}
+	if err := checkSessionFile(cmd, newWhat, f.sessionFile); err != nil {
+		return err
 	}
 	if err := f.prompt.check(cmd, newWhat, args); err != nil {
 		return err
@@ -87,6 +91,8 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return failJSON(stdout, r.out, err)
 	}
 	r.text = text
+	r.exitAfterTurn, r.file = f.exitAfterTurn, newSessionFile(f.sessionFile)
+	r.file.clear()
 	fail := func(kind errkind.Kind, format string, a ...any) error {
 		return failJSON(stdout, r.out, kindf(kind, newWhat+": "+format, a...))
 	}
@@ -127,6 +133,10 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return r.failBefore(spawnExit(newWhat, err))
 	}
 	r.session.id = ref.entry.CrazeSessionID
+	if err := r.file.host(newWhat, ref.entry); err != nil {
+		return r.failBefore(err)
+	}
+	newWaitHostKnown(r)
 	conn, err := dialWait(r.ctx, ref.entry, ref.entry.CrazeSessionID, newWhat, nil)
 	if err != nil {
 		return r.failBefore(err)
@@ -136,6 +146,11 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	defer conn.close(r.relayed)
 	return r.waitFor(conn)
 }
+
+// newWaitHostKnown sees the host known and --session-file written, nothing dialled:
+// a no-op, and the barrier a test sends a signal at when it means one that comes
+// before the prompt, with that file there to be taken away.
+var newWaitHostKnown = func(*promptJob) {}
 
 // spawnExit is a failed spawn (spawnHost) as command what's exit 1: the
 // spawn's own line — the host's words, and where its log is — under the

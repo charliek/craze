@@ -26,10 +26,12 @@ and want one fast, scriptable front end for several of them.
   [`craze new --load`](docs/reference/cli.md#craze-new-load)
 - **Scripting**: `craze new --wait`, `craze send` and `craze wait` run a task
   and print the result, with typed failures a program can branch on and retry,
-  a stopped turn's usage so far, a step that survives a mid-stream reset, and a
-  killed host's shell commands ended rather than left running.
+  a stopped turn's usage so far, a step that survives a mid-stream reset, a
+  killed host's shell commands ended rather than left running, a session that ends
+  with its turn, and `stop` and `cancel` safe to send twice.
   [`craze new`](docs/reference/cli.md#craze-new),
   [`craze wait`](docs/reference/cli.md#craze-wait),
+  [ending with the turn](docs/reference/cli.md#ending-with-the-turn),
   [failure kinds](docs/reference/cli.md#failure-kinds),
   [what a dead host leaves running](docs/reference/cli.md#what-a-dead-host-leaves-running)
 - **Claude Code sub-agents**: a plugin that hands a task to a craze session.

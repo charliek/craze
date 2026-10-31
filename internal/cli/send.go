@@ -72,6 +72,9 @@ type sendFlags struct {
 	maxMessage int
 	json       bool
 	prompt     promptInput
+	// exitAfterTurn and sessionFile are --exit-after-turn and --session-file.
+	exitAfterTurn bool
+	sessionFile   string
 }
 
 func newSendCmd() *cobra.Command {
@@ -94,8 +97,24 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "give up after this long (from the command's start); with --wait the result is running, exit 5, with a handle to follow it (default: no limit)")
 	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the outcome as one JSON object")
+	registerExitFlags(cmd, &f.exitAfterTurn, &f.sessionFile)
 	registerPromptInputFlags(cmd, &f.prompt)
 	return cmd
+}
+
+// registerExitFlags declares what craze new --wait and craze send --wait both
+// take for a caller that runs them unattended.
+func registerExitFlags(cmd *cobra.Command, exitAfterTurn *bool, sessionFile *string) {
+	cmd.Flags().BoolVar(exitAfterTurn, "exit-after-turn", false, "with --wait: end the session with its turn: no other prompt is admitted, and its host is gone by the time this exits, unless the turn runs on (exit 5, or its end not observed), its prompt was removed, or the host cannot be told from another process (see the docs); refused on a host that cannot do this")
+	cmd.Flags().StringVar(sessionFile, "session-file", "", "with --wait: write {session, short, hostPid, hostId} to this file as soon as the host is known, and handle once the prompt is taken")
+}
+
+// checkSessionFile refuses --session-file with no path to write.
+func checkSessionFile(cmd *cobra.Command, what, path string) error {
+	if cmd.Flags().Changed("session-file") && strings.TrimSpace(path) == "" {
+		return usagef("%s: --session-file needs a path", what)
+	}
+	return nil
 }
 
 // runSend is craze send (the file's comment).
@@ -113,9 +132,16 @@ func runSend(cmd *cobra.Command, f *sendFlags, args []string, sigs <-chan os.Sig
 		return usagef("craze send: --max-message must not be negative")
 	case cmd.Flags().Changed("max-message") && !f.wait:
 		return usagef("craze send: --max-message needs --wait")
+	case cmd.Flags().Changed("exit-after-turn") && !f.wait:
+		return usagef("craze send: --exit-after-turn needs --wait")
+	case cmd.Flags().Changed("session-file") && !f.wait:
+		return usagef("craze send: --session-file needs --wait")
 	case !rundir.ValidToken(id):
 		// Refused before a registry read builds a path (the bridge's rule).
 		return usagef("craze send: that is not a session id (craze ps lists them)")
+	}
+	if err := checkSessionFile(cmd, sendWhat, f.sessionFile); err != nil {
+		return err
 	}
 	if err := f.prompt.check(cmd, sendWhat, words); err != nil {
 		return err
@@ -132,12 +158,19 @@ func runSend(cmd *cobra.Command, f *sendFlags, args []string, sigs <-chan os.Sig
 		return failJSON(cmd.OutOrStdout(), r.out, err)
 	}
 	r.text = text
+	r.exitAfterTurn, r.file = f.exitAfterTurn, newSessionFile(f.sessionFile)
+	r.file.clear()
 	conn, err := r.connect(id)
 	if err != nil {
 		return r.failBefore(err)
 	}
 	defer conn.close(r.relayed)
 	r.session = resultSession{id: conn.sessionID, provider: conn.entry.Provider}
+	// A session found running has no ready line: this is the first the command
+	// has heard from its host (a reload's own spawn wrote it at its ready line).
+	if err := r.file.host(sendWhat, conn.entry); err != nil {
+		return r.failBefore(err)
+	}
 	if f.wait {
 		return r.waitFor(conn)
 	}
@@ -281,6 +314,11 @@ func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
 			ref, serr := r.spawn(opts, false)
 			if serr != nil {
 				return nil, spawnExit(sendWhat, serr)
+			}
+			if !ref.held {
+				if err := r.file.host(sendWhat, ref.entry); err != nil {
+					return nil, err
+				}
 			}
 			if ref.held {
 				conn, err = r.dialFound(ref.entry, ref.entry.CrazeSessionID)

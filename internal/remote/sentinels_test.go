@@ -99,6 +99,7 @@ func engineTwins(t *testing.T) []twin {
 		{"engine.ErrIndexWrite", "a rename whose index write failed", indexWriteTwin(t)},
 		{"engine.ErrNotAccepting", "", engine.ErrNotAccepting},
 		{"agent.ErrNotInTurn", "", agent.ErrNotInTurn},
+		{"engine.ErrExitFenced", "", engine.ErrExitFenced},
 		{"engine.ErrCommandInProgress", "", engine.ErrCommandInProgress},
 		{"engine.ErrAlreadyPending", "", engine.ErrAlreadyPending},
 		{"engine.ErrStaleTurn", "", engine.ErrStaleTurn},
@@ -155,7 +156,7 @@ var neverOnTheWire = map[string]string{
 func matchSet() map[string]error {
 	return map[string]error{
 		"engine.ErrIndexWrite": engine.ErrIndexWrite, "engine.ErrNotAccepting": engine.ErrNotAccepting,
-		"agent.ErrNotInTurn": agent.ErrNotInTurn, "engine.ErrCommandInProgress": engine.ErrCommandInProgress,
+		"agent.ErrNotInTurn": agent.ErrNotInTurn, "engine.ErrExitFenced": engine.ErrExitFenced, "engine.ErrCommandInProgress": engine.ErrCommandInProgress,
 		"engine.ErrAlreadyPending": engine.ErrAlreadyPending, "engine.ErrStaleTurn": engine.ErrStaleTurn,
 		"engine.ErrStaleVersion": engine.ErrStaleVersion, "engine.ErrUnknownRow": engine.ErrUnknownRow,
 		"agent.ErrBadAnswer": agent.ErrBadAnswer, "agent.ErrAlreadyResolved": agent.ErrAlreadyResolved,
@@ -486,7 +487,7 @@ func TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown(t *testing.T) {
 // field.
 func TestEveryWireCapabilityComesBack(t *testing.T) {
 	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true, "Presence": true,
-		"ModelsRefresh": true, "Aside": true, "SlashCatalog": true, "EffortFacts": true}
+		"ModelsRefresh": true, "Aside": true, "SlashCatalog": true, "EffortFacts": true, "ExitAfterTurn": true}
 	wt := reflect.TypeFor[protocol.SessionCapabilities]()
 	at := reflect.TypeFor[agent.Capabilities]()
 	from := map[string]string{} // agent field → wire field
@@ -616,6 +617,7 @@ var tuiSites = []tuiSite{
 	{"config.go", "ConfigControlSocket", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigDetach", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigHostIdleExit", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigHostIdleExitUnattended", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigProviderRetries", "Is", "ErrConfigMalformed", 1, proofLocal},
 	// /connect's (plan 031 §3.9): the TUI's own key store, read and written
 	// in this process through Config.NativeDir — never a Backend call's

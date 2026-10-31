@@ -43,7 +43,7 @@ end `it exits when idle`.
 
 **The waiting commands' JSON changes.** A program that reads `craze new --wait
 --json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
-Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn). `craze prompt
+Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn) and [`craze stop` on a session that has ended](#other-commands). `craze prompt
 --json` is unchanged but for [one new line](#a-stream-that-fails-partway), and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
 together: an error from an older host reads as kind `unknown`, retryable false, and
 a kind from a newer host that this craze does not know reads as `unknown` with the
@@ -263,6 +263,53 @@ the stderr line as before. Stdout used to be empty. `craze prompt`'s stays empty
 
 An unreadable, empty or over-size prompt is kind `prompt`, and an unknown
 `--provider` kind `config`, at the same exit 2.
+
+**`craze stop` on a session that has ended exits 0.** It used to exit 1, so a retried
+stop read as a failure. It says so on stdout now, and the new `--json` names it:
+
+```text
+craze stop: the session has ended          (stderr, exit 1)
+```
+
+becomes
+
+```text
+session 175bfe79 has already ended         (stdout, exit 0)
+```
+
+and with `--json`, which is new (the old command had none, and printed the line above
+on stderr with nothing on stdout):
+
+```json
+{"session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","result":"already_ended"}
+```
+
+A script that took exit 1 to mean "already gone" reads exit 0, or `result`. An unknown
+id stays exit 1: [`craze stop`](../reference/cli.md#craze-stop) lists each outcome.
+`craze cancel` without `--json` on a session that has ended stays exit 1. With `--json`,
+new too, it is exit 0, `already_ended`, and
+[`--turn`](../reference/cli.md#craze-cancel) cancels one named turn only.
+
+**An index or registry that cannot be read is told from an unknown id.** `craze stop`
+and `craze cancel` used to say `no session <id>` for an index they could not read, and
+`the session has ended` for a running host whose registry entry they could not read. Both
+are still exit 1; the message says which.
+
+**Unattended hosts idle out after ten minutes, and an ask no longer pins them.** A host
+`craze new --wait` started, or `craze send` reloaded from one, used to stay for
+`host_idle_exit`, an hour by default, and indefinitely with a permission ask open. It
+now exits after [`host_idle_exit_unattended`](../reference/configuration.md#host-idle-exit),
+ten minutes by default, ask or no ask, background work behind that ask included. So after `needs_input`, exit 4, under `--no-force`,
+answer within that limit, or stay attached, or raise it: `host_idle_exit_unattended =
+"1h"` gives you the old limit, but for the ask. `craze send` still loads an ended
+session again. A host already running keeps the limit it started with.
+
+**`--exit-after-turn` and `--session-file` are new**, on `craze new --wait` and `craze
+send --wait`, and `craze ps --json --brief`. See [ending with the
+turn](../reference/cli.md#ending-with-the-turn), [the session
+file](../reference/cli.md#the-session-file) and [`craze ps`](../reference/cli.md#craze-ps).
+`--exit-after-turn` refuses a host from before it, or one a TUI hosts, before sending
+the prompt: exit 1, kind `config`.
 
 **Plain `craze new --json` gains `kind`.** Its `error` is the wire's, as it was.
 
@@ -623,7 +670,7 @@ attach` picks it up again, and `craze ps` lists what is running.
   working session's turn and, pressed twice, closes an idle one. A stopped session stays
   resumable with `craze -c`.
 - **Idle exit:** a host with no client attached and nothing in flight exits by
-  itself after an hour. `host_idle_exit` in `config.toml` sets that (`"20m"`,
+  itself after an hour. (A host a waiting command started: ten minutes, since v0.2.0.) `host_idle_exit` in `config.toml` sets that (`"20m"`,
   `"2h30m"`, `"never"`); a session that was never prompted is capped at five
   minutes, and a host whose start failed goes as soon as its launcher has been
   told.

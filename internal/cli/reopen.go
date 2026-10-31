@@ -123,7 +123,7 @@ const (
 // starts a new session, and what --wait takes. A reopen sends no prompt, and
 // its session's provider, directory and settings are its own.
 var newLoadNot = []string{"prompt-file", "remove-prompt-file", "provider", "model", "effort", "fast", "no-fast", "no-force",
-	"title", "dir", "wait", "plan", "ask", "timeout", "max-message"}
+	"title", "dir", "wait", "plan", "ask", "timeout", "max-message", "exit-after-turn", "session-file"}
 
 // runNewLoad is craze new --load (the comment above).
 func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {

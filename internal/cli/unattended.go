@@ -3,15 +3,20 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -215,12 +220,17 @@ type promptJob struct {
 	// its prompt never reached it (undo). nil for every other: a reload's host
 	// (craze send) serves a session that existed before the command and that
 	// another send may have found and prompted meanwhile (C3 review r1, 1), so
-	// it stays up like any host — an interactive one idles out, an unattended
-	// one stays until craze stop (TF-9); and a held session's host is its
-	// holder's.
+	// it stays up like any host, until it idles out (idle.go: an unattended one
+	// after host_idle_exit_unattended, an interactive one after host_idle_exit);
+	// and a held session's host is its holder's.
 	spawned *hostRef
 	// session is who a result is about, once the command knows.
 	session resultSession
+	// exitAfterTurn is --exit-after-turn: the prompt raises its session's exit
+	// fence where the host can, and a result ends the session (endWithTurn).
+	exitAfterTurn bool
+	// file is --session-file, nil for none.
+	file *sessionFile
 }
 
 // newPromptJob is command what's run (cmd): its prompt text, --wait, its
@@ -316,7 +326,23 @@ func (r *promptJob) failBefore(err error) error {
 func (r *promptJob) waitAfter(g *submitGate, conn *waitConn, res *turnResult, wf *waitFailure) error {
 	stdout := r.cmd.OutOrStdout()
 	if wf == nil {
-		return writeResult(stdout, r.cmd.ErrOrStderr(), r.out, res)
+		if !r.exitAfterTurn || !endsWithResult(res.Status) {
+			err := writeResult(stdout, r.cmd.ErrOrStderr(), r.out, res)
+			if r.exitAfterTurn && res.Status == statusDropped {
+				fmt.Fprintf(r.cmd.ErrOrStderr(), "%s: the prompt was removed before it ran; session %s was left running\n", r.what, psShort(conn.sessionID))
+			}
+			return err
+		}
+		res.markStopping()
+		// The stream goes first: nothing reads it now, a host must not wait to
+		// flush to it, and a stdout nobody reads must not pin the host through it.
+		conn.abandon = true
+		_ = conn.c.Close()
+		// The result next, wherever it goes: a caller has it however the stop fares,
+		// and a stdout that has gone is no reason to leave the host up.
+		err := r.writeOrSignal(stdout, res)
+		r.endWithTurn(conn)
+		return err
 	}
 	switch fate, target := g.close(); fate {
 	case promptUnsent, promptRefused:
@@ -415,6 +441,9 @@ func (r *promptJob) undo(hurried bool) undoing {
 		return undoNone
 	}
 	r.spawned = nil
+	// A session with no prompt and no host leaves no index row: nothing the
+	// file could name is there any more.
+	r.file.remove()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -450,10 +479,211 @@ func withNote(err error, note string) error {
 // (submitGate) once the attachment's incarnation is proven, followed to its
 // turn's end, the result or the failure printed (waitAfter).
 func (r *promptJob) waitFor(conn *waitConn) error {
-	g := &submitGate{submit: submitPrompt(conn, r.text)}
+	if r.exitAfterTurn {
+		if err := r.checkEnds(conn); err != nil {
+			return r.failBefore(err)
+		}
+	}
+	g := &submitGate{submit: submitLastPrompt(conn, r.text, r.exitAfterTurn)}
 	timeout, stopTimer := timeoutAt(r.deadline)
 	defer stopTimer()
-	res, wf := waitTurn(context.Background(), conn, waitStart{submit: g.run}, waitOptions{timeout: timeout, sigs: r.relayed})
+	res, wf := waitTurn(context.Background(), conn, waitStart{submit: g.run}, waitOptions{timeout: timeout, sigs: r.relayed, submitted: r.promptSubmitted})
 	waitFate(g)
 	return r.waitAfter(g, conn, res, wf)
+}
+
+// checkEnds refuses --exit-after-turn on a host that cannot honour it, before the
+// prompt is sent: one that cannot hold its queue (an older craze), or cannot be
+// stopped (a TUI's). craze new --wait's is always this craze's own.
+func (r *promptJob) checkEnds(conn *waitConn) error {
+	ctx, cancel := context.WithTimeout(r.ctx, readBound)
+	defer cancel()
+	short := psShort(conn.sessionID)
+	var list protocol.SessionsListResult
+	if err := conn.c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list); err != nil {
+		return kindf(errkind.ConnectionLost, "%s: session %s did not answer before the prompt was sent; it was not sent: %s", r.what, short, sanitizeLine(err.Error()))
+	}
+	i := slices.IndexFunc(list.Sessions, func(row protocol.SessionRow) bool { return row.SessionID == conn.sessionID })
+	if i < 0 || !list.Sessions[i].Capabilities.ExitAfterTurn || !list.Sessions[i].Capabilities.Stop {
+		return kindf(errkind.Config, "%s: session %s's host cannot end with its turn (a craze TUI's, or an older craze's): --exit-after-turn refused, and the prompt was not sent", r.what, short)
+	}
+	return nil
+}
+
+// promptSubmitted is the host's answer to the prompt, for --session-file.
+func (r *promptJob) promptSubmitted(handle string) {
+	if err := r.file.submitted(handle); err != nil {
+		fmt.Fprintf(r.cmd.ErrOrStderr(), "%s: --session-file: %s; it has no handle\n", r.what, sanitizeLine(err.Error()))
+	}
+}
+
+// --------------------------------------------------------- --exit-after-turn
+
+// exitAfterTurnWait bounds the wait for a host to go after its stop, by its process
+// identity; a host's own stop sequence is bounded well inside it (serveStartJoin, an
+// agent's SIGTERM and SIGKILL). exitStopSendWait bounds sending that stop, and no
+// signal shortens it. exitKillWait bounds the wait for a killed host to go. Variables
+// only so a test can shorten them.
+var (
+	exitAfterTurnWait = 15 * time.Second
+	exitStopSendWait  = 5 * time.Second
+	exitKillWait      = 2 * time.Second
+)
+
+// exitAfterTurnPoll is how often the host is looked at.
+const exitAfterTurnPoll = 25 * time.Millisecond
+
+// endsWithResult says a result of status ends the session under --exit-after-turn:
+// the turn's end, or an ask nobody will answer. Not running, the --timeout that
+// leaves the turn going; not dropped, the prompt another client took away, which
+// lifted the fence: someone is using that session, and a stop would cancel their turn.
+func endsWithResult(status string) bool {
+	return status == statusCompleted || status == statusFailed || status == statusCancelled || status == statusNeedsInput
+}
+
+// writeOrSignal writes the result, on a goroutine of its own: a write a reader never
+// takes blocks, and a caught signal cannot interrupt it. A signal gives up on the
+// write and leaves the result's own exit code.
+func (r *promptJob) writeOrSignal(stdout io.Writer, res *turnResult) error {
+	code := statusExit(res.Status)
+	stderr := r.cmd.ErrOrStderr()
+	done := make(chan error, 1)
+	go func() { done <- writeResult(stdout, stderr, r.out, res) }()
+	select {
+	case err := <-done:
+		return err
+	case <-r.relayed:
+	}
+	fmt.Fprintf(stderr, "%s: interrupted with its stdout not read: the result was not written whole\n", r.what)
+	if code != 0 {
+		return &exitError{code: code}
+	}
+	return nil
+}
+
+// stopAfterTurn sees the waiter about to send its stop, its result written: a
+// no-op, and the barrier a test holds it at to read that result first.
+var stopAfterTurn = func() {}
+
+// endWithTurn is --exit-after-turn's end, the stream given up and the result
+// written: session.stop over a connection of its own, the socket naming this very
+// host, within exitStopSendWait, whatever signal comes; then the host gone by its
+// process identity, within exitAfterTurnWait, a signal ending only that wait. A stop
+// refused or unreachable, or a host still there at the bound, is killed (killHost).
+// Whatever comes of it, the result and its exit code stand, and stderr says what was
+// done.
+func (r *promptJob) endWithTurn(conn *waitConn) {
+	stopAfterTurn()
+	e := conn.entry
+	e.CrazeSessionID = conn.sessionID
+	stderr, short := r.cmd.ErrOrStderr(), psShort(conn.sessionID)
+	var said string
+	if err := sendStopBounded(e, r.what); err != nil {
+		said = "was not stopped (" + sanitizeLine(err.Error()) + ")"
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), exitAfterTurnWait)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- waitHostGone(ctx, e) }()
+		select {
+		case err := <-done:
+			if err == nil {
+				return
+			}
+		case <-r.relayed:
+			fmt.Fprintf(stderr, "%s: interrupted with session %s's stop sent and its host still going\n", r.what, short)
+			return
+		}
+		said = fmt.Sprintf("was still there %s after its stop", exitAfterTurnWait)
+	}
+	if err := r.killHost(e); err != nil {
+		fmt.Fprintf(stderr, "%s: session %s %s, and its host may still be running: %s; craze stop %s ends it\n", r.what, short, said, sanitizeLine(err.Error()), short)
+		return
+	}
+	fmt.Fprintf(stderr, "%s: session %s %s; its host was killed\n", r.what, short, said)
+}
+
+// sendStopBounded is session.stop to the host e names, within exitStopSendWait on a
+// context of its own: nil once the host has taken it, or is gone. A host's refusal is
+// the error. A dial or a command with no answer may be the host going, so it is looked
+// at, and the stop sent again while it stays.
+func sendStopBounded(e rundir.Entry, what string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), exitStopSendWait)
+	defer cancel()
+	for {
+		if readHost(e) == hostExited {
+			return nil
+		}
+		err := askStop(ctx, e, what, agent.StopCauseExitAfterTurn)
+		var re *remote.Error
+		switch {
+		case err == nil, stopRacedItsEnd(err):
+			return nil
+		case errors.As(err, &re):
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("its socket did not answer: %w", err)
+		case <-time.After(exitAfterTurnPoll):
+		}
+	}
+}
+
+// waitHostGone waits for the host e names to be gone by its identity, on ctx.
+func waitHostGone(ctx context.Context, e rundir.Entry) error {
+	for readHost(e) != hostExited {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(exitAfterTurnPoll):
+		}
+	}
+	return nil
+}
+
+// askStop is one session.stop over a connection of its own, answered by its
+// receipt.
+func askStop(ctx context.Context, e rundir.Entry, what, cause string) error {
+	c, err := dialCLI(ctx, e, what)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	_, err = c.Command(ctx, protocol.MethodSessionStop, protocol.StopParams{SessionID: e.CrazeSessionID, Cause: cause}, nil, remote.CommandOptions{})
+	return err
+}
+
+// killHost is the last of --exit-after-turn: SIGKILL to the host e names, its identity
+// read straight before the signal, which leaves an instant (no pidfd), then what it
+// left running ended as a waiter ends it (reapHostGroups). The error is why it could
+// not be done: a process that cannot be told from another's, or one not this user's.
+// A further signal cuts the wait and the reap short.
+func (r *promptJob) killHost(e rundir.Entry) error {
+	switch readHost(e) {
+	case hostExited:
+		return nil
+	case hostUnnamed:
+		return errors.New("its process cannot be told from another's")
+	}
+	if e.PID == os.Getpid() {
+		return errors.New("it is this process")
+	}
+	if err := syscall.Kill(e.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-r.relayed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	waitCtx, stop := context.WithTimeout(ctx, exitKillWait)
+	defer stop()
+	_ = waitHostGone(waitCtx, e)
+	reapHostGroups(ctx, e.HostID)
+	return nil
 }

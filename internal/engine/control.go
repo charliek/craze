@@ -383,6 +383,11 @@ func classify(err error) classification {
 		// whatever this command's own arguments are — so it is NEVER STORED
 		// (r28 finding 1). Its reason says which seam refused.
 		return classification{code: "not_accepting", reason: "not_in_turn"}
+	case errors.Is(err, ErrExitFenced):
+		// A gate refusal like ErrNotAccepting, of every prompt from the fence
+		// on: nothing ran, and it stays refused until the host has ended and a
+		// later prompt loads the session in another.
+		return classification{code: "not_accepting", reason: "exit_fenced"}
 	case errors.Is(err, ErrCommandInProgress):
 		// Never stored, but by a different mechanism: a duplicate that finds
 		// this reservation open is answered before finish is ever called, so

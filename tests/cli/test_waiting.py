@@ -41,7 +41,8 @@ def _config(fake_agent_bin: Path) -> None:
     craze_home = Path(os.environ["CRAZE_HOME"])
     craze_home.mkdir(parents=True, exist_ok=True)
     (craze_home / "config.toml").write_text(
-        f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n\n[agents]\ncursor = "{fake_agent_bin}"\n', encoding="utf-8"
+        f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\nhost_idle_exit_unattended = "{TEST_HOST_IDLE_EXIT}"\n\n[agents]\ncursor = "{fake_agent_bin}"\n',
+        encoding="utf-8",
     )
 
 

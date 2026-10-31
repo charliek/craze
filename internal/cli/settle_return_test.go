@@ -113,6 +113,19 @@ func (r *waitRig) heldReturn() *gate {
 	return g
 }
 
+// waitPublished waits for the last of evs on the session's stream, so a snapshot
+// taken after it holds them.
+func (r *waitRig) waitPublished(evs []agent.Event) {
+	r.t.Helper()
+	if len(evs) == 0 {
+		return
+	}
+	waitFor(r.t, "the events to be folded", func() bool {
+		snap, err := r.eng.TranscriptSnapshot("", 0)
+		return err == nil && len(snap.Ended) > 0
+	})
+}
+
 // waitStartedPublished waits for turn's started on the session's stream, read
 // from the start of the incarnation on a connection of the test's own: an
 // event emitted after it is the turn's. The engine runs the turn — State's

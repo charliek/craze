@@ -107,6 +107,10 @@ type Options struct {
 	// host's start is still when it started. It goes on the wire in UTC; the
 	// zero time leaves it out, which is an older host's document.
 	StartedAt time.Time
+	// ExitAfterTurn serves session.prompt's exitAfterTurn and session.stop's
+	// cause, and says so in the capability of that name: a host that serves
+	// session.stop (Stop), and a session it can therefore end after the turn.
+	ExitAfterTurn bool
 	// RowFacts puts the row facts on sessions.list's row (plan 030 §3.8) —
 	// the head ask's summary, what a working session is doing, its last
 	// reply, when it entered its row state, a failed start and its error,

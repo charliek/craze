@@ -314,7 +314,9 @@ socket](protocol.md#reaching-a-host). What follows:
   saving the session like any stop. A host whose session was never prompted
   has its idle limit capped at five minutes (after the startup grace, and
   only while nothing keeps it busy); one whose start failed, as soon as its
-  launcher has been told.
+  launcher has been told. A host a waiting command started has a shorter limit of
+  its own, [`host_idle_exit_unattended`](configuration.md#host-idle-exit) (ten
+  minutes by default).
 - **A quit before the session is up leaves nothing behind.** A host this
   launch spawned whose session never came up in the TUI (quit while starting,
   a failed start) is stopped; a host that was already running is never
@@ -836,6 +838,7 @@ refusing.
 ./bin/craze ps
 ./bin/craze ps --json
 ./bin/craze ps --no-hub
+./bin/craze ps --json --brief
 ./bin/craze ps --saved [-C <dir>] [--json] [--no-hub]
 ```
 
@@ -871,6 +874,7 @@ sessions running`.
 | Flag | Description |
 |------|-------------|
 | `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table; with `--saved`, the [`sessions.saved`](protocol.md#sessionssaved) result |
+| `--brief` | With `--json`: the same rows without each session's `catalogs`, its model and mode lists, which are most of a row's size. A usage error, exit 2, without `--json`, whose table has none to leave out, and with `--saved`, whose rows have none |
 | `--no-hub` | Read each session's host directly, without the hub; with `--saved`, the session index |
 | `--saved` | List the saved sessions instead — not running, ready to reopen — newest first ([below](#saved-sessions)) |
 | `-C`, `--dir <dir>` | With `--saved`, only the sessions that ran in this directory (made absolute and cleaned, then matched exactly). Without `--saved` it is a usage error, exit 2 |
@@ -1204,6 +1208,7 @@ same upgrade remedy as plain `craze new`'s.
 ./bin/craze new --wait --provider native --model chatgpt/gpt-6.1-sol "fix the flaky test in stats/"
 ./bin/craze new --wait --timeout 9m --max-message 20000 --provider grok --prompt-file /tmp/task.md --remove-prompt-file
 ./bin/craze new --wait --plan --provider cursor --json "how would you split core.py?"
+./bin/craze new --wait --exit-after-turn --session-file /tmp/run.json --provider native --json "fix the flaky test in stats/"
 ```
 
 Hands a task to a new session and prints its result: what a coding agent runs
@@ -1227,7 +1232,8 @@ prompt became to its end, printing the result exactly as
 or one JSON object with `--json` — and exiting with its status's code
 ([Waiting commands](#waiting-commands)): 0 completed, 3 failed or cancelled, 4
 needs_input, 5 running at `--timeout`. The session runs on once the turn has
-ended, until its host's [idle exit](configuration.md#host-idle-exit):
+ended, until its host's [idle exit](configuration.md#host-idle-exit) (ten minutes
+by default, `host_idle_exit_unattended`) or [`--exit-after-turn`](#ending-with-the-turn):
 [`craze send`](#craze-send) gives it the next prompt, with the context of the
 first; `craze attach`, `craze ps` and the session list find it like any
 session.
@@ -1256,6 +1262,8 @@ the settings it started with.
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
 | `--timeout <duration>` | Stop waiting after this long, counted from the command's start — the host's start included: `running`, exit 5, with a handle. Before the prompt was sent, the session is stopped instead, exit 1, `timed out before the prompt was sent` |
 | `--max-message <n>` | As `craze wait`'s |
+| `--exit-after-turn` | End the session with its turn: no other prompt is admitted, and the host is gone by the command's exit, with [these exceptions](#ending-with-the-turn) |
+| `--session-file <path>` | Write the session's identity to this file as soon as its host is ready, and the handle once the prompt is taken ([below](#the-session-file)) |
 | `--json` | Print the result as one JSON object; a failure as `{"error":{"message":…,"kind":…,"retryable":…}}` ([failures](#failures-and-kinds)) |
 
 **Signals.** The prompt is the command's own, as a handle's turn is
@@ -1281,6 +1289,129 @@ craze new: session 8327352e did not start: agent binary not found: /opt/cursor/a
 A prompt whose answer was lost with its connection is never sent again: exit
 1, `the prompt may not have reached it; craze wait <short> follows the
 session`.
+
+### Ending with the turn
+
+`--exit-after-turn`, on `craze new --wait` and `craze send --wait`, is for a caller
+that wants nothing left behind. **When the command writes a result that says `stopping:
+true`, the session's host is gone by the time the command has exited.** That is a
+`completed`, `failed`, `cancelled` or `needs_input` result, exits 0, 3 and 4. These are
+the only cases with a host still there afterwards:
+
+- **Exit 5**, `running` at `--timeout`: the turn goes on, so nothing is stopped.
+- **An exit 1 that couldn't observe the turn's end** (`connection_lost`, `unobserved`, a
+  cancel not confirmed after a signal): the turn may run on, so nothing is stopped.
+  `host_exited` and `stopped` have no host to stop.
+- **The prompt removed before it ran**, `dropped`, exit 3: the session was left running,
+  for whoever removed it.
+- **A host that can't be killed**: its stop failed and its process can't be told from
+  another's, or isn't yours. Stderr says it may still be running.
+- **A signal during the wait for the host to go**: the stop has been sent, and the
+  command doesn't wait to see it through. Stderr says so.
+
+It is refused **before the prompt is sent**, exit 1, kind `config`, on a host that can't
+do this: one from an older craze, whose queue can't be held, and one a craze TUI hosts,
+which can't be stopped from here. `craze new --wait` always has a host that can.
+
+**The fence, from when the prompt is taken.** The host admits no other prompt to the
+session from that moment, not only once the turn has ended, since one taken now could
+never run:
+
+- **A prompt sent meanwhile** is refused, whoever sends it. `craze send` exits 1, kind
+  `stopped`, `the prompt was refused: engine: this session ends with its current prompt
+  (--exit-after-turn), and takes no other`. On the protocol it is `not_accepting`,
+  reason [`exit_fenced`](protocol.md#the-exit-fence). So is an interjection, which
+  arriving after the turn could become a turn of the agent's own. Once the host has
+  gone, the same `craze send` loads the session again in a new host, as for any session
+  that has ended.
+- **Prompts queued ahead of this one** were there first and run first, in order. The
+  session stops after this prompt's turn, not before.
+- **A prompt queued behind this one** can only come from a client that queued it with
+  the session idle, before the fence. It is removed as the turn ends, with its
+  `removed` event; a `craze send --wait` following it reads `dropped`, exit 3. It never
+  starts.
+- **This prompt removed** before it ran, by another client or by a failed turn ahead of
+  it clearing the queue, lifts the fence. The command reads `dropped`, exit 3, with no
+  `stopping`, sends no stop, and says on stderr that the session was left running:
+  someone is using it, and a stop would cancel their turn. So does its own signal while
+  the prompt waits in the queue.
+- **An agent that starts a turn entirely on its own** can't be fenced. The stop ends it.
+- **A session loaded again** by a later host has no fence: it belongs to that host.
+
+**The stop, once the result is written.** The command first drops its attachment, so a
+stdout nobody reads pins nothing, then writes the result to stdout. It sends
+[`session.stop`](protocol.md#sessionstop) with cause `exit_after_turn`, and waits **up to
+15 seconds** for the host's process to be gone, by its identity. The result says so:
+`stopping: true`, and `session stopping` in the plain footer.
+
+- **`needs_input` abandons the ask.** Nobody can answer it: the turn is cancelled with
+  the session, and the result has no `handle`, there being nothing to follow. A caller
+  that wants to answer asks must not pass this flag. That includes a prompt still queued
+  behind another turn's open ask (`needs_input`, `blockedBy`): it never runs. A `craze
+  wait` following the turn from elsewhere reads cause `exit_after_turn`.
+- **The result comes first, and stands.** A caller has it even if the stop hangs, and
+  nothing below changes its exit code. A stdout that has gone fails the write, exit 1 as
+  for any waiting command, and the session is stopped all the same.
+- **A stdout nobody reads** blocks the write, for as long as that lasts, with nothing
+  attached, so the host's idle exit still ends it. A signal gives up on the write, says
+  so on stderr, goes on to the stop, and exits with the result's code.
+- **A stop that is refused, or gets no answer within 5 seconds, or a host still there
+  after the 15:** the host is sent `SIGKILL`, its identity read straight before, and what
+  it left running is ended as in [what a dead host leaves
+  running](#what-a-dead-host-leaves-running). Stderr says what was done.
+- **Any other client attached sees the session end**, a TUI included, as for any
+  `craze stop`. Attached clients do not hold the stop back.
+
+**After exit 5:** the fence stays and no further prompt is taken. `craze wait <id> --from
+<handle>` reports the turn as usual and **never stops the session**: it has no such flag.
+Call `craze stop` when you have the result, or leave it to the idle exit, which follows
+the wait's detach.
+
+**Signals.** A signal cancels the command's own turn, as without the flag
+([Signals](#craze-new-wait)): that is a result, written and followed by the stop. Once
+the result is out, a signal never keeps the stop from being sent; it only ends the wait
+for the host to go. A second signal during the cancel exits at once with nothing more
+sent. A prompt never sent stops nothing that was not already the command's own: `craze
+new --wait` stops the session it started, and `craze send --wait` leaves its session as
+it was.
+
+**A waiter killed outright** sends nothing. The fence holds, and the idle exit is the
+backstop: a session under a fence has at most `host_idle_exit_unattended`, whichever host
+it runs on, from when nothing is attached and nothing is running. An open ask does not
+hold it up.
+
+### The session file
+
+`--session-file <path>`, on `craze new --wait` and `craze send --wait`, tells a caller
+which session it has before the result arrives:
+
+```json
+{"session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","hostPid":48213,"hostId":"0123456789ab"}
+```
+
+It is written atomically, `0600`, its parent directories made if they are missing, in
+two steps:
+
+1. **As soon as the host is known, before the prompt is sent.** A host the command
+   started, `craze send`'s reload included, when its ready line arrives, before the
+   session has finished starting. A session `craze send` found running, or a reload
+   that found another host holding it, once attached, there being no ready line.
+2. **With `handle`,** the one `craze wait --from` takes, once the host has answered the
+   prompt. A failed rewrite is one line on stderr: the first write stays, and the turn
+   and its result are unaffected.
+
+A file already at the path is removed as the command starts, once its flags and prompt
+have passed, so it is never taken for this run's; it reappears at step 1. A directory
+there is left alone, and fails the first write.
+
+**A first write that fails** is exit 1, kind `config`, before the prompt is sent. `craze
+new --wait` stops the session it started. `craze send` leaves a session it found, and a
+host it started by reloading, which another `craze send` may already have found.
+
+**A session the command started that never took a prompt** is stopped, and leaves no
+[index row](configuration.md#session-index) to name: its file is removed with it (a
+signal or `--timeout` before the prompt, a refused prompt). Otherwise the file stays,
+and names a real session whichever way the command ended.
 
 ## craze send
 
@@ -1336,8 +1467,9 @@ is exit 1 with the host's own words. The host a reload starts is never
 stopped by `craze send`, whatever becomes of its prompt — another `craze send`
 may have found it and prompted it meanwhile — not even when `craze send` gives
 up while that host is still starting (a signal, `--timeout`): it stays up like
-any session's host (an interactive one idles out; an unattended one until
-`craze stop`).
+any session's host, until its [idle exit](configuration.md#host-idle-exit)
+(an interactive one's `host_idle_exit`, an unattended one's
+`host_idle_exit_unattended`) or `craze stop`.
 
 | Flag | Description |
 |------|-------------|
@@ -1346,6 +1478,8 @@ any session's host (an interactive one idles out; an unattended one until
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
 | `--timeout <duration>` | Give up after this long, counted from the command's start (a reload included). With `--wait`, `running` at its end, exit 5, with a handle |
 | `--max-message <n>` | With `--wait`, as `craze wait`'s (a usage error without it) |
+| `--exit-after-turn` | With `--wait` (a usage error without it): end the session with its turn, the host gone by the command's exit, with [these exceptions](#ending-with-the-turn). Exit 1, kind `config`, the prompt not sent, on a host that can't. On a session you are using too: every client attached sees it end |
+| `--session-file <path>` | With `--wait` (a usage error without it): write the session's identity to this file before the prompt is sent, and the handle once it is taken ([The session file](#the-session-file)) |
 | `--json` | One JSON object: the result with `--wait`, where the prompt went without it; a failure as `{"error":{"message":…,"kind":…,"retryable":…}}` ([failures](#failures-and-kinds)) |
 
 ### The prompt
@@ -1450,7 +1584,9 @@ sent), [`files:`](#what-files-lists) (with `outside the workspace:` and `plan fi
 when there are any), one
 `auto-answered:` line per question or plan craze's approval policy answered,
 `ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
-command to run next for a `running` or `needs_input` result.
+command to run next for a `running` or `needs_input` result; `session stopping`
+in its place for one `--exit-after-turn` ends, saying the ask is abandoned when one is
+open.
 
 | Status | Exit | |
 |--------|------|---|
@@ -1488,7 +1624,8 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | `usageComplete` | `false` when a step was in flight as the turn was cut short, so its spend is not in `usage` ([below](#a-turn-cut-short)); never `true`, and otherwise absent |
 | `autoAnswered` | `[{kind, summary, choice}]`: each question or plan craze's approval policy answered |
 | `ask`, `blockedBy` | `needs_input`: the open ask, `{id, kind, summary}`, and for a queued prompt the turn holding it up |
-| `handle` | `running`, `needs_input`, and a failure with one |
+| `handle` | `running`, `needs_input` (but for one that [`--exit-after-turn`](#ending-with-the-turn) ends), and a failure with one |
+| `stopping` | `true` when [`--exit-after-turn`](#ending-with-the-turn) goes on to stop the session after this result; absent otherwise |
 | `partial` | `true` when some of the turn's events were not seen |
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
 | `messageFile` | `--max-message`'s file, holding the whole result, when it cut or left out the message or the plan; `message` and `plan` are then what was kept |
@@ -1555,15 +1692,15 @@ workspace. It is what the agent's tools said, not a look at the disk:
 
 What each status carries:
 
-| Status | Exit | `stopReason` | `error` | `usage` | `usageComplete` | `planEnded` |
-|--------|------|--------------|---------|---------|-----------------|-------------|
-| `completed` | 0 | `end_turn`; `cancelled` for a plan returned to the caller | absent | the last report, when there was one | absent | `true` at a presented plan, else absent |
-| `idle` | 0 | absent | absent | absent | absent | absent |
-| `failed` | 3 | the engine's (`max_tokens`, `refusal`, `max_turn_requests`) when it sent one, else `error` | always | the last report, when there was one | absent | absent |
-| `cancelled` | 3 | `cancelled`; `stopped` when the session's close ended the turn | present when the prompt never reached the session (`interrupted`), or the session's close ended it (`stopped`); otherwise absent | the last report, when there was one | `false` when a step was in flight, else absent | absent |
-| `dropped` | 3 | `cancelled` | absent | absent | absent | absent |
-| `needs_input` | 4 | absent | absent | the last report, when there was one | absent | absent |
-| `running` | 5 | absent | absent | the last report, when there was one | absent | absent |
+| Status | Exit | `stopReason` | `error` | `usage` | `usageComplete` | `planEnded` | `stopping` |
+|--------|------|--------------|---------|---------|-----------------|-------------|------------|
+| `completed` | 0 | `end_turn`; `cancelled` for a plan returned to the caller | absent | the last report, when there was one | absent | `true` at a presented plan, else absent | `true` under `--exit-after-turn` |
+| `idle` | 0 | absent | absent | absent | absent | absent | absent |
+| `failed` | 3 | the engine's (`max_tokens`, `refusal`, `max_turn_requests`) when it sent one, else `error` | always | the last report, when there was one | absent | absent | `true` under `--exit-after-turn` |
+| `cancelled` | 3 | `cancelled`; `stopped` when the session's close ended the turn | present when the prompt never reached the session (`interrupted`), or the session's close ended it (`stopped`); otherwise absent | the last report, when there was one | `false` when a step was in flight, else absent | absent | `true` under `--exit-after-turn` |
+| `dropped` | 3 | `cancelled` | absent | absent | absent | absent | absent |
+| `needs_input` | 4 | absent | absent | the last report, when there was one | absent | absent | `true` under `--exit-after-turn` |
+| `running` | 5 | absent | absent | the last report, when there was one | absent | absent | absent |
 
 **`stopReason`** is the engine's word when it sent one. A turn the agent ran on
 its own (its bracket carries no reason) and a turn read from an older host report
@@ -1576,7 +1713,7 @@ reason it has always had, so `craze prompt`'s exit is unchanged. An agent that g
 on to carry an accepted plan out did not end at it, and has no `planEnded`. A
 waiter that met the turn afterwards reads the turn's events back from its host to
 tell, and gets the `plan` with it. It cannot once the host no longer holds those
-events, past `--timeout`'s end, or when the session has ended 256 more asks since
+events, once it has begun to stop, past `--timeout`'s end, or when the session has ended 256 more asks since
 (the plan's ask has aged out of the ended list its snapshot looks in): `planEnded`
 is then left out of a turn that did end at an approved plan.
 
@@ -1585,6 +1722,13 @@ or a wait that lost part of its stream, settles it from how the session says it
 ended. Its status comes from that outcome, which calls a stop other than
 `end_turn` done: `completed` there, `failed` when followed live; its `stopReason`
 says which it was.
+
+**A returned plan read as the host stops.** A waiter that met such a turn late, and whose
+look back at its events is refused because the session is stopping, reads what its
+snapshot says instead: a plan's ask the policy answered during this turn means `completed`,
+`planEnded: true`, without the plan's text, which was in the event. A wait with no snapshot
+of that moment (`--from` a handle placed past the plan) has nothing to go on, and reads
+`cancelled`.
 
 ### A turn cut short
 
@@ -1743,7 +1887,10 @@ are harmless: each holds the record's lock while it acts on it.
 - **The instant between a command's start and its line being written.**
 - **A cursor, grok or gx agent's commands**, which are the agent's own. An agent's
   group is ended only while the agent itself is running. An agent that has already
-  exited leaves anything still in its group alone.
+  exited leaves anything still in its group alone. A cursor agent runs its shell
+  commands in a session of their own, so after a `SIGKILL`ed host they keep running,
+  and neither the waiter nor a sweep can reach them. A grok agent's commands end with
+  the agent. A caller that needs certainty checks its workspace's processes itself.
 - **Other boots and PID namespaces.** Numbers in a record written in a container, or
   before a reboot, mean nothing here, so nothing is signalled and the record is left
   to [age out](configuration.md#host-logs).
@@ -1821,7 +1968,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | Kind | When | Retryable |
 |------|------|-----------|
 | `usage` | A flag or argument error (exit 2). At exit 1 too: an id several sessions match | false |
-| `config` | An unknown provider or model, bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has | false |
+| `config` | An unknown provider or model, bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
 | `workspace` | `-C` is missing or not a directory | false |
 | `prompt` | The prompt is unreadable, empty or too long (exit 2) | false |
 | `start_failed` | The agent or host did not start | true |
@@ -1832,7 +1979,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | `context_too_large` | The request does not fit the model's context window | false |
 | `model_not_found` | The provider or agent does not serve the model | false |
 | `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
-| `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running | false |
+| `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running, or a prompt refused because the session [ends with its turn](#ending-with-the-turn) | false |
 | `connection_lost` | The command lost its socket while the host is shown alive, or its state cannot be told: the turn then may have ended, and the message says which | true |
 | `host_exited` | The host's process is shown gone with no ending observed and no word of a stop | true |
 | `unobserved` | The turn's ending could not be learnt, a prompt may have reached the session with its answer lost, or `--timeout` ended with its answer out and the prompt was then taken | true |
@@ -1870,7 +2017,30 @@ agent runs on its own included — and prints `cancelled turn-3` (`cancelled`
 alone when no turn of craze's ran: the agent's own turn, or an ask open between
 turns). With nothing running it prints `nothing to cancel`, exit 0. The
 session goes on, and so does its queue: the next queued prompt starts. The id
-is resolved as `craze wait`'s; a failure is exit 1 with one line.
+is resolved as `craze wait`'s; a failure is exit 1 with one line. A session that has
+ended is one of those without `--json`: `the session has ended`, exit 1.
+
+| Flag | Description |
+|------|-------------|
+| `--turn <turn>` | Cancel this turn only, and only while it is the current one: a retried cancel can then never reach the next queued turn. It takes a result's `turn` field, `turn-3`. The host checks it as it takes the cancel, on every craze host there has been. It names a turn of craze's own, so an agent's own turn never matches. Turn ids restart with each host, so a session loaded again since has another `turn-3`: name a turn only while its host runs. Anything else prints `turn-3 is not the current turn; nothing was cancelled`, exit 0 |
+| `--json` | One object: `{session, short, turn?, result}` |
+
+With `--json`:
+
+| `result` | Exit | `error.kind` | When |
+|----------|------|--------------|------|
+| `cancelled` | 0 | | The cancel was taken; `turn` names it, absent when no turn of craze's ran |
+| `nothing_to_cancel` | 0 | | Nothing runs and no ask is open |
+| `turn_not_current` | 0 | | `--turn` named a turn that has ended, or has not started; `turn` is that turn, and nothing was cancelled |
+| `already_ended` | 0 | | No host serves the session and the index has its row, or its host went under the command |
+| `not_found` | 1 | `config` | No running session has the id, and the index has no row for it |
+| `ambiguous` | 1 | `usage` | The id matches more than one session |
+| `index_error` | 1 | `internal` | The host registry or the session index could not be read, or a running host's registry entry couldn't, unless the id was found live elsewhere: nothing can be said of the id |
+| `unreachable` | 1 | `connection_lost`, `start_failed` | The host is running and did not answer, or its session has not started |
+| `failed` | 1 | `internal` | The host answered with another failure |
+
+A failure is `{"error":{"message":…,"kind":…,"retryable":…},"result":…}`, with `session`
+and `short` once the id was resolved to one, and its usual line on stderr.
 
 ## craze stop
 
@@ -1880,10 +2050,33 @@ is resolved as `craze wait`'s; a failure is exit 1 with one line.
 
 Ends the session — its turn cancelled, its queue cleared, its host gone — and
 prints `stopped 8327352e` once its host has taken the stop. It stays in the
-session index, to resume. A session a craze TUI hosts cannot be stopped from
-here (exit 1): close it there. The id is resolved as `craze wait`'s. A waiting
-command following a turn it cuts short reports [a `cancelled` result](#a-turn-cut-short),
-exit 3, with that turn's usage so far.
+session index, to resume. A session that has ended already prints `session 8327352e
+has already ended`, also exit 0, so a stop can be sent again safely. A session a craze
+TUI hosts cannot be stopped from here (exit 1): close it there. The id is resolved as
+`craze wait`'s. A waiting command following a turn it cuts short reports [a `cancelled`
+result](#a-turn-cut-short), exit 3, with that turn's usage so far.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | One object: `{session, short, result}` |
+
+With `--json`:
+
+| `result` | Exit | `error.kind` | When |
+|----------|------|--------------|------|
+| `stopped` | 0 | | The host took the stop, or went while it was being sent |
+| `already_ended` | 0 | | No host serves the session and the index has its row, or its host had gone by the time it was dialled |
+| `not_found` | 1 | `config` | No running session has the id, and the index has no row for it |
+| `ambiguous` | 1 | `usage` | The id matches more than one session |
+| `index_error` | 1 | `internal` | The host registry or the session index could not be read, or a running host's registry entry couldn't, unless the id was found live elsewhere: nothing can be said of the id |
+| `unreachable` | 1 | `connection_lost`, `start_failed` | The host is running and did not answer, or its session has not started |
+| `unsupported` | 1 | `internal` | A craze TUI hosts the session, or an older craze cannot be stopped from here |
+| `failed` | 1 | `internal` | The host answered with another failure |
+
+A stop that races the host's own exit reads `stopped` or `already_ended`, never a
+failure. A session that never took a prompt has no index row, so once its host has gone
+its id reads `not_found`. A failure is `{"error":{"message":…,"kind":…,"retryable":…},"result":…}`, with
+`session` and `short` once the id was resolved to one, and its usual line on stderr.
 
 ## craze auth
 
@@ -2335,4 +2528,5 @@ script can branch on the code alone:
 | 5 | `running` | `--timeout` passed; the turn goes on (`craze wait <id> --from <handle>` follows it) |
 
 `craze cancel` and `craze stop` exit 0 when they did what they say —
-`nothing to cancel` included — 1 on a failure, and 2 for a usage error.
+`nothing to cancel` and `craze stop` on a session that has ended included — 1 on a
+failure, and 2 for a usage error. [`--json`](#craze-stop) names each outcome.

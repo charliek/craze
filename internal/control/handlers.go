@@ -386,6 +386,13 @@ func (c *conn) sessionPrompt(b *bound, info protocol.MethodInfo, req *request) o
 		default:
 			return badParams("params.mode %q is none of queue, send_now, interject", p.Mode)
 		}
+		switch {
+		case !p.ExitAfterTurn:
+		case !c.srv.opts.ExitAfterTurn:
+			return refused(protocol.CodeUnsupported, protocol.ReasonUnsupported, "params.exitAfterTurn is not served by this host: its capability exitAfterTurn is false")
+		case p.Mode != protocol.PromptQueue, p.FromRow != "":
+			return badParams("params.exitAfterTurn goes with mode queue and text")
+		}
 		return nil
 	}
 	if perr := c.params(b, info, req, &p, check); perr != nil {
@@ -393,6 +400,13 @@ func (c *conn) sessionPrompt(b *bound, info protocol.MethodInfo, req *request) o
 	}
 	cmd := engine.Command{Client: b.client, ID: p.CommandID}
 	return c.command(b, req.method, func() outcome {
+		if p.ExitAfterTurn {
+			res, err := b.eng.SubmitExitAfterTurn(cmd, p.Text)
+			if err != nil {
+				return refusal(engineError(err))
+			}
+			return promptResult(res)
+		}
 		if p.Mode == protocol.PromptInterject {
 			ctx, cancel := commandCtx()
 			defer cancel()

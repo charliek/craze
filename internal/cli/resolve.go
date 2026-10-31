@@ -98,10 +98,11 @@ func reloadHint(matches []string) string {
 	return " (craze send " + psShort(matches[0]) + " <prompt> reloads it)"
 }
 
-// sessionLive reports whether a live host still serves session id.
+// sessionLive reports whether a live host still serves session id, or may: a scan
+// that missed a live host's entry cannot say none does.
 func sessionLive(id string) bool {
-	entries, err := rundir.Hosts(rundir.ProcessEnv())
-	if err != nil {
+	entries, unreadable, err := rundir.HostsScan(rundir.ProcessEnv())
+	if err != nil || len(unreadable) > 0 {
 		// Cannot tell: say the connection was lost, which sends the user to
 		// the handle, not to a reload.
 		return true

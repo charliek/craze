@@ -44,6 +44,9 @@ func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 		if err := e.refusalLocked(); err != nil {
 			return agent.QueuedPrompt{}, err
 		}
+		if err := e.exitFenceRefusalLocked(""); err != nil {
+			return agent.QueuedPrompt{}, err
+		}
 		if !e.log.OutboxRoom() {
 			return agent.QueuedPrompt{}, ErrUnavailable
 		}

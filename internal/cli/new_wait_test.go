@@ -34,7 +34,7 @@ func unattendedHome(t *testing.T) (rundir.Env, string, *childCmds) {
 	_, ws := serveHome(t)
 	// A craze directory of its own (writeCrazeConfig's), so the environment
 	// is read again after it.
-	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
+	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\nhost_idle_exit_unattended = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
 	env := rundir.ProcessEnv()
 	kids := spawnAsChild(t, nil)
 	// No test here is about a bound of the handshake's: each is serveStep,
@@ -348,7 +348,7 @@ func TestSendReloadsAnEndedSessionWithItsRecordedSettings(t *testing.T) {
 // to it. Both prompts run in the one host, each send its own turn.
 func TestTwoSendsReloadingOneSessionShareItsHost(t *testing.T) {
 	_, ws := serveHome(t)
-	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
+	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\nhost_idle_exit_unattended = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
 	env := rundir.ProcessEnv()
 	gate := filepath.Join(t.TempDir(), "claimed")
 	if err := syscall.Mkfifo(gate, 0o600); err != nil {

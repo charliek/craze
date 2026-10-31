@@ -234,21 +234,45 @@ type HostIdleExit struct {
 // line saying why for the host's log; an absent key is the default and
 // silent. The host is what reads it, once, as it starts.
 func ConfigHostIdleExit() (HostIdleExit, string) {
-	def := HostIdleExit{After: DefaultHostIdleExit}
 	cfg, err := readConfig()
 	switch {
 	case errors.Is(err, ErrConfigMalformed):
-		return def, "config.toml could not be parsed"
+		return HostIdleExit{After: DefaultHostIdleExit}, "config.toml could not be parsed"
 	case err != nil:
-		return def, "config.toml could not be read"
+		return HostIdleExit{After: DefaultHostIdleExit}, "config.toml could not be read"
 	}
 	v, ok := cfg["host_idle_exit"]
+	return hostIdleExitValue("host_idle_exit", v, ok, DefaultHostIdleExit)
+}
+
+// DefaultHostIdleExitUnattended is host_idle_exit_unattended's default: a host
+// nobody attends has less reason to wait for anyone than one a person left.
+const DefaultHostIdleExitUnattended = 10 * time.Minute
+
+// ConfigHostIdleExitUnattended reads `host_idle_exit_unattended`, the limit of a
+// host started --unattended: the same forms and the same fail-safe as
+// ConfigHostIdleExit's, its own default ten minutes.
+func ConfigHostIdleExitUnattended() (HostIdleExit, string) {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return HostIdleExit{After: DefaultHostIdleExitUnattended}, "config.toml could not be parsed"
+	case err != nil:
+		return HostIdleExit{After: DefaultHostIdleExitUnattended}, "config.toml could not be read"
+	}
+	v, ok := cfg["host_idle_exit_unattended"]
+	return hostIdleExitValue("host_idle_exit_unattended", v, ok, DefaultHostIdleExitUnattended)
+}
+
+// hostIdleExitValue reads key's value (ok: present), def for anything else.
+func hostIdleExitValue(key string, v any, ok bool, after time.Duration) (HostIdleExit, string) {
+	def := HostIdleExit{After: after}
 	if !ok {
 		return def, ""
 	}
 	raw, ok := v.(string)
 	if !ok {
-		return def, "config.toml host_idle_exit is not a string"
+		return def, "config.toml " + key + " is not a string"
 	}
 	raw = strings.TrimSpace(raw)
 	if strings.EqualFold(raw, "never") {
@@ -256,7 +280,7 @@ func ConfigHostIdleExit() (HostIdleExit, string) {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d < 0 {
-		return def, fmt.Sprintf("config.toml host_idle_exit %q is neither a duration nor \"never\"", raw)
+		return def, fmt.Sprintf("config.toml %s %q is neither a duration nor \"never\"", key, raw)
 	}
 	return HostIdleExit{After: d}, ""
 }

@@ -339,6 +339,7 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostR
 		LocalClient: local,
 	}
 	if stop != nil {
+		opts.ExitAfterTurn = true
 		// A session.stop marks the entry stopping before its receipt is
 		// queued (plan 046 B4): no client reads the receipt before every
 		// reader of the registry reads the host as stopping.
@@ -940,7 +941,15 @@ func (l *hostLifecycle) request(cause, why string) {
 // stopBeginning is control.Options.StopBeginning: a session.stop the server has
 // accepted, ahead of its fence and its receipt.
 func (l *hostLifecycle) stopBeginning(r control.StopRequest) {
-	l.latch(agent.StopCauseStop, "session.stop from client "+r.Client)
+	l.latch(stopRequestCause(r), "session.stop from client "+r.Client)
+}
+
+// stopRequestCause is what a session.stop says began it, stop when it does not.
+func stopRequestCause(r control.StopRequest) string {
+	if r.Cause != "" {
+		return r.Cause
+	}
+	return agent.StopCauseStop
 }
 
 // serveStopHanded sees a stop acknowledged and about to reach the coordinator: a
@@ -950,7 +959,7 @@ var serveStopHanded = func() {}
 // stopFunc is control.Options.Stop: a session.stop the server accepted.
 func (l *hostLifecycle) stopFunc(r control.StopRequest) {
 	serveStopHanded()
-	l.request(agent.StopCauseStop, "session.stop from client "+r.Client)
+	l.request(stopRequestCause(r), "session.stop from client "+r.Client)
 }
 
 // cause is what began the stop and why, as the first request said: "" before

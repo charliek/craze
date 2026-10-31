@@ -61,6 +61,10 @@ type Options struct {
 	// exactly, with a duplicate stop or a refused attach before it. Off,
 	// session.stop is refused unsupported, reason stop_unsupported.
 	Stop bool
+	// ExitAfterTurn is plan 048's opt-in, with Stop: session.prompt takes
+	// exitAfterTurn and session.stop takes cause (capabilities.exitAfterTurn:
+	// true), and the run_stop op closes for the cause the stop said.
+	ExitAfterTurn bool
 	// StoppingMark is plan 046's opt-in (B4, #93), with Stop: a registered
 	// Host's first accepted session.stop marks its registry entry stopping
 	// before its receipt is queued (control.Options.StopAccepted,
@@ -285,6 +289,8 @@ type Host struct {
 	// fixtures' coordinator (Options.Stop): at most one, the server's own
 	// rule. stopped says run_stop has run the sequence.
 	stops int
+	// stopCause is what the stop handed over said began it.
+	stopCause string
 	// stopHeard is closed on the first stop the server hands over, so
 	// RunStop can wait for it (stopHeardWait).
 	stopHeard     chan struct{}
@@ -339,6 +345,7 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		AsideInterval: control.AsideEachDelta,
 	}
 	if o.Stop {
+		co.ExitAfterTurn = o.ExitAfterTurn
 		co.Stop = h.stopRequested
 		if o.StoppingMark {
 			co.StopAccepted = h.stopAccepted
@@ -1056,9 +1063,10 @@ func (h *Host) stopAccepted() {
 // stopRequested is the fixtures' coordinator (control.StopFunc, with
 // Options.Stop): it records the stop the server handed it — once, the
 // server's own rule — and returns, the sequence left to RunStop.
-func (h *Host) stopRequested(control.StopRequest) {
+func (h *Host) stopRequested(r control.StopRequest) {
 	h.mu.Lock()
 	h.stops++
+	h.stopCause = r.Cause
 	h.mu.Unlock()
 	h.stopHeardOnce.Do(func() { close(h.stopHeard) })
 }
@@ -1085,9 +1093,12 @@ func (h *Host) RunStop() error {
 		}
 	}
 	h.mu.Lock()
-	stops, stopped := h.stops, h.stopped
+	stops, stopped, cause := h.stops, h.stopped, h.stopCause
 	h.stopped = true
 	h.mu.Unlock()
+	if cause == "" {
+		cause = agent.StopCauseStop
+	}
 	switch {
 	case !h.opts.Stop:
 		return fmt.Errorf("fakehost: run_stop: this Host does not serve session.stop (Options.Stop)")
@@ -1096,7 +1107,7 @@ func (h *Host) RunStop() error {
 	case stopped:
 		return fmt.Errorf("fakehost: run_stop: the stop sequence has already run")
 	}
-	return h.currentEngine().CloseFor(agent.StopCauseStop)
+	return h.currentEngine().CloseFor(cause)
 }
 
 // opParams is one op's wire shape: {"name": "...", ...}, the union of every

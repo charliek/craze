@@ -83,6 +83,7 @@ type Reason string
 const (
 	ReasonNotAccepting      Reason = "not_accepting"
 	ReasonNotInTurn         Reason = "not_in_turn"
+	ReasonExitFenced        Reason = "exit_fenced"
 	ReasonCommandAborted    Reason = "command_aborted"
 	ReasonSetOutcomeUnknown Reason = "set_outcome_unknown"
 	ReasonBadCatalog        Reason = "bad_catalog"
@@ -275,6 +276,7 @@ type ReasonInfo struct {
 var reasons = []ReasonInfo{
 	{ReasonNotAccepting, CodeNotAccepting, true, false},
 	{ReasonNotInTurn, CodeNotAccepting, true, false},
+	{ReasonExitFenced, CodeNotAccepting, true, false},
 	{ReasonStartFailed, CodeNotAccepting, false, false},
 	{ReasonNotResumable, CodeNotAccepting, false, false},
 

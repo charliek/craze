@@ -7,7 +7,7 @@ about it in the session index (`~/.craze/sessions.jsonl`) that
 index](#session-index). Every session also writes a [journal](#session-journal)
 of what happened in it, which can contain secrets and can be turned off.
 `config.toml` also holds the switches `journal`, `control_socket`, `detach`,
-`host_idle_exit`, `terminal_title`, `background`, `host_status` and
+`host_idle_exit`, `host_idle_exit_unattended`, `terminal_title`, `background`, `host_status` and
 [`provider_retries`](#native-provider-retries), the
 [`[agents]`](#agent-binaries) table, and the
 [`[compat.claude]`](#claude-content-compatclaude) table that says which of
@@ -437,6 +437,36 @@ Three cases have their own limit:
 - **A failed start: none.** A host whose session could not start (an auth
   failure, say) stays only long enough for its launcher to attach and be told
   why; its limit is 0, even under `"never"`.
+
+**A host a waiting command started has its own limit.** `host_idle_exit_unattended`
+applies to a host started unattended (by `craze new --wait`, or by `craze send`
+reloading such a session), and is fixed as the host starts:
+
+```toml
+host_idle_exit_unattended = "10m"     # the default
+host_idle_exit_unattended = "2m"      # the same forms as host_idle_exit
+host_idle_exit_unattended = "never"   # never exit for being idle
+```
+
+Its value is read as `host_idle_exit`'s is, falling back to `"10m"`. The rest of this
+section applies, with these differences:
+
+- **A waiter attached pins it**, as any client attached does: `craze wait` or `--wait`
+  following a turn. After the last client detaches, the clock starts again.
+- **An open ask does not pin it.** A permission under `--no-force` that nobody answers
+  ends with the session once the clock runs out. The clock counts from when the ask
+  opened or the last client left, whichever is later, and an ask has no timeout of its
+  own, so that limit is all it gets. Precisely, the clock restarts at the first
+  one-second look that sees the ask. What the ask holds up does not count either: its
+  turn, the prompts queued behind it, any sub-agent running, and background work the
+  parent can't deliver while it waits, all cut off with it. A client attached still pins
+  it, as above.
+- **Never prompted: five minutes at most**, and **a failed start: none**, as above.
+
+**A session under [`--exit-after-turn`](cli.md#ending-with-the-turn)'s fence**, whatever
+host it runs on, has at most `host_idle_exit_unattended`, and an open ask does not pin
+it: this is what ends it if its waiter dies first. Under `"never"` the fence adds no
+limit, and a host's own `host_idle_exit` stands.
 
 Independently of the limit, a host whose socket file or registry entry has
 vanished (`/run/user` removed at the last logout, a registry swept by hand)

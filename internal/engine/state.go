@@ -105,6 +105,9 @@ type State struct {
 	// folding the stream has seen up to the same seq; like the snapshot and
 	// the asks, it is a read of its own and not a cut with the rest of State.
 	LastTurn *LastTurn
+	// ExitFenced says a prompt was submitted to be the session's last and the
+	// exit fence stands (exitfence.go): what shortens a host's idle limit.
+	ExitFenced bool
 }
 
 // LastTurn is how one turn ended (plan 030 §3.7): session.state's and a
@@ -237,6 +240,7 @@ func (e *Engine) State() State {
 	st.LastTurn = last
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	st.ExitFenced = e.exitFence != nil
 	st.Queue = e.queue.List()
 	st.Activity = e.activity
 	if replaying && (st.Activity == ActivityStarting || st.Activity == ActivityIdle) {

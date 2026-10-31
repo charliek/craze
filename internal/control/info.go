@@ -97,6 +97,9 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	}
 	// stop is this server's: true where it serves session.stop (stop.go).
 	info.Capabilities.Stop = s.opts.Stop != nil
+	// exitAfterTurn is too: session.prompt and session.stop take their members
+	// (Options.ExitAfterTurn).
+	info.Capabilities.ExitAfterTurn = s.opts.ExitAfterTurn
 	// rowFacts is too: its sessions.list row carries the row facts (rowFacts,
 	// plan 030 §3.8), and a document of a server without them leaves it out.
 	info.Capabilities.RowFacts = s.opts.RowFacts

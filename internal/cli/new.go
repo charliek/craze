@@ -95,11 +95,14 @@ type newFlags struct {
 	timeout    time.Duration
 	maxMessage int
 	prompt     promptInput
+	// exitAfterTurn and sessionFile are --exit-after-turn and --session-file.
+	exitAfterTurn bool
+	sessionFile   string
 }
 
 // newWaitOnly is every flag only craze new --wait takes: on plain craze new
 // each is a usage error.
-var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask"}
+var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask", "exit-after-turn", "session-file"}
 
 func newNewCmd() *cobra.Command {
 	f := &newFlags{}
@@ -153,6 +156,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "with --wait: start in ask mode")
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "with --wait: stop waiting after this long (from the command's start): the result is running, exit 5, with a handle to follow it (default: no limit)")
 	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
+	registerExitFlags(cmd, &f.exitAfterTurn, &f.sessionFile)
 	registerPromptInputFlags(cmd, &f.prompt)
 	return cmd
 }

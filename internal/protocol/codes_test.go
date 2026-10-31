@@ -38,7 +38,7 @@ func TestRetryIsTheFourCodesNothingRan(t *testing.T) {
 // have no code; and the lookups answer from the table.
 func TestTheReasonTableIsExhaustive(t *testing.T) {
 	shared := map[protocol.Code][]protocol.Reason{
-		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed", "not_resumable"},
+		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "exit_fenced", "start_failed", "not_resumable"},
 		protocol.CodeAborted:      {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
 		protocol.CodeUnavailable: {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
 			"closing", "spawn_failed", "host_unreachable"},

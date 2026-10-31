@@ -203,6 +203,9 @@ type waitOptions struct {
 	// sigs delivers SIGINT, SIGTERM and SIGHUP: signal.Notify's channel in
 	// production, a test's own channel in its tests.
 	sigs <-chan os.Signal
+	// submitted is told the handle once the submit's answer names the target,
+	// nil for nothing to tell (--session-file).
+	submitted func(handle string)
 }
 
 // waitStart is where one wait starts. At most one of from and submit is set;
@@ -585,10 +588,17 @@ var timeoutAt = func(deadline time.Time) (<-chan time.Time, func()) {
 // it was sent, is never sent again (P7): the prompt may not have reached the
 // session.
 func submitPrompt(conn *waitConn, text string) func(context.Context, uint64) (waitTarget, error) {
+	return submitLastPrompt(conn, text, false)
+}
+
+// submitLastPrompt is submitPrompt that, with fence, also raises the session's
+// exit fence (--exit-after-turn), on a host whose capability says it can
+// (promptJob.checkEnds).
+func submitLastPrompt(conn *waitConn, text string, fence bool) func(context.Context, uint64) (waitTarget, error) {
 	return func(ctx context.Context, ident uint64) (waitTarget, error) {
 		var res protocol.PromptResult
 		_, err := conn.c.Command(ctx, protocol.MethodSessionPrompt,
-			protocol.PromptParams{SessionID: conn.sessionID, Text: text, Mode: protocol.PromptQueue}, &res, remote.CommandOptions{Identity: ident})
+			protocol.PromptParams{SessionID: conn.sessionID, Text: text, Mode: protocol.PromptQueue, ExitAfterTurn: fence}, &res, remote.CommandOptions{Identity: ident})
 		follow := "; craze wait " + psShort(conn.sessionID) + " follows the session"
 		switch {
 		case errors.Is(err, remote.ErrOutcomeUnknown):
@@ -631,7 +641,7 @@ func (e *submitError) Unwrap() error { return e.err }
 func (e *submitError) ErrorInfo() errkind.Info { return errkind.New(e.kind) }
 
 // refusalKind is what the host's refusal of a prompt was: a session closing or
-// closed is stopped, one that cannot start its start's, a prompt the host's own
+// closed, or one ending with its current prompt, is stopped, one that cannot start its start's, a prompt the host's own
 // bound refuses the prompt's, a session it does not serve config's, and a full
 // queue or the agent's own turn holding the session the agent's. Anything else
 // is craze's own.
@@ -641,7 +651,7 @@ func refusalKind(err error) errkind.Kind {
 		return errkind.Internal
 	}
 	switch re.Reason {
-	case protocol.ReasonNotAccepting, protocol.ReasonClosing, protocol.ReasonNotResumable:
+	case protocol.ReasonNotAccepting, protocol.ReasonClosing, protocol.ReasonNotResumable, protocol.ReasonExitFenced:
 		return errkind.Stopped
 	case protocol.ReasonStartFailed:
 		return startKind(re.Kind)
@@ -1175,27 +1185,42 @@ func (w *turnWaiter) returnedCancel(ctx context.Context, turn string) (returned,
 	case w.expired:
 		return false, false
 	}
-	found, err := w.lookReturned(ctx, turn)
+	found, unknown, err := w.lookReturned(ctx, turn)
 	if err != nil {
 		return false, false
+	}
+	if !found && unknown && w.acc.planAnsweredInTurn && !inProcessProvider(w.session.provider) {
+		// The lookup was refused (a stop's attach fence), which says nothing of the
+		// plan; the snapshot said what the turn did. Only ACP's policy answers a plan
+		// without accepting it, so its plan was returned, though its text is gone.
+		w.acc.returned = true
+		return true, true
 	}
 	return found, true
 }
 
+// inProcessProvider says name is a provider whose agent craze runs itself, whose
+// automatic plan answer accepts rather than returns (unattendedPolicy).
+func inProcessProvider(name string) bool {
+	p, err := agent.ProviderByName(name)
+	return err == nil && p.InProcess()
+}
+
 // lookReturned looks for turn's returned plan in its events (readTurnBack) and,
 // found, folds it into the accumulator as the live wait would have: the plan,
-// its automatic answer, and the mark. err is the lookup's interruption (its
+// its automatic answer, and the mark. unknown says the events could not be read,
+// so not finding the plan says nothing. err is the lookup's interruption (its
 // context's error), never a plan not found.
-func (w *turnWaiter) lookReturned(ctx context.Context, turn string) (bool, error) {
+func (w *turnWaiter) lookReturned(ctx context.Context, turn string) (found, unknown bool, err error) {
 	back, err := readTurnBack(ctx, w.conn.entry, w.session.id, w.inc, turn)
 	p := back.returned
 	if p == nil {
-		return false, err
+		return false, back.unknown, err
 	}
 	w.acc.plan = p.Plan
 	w.acc.auto = append(w.acc.auto, autoPlan(p))
 	w.acc.returned = true
-	return true, nil
+	return true, false, nil
 }
 
 // lookApproved is a turn that finished with end_turn, and that the waiter has
@@ -1228,10 +1253,13 @@ var (
 
 // turnBack is what a turn's events said, read back: the plan an unattended host
 // returned in it, or, read through to its ending, the whole turn folded as a
-// live wait would have folded it. Either is nil for not found.
+// live wait would have folded it. Either is nil for not found, and unknown says
+// the events could not be read at all: a dial or an attach refused, as a stop's
+// fence refuses one, or a stream lost.
 type turnBack struct {
 	returned *agent.PlanEvent
 	whole    *turnAccumulator
+	unknown  bool
 }
 
 // readTurnBack reads turn of incarnation inc from the session's events as its
@@ -1242,8 +1270,9 @@ type turnBack struct {
 // reading: found while ctx stands, it is the answer. Otherwise the turn's ending
 // does, and the folded turn is the answer. With neither, what comes back is
 // empty and the error says which: nil is not found — a replay the host refuses
-// (the events evicted), another incarnation's answer, none such in the turn, or
-// no answer within readBound — and ctx's own error is interrupted: the waiter's
+// (the events evicted), another incarnation's answer, none such in the turn — or,
+// with unknown set, no answer to be had: refused, lost, or none within readBound —
+// and ctx's own error is interrupted: the waiter's
 // work ended under the lookup (a signal, --timeout's end), which decides nothing
 // about the plan, found or not. No protocol change: an attach with a cursor is
 // what wait --from makes.
@@ -1252,21 +1281,22 @@ func readTurnBack(ctx context.Context, e rundir.Entry, sessionID, inc, turn stri
 	ctx, cancel := context.WithTimeout(ctx, readBound)
 	defer cancel()
 	miss := func() (turnBack, error) { return turnBack{}, parent.Err() }
+	cutOff := func() (turnBack, error) { return turnBack{unknown: true}, parent.Err() }
 	c, err := dialCLI(ctx, e, waitWhat)
 	if err != nil {
-		return miss()
+		return cutOff()
 	}
 	defer func() { _ = c.Close() }()
 	waitLookingBack(ctx)
 	st, err := c.Attach(ctx, remote.AttachOptions{SessionID: sessionID, Cursor: &protocol.Cursor{Incarnation: inc}, When: protocol.WhenNow})
 	if err != nil {
-		return miss()
+		return cutOff()
 	}
 	in, whole := false, newTurnAccumulator()
 	for {
 		it, err := st.Next(ctx)
 		if err != nil {
-			return miss()
+			return cutOff()
 		}
 		switch it.Kind {
 		case remote.KindAttached:
@@ -1302,9 +1332,12 @@ func readTurnBack(ctx context.Context, e rundir.Entry, sessionID, inc, turn stri
 				whole.fold(ev)
 			}
 		case remote.KindReady, remote.KindPresence:
-		default:
-			// Caught up (synchronized), restored, ended or lost: not found.
+		case remote.KindSynchronized:
+			// Caught up, and none such: not found.
 			return miss()
+		default:
+			// Restored, ended or lost, part-way through.
+			return cutOff()
 		}
 	}
 }
@@ -1334,6 +1367,7 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 		if prev.returned {
 			w.acc.returned, w.acc.plan = true, prev.plan
 		}
+		w.acc.planAnsweredInTurn = w.acc.planAnsweredInTurn || prev.planAnsweredInTurn
 		if prev.planApproved && !w.acc.workSince(prev) {
 			w.acc.planApproved, w.acc.plan = true, prev.plan
 		}
@@ -1352,6 +1386,9 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 // middle of is retracted when its event arrives (retract).
 func seedFromSnapshot(a *turnAccumulator, snap *transcript.Snapshot) {
 	a.noPlanEnded = !slices.ContainsFunc(snap.Ended, func(e transcript.AskEnding) bool { return e.Kind == agent.AskPlan })
+	a.planAnsweredInTurn = !snap.Turn.At.IsZero() && slices.ContainsFunc(snap.Ended, func(e transcript.AskEnding) bool {
+		return e.Kind == agent.AskPlan && e.Outcome == agent.AskAutomatic && !e.At.Before(snap.Turn.At)
+	})
 	a.retries = max(a.retries, snap.Turn.Retries)
 	entries := snap.Main.Entries
 	from := 0
@@ -2037,6 +2074,10 @@ func (w *turnWaiter) submitAnswered(ctx context.Context, a submitAnswer) {
 		return
 	}
 	w.setTarget(a.target)
+	if w.opts.submitted != nil {
+		// With the buffer replayed: a turn's started moves the handle's place.
+		defer func() { w.opts.submitted(w.handle()) }()
+	}
 	buffered := w.buffer
 	w.buffer = nil
 	for _, p := range buffered {

@@ -392,7 +392,6 @@ func TestSessionIdsNoLiveHostServes(t *testing.T) {
 	}{
 		{[]string{"wait", "0000c003"}, "craze wait: the session has ended (craze send 0000c003 <prompt> reloads it)\n"},
 		{[]string{"cancel", "0000c003"}, "craze cancel: the session has ended\n"},
-		{[]string{"stop", ended}, "craze stop: the session has ended\n"},
 		{[]string{"wait", "nosuchsession"}, "craze wait: no session nosuchsession\n"},
 		{[]string{"stop", "nosuchsession"}, "craze stop: no session nosuchsession\n"},
 	} {
@@ -400,6 +399,10 @@ func TestSessionIdsNoLiveHostServes(t *testing.T) {
 		if code != 1 || stdout != "" || stderr != c.want {
 			t.Errorf("craze %q: exit %d, %q %q; want %q", c.argv, code, stdout, stderr, c.want)
 		}
+	}
+	// craze stop of a session that has ended is what was asked for, exit 0.
+	if stdout, stderr, code := executeErr([]string{"stop", ended}); code != 0 || stdout != "session 0000c003 has already ended\n" || stderr != "" {
+		t.Errorf("craze stop of an ended session: exit %d, %q %q", code, stdout, stderr)
 	}
 	// --from's handle, parsed already, is named with the failure (review
 	// round 2, N4): plain, and beside the error in --json's object.

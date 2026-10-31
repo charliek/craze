@@ -54,10 +54,16 @@ type waitRig struct {
 // default) and runs turns in order, the last repeating.
 func newWaitRig(t *testing.T, ring int, turns ...stubTurn) *waitRig {
 	t.Helper()
+	return newWaitRigOn(t, control.Options{Workspace: "/w"}, ring, turns...)
+}
+
+// newWaitRigOn is newWaitRig with its server built from opts.
+func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTurn) *waitRig {
+	t.Helper()
 	env, _ := serveHome(t)
 	r := &waitRig{t: t, env: env}
 	r.s, r.eng = r.newEngine(ring, turns...)
-	r.srv = control.New(control.Options{Workspace: "/w"})
+	r.srv = control.New(opts)
 	t.Cleanup(r.srv.AddAttachmentsListener(func(n int) {
 		r.mu.Lock()
 		r.attached = n

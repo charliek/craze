@@ -74,7 +74,8 @@ import (
 //     provider as the next plain craze's default, as the TUI's does.
 //  7. The host waits for its stop: session.stop, SIGINT or SIGTERM, or its
 //     idle watcher's (idle.go): no client attached and nothing in flight for
-//     host_idle_exit, or its socket or registry entry gone. SIGHUP is caught
+//     host_idle_exit (for an unattended host, host_idle_exit_unattended), or its
+//     socket or registry entry gone. SIGHUP is caught
 //     and dropped — signal.Notify, never signal.Ignore, whose SIG_IGN an agent
 //     child would inherit across exec. The stop sequence runs once
 //     (serveHost.stop) and craze serve returns: exit 0.
@@ -584,6 +585,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	engOpts.MintedCrazeSessionID = minted
 	if f.unattended {
 		engOpts.Index.Unattended = f.unattendedRecord()
+		engOpts.AsksDoNotPin = true
 	}
 	// The index writes the same title as the user's once the session has its
 	// id (plan 043 P10): the row is pinned to it, as after a /rename.
@@ -606,7 +608,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// is served, so no attach can come ahead of its count (plan 030 §3.6).
 	ticks, now, stopTicks := idleTicks()
 	defer stopTicks()
-	idle := newIdleWatcher(ctl.server, eng, ctl.host.Lost, now, out)
+	idle := newIdleWatcher(ctl.server, eng, ctl.host.Lost, now, f.unattended, out)
 	// Before the engine is served: no stop reaches the host ahead of this.
 	lc.setRecord(func(cause string) {
 		r := rundir.StopRecord{Cause: cause, Turn: eng.State().Turn, At: time.Now().UTC()}

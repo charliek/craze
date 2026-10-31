@@ -894,3 +894,63 @@ func TestTheStopIsMarkedBeforeItsReceipt(t *testing.T) {
 		t.Fatalf("StopAccepted was told %d times, want once", n)
 	}
 }
+
+// withExitAfterTurn serves the exit fence and a stop's cause.
+func withExitAfterTurn() hostOpt { return func(c *hostConfig) { c.opts.ExitAfterTurn = true } }
+
+// TestTheExitFenceOnTheWire: its capability in the info document; the member admitted
+// with mode queue and text, and refused bad_request otherwise; a later prompt refused
+// not_accepting, reason exit_fenced; a host without the capability refusing it
+// unsupported, its document saying nothing, as it does for a stop's cause.
+func TestTheExitFenceOnTheWire(t *testing.T) {
+	prompt := func(h *host, a *client, p protocol.PromptParams) *protocol.Response {
+		p.SessionID, p.CommandID = sid(h), a.cmd()
+		return a.call(protocol.MethodSessionPrompt, p)
+	}
+	t.Run("served", func(t *testing.T) {
+		h, _ := newStopHost(t, withExitAfterTurn())
+		a := h.dial()
+		a.sayHello(nil)
+		state := ok[protocol.SessionsListResult](t, a.call(protocol.MethodSessionsList, protocol.SessionsListParams{}))
+		if !state.Sessions[0].Capabilities.ExitAfterTurn {
+			t.Fatalf("the capability: %+v", state.Sessions[0].Capabilities)
+		}
+		refusedWith(t, prompt(h, a, protocol.PromptParams{Text: "x", Mode: protocol.PromptSendNow, ExitAfterTurn: true}), protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
+		refusedWith(t, prompt(h, a, protocol.PromptParams{FromRow: "q-1", Mode: protocol.PromptQueue, ExitAfterTurn: true}), protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
+		hung := h.stub.HangNext()
+		started := ok[protocol.PromptResult](t, prompt(h, a, protocol.PromptParams{Text: "the last", Mode: protocol.PromptQueue, ExitAfterTurn: true}))
+		if started.Turn != "turn-1" {
+			t.Fatalf("the fenced prompt: %+v", started)
+		}
+		await(t, hung, "the turn to open")
+		refusedWith(t, prompt(h, a, protocol.PromptParams{Text: "another", Mode: protocol.PromptQueue}), protocol.RPCRefused, protocol.CodeNotAccepting, protocol.ReasonExitFenced)
+		refusedWith(t, a.call(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: a.cmd(), Text: "later"}), protocol.RPCRefused, protocol.CodeNotAccepting, protocol.ReasonExitFenced)
+	})
+	t.Run("not served", func(t *testing.T) {
+		h, _ := newStopHost(t)
+		a := h.dial()
+		a.sayHello(nil)
+		state := ok[protocol.SessionsListResult](t, a.call(protocol.MethodSessionsList, protocol.SessionsListParams{}))
+		if state.Sessions[0].Capabilities.ExitAfterTurn {
+			t.Fatal("the capability on a host without it")
+		}
+		refusedWith(t, prompt(h, a, protocol.PromptParams{Text: "x", Mode: protocol.PromptQueue, ExitAfterTurn: true}), protocol.RPCRefused, protocol.CodeUnsupported, protocol.ReasonUnsupported)
+		refusedWith(t, a.call(protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(h), CommandID: a.cmd(), Cause: agent.StopCauseExitAfterTurn}), protocol.RPCRefused, protocol.CodeUnsupported, protocol.ReasonUnsupported)
+	})
+}
+
+// TestAStopsCauseReachesTheCoordinator: what session.stop says it is, and only the
+// two a client may say; a cause refused is no stop at all.
+func TestAStopsCauseReachesTheCoordinator(t *testing.T) {
+	h, co := newStopHost(t, withExitAfterTurn())
+	a := h.dial()
+	a.sayHello(nil)
+	refusedWith(t, a.call(protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(h), CommandID: a.cmd(), Cause: agent.StopCauseSignal}), protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
+	if co.started.Load() {
+		t.Fatal("a refused cause stopped the session")
+	}
+	ok[protocol.Empty](t, a.call(protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(h), CommandID: a.cmd(), Cause: agent.StopCauseExitAfterTurn}))
+	if r := co.next(t); r.Cause != agent.StopCauseExitAfterTurn {
+		t.Fatalf("the coordinator heard %+v", r)
+	}
+}

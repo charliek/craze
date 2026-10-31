@@ -705,6 +705,11 @@ func TestTheHostsStopsSayTheirCauses(t *testing.T) {
 		cause string
 	}{
 		{"session.stop", sendStop, agent.StopCauseStop},
+		{"session.stop, cause exit_after_turn", func(t *testing.T, _ *serveRun, e rundir.Entry) {
+			if err := askStop(stepCtx(t), e, "test", agent.StopCauseExitAfterTurn); err != nil {
+				t.Fatal(err)
+			}
+		}, agent.StopCauseExitAfterTurn},
 		{"SIGTERM", func(_ *testing.T, r *serveRun, _ rundir.Entry) { r.sigs <- syscall.SIGTERM }, agent.StopCauseSignal},
 		{"SIGINT", func(_ *testing.T, r *serveRun, _ rundir.Entry) { r.sigs <- syscall.SIGINT }, agent.StopCauseSignal},
 	} {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -52,6 +53,9 @@ import (
 // connection closes for the session's end: the request holds its admission
 // slot until its reply is written, and an ending connection closes only once
 // nothing it admitted is unwritten (conn.end).
+//
+// A stop may say what began it (params.cause, where capabilities.exitAfterTurn is
+// true: a waiter whose turn has ended), which StopBeginning latches.
 //
 // Every later stop — the same client's, another's, the same commandId resent,
 // one arriving while the first is still being handed over (stopOnce waits for
@@ -109,6 +113,9 @@ type StopRequest struct {
 	// id it sent.
 	Client    string
 	CommandID string
+	// Cause is what the client said began the stop: "" or stop for a plain one,
+	// exit_after_turn for a waiter's whose turn has ended.
+	Cause string
 }
 
 // serves reports whether this server serves a method a host may refuse
@@ -213,14 +220,24 @@ func (s *Server) lockAttachments(waits func()) {
 // receipt, {}, as an ordinary reply.
 func (c *conn) sessionStop(b *bound, info protocol.MethodInfo, req *request) outcome {
 	var p protocol.StopParams
-	if perr := c.params(b, info, req, &p, nil); perr != nil {
+	check := func() *protocol.Error {
+		switch {
+		case p.Cause == "":
+		case !c.srv.opts.ExitAfterTurn:
+			return refused(protocol.CodeUnsupported, protocol.ReasonUnsupported, "params.cause is not served by this host: its capability exitAfterTurn is false")
+		case p.Cause != agent.StopCauseStop && p.Cause != agent.StopCauseExitAfterTurn:
+			return badParams("params.cause %q is neither %s nor %s", p.Cause, agent.StopCauseStop, agent.StopCauseExitAfterTurn)
+		}
+		return nil
+	}
+	if perr := c.params(b, info, req, &p, check); perr != nil {
 		return refusal(perr)
 	}
 	c.srv.connNote(c.id, map[string]any{"event": "stop", "clientId": b.client})
 	first := false
 	c.srv.stopOnce.Do(func() {
 		first = true
-		stop := StopRequest{Client: b.client, CommandID: p.CommandID}
+		stop := StopRequest{Client: b.client, CommandID: p.CommandID, Cause: p.Cause}
 		if f := c.srv.opts.StopBeginning; f != nil {
 			f(stop)
 		}

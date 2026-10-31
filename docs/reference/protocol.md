@@ -565,7 +565,7 @@ endpoint-level reads.
 | `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings`, `lastTurn?` | a read, not a cut of the stream; `lastTurn` is [the last turn](#the-last-turn)'s ending |
 | `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot of the whole session with one sub-agent's entries budgeted first, no subscription |
 | `session.sync` | | — | `seq` | the reply barrier with no command ([below](#the-reply-barrier)) |
-| `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`) | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone |
+| `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`), `exitAfterTurn?` | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone; `exitAfterTurn` raises [the exit fence](#the-exit-fence), and a session under one refuses a prompt `not_accepting`, reason `exit_fenced` |
 | `session.cancel` | ✓ | `turnId?` | `outcome`, `turn`, `reported` | with no `turnId`, cancels **the current turn** — craze's own or the agent's, whichever holds the session when the host validates the call (see [The foreign turn](#the-foreign-turn)); a named turn that is not current is `stale_turn` |
 | `session.disarm` | ✓ | — | `{}` | takes back an armed send-now, leaving its text queued |
 | `session.queue.add` | ✓ | `text` | `row` | |
@@ -575,7 +575,7 @@ endpoint-level reads.
 | `session.set` | ✓ | `setting{kind, id?, value, forModel?}` | `value`, `rev` | `rev` is the seq of the state delta that carried the change, `0` if it could not be learned |
 | `session.setTitle` | ✓ | `title` | `{}` | the delta, not the reply, is how a client learns the title took |
 | `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
-| `session.stop` | ✓ | — | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
+| `session.stop` | ✓ | `cause?` | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
 | `session.models.refresh` | | `nativeDir?` | `status`, `revision`, `sameDir?` | served where the session capability `modelsRefresh` is `true` (a native session): the session takes up the models funded since it opened — see [`session.models.refresh`](#sessionmodelsrefresh); idempotent, so not mutating; a session whose `modelsRefresh` is absent (an ACP session) is refused `unsupported`, reason `models_refresh_unsupported` |
 | `session.aside` | | `asideId`, `question`, `prior?[]` | `text`, `model?`, `usage?` | served where the session capability `aside` is `true` (a native, grok or gx session): a side question answered from the session's context, its answer streamed as [`aside`](#aside) notifications to this connection and whole in the reply, nothing of it journaled or in the session's history — see [`session.aside`](#sessionaside); not mutating; a session whose `aside` is absent (cursor) is refused `unsupported`, reason `aside_unsupported` |
 | `session.aside.cancel` | | `asideId` | `{}` | cancels this connection's `session.aside` of that `asideId`, which then answers `aborted`, reason `context`; answers `{}` always, after that aside's reply when it found one — see [`session.aside.cancel`](#sessionasidecancel); refused `aside_unsupported` where `aside` is absent |
@@ -651,6 +651,51 @@ joins the first: the host runs its stop once. A stop runs no command of the
 engine's, so it is not in the receipts table: a resend is answered `{}`
 again, never `unknown_command`, and a client that lost the receipt need not
 resend it at all — it watches for the session's end.
+
+`cause` says what began the stop, as the session's closing ending, `lastTurn` and the
+journal then [say it](#what-began-a-close): `stop` when absent, or `exit_after_turn`
+from a waiter whose turn has ended; anything else is `-32602`, reason `bad_request`.
+Where the session capability `exitAfterTurn` is `true`: a host without it refuses the
+member, `unsupported`, or from an older host `-32602`, reason `unknown_field`, so a
+client sends it only where the capability says. The first stop's stands, whichever way
+it came: a signal or a later stop changes nothing, and a stop made after a signal began
+one says `signal`.
+
+### The exit fence
+
+`session.prompt` with `exitAfterTurn: true`, mode `queue` and text, makes that prompt
+the session's last. Served where the session capability `exitAfterTurn` is `true`: with
+`fromRow` or another mode it is `-32602`, reason `bad_request`, and a host without the
+capability answers `unsupported`, or from an older host `-32602`, reason `unknown_field`.
+`craze new --wait` and `craze send --wait` send it for
+[`--exit-after-turn`](cli.md#ending-with-the-turn), which refuses a host without the
+capability or without `stop` before it sends anything. The client that sends it is the one
+that ends the session afterwards, with `session.stop`: the fence only sees that nothing
+else starts first.
+
+- **Refused:** from the moment it is admitted, a `session.prompt` with new text or
+  naming a row behind this one, an interjection, and a `session.queue.add`, are
+  `not_accepting`, reason `exit_fenced`. So is another `exitAfterTurn`: the first is the
+  session's last. A client that wants the session reads this as the session ending, and
+  sends again once its host has gone. Nothing else is refused: a queue edit, a removal, a
+  cancel and a setting go on. An agent that starts a turn entirely on its own can't be
+  fenced; the stop ends that turn.
+- **Ahead of it:** rows already queued ahead of the prompt run first, in order, and may
+  be started by their ids, as the prompt's own row may.
+- **Behind it:** a row queued with the session idle, before the fence, is removed in the
+  settlement that ends the prompt's turn, its `removed` event before the turn's `ended`,
+  whose `pending` is 0.
+- **The turn's ending:** whatever it was, no turn is claimed afterwards, and the session
+  cannot start one of its own where it has an admission fence. An ACP agent's own turn
+  after it is ended by the stop, as with any close. A row the agent's own turn refused
+  goes back to the queue still fenced, its ending not this one.
+- **The row removed before it ran** lifts the fence: there is no turn for it to end with.
+  The client that raised it sends no stop then, since whoever removed it is using the
+  session.
+- **It lasts as long as the host's engine.** Nothing on the wire reports it, and a host
+  that loads the session again has none. Its host's [idle
+  exit](configuration.md#host-idle-exit) has at most `host_idle_exit_unattended` while it
+  stands, and an open ask does not pin it.
 
 ### `session.models.refresh`
 
@@ -1751,6 +1796,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
 | `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, gx or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
+| `exitAfterTurn` | the host's own, and omitted when `false`: `session.prompt` takes `exitAfterTurn` ([the exit fence](#the-exit-fence)) and `session.stop` takes `cause`, on a host that serves `session.stop`. It fences what craze admits, not a turn an agent starts entirely on its own. Absent on a TUI-hosted session and an older host, which refuse both, so a client sends neither |
 | `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
 
 A client hides — never merely disables — whatever a capability says this
@@ -1860,8 +1906,9 @@ no cause, and no error), and when a terminal closed the session it was hosting.
 `lastTurn` carries it too. It is also in the journal's `host_stop` note, as
 `stopCause` beside the note's own words under `cause`.
 
-`session.stop` latches `stop` before its attach fence and its receipt, so a stop that
-was acknowledged says `stop` whatever arrives next.
+`session.stop` latches its cause, `stop` unless [it says otherwise](#sessionstop), before
+its attach fence and its receipt, so a stop that was acknowledged says that whatever
+arrives next.
 
 ## The foreign turn
 
@@ -2409,7 +2456,7 @@ client never mistakes one for a host's own answer — no host ever sends them.
 
 | code | reasons a host or the hub sends |
 |---|---|
-| `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed`; the hub's `not_resumable` |
+| `not_accepting` | `not_accepting`, `not_in_turn`, `exit_fenced`, `start_failed`; the hub's `not_resumable` |
 | `aborted` | `command_aborted`, `set_outcome_unknown`, `bad_catalog`, `context` |
 | `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `aside_busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |

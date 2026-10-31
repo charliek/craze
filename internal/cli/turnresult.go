@@ -104,6 +104,10 @@ type turnAccumulator struct {
 	// noPlanEnded says the snapshot this was seeded from names no plan's ask as
 	// ended, so that there is nothing to look back for (turnWaiter.lookApproved).
 	noPlanEnded bool
+	// planAnsweredInTurn says the snapshot this was seeded from names a plan's ask
+	// the approval policy answered during this turn: what a returned plan leaves
+	// behind when its event cannot be read back (turnWaiter.returnedCancel).
+	planAnsweredInTurn bool
 }
 
 // accTool is one tool call's merged state: whether it reached completed or
@@ -612,7 +616,9 @@ type turnResult struct {
 	BlockedBy     string       `json:"blockedBy,omitempty"`
 	Partial       bool         `json:"partial,omitempty"`
 	Handle        string       `json:"handle,omitempty"`
-	Attach        string       `json:"attach"`
+	// Stopping says --exit-after-turn stops the session as this result is written.
+	Stopping bool   `json:"stopping,omitempty"`
+	Attach   string `json:"attach"`
 
 	// usage is Usage decoded, for the plain footer.
 	usage *agent.UsageState
@@ -837,10 +843,16 @@ func (r *turnResult) footer() string {
 	if r.Short != "" {
 		lines = append(lines, "session "+r.Short+" · "+r.Attach)
 	}
-	switch r.Status {
-	case statusRunning:
+	switch {
+	case r.Stopping && r.Status == statusNeedsInput:
+		lines = append(lines, "session stopping (--exit-after-turn): the ask is abandoned")
+	case r.Stopping:
+		lines = append(lines, "session stopping (--exit-after-turn)")
+	}
+	switch {
+	case r.Status == statusRunning:
 		lines = append(lines, "next: "+waitCommand(r.Short, r.Handle))
-	case statusNeedsInput:
+	case r.Status == statusNeedsInput && !r.Stopping:
 		lines = append(lines, fmt.Sprintf("next: answer it in %s (or craze cancel %s, craze stop %s), then %s",
 			r.Attach, r.Short, r.Short, waitCommand(r.Short, r.Handle)))
 	}
@@ -854,6 +866,15 @@ func (r *turnResult) plain() string {
 		body = r.cutBody
 	}
 	return body + "\n---\n" + r.footer() + "\n"
+}
+
+// markStopping is a result --exit-after-turn goes on to stop the session after: it
+// says so, and an open ask's handle goes, since nothing is left to follow or answer.
+func (r *turnResult) markStopping() {
+	r.Stopping = true
+	if r.Status == statusNeedsInput {
+		r.Handle = ""
+	}
 }
 
 // durationSeconds is durationMs in whole seconds, rounded.

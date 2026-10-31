@@ -40,6 +40,7 @@ func classifyTable() []classifyCase {
 		{"ErrIndexWrite", fmt.Errorf("%w: %w", ErrIndexWrite, boom), "index_write", "index_write", false},
 		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", "not_accepting", true},
 		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", "not_in_turn", true},
+		{"ErrExitFenced", ErrExitFenced, "not_accepting", "exit_fenced", true},
 		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", "in_progress", true},
 		// A DUPLICATE of a blocking command whose own wait timed out against an
 		// owner that is still running (waitReceipt, r31 finding 2). It wraps the
@@ -132,7 +133,7 @@ func classifyTable() []classifyCase {
 // checked against its code's row. A code not listed here has exactly one
 // reason, the code itself ("every other code | the code itself").
 var wireReasons = map[string][]string{
-	"not_accepting": {"not_accepting", "not_in_turn", "start_failed", "not_resumable"},
+	"not_accepting": {"not_accepting", "not_in_turn", "exit_fenced", "start_failed", "not_resumable"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
 	"unavailable": {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "aside_busy",
 		"closing", "spawn_failed", "host_unreachable"},
@@ -264,6 +265,7 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 func engineSentinels() map[string]error {
 	return map[string]error{
 		"ErrNotAccepting":      ErrNotAccepting,
+		"ErrExitFenced":        ErrExitFenced,
 		"ErrAlreadyPending":    ErrAlreadyPending,
 		"ErrStaleTurn":         ErrStaleTurn,
 		"ErrStaleVersion":      ErrStaleVersion,

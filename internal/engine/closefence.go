@@ -52,7 +52,12 @@ import (
 // pins a host indefinitely — the owner's rule); a sub-agent or a background
 // child running; and a background child's result owed outside any turn — its
 // child ended but its result not yet published, or published and waiting for
-// the wake the fence holds back (agent.OwedWork, plan 030 C5r). A start that
+// the wake the fence holds back (agent.OwedWork, plan 030 C5r). A session whose
+// asks do not pin it (Options.AsksDoNotPin, or its exit fence up) is not busy for
+// what an open ask holds up: the turn or the agent's own turn waiting on it, the
+// rows and the armed send behind that, the sub-agents running, one of which may be
+// the asker, and the background work the parent cannot deliver while it waits. A
+// start that
 // failed replays nothing (retireReplay): its load's open bracket is not a
 // replay running for ever. The engine's own facts are read in the fenced
 // section; the ask registry, the session's roster and its owed work after it,
@@ -69,10 +74,9 @@ import (
 // section under e.mu, then the registry's and the session's own reads, each
 // brief.
 func (e *Engine) FenceClose() (release func(), busy bool) {
-	busy = e.closeFenceUp()
-	if !busy {
-		busy = busyElsewhere(e.sess.Snapshot(), e.asks.Asks()) || e.owesWork()
-	}
+	facts := e.closeFenceUp()
+	asks := e.asks.Asks()
+	busy = facts.busy(e.sess.Snapshot(), asks) || facts.owedCounts(asks) && e.owesWork()
 	var once sync.Once
 	return func() { once.Do(e.releaseCloseFence) }, busy
 }
@@ -86,9 +90,10 @@ func (e *Engine) Busy() bool {
 	snap := e.sess.Snapshot()
 	asks := e.asks.Asks()
 	e.mu.Lock()
-	busy := e.busyLocked()
+	facts := e.busyFactsLocked()
 	e.mu.Unlock()
-	return busy || snap.ForeignTurn || busyElsewhere(snap, asks) || e.owesWork()
+	facts.waits = facts.waits || snap.ForeignTurn
+	return facts.busy(snap, asks) || facts.owedCounts(asks) && e.owesWork()
 }
 
 // owesWork is the session's own work outside any turn (agent.OwedWork):
@@ -110,13 +115,15 @@ func (e *Engine) owesWork() bool {
 // "The admission fence"), then one close fence more, and the engine's half of
 // the busy verdict — its own facts and the agent's turn, read with both up.
 // The deferred sync keeps the session's fence up for the close fence.
-func (e *Engine) closeFenceUp() bool {
+func (e *Engine) closeFenceUp() busyFacts {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	defer e.syncFenceLocked()
 	e.raiseFenceLocked()
 	e.closeFences++
-	return e.busyLocked() || e.foreignLocked()
+	facts := e.busyFactsLocked()
+	facts.waits = facts.waits || e.foreignLocked()
+	return facts
 }
 
 // releaseCloseFence lowers one close fence. The last one down replays a pass
@@ -133,27 +140,58 @@ func (e *Engine) releaseCloseFence() {
 	}
 }
 
-// busyLocked is the engine's own half of the busy verdict (the file's doc
+// busyFacts is the engine's half of the busy verdict: work, what is in flight
+// whatever else is open; waits, what an open ask may be holding up; and whether
+// an open ask pins this session at all.
+type busyFacts struct {
+	work, waits  bool
+	asksDoNotPin bool
+	// nothingStarts says the exit fence's turn has ended: a wake owed could never
+	// claim, and a host waiting for it would wait for ever.
+	nothingStarts bool
+}
+
+// busy is the verdict with the facts from outside the engine read (the file's
+// doc comment), but for the session's owed work.
+func (f busyFacts) busy(snap agent.Snapshot, asks []agent.AskRecord) bool {
+	switch {
+	case f.work:
+		return true
+	case f.asksDoNotPin && len(asks) > 0:
+		return false
+	}
+	return f.waits || busyElsewhere(snap, asks)
+}
+
+// owedCounts says the session's owed work is any part of the verdict. Not where
+// nothing can start again, and not where an open ask does not pin the session: a
+// parent blocked on an ask nobody will answer delivers no background result either,
+// so the limit cuts that work off with the ask.
+func (f busyFacts) owedCounts(asks []agent.AskRecord) bool {
+	return !f.nothingStarts && (!f.asksDoNotPin || len(asks) == 0)
+}
+
+// busyFactsLocked is the engine's own half of the busy verdict (the file's doc
 // comment): everything but the agent's turn, the asks and the roster. e.mu is
 // held.
-func (e *Engine) busyLocked() bool {
+func (e *Engine) busyFactsLocked() busyFacts {
+	f := busyFacts{asksDoNotPin: e.opts.AsksDoNotPin || e.exitFence != nil, nothingStarts: e.exitFenceEndedLocked()}
 	switch {
 	case e.closed:
-		return true
-	case e.activity == ActivityStarting, e.activity == ActivityWorking, e.activity == ActivityClosing:
-		return true
+		f.work = true
+	case e.activity == ActivityStarting, e.activity == ActivityClosing:
+		f.work = true
 	case e.isReplaying():
-		return true
-	case e.cur != nil, e.cancelsInFlight > 0, e.armed != nil:
-		return true
-	case e.queue.Len() > 0:
-		return true
+		f.work = true
+	case e.cancelsInFlight > 0:
+		f.work = true
 	case len(e.sets) > 0, e.setRunning:
-		return true
+		f.work = true
 	case e.admitting > 0:
-		return true
+		f.work = true
 	}
-	return false
+	f.waits = e.activity == ActivityWorking || e.cur != nil || e.armed != nil || e.queue.Len() > 0
+	return f
 }
 
 // admitLocked is refusalLocked for a command whose work runs after e.mu is
