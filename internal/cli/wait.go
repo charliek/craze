@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -109,7 +110,7 @@ func runWait(cmd *cobra.Command, f *waitFlags, args []string, sigs <-chan os.Sig
 		if from != nil && errors.As(err, &ee) && ee.code == 1 {
 			// The handle was given, and names the target still: say it, as
 			// the attach's failure does, so it is not lost with the error.
-			return writeFailure(stdout, out, "", &waitFailure{msg: out.exitMessage(err), handle: from.String()})
+			return writeFailure(stdout, out, "", &waitFailure{msg: out.exitMessage(err), kind: failureKind(err), handle: from.String()})
 		}
 		return failJSON(stdout, out, err)
 	}
@@ -135,12 +136,12 @@ func runWait(cmd *cobra.Command, f *waitFlags, args []string, sigs <-chan os.Sig
 	conn, err := dialWait(ctx, entry, id, waitWhat, cursor)
 	if err != nil {
 		if signalled() {
-			err = exitf(1, "%s: interrupted before session %s answered", waitWhat, short)
+			err = kindf(errkind.Interrupted, "%s: interrupted before session %s answered", waitWhat, short)
 		}
 		if from != nil {
 			// The target is the handle's still, untouched: say which, so it
 			// can be followed once the session answers.
-			return writeFailure(stdout, out, short, &waitFailure{msg: out.exitMessage(err), handle: from.String(), follow: true})
+			return writeFailure(stdout, out, short, &waitFailure{msg: out.exitMessage(err), kind: failureKind(err), handle: from.String(), follow: true})
 		}
 		return failJSON(stdout, out, err)
 	}

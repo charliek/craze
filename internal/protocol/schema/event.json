@@ -8,7 +8,7 @@
     "type": {
       "description": "The event's kind. A client ignores a kind it does not know.",
       "type": "string",
-      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction"]
+      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction", "step_retry"]
     },
     "text": {"type": "string", "description": "A text, thought or user chunk; a title (meta)."},
     "mode": {"type": "string", "description": "The mode an agent-initiated meta reports."},
@@ -32,6 +32,7 @@
     "replay": {"$ref": "#/$defs/replay"},
     "replayed": {"type": "boolean", "description": "The event came from a session/load replay."},
     "compaction": {"$ref": "#/$defs/compaction"},
+    "stepRetry": {"$ref": "#/$defs/stepRetry"},
     "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
     "err": {"$ref": "#/$defs/error"},
     "stopReason": {"type": "string"},
@@ -61,7 +62,19 @@
         "output": {"$ref": "#/$defs/toolOutput"},
         "diffs": {"type": "array", "items": {"$ref": "#/$defs/diff"}},
         "task": {"$ref": "#/$defs/task"},
+        "edited": {"$ref": "#/$defs/toolEdited"},
         "at": {"$ref": "#/$defs/time"}
+      },
+      "additionalProperties": false
+    },
+    "toolEdited": {
+      "description": "What an edit call that completed reported changing (ToolEdited).",
+      "type": "object",
+      "properties": {
+        "files": {"type": "array", "items": {"type": "string"}},
+        "outsideFiles": {"type": "array", "items": {"type": "string"}},
+        "planFile": {"type": "string"},
+        "truncated": {"type": "boolean"}
       },
       "additionalProperties": false
     },
@@ -267,7 +280,7 @@
       "additionalProperties": false
     },
     "turn": {
-      "description": "One end of an engine-driven turn (TurnInfo): phase started (with text and origin: submit, drain or send_now) or ended (with its stop reason, and errClass/err for a failure; synthetic for an ending the wire never produced; next, the successor turn this settlement started; pending, the rows still queued).",
+      "description": "One end of an engine-driven turn (TurnInfo): phase started (with text and origin: submit, drain or send_now) or ended (with its stop reason, and errClass/err and kind/retryable/status/provider_code for a failure; synthetic for an ending the wire never produced; next, the successor turn this settlement started; pending, the rows still queued; cause, what began a close's ending).",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
@@ -277,9 +290,14 @@
         "stopReason": {"type": "string"},
         "errClass": {"type": "string"},
         "err": {"type": "string"},
+        "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
+        "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
+        "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},
+        "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."},
         "synthetic": {"type": "boolean"},
         "next": {"type": "string"},
-        "pending": {"type": "integer", "minimum": 0}
+        "pending": {"type": "integer", "minimum": 0},
+        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent from a host that predates it, and when a terminal closed its own session."}
       },
       "additionalProperties": false
     },
@@ -517,13 +535,32 @@
       },
       "additionalProperties": false
     },
+    "stepRetry": {
+      "description": "A step's model request failed and is being sent again from the same input (StepRetryInfo; native only): before it produced output, or after, for a transport or server failure. turn and step are the harness's numbers, as a native tool call's id spells them; attempt counts this step's retries from 1, and total the turn's over all its steps. reason is the failure, on one line; delayMs the wait before the next attempt. When discarded is set, the failed attempt's text, thought and tool events are not part of the answer, and no tool of it ran: every one of them on the stream of the event's agent from seq from on, which a reader that holds them retracts.",
+      "type": "object",
+      "properties": {
+        "turn": {"type": "integer", "minimum": 0},
+        "step": {"type": "integer", "minimum": 0},
+        "attempt": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string"},
+        "delayMs": {"type": "integer", "minimum": 0},
+        "from": {"type": "integer", "minimum": 0},
+        "discarded": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "error": {
-      "description": "An event's error: its message, its class (rpc, closed, agent_exited, agent_exit_status, canceled, deadline_exceeded, auth, model_not_found, context_too_large, empty_step, empty_prompt, harness_closed, provider, other, prompt_cancelled, prompt_in_flight, foreign_turn; a class a later craze wrote is kept as it is) and its code (the JSON-RPC code, HTTP status or exit status, else 0). All three are always present.",
+      "description": "An event's error: its message, its class (rpc, closed, agent_exited, agent_exit_status, canceled, deadline_exceeded, auth, model_not_found, context_too_large, empty_step, empty_prompt, harness_closed, provider, other, prompt_cancelled, prompt_in_flight, foreign_turn; a class a later craze wrote is kept as it is) and its code (the JSON-RPC code, HTTP status or exit status, else 0), all three always present; then what it said of itself where it happened, each absent at its zero value.",
       "type": "object",
       "properties": {
         "message": {"type": "string"},
         "class": {"type": "string"},
-        "code": {"type": "integer"}
+        "code": {"type": "integer"},
+        "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
+        "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
+        "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},
+        "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."}
       },
       "required": ["message", "class", "code"],
       "additionalProperties": false

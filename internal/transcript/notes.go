@@ -11,6 +11,9 @@ import (
 // exact text (internal/tui/app.go and transcript.go at plan 024's baseline):
 // every client folding the same event writes the same row.
 const (
+	// NoteStepRetried follows the rows a retried step's attempt left, which are
+	// struck out (Entry.Retracted).
+	NoteStepRetried = "retried after a stream error"
 	// NoteCancelled is the row a cancelled turn leaves: EventDone with the
 	// stop reason "cancelled", or the engine's synthetic cancelled ending.
 	NoteCancelled = "cancelled"

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -594,8 +595,18 @@ func ids(rows []protocol.RosterRow) []string {
 // tests: "<hostId> <sessionId>" ("-" for none yet). It binds and lists the
 // host in the process's registry (rundir.ProcessEnv) — with a fake host
 // serving its socket when it has a session — says "bound" on stdout, and
-// waits for its end: a SIGKILL, a crash, or its parent's going.
+// waits for its end: a SIGKILL, a crash, or its parent's going. Each line on
+// its stdin runs the collector (collectAll), and it says "collected".
 const hostTestChild = "CRAZE_HUB_TEST_HOST"
+
+// hostChildHolds keeps a host child's registration reachable for its life.
+// The host's lock is an *os.File, which the collector closes once nothing
+// refers to it, and that lets go of the flock: to every reader of the registry
+// a free lock is a dead host, which the next read sweeps. Nothing else in the
+// child refers to it once it is serving: init's locals are past their last use
+// in its final wait, and Serve does not need the registration. Without this a
+// collection just after "bound" left a live child out of the first list.
+var hostChildHolds any
 
 func init() {
 	v, ok := os.LookupEnv(hostTestChild)
@@ -611,15 +622,18 @@ func init() {
 	id, session, _ := strings.Cut(v, " ")
 	env := rundir.ProcessEnv()
 	if session == "-" {
-		if _, err := rundir.Bind(env, id, rundir.Entry{StartedAt: time.Now().UTC(), Workspace: "/work"}); err != nil {
+		reg, err := rundir.Bind(env, id, rundir.Entry{StartedAt: time.Now().UTC(), Workspace: "/work"})
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "host test child:", err)
 			os.Exit(97)
 		}
+		hostChildHolds = reg
 	} else {
 		h, err := fakehost.New(fakehost.Options{HostID: id, CrazeSessionID: session})
 		if err == nil {
 			var reg *rundir.Host
 			if reg, err = h.Register(env); err == nil {
+				hostChildHolds = []any{h, reg}
 				go func() { _ = h.Serve(reg.Listener()) }()
 			}
 		}
@@ -629,7 +643,32 @@ func init() {
 		}
 	}
 	fmt.Println("bound")
+	for in := bufio.NewScanner(os.Stdin); in.Scan(); {
+		collectAll()
+		fmt.Println("collected")
+	}
 	select {}
+}
+
+// collectAll runs the collector until every finalizer of what it found
+// unreachable has run. The first collection queues them all, since runtime.GC
+// returns with its sweep done. Each round after it waits for its own sentinel's
+// finalizer; the finalizer goroutine ends one batch before it takes the next, and
+// a batch runs in no set order, so only the second sentinel's says the batch
+// holding an *os.File's close is over.
+func collectAll() {
+	runtime.GC()
+	for range 2 {
+		ran := make(chan struct{})
+		runtime.SetFinalizer(new([64]byte), func(*[64]byte) { close(ran) })
+		runtime.GC()
+		select {
+		case <-ran:
+		case <-time.After(step):
+			fmt.Fprintln(os.Stderr, "host test child: a collection's finalizers did not run")
+			os.Exit(97)
+		}
+	}
 }
 
 // hostChild is a session host of the test's own in env's registry, in a
@@ -638,6 +677,9 @@ func init() {
 type hostChild struct {
 	cmd  *exec.Cmd
 	done chan struct{}
+	// in is its stdin; said is each line of its stdout, closed at their end.
+	in   io.Writer
+	said chan string
 }
 
 func startHostChild(t *testing.T, env rundir.Env, id, session string) *hostChild {
@@ -653,6 +695,10 @@ func startHostChild(t *testing.T, env rundir.Env, id, session string) *hostChild
 	cmd.Env = append(os.Environ(), "HOME="+env.Home, "CRAZE_HOME="+env.CrazeDir, "CRAZE_RUNTIME_DIR="+env.CrazeRuntimeDir,
 		hostTestChild+"="+id+" "+session, hubTestParent+"="+strconv.Itoa(os.Getpid()))
 	cmd.Stderr = os.Stderr
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -660,24 +706,40 @@ func startHostChild(t *testing.T, env rundir.Env, id, session string) *hostChild
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	hc := &hostChild{cmd: cmd, done: make(chan struct{})}
-	bound := make(chan string, 1)
+	hc := &hostChild{cmd: cmd, done: make(chan struct{}), in: in, said: make(chan string, 1)}
 	go func() {
-		line, _ := bufio.NewReader(out).ReadString('\n')
-		bound <- line
-		_, _ = io.Copy(io.Discard, out)
+		defer close(hc.said)
+		for lines := bufio.NewScanner(out); lines.Scan(); {
+			hc.said <- lines.Text()
+		}
 	}()
 	go func() { _ = cmd.Wait(); close(hc.done) }()
 	t.Cleanup(func() { hc.crash(t) })
 	select {
-	case line := <-bound:
-		if strings.TrimSpace(line) != "bound" {
+	case line := <-hc.said:
+		if line != "bound" {
 			t.Fatalf("host child %s said %q, not bound", id, line)
 		}
 	case <-time.After(step):
 		t.Fatalf("host child %s did not bind within %v", id, step)
 	}
 	return hc
+}
+
+// collect has the host run its collector, finalizers and all, and waits for it.
+func (hc *hostChild) collect(t *testing.T) {
+	t.Helper()
+	if _, err := io.WriteString(hc.in, "collect\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case line := <-hc.said:
+		if line != "collected" {
+			t.Fatalf("host child %d said %q, not collected", hc.cmd.Process.Pid, line)
+		}
+	case <-time.After(step):
+		t.Fatalf("host child %d did not collect within %v", hc.cmd.Process.Pid, step)
+	}
 }
 
 // crash SIGKILLs the host and waits for its exit: its lock is free, its

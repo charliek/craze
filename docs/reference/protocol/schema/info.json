@@ -96,7 +96,7 @@
       "additionalProperties": false
     },
     "sessionCapabilities": {
-      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host), stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host), rowFacts (the host's own, omitted when false: the row carries the row facts), presence (the host's own, omitted when false: the host sends presence and the row carries attached), and the session's own modelsRefresh and aside (each omitted when false: the host serves the methods they name), slashCatalog (omitted when false: the session publishes the slash catalog section) and effortFacts (omitted when false: every catalog model states its effort facts). A client hides what a capability says the session cannot do.",
+      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host), stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host), rowFacts (the host's own, omitted when false: the row carries the row facts), presence (the host's own, omitted when false: the host sends presence and the row carries attached), and the session's own modelsRefresh and aside (each omitted when false: the host serves the methods they name), slashCatalog (omitted when false: the session publishes the slash catalog section) and effortFacts (omitted when false: every catalog model states its effort facts), and exitAfterTurn (the host's own, omitted when false: session.prompt takes exitAfterTurn and session.stop takes cause). A client hides what a capability says the session cannot do.",
       "type": "object",
       "properties": {
         "interject": {"type": "boolean"},
@@ -120,7 +120,8 @@
         "modelsRefresh": {"type": "boolean", "description": "The session can take up models funded while it runs (a native session), and the host serves session.models.refresh for it. Absent — false — for an ACP session, and on an older host: the method is refused there, and a client makes no call."},
         "aside": {"type": "boolean", "description": "The session answers side questions (/btw) from its context (a native, grok or gx session), and the host serves session.aside and session.aside.cancel for it. Absent — false — for cursor, and on an older host: the methods are refused there, and a client offers no side questions."},
         "slashCatalog": {"type": "boolean", "description": "The session publishes the slash catalog (a cursor, grok, gx or native session): the state delta's slash section, and the snapshot's settings.slash — every / row it offers and what running each does. Absent — false — on an older host and for a session that is not craze's own: a client offers no / menu from the stream."},
-        "effortFacts": {"type": "boolean", "description": "Every model of the session's catalog states its effort facts (a native session): catalogs.models and the catalog section's models carry efforts, defaultEffort and switchEffort, and a model with no effort control lists none. Absent — false — for an ACP session, on an older host and for a session that is not craze's own: a client shows only the current model's levels, from its effort option."}
+        "effortFacts": {"type": "boolean", "description": "Every model of the session's catalog states its effort facts (a native session): catalogs.models and the catalog section's models carry efforts, defaultEffort and switchEffort, and a model with no effort control lists none. Absent — false — for an ACP session, on an older host and for a session that is not craze's own: a client shows only the current model's levels, from its effort option."},
+        "exitAfterTurn": {"type": "boolean", "description": "The host's own: session.prompt takes exitAfterTurn and session.stop takes cause, on a host that serves session.stop. It fences what craze admits, not a turn an agent starts entirely on its own. Absent — false — on a TUI-hosted session and an older host, which refuse both members, and a client sends neither."}
       },
       "required": ["interject", "subagentCancel", "subagentBackground", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
       "additionalProperties": false
@@ -184,6 +185,13 @@
       "properties": {
         "outcome": {"$ref": "#/$defs/turnOutcome"},
         "err": {"type": "string", "description": "A failed turn's error text; absent for the other outcomes."},
+        "stopReason": {"type": "string", "description": "The ending's own stop reason: absent for a foreign turn, a failure with none, and an older host."},
+        "cause": {"type": "string", "description": "On a stopReason of closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent otherwise, from an older host, and when a terminal closed its own session."},
+        "withdrawn": {"type": "boolean", "description": "A cancelled turn's prompt never reached the agent, so no step of it ran. Absent otherwise, and from an older host."},
+        "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
+        "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
+        "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},
+        "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."},
         "endedAt": {"$ref": "event.json#/$defs/time", "description": "The turn's ending event's time, in UTC."},
         "turnId": {"type": "string", "description": "The ended turn's id as the stream names it: turn.id for a turn of craze's own, the foreign_turn bracket's id for the agent's own."}
       },

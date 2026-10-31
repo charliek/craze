@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/harness"
 )
 
 // HomeDir is the home directory craze reads the user-level skills and the
@@ -157,7 +159,41 @@ const (
 	// replay has only the ended of each stored compaction. No ACP provider
 	// emits it.
 	EventCompaction EventType = "compaction"
+	// EventStepRetry says a step's model request failed and will be sent again
+	// from the same input (StepRetryInfo): what its failed attempt streamed is
+	// not part of the answer, and no tool of it ran. Event.Agent names the
+	// sub-agent whose step it was, "" for the session's own. No ACP provider
+	// emits it.
+	EventStepRetry EventType = "step_retry"
 )
+
+// A native step's retry budget, `provider_retries`: the harness's own.
+const (
+	DefaultProviderRetries = harness.DefaultProviderRetries
+	MaxProviderRetries     = harness.MaxProviderRetries
+)
+
+// StepRetryInfo is Event.StepRetry: one retry of one step. Turn and Step are the
+// native harness's numbers for them, as a tool call's id spells them; Attempt
+// counts this step's retries, from 1, and Total the turn's, over all its steps.
+// Reason is the failure, on one line, and DelayMs the wait before the next
+// attempt.
+//
+// From is the Seq the failed attempt's events start at: of the events its
+// Agent's stream carries, every text, thought and tool since From is retracted,
+// and a consumer that holds them drops them. Discarded says there was something
+// to retract; a request that failed before its first output has nothing, and
+// its retry changes nothing but the count.
+type StepRetryInfo struct {
+	Turn      int
+	Step      int
+	Attempt   int
+	Total     int
+	Reason    string
+	DelayMs   int64
+	From      uint64
+	Discarded bool
+}
 
 // CompactionInfo is Event.Compaction: one end of one compaction (plan 028
 // §3.13). Phase is CompactionStarted or CompactionEnded. Reason is
@@ -226,6 +262,11 @@ type TurnInfo struct {
 	// engine has no live error value for a synthetic ending in the first
 	// place — only what ClassifyEventErr made of one.
 	Err string
+	// Info is what the failure said of itself (ErrorInfo) while its type was
+	// still known, set on TurnEnded alongside ErrClass: all the waiting commands
+	// have to tell one failure from another by. An ending from a host that
+	// predates it has none, which a reader takes for errkind.Unknown.
+	errkind.Info
 	// Synthetic marks a TurnEnded the wire never produced: a withdrawn
 	// prompt (ErrPromptCancelled), or a refusal turned into an ending
 	// (ErrPromptInFlight, ErrForeignTurn).
@@ -237,6 +278,31 @@ type TurnInfo struct {
 	Next string
 	// Pending is how many rows were still queued after this settlement.
 	Pending int
+	// Cause is why the session closed, on the synthetic ending Close authors
+	// (stop reason closing): one of the StopCause values, set by the code that
+	// began the stop. "" on every other ending, from a host that predates it,
+	// and from a session its own terminal closed.
+	Cause string
+}
+
+// The causes of a session's close (TurnInfo.Cause): what began the stop.
+const (
+	// StopCauseStop: a client asked, session.stop or craze stop.
+	StopCauseStop = "stop"
+	// StopCauseSignal: SIGTERM or SIGINT reached the host.
+	StopCauseSignal = "signal"
+	// StopCauseIdle: the host's idle exit.
+	StopCauseIdle = "idle"
+	// StopCauseExitAfterTurn: --exit-after-turn's stop, once its turn has ended.
+	StopCauseExitAfterTurn = "exit_after_turn"
+	// StopCauseLostOwner: what the host answered to went away: the launcher
+	// that was waiting for its ready line, or its socket or registry entry.
+	StopCauseLostOwner = "lost_owner"
+)
+
+// StopCauses is every cause, for the docs' drift test.
+func StopCauses() []string {
+	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner}
 }
 
 // The two phases a TurnInfo carries.
@@ -671,7 +737,7 @@ type Event struct {
 	// carry the fact that it changed at all.
 	Mode string
 	// Agent is the child session id for EventText/Thought/Tool/User/
-	// Compaction that belong to a sub-agent. "" is the main session.
+	// Compaction/StepRetry that belong to a sub-agent. "" is the main session.
 	Agent          string
 	Tool           *ToolEvent
 	Todos          []Todo
@@ -703,6 +769,8 @@ type Event struct {
 	Compaction *CompactionInfo
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
 	Turn *TurnInfo
+	// StepRetry is set on EventStepRetry: one retry of one step.
+	StepRetry *StepRetryInfo
 	// Ask is set on EventAsk: how one ask ended (plan 021 §3.6). It carries
 	// the opening itself when no opening was ever published — a permission
 	// craze's policy allowed, a request the provider had already answered, one
@@ -788,7 +856,21 @@ type ToolEvent struct {
 	Output      *ToolOutput
 	Diffs       []ToolDiff
 	Task        *TaskInfo
-	At          time.Time
+	// Edited is what the call changed, as its host judged it once it completed
+	// (edited.go); nil for every other call, and on every other status.
+	Edited *ToolEdited
+	At     time.Time
+}
+
+// ToolEdited is the paths an edit call that completed reported changing: Files
+// inside the workspace, spelled from it; OutsideFiles elsewhere, absolute;
+// PlanFile the session's plan file, in neither. Truncated says the call named
+// more than editedPathsCap paths and these are the first of them.
+type ToolEdited struct {
+	Files        []string
+	OutsideFiles []string
+	PlanFile     string
+	Truncated    bool
 }
 
 // ToolOutput is a tool_call rawOutput. Stdout/Stderr/Content are the 8 KiB
@@ -1063,6 +1145,15 @@ type Options struct {
 	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
 	// native session spawns no agent and never calls it.
 	AgentGroup func(pgid int) error
+	// ShellGroups, when set, is told of every process group a native session's
+	// tools start, a shell command's or ripgrep's: a host writes them down beside
+	// AgentGroup's, so that the commands of a host killed outright can be ended
+	// after it. Unlike AgentGroup's it cannot fail a thing: a command runs whether
+	// or not it could be written down. An ACP session never calls it.
+	ShellGroups harness.GroupRecorder
+	// ShellMark is an environment entry every process those tools start carries,
+	// which recognises it as this host's once the leader of its group has gone.
+	ShellMark string
 	// ContentHome is the home directory a native session reads the user's own
 	// Claude content under — commands, skills and the installed plugins
 	// (§3.1). "" is HomeDir(), which is what production wants and what every
@@ -1077,6 +1168,10 @@ type Options struct {
 	// care gets; the CLI fills it from config.toml. Only a native session
 	// reads it — no other provider's content is craze's to turn off.
 	Compat ClaudeCompat
+	// ProviderRetries is `provider_retries`, a native step's retry budget
+	// (harness.Options.ProviderRetries): nil is the harness's default. Only a
+	// native session reads it; an ACP agent keeps its own retries.
+	ProviderRetries *int
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

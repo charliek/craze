@@ -17,6 +17,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
@@ -46,7 +47,8 @@ import (
 // version — one still running from before an upgrade that removed its binary
 // — gains how to stop that hub, by its pid from its hello (plan 046 U2,
 // newFailure). With --json every one of those failures also
-// prints one JSON object on stdout (newFailureJSON); usage errors stay plain.
+// prints one JSON object on stdout (newFailureJSON); a usage error prints its
+// own, from the root (usageJSON).
 //
 // --title (plan 043 D8, P11) names the session from its start, pinned as a
 // /rename pins one: normalized here as the hub normalizes it
@@ -93,11 +95,14 @@ type newFlags struct {
 	timeout    time.Duration
 	maxMessage int
 	prompt     promptInput
+	// exitAfterTurn and sessionFile are --exit-after-turn and --session-file.
+	exitAfterTurn bool
+	sessionFile   string
 }
 
 // newWaitOnly is every flag only craze new --wait takes: on plain craze new
 // each is a usage error.
-var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask"}
+var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask", "exit-after-turn", "session-file"}
 
 func newNewCmd() *cobra.Command {
 	f := &newFlags{}
@@ -151,6 +156,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "with --wait: start in ask mode")
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "with --wait: stop waiting after this long (from the command's start): the result is running, exit 5, with a handle to follow it (default: no limit)")
 	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
+	registerExitFlags(cmd, &f.exitAfterTurn, &f.sessionFile)
 	registerPromptInputFlags(cmd, &f.prompt)
 	return cmd
 }
@@ -167,9 +173,8 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// An explicit, non-empty --provider is checked here, before anything is
 	// dialled (plan 037 LC-4): by its id alone — no CRAZE_PROVIDER, no
 	// config, no default — and a wrong one is the usage error every other
-	// command gives, plain and exit 2 with or without --json (cli.md: a
-	// usage error is never JSON). Omitted or empty, the hub chooses: its
-	// configured default.
+	// command gives, exit 2, kind config under --json. Omitted or empty, the
+	// hub chooses: its configured default.
 	provider := strings.TrimSpace(f.provider)
 	if provider != "" {
 		if _, err := agent.ProviderByName(provider); err != nil {
@@ -188,16 +193,16 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return fail(err, "the current directory: %v", err)
+			return fail(errkind.Workspace, err, "the current directory: %v", err)
 		}
 		dir = wd
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return fail(err, "%s: %v", dir, err)
+		return fail(errkind.Workspace, err, "%s: %v", dir, err)
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return fail(nil, "%s is not a directory", abs)
+		return fail(errkind.Workspace, nil, "%s is not a directory", abs)
 	}
 	// The hub's refusal of a create that names no provider when it has no
 	// default is wire words (params.provider …), and its badParams carries
@@ -209,11 +214,11 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// (different) refusal, not "no default". --json passes the hub's refusal
 	// through whole, as cli.md documents.
 	if provider == "" && !f.json && tui.ConfigProvider() == "" {
-		return fail(nil, "no default provider yet; pass --provider %s", newProviderChoices)
+		return fail(errkind.Config, nil, "no default provider yet; pass --provider %s", newProviderChoices)
 	}
 	id, err := newRequestID()
 	if err != nil {
-		return fail(err, "%v", err)
+		return fail(errkind.Internal, err, "%v", err)
 	}
 	p := protocol.CreateParams{Cwd: abs, Prompt: strings.Join(args, " "), Provider: provider,
 		Model: strings.TrimSpace(f.model), Effort: strings.TrimSpace(f.effort), RequestID: id, Title: title}
@@ -236,11 +241,11 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	defer cancel()
 	raw, hello, err := createThroughHub(ctx, env, p)
 	if err != nil {
-		return fail(err, "%s", newFailure(err, hello))
+		return fail(hubFailureKind(err), err, "%s", newFailure(err, hello))
 	}
 	var res protocol.CreateResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return fail(nil, "the hub's answer: %v", err)
+		return fail(errkind.Internal, nil, "the hub's answer: %v", err)
 	}
 	if f.json {
 		if _, err := fmt.Fprintf(out, "%s\n", raw); err != nil {
@@ -313,22 +318,47 @@ func newFailure(err error, hello protocol.HubHelloResult) string {
 // newFail is craze new's fail, writing to out: every exit-1 path before the
 // session started (SF-124, plan 035 P5) — the stderr line as ever and, under
 // --json (asJSON), one JSON object on stdout first (newFailureJSON).
-func newFail(out io.Writer, asJSON bool) func(err error, format string, args ...any) error {
-	return func(err error, format string, args ...any) error {
+func newFail(out io.Writer, asJSON bool) func(kind errkind.Kind, err error, format string, args ...any) error {
+	return func(kind errkind.Kind, err error, format string, args ...any) error {
 		msg := fmt.Sprintf(format, args...)
 		if asJSON {
-			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
+			fmt.Fprintf(out, "%s\n", newFailureJSON(err, kind, msg))
 		}
-		return exitf(1, "craze new: %s", msg)
+		return kindf(kind, "craze new: %s", msg)
 	}
+}
+
+// hubFailureKind is what a failed hub request was: a refusal by what it says,
+// and otherwise a hub that could not be started or reached, whose session did
+// not start.
+func hubFailureKind(err error) errkind.Kind {
+	var perr *protocol.Error
+	if !errors.As(err, &perr) {
+		if errors.Is(err, hub.ErrUnanswered) {
+			return errkind.ConnectionLost
+		}
+		return errkind.StartFailed
+	}
+	switch perr.Data.Reason {
+	case protocol.ReasonStartFailed:
+		return startKind(perr.Data.Kind)
+	case protocol.ReasonSpawnFailed, protocol.ReasonClosing, protocol.ReasonNotReady:
+		return errkind.StartFailed
+	case protocol.ReasonHostUnreachable:
+		return errkind.ConnectionLost
+	case protocol.ReasonUnknownSession, protocol.ReasonNotResumable, protocol.ReasonBadRequest:
+		return errkind.Config
+	}
+	return errkind.Internal
 }
 
 // newFailureJSON is a failed craze new's one JSON object (SF-124, plan 035
 // P5): a protocol refusal as {"error": <protocol.Error>}, so a script reads
 // .error.data.code, .reason and .cause where it reads them on the wire; any
-// other failure as {"error":{"message": msg}}. Its key, "error", is not one
-// of session.create's result, so success and failure stay disjoint.
-func newFailureJSON(err error, msg string) []byte {
+// other failure as {"error":{"message": msg}}; and either way kind beside it,
+// the kind the waiting commands' error says. Neither key is one of
+// session.create's result, so success and failure stay disjoint.
+func newFailureJSON(err error, kind errkind.Kind, msg string) []byte {
 	var body any = struct {
 		Message string `json:"message"`
 	}{msg}
@@ -336,9 +366,12 @@ func newFailureJSON(err error, msg string) []byte {
 	if errors.As(err, &perr) {
 		body = perr
 	}
-	raw, merr := json.Marshal(map[string]any{"error": body})
+	raw, merr := json.Marshal(struct {
+		Error any          `json:"error"`
+		Kind  errkind.Kind `json:"kind"`
+	}{body, kind})
 	if merr != nil {
-		raw = []byte(`{"error":{"message":"craze new failed"}}`)
+		raw = []byte(`{"error":{"message":"craze new failed"},"kind":"internal"}`)
 	}
 	return raw
 }

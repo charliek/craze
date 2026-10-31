@@ -89,6 +89,7 @@ type fixtureHost struct {
 	// built as the rest of the line says.
 	HubCreates     bool                    `json:"hubCreates,omitempty"`
 	Stop           bool                    `json:"stop,omitempty"`
+	ExitAfterTurn  bool                    `json:"exitAfterTurn,omitempty"`
 	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
 	StartedAt      bool                    `json:"startedAt,omitempty"`
 	RowFacts       bool                    `json:"rowFacts,omitempty"`
@@ -142,7 +143,7 @@ func (fh *fixtureHost) options() Options {
 	}
 	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts,
 		Presence: fh.Presence, Models: models, ModelsRefresh: fh.ModelsRefresh, NativeDir: fh.NativeDir, Aside: fh.Aside,
-		Slash: fh.Slash, Provider: fh.Provider, Plugins: plugins, EffortFacts: fh.EffortFacts}
+		Slash: fh.Slash, Provider: fh.Provider, Plugins: plugins, EffortFacts: fh.EffortFacts, ExitAfterTurn: fh.ExitAfterTurn}
 }
 
 // fixturePlugin is a host line's plugin row, agent.PluginCommand field for

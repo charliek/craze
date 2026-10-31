@@ -70,6 +70,7 @@
         "origin": {"type": "string"},
         "at": {"$ref": "event.json#/$defs/time"},
         "foreign": {"$ref": "event.json#/$defs/foreignTurn"},
+        "retries": {"type": "integer", "minimum": 0, "description": "How many times the turn's steps have been sent again so far, kept until the next turn starts (a step_retry event's total); absent for none."},
         "truncated": {"type": "boolean"}
       },
       "additionalProperties": false
@@ -164,17 +165,22 @@
         "open": {"type": "boolean"},
         "interject": {"type": "boolean"},
         "streaming": {"type": "boolean"},
-        "cut": {"type": "boolean"}
+        "cut": {"type": "boolean"},
+        "retracted": {"type": "boolean", "description": "An assistant, thought or tool row of a step's attempt that failed and was sent again (a step_retry event): not part of the answer, and its tool call never ran. A client may strike it out; what reads the answer skips it."}
       },
       "required": ["id"],
       "additionalProperties": false
     },
     "entryErr": {
-      "description": "An error entry's class and code, in the event codec's vocabulary; both always present.",
+      "description": "An error entry's class and code, in the event codec's vocabulary, both always present; then what the error said of itself, each absent at its zero value.",
       "type": "object",
       "properties": {
         "class": {"type": "string"},
-        "code": {"type": "integer"}
+        "code": {"type": "integer"},
+        "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
+        "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
+        "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},
+        "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."}
       },
       "required": ["class", "code"],
       "additionalProperties": false

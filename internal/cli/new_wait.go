@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -35,7 +36,8 @@ import (
 // prompt was sent, a signal stops the session the command spawned and reports
 // it `cancelled` (exit 3), and --timeout's end stops it too (exit 1); a
 // provider that cannot start is exit 1 with the host's words. The session
-// runs on once its turn ends, for craze send to continue.
+// runs on once its turn ends, for craze send to continue, unless
+// --exit-after-turn ends it with its result (promptJob.endWithTurn).
 
 // newWhat names craze new in its lines.
 const newWhat = "craze new"
@@ -54,6 +56,9 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return usagef("craze new: --timeout must not be negative")
 	case f.maxMessage < 0:
 		return usagef("craze new: --max-message must not be negative")
+	}
+	if err := checkSessionFile(cmd, newWhat, f.sessionFile); err != nil {
+		return err
 	}
 	if err := f.prompt.check(cmd, newWhat, args); err != nil {
 		return err
@@ -86,23 +91,25 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return failJSON(stdout, r.out, err)
 	}
 	r.text = text
-	fail := func(format string, a ...any) error {
-		return failJSON(stdout, r.out, exitf(1, newWhat+": "+format, a...))
+	r.exitAfterTurn, r.file = f.exitAfterTurn, newSessionFile(f.sessionFile)
+	r.file.clear()
+	fail := func(kind errkind.Kind, format string, a ...any) error {
+		return failJSON(stdout, r.out, kindf(kind, newWhat+": "+format, a...))
 	}
 	dir := f.dir
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return fail("the current directory: %v", err)
+			return fail(errkind.Workspace, "the current directory: %v", err)
 		}
 		dir = wd
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return fail("%s: %v", dir, err)
+		return fail(errkind.Workspace, "%s: %v", dir, err)
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return fail("%s is not a directory", abs)
+		return fail(errkind.Workspace, "%s is not a directory", abs)
 	}
 	if provider == "" {
 		// The default a hub-created session would have had: config.toml's
@@ -110,20 +117,26 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		// which the host's environment does not carry.
 		provider = tui.ConfigProvider()
 		if provider == "" {
-			return fail("no default provider yet; pass --provider %s", newProviderChoices)
+			return fail(errkind.Config, "no default provider yet; pass --provider %s", newProviderChoices)
 		}
 		if _, err := agent.ProviderByName(provider); err != nil {
-			return fail("config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
+			return fail(errkind.Config, "config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
 		}
 	}
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
 		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
-	r.session = resultSession{provider: provider, model: flags.model}
+	// No model: --model is only what was asked for, which the agent may yet
+	// refuse, and a result says the model once the session has said it.
+	r.session = resultSession{provider: provider}
 	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true, reparent: true, title: title}, true)
 	if err != nil {
 		return r.failBefore(spawnExit(newWhat, err))
 	}
 	r.session.id = ref.entry.CrazeSessionID
+	if err := r.file.host(newWhat, ref.entry); err != nil {
+		return r.failBefore(err)
+	}
+	newWaitHostKnown(r)
 	conn, err := dialWait(r.ctx, ref.entry, ref.entry.CrazeSessionID, newWhat, nil)
 	if err != nil {
 		return r.failBefore(err)
@@ -134,15 +147,25 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	return r.waitFor(conn)
 }
 
+// newWaitHostKnown sees the host known and --session-file written, nothing dialled:
+// a no-op, and the barrier a test sends a signal at when it means one that comes
+// before the prompt, with that file there to be taken away.
+var newWaitHostKnown = func(*promptJob) {}
+
 // spawnExit is a failed spawn (spawnHost) as command what's exit 1: the
 // spawn's own line — the host's words, and where its log is — under the
 // command's name rather than craze's.
 func spawnExit(what string, err error) error {
 	var se *spawnError
 	if !errors.As(err, &se) {
-		return &exitError{code: 1, msg: what + ": " + sanitizeLine(err.Error()), cause: err}
+		return &exitError{code: 1, msg: what + ": " + sanitizeLine(err.Error()), cause: err, kind: errkind.StartFailed}
 	}
-	// A refusal is the host's own line, "craze serve: …" (choiceRefusal).
+	// A refusal is the host's own line, "craze serve: …" (choiceRefusal): of
+	// what the host was asked to run, which it will refuse again.
+	kind := errkind.StartFailed
+	if se.kind == spawnRefused {
+		kind = errkind.Config
+	}
 	msg := strings.TrimPrefix(strings.TrimPrefix(sanitizeLine(se.msg), "craze: "), "craze serve: ")
-	return &exitError{code: 1, msg: what + ": " + msg, cause: err}
+	return &exitError{code: 1, msg: what + ": " + msg, cause: err, kind: kind}
 }

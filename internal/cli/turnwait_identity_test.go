@@ -128,11 +128,11 @@ func TestWaitTurnHandleAfterAReconcileKeepsTheRow(t *testing.T) {
 	}
 }
 
-// TestWaitTurnEngineCloseIsTheSessionsEnd (N3): the engine closes while the
+// TestWaitTurnEngineCloseIsTheTurnsResult (N3): the engine closes while the
 // waiter's own turn runs. The turn's ending the close authors (synthetic,
-// stopReason closing) is the session's end — exit 1, `the session ended`,
-// with the handle — never the turn failed.
-func TestWaitTurnEngineCloseIsTheSessionsEnd(t *testing.T) {
+// stopReason closing) is a cancelled result, stopReason stopped, naming the
+// turn — never the turn failed, and no failure of the wait's.
+func TestWaitTurnEngineCloseIsTheTurnsResult(t *testing.T) {
 	r := newWaitRig(t, 0)
 	turn := endTurn()
 	turn.before = func() { <-r.s.closed }
@@ -143,10 +143,8 @@ func TestWaitTurnEngineCloseIsTheSessionsEnd(t *testing.T) {
 	waitFor(t, "the waiter's look", func() bool { return len(tp.lines(protocol.MethodSessionSnapshot)) >= 1 })
 	_ = r.eng.Close()
 	res, f := w.result(t)
-	if res != nil || f == nil || !strings.HasPrefix(f.msg, "the session ended") {
-		t.Fatalf("the engine's close: %+v, %+v", res, f)
-	}
-	if h, err := parseHandle(f.handle); err != nil || h.target != (waitTarget{kind: targetTurn, id: "turn-1"}) {
-		t.Fatalf("the handle %q: %+v %v", f.handle, h, err)
+	res = wantResult(t, res, f, statusCancelled)
+	if res.Turn != "turn-1" || res.StopReason != stopStopped || res.Error == nil || !strings.HasPrefix(res.Error.Message, "the session ended") {
+		t.Fatalf("the engine's close: %+v", res)
 	}
 }

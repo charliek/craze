@@ -97,6 +97,9 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	}
 	// stop is this server's: true where it serves session.stop (stop.go).
 	info.Capabilities.Stop = s.opts.Stop != nil
+	// exitAfterTurn is too: session.prompt and session.stop take their members
+	// (Options.ExitAfterTurn).
+	info.Capabilities.ExitAfterTurn = s.opts.ExitAfterTurn
 	// rowFacts is too: its sessions.list row carries the row facts (rowFacts,
 	// plan 030 §3.8), and a document of a server without them leaves it out.
 	info.Capabilities.RowFacts = s.opts.RowFacts
@@ -238,7 +241,9 @@ func lastTurn(st engine.State) *protocol.LastTurn {
 	if lt == nil {
 		return nil
 	}
-	return &protocol.LastTurn{Outcome: protocol.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt.UTC(), TurnID: lt.TurnID}
+	return &protocol.LastTurn{Outcome: protocol.TurnOutcome(lt.Outcome), Err: lt.Err, StopReason: lt.StopReason, Cause: lt.Cause, Withdrawn: lt.Withdrawn,
+		Kind: string(lt.Info.Kind), Retryable: lt.Info.Retryable, Status: lt.Info.Status, ProviderCode: lt.Info.ProviderCode,
+		EndedAt: lt.EndedAt.UTC(), TurnID: lt.TurnID}
 }
 
 // queueRows is each row as the event codec writes a queue row.

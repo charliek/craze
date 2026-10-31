@@ -8,7 +8,8 @@
       "type": "object",
       "properties": {
         "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
-        "commandId": {"$ref": "envelope.json#/$defs/commandId"}
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "cause": {"type": "string", "enum": ["stop", "exit_after_turn"], "description": "What began the stop, as its closing ending, lastTurn and the journal say it: stop when absent; exit_after_turn from a waiter whose turn has ended. Where the session capability exitAfterTurn is true: a host without it refuses the member. The first stop's stands."}
       },
       "required": ["sessionId", "commandId"],
       "additionalProperties": false

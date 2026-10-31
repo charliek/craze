@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -65,7 +67,7 @@ func resolveLive(env rundir.Env, what, id string, reload bool) (rundir.Entry, er
 	case 0:
 		return rundir.Entry{}, liveGone(what, id, reload)
 	}
-	return rundir.Entry{}, exitf(1, "%s: %d sessions match %s: %s", what, len(matches), id, sanitizeLine(formatEntries(matches)))
+	return rundir.Entry{}, kindf(errkind.Usage, "%s: %d sessions match %s: %s", what, len(matches), id, sanitizeLine(formatEntries(matches)))
 }
 
 // liveGone is the refusal of an id no live host serves (§3.1): `the session
@@ -77,13 +79,13 @@ func liveGone(what, id string, reload bool) error {
 	matches := matchCrazeID(indexCrazeIDs(), id)
 	switch {
 	case len(matches) == 0:
-		return exitf(1, "%s: no session %s", what, id)
+		return kindf(errkind.Config, "%s: no session %s", what, id)
 	case len(matches) > 1:
-		return exitf(1, "%s: the session has ended: %d ended sessions match %s", what, len(matches), id)
+		return kindf(errkind.Usage, "%s: the session has ended: %d ended sessions match %s", what, len(matches), id)
 	case reload:
-		return exitf(1, "%s: the session has ended%s", what, reloadHint(matches))
+		return kindf(errkind.Stopped, "%s: the session has ended%s", what, reloadHint(matches))
 	}
-	return exitf(1, "%s: the session has ended", what)
+	return kindf(errkind.Stopped, "%s: the session has ended", what)
 }
 
 // reloadHint is how an ended session is loaded again — ` (craze send <short>
@@ -96,15 +98,72 @@ func reloadHint(matches []string) string {
 	return " (craze send " + psShort(matches[0]) + " <prompt> reloads it)"
 }
 
-// sessionLive reports whether a live host still serves session id.
+// sessionLive reports whether a live host still serves session id, or may: a scan
+// that missed a live host's entry cannot say none does.
 func sessionLive(id string) bool {
-	entries, err := rundir.Hosts(rundir.ProcessEnv())
-	if err != nil {
+	entries, unreadable, err := rundir.HostsScan(rundir.ProcessEnv())
+	if err != nil || len(unreadable) > 0 {
 		// Cannot tell: say the connection was lost, which sends the user to
 		// the handle, not to a reload.
 		return true
 	}
 	return slices.ContainsFunc(entries, func(e rundir.Entry) bool { return e.CrazeSessionID == id })
+}
+
+// hostState is a host's process as its record's identity reads it.
+type hostState int
+
+const (
+	// hostUnnamed: the process cannot be told from another, or its identity
+	// not read — an older host's record has no start time, some OSes no reader.
+	hostUnnamed hostState = iota
+	// hostRunning: the very process the record names is running.
+	hostRunning
+	// hostExited: no such process, its pid another's since, or a zombie.
+	hostExited
+)
+
+// readHost reads e's process by its identity (rundir.ProcessIdentity): a pid
+// alone may be a later process's, and a registry row alone says nothing of a host
+// that was killed, or one that exited and removed it.
+func readHost(e rundir.Entry) hostState {
+	id, err := rundir.ProcessIdentity(e.PID)
+	switch {
+	case errors.Is(err, rundir.ErrNoProcess):
+		return hostExited
+	case err != nil:
+		return hostUnnamed
+	case id.Zombie:
+		return hostExited
+	case e.PIDStart == 0:
+		return hostUnnamed
+	case id.Start != e.PIDStart:
+		return hostExited
+	}
+	return hostRunning
+}
+
+// hostScanned sees the registry read hostMarkedStopping makes, once it is made: a
+// no-op, and the barrier a test kills a host at.
+var hostScanned = func() {}
+
+// hostMarkedStopping reports whether e's registry entry says its host has begun
+// to stop (rundir.Entry.Stopping). An entry that is missing, or that cannot be
+// read, says nothing: a killed host's is swept, by this very scan. Nor does one of
+// another process at this host id, or either with no identity: the mark is the word
+// of the very host e names, as its stop record is (rundir.StopRecord.OwnedBy).
+func hostMarkedStopping(e rundir.Entry) bool {
+	entries, err := rundir.Hosts(rundir.ProcessEnv())
+	hostScanned()
+	if err != nil {
+		return false
+	}
+	i := slices.IndexFunc(entries, func(r rundir.Entry) bool { return r.HostID == e.HostID })
+	if i < 0 || !entries[i].Stopping {
+		return false
+	}
+	r := entries[i]
+	return e.PID > 0 && e.PIDStart != 0 && r.PID == e.PID && r.PIDStart == e.PIDStart
 }
 
 // indexCrazeIDs is every craze id the session index holds a row for.
@@ -137,7 +196,7 @@ func matchCrazeID(ids []string, id string) []string {
 // session-scoped method could take.
 func entrySession(what string, e rundir.Entry) (string, error) {
 	if e.CrazeSessionID == "" {
-		return "", exitf(1, "%s: session %s has not started yet; try again in a moment", what, sanitizeLine(entryID(e)))
+		return "", kindf(errkind.StartFailed, "%s: session %s has not started yet; try again in a moment", what, sanitizeLine(entryID(e)))
 	}
 	return e.CrazeSessionID, nil
 }
@@ -157,5 +216,5 @@ func dialCLI(ctx context.Context, e rundir.Entry, what string) (*remote.Client, 
 // attach was refused: exit 1, carrying err (exitError.cause), which craze
 // send reads a host closing its session from (plan 041 §3.4).
 func unreachable(what string, e rundir.Entry, err error) error {
-	return &exitError{code: 1, msg: what + ": session " + psShort(entryID(e)) + " is unreachable: " + sanitizeLine(err.Error()), cause: err}
+	return &exitError{code: 1, msg: what + ": session " + psShort(entryID(e)) + " is unreachable: " + sanitizeLine(err.Error()), cause: err, kind: errkind.ConnectionLost}
 }

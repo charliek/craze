@@ -94,7 +94,7 @@ func (s *nativeSession) Aside(ctx context.Context, req AsideRequest, onDelta fun
 		if seam := s.asideSeam; seam != nil {
 			seam("spent")
 		}
-		s.spent(e)
+		s.spentIdle(e)
 	}
 	if err != nil {
 		return AsideResult{}, s.phraseAside(parent, err)

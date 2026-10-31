@@ -420,10 +420,20 @@ func copyToStdout(conn *net.UnixConn, stdout io.Writer) error {
 	}
 }
 
+// halfCloser is what copyFromStdin needs of the socket: a *net.UnixConn, or a
+// test's.
+type halfCloser interface {
+	io.Writer
+	CloseWrite() error
+}
+
 // copyFromStdin is the pump's stdin -> conn direction: each read written to
 // conn at once. stdin's EOF half-closes conn's write side and returns —
-// never a fatal end of the pump, only of this direction.
-func copyFromStdin(stdin io.Reader, conn *net.UnixConn) error {
+// never a fatal end of the pump, only of this direction. A peer that has closed
+// first leaves nothing to half-close, which macOS answers ENOTCONN (XNU's
+// soshutdown) and Linux does not: the other direction reads what is left, and
+// its EOF owns the exit.
+func copyFromStdin(stdin io.Reader, conn halfCloser) error {
 	buf := make([]byte, pumpChunk)
 	for {
 		n, err := stdin.Read(buf)
@@ -434,7 +444,7 @@ func copyFromStdin(stdin io.Reader, conn *net.UnixConn) error {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if cerr := conn.CloseWrite(); cerr != nil {
+				if cerr := conn.CloseWrite(); cerr != nil && !errors.Is(cerr, syscall.ENOTCONN) {
 					return fmt.Errorf("half-close the session socket: %w", cerr)
 				}
 				return nil

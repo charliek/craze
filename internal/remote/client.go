@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/charliek/craze/internal/backend"
@@ -265,6 +266,19 @@ type wire struct {
 	// handed them; posting says a goroutine is running them.
 	posted  []func()
 	posting bool
+
+	// drain and drained are drainThenEnd's: the first broken pipe's one deadline.
+	drain   sync.Once
+	drained bool
+}
+
+// drainThenEnd gives w's reader until brokenPipeDrain from the first broken pipe
+// to read what the host left, and reports whether it could: later sends never
+// extend it, so calls that keep arriving cannot hold off the reader's end, and
+// the reconnect behind it.
+func (w *wire) drainThenEnd() bool {
+	w.drain.Do(func() { w.drained = w.nc.SetReadDeadline(time.Now().Add(brokenPipeDrain)) == nil })
+	return w.drained
 }
 
 // replyFunc receives a request's reply — or, with err set, the news that the
@@ -522,6 +536,21 @@ func (c *Client) requestLine(method string, params json.RawMessage) (string, []b
 	return id, line, err
 }
 
+// brokenPipeDrain bounds the read of what a host wrote before it closed its end
+// (send): a host that closed has EOF right behind it, and this is for one that
+// shut down only its reading side, which only Linux tells a writer of: on macOS
+// the write succeeds and its bytes are dropped, so nothing here can start this
+// clock, and protocol.md says so. A variable only so a test can shorten it.
+var brokenPipeDrain = 2 * time.Second
+
+// peerClosed says a write's error is the host having closed its end: EPIPE, or on
+// macOS also ENOTCONN. XNU's sosend looks for EPIPE, lets go of the socket to copy
+// the write in, and hands it to uipc_send, which asks if the socket is connected
+// before it asks anything else: a host closing in that copy is ENOTCONN.
+func peerClosed(err error) bool {
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ENOTCONN)
+}
+
 // errUnsent is a send that wrote no byte of its request: the connection was
 // already gone. It is ErrConnectionLost to a caller; a command knows from it
 // that this attempt cannot have run.
@@ -547,9 +576,14 @@ type writeHooks struct {
 // host's inbound limit (ErrRequestTooLarge; nothing sent), when hk.begin
 // withdraws it (errWithdrawn), or when the write fails — ErrConnectionLost if
 // some of it may have gone, errUnsent if not a byte did — which closes w: its
-// reader then exits, and the client reconnects. A write on a connection a
-// reconnect is adopting tells the episode it begins and ends, so it is bounded
-// by the episode even while the adoption's wait has stopped its clock (C8c).
+// reader then exits, and the client reconnects. But a write that finds the host
+// has closed its end (peerClosed) leaves w to its reader, within brokenPipeDrain: what
+// the host wrote before it closed is still there to read — a session's closing
+// records and its reset{session_closed} among them — and closing w here would
+// throw it away, and turn a session's end into a connection lost. A write on a
+// connection a reconnect is adopting tells the episode it begins and ends, so it
+// is bounded by the episode even while the adoption's wait has stopped its clock
+// (C8c).
 func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFunc, hk writeHooks) (string, error) {
 	id, line, err := c.requestLine(method, params)
 	if err != nil {
@@ -583,7 +617,9 @@ func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFu
 	w.wmu.Unlock()
 	if err != nil {
 		w.take(id)
-		_ = w.nc.Close()
+		if !peerClosed(err) || !w.drainThenEnd() {
+			_ = w.nc.Close()
+		}
 		if n == 0 {
 			return "", errUnsent
 		}

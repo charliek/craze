@@ -43,6 +43,9 @@ func (m *Model) Progress() Progress {
 	inTurn := true
 	for i := last; i >= 0; i-- {
 		e := ents[i]
+		if e.Retracted {
+			continue
+		}
 		if inTurn {
 			switch {
 			case turnBoundary(e):

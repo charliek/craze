@@ -221,6 +221,9 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 			if tc.want != "" && re.Cause != tc.want {
 				t.Fatalf("data.cause %q\nwant       %q", re.Cause, tc.want)
 			}
+			if re.Kind != "start_failed" {
+				t.Fatalf("data.kind %q, want start_failed", re.Kind)
+			}
 			if tc.wantPrefix != "" && (!strings.HasPrefix(re.Cause, tc.wantPrefix) || strings.Contains(re.Cause, "login session")) {
 				t.Fatalf("data.cause %q, want %q… and no hint", re.Cause, tc.wantPrefix)
 			}
@@ -355,10 +358,11 @@ func TestNewSaysTheAgentsWordsThroughAHub(t *testing.T) {
 			stdout, stderr, code = executeErr([]string{"new", "--json", "-C", ws, "--provider", "cursor"})
 			var got struct {
 				Error protocol.Error `json:"error"`
+				Kind  string         `json:"kind"`
 			}
 			if code != 1 || stderr != "craze new: the session did not start: "+want+"\n" || strings.Count(stdout, "\n") != 1 ||
 				json.Unmarshal([]byte(stdout), &got) != nil || got.Error.Data.Code != protocol.CodeNotAccepting ||
-				got.Error.Data.Reason != protocol.ReasonStartFailed || got.Error.Data.Cause != want {
+				got.Error.Data.Reason != protocol.ReasonStartFailed || got.Error.Data.Cause != want || got.Kind != "start_failed" {
 				t.Fatalf("craze new --json exited %d: stdout %q, stderr %q", code, stdout, stderr)
 			}
 		})

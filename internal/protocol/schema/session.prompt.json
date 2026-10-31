@@ -11,7 +11,8 @@
         "commandId": {"$ref": "envelope.json#/$defs/commandId"},
         "text": {"type": "string"},
         "fromRow": {"type": "string"},
-        "mode": {"$ref": "#/$defs/mode"}
+        "mode": {"$ref": "#/$defs/mode"},
+        "exitAfterTurn": {"type": "boolean", "description": "Sets the exit fence with this prompt, where the session capability exitAfterTurn is true: from its admission no other prompt or interjection is admitted (not_accepting, reason exit_fenced), rows queued ahead of it run first, and when its turn ends nothing else starts of craze's; a turn an agent starts entirely on its own cannot be fenced. Only with mode queue and text. A host without the capability refuses it: unsupported, or an older host's -32602 unknown_field."}
       },
       "required": ["sessionId", "commandId", "mode"],
       "additionalProperties": false

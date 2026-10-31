@@ -646,8 +646,8 @@ func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
 //     and a body holding the standard error object, from which the scrubber
 //     reads the code and type back (ErrorNames). One inside the stream is
 //     retryable when the core calls it transient (usage or account
-//     information unavailable, a server error) — before any output only,
-//     which the wrapper's rule 3 enforces (D-32). A 401, the token refused
+//     information unavailable, a server error) before any output; after it,
+//     only a server's fault, as the wrapper's rule 3 decides (D-32). A 401, the token refused
 //     after its one renewal, is an auth failure nothing retries, whatever
 //     its body or headers say.
 //   - A stream that stopped before saying how it ended is Fantasy's
@@ -660,8 +660,8 @@ func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
 // — the ChatGPT plan's codes mean nothing there — and a failure the server
 // reported is keyProviderError's: the classification the Chat Completions
 // drivers get, which the harness already words and retries. Whatever is
-// retryable on either route is so before any output only: after it, the
-// wrapper's rule 3 fails the step (D-32).
+// retryable on either route is so before any output: after it, the wrapper's
+// rule 3 decides (D-32).
 func responsesError(err error) error {
 	var re *responsesapi.Error
 	switch {

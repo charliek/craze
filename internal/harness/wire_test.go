@@ -709,7 +709,7 @@ func TestWireErrors(t *testing.T) {
 		{name: "stream error after text", replies: []http.HandlerFunc{func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(w, "data: %s\n\n", textChunk("partial"))
-			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"server_error\"}}\n\n", "upstream overloaded: "+r.Header.Get("Authorization"))
+			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"invalid_request_error\"}}\n\n", "upstream overloaded: "+r.Header.Get("Authorization"))
 		}}, message: "stream error: upstream overloaded: Bearer [redacted]", requests: 1,
 			wantEntries: []string{"user test/a high: hi", "assistant test/a high interrupted: partial"}, wantTextSeen: "partial"},
 		{name: "a raw body", replies: []http.HandlerFunc{func(w http.ResponseWriter, r *http.Request) {
@@ -808,7 +808,7 @@ func TestWireRetryBeforeOutput(t *testing.T) {
 	recovered := done(1, fantasy.FinishReasonStop, StopEndTurn, 2)
 	recovered.Usage = Usage{Input: 56, Output: 8, CacheRead: 64}
 	equal(t, "events", plain(ev.list()), []Event{
-		Retrying{Delay: time.Millisecond, Attempt: 1, Reason: "HTTP 503: busy: Bearer [redacted]"},
+		Retrying{Delay: time.Millisecond, Turn: 1, Step: 1, Attempt: 1, Total: 1, Reason: "HTTP 503: busy: Bearer [redacted]"},
 		TextDelta{Text: "recovered"},
 		recovered,
 		unpricedSpent(56+64+8, recovered.Usage, recovered.Usage), // the failed attempt spent nothing

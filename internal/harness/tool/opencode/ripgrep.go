@@ -144,7 +144,7 @@ func (r *ripgrep) run(ctx context.Context, env tool.Env, bin, dir string, args [
 	cmd.Env = environ(env, dir)
 	cmd.Stdout, cmd.Stderr = outW, errW
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	g, err := startGroup(cmd)
+	g, err := startGroup(cmd, env.ProcessGroups)
 	// rg has its own copies of the write ends; the pipes close when it exits.
 	_, _ = outW.Close(), errW.Close()
 	if err != nil {

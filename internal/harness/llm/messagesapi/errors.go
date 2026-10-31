@@ -3,6 +3,7 @@ package messagesapi
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -31,6 +32,13 @@ func (v *violation) Error() string { return "messagesapi: the stream broke the p
 func (v *violation) Unwrap() error { return ErrIncomplete }
 
 func broke(format string, args ...any) error { return &violation{rule: fmt.Sprintf(format, args...)} }
+
+// IsViolation reports whether err is a stream that broke the protocol, not one
+// that merely stopped short: both are ErrIncomplete.
+func IsViolation(err error) bool {
+	var v *violation
+	return errors.As(err, &v)
+}
 
 // Error is a failed request: an HTTP status before the stream, or an error
 // event inside it.

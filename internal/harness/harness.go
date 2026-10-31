@@ -202,6 +202,20 @@ type Options struct {
 	// the built-ins alone. A sub-agent has no agent tool, and this is not read
 	// for one.
 	Personas []Persona
+	// ProviderRetries is how many times a step's model request may be sent again
+	// after failing, before output or (for a transport or server failure) after
+	// it: `provider_retries`. nil is DefaultProviderRetries; 0 is none; anything
+	// past MaxProviderRetries is held to it. A child's is its parent's.
+	ProviderRetries *int
+	// ProcessGroups is told of every process group the session's tools start, so
+	// a host can write them down for whoever must end them if it is killed
+	// outright (tool.GroupRecorder). nil records nothing: craze prompt, and the
+	// TUI's session in its own process. A child's is its parent's.
+	ProcessGroups GroupRecorder
+	// ProcessMark is an environment entry ("NAME=value") every process the session's
+	// tools start carries, which recognises them as this host's (tool.Env.ProcessMark).
+	// "" is none. A child's is its parent's.
+	ProcessMark string
 	// Child opens the session as a sub-agent of another (child.go, plan 026
 	// §3.2); nil is an ordinary session. Only the runner that starts children
 	// sets it, and fills the rest of these Options with the parent's own
@@ -316,6 +330,7 @@ type Session struct {
 	// entry's for a resumed one (PromptSHA256).
 	promptSHA string
 	store     *store.Store
+	workspace string   // Options.Workspace
 	tools     *toolset // fixed at Open
 	getenv    func(string) string
 	newModel  func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -327,9 +342,11 @@ type Session struct {
 	// 028 §3.8 item 6, review r1-c9): defaultSummarizerAgent, with retries of
 	// its own switched off — the outer attempts loop is compact's whole retry
 	// budget, so three attempts send at most three provider requests, never
-	// Fantasy's own retry stacked on top of it (newAgent's, maxRetries). A
+	// Fantasy's own retry stacked on top of it (a turn's, providerRetries). A
 	// test may replace it before compact runs.
 	newSummarizerAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
+	// providerRetries is each step's retry budget (Options.ProviderRetries).
+	providerRetries int
 
 	closeOnce sync.Once
 	closeErr  error
@@ -494,12 +511,21 @@ func (s *Session) renderer() store.Renderer {
 }
 
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
-// one retry, and the session's tools in the profile's order.
+// its default retries (a turn's call says its own), and the session's tools in
+// the profile's order.
 func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
 	return fantasy.NewAgent(lm,
 		fantasy.WithSystemPrompt(system),
-		fantasy.WithMaxRetries(maxRetries),
+		fantasy.WithMaxRetries(DefaultProviderRetries),
 		fantasy.WithTools(tools...))
+}
+
+// providerRetries is the budget n asks for (Options.ProviderRetries).
+func providerRetries(n *int) int {
+	if n == nil {
+		return DefaultProviderRetries
+	}
+	return min(max(*n, 0), MaxProviderRetries)
 }
 
 // defaultSummarizerAgent is the summarizer's own agent (compact.go, plan 028
@@ -587,12 +613,20 @@ func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
 	}
+	if opts.ProcessGroups != nil {
+		opts.tools.groups = opts.ProcessGroups
+	}
+	if opts.ProcessMark != "" {
+		opts.tools.mark = opts.ProcessMark
+	}
 	child := opts.Child
 	s := &Session{
+		workspace:          opts.Workspace,
 		getenv:             opts.Getenv,
 		newModel:           opts.NewModel,
 		newAgent:           defaultAgent,
 		newSummarizerAgent: defaultSummarizerAgent,
+		providerRetries:    providerRetries(opts.ProviderRetries),
 		table:              opts.Table,
 		openTable:          opts.Table,
 		child:              child != nil,
@@ -815,7 +849,7 @@ func (s *Session) build(table *modeltable.Table, alias string) (model, error) {
 func withEffort(m model, effort string) (model, error) {
 	opts, err := llm.EffortOptions(m.r, effort)
 	if err != nil {
-		return model{}, fmt.Errorf("harness: effort %q: %w", effort, err)
+		return model{}, configError{fmt.Errorf("harness: effort %q: %w", effort, err)}
 	}
 	m.effort, m.effortOpts = effort, opts
 	return m, nil
@@ -1143,6 +1177,13 @@ func (s *Session) Current() (model, effort string) {
 
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
+
+// PlanPath is the session's plan file, fixed at Open; "" for a sub-agent, which
+// has none.
+func (s *Session) PlanPath() string { return s.modes.planPath }
+
+// Workspace is the session's working directory, absolute.
+func (s *Session) Workspace() string { return s.workspace }
 
 // PromptSize and PromptSHA256 describe the frozen system prompt — the
 // profile's text with Options.Prompt and the session-start section rendered

@@ -724,3 +724,19 @@ func TestSearchRefusesWithoutAnEnvironment(t *testing.T) {
 		})
 	}
 }
+
+// TestSearchWritesItsGroupDown: rg runs in a session of its own, as a command does,
+// so it is written down and forgotten as a command is (TestBashWritesItsGroupDown).
+func TestSearchWritesItsGroupDown(t *testing.T) {
+	env := fakeEnv(t, "FAKE_RG_OUT=", "FAKE_RG_ERR=", "FAKE_RG_CODE=1")
+	notes := &groupNotes{}
+	env.ProcessGroups = notes.record
+	p := prepareSearch(t, fakeRG("exit", time.Minute), env, "grep", map[string]any{"pattern": "x"})
+	if res := p.Run(context.Background(), env); res.IsError {
+		t.Fatalf("the search: %+v", res)
+	}
+	recorded, forgotten := notes.told()
+	if len(recorded) != 1 || !slices.Equal(recorded, forgotten) {
+		t.Fatalf("recorded %v, forgotten %v; want one, once each", recorded, forgotten)
+	}
+}

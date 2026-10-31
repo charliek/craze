@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -238,8 +239,8 @@ func release(t *testing.T, path string) {
 func groups(c *bashCall) <-chan *group {
 	gs := make(chan *group, 1)
 	start := c.ops.start
-	c.ops.start = func(cmd *exec.Cmd) (*group, error) {
-		g, err := start(cmd)
+	c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+		g, err := start(cmd, rec)
 		if err == nil {
 			gs <- g
 		}
@@ -529,9 +530,9 @@ func TestBashRunInBackground(t *testing.T) {
 		c := prepareBash(t, env, map[string]any{"command": "echo started; read line < gate; exit 3", "run_in_background": true})
 		var reservedFirst bool
 		start := c.ops.start
-		c.ops.start = func(cmd *exec.Cmd) (*group, error) {
+		c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
 			reservedFirst = len(jobs.reservations()) == 1
-			return start(cmd)
+			return start(cmd, rec)
 		}
 		res := startBash(t, c, env).await(t, 30*time.Second)
 		body := adopt(t, jobs)
@@ -628,8 +629,8 @@ func TestBashRunInBackground(t *testing.T) {
 		c := prepareBash(t, env, map[string]any{"command": "echo hi; sleep 626", "run_in_background": true})
 		runs := make(chan *bashRun, 1)
 		start := c.ops.start
-		c.ops.start = func(cmd *exec.Cmd) (*group, error) {
-			g, err := start(cmd)
+		c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+			g, err := start(cmd, rec)
 			select {
 			case r := <-runs:
 				r.cancel(nil) // the command has started; the call is cancelled before it is handed over
@@ -762,6 +763,10 @@ func TestJobBodyEnds(t *testing.T) {
 	t.Run("closing", func(t *testing.T) {
 		t.Parallel()
 		body, pid, _, _ := start(t, "trap '' TERM; echo up; sleep 632")
+		// Closed once its trap is set, or the close proves nothing of a command that ignores SIGTERM.
+		if !waitFor(15*time.Second, func() bool { return body.Output(0).Total > 0 }) {
+			t.Fatal("control: the job's output never arrived")
+		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		cancel(tool.ErrClosing)
 		began := time.Now()
@@ -965,5 +970,151 @@ func TestPromotionReceiptSpacing(t *testing.T) {
 	}
 	if got := c.result(outcome{why: endTimeout, kept: "tick 4\n"}).Text; !strings.HasPrefix(got, "tick 4\n\n\n<shell_metadata>") {
 		t.Fatalf("control: a foreground result begins %q", got)
+	}
+}
+
+// groupNotes is a tool.GroupRecorder that writes down what it is told, for a test.
+type groupNotes struct {
+	mu        sync.Mutex
+	recorded  []int
+	forgotten []int
+	// onRecord and onForget run as each is told, with the group's pid.
+	onRecord, onForget func(pid int)
+}
+
+func (n *groupNotes) record(pid int) (forget func()) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.recorded = append(n.recorded, pid)
+	if n.onRecord != nil {
+		n.onRecord(pid)
+	}
+	return func() {
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		n.forgotten = append(n.forgotten, pid)
+		if n.onForget != nil {
+			n.onForget(pid)
+		}
+	}
+}
+
+func (n *groupNotes) told() (recorded, forgotten []int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return slices.Clone(n.recorded), slices.Clone(n.forgotten)
+}
+
+// TestBashWritesItsGroupDown: a command's group is told to the recorder once, as
+// the leader's own pid, with the leader not reaped yet whatever it has done by then;
+// and is forgotten once, only after its leader has been reaped, by the time the
+// call returns. So a host killed at any instant before leaves it written down.
+func TestBashWritesItsGroupDown(t *testing.T) {
+	t.Parallel()
+	env := bashEnv(t, nil)
+	notes := &groupNotes{}
+	var heldAtRecord, goneAtForget atomic.Bool
+	notes.onRecord = func(pid int) { heldAtRecord.Store(syscall.Kill(pid, 0) == nil) }
+	notes.onForget = func(pid int) { goneAtForget.Store(errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)) }
+	env.ProcessGroups = notes.record
+	c := prepareBash(t, env, map[string]any{"command": "exit 0"})
+	pids := startedPIDs(c)
+	if res := startBash(t, c, env).await(t, 30*time.Second); res.IsError {
+		t.Fatalf("the command: %+v", res)
+	}
+	pid := <-pids
+	recorded, forgotten := notes.told()
+	if !slices.Equal(recorded, []int{pid}) || !slices.Equal(forgotten, []int{pid}) {
+		t.Fatalf("recorded %v, forgotten %v; want the leader %d once each", recorded, forgotten, pid)
+	}
+	if !heldAtRecord.Load() {
+		t.Fatal("the leader was gone by the time it was recorded")
+	}
+	if !goneAtForget.Load() {
+		t.Fatal("the group was forgotten before its leader was reaped")
+	}
+}
+
+// TestBashPromotionStaysWrittenDown: a promoted job is the same group: recorded
+// once, as it started, and not forgotten until the job ends it. A job running
+// in the background is what a host killed outright would otherwise leak.
+func TestBashPromotionStaysWrittenDown(t *testing.T) {
+	t.Parallel()
+	jobs := newFakeJobs()
+	env := jobEnv(t, jobs)
+	notes := &groupNotes{}
+	env.ProcessGroups = notes.record
+	gate := fifo(t, env, "gate")
+	c := prepareBash(t, env, map[string]any{"command": "echo before; read line < gate", "timeout": longTimeout})
+	fire := timedOut(t, c, &env, "before\n")
+	r := startBash(t, c, env)
+	pid := fire(r)
+	if res := r.await(t, 30*time.Second); res.IsError {
+		t.Fatalf("the promotion: %+v", res)
+	}
+	body := adopt(t, jobs)
+	recorded, forgotten := notes.told()
+	if !slices.Equal(recorded, []int{pid}) || len(forgotten) != 0 {
+		t.Fatalf("after the promotion: recorded %v, forgotten %v; want %d recorded and not forgotten", recorded, forgotten, pid)
+	}
+	release(t, gate)
+	if end := body.wait(context.Background(), time.Hour); end.Status != tool.JobExited {
+		t.Fatalf("the job ended %+v", end)
+	}
+	if recorded, forgotten = notes.told(); !slices.Equal(recorded, []int{pid}) || !slices.Equal(forgotten, []int{pid}) {
+		t.Fatalf("once the job ended: recorded %v, forgotten %v; want %d once each", recorded, forgotten, pid)
+	}
+}
+
+// TestACommandCarriesItsHostsMark: the mark is in the command's environment, over one
+// it inherited from a craze an agent ran, and what its children start has it too.
+func TestACommandCarriesItsHostsMark(t *testing.T) {
+	t.Parallel()
+	env := bashEnv(t, nil)
+	env.Environ = append(env.Environ, "CRAZE_TEST_MARK=inherited")
+	env.ProcessMark = "CRAZE_TEST_MARK=mine"
+	res := runBash(t, env, map[string]any{"command": `sh -c 'echo "got $CRAZE_TEST_MARK"'`})
+	if !strings.Contains(res.Text, "got mine") {
+		t.Fatalf("the command's environment: %+v", res)
+	}
+}
+
+// TestBashWithNoGroupRecorder: nil records nothing, and nothing is the matter.
+func TestBashWithNoGroupRecorder(t *testing.T) {
+	t.Parallel()
+	env := bashEnv(t, nil)
+	if res := runBash(t, env, map[string]any{"command": "echo ok"}); res.IsError {
+		t.Fatalf("the command: %+v", res)
+	}
+}
+
+// TestBashDiscardedAtItsStartIsForgotten: a call stopped as its command starts
+// discards the group, which is still reaped and still forgotten.
+func TestBashDiscardedAtItsStartIsForgotten(t *testing.T) {
+	t.Parallel()
+	env := bashEnv(t, nil)
+	notes := &groupNotes{}
+	env.ProcessGroups = notes.record
+	c := prepareBash(t, env, map[string]any{"command": "sleep 7421"})
+	var r *bashRun
+	ready, started := make(chan struct{}), make(chan struct{})
+	start := c.ops.start
+	c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+		g, err := start(cmd, rec)
+		<-ready
+		r.cancel(nil)
+		close(started)
+		return g, err
+	}
+	r = startBash(t, c, env)
+	close(ready)
+	<-started
+	r.await(t, 30*time.Second)
+	if !waitFor(30*time.Second, func() bool {
+		recorded, forgotten := notes.told()
+		return len(recorded) == 1 && slices.Equal(recorded, forgotten)
+	}) {
+		recorded, forgotten := notes.told()
+		t.Fatalf("recorded %v, forgotten %v; want the one, once each", recorded, forgotten)
 	}
 }

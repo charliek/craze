@@ -4,8 +4,12 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestParseProcStat is a Linux stat line read (parseProcStat): the command
@@ -92,5 +96,179 @@ func TestProcessIdentity(t *testing.T) {
 	}
 	if _, err := ProcessIdentity(0); err == nil || errors.Is(err, ErrNoProcess) {
 		t.Fatalf("pid 0: %v, want an error that is not ErrNoProcess", err)
+	}
+}
+
+// TestParseProcMember is a stat line's group and session, its command's spaces
+// and parentheses no trouble: the same reading as TestParseProcStat's.
+func TestParseProcMember(t *testing.T) {
+	// The fields after the command, 3 on: state, ppid, pgrp, session, then 15 more
+	// up to the start time, field 22.
+	tail := " S 4242 900 901 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0\n"
+	for _, tc := range []struct {
+		name, line string
+		want       GroupMember
+	}{
+		{"plain", "77 (sleep)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
+		{"a command like a) b (c", "77 (a) b (c)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
+		{"a command that ends like a line", "77 (x) S 1 2 3 ) 4)" + tail, GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654}},
+		{"a zombie", "77 (x) Z" + tail[2:], GroupMember{PID: 77, PGID: 900, Session: 901, Start: 987654, Zombie: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseProcMember(77, tc.line)
+			if err != nil || got != tc.want {
+				t.Fatalf("%q: %+v, %v; want %+v", tc.line, got, err, tc.want)
+			}
+		})
+	}
+	for _, line := range []string{
+		"", "77 no parenthesis", "77 (x)", "77 (x) S 1",
+		"77 (x) S 4242 nine 901" + strings.Repeat(" 0", 16),
+		"77 (x) S 4242 900 nine" + strings.Repeat(" 0", 16),
+	} {
+		if m, err := parseProcMember(77, line); err == nil {
+			t.Fatalf("%q read as %+v", line, m)
+		}
+	}
+}
+
+// TestEnvironHolds takes a mark whole and nothing that merely has it in it.
+func TestEnvironHolds(t *testing.T) {
+	const mark = "CRAZE_AGENT=1"
+	for env, want := range map[string]bool{
+		"":                         false,
+		"CRAZE_AGENT=1":            true,
+		"A=b\x00CRAZE_AGENT=1\x00": true,
+		"CRAZE_AGENT=1\x00A=b\x00": true,
+		"XCRAZE_AGENT=1\x00":       false,
+		"CRAZE_AGENT=10\x00":       false,
+		"A=CRAZE_AGENT=1\x00":      false,
+		"CRAZE_AGENT=\x001":        false,
+		"\x00\x00":                 false,
+	} {
+		if got := environHolds([]byte(env), mark); got != want {
+			t.Fatalf("%q: %v, want %v", env, got, want)
+		}
+	}
+}
+
+// TestProcArgsEnviron reads a kern.procargs2 buffer: argc, the executable's path,
+// its padding, the arguments and then the environment.
+func TestProcArgsEnviron(t *testing.T) {
+	buf := func(argc byte, rest string) []byte { return append([]byte{argc, 0, 0, 0}, rest...) }
+	for _, tc := range []struct {
+		name string
+		b    []byte
+		want string
+	}{
+		// "/bin/sh" and its NUL are 8 bytes, so no padding; "/bin/zsh" and its NUL are 9,
+		// so 7 NULs.
+		{"whole", buf(2, "/bin/zsh\x00\x00\x00\x00\x00\x00\x00\x00sh\x00-c\x00A=b\x00CRAZE_AGENT=1\x00\x00\x00apple=x\x00"), "A=b\x00CRAZE_AGENT=1\x00"},
+		{"an empty argument", buf(2, "/bin/sh\x00sh\x00\x00A=b\x00\x00"), "A=b\x00"},
+		{"an empty first argument, the mark alone", buf(1, "/bin/sh\x00\x00CRAZE_AGENT=1\x00\x00"), "CRAZE_AGENT=1\x00"},
+		{"an empty first argument after padding", buf(1, "/bin/zsh\x00\x00\x00\x00\x00\x00\x00\x00\x00CRAZE_AGENT=1\x00\x00"), "CRAZE_AGENT=1\x00"},
+		{"padding wider than a pointer's", buf(1, "/bin/sh\x00\x00\x00\x00sh\x00A=b\x00\x00"), "sh\x00A=b\x00"},
+		{"nothing after the arguments", buf(1, "/bin/sh\x00sh\x00"), ""},
+		{"too short", []byte{1, 0}, ""},
+		{"no path's end", buf(1, "/bin/sh"), ""},
+		{"too few arguments", buf(3, "/bin/sh\x00sh\x00"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(procArgsEnviron(tc.b)); got != tc.want {
+				t.Fatalf("%q: %q, want %q", tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProcArgsCarryReadsAgainWhatAnExecRefused: a refusal is no answer while the process
+// is there, so the read is made again, and only a read that holds an environment says
+// no. What goes on being refused is not known, after a bounded number of reads; a
+// process that has gone carries nothing, and is not read twice.
+func TestProcArgsCarryReadsAgainWhatAnExecRefused(t *testing.T) {
+	const mark = "CRAZE_HOST_ID=x"
+	marked := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00" + mark + "\x00\x00")
+	unmarked := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00A=b\x00\x00")
+	noEnviron := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00")
+	refused := errors.New("EINVAL")
+	for _, tc := range []struct {
+		name           string
+		refuse         int
+		b              []byte
+		there          bool
+		carries, known bool
+		reads          int
+	}{
+		{"read at once", 0, marked, true, true, true, 1},
+		{"no mark, read at once", 0, unmarked, true, false, true, 1},
+		{"no environment, read at once", 0, noEnviron, true, false, true, 1},
+		{"refused, then read", 3, marked, true, true, true, 4},
+		{"refused, then no mark", 3, unmarked, true, false, true, 4},
+		{"refused throughout", 1 << 30, marked, true, false, false, carriesReads},
+		{"nothing read throughout", 0, nil, true, false, false, carriesReads},
+		{"a buffer with no environment's shape throughout", 0, []byte{1, 0}, true, false, false, carriesReads},
+		{"refused, and gone", 1 << 30, marked, false, false, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := 0
+			carries, known := procArgsCarry(func() ([]byte, error) {
+				if reads++; reads <= tc.refuse {
+					return nil, refused
+				}
+				return tc.b, nil
+			}, func() bool { return tc.there }, mark)
+			if carries != tc.carries || known != tc.known || reads != tc.reads {
+				t.Fatalf("carries %v, known %v after %d reads, want %v, %v after %d", carries, known, reads, tc.carries, tc.known, tc.reads)
+			}
+		})
+	}
+}
+
+// TestProcessGroupsFindsAGroupsMembers is the scan on this machine: a child leading
+// a group of its own is found in it, with its session and its start time, and
+// nothing in that group but it; a past deadline is a scan that says nothing.
+func TestProcessGroupsFindsAGroupsMembers(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.Env = append(os.Environ(), "CRAZE_REAP_TEST_MARK=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	pid := cmd.Process.Pid
+	id, err := ProcessIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := ProcessGroups(time.Now().Add(30 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := groups[pid], []GroupMember{{PID: pid, PGID: pid, Session: pid, Start: id.Start}}; !slices.Equal(got, want) {
+		t.Fatalf("the group: %+v, want %+v", got, want)
+	}
+	if m, err := ProcessMember(pid); err != nil || m != groups[pid][0] {
+		t.Fatalf("one read of it: %+v, %v; the scan's: %+v", m, err, groups[pid][0])
+	}
+	if _, err := ProcessMember(1 << 30); !errors.Is(err, ErrNoProcess) {
+		t.Fatalf("a pid nothing has: %v", err)
+	}
+	if carries, known := ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=1"); !carries || !known {
+		t.Fatalf("the child and what its environment holds: carries %v, known %v", carries, known)
+	}
+	if carries, known := ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=2"); carries || !known {
+		t.Fatalf("the child and what it was not given: carries %v, known %v", carries, known)
+	}
+	if carries, known := ProcessCarries(1<<30, "CRAZE_REAP_TEST_MARK=1"); carries || !known {
+		t.Fatalf("a pid nothing has: carries %v, known %v", carries, known)
+	}
+	if _, err := ProcessGroups(time.Now().Add(-time.Hour)); !errors.Is(err, ErrScanCut) && runtime.GOOS == "linux" {
+		t.Fatalf("a deadline past: %v, want %v", err, ErrScanCut)
+	}
+	if boot, ns, err := ProcessScope(); err != nil || boot == "" || ns == "" {
+		t.Fatalf("the scope: %q %q %v", boot, ns, err)
 	}
 }

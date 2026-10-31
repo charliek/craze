@@ -32,8 +32,8 @@ import (
 const summarizerAttempts = 3
 
 // summarizerBackoff is the delay before the summarizer's 2nd and 3rd
-// attempts, in order; compact's own retry, on top of Fantasy's (maxRetries)
-// inside any one of them.
+// attempts, in order; compact's own retry: Fantasy's is off inside them
+// (newSummarizerAgent).
 var summarizerBackoff = []time.Duration{2 * time.Second, 4 * time.Second}
 
 // minSummaryLen is the shortest cleaned summary compact accepts without

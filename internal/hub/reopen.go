@@ -682,7 +682,7 @@ func (r *reopening) join(e rundir.Entry) holderLook {
 		if at.kind == attendStartTimeout && r.over() {
 			return answered(r.spent())
 		}
-		return answered(createRefusal(startFailed(at.cause)))
+		return answered(createRefusal(startFailed(at)))
 	case attendLost:
 		h.logf("%s: host %s went before its session started: %v", r.tag, e.HostID, at.err)
 		if r.ctx.Err() != nil {

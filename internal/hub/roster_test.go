@@ -227,6 +227,41 @@ func TestAHostDyingBetweenBindAndIdentity(t *testing.T) {
 	p.nothing("after the removal")
 }
 
+// TestAHostChildHoldsItsLockThroughACollection: a host child is a live host
+// for as long as it runs, whatever its collector does — the promise of "bound"
+// every test of a real host relies on. A registration nothing refers to has
+// its lock closed by the collector, and the registry then reads a live process
+// as a dead host and sweeps it, which left it out of a first list at random.
+// Both kinds are collected once the known one has answered, so its Serve is
+// under way and init's locals are past their last use: without hostChildHolds
+// each lock is free here, every time, the negative control.
+func TestAHostChildHoldsItsLockThroughACollection(t *testing.T) {
+	env := testEnv(t)
+	rg := newRosterRig(t, env, rigOpts{})
+	early, known := hostOf(7), hostOf(8)
+	hc := startHostChild(t, env, early, "")
+	hk := startHostChild(t, env, known, sessionOf(8))
+	setVar(t, &listWait, step)
+	sub := dialPeer(t, rg.sock).subscribe()
+	if r := rowOf(sub.Sessions, known); r == nil || r.Status != protocol.RosterReachable {
+		t.Fatalf("listed %+v, want %s reachable", sub.Sessions, known)
+	}
+	hc.collect(t)
+	hk.collect(t)
+	for _, id := range []string{early, known} {
+		if rundir.HostLockFree(env, id) {
+			t.Fatalf("host %s's lock is free after a collection, with its process alive", id)
+		}
+	}
+	entries, err := rundir.Hosts(env)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("the registry after the collections: %+v, %v, want both hosts", entries, err)
+	}
+	if l := dialPeer(t, rg.sock).list(); rowOf(l.Sessions, known) == nil {
+		t.Fatalf("listed %v after the collection, want %s", ids(l.Sessions), known)
+	}
+}
+
 // TestAnUnreachableHostKeepsItsLastRow (§3.6): a row is fresh while its last
 // read is at most freshFor old — at the bound still fresh, the negative
 // control, and a nanosecond past it approximate, which a list reads and its

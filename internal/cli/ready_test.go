@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -637,6 +640,352 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 			}
 			if out := r.stderr.String(); !strings.Contains(out, "craze serve: the session's start had not returned when the host stopped") {
 				t.Fatalf("the log: %s", out)
+			}
+		})
+	}
+}
+
+// shellGroups is a record of a host's own, in a host-logs directory of the test's.
+func shellGroups(t testing.TB) (g *agentGroups, log *bytes.Buffer) {
+	t.Helper()
+	log = &bytes.Buffer{}
+	g = &agentGroups{path: filepath.Join(t.TempDir(), "0123456789ab.pgids"), log: log, write: (*os.File).WriteString}
+	owner, err := hostspawn.NewGroupOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.owner = owner
+	return g, log
+}
+
+// TestShellGroupsStayBoundedAsCommandsRun: a long session of short commands never
+// grows the record, and the file reads back as what is running. One a session has
+// many of at once goes one at a time; the last one takes the file.
+func TestShellGroupsStayBoundedAsCommandsRun(t *testing.T) {
+	g, _ := shellGroups(t)
+	// Far past the cap: a session of many commands does not come near it.
+	for range 3 * hostspawn.AgentGroupsMax {
+		g.recordShell(os.Getpid())()
+		if _, err := os.Lstat(g.path); !os.IsNotExist(err) {
+			t.Fatalf("the record stays once its last command has gone: %v", err)
+		}
+	}
+	forget := make([]func(), 5)
+	for i := range forget {
+		forget[i] = g.recordShell(os.Getpid())
+	}
+	for i := range forget {
+		b, err := os.ReadFile(g.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := g.line(os.Getpid(), mustIdentity(t).Start, hostspawn.GroupShell)
+		if got := strings.Count(string(b), want); got != len(forget)-i || !strings.HasSuffix(string(b), "\n") {
+			t.Fatalf("%q holds %d lines, want %d", b, got, len(forget)-i)
+		}
+		forget[i]()
+	}
+	if _, err := os.Lstat(g.path); !os.IsNotExist(err) {
+		t.Fatalf("the record was left: %v", err)
+	}
+}
+
+func mustIdentity(t *testing.T) rundir.ProcIdentity {
+	t.Helper()
+	id, err := rundir.ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestShellGroupsBesideAnAgent: a rewrite keeps every other line; an agent's stays
+// through any number of commands, and the record ends with what ended the agent's.
+func TestShellGroupsBesideAnAgent(t *testing.T) {
+	g, _ := shellGroups(t)
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if err := g.record(cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		g.recordShell(os.Getpid())()
+	}
+	if got := recordedGroups(t, g.path); len(got) != 1 || got[0] != cmd.Process.Pid {
+		t.Fatalf("the record holds %v, want the agent %d", got, cmd.Process.Pid)
+	}
+	entry, _ := os.ReadFile(g.path)
+	parsed, ok := hostspawn.ParseAgentGroup(string(entry))
+	if !ok || parsed.Kind != hostspawn.GroupAgent || parsed.Owner != g.owner {
+		t.Fatalf("the agent's line: %+v, %v (%q)", parsed, ok, entry)
+	}
+	g.close()
+	if _, err := os.Lstat(g.path); !os.IsNotExist(err) {
+		t.Fatalf("the record was left: %v", err)
+	}
+	// Once the record is closed, nothing reappears from a command's removal or start.
+	forget := g.recordShell(os.Getpid())
+	forget()
+	if _, err := os.Lstat(g.path); !os.IsNotExist(err) {
+		t.Fatalf("a closed record came back: %v", err)
+	}
+}
+
+// TestShellGroupPastTheCap: the record holds at most its cap, so a host at it runs
+// the command unwritten, and says so once; an agent past it does not start, since
+// that is what a record that cannot be made means. A record freed takes the next.
+func TestShellGroupPastTheCap(t *testing.T) {
+	g, log := shellGroups(t)
+	var forget []func()
+	for range hostspawn.AgentGroupsMax {
+		forget = append(forget, g.recordShell(os.Getpid()))
+	}
+	for range 3 {
+		g.recordShell(os.Getpid())() // nothing to take out: not written
+	}
+	b, err := os.ReadFile(g.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "\n"); n != hostspawn.AgentGroupsMax {
+		t.Fatalf("the record holds %d lines, want the cap's %d", n, hostspawn.AgentGroupsMax)
+	}
+	if n := strings.Count(log.String(), "not, and would outlive a host killed outright"); n != 1 {
+		t.Fatalf("the cap was said %d times:\n%s", n, log)
+	}
+	agent := exec.Command("sleep", "30")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = agent.Process.Kill()
+		_ = agent.Wait()
+	})
+	if err := g.record(agent.Process.Pid); err == nil {
+		t.Fatal("an agent past the cap was recorded")
+	}
+	forget[0]()
+	g.recordShell(os.Getpid())
+	if b, _ = os.ReadFile(g.path); strings.Count(string(b), "\n") != hostspawn.AgentGroupsMax {
+		t.Fatalf("a freed line was not taken: %d lines", strings.Count(string(b), "\n"))
+	}
+}
+
+// TestAShellGroupThatCannotBeWrittenRunsAnyway: nothing about a record can fail a
+// command: it is said on the log, and the remover does nothing. A host-logs
+// directory that cannot be used, the file a directory, and a nil record all answer
+// a remover that works.
+func TestAShellGroupThatCannotBeWrittenRunsAnyway(t *testing.T) {
+	g, log := shellGroups(t)
+	if err := os.Mkdir(g.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g.recordShell(os.Getpid())()
+	if !strings.Contains(log.String(), "not recorded") {
+		t.Fatalf("the log does not say so: %s", log)
+	}
+	(&agentGroups{err: errors.New("no directory")}).recordShell(os.Getpid())()
+	var none *agentGroups
+	none.recordShell(os.Getpid())()
+	// A pid nothing has is said, not failed.
+	g, log = shellGroups(t)
+	g.recordShell(1 << 30)()
+	if !strings.Contains(log.String(), "not recorded") {
+		t.Fatalf("the log does not say so: %s", log)
+	}
+}
+
+// TestAHostWithNoScope: a host that cannot read its scope gives a sweep nothing to go
+// on. A shell command goes unrecorded, as a failed record does, and runs; an agent's
+// line has two fields, for its spawner alone.
+func TestAHostWithNoScope(t *testing.T) {
+	g, _ := shellGroups(t)
+	g.owner = hostspawn.GroupOwner{}
+	forget := g.recordShell(os.Getpid())
+	if _, err := os.Lstat(g.path); !os.IsNotExist(err) {
+		t.Fatalf("a shell command was written down with no owner: %v", err)
+	}
+	forget()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if err := g.record(cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(g.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, ok := hostspawn.ParseAgentGroup(string(b))
+	if !ok || parsed.Kind != "" || parsed.PGID != cmd.Process.Pid {
+		t.Fatalf("%q: %+v, %v", b, parsed, ok)
+	}
+}
+
+// TestAFailedAppendLeavesTheNextLineWhole: a write that fails partway is taken back, so
+// the next command's line is a line. Where it could not be taken back, the next line
+// starts a line of its own and the broken one is passed over.
+func TestAFailedAppendLeavesTheNextLineWhole(t *testing.T) {
+	lines := func(t *testing.T, path string) (whole int) {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+			if g, ok := hostspawn.ParseAgentGroup(line); ok && g.Kind == hostspawn.GroupShell {
+				whole++
+			}
+		}
+		return whole
+	}
+	partway := func(f *os.File, s string) (int, error) {
+		n, _ := f.WriteString(s[:len(s)/2])
+		return n, errors.New("no space left")
+	}
+	t.Run("taken back", func(t *testing.T) {
+		g, log := shellGroups(t)
+		g.recordShell(os.Getpid())
+		g.write = partway
+		g.recordShell(os.Getpid())()
+		if !strings.Contains(log.String(), "not recorded") {
+			t.Fatalf("the log does not say so: %s", log)
+		}
+		g.write = (*os.File).WriteString
+		g.recordShell(os.Getpid())
+		if got := lines(t, g.path); got != 2 {
+			t.Fatalf("%d whole lines, want 2", got)
+		}
+		if b, _ := os.ReadFile(g.path); strings.Count(string(b), "\n") != 2 {
+			t.Fatalf("what the failed write left is still there: %q", b)
+		}
+	})
+	t.Run("not taken back", func(t *testing.T) {
+		g, _ := shellGroups(t)
+		g.recordShell(os.Getpid())
+		// What a failed write that also could not be truncated leaves.
+		f, err := os.OpenFile(g.path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("12345 6"); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+		g.torn = true
+		g.recordShell(os.Getpid())
+		if got := lines(t, g.path); got != 2 {
+			b, _ := os.ReadFile(g.path)
+			t.Fatalf("%d whole lines, want 2: %q", got, b)
+		}
+	})
+}
+
+// TestARepairKeepsTheLinesOnDisk: A, B and C recorded; A goes and its rewrite fails, so
+// the file holds a line memory has let go of; an append then fails partway. Taking
+// that back to what memory adds up to would cut C. It goes back to what the file held.
+func TestARepairKeepsTheLinesOnDisk(t *testing.T) {
+	g, _ := shellGroups(t)
+	sleeper := exec.Command("sleep", "30")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sleeper.Process.Kill()
+		_ = sleeper.Wait()
+	})
+	forgetA := g.recordShell(os.Getpid())
+	g.recordShell(os.Getppid())
+	g.recordShell(sleeper.Process.Pid)
+	dir := filepath.Dir(g.path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	forgetA()
+	g.write = func(f *os.File, s string) (int, error) {
+		n, _ := f.WriteString(s[:len(s)/2])
+		return n, errors.New("no space left")
+	}
+	g.recordShell(os.Getpid())()
+	g.write = (*os.File).WriteString
+	for _, pid := range []int{os.Getppid(), sleeper.Process.Pid} {
+		id, err := rundir.ProcessIdentity(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(g.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line := g.line(pid, id.Start, hostspawn.GroupShell); !strings.Contains(string(b), line) {
+			t.Fatalf("the repair cut %d's line: %q", pid, b)
+		}
+	}
+	if b, _ := os.ReadFile(g.path); !strings.HasSuffix(string(b), "\n") {
+		t.Fatalf("what the failed write left is still there: %q", b)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestATornFlagOutlivesWhatDidNotRepairIt: the mark that the next line must start a line
+// of its own goes only with a write that succeeded: not with a failed one, nor with a
+// failed rewrite.
+func TestATornFlagOutlivesWhatDidNotRepairIt(t *testing.T) {
+	g, _ := shellGroups(t)
+	forget := g.recordShell(os.Getpid())
+	g.recordShell(os.Getppid())
+	g.torn = true
+	g.write = func(*os.File, string) (int, error) { return 0, errors.New("no space left") }
+	g.recordShell(os.Getpid())()
+	if !g.torn {
+		t.Fatal("a failed write cleared it")
+	}
+	g.write = (*os.File).WriteString
+	dir := filepath.Dir(g.path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	forget()
+	if !g.torn {
+		t.Fatal("a failed rewrite cleared it")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g.recordShell(os.Getpid())
+	if g.torn {
+		t.Fatal("a write that succeeded left it")
+	}
+}
+
+// BenchmarkShellGroupPerCommand is what a host adds to each command: its line
+// written and removed, alone and beside others; a command's own fork and exec
+// cost a millisecond or more.
+func BenchmarkShellGroupPerCommand(b *testing.B) {
+	for _, others := range []int{0, 1, 16} {
+		b.Run(fmt.Sprintf("others=%d", others), func(b *testing.B) {
+			g, _ := shellGroups(b)
+			for range others {
+				g.recordShell(os.Getpid())
+			}
+			b.ResetTimer()
+			for b.Loop() {
+				g.recordShell(os.Getpid())()
 			}
 		})
 	}

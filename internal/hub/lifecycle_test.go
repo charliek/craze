@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -17,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -938,6 +940,83 @@ func TestConnectionsPastTheCapAndForeignPeersAreClosed(t *testing.T) {
 		}
 		waitFor(t, "the hub says it refused the peer", func() bool { return strings.Contains(rn.stderr.String(), "refused a connection") })
 	})
+}
+
+// TestTheHubEndsWhatADeadHostLeft: a host that has outlived every spawner it had,
+// as a --wait host does, has only this for what it leaves when it dies with no
+// waiter and no craze run after it: the hub's sweep, at its start, ends its shell
+// command's group and removes the record, and leaves a running host's alone.
+func TestTheHubEndsWhatADeadHostLeft(t *testing.T) {
+	env := testEnv(t)
+	dir, err := rundir.HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func() (*exec.Cmd, uint64, chan error) {
+		cmd := exec.Command("sleep", "60")
+		cmd.Env = append(os.Environ(), hostspawn.CommandMark(rundir.NewHostID()))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		id, err := rundir.ProcessIdentity(cmd.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cmd, id.Start, exited
+	}
+	dead := exec.Command("sleep", "60")
+	if err := dead.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadID, err := rundir.ProcessIdentity(dead.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = dead.Process.Kill()
+	_ = dead.Wait()
+	self, err := hostspawn.NewGroupOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := self
+	owner.PID, owner.Start = dead.Process.Pid, deadID.Start
+
+	ended, endedStart, endedExit := command()
+	running, runningStart, runningExit := command()
+	deadRecord := filepath.Join(dir, hostspawn.AgentGroupsName(rundir.NewHostID()))
+	liveRecord := filepath.Join(dir, hostspawn.AgentGroupsName(rundir.NewHostID()))
+	write := func(path string, cmd *exec.Cmd, start uint64, o hostspawn.GroupOwner) {
+		g := hostspawn.AgentGroup{PGID: cmd.Process.Pid, Start: start, Kind: hostspawn.GroupShell, Owner: o}
+		if err := os.WriteFile(path, []byte(g.Line()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(deadRecord, ended, endedStart, owner)
+	write(liveRecord, running, runningStart, self)
+
+	rn := runIn(t, env, quiet())
+	rn.line(t)
+	select {
+	case <-endedExit:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hub's sweep left the dead host's command running")
+	}
+	waitFor(t, "the dead host's record removed", func() bool {
+		_, err := os.Lstat(deadRecord)
+		return os.IsNotExist(err)
+	})
+	select {
+	case err := <-runningExit:
+		t.Fatalf("the hub's sweep ended a running host's command: %v", err)
+	default:
+	}
+	if _, err := os.Lstat(liveRecord); err != nil {
+		t.Fatalf("the hub's sweep removed a running host's record: %v", err)
+	}
 }
 
 // TestTheOrphanSweepRuns (§3.9): at start and at every tick, its report in

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/tui"
@@ -33,11 +34,14 @@ import (
 //     anything in flight (engine.Engine.Busy) restarts the clock, and so does
 //     a turn that ended since it last looked (State.LastTurn): a sample's gap
 //     does not hide a turn that began and ended between two ticks.
-//  5. The limit: host_idle_exit (tui.ConfigHostIdleExit); min(that,
+//  5. The limit: host_idle_exit (tui.ConfigHostIdleExit), or for a host started
+//     --unattended host_idle_exit_unattended, fixed as it starts; min(that,
 //     hostNeverPromptedIdle) for a session that has had no prompt — it has
 //     nothing to resume; 0 for one whose start failed — it has nothing at
 //     all, and the grace above is what let its launcher attach and be told;
-//     and none for "never", which the start-failed rule outranks.
+//     and none for "never", which the start-failed rule outranks. A session
+//     under its exit fence (engine.Engine.SubmitExitAfterTurn), whose waiter may
+//     be gone, has at most host_idle_exit_unattended, whichever host it is on.
 //  6. The decision, once the clock has run out, is atomic (R2-1): the host's
 //     close fence (control.Server.FenceClose) — its attach fence, then its
 //     engine's — and, under both, the count of attachments and whether
@@ -45,7 +49,10 @@ import (
 //     Anything: both released, and the clock starts again.
 //
 // An open ask is in flight, so it pins its host for as long as it is open (the
-// owner's rule). A stopped or expired session that received a prompt is in the
+// owner's rule) — but for an unattended host's, and one under its exit fence,
+// which nobody is there to answer: its clock restarts at the first look that sees
+// the ask (seeAsk; engine.Options.AsksDoNotPin; asks have no timeout of their own).
+// A stopped or expired session that received a prompt is in the
 // session index already (the engine writes it); one that never did leaves
 // nothing there.
 
@@ -84,9 +91,11 @@ type idleLook struct {
 	Idle, Limit time.Duration
 	Timed       bool
 	// Fenced says the clock ran out and the close fence was raised; Stop is
-	// why the host stops, "" when it stays.
+	// why the host stops, "" when it stays, and Cause what began it: the idle
+	// exit, or the socket lost (agent.TurnInfo.Cause).
 	Fenced bool
 	Stop   string
+	Cause  string
 }
 
 // idleEngine is what the watcher reads of the engine: an interface only so
@@ -111,6 +120,9 @@ type idleWatcher struct {
 	eng    idleEngine
 	lost   func() string
 	policy tui.HostIdleExit
+	// fenced is host_idle_exit_unattended, whichever host this is: an exit
+	// fence's limit.
+	fenced tui.HostIdleExit
 	now    func() time.Time
 	start  time.Time
 
@@ -123,20 +135,30 @@ type idleWatcher struct {
 
 	armed     bool
 	idleSince time.Time
+	// askSeen is the open ask this clock last restarted for, "" for none: an ask
+	// that does not pin the host gets the whole limit from the first look at it.
+	askSeen string
 }
 
 var _ idleServer = (*control.Server)(nil)
 var _ idleEngine = (*engine.Engine)(nil)
 
 // newIdleWatcher builds a host's watcher, its clock at now, and has the server
-// report its attachments to it from here on. log takes the one line a
-// host_idle_exit craze cannot read deserves.
-func newIdleWatcher(srv idleServer, eng idleEngine, lost func() string, now func() time.Time, log io.Writer) *idleWatcher {
+// report its attachments to it from here on. unattended is the host's --unattended,
+// which picks its limit once and for all. log takes the one line a limit craze
+// cannot read deserves.
+func newIdleWatcher(srv idleServer, eng idleEngine, lost func() string, now func() time.Time, unattended bool, log io.Writer) *idleWatcher {
 	policy, why := tui.ConfigHostIdleExit()
+	fenced, fencedWhy := tui.ConfigHostIdleExitUnattended()
+	if unattended {
+		policy, why = fenced, fencedWhy
+	} else if fencedWhy != "" && fencedWhy != why {
+		fmt.Fprintf(log, "craze serve: %s; the limit is the default, %s\n", fencedWhy, fenced.After)
+	}
 	if why != "" {
 		fmt.Fprintf(log, "craze serve: %s; the idle exit is the default, %s\n", why, policy.After)
 	}
-	w := &idleWatcher{srv: srv, eng: eng, lost: lost, policy: policy, now: now, start: now()}
+	w := &idleWatcher{srv: srv, eng: eng, lost: lost, policy: policy, fenced: fenced, now: now, start: now()}
 	// For the host's life: the watcher is never removed, and the listener
 	// beside it — none on a detached host — hears every change too.
 	srv.AddAttachmentsListener(w.attachments)
@@ -160,7 +182,7 @@ func (w *idleWatcher) attachments(n int) {
 
 // run looks at every tick until the host is stopping, and asks for the stop
 // (request) the first time a look says so.
-func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, request func(string)) {
+func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, request func(cause, why string)) {
 	for {
 		select {
 		case <-stopping:
@@ -170,7 +192,7 @@ func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, requ
 		look := w.look()
 		idleLooked(look)
 		if look.Stop != "" {
-			request(look.Stop)
+			request(look.Cause, look.Stop)
 			return
 		}
 	}
@@ -179,7 +201,7 @@ func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, requ
 // look is one tick (the file's doc comment, steps 1–6).
 func (w *idleWatcher) look() idleLook {
 	if why := w.lost(); why != "" {
-		return idleLook{Stop: why}
+		return idleLook{Stop: why, Cause: agent.StopCauseLostOwner}
 	}
 	select {
 	case <-w.eng.Ready():
@@ -196,11 +218,13 @@ func (w *idleWatcher) look() idleLook {
 		}
 		w.armed, w.idleSince = true, now
 	}
-	st := w.eng.State()
 	if attached > 0 || w.eng.Busy() {
 		w.idleSince = now
 		return idleLook{Armed: true}
 	}
+	// Read after the sample: an ask that made it read idle is in this state.
+	st := w.eng.State()
+	w.seeAsk(st, now)
 	if left.After(w.idleSince) {
 		w.idleSince = left
 	}
@@ -214,8 +238,8 @@ func (w *idleWatcher) look() idleLook {
 	}
 	look.Fenced = true
 	n, busy, release := w.srv.FenceClose()
-	if n == 0 && !busy {
-		look.Stop = w.why(st, look.Idle)
+	if n == 0 && !busy && !w.askSince() {
+		look.Stop, look.Cause = w.why(st, look.Idle), agent.StopCauseIdle
 		return look
 	}
 	release()
@@ -223,11 +247,34 @@ func (w *idleWatcher) look() idleLook {
 	return look
 }
 
+// seeAsk restarts the clock for an open ask it has not seen. Only an ask that does
+// not pin the host reaches here: one that does reads busy.
+func (w *idleWatcher) seeAsk(st engine.State, now time.Time) {
+	switch {
+	case st.PendingAsks == 0:
+		w.askSeen = ""
+	case st.HeadAsk.ID != w.askSeen:
+		w.askSeen, w.idleSince = st.HeadAsk.ID, now
+	}
+}
+
+// askSince says, with the close fence up, that an ask this look did not count has
+// opened since: a turn that started and asked between its sample and the fence.
+func (w *idleWatcher) askSince() bool {
+	st := w.eng.State()
+	return st.PendingAsks > 0 && st.HeadAsk.ID != w.askSeen
+}
+
 // limit is how long this session may be idle, and false for never.
 func (w *idleWatcher) limit(st engine.State) (time.Duration, bool) {
 	switch {
 	case st.StartFailed:
 		return 0, true
+	case st.ExitFenced && !w.fenced.Never:
+		if w.policy.Never {
+			return w.fenced.After, true
+		}
+		return min(w.policy.After, w.fenced.After), true
 	case w.policy.Never:
 		return 0, false
 	case !st.Prompted:
@@ -243,6 +290,8 @@ func (w *idleWatcher) why(st engine.State, idle time.Duration) string {
 		return "its session did not start and no client is attached"
 	case !st.Prompted:
 		return fmt.Sprintf("idle for %s with no client attached, never prompted", idle.Round(time.Millisecond))
+	case st.PendingAsks > 0:
+		return fmt.Sprintf("idle for %s with no client attached and an ask nobody answered", idle.Round(time.Millisecond))
 	}
 	return fmt.Sprintf("idle for %s with no client attached", idle.Round(time.Millisecond))
 }

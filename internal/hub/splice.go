@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -290,6 +291,9 @@ type splice struct {
 	// which set it from the handedOff hook before the splice runs; nil in
 	// production.
 	probed func(gone, supported bool)
+	// hostCloseWrite, when set, answers for the host leg's half-close: a seam for the
+	// tests, nil in production.
+	hostCloseWrite func() error
 }
 
 // flow is one direction of a splice: the bytes it has read and written, and
@@ -330,11 +334,22 @@ func (sp *splice) upstream() {
 		sp.close()
 		return
 	}
-	if err := sp.host.CloseWrite(); err != nil {
+	// A host that has closed first leaves nothing to half-close, which macOS answers
+	// ENOTCONN (XNU's soshutdown) and Linux does not: what it wrote is still on its way
+	// to the client, and its EOF ends the splice.
+	if err := sp.closeHostWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 		sp.close()
 		return
 	}
 	go sp.watchClient()
+}
+
+// closeHostWrite closes the host leg's writing half (hostCloseWrite, in a test).
+func (sp *splice) closeHostWrite() error {
+	if sp.hostCloseWrite != nil {
+		return sp.hostCloseWrite()
+	}
+	return sp.host.CloseWrite()
 }
 
 // watchClient probes the client leg, at once and then every

@@ -34,7 +34,7 @@ func unattendedHome(t *testing.T) (rundir.Env, string, *childCmds) {
 	_, ws := serveHome(t)
 	// A craze directory of its own (writeCrazeConfig's), so the environment
 	// is read again after it.
-	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
+	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\nhost_idle_exit_unattended = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
 	env := rundir.ProcessEnv()
 	kids := spawnAsChild(t, nil)
 	// No test here is about a bound of the handshake's: each is serveStep,
@@ -348,7 +348,7 @@ func TestSendReloadsAnEndedSessionWithItsRecordedSettings(t *testing.T) {
 // to it. Both prompts run in the one host, each send its own turn.
 func TestTwoSendsReloadingOneSessionShareItsHost(t *testing.T) {
 	_, ws := serveHome(t)
-	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
+	writeCrazeConfig(t, fmt.Sprintf("host_idle_exit = \"30s\"\nhost_idle_exit_unattended = \"30s\"\n\n[agents]\ncursor = %q\n", fakeAgentPath(t)))
 	env := rundir.ProcessEnv()
 	gate := filepath.Join(t.TempDir(), "claimed")
 	if err := syscall.Mkfifo(gate, 0o600); err != nil {
@@ -424,7 +424,8 @@ func TestTwoSendsReloadingOneSessionShareItsHost(t *testing.T) {
 // fake agent's effort set, gated), a signal comes once the host is up and
 // the command is attaching, and the session the command spawned is stopped —
 // its host gone — and the result is `cancelled`, exit 3; the agent was never
-// prompted.
+// prompted. --model is only what was asked for, never resolved, so the result
+// has no model.
 func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	env, ws, _ := unattendedHome(t)
 	dir := t.TempDir()
@@ -441,7 +442,7 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	promptSpawned = func(ref hostRef) { spawned <- ref }
 	t.Cleanup(func() { promptSpawned = prev })
 
-	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "--effort", "low", "-C", ws, "never sent")
+	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "--model", "nope", "--effort", "low", "-C", ws, "never sent")
 	var ref hostRef
 	select {
 	case ref = <-spawned:
@@ -452,8 +453,11 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	stdout, stderr, code := run.wait(t)
 	m := decodeResult(t, stdout)
 	if code != 3 || m["status"] != "cancelled" || m["session"] != ref.entry.CrazeSessionID || m["message"] != "" ||
-		m["error"] != "interrupted before the prompt was sent; the session it started was stopped" || stderr != "" {
+		!errorIs(m, "interrupted before the prompt was sent; the session it started was stopped", "interrupted", false) || stderr != "" {
 		t.Fatalf("a signal before the prompt: exit %d, %v, %q", code, m, stderr)
+	}
+	if model, ok := m["model"]; ok {
+		t.Fatalf("a model never resolved is on the result: %v", model)
 	}
 	waitReaped(t, ref.entry.PID)
 	if entries, err := rundir.Hosts(env); err != nil || len(entries) != 0 {

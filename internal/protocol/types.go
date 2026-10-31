@@ -419,6 +419,12 @@ type CatalogMode struct {
 // is: absent is an ACP session, an older host, or a session that is not
 // craze's own (the fake host's by default), and a client then shows only the
 // current model's levels, from its effort option, as before.
+//
+// ExitAfterTurn is the host's own: true where session.prompt takes
+// exitAfterTurn and session.stop takes cause, on a host that serves
+// session.stop (every craze serve from plan 048 on). It is omitted when false,
+// as rowFacts is: absent is a TUI-hosted session, or an older host, which
+// refuses both members unknown_field, and a client sends neither.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -442,6 +448,7 @@ type SessionCapabilities struct {
 	Aside               bool `json:"aside,omitempty"`
 	SlashCatalog        bool `json:"slashCatalog,omitempty"`
 	EffortFacts         bool `json:"effortFacts,omitempty"`
+	ExitAfterTurn       bool `json:"exitAfterTurn,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -537,6 +544,23 @@ type LastTurn struct {
 	Outcome TurnOutcome `json:"outcome"`
 	// Err is a failed turn's error text, absent for the other two.
 	Err string `json:"err,omitempty"`
+	// StopReason is the ending's own reason: absent for a foreign turn, a
+	// failure that has none, and an older host.
+	StopReason string `json:"stopReason,omitempty"`
+	// Cause is what began the close that ended the turn, on a stop reason of
+	// closing: absent otherwise, from an older host, and when the close did not
+	// say.
+	Cause string `json:"cause,omitempty"`
+	// Withdrawn says a cancelled turn's prompt never reached the agent, so no
+	// step of it ran: absent otherwise, and from an older host.
+	Withdrawn bool `json:"withdrawn,omitempty"`
+	// Kind, Retryable, Status and ProviderCode are what a failed turn said of
+	// itself (internal/errkind): absent for the other two, and from an older
+	// host, which a reader takes for kind unknown.
+	Kind         string `json:"kind,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	Status       int    `json:"status,omitempty"`
+	ProviderCode string `json:"provider_code,omitempty"`
 	// EndedAt is when the turn ended: its ending event's time, in UTC.
 	EndedAt time.Time `json:"endedAt"`
 	// TurnID is the ended turn's id as the stream names it — a turn of
@@ -1262,6 +1286,11 @@ type PromptParams struct {
 	Text      string     `json:"text,omitempty"`
 	FromRow   string     `json:"fromRow,omitempty"`
 	Mode      PromptMode `json:"mode"`
+	// ExitAfterTurn sets the exit fence with this prompt (engine.Engine.
+	// SubmitExitAfterTurn): no further prompt is admitted, and when this
+	// prompt's turn ends no queued turn starts. Only with mode queue and text,
+	// and only where the session capability exitAfterTurn is true.
+	ExitAfterTurn bool `json:"exitAfterTurn,omitempty"`
 }
 
 // PromptResult is what became of a prompt: for queue and send_now, exactly
@@ -1434,6 +1463,10 @@ type SubagentCancelParams struct {
 type StopParams struct {
 	SessionID string `json:"sessionId"`
 	CommandID string `json:"commandId"`
+	// Cause is what began this stop, when the first stop says: stop (the
+	// default) or exit_after_turn, only where the session capability
+	// exitAfterTurn is true. A host from before it refuses the member.
+	Cause string `json:"cause,omitempty"`
 }
 
 // ModelsRefreshParams is session.models.refresh's params (plan 034 §3.4,
@@ -1682,6 +1715,10 @@ type ReadyParams struct {
 	Session      SessionInfo `json:"session"`
 	StartFailed  bool        `json:"startFailed"`
 	Err          string      `json:"err,omitempty"`
+	// Kind is what a failed start said of itself (internal/errkind): absent
+	// when it started, and from an older host, which a reader takes for
+	// start_failed.
+	Kind string `json:"kind,omitempty"`
 }
 
 // PresenceParams is a presence notification's params (plan 032 §3.14,

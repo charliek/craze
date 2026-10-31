@@ -455,6 +455,30 @@ func TestConfigDetachTable(t *testing.T) {
 // §3.6): a Go duration, "0", or "never" in any case; an absent key the
 // default hour, silently; and everything craze cannot read the default hour
 // with a line saying why — the host fails safe onto the owner's default.
+func TestConfigHostIdleExitUnattended(t *testing.T) {
+	ten := HostIdleExit{After: 10 * time.Minute}
+	for _, tc := range []struct {
+		name, body string
+		want       HostIdleExit
+		why        string
+	}{
+		{"missing key, whatever host_idle_exit says", "host_idle_exit = \"2s\"\n", ten, ""},
+		{"a duration", "host_idle_exit_unattended = \"2s\"\n", HostIdleExit{After: 2 * time.Second}, ""},
+		{"zero", "host_idle_exit_unattended = \"0\"\n", HostIdleExit{}, ""},
+		{"never", "host_idle_exit_unattended = \"NEVER\"\n", HostIdleExit{Never: true}, ""},
+		{"an integer", "host_idle_exit_unattended = 0\n", ten, "config.toml host_idle_exit_unattended is not a string"},
+		{"negative", "host_idle_exit_unattended = \"-1m\"\n", ten, "config.toml host_idle_exit_unattended \"-1m\" is neither a duration nor \"never\""},
+		{"malformed file", "this is not toml [[[\n", ten, "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got, why := ConfigHostIdleExitUnattended(); got != tc.want || why != tc.why {
+				t.Fatalf("ConfigHostIdleExitUnattended() = %+v, %q; want %+v, %q", got, why, tc.want, tc.why)
+			}
+		})
+	}
+}
+
 func TestConfigHostIdleExitTable(t *testing.T) {
 	hour := HostIdleExit{After: time.Hour}
 	for _, tc := range []struct {
@@ -522,4 +546,29 @@ func TestConfigAgentBin(t *testing.T) {
 			t.Fatalf("no file: %q, %q", path, why)
 		}
 	})
+}
+
+// TestConfigProviderRetriesTable is `provider_retries`' parsing rule: an integer
+// from 0 to 3, anything else the default with a line.
+func TestConfigProviderRetriesTable(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       int
+		why        string
+	}{
+		{"missing key", "theme = \"dark\"\n", 1, ""},
+		{"none", "provider_retries = 0\n", 0, ""},
+		{"the most", "provider_retries = 3\n", 3, ""},
+		{"past the most", "provider_retries = 4\n", 1, "config.toml provider_retries 4 is not between 0 and 3"},
+		{"negative", "provider_retries = -1\n", 1, "config.toml provider_retries -1 is not between 0 and 3"},
+		{"a string", "provider_retries = \"2\"\n", 1, "config.toml provider_retries is not an integer"},
+		{"malformed file", "this is not toml [[[\n", 1, "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got, why := ConfigProviderRetries(); got != tc.want || why != tc.why {
+				t.Fatalf("ConfigProviderRetries() = %d, %q; want %d, %q", got, why, tc.want, tc.why)
+			}
+		})
+	}
 }

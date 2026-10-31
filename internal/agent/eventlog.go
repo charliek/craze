@@ -653,6 +653,10 @@ func orDefault(v, def int) int {
 // Incarnation is the log's id, the scope of its sequence numbers.
 func (l *EventLog) Incarnation() string { return l.incarnation }
 
+// LastSeq is the Seq of the last event committed: every event the caller has
+// published is at or below it, and every one it publishes next above.
+func (l *EventLog) LastSeq() uint64 { return l.committed.Load() }
+
 // Primary is the session's own event stream, what Events() returns: every
 // published event, in sequence order, with Seq set. Its buffer is 256 and it
 // is never closed.

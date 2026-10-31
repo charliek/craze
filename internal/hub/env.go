@@ -27,7 +27,10 @@ import (
 //   - Removed: the ready pipe's descriptor and both children's marks
 //     (CRAZE_READY_FD, CRAZE_HOST_CHILD, CRAZE_HUB_CHILD — the hub's is set
 //     again for the hub child alone, by its spawner, as hostspawn.StartCmd
-//     sets a host's), one launch's choices (CRAZE_PROVIDER, CRAZE_DETACH,
+//     sets a host's), a native command's mark of its host (CRAZE_HOST_ID, which
+//     every craze clears from its own environment at its start, and which is
+//     named here too so that no environment handed in can carry it), one launch's
+//     choices (CRAZE_PROVIDER, CRAZE_DETACH,
 //     CRAZE_CONTROL_SOCKET, CRAZE_AGENT_BIN: P7 scopes an agent binary to the
 //     launch that named it), and the terminal the first spawner ran in:
 //     every HERDR_* and ROOST_* variable, TMUX, TMUX_PANE and STY.
@@ -52,7 +55,7 @@ const crazeHomeEnv = "CRAZE_HOME"
 
 // removedEnv is every variable the contract removes by its exact name.
 var removedEnv = []string{
-	hostspawn.ReadyFDEnv, hostspawn.HostChildEnv, HubChildEnv,
+	hostspawn.ReadyFDEnv, hostspawn.HostChildEnv, HubChildEnv, hostspawn.CommandMarkName,
 	"CRAZE_PROVIDER", "CRAZE_DETACH", "CRAZE_CONTROL_SOCKET", "CRAZE_AGENT_BIN",
 	"TMUX", "TMUX_PANE", "STY",
 }

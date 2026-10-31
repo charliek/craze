@@ -76,13 +76,19 @@ func newIdleRig(t *testing.T, config string, started bool) *idleRig {
 // or a real one (idle_jobs_test.go) — and no stub of the rig's.
 func newIdleRigOver(t *testing.T, config string, started bool, sess agent.Session) *idleRig {
 	t.Helper()
+	return newIdleRigOn(t, config, started, sess, engine.Options{})
+}
+
+// newIdleRigOn is newIdleRigOver with the engine built from opts.
+func newIdleRigOn(t *testing.T, config string, started bool, sess agent.Session, opts engine.Options) *idleRig {
+	t.Helper()
 	if config != "" {
 		writeCrazeConfig(t, config)
 	} else {
 		crazeHome(t)
 	}
 	r := &idleRig{t: t, base: time.Now()}
-	eng, err := engine.New(sess, engine.Options{})
+	eng, err := engine.New(sess, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,7 @@ func newIdleRigOver(t *testing.T, config string, started bool, sess agent.Sessio
 		}
 	}
 	r.srv = control.New(control.Options{Workspace: "/w"})
-	r.w = newIdleWatcher(idleServerHook{Server: r.srv, r: r}, eng, r.lost, r.now, io.Discard)
+	r.w = newIdleWatcher(idleServerHook{Server: r.srv, r: r}, eng, r.lost, r.now, false, io.Discard)
 	r.srv.SetEngine(eng)
 	dir, err := os.MkdirTemp("/tmp", "czi")
 	if err != nil {

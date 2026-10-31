@@ -105,19 +105,18 @@ func TestAccumulatorKeepsTheMessagesTail(t *testing.T) {
 }
 
 // TestAccumulatorToolsFilesAndAsks: toolCalls counts distinct ids that
-// finished (completed or failed); files are the edit-kind calls' paths in
-// first-touch order, a kind learnt from a later update included; the plan is
-// the last presented; automatic answers are listed, a sub-agent's tools are
-// not counted.
+// finished (completed or failed); files are what the calls' stamps say, in the
+// order the calls opened; the plan is the last presented; automatic answers are
+// listed, a sub-agent's tools are not counted.
 func TestAccumulatorToolsFilesAndAsks(t *testing.T) {
 	a := newTurnAccumulator()
 	for _, ev := range []agent.Event{
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Status: "pending", Locations: []string{"b.go"}}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "r1", Kind: "read", Status: "completed", Locations: []string{"z.go"}}},
-		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Kind: "edit", Status: "completed", Diffs: []agent.ToolDiff{{Path: "a.go"}, {Path: "b.go"}}}},
+		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Kind: "edit", Status: "completed", Edited: &agent.ToolEdited{Files: []string{"b.go", "a.go"}}}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "x1", Kind: "execute", Status: "failed"}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "x2", Kind: "execute", Status: "in_progress"}},
-		{Type: agent.EventTool, Agent: "child", Tool: &agent.ToolEvent{ID: "c1", Kind: "edit", Status: "completed", Locations: []string{"child.go"}}},
+		{Type: agent.EventTool, Agent: "child", Tool: &agent.ToolEvent{ID: "c1", Kind: "edit", Status: "completed", Edited: &agent.ToolEdited{Files: []string{"child.go"}}}},
 		{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Auto: true, Questions: []agent.Question{{ID: "q1", Prompt: "Pick one",
 			Options: []agent.Option{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}}}, Answers: map[string][]string{"q1": {"a"}}}},
 		{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "Refactor", Plan: "1. do it", Auto: true, Accepted: true}},
@@ -127,7 +126,7 @@ func TestAccumulatorToolsFilesAndAsks(t *testing.T) {
 	if n := a.toolCalls(); n != 3 {
 		t.Errorf("toolCalls = %d, want 3 (e1, r1, x1)", n)
 	}
-	if got := a.files(); !slices.Equal(got, []string{"b.go", "a.go"}) {
+	if got := a.edited().files; !slices.Equal(got, []string{"b.go", "a.go"}) {
 		t.Errorf("files = %q, want [b.go a.go]", got)
 	}
 	if a.plan != "1. do it" {
@@ -333,9 +332,14 @@ func TestResultJSONKeys(t *testing.T) {
 	got := jsonKeys(t, done)
 	want := map[string]string{"status": "string", "session": "string", "short": "string", "provider": "string",
 		"model": "string", "attach": "string", "turn": "string", "message": "string", "toolCalls": "number",
-		"durationMs": "number", "files": "array"}
+		"durationMs": "number", "files": "array", "stopReason": "string"}
 	if !maps.Equal(got, want) {
 		t.Errorf("a completed result's keys: %v, want %v", got, want)
+	}
+	unresolved := newResult(resultSession{provider: "grok"}, statusCancelled)
+	unresolved.fill(newTurnAccumulator())
+	if _, ok := jsonKeys(t, unresolved)["model"]; ok {
+		t.Errorf("a model never resolved is written: %v", jsonKeys(t, unresolved))
 	}
 	running := newResult(s, statusRunning)
 	running.Row, running.Handle, running.Partial = "q-1", "inc.3.row-q-1", true
@@ -409,4 +413,15 @@ func TestUnsavedWhyIsOneShortLine(t *testing.T) {
 	if got := unsavedWhy(errors.New("disk full")); got != "disk full" {
 		t.Fatalf("a short reason is %q, want it whole", got)
 	}
+}
+
+// errorIs says m's error is the one object every waiting command prints: its
+// message, kind and retryable exactly, and nothing else but a detail.
+func errorIs(m map[string]any, message, kind string, retryable bool) bool {
+	e, ok := m["error"].(map[string]any)
+	if !ok || e["message"] != message || e["kind"] != kind || e["retryable"] != retryable {
+		return false
+	}
+	delete(e, "detail")
+	return len(e) == 3
 }

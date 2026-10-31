@@ -149,6 +149,56 @@ def test_native_prompt_streams_text_and_ends_end_turn(
     assert CANARY not in proc.stderr
 
 
+def write_retries(craze_home: Path, value: str) -> None:
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(f"provider = \"native\"\nprovider_retries = {value}\n", encoding="utf-8")
+
+
+def test_native_stream_error_retries_the_step(craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture) -> None:
+    """A server's error event after text sends the step again, once by default,
+    after Fantasy's own 5 s: the failed attempt's lines are told to be dropped
+    by step_retry's from, and what is left is the answer."""
+    fixture_server.set_script([Step(text=("abandoned",), stream_error="server_error"), answer("whole")])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi", timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    retries = [e for e in events if e.get("type") == "step_retry"]
+    assert len(retries) == 1, events
+    r = retries[0]
+    assert r["discarded"] is True and r["attempt"] == 1 and r["step"] == 1
+    kept = [e for e in events if e.get("type") == "text" and e["seq"] < r["from"] or e.get("type") == "text" and e["seq"] > r["seq"]]
+    assert "".join(e["text"] for e in kept) == "whole", events
+    assert len(fixture_server.requests) == 2
+
+
+def test_native_provider_retries_zero_fails_at_once(craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture) -> None:
+    fixture_server.set_script([Step(text=("half",), stream_error="server_error"), answer("never")])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    write_retries(craze_home, "0")
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi")
+    assert proc.returncode != 0
+    events = parse_events(proc.stdout)
+    assert [e for e in events if e.get("type") == "step_retry"] == []
+    assert len(fixture_server.requests) == 1
+    assert "provider_retries" not in proc.stderr
+
+
+def test_native_provider_retries_out_of_range_says_so(craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture) -> None:
+    fixture_server.set_ok(text_parts=["fine"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    write_retries(craze_home, "9")
+
+    proc = run_native(craze_bin, craze_home, tmp_path, "hi")
+    assert proc.returncode == 0, proc.stderr
+    assert "provider_retries 9 is not between 0 and 3" in proc.stderr
+
+
 def test_native_prompt_model_flag_resolves_alias(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
 ) -> None:

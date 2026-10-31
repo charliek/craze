@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/roster"
@@ -73,6 +74,7 @@ type psFlags struct {
 	noHub bool
 	saved bool
 	dir   string
+	brief bool
 }
 
 func newPsCmd() *cobra.Command {
@@ -90,6 +92,12 @@ func newPsCmd() *cobra.Command {
 			if f.dir != "" && !f.saved {
 				return usagef("craze ps: -C/--dir needs --saved")
 			}
+			switch {
+			case f.brief && !f.json:
+				return usagef("craze ps: --brief needs --json: the table has no catalogs to leave out")
+			case f.brief && f.saved:
+				return usagef("craze ps: --brief does not go with --saved, whose rows have no catalogs")
+			}
 			if f.saved {
 				return runPsSaved(cmd, *f)
 			}
@@ -97,6 +105,7 @@ func newPsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's roster (sessions.list's result) as JSON")
+	cmd.Flags().BoolVar(&f.brief, "brief", false, "with --json: leave each session's model and mode catalogs out of its row")
 	cmd.Flags().BoolVar(&f.noHub, "no-hub", false, "read each session's host directly, without the hub")
 	cmd.Flags().BoolVar(&f.saved, "saved", false, "list the saved sessions — not running, ready to reopen — newest first "+
 		"(with --json, sessions.saved's result; with --no-hub, read from the session index)")
@@ -140,11 +149,58 @@ func runPs(cmd *cobra.Command, f psFlags) error {
 			}
 			raw = b
 		}
+		if f.brief {
+			b, err := psBrief(raw)
+			if err != nil {
+				return kindf(errkind.Internal, "craze ps: --brief: %v", err)
+			}
+			raw = b
+		}
 		_, err := fmt.Fprintf(out, "%s\n", raw)
 		return err
 	}
 	_, err := io.WriteString(out, psTable(psRows(res, env.Home, indexTitles(), time.Now()), psWidth(out)))
 	return err
+}
+
+// psBrief is a roster's JSON less each row's catalogs and nothing else: read as
+// raw members, so what a later craze or host adds passes through it as through
+// the hub. A roster row's row may be absent (not read yet).
+func psBrief(raw json.RawMessage) (json.RawMessage, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil, err
+	}
+	var rows []map[string]json.RawMessage
+	if s, ok := top["sessions"]; ok {
+		if err := json.Unmarshal(s, &rows); err != nil {
+			return nil, err
+		}
+	}
+	for _, r := range rows {
+		rr, ok := r["row"]
+		if !ok {
+			continue
+		}
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(rr, &row); err != nil {
+			return nil, err
+		}
+		delete(row, "catalogs")
+		b, err := json.Marshal(row)
+		if err != nil {
+			return nil, err
+		}
+		r["row"] = b
+	}
+	if rows != nil {
+		b, err := json.Marshal(rows)
+		if err != nil {
+			return nil, err
+		}
+		top["sessions"] = b
+	}
+	return json.Marshal(top)
 }
 
 // psFromHub is the hub's roster: Ensure, then its sessions.list, within

@@ -54,7 +54,7 @@ func TestASignalledReloadLeavesTheHostAnotherSendFound(t *testing.T) {
 	sigs <- syscall.SIGINT
 	stdout, stderr, code = a.wait(t)
 	m = decodeResult(t, stdout)
-	if code != 3 || m["status"] != "cancelled" || m["error"] != "interrupted before the prompt was sent" {
+	if code != 3 || m["status"] != "cancelled" || !errorIs(m, "interrupted before the prompt was sent", "interrupted", false) {
 		t.Fatalf("send A, signalled in its handshake: exit %d, %v, %q", code, m, stderr)
 	}
 	if !processAlive(e.PID) {

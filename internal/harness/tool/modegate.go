@@ -309,14 +309,14 @@ func (g *ModeGate) onlyThePlan(targets []string) bool {
 		return false
 	}
 	for _, t := range targets {
-		if !isThePlan(t, plan) {
+		if !IsThePlan(t, plan) {
 			return false
 		}
 	}
 	return true
 }
 
-// isThePlan reports whether target, a path RealPath resolved, names the plan
+// IsThePlan reports whether target, a path RealPath resolved, names the plan
 // file, which RealPath resolved too: equal strings, which is the answer on a
 // case-sensitive file system, or one file under two spellings of one name.
 //
@@ -330,7 +330,7 @@ func (g *ModeGate) onlyThePlan(targets []string) bool {
 // os.SameFile and only a case-equivalent spelling is the plan file under
 // another name. Both must hold, and a target that does not exist can only be
 // the plan file by its string (plan 023 §3.1).
-func isThePlan(target, plan string) bool {
+func IsThePlan(target, plan string) bool {
 	if target == plan {
 		return true
 	}

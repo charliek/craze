@@ -5,9 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
@@ -387,6 +396,204 @@ func TestASessionClosedEndsTheStream(t *testing.T) {
 	}
 	if n := tp.dialCount(); n != 1 {
 		t.Fatalf("%d dials: the ended session was redialled", n)
+	}
+}
+
+// TestAWriteAfterTheHostClosedLeavesItsLastWordsToRead: the session ends and the
+// host closes, its closing records and reset{session_closed} on the socket and
+// not yet read, when a call writes: EPIPE. What the host wrote is still the
+// stream's, and its end is the session's, never a connection lost and a redial. The
+// reader is held from before the host writes them, so they are all still unread.
+func TestAWriteAfterTheHostClosedLeavesItsLastWordsToRead(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	c := dialClient(t, h.path, tp, remote.Options{})
+	s := attach(t, c, remote.AttachOptions{})
+	nextKind(t, s, remote.KindAttached)
+	nextKind(t, s, remote.KindSynchronized)
+	held, release := make(chan struct{}), make(chan struct{})
+	let := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(let)
+	var once sync.Once
+	tp.setRewriteIn(func(l wireLine) [][]byte {
+		if strings.Contains(string(l.raw), "held here") {
+			once.Do(func() { close(held) })
+			<-release
+		}
+		return [][]byte{l.raw}
+	})
+	h.text("held here")
+	await(t, held, "the reader to reach the held line")
+	h.text("the last word")
+	if err := h.eng.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); h.srv.OpenConns() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the host still holds %d connections", h.srv.OpenConns())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil); err == nil {
+		t.Fatal("a call to a host that has closed was answered")
+	}
+	if len(tp.sent(protocol.MethodSessionsList)) == 0 {
+		t.Fatal("the premise: the call was never written")
+	}
+	let()
+	until(t, s, isText(t, "the last word"))
+	until(t, s, ofKind(remote.KindEnd))
+	await(t, c.Done(), "the client to stop")
+	if !errors.Is(c.Err(), remote.ErrSessionEnded) {
+		t.Fatalf("the client stopped with %v", c.Err())
+	}
+	if n := tp.dialCount(); n != 1 {
+		t.Fatalf("%d dials: the ended session was redialled", n)
+	}
+}
+
+// brokenWrites is a connection whose writes fail with errno once broken is set, as the
+// kernel's would, and whose reads go on: what a test holds a reader to on any OS.
+type brokenWrites struct {
+	net.Conn
+	errno     syscall.Errno
+	broken    atomic.Bool
+	failed    atomic.Int32
+	deadlines atomic.Int32
+}
+
+func (b *brokenWrites) Write(p []byte) (int, error) {
+	if b.broken.Load() {
+		b.failed.Add(1)
+		return 0, &net.OpError{Op: "write", Net: "unix", Err: os.NewSyscallError("write", b.errno)}
+	}
+	return b.Conn.Write(p)
+}
+
+func (b *brokenWrites) SetReadDeadline(t time.Time) error {
+	b.deadlines.Add(1)
+	return b.Conn.SetReadDeadline(t)
+}
+
+// TestABrokenPipesDrainHasOneDeadline: writes that fail, each error saying the host has
+// closed its end, with the reader left waiting on a host that says nothing. The first
+// sets the reader one deadline, and calls that keep arriving, each failing in turn,
+// never extend it: the reader ends and the client redials. ENOTCONN is what a Mac's
+// write can say in the host's closing (peerClosed).
+func TestABrokenPipesDrainHasOneDeadline(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EPIPE, syscall.ENOTCONN} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			defer remote.SetBrokenPipeDrain(150 * time.Millisecond)()
+			h := newHost(t)
+			var dials atomic.Int32
+			var first atomic.Pointer[brokenWrites]
+			c, err := remote.Dial(tctx(t), h.path, remote.Options{
+				Dial: func(ctx context.Context, path string) (net.Conn, error) {
+					nc, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+					if err != nil {
+						return nil, err
+					}
+					dials.Add(1)
+					b := &brokenWrites{Conn: nc, errno: errno}
+					first.CompareAndSwap(nil, b)
+					return b, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = c.Close() }()
+			bw := first.Load()
+			bw.broken.Store(true)
+			deadline := time.Now().Add(watchdog)
+			for dials.Load() < 2 {
+				if time.Now().After(deadline) {
+					t.Fatalf("no redial within %v: the calls kept the reader waiting (%d writes failed, %d read deadlines)", watchdog, bw.failed.Load(), bw.deadlines.Load())
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				_ = c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil)
+				cancel()
+			}
+			if n := bw.failed.Load(); n < 2 {
+				t.Fatalf("the premise: %d writes failed, so no later one had the chance to extend the deadline", n)
+			}
+			if n := bw.deadlines.Load(); n != 1 {
+				t.Fatalf("%d read deadlines over %d failed writes, want the one", n, bw.failed.Load())
+			}
+		})
+	}
+}
+
+// TestAPeerThatShutItsReadingSide: a peer that shut its reading side and keeps its
+// writing side open, silent, as the kernel has it. On Linux a write is a broken pipe,
+// and the reader's one deadline ends the connection: the client redials. A Mac has no
+// such thing to tell a writer: XNU's uipc_send looks only at the writer's own state, and
+// the reader's shutdown marks its buffer to drop what comes, so the write succeeds and
+// the call waits out its own deadline on a connection that stays, the limit protocol.md
+// states. This holds both to what they do, so a kernel that changes is a failure here.
+func TestAPeerThatShutItsReadingSide(t *testing.T) {
+	defer remote.SetBrokenPipeDrain(150 * time.Millisecond)()
+	h := newHost(t)
+	dir := shortDir(t)
+	front := filepath.Join(dir, "front")
+	l, err := net.Listen("unix", front)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	first := make(chan *net.UnixConn, 1)
+	var accepted atomic.Int32
+	go func() {
+		for {
+			nc, err := l.Accept()
+			if err != nil {
+				return
+			}
+			back, err := net.Dial("unix", h.path)
+			if err != nil {
+				_ = nc.Close()
+				return
+			}
+			t.Cleanup(func() { _ = nc.Close(); _ = back.Close() })
+			if accepted.Add(1) == 1 {
+				first <- nc.(*net.UnixConn)
+			}
+			go func() { _, _ = io.Copy(back, nc) }()
+			go func() { _, _ = io.Copy(nc, back) }()
+		}
+	}()
+	c, err := remote.Dial(tctx(t), front, remote.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := (<-first).CloseRead(); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "darwin" {
+		for range 3 { // past the drain, had a write started it
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			err := c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("a write to a peer that shut its reading side: the call said %v, want its own deadline", err)
+			}
+			if n := accepted.Load(); n != 1 {
+				t.Fatalf("%d connections: the client redialled, last call %v", n, err)
+			}
+		}
+		return
+	}
+	deadline := time.Now().Add(watchdog)
+	for accepted.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no redial within %v: the calls kept the reader waiting", watchdog)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_ = c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil)
+		cancel()
 	}
 }
 

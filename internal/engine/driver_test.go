@@ -186,6 +186,10 @@ func TestCancelRightAfterSubmitWithdrawsThePrompt(t *testing.T) {
 	if st := e.State(); st.Activity != ActivityIdle || !st.Cancelled {
 		t.Fatalf("state: %+v", st)
 	}
+	// What a client reading it afterwards has to tell it from a cancel mid-step.
+	if lt := e.State().LastTurn; lt == nil || lt.Outcome != TurnCancelled || !lt.Withdrawn {
+		t.Fatalf("the last turn: %+v", lt)
+	}
 }
 
 // TestACancelledTurnWithARowBehindItNeverReportsIdle: the TUI's chain carries

@@ -42,11 +42,16 @@ const (
 	StopToolUse = "tool_use"
 )
 
-// maxRetries is Fantasy's retry budget for a step. Retrying has no surface
-// in H1, so one retry bounds the worst silent stall to one backoff; and the
-// wrapper only lets a step be retried before any of it reached the screen
-// (plan 018 §3.5, §3.7).
-const maxRetries = 1
+// DefaultProviderRetries is a step's retry budget when Options.ProviderRetries
+// is unset: Fantasy's retries of one model request, before output and after it
+// alike (the wrapper's rule 3 says which failures). Each is reported (Retrying)
+// and what its attempt streamed is taken back, so one retry bounds the worst
+// silent stall to one backoff.
+const DefaultProviderRetries = 1
+
+// MaxProviderRetries is the most Options.ProviderRetries may ask for; Fantasy's
+// backoff doubles from 5 s, so three waits 35 s in all.
+const MaxProviderRetries = 3
 
 // maxSteps bounds the model requests one turn makes: a model that keeps
 // calling tools is stopped after this many steps, with max_turn_requests
@@ -351,19 +356,20 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	}
 
 	t := &turn{
-		ctx:       turnCtx,
-		store:     s.store,
-		model:     m,
-		sink:      sink,
-		number:    number,
-		calls:     calls{tools: s.tools},
-		steers:    &s.steers,
-		modes:     s.modes,
-		logMode:   s.recordMode,
-		subs:      s.subs,
-		wake:      wake,
-		held:      held,
-		heldNames: heldNames,
+		ctx:        turnCtx,
+		store:      s.store,
+		model:      m,
+		sink:       sink,
+		number:     number,
+		maxRetries: s.providerRetries,
+		calls:      calls{tools: s.tools},
+		steers:     &s.steers,
+		modes:      s.modes,
+		logMode:    s.recordMode,
+		subs:       s.subs,
+		wake:       wake,
+		held:       held,
+		heldNames:  heldNames,
 
 		turnFirstRequest:    true,
 		segmentFirstRequest: true,
@@ -709,6 +715,10 @@ type turn struct {
 	stepStart  time.Time     // when its request went out (a retry's, after the backoff)
 	firstToken time.Duration // from stepStart to its first text, thinking or tool call; 0 before
 	retries    int           // the step's retries so far
+	// totalRetries is every retry the turn has made, and maxRetries the budget
+	// of each of its steps (Options.ProviderRetries).
+	totalRetries int
+	maxRetries   int
 
 	stepped bool   // a step finished
 	stop    string // that step's stop reason
@@ -889,6 +899,7 @@ func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Mes
 		Messages:        history,
 		ProviderOptions: requestOptions(t.model, t.store.ID()),
 		Headers:         requestHeaders(t.model.r, t.store.ID()),
+		MaxRetries:      &t.maxRetries,
 		// The step allowance is the turn's, not the segment's (plan 028
 		// §3.11 item 8): a segment may make what earlier ones left of it.
 		StopWhen: []fantasy.StopCondition{fantasy.StepCountIs(maxSteps - t.stepBase), t.halted, t.compactionDue},
@@ -1204,6 +1215,9 @@ func (t *turn) stepStarted(n int) error {
 	defer t.mu.Unlock()
 	t.step = t.stepBase + n + 1
 	t.stepStart, t.firstToken, t.retries = time.Now(), 0, 0
+	if t.sink != nil {
+		t.emit(StepStarted{Turn: t.number, Step: t.step})
+	}
 	t.compactDue = false
 	t.turnFirstRequest, t.segmentFirstRequest = false, false
 	t.resetCalls(true)
@@ -1220,7 +1234,10 @@ func (t *turn) firstOutput() {
 
 // retry is OnRetry. A retry replays the step from the start and every
 // callback fires again (plan 018 §2.4): what the failed attempt streamed is
-// not part of the answer, and a call it began never arrives.
+// not part of the answer, and a call it began never arrives. Fantasy calls this
+// on the goroutine that ran every callback of the attempt, and it starts no tool
+// before a stream has ended, so nothing of the attempt can follow the Retrying,
+// and none of its calls ran.
 //
 // A session found refusing here (refusingNow, plan 034 C4r2, r11 #2a) gets no
 // retry: Fantasy would re-send the step's request as PrepareStep prepared it —
@@ -1234,6 +1251,11 @@ func (t *turn) firstOutput() {
 func (t *turn) retry(err *fantasy.ProviderError, delay time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	discarded := t.text.Len() > 0 || t.reasoning.Len() > 0 || len(t.list) > 0
+	var abandoned []string
+	for _, c := range t.list {
+		abandoned = append(abandoned, c.id)
+	}
 	t.resetDeltas()
 	t.settleCalls(incomplete)
 	t.resetCalls(false)
@@ -1241,8 +1263,18 @@ func (t *turn) retry(err *fantasy.ProviderError, delay time.Duration) {
 		return
 	}
 	t.retries++
+	t.totalRetries++
 	t.stepStart, t.firstToken = time.Now().Add(delay), 0
-	t.emit(Retrying{Delay: delay, Attempt: t.retries, Reason: t.redactor().String(retryReason(err))})
+	t.emit(Retrying{
+		Delay:     delay,
+		Turn:      t.number,
+		Step:      t.step,
+		Attempt:   t.retries,
+		Total:     t.totalRetries,
+		Reason:    t.redactor().String(retryReason(err)),
+		Discarded: discarded,
+		Abandoned: abandoned,
+	})
 }
 
 // refusalGate is the turn's model as its agent holds it (plan 034 C4r2, r11
@@ -1272,7 +1304,9 @@ func (g refusalGate) Stream(ctx context.Context, call fantasy.Call) (fantasy.Str
 	if refusing {
 		return nil, ErrStoredKeyFrozen
 	}
-	return g.LanguageModel.Stream(ctx, call)
+	// The turn takes back what a failed attempt streamed (retry), so a failure
+	// after output may be sent again.
+	return g.LanguageModel.Stream(llm.WithRetraction(ctx), call)
 }
 
 // retryReason is a retried failure on one line.
@@ -1620,9 +1654,8 @@ func (t *turn) stopBeforeRequest(err error) (Result, error) {
 // returned, is prepareStep's refusal of the request it was preparing, or the
 // refusal gate's of a request Fantasy was about to send — a retry's
 // (refusalGate, plan 034 C4r2) — (refusingNow): nothing of that request went
-// out. A retried step's earlier attempt did, and failed before any output
-// (Fantasy retries nothing else, D-32): retry settled it, and nothing of it
-// is kept.
+// out. A retried step's earlier attempt did, and failed: retry settled it, and
+// nothing of it is kept.
 func (t *turn) refusedRequest(err error) bool {
 	if !errors.Is(err, ErrStoredKeyFrozen) {
 		return false

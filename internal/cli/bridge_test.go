@@ -560,6 +560,50 @@ func acceptPump(t *testing.T, ln *net.UnixListener) *net.UnixConn {
 	return sc
 }
 
+// fakeHalfCloser is a socket whose half-close answers err.
+type fakeHalfCloser struct {
+	io.Writer
+	err error
+}
+
+func (f fakeHalfCloser) CloseWrite() error { return f.err }
+
+// TestAPeerThatClosedFirstIsNothingToHalfClose: stdin's EOF after the peer has closed.
+// macOS answers the half-close ENOTCONN, in the shape net.UnixConn wraps it in, and that
+// ends nothing: the socket's own EOF owns the exit. Any other error is still the pump's
+// end. On a real socket, the peer's last words reach stdout and the pump ends clean
+// whichever the kernel answers.
+func TestAPeerThatClosedFirstIsNothingToHalfClose(t *testing.T) {
+	closeErr := func(errno syscall.Errno) error {
+		return &net.OpError{Op: "close", Net: "unix", Addr: &net.UnixAddr{Name: "hub.sock", Net: "unix"}, Err: os.NewSyscallError("shutdown", errno)}
+	}
+	if err := copyFromStdin(strings.NewReader(""), fakeHalfCloser{io.Discard, closeErr(syscall.ENOTCONN)}); err != nil {
+		t.Fatalf("ENOTCONN: %v", err)
+	}
+	if err := copyFromStdin(strings.NewReader(""), fakeHalfCloser{io.Discard, closeErr(syscall.EBADF)}); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("another error: %v", err)
+	}
+
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	peer := acceptPump(t, ln)
+	if _, err := peer.Write([]byte("last words")); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader(""), &stdout, conn) }()
+	if err := pumpReturns(t, done, probeWait, "the pump"); err != nil {
+		t.Fatalf("the pump: %v", err)
+	}
+	if got := stdout.String(); got != "last words" {
+		t.Fatalf("stdout %q", got)
+	}
+}
+
 // readToEnd is everything the server reads up to the pump's half-close
 // (stdin's EOF), within probeWait.
 func readToEnd(t *testing.T, sc *net.UnixConn) string {
@@ -869,12 +913,8 @@ func executeErr(argv []string) (stdout, stderr string, code int) {
 	if err == nil {
 		return out.String(), errBuf.String(), 0
 	}
-	line, c := diagnose(ranCmd, err)
-	stderrOut := errBuf.String()
-	if line != "" {
-		stderrOut += line + "\n"
-	}
-	return out.String(), stderrOut, c
+	c := report(&out, &errBuf, ranCmd, argv, err)
+	return out.String(), errBuf.String(), c
 }
 
 func TestBridgeUnknownFlagIsOneLineExitOne(t *testing.T) {

@@ -44,7 +44,7 @@ func TestThePromptIsReadUnderTheCommandsDeadlineAndSignals(t *testing.T) {
 	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
 	stdout, stderr, code := goCrazeIn(pr, "send", waitRigShort, "--timeout", "200ms", "--json").wait(t)
 	if code != 1 || stderr != "craze send: timed out reading the prompt from stdin\n" ||
-		stdout != `{"error":{"message":"timed out reading the prompt from stdin"}}`+"\n" {
+		stdout != `{"error":{"message":"timed out reading the prompt from stdin","kind":"timeout_before_prompt","retryable":true}}`+"\n" {
 		t.Fatalf("a pipe held open: exit %d, %q %q", code, stdout, stderr)
 	}
 

@@ -52,7 +52,13 @@ func TestUsageErrorsNeverEchoWhatTheyWereGiven(t *testing.T) {
 		{[]string{"bridge", "--" + argsKey}, 1, "craze bridge: unknown or malformed flag; see craze bridge --help"},
 	} {
 		stdout, stderr, code := executeErr(tc.argv)
-		if code != tc.code || stdout != "" || stderr != tc.want+"\n" {
+		wantOut := ""
+		if strings.HasPrefix(tc.argv[len(tc.argv)-1], "--json=") {
+			// Under --json a usage error is an object too, in the same words:
+			// a pasted key is no more echoed there than on stderr.
+			wantOut = `{"error":{"message":"` + tc.want + `","kind":"usage","retryable":false}}` + "\n"
+		}
+		if code != tc.code || stdout != wantOut || stderr != tc.want+"\n" {
 			t.Errorf("craze %q: exit %d, stdout %q, stderr %q; want %d, %q", tc.argv, code, stdout, stderr, tc.code, tc.want)
 		}
 		if strings.Contains(stdout+stderr, argsKey) {

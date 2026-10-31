@@ -1,8 +1,8 @@
 // Package llm turns a model-table entry into the Fantasy LanguageModel the
 // native harness runs a turn on: the provider factory (New), the per-call
 // effort options (EffortOptions), and the decorator every model is wrapped
-// in, which normalizes a streamed step's finish, refuses to retry a step
-// whose output is already on screen, and scrubs the key from every error
+// in, which normalizes a streamed step's finish, decides whether a step whose
+// output is already on screen is retried, and scrubs the key from every error
 // (wrap.go; plan 018 §3.5).
 //
 // Both drivers are built on Fantasy's OpenAI-compatible provider, and no

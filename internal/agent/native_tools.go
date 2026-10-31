@@ -125,7 +125,8 @@ func (set *nativeToolSet) merge(id string, onlyIfInFlight bool, apply func(*Tool
 		out.RawInput != prev.RawInput ||
 		!sameOutput(prev.Output, out.Output) ||
 		!sameDiffs(prev.Diffs, out.Diffs) ||
-		!sameTask(prev.Task, out.Task)
+		!sameTask(prev.Task, out.Task) ||
+		!out.Edited.same(prev.Edited)
 	set.rows[id] = out
 	return cloneTool(out), changed
 }
@@ -194,9 +195,14 @@ func (s *nativeSession) dropChildTools(owners []string) {
 		return
 	}
 	s.toolMu.Lock()
-	defer s.toolMu.Unlock()
 	for _, owner := range owners {
 		delete(s.childTools, owner)
+	}
+	s.toolMu.Unlock()
+	s.attempts.mu.Lock()
+	defer s.attempts.mu.Unlock()
+	for _, owner := range owners {
+		delete(s.attempts.from, owner)
 	}
 }
 
@@ -244,6 +250,9 @@ func (s *nativeSession) toolCalled(owner string, e harness.ToolCalled) {
 		t.Status = toolInProgress
 		t.Title = title
 		t.Locations = nativeLocations(e.Request.Paths)
+		if owner == "" {
+			s.namedPaths.note(e.ID, e.Request.Paths...)
+		}
 		t.RawInput = raw
 		// The harness opens every call with a ToolStarted, so these are
 		// already set; a row that somehow missed one would otherwise draw
@@ -365,11 +374,16 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 		safe = nativeSafe{red: s.redactor()}
 		res.Text, res.Content = safe.text(res.Text), safe.text(res.Content)
 	}
+	var edited *ToolEdited
+	if owner == "" && !res.IsError && !e.Replayed {
+		edited = s.editedNative(e.ID, res.Edits)
+	}
 	s.publishTool(owner, e.ID, func(t *ToolEvent) {
 		t.Status = toolCompleted
 		if res.IsError {
 			t.Status = toolFailed
 		}
+		t.Edited = edited
 		if e.Replayed {
 			t.Output = replayedOutput(res, t.Kind)
 			if task && t.Task != nil {

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 )
 
@@ -27,7 +28,8 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, Spend, ModelInfo)
+// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, StepRetryInfo, Spend,
+// ModelInfo)
 // are converted rather than copied field by field: their wire twins have the
 // same fields in the same order, so a field added to one of them stops this
 // file compiling until the twin has it too. Held by pointer, they convert as
@@ -50,8 +52,10 @@ import (
 //     the location are gone. A zero time decodes zero. A year outside
 //     0000–9999 cannot be written and is an encode error.
 //   - An error keeps its message, its EventErrClass and its code (below),
-//     and decodes as a *RemoteError that errors.Is matches against its
-//     class's sentinel.
+//     what it said of itself (errkind.Info: its kind, retryable, status and
+//     provider code; ErrorInfo), and decodes as a *RemoteError that errors.Is
+//     matches against its class's sentinel. A body from a host that predates
+//     those four decodes with a zero Info, and is written back without them.
 //   - A string is carried as JSON carries it: invalid UTF-8 becomes U+FFFD.
 //     What the agent sent has already been through a JSON decoder or
 //     sanitizeText, which make the same replacement. The rest — the user's
@@ -170,9 +174,9 @@ var eventErrSentinels = []struct {
 }
 
 // RemoteError is an Event.Err that came back through the codec: the error's
-// message, its class and its code, which is everything the codec keeps of an
-// error. Error returns the original message unchanged, so what a user reads is
-// never reduced to a bare sentinel's text. Is matches the sentinel the class
+// message, its class, its code and what it said of itself, which is everything
+// the codec keeps of an error. Error returns the original message unchanged, so
+// what a user reads is never reduced to a bare sentinel's text. Is matches the sentinel the class
 // stands for, so errors.Is answers on a decoded event the way it did on the
 // live one. errors.As for a concrete type (*acp.RPCError,
 // *harness.ProviderError) does not: Class and Code are what stands in for it.
@@ -180,6 +184,9 @@ type RemoteError struct {
 	Message string
 	Class   EventErrClass
 	Code    int
+	// Info is what the error said of itself where it happened; zero from a
+	// host that predates it.
+	Info errkind.Info
 }
 
 func (e *RemoteError) Error() string {
@@ -370,6 +377,7 @@ type wireEvent struct {
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
 	Compaction     *wireCompaction  `json:"compaction,omitempty"`
+	StepRetry      *wireStepRetry   `json:"stepRetry,omitempty"`
 	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
@@ -389,7 +397,16 @@ type wireTool struct {
 	Output      *wireToolOutput `json:"output,omitempty"`
 	Diffs       []wireDiff      `json:"diffs,omitempty"`
 	Task        *wireTask       `json:"task,omitempty"`
+	Edited      *wireEdited     `json:"edited,omitempty"`
 	At          time.Time       `json:"at,omitzero"`
+}
+
+// wireEdited is ToolEdited.
+type wireEdited struct {
+	Files        []string `json:"files,omitempty"`
+	OutsideFiles []string `json:"outsideFiles,omitempty"`
+	PlanFile     string   `json:"planFile,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
 }
 
 type wireToolOutput struct {
@@ -541,9 +558,11 @@ type wireTurn struct {
 	StopReason string        `json:"stopReason,omitempty"`
 	ErrClass   EventErrClass `json:"errClass,omitempty"`
 	Err        string        `json:"err,omitempty"`
-	Synthetic  bool          `json:"synthetic,omitempty"`
-	Next       string        `json:"next,omitempty"`
-	Pending    int           `json:"pending,omitempty"`
+	errkind.Info
+	Synthetic bool   `json:"synthetic,omitempty"`
+	Next      string `json:"next,omitempty"`
+	Pending   int    `json:"pending,omitempty"`
+	Cause     string `json:"cause,omitempty"`
 }
 
 // wireAsk is an AskUpdate. Its Body is the one part that is not a plain field
@@ -821,12 +840,28 @@ type wireCompaction struct {
 	Err          string `json:"err,omitempty"`
 }
 
-// wireError is an Event.Err: always all three keys, so a jq filter over a
-// journal can read .err.class without a default.
+// wireStepRetry is StepRetryInfo, field for field in the same order, so it
+// converts by a plain pointer cast like wireCompaction does.
+type wireStepRetry struct {
+	Turn      int    `json:"turn,omitempty"`
+	Step      int    `json:"step,omitempty"`
+	Attempt   int    `json:"attempt,omitempty"`
+	Total     int    `json:"total,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	DelayMs   int64  `json:"delayMs,omitempty"`
+	From      uint64 `json:"from,omitempty"`
+	Discarded bool   `json:"discarded,omitempty"`
+}
+
+// wireError is an Event.Err: always the first three keys, so a jq filter over a
+// journal can read .err.class without a default, and the rest — what the error
+// said of itself where it happened (errkind.Info) — each absent at its zero
+// value, and all of them absent from a host that predates them.
 type wireError struct {
 	Message string        `json:"message"`
 	Class   EventErrClass `json:"class"`
 	Code    int           `json:"code"`
+	errkind.Info
 }
 
 // nilIfEmpty is the collection rule on decode: absent and [] both yield nil.
@@ -884,6 +919,7 @@ func toWireEvent(ev Event) wireEvent {
 		Replay:         (*wireReplay)(ev.Replay),
 		Replayed:       ev.Replayed,
 		Compaction:     (*wireCompaction)(ev.Compaction),
+		StepRetry:      (*wireStepRetry)(ev.StepRetry),
 		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
 		At:             ev.At.UTC(),
@@ -1064,7 +1100,7 @@ func toWireError(err error) *wireError {
 		return nil
 	}
 	class, code := classifyEventErr(err)
-	return &wireError{Message: err.Error(), Class: class, Code: code}
+	return &wireError{Message: err.Error(), Class: class, Code: code, Info: ErrorInfo(err)}
 }
 
 // remoteError is the *RemoteError that decoding w yields, built without a
@@ -1086,6 +1122,8 @@ func remoteError(w *wireError) *RemoteError {
 		Message: asJSONCarriesIt(w.Message),
 		Class:   EventErrClass(asJSONCarriesIt(string(w.Class))),
 		Code:    w.Code,
+		Info: errkind.Info{Kind: errkind.Kind(asJSONCarriesIt(string(w.Kind))), Retryable: w.Retryable,
+			Status: w.Status, ProviderCode: asJSONCarriesIt(w.ProviderCode)},
 	}
 }
 
@@ -1152,6 +1190,7 @@ func toWireTool(t *ToolEvent) *wireTool {
 		Locations:   t.Locations,
 		Output:      (*wireToolOutput)(t.Output),
 		Diffs:       convertSlice(t.Diffs, func(d ToolDiff) wireDiff { return wireDiff(d) }),
+		Edited:      (*wireEdited)(t.Edited),
 		At:          t.At.UTC(),
 	}
 	if k := t.Task; k != nil {
@@ -1232,6 +1271,7 @@ func (w *wireEvent) event() Event {
 		Replay:         (*ReplayInfo)(w.Replay),
 		Replayed:       w.Replayed,
 		Compaction:     (*CompactionInfo)(w.Compaction),
+		StepRetry:      (*StepRetryInfo)(w.StepRetry),
 		Cause:          w.Cause,
 		StopReason:     w.StopReason,
 		At:             w.At.UTC(),
@@ -1284,7 +1324,7 @@ func (w *wireEvent) event() Event {
 		ev.State.Catalog = s.Catalog.catalog()
 	}
 	if e := w.Err; e != nil {
-		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}
+		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code, Info: e.Info}
 	}
 	return ev
 }
@@ -1336,6 +1376,7 @@ func (w *wireTool) tool() *ToolEvent {
 		Locations:   nilIfEmpty(w.Locations),
 		Output:      (*ToolOutput)(w.Output),
 		Diffs:       convertSlice(w.Diffs, func(d wireDiff) ToolDiff { return ToolDiff(d) }),
+		Edited:      (*ToolEdited)(w.Edited),
 		At:          w.At.UTC(),
 	}
 	if k := w.Task; k != nil {

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
@@ -94,7 +95,7 @@ func TestServeExitsWhenIdle(t *testing.T) {
 		t.Fatalf("the grace over: %+v", l)
 	}
 	d.advance(2 * time.Second)
-	if l := d.look(t, r); !l.Fenced || !strings.Contains(l.Stop, "idle for 2s") {
+	if l := d.look(t, r); !l.Fenced || !strings.Contains(l.Stop, "idle for 2s") || l.Cause != agent.StopCauseIdle {
 		t.Fatalf("2 s idle: %+v", l)
 	}
 	if err := r.result(t, serveStep); err != nil {
@@ -137,7 +138,7 @@ func TestServeStopsWhenItsSocketOrEntryIsGone(t *testing.T) {
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-			if l := d.look(t, r); !strings.Contains(l.Stop, path+" is gone") {
+			if l := d.look(t, r); !strings.Contains(l.Stop, path+" is gone") || l.Cause != agent.StopCauseLostOwner {
 				t.Fatalf("the look after the %s went: %+v", gone, l)
 			}
 			if err := r.result(t, serveStep); err != nil {
@@ -552,6 +553,13 @@ func TestServeJournalsWhyItStopped(t *testing.T) {
 			fields, _ := stops[0]["fields"].(map[string]any)
 			if cause, _ := fields["cause"].(string); !strings.HasPrefix(cause, want) {
 				t.Fatalf("the host_stop note's cause is %q, want %q…", cause, want)
+			}
+			wantKind := agent.StopCauseSignal
+			if how == "session.stop" {
+				wantKind = agent.StopCauseStop
+			}
+			if got, _ := fields["stopCause"].(string); got != wantKind {
+				t.Fatalf("the host_stop note's stopCause is %q, want %q", got, wantKind)
 			}
 		})
 	}

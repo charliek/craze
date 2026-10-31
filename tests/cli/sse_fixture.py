@@ -165,6 +165,10 @@ class Step:
     # at its end, as Meta sends it; None sends one only when reasoning has
     # text. Chat Completions has no such item and ignores it.
     sealed: tuple[str, str] | None = None
+    # stream_error makes this a response that fails mid-stream: after its text,
+    # one in-band error event with this type, and no finish. Chat Completions
+    # only.
+    stream_error: str = ""
 
     def finish_reason(self) -> str:
         if self.finish:
@@ -600,6 +604,9 @@ def _sse_body(step: Step) -> bytes:
     chunks = [_delta_chunk({"reasoning_content": r}) for r in step.reasoning]
     chunks += [_delta_chunk({"content": t}) for t in step.text]
     chunks += sse_call_chunks(step)
+    if step.stream_error:
+        chunks.append(json.dumps({"error": {"type": step.stream_error, "message": "the stream failed"}}))
+        return "".join(f"data: {c}\n\n" for c in chunks).encode("utf-8")
     chunks.append(_finish_chunk(step.finish_reason(), step.usage))
     out = "".join(f"data: {c}\n\n" for c in chunks)
     out += "data: [DONE]\n\n"

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // The snapshot codec's completeness guard (plan 024 §3.5, A7), in the shape of
@@ -75,7 +76,8 @@ func (f *snapFiller) fill(path string, v reflect.Value) {
 			v.Set(reflect.ValueOf(fmt.Errorf("e%d", n)))
 			return
 		}
-		v.Set(reflect.ValueOf(error(&agent.RemoteError{Message: fmt.Sprintf("e%d", n), Class: agent.EventErrClass(fmt.Sprintf("c%d", n)), Code: n})))
+		v.Set(reflect.ValueOf(error(&agent.RemoteError{Message: fmt.Sprintf("e%d", n), Class: agent.EventErrClass(fmt.Sprintf("c%d", n)), Code: n,
+			Info: errkind.Info{Kind: errkind.Kind(fmt.Sprintf("k%d", n)), Retryable: n%2 == 0, Status: n, ProviderCode: fmt.Sprintf("p%d", n)}})))
 		return
 	case snapKindType:
 		// A kind is one of the seven there are; the zero pass leaves it zero.
@@ -266,7 +268,7 @@ func snapCompareEntry(path string, want, got Entry, d *[]string) {
 		if text == "" {
 			text = re.Message
 		}
-		wantErr = &agent.RemoteError{Message: text, Class: re.Class, Code: re.Code}
+		wantErr = &agent.RemoteError{Message: text, Class: re.Class, Code: re.Code, Info: re.Info}
 	}
 	if got.Text != text {
 		*d = append(*d, fmt.Sprintf("%s.Text: %q, want %q", path, got.Text, text))
@@ -620,7 +622,7 @@ func pinnedSnapshots() []pinnedSnapshot {
 				`{"id":"8.0","kind":"plan","plan":{"id":"plan-1","name":"P"}},` +
 				`{"id":"9.0","kind":"error","text":"boom","err":{"class":"rpc","code":-32603}},` +
 				`{"id":"9.1","kind":"error","text":"index write failed"},` +
-				`{"id":"0.2","kind":"error","text":"never read by the fold","err":{"class":"other","code":0}},` +
+				`{"id":"0.2","kind":"error","text":"never read by the fold","err":{"class":"other","code":0,"kind":"internal"}},` +
 				`{"id":"10.0","kind":"thought","text":"…still thinking","at":` + goldenAt + `,"end":` + goldenAt + `,"open":true,"streaming":true,"cut":true}]}}`},
 		{"a child's window", Snapshot{Subs: []SubSnap{
 			{ID: "sub-1", TranscriptSnap: TranscriptSnap{Windowed: true, Dropped: 12, StreamOpen: true, OmittedRun: KindAssistant,

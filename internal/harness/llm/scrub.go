@@ -419,6 +419,26 @@ func (s *scrubber) midStream(err error) *MidStreamError {
 	return me
 }
 
+// transient builds the error for a failure the step is to be tried again for
+// (fault): a *fantasy.ProviderError from scrubbed values, marked so whatever
+// Fantasy would have read of the original survives. Its headers keep the wait a
+// provider asked for.
+func (s *scrubber) transient(err error) *fantasy.ProviderError {
+	var pe *fantasy.ProviderError
+	if errors.As(err, &pe) {
+		out := s.providerError(pe, s.sentinel(err))
+		out.TransientError = true
+		return out
+	}
+	return &fantasy.ProviderError{Title: transportTitle, Message: s.text(err.Error()), Cause: s.sentinel(err), TransientError: true}
+}
+
+// fault is streamFault, less a failure of the sign-in's own: it says something
+// of the account, whatever carried it.
+func (s *scrubber) fault(err error) bool {
+	return streamFault(err) && !slices.Contains(s.sentinels, s.sentinel(err))
+}
+
 // errorName is what a provider's code or type for a failure must look like
 // to be kept: a short lowercase identifier — "insufficient_quota",
 // "rate_limit_exceeded", "server_error". Anything else names nothing craze

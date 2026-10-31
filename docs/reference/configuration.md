@@ -7,7 +7,8 @@ about it in the session index (`~/.craze/sessions.jsonl`) that
 index](#session-index). Every session also writes a [journal](#session-journal)
 of what happened in it, which can contain secrets and can be turned off.
 `config.toml` also holds the switches `journal`, `control_socket`, `detach`,
-`host_idle_exit`, `terminal_title`, `background` and `host_status`, the
+`host_idle_exit`, `host_idle_exit_unattended`, `terminal_title`, `background`, `host_status` and
+[`provider_retries`](#native-provider-retries), the
 [`[agents]`](#agent-binaries) table, and the
 [`[compat.claude]`](#claude-content-compatclaude) table that says which of
 Claude's own files a native session reads. Session flags (`--workspace`, `--model`, `--effort`, `--fast` / `--no-fast`,
@@ -269,6 +270,11 @@ journals.
 | `diag` | Everything that is not transcript: the agent's own stderr, a start that failed, a start setting (`--effort`, `--fast`) that could not be applied, an event too large to record, a reader craze dropped, and the line that closes the file |
 | `gap` | Written when the journal could not keep up: exactly what was lost, so a reader is never quietly short of events |
 
+A native step that fails and is [sent again](#native-provider-retries) leaves a
+`step_retry` `diag` beside its `event`: the turn, the step, the attempt, the
+reason, the wait, and the sub-agent if it was a child's. It is the one record of an
+attempt that may have spent something no usage report holds.
+
 A journal never slows a turn down and never fails a session. If it falls
 behind, it records what it lost as a `gap` rather than skipping it quietly; if
 a write fails outright — a full disk — journaling stops for that session and
@@ -432,6 +438,36 @@ Three cases have their own limit:
   failure, say) stays only long enough for its launcher to attach and be told
   why; its limit is 0, even under `"never"`.
 
+**A host a waiting command started has its own limit.** `host_idle_exit_unattended`
+applies to a host started unattended (by `craze new --wait`, or by `craze send`
+reloading such a session), and is fixed as the host starts:
+
+```toml
+host_idle_exit_unattended = "10m"     # the default
+host_idle_exit_unattended = "2m"      # the same forms as host_idle_exit
+host_idle_exit_unattended = "never"   # never exit for being idle
+```
+
+Its value is read as `host_idle_exit`'s is, falling back to `"10m"`. The rest of this
+section applies, with these differences:
+
+- **A waiter attached pins it**, as any client attached does: `craze wait` or `--wait`
+  following a turn. After the last client detaches, the clock starts again.
+- **An open ask does not pin it.** A permission under `--no-force` that nobody answers
+  ends with the session once the clock runs out. The clock counts from when the ask
+  opened or the last client left, whichever is later, and an ask has no timeout of its
+  own, so that limit is all it gets. Precisely, the clock restarts at the first
+  one-second look that sees the ask. What the ask holds up does not count either: its
+  turn, the prompts queued behind it, any sub-agent running, and background work the
+  parent can't deliver while it waits, all cut off with it. A client attached still pins
+  it, as above.
+- **Never prompted: five minutes at most**, and **a failed start: none**, as above.
+
+**A session under [`--exit-after-turn`](cli.md#ending-with-the-turn)'s fence**, whatever
+host it runs on, has at most `host_idle_exit_unattended`, and an open ask does not pin
+it: this is what ends it if its waiter dies first. Under `"never"` the fence adds no
+limit, and a host's own `host_idle_exit` stands.
+
 Independently of the limit, a host whose socket file or registry entry has
 vanished (`/run/user` removed at the last logout, a registry swept by hand)
 stops at once, the ordinary way: it can no longer be reached, and stopping
@@ -448,13 +484,25 @@ The launcher names it whenever a host could not start. A spawned host's
 
 - The log is **rotated once**: at 4 MiB the current file becomes
   `<hostId>.log.1` (replacing an older one), and a new `<hostId>.log` starts.
-- Beside it, `<hostId>.pgids` records the process groups of the host's agents
-  while it runs, for its launcher's last-resort cleanup; it is removed when
-  the host stops cleanly.
+- Beside it, `<hostId>.pgids` records the process groups the host is running: its
+  native shell commands, each crossed off when it has ended, and its agents, which stay
+  until its teardown. It is how [what a dead host leaves
+  running](cli.md#what-a-dead-host-leaves-running) gets ended. It goes when that is
+  done, or when the host stops cleanly. The log sweep below never touches it, because
+  an old record can still name something running. One nothing can act on (from another
+  boot or PID namespace, or whose host or groups cannot be read) goes after 7 days, and
+  a line with no owner, from an older craze, goes after 10 minutes once its host's lock
+  is free.
+- `<hostId>.stop` is written as a host begins to stop, saying why, which turn was
+  running and which process wrote it, and stays behind it: it is how a waiting command
+  that lost its stream tells a stop from a crash. It counts only for the process it
+  names. A later host at the same id writes over it if that host stops; otherwise it
+  goes with the host's logs.
 - Every host **sweeps the directory as it starts**: the files of a host that
   is gone (decided by its own host lock, never by its registry entry) and that
-  nobody has touched for 7 days are removed. A live host's files are never
-  removed, whatever their age.
+  nobody has touched for 7 days are removed: its logs, its `.stop`, and any temporary
+  a rewrite of its `.pgids` left. A live host's files are never removed, whatever
+  their age.
 - The directory is `0700`, and a `--log` inside it must be named for the host
   that opens it.
 
@@ -1315,7 +1363,8 @@ function, and:
 404 says the provider does not serve the model's `wire_model`; a 400 is not
 retried. A 429 or a 5xx, and a rate limit or server error inside the stream,
 are retried before any output, honouring the provider's `Retry-After`. An
-answer that has begun is never retried. A response cut short by the output
+answer that has begun is [retried](#native-provider-retries) only for a server
+error or a transport's failure. A response cut short by the output
 ceiling ends the turn as on Chat Completions, stopped at `max_tokens` with the
 answer so far, and a tool call cut off mid-arguments is not run; one stopped by
 the provider's content filter ends as a refusal.
@@ -1372,6 +1421,60 @@ goes to the Responses API, and every tool call keeps its result. A running
 session goes on with the client its model was built with: the new driver
 reaches it when it next builds one, in a new or resumed session or at a switch
 to another model.
+
+### Native provider retries
+
+`provider_retries` in `config.toml` says how many times a native step's model
+request is sent again after failing:
+
+```toml
+provider_retries = 1   # the default
+provider_retries = 0   # never: a step's first failure ends the turn
+provider_retries = 3   # the most
+```
+
+The budget is per step, and covers a failure before the model's first output
+and one after it alike. Before output, a failure is retried when the provider
+says it may be (a 429, a 5xx, a connection that failed). After output began,
+only a failure of the transport or the server is: an HTTP/2 `RST_STREAM` or
+`GOAWAY`, an unexpected EOF, a reset connection, a 5xx or a server's own error
+event in the stream (`server_error`, `overloaded_error`). A content filter, a
+schema refusal, a context too large or a rate limit in the stream stays final,
+and so does everything the ChatGPT plan's route says not to repeat, its 429s and
+400s among them. A step whose attempt already received the result of a tool the
+provider ran itself is not sent again either.
+
+A failure in a response a parser could not read (a malformed chunk, a stream
+that broke its protocol) is the response's and stays final too. A stream that merely
+stopped short is a truncation, and is retried.
+
+The waits are 5, 10 and 20 seconds, or what the provider asked for with
+`Retry-After` when it asked for under 60 seconds. Cancelling during one ends the
+turn at once. A failure after output whose `Retry-After` asks for 60 seconds or more
+is not retried: the provider said not soon, and asking sooner would spend the budget
+for nothing, so the turn ends with kind `provider`, `retryable: true`, for a caller to
+try later. Before any output, a wait that long is ignored and the step waits its
+usual 5, 10 or 20 seconds, which is Fantasy's own rule.
+
+A sub-agent's steps have the same budget as its parent's. Two other requests are not
+steps and keep their own attempts whatever this says, so `provider_retries = 0` does
+not govern them: a [compaction](#native-compaction)'s summarizer makes up to three
+attempts, its stream's failure after output among them, since it keeps nothing until
+one is whole; and a [side question](tui.md#side-questions-btw) retries once, before
+its first text, and never after it, since it hands text on as it comes.
+
+A retry repeats the step from the same input. Native tools run only after a
+stream has ended whole, so none of the failed attempt's ran; its text and
+abandoned calls are [taken back](protocol.md#a-steps-retry). **Discarded attempts
+may have cost something**: a provider can bill a request that then failed, and no
+usage report holds it, so `usage` can be less than what was spent. A result's
+[`retries`](cli.md#craze-new) says when that is possible.
+
+An absent key is `1`, silently. A file that cannot be read or parsed, a value that
+is not an integer, or one outside 0 to 3 is also `1`, with one line on craze's own
+diagnostics: stderr for `craze prompt`, the host's log for a detached host. It is
+read as each session starts, and an ACP agent (cursor, grok, gx) keeps its own
+retries.
 
 ### Model memory: `recent.json`
 

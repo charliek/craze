@@ -3048,7 +3048,9 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	}
 	rows := m.cur().rows
 	for i := len(rows) - 1; i >= 0; i-- {
-		if e := rows[i]; e.kind == entryAssistant && e.text != "" {
+		// A row a retried step's attempt left is struck out, no reply; a selection
+		// over it, above, is the reader's own choice.
+		if e := rows[i]; e.kind == entryAssistant && e.text != "" && !e.retracted {
 			return m, copyText(m.shownGen, e.text, "copied last reply")
 		}
 	}

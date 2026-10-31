@@ -1,8 +1,9 @@
 # Upgrading
 
-Three sections: [since v0.1.1](#since-v011), the changes after the third
-release; [since v0.1.0](#since-v010), the second release's; and [from
-v0.0.1](#from-v001), the first release's. Whatever the version, [upgrading
+Four sections: [since v0.2.0](#since-v020), the changes after the fourth
+release; [since v0.1.1](#since-v011), the third release's; [since
+v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
+first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
 to the hub and the sessions already running.
 
@@ -22,7 +23,8 @@ craze:
   names that hub's pid: `the session host cannot be started; the hub (pid
   <pid>) runs craze <old> and this is craze <new>: if craze was upgraded, stop
   that hub with kill <pid> (no session ends) and run this again`. `kill` it:
-  every session runs on, and the next command starts the new craze's hub.
+  every session runs on, and the next command that needs a hub (`craze ps`, `craze
+  new`, the TUI's session list) starts the new craze's.
 - **From this release on, the hub says so itself** — `this hub's craze
   (<path>) was replaced by an upgrade: stop this hub with kill <pid> (no
   session ends) and run this again` — and goes on serving its clients and the
@@ -36,6 +38,319 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.2.0
+
+**The waiting commands' JSON changes.** A program that reads `craze new --wait
+--json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
+Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn) and [`craze stop` on a session that has ended](#other-commands). `craze prompt
+--json` is unchanged but for [one new line](#a-stream-that-fails-partway), and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
+together: an error from an older host reads as kind `unknown`, retryable false, and
+a kind from a newer host that this craze does not know reads as `unknown` with the
+`retryable` that host sent.
+
+### Results and failures
+
+**`error` is one object.** It used to be a string on a result (exit 3, 4, 5) and a
+message-only object on a failure (exit 1). It is `{message, kind, retryable,
+detail?}` on both. A program reads `.error.message` on both now.
+
+```json
+{"status":"failed","error":"native: provider \"openai\" failed (HTTP 429): Rate limit reached"}
+{"error":{"message":"the turn's ending was not observed"},"handle":"…"}
+```
+
+becomes
+
+```json
+{"status":"failed","stopReason":"error","error":{"message":"native: provider \"openai\" failed (HTTP 429): Rate limit reached","kind":"provider","retryable":true,"detail":{"status":429,"provider_code":"rate_limit_exceeded"}}}
+{"error":{"message":"the turn's ending was not observed","kind":"unobserved","retryable":true},"handle":"…"}
+```
+
+**`kind` and `retryable` are new.** Branch on them rather than the words. The set
+is closed, and [the reference](../reference/cli.md#failure-kinds) lists it, with
+what each means and whether it may be retried.
+
+**A turn that stopped short has an `error` too.** A `failed` result always has
+one now. The plain footer's `stopped:` line is gone with it, its words under
+`error:`.
+
+```json
+{"status":"failed","stopReason":"max_tokens"}
+```
+
+becomes
+
+```json
+{"status":"failed","stopReason":"max_tokens","error":{"message":"the turn stopped short: max_tokens","kind":"agent","retryable":false}}
+```
+
+**`stopReason` is always there on a terminal status.** It was absent when craze did
+not know it (a result read from how the session says its last turn ended, or a
+failure with no reason). Its value is the engine's when it sent one, else `error`
+for a failed turn and `cancelled` for a cancelled or dropped one; a turn the agent
+ran on its own reports `end_turn`.
+
+```json
+{"status":"completed","partial":true}
+```
+
+becomes
+
+```json
+{"status":"completed","stopReason":"end_turn","partial":true}
+```
+
+**`model` is left out until it is resolved.** It used to be `""`.
+
+```json
+{"status":"cancelled","session":"","provider":"cursor","model":""}
+```
+
+becomes
+
+```json
+{"status":"cancelled","session":"","provider":"cursor","stopReason":"cancelled","error":{"message":"interrupted before the prompt was sent","kind":"interrupted","retryable":false}}
+```
+
+**`planEnded` is new.** `true` when the turn ended at a plan it presented: cursor's
+and grok's `completed` with `stopReason: cancelled`, and a native session's approved
+plan, which keeps `end_turn`. Read it rather than inferring it from `stopReason`
+and `plan`.
+
+```json
+{"status":"completed","stopReason":"cancelled","plan":"1. …"}
+```
+
+becomes
+
+```json
+{"status":"completed","stopReason":"cancelled","planEnded":true,"plan":"1. …"}
+```
+
+See [each status](../reference/cli.md#each-status) for what each one carries.
+
+### A stop mid-turn
+
+**A turn a stop cuts short is a `cancelled` result, exit 3. It used to be a failure,
+exit 1.** A waiting command whose turn is running when `craze stop`, a `SIGTERM` to
+the host or the host's other stops end the session now reports that turn: what it
+did, what it spent so far, and what began the stop. A script that took exit 1 to mean
+a stopped session reads exit 3 and `stopReason: stopped`, or `error.kind: stopped`.
+
+```json
+{"error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"stopped","retryable":false},"handle":"0199c0de-1111-7000-8000-397e175bfe79.41.turn-3"}
+```
+
+becomes
+
+```json
+{"status":"cancelled","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","turn":"turn-3","message":"Reading the tests next.","stopReason":"stopped","error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"stopped","retryable":false,"detail":{"cause":"stop"}},"toolCalls":2,"durationMs":8120,"files":[],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"usageComplete":false,"attach":"craze attach --session 175bfe79"}
+```
+
+**`usageComplete` is new.** `false` when a step was in flight as the turn was cut
+short, or the waiter did not see all of the turn, its spend then maybe missing from
+`usage`; otherwise absent. A cancelled result says so too, and `craze cancel` mid-step
+reads that way now:
+
+```json
+{"status":"cancelled","stopReason":"cancelled"}
+```
+
+becomes
+
+```json
+{"status":"cancelled","stopReason":"cancelled","usageComplete":false}
+```
+
+**A killed host is told from a stop and from a lost connection.** It used to be told
+by the registry alone, so a live host whose entry had gone read as exited. A host now
+records that it began to stop, in `<hostId>.stop` beside its log, so a stop whose
+ending never reached the waiter is still the exit-3 `cancelled` result above. With no
+such word, `host_exited` means the process is gone, and carries the usage folded so
+far. `connection_lost` is a process shown running, whose turn runs on, or one that
+cannot be told, whose message says the turn may have ended. Both stay exit 1.
+
+```json
+{"error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"host_exited","retryable":true},"handle":"…"}
+```
+
+becomes
+
+```json
+{"error":{"message":"the session ended: its host exited with no ending for the turn (craze send 175bfe79 <prompt> reloads it)","kind":"host_exited","retryable":true},"handle":"…","usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"usageComplete":false}
+```
+
+A prompt still queued when the session stops never ran, and stays exit 1, kind
+`stopped`, now with `detail.cause` when it is known.
+
+The stream and `lastTurn` gain an optional [`cause`](../reference/protocol.md#what-began-a-close)
+on a close's ending, and `lastTurn` an optional `withdrawn`. A host from before them
+sends neither: its stop reads with no `detail.cause`, and a prompt it withdrew reads
+`usageComplete: false`.
+
+See [a turn cut short](../reference/cli.md#a-turn-cut-short).
+
+### `files`
+
+**`files` now lists only successful edits inside the workspace, spelled from it.** It
+used to list every path an edit-kind call named, however the call ended: an edit plan
+mode refused, a `search_replace` whose old text did not match and a permission denied
+were all in it. Agent-private files were too.
+
+```json
+{"files":["/work/proj/stats/core.py","/work/proj/refused.py","/home/me/.grok/sessions/%2Fwork%2Fproj/01a19050-6468-79c1-ac66-263c44a65a74/plan.md"]}
+```
+
+becomes
+
+```json
+{"files":["stats/core.py"],"planFile":"/home/me/.grok/sessions/%2Fwork%2Fproj/01a19050-6468-79c1-ac66-263c44a65a74/plan.md"}
+```
+
+- A program that opened a path from `files` joins it to the workspace first.
+- A program that filtered craze's or grok's plan file out of `files` can stop, and reads
+  `planFile`.
+- Edits elsewhere are in `outsideFiles`, absolute. `filesTruncated: true` says a call
+  named more than 64 paths.
+- grok's and gx's edits count by tool name (`search_replace`, `write`). A new grok edit
+  tool does not count until craze knows its name.
+- cursor's deletes and moves count, so a deleted file and both names of a rename are
+  listed. They used to be missing.
+
+`files` still says only what edit tools reported. Plan mode refuses edit tools but lets
+the shell through, and shell writes are never in `files`: a program that must know every
+change diffs the workspace itself. See [what `files`
+lists](../reference/cli.md#what-files-lists). A waiter on a host from before this change
+reads `files: []`, whatever that host's turn edited, because the host is what decides.
+
+### A stream that fails partway
+
+**A native step now survives a mid-stream reset.** It used to cost the turn: an HTTP/2
+`RST_STREAM` or `GOAWAY`, an unexpected EOF or a server's error event after the model
+had begun answering was final. Such a step is now sent again from the same input, once
+by default: [`provider_retries`](../reference/configuration.md#native-provider-retries)
+(0 to 3) sets it, and `provider_retries = 0` keeps the old behaviour. Failures of
+another kind, and everything the ChatGPT plan's route says not to repeat, stay final.
+
+A waiting command's result reports the final attempt, and gains `retries`, absent for
+none. A turn's cost may now hold requests no report shows: a discarded attempt may
+have been billed.
+
+```json
+{"status":"completed","message":"The final attempt's answer.","toolCalls":1,"retries":1, "…":"…"}
+```
+
+**`craze prompt --json` gains one line type**, `step_retry`, and its other lines do
+not change. It says which lines already read to drop: the `text`, `thought` and `tool`
+lines of the same `agent` from `seq` `from` on. [A reader that ignores
+it](../reference/cli.md#a-retried-step-in-the-stream) reads the abandoned attempt's
+text before the final one's. Plain `craze prompt` cannot take back what it wrote, and
+says so on stderr.
+
+**A socket client** sees a new `step_retry` event and `retracted` on a snapshot's
+entries: [what they mean](../reference/protocol.md#a-steps-retry). One that ignores
+both draws the abandoned attempt as if it stood.
+
+### Other commands
+
+**A usage error under `--json` prints an object.** Any command, exit 2 as before,
+the stderr line as before. Stdout used to be empty. `craze prompt`'s stays empty.
+
+```json
+{"error":{"message":"craze wait: unknown or malformed flag; see craze wait --help","kind":"usage","retryable":false}}
+```
+
+An unreadable, empty or over-size prompt is kind `prompt`, and an unknown
+`--provider` kind `config`, at the same exit 2.
+
+**`craze stop` on a session that has ended exits 0.** It used to exit 1, so a retried
+stop read as a failure. It says so on stdout now, and the new `--json` names it:
+
+```text
+craze stop: the session has ended          (stderr, exit 1)
+```
+
+becomes
+
+```text
+session 175bfe79 has already ended         (stdout, exit 0)
+```
+
+and with `--json`, which is new (the old command had none, and printed the line above
+on stderr with nothing on stdout):
+
+```json
+{"session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","result":"already_ended"}
+```
+
+A script that took exit 1 to mean "already gone" reads exit 0, or `result`. An unknown
+id stays exit 1: [`craze stop`](../reference/cli.md#craze-stop) lists each outcome.
+`craze cancel` without `--json` on a session that has ended stays exit 1. With `--json`,
+new too, it is exit 0, `already_ended`, and
+[`--turn`](../reference/cli.md#craze-cancel) cancels one named turn only.
+
+**An index or registry that cannot be read is told from an unknown id.** `craze stop`
+and `craze cancel` used to say `no session <id>` for an index they could not read, and
+`the session has ended` for a running host whose registry entry they could not read. Both
+are still exit 1; the message says which.
+
+**Unattended hosts idle out after ten minutes, and an ask no longer pins them.** A host
+`craze new --wait` started, or `craze send` reloaded from one, used to stay for
+`host_idle_exit`, an hour by default, and indefinitely with a permission ask open. It
+now exits after [`host_idle_exit_unattended`](../reference/configuration.md#host-idle-exit),
+ten minutes by default, ask or no ask, background work behind that ask included. So after `needs_input`, exit 4, under `--no-force`,
+answer within that limit, or stay attached, or raise it: `host_idle_exit_unattended =
+"1h"` gives you the old limit, but for the ask. `craze send` still loads an ended
+session again. A host already running keeps the limit it started with.
+
+**`--exit-after-turn` and `--session-file` are new**, on `craze new --wait` and `craze
+send --wait`, and `craze ps --json --brief`. See [ending with the
+turn](../reference/cli.md#ending-with-the-turn), [the session
+file](../reference/cli.md#the-session-file) and [`craze ps`](../reference/cli.md#craze-ps).
+`--exit-after-turn` refuses a host from before it, or one a TUI hosts, before sending
+the prompt: exit 1, kind `config`.
+
+**Plain `craze new --json` gains `kind`.** Its `error` is the wire's, as it was.
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"}}
+```
+
+becomes
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"},"kind":"workspace"}
+```
+
+**A killed host's shell commands are ended.** A native host killed outright used to
+leave its shell commands running with nothing to end them. They are now sent `SIGTERM`
+and then `SIGKILL`, by a waiter that sees the host go, or else by the next craze
+command to run: see [what a dead host leaves
+running](../reference/cli.md#what-a-dead-host-leaves-running), including what it does
+not reach. A command you meant to outlive its host has to leave its process group
+(`setsid`), as one meant to outlive its call already does. A command that finds a
+group ignoring `SIGTERM` takes about 2 s longer to exit, with its output already
+written. Every native command now has `CRAZE_HOST_ID` in its environment.
+`<hostId>.pgids` in the host logs' directory now has a longer line and exists for a
+host run by hand too; anything that read it should stop. It is also no longer removed
+with the host's logs after 7 days.
+
+**Restart the hub after upgrading.** A hub from before this release, still running, can
+start a new host through the replaced binary, and when that host dies it removes the
+host's record without signalling anything, because it can't read the new lines. Those
+commands then run on, as they did before this release. To restart it, take its pid from
+the `pid` field of `~/.cache/craze/hubs/<ns>.json`, or from a message that names it,
+check that `ps -o args= -p <pid>` still shows `craze hub`, and `kill <pid>`. Running
+hosts keep running; a session still being created at that moment may fail, and can be
+created again. The next command that needs a hub (`craze ps`, `craze new`, the TUI's
+session list) starts the new one. `craze version`, `craze wait` and `craze ps --no-hub`
+don't.
+
+**cursor's and grok's refusal of `--model` says so.** A model the agent will not
+start on used to read `json-rpc error -32602: Invalid params`, and now says `the
+agent refused model "x": Invalid params`, kind `model_not_found`. The agent's own
+data on that error, which can quote its request, stays out of it, as it always has.
 
 ## Since v0.1.1
 
@@ -355,7 +670,7 @@ attach` picks it up again, and `craze ps` lists what is running.
   working session's turn and, pressed twice, closes an idle one. A stopped session stays
   resumable with `craze -c`.
 - **Idle exit:** a host with no client attached and nothing in flight exits by
-  itself after an hour. `host_idle_exit` in `config.toml` sets that (`"20m"`,
+  itself after an hour. (A host a waiting command started: ten minutes, since v0.2.0.) `host_idle_exit` in `config.toml` sets that (`"20m"`,
   `"2h30m"`, `"never"`); a session that was never prompted is capped at five
   minutes, and a host whose start failed goes as soon as its launcher has been
   told.

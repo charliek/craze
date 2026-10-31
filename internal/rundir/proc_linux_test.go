@@ -5,6 +5,7 @@ package rundir
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -50,5 +51,33 @@ func TestAStartTokenNeedsThisNamespacesProc(t *testing.T) {
 	procSelfStatus = func() ([]byte, error) { return []byte("Name:\tx\nNStgid:\t" + pid + "\nNSpid:\t" + pid + "\n"), nil }
 	if tok, err := StartToken(os.Getpid()); err != nil || tok != self {
 		t.Fatalf("its own namespace's /proc: StartToken = %q, %v; want %q", tok, err, self)
+	}
+}
+
+// TestAnEnvironmentThatCannotBeReadIsNotKnown: a read that fails of a process still
+// there says nothing about it; of one that has gone, or of another user's, it does.
+func TestAnEnvironmentThatCannotBeReadIsNotKnown(t *testing.T) {
+	const mark = "CRAZE_REAP_TEST_MARK=1"
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "environ"), 0o700); err != nil { // a read of it fails
+		t.Fatal(err)
+	}
+	if carries, known := carriesIn(dir, os.Getpid(), mark); carries || known {
+		t.Fatalf("a failing read of a process still there: carries %v, known %v", carries, known)
+	}
+	if carries, known := carriesIn(dir, 1<<30, mark); carries || !known {
+		t.Fatalf("a failing read of a process that has gone: carries %v, known %v", carries, known)
+	}
+	readable := t.TempDir()
+	if err := os.WriteFile(filepath.Join(readable, "environ"), []byte("A=b\x00"+mark+"\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if carries, known := carriesIn(readable, os.Getpid(), mark); !carries || !known {
+		t.Fatalf("a read that holds the mark: carries %v, known %v", carries, known)
+	}
+	if os.Geteuid() != 0 {
+		if carries, known := carriesIn("/proc/1", 1, mark); carries || !known {
+			t.Fatalf("another user's process: carries %v, known %v", carries, known)
+		}
 	}
 }

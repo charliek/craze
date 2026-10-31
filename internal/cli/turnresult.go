@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/transcript"
 )
@@ -33,8 +35,6 @@ const resultMessageMax = 1 << 20
 const (
 	toolCompleted = "completed"
 	toolFailed    = "failed"
-	// toolKindEdit is an edit-kind call's Kind: its paths are files.
-	toolKindEdit = "edit"
 )
 
 // turnAccumulator is one turn's result, folded from its events.
@@ -53,15 +53,37 @@ type turnAccumulator struct {
 	msg     []byte
 	runOpen bool
 	msgCut  bool
-	// tools are the main session's tool calls by id; touches every distinct
-	// (call, path) an update named, in first-touch order (files) — an ACP
-	// call's updates name its paths again and again, touched once each.
-	tools   map[string]*accTool
-	touches []accTouch
-	touched map[accTouch]bool
+	// msgSeq is the Seq of the event that opened msg's run, and seq the event
+	// being folded. behind is what a retried step's retraction uncovers
+	// (retract), oldest first: the message as it stood when the step's first run
+	// opened (holding says it is there), whatever the attempt goes on to say, and
+	// the one before it, since a report is no promise that no attempt is under way.
+	// So a follower holds at most two runs behind msg, each cut to resultMessageMax,
+	// however many runs an attempt has. A waiter seeded from a snapshot does not
+	// know where a step began: it holds every assistant entry the snapshot gave it,
+	// which that snapshot's budget bounds, until the next report (seedRun).
+	msgSeq  uint64
+	behind  []accRun
+	holding bool
+	seq     uint64
+	// retries is how many times the turn's steps were sent again.
+	retries int
+	// tools are the main session's tool calls by id, and toolOrder their ids as
+	// first seen. An update is a call's whole state, so a re-fold of one, or a
+	// snapshot's row, changes nothing but what the call last said.
+	tools     map[string]*accTool
+	toolOrder []string
 	// usage is the last usage section folded (P6): before the ending, since
 	// the accumulator stops at it.
 	usage *agent.UsageState
+	// stepOpen says a step of the turn has begun and not reported its usage, as
+	// far as the stream tells: a report comes when a step has finished, its tools
+	// included, and no event says the next has begun. So a turn opens with a step
+	// under way, anything it does since a report is one, and a report leaves one
+	// under way when stepNext says another follows: its step called a tool, or a
+	// compaction ran. A sub-agent's events are not folded: its spend rides on the
+	// report of the parent's step that called it, a tool call still open.
+	stepOpen, stepNext bool
 	// plan is the text of the last plan the turn presented, automatic or not
 	// (P9: an automatic plan is not in the transcript at all).
 	plan string
@@ -73,17 +95,37 @@ type turnAccumulator struct {
 	// host then cancelled the turn itself, and its cancelled ending is the
 	// plan's delivery, not a person's cancel (turnWaiter.ended).
 	returned bool
+	// planApproved says the last thing the turn did was have its plan approved
+	// (automatically or by a person): nothing that opens a new step of work has
+	// come since. A native turn ends right there, so its end_turn is the plan's
+	// (turnAccumulator.planEnded); an ACP agent told its plan was accepted goes
+	// on, and its next text or tool clears this.
+	planApproved bool
+	// noPlanEnded says the snapshot this was seeded from names no plan's ask as
+	// ended, so that there is nothing to look back for (turnWaiter.lookApproved).
+	noPlanEnded bool
+	// planAnsweredInTurn says the snapshot this was seeded from names a plan's ask
+	// the approval policy answered during this turn: what a returned plan leaves
+	// behind when its event cannot be read back (turnWaiter.returnedCancel).
+	planAnsweredInTurn bool
 }
 
-// accTool is one tool call's merged state: its kind (an update may carry it
-// only later) and whether it reached completed or failed.
+// accTool is one tool call's merged state: whether it reached completed or
+// failed, and what its host last said it changed: only a call that completed has
+// any (agent.ToolEvent.Edited). seq is the Seq of the event that opened it.
 type accTool struct {
-	kind     string
 	finished bool
+	failed   bool
+	edited   *agent.ToolEdited
+	seq      uint64
 }
 
-// accTouch is one path a tool call named.
-type accTouch struct{ tool, path string }
+// accRun is an earlier assistant text run (turnAccumulator.behind).
+type accRun struct {
+	seq  uint64
+	text []byte
+	cut  bool
+}
 
 // autoAnswer is one automatic answer (`autoAnswered`): what was asked and
 // what craze's policy chose.
@@ -94,7 +136,7 @@ type autoAnswer struct {
 }
 
 func newTurnAccumulator() *turnAccumulator {
-	return &turnAccumulator{tools: map[string]*accTool{}, touched: map[accTouch]bool{}}
+	return &turnAccumulator{tools: map[string]*accTool{}, stepOpen: true}
 }
 
 // start is the turn's opening: its time.
@@ -119,6 +161,8 @@ func runBoundary(ev agent.Event) bool {
 		return ev.Tool != nil && !ev.Tool.IsTodoTool()
 	case agent.EventDone:
 		return true
+	case agent.EventStepRetry:
+		return ev.StepRetry != nil && ev.StepRetry.Discarded
 	}
 	return false
 }
@@ -130,12 +174,17 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// session only).
 		return
 	}
+	a.seq = ev.Seq
+	a.noteStep(ev)
 	if runBoundary(ev) {
 		a.split()
 	}
 	switch ev.Type {
 	case agent.EventText:
+		a.planApproved = a.planApproved && ev.Text == ""
 		a.text(ev.Text)
+	case agent.EventThought:
+		a.planApproved = a.planApproved && ev.Text == ""
 	case agent.EventTool:
 		if ev.Tool == nil {
 			return
@@ -144,6 +193,7 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 	case agent.EventPlan:
 		if p := ev.Plan; p != nil {
 			a.plan = p.Plan
+			a.planApproved = p.Auto && p.Accepted
 			if p.Auto {
 				a.auto = append(a.auto, autoPlan(p))
 				a.returned = a.returned || !p.Accepted
@@ -178,6 +228,13 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		if ev.Compaction != nil {
 			a.split()
 		}
+	case agent.EventStepRetry:
+		if r := ev.StepRetry; r != nil {
+			a.retries = max(a.retries, r.Total)
+			if r.Discarded {
+				a.retract(r.From)
+			}
+		}
 	case agent.EventError:
 		if ev.Err != nil && ev.Err.Error() != "" {
 			a.split()
@@ -186,6 +243,9 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// An answered question's or plan's ending draws its outcome note.
 		if u := ev.Ask; u != nil && u.Outcome == agent.AskAnswered && u.Kind != agent.AskPermission {
 			a.split()
+			if u.Kind == agent.AskPlan {
+				a.planApproved = u.Accepted
+			}
 		}
 	case agent.EventMeta:
 		if st := ev.State; st != nil {
@@ -201,16 +261,101 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 	}
 }
 
+// noteStep keeps stepOpen and stepNext from one event of the turn. Neither the
+// wire's own done nor the queue's rows say anything of a step.
+func (a *turnAccumulator) noteStep(ev agent.Event) {
+	switch ev.Type {
+	case agent.EventDone, agent.EventQueue:
+	case agent.EventMeta:
+		if st := ev.State; st != nil && st.Usage != nil {
+			a.stepOpen, a.stepNext = a.stepNext, false
+			a.reported()
+		}
+	case agent.EventTool:
+		a.stepOpen, a.stepNext = true, true
+	case agent.EventCompaction:
+		a.stepNext = true
+	case agent.EventStepRetry:
+		// The step goes on, and whatever its attempt called it will not now.
+		a.stepOpen = true
+		if r := ev.StepRetry; r != nil && r.Discarded {
+			a.stepNext = false
+		}
+	default:
+		a.stepOpen = true
+	}
+}
+
+// retract drops what a retried step's failed attempt said, every event of it
+// being from Seq from on: its unfinished and settled tool calls, and its text.
+// The message is then what it was before the attempt, the run the attempt's
+// first text pushed behind it. It holds for a run seeded from a snapshot cut
+// mid-attempt, by the entry's own Seq, as for one folded here.
+func (a *turnAccumulator) retract(from uint64) {
+	a.split()
+	if from == 0 {
+		return
+	}
+	for id, st := range a.tools {
+		if st.seq >= from {
+			delete(a.tools, id)
+		}
+	}
+	a.toolOrder = slices.DeleteFunc(a.toolOrder, func(id string) bool { return a.tools[id] == nil })
+	if a.msgSeq < from {
+		return
+	}
+	a.msg, a.msgCut, a.msgSeq, a.holding = nil, false, 0, false
+	for n := len(a.behind) - 1; n >= 0; n-- {
+		r := a.behind[n]
+		a.behind = a.behind[:n]
+		if r.seq < from {
+			a.msg, a.msgCut, a.msgSeq = r.text, r.cut, r.seq
+			return
+		}
+	}
+}
+
+// reported is a step's usage report: what lay behind the message before it is
+// done with, but for the newest (behind's comment), and the next run opened holds
+// the message it finds.
+func (a *turnAccumulator) reported() {
+	if n := len(a.behind); n > 1 {
+		a.behind = append(a.behind[:0], a.behind[n-1])
+	}
+	a.holding = false
+}
+
 // text grows the open run, or opens a new one: the last entry is this one.
 func (a *turnAccumulator) text(s string) {
 	if s == "" {
 		return
 	}
 	if !a.runOpen {
-		a.msg, a.msgCut, a.runOpen = a.msg[:0], false, true
+		a.newRun(a.seq)
 	}
 	a.msg = append(a.msg, s...)
 	a.compact()
+}
+
+// newRun opens an empty message at Seq seq. The message it replaces goes behind
+// it when it is the step's first run's to keep, and otherwise goes: a later run of
+// one attempt has nothing to uncover but what the first found.
+func (a *turnAccumulator) newRun(seq uint64) {
+	if !a.holding {
+		a.hold()
+	}
+	a.holding = true
+	a.msg, a.msgCut, a.msgSeq, a.runOpen = nil, false, seq, true
+}
+
+// hold puts the message behind it, cut to resultMessageMax.
+func (a *turnAccumulator) hold() {
+	if len(a.msg) == 0 {
+		return
+	}
+	tail, cut := messageTail(a.msg)
+	a.behind = append(a.behind, accRun{seq: a.msgSeq, text: tail, cut: a.msgCut || cut})
 }
 
 // compact cuts msg to its tail (messageTail) once it holds twice
@@ -239,11 +384,14 @@ func messageTail(msg []byte) ([]byte, bool) {
 // split ends the open run: the next text is a new entry.
 func (a *turnAccumulator) split() { a.runOpen = false }
 
-// seedMessage is a message already under way when the accumulator starts —
-// read from a snapshot: an entry's text, whether its run is still open, and
-// whether the entry lost its head.
-func (a *turnAccumulator) seedMessage(text string, open, cut bool) {
-	a.msg, a.runOpen, a.msgCut = append(a.msg[:0], text...), open, cut
+// seedRun is a run already under way or over when the accumulator starts, read
+// from a snapshot: an assistant entry's Seq and text, whether its run is still
+// open, and whether the entry lost its head. Each entry is the message until the
+// next, as the runs it was folded from were.
+func (a *turnAccumulator) seedRun(seq uint64, text string, open, cut bool) {
+	a.hold()
+	a.msg, a.msgSeq, a.runOpen, a.msgCut = append([]byte(nil), text...), seq, open, cut
+	a.holding = false
 	a.compact()
 }
 
@@ -254,29 +402,18 @@ func (a *turnAccumulator) tool(t agent.ToolEvent) {
 	}
 	st, ok := a.tools[t.ID]
 	if !ok {
-		st = &accTool{}
+		st = &accTool{seq: a.seq}
 		a.tools[t.ID] = st
-	}
-	if t.Kind != "" {
-		st.kind = t.Kind
+		a.toolOrder = append(a.toolOrder, t.ID)
+		// A call that opens after the approval is more work — but for one the
+		// harness refused because the plan was approved, which fails unrun.
+		a.planApproved = a.planApproved && t.Status == toolFailed
 	}
 	if t.Status == toolCompleted || t.Status == toolFailed {
 		st.finished = true
+		st.failed = t.Status == toolFailed
 	}
-	for _, p := range t.Locations {
-		a.touch(t.ID, p)
-	}
-	for _, d := range t.Diffs {
-		a.touch(t.ID, d.Path)
-	}
-}
-
-// touch notes that call id named path, the first time it does.
-func (a *turnAccumulator) touch(id, path string) {
-	if t := (accTouch{tool: id, path: path}); path != "" && !a.touched[t] {
-		a.touched[t] = true
-		a.touches = append(a.touches, t)
-	}
+	st.edited = t.Edited
 }
 
 // message is the last assistant text entry, and whether it lost its head.
@@ -296,17 +433,63 @@ func (a *turnAccumulator) toolCalls() int {
 	return n
 }
 
-// files is every distinct path an edit-kind call named, in first-touch order.
-func (a *turnAccumulator) files() []string {
-	out, seen := []string{}, map[string]bool{}
-	for _, t := range a.touches {
-		if st := a.tools[t.tool]; st == nil || st.kind != toolKindEdit || seen[t.path] {
+// editedFiles is what a turn's calls said they changed, each path once, in the
+// order the calls opened.
+type editedFiles struct {
+	files, outside []string
+	plan           string
+	truncated      bool
+}
+
+// edited is the turn's editedFiles; files is never nil, a result's `[]`.
+func (a *turnAccumulator) edited() editedFiles {
+	out := editedFiles{files: []string{}}
+	seen := map[string]bool{}
+	distinct := func(list *[]string, paths []string) {
+		for _, p := range paths {
+			if !seen[p] {
+				seen[p] = true
+				*list = append(*list, p)
+			}
+		}
+	}
+	for _, id := range a.toolOrder {
+		e := a.tools[id].edited
+		if e == nil {
 			continue
 		}
-		seen[t.path] = true
-		out = append(out, t.path)
+		distinct(&out.files, e.Files)
+		distinct(&out.outside, e.OutsideFiles)
+		if e.PlanFile != "" {
+			out.plan = e.PlanFile
+		}
+		out.truncated = out.truncated || e.Truncated
 	}
 	return out
+}
+
+// planEnded says the turn, ending with stopReason, ended at a plan it presented:
+// returned to the caller (the ACP agents' completed, stop reason cancelled, X28),
+// or approved with nothing after it (native's, whose turn the approval ends with
+// its own end_turn, so that craze prompt's exit stays what it was).
+func (a *turnAccumulator) planEnded(stopReason string) bool {
+	return a.returned || a.planApproved && stopReason == stopEndTurn
+}
+
+// workSince says a, seeded from a snapshot, shows work since prev, the accumulator
+// it replaces: a tool call prev did not have, but for one that failed unrun, or
+// another last message. fold reads that as the plan's approval having been followed.
+// A gap of thoughts alone goes unseen, a snapshot not showing them as work: the
+// approval is then kept, where fold would have cleared it.
+func (a *turnAccumulator) workSince(prev *turnAccumulator) bool {
+	for id, st := range a.tools {
+		if prev.tools[id] == nil && !st.failed {
+			return true
+		}
+	}
+	was, _ := prev.message()
+	now, _ := a.message()
+	return was != now
 }
 
 // durationMs is the turn's length, from its started to its ending; 0 when
@@ -395,34 +578,47 @@ func terminalStatus(status string) bool {
 }
 
 // turnResult is one waiting command's result, as `--json` prints it (§3.1's
-// keys): status, session, short, provider, model and attach always; turn
-// and/or row with a target; message, toolCalls, durationMs and files (`[]`
-// when none) on a terminal status, stopReason when known; the rest when
-// present. A key that is absent is never written as null or false.
+// keys): status, session, short, provider and attach always; model once it was
+// resolved; turn and/or row with a target; message, toolCalls, durationMs, files
+// (`[]` when none) and stopReason on a terminal status; the rest when present. A
+// key that is absent is never written as null or false.
 type turnResult struct {
-	Status       string          `json:"status"`
-	Session      string          `json:"session"`
-	Short        string          `json:"short"`
-	Provider     string          `json:"provider"`
-	Model        string          `json:"model"`
-	Turn         string          `json:"turn,omitempty"`
-	Row          string          `json:"row,omitempty"`
-	Message      *string         `json:"message,omitempty"`
-	MessageCut   bool            `json:"messageCut,omitempty"`
-	MessageFile  string          `json:"messageFile,omitempty"`
-	StopReason   string          `json:"stopReason,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	ToolCalls    *int            `json:"toolCalls,omitempty"`
-	DurationMs   *int64          `json:"durationMs,omitempty"`
-	Files        *[]string       `json:"files,omitempty"`
-	Plan         string          `json:"plan,omitempty"`
-	Usage        json.RawMessage `json:"usage,omitempty"`
-	AutoAnswered []autoAnswer    `json:"autoAnswered,omitempty"`
-	Ask          *resultAsk      `json:"ask,omitempty"`
-	BlockedBy    string          `json:"blockedBy,omitempty"`
-	Partial      bool            `json:"partial,omitempty"`
-	Handle       string          `json:"handle,omitempty"`
-	Attach       string          `json:"attach"`
+	Status      string       `json:"status"`
+	Session     string       `json:"session"`
+	Short       string       `json:"short"`
+	Provider    string       `json:"provider"`
+	Model       string       `json:"model,omitempty"`
+	Turn        string       `json:"turn,omitempty"`
+	Row         string       `json:"row,omitempty"`
+	Message     *string      `json:"message,omitempty"`
+	MessageCut  bool         `json:"messageCut,omitempty"`
+	MessageFile string       `json:"messageFile,omitempty"`
+	StopReason  string       `json:"stopReason,omitempty"`
+	Error       *resultError `json:"error,omitempty"`
+	PlanEnded   bool         `json:"planEnded,omitempty"`
+	ToolCalls   *int         `json:"toolCalls,omitempty"`
+	// Retries is how many times the turn's steps were sent again after a
+	// provider failure: absent is none.
+	Retries    int       `json:"retries,omitempty"`
+	DurationMs *int64    `json:"durationMs,omitempty"`
+	Files      *[]string `json:"files,omitempty"`
+	// FilesTruncated, OutsideFiles and PlanFile sit beside Files: see
+	// agent.ToolEdited.
+	FilesTruncated bool            `json:"filesTruncated,omitempty"`
+	OutsideFiles   []string        `json:"outsideFiles,omitempty"`
+	PlanFile       string          `json:"planFile,omitempty"`
+	Plan           string          `json:"plan,omitempty"`
+	Usage          json.RawMessage `json:"usage,omitempty"`
+	// UsageComplete is only ever false (usageIncomplete): absent is the rule.
+	UsageComplete *bool        `json:"usageComplete,omitempty"`
+	AutoAnswered  []autoAnswer `json:"autoAnswered,omitempty"`
+	Ask           *resultAsk   `json:"ask,omitempty"`
+	BlockedBy     string       `json:"blockedBy,omitempty"`
+	Partial       bool         `json:"partial,omitempty"`
+	Handle        string       `json:"handle,omitempty"`
+	// Stopping says --exit-after-turn stops the session as this result is written.
+	Stopping bool   `json:"stopping,omitempty"`
+	Attach   string `json:"attach"`
 
 	// usage is Usage decoded, for the plain footer.
 	usage *agent.UsageState
@@ -435,6 +631,62 @@ type turnResult struct {
 	// turn-1 with every incarnation — a reload's first turn is another
 	// turn-1 of the same session (plan 041 C8, 1).
 	inc string
+}
+
+// resultError is `error` wherever the waiting commands print one — a result's
+// and an exit-1 envelope's alike: its words on one line, what it was, whether a
+// fresh turn may succeed, and what else the provider said of it, when it did.
+type resultError struct {
+	Message   string       `json:"message"`
+	Kind      errkind.Kind `json:"kind"`
+	Retryable bool         `json:"retryable"`
+	Detail    *errorDetail `json:"detail,omitempty"`
+}
+
+// errorDetail is resultError's detail: names and numbers only, each cleaned
+// again here whatever host sent it, so no text from outside craze — a key, a
+// path, a piece of a request — can ride in it. Cause is what began the stop, on
+// kind stopped.
+type errorDetail struct {
+	Status       int    `json:"status,omitempty"`
+	ProviderCode string `json:"provider_code,omitempty"`
+	Cause        string `json:"cause,omitempty"`
+}
+
+// newResultError is msg as a resultError saying info. A kind a reader does not
+// know — none at all, from a host that predates kinds — is unknown.
+func newResultError(msg string, info errkind.Info) *resultError {
+	info = info.Known()
+	e := &resultError{Message: sanitizeLine(msg), Kind: info.Kind, Retryable: info.Retryable}
+	if d := (errorDetail{Status: errkind.CleanStatus(info.Status), ProviderCode: errkind.CleanCode(info.ProviderCode)}); d != (errorDetail{}) {
+		e.Detail = &d
+	}
+	return e
+}
+
+// kindError is msg as a resultError of kind, with its default retryable.
+func kindError(msg string, kind errkind.Kind) *resultError {
+	return newResultError(msg, errkind.New(kind))
+}
+
+// stoppedError is msg as a resultError of kind stopped, its detail saying what
+// began the stop, when the host said.
+func stoppedError(msg, cause string) *resultError {
+	e := kindError(msg, errkind.Stopped)
+	if c := errkind.CleanCode(cause); c != "" {
+		e.Detail = &errorDetail{Cause: c}
+	}
+	return e
+}
+
+// usageIncomplete is usageComplete, as a turn cut short with a step in flight
+// says it: false, and otherwise absent.
+func usageIncomplete(inFlight bool) *bool {
+	if !inFlight {
+		return nil
+	}
+	complete := false
+	return &complete
 }
 
 // resultAsk is a needs_input result's open ask.
@@ -467,14 +719,34 @@ func newResult(s resultSession, status string) *turnResult {
 // the turn folded none (§3.1) — message, tools, files and duration.
 func (r *turnResult) fill(a *turnAccumulator) {
 	msg, cut := a.message()
-	n, d, files := a.toolCalls(), a.durationMs(), a.files()
+	n, d, edited := a.toolCalls(), a.durationMs(), a.edited()
 	if terminalStatus(r.Status) {
-		r.Message, r.ToolCalls, r.DurationMs, r.Files = &msg, &n, &d, &files
+		r.Message, r.ToolCalls, r.DurationMs, r.Files = &msg, &n, &d, &edited.files
+		r.FilesTruncated, r.OutsideFiles, r.PlanFile = edited.truncated, edited.outside, edited.plan
 		r.MessageCut = cut
+		if r.StopReason == "" {
+			r.StopReason = defaultStopReason(r.Status)
+		}
+		r.PlanEnded = r.Status == statusCompleted && a.planEnded(r.StopReason)
 	}
+	r.Retries = a.retries
 	r.Plan = a.plan
 	r.AutoAnswered = a.auto
 	r.setUsage(a.usage)
+}
+
+// defaultStopReason is a terminal status's stopReason when the engine sent none:
+// a failure's `error`; a cancel's, and a queued row's that never ran, `cancelled`;
+// and `end_turn` for a turn that ran to its end with no reason told — a foreign
+// turn's bracket carries none, nor does an older host's lastTurn.
+func defaultStopReason(status string) string {
+	switch status {
+	case statusFailed:
+		return stopError
+	case statusCancelled, statusDropped:
+		return stopCancelled
+	}
+	return stopEndTurn
 }
 
 // setUsage sets the usage section, as the wire's event codec writes it.
@@ -517,7 +789,8 @@ func plainBodyOf(msg, plan string) string {
 
 // footer is plain output's footer (§3.1): the status line —
 // `<status> · <s>s · <n> tool calls[ · $<turn cost>| · unpriced][ · context
-// <a>/<b>]` — then, each when there is one, the error, `files:`, one
+// <a>/<b>]` — then, each when there is one, the error, `files:` and what goes
+// with it, one
 // `auto-answered:` line per answer, the ask and what blocks the target, the
 // session line, and the exact next command for a running or needs_input
 // result.
@@ -540,15 +813,23 @@ func (r *turnResult) footer() string {
 		}
 	}
 	lines = append(lines, strings.Join(parts, " · "))
-	if r.Error != "" {
-		lines = append(lines, "error: "+psLine(r.Error))
-	} else if r.StopReason != "" && r.StopReason != stopEndTurn && r.Status != statusCancelled && r.Status != statusCompleted {
-		// A completed turn's stop other than end_turn is a returned plan's
-		// cancel (X28), which its auto-answered line says.
-		lines = append(lines, "stopped: "+psLine(r.StopReason))
+	if r.UsageComplete != nil && r.usage != nil {
+		lines = append(lines, "usage: a step was in flight, and its spend is not counted")
+	}
+	if r.Error != nil {
+		lines = append(lines, "error: "+psLine(r.Error.Message))
 	}
 	if r.Files != nil && len(*r.Files) > 0 {
 		lines = append(lines, "files: "+psLine(strings.Join(*r.Files, ", ")))
+	}
+	if len(r.OutsideFiles) > 0 {
+		lines = append(lines, "outside the workspace: "+psLine(strings.Join(r.OutsideFiles, ", ")))
+	}
+	if r.FilesTruncated {
+		lines = append(lines, "files: a call named more paths than are listed")
+	}
+	if r.PlanFile != "" {
+		lines = append(lines, "plan file: "+psLine(r.PlanFile))
 	}
 	for _, a := range r.AutoAnswered {
 		lines = append(lines, fmt.Sprintf("auto-answered: %s %q → %s", a.Kind, a.Summary, a.Choice))
@@ -562,10 +843,16 @@ func (r *turnResult) footer() string {
 	if r.Short != "" {
 		lines = append(lines, "session "+r.Short+" · "+r.Attach)
 	}
-	switch r.Status {
-	case statusRunning:
+	switch {
+	case r.Stopping && r.Status == statusNeedsInput:
+		lines = append(lines, "session stopping (--exit-after-turn): the ask is abandoned")
+	case r.Stopping:
+		lines = append(lines, "session stopping (--exit-after-turn)")
+	}
+	switch {
+	case r.Status == statusRunning:
 		lines = append(lines, "next: "+waitCommand(r.Short, r.Handle))
-	case statusNeedsInput:
+	case r.Status == statusNeedsInput && !r.Stopping:
 		lines = append(lines, fmt.Sprintf("next: answer it in %s (or craze cancel %s, craze stop %s), then %s",
 			r.Attach, r.Short, r.Short, waitCommand(r.Short, r.Handle)))
 	}
@@ -579,6 +866,15 @@ func (r *turnResult) plain() string {
 		body = r.cutBody
 	}
 	return body + "\n---\n" + r.footer() + "\n"
+}
+
+// markStopping is a result --exit-after-turn goes on to stop the session after: it
+// says so, and an open ask's handle goes, since nothing is left to follow or answer.
+func (r *turnResult) markStopping() {
+	r.Stopping = true
+	if r.Status == statusNeedsInput {
+		r.Handle = ""
+	}
 }
 
 // durationSeconds is durationMs in whole seconds, rounded.
@@ -799,21 +1095,37 @@ func (o resultOutput) writeFull(res *turnResult, data []byte) (string, error) {
 	return path, nil
 }
 
+// failureBody is the one object a failure with no result prints under --json:
+// usage and usageComplete beside it when the session ended under a turn whose
+// ending was not seen (waitFailure.usage).
+type failureBody struct {
+	Error         *resultError    `json:"error"`
+	Handle        string          `json:"handle,omitempty"`
+	Usage         json.RawMessage `json:"usage,omitempty"`
+	UsageComplete *bool           `json:"usageComplete,omitempty"`
+}
+
 // writeFailure prints a wait's exit-1 failure (§3.1): with --json, one
-// {"error": {"message": …}} object on stdout first, `handle` beside it when
-// the failure has one (as craze new --json's failures); and the command's
-// one stderr line, which names the handle — and, for a turn that goes on,
-// the command that follows it.
+// {"error": {"message": …, "kind": …, "retryable": …}} object on stdout first,
+// `handle` beside it when the failure has one; and the command's one stderr
+// line, which names the handle — and, for a turn that goes on, the command that
+// follows it.
 func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure) error {
 	msg := sanitizeLine(f.msg)
+	kind := f.kind
+	if kind == "" {
+		kind = errkind.Internal
+	}
 	if o.json {
-		body := struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-			Handle string `json:"handle,omitempty"`
-		}{Handle: f.handle}
-		body.Error.Message = msg
+		body := failureBody{Error: kindError(msg, kind), Handle: f.handle, UsageComplete: usageIncomplete(f.inFlight)}
+		if kind == errkind.Stopped {
+			body.Error = stoppedError(msg, f.cause)
+		}
+		if f.usage != nil {
+			if raw, err := agent.EncodeUsageState(f.usage); err == nil {
+				body.Usage = raw
+			}
+		}
 		if b, err := json.Marshal(body); err == nil {
 			fmt.Fprintf(stdout, "%s\n", b)
 		}
@@ -824,7 +1136,7 @@ func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure
 	case f.handle != "":
 		msg += " (handle " + f.handle + ")"
 	}
-	return exitf(1, "%s: %s", o.what, msg)
+	return kindf(kind, "%s: %s", o.what, msg)
 }
 
 // failJSON is an exit-1 error before the wait began, with --json's object
@@ -835,7 +1147,7 @@ func failJSON(stdout io.Writer, o resultOutput, err error) error {
 	if !errors.As(err, &ee) || ee.code != 1 || !o.json {
 		return err
 	}
-	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err)})
+	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err), kind: failureKind(err)})
 	return err
 }
 

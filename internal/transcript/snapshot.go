@@ -609,8 +609,8 @@ func snapEntry(p *Entry) Entry {
 	if e.Text == "" {
 		e.Text = re.Message
 	}
-	if held, ok := e.Err.(*agent.RemoteError); !ok || held == nil || *held != (agent.RemoteError{Message: e.Text, Class: re.Class, Code: re.Code}) {
-		e.Err = &agent.RemoteError{Message: e.Text, Class: re.Class, Code: re.Code}
+	if held, ok := e.Err.(*agent.RemoteError); !ok || held == nil || *held != (agent.RemoteError{Message: e.Text, Class: re.Class, Code: re.Code, Info: re.Info}) {
+		e.Err = &agent.RemoteError{Message: e.Text, Class: re.Class, Code: re.Code, Info: re.Info}
 	}
 	return e
 }

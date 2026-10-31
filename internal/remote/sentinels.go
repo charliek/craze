@@ -51,6 +51,8 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 		return []error{engine.ErrNotAccepting}
 	case protocol.ReasonNotInTurn:
 		return []error{agent.ErrNotInTurn}
+	case protocol.ReasonExitFenced:
+		return []error{engine.ErrExitFenced}
 	// aborted
 	case protocol.ReasonCommandAborted:
 		return []error{engine.ErrCommandAborted}

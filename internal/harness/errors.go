@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
@@ -307,6 +308,60 @@ func (e *ProviderError) Unwrap() []error {
 		}
 	}
 	return out
+}
+
+// transientNames are the provider's own names (lowercase) for a failure on its
+// side that a fresh request may not meet again, for an error with no status: an
+// in-band stream error rides in a 200 response.
+var transientNames = map[string]bool{
+	"server_error": true, "internal_error": true, "api_error": true,
+	"overloaded_error": true, "rate_limit_error": true, "rate_limit_exceeded": true,
+	"timeout": true, "timeout_error": true,
+}
+
+// ErrorInfo is the failure as the waiting commands report it (internal/errkind):
+// a typed failure's kind, and for the rest whether a fresh turn may succeed. The
+// status is the provider's, and the code its own name for the failure, already
+// a short identifier (llm.ErrorNames), its type standing in when it sent no code.
+func (e *ProviderError) ErrorInfo() errkind.Info {
+	info := errkind.Info{Status: e.StatusCode, ProviderCode: errkind.CleanCode(e.Code)}
+	if info.ProviderCode == "" {
+		info.ProviderCode = errkind.CleanCode(e.Type)
+	}
+	switch {
+	case e.kind == ErrAuth:
+		info.Kind = errkind.Auth
+	case e.StatusCode == 402 || quotaExhausted(e):
+		info.Kind = errkind.Quota
+	case e.kind == ErrModelNotFound:
+		info.Kind = errkind.ModelNotFound
+	case e.kind == ErrContextTooLarge:
+		info.Kind = errkind.ContextTooLarge
+	default:
+		info.Kind, info.Retryable = errkind.Provider, e.transient()
+	}
+	return info
+}
+
+// transient says a provider failure of no typed kind may not recur on a fresh
+// turn: a 5xx, a 408 or a 429 the provider did not mark final; a connection that
+// failed, which has no status and no name; or an in-band stream error the
+// provider names as its own trouble. Anything the provider said not to repeat
+// (Final: the ChatGPT route's every 429 and 400), any other 4xx, a response the
+// harness could not pair (ErrBadToolCalls), the sign-in's own failures and an
+// in-band error it names as something else (a content filter) are not.
+func (e *ProviderError) transient() bool {
+	switch {
+	case e.Final || e.kind != nil || e.signIn != nil:
+		return false
+	case e.StatusCode >= 500, transientClientStatus(e):
+		return true
+	case e.StatusCode != 0:
+		return false
+	case e.Code == "" && e.Type == "":
+		return true
+	}
+	return transientNames[strings.ToLower(e.Code)] || transientNames[strings.ToLower(e.Type)]
 }
 
 // classify maps a failed turn's error, from Fantasy's agent loop, onto the

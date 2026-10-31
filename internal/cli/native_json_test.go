@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -93,6 +94,12 @@ func nativeJSONAnswer(thought, text string) []fantasy.StreamPart {
 // model switch has somewhere to go), with the scripted model behind both.
 func nativeJSONSession(t *testing.T, model *nativeJSONModel, ws string) agent.Session {
 	t.Helper()
+	return nativeJSONSessionIn(t, model, ws, t.TempDir(), "")
+}
+
+// nativeJSONSessionIn is nativeJSONSession with its harness home and mode named.
+func nativeJSONSessionIn(t *testing.T, model *nativeJSONModel, ws, home, mode string) agent.Session {
+	t.Helper()
 	table := &modeltable.Table{
 		DefaultModel: "test/a",
 		Providers: map[string]modeltable.Provider{
@@ -103,12 +110,11 @@ func nativeJSONSession(t *testing.T, model *nativeJSONModel, ws string) agent.Se
 			"test/b": {Provider: "test", WireModel: "wire-b", Name: "B"},
 		},
 	}
-	home := t.TempDir()
 	// ContentHome is an empty directory of this test's own: from plan 022 C3 a
 	// native Start reads the user's Claude commands and skills, and this
 	// file's assertions are about the event projection, not about whatever the
 	// machine running them has installed.
-	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, func(o *harness.Options) {
+	sess := agent.NewNative(agent.Options{Workspace: ws, Mode: mode, ContentHome: t.TempDir()}, func(o *harness.Options) {
 		o.Home = home
 		o.Table = table
 		o.Getenv = func(k string) string {
@@ -473,4 +479,228 @@ func joinedText(objs []map[string]any, agentID string) string {
 		}
 	}
 	return b.String()
+}
+
+// lastToolRows is the last event of each call, by the name its step gave it: the
+// harness numbers the calls itself, in the order they ran.
+func lastToolRows(t *testing.T, evs []agent.Event, names ...string) map[string]*agent.ToolEvent {
+	t.Helper()
+	last, order := map[string]*agent.ToolEvent{}, []string{}
+	for _, ev := range evs {
+		if ev.Type == agent.EventTool && ev.Tool != nil && ev.Agent == "" {
+			if last[ev.Tool.ID] == nil {
+				order = append(order, ev.Tool.ID)
+			}
+			last[ev.Tool.ID] = ev.Tool
+		}
+	}
+	if len(order) != len(names) {
+		t.Fatalf("%d calls ran, want %d", len(order), len(names))
+	}
+	rows := map[string]*agent.ToolEvent{}
+	for i, name := range names {
+		rows[name] = last[order[i]]
+	}
+	return rows
+}
+
+// TestNativeEditsAreStampedByHowTheyEnded: a real native turn. A successful edit is
+// spelled from the workspace, a relative one too; an edit whose old text does not
+// match fails unstamped, though the row names its path, and a shell's write has no
+// stamp at all.
+func TestNativeEditsAreStampedByHowTheyEnded(t *testing.T) {
+	ws, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("read", "read", `{"filePath":"notes.txt"}`),
+		nativeJSONCall("edited", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
+		nativeJSONCall("nomatch", "edit", `{"filePath":"notes.txt","oldString":"not there","newString":"x"}`),
+		nativeJSONCall("written", "write", `{"filePath":"`+filepath.Join(ws, "sub", "new.txt")+`","content":"x"}`),
+		nativeJSONCall("elsewhere", "write", `{"filePath":"`+filepath.Join(outside, "o.txt")+`","content":"x"}`),
+		nativeJSONCall("shell", "bash", `{"command":"echo x > shell.txt"}`),
+		nativeJSONAnswer("thinking", "done"),
+	}}
+	sess := nativeJSONSession(t, model, ws)
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	evs := drainNativeEvents(sess)
+	rows := lastToolRows(t, evs, "read", "edited", "nomatch", "written", "elsewhere", "shell")
+	if got := rows["read"]; got == nil || got.Status != "completed" || got.Edited != nil || len(got.Locations) != 1 {
+		t.Errorf("a read: %+v", got)
+	}
+	realOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]*agent.ToolEdited{
+		"edited":    {Files: []string{"notes.txt"}},
+		"written":   {Files: []string{"sub/new.txt"}},
+		"elsewhere": {OutsideFiles: []string{filepath.Join(realOutside, "o.txt")}},
+	} {
+		if got := rows[id]; got == nil || got.Status != "completed" || got.Edited == nil || !reflect.DeepEqual(*got.Edited, *want) {
+			t.Errorf("%s: %+v, want %+v", id, got, want)
+		}
+	}
+	if got := rows["nomatch"]; got == nil || got.Status != "failed" || got.Edited != nil || !slices.Contains(got.Locations, filepath.Join(ws, "notes.txt")) {
+		t.Errorf("a failed edit: %+v", got)
+	}
+	if got := rows["shell"]; got == nil || got.Status != "completed" || got.Edited != nil {
+		t.Errorf("a shell's write: %+v", got)
+	}
+	// craze prompt --json is another contract, and says nothing of it.
+	for _, o := range encodeNativeEvents(t, evs) {
+		if _, ok := o["edited"]; ok {
+			t.Errorf("craze prompt --json wrote a stamp: %v", o)
+		}
+	}
+	acc := newTurnAccumulator()
+	for _, ev := range evs {
+		acc.fold(ev)
+	}
+	e := acc.edited()
+	if !slices.Equal(e.files, []string{"notes.txt", "sub/new.txt"}) || !slices.Equal(e.outside, []string{filepath.Join(realOutside, "o.txt")}) || e.plan != "" || e.truncated {
+		t.Errorf("the result's files: %+v", e)
+	}
+}
+
+// TestNativePlanModesEdits: the plan file, written in plan mode, is planFile and in
+// neither list; the edit plan mode refuses is a failed call, unstamped.
+func TestNativePlanModesEdits(t *testing.T) {
+	ws, home := t.TempDir(), t.TempDir()
+	model := &nativeJSONModel{}
+	sess := nativeJSONSessionIn(t, model, ws, home, "plan")
+	plans, err := filepath.Glob(filepath.Join(home, "sessions", "*", "*.plan.md"))
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("the plan file: %v, %v", plans, err)
+	}
+	model.steps = [][]fantasy.StreamPart{
+		nativeJSONCall("refused", "write", `{"filePath":"main.go","content":"x"}`),
+		nativeJSONCall("plan", "write", `{"filePath":"`+plans[0]+`","content":"# the plan\n"}`),
+		nativeJSONAnswer("thinking", "done"),
+	}
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	evs := drainNativeEvents(sess)
+	rows := lastToolRows(t, evs, "refused", "plan")
+	if got := rows["refused"]; got == nil || got.Status != "failed" || got.Edited != nil {
+		t.Errorf("a refused edit: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "main.go")); err == nil {
+		t.Error("the refused edit ran")
+	}
+	realPlan, err := filepath.EvalSymlinks(plans[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rows["plan"]
+	if got == nil || got.Status != "completed" || got.Edited == nil || got.Edited.PlanFile != realPlan || got.Edited.Files != nil || got.Edited.OutsideFiles != nil {
+		t.Fatalf("the plan's write: %+v", got)
+	}
+	acc := newTurnAccumulator()
+	for _, ev := range evs {
+		acc.fold(ev)
+	}
+	if e := acc.edited(); e.plan != realPlan || len(e.files) != 0 || e.outside != nil {
+		t.Errorf("the result's files: %+v", e)
+	}
+}
+
+// TestNativeEditThroughASymlinkedWorkspace: a -C that is a symlink judges a
+// native path as it does an agent's.
+func TestNativeEditThroughASymlinkedWorkspace(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("written", "write", `{"filePath":"new.txt","content":"x"}`),
+		nativeJSONAnswer("thinking", "done"),
+	}}
+	sess := nativeJSONSession(t, model, link)
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := lastToolRows(t, drainNativeEvents(sess), "written")["written"]
+	if got == nil || got.Edited == nil || !slices.Equal(got.Edited.Files, []string{"new.txt"}) || got.Edited.OutsideFiles != nil {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// TestNativeWriteOfAFileTooBigToDiff: the call's own paths are what say, a write over
+// a file too big to read back having no edits to report.
+func TestNativeWriteOfAFileTooBigToDiff(t *testing.T) {
+	ws := t.TempDir()
+	big := filepath.Join(ws, "big.bin")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("written", "write", `{"filePath":"big.bin","content":"small now"}`),
+		nativeJSONAnswer("thinking", "done"),
+	}}
+	sess := nativeJSONSession(t, model, ws)
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := lastToolRows(t, drainNativeEvents(sess), "written")["written"]
+	if got == nil || got.Status != "completed" || len(got.Diffs) != 0 || got.Edited == nil || !slices.Equal(got.Edited.Files, []string{"big.bin"}) {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// TestNativeEditInAWorkspaceThatIsNotUTF8: an inside edit stays inside. Its name in the
+// row is the sanitized one, and the stamp is judged on the bytes. A file system that
+// refuses such a name (APFS) has nothing to test.
+func TestNativeEditInAWorkspaceThatIsNotUTF8(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "caf\xe9")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Skipf("no non-UTF-8 names here: %v", err)
+	}
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("written", "write", `{"filePath":"new.txt","content":"x"}`),
+		nativeJSONAnswer("thinking", "done"),
+	}}
+	sess := nativeJSONSession(t, model, ws)
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := lastToolRows(t, drainNativeEvents(sess), "written")["written"]
+	if got == nil || got.Status != "completed" || got.Edited == nil || !slices.Equal(got.Edited.Files, []string{"new.txt"}) || got.Edited.OutsideFiles != nil {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// TestNativeStampHoldsTheFilesName: a name a row's display text would change.
+func TestNativeStampHoldsTheFilesName(t *testing.T) {
+	ws := t.TempDir()
+	name := "a\u200bb.go"
+	input, err := json.Marshal(map[string]string{"filePath": name, "content": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("written", "write", string(input)),
+		nativeJSONAnswer("thinking", "done"),
+	}}
+	sess := nativeJSONSession(t, model, ws)
+	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, name)); err != nil {
+		t.Fatal(err)
+	}
+	got := lastToolRows(t, drainNativeEvents(sess), "written")["written"]
+	if got == nil || got.Edited == nil || !slices.Equal(got.Edited.Files, []string{name}) {
+		t.Fatalf("%+v", got)
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -106,9 +107,9 @@ func TestNewProviderBeforeTheHub(t *testing.T) {
 			if tc.wantLike != nil && !tc.wantLike.MatchString(stderr) {
 				t.Fatalf("%v said %q, want %v", argv, stderr, tc.wantLike)
 			}
-			// A usage error and the plain refusal print nothing on stdout; a
-			// --json failure that reached the hub prints its one object.
-			if jsonMode := slices.Contains(tc.argv, "--json"); (stdout == "") == (jsonMode && tc.code == 1 && tc.wantLike != nil) {
+			// A plain failure prints nothing on stdout; under --json, a usage
+			// error and a failure that reached the hub each print one object.
+			if jsonMode := slices.Contains(tc.argv, "--json"); (stdout == "") == jsonMode {
 				t.Fatalf("%v printed %q on stdout", argv, stdout)
 			}
 		})
@@ -117,8 +118,8 @@ func TestNewProviderBeforeTheHub(t *testing.T) {
 
 // TestNewJSONFailures (SF-124, plan 035 P5, A10): with --json every exit-1
 // path before the session started prints exactly one JSON object on stdout —
-// {"error":{"message":…}} for an invalid -C and for no hub — the stderr line
-// and the exit code as without --json; a usage error stays plain.
+// {"error":{"message":…},"kind":…} for an invalid -C and for no hub — the stderr
+// line and the exit code as without --json; a usage error prints its own.
 func TestNewJSONFailures(t *testing.T) {
 	serveHome(t)
 	type failure struct {
@@ -126,48 +127,50 @@ func TestNewJSONFailures(t *testing.T) {
 			Message string `json:"message"`
 			Data    *struct{}
 		} `json:"error"`
+		Kind errkind.Kind `json:"kind"`
 	}
 	for _, tc := range []struct {
 		argv   []string
 		stderr *regexp.Regexp
+		kind   errkind.Kind
 	}{
-		{[]string{"new", "--json", "-C", "/no/such/dir"}, regexp.MustCompile(`^craze new: /no/such/dir is not a directory\n$`)},
-		{[]string{"new", "--json", "-C", t.TempDir(), "hello"}, regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`)},
+		{[]string{"new", "--json", "-C", "/no/such/dir"}, regexp.MustCompile(`^craze new: /no/such/dir is not a directory\n$`), errkind.Workspace},
+		{[]string{"new", "--json", "-C", t.TempDir(), "hello"}, regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`), errkind.StartFailed},
 	} {
 		stdout, stderr, code := executeErr(tc.argv)
 		var got failure
 		if code != 1 || !tc.stderr.MatchString(stderr) || strings.Count(stdout, "\n") != 1 ||
-			json.Unmarshal([]byte(stdout), &got) != nil || got.Error.Message == "" ||
+			json.Unmarshal([]byte(stdout), &got) != nil || got.Error.Message == "" || got.Kind != tc.kind ||
 			stderr != "craze new: "+got.Error.Message+"\n" {
 			t.Fatalf("%v exited %d: stdout %q, stderr %q", tc.argv, code, stdout, stderr)
 		}
 		var keys map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(stdout), &keys); err != nil || len(keys) != 1 {
-			t.Fatalf("%v printed %q, want the one key \"error\"", tc.argv, stdout)
+		if err := json.Unmarshal([]byte(stdout), &keys); err != nil || len(keys) != 2 {
+			t.Fatalf("%v printed %q, want the keys \"error\" and \"kind\"", tc.argv, stdout)
 		}
 	}
 	stdout, stderr, code := executeErr([]string{"new", "--json", "--fast", "--no-fast"})
-	if code != 2 || stdout != "" || stderr != "craze new: --fast and --no-fast are mutually exclusive\n" {
+	if code != 2 || !errorIs(decodeResult(t, stdout), "craze new: --fast and --no-fast are mutually exclusive", "usage", false) || stderr != "craze new: --fast and --no-fast are mutually exclusive\n" {
 		t.Fatalf("the usage error exited %d: stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 
 // TestNewFailureJSON: a protocol refusal is {"error": <protocol.Error>}, whole
 // — code, message, data.code, data.reason, data.cause — a wrapped one too; any
-// other error is {"error":{"message": msg}}.
+// other error is {"error":{"message": msg}}; and either way the kind beside it.
 func TestNewFailureJSON(t *testing.T) {
 	perr := &protocol.Error{Code: -32000, Message: "the session did not start: boom",
 		Data: protocol.ErrorData{Code: protocol.CodeNotAccepting, Reason: protocol.ReasonStartFailed, Cause: "boom"}}
 	for _, err := range []error{perr, fmt.Errorf("create: %w", perr)} {
-		want := `{"error":{"code":-32000,"message":"the session did not start: boom","data":{"code":"not_accepting","reason":"start_failed","cause":"boom"}}}`
-		if got := string(newFailureJSON(err, "ignored")); got != want {
+		want := `{"error":{"code":-32000,"message":"the session did not start: boom","data":{"code":"not_accepting","reason":"start_failed","cause":"boom"}},"kind":"start_failed"}`
+		if got := string(newFailureJSON(err, errkind.StartFailed, "ignored")); got != want {
 			t.Fatalf("a refusal: %s\nwant %s", got, want)
 		}
 	}
-	if got, want := string(newFailureJSON(errors.New("x"), "hub: down")), `{"error":{"message":"hub: down"}}`; got != want {
+	if got, want := string(newFailureJSON(errors.New("x"), errkind.StartFailed, "hub: down")), `{"error":{"message":"hub: down"},"kind":"start_failed"}`; got != want {
 		t.Fatalf("a plain failure: %s, want %s", got, want)
 	}
-	if got, want := string(newFailureJSON(nil, "bad")), `{"error":{"message":"bad"}}`; got != want {
+	if got, want := string(newFailureJSON(nil, errkind.Workspace, "bad")), `{"error":{"message":"bad"},"kind":"workspace"}`; got != want {
 		t.Fatalf("no error: %s, want %s", got, want)
 	}
 }

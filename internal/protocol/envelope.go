@@ -89,6 +89,9 @@ type ErrorData struct {
 	Reason Reason          `json:"reason"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Cause  string          `json:"cause,omitempty"`
+	// Kind is what a failed start said of itself (internal/errkind), beside
+	// reason start_failed: absent otherwise, and from an older host.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Error is e as one line of text: its code, reason and message.

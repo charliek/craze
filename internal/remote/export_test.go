@@ -3,10 +3,18 @@ package remote
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
 )
+
+// SetBrokenPipeDrain shortens brokenPipeDrain, until the test ends.
+func SetBrokenPipeDrain(d time.Duration) (restore func()) {
+	old := brokenPipeDrain
+	brokenPipeDrain = d
+	return func() { brokenPipeDrain = old }
+}
 
 // Waiting is how many commands have a caller waiting on them: sent and
 // unanswered, or held for a connection.

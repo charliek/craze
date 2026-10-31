@@ -306,6 +306,61 @@ func TestNativeSpentDropsAStaleReport(t *testing.T) {
 		}
 	})
 
+	// The side question's IdleSpent is read, and the next turn has begun its
+	// first request when it publishes: the report's turn spend is the last
+	// turn's, which must not read as this one's. The turn then stops.
+	t.Run("a turn begun between the idle read and the publication", func(t *testing.T) {
+		f := newNativeFixture(t)
+		reached, release := make(chan struct{}), make(chan struct{})
+		var held atomic.Bool
+		s := f.session(Options{})
+		s.asideSeam = func(stage string) {
+			if stage == "spent" && held.CompareAndSwap(false, true) {
+				close(reached)
+				<-release
+			}
+		}
+		if err := s.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		h := newHeld(t)
+		a := f.models["test/a"]
+		a.push(answer("one"), answer("side"), h.step(nil, nil))
+		if _, err := s.Prompt(context.Background(), "one"); err != nil {
+			t.Fatal(err)
+		}
+		before := *s.Snapshot().Usage
+		side := startNativeAside(s, "q")
+		await(t, reached, "the side question's publication")
+		_ = s.log.Flush(context.Background(), nil)
+		drained(s)
+		turn := make(chan outcome, 1)
+		go func() {
+			res, err := s.Prompt(context.Background(), "two")
+			turn <- outcome{res: res, err: err}
+		}()
+		await(t, h.reached, "the next turn's first request")
+		close(release)
+		if o := await(t, side, "the side question"); o.err != nil {
+			t.Fatal(o.err)
+		}
+		_ = s.log.Flush(context.Background(), nil)
+		if got := usageDeltas(drained(s)); len(got) != 0 {
+			t.Fatalf("the last turn's report was published into the running turn: %+v", got)
+		}
+		if got := *s.Snapshot().Usage; got != before {
+			t.Fatalf("the running turn's snapshot holds the stale report:\n got %+v\nwant %+v", got, before)
+		}
+		if _, err := s.Cancel(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, turn, "the turn's end")
+		_ = s.log.Flush(context.Background(), nil)
+		if got := usageDeltas(drained(s)); len(got) != 0 {
+			t.Fatalf("the stopped turn reported a usage of no step: %+v", got)
+		}
+	})
+
 	// Two side questions: the first's report is read, the second runs and
 	// publishes, then the first publishes.
 	t.Run("two side questions finishing together", func(t *testing.T) {

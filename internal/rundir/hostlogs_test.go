@@ -46,7 +46,7 @@ func TestHostLogDirIsMade0700InTheCacheTree(t *testing.T) {
 }
 
 // TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs: the sweep removes a host's
-// log, its rotation and its pgids file once they are older than the bound —
+// log, its rotation and its stop record once they are older than the bound —
 // and nothing else: a recent file, a live host's old log, a name that is not
 // a host's, a symlink (never followed, never a regular file) and a directory
 // all stay. A missing directory is nothing to sweep, and is not made.
@@ -82,8 +82,9 @@ func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 		}
 		return p
 	}
-	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".pgids")}
-	kept := []string{aged(live + ".log"), aged("notes.log"), aged(gone + ".txt"), aged("ABCDEF012345.log")}
+	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".stop"), aged("." + gone + ".pgids.4815")}
+	// A record can name something still running, however old: hostspawn's to remove.
+	kept := []string{aged(gone + ".pgids"), aged(live + ".log"), aged("." + live + ".pgids.4815"), aged("notes.log"), aged(gone + ".txt"), aged("." + gone + ".log.4815"), aged("ABCDEF012345.log")}
 	recent := filepath.Join(dir, NewHostID()+".log")
 	writeFile(t, recent, "x")
 	kept = append(kept, recent)
@@ -147,7 +148,7 @@ func TestSweepHostLogsDecidesDeathByTheHostLock(t *testing.T) {
 	aged := func(id string) []string {
 		t.Helper()
 		var ps []string
-		for _, suffix := range []string{".log", ".log.1", ".pgids"} {
+		for _, suffix := range []string{".log", ".log.1", ".stop"} {
 			p := filepath.Join(dir, id+suffix)
 			writeFile(t, p, "x")
 			if err := os.Chtimes(p, old, old); err != nil {
@@ -238,7 +239,7 @@ func TestASweepOfACopiedRegistryLeavesTheLiveLogs(t *testing.T) {
 	}
 	h := bind(t, env)
 	old := now.Add(-2 * time.Hour)
-	files := []string{h.ID() + ".log", h.ID() + ".log.1", h.ID() + ".pgids"}
+	files := []string{h.ID() + ".log", h.ID() + ".log.1", h.ID() + ".stop"}
 	aged := func(dir string) {
 		t.Helper()
 		for _, n := range files {
@@ -318,5 +319,99 @@ func TestASweepOfACopiedRegistryLeavesTheLiveLogs(t *testing.T) {
 		if !exists(t, filepath.Join(aside, hostLogsName, f)) {
 			t.Errorf("a sweep of the copy removed the live host's %s", f)
 		}
+	}
+}
+
+// TestAStopRecordIsWhatWasWritten: read back whole; none, or one that cannot be
+// read, is no record; and a name that is no host id's is neither written nor read.
+func TestAStopRecordIsWhatWasWritten(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	if _, ok := ReadStopRecord(env, id); ok {
+		t.Fatal("a record before any was written")
+	}
+	want := StopRecord{Cause: "stop", Turn: "turn-3", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), PID: 42, PIDStart: 7}
+	if err := WriteStopRecord(env, id, want); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ReadStopRecord(env, id); !ok || got != want {
+		t.Fatalf("read back %+v, %v", got, ok)
+	}
+	dir, err := HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".stop"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStopRecord(env, id); ok {
+		t.Fatal("a record that cannot be read was taken for one")
+	}
+	if err := WriteStopRecord(env, "../x", want); err == nil {
+		t.Fatal("a record under a name that is no host id's")
+	}
+	if _, ok := ReadStopRecord(env, "../x"); ok {
+		t.Fatal("read a record under a name that is no host id's")
+	}
+}
+
+// TestAStopRecordIsItsOwners: a record is the word of the very process it names. One
+// with no owner, or half of one, an older craze's, is nobody's, and a process whose
+// start is not known owns none.
+func TestAStopRecordIsItsOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rec   StopRecord
+		pid   int
+		start uint64
+		want  bool
+	}{
+		{"its own", StopRecord{PID: 42, PIDStart: 7}, 42, 7, true},
+		{"another pid", StopRecord{PID: 42, PIDStart: 7}, 43, 7, false},
+		{"its pid another's since", StopRecord{PID: 42, PIDStart: 7}, 42, 8, false},
+		{"no owner", StopRecord{}, 42, 7, false},
+		{"no owner, a process with no identity", StopRecord{}, 0, 0, false},
+		{"no pid", StopRecord{PIDStart: 7}, 0, 7, false},
+		{"no start", StopRecord{PID: 42}, 42, 0, false},
+		{"a process whose start is not known", StopRecord{PID: 42, PIDStart: 7}, 42, 0, false},
+	} {
+		if got := tc.rec.OwnedBy(tc.pid, tc.start); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestABindLeavesAnEarlierHostsStopRecord: a host bound at an id, and one refused it,
+// leave the record there as it was: it is evidence for the earlier host's waiter, and
+// its owner says it is none of the new host's.
+func TestABindLeavesAnEarlierHostsStopRecord(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	old := StopRecord{Cause: "stop", Turn: "turn-1", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), PID: 42, PIDStart: 7}
+	if err := WriteStopRecord(env, id, old); err != nil {
+		t.Fatal(err)
+	}
+	self, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Skipf("no process identity here: %v", err)
+	}
+	h, err := Bind(env, id, Entry{StartedAt: time.Now(), PIDStart: self.Start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	got, ok := ReadStopRecord(env, id)
+	if !ok || got != old {
+		t.Fatalf("the record after a bind: %+v, %v", got, ok)
+	}
+	if got.OwnedBy(os.Getpid(), self.Start) {
+		t.Fatal("the bound host owns the earlier host's record")
+	}
+	if again, err := Bind(env, id, Entry{StartedAt: time.Now()}); err == nil {
+		_ = again.Close()
+		t.Fatal("a second bind of a live host's id")
+	}
+	if got, ok := ReadStopRecord(env, id); !ok || got != old {
+		t.Fatalf("the record after a refused bind: %+v, %v", got, ok)
 	}
 }

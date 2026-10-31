@@ -175,7 +175,7 @@ func TestUpgradeRemedy(t *testing.T) {
 		{"wrapped", fmt.Errorf("hub: session.create: %w", spawn), older, want},
 		{"a hub of this version", spawn, same, ""},
 		{"an answer naming the remedy", u1, older, ""},
-		{"another refusal", startFailed("the agent could not start"), older, ""},
+		{"another refusal", startFailed(attendance{cause: "the agent could not start"}), older, ""},
 		{"no refusal", errors.New("dial: no such file"), older, ""},
 		{"no pid", spawn, noPID, ""},
 		{"no version", spawn, noVersion, ""},

@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -71,6 +72,9 @@ type sendFlags struct {
 	maxMessage int
 	json       bool
 	prompt     promptInput
+	// exitAfterTurn and sessionFile are --exit-after-turn and --session-file.
+	exitAfterTurn bool
+	sessionFile   string
 }
 
 func newSendCmd() *cobra.Command {
@@ -93,8 +97,24 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "give up after this long (from the command's start); with --wait the result is running, exit 5, with a handle to follow it (default: no limit)")
 	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the outcome as one JSON object")
+	registerExitFlags(cmd, &f.exitAfterTurn, &f.sessionFile)
 	registerPromptInputFlags(cmd, &f.prompt)
 	return cmd
+}
+
+// registerExitFlags declares what craze new --wait and craze send --wait both
+// take for a caller that runs them unattended.
+func registerExitFlags(cmd *cobra.Command, exitAfterTurn *bool, sessionFile *string) {
+	cmd.Flags().BoolVar(exitAfterTurn, "exit-after-turn", false, "with --wait: end the session with its turn: no other prompt is admitted, and its host is gone by the time this exits, unless the turn runs on (exit 5, or its end not observed), its prompt was removed, or the host cannot be told from another process (see the docs); refused on a host that cannot do this")
+	cmd.Flags().StringVar(sessionFile, "session-file", "", "with --wait: write {session, short, hostPid, hostId} to this file as soon as the host is known, and handle once the prompt is taken")
+}
+
+// checkSessionFile refuses --session-file with no path to write.
+func checkSessionFile(cmd *cobra.Command, what, path string) error {
+	if cmd.Flags().Changed("session-file") && strings.TrimSpace(path) == "" {
+		return usagef("%s: --session-file needs a path", what)
+	}
+	return nil
 }
 
 // runSend is craze send (the file's comment).
@@ -112,9 +132,16 @@ func runSend(cmd *cobra.Command, f *sendFlags, args []string, sigs <-chan os.Sig
 		return usagef("craze send: --max-message must not be negative")
 	case cmd.Flags().Changed("max-message") && !f.wait:
 		return usagef("craze send: --max-message needs --wait")
+	case cmd.Flags().Changed("exit-after-turn") && !f.wait:
+		return usagef("craze send: --exit-after-turn needs --wait")
+	case cmd.Flags().Changed("session-file") && !f.wait:
+		return usagef("craze send: --session-file needs --wait")
 	case !rundir.ValidToken(id):
 		// Refused before a registry read builds a path (the bridge's rule).
 		return usagef("craze send: that is not a session id (craze ps lists them)")
+	}
+	if err := checkSessionFile(cmd, sendWhat, f.sessionFile); err != nil {
+		return err
 	}
 	if err := f.prompt.check(cmd, sendWhat, words); err != nil {
 		return err
@@ -131,12 +158,19 @@ func runSend(cmd *cobra.Command, f *sendFlags, args []string, sigs <-chan os.Sig
 		return failJSON(cmd.OutOrStdout(), r.out, err)
 	}
 	r.text = text
+	r.exitAfterTurn, r.file = f.exitAfterTurn, newSessionFile(f.sessionFile)
+	r.file.clear()
 	conn, err := r.connect(id)
 	if err != nil {
 		return r.failBefore(err)
 	}
 	defer conn.close(r.relayed)
 	r.session = resultSession{id: conn.sessionID, provider: conn.entry.Provider}
+	// A session found running has no ready line: this is the first the command
+	// has heard from its host (a reload's own spawn wrote it at its ready line).
+	if err := r.file.host(sendWhat, conn.entry); err != nil {
+		return r.failBefore(err)
+	}
 	if f.wait {
 		return r.waitFor(conn)
 	}
@@ -177,7 +211,7 @@ func (r *promptJob) connect(id string) (*waitConn, error) {
 			return nil, err
 		}
 	default:
-		return nil, exitf(1, "%s: %d sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(formatEntries(matches)))
+		return nil, kindf(errkind.Usage, "%s: %d sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(formatEntries(matches)))
 	}
 	return r.reload(row)
 }
@@ -245,7 +279,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 	matches := matchCrazeID(ids, id)
 	switch len(matches) {
 	case 0:
-		return sessions.Row{}, exitf(1, "%s: no session %s", sendWhat, id)
+		return sessions.Row{}, kindf(errkind.Config, "%s: no session %s", sendWhat, id)
 	case 1:
 		return rows[matches[0]], nil
 	}
@@ -253,7 +287,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 	for i, m := range matches {
 		named[i] = fmt.Sprintf("%s (%s, %s)", psShort(m), rows[m].Provider, rows[m].CWD)
 	}
-	return sessions.Row{}, exitf(1, "%s: %d ended sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(strings.Join(named, ", ")))
+	return sessions.Row{}, kindf(errkind.Usage, "%s: %d ended sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(strings.Join(named, ", ")))
 }
 
 // reload is row's session loaded again and attached (§3.4): a host that
@@ -281,6 +315,11 @@ func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
 			if serr != nil {
 				return nil, spawnExit(sendWhat, serr)
 			}
+			if !ref.held {
+				if err := r.file.host(sendWhat, ref.entry); err != nil {
+					return nil, err
+				}
+			}
 			if ref.held {
 				conn, err = r.dialFound(ref.entry, ref.entry.CrazeSessionID)
 			} else if conn, err = dialWait(r.ctx, ref.entry, ref.entry.CrazeSessionID, sendWhat, nil); err != nil {
@@ -293,7 +332,7 @@ func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
 		case !retryable(err) || r.ctx.Err() != nil:
 			return nil, err
 		case !time.Now().Before(until) && reloadable(err):
-			return nil, &exitError{code: 1, msg: sendWhat + ": session " + psShort(row.CrazeID) + " is still closing; try again once it has ended", cause: err}
+			return nil, &exitError{code: 1, msg: sendWhat + ": session " + psShort(row.CrazeID) + " is still closing; try again once it has ended", cause: err, kind: errkind.StartFailed}
 		case !time.Now().Before(until):
 			return nil, err
 		}
@@ -344,7 +383,7 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 		err = errors.New("its attachment did not answer first")
 	}
 	if err != nil {
-		return r.failBefore(exitf(1, "%s: session %s: %s", sendWhat, short, sanitizeLine(err.Error())))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: session %s: %s", sendWhat, short, sanitizeLine(err.Error())))
 	}
 	after := it.Reply.After
 	pctx, cancel := context.WithTimeout(r.ctx, readBound)
@@ -353,9 +392,9 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 	switch {
 	case err == nil:
 	case errors.Is(err, errNotThisHost):
-		return r.failBefore(exitf(1, "%s: the session's host changed before the prompt was sent; it was not sent", sendWhat))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: the session's host changed before the prompt was sent; it was not sent", sendWhat))
 	default:
-		return r.failBefore(exitf(1, "%s: the session did not answer before the prompt was sent; it was not sent: %s", sendWhat, sanitizeLine(err.Error())))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: the session did not answer before the prompt was sent; it was not sent: %s", sendWhat, sanitizeLine(err.Error())))
 	}
 	g := &submitGate{submit: submitPrompt(conn, r.text)}
 	answers := make(chan submitAnswer, 1)
@@ -375,26 +414,26 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 		// Nothing reached the session; a reload's host is not this
 		// command's to stop (spawned is craze new --wait's alone).
 		undone := r.undo(false)
-		msg := "interrupted before the prompt was sent"
+		msg, kind := "interrupted before the prompt was sent", errkind.Interrupted
 		switch {
 		case fate == promptRefused:
-			msg = a.err.Error()
+			msg, kind = a.err.Error(), failureKind(a.err)
 		case r.timedOut():
-			msg = "timed out before the prompt was sent"
+			msg, kind = "timed out before the prompt was sent", errkind.TimeoutBeforePrompt
 		}
-		return r.fail(&waitFailure{msg: msg + undone.note()})
+		return r.fail(&waitFailure{msg: msg + undone.note(), kind: kind})
 	case promptPending:
-		msg := "interrupted before the prompt's answer; it may have reached the session" + follow
+		msg, kind := "interrupted before the prompt's answer; it may have reached the session"+follow, errkind.Interrupted
 		if r.timedOut() {
-			msg = "timed out before the prompt's answer; it may have reached the session" + follow
+			msg, kind = "timed out before the prompt's answer; it may have reached the session"+follow, errkind.Unobserved
 		}
 		if a.err != nil && !errors.Is(a.err, errNoAnswer) {
-			msg = a.err.Error()
+			msg, kind = a.err.Error(), failureKind(a.err)
 			if !strings.Contains(msg, "craze wait ") {
 				msg += follow
 			}
 		}
-		return r.fail(&waitFailure{msg: msg})
+		return r.fail(&waitFailure{msg: msg, kind: kind})
 	}
 	h := turnHandle{incarnation: after.Incarnation, seq: after.Seq, target: target}
 	place, found := sendPlace(r, conn, target)

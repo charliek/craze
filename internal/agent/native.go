@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/chatgptauth"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -127,7 +128,10 @@ type nativeSession struct {
 	// harness. tools is the parent's set, Snapshot().Tools; childTools holds
 	// one set per sub-agent, by its id (plan 026 §3.9). A leaf: s.mu → toolMu,
 	// and never nested with rosterMu either way.
-	toolMu     sync.Mutex
+	toolMu sync.Mutex
+	// namedPaths is the paths each of the parent's calls has named, for its
+	// stamp (edited.go); under toolMu.
+	namedPaths callPaths
 	tools      nativeToolSet
 	childTools map[string]*nativeToolSet
 
@@ -236,6 +240,12 @@ type nativeSession struct {
 	// a paragraph after it, and otherwise the turn's only text. Each claim
 	// clears it; sink sets it, from the harness's turn with s.mu not held.
 	textShown atomic.Bool
+	// attempts is where each owner's current attempt at a step began
+	// (markAttempt).
+	attempts attemptMarks
+	// reportEnqueued says a usage report may still be in the outbox, for the next
+	// step's start to wait for (sink's StepStarted).
+	reportEnqueued atomic.Bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
 	// returns, which is what Cancel and Close wait on. turnToken is the
@@ -1217,6 +1227,10 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		Version:   version.Version,
 		Mode:      mode,
 		Resume:    s.opts.LoadSessionID,
+
+		ProviderRetries: s.opts.ProviderRetries,
+		ProcessGroups:   s.opts.ShellGroups,
+		ProcessMark:     s.opts.ShellMark,
 	}
 	if s.tweak != nil {
 		s.tweak(&hopts)
@@ -1235,7 +1249,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	unsealed := hopts.Getenv
 	hopts.Getenv = getenv
 	if hopts.Home == "" {
-		return nil, nativeOpened{}, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
+		return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)"}
 	}
 	// The directory whose providers.toml every turn looks at for keys stored
 	// since (native_keys.go, plan 031 §3.8): the Home the harness opens with,
@@ -1275,7 +1289,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		stamps := statModelInputs(hopts.Home)
 		table, err := modeltable.Load(hopts.Home)
 		if err != nil {
-			return nil, nativeOpened{}, none, fmt.Errorf("native: %w", err)
+			return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
 		}
 		hopts.Table = table
 		// Set under modelsMu, like everything the reloads keep, though none
@@ -1307,7 +1321,10 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// model's display name, still finds it.
 		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
-			return nil, nativeOpened{}, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
+			return nil, nativeOpened{}, none, &nativeConfigError{
+				msg:   fmt.Sprintf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", ")),
+				cause: err,
+			}
 		}
 		hopts.Model = alias
 	}
@@ -2410,13 +2427,14 @@ func nativeTitle(prompt string) string {
 // children's own tagged events and the agent row's task (native_subagents.go,
 // plan 026 §3.9), a compaction becomes its EventCompaction pair (plan 028
 // §3.13, compacted), and what the session has spent becomes the snapshot's
-// usage section and its state delta (§3.14, spent). StepDone, Retrying and
+// usage section and its state delta (§3.14, spent). StepDone and
 // Diag have no agent event and are dropped: a step's own usage goes to the
 // transcript, and reaches a client summed, through Spent — but for the
 // sub-agent usage an unsaved step could not record, which is journaled
-// (noteSubagentUsage) — the harness allows one silent retry (plan 018 §3.8),
-// and a Diag is for the journal and for diagnosis, not for a consumer (plan
-// 019 §3.5). ToolProgress never blocks here, since the harness drops a
+// (noteSubagentUsage) — and a Diag is for the journal and for diagnosis, not for
+// a consumer (plan 019 §3.5). A retry is an event of its own, which says what the
+// failed attempt's events retract (native_retry.go), and a step's start only
+// marks where the next attempt begins. ToolProgress never blocks here, since the harness drops a
 // snapshot rather than wait on it.
 //
 // It runs synchronously on Fantasy's callbacks — the tool ones on tool
@@ -2511,7 +2529,20 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.jobProgress(e)
 	case harness.JobFinished:
 		s.jobFinished(e)
-	case harness.Retrying, harness.Diag:
+	case harness.StepStarted:
+		// What the last step spent is enqueued (spent), and a step's own events
+		// are published: without this, step 1's report could land after step 2
+		// had begun, or after its retry, and read as step 2's own. A waiter's
+		// usageComplete stands on a report coming before the next step's first
+		// event. A closing session gives the barrier up; so does this. A step with
+		// no report before it, a turn's first, waits for nothing.
+		if s.reportEnqueued.Swap(false) {
+			_ = s.log.Flush(context.Background(), s.done)
+		}
+		s.markAttempt("")
+	case harness.Retrying:
+		s.stepRetried("", e)
+	case harness.Diag:
 		// Dropped (the function's comment).
 	case harness.Todos:
 		s.applyTodos(e)
@@ -2566,14 +2597,35 @@ func (s *nativeSession) sink(ev harness.Event) {
 // there reads the turn's own spend (TestATurnsUsageReachesTheStreamBeforeItsEnd,
 // on the engine, in internal/tui).
 func (s *nativeSession) spent(e harness.Spent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spentLocked(e)
+}
+
+// spentIdle is spent for a report read while no turn ran (a side question's
+// harness.IdleSpent), which a turn may have claimed the session since: its Turn
+// is the last turn's spend, which published into the turn now running would read
+// as that turn's own. So it is dropped from the claim on, in the section that
+// takes the claim's flag, ahead of the turn's started (the engine's Begin, then
+// its started): the running turn's own next report counts what it held, and
+// until then nothing says the turn has spent what it has not.
+func (s *nativeSession) spentIdle(e harness.Spent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claimed || s.inPrompt {
+		return
+	}
+	s.spentLocked(e)
+}
+
+// spentLocked is spent; s.mu is held.
+func (s *nativeSession) spentLocked(e harness.Spent) {
 	u := UsageState{
 		ContextTokens: e.ContextTokens,
 		ContextWindow: e.ContextWindow,
 		Turn:          Spend(e.Turn),
 		Session:       Spend(e.Session),
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// A report whose data is older than the last applied one's — an idle side
 	// question's, computed before a turn's step was reported (plan 040 §3.4)
 	// — would put the older numbers back: dropped.
@@ -2589,6 +2641,7 @@ func (s *nativeSession) spent(e harness.Spent) {
 	// the event is encoded on the drainer's goroutine.
 	d := u
 	s.enqueueDeltaLocked("", Event{}, &StateDelta{Usage: &d})
+	s.reportEnqueued.Store(true)
 }
 
 // compacted is one end of a compaction of a session's context — the parent's
@@ -3636,6 +3689,19 @@ type nativeError struct {
 
 func (e *nativeError) Error() string { return e.msg }
 func (e *nativeError) Unwrap() error { return e.cause }
+
+// nativeConfigError is a start refused for what the configuration says: a
+// --model no model of the table answers to, a table that will not load, no
+// directory to load one from. Another attempt meets the same refusal until
+// someone changes it, so it says so itself, the failed start's kind.
+type nativeConfigError struct {
+	msg   string
+	cause error
+}
+
+func (e *nativeConfigError) Error() string           { return e.msg }
+func (e *nativeConfigError) Unwrap() error           { return e.cause }
+func (e *nativeConfigError) ErrorInfo() errkind.Info { return errkind.New(errkind.Config) }
 
 // The ChatGPT plan's failures in the adapter's words (plan 033 §3.12): each
 // says what happened and what to do, and none quotes a token — they are fixed

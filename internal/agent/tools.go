@@ -70,6 +70,9 @@ func (s *session) applyToolDelta(owner string, d toolDelta) (ToolEvent, bool, []
 	s.mu.Lock()
 	tool, changed, extras := s.mergeToolLocked(owner, d)
 	s.mu.Unlock()
+	if owner == "" {
+		s.stampEditedLive(d, &tool, &changed)
+	}
 	return tool, changed, extras
 }
 
@@ -134,6 +137,9 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 		if diffs := contentDiffs(d.content); len(diffs) > 0 {
 			out.Diffs = diffs
 		}
+		if owner == "" {
+			s.namedPaths.note(d.id, diffPaths(d.content)...)
+		}
 	}
 	if d.hasRawOutput {
 		out.Output = parseToolOutput(d.rawOutput)
@@ -143,6 +149,13 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	}
 	if d.hasLocations {
 		out.Locations = locationPaths(d.locations)
+		if owner == "" {
+			s.namedPaths.note(d.id, namedLocations(d.locations, editedPathsCap+1)...)
+		}
+	}
+	if out.Status != toolCompleted {
+		// A stamp is a completed call's alone (ToolEvent.Edited).
+		out.Edited = nil
 	}
 	out.At = time.Now()
 	tools[d.id] = out
@@ -294,6 +307,7 @@ func cloneTool(t ToolEvent) ToolEvent {
 		task := *t.Task
 		t.Task = &task
 	}
+	t.Edited = t.Edited.clone()
 	return t
 }
 
@@ -381,6 +395,16 @@ func contentText(raw json.RawMessage) string {
 }
 
 func locationPaths(raw json.RawMessage) []string {
+	out := namedLocations(raw, locationsCap)
+	for i, p := range out {
+		out[i] = sanitizeText(p)
+	}
+	return out
+}
+
+// namedLocations is a tool_call's locations[] as the agent spelled them, at most limit
+// of them: a stamp's identities, which sanitizing a row's display text would change.
+func namedLocations(raw json.RawMessage, limit int) []string {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -394,8 +418,8 @@ func locationPaths(raw json.RawMessage) []string {
 		if it.Path == "" {
 			continue
 		}
-		out = append(out, sanitizeText(it.Path))
-		if len(out) >= locationsCap {
+		out = append(out, it.Path)
+		if len(out) >= limit {
 			break
 		}
 	}
@@ -596,6 +620,31 @@ func contentDiffs(raw json.RawMessage) []ToolDiff {
 		}
 		out = append(out, toolDiff(it))
 		if len(out) >= diffsCap {
+			break
+		}
+	}
+	return out
+}
+
+// diffPaths is the path of every diff item of a tool_call content[], as the agent
+// spelled it, at most one past editedPathsCap: contentDiffs keeps the first diffsCap
+// of them for their texts, sanitized, and a stamp wants them all as they are.
+func diffPaths(raw json.RawMessage) []string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil
+	}
+	var items []acp.ToolContent
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	var out []string
+	for _, it := range items {
+		if it.Type != "diff" || it.Path == "" {
+			continue
+		}
+		out = append(out, it.Path)
+		if len(out) > editedPathsCap {
 			break
 		}
 	}

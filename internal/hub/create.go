@@ -845,7 +845,7 @@ func (h *hub) startSpawned(ctx context.Context, tag string, host *ownedHost, lin
 	case attendStartFailed, attendStartTimeout:
 		h.logf("%s: host %s: the session did not start: %s; stopping it", tag, line.HostID, at.cause)
 		h.abandonHost(host, line.Socket, line.CrazeSessionID)
-		return at, startFailed(at.cause)
+		return at, startFailed(at)
 	case attendLost, attendClosing:
 		h.logf("%s: host %s went before its session started: %v; stopping it", tag, line.HostID, at.err)
 		h.abandonHost(host, line.Socket, line.CrazeSessionID)
@@ -907,7 +907,7 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 		if err := stopCreated(e.Socket, e.CrazeSessionID); err != nil {
 			h.logf("%s: host %s: session.stop: %v", tag, e.HostID, err)
 		}
-		return createRefusal(startFailed(at.cause))
+		return createRefusal(startFailed(at))
 	case attendLost, attendClosing:
 		h.logf("%s: host %s went before its session started: %v", tag, e.HostID, at.err)
 		return createRefusal(refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
@@ -1247,9 +1247,11 @@ const (
 // attendance is what attend came to.
 type attendance struct {
 	kind attendKind
-	// cause is a start that failed's first error line.
-	cause string
-	err   error
+	// cause is a start that failed's first error line, and startKind what it
+	// said of itself.
+	cause     string
+	startKind string
+	err       error
 	// prompt and promptErr are the first prompt's outcome.
 	prompt    protocol.CreatePrompt
 	promptErr string
@@ -1304,7 +1306,7 @@ func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, de
 		var se *remote.StartError
 		switch {
 		case errors.As(err, &se):
-			return attendance{kind: attendStartFailed, cause: firstLine(se.Text)}
+			return attendance{kind: attendStartFailed, cause: firstLine(se.Text), startKind: se.Kind}
 		case ctx.Err() != nil:
 			return attendance{kind: attendCut}
 		case timedOut:
@@ -1541,11 +1543,11 @@ func spawnFailed(format string, args ...any) *protocol.Error {
 	return refused(protocol.CodeUnavailable, protocol.ReasonSpawnFailed, format, args...)
 }
 
-// startFailed is a session whose start failed, or took too long: cause is
-// the host's first error line, data.cause.
-func startFailed(cause string) *protocol.Error {
-	e := refused(protocol.CodeNotAccepting, protocol.ReasonStartFailed, "the session did not start: %s", cause)
-	e.Data.Cause = cause
+// startFailed is a session whose start failed, or took too long: its cause is
+// the host's first error line, data.cause, and data.kind what it said of itself.
+func startFailed(at attendance) *protocol.Error {
+	e := refused(protocol.CodeNotAccepting, protocol.ReasonStartFailed, "the session did not start: %s", at.cause)
+	e.Data.Cause, e.Data.Kind = at.cause, at.startKind
 	return e
 }
 

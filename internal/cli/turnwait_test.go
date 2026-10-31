@@ -54,18 +54,28 @@ type waitRig struct {
 // default) and runs turns in order, the last repeating.
 func newWaitRig(t *testing.T, ring int, turns ...stubTurn) *waitRig {
 	t.Helper()
+	return newWaitRigOn(t, control.Options{Workspace: "/w"}, ring, turns...)
+}
+
+// newWaitRigOn is newWaitRig with its server built from opts.
+func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTurn) *waitRig {
+	t.Helper()
 	env, _ := serveHome(t)
 	r := &waitRig{t: t, env: env}
 	r.s, r.eng = r.newEngine(ring, turns...)
-	r.srv = control.New(control.Options{Workspace: "/w"})
+	r.srv = control.New(opts)
 	t.Cleanup(r.srv.AddAttachmentsListener(func(n int) {
 		r.mu.Lock()
 		r.attached = n
 		r.mu.Unlock()
 	}))
 	r.srv.SetEngine(r.eng)
+	self, err := rundir.ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
 	reg, err := rundir.Bind(env, "0000000000a1", rundir.Entry{StartedAt: time.Now(), CrazeSessionID: waitRigID,
-		Incarnation: r.eng.State().Incarnation, Provider: "grok", Workspace: "/w", Ready: true})
+		Incarnation: r.eng.State().Incarnation, Provider: "grok", Workspace: "/w", Ready: true, PIDStart: self.Start})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +499,7 @@ func wantResult(t *testing.T, res *turnResult, f *waitFailure, status string) *t
 // and matched to the target the reply names. The reply is held until the
 // waiter has buffered the ending.
 func TestWaitTurnMatchesEventsBeforeTheSubmitReply(t *testing.T) {
-	r := newWaitRig(t, 0, answerTurn(toolEv("t1", "edit", "completed", "a.go"), textEv("the answer")))
+	r := newWaitRig(t, 0, answerTurn(editEv("t1", "completed", stamp("a.go")), textEv("the answer")))
 	conn := r.dial(nil)
 	buffered := make(chan struct{})
 	var once sync.Once

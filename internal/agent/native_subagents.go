@@ -295,11 +295,16 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 		// note and its working line says so while it runs. What it cost is
 		// already in the child's usage feeds, harness-side (X34).
 		s.compacted(id, c)
-	case harness.Retrying, harness.Todos, harness.Steered, harness.Diag:
-		// Dropped, by name. A retry discards what its step streamed, which the
-		// runner's own text rule already does (childObserver); a child has no
-		// todo list and takes no steer; and a Diag stays out of the stream, the
-		// parent's rule (plan 019 §3.5).
+	case harness.StepStarted:
+		s.markAttempt(id)
+	case harness.Retrying:
+		// The runner's own text rule discards what the attempt streamed from the
+		// child's answer (childObserver); this takes it back from the child's
+		// transcript.
+		s.stepRetried(id, c)
+	case harness.Todos, harness.Steered, harness.Diag:
+		// Dropped, by name. A child has no todo list and takes no steer; and a
+		// Diag stays out of the stream, the parent's rule (plan 019 §3.5).
 	case harness.SubagentStarted, harness.SubagentEvent, harness.SubagentFinished:
 		// A child starts no child of its own (depth 1, §3.2): never sent.
 	case harness.Spent:

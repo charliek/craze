@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -75,7 +76,7 @@ func observedErrors(t *testing.T, evs []Event) []*RemoteError {
 // error at all: it substituted its inert sentinel (Enqueue), and that is the
 // RemoteError its observer sees.
 func TestEventLogTheObserverIsHandedTheCodecsError(t *testing.T) {
-	want := &RemoteError{Message: "the turn failed", Class: EventErrRPC, Code: 42}
+	want := &RemoteError{Message: "the turn failed", Class: EventErrRPC, Code: 42, Info: errkind.Info{Kind: errkind.Agent}}
 
 	for _, path := range []string{"Publish", "TryPublish"} {
 		t.Run(path, func(t *testing.T) {
@@ -143,7 +144,7 @@ func TestEventLogTheObserverIsHandedTheCodecsError(t *testing.T) {
 		if len(evs) != primaryCap+1 || evs[0].Text != "drained" || evs[primaryCap].Text != "at close" {
 			t.Fatalf("the observer saw %d events, want the drained one first and the at-close one last", len(evs))
 		}
-		sentinel := &RemoteError{Message: errEnqueuedErr.Error(), Class: EventErrOther}
+		sentinel := &RemoteError{Message: errEnqueuedErr.Error(), Class: EventErrOther, Info: errkind.New(errkind.Internal)}
 		got := observedErrors(t, evs)
 		if len(got) != 2 || !reflect.DeepEqual(got[0], sentinel) || !reflect.DeepEqual(got[1], sentinel) {
 			t.Fatalf("the observer was handed %+v, want the outbox sentinel's RemoteError twice", got)
@@ -183,7 +184,7 @@ func TestEventLogTheObserversErrorSurvivesAnOmittedRecord(t *testing.T) {
 			if len(recs) != 1 || recs[0].Omitted == nil || recs[0].Omitted.Reason != tc.reason {
 				t.Fatalf("the record is %+v, want one omitted as %s", recs, tc.reason)
 			}
-			want := &RemoteError{Message: asJSONCarriesIt(tc.msg), Class: EventErrRPC, Code: 42}
+			want := &RemoteError{Message: asJSONCarriesIt(tc.msg), Class: EventErrRPC, Code: 42, Info: errkind.Info{Kind: errkind.Agent}}
 			if got := observedErrors(t, observed()); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 				t.Fatalf("the observer was handed %+v, want %+v", got, want)
 			}

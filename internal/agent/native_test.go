@@ -1814,7 +1814,7 @@ func TestNativeWireErrorsArePhrasedWithoutTheKey(t *testing.T) {
 		{name: "stream error after text", replies: []http.HandlerFunc{func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(w, "data: %s\n\n", textChunk("partial"))
-			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"server_error\"}}\n\n", "upstream: "+r.Header.Get("Authorization"))
+			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"invalid_request_error\"}}\n\n", "upstream: "+r.Header.Get("Authorization"))
 		}}, want: `native: provider "wire" failed: stream error: upstream: Bearer [redacted]`, text: "partial"},
 		{name: "a raw HTML body", replies: []http.HandlerFunc{func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")

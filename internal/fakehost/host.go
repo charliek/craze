@@ -61,6 +61,10 @@ type Options struct {
 	// exactly, with a duplicate stop or a refused attach before it. Off,
 	// session.stop is refused unsupported, reason stop_unsupported.
 	Stop bool
+	// ExitAfterTurn is plan 048's opt-in, with Stop: session.prompt takes
+	// exitAfterTurn and session.stop takes cause (capabilities.exitAfterTurn:
+	// true), and the run_stop op closes for the cause the stop said.
+	ExitAfterTurn bool
 	// StoppingMark is plan 046's opt-in (B4, #93), with Stop: a registered
 	// Host's first accepted session.stop marks its registry entry stopping
 	// before its receipt is queued (control.Options.StopAccepted,
@@ -285,6 +289,8 @@ type Host struct {
 	// fixtures' coordinator (Options.Stop): at most one, the server's own
 	// rule. stopped says run_stop has run the sequence.
 	stops int
+	// stopCause is what the stop handed over said began it.
+	stopCause string
 	// stopHeard is closed on the first stop the server hands over, so
 	// RunStop can wait for it (stopHeardWait).
 	stopHeard     chan struct{}
@@ -339,6 +345,7 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		AsideInterval: control.AsideEachDelta,
 	}
 	if o.Stop {
+		co.ExitAfterTurn = o.ExitAfterTurn
 		co.Stop = h.stopRequested
 		if o.StoppingMark {
 			co.StopAccepted = h.stopAccepted
@@ -676,14 +683,36 @@ func (h *Host) Thought(agentID, text string) {
 	h.currentStub().Emit(agent.Event{Type: agent.EventThought, Agent: agentID, Text: text})
 }
 
+// StepRetry emits an EventStepRetry: a step's failed attempt, from Seq from on,
+// retracted.
+func (h *Host) StepRetry(agentID string, step, attempt int, reason string, from uint64) {
+	h.currentStub().Emit(agent.Event{Type: agent.EventStepRetry, Agent: agentID, StepRetry: &agent.StepRetryInfo{
+		Turn: 1, Step: step, Attempt: attempt, Total: attempt, Reason: reason, DelayMs: 5000, From: from, Discarded: true,
+	}})
+}
+
 // Tool emits an EventTool with the given id, name and status, agentID "" for
 // the main session.
-func (h *Host) Tool(agentID, id, name, status string) { h.ToolTitled(agentID, id, name, "", status) }
+func (h *Host) Tool(agentID, id, name, status string) {
+	h.ToolTitled(agentID, id, name, "", status, nil)
+}
 
 // ToolTitled is Tool with the call's title — what a row's doing names a
 // running tool by (plan 030 §3.10) — "" for none, which is Tool.
-func (h *Host) ToolTitled(agentID, id, name, title, status string) {
-	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: &agent.ToolEvent{ID: id, Name: name, Title: title, Status: status}})
+func (h *Host) ToolTitled(agentID, id, name, title, status string, edited *EditedOp) {
+	t := &agent.ToolEvent{ID: id, Name: name, Title: title, Status: status}
+	if edited != nil {
+		t.Edited = &agent.ToolEdited{Files: edited.Files, OutsideFiles: edited.OutsideFiles, PlanFile: edited.PlanFile, Truncated: edited.Truncated}
+	}
+	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: t})
+}
+
+// EditedOp is a tool op's stamp (agent.ToolEdited).
+type EditedOp struct {
+	Files        []string `json:"files,omitempty"`
+	OutsideFiles []string `json:"outsideFiles,omitempty"`
+	PlanFile     string   `json:"planFile,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
 }
 
 // PermOption is one option a Permission call offers.
@@ -1034,9 +1063,10 @@ func (h *Host) stopAccepted() {
 // stopRequested is the fixtures' coordinator (control.StopFunc, with
 // Options.Stop): it records the stop the server handed it — once, the
 // server's own rule — and returns, the sequence left to RunStop.
-func (h *Host) stopRequested(control.StopRequest) {
+func (h *Host) stopRequested(r control.StopRequest) {
 	h.mu.Lock()
 	h.stops++
+	h.stopCause = r.Cause
 	h.mu.Unlock()
 	h.stopHeardOnce.Do(func() { close(h.stopHeard) })
 }
@@ -1063,9 +1093,12 @@ func (h *Host) RunStop() error {
 		}
 	}
 	h.mu.Lock()
-	stops, stopped := h.stops, h.stopped
+	stops, stopped, cause := h.stops, h.stopped, h.stopCause
 	h.stopped = true
 	h.mu.Unlock()
+	if cause == "" {
+		cause = agent.StopCauseStop
+	}
 	switch {
 	case !h.opts.Stop:
 		return fmt.Errorf("fakehost: run_stop: this Host does not serve session.stop (Options.Stop)")
@@ -1074,7 +1107,7 @@ func (h *Host) RunStop() error {
 	case stopped:
 		return fmt.Errorf("fakehost: run_stop: the stop sequence has already run")
 	}
-	return h.currentEngine().Close()
+	return h.currentEngine().CloseFor(cause)
 }
 
 // opParams is one op's wire shape: {"name": "...", ...}, the union of every
@@ -1091,7 +1124,9 @@ type opParams struct {
 
 	// tool
 	ToolName string `json:"toolName,omitempty"`
-	Status   string `json:"status,omitempty"`
+	// Edited is a tool's stamp.
+	Edited *EditedOp `json:"edited,omitempty"`
+	Status string    `json:"status,omitempty"`
 
 	// permission
 	Tool    string         `json:"tool,omitempty"`
@@ -1113,6 +1148,12 @@ type opParams struct {
 
 	// stall_writes, advance_clock
 	MS int `json:"ms,omitempty"`
+
+	// step_retry: the step, the attempt, and the Seq the failed attempt began
+	// at; its reason is Reason.
+	Step    int    `json:"step,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+	From    uint64 `json:"from,omitempty"`
 
 	// stage_models: the list the next refresh takes up, each model as the
 	// info document's catalog model is written (id, name, recent).
@@ -1188,7 +1229,9 @@ func (h *Host) do(p opParams) error {
 	case "thought":
 		h.Thought(p.Agent, p.Text)
 	case "tool":
-		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status)
+		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status, p.Edited)
+	case "step_retry":
+		h.StepRetry(p.Agent, p.Step, p.Attempt, p.Reason, p.From)
 	case "permission":
 		opts := make([]PermOption, len(p.Options))
 		for i, o := range p.Options {

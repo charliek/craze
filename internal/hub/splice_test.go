@@ -1143,3 +1143,91 @@ func TestAConnectRefusalNamesNoPath(t *testing.T) {
 		t.Fatalf("the hub's log lacks the registry's error: %s", log)
 	}
 }
+
+// TestAHostThatClosedFirstIsNothingToHalfClose: the client's EOF after the host has
+// closed. macOS answers the host leg's half-close ENOTCONN, in the shape net.UnixConn
+// wraps it in, and what the host wrote still reaches the client before the splice ends.
+// Any other error still closes both legs.
+func TestAHostThatClosedFirstIsNothingToHalfClose(t *testing.T) {
+	for _, tc := range []struct {
+		errno syscall.Errno
+		want  string
+	}{
+		{syscall.ENOTCONN, "the last word"},
+		{syscall.EBADF, ""},
+	} {
+		t.Run(tc.errno.Error(), func(t *testing.T) {
+			client, clientLeg := socketPair(t)
+			host, hostLeg := socketPair(t)
+			halfClosed := make(chan struct{})
+			sp := &splice{client: clientLeg, host: hostLeg, done: make(chan struct{})}
+			sp.hostCloseWrite = func() error {
+				defer close(halfClosed)
+				return &net.OpError{Op: "close", Net: "unix", Addr: &net.UnixAddr{Name: "host.sock", Net: "unix"}, Err: os.NewSyscallError("shutdown", tc.errno)}
+			}
+			// The watch starts only once upstream has taken the error for no failure.
+			watching := make(chan struct{})
+			var once sync.Once
+			sp.probed = func(bool, bool) { once.Do(func() { close(watching) }) }
+			ran := make(chan struct{})
+			go func() {
+				defer close(ran)
+				sp.run()
+			}()
+			if err := client.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-halfClosed:
+			case <-time.After(step):
+				t.Fatal("the splice never half-closed the host leg")
+			}
+			if tc.errno == syscall.ENOTCONN {
+				select {
+				case <-watching:
+				case <-time.After(step):
+					t.Fatal("the splice never went on past the half-close's ENOTCONN")
+				}
+			} else {
+				// Its legs closed, nothing the host writes can arrive: it is read after that.
+				select {
+				case <-ran:
+				case <-time.After(step):
+					t.Fatal("the splice did not end at the error")
+				}
+			}
+			_, _ = host.Write([]byte("the last word"))
+			_ = host.Close()
+			_ = client.SetReadDeadline(time.Now().Add(step))
+			got, err := io.ReadAll(client)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("the client read %q (%v), want %q", got, err, tc.want)
+			}
+			select {
+			case <-ran:
+			case <-time.After(step):
+				t.Fatal("the splice did not end at the host's EOF")
+			}
+		})
+	}
+}
+
+// socketPair is two connected Unix stream sockets, closed with the test.
+func socketPair(t *testing.T) (a, b *net.UnixConn) {
+	t.Helper()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := func(fd int) *net.UnixConn {
+		f := os.NewFile(uintptr(fd), "socket")
+		defer func() { _ = f.Close() }()
+		c, err := net.FileConn(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c.(*net.UnixConn)
+	}
+	return conn(fds[0]), conn(fds[1])
+}

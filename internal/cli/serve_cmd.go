@@ -74,7 +74,8 @@ import (
 //     provider as the next plain craze's default, as the TUI's does.
 //  7. The host waits for its stop: session.stop, SIGINT or SIGTERM, or its
 //     idle watcher's (idle.go): no client attached and nothing in flight for
-//     host_idle_exit, or its socket or registry entry gone. SIGHUP is caught
+//     host_idle_exit (for an unattended host, host_idle_exit_unattended), or its
+//     socket or registry entry gone. SIGHUP is caught
 //     and dropped — signal.Notify, never signal.Ignore, whose SIG_IGN an agent
 //     child would inherit across exec. The stop sequence runs once
 //     (serveHost.stop) and craze serve returns: exit 0.
@@ -524,7 +525,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	journalAt := journalDir(out)
 
 	lc := newHostLifecycle()
-	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, req, lc.stopFunc, false, out)
+	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, req, lc.stopFunc, lc.stopBeginning, false, out)
 	if err != nil {
 		return exitf(1, "craze serve: the control socket: %v", err)
 	}
@@ -564,12 +565,14 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// do neither.
 	opts.StartErrAgentStderr = true
 	opts.StartErrExitHint = loginSessionHint(f.hubPID)
-	// A spawned host records its agents' process groups for its spawner's
-	// last resort (plan 030 §3.4, X22), and an agent it cannot record does
-	// not run; one run by hand has no spawner to read them.
-	var groups *agentGroups
+	// Every host records its native shell commands' process groups, for whoever
+	// finds it dead (hostspawn.SweepDeadHosts). A spawned host also records its
+	// agents' for its spawner's last resort (plan 030 §3.4, X22), and an agent it
+	// cannot record does not run; one run by hand has no spawner to read them.
+	groups := newAgentGroups(runEnv, hostID, out)
+	opts.ShellGroups = groups.recordShell
+	opts.ShellMark = hostspawn.CommandMark(hostID)
 	if f.ready != nil {
-		groups = newAgentGroups(runEnv, hostID, out)
 		opts.AgentGroup = func(pgid int) error {
 			err := groups.record(pgid)
 			serveAgentGroup(pgid, err)
@@ -582,6 +585,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	engOpts.MintedCrazeSessionID = minted
 	if f.unattended {
 		engOpts.Index.Unattended = f.unattendedRecord()
+		engOpts.AsksDoNotPin = true
 	}
 	// The index writes the same title as the user's once the session has its
 	// id (plan 043 P10): the row is pinned to it, as after a /rename.
@@ -604,7 +608,16 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// is served, so no attach can come ahead of its count (plan 030 §3.6).
 	ticks, now, stopTicks := idleTicks()
 	defer stopTicks()
-	idle := newIdleWatcher(ctl.server, eng, ctl.host.Lost, now, out)
+	idle := newIdleWatcher(ctl.server, eng, ctl.host.Lost, now, f.unattended, out)
+	// Before the engine is served: no stop reaches the host ahead of this. An
+	// identity that cannot be read leaves a record with no owner: no evidence.
+	self, _ := rundir.ProcessIdentity(os.Getpid())
+	lc.setRecord(func(cause string) {
+		r := rundir.StopRecord{Cause: cause, Turn: eng.State().Turn, At: time.Now().UTC(), PID: os.Getpid(), PIDStart: self.Start}
+		if err := rundir.WriteStopRecord(runEnv, hostID, r); err != nil {
+			fmt.Fprintf(out, "craze serve: the stop's record: %v\n", err)
+		}
+	})
 	published := rh.publish(eng)
 	fmt.Fprintf(out, "craze serve: host %s serving session %s (%s) in %s\n",
 		hostID, eng.State().CrazeSessionID, p.Name(), indexCWD)
@@ -767,7 +780,7 @@ func loadWorkspace(cmd *cobra.Command, flag string, row sessions.Row) (string, e
 
 // serveHost is a running craze serve: its socket and claims (runHost), its
 // engine, its lifecycle coordinator and its log; for a spawned host, its
-// ready pipe and its agents' process-group record; and started, closed once
+// ready pipe; its process-group record; and started, closed once
 // the session's start (serveHost.start, on a goroutine of its own) has
 // returned.
 type serveHost struct {
@@ -856,7 +869,7 @@ func (h *serveHost) wait(sigs <-chan os.Signal, published <-chan struct{}) {
 				fmt.Fprintln(h.log, "craze serve: hangup ignored; the session runs on")
 				continue
 			}
-			h.lc.request(signalName(sig))
+			h.lc.request(agent.StopCauseSignal, signalName(sig))
 		}
 	}
 }
@@ -887,7 +900,7 @@ func (h *serveHost) announce() {
 			fmt.Fprintln(h.log, "craze serve: serving on: this host outlives its spawner")
 			return
 		}
-		h.lc.request("its launcher went before it was ready")
+		h.lc.request(agent.StopCauseLostOwner, "its launcher went before it was ready")
 	}
 }
 
@@ -903,24 +916,26 @@ func signalName(sig os.Signal) string {
 }
 
 // stop is the stop sequence (plan 030 §3.6a), run once, on craze serve's own
-// goroutine, after the first stop request:
+// goroutine, after the first stop request, whose cause is latched and whose stop
+// record is written already (hostLifecycle.latch):
 //
 //  0. the registry entry is marked stopping (plan 046 B4), before anything
 //     else of the stop can be observed, so no roster lists the host from
 //     here: a signal's, the idle exit's and a lost socket's mark — a
 //     session.stop's was written before its receipt was queued
 //     (control.Options.StopAccepted), and this is then a no-op;
-//  1. the stop's cause is noted in the session's journal (a host_stop diag):
-//     a session.stop's, a signal's, the idle exit's, a lost socket's — the
-//     one record of why a host ended that is not a connection's;
+//  1. the stop's cause is noted in the session's journal (a host_stop diag,
+//     its words under cause and what began it under stopCause): a
+//     session.stop's, a signal's, the idle exit's, a lost socket's — the one
+//     record of why a host ended that is not a connection's;
 //  2. attaches are refused closing from here: the stop's own attach fence,
 //     never lowered (a session.stop raised the server's own already, and the
 //     idle exit its close fence; this is one more that is never lowered, and
 //     the one a signal's stop has);
 //  3. the engine's own close — today's quit: it authors a running turn's
-//     ending and every parked ask's, closes the agent, and ends every
-//     attachment's stream with reset{session_closed} once what each admitted
-//     is written;
+//     ending, carrying what began the stop, and every parked ask's, closes the
+//     agent, and ends every attachment's stream with reset{session_closed}
+//     once what each admitted is written;
 //  4. S2's close order (controlHost.close): the flush wait, Server.Close, the
 //     registry entry, the socket, the host lock;
 //  5. the session's start joined (joinStart), bounded by serveStartJoin;
@@ -929,7 +944,8 @@ func signalName(sig os.Signal) string {
 //     for, a native load's transcript lock inside harness.Open among them,
 //     and a claim released ahead of it would let a second host claim the
 //     session and fail on that lock;
-//  7. last, a spawned host's record of its agents' process groups removed.
+//  7. last, the host's record of its process groups removed: its agents and its
+//     shell commands, background jobs among them, have ended by now.
 //
 // A start that has not joined within the bound: this host kills the agents it
 // recorded itself (killOwnAgents: SIGTERM, a grace, SIGKILL, each group only
@@ -943,12 +959,12 @@ func signalName(sig os.Signal) string {
 func (h *serveHost) stop() {
 	teardownStep("stopping")
 	h.rh.markStopping()
-	cause := h.lc.cause()
-	fmt.Fprintf(h.log, "craze serve: stopping: %s\n", cause)
-	h.eng.Note(journal.DiagNote{Kind: journal.DiagHostStop, Fields: map[string]any{"cause": cause}})
+	cause, why := h.lc.cause()
+	fmt.Fprintf(h.log, "craze serve: stopping: %s\n", why)
+	h.eng.Note(journal.DiagNote{Kind: journal.DiagHostStop, Fields: map[string]any{"cause": why, "stopCause": cause}})
 	_, _ = h.rh.ctl.server.FenceAttaches()
 	teardownStep("fenced")
-	_ = h.eng.Close()
+	_ = h.eng.CloseFor(cause)
 	teardownStep("engine closed")
 	h.rh.closeSocket()
 	teardownStep("joining")
@@ -988,15 +1004,12 @@ func (h *serveHost) joinStart() bool {
 // SIGKILL if it is still there, and the record is removed. It is the
 // spawner's KillAgents, run by the host itself before it exits — a record
 // left for a launcher that has gone is an agent nobody ends. A host run by
-// hand records nothing and kills nothing.
+// hand has no agents in its record, only the shell commands its close has ended.
 func (h *serveHost) killOwnAgents() {
-	if h.groups == nil {
-		return
-	}
 	// Nothing is recorded from here: a spawn the stalled start finishes now
 	// is refused its record, which fails that start and ends its agent.
 	h.groups.seal()
-	hostspawn.KillRecordedAgents(h.groups.path, serveAgentTermGrace, func(format string, args ...any) {
+	hostspawn.KillRecordedAgents(h.groups.path, os.Getpid(), h.groups.owner.Start, serveAgentTermGrace, func(format string, args ...any) {
 		fmt.Fprintf(h.log, "craze serve: "+format+"\n", args...)
 	})
 }

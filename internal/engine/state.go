@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // Activity is what the engine is doing, in the words the protocol's gate table
@@ -79,8 +80,10 @@ type State struct {
 	// reads it from here rather than from Activity.
 	PendingAsks int
 	HeadAsk     HeadAsk
-	// StartFailed says Start returned an error; Err carries it.
+	// StartFailed says Start returned an error; Err carries it, and StartKind
+	// what it said of itself (agent.StartErrorKind).
 	StartFailed bool
+	StartKind   errkind.Kind
 	// Incarnation is the log's id: the scope of turn ids and sequence numbers.
 	Incarnation string
 	// CrazeSessionID is the durable craze session id (session control SD-22):
@@ -102,6 +105,9 @@ type State struct {
 	// folding the stream has seen up to the same seq; like the snapshot and
 	// the asks, it is a read of its own and not a cut with the rest of State.
 	LastTurn *LastTurn
+	// ExitFenced says a prompt was submitted to be the session's last and the
+	// exit fence stands (exitfence.go): what shortens a host's idle limit.
+	ExitFenced bool
 }
 
 // LastTurn is how one turn ended (plan 030 §3.7): session.state's and a
@@ -114,6 +120,18 @@ type LastTurn struct {
 	// Err is a failed turn's error text, the ending's own (TurnInfo.Err); ""
 	// for the other outcomes.
 	Err string
+	// StopReason is the ending's own (TurnInfo.StopReason): "" for a foreign
+	// turn, whose bracket carries none, and for a failure with no reason.
+	StopReason string
+	// Info is what a failed turn said of itself (TurnInfo.Info): zero for the
+	// other outcomes.
+	Info errkind.Info
+	// Cause is why the session's close ended the turn (TurnInfo.Cause): "" for
+	// every other ending, and when the close did not say.
+	Cause string
+	// Withdrawn says a cancelled turn's prompt never reached the agent: its
+	// ending was synthetic, stopped cancelled, and no step of it ever ran.
+	Withdrawn bool
 	// EndedAt is the ending event's time (Event.At, the session's clock for
 	// an ending the engine authored).
 	EndedAt time.Time
@@ -168,12 +186,13 @@ func turnEnding(ev agent.Event) (starts bool, ended *LastTurn) {
 		case agent.TurnStarted:
 			return true, nil
 		case agent.TurnEnded:
-			lt := &LastTurn{Outcome: TurnDone, EndedAt: at, TurnID: tu.ID}
+			lt := &LastTurn{Outcome: TurnDone, StopReason: tu.StopReason, Cause: tu.Cause, EndedAt: at, TurnID: tu.ID}
 			switch {
 			case tu.Err != "":
-				lt.Outcome, lt.Err = TurnFailed, tu.Err
+				lt.Outcome, lt.Err, lt.Info = TurnFailed, tu.Err, tu.Info
 			case tu.StopReason == stopCancelled, tu.StopReason == stopClosing:
 				lt.Outcome = TurnCancelled
+				lt.Withdrawn = tu.Synthetic && tu.StopReason == stopCancelled
 			}
 			return false, lt
 		}
@@ -221,6 +240,7 @@ func (e *Engine) State() State {
 	st.LastTurn = last
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	st.ExitFenced = e.exitFence != nil
 	st.Queue = e.queue.List()
 	st.Activity = e.activity
 	if replaying && (st.Activity == ActivityStarting || st.Activity == ActivityIdle) {
@@ -236,6 +256,6 @@ func (e *Engine) State() State {
 	st.Err = e.err
 	st.Cancelled = e.cancelled
 	st.Prompted = e.prompted
-	st.StartFailed = e.startFailed
+	st.StartFailed, st.StartKind = e.startFailed, e.startKind
 	return st
 }
