@@ -461,7 +461,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(folded())
 		w.conn.entry = rundir.Entry{HostID: "0000000000a1", PID: exitedPID(t), PIDStart: self.Start}
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		f := w.fail
 		if f == nil || f.kind != errkind.HostExited || f.usage == nil || !f.inFlight || f.follow || f.handle == "" {
 			t.Fatalf("the failure: %+v", f)
@@ -492,7 +492,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		}
 		w := waiterAt(folded())
 		w.conn.entry = e
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		res := wantStopped(t, w.result, w.fail, "")
 		if res.Usage == nil || res.UsageComplete == nil || *res.UsageComplete || !res.Partial {
 			t.Fatalf("what was folded: %+v", res)
@@ -506,7 +506,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		}
 		w := waiterAt(folded())
 		w.conn.entry = rundir.Entry{HostID: id, PID: exitedPID(t)}
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		res := wantStopped(t, w.result, w.fail, agent.StopCauseStop)
 		if res.Usage == nil || res.UsageComplete == nil || *res.UsageComplete || !res.Partial || statusExit(res.Status) != 3 {
 			t.Fatalf("what was folded: %+v", res)
@@ -521,7 +521,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 			}
 			w := waiterAt(folded())
 			w.conn.entry = rundir.Entry{HostID: id, PID: exitedPID(t)}
-			w.lost(errors.New("broken pipe"))
+			w.lost(context.Background(), errors.New("broken pipe"))
 			if f := w.fail; w.result != nil || f == nil || f.kind != errkind.Stopped || f.cause != agent.StopCauseSignal || f.usage == nil {
 				t.Fatalf("recorded %q: %+v, %+v", turn, w.result, f)
 			}
@@ -542,7 +542,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(nil)
 		w.conn.entry = rundir.Entry{HostID: "0000000000a1", PID: os.Getpid(), PIDStart: self.Start}
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		if f := w.fail; f == nil || f.kind != errkind.ConnectionLost || !strings.Contains(f.msg, "the turn runs on in its host") {
 			t.Fatalf("the failure: %+v", f)
 		}
@@ -566,7 +566,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		defer func() { hostScanned = prev }()
 		w := waiterAt(folded())
 		w.conn.entry = rundir.Entry{HostID: "0000000000a1", PID: cmd.Process.Pid, PIDStart: id.Start}
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		if f := w.fail; f == nil || f.kind != errkind.HostExited {
 			t.Fatalf("the failure: %+v", f)
 		}
@@ -580,7 +580,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		e.PIDStart = self.Start
 		w := waiterAt(nil)
 		w.conn.entry = e
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		if f := w.fail; f == nil || f.kind != errkind.ConnectionLost {
 			t.Fatalf("the failure: %+v", f)
 		}
@@ -593,7 +593,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		} {
 			w := waiterAt(folded())
 			w.conn.entry = e
-			w.lost(errors.New("broken pipe"))
+			w.lost(context.Background(), errors.New("broken pipe"))
 			f := w.fail
 			if f == nil || f.kind != errkind.ConnectionLost || !strings.Contains(f.msg, "state is unknown") || strings.Contains(f.msg, "runs on") {
 				t.Fatalf("%s: the failure: %+v", name, f)
@@ -606,7 +606,7 @@ func TestALostStreamIsToldByTheHost(t *testing.T) {
 		w.target = waitTarget{kind: targetRow, id: "q-1"}
 		w.closing, w.closeCause = true, agent.StopCauseSignal
 		w.conn.entry = rundir.Entry{PID: exitedPID(t)}
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		if f := w.fail; f == nil || f.kind != errkind.Stopped || f.cause != agent.StopCauseSignal || f.usage != nil || f.inFlight {
 			t.Fatalf("the failure: %+v", f)
 		}

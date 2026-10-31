@@ -634,3 +634,24 @@ func (n *namedTool) Spec() tool.Spec {
 }
 
 func (*namedTool) Prepare(tool.Env, tool.Call) (tool.Prepared, error) { return probeRun{}, nil }
+
+// TestAChildSessionHasItsParentsGroupRecorder: a sub-agent's commands are the
+// host's too, so they are written down as its parent's are.
+func TestAChildSessionHasItsParentsGroupRecorder(t *testing.T) {
+	var told []int
+	s := &Session{base: childBase{seams: toolSeams{groups: func(pid int) func() {
+		told = append(told, pid)
+		return func() {}
+	}}}}
+	opts := s.childOpenOptions(tableView{}, "", "", &ChildOptions{})
+	if opts.ProcessGroups != nil {
+		t.Fatal("a child's own Options name a recorder, which Open would take over its parent's")
+	}
+	if opts.tools.groups == nil {
+		t.Fatal("a child's tools have no recorder")
+	}
+	opts.tools.groups(7)
+	if len(told) != 1 || told[0] != 7 {
+		t.Fatalf("the parent's recorder was told %v", told)
+	}
+}

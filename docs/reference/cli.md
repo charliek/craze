@@ -1672,6 +1672,92 @@ for a process it cannot tell has gone.
 {"error":{"message":"the session ended: its host exited with no ending for the turn (craze send 175bfe79 <prompt> reloads it)","kind":"host_exited","retryable":true},"handle":"0199c0de-1111-7000-8000-397e175bfe79.41.turn-3","usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"usageComplete":false}
 ```
 
+### What a dead host leaves running
+
+A native session's shell commands lead a session and a process group of their own,
+so a host that is killed outright, or crashes, takes none of them with it. Everything
+a native host starts that way (a command in the foreground, a background job, the
+`rg` behind `grep` and `glob`) is written down as it starts, in `<hostId>.pgids` in
+the [host logs' directory](configuration.md#host-logs), and crossed off once it has
+ended. Each carries `CRAZE_HOST_ID=<hostId>` in its environment, as does anything it
+runs that isn't craze. Every craze clears that variable as it starts, so a hub, a host,
+an agent or a TUI `!` command never has one. An agent's entry stays until its host's
+teardown. A host's clean stop ends its own commands, its
+background jobs included, and leaves no record; what follows is for a host that got
+no chance to.
+
+**The bound: a dead host's commands are signalled when a waiter sees it go, and
+otherwise by the next craze command.** Until then they run on, and if no craze ever
+runs again nothing ends them. Each group gets `SIGTERM`, then `SIGKILL` 2 s later if
+anything in it is left. Each is read again straight before each of its signals.
+
+- **The waiter** that sees its host gone ends the host's commands before it reports
+  [`host_exited`](#no-ending-seen). **`host_exited` promises this much:** the waiter
+  has either finished with the record, or been cut short. Finished means each group
+  recognised in it has had its signals, not that every process has gone yet; it waits
+  for another craze already at the record, about 3.5 s at most, then takes up to about
+  3 s of its own. A `--timeout` or a further signal cuts that short, and so does a
+  stalled file system at about 7 s. `host_exited` is reported at once and the record
+  stays for the next craze, with whatever had not been signalled still running.
+- **Every command that reads the host registry**, alongside its own work: `craze`,
+  `attach`, `bridge`, `cancel`, `new`, `ps`, `send`, `stop` and `wait`. This never
+  delays a command's start, is outside `--timeout`, and can't fail the command.
+  A short command stays until the sweep is done once its output is written: a few
+  milliseconds at most on a healthy machine, and when a group ignores `SIGTERM`, the
+  2 s grace before its `SIGKILL`. It waits about 3.5 s at most, and a `SIGINT` or
+  `SIGTERM` ends that wait at once with the exit code the command had already
+  determined. A process that exits before its `SIGKILL` goes out leaves the record for
+  the next craze; the hub or a longer-running craze finishes it.
+- **The hub**, at its start and every ten minutes while it runs. When a host the hub
+  started dies, the hub ends its groups at once: an agent's with `SIGKILL`, a shell
+  command's with the same `SIGTERM` and grace.
+
+One pass acts on at most 20 dead hosts. It starts at a random place among the records,
+so one left waiting is reached by a later pass, though no fixed number of passes
+promises it. Choosing records and sending `SIGTERM` have about 1 s between them, counted
+after the directory has been listed, and then comes the 2 s grace. A group that has had
+its `SIGTERM` then gets its `SIGKILL` however long that took, unless the waiter is cut
+short or the process exits first.
+
+A host still running is never touched, nor is one mid-exit: what decides is the
+host's own process and start time, written in the record. Several of these at once
+are harmless: each holds the record's lock while it acts on it.
+
+**What this does not cover:**
+
+- **A process that leaves the group.** One that calls `setsid` or `setpgid` (`setsid`
+  itself, a daemon, a shell's job control under `set -m`) escapes, as it escapes the
+  kill a command's own end brings.
+- **A group whose leader has exited, when nothing left in it can be recognised.** A
+  group whose leader has gone can only be told from another's that has taken its number
+  since by what is left in it. A member must be in the group's own session, have
+  started after the leader, and still carry this host's `CRAZE_HOST_ID` in the
+  environment it was started with. So a process running under `env -i`, alone in its
+  group with the shell that started it gone, stays running, and so does a restricted
+  process on macOS whose environment the system hides. While the leader is still
+  there, the whole group goes, whatever is in it.
+- **A command that could not be recorded.** The command runs and the host's log says
+  why. That means an unusable host logs' directory, an identity or scope the host
+  cannot read, a failed write, or more than 1000 groups running at once in one host.
+  Crossing off is what keeps a long session of short commands far from that cap.
+- **The instant between a command's start and its line being written.**
+- **A cursor, grok or gx agent's commands**, which are the agent's own. An agent's
+  group is ended only while the agent itself is running. An agent that has already
+  exited leaves anything still in its group alone.
+- **Other boots and PID namespaces.** Numbers in a record written in a container, or
+  before a reboot, mean nothing here, so nothing is signalled and the record is left
+  to [age out](configuration.md#host-logs).
+- **A craze the agent ran itself.** A process never signals its own group: a dead
+  host's command that happens to be a craze leaves the record for the next craze
+  outside it.
+- **`craze prompt`, and a TUI running its session in its own process.** Neither has a
+  host, so neither has a record. Killed outright, their shell commands run on.
+- **The TUI's `!` commands**, which are the person's own and are never recorded, even
+  in a TUI attached to a hosted session.
+- **The `git` a native session runs as it starts.** It is short-lived and killed on
+  any clean exit, so it is not recorded.
+- **A process of another user's**, which a signal cannot reach.
+
 ### Failures and kinds
 
 Everywhere a waiting command prints an `error` (a result's, and an exit-1 failure's)

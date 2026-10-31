@@ -11,10 +11,12 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -22,8 +24,10 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
+	"github.com/charliek/craze/internal/rundir"
 )
 
 // internalFailureSites is every failure in this package that leaves its kind
@@ -474,15 +478,60 @@ func TestTheWaitersOwnFailuresHaveTheirKinds(t *testing.T) {
 	t.Run("the socket lost, the host still listed", func(t *testing.T) {
 		r := newWaitRig(t, 0)
 		w := newTurnWaiter(r.dial(nil), waitStart{}, waitOptions{})
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		check(t, w.fail, errkind.ConnectionLost, true)
 	})
 	t.Run("the socket lost, the host gone", func(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(nil)
 		w.conn.entry.PID = exitedPID(t)
-		w.lost(errors.New("broken pipe"))
+		w.lost(context.Background(), errors.New("broken pipe"))
 		check(t, w.fail, errkind.HostExited, true)
+	})
+	t.Run("the socket lost, the host gone, the wait cut short", func(t *testing.T) {
+		// A --timeout or a signal as the waiter ends what the host left: host_exited
+		// all the same and at once, with the record there for the next craze.
+		env, _ := serveHome(t)
+		w := waiterAt(nil)
+		w.conn.entry.PID = exitedPID(t)
+		w.conn.entry.HostID = rundir.NewHostID()
+		dir, err := rundir.HostLogDir(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sleep", "30")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+		id, err := rundir.ProcessIdentity(cmd.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := hostspawn.NewGroupOwner()
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner.PID, owner.Start = w.conn.entry.PID, 1
+		record := filepath.Join(dir, hostspawn.AgentGroupsName(w.conn.entry.HostID))
+		line := hostspawn.AgentGroup{PGID: cmd.Process.Pid, Start: id.Start, Kind: hostspawn.GroupShell, Owner: owner}.Line()
+		if err := os.WriteFile(record, []byte(line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		w.lost(ctx, errors.New("broken pipe"))
+		check(t, w.fail, errkind.HostExited, true)
+		if !fileExists(record) {
+			t.Fatal("the record was removed")
+		}
+		if err := syscall.Kill(cmd.Process.Pid, 0); err != nil {
+			t.Fatalf("the command was signalled: %v", err)
+		}
 	})
 	t.Run("the session's end from its host", func(t *testing.T) {
 		serveHome(t)

@@ -56,6 +56,9 @@ func NewRootCmd() *cobra.Command {
 			if isCompletionRequest(cmd) {
 				return checkCompletionRequest(cmd, args)
 			}
+			if readsRegistry(cmd) {
+				startHostSweep()
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -114,9 +117,16 @@ func newVersionCmd() *cobra.Command {
 func Execute() {
 	ranCmd, err := NewRootCmd().ExecuteC()
 	if err == nil {
+		joinHostSweep()
 		return
 	}
-	os.Exit(report(os.Stdout, os.Stderr, ranCmd, os.Args[1:], err))
+	// What the command has to say is out before the join waits on anything, and the
+	// code it has determined is what the process exits with, whatever the join meets.
+	// The one other way out is auth's signal handler (terminal.go), and auth starts no
+	// sweep.
+	code := report(os.Stdout, os.Stderr, ranCmd, os.Args[1:], err)
+	joinHostSweep()
+	os.Exit(code)
 }
 
 // report is what Execute does with a command's error, given the command line:

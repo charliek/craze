@@ -564,12 +564,14 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// do neither.
 	opts.StartErrAgentStderr = true
 	opts.StartErrExitHint = loginSessionHint(f.hubPID)
-	// A spawned host records its agents' process groups for its spawner's
-	// last resort (plan 030 §3.4, X22), and an agent it cannot record does
-	// not run; one run by hand has no spawner to read them.
-	var groups *agentGroups
+	// Every host records its native shell commands' process groups, for whoever
+	// finds it dead (hostspawn.SweepDeadHosts). A spawned host also records its
+	// agents' for its spawner's last resort (plan 030 §3.4, X22), and an agent it
+	// cannot record does not run; one run by hand has no spawner to read them.
+	groups := newAgentGroups(runEnv, hostID, out)
+	opts.ShellGroups = groups.recordShell
+	opts.ShellMark = hostspawn.CommandMark(hostID)
 	if f.ready != nil {
-		groups = newAgentGroups(runEnv, hostID, out)
 		opts.AgentGroup = func(pgid int) error {
 			err := groups.record(pgid)
 			serveAgentGroup(pgid, err)
@@ -774,7 +776,7 @@ func loadWorkspace(cmd *cobra.Command, flag string, row sessions.Row) (string, e
 
 // serveHost is a running craze serve: its socket and claims (runHost), its
 // engine, its lifecycle coordinator and its log; for a spawned host, its
-// ready pipe and its agents' process-group record; and started, closed once
+// ready pipe; its process-group record; and started, closed once
 // the session's start (serveHost.start, on a goroutine of its own) has
 // returned.
 type serveHost struct {
@@ -938,7 +940,8 @@ func signalName(sig os.Signal) string {
 //     for, a native load's transcript lock inside harness.Open among them,
 //     and a claim released ahead of it would let a second host claim the
 //     session and fail on that lock;
-//  7. last, a spawned host's record of its agents' process groups removed.
+//  7. last, the host's record of its process groups removed: its agents and its
+//     shell commands, background jobs among them, have ended by now.
 //
 // A start that has not joined within the bound: this host kills the agents it
 // recorded itself (killOwnAgents: SIGTERM, a grace, SIGKILL, each group only
@@ -997,15 +1000,12 @@ func (h *serveHost) joinStart() bool {
 // SIGKILL if it is still there, and the record is removed. It is the
 // spawner's KillAgents, run by the host itself before it exits — a record
 // left for a launcher that has gone is an agent nobody ends. A host run by
-// hand records nothing and kills nothing.
+// hand has no agents in its record, only the shell commands its close has ended.
 func (h *serveHost) killOwnAgents() {
-	if h.groups == nil {
-		return
-	}
 	// Nothing is recorded from here: a spawn the stalled start finishes now
 	// is refused its record, which fails that start and ends its agent.
 	h.groups.seal()
-	hostspawn.KillRecordedAgents(h.groups.path, serveAgentTermGrace, func(format string, args ...any) {
+	hostspawn.KillRecordedAgents(h.groups.path, os.Getpid(), h.groups.owner.Start, serveAgentTermGrace, func(format string, args ...any) {
 		fmt.Fprintf(h.log, "craze serve: "+format+"\n", args...)
 	})
 }

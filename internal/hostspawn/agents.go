@@ -1,59 +1,96 @@
 package hostspawn
 
 import (
-	"errors"
-	"fmt"
+	"context"
 	"math"
-	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-
-	"github.com/charliek/craze/internal/rundir"
 )
 
-// A spawned host's record of its agents' process groups (plan 030 §3.4, R2-2,
-// X22): <host-logs>/<hostId>.pgids, one AgentGroup line per agent, which the
-// host appends as each agent is spawned and removes once its stop sequence has
-// ended them all. An ACP agent leads a process group of its own and may
-// outlive its pipes closing; a host its spawner has to kill outright — one
-// that never answered, or would not stop — cannot end it, and the spawner
-// kills each group recorded there after it (Child.KillAgents), each only while
-// its leader is the agent recorded. The host writes the record (craze serve's
-// agentGroups); this is its format and its last resort.
+// A host's record of what it runs in process groups of their own (plan 030 §3.4,
+// R2-2, X22): <host-logs>/<hostId>.pgids, one AgentGroup line per group. An ACP
+// agent's line is appended as the agent is spawned and goes when the host's stop
+// sequence has ended them all; a shell command's is appended as the command starts
+// and goes when its group has been reaped. An ACP agent leads a process group of
+// its own and may outlive its pipes closing, and a shell command leads a session;
+// a host killed outright can end neither. What may act on the record once the host
+// has gone is in reap.go. The host writes the record (craze serve's agentGroups);
+// this is its format and its last resort.
 
-// AgentGroupsName is a host's record of its agents' process groups, in the
-// host logs' directory beside its log.
-func AgentGroupsName(hostID string) string { return hostID + ".pgids" }
+// AgentGroupsName is a host's record of its process groups, in the host logs'
+// directory beside its log.
+func AgentGroupsName(hostID string) string { return hostID + groupsSuffix }
 
-// agentGroupsMax bounds how many records a spawner acts on: a host spawns one
-// agent per session start, so a file past it is not a host's.
-const agentGroupsMax = 1000
+// groupsSuffix is a record's name past the host's id.
+const groupsSuffix = ".pgids"
 
-// AgentGroup is one agent in a host's record: the process group it leads —
-// an ACP agent is spawned leading one of its own (acp.Spawn's Setpgid), so
-// the group's id is the agent's pid — and that leader's start time
-// (rundir.ProcIdentity), which is what makes the number the agent's and
-// nobody else's (astra r5-c3 1). A pid, and the group id with it, is free for
-// the next process once its own has gone and been reaped; a start time
-// cannot be the next process's, which started later.
+// AgentGroupsMax bounds how many entries a record holds, and how many a reader
+// acts on. A host's entries are what is running now: one per agent, one per shell
+// command, so a file past it is not a host's. A host that reaches it runs a command
+// without writing it down (agentGroups.recordShell), which is a leak if the host
+// is then killed; the docs say so.
+const AgentGroupsMax = 1000
+
+// The kinds of a record's entry.
+const (
+	// GroupAgent is an ACP agent's group (acp.Spawn's Setpgid).
+	GroupAgent = "agent"
+	// GroupShell is a native shell command's group, or ripgrep's: a session and a
+	// group, Setsid, whose leader's pid is both ids, and CommandMark in the
+	// environment of everything it starts.
+	GroupShell = "shell"
+)
+
+// GroupOwner is the host a record's entry belongs to, and where that means
+// anything: its pid and start time (rundir.ProcessIdentity), and the boot and
+// the PID namespace a number is meaningful in (rundir.ProcessScope). What tells
+// a sweep the host has died, and keeps it off a host still running, or one on
+// another boot or in another namespace using the same home directory.
+type GroupOwner struct {
+	PID   int
+	Start uint64
+	Boot  string
+	PIDNS string
+}
+
+func (o GroupOwner) valid() bool {
+	return o.PID > 1 && o.PID <= math.MaxInt32 && o.Start > 0 && o.Boot != "" && o.PIDNS != "" &&
+		!strings.ContainsAny(o.Boot+o.PIDNS, " \t\n")
+}
+
+// AgentGroup is one entry in a host's record: the process group, and that group's
+// leader's start time (rundir.ProcIdentity), which is what makes the number the
+// group's and nobody else's (astra r5-c3 1). A pid, and the group id with it, is
+// free for the next process once its own has gone and been reaped; a start time
+// cannot be the next process's, which started later. An ACP agent is spawned
+// leading a group of its own, and a shell command too, so the group's id is the
+// leader's pid. Kind and Owner are empty in an older craze's record, one whose
+// host could not read its scope, and an intermediate's report (reparent.go).
 type AgentGroup struct {
 	PGID  int
 	Start uint64
+	Kind  string
+	Owner GroupOwner
 }
 
-// Line is g as its record's line: "<pgid> <start>\n", one write(2).
+// Line is g as its record's line, one write(2): "<pgid> <start>\n", or with an
+// owner "<pgid> <start> <kind> <host pid> <host start> <boot> <pid namespace>\n".
 func (g AgentGroup) Line() string {
-	return strconv.Itoa(g.PGID) + " " + strconv.FormatUint(g.Start, 10) + "\n"
+	line := strconv.Itoa(g.PGID) + " " + strconv.FormatUint(g.Start, 10)
+	if g.Kind != "" {
+		line += " " + g.Kind + " " + strconv.Itoa(g.Owner.PID) + " " + strconv.FormatUint(g.Owner.Start, 10) + " " + g.Owner.Boot + " " + g.Owner.PIDNS
+	}
+	return line + "\n"
 }
 
-// ParseAgentGroup reads one record line: two decimal fields, a group id a
-// pid_t can hold and a start time; false for anything else — a blank line,
-// or one written by anything but AgentGroup.Line.
+// ParseAgentGroup reads one record line (Line): a group id a pid_t can hold and a
+// start time, and with them either nothing or a known kind and a whole owner;
+// false for anything else — a blank line, or one written by anything but
+// AgentGroup.Line.
 func ParseAgentGroup(line string) (AgentGroup, bool) {
 	f := strings.Fields(line)
-	if len(f) != 2 {
+	if len(f) != 2 && len(f) != 7 {
 		return AgentGroup{}, false
 	}
 	pgid, err := strconv.Atoi(f[0])
@@ -64,105 +101,67 @@ func ParseAgentGroup(line string) (AgentGroup, bool) {
 	if err != nil {
 		return AgentGroup{}, false
 	}
-	return AgentGroup{PGID: pgid, Start: start}, true
-}
-
-// stale says why g may no longer be the agent's group, "" when it is: the
-// process with the group's number — its leader, the agent — must still exist
-// and have started when the agent did. A leader that has exited leaves a
-// group, if anything is left in it, whose number cannot be told from a
-// stranger's that has taken it since; a leader with another start time is a
-// stranger, its group whatever that stranger's is. Either is left alone. What
-// stays open is the instant between this read and the signal: the leader
-// would have to exit, be reaped and have its number taken by a new group
-// leader in it (plan 030 X22).
-func (g AgentGroup) stale() string {
-	id, err := rundir.ProcessIdentity(g.PGID)
-	switch {
-	case errors.Is(err, rundir.ErrNoProcess):
-		return "its agent has exited, and a group whose leader has gone cannot be told from another's"
-	case err != nil:
-		return "its agent cannot be told: " + err.Error()
-	case id.Start != g.Start:
-		return fmt.Sprintf("its number is another process's now (started at %d, the agent at %d)", id.Start, g.Start)
+	g := AgentGroup{PGID: pgid, Start: start}
+	if len(f) == 2 {
+		return g, true
 	}
-	return ""
+	hostPID, err := strconv.Atoi(f[3])
+	if err != nil {
+		return AgentGroup{}, false
+	}
+	hostStart, err := strconv.ParseUint(f[4], 10, 64)
+	if err != nil {
+		return AgentGroup{}, false
+	}
+	g.Kind = f[2]
+	g.Owner = GroupOwner{PID: hostPID, Start: hostStart, Boot: f[5], PIDNS: f[6]}
+	if (g.Kind != GroupAgent && g.Kind != GroupShell) || g.Start == 0 || !g.Owner.valid() {
+		return AgentGroup{}, false
+	}
+	return g, true
 }
 
-// KillRecordedAgents kills every agent process group the record at path names
-// and removes the record. A group is signalled only while it is provably the
-// agent's (plan 030 X22, astra r5-c3 1): the process leading it — the agent,
-// whose pid is the group's id — still there, and started at the instant the
-// host recorded (AgentGroup.stale). A number an agent had can be anyone's once
-// the agent has gone and been reaped; a group whose leader has exited or is a
-// stranger is left alone, and note says so. Never 0 or 1 or this process's
-// own group, and at most agentGroupsMax records.
+// KillRecordedAgents ends every process group the record at path names and removes
+// the record: a spawner's last resort after its own child, the host, has gone, or a
+// stopping host's own. pid and start name that host (start 0: not known). A host id
+// can be used again, so what is at the path may be another host's by now: lines
+// whose owner is not this host, or that disagree, are left alone and the file with
+// them. A line with no owner has nothing to say about that, and is acted on here and
+// nowhere else. It takes the record's lock as a sweep does, and leaves a record a
+// sweep holds to that sweep. A group is signalled only while it is provably the group
+// written down (reaper.fate), and each one left alone is noted, as is a line that
+// names none. Never 0 or 1 or this process's own group, and at most AgentGroupsMax
+// records. A shell command's entry that could not be told keeps the record, for the
+// sweep that can.
 //
 // With a grace (a stopping host's own last resort, craze serve's
-// serveHost.killOwnAgents) each group is sent SIGTERM first, and SIGKILL once
-// the grace is over if its leader is still the agent — checked again, since
-// the agent may have exited meanwhile and its number gone to another. Without
-// one (the spawner, after its host has gone) SIGKILL at once.
-func KillRecordedAgents(path string, grace time.Duration, note func(format string, args ...any)) {
-	b, err := os.ReadFile(path)
-	if err != nil {
+// serveHost.killOwnAgents) each group is sent SIGTERM first, and SIGKILL once the
+// grace is over if it is still the group written down, read again, since its leader
+// may have exited meanwhile and its number gone to another; this returns when that is
+// done. Without one (the spawner, after its host has gone) an agent has SIGKILL at
+// once, and a shell command, which a host killed outright gave no chance to stop, has
+// SIGTERM and then SIGKILL after ReapGrace. That part goes on behind the return, so
+// no spawner's watch waits on it; a spawner that exits first leaves the record for
+// the next sweep.
+func KillRecordedAgents(path string, pid int, start uint64, grace time.Duration, note func(format string, args ...any)) {
+	rec, _ := openRecord(path, note)
+	if rec == nil {
 		return
 	}
-	own := syscall.Getpgrp()
-	var ours []AgentGroup
-	n := 0
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if n++; n > agentGroupsMax {
-			note("agent process groups past the first %d in %s not killed", agentGroupsMax, path)
-			break
-		}
-		g, ok := ParseAgentGroup(line)
-		if !ok || g.PGID <= 1 || g.PGID == own {
-			if len(line) > 64 {
-				line = line[:64] + "…"
-			}
-			note("a record that names no agent's process group not acted on: %q", line)
-			continue
-		}
-		if why := g.stale(); why != "" {
-			note("agent process group %d not killed: %s", g.PGID, why)
-			continue
-		}
-		ours = append(ours, g)
+	if o := rec.owner; rec.mixed || (o != (GroupOwner{}) && (o.PID != pid || (start != 0 && o.Start != start))) {
+		note("a record at %s that is not this host's (%d) left alone", path, pid)
+		rec.release()
+		return
 	}
-	if grace > 0 && len(ours) > 0 {
-		for _, g := range ours {
-			_ = syscall.Kill(-g.PGID, syscall.SIGTERM)
-		}
-		deadline := time.Now().Add(grace)
-		for time.Now().Before(deadline) && anyAgentLeft(ours) {
-			time.Sleep(agentExitPoll)
-		}
+	recs := []*groupRecord{rec}
+	r := &reaper{ctx: context.Background(), firstBy: time.Now().Add(2 * sweepRead), grace: grace, direct: true, agentsAtOnce: grace == 0}
+	if grace == 0 {
+		r.grace = ReapGrace
 	}
-	for _, g := range ours {
-		// Checked again after a grace: an agent that exited meanwhile, its
-		// number since another's, is not signalled.
-		if grace > 0 && g.stale() != "" {
-			continue
-		}
-		_ = syscall.Kill(-g.PGID, syscall.SIGKILL)
+	termed := r.first(recs)
+	if grace == 0 && len(termed) > 0 {
+		go r.second(recs, termed)
+		return
 	}
-	_ = os.Remove(path)
-}
-
-// agentExitPoll is how often a grace looks for its agents to have gone.
-const agentExitPoll = 20 * time.Millisecond
-
-// anyAgentLeft reports whether any of gs still leads its group as the agent
-// recorded.
-func anyAgentLeft(gs []AgentGroup) bool {
-	for _, g := range gs {
-		if g.stale() == "" {
-			return true
-		}
-	}
-	return false
+	r.second(recs, termed)
 }

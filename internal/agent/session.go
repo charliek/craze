@@ -1145,6 +1145,15 @@ type Options struct {
 	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
 	// native session spawns no agent and never calls it.
 	AgentGroup func(pgid int) error
+	// ShellGroups, when set, is told of every process group a native session's
+	// tools start, a shell command's or ripgrep's: a host writes them down beside
+	// AgentGroup's, so that the commands of a host killed outright can be ended
+	// after it. Unlike AgentGroup's it cannot fail a thing: a command runs whether
+	// or not it could be written down. An ACP session never calls it.
+	ShellGroups harness.GroupRecorder
+	// ShellMark is an environment entry every process those tools start carries,
+	// which recognises it as this host's once the leader of its group has gone.
+	ShellMark string
 	// ContentHome is the home directory a native session reads the user's own
 	// Claude content under — commands, skills and the installed plugins
 	// (§3.1). "" is HomeDir(), which is what production wants and what every

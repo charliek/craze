@@ -86,8 +86,9 @@ func (r OrphanReport) String() string {
 //     sweeps registry orphans only, and a dead host's socket stays until its
 //     directory is cleared, as before plan 032.
 //
-//  3. Nothing is signalled. A dead host's agents and its .pgids are left to
-//     its spawner and the host-log sweep (SweepHostLogs).
+//  3. Nothing is signalled here. A dead host's process groups are the hub's next
+//     step (hostspawn.SweepDeadHosts, which this package cannot import), and the
+//     file that records them is the host-log sweep's (SweepHostLogs).
 //
 // A registry that does not validate is an error, and then no socket is
 // touched either, since no host's lock can be told; one that does not exist

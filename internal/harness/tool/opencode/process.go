@@ -74,6 +74,10 @@ type group struct {
 	// reaped is closed once the leader has been reaped; state is set then.
 	reaped chan struct{}
 	state  *os.ProcessState
+	// forget removes the group from the host's record (tool.GroupRecorder): once
+	// its last signal has gone and its leader has been reaped, so a host killed
+	// at any instant before that leaves it written down. nil: not recorded.
+	forget func()
 	// grace is the SIGTERM-to-SIGKILL grace supervise gives the group: 0 is
 	// termGrace, every production group's. A test whose premise needs the
 	// command scheduled inside the grace gives it longer, so a starved CPU
@@ -109,8 +113,9 @@ func (g *group) drainWait() time.Duration {
 }
 
 // startGroup starts cmd, which must set SysProcAttr.Setsid, and watches its
-// leader.
-func startGroup(cmd *exec.Cmd) (*group, error) {
+// leader, having told record of the group (nil: nobody to tell) before anything
+// may reap the leader: the pid names it for as long as record takes.
+func startGroup(cmd *exec.Cmd, record tool.GroupRecorder) (*group, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -120,6 +125,9 @@ func startGroup(cmd *exec.Cmd) (*group, error) {
 		exited:  make(chan struct{}),
 		release: make(chan struct{}),
 		reaped:  make(chan struct{}),
+	}
+	if record != nil {
+		g.forget = record(g.pid)
 	}
 	go g.watch()
 	return g, nil
@@ -155,6 +163,12 @@ func (g *group) watch() {
 	g.state = g.cmd.ProcessState
 	if !pinned {
 		close(g.exited)
+	}
+	if g.forget != nil {
+		// Where reaping is how watch learned, the group's last signal may be yet
+		// to come, and what it is meant for is still running.
+		<-g.release
+		g.forget()
 	}
 }
 

@@ -46,7 +46,7 @@ func TestHostLogDirIsMade0700InTheCacheTree(t *testing.T) {
 }
 
 // TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs: the sweep removes a host's
-// log, its rotation and its pgids file once they are older than the bound —
+// log, its rotation and its stop record once they are older than the bound —
 // and nothing else: a recent file, a live host's old log, a name that is not
 // a host's, a symlink (never followed, never a regular file) and a directory
 // all stay. A missing directory is nothing to sweep, and is not made.
@@ -82,8 +82,9 @@ func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 		}
 		return p
 	}
-	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".pgids"), aged(gone + ".stop")}
-	kept := []string{aged(live + ".log"), aged("notes.log"), aged(gone + ".txt"), aged("ABCDEF012345.log")}
+	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".stop"), aged("." + gone + ".pgids.4815")}
+	// A record can name something still running, however old: hostspawn's to remove.
+	kept := []string{aged(gone + ".pgids"), aged(live + ".log"), aged("." + live + ".pgids.4815"), aged("notes.log"), aged(gone + ".txt"), aged("." + gone + ".log.4815"), aged("ABCDEF012345.log")}
 	recent := filepath.Join(dir, NewHostID()+".log")
 	writeFile(t, recent, "x")
 	kept = append(kept, recent)
@@ -147,7 +148,7 @@ func TestSweepHostLogsDecidesDeathByTheHostLock(t *testing.T) {
 	aged := func(id string) []string {
 		t.Helper()
 		var ps []string
-		for _, suffix := range []string{".log", ".log.1", ".pgids"} {
+		for _, suffix := range []string{".log", ".log.1", ".stop"} {
 			p := filepath.Join(dir, id+suffix)
 			writeFile(t, p, "x")
 			if err := os.Chtimes(p, old, old); err != nil {
@@ -238,7 +239,7 @@ func TestASweepOfACopiedRegistryLeavesTheLiveLogs(t *testing.T) {
 	}
 	h := bind(t, env)
 	old := now.Add(-2 * time.Hour)
-	files := []string{h.ID() + ".log", h.ID() + ".log.1", h.ID() + ".pgids"}
+	files := []string{h.ID() + ".log", h.ID() + ".log.1", h.ID() + ".stop"}
 	aged := func(dir string) {
 		t.Helper()
 		for _, n := range files {

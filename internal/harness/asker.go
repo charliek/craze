@@ -12,6 +12,10 @@ import (
 // both Fantasy and the tool framework (Seam 1, plan 019 §3.1).
 type Asker = tool.Asker
 
+// GroupRecorder is how a caller hears of the process groups a session's tools
+// start (Options.ProcessGroups).
+type GroupRecorder = tool.GroupRecorder
+
 // watchedAsker is the caller's asker (Options.Asker) with the session
 // watching one outcome over its shoulder: a plan the person approved, which
 // ends the turn (plan 023 §3.4, D-51).

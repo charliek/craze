@@ -1062,7 +1062,7 @@ func TestServeSweepsOldHostLogsAtStart(t *testing.T) {
 	gone, recent := rundir.NewHostID(), rundir.NewHostID()
 	old := time.Now().Add(-8 * 24 * time.Hour)
 	var stale []string
-	for _, name := range []string{gone + ".log", gone + ".log.1", gone + ".pgids"} {
+	for _, name := range []string{gone + ".log", gone + ".log.1", gone + ".stop"} {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
@@ -1076,6 +1076,20 @@ func TestServeSweepsOldHostLogsAtStart(t *testing.T) {
 	if err := os.WriteFile(kept, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A process-group record can name something still running, however old: a
+	// starting host leaves it to the craze commands that can act on it.
+	record := filepath.Join(dir, gone+".pgids")
+	if err := os.WriteFile(record, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(record, old, old); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if !fileExists(record) {
+			t.Error("a starting host removed a process-group record")
+		}
+	})
 	hostID := rundir.NewHostID()
 	own := filepath.Join(dir, hostID+".log")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")

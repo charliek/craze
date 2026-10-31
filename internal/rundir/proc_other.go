@@ -5,6 +5,7 @@ package rundir
 import (
 	"fmt"
 	"runtime"
+	"time"
 )
 
 // processIdentity has no implementation off Linux and macOS: every read
@@ -19,3 +20,17 @@ func processIdentity(int) (ProcIdentity, error) {
 func processTokenScope() (string, string, error) {
 	return "", "", fmt.Errorf("start token scopes are not implemented on %s", runtime.GOOS)
 }
+
+// processGroups has no implementation off Linux and macOS: a scan says nothing,
+// so no group is signalled on its word.
+func processGroups(time.Time) (map[int][]GroupMember, error) {
+	return nil, fmt.Errorf("process scans are not implemented on %s", runtime.GOOS)
+}
+
+// processMember has no implementation off Linux and macOS.
+func processMember(int) (GroupMember, error) {
+	return GroupMember{}, fmt.Errorf("process reads are not implemented on %s", runtime.GOOS)
+}
+
+// processCarries is false off Linux and macOS: nothing can be read.
+func processCarries(int, string) bool { return false }

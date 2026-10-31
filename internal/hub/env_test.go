@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/paths"
 )
 
@@ -112,5 +113,14 @@ func TestChildEnvResolvesCrazeHomeAsCrazeDoes(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimPrefix(got[1], "CRAZE_HOME="), "/") {
 			t.Errorf("CRAZE_HOME=%q is handed on relative: %q", v, got[1])
 		}
+	}
+}
+
+// TestChildEnvRemovesACommandsMark: a native command's mark of its host is no hub's or
+// host's, whatever environment one is handed.
+func TestChildEnvRemovesACommandsMark(t *testing.T) {
+	got := ChildEnv([]string{hostspawn.CommandMark("0a0b0c0d0e0f"), "PATH=/bin"}, "/")
+	if len(got) != 1 || got[0] != "PATH=/bin" {
+		t.Fatalf("handed on: %q", got)
 	}
 }

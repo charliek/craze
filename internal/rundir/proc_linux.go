@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // processIdentity reads /proc/<pid>/stat (parseProcStat). A pid with no
@@ -24,6 +25,80 @@ func processIdentity(pid int) (ProcIdentity, error) {
 		return ProcIdentity{}, err
 	}
 	return parseProcStat(string(b))
+}
+
+// processGroups reads /proc/<pid>/stat for every number in /proc (ProcessGroups).
+// The read's own buffer is one page, past any stat line, so a scan is three
+// syscalls a process. The deadline is looked at every so often, not every read.
+func processGroups(deadline time.Time) (map[int][]GroupMember, error) {
+	d, err := os.Open("/proc")
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	groups := map[int][]GroupMember{}
+	buf := make([]byte, 4096)
+	for i, name := range names {
+		pid, err := strconv.Atoi(name)
+		if err != nil {
+			continue
+		}
+		if i%64 == 0 && time.Now().After(deadline) {
+			return nil, ErrScanCut
+		}
+		n := readStat(name, buf)
+		if n <= 0 {
+			continue
+		}
+		m, err := parseProcMember(pid, string(buf[:n]))
+		if err != nil {
+			continue
+		}
+		groups[m.PGID] = append(groups[m.PGID], m)
+	}
+	return groups, nil
+}
+
+// processMember reads one /proc/<pid>/stat (ProcessMember).
+func processMember(pid int) (GroupMember, error) {
+	buf := make([]byte, 4096)
+	n := readStat(strconv.Itoa(pid), buf)
+	if n <= 0 {
+		return GroupMember{}, ErrNoProcess
+	}
+	return parseProcMember(pid, string(buf[:n]))
+}
+
+// readStat reads /proc/<pid>/stat into buf: how much, or 0 for a process that
+// has gone or cannot be read.
+func readStat(pid string, buf []byte) int {
+	fd, err := syscall.Open("/proc/"+pid+"/stat", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	n, err := syscall.Read(fd, buf)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// processCarries reads /proc/<pid>/environ, which the kernel shows only to whoever
+// may ptrace the process, once /proc/<pid> says the process is this user's: a
+// process running as root reads every other user's too.
+func processCarries(pid int, mark string) bool {
+	dir := "/proc/" + strconv.Itoa(pid)
+	var st syscall.Stat_t
+	if syscall.Stat(dir, &st) != nil || int(st.Uid) != os.Geteuid() {
+		return false
+	}
+	b, err := os.ReadFile(dir + "/environ")
+	return err == nil && environHolds(b, mark)
 }
 
 // procSelfStatus is /proc/self/status: os.ReadFile, which a test replaces

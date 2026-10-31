@@ -18,10 +18,11 @@ import (
 // The host logs (plan 030 §3.3, §3.4): <Home>/.cache/craze/host-logs, beside
 // the registry and the session locks and validated as they are. A detached
 // host (craze serve) writes its own diagnostics and its agent's stderr to
-// <hostId>.log there, rotated once to <hostId>.log.1; the spawner records the
-// process groups of a host's agents beside it in <hostId>.pgids, and a host that
-// begins to stop says so in <hostId>.stop (StopRecord). Every host sweeps the
-// directory as it starts (SweepHostLogs), so it never outgrows a week of hosts.
+// <hostId>.log there, rotated once to <hostId>.log.1; it records the process
+// groups of its agents and its shell commands beside it in <hostId>.pgids, and a
+// host that begins to stop says so in <hostId>.stop (StopRecord). Every host
+// sweeps the directory as it starts (SweepHostLogs), so it never outgrows a week
+// of hosts.
 
 // hostLogsName is the host logs' directory under the cache tree.
 const hostLogsName = "host-logs"
@@ -47,10 +48,41 @@ func HostLogDir(env Env) (string, error) {
 	return d.path, nil
 }
 
+// ExistingHostLogDir is HostLogDir for a reader, which makes nothing: a tree
+// that does not exist yet answers fs.ErrNotExist, and one that fails validation
+// its error.
+func ExistingHostLogDir(env Env) (string, error) {
+	d, err := env.cacheDir(hostLogsName, false)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = d.close() }()
+	return d.path, nil
+}
+
+// HostLockFree reports whether the host id is gone by its own lock (hostGone):
+// missing, or free. Held, or cannot be told, is false. The lock is let go at
+// once: it answers a question, and removes nothing.
+func HostLockFree(env Env, id string) bool {
+	hosts, err := env.cacheDir(hostsName, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	defer func() { _ = hosts.close() }()
+	release, gone := hostGone(hosts, id)
+	release()
+	return gone
+}
+
 // SweepHostLogs removes from the host logs' directory everything a host that
 // is gone left there and nobody has touched for maxAge: each regular file whose
-// name is <hostId>.log, <hostId>.log.<n>, <hostId>.pgids or <hostId>.stop — a
-// name that is not a host id's is left alone — last modified before now less maxAge, and
+// name is <hostId>.log, <hostId>.log.<n>, <hostId>.stop or a .<hostId>.pgids.<n>
+// left by a rewrite that died — a name that is not a host id's is left alone, and
+// <hostId>.pgids is hostspawn's, since an old one can still name something running
+// — last modified before now less maxAge, and
 // whose host is gone by its own host lock (hostGone): a host that has run,
 // silent, for longer is still writing to it. keep is a name never removed
 // whatever its age — the log the sweeping host is about to open and append to
@@ -188,14 +220,23 @@ func hostGone(hosts *dir, id string) (release func(), gone bool) {
 	}, true
 }
 
-// hostLogOwner is the host id a host-logs name belongs to — <id>.log,
-// <id>.log.<n>, <id>.pgids or <id>.stop — or false for any other name.
+// hostLogOwner is the host id a host-logs name this sweep owns belongs to —
+// <id>.log, <id>.log.<n>, <id>.stop, or .<id>.pgids.<n>, a rewrite of the
+// process-group record that died before its rename — or false for any other
+// name.
 func hostLogOwner(name string) (string, bool) {
+	if temp, ok := strings.CutPrefix(name, "."); ok {
+		id, rest, ok := strings.Cut(temp, ".")
+		if ok && ValidHostID(id) && strings.HasPrefix(rest, "pgids.") {
+			return id, true
+		}
+		return "", false
+	}
 	id, rest, ok := strings.Cut(name, ".")
 	if !ok || !ValidHostID(id) {
 		return "", false
 	}
-	if rest == "log" || rest == "pgids" || rest == stopRecordExt || strings.HasPrefix(rest, "log.") {
+	if rest == "log" || rest == stopRecordExt || strings.HasPrefix(rest, "log.") {
 		return id, true
 	}
 	return "", false

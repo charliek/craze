@@ -38,6 +38,11 @@ type toolSeams struct {
 	profiles func() (*tool.Registry, error)
 	// gate judges every call before it runs; nil is tool.AllowAll.
 	gate tool.Gate
+	// groups is Options.ProcessGroups, here so a child session has its parent's
+	// with the rest of what childBase keeps: not a test seam.
+	groups tool.GroupRecorder
+	// mark is Options.ProcessMark, kept for the same reason.
+	mark string
 }
 
 // toolset is one session's tools, fixed from Open to Close.
@@ -444,7 +449,9 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		// Every session's commands are tracked (plan 033 C14r, r12 #6a),
 		// a child's and a headless one's too: a token minted while one runs
 		// reaches its stream through extend, as a job's does (X91).
-		Streams: streams{ts},
+		Streams:       streams{ts},
+		ProcessGroups: seams.groups,
+		ProcessMark:   seams.mark,
 	}
 	// Set only when there is one, so a child's Env.Todos is a nil interface
 	// rather than an interface around a nil store: todo_write tests the

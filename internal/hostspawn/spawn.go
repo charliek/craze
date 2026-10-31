@@ -290,6 +290,10 @@ type Child struct {
 	// groups is the host's record of its agents' process groups
 	// (AgentGroupsName).
 	groups string
+	// ownStart is a child of this process's own's start time, read before anything
+	// could reap it: what its record's owner is compared with. 0 for one that could
+	// not be read, and for a reparented host, whose start is start.
+	ownStart uint64
 	// log is the host's log, where the spawner notes a recorded group it
 	// did not kill (note).
 	log  string
@@ -354,6 +358,9 @@ func StartCmd(cmd *exec.Cmd, marker, groups, log string) (*Child, *os.File, erro
 		return nil, nil, startError(cmd, err)
 	}
 	c := &Child{cmd: cmd, pid: cmd.Process.Pid, groups: groups, log: log, done: make(chan struct{})}
+	if id, err := rundir.ProcessIdentity(c.pid); err == nil {
+		c.ownStart = id.Start
+	}
 	go func() {
 		c.err = cmd.Wait()
 		close(c.done)
@@ -574,13 +581,18 @@ func checkThenSignal(pid int, start uint64, sig syscall.Signal, group bool) bool
 	return syscall.Kill(target, sig) == nil
 }
 
-// KillAgents kills every agent process group the host recorded and removes
-// the record: nothing, for a host that stopped cleanly and removed it itself
+// KillAgents kills every agent process group this host recorded and removes
+// the record: nothing, for a host that stopped cleanly and removed it itself, and
+// nothing for a record another host has written at the same name since
 // (KillRecordedAgents, at once: the host has gone, and so has any grace an
 // agent would have had from it). The host's log says what was left alone
 // (note).
 func (c *Child) KillAgents() {
-	KillRecordedAgents(c.groups, 0, c.note)
+	start := c.start
+	if start == 0 {
+		start = c.ownStart
+	}
+	KillRecordedAgents(c.groups, c.pid, start, 0, c.note)
 }
 
 // note appends one line to the host's log: what the spawner did after the

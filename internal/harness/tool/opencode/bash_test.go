@@ -1730,7 +1730,7 @@ func stallOp(t *testing.T, c *bashCall, op string) *stall {
 	case "tmp mkdir":
 		c.ops.ensureTmp = func(p string) error { s.hold(); return real.ensureTmp(p) }
 	case "exec start":
-		c.ops.start = func(cmd *exec.Cmd) (*group, error) { s.hold(); return real.start(cmd) }
+		c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) { s.hold(); return real.start(cmd, rec) }
 	case "spill open":
 		c.ops.openSpill = func(string, string) (spillFile, error) { s.hold(); return f, nil }
 	case "spill write":
@@ -1750,8 +1750,8 @@ func stallOp(t *testing.T, c *bashCall, op string) *stall {
 func startedPIDs(c *bashCall) <-chan int {
 	pids := make(chan int, 1)
 	start := c.ops.start
-	c.ops.start = func(cmd *exec.Cmd) (*group, error) {
-		g, err := start(cmd)
+	c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+		g, err := start(cmd, rec)
 		if err == nil {
 			pids <- g.pid
 		}
@@ -2454,8 +2454,8 @@ func TestBashStopAsTheStartCompletes(t *testing.T) {
 			var r *bashRun
 			ready := make(chan struct{})
 			start := c.ops.start
-			c.ops.start = func(cmd *exec.Cmd) (*group, error) {
-				g, err := start(cmd)
+			c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+				g, err := start(cmd, rec)
 				<-ready
 				switch tc.name {
 				case "a cancel":
@@ -2513,8 +2513,8 @@ func TestBashStopBeforeLaunchTakesTheStart(t *testing.T) {
 				var r *bashRun
 				ready, returned := make(chan struct{}), make(chan struct{})
 				start := c.ops.start
-				c.ops.start = func(cmd *exec.Cmd) (*group, error) {
-					g, err := start(cmd)
+				c.ops.start = func(cmd *exec.Cmd, rec tool.GroupRecorder) (*group, error) {
+					g, err := start(cmd, rec)
 					<-ready
 					if tc.name == "a cancel" {
 						r.cancel(nil)

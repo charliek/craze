@@ -352,6 +352,13 @@ type Env struct {
 	// jobs tracks through Jobs.Track, the same registry. nil tracks nothing
 	// (a test's Env).
 	Streams StreamTracker
+	// ProcessGroups is told of every process group a tool starts, a command's
+	// or ripgrep's. nil records nothing.
+	ProcessGroups GroupRecorder
+	// ProcessMark is an environment entry ("NAME=value") every process a tool starts
+	// carries, whatever the user's environment holds: what recognises a process
+	// ProcessGroups was told of once the leader of its group has gone. "" is none.
+	ProcessMark string
 	// Vision says whether the model the call runs for accepts images
 	// (modeltable's vision flag, plan 033 §3.5): a tool returns an image
 	// (Result.Media) only when it does, and otherwise says the model cannot
@@ -368,6 +375,15 @@ type Env struct {
 	// "<model> does not accept images". "" before any turn has set it.
 	ModelName string
 }
+
+// GroupRecorder writes down the process group a tool has just started, whose
+// leader is pid, for whoever must end it if this process is killed outright; this
+// package may not import what does the writing, so it is a seam of its own. It is
+// called once the leader has started and before anything may reap it, so the pid
+// still names it. It returns what removes the entry, called once the group has
+// had its last signal and its leader has been reaped, and never nil. A group it
+// could not write down runs all the same: a failure is its own to report.
+type GroupRecorder func(pid int) (forget func())
 
 // CurrentRedactor is the session's redactor as it is now, not as it was when
 // the call began (Redactor): the dispatcher's, which a key the session learns

@@ -464,7 +464,7 @@ func TestASecondSignalHurriesAnAbandonedSpawn(t *testing.T) {
 		// It never acts on SIGTERM: killed, and the agents it recorded.
 		_ = syscall.Kill(-e.PID, syscall.SIGKILL)
 		waitReaped(t, e.PID)
-		hostspawn.KillRecordedAgents(filepath.Join(hostLogsDir(t, env), hostspawn.AgentGroupsName(e.HostID)), 0, func(string, ...any) {})
+		hostspawn.KillRecordedAgents(filepath.Join(hostLogsDir(t, env), hostspawn.AgentGroupsName(e.HostID)), e.PID, e.PIDStart, 0, func(string, ...any) {})
 	})
 	sigs <- syscall.SIGINT
 	select {

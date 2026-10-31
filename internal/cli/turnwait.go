@@ -685,7 +685,7 @@ func pumpStream(ctx context.Context, st *remote.Stream, out chan<- pumped) {
 // item is one stream item.
 func (w *turnWaiter) item(ctx context.Context, p pumped) {
 	if p.err != nil {
-		w.lost(p.err)
+		w.lost(ctx, p.err)
 		return
 	}
 	it := p.it
@@ -721,7 +721,7 @@ func (w *turnWaiter) item(ctx context.Context, p pumped) {
 		}
 		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
 	case remote.KindError:
-		w.lost(it.Err)
+		w.lost(ctx, it.Err)
 	}
 }
 
@@ -734,7 +734,7 @@ func (w *turnWaiter) item(ctx context.Context, p pumped) {
 // turn is all there will be; one running has a connection lost and a turn that
 // runs on (the handle follows it); one that cannot be named is never host_exited,
 // and nothing is claimed of its turn.
-func (w *turnWaiter) lost(err error) {
+func (w *turnWaiter) lost(ctx context.Context, err error) {
 	if err == nil || errors.Is(err, remote.ErrStreamClosed) {
 		err = errors.New("the stream closed")
 	}
@@ -754,6 +754,10 @@ func (w *turnWaiter) lost(err error) {
 	lost := "lost the connection to session " + psShort(w.session.id) + ": " + sanitizeLine(err.Error())
 	switch readHost(e) {
 	case hostExited:
+		// Before the failure is written: what the waiter reports is then true of
+		// the commands the host left, with no later craze needed to make it so. A
+		// --timeout or a signal cuts it short, and leaves them to the next craze.
+		reapHostGroups(ctx, e.HostID)
 		w.sessionGone("the session ended: its host exited with no ending for the turn"+reloadHint(matchCrazeID(indexCrazeIDs(), w.session.id)), errkind.HostExited)
 	case hostRunning:
 		w.fail = &waitFailure{msg: lost + "; the turn runs on in its host", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}

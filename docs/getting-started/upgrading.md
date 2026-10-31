@@ -23,7 +23,8 @@ craze:
   names that hub's pid: `the session host cannot be started; the hub (pid
   <pid>) runs craze <old> and this is craze <new>: if craze was upgraded, stop
   that hub with kill <pid> (no session ends) and run this again`. `kill` it:
-  every session runs on, and the next command starts the new craze's hub.
+  every session runs on, and the next command that needs a hub (`craze ps`, `craze
+  new`, the TUI's session list) starts the new craze's.
 - **From this release on, the hub says so itself** — `this hub's craze
   (<path>) was replaced by an upgrade: stop this hub with kill <pid> (no
   session ends) and run this again` — and goes on serving its clients and the
@@ -274,6 +275,30 @@ becomes
 ```json
 {"error":{"message":"/no/such/dir is not a directory"},"kind":"workspace"}
 ```
+
+**A killed host's shell commands are ended.** A native host killed outright used to
+leave its shell commands running with nothing to end them. They are now sent `SIGTERM`
+and then `SIGKILL`, by a waiter that sees the host go, or else by the next craze
+command to run: see [what a dead host leaves
+running](../reference/cli.md#what-a-dead-host-leaves-running), including what it does
+not reach. A command you meant to outlive its host has to leave its process group
+(`setsid`), as one meant to outlive its call already does. A command that finds a
+group ignoring `SIGTERM` takes about 2 s longer to exit, with its output already
+written. Every native command now has `CRAZE_HOST_ID` in its environment.
+`<hostId>.pgids` in the host logs' directory now has a longer line and exists for a
+host run by hand too; anything that read it should stop. It is also no longer removed
+with the host's logs after 7 days.
+
+**Restart the hub after upgrading.** A hub from before this release, still running, can
+start a new host through the replaced binary, and when that host dies it removes the
+host's record without signalling anything, because it can't read the new lines. Those
+commands then run on, as they did before this release. To restart it, take its pid from
+the `pid` field of `~/.cache/craze/hubs/<ns>.json`, or from a message that names it,
+check that `ps -o args= -p <pid>` still shows `craze hub`, and `kill <pid>`. Running
+hosts keep running; a session still being created at that moment may fail, and can be
+created again. The next command that needs a hub (`craze ps`, `craze new`, the TUI's
+session list) starts the new one. `craze version`, `craze wait` and `craze ps --no-hub`
+don't.
 
 **cursor's and grok's refusal of `--model` says so.** A model the agent will not
 start on used to read `json-rpc error -32602: Invalid params`, and now says `the

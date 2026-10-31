@@ -326,10 +326,10 @@ type bashCall struct {
 // and watch Run return all the same (output.go says how). realOps are the
 // real ones.
 type ops struct {
-	stat      func(string) (os.FileInfo, error) // the workdir check
-	ensureTmp func(string) error                // the temporary directory: made, or checked
-	start     func(*exec.Cmd) (*group, error)   // exec, in the workdir
-	openSpill spillOpener                       // the spill file, under the harness home
+	stat      func(string) (os.FileInfo, error)                   // the workdir check
+	ensureTmp func(string) error                                  // the temporary directory: made, or checked
+	start     func(*exec.Cmd, tool.GroupRecorder) (*group, error) // exec, in the workdir
+	openSpill spillOpener                                         // the spill file, under the harness home
 	// expiring is a test seam: promotion.expiring, run as the foreground
 	// timeout fires in a session that runs jobs. nil in production.
 	expiring func()
@@ -721,7 +721,7 @@ func (c *bashCall) start(env tool.Env, hold *readEnd) (*group, *os.File, error) 
 	cmd.Env = environ(env, c.dir)
 	cmd.Stdout, cmd.Stderr = w, w
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	g, err := c.ops.start(cmd)
+	g, err := c.ops.start(cmd, env.ProcessGroups)
 	// The command has its own copy of the write end. Once craze's is
 	// closed, the pipe closes when the last process holding it exits.
 	_ = w.Close()
@@ -742,11 +742,16 @@ func (c *bashCall) start(env tool.Env, hold *readEnd) (*group, *os.File, error) 
 //
 // noPrompt comes last so that it overrides: exec.Cmd keeps the last value of
 // a name it finds twice, so the user's PAGER or EDITOR never reaches the
-// command. ripgrep (grep and glob) runs with this environment too, where
+// command. Env.ProcessMark comes after it, for the same reason: a host's commands
+// carry its own mark, not one it inherited from a craze that an agent ran. ripgrep (grep and glob) runs with this environment too, where
 // none of it changes anything: rg writes JSON or NUL-separated paths to a
 // pipe.
 func environ(env tool.Env, dir string) []string {
-	return append(append(tool.ChildEnviron(env.Environ, nil), "PWD="+dir), noPrompt...)
+	e := append(append(tool.ChildEnviron(env.Environ, nil), "PWD="+dir), noPrompt...)
+	if env.ProcessMark != "" {
+		e = append(e, env.ProcessMark)
+	}
+	return e
 }
 
 // noPrompt is the environment that keeps a command from waiting on a

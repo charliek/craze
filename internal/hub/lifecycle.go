@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
@@ -43,9 +44,10 @@ import (
 //  5. The record, hubs/<ns>.json, written (HubLock.WriteRecord).
 //  6. ok on the ready pipe.
 //
-// Then the hub serves (server.go), sweeps (rundir.SweepOrphans, at once and
-// every sweepEvery: a dead host's orphan lock, temporaries and refused
-// socket; it kills no agent) and watches, on one goroutine (loop):
+// Then the hub serves (server.go), sweeps (at once and every sweepEvery:
+// rundir.SweepOrphans, a dead host's orphan lock, temporaries and refused socket;
+// hostspawn.SweepDeadHosts, what a dead host left running) and watches, on one
+// goroutine (loop):
 //
 //   - Lost: each lostEvery, the record and the socket must still be the files
 //     it made, by (dev, ino); one gone or replaced is a hub nobody can find,
@@ -741,6 +743,9 @@ func (h *hub) sweeper(tick <-chan time.Time) {
 		} else {
 			h.logf("orphan sweep: %s", r)
 		}
+		// A --wait host outlives every spawner it had, so a dead one's process
+		// groups have no one else to end them unless another craze runs.
+		hostspawn.SweepDeadHosts(h.o.Env, h.logf)
 		select {
 		case <-h.sweepStop:
 			return

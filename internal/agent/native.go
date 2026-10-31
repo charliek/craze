@@ -1229,6 +1229,8 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		Resume:    s.opts.LoadSessionID,
 
 		ProviderRetries: s.opts.ProviderRetries,
+		ProcessGroups:   s.opts.ShellGroups,
+		ProcessMark:     s.opts.ShellMark,
 	}
 	if s.tweak != nil {
 		s.tweak(&hopts)

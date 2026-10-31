@@ -454,16 +454,23 @@ The launcher names it whenever a host could not start. A spawned host's
 
 - The log is **rotated once**: at 4 MiB the current file becomes
   `<hostId>.log.1` (replacing an older one), and a new `<hostId>.log` starts.
-- Beside it, `<hostId>.pgids` records the process groups of the host's agents
-  while it runs, for its launcher's last-resort cleanup; it is removed when
-  the host stops cleanly.
+- Beside it, `<hostId>.pgids` records the process groups the host is running: its
+  native shell commands, each crossed off when it has ended, and its agents, which stay
+  until its teardown. It is how [what a dead host leaves
+  running](cli.md#what-a-dead-host-leaves-running) gets ended. It goes when that is
+  done, or when the host stops cleanly. The log sweep below never touches it, because
+  an old record can still name something running. One nothing can act on (from another
+  boot or PID namespace, or whose host or groups cannot be read) goes after 7 days, and
+  a line with no owner, from an older craze, goes after 10 minutes once its host's lock
+  is free.
 - `<hostId>.stop` is written as a host begins to stop, saying why and which turn
   was running, and stays behind it: it is how a waiting command that lost its
   stream tells a stop from a crash. It goes with the host's logs.
 - Every host **sweeps the directory as it starts**: the files of a host that
   is gone (decided by its own host lock, never by its registry entry) and that
-  nobody has touched for 7 days are removed. A live host's files are never
-  removed, whatever their age.
+  nobody has touched for 7 days are removed: its logs, its `.stop`, and any temporary
+  a rewrite of its `.pgids` left. A live host's files are never removed, whatever
+  their age.
 - The directory is `0700`, and a `--log` inside it must be named for the host
   that opens it.
 

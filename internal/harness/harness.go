@@ -207,6 +207,15 @@ type Options struct {
 	// it: `provider_retries`. nil is DefaultProviderRetries; 0 is none; anything
 	// past MaxProviderRetries is held to it. A child's is its parent's.
 	ProviderRetries *int
+	// ProcessGroups is told of every process group the session's tools start, so
+	// a host can write them down for whoever must end them if it is killed
+	// outright (tool.GroupRecorder). nil records nothing: craze prompt, and the
+	// TUI's session in its own process. A child's is its parent's.
+	ProcessGroups GroupRecorder
+	// ProcessMark is an environment entry ("NAME=value") every process the session's
+	// tools start carries, which recognises them as this host's (tool.Env.ProcessMark).
+	// "" is none. A child's is its parent's.
+	ProcessMark string
 	// Child opens the session as a sub-agent of another (child.go, plan 026
 	// §3.2); nil is an ordinary session. Only the runner that starts children
 	// sets it, and fills the rest of these Options with the parent's own
@@ -603,6 +612,12 @@ type logged struct {
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
+	}
+	if opts.ProcessGroups != nil {
+		opts.tools.groups = opts.ProcessGroups
+	}
+	if opts.ProcessMark != "" {
+		opts.tools.mark = opts.ProcessMark
 	}
 	child := opts.Child
 	s := &Session{
