@@ -596,7 +596,7 @@ func TestBashTermIgnoringCommandIsKilled(t *testing.T) {
 		atLeast               time.Duration
 	}{
 		{"the leader ignores it", "trap '' TERM; sleep 604 & echo $! > pid; echo supervised; wait", "sleep 604", planGrace},
-		{"a child holding the pipe ignores it", "(trap '' TERM; sleep 605) & echo $! > pid; echo supervised; wait", "sleep 605", planDrain},
+		{"a child holding the pipe ignores it", "(trap '' TERM; : > armed; sleep 605) & echo $! > pid; while [ ! -e armed ]; do sleep 0.01; done; echo supervised; wait", "sleep 605", planDrain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -778,7 +778,7 @@ func TestBashCloseSignal(t *testing.T) {
 		// The shell survives SIGTERM and says it got it, waiting in the wait
 		// builtin, which a trapped signal ends at once (bashWaitLoop); its
 		// child ignores SIGTERM.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; echo supervised; " + bashWaitLoop})
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; : > armed; sleep 614) & echo $! > pid; while [ ! -e armed ]; do sleep 0.01; done; echo supervised; " + bashWaitLoop})
 		// The premise — the close comes inside the cancel's grace — needs the
 		// shell to run its handler before the SIGKILL: a starved CPU could
 		// spend the 3 s grace first, and the handler never ran. A minute's

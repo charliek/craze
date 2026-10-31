@@ -763,6 +763,10 @@ func TestJobBodyEnds(t *testing.T) {
 	t.Run("closing", func(t *testing.T) {
 		t.Parallel()
 		body, pid, _, _ := start(t, "trap '' TERM; echo up; sleep 632")
+		// Closed once its trap is set, or the close proves nothing of a command that ignores SIGTERM.
+		if !waitFor(15*time.Second, func() bool { return body.Output(0).Total > 0 }) {
+			t.Fatal("control: the job's output never arrived")
+		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		cancel(tool.ErrClosing)
 		began := time.Now()

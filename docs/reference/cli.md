@@ -620,7 +620,9 @@ index by tiers of the same kind.
 
 - stdout carries only bytes read off the socket, flushed as they arrive.
 - stdin's EOF half-closes the socket's write side (`CloseWrite`) and keeps
-  reading the socket — the session may still have plenty left to send.
+  reading the socket — the session may still have plenty left to send. A peer
+  that has already closed leaves nothing to half-close, which is no error: the
+  bridge reads what is left and exits at its end.
 - From stdin's EOF the bridge looks at its stdout about once a second: a
   reader gone entirely (a pipe whose reader closed, a Unix stream socket
   whose peer closed, as when an SSH connection drops) closes the socket and

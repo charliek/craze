@@ -161,6 +161,14 @@ func recordCommand(t *testing.T, env rundir.Env, hostID string, owner hostspawn.
 	return c
 }
 
+// awaitArmed waits for a command that writes the file armed once its trap is set. Until
+// then SIGTERM ends it like anything else: on a Mac, where /bin/sh is a shim that execs
+// the real shell, that takes longer than a test's next few steps.
+func (c *recordedCommand) awaitArmed(t *testing.T) {
+	t.Helper()
+	waitFor(t, "the command's trap", func() bool { return fileExists(filepath.Join(c.dir, "armed")) })
+}
+
 // awaitReaped is the command signalled and its record gone, within the watchdog.
 func (c *recordedCommand) awaitReaped(t *testing.T) {
 	t.Helper()
@@ -373,7 +381,7 @@ func TestASignalCutsAWaitersReapShort(t *testing.T) {
 	conn.entry.PID, conn.entry.PIDStart = pid, start
 	c := recordCommand(t, r.env, conn.entry.HostID, groupOwner(t, pid, start),
 		`trap 'echo term > term' TERM; : > armed; while :; do sleep 0.05; done`)
-	waitFor(t, "the command's trap", func() bool { return fileExists(filepath.Join(c.dir, "armed")) })
+	c.awaitArmed(t)
 	sigs := make(chan os.Signal, 2)
 	w := goWait(conn, waitStart{submit: submitPrompt(conn, "mine")}, waitOptions{sigs: sigs})
 	waitFor(t, "the waiter's look", func() bool { return len(tp.lines(protocol.MethodSessionSnapshot)) >= 1 })
@@ -430,7 +438,7 @@ func TestASecondSignalDuringTheReapLeavesASettledFailure(t *testing.T) {
 	conn.entry.PID, conn.entry.PIDStart = pid, start
 	c := recordCommand(t, r.env, conn.entry.HostID, groupOwner(t, pid, start),
 		`trap 'echo term > term' TERM; : > armed; while :; do sleep 0.05; done`)
-	waitFor(t, "the command's trap", func() bool { return fileExists(filepath.Join(c.dir, "armed")) })
+	c.awaitArmed(t)
 	sigs := make(chan os.Signal, 2)
 	w := goWait(conn, waitStart{submit: submitPrompt(conn, "mine")}, waitOptions{sigs: sigs})
 	waitFor(t, "the waiter's look", func() bool { return len(tp.lines(protocol.MethodSessionSnapshot)) >= 1 })
