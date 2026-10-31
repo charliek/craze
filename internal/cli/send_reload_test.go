@@ -2,13 +2,18 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/fakehost"
+	"github.com/charliek/craze/internal/harness/store"
+	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 )
@@ -129,7 +134,7 @@ func TestSendToASessionThatCannotBeLoaded(t *testing.T) {
 	seedIndexRow(t, sessions.Row{SessionID: "fake-session-1", Provider: "cursor", CWD: gone, CrazeID: id})
 	stdout, stderr, code := executeErr([]string{"send", "00008008", "--json", "hello"})
 	want := "that session ran in " + gone + ", which is no longer a directory"
-	if code != 1 || stdout != `{"error":{"message":"`+want+`"}}`+"\n" || stderr != "craze send: "+want+"\n" {
+	if code != 1 || stdout != `{"error":{"message":"`+want+`","kind":"config","retryable":false}}`+"\n" || stderr != "craze send: "+want+"\n" {
 		t.Fatalf("craze send to a gone workspace: exit %d, %q %q", code, stdout, stderr)
 	}
 	if entries, err := rundir.Hosts(env); err != nil || len(entries) != 0 {
@@ -138,4 +143,31 @@ func TestSendToASessionThatCannotBeLoaded(t *testing.T) {
 	if stdout, stderr, code = executeErr([]string{"send", "nosuchid", "hello"}); code != 1 || stderr != "craze send: no session nosuchid\n" {
 		t.Fatalf("craze send to no session: exit %d, %q %q", code, stdout, stderr)
 	}
+}
+
+// TestSendToAStoredSessionItsAgentCannotLoad: a native session whose transcript
+// is no transcript. The real reload, through the host's start: exit 1, the session
+// it says cannot be resumed, kind internal, and no retry helps. Nothing is left
+// running.
+func TestSendToAStoredSessionItsAgentCannotLoad(t *testing.T) {
+	env, ws, _ := unattendedHome(t)
+	id := "0199c0de-8888-7000-8000-000000008009"
+	dir := filepath.Join(paths.NativeDir(), "sessions", store.Slug(ws))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20260918T120000_"+id+".jsonl"), []byte("not a header\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedIndexRow(t, sessions.Row{SessionID: id, Provider: "native", CWD: ws, CrazeID: id})
+	stdout, stderr, code := executeErr([]string{"send", "00008009", "--wait", "--json", "hello"})
+	m := decodeResult(t, stdout)
+	e, _ := m["error"].(map[string]any)
+	if code != 1 || e["kind"] != "internal" || e["retryable"] != false || !strings.Contains(fmt.Sprint(e["message"]), "cannot be resumed") {
+		t.Fatalf("craze send to a damaged transcript: exit %d, %v, %q", code, m, stderr)
+	}
+	waitFor(t, "the reload's host gone", func() bool {
+		entries, err := rundir.Hosts(env)
+		return err == nil && len(entries) == 0
+	})
 }

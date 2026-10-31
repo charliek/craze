@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+
+	"github.com/charliek/craze/internal/errkind"
 )
 
 const (
@@ -45,6 +47,24 @@ func (e *RPCError) Error() string {
 		return "json-rpc error"
 	}
 	return fmt.Sprintf("json-rpc error %d: %s", e.Code, e.Message)
+}
+
+// ErrorInfo is the error as the waiting commands report it: an agent's, not
+// worth repeating unless its own data says otherwise (`{"retryable":true}`). The
+// JSON-RPC code is no HTTP status, so it is not reported as one, and nothing of
+// Message or Data travels beyond that flag.
+func (e *RPCError) ErrorInfo() errkind.Info {
+	info := errkind.New(errkind.Agent)
+	if e == nil {
+		return info
+	}
+	var data struct {
+		Retryable bool `json:"retryable"`
+	}
+	if json.Unmarshal(e.Data, &data) == nil {
+		info.Retryable = data.Retryable
+	}
+	return info
 }
 
 // DataMessage is the error's data read as the text an agent put there, in

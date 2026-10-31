@@ -174,7 +174,7 @@ func TestWaitPlainReportsTheLastTurn(t *testing.T) {
 	})
 	stdout, _, code = executeErr([]string{"wait", waitRigShort, "--json"})
 	m = decodeResult(t, stdout)
-	if code != 0 || m["turn"] != "turn-2" || m["message"] != "" || m["toolCalls"] != float64(1) || m["stopReason"] != nil {
+	if code != 0 || m["turn"] != "turn-2" || m["message"] != "" || m["toolCalls"] != float64(1) || m["stopReason"] != "end_turn" {
 		t.Fatalf("a turn with no text: exit %d, %v", code, m)
 	}
 	stdout, _, code = executeErr([]string{"wait", waitRigShort})
@@ -584,19 +584,18 @@ func TestWaitMaxMessageAndJSONFailures(t *testing.T) {
 	}
 
 	stdout, stderr, code = executeErr([]string{"wait", "nosuchsession", "--json"})
-	if code != 1 || stdout != `{"error":{"message":"no session nosuchsession"}}`+"\n" || stderr != "craze wait: no session nosuchsession\n" {
+	if code != 1 || stdout != `{"error":{"message":"no session nosuchsession","kind":"config","retryable":false}}`+"\n" || stderr != "craze wait: no session nosuchsession\n" {
 		t.Fatalf("--json's exit 1: %d, %q %q", code, stdout, stderr)
 	}
 	foreign := turnHandle{incarnation: "0199c0de-9999-7000-8000-000000000000", seq: 3, target: waitTarget{kind: targetTurn, id: "turn-1"}}
 	stdout, stderr, code = executeErr([]string{"wait", waitRigShort, "--from", foreign.String(), "--json"})
 	m = decodeResult(t, stdout)
-	errObj, _ := m["error"].(map[string]any)
-	if code != 1 || errObj["message"] != "the turn's ending was not observed" || m["handle"] != foreign.String() ||
+	if code != 1 || !errorIs(m, "the turn's ending was not observed", "unobserved", true) || m["handle"] != foreign.String() ||
 		stderr != "craze wait: the turn's ending was not observed (handle "+foreign.String()+")\n" {
 		t.Fatalf("--json's exit 1 with a handle: %d, %v, %q", code, m, stderr)
 	}
 	stdout, stderr, code = executeErr([]string{"wait", "--json"})
-	if code != 2 || stdout != "" || stderr == "" {
+	if code != 2 || !errorIs(decodeResult(t, stdout), strings.TrimSuffix(stderr, "\n"), "usage", false) {
 		t.Fatalf("a usage error under --json: %d, %q %q", code, stdout, stderr)
 	}
 }

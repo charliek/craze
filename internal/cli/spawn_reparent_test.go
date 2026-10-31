@@ -480,7 +480,7 @@ func TestASecondSignalHurriesAnAbandonedSpawn(t *testing.T) {
 		t.Fatalf("craze new --wait has not returned %v after its second signal (the host's grace is %v)", time.Since(hurried), hostspawn.TermGrace)
 	}
 	m := decodeResult(t, run.stdout)
-	if run.code != 3 || m["status"] != "cancelled" || m["error"] != "interrupted before the prompt was sent" {
+	if run.code != 3 || m["status"] != "cancelled" || !errorIs(m, "interrupted before the prompt was sent", "interrupted", false) {
 		t.Fatalf("a hurried abandon: exit %d, %v, %q", run.code, m, run.stderr)
 	}
 	b, _ := os.ReadFile(filepath.Join(hostLogsDir(t, env), e.HostID+".log"))

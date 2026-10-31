@@ -179,5 +179,5 @@ def test_new_load_of_no_saved_session(craze_bin: Path, fake_agent_bin: Path, tmp
         1, b"", b"craze new: no saved session zzzz (craze ps --saved lists them)\n"), out
     out = _load(craze_bin, "zzzz", "--json")
     assert out.returncode == 1 and json.loads(out.stdout) == {
-        "error": {"message": "no saved session zzzz (craze ps --saved lists them)"}}, out
+        "error": {"message": "no saved session zzzz (craze ps --saved lists them)"}, "kind": "config"}, out
     assert re.fullmatch(rb"craze new: no saved session zzzz[^\n]*\n", out.stderr), out.stderr

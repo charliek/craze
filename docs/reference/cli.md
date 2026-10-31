@@ -982,7 +982,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | Flag | Description |
 |------|-------------|
 | `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
-| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok, gx or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, plain even with `--json` |
+| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok, gx or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, kind `config` under `--json` |
 | `--model <id>` | The model to start on. Without it the session uses the agent's own default: craze keeps no default model of its own for an ACP provider |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
@@ -1044,29 +1044,31 @@ connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
 
-**`--json` failures.** With `--json`, every failure other than a usage error
-(exit 2, plain) also prints **one JSON object** on stdout before the exit; the
-stderr line and exit 1 are as without `--json`. The one exception is stdout
-itself failing: a result that cannot be written (stdout closed, a full disk)
-exits 1 with the write's error on stderr, and stdout may hold nothing or part
-of the object. A refusal by the hub is the
-wire's error, whole, under one key, so a script reads `.error.data.code`,
-`.error.data.reason` and `.error.data.cause` where it reads them on the wire:
+**`--json` failures.** With `--json`, every failure also prints **one JSON
+object** on stdout before the exit; the stderr line and the exit code are as
+without `--json`. The one exception is stdout itself failing: a result that
+cannot be written (stdout closed, a full disk) exits 1 with the write's error on
+stderr, and stdout may hold nothing or part of the object. A refusal by the hub
+is the wire's error, whole, under `error`, so a script reads `.error.data.code`,
+`.error.data.reason` and `.error.data.cause` where it reads them on the wire, and
+beside it `kind`, one of the [failure kinds](#failure-kinds):
 
 ```json
-{"error":{"code":-32000,"message":"the session did not start: acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry.","data":{"code":"not_accepting","reason":"start_failed","cause":"acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry."}}}
+{"error":{"code":-32000,"message":"the session did not start: acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry.","data":{"code":"not_accepting","reason":"start_failed","cause":"acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry.","kind":"start_failed"}},"kind":"start_failed"}
 ```
 
 Any other failure (no hub to be had, a `-C` that is no directory, an answer
-that does not decode) is the message alone:
+that does not decode) is the message alone, and the kind:
 
 ```json
-{"error":{"message":"/no/such/dir is not a directory"}}
+{"error":{"message":"/no/such/dir is not a directory"},"kind":"workspace"}
 ```
 
-A success has no `error` key, and a session that started but refused its first
-prompt is still the success object (exit 1, as before). Check the exit code,
-then `.error`.
+A usage error (exit 2) prints the [usage object](#usage-errors-under-json)
+every command does. A success has no `error` key, and a session that started but
+refused its first prompt is still the success object (exit 1, as before). Check
+the exit code, then `.error`. This is plain `craze new`'s shape; `craze new
+--wait` prints a [waiting command's](#craze-wait).
 
 On macOS a session the hub creates runs in the hub's login (security)
 session, and a hub keeps the session of whichever command first started it
@@ -1235,7 +1237,7 @@ the settings it started with.
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
 | `--timeout <duration>` | Stop waiting after this long, counted from the command's start — the host's start included: `running`, exit 5, with a handle. Before the prompt was sent, the session is stopped instead, exit 1, `timed out before the prompt was sent` |
 | `--max-message <n>` | As `craze wait`'s |
-| `--json` | Print the result as one JSON object; a failure as `{"error":{"message":…}}` |
+| `--json` | Print the result as one JSON object; a failure as `{"error":{"message":…,"kind":…,"retryable":…}}` ([failures](#failures-and-kinds)) |
 
 **Signals.** The prompt is the command's own, as a handle's turn is
 `craze wait --from`'s: `Ctrl+C`, `SIGTERM` or `SIGHUP` remove it while it is
@@ -1325,7 +1327,7 @@ any session's host (an interactive one idles out; an unattended one until
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
 | `--timeout <duration>` | Give up after this long, counted from the command's start (a reload included). With `--wait`, `running` at its end, exit 5, with a handle |
 | `--max-message <n>` | With `--wait`, as `craze wait`'s (a usage error without it) |
-| `--json` | One JSON object: the result with `--wait`, where the prompt went without it; a failure as `{"error":{"message":…}}` |
+| `--json` | One JSON object: the result with `--wait`, where the prompt went without it; a failure as `{"error":{"message":…,"kind":…,"retryable":…}}` ([failures](#failures-and-kinds)) |
 
 ### The prompt
 
@@ -1423,15 +1425,15 @@ none: never an earlier turn's. A plan the turn presented follows it, under
 `plan:`. The footer's first line is the status, the turn's time and its tool
 calls, then — for a native session — what the turn cost (`unpriced` when none
 of it had a price; `+` when some did not) and how full the context is. Then,
-each when there is one: `error:` (a failed turn), `stopped:` (a stop other than
-`end_turn`), `files:` (the paths the turn's edits touched), one
+each when there is one: `error:` (a failed turn, or one interrupted before its
+prompt was sent), `files:` (the paths the turn's edits touched), one
 `auto-answered:` line per question or plan craze's approval policy answered,
 `ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
 command to run next for a `running` or `needs_input` result.
 
 | Status | Exit | |
 |--------|------|---|
-| `completed` | 0 | The turn ended `end_turn`, with no error |
+| `completed` | 0 | The turn ended `end_turn`, with no error; or at a plan it presented (`planEnded`) |
 | `idle` | 0 | The session has had no turn |
 | `failed` | 3 | The turn ended with an error, or with a stop other than `end_turn` |
 | `cancelled` | 3 | The turn was cancelled |
@@ -1447,13 +1449,15 @@ command to run next for a `running` or `needs_input` result.
 | `--json` | Print the result as one JSON object on one line |
 
 With `--json`, one object. These keys are always there: `status`, `session`
-(the whole id), `short`, `provider`, `model` and `attach`; and with a turn or a
-queued prompt, `turn` and/or `row`.
+(the whole id), `short`, `provider` and `attach`; `model` too, once the session's
+model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 
 | Key | |
 |-----|---|
 | `message`, `toolCalls`, `durationMs`, `files` | On `completed`, `failed`, `cancelled` and `dropped`, always: `""`, `0` and `[]` when there is none |
-| `stopReason`, `error` | How the turn ended; `stopReason` is absent when unknown (a partial result for an idle session) |
+| `stopReason` | How the turn ended, on every terminal status ([below](#each-status)) |
+| `error` | Why it did not complete: the [object](#failures-and-kinds) `{message, kind, retryable, detail?}` |
+| `planEnded` | `true` when the turn ended at a plan it presented ([below](#each-status)) |
 | `plan` | The text of a plan the turn presented, accepted automatically or not |
 | `usage` | The last usage report before the turn's end (native sessions), as the [stream's usage section](protocol.md#usage) carries it: `{contextTokens, contextWindow, turn, session}`. A partial result settled from where the session stands carries only what was seen of the turn itself — none for an idle session's last turn |
 | `autoAnswered` | `[{kind, summary, choice}]`: each question or plan craze's approval policy answered |
@@ -1469,12 +1473,66 @@ A key that does not apply is absent, never `null` or `false`:
 {"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
 ```
 
+### Each status
+
+What each status carries:
+
+| Status | Exit | `stopReason` | `error` | `usage` | `planEnded` |
+|--------|------|--------------|---------|---------|-------------|
+| `completed` | 0 | `end_turn`; `cancelled` for a plan returned to the caller | absent | the last report, when there was one | `true` at a presented plan, else absent |
+| `idle` | 0 | absent | absent | absent | absent |
+| `failed` | 3 | the engine's (`max_tokens`, `refusal`, `max_turn_requests`) when it sent one, else `error` | always | the last report, when there was one | absent |
+| `cancelled` | 3 | `cancelled`; `stopped` when a `craze wait` read afterwards that the session's close ended the turn | present when the prompt never reached the session (`interrupted`), or the session's close ended it (`stopped`); otherwise absent | the last report, when there was one | absent |
+| `dropped` | 3 | `cancelled` | absent | absent | absent |
+| `needs_input` | 4 | absent | absent | the last report, when there was one | absent |
+| `running` | 5 | absent | absent | the last report, when there was one | absent |
+
+**`stopReason`** is the engine's word when it sent one. A turn the agent ran on
+its own (its bracket carries no reason) and a turn read from an older host report
+`end_turn`.
+
+**`planEnded`** is computed from how the turn actually ended. Cursor and grok are
+told a plan is cancelled, which ends the turn there: `completed`, `stopReason:
+cancelled`. A native session's approved plan ends its turn with `end_turn`, the
+reason it has always had, so `craze prompt`'s exit is unchanged. An agent that goes
+on to carry an accepted plan out did not end at it, and has no `planEnded`. A
+waiter that met the turn afterwards reads the turn's events back from its host to
+tell, and gets the `plan` with it. It cannot once the host no longer holds those
+events, past `--timeout`'s end, or when the session has ended 256 more asks since
+(the plan's ask has aged out of the ended list its snapshot looks in): `planEnded`
+is then left out of a turn that did end at an approved plan.
+
+**A turn read afterwards.** A plain `craze wait` that meets a turn already over,
+or a wait that lost part of its stream, settles it from how the session says it
+ended. Its status comes from that outcome, which calls a stop other than
+`end_turn` done: `completed` there, `failed` when followed live; its `stopReason`
+says which it was.
+
+### Failures and kinds
+
+Everywhere a waiting command prints an `error` (a result's, and an exit-1 failure's)
+it is one object:
+
+```json
+{"message":"native: provider \"openai\" failed (HTTP 429): Rate limit reached","kind":"provider","retryable":true,"detail":{"status":429,"provider_code":"rate_limit_exceeded"}}
+```
+
+`message` is for people, on one line. `kind` and `retryable` are for a program.
+`detail` is present only when the provider said more, and holds only `status` (its
+HTTP status) and `provider_code` (its own short name for the failure): names and
+numbers, never text, a key or a piece of a request. An ACP agent's JSON-RPC code
+is not an HTTP status, and is not reported as one.
+
+A failure is exit 1 with one line, and with `--json` one object on stdout first,
+`handle` beside it when there is one:
+
+```json
+{"error":{"message":"the turn's ending was not observed","kind":"unobserved","retryable":true},"handle":"0199c0de-1111-7000-8000-397e175bfe79.41.turn-3"}
+```
+
 A dropped connection is redialled and the stream picked up where it was; a
 host that can no longer replay that far answers with where the session stands,
-and the result is then partial. A failure is exit 1 with one line, and with
-`--json` one `{"error":{"message":…}}` object on stdout first — `handle` beside
-it when there is one — as [`craze new`](#craze-new)'s failures are; a usage
-error stays plain (exit 2):
+and the result is then partial. The failures say:
 
 ```text
 craze wait: no session <id>
@@ -1482,6 +1540,7 @@ craze wait: the session has ended (craze send <short> <prompt> reloads it)
 craze wait: interrupted before session <short> answered
 craze wait: timed out before session <short> answered
 craze wait: timed out before the turn could be followed; craze wait <short> --from <handle> follows it
+craze new: timed out before the turn could be followed; the prompt was taken; craze wait <short> --from <handle> follows it
 craze wait: the session ended (craze send <short> <prompt> reloads it) (handle <handle>)
 craze wait: the turn's ending was not observed (handle <handle>)
 craze wait: the session's host changed before the cancel reached it; the turn's ending was not observed (handle <handle>)
@@ -1498,6 +1557,53 @@ names the turn. `not observed` is a turn whose end cannot be learnt: its host
 restarted (turn ids start again in a new host, so nothing the new host says is
 taken for the turn's), or the turn ended and others ran since, out of the
 host's reach.
+
+### Failure kinds
+
+`kind` is one of these, a closed set, classified where the failure happened rather
+than guessed from its words. `retryable` means a fresh turn may succeed. It does
+not promise that re-running a turn repeats no side effects already performed.
+
+| Kind | When | Retryable |
+|------|------|-----------|
+| `usage` | A flag or argument error (exit 2). At exit 1 too: an id several sessions match | false |
+| `config` | An unknown provider or model, bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has | false |
+| `workspace` | `-C` is missing or not a directory | false |
+| `prompt` | The prompt is unreadable, empty or too long (exit 2) | false |
+| `start_failed` | The agent or host did not start | true |
+| `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
+| `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
+| `auth` | The provider refused the credentials, or there are none to send | false |
+| `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so) | false |
+| `context_too_large` | The request does not fit the model's context window | false |
+| `model_not_found` | The provider or agent does not serve the model | false |
+| `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
+| `stopped` | The session was stopped, or has ended | false |
+| `connection_lost` | The command lost its socket while the host is shown alive | true |
+| `host_exited` | The host is shown gone with no ending observed | true |
+| `unobserved` | The turn's ending could not be learnt, a prompt may have reached the session with its answer lost, or `--timeout` ended with its answer out and the prompt was then taken | true |
+| `interrupted` | The command was signalled, before or after the prompt | false |
+| `internal` | Anything else: craze's own failure, a stored session whose transcript cannot be loaded (damaged, or written by a newer craze) included | false |
+| `unknown` | An error from a host older than kinds, which claims nothing and so is not retryable; or a kind from a later craze this one does not know, which keeps the `retryable` that host sent | false unless sent |
+
+### Usage errors under `--json`
+
+A command line that asks for `--json` and cannot run prints one object on stdout,
+in the same words as the stderr line, which stays. This holds for any command,
+whether or not it takes `--json`, and whatever made it a usage error (exit 2): an
+unknown flag before or after `--json`, an invalid value, an argument error, or a
+refusal before the command ran. `prompt` and `config` are kinds too: an unreadable,
+empty or over-size prompt, and an unknown `--provider`.
+
+```json
+{"error":{"message":"craze wait: unknown or malformed flag; see craze wait --help","kind":"usage","retryable":false}}
+```
+
+`--json` is read as the flag parser reads it. `--title --json` is a title, `new
+--wait -- --json` is a prompt, and a later `--json=false` takes it back: none of
+those asked. [`craze prompt`](#craze-prompt) is the exception: its `--json` is an
+event stream, whose usage errors stay on stderr alone. So are `craze bridge`, whose
+stdout is a protocol, and a shell's completion request.
 
 ## craze cancel
 
@@ -1952,7 +2058,7 @@ script; `craze completion <shell> --help` says how for that shell. `craze help
 | 1 | Session never started (no login, agent would not come up — a binary that is missing says `agent binary not found: cursor-agent is not on PATH (also tried agent); install it, or set [agents].cursor in <config>` — or a load the agent refused), a runtime failure, or nothing to `--continue`/`--resume` — no matching session, or a session index craze could not read |
 | 2 | Usage error: an unknown or malformed flag, a stray argument, an unknown command or provider or theme, a flag value or combination craze refuses (`--ask` with `--plan`, `--continue` with `--resume`), missing prompt text, or a non-tty TUI. The non-tty refusal is checked before `--continue`/`--resume` are considered. `craze bridge` is the exception: it exits 1 for every failure, usage errors included |
 
-A usage error never echoes what was typed (a mistyped word may be a pasted key): `craze: unknown command; see craze --help` (with `(did you mean "ps"?)` when a command name is close), `craze ps: takes no arguments; see craze ps --help`, `craze prompt: unknown or malformed flag; see craze prompt --help`. A flag with an invalid value keeps its own message.
+With `--json` in the line, a usage error also prints [one object](#usage-errors-under-json) on stdout. A usage error never echoes what was typed (a mistyped word may be a pasted key): `craze: unknown command; see craze --help` (with `(did you mean "ps"?)` when a command name is close), `craze ps: takes no arguments; see craze ps --help`, `craze prompt: unknown or malformed flag; see craze prompt --help`. A flag with an invalid value keeps its own message.
 
 `craze frame` uses 2 for a bad key script and 3 for a wait timeout; that
 command is hidden. See [Testing](../development/testing.md#craze-frame).
@@ -1966,7 +2072,7 @@ script can branch on the code alone:
 | Code | Status | When |
 |------|--------|------|
 | 0 | `completed`, `idle` | The turn ended `end_turn` with no error; `wait` on a session that has had no turn |
-| 1 | — | craze failed: no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal; for `new --wait` and `send`, a session that could not start or load, `--timeout` before the prompt was sent, and a prompt whose answer was lost (`the prompt may not have reached it`, never sent again) |
+| 1 | — | craze failed ([kinds](#failure-kinds)): no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal; for `new --wait` and `send`, a session that could not start or load, `--timeout` before the prompt was sent, and a prompt whose answer was lost (`the prompt may not have reached it`, never sent again) |
 | 2 | — | Usage error — for `new --wait` and `send`, no prompt, two prompts, an empty one or one over 32 KiB too |
 | 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing; the queued prompt was removed before it ran; a `new --wait` or `send --wait` interrupted before its prompt was sent |
 | 4 | `needs_input` | An ask is open that nothing here answers |

@@ -39,6 +39,8 @@ type Error struct {
 	Result json.RawMessage
 	// Cause is data.cause: a wrapped failure's text ("" for none).
 	Cause string
+	// Kind is data.kind: what a failed start said of itself ("" for none).
+	Kind string
 }
 
 // Error is the host's message, verbatim: the text the host's own error had.
@@ -69,6 +71,7 @@ func newError(pe *protocol.Error) *Error {
 		Message: pe.Message,
 		Result:  pe.Data.Result,
 		Cause:   pe.Data.Cause,
+		Kind:    pe.Data.Kind,
 	}
 }
 

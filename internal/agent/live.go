@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/paths"
 )
@@ -788,7 +789,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			s.mu.Unlock()
 		}
 		if err := s.changeModel(ctx, client, s.opts.Model); err != nil {
-			return true, err
+			return true, startModelRefusal(s.opts.Model, err)
 		}
 		s.mu.Lock()
 		if loading {
@@ -1895,6 +1896,37 @@ func (s *session) changeModel(ctx context.Context, client *acp.Client, modelID s
 	}
 	_, err := client.SetModel(ctx, modelID)
 	return err
+}
+
+// startModelRefusal is a --model the agent would not move to at the session's
+// start. changeModel has already sent a refused path on to set_model, so a
+// -32602 it returns says the model is wrong (cursor's "Invalid model value",
+// grok's "unknown model id"): said so, naming the model craze asked for and the
+// reply's own Message, as RPCError.Error always has, and classified as what
+// another attempt would meet again. Never the reply's Data, which is the agent's
+// own diagnostic, free to quote a request or a credential, and which goes on from
+// here to whoever reads the failure. Any other failure is as it was.
+func startModelRefusal(model string, err error) error {
+	var rpc *acp.RPCError
+	if !errors.As(err, &rpc) || rpc.Code != acp.CodeInvalidParams {
+		return err
+	}
+	return &modelRefusedError{model: model, why: sanitizeLine(rpc.Message), err: err}
+}
+
+// modelRefusedError is startModelRefusal's: the agent's -32602 underneath, so
+// the codec's class and code are still the RPC error's.
+type modelRefusedError struct {
+	model, why string
+	err        error
+}
+
+func (e *modelRefusedError) Error() string {
+	return fmt.Sprintf("the agent refused model %q: %s", e.model, e.why)
+}
+func (e *modelRefusedError) Unwrap() error { return e.err }
+func (e *modelRefusedError) ErrorInfo() errkind.Info {
+	return errkind.New(errkind.ModelNotFound)
 }
 
 // unknownConfigOption is how cursor's -32602 for an option id the current

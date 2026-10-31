@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/chatgptauth"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -1235,7 +1236,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	unsealed := hopts.Getenv
 	hopts.Getenv = getenv
 	if hopts.Home == "" {
-		return nil, nativeOpened{}, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
+		return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)"}
 	}
 	// The directory whose providers.toml every turn looks at for keys stored
 	// since (native_keys.go, plan 031 §3.8): the Home the harness opens with,
@@ -1275,7 +1276,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		stamps := statModelInputs(hopts.Home)
 		table, err := modeltable.Load(hopts.Home)
 		if err != nil {
-			return nil, nativeOpened{}, none, fmt.Errorf("native: %w", err)
+			return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
 		}
 		hopts.Table = table
 		// Set under modelsMu, like everything the reloads keep, though none
@@ -1307,7 +1308,10 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// model's display name, still finds it.
 		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
-			return nil, nativeOpened{}, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
+			return nil, nativeOpened{}, none, &nativeConfigError{
+				msg:   fmt.Sprintf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", ")),
+				cause: err,
+			}
 		}
 		hopts.Model = alias
 	}
@@ -3636,6 +3640,19 @@ type nativeError struct {
 
 func (e *nativeError) Error() string { return e.msg }
 func (e *nativeError) Unwrap() error { return e.cause }
+
+// nativeConfigError is a start refused for what the configuration says: a
+// --model no model of the table answers to, a table that will not load, no
+// directory to load one from. Another attempt meets the same refusal until
+// someone changes it, so it says so itself, the failed start's kind.
+type nativeConfigError struct {
+	msg   string
+	cause error
+}
+
+func (e *nativeConfigError) Error() string           { return e.msg }
+func (e *nativeConfigError) Unwrap() error           { return e.cause }
+func (e *nativeConfigError) ErrorInfo() errkind.Info { return errkind.New(errkind.Config) }
 
 // The ChatGPT plan's failures in the adapter's words (plan 033 §3.12): each
 // says what happened and what to do, and none quotes a token — they are fixed

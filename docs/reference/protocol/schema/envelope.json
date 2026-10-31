@@ -64,13 +64,14 @@
       "additionalProperties": false
     },
     "errorData": {
-      "description": "The craze half of an error. A client decides from code alone; reason names the exact sentinel under that code, for wording and reconstruction, never for retry. result is a result returned beside the error (session.cancel's, hello's on protocol_version: see each method's errorResult); cause is a wrapped failure's text.",
+      "description": "The craze half of an error. A client decides from code alone; reason names the exact sentinel under that code, for wording and reconstruction, never for retry. result is a result returned beside the error (session.cancel's, hello's on protocol_version: see each method's errorResult); cause is a wrapped failure's text; kind, beside reason start_failed, is what the failed start said of itself, one of the kinds in the CLI reference.",
       "type": "object",
       "properties": {
         "code": {"$ref": "#/$defs/code"},
         "reason": {"$ref": "#/$defs/reason"},
         "result": {"type": "object"},
-        "cause": {"type": "string"}
+        "cause": {"type": "string"},
+        "kind": {"type": "string"}
       },
       "required": ["code", "reason"],
       "additionalProperties": false,

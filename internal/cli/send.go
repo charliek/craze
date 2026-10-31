@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -177,7 +178,7 @@ func (r *promptJob) connect(id string) (*waitConn, error) {
 			return nil, err
 		}
 	default:
-		return nil, exitf(1, "%s: %d sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(formatEntries(matches)))
+		return nil, kindf(errkind.Usage, "%s: %d sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(formatEntries(matches)))
 	}
 	return r.reload(row)
 }
@@ -245,7 +246,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 	matches := matchCrazeID(ids, id)
 	switch len(matches) {
 	case 0:
-		return sessions.Row{}, exitf(1, "%s: no session %s", sendWhat, id)
+		return sessions.Row{}, kindf(errkind.Config, "%s: no session %s", sendWhat, id)
 	case 1:
 		return rows[matches[0]], nil
 	}
@@ -253,7 +254,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 	for i, m := range matches {
 		named[i] = fmt.Sprintf("%s (%s, %s)", psShort(m), rows[m].Provider, rows[m].CWD)
 	}
-	return sessions.Row{}, exitf(1, "%s: %d ended sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(strings.Join(named, ", ")))
+	return sessions.Row{}, kindf(errkind.Usage, "%s: %d ended sessions match %s: %s", sendWhat, len(matches), id, sanitizeLine(strings.Join(named, ", ")))
 }
 
 // reload is row's session loaded again and attached (§3.4): a host that
@@ -293,7 +294,7 @@ func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
 		case !retryable(err) || r.ctx.Err() != nil:
 			return nil, err
 		case !time.Now().Before(until) && reloadable(err):
-			return nil, &exitError{code: 1, msg: sendWhat + ": session " + psShort(row.CrazeID) + " is still closing; try again once it has ended", cause: err}
+			return nil, &exitError{code: 1, msg: sendWhat + ": session " + psShort(row.CrazeID) + " is still closing; try again once it has ended", cause: err, kind: errkind.StartFailed}
 		case !time.Now().Before(until):
 			return nil, err
 		}
@@ -344,7 +345,7 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 		err = errors.New("its attachment did not answer first")
 	}
 	if err != nil {
-		return r.failBefore(exitf(1, "%s: session %s: %s", sendWhat, short, sanitizeLine(err.Error())))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: session %s: %s", sendWhat, short, sanitizeLine(err.Error())))
 	}
 	after := it.Reply.After
 	pctx, cancel := context.WithTimeout(r.ctx, readBound)
@@ -353,9 +354,9 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 	switch {
 	case err == nil:
 	case errors.Is(err, errNotThisHost):
-		return r.failBefore(exitf(1, "%s: the session's host changed before the prompt was sent; it was not sent", sendWhat))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: the session's host changed before the prompt was sent; it was not sent", sendWhat))
 	default:
-		return r.failBefore(exitf(1, "%s: the session did not answer before the prompt was sent; it was not sent: %s", sendWhat, sanitizeLine(err.Error())))
+		return r.failBefore(kindf(errkind.ConnectionLost, "%s: the session did not answer before the prompt was sent; it was not sent: %s", sendWhat, sanitizeLine(err.Error())))
 	}
 	g := &submitGate{submit: submitPrompt(conn, r.text)}
 	answers := make(chan submitAnswer, 1)
@@ -375,26 +376,26 @@ func (r *promptJob) sendOnly(conn *waitConn) error {
 		// Nothing reached the session; a reload's host is not this
 		// command's to stop (spawned is craze new --wait's alone).
 		undone := r.undo(false)
-		msg := "interrupted before the prompt was sent"
+		msg, kind := "interrupted before the prompt was sent", errkind.Interrupted
 		switch {
 		case fate == promptRefused:
-			msg = a.err.Error()
+			msg, kind = a.err.Error(), failureKind(a.err)
 		case r.timedOut():
-			msg = "timed out before the prompt was sent"
+			msg, kind = "timed out before the prompt was sent", errkind.TimeoutBeforePrompt
 		}
-		return r.fail(&waitFailure{msg: msg + undone.note()})
+		return r.fail(&waitFailure{msg: msg + undone.note(), kind: kind})
 	case promptPending:
-		msg := "interrupted before the prompt's answer; it may have reached the session" + follow
+		msg, kind := "interrupted before the prompt's answer; it may have reached the session"+follow, errkind.Interrupted
 		if r.timedOut() {
-			msg = "timed out before the prompt's answer; it may have reached the session" + follow
+			msg, kind = "timed out before the prompt's answer; it may have reached the session"+follow, errkind.Unobserved
 		}
 		if a.err != nil && !errors.Is(a.err, errNoAnswer) {
-			msg = a.err.Error()
+			msg, kind = a.err.Error(), failureKind(a.err)
 			if !strings.Contains(msg, "craze wait ") {
 				msg += follow
 			}
 		}
-		return r.fail(&waitFailure{msg: msg})
+		return r.fail(&waitFailure{msg: msg, kind: kind})
 	}
 	h := turnHandle{incarnation: after.Incarnation, seq: after.Seq, target: target}
 	place, found := sendPlace(r, conn, target)

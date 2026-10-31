@@ -688,9 +688,9 @@ func pinnedWireShapes() []pinnedWireShape {
 		{Event{Type: EventTool, Tool: &ToolEvent{ID: "call-1", Output: &ToolOutput{ExitCode: ptr(0)}, Task: &TaskInfo{}}},
 			`{"type":"tool","tool":{"id":"call-1","output":{"exitCode":0},"task":{}}}`},
 		{Event{Type: EventError, Err: &acp.RPCError{Code: -32603, Message: "Internal error"}},
-			`{"type":"error","err":{"message":"json-rpc error -32603: Internal error","class":"rpc","code":-32603}}`},
+			`{"type":"error","err":{"message":"json-rpc error -32603: Internal error","class":"rpc","code":-32603,"kind":"agent"}}`},
 		{Event{Type: EventError, Err: acp.ErrClosed},
-			`{"type":"error","err":{"message":"acp: connection closed","class":"closed","code":0}}`},
+			`{"type":"error","err":{"message":"acp: connection closed","class":"closed","code":0,"kind":"agent"}}`},
 		{Event{Type: EventCommand, Command: &ExpandedCommand{
 			PluginCommand: PluginCommand{Plugin: "p", Bare: "b", Display: "b", Qualified: "p:b", Description: "d", Kind: "skill"},
 			Path:          "/x", Text: "t"}},
@@ -1174,6 +1174,7 @@ func TestEventCodecReencodesADecodedEventUnchanged(t *testing.T) {
 		`{"type":"error","err":{"message":"json-rpc error -32603: Internal error","class":"rpc","code":-32603}}`,
 		`{"type":"error","err":{"message":"native: provider \"x\" rejected the API key (HTTP 401)","class":"auth","code":401}}`,
 		`{"type":"error","err":{"message":"a later craze's error","class":"quantum","code":7}}`,
+		`{"type":"error","err":{"message":"acp: connection closed","class":"closed","code":0}}`,
 		`{"type":"tool","tool":{"id":"call-1","output":{"exitCode":0},"task":{}},"at":"2026-09-19T10:30:45.123456789Z"}`,
 	}
 	for _, body := range bodies {

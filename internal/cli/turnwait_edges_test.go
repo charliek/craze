@@ -12,6 +12,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/fakehost"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -121,7 +122,7 @@ func TestWaitTurnNeverTakesAnotherRowForItsRestoration(t *testing.T) {
 	g.open()
 	res, f := w.result(t)
 	res = wantResult(t, res, f, statusFailed)
-	if res.Turn != "turn-1" || res.Row != "" || !strings.Contains(res.Error, "running a turn of its own") {
+	if res.Turn != "turn-1" || res.Row != "" || res.Error == nil || !strings.Contains(res.Error.Message, "running a turn of its own") || res.Error.Kind != errkind.Agent || !res.Error.Retryable {
 		t.Fatalf("the refused turn's result: %+v", res)
 	}
 }

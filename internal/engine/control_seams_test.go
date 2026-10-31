@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -94,8 +95,20 @@ func TestReadyClosesOnceTheStartHasRunOrTheEngineCloses(t *testing.T) {
 		if err := e.Start(context.Background()); !errors.Is(err, boom) {
 			t.Fatalf("start: %v", err)
 		}
-		if got := stateWithin(t, st); !got.StartFailed || got.Activity != ActivityError {
+		if got := stateWithin(t, st); !got.StartFailed || got.Activity != ActivityError || got.StartKind != errkind.StartFailed {
 			t.Fatalf("the waiter woke to %+v, want the failed start", got)
+		}
+	})
+
+	t.Run("a start that failed and said what it was", func(t *testing.T) {
+		s := newFake(t, agent.EventLogOptions{NoPrimary: true})
+		s.startErr = saysKind{errkind.New(errkind.ModelNotFound)}
+		e := newUnstarted(t, s)
+		if err := e.Start(context.Background()); err == nil {
+			t.Fatal("the start succeeded")
+		}
+		if got := e.State(); !got.StartFailed || got.StartKind != errkind.ModelNotFound {
+			t.Fatalf("the state is %+v, want the kind the start said", got)
 		}
 	})
 

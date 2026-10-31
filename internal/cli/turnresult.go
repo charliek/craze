@@ -13,6 +13,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/transcript"
 )
@@ -73,6 +74,15 @@ type turnAccumulator struct {
 	// host then cancelled the turn itself, and its cancelled ending is the
 	// plan's delivery, not a person's cancel (turnWaiter.ended).
 	returned bool
+	// planApproved says the last thing the turn did was have its plan approved
+	// (automatically or by a person): nothing that opens a new step of work has
+	// come since. A native turn ends right there, so its end_turn is the plan's
+	// (turnAccumulator.planEnded); an ACP agent told its plan was accepted goes
+	// on, and its next text or tool clears this.
+	planApproved bool
+	// noPlanEnded says the snapshot this was seeded from names no plan's ask as
+	// ended, so that there is nothing to look back for (turnWaiter.lookApproved).
+	noPlanEnded bool
 }
 
 // accTool is one tool call's merged state: its kind (an update may carry it
@@ -80,6 +90,7 @@ type turnAccumulator struct {
 type accTool struct {
 	kind     string
 	finished bool
+	failed   bool
 }
 
 // accTouch is one path a tool call named.
@@ -135,7 +146,10 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 	}
 	switch ev.Type {
 	case agent.EventText:
+		a.planApproved = a.planApproved && ev.Text == ""
 		a.text(ev.Text)
+	case agent.EventThought:
+		a.planApproved = a.planApproved && ev.Text == ""
 	case agent.EventTool:
 		if ev.Tool == nil {
 			return
@@ -144,6 +158,7 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 	case agent.EventPlan:
 		if p := ev.Plan; p != nil {
 			a.plan = p.Plan
+			a.planApproved = p.Auto && p.Accepted
 			if p.Auto {
 				a.auto = append(a.auto, autoPlan(p))
 				a.returned = a.returned || !p.Accepted
@@ -186,6 +201,9 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// An answered question's or plan's ending draws its outcome note.
 		if u := ev.Ask; u != nil && u.Outcome == agent.AskAnswered && u.Kind != agent.AskPermission {
 			a.split()
+			if u.Kind == agent.AskPlan {
+				a.planApproved = u.Accepted
+			}
 		}
 	case agent.EventMeta:
 		if st := ev.State; st != nil {
@@ -256,12 +274,16 @@ func (a *turnAccumulator) tool(t agent.ToolEvent) {
 	if !ok {
 		st = &accTool{}
 		a.tools[t.ID] = st
+		// A call that opens after the approval is more work — but for one the
+		// harness refused because the plan was approved, which fails unrun.
+		a.planApproved = a.planApproved && t.Status == toolFailed
 	}
 	if t.Kind != "" {
 		st.kind = t.Kind
 	}
 	if t.Status == toolCompleted || t.Status == toolFailed {
 		st.finished = true
+		st.failed = t.Status == toolFailed
 	}
 	for _, p := range t.Locations {
 		a.touch(t.ID, p)
@@ -307,6 +329,30 @@ func (a *turnAccumulator) files() []string {
 		out = append(out, t.path)
 	}
 	return out
+}
+
+// planEnded says the turn, ending with stopReason, ended at a plan it presented:
+// returned to the caller (the ACP agents' completed, stop reason cancelled, X28),
+// or approved with nothing after it (native's, whose turn the approval ends with
+// its own end_turn, so that craze prompt's exit stays what it was).
+func (a *turnAccumulator) planEnded(stopReason string) bool {
+	return a.returned || a.planApproved && stopReason == stopEndTurn
+}
+
+// workSince says a, seeded from a snapshot, shows work since prev, the accumulator
+// it replaces: a tool call prev did not have, but for one that failed unrun, or
+// another last message. fold reads that as the plan's approval having been followed.
+// A gap of thoughts alone goes unseen, a snapshot not showing them as work: the
+// approval is then kept, where fold would have cleared it.
+func (a *turnAccumulator) workSince(prev *turnAccumulator) bool {
+	for id, st := range a.tools {
+		if prev.tools[id] == nil && !st.failed {
+			return true
+		}
+	}
+	was, _ := prev.message()
+	now, _ := a.message()
+	return was != now
 }
 
 // durationMs is the turn's length, from its started to its ending; 0 when
@@ -395,23 +441,24 @@ func terminalStatus(status string) bool {
 }
 
 // turnResult is one waiting command's result, as `--json` prints it (§3.1's
-// keys): status, session, short, provider, model and attach always; turn
-// and/or row with a target; message, toolCalls, durationMs and files (`[]`
-// when none) on a terminal status, stopReason when known; the rest when
-// present. A key that is absent is never written as null or false.
+// keys): status, session, short, provider and attach always; model once it was
+// resolved; turn and/or row with a target; message, toolCalls, durationMs, files
+// (`[]` when none) and stopReason on a terminal status; the rest when present. A
+// key that is absent is never written as null or false.
 type turnResult struct {
 	Status       string          `json:"status"`
 	Session      string          `json:"session"`
 	Short        string          `json:"short"`
 	Provider     string          `json:"provider"`
-	Model        string          `json:"model"`
+	Model        string          `json:"model,omitempty"`
 	Turn         string          `json:"turn,omitempty"`
 	Row          string          `json:"row,omitempty"`
 	Message      *string         `json:"message,omitempty"`
 	MessageCut   bool            `json:"messageCut,omitempty"`
 	MessageFile  string          `json:"messageFile,omitempty"`
 	StopReason   string          `json:"stopReason,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	Error        *resultError    `json:"error,omitempty"`
+	PlanEnded    bool            `json:"planEnded,omitempty"`
 	ToolCalls    *int            `json:"toolCalls,omitempty"`
 	DurationMs   *int64          `json:"durationMs,omitempty"`
 	Files        *[]string       `json:"files,omitempty"`
@@ -435,6 +482,40 @@ type turnResult struct {
 	// turn-1 with every incarnation — a reload's first turn is another
 	// turn-1 of the same session (plan 041 C8, 1).
 	inc string
+}
+
+// resultError is `error` wherever the waiting commands print one — a result's
+// and an exit-1 envelope's alike: its words on one line, what it was, whether a
+// fresh turn may succeed, and what else the provider said of it, when it did.
+type resultError struct {
+	Message   string       `json:"message"`
+	Kind      errkind.Kind `json:"kind"`
+	Retryable bool         `json:"retryable"`
+	Detail    *errorDetail `json:"detail,omitempty"`
+}
+
+// errorDetail is resultError's detail: names and numbers only, each cleaned
+// again here whatever host sent it, so no text from outside craze — a key, a
+// path, a piece of a request — can ride in it.
+type errorDetail struct {
+	Status       int    `json:"status,omitempty"`
+	ProviderCode string `json:"provider_code,omitempty"`
+}
+
+// newResultError is msg as a resultError saying info. A kind a reader does not
+// know — none at all, from a host that predates kinds — is unknown.
+func newResultError(msg string, info errkind.Info) *resultError {
+	info = info.Known()
+	e := &resultError{Message: sanitizeLine(msg), Kind: info.Kind, Retryable: info.Retryable}
+	if d := (errorDetail{Status: errkind.CleanStatus(info.Status), ProviderCode: errkind.CleanCode(info.ProviderCode)}); d != (errorDetail{}) {
+		e.Detail = &d
+	}
+	return e
+}
+
+// kindError is msg as a resultError of kind, with its default retryable.
+func kindError(msg string, kind errkind.Kind) *resultError {
+	return newResultError(msg, errkind.New(kind))
 }
 
 // resultAsk is a needs_input result's open ask.
@@ -471,10 +552,28 @@ func (r *turnResult) fill(a *turnAccumulator) {
 	if terminalStatus(r.Status) {
 		r.Message, r.ToolCalls, r.DurationMs, r.Files = &msg, &n, &d, &files
 		r.MessageCut = cut
+		if r.StopReason == "" {
+			r.StopReason = defaultStopReason(r.Status)
+		}
+		r.PlanEnded = r.Status == statusCompleted && a.planEnded(r.StopReason)
 	}
 	r.Plan = a.plan
 	r.AutoAnswered = a.auto
 	r.setUsage(a.usage)
+}
+
+// defaultStopReason is a terminal status's stopReason when the engine sent none:
+// a failure's `error`; a cancel's, and a queued row's that never ran, `cancelled`;
+// and `end_turn` for a turn that ran to its end with no reason told — a foreign
+// turn's bracket carries none, nor does an older host's lastTurn.
+func defaultStopReason(status string) string {
+	switch status {
+	case statusFailed:
+		return stopError
+	case statusCancelled, statusDropped:
+		return stopCancelled
+	}
+	return stopEndTurn
 }
 
 // setUsage sets the usage section, as the wire's event codec writes it.
@@ -540,12 +639,8 @@ func (r *turnResult) footer() string {
 		}
 	}
 	lines = append(lines, strings.Join(parts, " · "))
-	if r.Error != "" {
-		lines = append(lines, "error: "+psLine(r.Error))
-	} else if r.StopReason != "" && r.StopReason != stopEndTurn && r.Status != statusCancelled && r.Status != statusCompleted {
-		// A completed turn's stop other than end_turn is a returned plan's
-		// cancel (X28), which its auto-answered line says.
-		lines = append(lines, "stopped: "+psLine(r.StopReason))
+	if r.Error != nil {
+		lines = append(lines, "error: "+psLine(r.Error.Message))
 	}
 	if r.Files != nil && len(*r.Files) > 0 {
 		lines = append(lines, "files: "+psLine(strings.Join(*r.Files, ", ")))
@@ -799,22 +894,25 @@ func (o resultOutput) writeFull(res *turnResult, data []byte) (string, error) {
 	return path, nil
 }
 
+// failureBody is the one object a failure with no result prints under --json.
+type failureBody struct {
+	Error  *resultError `json:"error"`
+	Handle string       `json:"handle,omitempty"`
+}
+
 // writeFailure prints a wait's exit-1 failure (§3.1): with --json, one
-// {"error": {"message": …}} object on stdout first, `handle` beside it when
-// the failure has one (as craze new --json's failures); and the command's
-// one stderr line, which names the handle — and, for a turn that goes on,
-// the command that follows it.
+// {"error": {"message": …, "kind": …, "retryable": …}} object on stdout first,
+// `handle` beside it when the failure has one; and the command's one stderr
+// line, which names the handle — and, for a turn that goes on, the command that
+// follows it.
 func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure) error {
 	msg := sanitizeLine(f.msg)
+	kind := f.kind
+	if kind == "" {
+		kind = errkind.Internal
+	}
 	if o.json {
-		body := struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-			Handle string `json:"handle,omitempty"`
-		}{Handle: f.handle}
-		body.Error.Message = msg
-		if b, err := json.Marshal(body); err == nil {
+		if b, err := json.Marshal(failureBody{Error: kindError(msg, kind), Handle: f.handle}); err == nil {
 			fmt.Fprintf(stdout, "%s\n", b)
 		}
 	}
@@ -824,7 +922,7 @@ func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure
 	case f.handle != "":
 		msg += " (handle " + f.handle + ")"
 	}
-	return exitf(1, "%s: %s", o.what, msg)
+	return kindf(kind, "%s: %s", o.what, msg)
 }
 
 // failJSON is an exit-1 error before the wait began, with --json's object
@@ -835,7 +933,7 @@ func failJSON(stdout io.Writer, o resultOutput, err error) error {
 	if !errors.As(err, &ee) || ee.code != 1 || !o.json {
 		return err
 	}
-	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err)})
+	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err), kind: failureKind(err)})
 	return err
 }
 

@@ -35,12 +35,8 @@ func executeIn(argv []string, stdin io.Reader) (stdout, stderr string, code int)
 	if err == nil {
 		return out.String(), errBuf.String(), 0
 	}
-	line, c := diagnose(ranCmd, err)
-	stderrOut := errBuf.String()
-	if line != "" {
-		stderrOut += line + "\n"
-	}
-	return out.String(), stderrOut, c
+	c := report(&out, &errBuf, ranCmd, argv, err)
+	return out.String(), errBuf.String(), c
 }
 
 // sendNext is the handle a send's `next:` line names, failing the test when

@@ -315,7 +315,7 @@ func (c *conn) attach(a *attachment, eng *engine.Engine, p protocol.AttachParams
 		switch {
 		case st.StartFailed:
 			e := refused(protocol.CodeNotAccepting, protocol.ReasonStartFailed, "the session failed to start: %s", st.Err)
-			e.Data.Cause = st.Err
+			e.Data.Cause, e.Data.Kind = st.Err, string(st.StartKind)
 			return none, nil, refusal(e)
 		case st.Activity == engine.ActivityClosing:
 			// Ready is closed by a close too, so this never waited.
@@ -499,7 +499,7 @@ func (c *conn) watchReady(a *attachment) {
 	}
 	p := protocol.ReadyParams{Subscription: a.id, Session: info, StartFailed: st.StartFailed}
 	if st.StartFailed {
-		p.Err = st.Err
+		p.Err, p.Kind = st.Err, string(st.StartKind)
 	}
 	if h := c.srv.hooks.readyDecided; h != nil {
 		h(a.id, seq)

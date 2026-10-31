@@ -345,14 +345,16 @@ of the row, a read, not a cut through the stream.
 ### The last turn
 
 `lastTurn` — on a `sessions.list` row and in `session.state`, never in a
-snapshot, whose codec stays at version 1 — is `{outcome, err?, endedAt,
-turnId}`: how the session's most recent turn ended, whether it was craze's
+snapshot, whose codec stays at version 1 — is `{outcome, err?, stopReason?,
+kind?, retryable?, status?, provider_code?, endedAt, turnId}`: how the session's most recent turn ended, whether it was craze's
 own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
 
 | field | |
 |---|---|
 | `outcome` | `done` (ran to its end — and every foreign turn, whose closing bracket carries no outcome), `failed` (its ending carried an error), or `cancelled` (a cancel, a prompt withdrawn before it was sent, or the session's close) |
 | `err` | a failed turn's error text; absent otherwise |
+| `stopReason` | the ending's own stop reason; absent for a foreign turn, a failure that has none, and an older host |
+| `kind`, `retryable`, `status`, `provider_code` | what a failed turn [said of itself](#what-a-failure-says-of-itself); absent otherwise |
 | `endedAt` | the ending event's time, UTC |
 | `turnId` | the ended turn's id as the stream names it: `turn.id` on its `started`/`ended` events for a turn of craze's own, the `foreign_turn` bracket's `id` for the agent's own |
 
@@ -363,6 +365,30 @@ present always names the latest turn, with nothing run since — a list shows
 "failed" from it without asking whether a turn came after. A client that
 reads it after a restore (a reconnect's fresh snapshot carries no ending)
 applies it only if it has folded no later turn since, by `turnId`.
+
+### What a failure says of itself
+
+A failure is classified where it happens, while its type is still known, and
+carries four optional members with it: on an event's `err`, on a `turn` event's
+ended phase beside `errClass`/`err`, on an error entry's `err` in a snapshot, and on
+`lastTurn`. They replay and round-trip with the rest of the record.
+
+| member | |
+|---|---|
+| `kind` | one of the CLI reference's [failure kinds](cli.md#failure-kinds) |
+| `retryable` | a fresh turn may succeed; absent is false |
+| `status` | the provider's HTTP status; absent for none. An ACP agent's JSON-RPC code stays in `code` |
+| `provider_code` | the provider's own short name for the failure, an identifier; absent for none |
+
+Each is additive, so the codecs' versions do not move. A host that predates them
+writes none: a reader takes that for kind `unknown`, retryable false, and writes it
+back without them. A kind a later craze wrote reads as `unknown` too, its flag
+standing. `errClass` and `class` are as they were.
+
+A failed start says its kind beside `data.reason` `start_failed`, as `data.kind`,
+and on the `ready` notification as `kind`: `start_failed` itself, unless another
+attempt would meet the same refusal (`auth`, `config`, `model_not_found`). Absent
+from an older host, it is read as `start_failed`.
 
 `sessions.subscribe` and `session.connect` are `unsupported` on a host
 (reasons `roster_unsupported` and `hub_only`): both belong to the hub.
@@ -1367,7 +1393,7 @@ for `aside`, its aside id.
 |---|---|---|
 | `event` | `subscription`, `seq`, `event` | one committed event; `event` is the record's body **verbatim** — the same JSON the lossless event codec wrote, never re-encoded |
 | `synchronized` | `subscription`, `seq` | the stream has delivered through this attachment's cutoff — shed's "ready" for the *stream* (not to be confused with `ready`, the *session*'s readiness). Sent once per attachment |
-| `ready` | `subscription`, `session`, `startFailed`, `err?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text); owed once, only to an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start) — but not delivered if that subscription resets before its position reaches the seq the start completed at, and not owed at all if the session closes without ever starting (that attachment ends `reset{session_closed}` instead, with no `ready`). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
+| `ready` | `subscription`, `session`, `startFailed`, `err?`, `kind?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text, `kind` [what it said of itself](#what-a-failure-says-of-itself)); owed once, only to an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start) — but not delivered if that subscription resets before its position reaches the seq the start completed at, and not owed at all if the session closes without ever starting (that attachment ends `reset{session_closed}` instead, with no `ready`). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
 | `reset` | `subscription`, `reason` | the subscription is over (below) |
 | `presence` | `subscription`, `attached` | how many clients are attached to the session now, this one included — see [below](#presence); only from a host whose session capability `presence` is `true` |
 | `roster` | `subscription`, `epoch`, `cursor`, `upserts[]`, `removes[]` | the hub's alone: the roster's net change since the cursor the subscriber last had — see [the hub's roster](#the-hubs-roster) |
@@ -2232,6 +2258,7 @@ A refused call's `error` object:
 | `data.reason` | a second, finer closed set naming the exact sentinel — for wording and for reconstructing the underlying Go error, **never** for retry |
 | `data.result` | a result carried beside the error: `session.cancel`'s `{outcome, turn, reported}`, or `hello`'s `{supported}` on `protocol_version` |
 | `data.cause` | a wrapped failure's own text — `session.setTitle`'s index-write half, or a start failure |
+| `data.kind` | beside reason `start_failed`, [what the start said of itself](#what-a-failure-says-of-itself); absent otherwise, and from an older host. Never part of the retry contract |
 
 **A client decides everything from `data.code` alone.** `data.reason` is
 richer but is not part of the retry contract; a client that only knows `code`

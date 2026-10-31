@@ -1,8 +1,9 @@
 # Upgrading
 
-Three sections: [since v0.1.1](#since-v011), the changes after the third
-release; [since v0.1.0](#since-v010), the second release's; and [from
-v0.0.1](#from-v001), the first release's. Whatever the version, [upgrading
+Four sections: [since v0.2.0](#since-v020), the changes after the fourth
+release; [since v0.1.1](#since-v011), the third release's; [since
+v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
+first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
 to the hub and the sessions already running.
 
@@ -36,6 +37,126 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.2.0
+
+**The waiting commands' JSON changes.** A program that reads `craze new --wait
+--json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
+Exit codes do not change. `craze prompt --json` is unchanged, and so is plain `craze
+new --json` but for one new key. A waiter and a host of different versions work
+together: an error from an older host reads as kind `unknown`, retryable false, and
+a kind from a newer host that this craze does not know reads as `unknown` with the
+`retryable` that host sent.
+
+### Results and failures
+
+**`error` is one object.** It used to be a string on a result (exit 3, 4, 5) and a
+message-only object on a failure (exit 1). It is `{message, kind, retryable,
+detail?}` on both. A program reads `.error.message` on both now.
+
+```json
+{"status":"failed","error":"native: provider \"openai\" failed (HTTP 429): Rate limit reached"}
+{"error":{"message":"the turn's ending was not observed"},"handle":"…"}
+```
+
+becomes
+
+```json
+{"status":"failed","stopReason":"error","error":{"message":"native: provider \"openai\" failed (HTTP 429): Rate limit reached","kind":"provider","retryable":true,"detail":{"status":429,"provider_code":"rate_limit_exceeded"}}}
+{"error":{"message":"the turn's ending was not observed","kind":"unobserved","retryable":true},"handle":"…"}
+```
+
+**`kind` and `retryable` are new.** Branch on them rather than the words. The set
+is closed, and [the reference](../reference/cli.md#failure-kinds) lists it, with
+what each means and whether it may be retried.
+
+**A turn that stopped short has an `error` too.** A `failed` result always has
+one now. The plain footer's `stopped:` line is gone with it, its words under
+`error:`.
+
+```json
+{"status":"failed","stopReason":"max_tokens"}
+```
+
+becomes
+
+```json
+{"status":"failed","stopReason":"max_tokens","error":{"message":"the turn stopped short: max_tokens","kind":"agent","retryable":false}}
+```
+
+**`stopReason` is always there on a terminal status.** It was absent when craze did
+not know it (a result read from how the session says its last turn ended, or a
+failure with no reason). Its value is the engine's when it sent one, else `error`
+for a failed turn and `cancelled` for a cancelled or dropped one; a turn the agent
+ran on its own reports `end_turn`.
+
+```json
+{"status":"completed","partial":true}
+```
+
+becomes
+
+```json
+{"status":"completed","stopReason":"end_turn","partial":true}
+```
+
+**`model` is left out until it is resolved.** It used to be `""`.
+
+```json
+{"status":"cancelled","session":"","provider":"cursor","model":""}
+```
+
+becomes
+
+```json
+{"status":"cancelled","session":"","provider":"cursor","stopReason":"cancelled","error":{"message":"interrupted before the prompt was sent","kind":"interrupted","retryable":false}}
+```
+
+**`planEnded` is new.** `true` when the turn ended at a plan it presented: cursor's
+and grok's `completed` with `stopReason: cancelled`, and a native session's approved
+plan, which keeps `end_turn`. Read it rather than inferring it from `stopReason`
+and `plan`.
+
+```json
+{"status":"completed","stopReason":"cancelled","plan":"1. …"}
+```
+
+becomes
+
+```json
+{"status":"completed","stopReason":"cancelled","planEnded":true,"plan":"1. …"}
+```
+
+See [each status](../reference/cli.md#each-status) for what each one carries.
+
+### Other commands
+
+**A usage error under `--json` prints an object.** Any command, exit 2 as before,
+the stderr line as before. Stdout used to be empty. `craze prompt`'s stays empty.
+
+```json
+{"error":{"message":"craze wait: unknown or malformed flag; see craze wait --help","kind":"usage","retryable":false}}
+```
+
+An unreadable, empty or over-size prompt is kind `prompt`, and an unknown
+`--provider` kind `config`, at the same exit 2.
+
+**Plain `craze new --json` gains `kind`.** Its `error` is the wire's, as it was.
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"}}
+```
+
+becomes
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"},"kind":"workspace"}
+```
+
+**cursor's and grok's refusal of `--model` says so.** A model the agent will not
+start on used to read `json-rpc error -32602: Invalid params`, and now says `the
+agent refused model "x": Invalid params`, kind `model_not_found`. The agent's own
+data on that error, which can quote its request, stays out of it, as it always has.
 
 ## Since v0.1.1
 

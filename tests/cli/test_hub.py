@@ -535,19 +535,23 @@ def test_new_with_no_default_says_how_to_choose_one(craze_bin: Path, tmp_path: P
 
 def test_new_unknown_provider_is_a_usage_error(craze_bin: Path, tmp_path: Path) -> None:
     """An explicit --provider that names no provider is the usage error every
-    command gives (plan 037 LC-4): exit 2, one plain line -- with --json too,
-    since a usage error is never JSON -- before any hub is asked."""
-    for flags in ([], ["--json"]):
-        out = _new(craze_bin, *flags, "--provider", "nosuch", "-C", str(tmp_path), "hello")
-        assert out.returncode == 2 and out.stdout == b"", (flags, out)
-        assert out.stderr == b'craze: unknown provider "nosuch" (want cursor, grok, gx, or native)\n', (flags, out.stderr)
+    command gives (plan 037 LC-4): exit 2, one line, before any hub is asked --
+    and with --json one object in the same words too, of kind config."""
+    line = 'craze: unknown provider "nosuch" (want cursor, grok, gx, or native)'
+    out = _new(craze_bin, "--provider", "nosuch", "-C", str(tmp_path), "hello")
+    assert (out.returncode, out.stdout, out.stderr.decode()) == (2, b"", line + "\n"), out
+    out = _new(craze_bin, "--json", "--provider", "nosuch", "-C", str(tmp_path), "hello")
+    assert out.returncode == 2 and out.stderr.decode() == line + "\n", out
+    assert out.stdout.count(b"\n") == 1 and json.loads(out.stdout) == {
+        "error": {"message": line, "kind": "config", "retryable": False}}, out
     assert not list(_hubs(_home()).glob("*.json"))
 
 
-def _start_failure(out: subprocess.CompletedProcess[bytes]) -> str:
+def _start_failure(out: subprocess.CompletedProcess[bytes], kind: str = "start_failed") -> str:
     """A `craze new --json` whose session did not start: the wire's error,
     whole, on stdout -- not_accepting, start_failed -- its message the cause
-    after "the session did not start: ", and the same words on stderr, exit 1.
+    after "the session did not start: ", and the same words on stderr, exit 1;
+    kind what the start said of itself, on the wire and beside the error.
     Returns data.cause."""
     assert out.returncode == 1, (out.returncode, out.stdout, out.stderr)
     body = json.loads(out.stdout)
@@ -555,6 +559,7 @@ def _start_failure(out: subprocess.CompletedProcess[bytes]) -> str:
     assert err["data"]["code"] == "not_accepting" and err["data"]["reason"] == "start_failed", err
     cause = err["data"]["cause"]
     assert err["message"] == "the session did not start: " + cause, err
+    assert body["kind"] == kind and err["data"]["kind"] == kind, body
     assert out.stderr.decode() == "craze new: the session did not start: " + cause + "\n", out.stderr
     return cause
 
@@ -563,14 +568,15 @@ def test_new_native_with_no_key_names_the_chatgpt_plan(craze_bin: Path, fake_age
     """P-1 (plan 037): a native session started through the hub with no key
     anywhere fails its start with SF-143's words in data.cause -- craze auth
     login for an API key, or "craze auth login chatgpt" for a ChatGPT plan --
-    over the socket and into `craze new --json`'s error. Prose in data.cause,
-    not a wire change: the code and the reason are as ever."""
+    over the socket and into `craze new --json`'s error. The code and the reason
+    are as ever; its kind is auth, since another attempt would meet the same
+    refusal, which start_failed would say a retry may get past."""
     craze_home = Path(os.environ["CRAZE_HOME"])
     craze_home.mkdir(parents=True, exist_ok=True)
     (craze_home / "config.toml").write_text(f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n', encoding="utf-8")
     work = tmp_path / "proj-native"
     work.mkdir()
-    cause = _start_failure(_new(craze_bin, "--json", "--provider", "native", "-C", str(work)))
+    cause = _start_failure(_new(craze_bin, "--json", "--provider", "native", "-C", str(work)), kind="auth")
     assert cause.startswith(
         'native: no model provider has an API key \u2014 run "craze auth login" '
         '(an API key, or "craze auth login chatgpt" for a ChatGPT plan), '
@@ -664,15 +670,16 @@ def test_new_started_with_its_stdout_gone_fails_not_silently(craze_bin: Path, fa
 
 def test_new_json_refusal_is_the_wire_error(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """SF-124: `craze new --json` refused by the hub prints one JSON object on
-    stdout, {"error": <the wire's error>}: .error.data.code and .reason are
-    where a script reads them on the wire. The stderr line and exit 1 are as
-    without --json. Nothing is started."""
+    stdout, {"error": <the wire's error>, "kind": ...}: .error.data.code and
+    .reason are where a script reads them on the wire, and kind is the kind the
+    waiting commands' errors say. The stderr line and exit 1 are as without
+    --json. Nothing is started."""
     out = _new(craze_bin, "--json", "-C", str(tmp_path), "hello")
     assert out.returncode == 1, out
     assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
     assert out.stdout.count(b"\n") == 1, out.stdout
     body = json.loads(out.stdout)
-    assert list(body) == ["error"], body
+    assert sorted(body) == ["error", "kind"] and body["kind"] == "config", body
     assert body["error"]["data"]["code"] == "bad_request" and body["error"]["data"]["reason"], body
     assert body["error"]["message"].startswith("params.provider is required"), body
     assert not [e for e in _entries(_home()) if e.get("requestId")]

@@ -153,7 +153,11 @@ func TestNewLoadRefusesWhatAReopenDoesNotTake(t *testing.T) {
 		{[]string{"new", "--load", "abcd", "--json", "x"}, "craze new: --load takes no prompt: reopen the session, then craze send it one"},
 	} {
 		stdout, stderr, code := executeIn(tc.argv, noStdin())
-		if code != 2 || stdout != "" || stderr != tc.want+"\n" {
+		wantOut := ""
+		if slices.Contains(tc.argv, "--json") {
+			wantOut = `{"error":{"message":"` + tc.want + `","kind":"usage","retryable":false}}` + "\n"
+		}
+		if code != 2 || stdout != wantOut || stderr != tc.want+"\n" {
 			t.Errorf("%v exited %d: stdout %q, stderr %q; want 2, %q", tc.argv, code, stdout, stderr, tc.want)
 		}
 	}
@@ -207,7 +211,7 @@ func TestNewLoadResolvesShortIDs(t *testing.T) {
 		t.Fatalf("craze new --load of no session: exit %d, %q %q", code, stdout, stderr)
 	}
 	stdout, stderr, code = loadIn(noStdin(), "zzzz", "--json")
-	if code != 1 || stdout != `{"error":{"message":"no saved session zzzz (craze ps --saved lists them)"}}`+"\n" {
+	if code != 1 || stdout != `{"error":{"message":"no saved session zzzz (craze ps --saved lists them)"},"kind":"config"}`+"\n" {
 		t.Fatalf("craze new --load --json of no session: exit %d, %q %q", code, stdout, stderr)
 	}
 	stdout, stderr, code = loadIn(noStdin(), "aaaa1111")

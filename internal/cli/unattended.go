@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -111,7 +112,7 @@ const (
 )
 
 // errPromptWithheld is a submit the gate refused: it closed first.
-var errPromptWithheld = errors.New("the command ended before the prompt was sent; it was not sent")
+var errPromptWithheld = &submitError{msg: "the command ended before the prompt was sent; it was not sent", kind: errkind.Interrupted}
 
 // submitGate stands between the waiter and the prompt (waitStart.submit): it
 // records whether the prompt was ever sent and what its answer was, and once
@@ -298,7 +299,7 @@ func (r *promptJob) failBefore(err error) error {
 	case r.signalled():
 		return r.notSent("interrupted before the prompt was sent", undone)
 	case r.timedOut():
-		return r.fail(&waitFailure{msg: "timed out before the prompt was sent" + undone.note()})
+		return r.fail(&waitFailure{msg: "timed out before the prompt was sent" + undone.note(), kind: errkind.TimeoutBeforePrompt})
 	}
 	return failJSON(r.cmd.OutOrStdout(), r.out, withNote(err, undone.note()))
 }
@@ -309,29 +310,51 @@ func (r *promptJob) failBefore(err error) error {
 // session, and is answered as failBefore answers one — the undo hurried when
 // the waiter already took a second signal (conn.abandon: the command exits at
 // once, C3 review r1, 4); one whose prompt may have reached it names the
-// command that follows the session.
+// command that follows the session; and one whose prompt was taken after
+// --timeout gave up on its answer is no timeout before it, but a turn whose
+// ending was not observed, which the answer's target names.
 func (r *promptJob) waitAfter(g *submitGate, conn *waitConn, res *turnResult, wf *waitFailure) error {
 	stdout := r.cmd.OutOrStdout()
 	if wf == nil {
 		return writeResult(stdout, r.cmd.ErrOrStderr(), r.out, res)
 	}
-	switch fate, _ := g.close(); fate {
+	switch fate, target := g.close(); fate {
 	case promptUnsent, promptRefused:
 		undone := r.undo(conn.abandon)
 		switch {
 		case r.signalled():
 			return r.notSent("interrupted before the prompt was sent", undone)
 		case fate == promptUnsent && r.timedOut():
-			wf = &waitFailure{msg: "timed out before the prompt was sent"}
+			wf = &waitFailure{msg: "timed out before the prompt was sent", kind: errkind.TimeoutBeforePrompt}
 		}
 		wf.msg += undone.note()
 	case promptPending:
 		if wf.handle == "" && !strings.Contains(wf.msg, "craze wait ") {
 			wf.msg += "; craze wait " + psShort(r.session.id) + " follows the session"
 		}
+		if wf.kind == errkind.TimeoutBeforePrompt {
+			// The prompt may have gone: it was not before it.
+			wf.kind = errkind.Unobserved
+		}
+	case promptTaken:
+		if wf.kind == errkind.TimeoutBeforePrompt {
+			wf.kind = errkind.Unobserved
+			wf.msg = "timed out before the turn could be followed; the prompt was taken"
+			h := wf.awaited
+			h.target = target
+			if s := h.String(); h.incarnation != "" && s != "" {
+				wf.handle, wf.follow = s, true
+			} else {
+				wf.msg += "; craze wait " + psShort(r.session.id) + " follows the session"
+			}
+		}
 	}
 	return r.fail(wf)
 }
+
+// waitFate sees an owned wait's end, before it reads its gate: a no-op, and the
+// barrier a test lets a prompt's answer in at, once the waiter has given up on it.
+var waitFate = func(*submitGate) {}
 
 // fail prints an exit-1 failure (writeFailure) about the run's session.
 func (r *promptJob) fail(wf *waitFailure) error {
@@ -345,11 +368,11 @@ func (r *promptJob) fail(wf *waitFailure) error {
 // no session.
 func (r *promptJob) notSent(why string, undone undoing) error {
 	if !r.wait {
-		return r.fail(&waitFailure{msg: why + undone.note()})
+		return r.fail(&waitFailure{msg: why + undone.note(), kind: errkind.Interrupted})
 	}
 	res := newResult(r.session, statusCancelled)
 	res.fill(newTurnAccumulator())
-	res.Error = why + undone.note()
+	res.Error = kindError(why+undone.note(), errkind.Interrupted)
 	return writeResult(r.cmd.OutOrStdout(), r.cmd.ErrOrStderr(), r.out, res)
 }
 
@@ -418,7 +441,7 @@ func withNote(err error, note string) error {
 	}
 	var ee *exitError
 	if errors.As(err, &ee) {
-		return &exitError{code: ee.code, msg: ee.msg + note, cause: ee.cause}
+		return &exitError{code: ee.code, msg: ee.msg + note, cause: ee.cause, kind: ee.kind}
 	}
 	return errors.New(err.Error() + note)
 }
@@ -431,5 +454,6 @@ func (r *promptJob) waitFor(conn *waitConn) error {
 	timeout, stopTimer := timeoutAt(r.deadline)
 	defer stopTimer()
 	res, wf := waitTurn(context.Background(), conn, waitStart{submit: g.run}, waitOptions{timeout: timeout, sigs: r.relayed})
+	waitFate(g)
 	return r.waitAfter(g, conn, res, wf)
 }

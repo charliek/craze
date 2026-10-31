@@ -869,12 +869,8 @@ func executeErr(argv []string) (stdout, stderr string, code int) {
 	if err == nil {
 		return out.String(), errBuf.String(), 0
 	}
-	line, c := diagnose(ranCmd, err)
-	stderrOut := errBuf.String()
-	if line != "" {
-		stderrOut += line + "\n"
-	}
-	return out.String(), stderrOut, c
+	c := report(&out, &errBuf, ranCmd, argv, err)
+	return out.String(), errBuf.String(), c
 }
 
 func TestBridgeUnknownFlagIsOneLineExitOne(t *testing.T) {

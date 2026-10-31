@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // HomeDir is the home directory craze reads the user-level skills and the
@@ -226,6 +227,11 @@ type TurnInfo struct {
 	// engine has no live error value for a synthetic ending in the first
 	// place — only what ClassifyEventErr made of one.
 	Err string
+	// Info is what the failure said of itself (ErrorInfo) while its type was
+	// still known, set on TurnEnded alongside ErrClass: all the waiting commands
+	// have to tell one failure from another by. An ending from a host that
+	// predates it has none, which a reader takes for errkind.Unknown.
+	errkind.Info
 	// Synthetic marks a TurnEnded the wire never produced: a withdrawn
 	// prompt (ErrPromptCancelled), or a refusal turned into an ending
 	// (ErrPromptInFlight, ErrForeignTurn).

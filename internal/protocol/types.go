@@ -537,6 +537,16 @@ type LastTurn struct {
 	Outcome TurnOutcome `json:"outcome"`
 	// Err is a failed turn's error text, absent for the other two.
 	Err string `json:"err,omitempty"`
+	// StopReason is the ending's own reason: absent for a foreign turn, a
+	// failure that has none, and an older host.
+	StopReason string `json:"stopReason,omitempty"`
+	// Kind, Retryable, Status and ProviderCode are what a failed turn said of
+	// itself (internal/errkind): absent for the other two, and from an older
+	// host, which a reader takes for kind unknown.
+	Kind         string `json:"kind,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	Status       int    `json:"status,omitempty"`
+	ProviderCode string `json:"provider_code,omitempty"`
 	// EndedAt is when the turn ended: its ending event's time, in UTC.
 	EndedAt time.Time `json:"endedAt"`
 	// TurnID is the ended turn's id as the stream names it — a turn of
@@ -1682,6 +1692,10 @@ type ReadyParams struct {
 	Session      SessionInfo `json:"session"`
 	StartFailed  bool        `json:"startFailed"`
 	Err          string      `json:"err,omitempty"`
+	// Kind is what a failed start said of itself (internal/errkind): absent
+	// when it started, and from an older host, which a reader takes for
+	// start_failed.
+	Kind string `json:"kind,omitempty"`
 }
 
 // PresenceParams is a presence notification's params (plan 032 §3.14,

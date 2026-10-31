@@ -333,9 +333,14 @@ func TestResultJSONKeys(t *testing.T) {
 	got := jsonKeys(t, done)
 	want := map[string]string{"status": "string", "session": "string", "short": "string", "provider": "string",
 		"model": "string", "attach": "string", "turn": "string", "message": "string", "toolCalls": "number",
-		"durationMs": "number", "files": "array"}
+		"durationMs": "number", "files": "array", "stopReason": "string"}
 	if !maps.Equal(got, want) {
 		t.Errorf("a completed result's keys: %v, want %v", got, want)
+	}
+	unresolved := newResult(resultSession{provider: "grok"}, statusCancelled)
+	unresolved.fill(newTurnAccumulator())
+	if _, ok := jsonKeys(t, unresolved)["model"]; ok {
+		t.Errorf("a model never resolved is written: %v", jsonKeys(t, unresolved))
 	}
 	running := newResult(s, statusRunning)
 	running.Row, running.Handle, running.Partial = "q-1", "inc.3.row-q-1", true
@@ -409,4 +414,15 @@ func TestUnsavedWhyIsOneShortLine(t *testing.T) {
 	if got := unsavedWhy(errors.New("disk full")); got != "disk full" {
 		t.Fatalf("a short reason is %q, want it whole", got)
 	}
+}
+
+// errorIs says m's error is the one object every waiting command prints: its
+// message, kind and retryable exactly, and nothing else but a detail.
+func errorIs(m map[string]any, message, kind string, retryable bool) bool {
+	e, ok := m["error"].(map[string]any)
+	if !ok || e["message"] != message || e["kind"] != kind || e["retryable"] != retryable {
+		return false
+	}
+	delete(e, "detail")
+	return len(e) == 3
 }

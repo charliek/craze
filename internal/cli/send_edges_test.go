@@ -63,7 +63,7 @@ func TestSendNeverStopsTheHostItsReloadSpawned(t *testing.T) {
 	sigs <- syscall.SIGINT
 	stdout, stderr, code := run.wait(t)
 	m := decodeResult(t, stdout)
-	if code != 3 || m["status"] != "cancelled" || m["error"] != "interrupted before the prompt was sent" || stderr != "" {
+	if code != 3 || m["status"] != "cancelled" || !errorIs(m, "interrupted before the prompt was sent", "interrupted", false) || stderr != "" {
 		t.Fatalf("a signal before the reload's prompt: exit %d, %v, %q", code, m, stderr)
 	}
 	e, ok := hostServing(env, id)
@@ -231,7 +231,7 @@ func TestASecondSignalTakenByTheWaiterHurriesTheUndo(t *testing.T) {
 	m := decodeResult(t, out.String())
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 3 || m["status"] != "cancelled" ||
-		m["error"] != "interrupted before the prompt was sent; the session it started was told to stop" {
+		!errorIs(m, "interrupted before the prompt was sent; the session it started was told to stop", "interrupted", false) {
 		t.Fatalf("the second signal: %v, %v", err, m)
 	}
 	if exited {

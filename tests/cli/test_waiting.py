@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from conftest import PS_TIMEOUT, TEST_HOST_IDLE_EXIT, _argv, pid_alive
+from conftest import PS_TIMEOUT, REMOVED_CONFIG_ENV, TEST_HOST_IDLE_EXIT, _argv, pid_alive
 from test_detach import _entries
 
 WAIT = 10.0
@@ -249,3 +249,136 @@ def test_a_tree_kill_cancels_the_turn_and_leaves_the_session(craze_bin: Path, fa
             waiter.kill()
             waiter.communicate()
     _stop(craze_bin, short)
+
+
+def _one_object(out: subprocess.CompletedProcess[bytes]) -> dict:
+    """The one JSON object a command printed on stdout, on one line."""
+    assert out.stdout.count(b"\n") == 1 and out.stdout.endswith(b"\n"), out
+    return json.loads(out.stdout)
+
+
+def _usage_object(out: subprocess.CompletedProcess[bytes], kind: str = "usage") -> None:
+    """A usage error under --json: exit 2, one object, the stderr line its words."""
+    assert out.returncode == 2 and out.stderr.count(b"\n") == 1, out
+    assert _one_object(out) == {"error": {"message": out.stderr.decode().rstrip("\n"), "kind": kind, "retryable": False}}, out
+
+
+def test_usage_errors_under_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """Through the binary's own command line: an unknown flag before and after
+    --json, an invalid value, an argument error and a failure before the command
+    ran each print one object beside the stderr line, and the prompt's and the
+    provider's errors say their kinds. --json as a value, or past `--`, is no
+    --json; craze prompt's stream never gets an object. Nothing is started."""
+    _config(fake_agent_bin)
+    work = str(tmp_path)
+    for args in (
+        ["wait", "--json", "--nope"],
+        ["wait", "--nope", "--json"],
+        ["version", "--json"],
+        ["--json", "nosuchcommand"],
+        ["wait", "abcd1234", "--json", "--timeout", "soon"],
+        ["wait", "a", "b", "--json"],
+        ["new", "--wait", "--json", "--plan", "--ask", "-C", work, "x"],
+    ):
+        _usage_object(_craze(craze_bin, *args))
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "nosuch", "-C", work, "x"), "config")
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "  "), "prompt")
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work), "prompt")
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "--prompt-file", "/no/such/file"), "prompt")
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "x" * (33 << 10)), "prompt")
+    env = {**os.environ, REMOVED_CONFIG_ENV: "/x"}
+    _usage_object(subprocess.run([str(craze_bin), "wait", "abcd1234", "--json"], capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=WAIT))
+
+    for args in (
+        ["wait", "--nope"],
+        ["new", "--title", "--json", "--nope"],
+        ["new", "-C", "--json", "--nope"],
+        ["new", "--wait", "--nope", "--", "--json"],
+        ["wait", "--json", "--json=false", "--nope"],
+        ["prompt", "--json", "--nope"],
+    ):
+        out = _craze(craze_bin, *args)
+        assert out.returncode == 2 and out.stdout == b"" and out.stderr.count(b"\n") == 1, (args, out)
+    assert _entries(_home()) == []
+
+
+def test_failures_and_endings_say_their_kinds(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A failed turn's `error` is the object, a running ACP agent's JSON-RPC error
+    an `agent` kind with no HTTP status; the turn's stop reason is `error`; a
+    `craze wait` reading it afterwards says the same; a directory that is not one
+    is `workspace`, an id nothing knows `config`."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "go", script="turnfail")
+    res = json.loads(out.stdout)
+    assert out.returncode == 3 and res["status"] == "failed" and res["stopReason"] == "error", out
+    assert res["error"] == {"message": res["error"]["message"], "kind": "agent", "retryable": False}, res
+    assert "the turn failed" in res["error"]["message"], res
+    short = res["short"]
+    out = _craze(craze_bin, "wait", short, "--json")
+    again = json.loads(out.stdout)
+    assert out.returncode == 3 and again["partial"] is True and again["error"] == res["error"] and again["stopReason"] == "error", out
+    _stop(craze_bin, short)
+
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work / "nope"), "go")
+    assert out.returncode == 1 and _one_object(out)["error"]["kind"] == "workspace", out
+    assert _one_object(out)["error"]["retryable"] is False and sorted(_one_object(out)) == ["error"], out
+    out = _craze(craze_bin, "wait", "abcd1234", "--json")
+    assert out.returncode == 1 and _one_object(out)["error"] == {"message": "no session abcd1234", "kind": "config", "retryable": False}, out
+    assert _entries(_home()) == []
+
+
+def test_an_agent_refusing_the_model_at_the_start(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """cursor's -32602 for a --model it does not serve is told from any other start
+    failure: it names the model, is `model_not_found`, and says a retry will not
+    help; its data, the agent's own diagnostic, stays out of the message; and the
+    session the command started is stopped."""
+    _config(fake_agent_bin)
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "--model", "nope-model", "-C", str(tmp_path), "go", script="permodel")
+    assert out.returncode == 1, out
+    err = _one_object(out)["error"]
+    assert err["kind"] == "model_not_found" and err["retryable"] is False, out
+    assert 'the agent refused model "nope-model": ' in err["message"], out
+    assert "Invalid model value" not in err["message"], out
+    assert _entries(_home()) == []
+
+
+def test_a_native_start_refused_for_its_configuration(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A native --model no model answers to, and a model table that will not load,
+    are the real matching and loading paths through the built binary: `config`, no
+    retry helps, the session the command started stopped. No model is ever called."""
+    _config(fake_agent_bin)
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "native", "--model", "definitely-not-a-model", "-C", str(tmp_path), "go")
+    assert out.returncode == 1, out
+    err = _one_object(out)["error"]
+    assert err["kind"] == "config" and err["retryable"] is False, out
+    assert 'unknown model "definitely-not-a-model"' in err["message"], out
+    assert _entries(_home()) == []
+
+    native = Path(os.environ["CRAZE_HOME"]) / "native"
+    native.mkdir(parents=True, exist_ok=True)
+    (native / "models.toml").write_text("version = [\n", encoding="utf-8")
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "native", "-C", str(tmp_path), "go")
+    assert out.returncode == 1, out
+    err = _one_object(out)["error"]
+    assert err["kind"] == "config" and err["retryable"] is False, out
+    assert "not valid TOML" in err["message"], out
+    assert _entries(_home()) == []
+
+
+def test_a_plan_returned_says_its_turn_ended_there(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """An ACP agent's plan under --plan: completed, its stop reason cancelled, and
+    planEnded says so. A turn that ended any other way has no planEnded."""
+    _config(fake_agent_bin)
+    with (Path(os.environ["CRAZE_HOME"]) / "config.toml").open("a", encoding="utf-8") as f:
+        f.write(f'grok = "{fake_agent_bin}"\n')
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "grok", "--plan", "-C", str(tmp_path), "plan it", script="grok-plan")
+    res = json.loads(out.stdout)
+    assert out.returncode == 0 and res["status"] == "completed" and res["stopReason"] == "cancelled", out
+    assert res["planEnded"] is True and res["plan"], res
+    _stop(craze_bin, res["short"])
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", str(tmp_path), "hi")
+    res = json.loads(out.stdout)
+    assert out.returncode == 0 and res["stopReason"] == "end_turn" and "planEnded" not in res and "error" not in res, out
+    _stop(craze_bin, res["short"])

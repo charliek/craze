@@ -12,6 +12,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/transcript"
 )
@@ -145,9 +146,11 @@ const closeBound = 3 * time.Second
 
 // StartError is the host's start having failed (§3.4: ready{startFailed}, or
 // an attach refused not_accepting, reason start_failed): Error is the host's
-// start error text, verbatim — what the in-process Start returned.
+// start error text, verbatim — what the in-process Start returned — and Kind
+// what it said of itself, "" from an older host.
 type StartError struct {
 	Text string
+	Kind string
 }
 
 func (e *StartError) Error() string { return e.Text }
@@ -298,7 +301,7 @@ func (s *Session) Start(ctx context.Context) error {
 	if err := s.Attach(ctx); err != nil {
 		var e *Error
 		if errors.As(err, &e) && e.Code == protocol.CodeNotAccepting && e.Reason == protocol.ReasonStartFailed {
-			return &StartError{Text: e.Cause}
+			return &StartError{Text: e.Cause, Kind: e.Kind}
 		}
 		return err
 	}
@@ -438,7 +441,7 @@ func (s *Session) observe(it Item) {
 		}
 		var err error
 		if r.StartFailed {
-			err = &StartError{Text: r.Err}
+			err = &StartError{Text: r.Err, Kind: r.Kind}
 		}
 		s.readyLocked(err)
 	case KindEnd, KindError:
@@ -572,7 +575,7 @@ func (s *Session) item(st *Stream, it Item) (backend.Item, bool) {
 		}
 		var err error
 		if r.StartFailed {
-			err = &StartError{Text: r.Err}
+			err = &StartError{Text: r.Err, Kind: r.Kind}
 		}
 		return backend.Item{Kind: backend.ItemReady, Info: info, Err: err}, true
 	case KindEnd, KindError:
@@ -1028,7 +1031,14 @@ func (s *Session) LastTurn(ctx context.Context) (*engine.LastTurn, error) {
 		return nil, err
 	}
 	lt := r.LastTurn
-	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt, TurnID: lt.TurnID}, nil
+	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, StopReason: lt.StopReason,
+		Info: LastTurnInfo(lt), EndedAt: lt.EndedAt, TurnID: lt.TurnID}, nil
+}
+
+// LastTurnInfo is what lt's failure said of itself. protocol holds it flat, the
+// package importing nothing of craze's.
+func LastTurnInfo(lt *protocol.LastTurn) errkind.Info {
+	return errkind.Info{Kind: errkind.Kind(lt.Kind), Retryable: lt.Retryable, Status: lt.Status, ProviderCode: lt.ProviderCode}
 }
 
 // replyError is a reply whose result this build could not read.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -65,7 +66,7 @@ func resolveLive(env rundir.Env, what, id string, reload bool) (rundir.Entry, er
 	case 0:
 		return rundir.Entry{}, liveGone(what, id, reload)
 	}
-	return rundir.Entry{}, exitf(1, "%s: %d sessions match %s: %s", what, len(matches), id, sanitizeLine(formatEntries(matches)))
+	return rundir.Entry{}, kindf(errkind.Usage, "%s: %d sessions match %s: %s", what, len(matches), id, sanitizeLine(formatEntries(matches)))
 }
 
 // liveGone is the refusal of an id no live host serves (§3.1): `the session
@@ -77,13 +78,13 @@ func liveGone(what, id string, reload bool) error {
 	matches := matchCrazeID(indexCrazeIDs(), id)
 	switch {
 	case len(matches) == 0:
-		return exitf(1, "%s: no session %s", what, id)
+		return kindf(errkind.Config, "%s: no session %s", what, id)
 	case len(matches) > 1:
-		return exitf(1, "%s: the session has ended: %d ended sessions match %s", what, len(matches), id)
+		return kindf(errkind.Usage, "%s: the session has ended: %d ended sessions match %s", what, len(matches), id)
 	case reload:
-		return exitf(1, "%s: the session has ended%s", what, reloadHint(matches))
+		return kindf(errkind.Stopped, "%s: the session has ended%s", what, reloadHint(matches))
 	}
-	return exitf(1, "%s: the session has ended", what)
+	return kindf(errkind.Stopped, "%s: the session has ended", what)
 }
 
 // reloadHint is how an ended session is loaded again — ` (craze send <short>
@@ -137,7 +138,7 @@ func matchCrazeID(ids []string, id string) []string {
 // session-scoped method could take.
 func entrySession(what string, e rundir.Entry) (string, error) {
 	if e.CrazeSessionID == "" {
-		return "", exitf(1, "%s: session %s has not started yet; try again in a moment", what, sanitizeLine(entryID(e)))
+		return "", kindf(errkind.StartFailed, "%s: session %s has not started yet; try again in a moment", what, sanitizeLine(entryID(e)))
 	}
 	return e.CrazeSessionID, nil
 }
@@ -157,5 +158,5 @@ func dialCLI(ctx context.Context, e rundir.Entry, what string) (*remote.Client, 
 // attach was refused: exit 1, carrying err (exitError.cause), which craze
 // send reads a host closing its session from (plan 041 §3.4).
 func unreachable(what string, e rundir.Entry, err error) error {
-	return &exitError{code: 1, msg: what + ": session " + psShort(entryID(e)) + " is unreachable: " + sanitizeLine(err.Error()), cause: err}
+	return &exitError{code: 1, msg: what + ": session " + psShort(entryID(e)) + " is unreachable: " + sanitizeLine(err.Error()), cause: err, kind: errkind.ConnectionLost}
 }

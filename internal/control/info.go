@@ -238,7 +238,9 @@ func lastTurn(st engine.State) *protocol.LastTurn {
 	if lt == nil {
 		return nil
 	}
-	return &protocol.LastTurn{Outcome: protocol.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt.UTC(), TurnID: lt.TurnID}
+	return &protocol.LastTurn{Outcome: protocol.TurnOutcome(lt.Outcome), Err: lt.Err, StopReason: lt.StopReason,
+		Kind: string(lt.Info.Kind), Retryable: lt.Info.Retryable, Status: lt.Info.Status, ProviderCode: lt.Info.ProviderCode,
+		EndedAt: lt.EndedAt.UTC(), TurnID: lt.TurnID}
 }
 
 // queueRows is each row as the event codec writes a queue row.

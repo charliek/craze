@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
@@ -497,7 +498,7 @@ var (
 	// holds a provider key. Redacting the path instead would put in the
 	// prompt, and in the header, something that is neither the directory nor
 	// — with a key at its front — an absolute path at all.
-	errWorkspaceKey = errors.New("harness: the working directory's path contains a configured provider key; " +
+	errWorkspaceKey = keyRefusal("harness: the working directory's path contains a configured provider key; " +
 		"start craze from another directory, or change the key")
 
 	// errPlanPathKey is errWorkspaceKey's twin for the session's plan file:
@@ -505,7 +506,7 @@ var (
 	// Every plan-mode reminder hands the model that path so it can write the
 	// plan there (§3.3), and a redacted path is one the model cannot open, so
 	// the answer is the working directory's — refuse, and say what to do.
-	errPlanPathKey = errors.New("harness: the plan file's path contains a configured provider key; " +
+	errPlanPathKey = keyRefusal("harness: the plan file's path contains a configured provider key; " +
 		"move the craze directory, or change the key")
 
 	// errChildHomeKey is errPlanPathKey's twin for a sub-agent: its Open's
@@ -530,7 +531,7 @@ var (
 	// configured key is inside — wholly, or spanning the join with the extras
 	// rendered after it, or with the session-start section after those.
 	// withPromptExtras and withSnapshot say why none of them can be redacted.
-	errProfileKey = errors.New("harness: a configured provider key is inside the system prompt's own text, or spans " +
+	errProfileKey = keyRefusal("harness: a configured provider key is inside the system prompt's own text, or spans " +
 		"the join between it and the instructions or session-start section rendered after it; change the key, or remove that provider from the model table")
 
 	// errSnapshotKey is Open's refusal of a session-start section the final
@@ -540,7 +541,7 @@ var (
 	// where the markers of keys spelled across the joins between fields grow it
 	// past its bound with no status left to give back. withSnapshot says why
 	// neither can be redacted.
-	errSnapshotKey = errors.New("harness: a configured provider key spans the framing of the session-start section, " +
+	errSnapshotKey = keyRefusal("harness: a configured provider key spans the framing of the session-start section, " +
 		"or grows it past its bound when redacted; change the key, or remove that provider from the model table")
 
 	// errDigestKey is Open's refusal of a transcript header whose SHA-256 of
@@ -549,7 +550,7 @@ var (
 	// repeats the prompt's, which C6 requires to be the same string: redacting
 	// one copy would break that equality and leave the other, and a digest
 	// with a marker in it is not a digest.
-	errDigestKey = errors.New("harness: a configured provider key appears in one of this session's transcript-header " +
+	errDigestKey = keyRefusal("harness: a configured provider key appears in one of this session's transcript-header " +
 		"digests; change the key, or remove that provider from the model table")
 
 	// errHeaderKey is Open's refusal of a transcript header whose encoded line
@@ -557,7 +558,7 @@ var (
 	// JSON between two fields — a sub-agent's type and its persona's path, say,
 	// each of which a plugin or a repository wrote. The fields were redacted
 	// one at a time, and the line is what goes to disk.
-	errHeaderKey = errors.New("harness: a configured provider key appears in this session's transcript header, " +
+	errHeaderKey = keyRefusal("harness: a configured provider key appears in this session's transcript header, " +
 		"spanning two of its fields; change the key, or the file or directory names it spans")
 
 	// errChildPromptKey is a sub-agent's Open refusing a system prompt that a
@@ -574,6 +575,22 @@ var (
 func holdsAKey(text string, keys []string) bool {
 	return slices.ContainsFunc(keys, func(k string) bool { return strings.Contains(text, k) })
 }
+
+// keyRefusal is Open refusing a session over where a configured provider key
+// turns up, and what to change so it does not. Another attempt meets it again
+// until someone does, so a failed start says it is configuration.
+type keyRefusal string
+
+func (e keyRefusal) Error() string           { return string(e) }
+func (e keyRefusal) ErrorInfo() errkind.Info { return errkind.New(errkind.Config) }
+
+// configError is err, an effort no request of the model's driver can carry: the
+// table lets a model list any word as a level, so a file can reach this, and
+// another attempt meets it again until the file changes.
+type configError struct{ error }
+
+func (e configError) Unwrap() error           { return e.error }
+func (e configError) ErrorInfo() errkind.Info { return errkind.New(errkind.Config) }
 
 // holdsKey is holdsAKey over the keys this session knows of now. Under ts.mu,
 // because a switch can add to them (resolve).

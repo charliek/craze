@@ -184,6 +184,11 @@
       "properties": {
         "outcome": {"$ref": "#/$defs/turnOutcome"},
         "err": {"type": "string", "description": "A failed turn's error text; absent for the other outcomes."},
+        "stopReason": {"type": "string", "description": "The ending's own stop reason: absent for a foreign turn, a failure with none, and an older host."},
+        "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
+        "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
+        "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},
+        "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."},
         "endedAt": {"$ref": "event.json#/$defs/time", "description": "The turn's ending event's time, in UTC."},
         "turnId": {"type": "string", "description": "The ended turn's id as the stream names it: turn.id for a turn of craze's own, the foreign_turn bracket's id for the agent's own."}
       },

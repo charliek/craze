@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // The prompt of craze new --wait and craze send (plan 041 §3.2, P14, P16):
@@ -92,7 +94,7 @@ func (p *promptInput) read(ctx context.Context, cmd *cobra.Command, what string,
 	case !stdinIsTTY(stdin):
 		source, readIt = "stdin", func() (string, error) { return readPrompt(stdin) }
 	default:
-		return "", usagef("%s: needs a prompt: words, --prompt-file <path>, or stdin; see %s --help", what, cmd.CommandPath())
+		return "", usageKindf(errkind.Prompt, "%s: needs a prompt: words, --prompt-file <path>, or stdin; see %s --help", what, cmd.CommandPath())
 	}
 	type read struct {
 		text string
@@ -116,9 +118,9 @@ func (p *promptInput) read(ctx context.Context, cmd *cobra.Command, what string,
 		return checkPrompt(what, r.text, r.err)
 	case <-ctx.Done():
 		if signalled() {
-			return "", exitf(1, "%s: interrupted while reading the prompt from %s", what, source)
+			return "", kindf(errkind.Interrupted, "%s: interrupted while reading the prompt from %s", what, source)
 		}
-		return "", exitf(1, "%s: timed out reading the prompt from %s", what, source)
+		return "", kindf(errkind.TimeoutBeforePrompt, "%s: timed out reading the prompt from %s", what, source)
 	}
 }
 
@@ -131,14 +133,14 @@ var promptReading = func() {}
 func checkPrompt(what, text string, err error) (string, error) {
 	over := errors.Is(err, errPromptTooLong)
 	if err != nil && !over {
-		return "", usagef("%s: the prompt cannot be read: %s", what, sanitizeLine(err.Error()))
+		return "", usageKindf(errkind.Prompt, "%s: the prompt cannot be read: %s", what, sanitizeLine(err.Error()))
 	}
 	text = strings.TrimSpace(text)
 	switch {
 	case over, len(text) > promptTextMax:
-		return "", usagef("%s: the prompt is over %d KiB; put the bulk of it in a file the task names", what, promptTextMax>>10)
+		return "", usageKindf(errkind.Prompt, "%s: the prompt is over %d KiB; put the bulk of it in a file the task names", what, promptTextMax>>10)
 	case text == "":
-		return "", usagef("%s: the prompt is empty", what)
+		return "", usageKindf(errkind.Prompt, "%s: the prompt is empty", what)
 	}
 	return text, nil
 }

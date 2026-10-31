@@ -3,10 +3,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // The last turn's ending (plan 030 §3.7, SF-57): State.LastTurn is kept from
@@ -64,7 +66,7 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 		if id := got[len(got)-1].Turn.ID; id != res.Turn {
 			t.Fatalf("the ending names %s, the submit started %s", id, res.Turn)
 		}
-		r.wantLastTurn(&LastTurn{Outcome: TurnDone, EndedAt: fakeClock, TurnID: res.Turn})
+		r.wantLastTurn(&LastTurn{Outcome: TurnDone, StopReason: "end_turn", EndedAt: fakeClock, TurnID: res.Turn})
 	})
 	t.Run("failed, with the ending's error", func(t *testing.T) {
 		r := newRig(t, Options{})
@@ -72,7 +74,7 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 		r.s.script(&script{fail: boom})
 		res := r.submit("one")
 		r.until(ended(res.Turn))
-		r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: boom.Error(), EndedAt: fakeClock, TurnID: res.Turn})
+		r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: boom.Error(), Info: errkind.New(errkind.Internal), EndedAt: fakeClock, TurnID: res.Turn})
 		if st := r.e.State(); st.Activity != ActivityError || st.Err != boom.Error() {
 			t.Fatalf("the engine is %s with %q, want error with the turn's", st.Activity, st.Err)
 		}
@@ -86,7 +88,7 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.until(ended(res.Turn))
-		r.wantLastTurn(&LastTurn{Outcome: TurnCancelled, EndedAt: fakeClock, TurnID: res.Turn})
+		r.wantLastTurn(&LastTurn{Outcome: TurnCancelled, StopReason: "cancelled", EndedAt: fakeClock, TurnID: res.Turn})
 	})
 	t.Run("cancelled by the close that ended it", func(t *testing.T) {
 		r := newRig(t, Options{})
@@ -101,7 +103,7 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := r.e.State().LastTurn
-		if want := (LastTurn{Outcome: TurnCancelled, EndedAt: fakeClock, TurnID: res.Turn}); got == nil || *got != want {
+		if want := (LastTurn{Outcome: TurnCancelled, StopReason: "closing", EndedAt: fakeClock, TurnID: res.Turn}); got == nil || *got != want {
 			t.Fatalf("after the close the last turn is %+v, want %+v", got, want)
 		}
 	})
@@ -116,7 +118,7 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 		r := newRig(t, Options{})
 		res := r.submit("one")
 		r.until(ended(res.Turn))
-		want := &LastTurn{Outcome: TurnDone, EndedAt: fakeClock, TurnID: res.Turn}
+		want := &LastTurn{Outcome: TurnDone, StopReason: "end_turn", EndedAt: fakeClock, TurnID: res.Turn}
 		r.wantLastTurn(want)
 		for _, running := range []bool{true, false} {
 			r.s.emit(agent.Event{Type: agent.EventForeignTurn, Replayed: true,
@@ -135,7 +137,7 @@ func TestTheNextTurnsStartSupersedesTheLastTurn(t *testing.T) {
 	r.s.script(&script{fail: boom})
 	first := r.submit("one")
 	r.until(ended(first.Turn))
-	r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: boom.Error(), EndedAt: fakeClock, TurnID: first.Turn})
+	r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: boom.Error(), Info: errkind.New(errkind.Internal), EndedAt: fakeClock, TurnID: first.Turn})
 
 	sc := r.s.script(held())
 	second := r.submit("two")
@@ -147,11 +149,32 @@ func TestTheNextTurnsStartSupersedesTheLastTurn(t *testing.T) {
 	}
 	sc.release()
 	r.until(ended(second.Turn))
-	r.wantLastTurn(&LastTurn{Outcome: TurnDone, EndedAt: fakeClock, TurnID: second.Turn})
+	r.wantLastTurn(&LastTurn{Outcome: TurnDone, StopReason: "end_turn", EndedAt: fakeClock, TurnID: second.Turn})
 
 	// A foreign turn starting supersedes craze's own ending too.
 	r.foreignTurn("grok-7", true)
 	r.wantLastTurn(nil)
 	r.foreignTurn("grok-7", false)
 	r.wantLastTurn(&LastTurn{Outcome: TurnDone, EndedAt: fakeClock, TurnID: "grok-7"})
+}
+
+// saysKind is a turn's or a start's failure that says what it is, as a provider's
+// does.
+type saysKind struct{ info errkind.Info }
+
+func (saysKind) Error() string             { return "said" }
+func (e saysKind) ErrorInfo() errkind.Info { return e.info }
+
+// TestAFailedEndingCarriesWhatTheFailureSaid: the ending on the stream and the
+// last turn both have it, from the live error, before it is only text.
+func TestAFailedEndingCarriesWhatTheFailureSaid(t *testing.T) {
+	r := newRig(t, Options{})
+	want := errkind.Info{Kind: errkind.Quota, Status: 429, ProviderCode: "insufficient_quota"}
+	r.s.script(&script{fail: fmt.Errorf("wrapped: %w", saysKind{want})})
+	res := r.submit("one")
+	got := r.until(ended(res.Turn))
+	if tu := got[len(got)-1].Turn; tu.Info != want {
+		t.Fatalf("the ending says %+v, want %+v", tu.Info, want)
+	}
+	r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: "wrapped: said", Info: want, EndedAt: fakeClock, TurnID: res.Turn})
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 )
 
 // The snapshot codec is a Snapshot as one JSON object (plan 024 §3.5): what S2
@@ -198,6 +199,9 @@ type wireEntry struct {
 type wireEntryErr struct {
 	Class agent.EventErrClass `json:"class"`
 	Code  int                 `json:"code"`
+	// What the error said of itself, each absent at its zero value, and all
+	// absent from a host that predates them.
+	errkind.Info
 }
 
 // wireSnapshotIn is the whole object as a decoder reads it.
@@ -438,7 +442,7 @@ func encodeEntry(jw *jsonWriter, e *Entry) ([]byte, error) {
 		if w.Text == "" {
 			w.Text = re.Message
 		}
-		w.Err = &wireEntryErr{Class: re.Class, Code: re.Code}
+		w.Err = &wireEntryErr{Class: re.Class, Code: re.Code, Info: re.Info}
 	}
 	b, err := jw.marshal(&w)
 	if err != nil {
@@ -891,7 +895,7 @@ func (w *wireEntry) entry() (Entry, error) {
 		return Entry{}, err
 	}
 	if w.Err != nil {
-		e.Err = &agent.RemoteError{Message: w.Text, Class: w.Err.Class, Code: w.Err.Code}
+		e.Err = &agent.RemoteError{Message: w.Text, Class: w.Err.Class, Code: w.Err.Code, Info: w.Err.Info}
 	}
 	return e, nil
 }

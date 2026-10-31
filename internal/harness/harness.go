@@ -815,7 +815,7 @@ func (s *Session) build(table *modeltable.Table, alias string) (model, error) {
 func withEffort(m model, effort string) (model, error) {
 	opts, err := llm.EffortOptions(m.r, effort)
 	if err != nil {
-		return model{}, fmt.Errorf("harness: effort %q: %w", effort, err)
+		return model{}, configError{fmt.Errorf("harness: effort %q: %w", effort, err)}
 	}
 	m.effort, m.effortOpts = effort, opts
 	return m, nil

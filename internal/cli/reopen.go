@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/roster"
@@ -150,16 +151,16 @@ func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {
 	defer cancel()
 	row, err := newLoadRow(id)
 	if err != nil {
-		return fail(err, "%s", err.Error())
+		return fail(errkind.Config, err, "%s", err.Error())
 	}
 	env := rundir.ProcessEnv()
 	raw, hello, err := reopenThroughHub(ctx, env, roster.SavedID(row))
 	if err != nil {
-		return fail(err, "%s", newFailure(err, hello))
+		return fail(hubFailureKind(err), err, "%s", newFailure(err, hello))
 	}
 	var res protocol.ReopenResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return fail(nil, "the hub's answer: %v", err)
+		return fail(errkind.Internal, nil, "the hub's answer: %v", err)
 	}
 	if f.json {
 		_, err := fmt.Fprintf(out, "%s\n", raw)

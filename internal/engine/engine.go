@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/transcript"
 )
@@ -283,6 +284,7 @@ type Engine struct {
 	cancelled       bool
 	err             string
 	startFailed     bool
+	startKind       errkind.Kind
 	// asides is how many side questions are in flight on the session
 	// (aside.go): Aside counts one in under e.mu before it calls the session
 	// and out in a defer, so it is 0 again on every path.
@@ -686,6 +688,7 @@ func (e *Engine) Started(err error) {
 		e.activity = ActivityError
 		e.startFailed = true
 		e.err = err.Error()
+		e.startKind = agent.StartErrorKind(err)
 		e.retireReplay()
 		return
 	}
@@ -2052,6 +2055,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		info.Synthetic = refused
 		info.Err = t.err.Error()
 		info.ErrClass = agent.ClassifyEventErr(t.err)
+		info.Info = agent.ErrorInfo(t.err)
 	}
 	e.cancelled = info.StopReason == stopCancelled
 	e.rememberErrLocked(t)
@@ -2220,7 +2224,7 @@ func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
 	e.rememberErrLocked(t)
 	info := &agent.TurnInfo{
 		ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
-		Err: t.err.Error(), ErrClass: agent.ClassifyEventErr(t.err),
+		Err: t.err.Error(), ErrClass: agent.ClassifyEventErr(t.err), Info: agent.ErrorInfo(t.err),
 		Pending: e.queue.Len(),
 	}
 	batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: info}, t.cause))

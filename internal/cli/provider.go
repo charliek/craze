@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -49,7 +50,7 @@ func joinOrPlain(names []string) string {
 // no provider: a usage error that quotes the value — a recognised flag's,
 // given on purpose — and lists the ids.
 func unknownProviderError(id string) error {
-	return usagef("craze: unknown provider %q (want %s)", id, providerIDs)
+	return usageKindf(errkind.Config, "craze: unknown provider %q (want %s)", id, providerIDs)
 }
 
 type resolvedProvider struct {

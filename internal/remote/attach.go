@@ -732,7 +732,7 @@ func (s *Stream) refusedLocked(e *Error) (items []Item, retry, ended bool) {
 	case e.Code == protocol.CodeNotAccepting && e.Reason == protocol.ReasonStartFailed:
 		if s.readyOwed {
 			s.readyOwed = false
-			items = append(items, Item{Kind: KindReady, Ready: &protocol.ReadyParams{StartFailed: true, Err: e.Cause}})
+			items = append(items, Item{Kind: KindReady, Ready: &protocol.ReadyParams{StartFailed: true, Err: e.Cause, Kind: e.Kind}})
 		}
 		s.stopLocked()
 		return append(items, Item{Kind: KindError, Err: e}), false, false

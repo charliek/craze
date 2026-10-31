@@ -424,7 +424,8 @@ func TestTwoSendsReloadingOneSessionShareItsHost(t *testing.T) {
 // fake agent's effort set, gated), a signal comes once the host is up and
 // the command is attaching, and the session the command spawned is stopped —
 // its host gone — and the result is `cancelled`, exit 3; the agent was never
-// prompted.
+// prompted. --model is only what was asked for, never resolved, so the result
+// has no model.
 func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	env, ws, _ := unattendedHome(t)
 	dir := t.TempDir()
@@ -441,7 +442,7 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	promptSpawned = func(ref hostRef) { spawned <- ref }
 	t.Cleanup(func() { promptSpawned = prev })
 
-	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "--effort", "low", "-C", ws, "never sent")
+	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "--model", "nope", "--effort", "low", "-C", ws, "never sent")
 	var ref hostRef
 	select {
 	case ref = <-spawned:
@@ -452,8 +453,11 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	stdout, stderr, code := run.wait(t)
 	m := decodeResult(t, stdout)
 	if code != 3 || m["status"] != "cancelled" || m["session"] != ref.entry.CrazeSessionID || m["message"] != "" ||
-		m["error"] != "interrupted before the prompt was sent; the session it started was stopped" || stderr != "" {
+		!errorIs(m, "interrupted before the prompt was sent; the session it started was stopped", "interrupted", false) || stderr != "" {
 		t.Fatalf("a signal before the prompt: exit %d, %v, %q", code, m, stderr)
+	}
+	if model, ok := m["model"]; ok {
+		t.Fatalf("a model never resolved is on the result: %v", model)
 	}
 	waitReaped(t, ref.entry.PID)
 	if entries, err := rundir.Hosts(env); err != nil || len(entries) != 0 {

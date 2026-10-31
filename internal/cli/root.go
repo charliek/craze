@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
@@ -112,12 +116,96 @@ func Execute() {
 	if err == nil {
 		return
 	}
-	line, code := diagnose(ranCmd, err)
-	if line != "" {
-		fmt.Fprintln(os.Stderr, line)
-	}
-	os.Exit(code)
+	os.Exit(report(os.Stdout, os.Stderr, ranCmd, os.Args[1:], err))
 }
+
+// report is what Execute does with a command's error, given the command line:
+// the exit code it answers, a usage error's JSON object on stdout when the line
+// asked for JSON (usageJSON), and the one stderr line either way.
+func report(stdout, stderr io.Writer, ranCmd *cobra.Command, args []string, err error) int {
+	line, code := diagnose(ranCmd, err)
+	if b := usageJSON(ranCmd, args, err, line, code); b != nil {
+		// A stdout whose reader has gone must not take the stderr line with it
+		// (craze new's rule): the write fails with EPIPE instead.
+		ignoreSIGPIPE()
+		_, _ = stdout.Write(b)
+	}
+	if line != "" {
+		fmt.Fprintln(stderr, line)
+	}
+	return code
+}
+
+// usageJSON is a usage error's one JSON object — {"error":{"message":…,"kind":…,
+// "retryable":false}} and a newline — when the command line asked for JSON, and
+// nil otherwise. Asked for by jsonRequested, since a command line cobra could
+// not parse never set the flag. Exit 2 alone: every other failure a --json
+// command prints as its own. Never for craze prompt, whose --json is an event
+// stream with a contract of its own, or for a completion request, whose stdout
+// is the shell's.
+func usageJSON(ranCmd *cobra.Command, args []string, err error, line string, code int) []byte {
+	if code != 2 || ranCmd == nil || ranCmd.Name() == "prompt" || isCompletionRequest(ranCmd) || !jsonRequested(ranCmd, args) {
+		return nil
+	}
+	b, merr := json.Marshal(failureBody{Error: kindError(line, failureKind(err))})
+	if merr != nil {
+		return nil
+	}
+	return append(b, '\n')
+}
+
+// jsonRequested says whether args, the command line cmd ran from, asks for
+// --json, read as pflag would have read it: the last --json wins, and a value
+// that is no bool (--json=maybe) still asks, that being the error to report. It
+// is not a search for the word. Nothing after `--` is a flag, and a flag that
+// takes a value takes the next word as it stands, so `--title --json` names a
+// title and `new --wait -- --json` a prompt. A flag cmd does not know takes no
+// word, its arity being unknown: `--bogus --json` asks. TestJSONRequestedReadsAsPflagDoes
+// holds it to the parser. pflag's own ParseAll cannot do this reading: even told to
+// pass over flags it does not know, it stops at a malformed one (`---x`) and at a
+// help flag it has not been given, and a line it stopped on is what this is for.
+func jsonRequested(cmd *cobra.Command, args []string) bool {
+	flags, on := cmd.Flags(), false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			return on
+		case arg == "--json":
+			on = true
+		case strings.HasPrefix(arg, "--json="):
+			v, err := strconv.ParseBool(strings.TrimPrefix(arg, "--json="))
+			on = err != nil || v
+		case strings.HasPrefix(arg, "--"):
+			if name, _, inline := strings.Cut(arg[2:], "="); !inline && takesValue(flags.Lookup(name)) {
+				i++
+			}
+		case len(arg) > 1 && arg[0] == '-':
+			// A run of shorthands, as pflag reads one, each in turn: the first
+			// that takes a value has the rest of the word or, when it is the
+			// last, the next word. One it does not know ends the reading there
+			// and takes no word. `=` is one such, which is why -w=C --json asks:
+			// the rest of the word is w's value, never another shorthand.
+			for j := 1; j < len(arg); j++ {
+				f := flags.ShorthandLookup(arg[j : j+1])
+				if f == nil {
+					break
+				}
+				if takesValue(f) {
+					if j == len(arg)-1 {
+						i++
+					}
+					break
+				}
+			}
+		}
+	}
+	return on
+}
+
+// takesValue says f, nil when no such flag, takes a value that may be the next
+// word: not a bool, which has a value of its own for its bare form.
+func takesValue(f *pflag.Flag) bool { return f != nil && f.NoOptDefVal == "" }
 
 // diagnose is what Execute prints (one line, or none) and the code it exits
 // with, for ranCmd's error: craze bridge's own contract (bridgeLine, exit 1;

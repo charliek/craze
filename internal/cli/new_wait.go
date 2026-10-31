@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -86,23 +87,23 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return failJSON(stdout, r.out, err)
 	}
 	r.text = text
-	fail := func(format string, a ...any) error {
-		return failJSON(stdout, r.out, exitf(1, newWhat+": "+format, a...))
+	fail := func(kind errkind.Kind, format string, a ...any) error {
+		return failJSON(stdout, r.out, kindf(kind, newWhat+": "+format, a...))
 	}
 	dir := f.dir
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return fail("the current directory: %v", err)
+			return fail(errkind.Workspace, "the current directory: %v", err)
 		}
 		dir = wd
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return fail("%s: %v", dir, err)
+		return fail(errkind.Workspace, "%s: %v", dir, err)
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return fail("%s is not a directory", abs)
+		return fail(errkind.Workspace, "%s is not a directory", abs)
 	}
 	if provider == "" {
 		// The default a hub-created session would have had: config.toml's
@@ -110,15 +111,17 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		// which the host's environment does not carry.
 		provider = tui.ConfigProvider()
 		if provider == "" {
-			return fail("no default provider yet; pass --provider %s", newProviderChoices)
+			return fail(errkind.Config, "no default provider yet; pass --provider %s", newProviderChoices)
 		}
 		if _, err := agent.ProviderByName(provider); err != nil {
-			return fail("config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
+			return fail(errkind.Config, "config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
 		}
 	}
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
 		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
-	r.session = resultSession{provider: provider, model: flags.model}
+	// No model: --model is only what was asked for, which the agent may yet
+	// refuse, and a result says the model once the session has said it.
+	r.session = resultSession{provider: provider}
 	ref, err := r.spawn(spawnOptions{env: r.env, flags: flags, unattended: true, hubEnv: true, reparent: true, title: title}, true)
 	if err != nil {
 		return r.failBefore(spawnExit(newWhat, err))
@@ -140,9 +143,14 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 func spawnExit(what string, err error) error {
 	var se *spawnError
 	if !errors.As(err, &se) {
-		return &exitError{code: 1, msg: what + ": " + sanitizeLine(err.Error()), cause: err}
+		return &exitError{code: 1, msg: what + ": " + sanitizeLine(err.Error()), cause: err, kind: errkind.StartFailed}
 	}
-	// A refusal is the host's own line, "craze serve: …" (choiceRefusal).
+	// A refusal is the host's own line, "craze serve: …" (choiceRefusal): of
+	// what the host was asked to run, which it will refuse again.
+	kind := errkind.StartFailed
+	if se.kind == spawnRefused {
+		kind = errkind.Config
+	}
 	msg := strings.TrimPrefix(strings.TrimPrefix(sanitizeLine(se.msg), "craze: "), "craze serve: ")
-	return &exitError{code: 1, msg: what + ": " + msg, cause: err}
+	return &exitError{code: 1, msg: what + ": " + msg, cause: err, kind: kind}
 }
