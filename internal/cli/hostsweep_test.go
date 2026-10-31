@@ -125,19 +125,29 @@ func recordCommand(t *testing.T, env rundir.Env, hostID string, owner hostspawn.
 		close(c.reaped)
 	}()
 	t.Cleanup(func() {
-		groups, err := rundir.ProcessGroups(time.Now().Add(stubWatchdog))
-		if err != nil {
-			t.Errorf("the cleanup could not scan: %v", err)
-		}
-		for _, m := range groups[c.pid] {
-			if rundir.ProcessCarries(m.PID, mark) {
-				_ = syscall.Kill(m.PID, syscall.SIGKILL)
+		// It looks until the shell has been reaped: one look can find the command in the
+		// middle of an exec, or its environment not to be read.
+		deadline := time.Now().Add(stubWatchdog)
+		for {
+			groups, err := rundir.ProcessGroups(time.Now().Add(stubWatchdog))
+			if err != nil {
+				t.Errorf("the cleanup could not scan: %v", err)
+				return
 			}
-		}
-		select {
-		case <-c.reaped:
-		case <-time.After(stubWatchdog):
-			t.Errorf("the command's shell (%d) was not reaped within %v", c.pid, stubWatchdog)
+			for _, m := range groups[c.pid] {
+				if carries, _ := rundir.ProcessCarries(m.PID, mark); carries {
+					_ = syscall.Kill(m.PID, syscall.SIGKILL)
+				}
+			}
+			select {
+			case <-c.reaped:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("the command's shell (%d) was not reaped within %v", c.pid, stubWatchdog)
+				return
+			}
 		}
 	})
 	id, err := rundir.ProcessIdentity(c.pid)
@@ -362,7 +372,8 @@ func TestASignalCutsAWaitersReapShort(t *testing.T) {
 	pid, start, gone := liveProcess(t)
 	conn.entry.PID, conn.entry.PIDStart = pid, start
 	c := recordCommand(t, r.env, conn.entry.HostID, groupOwner(t, pid, start),
-		`trap 'echo term > term' TERM; while :; do sleep 0.05; done`)
+		`trap 'echo term > term' TERM; : > armed; while :; do sleep 0.05; done`)
+	waitFor(t, "the command's trap", func() bool { return fileExists(filepath.Join(c.dir, "armed")) })
 	sigs := make(chan os.Signal, 2)
 	w := goWait(conn, waitStart{submit: submitPrompt(conn, "mine")}, waitOptions{sigs: sigs})
 	waitFor(t, "the waiter's look", func() bool { return len(tp.lines(protocol.MethodSessionSnapshot)) >= 1 })
@@ -418,7 +429,8 @@ func TestASecondSignalDuringTheReapLeavesASettledFailure(t *testing.T) {
 	pid, start, gone := liveProcess(t)
 	conn.entry.PID, conn.entry.PIDStart = pid, start
 	c := recordCommand(t, r.env, conn.entry.HostID, groupOwner(t, pid, start),
-		`trap 'echo term > term' TERM; while :; do sleep 0.05; done`)
+		`trap 'echo term > term' TERM; : > armed; while :; do sleep 0.05; done`)
+	waitFor(t, "the command's trap", func() bool { return fileExists(filepath.Join(c.dir, "armed")) })
 	sigs := make(chan os.Signal, 2)
 	w := goWait(conn, waitStart{submit: submitPrompt(conn, "mine")}, waitOptions{sigs: sigs})
 	waitFor(t, "the waiter's look", func() bool { return len(tp.lines(protocol.MethodSessionSnapshot)) >= 1 })

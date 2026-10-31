@@ -58,6 +58,13 @@ trailing `\r` is stripped): a peer that half-closes right after an
 unterminated object still gets its answer. Every line a host itself writes
 ends in `\n`.
 
+A host must not shut only its reading side of a connection and go on holding
+it open. On Linux a client's next write to such a host fails, and craze's
+client reads what the host wrote for 2 seconds and then redials. On macOS the
+kernel tells the writer nothing: the write succeeds and its bytes are dropped,
+so a client cannot see it, and each request waits out its own deadline for as
+long as the host holds the connection. No craze host or hub does this.
+
 ### The envelope
 
 A request:

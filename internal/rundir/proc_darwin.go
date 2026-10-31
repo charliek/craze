@@ -99,13 +99,14 @@ func processMember(pid int) (GroupMember, error) {
 // is an error here, never a failure of the caller's). A root caller's scan named
 // only its own processes (processGroups). The kernel also leaves the environment out
 // for a restricted process (CS_RESTRICT) unless the caller is entitled to it, so such a
-// process reads as carrying nothing either, which the docs say.
-func processCarries(pid int, mark string) bool {
-	b, err := unix.SysctlRaw("kern.procargs2", pid)
-	if err != nil {
-		return false
-	}
-	return environHolds(procArgsEnviron(b), mark)
+// process reads as carrying nothing either, which the docs say. A read that fails of a
+// process still there, as one in the middle of an exec does, is made again, and what
+// goes on failing is not known (carriesRead).
+func processCarries(pid int, mark string) (carries, known bool) {
+	return procArgsCarry(
+		func() ([]byte, error) { return unix.SysctlRaw("kern.procargs2", pid) },
+		func() bool { return unix.Kill(pid, 0) == nil },
+		mark)
 }
 
 // sZomb is <sys/proc.h>'s SZOMB, kinfo_proc's p_stat for a process that has

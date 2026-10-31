@@ -181,6 +181,49 @@ func TestProcArgsEnviron(t *testing.T) {
 	}
 }
 
+// TestProcArgsCarryReadsAgainWhatAnExecRefused: a refusal is no answer while the process
+// is there, so the read is made again, and only a read that holds an environment says
+// no. What goes on being refused is not known, after a bounded number of reads; a
+// process that has gone carries nothing, and is not read twice.
+func TestProcArgsCarryReadsAgainWhatAnExecRefused(t *testing.T) {
+	const mark = "CRAZE_HOST_ID=x"
+	marked := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00" + mark + "\x00\x00")
+	unmarked := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00A=b\x00\x00")
+	noEnviron := []byte("\x01\x00\x00\x00/bin/sh\x00sh\x00")
+	refused := errors.New("EINVAL")
+	for _, tc := range []struct {
+		name           string
+		refuse         int
+		b              []byte
+		there          bool
+		carries, known bool
+		reads          int
+	}{
+		{"read at once", 0, marked, true, true, true, 1},
+		{"no mark, read at once", 0, unmarked, true, false, true, 1},
+		{"no environment, read at once", 0, noEnviron, true, false, true, 1},
+		{"refused, then read", 3, marked, true, true, true, 4},
+		{"refused, then no mark", 3, unmarked, true, false, true, 4},
+		{"refused throughout", 1 << 30, marked, true, false, false, carriesReads},
+		{"nothing read throughout", 0, nil, true, false, false, carriesReads},
+		{"a buffer with no environment's shape throughout", 0, []byte{1, 0}, true, false, false, carriesReads},
+		{"refused, and gone", 1 << 30, marked, false, false, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := 0
+			carries, known := procArgsCarry(func() ([]byte, error) {
+				if reads++; reads <= tc.refuse {
+					return nil, refused
+				}
+				return tc.b, nil
+			}, func() bool { return tc.there }, mark)
+			if carries != tc.carries || known != tc.known || reads != tc.reads {
+				t.Fatalf("carries %v, known %v after %d reads, want %v, %v after %d", carries, known, reads, tc.carries, tc.known, tc.reads)
+			}
+		})
+	}
+}
+
 // TestProcessGroupsFindsAGroupsMembers is the scan on this machine: a child leading
 // a group of its own is found in it, with its session and its start time, and
 // nothing in that group but it; a past deadline is a scan that says nothing.
@@ -213,11 +256,14 @@ func TestProcessGroupsFindsAGroupsMembers(t *testing.T) {
 	if _, err := ProcessMember(1 << 30); !errors.Is(err, ErrNoProcess) {
 		t.Fatalf("a pid nothing has: %v", err)
 	}
-	if !ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=1") {
-		t.Fatal("the child does not carry what its environment holds")
+	if carries, known := ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=1"); !carries || !known {
+		t.Fatalf("the child and what its environment holds: carries %v, known %v", carries, known)
 	}
-	if ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=2") || ProcessCarries(1<<30, "CRAZE_REAP_TEST_MARK=1") {
-		t.Fatal("something carries what it was not given")
+	if carries, known := ProcessCarries(pid, "CRAZE_REAP_TEST_MARK=2"); carries || !known {
+		t.Fatalf("the child and what it was not given: carries %v, known %v", carries, known)
+	}
+	if carries, known := ProcessCarries(1<<30, "CRAZE_REAP_TEST_MARK=1"); carries || !known {
+		t.Fatalf("a pid nothing has: carries %v, known %v", carries, known)
 	}
 	if _, err := ProcessGroups(time.Now().Add(-time.Hour)); !errors.Is(err, ErrScanCut) && runtime.GOOS == "linux" {
 		t.Fatalf("a deadline past: %v, want %v", err, ErrScanCut)

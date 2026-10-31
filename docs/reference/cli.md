@@ -1898,7 +1898,10 @@ are harmless: each holds the record's lock while it acts on it.
   environment it was started with. So a process running under `env -i`, alone in its
   group with the shell that started it gone, stays running, and so does a restricted
   process on macOS whose environment the system hides. While the leader is still
-  there, the whole group goes, whatever is in it.
+  there, the whole group goes, whatever is in it. An environment that cannot be read
+  at all, of a process still there, is not an answer: nothing is signalled, the record
+  stays and the next craze reads it again, until the record is 7 days old and goes
+  with the process still running.
 - **A command that could not be recorded.** The command runs and the host's log says
   why. That means an unusable host logs' directory, an identity or scope the host
   cannot read, a failed write, or more than 1000 groups running at once in one host.

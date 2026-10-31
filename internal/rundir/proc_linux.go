@@ -90,15 +90,25 @@ func readStat(pid string, buf []byte) int {
 
 // processCarries reads /proc/<pid>/environ, which the kernel shows only to whoever
 // may ptrace the process, once /proc/<pid> says the process is this user's: a
-// process running as root reads every other user's too.
-func processCarries(pid int, mark string) bool {
-	dir := "/proc/" + strconv.Itoa(pid)
-	var st syscall.Stat_t
-	if syscall.Stat(dir, &st) != nil || int(st.Uid) != os.Geteuid() {
-		return false
-	}
-	b, err := os.ReadFile(dir + "/environ")
-	return err == nil && environHolds(b, mark)
+// process running as root reads every other user's too. A read that fails of a process
+// still there is made again, and what goes on failing is not known (carriesRead).
+func processCarries(pid int, mark string) (carries, known bool) {
+	return carriesIn("/proc/"+strconv.Itoa(pid), pid, mark)
+}
+
+// carriesIn is processCarries, with the process's /proc directory named so a test can
+// give it one that cannot be read.
+func carriesIn(dir string, pid int, mark string) (carries, known bool) {
+	return carriesRead(func() ([]byte, error) {
+		var st syscall.Stat_t
+		if err := syscall.Stat(dir, &st); err != nil {
+			return nil, err
+		}
+		if int(st.Uid) != os.Geteuid() {
+			return nil, nil
+		}
+		return os.ReadFile(dir + "/environ")
+	}, func() bool { return syscall.Kill(pid, 0) == nil }, mark)
 }
 
 // procSelfStatus is /proc/self/status: os.ReadFile, which a test replaces

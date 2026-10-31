@@ -53,7 +53,8 @@ import (
 //     no earlier than the leader; and carrying CommandMark for this very host. A
 //     member that cleared its environment, alone in its group with its leader gone,
 //     is therefore left running: a sweep cannot tell it from a stranger, and the
-//     docs say so.
+//     docs say so. A member whose environment cannot be read at all, though it is still
+//     there, is neither: nothing is signalled and the entry stays, to be read again.
 //   - No process at all, an agent's entry: dropped. An agent's entry is not removed
 //     when the agent exits, only when its host stops, so its number may have been
 //     anyone's for hours, and an agent's environment is not craze's to mark. It
@@ -144,6 +145,8 @@ var (
 	groupRead = func(AgentGroup) {}
 	// sendSignal is syscall.Kill, for signalGroup alone.
 	sendSignal = syscall.Kill
+	// processCarries is rundir.ProcessCarries, for shellMember alone.
+	processCarries = rundir.ProcessCarries
 )
 
 // noteFunc says something on a log; never nil past the entry points.
@@ -271,7 +274,7 @@ func (r *reaper) leaderGone(g AgentGroup, hostID string) (groupFate, string, fun
 	if err != nil {
 		return groupUnknown, "what is left of it cannot be told: " + err.Error(), nil
 	}
-	live := 0
+	live, unread := 0, 0
 	for _, m := range members {
 		if m.Zombie {
 			continue
@@ -280,12 +283,22 @@ func (r *reaper) leaderGone(g AgentGroup, hostID string) (groupFate, string, fun
 			return groupCut, "this run ended before what is left of it could be told", nil
 		}
 		live++
-		if g.shellMember(m, hostID) {
+		member, known := g.shellMember(m, hostID)
+		if member {
 			return groupHere, "", func() bool {
 				now, err := rundir.ProcessMember(m.PID)
 				return err == nil && now.PGID == g.PGID && now.Start == m.Start && !now.Zombie
 			}
 		}
+		if !known {
+			unread++
+		}
+	}
+	if unread > 0 {
+		if r.readsOut() {
+			return groupCut, "this run ended before what is left of it could be told", nil
+		}
+		return groupUnknown, fmt.Sprintf("the environment of %d of the %d left in the group cannot be read", unread, live), nil
 	}
 	if live > 0 {
 		return groupOver, fmt.Sprintf("its leader has gone, and none of the %d left in the group can be told from a stranger's", live), nil
@@ -295,9 +308,12 @@ func (r *reaper) leaderGone(g AgentGroup, hostID string) (groupFate, string, fun
 
 // shellMember reports whether m, found in g's group with its leader gone, is one
 // of the commands of host hostID and not a stranger's that has taken the group's
-// number since.
-func (g AgentGroup) shellMember(m rundir.GroupMember, hostID string) bool {
-	return m.Session == g.PGID && m.Start >= g.Start && rundir.ProcessCarries(m.PID, CommandMark(hostID))
+// number since. known is false when that hangs on an environment that cannot be read.
+func (g AgentGroup) shellMember(m rundir.GroupMember, hostID string) (member, known bool) {
+	if m.Session != g.PGID || m.Start < g.Start {
+		return false, true
+	}
+	return processCarries(m.PID, CommandMark(hostID))
 }
 
 // signal reads e's group and sends it sigs, each straight after a read of what

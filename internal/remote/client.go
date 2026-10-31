@@ -538,8 +538,18 @@ func (c *Client) requestLine(method string, params json.RawMessage) (string, []b
 
 // brokenPipeDrain bounds the read of what a host wrote before it closed its end
 // (send): a host that closed has EOF right behind it, and this is for one that
-// shut down only its reading side. A variable only so a test can shorten it.
+// shut down only its reading side, which only Linux tells a writer of: on macOS
+// the write succeeds and its bytes are dropped, so nothing here can start this
+// clock, and protocol.md says so. A variable only so a test can shorten it.
 var brokenPipeDrain = 2 * time.Second
+
+// peerClosed says a write's error is the host having closed its end: EPIPE, or on
+// macOS also ENOTCONN. XNU's sosend looks for EPIPE, lets go of the socket to copy
+// the write in, and hands it to uipc_send, which asks if the socket is connected
+// before it asks anything else: a host closing in that copy is ENOTCONN.
+func peerClosed(err error) bool {
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ENOTCONN)
+}
 
 // errUnsent is a send that wrote no byte of its request: the connection was
 // already gone. It is ErrConnectionLost to a caller; a command knows from it
@@ -567,7 +577,7 @@ type writeHooks struct {
 // withdraws it (errWithdrawn), or when the write fails — ErrConnectionLost if
 // some of it may have gone, errUnsent if not a byte did — which closes w: its
 // reader then exits, and the client reconnects. But a write that finds the host
-// has closed its end (EPIPE) leaves w to its reader, within brokenPipeDrain: what
+// has closed its end (peerClosed) leaves w to its reader, within brokenPipeDrain: what
 // the host wrote before it closed is still there to read — a session's closing
 // records and its reset{session_closed} among them — and closing w here would
 // throw it away, and turn a session's end into a connection lost. A write on a
@@ -607,7 +617,7 @@ func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFu
 	w.wmu.Unlock()
 	if err != nil {
 		w.take(id)
-		if !errors.Is(err, syscall.EPIPE) || !w.drainThenEnd() {
+		if !peerClosed(err) || !w.drainThenEnd() {
 			_ = w.nc.Close()
 		}
 		if n == 0 {

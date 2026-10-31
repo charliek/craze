@@ -70,13 +70,27 @@ func (p proc) alive() bool {
 	return err == nil && id.Start == p.start && !id.Zombie
 }
 
+// state is all a failure can say of p, for a machine nobody can look at: CI is the
+// only Mac these tests run on.
+func (p proc) state() string {
+	id, idErr := rundir.ProcessIdentity(p.pid)
+	m, memberErr := rundir.ProcessMember(p.pid)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "lstart=", "-o", "command=", "-p", strconv.Itoa(p.pid))
+	cmd.WaitDelay = time.Second
+	ps, psErr := cmd.CombinedOutput()
+	return fmt.Sprintf("started at %d; identity %+v (%v); member %+v (%v); %s; ps %q (%v)",
+		p.start, id, idErr, m, memberErr, environState(p.pid), strings.TrimSpace(string(ps)), psErr)
+}
+
 // awaitGone waits for p to have died, within testStep.
 func (p proc) awaitGone(t *testing.T, what string) {
 	t.Helper()
 	deadline := time.Now().Add(testStep)
 	for p.alive() {
 		if time.Now().After(deadline) {
-			t.Fatalf("%s (%d) was still running after %v", what, p.pid, testStep)
+			t.Fatalf("%s (%d) was still running after %v: %s", what, p.pid, testStep, p.state())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -87,9 +101,14 @@ func (p proc) awaitGone(t *testing.T, what string) {
 // give the process a moment to read as dead if it was hit.
 func (p proc) survives(t *testing.T, what string) {
 	t.Helper()
+	p.surviving(t, what, p.state)
+}
+
+func (p proc) surviving(t *testing.T, what string, report func() string) {
+	t.Helper()
 	time.Sleep(100 * time.Millisecond)
 	if !p.alive() {
-		t.Fatalf("%s (%d) was signalled", what, p.pid)
+		t.Fatalf("%s (%d) was signalled: %s", what, p.pid, report())
 	}
 }
 
@@ -110,27 +129,62 @@ type command struct {
 	// number by then.
 	mark   string
 	reaped chan struct{}
+	// exit is what the shell's wait said, set before reaped closes.
+	exit string
 }
 
 var testMarks atomic.Int64
 
-// end is the test's cleanup: what is left in the command's group that carries its
-// mark, killed by pid, and its shell reaped, each within testStep.
-func (c *command) end(t *testing.T) {
-	t.Helper()
-	groups, err := rundir.ProcessGroups(time.Now().Add(testStep))
-	if err != nil {
-		t.Errorf("the cleanup could not scan: %v", err)
-	}
-	for _, m := range groups[c.pid] {
-		if rundir.ProcessCarries(m.PID, c.mark) {
-			_ = syscall.Kill(m.PID, syscall.SIGKILL)
-		}
-	}
+// report is the shell's state and what its wait said, for a failure.
+func (c *command) report() string {
+	carries, known := rundir.ProcessCarries(c.pid, c.mark)
+	s := fmt.Sprintf("%s; carries its mark: %v, known: %v", c.state(), carries, known)
 	select {
 	case <-c.reaped:
-	case <-time.After(testStep):
-		t.Errorf("the command's shell (%d) was not reaped within %v", c.pid, testStep)
+		return s + "; its wait said: " + c.exit
+	default:
+		return s + "; not reaped"
+	}
+}
+
+// survives is proc's, with what the shell's wait said: a shell that really was
+// signalled says by what.
+func (c *command) survives(t *testing.T, what string) {
+	t.Helper()
+	c.surviving(t, what, c.report)
+}
+
+// end is the test's cleanup: what is left in the command's group that carries its
+// mark, killed by pid, and its shell reaped, all within testStep. It looks until the
+// shell has been reaped: one look can find a command in its first moments, in the
+// middle of an exec, which on a Mac, where /bin/sh is a shim that execs the real shell,
+// takes long enough to land in.
+func (c *command) end(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(testStep)
+	scanning := true
+	for {
+		if scanning {
+			groups, err := rundir.ProcessGroups(time.Now().Add(testStep))
+			if err != nil {
+				t.Errorf("the cleanup could not scan: %v", err)
+				scanning = false
+			}
+			for _, m := range groups[c.pid] {
+				if carries, _ := rundir.ProcessCarries(m.PID, c.mark); carries {
+					_ = syscall.Kill(m.PID, syscall.SIGKILL)
+				}
+			}
+		}
+		select {
+		case <-c.reaped:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("the command's shell (%d) was not reaped within %v: %s", c.pid, testStep, c.report())
+			return
+		}
 	}
 }
 
@@ -159,6 +213,7 @@ func runCommand(t *testing.T, env []string, attr *syscall.SysProcAttr, script st
 	c.proc = proc{cmd.Process.Pid, id.Start}
 	go func() {
 		_ = cmd.Wait()
+		c.exit = cmd.ProcessState.String()
 		close(c.reaped)
 	}()
 	t.Cleanup(func() { c.end(t) })
@@ -169,6 +224,17 @@ func runCommand(t *testing.T, env []string, attr *syscall.SysProcAttr, script st
 func shellCommand(t *testing.T, script string) *command {
 	t.Helper()
 	return runCommand(t, []string{CommandMark(markHost)}, &syscall.SysProcAttr{Setsid: true}, script)
+}
+
+// stubbornCommand is a shell command that ignores SIGTERM, returned once it does. A
+// trap is not set until the shell has got that far, and until then SIGTERM ends it like
+// anything else: on a Mac, where /bin/sh is a shim that execs the real shell, that takes
+// longer than a test's next few steps.
+func stubbornCommand(t *testing.T) *command {
+	t.Helper()
+	c := shellCommand(t, `trap '' TERM; echo $$ > pid.ready; exec sleep 120`)
+	c.child(t, "pid.ready")
+	return c
 }
 
 // child is the process whose pid the command wrote to name (the whole line).
@@ -804,7 +870,7 @@ func TestReapWaitsForAnotherSweep(t *testing.T) {
 // record whole, however old, for the next sweep, which finishes the job.
 func TestAReapCutShortLeavesTheRecord(t *testing.T) {
 	env := holderEnv(t)
-	c := shellCommand(t, `trap '' TERM; exec sleep 120`)
+	c := stubbornCommand(t)
 	id := rundir.NewHostID()
 	path := recordIn(t, env, id, c.entry(deadHost(t)))
 	long := time.Now().Add(-2 * RecordKeep)
@@ -887,7 +953,7 @@ func TestASweepExitingBeforeSIGKILLLeavesTheRecord(t *testing.T) {
 		os.Exit(1)
 	}
 	env := holderEnv(t)
-	c := shellCommand(t, `trap '' TERM; exec sleep 120`)
+	c := stubbornCommand(t)
 	path := recordIn(t, env, rundir.NewHostID(), c.entry(deadHost(t)))
 	bin, err := os.Executable()
 	if err != nil {
@@ -1006,8 +1072,8 @@ func TestAGroupIsReadStraightBeforeItsOwnSignal(t *testing.T) {
 	for _, round := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 		t.Run(round.String(), func(t *testing.T) {
 			env := holderEnv(t)
-			first := shellCommand(t, `trap '' TERM; exec sleep 120`)
-			next := shellCommand(t, `trap '' TERM; exec sleep 120`)
+			first := stubbornCommand(t)
+			next := stubbornCommand(t)
 			owner := deadHost(t)
 			id := rundir.NewHostID()
 			recordIn(t, env, id, first.entry(owner), next.entry(owner))
@@ -1125,7 +1191,7 @@ func TestACleanupLeavesAReplacementAtItsName(t *testing.T) {
 	t.Run("the end of a spawner's cleanup", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "0123456789ab.pgids")
-		c := shellCommand(t, `trap '' TERM; exec sleep 120`)
+		c := stubbornCommand(t)
 		owner := deadHost(t)
 		if err := os.WriteFile(path, []byte(c.entry(owner).Line()), 0o600); err != nil {
 			t.Fatal(err)
@@ -1178,7 +1244,7 @@ func TestACancelStopsTheNextSignal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := holderEnv(t)
-			c := shellCommand(t, `trap '' TERM; exec sleep 120`)
+			c := stubbornCommand(t)
 			id := rundir.NewHostID()
 			path := recordIn(t, env, id, c.entry(deadHost(t)))
 			long := time.Now().Add(-2 * RecordKeep)
@@ -1245,6 +1311,108 @@ func TestASearchOfAGroupStopsWhenTheRunDoes(t *testing.T) {
 	}
 }
 
+// TestAMemberThatCannotBeReadKeepsTheRecord: with its leader gone, a member still there
+// whose environment cannot be read may be the host's or may not. Nothing is signalled,
+// and the record stays for a pass that can read it, which ends it; it goes once it has
+// aged, as other records that cannot be told do, unless the run ended in that read,
+// which says nothing of the record's age. A member that can be told is enough.
+func TestAMemberThatCannotBeReadKeepsTheRecord(t *testing.T) {
+	unread := func(int, string) (bool, bool) { return false, false }
+	left := func(t *testing.T) (*command, proc, rundir.Env, string) {
+		t.Helper()
+		env := holderEnv(t)
+		c := shellCommand(t, `sleep 120 & echo $! > pid.child`)
+		kid := c.child(t, "pid.child")
+		c.awaitExit(t)
+		return c, kid, env, recordIn(t, env, markHost, c.entry(deadHost(t)))
+	}
+	aged := func(t *testing.T, path string) {
+		t.Helper()
+		long := time.Now().Add(-2 * RecordKeep)
+		if err := os.Chtimes(path, long, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("kept, and reaped by the pass that can read it", func(t *testing.T) {
+		_, kid, env, path := left(t)
+		restore := carriesAre(t, unread)
+		sent := signalsAre(t, nil)
+		SweepDeadHosts(env, nil)
+		if len(*sent) != 0 {
+			t.Fatalf("sent %q", *sent)
+		}
+		kid.survives(t, "the member that cannot be read")
+		if !fileExists(path) {
+			t.Fatal("the record went with a member that cannot be read")
+		}
+		restore()
+		SweepDeadHosts(env, nil)
+		kid.awaitGone(t, "the member, read")
+		if fileExists(path) {
+			t.Fatal("the record was left")
+		}
+	})
+	t.Run("gone once it has aged", func(t *testing.T) {
+		_, kid, env, path := left(t)
+		aged(t, path)
+		carriesAre(t, unread)
+		SweepDeadHosts(env, nil)
+		kid.survives(t, "the member that cannot be read")
+		if fileExists(path) {
+			t.Fatal("the aged record was left")
+		}
+	})
+	t.Run("the run ending in the read keeps it however old", func(t *testing.T) {
+		_, kid, env, path := left(t)
+		aged(t, path)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		carriesAre(t, func(int, string) (bool, bool) {
+			cancel()
+			return false, false
+		})
+		sent := signalsAre(t, nil)
+		ReapHost(ctx, env, markHost, noNote)
+		if len(*sent) != 0 {
+			t.Fatalf("sent %q", *sent)
+		}
+		kid.survives(t, "the member that cannot be read")
+		if !fileExists(path) {
+			t.Fatal("the run's end removed the record")
+		}
+	})
+	t.Run("a member that can be told beside one that cannot", func(t *testing.T) {
+		env := holderEnv(t)
+		c := shellCommand(t, `sleep 120 & echo $! > pid.child; sleep 120 & echo $! > pid.other`)
+		kid, other := c.child(t, "pid.child"), c.child(t, "pid.other")
+		c.awaitExit(t)
+		path := recordIn(t, env, markHost, c.entry(deadHost(t)))
+		carriesAre(t, func(pid int, _ string) (bool, bool) {
+			if pid == other.pid {
+				return true, true
+			}
+			return false, false
+		})
+		SweepDeadHosts(env, nil)
+		kid.awaitGone(t, "the member that cannot be read")
+		other.awaitGone(t, "the member that can")
+		if fileExists(path) {
+			t.Fatal("the record was left")
+		}
+	})
+}
+
+// carriesAre replaces the read of a member's environment, never in parallel: it answers
+// the way to put the real one back early.
+func carriesAre(t *testing.T, read func(int, string) (bool, bool)) (restore func()) {
+	t.Helper()
+	prev := processCarries
+	processCarries = read
+	restore = func() { processCarries = prev }
+	t.Cleanup(restore)
+	return restore
+}
+
 // TestASlowListingStillExaminesRecords: the budget for selecting records starts after
 // the listing, or a big directory would make no progress however many passes came.
 func TestASlowListingStillExaminesRecords(t *testing.T) {
@@ -1266,7 +1434,7 @@ func TestASlowListingStillExaminesRecords(t *testing.T) {
 // and SIGKILL never.
 func TestALateSIGKILLStillGoes(t *testing.T) {
 	env := holderEnv(t)
-	c := shellCommand(t, `trap '' TERM; exec sleep 120`)
+	c := stubbornCommand(t)
 	path := recordIn(t, env, rundir.NewHostID(), c.entry(deadHost(t)))
 	waitForGroupsIs(t, func(context.Context, []entry, time.Time) { time.Sleep(2*sweepRead + 100*time.Millisecond) })
 	SweepDeadHosts(env, nil)
@@ -1282,6 +1450,16 @@ func TestATestsCleanupKeepsToItsOwn(t *testing.T) {
 	c := shellCommand(t, `env -u `+strings.SplitN(CommandMark(markHost), "=", 2)[0]+` -u CRAZE_REAP_TEST sleep 120 & echo $! > pid.child; exec sleep 120`)
 	stranger := c.child(t, "pid.child")
 	t.Cleanup(func() { _ = syscall.Kill(stranger.pid, syscall.SIGKILL) })
+	// Until env has run, the child is still a copy of the shell, mark and all.
+	for deadline := time.Now().Add(testStep); ; time.Sleep(5 * time.Millisecond) {
+		carries, known := rundir.ProcessCarries(stranger.pid, c.mark)
+		if known && !carries {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the child (%d) after %v: carries the mark %v, known %v: %s", stranger.pid, testStep, carries, known, stranger.state())
+		}
+	}
 	c.end(t)
 	stranger.survives(t, "a process in the group without the command's mark")
 	if c.alive() {
@@ -1409,7 +1587,7 @@ func TestASpawnerGivesAShellCommandAGraceAndDoesNotWait(t *testing.T) {
 	c := &Child{groups: filepath.Join(dir, "0123456789ab.pgids"), log: filepath.Join(dir, "0123456789ab.log")}
 	shell := shellCommand(t, `trap 'echo term > got; exit 0' TERM; echo $$ > pid.ready; while :; do sleep 0.05; done`)
 	shell.child(t, "pid.ready")
-	stubborn := shellCommand(t, `trap '' TERM; exec sleep 120`)
+	stubborn := stubbornCommand(t)
 	agent := leadGroup(t)
 	owner := deadHost(t)
 	c.pid, c.start = owner.PID, owner.Start
