@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
@@ -387,6 +393,115 @@ func TestASessionClosedEndsTheStream(t *testing.T) {
 	}
 	if n := tp.dialCount(); n != 1 {
 		t.Fatalf("%d dials: the ended session was redialled", n)
+	}
+}
+
+// TestAWriteAfterTheHostClosedLeavesItsLastWordsToRead: the session ends and the
+// host closes, its closing records and reset{session_closed} on the socket and
+// not yet read, when a call writes: EPIPE. What the host wrote is still the
+// stream's, and its end is the session's, never a connection lost and a redial. The
+// reader is held from before the host writes them, so they are all still unread.
+func TestAWriteAfterTheHostClosedLeavesItsLastWordsToRead(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	c := dialClient(t, h.path, tp, remote.Options{})
+	s := attach(t, c, remote.AttachOptions{})
+	nextKind(t, s, remote.KindAttached)
+	nextKind(t, s, remote.KindSynchronized)
+	held, release := make(chan struct{}), make(chan struct{})
+	let := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(let)
+	var once sync.Once
+	tp.setRewriteIn(func(l wireLine) [][]byte {
+		if strings.Contains(string(l.raw), "held here") {
+			once.Do(func() { close(held) })
+			<-release
+		}
+		return [][]byte{l.raw}
+	})
+	h.text("held here")
+	await(t, held, "the reader to reach the held line")
+	h.text("the last word")
+	if err := h.eng.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); h.srv.OpenConns() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the host still holds %d connections", h.srv.OpenConns())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil); err == nil {
+		t.Fatal("a call to a host that has closed was answered")
+	}
+	if len(tp.sent(protocol.MethodSessionsList)) == 0 {
+		t.Fatal("the premise: the call was never written")
+	}
+	let()
+	until(t, s, isText(t, "the last word"))
+	until(t, s, ofKind(remote.KindEnd))
+	await(t, c.Done(), "the client to stop")
+	if !errors.Is(c.Err(), remote.ErrSessionEnded) {
+		t.Fatalf("the client stopped with %v", c.Err())
+	}
+	if n := tp.dialCount(); n != 1 {
+		t.Fatalf("%d dials: the ended session was redialled", n)
+	}
+}
+
+// TestABrokenPipesDrainHasOneDeadline: a peer that shut its reading side and
+// keeps its writing side open, silent. The first broken pipe sets the reader one
+// deadline, and calls that keep arriving, each a broken pipe of its own, never
+// extend it: the reader ends and the client redials.
+func TestABrokenPipesDrainHasOneDeadline(t *testing.T) {
+	defer remote.SetBrokenPipeDrain(150 * time.Millisecond)()
+	h := newHost(t)
+	dir := shortDir(t)
+	front := filepath.Join(dir, "front")
+	l, err := net.Listen("unix", front)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	first := make(chan *net.UnixConn, 1)
+	var accepted atomic.Int32
+	go func() {
+		for {
+			nc, err := l.Accept()
+			if err != nil {
+				return
+			}
+			back, err := net.Dial("unix", h.path)
+			if err != nil {
+				_ = nc.Close()
+				return
+			}
+			t.Cleanup(func() { _ = nc.Close(); _ = back.Close() })
+			if accepted.Add(1) == 1 {
+				first <- nc.(*net.UnixConn)
+			}
+			go func() { _, _ = io.Copy(back, nc) }()
+			go func() { _, _ = io.Copy(nc, back) }()
+		}
+	}()
+	c, err := remote.Dial(tctx(t), front, remote.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := (<-first).CloseRead(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(watchdog)
+	for accepted.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no redial within %v: the calls kept the reader waiting", watchdog)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_ = c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, nil)
+		cancel()
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/tui"
@@ -84,9 +85,11 @@ type idleLook struct {
 	Idle, Limit time.Duration
 	Timed       bool
 	// Fenced says the clock ran out and the close fence was raised; Stop is
-	// why the host stops, "" when it stays.
+	// why the host stops, "" when it stays, and Cause what began it: the idle
+	// exit, or the socket lost (agent.TurnInfo.Cause).
 	Fenced bool
 	Stop   string
+	Cause  string
 }
 
 // idleEngine is what the watcher reads of the engine: an interface only so
@@ -160,7 +163,7 @@ func (w *idleWatcher) attachments(n int) {
 
 // run looks at every tick until the host is stopping, and asks for the stop
 // (request) the first time a look says so.
-func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, request func(string)) {
+func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, request func(cause, why string)) {
 	for {
 		select {
 		case <-stopping:
@@ -170,7 +173,7 @@ func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, requ
 		look := w.look()
 		idleLooked(look)
 		if look.Stop != "" {
-			request(look.Stop)
+			request(look.Cause, look.Stop)
 			return
 		}
 	}
@@ -179,7 +182,7 @@ func (w *idleWatcher) run(ticks <-chan time.Time, stopping <-chan struct{}, requ
 // look is one tick (the file's doc comment, steps 1–6).
 func (w *idleWatcher) look() idleLook {
 	if why := w.lost(); why != "" {
-		return idleLook{Stop: why}
+		return idleLook{Stop: why, Cause: agent.StopCauseLostOwner}
 	}
 	select {
 	case <-w.eng.Ready():
@@ -215,7 +218,7 @@ func (w *idleWatcher) look() idleLook {
 	look.Fenced = true
 	n, busy, release := w.srv.FenceClose()
 	if n == 0 && !busy {
-		look.Stop = w.why(st, look.Idle)
+		look.Stop, look.Cause = w.why(st, look.Idle), agent.StopCauseIdle
 		return look
 	}
 	release()

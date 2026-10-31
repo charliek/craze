@@ -551,6 +551,7 @@ type wireTurn struct {
 	Synthetic bool   `json:"synthetic,omitempty"`
 	Next      string `json:"next,omitempty"`
 	Pending   int    `json:"pending,omitempty"`
+	Cause     string `json:"cause,omitempty"`
 }
 
 // wireAsk is an AskUpdate. Its Body is the one part that is not a plain field

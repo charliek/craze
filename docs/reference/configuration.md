@@ -451,6 +451,9 @@ The launcher names it whenever a host could not start. A spawned host's
 - Beside it, `<hostId>.pgids` records the process groups of the host's agents
   while it runs, for its launcher's last-resort cleanup; it is removed when
   the host stops cleanly.
+- `<hostId>.stop` is written as a host begins to stop, saying why and which turn
+  was running, and stays behind it: it is how a waiting command that lost its
+  stream tells a stop from a crash. It goes with the host's logs.
 - Every host **sweeps the directory as it starts**: the files of a host that
   is gone (decided by its own host lock, never by its registry entry) and that
   nobody has touched for 7 days are removed. A live host's files are never

@@ -819,6 +819,49 @@ func TestStateAndRowsCarryTheLastTurn(t *testing.T) {
 // connection is refused closing (the fence is up), the stopping client has
 // no receipt to read, and the coordinator has heard nothing. The negative
 // control is the same read once StopAccepted returns: the receipt is there.
+// TestAStopsBeginningComesBeforeEverythingItMakesVisible: told first of all, with
+// the attach fence not yet up, no mark made and no receipt queued, so what the
+// host latches there is settled before a client can learn of the stop.
+func TestAStopsBeginningComesBeforeEverythingItMakesVisible(t *testing.T) {
+	var calls atomic.Int32
+	var accepted atomic.Bool
+	var markedFirst atomic.Bool
+	gate := newHoldOnce()
+	h, co := newStopHost(t, func(c *hostConfig) {
+		c.opts.StopBeginning = func(control.StopRequest) {
+			calls.Add(1)
+			markedFirst.Store(accepted.Load())
+			gate.hold()
+		}
+		c.opts.StopAccepted = func() { accepted.Store(true) }
+	}, withOnClose(gate.release))
+	a := h.dial()
+	a.sayHello(nil)
+	b := h.dial()
+	b.sayHello(nil)
+
+	stop := a.stop(h, a.cmd())
+	await(t, gate.arrived, "the stop's beginning")
+	if err := b.call(protocol.MethodSessionAttach, attachParams(h)); err.Error != nil {
+		t.Fatalf("an attach while the stop is beginning: %+v", err.Error)
+	}
+	_ = a.nc.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if line, err := a.lr.ReadLine(); err == nil {
+		t.Fatalf("the receipt was written before the stop's beginning returned: %s", line)
+	}
+	co.none(t)
+	if accepted.Load() || markedFirst.Load() {
+		t.Fatal("the stop was marked before its beginning")
+	}
+
+	gate.release()
+	ok[protocol.Empty](t, a.reply(stop))
+	co.next(t)
+	if !accepted.Load() || calls.Load() != 1 {
+		t.Fatalf("accepted %v, told %d times", accepted.Load(), calls.Load())
+	}
+}
+
 func TestTheStopIsMarkedBeforeItsReceipt(t *testing.T) {
 	var calls atomic.Int32
 	gate := newHoldOnce()

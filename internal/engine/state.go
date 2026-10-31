@@ -123,6 +123,12 @@ type LastTurn struct {
 	// Info is what a failed turn said of itself (TurnInfo.Info): zero for the
 	// other outcomes.
 	Info errkind.Info
+	// Cause is why the session's close ended the turn (TurnInfo.Cause): "" for
+	// every other ending, and when the close did not say.
+	Cause string
+	// Withdrawn says a cancelled turn's prompt never reached the agent: its
+	// ending was synthetic, stopped cancelled, and no step of it ever ran.
+	Withdrawn bool
 	// EndedAt is the ending event's time (Event.At, the session's clock for
 	// an ending the engine authored).
 	EndedAt time.Time
@@ -177,12 +183,13 @@ func turnEnding(ev agent.Event) (starts bool, ended *LastTurn) {
 		case agent.TurnStarted:
 			return true, nil
 		case agent.TurnEnded:
-			lt := &LastTurn{Outcome: TurnDone, StopReason: tu.StopReason, EndedAt: at, TurnID: tu.ID}
+			lt := &LastTurn{Outcome: TurnDone, StopReason: tu.StopReason, Cause: tu.Cause, EndedAt: at, TurnID: tu.ID}
 			switch {
 			case tu.Err != "":
 				lt.Outcome, lt.Err, lt.Info = TurnFailed, tu.Err, tu.Info
 			case tu.StopReason == stopCancelled, tu.StopReason == stopClosing:
 				lt.Outcome = TurnCancelled
+				lt.Withdrawn = tu.Synthetic && tu.StopReason == stopCancelled
 			}
 			return false, lt
 		}

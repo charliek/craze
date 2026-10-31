@@ -345,7 +345,7 @@ of the row, a read, not a cut through the stream.
 ### The last turn
 
 `lastTurn` — on a `sessions.list` row and in `session.state`, never in a
-snapshot, whose codec stays at version 1 — is `{outcome, err?, stopReason?,
+snapshot, whose codec stays at version 1 — is `{outcome, err?, stopReason?, cause?, withdrawn?,
 kind?, retryable?, status?, provider_code?, endedAt, turnId}`: how the session's most recent turn ended, whether it was craze's
 own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
 
@@ -354,6 +354,8 @@ own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
 | `outcome` | `done` (ran to its end — and every foreign turn, whose closing bracket carries no outcome), `failed` (its ending carried an error), or `cancelled` (a cancel, a prompt withdrawn before it was sent, or the session's close) |
 | `err` | a failed turn's error text; absent otherwise |
 | `stopReason` | the ending's own stop reason; absent for a foreign turn, a failure that has none, and an older host |
+| `cause` | on a stop reason of `closing`, [what began the close](#what-began-a-close); absent otherwise |
+| `withdrawn` | `true` on a cancelled turn whose prompt never reached the agent (its ending synthetic, stopped `cancelled`): no step of it ran. Absent otherwise, and from an older host |
 | `kind`, `retryable`, `status`, `provider_code` | what a failed turn [said of itself](#what-a-failure-says-of-itself); absent otherwise |
 | `endedAt` | the ending event's time, UTC |
 | `turnId` | the ended turn's id as the stream names it: `turn.id` on its `started`/`ended` events for a turn of craze's own, the `foreign_turn` bracket's `id` for the agent's own |
@@ -631,8 +633,9 @@ runs on where it is.
 
 The reply `{}` is a **receipt**: the host has taken the stop, and the
 session's end follows on the stream — its closing records (a running turn's
-`ended`, stop reason `closing`; every open ask's `closing`) and then
-`reset{session_closed}`, after which the host closes the connection. Before
+`ended`, stop reason `closing`, [its `cause`](#what-began-a-close) `stop`; every
+open ask's `closing`) and then `reset{session_closed}`, after which the host
+closes the connection. Before
 the receipt is sent, the host has stopped admitting new attachments: from
 then on a `session.attach` on any connection is `unavailable`, reason
 `closing`, so a client that reads the receipt and attaches is never
@@ -1836,6 +1839,30 @@ answers it `unsupported`, reason `unknown_method`, which a client takes as a
 hub that cannot list the saved sessions (`craze ps --saved` then reads the
 index itself).
 
+### What began a close
+
+A turn the session's close cuts short gets one `ended`, the last event of its turn:
+`synthetic`, stop reason `closing`, and `cause`, what began the close, set by the
+host once, when the stop begins: a signal arriving during a `session.stop` leaves
+`stop`. A turn that had already ended has no such event, whichever way the two
+raced: the engine publishes one ending for a turn.
+
+| `cause` | |
+|---|---|
+| `stop` | `session.stop`, or `craze stop` |
+| `signal` | `SIGTERM` or `SIGINT` to the host |
+| `idle` | the host's idle exit. It waits for no client attached and nothing in flight, so a client attached through the turn never reads it live |
+| `exit_after_turn` | the stop a waiting command sends once its turn has ended |
+| `lost_owner` | what the host answered to went away: the launcher waiting for its ready line, or its socket or registry entry |
+
+`cause` is optional: absent from a host that predates it (a reader treats that as
+no cause, and no error), and when a terminal closed the session it was hosting.
+`lastTurn` carries it too. It is also in the journal's `host_stop` note, as
+`stopCause` beside the note's own words under `cause`.
+
+`session.stop` latches `stop` before its attach fence and its receipt, so a stop that
+was acknowledged says `stop` whatever arrives next.
+
 ## The foreign turn
 
 `foreignTurn` (on `sessions.list` rows, `session.state`, and inside a
@@ -2601,7 +2628,8 @@ a session that states its models' effort facts — its info document saying
 none — whose `session.models.refresh` takes up a list with other ranks and
 switch efforts, its `catalog` delta, the `sessions.list` row, a second
 client's attach reply and snapshot and its `session.state` all carrying the
-new facts (33).
+new facts (33); a stop that finds a turn running, whose `ended` says what began
+the close (34).
 Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host

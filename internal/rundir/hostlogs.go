@@ -1,22 +1,27 @@
 package rundir
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/charliek/craze/internal/atomicfile"
 )
 
 // The host logs (plan 030 §3.3, §3.4): <Home>/.cache/craze/host-logs, beside
 // the registry and the session locks and validated as they are. A detached
 // host (craze serve) writes its own diagnostics and its agent's stderr to
 // <hostId>.log there, rotated once to <hostId>.log.1; the spawner records the
-// process groups of a host's agents beside it in <hostId>.pgids. Every host
-// sweeps the directory as it starts (SweepHostLogs), so it never outgrows a
-// week of hosts.
+// process groups of a host's agents beside it in <hostId>.pgids, and a host that
+// begins to stop says so in <hostId>.stop (StopRecord). Every host sweeps the
+// directory as it starts (SweepHostLogs), so it never outgrows a week of hosts.
 
 // hostLogsName is the host logs' directory under the cache tree.
 const hostLogsName = "host-logs"
@@ -44,8 +49,8 @@ func HostLogDir(env Env) (string, error) {
 
 // SweepHostLogs removes from the host logs' directory everything a host that
 // is gone left there and nobody has touched for maxAge: each regular file whose
-// name is <hostId>.log, <hostId>.log.<n> or <hostId>.pgids — a name that is
-// not a host id's is left alone — last modified before now less maxAge, and
+// name is <hostId>.log, <hostId>.log.<n>, <hostId>.pgids or <hostId>.stop — a
+// name that is not a host id's is left alone — last modified before now less maxAge, and
 // whose host is gone by its own host lock (hostGone): a host that has run,
 // silent, for longer is still writing to it. keep is a name never removed
 // whatever its age — the log the sweeping host is about to open and append to
@@ -184,14 +189,67 @@ func hostGone(hosts *dir, id string) (release func(), gone bool) {
 }
 
 // hostLogOwner is the host id a host-logs name belongs to — <id>.log,
-// <id>.log.<n> or <id>.pgids — or false for any other name.
+// <id>.log.<n>, <id>.pgids or <id>.stop — or false for any other name.
 func hostLogOwner(name string) (string, bool) {
 	id, rest, ok := strings.Cut(name, ".")
 	if !ok || !ValidHostID(id) {
 		return "", false
 	}
-	if rest == "log" || rest == "pgids" || strings.HasPrefix(rest, "log.") {
+	if rest == "log" || rest == "pgids" || rest == stopRecordExt || strings.HasPrefix(rest, "log.") {
 		return id, true
 	}
 	return "", false
+}
+
+// stopRecordExt is a stop record's extension in the host logs' directory.
+const stopRecordExt = "stop"
+
+// StopRecord is a host's word that it began to stop, written before it closes
+// anything and left behind it: a client that lost its stream with no ending, the
+// host's socket and registry entry gone by then, can still tell a stop from a
+// death. Host ids are never reused, so it can only be that host's. The sweep
+// takes it with the host's logs.
+type StopRecord struct {
+	// Cause is what began the stop (agent.TurnInfo.Cause).
+	Cause string `json:"cause,omitempty"`
+	// Turn is the turn of craze's own running as it began, "" for none: the
+	// one a stop's ending would cut short.
+	Turn string `json:"turn,omitempty"`
+	// At is when it began.
+	At time.Time `json:"at"`
+}
+
+// WriteStopRecord writes host id's stop record, atomically, so that a reader
+// finds all of it or none.
+func WriteStopRecord(env Env, id string, r StopRecord) error {
+	if !ValidHostID(id) {
+		return fmt.Errorf("rundir: a stop record for host %q", id)
+	}
+	dir, err := HostLogDir(env)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(filepath.Join(dir, id+"."+stopRecordExt), b, 0o600)
+}
+
+// ReadStopRecord is host id's stop record, and false when it has none, or none
+// that can be read: no record is no evidence of a stop.
+func ReadStopRecord(env Env, id string) (StopRecord, bool) {
+	var r StopRecord
+	if !ValidHostID(id) {
+		return r, false
+	}
+	dir, err := HostLogDir(env)
+	if err != nil {
+		return r, false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, id+"."+stopRecordExt))
+	if err != nil || json.Unmarshal(b, &r) != nil {
+		return StopRecord{}, false
+	}
+	return r, true
 }

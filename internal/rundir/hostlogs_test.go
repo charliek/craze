@@ -82,7 +82,7 @@ func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 		}
 		return p
 	}
-	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".pgids")}
+	removed := []string{aged(gone + ".log"), aged(gone + ".log.1"), aged(gone + ".pgids"), aged(gone + ".stop")}
 	kept := []string{aged(live + ".log"), aged("notes.log"), aged(gone + ".txt"), aged("ABCDEF012345.log")}
 	recent := filepath.Join(dir, NewHostID()+".log")
 	writeFile(t, recent, "x")
@@ -318,5 +318,38 @@ func TestASweepOfACopiedRegistryLeavesTheLiveLogs(t *testing.T) {
 		if !exists(t, filepath.Join(aside, hostLogsName, f)) {
 			t.Errorf("a sweep of the copy removed the live host's %s", f)
 		}
+	}
+}
+
+// TestAStopRecordIsWhatWasWritten: read back whole; none, or one that cannot be
+// read, is no record; and a name that is no host id's is neither written nor read.
+func TestAStopRecordIsWhatWasWritten(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	if _, ok := ReadStopRecord(env, id); ok {
+		t.Fatal("a record before any was written")
+	}
+	want := StopRecord{Cause: "stop", Turn: "turn-3", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	if err := WriteStopRecord(env, id, want); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ReadStopRecord(env, id); !ok || got != want {
+		t.Fatalf("read back %+v, %v", got, ok)
+	}
+	dir, err := HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".stop"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStopRecord(env, id); ok {
+		t.Fatal("a record that cannot be read was taken for one")
+	}
+	if err := WriteStopRecord(env, "../x", want); err == nil {
+		t.Fatal("a record under a name that is no host id's")
+	}
+	if _, ok := ReadStopRecord(env, "../x"); ok {
+		t.Fatal("read a record under a name that is no host id's")
 	}
 }

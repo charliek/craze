@@ -267,7 +267,7 @@
       "additionalProperties": false
     },
     "turn": {
-      "description": "One end of an engine-driven turn (TurnInfo): phase started (with text and origin: submit, drain or send_now) or ended (with its stop reason, and errClass/err and kind/retryable/status/provider_code for a failure; synthetic for an ending the wire never produced; next, the successor turn this settlement started; pending, the rows still queued).",
+      "description": "One end of an engine-driven turn (TurnInfo): phase started (with text and origin: submit, drain or send_now) or ended (with its stop reason, and errClass/err and kind/retryable/status/provider_code for a failure; synthetic for an ending the wire never produced; next, the successor turn this settlement started; pending, the rows still queued; cause, what began a close's ending).",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
@@ -283,7 +283,8 @@
         "provider_code": {"type": "string", "description": "The provider's own short name for the failure; absent for none."},
         "synthetic": {"type": "boolean"},
         "next": {"type": "string"},
-        "pending": {"type": "integer", "minimum": 0}
+        "pending": {"type": "integer", "minimum": 0},
+        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent from a host that predates it, and when a terminal closed its own session."}
       },
       "additionalProperties": false
     },

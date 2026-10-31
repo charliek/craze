@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -106,6 +107,56 @@ func sessionLive(id string) bool {
 		return true
 	}
 	return slices.ContainsFunc(entries, func(e rundir.Entry) bool { return e.CrazeSessionID == id })
+}
+
+// hostState is a host's process as its record's identity reads it.
+type hostState int
+
+const (
+	// hostUnnamed: the process cannot be told from another, or its identity
+	// not read — an older host's record has no start time, some OSes no reader.
+	hostUnnamed hostState = iota
+	// hostRunning: the very process the record names is running.
+	hostRunning
+	// hostExited: no such process, its pid another's since, or a zombie.
+	hostExited
+)
+
+// readHost reads e's process by its identity (rundir.ProcessIdentity): a pid
+// alone may be a later process's, and a registry row alone says nothing of a host
+// that was killed, or one that exited and removed it.
+func readHost(e rundir.Entry) hostState {
+	id, err := rundir.ProcessIdentity(e.PID)
+	switch {
+	case errors.Is(err, rundir.ErrNoProcess):
+		return hostExited
+	case err != nil:
+		return hostUnnamed
+	case id.Zombie:
+		return hostExited
+	case e.PIDStart == 0:
+		return hostUnnamed
+	case id.Start != e.PIDStart:
+		return hostExited
+	}
+	return hostRunning
+}
+
+// hostScanned sees the registry read hostMarkedStopping makes, once it is made: a
+// no-op, and the barrier a test kills a host at.
+var hostScanned = func() {}
+
+// hostMarkedStopping reports whether e's registry entry says its host has begun
+// to stop (rundir.Entry.Stopping). An entry that is missing, or that cannot be
+// read, says nothing: a killed host's is swept, by this very scan.
+func hostMarkedStopping(e rundir.Entry) bool {
+	entries, err := rundir.Hosts(rundir.ProcessEnv())
+	hostScanned()
+	if err != nil {
+		return false
+	}
+	i := slices.IndexFunc(entries, func(r rundir.Entry) bool { return r.HostID == e.HostID })
+	return i >= 0 && entries[i].Stopping
 }
 
 // indexCrazeIDs is every craze id the session index holds a row for.

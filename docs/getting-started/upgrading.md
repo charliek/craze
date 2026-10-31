@@ -42,8 +42,8 @@ end `it exits when idle`.
 
 **The waiting commands' JSON changes.** A program that reads `craze new --wait
 --json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
-Exit codes do not change. `craze prompt --json` is unchanged, and so is plain `craze
-new --json` but for one new key. A waiter and a host of different versions work
+Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn). `craze prompt
+--json` is unchanged, and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
 together: an error from an older host reads as kind `unknown`, retryable false, and
 a kind from a newer host that this craze does not know reads as `unknown` with the
 `retryable` that host sent.
@@ -128,6 +128,67 @@ becomes
 ```
 
 See [each status](../reference/cli.md#each-status) for what each one carries.
+
+### A stop mid-turn
+
+**A turn a stop cuts short is a `cancelled` result, exit 3. It used to be a failure,
+exit 1.** A waiting command whose turn is running when `craze stop`, a `SIGTERM` to
+the host or the host's other stops end the session now reports that turn: what it
+did, what it spent so far, and what began the stop. A script that took exit 1 to mean
+a stopped session reads exit 3 and `stopReason: stopped`, or `error.kind: stopped`.
+
+```json
+{"error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"stopped","retryable":false},"handle":"0199c0de-1111-7000-8000-397e175bfe79.41.turn-3"}
+```
+
+becomes
+
+```json
+{"status":"cancelled","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","turn":"turn-3","message":"Reading the tests next.","stopReason":"stopped","error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"stopped","retryable":false,"detail":{"cause":"stop"}},"toolCalls":2,"durationMs":8120,"files":[],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"usageComplete":false,"attach":"craze attach --session 175bfe79"}
+```
+
+**`usageComplete` is new.** `false` when a step was in flight as the turn was cut
+short, or the waiter did not see all of the turn, its spend then maybe missing from
+`usage`; otherwise absent. A cancelled result says so too, and `craze cancel` mid-step
+reads that way now:
+
+```json
+{"status":"cancelled","stopReason":"cancelled"}
+```
+
+becomes
+
+```json
+{"status":"cancelled","stopReason":"cancelled","usageComplete":false}
+```
+
+**A killed host is told from a stop and from a lost connection.** It used to be told
+by the registry alone, so a live host whose entry had gone read as exited. A host now
+records that it began to stop, in `<hostId>.stop` beside its log, so a stop whose
+ending never reached the waiter is still the exit-3 `cancelled` result above. With no
+such word, `host_exited` means the process is gone, and carries the usage folded so
+far. `connection_lost` is a process shown running, whose turn runs on, or one that
+cannot be told, whose message says the turn may have ended. Both stay exit 1.
+
+```json
+{"error":{"message":"the session ended (craze send 175bfe79 <prompt> reloads it)","kind":"host_exited","retryable":true},"handle":"…"}
+```
+
+becomes
+
+```json
+{"error":{"message":"the session ended: its host exited with no ending for the turn (craze send 175bfe79 <prompt> reloads it)","kind":"host_exited","retryable":true},"handle":"…","usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"usageComplete":false}
+```
+
+A prompt still queued when the session stops never ran, and stays exit 1, kind
+`stopped`, now with `detail.cause` when it is known.
+
+The stream and `lastTurn` gain an optional [`cause`](../reference/protocol.md#what-began-a-close)
+on a close's ending, and `lastTurn` an optional `withdrawn`. A host from before them
+sends neither: its stop reads with no `detail.cause`, and a prompt it withdrew reads
+`usageComplete: false`.
+
+See [a turn cut short](../reference/cli.md#a-turn-cut-short).
 
 ### Other commands
 

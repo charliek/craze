@@ -530,6 +530,8 @@ func emitSiteEvents() []emitSiteEvent {
 		{"a turn ended cleanly, with a successor", Event{Type: EventTurn, Cause: "tui-1/12", Turn: &TurnInfo{
 			ID: "turn-3", Phase: TurnEnded, StopReason: "end_turn", Next: "turn-4", Pending: 2,
 		}, At: at}},
+		{"a turn ended by its session's close, saying what began it", Event{Type: EventTurn, Turn: &TurnInfo{
+			ID: "turn-5", Phase: TurnEnded, StopReason: "closing", Synthetic: true, Pending: 1, Cause: StopCauseSignal}, At: at}},
 		{"a turn ended synthetically, with no successor", Event{Type: EventTurn, Turn: &TurnInfo{
 			ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled,
 			Err: "agent: prompt cancelled before it was sent", Synthetic: true,
@@ -702,6 +704,10 @@ func pinnedWireShapes() []pinnedWireShape {
 			`{"type":"queue","queue":{"id":"q-1","text":"next","queuedAt":"2026-09-19T10:30:45.123456789Z","version":1},"queueChange":"edited","queuePos":1}`},
 		{Event{Type: EventTurn, Cause: "cli-1/7", Turn: &TurnInfo{ID: "turn-3", Phase: TurnStarted, Text: "go", Origin: TurnOriginSubmit}},
 			`{"type":"turn","turn":{"id":"turn-3","phase":"started","text":"go","origin":"submit"},"cause":"cli-1/7"}`},
+		{Event{Type: EventTurn, Turn: &TurnInfo{ID: "turn-3", Phase: TurnEnded, StopReason: "closing", Synthetic: true, Cause: StopCauseStop}},
+			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"closing","synthetic":true,"cause":"stop"}}`},
+		{Event{Type: EventTurn, Turn: &TurnInfo{ID: "turn-3", Phase: TurnEnded, StopReason: "closing", Synthetic: true}},
+			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"closing","synthetic":true}}`},
 		{Event{Type: EventTurn, Turn: &TurnInfo{ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled, Err: "agent: prompt cancelled before it was sent", Synthetic: true}},
 			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"cancelled","errClass":"prompt_cancelled","err":"agent: prompt cancelled before it was sent","synthetic":true}}`},
 		{Event{Type: EventMeta, Cause: "c-1/4", State: &StateDelta{SendNow: &SendNowState{Armed: true, Text: "now, please", FromRow: "q-2", Turn: "turn-3"}}},

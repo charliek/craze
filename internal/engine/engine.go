@@ -280,11 +280,13 @@ type Engine struct {
 	cancelsInFlight int
 	stopped         bool
 	closed          bool
-	prompted        bool
-	cancelled       bool
-	err             string
-	startFailed     bool
-	startKind       errkind.Kind
+	// closeCause is what began the close (CloseFor), "" when nothing said.
+	closeCause  string
+	prompted    bool
+	cancelled   bool
+	err         string
+	startFailed bool
+	startKind   errkind.Kind
 	// asides is how many side questions are in flight on the session
 	// (aside.go): Aside counts one in under e.mu before it calls the session
 	// and out in a defer, so it is 0 again on every path.
@@ -886,7 +888,8 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // word the ask registry and the send-now's own disarm already use for this —
 // with no successor and the queue's own length as Pending: Close is not Stop, so
 // the rows stay where they are and nothing is said about them. It is enqueued
-// before the session's close, so the log's own close phases commit it.
+// before the session's close, so the log's own close phases commit it. It says
+// nothing of why the session closed: CloseFor is Close with the cause.
 //
 // The index worker is joined too, but its join is bounded where the others are
 // not: a row is written through a file lock that nothing can interrupt, so the
@@ -926,7 +929,7 @@ func (e *Engine) Close() error {
 			e.cur = nil
 			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
 				ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
-				StopReason: stopClosing, Pending: e.queue.Len(),
+				StopReason: stopClosing, Pending: e.queue.Len(), Cause: e.closeCause,
 			}}, t.cause))
 		}
 		// An armed send will never fire now, and the record says so before the
@@ -950,6 +953,19 @@ func (e *Engine) Close() error {
 		e.idx.close()
 	})
 	return e.closeErr
+}
+
+// CloseFor is Close, cause (agent.TurnInfo.Cause) saying what began it, on the
+// ending of the turn it finds running. Only the first to ask says: a later one
+// joins it, so a signal arriving during a stop leaves the stop's cause, and a
+// close already under way says what it said.
+func (e *Engine) CloseFor(cause string) error {
+	e.mu.Lock()
+	if !e.closed && e.closeCause == "" {
+		e.closeCause = cause
+	}
+	e.mu.Unlock()
+	return e.Close()
 }
 
 // reportIndexErr publishes a failed index write, for every write but the

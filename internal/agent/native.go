@@ -2570,14 +2570,35 @@ func (s *nativeSession) sink(ev harness.Event) {
 // there reads the turn's own spend (TestATurnsUsageReachesTheStreamBeforeItsEnd,
 // on the engine, in internal/tui).
 func (s *nativeSession) spent(e harness.Spent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spentLocked(e)
+}
+
+// spentIdle is spent for a report read while no turn ran (a side question's
+// harness.IdleSpent), which a turn may have claimed the session since: its Turn
+// is the last turn's spend, which published into the turn now running would read
+// as that turn's own. So it is dropped from the claim on, in the section that
+// takes the claim's flag, ahead of the turn's started (the engine's Begin, then
+// its started): the running turn's own next report counts what it held, and
+// until then nothing says the turn has spent what it has not.
+func (s *nativeSession) spentIdle(e harness.Spent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claimed || s.inPrompt {
+		return
+	}
+	s.spentLocked(e)
+}
+
+// spentLocked is spent; s.mu is held.
+func (s *nativeSession) spentLocked(e harness.Spent) {
 	u := UsageState{
 		ContextTokens: e.ContextTokens,
 		ContextWindow: e.ContextWindow,
 		Turn:          Spend(e.Turn),
 		Session:       Spend(e.Session),
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// A report whose data is older than the last applied one's — an idle side
 	// question's, computed before a turn's step was reported (plan 040 §3.4)
 	// — would put the older numbers back: dropped.

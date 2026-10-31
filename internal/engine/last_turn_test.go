@@ -107,6 +107,54 @@ func TestTheLastTurnIsEachTurnsEnding(t *testing.T) {
 			t.Fatalf("after the close the last turn is %+v, want %+v", got, want)
 		}
 	})
+	t.Run("cancelled by a close saying what began it", func(t *testing.T) {
+		r := newRig(t, Options{})
+		sc := r.s.script(held())
+		res := r.submit("one")
+		await(t, sc.opened, "the turn to open")
+		r.until(started(res.Turn))
+		if err := r.e.CloseFor(agent.StopCauseSignal); err != nil {
+			t.Fatal(err)
+		}
+		got := r.e.State().LastTurn
+		if want := (LastTurn{Outcome: TurnCancelled, StopReason: "closing", Cause: agent.StopCauseSignal, EndedAt: fakeClock, TurnID: res.Turn}); got == nil || *got != want {
+			t.Fatalf("after the close the last turn is %+v, want %+v", got, want)
+		}
+		// A close after it joins it, and says nothing new.
+		if err := r.e.CloseFor(agent.StopCauseStop); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.e.State().LastTurn; got == nil || got.Cause != agent.StopCauseSignal {
+			t.Fatalf("after a second close the last turn is %+v", got)
+		}
+	})
+	t.Run("the first to ask for the close says why, ahead of its section", func(t *testing.T) {
+		r := newRig(t, Options{})
+		sc := r.s.script(held())
+		res := r.submit("one")
+		await(t, sc.opened, "the turn to open")
+		r.until(started(res.Turn))
+		r.e.mu.Lock()
+		r.e.closeCause = agent.StopCauseStop
+		r.e.mu.Unlock()
+		if err := r.e.CloseFor(agent.StopCauseSignal); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.e.State().LastTurn; got == nil || got.Cause != agent.StopCauseStop {
+			t.Fatalf("the last turn is %+v", got)
+		}
+	})
+	t.Run("a turn over before the close has no closing ending", func(t *testing.T) {
+		r := newRig(t, Options{})
+		res := r.submit("one")
+		r.until(ended(res.Turn))
+		if err := r.e.CloseFor(agent.StopCauseStop); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.e.State().LastTurn; got == nil || got.StopReason == "closing" || got.Cause != "" {
+			t.Fatalf("the last turn is %+v", got)
+		}
+	})
 	t.Run("a foreign turn's ending, named by the agent's id", func(t *testing.T) {
 		r := newRig(t, Options{})
 		r.foreignTurn("wake-1", true)

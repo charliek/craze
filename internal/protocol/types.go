@@ -540,6 +540,13 @@ type LastTurn struct {
 	// StopReason is the ending's own reason: absent for a foreign turn, a
 	// failure that has none, and an older host.
 	StopReason string `json:"stopReason,omitempty"`
+	// Cause is what began the close that ended the turn, on a stop reason of
+	// closing: absent otherwise, from an older host, and when the close did not
+	// say.
+	Cause string `json:"cause,omitempty"`
+	// Withdrawn says a cancelled turn's prompt never reached the agent, so no
+	// step of it ran: absent otherwise, and from an older host.
+	Withdrawn bool `json:"withdrawn,omitempty"`
 	// Kind, Retryable, Status and ProviderCode are what a failed turn said of
 	// itself (internal/errkind): absent for the other two, and from an older
 	// host, which a reader takes for kind unknown.

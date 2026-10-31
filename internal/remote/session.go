@@ -1031,7 +1031,7 @@ func (s *Session) LastTurn(ctx context.Context) (*engine.LastTurn, error) {
 		return nil, err
 	}
 	lt := r.LastTurn
-	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, StopReason: lt.StopReason,
+	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, StopReason: lt.StopReason, Cause: lt.Cause, Withdrawn: lt.Withdrawn,
 		Info: LastTurnInfo(lt), EndedAt: lt.EndedAt, TurnID: lt.TurnID}, nil
 }
 

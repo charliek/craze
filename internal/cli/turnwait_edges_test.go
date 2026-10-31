@@ -586,6 +586,9 @@ func TestWaitTurnSessionEndKeepsTheHandle(t *testing.T) {
 		r.s.setForeign(true)
 		waitFor(t, "the agent's own turn", func() bool { return r.s.ForeignTurn() })
 		conn := r.dial(nil)
+		// The host is this test's process: named by a pid nothing has, it has
+		// gone with its registry entry.
+		conn.entry.PID = exitedPID(t)
 		w := goWait(conn, waitStart{}, waitOptions{})
 		_ = r.reg.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), serveStep)

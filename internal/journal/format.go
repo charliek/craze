@@ -145,10 +145,11 @@ const (
 	DiagControlConn = "control_conn"
 	// DiagHostStop is a detached host's stop sequence beginning (plan 030
 	// §3.6, C5), written by craze serve before its engine closes: the stop's
-	// cause — a session.stop and the client that sent it, a signal, the idle
-	// exit, the host's socket or registry entry lost. A session.stop also
-	// has its connection's own control_conn stop note; this is the one
-	// record of why the host ended, whatever ended it.
+	// cause in words — a session.stop and the client that sent it, a signal,
+	// the idle exit, the host's socket or registry entry lost — and under
+	// stopCause the word the turn's ending carries (agent.TurnInfo.Cause). A
+	// session.stop also has its connection's own control_conn stop note; this
+	// is the one record of why the host ended, whatever ended it.
 	DiagHostStop = "host_stop"
 )
 

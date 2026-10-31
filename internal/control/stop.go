@@ -25,6 +25,9 @@ import (
 // For the first stop the server accepts, in this order, on its handler's
 // goroutine (sessionStop):
 //
+//  0. Options.StopBeginning, when set, is told: the host latches what began
+//     its stop, so that nothing this stop goes on to make visible — the fence,
+//     the mark, the receipt — can come ahead of it;
 //  1. a close fence of the stop's own goes up over attach reservations
 //     (FenceAttaches), never to be released: a stop is one way. From here a
 //     new session.attach is refused unavailable, reason closing;
@@ -217,6 +220,10 @@ func (c *conn) sessionStop(b *bound, info protocol.MethodInfo, req *request) out
 	first := false
 	c.srv.stopOnce.Do(func() {
 		first = true
+		stop := StopRequest{Client: b.client, CommandID: p.CommandID}
+		if f := c.srv.opts.StopBeginning; f != nil {
+			f(stop)
+		}
 		// Never released: a stop is one way. Up before the receipt is
 		// queued, and so before it can be read.
 		_, _ = c.srv.FenceAttaches()
@@ -232,7 +239,7 @@ func (c *conn) sessionStop(b *bound, info protocol.MethodInfo, req *request) out
 		c.stopReceipt(req.id)
 		// Only now does the coordinator hear of the stop: whatever its
 		// sequence puts on this connection queues behind the receipt.
-		c.srv.opts.Stop(StopRequest{Client: b.client, CommandID: p.CommandID})
+		c.srv.opts.Stop(stop)
 	})
 	if first {
 		return replied()

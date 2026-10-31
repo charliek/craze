@@ -243,6 +243,31 @@ type TurnInfo struct {
 	Next string
 	// Pending is how many rows were still queued after this settlement.
 	Pending int
+	// Cause is why the session closed, on the synthetic ending Close authors
+	// (stop reason closing): one of the StopCause values, set by the code that
+	// began the stop. "" on every other ending, from a host that predates it,
+	// and from a session its own terminal closed.
+	Cause string
+}
+
+// The causes of a session's close (TurnInfo.Cause): what began the stop.
+const (
+	// StopCauseStop: a client asked, session.stop or craze stop.
+	StopCauseStop = "stop"
+	// StopCauseSignal: SIGTERM or SIGINT reached the host.
+	StopCauseSignal = "signal"
+	// StopCauseIdle: the host's idle exit.
+	StopCauseIdle = "idle"
+	// StopCauseExitAfterTurn: --exit-after-turn's stop, once its turn has ended.
+	StopCauseExitAfterTurn = "exit_after_turn"
+	// StopCauseLostOwner: what the host answered to went away: the launcher
+	// that was waiting for its ready line, or its socket or registry entry.
+	StopCauseLostOwner = "lost_owner"
+)
+
+// StopCauses is every cause, for the docs' drift test.
+func StopCauses() []string {
+	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner}
 }
 
 // The two phases a TurnInfo carries.

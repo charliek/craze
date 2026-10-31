@@ -1074,7 +1074,7 @@ func (h *Host) RunStop() error {
 	case stopped:
 		return fmt.Errorf("fakehost: run_stop: the stop sequence has already run")
 	}
-	return h.currentEngine().Close()
+	return h.currentEngine().CloseFor(agent.StopCauseStop)
 }
 
 // opParams is one op's wire shape: {"name": "...", ...}, the union of every

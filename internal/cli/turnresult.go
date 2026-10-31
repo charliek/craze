@@ -63,6 +63,14 @@ type turnAccumulator struct {
 	// usage is the last usage section folded (P6): before the ending, since
 	// the accumulator stops at it.
 	usage *agent.UsageState
+	// stepOpen says a step of the turn has begun and not reported its usage, as
+	// far as the stream tells: a report comes when a step has finished, its tools
+	// included, and no event says the next has begun. So a turn opens with a step
+	// under way, anything it does since a report is one, and a report leaves one
+	// under way when stepNext says another follows: its step called a tool, or a
+	// compaction ran. A sub-agent's events are not folded: its spend rides on the
+	// report of the parent's step that called it, a tool call still open.
+	stepOpen, stepNext bool
 	// plan is the text of the last plan the turn presented, automatic or not
 	// (P9: an automatic plan is not in the transcript at all).
 	plan string
@@ -105,7 +113,7 @@ type autoAnswer struct {
 }
 
 func newTurnAccumulator() *turnAccumulator {
-	return &turnAccumulator{tools: map[string]*accTool{}, touched: map[accTouch]bool{}}
+	return &turnAccumulator{tools: map[string]*accTool{}, touched: map[accTouch]bool{}, stepOpen: true}
 }
 
 // start is the turn's opening: its time.
@@ -141,6 +149,7 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// session only).
 		return
 	}
+	a.noteStep(ev)
 	if runBoundary(ev) {
 		a.split()
 	}
@@ -216,6 +225,24 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 				a.split()
 			}
 		}
+	}
+}
+
+// noteStep keeps stepOpen and stepNext from one event of the turn. Neither the
+// wire's own done nor the queue's rows say anything of a step.
+func (a *turnAccumulator) noteStep(ev agent.Event) {
+	switch ev.Type {
+	case agent.EventDone, agent.EventQueue:
+	case agent.EventMeta:
+		if st := ev.State; st != nil && st.Usage != nil {
+			a.stepOpen, a.stepNext = a.stepNext, false
+		}
+	case agent.EventTool:
+		a.stepOpen, a.stepNext = true, true
+	case agent.EventCompaction:
+		a.stepNext = true
+	default:
+		a.stepOpen = true
 	}
 }
 
@@ -446,30 +473,32 @@ func terminalStatus(status string) bool {
 // (`[]` when none) and stopReason on a terminal status; the rest when present. A
 // key that is absent is never written as null or false.
 type turnResult struct {
-	Status       string          `json:"status"`
-	Session      string          `json:"session"`
-	Short        string          `json:"short"`
-	Provider     string          `json:"provider"`
-	Model        string          `json:"model,omitempty"`
-	Turn         string          `json:"turn,omitempty"`
-	Row          string          `json:"row,omitempty"`
-	Message      *string         `json:"message,omitempty"`
-	MessageCut   bool            `json:"messageCut,omitempty"`
-	MessageFile  string          `json:"messageFile,omitempty"`
-	StopReason   string          `json:"stopReason,omitempty"`
-	Error        *resultError    `json:"error,omitempty"`
-	PlanEnded    bool            `json:"planEnded,omitempty"`
-	ToolCalls    *int            `json:"toolCalls,omitempty"`
-	DurationMs   *int64          `json:"durationMs,omitempty"`
-	Files        *[]string       `json:"files,omitempty"`
-	Plan         string          `json:"plan,omitempty"`
-	Usage        json.RawMessage `json:"usage,omitempty"`
-	AutoAnswered []autoAnswer    `json:"autoAnswered,omitempty"`
-	Ask          *resultAsk      `json:"ask,omitempty"`
-	BlockedBy    string          `json:"blockedBy,omitempty"`
-	Partial      bool            `json:"partial,omitempty"`
-	Handle       string          `json:"handle,omitempty"`
-	Attach       string          `json:"attach"`
+	Status      string          `json:"status"`
+	Session     string          `json:"session"`
+	Short       string          `json:"short"`
+	Provider    string          `json:"provider"`
+	Model       string          `json:"model,omitempty"`
+	Turn        string          `json:"turn,omitempty"`
+	Row         string          `json:"row,omitempty"`
+	Message     *string         `json:"message,omitempty"`
+	MessageCut  bool            `json:"messageCut,omitempty"`
+	MessageFile string          `json:"messageFile,omitempty"`
+	StopReason  string          `json:"stopReason,omitempty"`
+	Error       *resultError    `json:"error,omitempty"`
+	PlanEnded   bool            `json:"planEnded,omitempty"`
+	ToolCalls   *int            `json:"toolCalls,omitempty"`
+	DurationMs  *int64          `json:"durationMs,omitempty"`
+	Files       *[]string       `json:"files,omitempty"`
+	Plan        string          `json:"plan,omitempty"`
+	Usage       json.RawMessage `json:"usage,omitempty"`
+	// UsageComplete is only ever false (usageIncomplete): absent is the rule.
+	UsageComplete *bool        `json:"usageComplete,omitempty"`
+	AutoAnswered  []autoAnswer `json:"autoAnswered,omitempty"`
+	Ask           *resultAsk   `json:"ask,omitempty"`
+	BlockedBy     string       `json:"blockedBy,omitempty"`
+	Partial       bool         `json:"partial,omitempty"`
+	Handle        string       `json:"handle,omitempty"`
+	Attach        string       `json:"attach"`
 
 	// usage is Usage decoded, for the plain footer.
 	usage *agent.UsageState
@@ -496,10 +525,12 @@ type resultError struct {
 
 // errorDetail is resultError's detail: names and numbers only, each cleaned
 // again here whatever host sent it, so no text from outside craze — a key, a
-// path, a piece of a request — can ride in it.
+// path, a piece of a request — can ride in it. Cause is what began the stop, on
+// kind stopped.
 type errorDetail struct {
 	Status       int    `json:"status,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
+	Cause        string `json:"cause,omitempty"`
 }
 
 // newResultError is msg as a resultError saying info. A kind a reader does not
@@ -516,6 +547,26 @@ func newResultError(msg string, info errkind.Info) *resultError {
 // kindError is msg as a resultError of kind, with its default retryable.
 func kindError(msg string, kind errkind.Kind) *resultError {
 	return newResultError(msg, errkind.New(kind))
+}
+
+// stoppedError is msg as a resultError of kind stopped, its detail saying what
+// began the stop, when the host said.
+func stoppedError(msg, cause string) *resultError {
+	e := kindError(msg, errkind.Stopped)
+	if c := errkind.CleanCode(cause); c != "" {
+		e.Detail = &errorDetail{Cause: c}
+	}
+	return e
+}
+
+// usageIncomplete is usageComplete, as a turn cut short with a step in flight
+// says it: false, and otherwise absent.
+func usageIncomplete(inFlight bool) *bool {
+	if !inFlight {
+		return nil
+	}
+	complete := false
+	return &complete
 }
 
 // resultAsk is a needs_input result's open ask.
@@ -639,6 +690,9 @@ func (r *turnResult) footer() string {
 		}
 	}
 	lines = append(lines, strings.Join(parts, " · "))
+	if r.UsageComplete != nil && r.usage != nil {
+		lines = append(lines, "usage: a step was in flight, and its spend is not counted")
+	}
 	if r.Error != nil {
 		lines = append(lines, "error: "+psLine(r.Error.Message))
 	}
@@ -894,10 +948,14 @@ func (o resultOutput) writeFull(res *turnResult, data []byte) (string, error) {
 	return path, nil
 }
 
-// failureBody is the one object a failure with no result prints under --json.
+// failureBody is the one object a failure with no result prints under --json:
+// usage and usageComplete beside it when the session ended under a turn whose
+// ending was not seen (waitFailure.usage).
 type failureBody struct {
-	Error  *resultError `json:"error"`
-	Handle string       `json:"handle,omitempty"`
+	Error         *resultError    `json:"error"`
+	Handle        string          `json:"handle,omitempty"`
+	Usage         json.RawMessage `json:"usage,omitempty"`
+	UsageComplete *bool           `json:"usageComplete,omitempty"`
 }
 
 // writeFailure prints a wait's exit-1 failure (§3.1): with --json, one
@@ -912,7 +970,16 @@ func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure
 		kind = errkind.Internal
 	}
 	if o.json {
-		if b, err := json.Marshal(failureBody{Error: kindError(msg, kind), Handle: f.handle}); err == nil {
+		body := failureBody{Error: kindError(msg, kind), Handle: f.handle, UsageComplete: usageIncomplete(f.inFlight)}
+		if kind == errkind.Stopped {
+			body.Error = stoppedError(msg, f.cause)
+		}
+		if f.usage != nil {
+			if raw, err := agent.EncodeUsageState(f.usage); err == nil {
+				body.Usage = raw
+			}
+		}
+		if b, err := json.Marshal(body); err == nil {
 			fmt.Fprintf(stdout, "%s\n", b)
 		}
 	}

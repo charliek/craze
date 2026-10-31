@@ -64,10 +64,21 @@ import (
 //     the target running in it is followed on (partial), a turn that ended is
 //     settled from session.state's lastTurn (partial), and anything else is
 //     an ending not observed.
-//   - The session's own end is exit 1, `the session ended`, with the reload
-//     hint and the handle — the ending its close gives a turn it cut short
-//     (stopReason closing) included; a connection that cannot be recovered
-//     is exit 1 with the handle — the turn runs on in its host.
+//   - The ending a session's close gives the turn it cuts short (stopReason
+//     closing, its cause what began the stop) is that turn's result: cancelled,
+//     exit 3, stopReason stopped, with what was folded of it (closed). Whichever
+//     ending the engine published first is the one folded: nothing is read past
+//     a result.
+//   - A turn whose ending never reached the waiter, in a stop its host said it
+//     began (its stop record, its registry entry marked), is that same result,
+//     from what was folded, its usage not called whole (stopUnseen).
+//   - A session that ends with no ending for the target and no such turn — a row
+//     that never ran, the agent's own turn, a turn the stop found already over —
+//     is exit 1, kind stopped, `the session ended`, with the reload hint and the
+//     handle.
+//   - A stream lost with no word of a stop is told by the host's process (lost):
+//     gone, exit 1, host_exited; running, exit 1, connection_lost, the turn runs
+//     on in its host; one that cannot be named, the same kind, its state unknown.
 //   - A signal or --timeout's end interrupts the waiter's work at once,
 //     reads in flight included (run's op). Past --timeout's end nothing read
 //     decides the target: it is running, with its handle (timedOut).
@@ -233,6 +244,12 @@ type waitFailure struct {
 	// awaited is where the waiter's stream stood when it gave up on a submit's
 	// answer, for a handle should the gate turn out to hold one (waitAfter).
 	awaited turnHandle
+	// cause is what began the session's close (kind stopped), when it was seen.
+	// usage and inFlight are what was folded of a turn whose session ended with
+	// no ending seen (sessionGone).
+	cause    string
+	usage    *agent.UsageState
+	inFlight bool
 }
 
 // pumped is one stream item as the pump hands it over, or why the stream
@@ -324,6 +341,14 @@ type turnWaiter struct {
 	rowLinked bool
 	// foreign is the id of the agent's own turn running now, for blockedBy.
 	foreign string
+	// closing says a close's ending has gone by on the stream (any turn's, the
+	// target still a row), and closeCause what it said began the stop: the
+	// session is ending, whatever its stream does next.
+	closing    bool
+	closeCause string
+	// withdrawn says the target's prompt never reached the agent (ended,
+	// settleOutcome).
+	withdrawn bool
 
 	// submitted is set while a submit's reply is still out (buffering):
 	// every item is kept in buffer, in order, and handed to item once the
@@ -485,11 +510,13 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 			w.fail = w.interrupted(ctx.Err().Error())
 		}
 	}
-	if w.result != nil && w.session.model == "" {
+	if w.result != nil && w.session.model == "" && !w.closing {
 		// Nothing the wait read named the session's model — a replay from a
 		// handle that ended before its attachment caught up reads nothing:
 		// one bound read of the session's state names it, on the wait's own
-		// work (op), which an interrupt has ended already.
+		// work (op), which an interrupt has ended already. Not of a session
+		// that is closing: nothing is left to answer it, and it would only
+		// hold the result back.
 		if _, err := w.state(op); err == nil {
 			w.result.Model = w.session.model
 		}
@@ -685,27 +712,87 @@ func (w *turnWaiter) item(ctx context.Context, p pumped) {
 	case remote.KindEnd:
 		// The handle still names the target (§3.1: every exit 1 after one
 		// has a target carries it), whose ending the stream never brought.
-		// The host itself said the session has closed.
-		w.fail = &waitFailure{msg: endedLine(w.session.id), kind: errkind.Stopped, handle: w.handle()}
+		// The host itself said the session has closed, so its process is not
+		// asked: it may yet be on its way out. Its record says of the target
+		// what the stream did not.
+		if rec, ok := rundir.ReadStopRecord(rundir.ProcessEnv(), w.conn.entry.HostID); ok && !w.closing {
+			w.stopUnseen(&rec)
+			return
+		}
+		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
 	case remote.KindError:
 		w.lost(it.Err)
 	}
 }
 
-// lost is the stream given up: its redials spent, or the stream broken. A
-// session no live host serves any more has ended; otherwise the connection
-// is lost and the turn runs on in its host (the handle follows it). Either
-// way the handle names the target, once there is one.
+// lost is the stream given up: its redials spent, or the stream broken. Only what
+// says a stop began makes it one: a close seen on the stream, the host's stop
+// record, its registry entry marked stopping. A registry entry that is merely
+// missing says nothing — a host that is killed has its entry swept, by this very
+// read or anyone's — so with no such word the host's process decides, read after
+// the registry: one gone exited with no ending seen, and what was folded of the
+// turn is all there will be; one running has a connection lost and a turn that
+// runs on (the handle follows it); one that cannot be named is never host_exited,
+// and nothing is claimed of its turn.
 func (w *turnWaiter) lost(err error) {
 	if err == nil || errors.Is(err, remote.ErrStreamClosed) {
 		err = errors.New("the stream closed")
 	}
-	if !sessionLive(w.session.id) {
-		w.fail = &waitFailure{msg: endedLine(w.session.id), kind: errkind.HostExited, handle: w.handle()}
+	e := w.conn.entry
+	if w.closing {
+		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
 		return
 	}
-	w.fail = &waitFailure{msg: "lost the connection to session " + psShort(w.session.id) + ": " +
-		sanitizeLine(err.Error()) + "; the turn runs on in its host", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}
+	if rec, ok := rundir.ReadStopRecord(rundir.ProcessEnv(), e.HostID); ok {
+		w.stopUnseen(&rec)
+		return
+	}
+	if hostMarkedStopping(e) {
+		w.stopUnseen(nil)
+		return
+	}
+	lost := "lost the connection to session " + psShort(w.session.id) + ": " + sanitizeLine(err.Error())
+	switch readHost(e) {
+	case hostExited:
+		w.sessionGone("the session ended: its host exited with no ending for the turn"+reloadHint(matchCrazeID(indexCrazeIDs(), w.session.id)), errkind.HostExited)
+	case hostRunning:
+		w.fail = &waitFailure{msg: lost + "; the turn runs on in its host", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}
+	default:
+		w.fail = &waitFailure{msg: lost + "; its host's state is unknown, and the turn may have ended", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}
+	}
+}
+
+// stopUnseen is a stop whose ending never reached the waiter: a backlog the host's
+// flush gave up on, a subscription dropped for overflow, a reconnect its attach
+// fence refused. rec is what the host wrote as it began, nil when only its
+// registry entry says. The target turn, the one the stop found running as far as
+// it can be told, has the result its ending would have given, from what was
+// folded; anything else is the session's end, the host's word on the target being
+// only that it is over.
+func (w *turnWaiter) stopUnseen(rec *rundir.StopRecord) {
+	w.closing = true
+	at := time.Now()
+	if rec != nil {
+		w.closeCause, at = rec.Cause, rec.At
+	}
+	if w.target.kind != targetTurn || (rec != nil && rec.Turn != w.target.id) {
+		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
+		return
+	}
+	w.partial = true
+	w.acc.end(at)
+	w.closed(w.closeCause)
+}
+
+// sessionGone is the session's end with no ending for the target: exit 1 as kind,
+// with the handle, what began its close if that was seen, and — a turn's — what
+// was folded of its usage, and whether a step was in flight when the stream ended.
+func (w *turnWaiter) sessionGone(msg string, kind errkind.Kind) {
+	f := &waitFailure{msg: msg, kind: kind, handle: w.handle(), cause: w.closeCause}
+	if k := w.target.kind; k == targetTurn || k == targetForeign {
+		f.usage, f.inFlight = w.acc.usage, w.stepInFlight()
+	}
+	w.fail = f
 }
 
 // attached is the first attachment's reply: where the stream starts, and —
@@ -1026,6 +1113,11 @@ func (w *turnWaiter) settleLastTurn(ctx context.Context, lt *protocol.LastTurn, 
 // interrupt cut short is left unsettled for the interrupt to decide. A turn that
 // finished may have finished at its approved plan (lookApproved).
 func (w *turnWaiter) settleOutcome(ctx context.Context, lt *protocol.LastTurn) {
+	if lt.StopReason == stopClosing {
+		w.closed(lt.Cause)
+		return
+	}
+	w.withdrawn = lt.Withdrawn
 	status := statusCompleted
 	switch lt.Outcome {
 	case protocol.TurnDone:
@@ -1045,12 +1137,7 @@ func (w *turnWaiter) settleOutcome(ctx context.Context, lt *protocol.LastTurn) {
 	}
 	res := w.newResult(status)
 	res.StopReason = lt.StopReason
-	switch {
-	case lt.StopReason == stopClosing:
-		// The session's close ended it, read after the fact.
-		res.StopReason = stopStopped
-		res.Error = kindError(endedLine(w.session.id), errkind.Stopped)
-	case lt.Err != "":
+	if lt.Err != "" {
 		res.Error = newResultError(lt.Err, remote.LastTurnInfo(lt))
 	}
 	w.finish(res)
@@ -1235,6 +1322,9 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 	seedFromSnapshot(w.acc, snap)
 	if same {
 		w.acc.auto = append(prev.auto, w.acc.auto...)
+		// A report carries the whole turn's spend so far, and no snapshot is
+		// read for it (settleLastTurn).
+		w.acc.usage = prev.usage
 		if prev.returned {
 			w.acc.returned, w.acc.plan = true, prev.plan
 		}
@@ -1320,6 +1410,9 @@ func (w *turnWaiter) event(ctx context.Context, ev agent.Event) {
 	}
 	if st := ev.State; ev.Type == agent.EventMeta && st != nil && st.Model != nil {
 		w.session.model = *st.Model
+	}
+	if tu := ev.Turn; ev.Type == agent.EventTurn && tu != nil && tu.Phase == agent.TurnEnded && closingEnding(tu) {
+		w.closing, w.closeCause = true, tu.Cause
 	}
 	switch w.target.kind {
 	case targetNone:
@@ -1468,16 +1561,13 @@ func (w *turnWaiter) restoring(ev agent.Event) (string, bool) {
 // returned plan is still cancelled. A cancel whose lookup an interrupt cut
 // short is left unsettled, for the interrupt to decide.
 func (w *turnWaiter) ended(ctx context.Context, tu *agent.TurnInfo) {
-	if tu.Synthetic && tu.StopReason == stopClosing {
-		// The engine's close authored it (engine.Close): the session ended
-		// under the turn, which §3.1 says as the session's end — exit 1, the
-		// reload hint, the handle — not as the turn's.
-		w.fail = &waitFailure{msg: endedLine(w.session.id), kind: errkind.Stopped, handle: w.handle()}
-		return
-	}
 	if !w.folding {
 		// Its ending, and nothing of the turn before it.
 		w.partial = true
+	}
+	if closingEnding(tu) {
+		w.closed(tu.Cause)
+		return
 	}
 	status := statusFailed
 	switch {
@@ -1491,6 +1581,7 @@ func (w *turnWaiter) ended(ctx context.Context, tu *agent.TurnInfo) {
 		if returned {
 			status = statusCompleted
 		}
+		w.withdrawn = tu.Synthetic
 	case tu.Err != "":
 	case tu.StopReason == stopEndTurn:
 		status = statusCompleted
@@ -1507,6 +1598,22 @@ func (w *turnWaiter) ended(ctx context.Context, tu *agent.TurnInfo) {
 		// always has an error for a program to read.
 		res.Error = kindError("the turn stopped short: "+tu.StopReason, errkind.Agent)
 	}
+	w.finish(res)
+}
+
+// closingEnding says tu is the ending a session's close gives the turn it cuts
+// short (engine.CloseFor).
+func closingEnding(tu *agent.TurnInfo) bool { return tu.Synthetic && tu.StopReason == stopClosing }
+
+// closed is the target turn cut short by its session's close, cause what began
+// it: cancelled, stopReason stopped, with what was folded of the turn: its usage
+// the last report's, not the turn's own ending's (the harness counts a cancelled
+// turn as nothing), and whether a step was in flight. Live or read back from
+// lastTurn, the result is this; read back, what is folded may be nothing.
+func (w *turnWaiter) closed(cause string) {
+	res := w.newResult(statusCancelled)
+	res.StopReason = stopStopped
+	res.Error = stoppedError(endedLine(w.session.id), cause)
 	w.finish(res)
 }
 
@@ -1810,11 +1917,25 @@ func (w *turnWaiter) newResult(status string) *turnResult {
 	return res
 }
 
-// finish ends the wait with res, its facts filled from the accumulator.
+// finish ends the wait with res, its facts filled from the accumulator. A turn
+// that was cancelled says so when its usage leaves a step out; one that failed
+// does not: a failing step has no spend it can report, and none is expected.
 func (w *turnWaiter) finish(res *turnResult) {
 	res.fill(w.acc)
 	res.Partial = w.partial
+	if res.Status == statusCancelled {
+		res.UsageComplete = usageIncomplete(w.stepInFlight())
+	}
 	w.result = res
+}
+
+// stepInFlight says a step of the target may have been under way as it was cut
+// short: the accumulator's reading of the events it folded, and whenever some of
+// the turn's events were never seen (a snapshot, a cursor mid-way, a look
+// afterwards), when that reading has nothing to stand on. Only a prompt withdrawn
+// before it was sent is known to have had none.
+func (w *turnWaiter) stepInFlight() bool {
+	return !w.withdrawn && (w.partial || w.acc.stepOpen)
 }
 
 // handle is the wait's handle (turnHandle), "" before it has a target —

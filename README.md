@@ -25,7 +25,8 @@ and want one fast, scriptable front end for several of them.
   `craze new --load`, and the same for a hub client such as shed on a phone.
   [`craze new --load`](docs/reference/cli.md#craze-new-load)
 - **Scripting**: `craze new --wait`, `craze send` and `craze wait` run a task
-  and print the result, with typed failures a program can branch on and retry.
+  and print the result, with typed failures a program can branch on and retry,
+  and a stopped turn's usage so far.
   [`craze new`](docs/reference/cli.md#craze-new),
   [`craze wait`](docs/reference/cli.md#craze-wait),
   [failure kinds](docs/reference/cli.md#failure-kinds)

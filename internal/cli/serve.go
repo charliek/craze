@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
@@ -269,7 +270,7 @@ func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 // attached clients (plan 032 §3.14, control.Options.LocalClient) and keeps the
 // count where the TUI reads it (controlHost.presence).
 func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
-	h, err := bindControl(env, hostID, workspace, force, hostRequest{}, nil, true, diag)
+	h, err := bindControl(env, hostID, workspace, force, hostRequest{}, nil, nil, true, diag)
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
@@ -298,7 +299,7 @@ type hostRequest struct {
 // count of attached clients includes it, and is kept for it in
 // controlHost.presence. Every host counts its clients for them
 // (control.Options.Presence, plan 032 §3.14).
-func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostRequest, stop control.StopFunc, local bool, diag io.Writer) (*controlHost, error) {
+func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostRequest, stop control.StopFunc, stopBeginning func(control.StopRequest), local bool, diag io.Writer) (*controlHost, error) {
 	started := time.Now().UTC()
 	// This process's own start as its kernel keeps it (rundir.Entry.PIDStart,
 	// plan 041 C6 r3): what tells it from a later process given its pid, for
@@ -327,6 +328,7 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostR
 		PermissionMode: permissionMode(force),
 		StartedAt:      started,
 		Stop:           stop,
+		StopBeginning:  stopBeginning,
 		// Every craze host's row carries the row facts (plan 030 §3.8), a
 		// TUI-hosted one's too: another craze's session list reads them the
 		// same way.
@@ -889,34 +891,72 @@ type hostLifecycle struct {
 	once     sync.Once
 	stopping chan struct{}
 
-	mu  sync.Mutex
-	why string
+	latchOnce sync.Once
+	mu        sync.Mutex
+	why       string
+	stopCause string
+	// record, when set, is told what began the stop, once, before anything else
+	// of it can be seen (setRecord).
+	record func(cause string)
 }
 
 func newHostLifecycle() *hostLifecycle {
 	return &hostLifecycle{stopping: make(chan struct{})}
 }
 
-// request asks for the stop, saying why: the first request closes stopping,
-// and every later one joins it.
-func (l *hostLifecycle) request(why string) {
-	l.once.Do(func() {
+// latch settles what began the stop and why, and writes it down (setRecord): the
+// first to ask says, and a later one waits for that and says nothing new. It is
+// separate from request because a stop is acknowledged before the coordinator
+// hears of it (control.Options.StopBeginning): what began it is the stop's from
+// before any of that, whatever a signal does meanwhile.
+func (l *hostLifecycle) latch(cause, why string) {
+	l.latchOnce.Do(func() {
 		l.mu.Lock()
-		l.why = why
+		l.stopCause, l.why = cause, why
+		record := l.record
 		l.mu.Unlock()
-		close(l.stopping)
+		if record != nil {
+			record(cause)
+		}
 	})
 }
 
-// stopFunc is control.Options.Stop: a session.stop the server accepted.
-func (l *hostLifecycle) stopFunc(r control.StopRequest) {
-	l.request("session.stop from client " + r.Client)
-}
-
-// cause is why the host is stopping: the first request's words, "" before
-// any.
-func (l *hostLifecycle) cause() string {
+// setRecord is what latch tells of a stop, set once the session it would read
+// exists, which is before a stop can reach the host.
+func (l *hostLifecycle) setRecord(record func(cause string)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.why
+	l.record = record
+}
+
+// request asks for the stop, saying what began it (agent.TurnInfo.Cause) and
+// why, in words for the log: the first request closes stopping, and every later
+// one joins it, so what the first said stands.
+func (l *hostLifecycle) request(cause, why string) {
+	l.latch(cause, why)
+	l.once.Do(func() { close(l.stopping) })
+}
+
+// stopBeginning is control.Options.StopBeginning: a session.stop the server has
+// accepted, ahead of its fence and its receipt.
+func (l *hostLifecycle) stopBeginning(r control.StopRequest) {
+	l.latch(agent.StopCauseStop, "session.stop from client "+r.Client)
+}
+
+// serveStopHanded sees a stop acknowledged and about to reach the coordinator: a
+// no-op, and the barrier a test sends a signal in that window at.
+var serveStopHanded = func() {}
+
+// stopFunc is control.Options.Stop: a session.stop the server accepted.
+func (l *hostLifecycle) stopFunc(r control.StopRequest) {
+	serveStopHanded()
+	l.request(agent.StopCauseStop, "session.stop from client "+r.Client)
+}
+
+// cause is what began the stop and why, as the first request said: "" before
+// any.
+func (l *hostLifecycle) cause() (cause, why string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stopCause, l.why
 }

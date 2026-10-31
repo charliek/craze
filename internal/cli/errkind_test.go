@@ -480,6 +480,7 @@ func TestTheWaitersOwnFailuresHaveTheirKinds(t *testing.T) {
 	t.Run("the socket lost, the host gone", func(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(nil)
+		w.conn.entry.PID = exitedPID(t)
 		w.lost(errors.New("broken pipe"))
 		check(t, w.fail, errkind.HostExited, true)
 	})
@@ -493,7 +494,10 @@ func TestTheWaitersOwnFailuresHaveTheirKinds(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(nil)
 		w.ended(context.Background(), &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, Synthetic: true, StopReason: stopClosing})
-		check(t, w.fail, errkind.Stopped, false)
+		res := wantResult(t, w.result, w.fail, statusCancelled)
+		if res.Error == nil || res.Error.Kind != errkind.Stopped || res.Error.Retryable {
+			t.Fatalf("its error: %+v", res.Error)
+		}
 	})
 	t.Run("the ending not observed", func(t *testing.T) {
 		w := waiterAt(nil)

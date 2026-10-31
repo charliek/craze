@@ -79,6 +79,12 @@ type Options struct {
 	// StopFunc for what the server does before it calls it, and what it must
 	// not do.
 	Stop StopFunc
+	// StopBeginning is told the first session.stop the server accepts, ahead of
+	// its fence, its StopAccepted and its receipt: the host latches what began
+	// its stop, which a signal arriving before Stop is called must not take
+	// from a stop already acknowledged. It runs on the request's handler
+	// goroutine, and returns promptly.
+	StopBeginning func(StopRequest)
 	// StopAccepted is told the first session.stop the server accepts, once
 	// its close fence is up and before its receipt is queued (stop.go; plan
 	// 046 B4): the host marks its registry entry stopping here

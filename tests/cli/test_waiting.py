@@ -19,10 +19,13 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from conftest import PS_TIMEOUT, REMOVED_CONFIG_ENV, TEST_HOST_IDLE_EXIT, _argv, pid_alive
+from sse_fixture import SSEFixture, Step, answer, call_step, write_native_config
 from test_detach import _entries
 
 WAIT = 10.0
@@ -382,3 +385,216 @@ def test_a_plan_returned_says_its_turn_ended_there(craze_bin: Path, fake_agent_b
     res = json.loads(out.stdout)
     assert out.returncode == 0 and res["stopReason"] == "end_turn" and "planEnded" not in res and "error" not in res, out
     _stop(craze_bin, res["short"])
+
+
+def _long_turn_waiter(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> tuple[subprocess.Popen[bytes], int, dict]:
+    """craze new --wait --json on the fake agent's turn held at its gate: the
+    waiter, the gate's write end, and the host's registry entry, the turn running."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    gate = tmp_path / "gate"
+    os.mkfifo(gate)
+    env = os.environ.copy()
+    env["CRAZE_FAKE_SCRIPT"] = "long-turn"
+    env["CRAZE_FAKE_GATE"] = str(gate)
+    waiter = subprocess.Popen(
+        [str(craze_bin), "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "a long task"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    fd = _open_gate(gate, waiter)
+    (entry,) = _entries(_home())
+    return waiter, fd, entry
+
+
+def _hosts_gone() -> None:
+    deadline = time.monotonic() + WAIT
+    while _entries(_home()):
+        assert time.monotonic() < deadline, ("a host is still registered", _entries(_home()))
+        time.sleep(0.05)
+
+
+def test_a_stop_mid_turn_is_the_turns_result(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """craze stop under a running turn: its waiter reports the turn, `cancelled`,
+    exit 3, stopped, saying what began it. An ACP agent reports no usage and shows
+    no steps, so there is no usage and it is not called whole. craze wait afterwards
+    names the reload, as it did."""
+    waiter, fd, entry = _long_turn_waiter(craze_bin, fake_agent_bin, tmp_path)
+    try:
+        short = entry["crazeSessionId"][-8:]
+        out = _craze(craze_bin, "stop", short)
+        assert out.returncode == 0, out
+        stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+        assert waiter.returncode == 3 and stderr == b"", (waiter.returncode, stdout, stderr)
+        res = json.loads(stdout)
+        assert res["status"] == "cancelled" and res["stopReason"] == "stopped" and res["turn"] == "turn-1", res
+        err = res["error"]
+        assert err["kind"] == "stopped" and err["retryable"] is False and err["detail"] == {"cause": "stop"}, res
+        assert "usage" not in res and res["usageComplete"] is False, res
+        assert res["toolCalls"] == 0 and res["files"] == [] and "handle" not in res, res
+    finally:
+        os.close(fd)
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+    _hosts_gone()
+    record = json.loads((_home() / ".cache" / "craze" / "host-logs" / f"{entry['hostId']}.stop").read_text(encoding="utf-8"))
+    assert record["cause"] == "stop" and record["turn"] == "turn-1", record
+    out = _craze(craze_bin, "wait", short, "--json")
+    assert out.returncode == 1 and _one_object(out)["error"]["kind"] == "stopped", out
+
+
+def test_a_signal_to_the_host_says_so(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """SIGTERM to the host, not the waiter: the same result, its cause `signal`."""
+    waiter, fd, entry = _long_turn_waiter(craze_bin, fake_agent_bin, tmp_path)
+    try:
+        os.kill(entry["pid"], signal.SIGTERM)
+        stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+        assert waiter.returncode == 3 and stderr == b"", (waiter.returncode, stdout, stderr)
+        res = json.loads(stdout)
+        assert res["status"] == "cancelled" and res["stopReason"] == "stopped", res
+        assert res["error"]["kind"] == "stopped" and res["error"]["detail"] == {"cause": "signal"}, res
+    finally:
+        os.close(fd)
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+    _hosts_gone()
+
+
+def test_a_killed_host_is_told_from_a_stop(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """SIGKILL to the host says nothing, so its process does: `host_exited`, exit 1,
+    retryable, one object with the handle, and the next craze sweeps what it left."""
+    waiter, fd, entry = _long_turn_waiter(craze_bin, fake_agent_bin, tmp_path)
+    try:
+        os.kill(entry["pid"], signal.SIGKILL)
+        stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+        assert waiter.returncode == 1, (waiter.returncode, stdout, stderr)
+        body = json.loads(stdout)
+        err = body["error"]
+        assert err["kind"] == "host_exited" and err["retryable"] is True and "detail" not in err, body
+        assert "its host exited" in err["message"] and body["handle"] and body["usageComplete"] is False, body
+        assert "usage" not in body, body
+        assert b"host_exited" not in stderr and b"its host exited" in stderr, stderr
+    finally:
+        os.close(fd)
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+    assert not (_home() / ".cache" / "craze" / "host-logs" / f"{entry['hostId']}.stop").exists(), "a killed host wrote a stop record"
+    # A killed host cleans up nothing: the next read of the registry sweeps its row.
+    assert _craze(craze_bin, "ps", "--json").returncode == 0
+    _hosts_gone()
+
+
+def _native_waiter(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, fixture: SSEFixture) -> subprocess.Popen[bytes]:
+    """craze new --wait --json on a native session over fixture."""
+    _config(fake_agent_bin)
+    write_native_config(Path(os.environ["CRAZE_HOME"]) / "native", fixture.base_url)
+    work = tmp_path / "proj"
+    work.mkdir()
+    (work / "a.txt").write_text("alpha\n", encoding="utf-8")
+    return subprocess.Popen(
+        [str(craze_bin), "new", "--wait", "--json", "--provider", "native", "-C", str(work), "read it"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+
+
+def _held_step(reached: threading.Event, release: threading.Event) -> Callable[[object], Step]:
+    """A scripted step that answers only once released: a model request in flight
+    for as long as the test wants, reached saying it is."""
+
+    def step(_request: object) -> Step:
+        reached.set()
+        release.wait(6 * WAIT)
+        return answer("too late")
+
+    return step
+
+
+def _reached(reached: threading.Event, waiter: subprocess.Popen[bytes]) -> str:
+    """The short id of the one host, once the turn's request is in flight."""
+    deadline = time.monotonic() + 3 * WAIT
+    while not reached.wait(0.05):
+        assert waiter.poll() is None, ("craze new --wait exited", waiter.returncode, waiter.communicate())
+        assert time.monotonic() < deadline, "the turn's request never reached the fixture"
+    (entry,) = _entries(_home())
+    return entry["crazeSessionId"][-8:]
+
+
+def test_a_stop_during_the_first_step_has_no_usage(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A native turn stopped while its first request is out: nothing has reported,
+    so no usage, and a step's spend is said to be missing."""
+    reached, release = threading.Event(), threading.Event()
+    with SSEFixture() as fixture:
+        fixture.set_script([_held_step(reached, release)])
+        waiter = _native_waiter(craze_bin, fake_agent_bin, tmp_path, fixture)
+        try:
+            short = _reached(reached, waiter)
+            assert _craze(craze_bin, "stop", short).returncode == 0
+            stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+            assert waiter.returncode == 3 and stderr == b"", (waiter.returncode, stdout, stderr)
+            res = json.loads(stdout)
+            assert res["status"] == "cancelled" and res["stopReason"] == "stopped", res
+            assert res["error"]["detail"] == {"cause": "stop"}, res
+            assert "usage" not in res and res["usageComplete"] is False and res["toolCalls"] == 0, res
+        finally:
+            release.set()
+            if waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate()
+    _hosts_gone()
+
+
+def test_a_stop_after_a_finished_step_has_its_usage(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A native turn stopped with its second request out: the first step's usage
+    and its tool call are in the result, not the harness's zero for a cancelled
+    turn, and the step in flight is said to be missing."""
+    reached, release = threading.Event(), threading.Event()
+    with SSEFixture() as fixture:
+        fixture.set_script([call_step("read", {"filePath": "a.txt"}, usage=(40, 3)), _held_step(reached, release)])
+        waiter = _native_waiter(craze_bin, fake_agent_bin, tmp_path, fixture)
+        try:
+            short = _reached(reached, waiter)
+            assert _craze(craze_bin, "stop", short).returncode == 0
+            stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+            assert waiter.returncode == 3 and stderr == b"", (waiter.returncode, stdout, stderr)
+            res = json.loads(stdout)
+            assert res["status"] == "cancelled" and res["stopReason"] == "stopped" and res["toolCalls"] == 1, res
+            assert res["usage"]["turn"]["input"] == 40 and res["usage"]["turn"]["output"] == 3, res
+            assert res["usageComplete"] is False, res
+        finally:
+            release.set()
+            if waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate()
+    _hosts_gone()
+
+
+def test_a_cancel_mid_step_reads_the_same(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """craze cancel mid-step: `cancelled`, exit 3, stop reason `cancelled` and no
+    error, usage as a stop's, and the same word on the step left out."""
+    reached, release = threading.Event(), threading.Event()
+    with SSEFixture() as fixture:
+        fixture.set_script([call_step("read", {"filePath": "a.txt"}, usage=(40, 3)), _held_step(reached, release)])
+        waiter = _native_waiter(craze_bin, fake_agent_bin, tmp_path, fixture)
+        try:
+            short = _reached(reached, waiter)
+            assert _craze(craze_bin, "cancel", short).returncode == 0
+            stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+            assert waiter.returncode == 3 and stderr == b"", (waiter.returncode, stdout, stderr)
+            res = json.loads(stdout)
+            assert res["status"] == "cancelled" and res["stopReason"] == "cancelled" and "error" not in res, res
+            assert res["usage"]["turn"]["input"] == 40 and res["usageComplete"] is False, res
+        finally:
+            release.set()
+            if waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate()
+        _stop(craze_bin, short)

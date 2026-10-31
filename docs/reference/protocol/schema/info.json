@@ -185,6 +185,8 @@
         "outcome": {"$ref": "#/$defs/turnOutcome"},
         "err": {"type": "string", "description": "A failed turn's error text; absent for the other outcomes."},
         "stopReason": {"type": "string", "description": "The ending's own stop reason: absent for a foreign turn, a failure with none, and an older host."},
+        "cause": {"type": "string", "description": "On a stopReason of closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent otherwise, from an older host, and when a terminal closed its own session."},
+        "withdrawn": {"type": "boolean", "description": "A cancelled turn's prompt never reached the agent, so no step of it ran. Absent otherwise, and from an older host."},
         "kind": {"type": "string", "description": "What the failure said of itself where it happened, one of the kinds in the CLI reference; absent from a host that predates it, which a reader takes for unknown."},
         "retryable": {"type": "boolean", "description": "A fresh turn may succeed. Absent is false."},
         "status": {"type": "integer", "description": "The provider's HTTP status; absent for none. An ACP agent's JSON-RPC code is not one."},

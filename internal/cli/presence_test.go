@@ -88,7 +88,7 @@ func TestTheTUIHostedServerCountsItsTUI(t *testing.T) {
 
 	denv := serveEnv(t)
 	dID := rundir.NewHostID()
-	d, err := bindControl(denv, dID, "/ws", true, hostRequest{}, func(control.StopRequest) {}, false, io.Discard)
+	d, err := bindControl(denv, dID, "/ws", true, hostRequest{}, func(control.StopRequest) {}, nil, false, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
