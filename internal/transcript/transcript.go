@@ -807,6 +807,34 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 	}
 }
 
+// retract closes the open run and marks every assistant, thought and tool entry
+// from Seq from on (Entry.Retracted): a new Entry with the same ID, accounting
+// what the old one did, so that a retraction moves no trim and a restored
+// window's placeholders still stand for what they stood for. Entries are in Seq
+// order, so the walk ends at the first one older than from, O(the attempt). A
+// row of another kind among them, a steer's or a note, is not the attempt's.
+// from 0 names no event.
+func (t *Transcript) retract(from uint64, at time.Time) {
+	t.closeStream(at)
+	if from == 0 {
+		return
+	}
+	t.model.noteRetracted(t, from)
+	live := t.live()
+	for i := len(live) - 1; i >= 0; i-- {
+		e := live[i]
+		if e.ID.Seq < from {
+			return
+		}
+		if e.Retracted || (e.Kind != KindAssistant && e.Kind != KindThought && e.Kind != KindTool) {
+			continue
+		}
+		ne := *e
+		ne.Retracted = true
+		t.replace(t.base+t.head+i, &ne)
+	}
+}
+
 // addUser writes a user row. Unlike the other rows it is written for empty
 // text too (today's rule).
 func (t *Transcript) addUser(text string, now time.Time) {

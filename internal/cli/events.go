@@ -148,6 +148,32 @@ func compactionJSON(ev agent.Event) jsonCompaction {
 	return j
 }
 
+// jsonStepRetry says a step's model request failed and is being sent again, the
+// one line a consumer must act on for what it already read: when discarded is
+// set, the text, thought and tool lines of the same agent from seq from on are
+// not part of the answer, and the attempt that follows repeats the step. An
+// older consumer skips a line type it does not know, and reads those lines twice
+// over, as it would any retried text.
+type jsonStepRetry struct {
+	Type      string `json:"type"`
+	Seq       uint64 `json:"seq,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	Turn      int    `json:"turn"`
+	Step      int    `json:"step"`
+	Attempt   int    `json:"attempt"`
+	Reason    string `json:"reason"`
+	From      uint64 `json:"from"`
+	Discarded bool   `json:"discarded"`
+}
+
+func stepRetryJSON(ev agent.Event) jsonStepRetry {
+	j := jsonStepRetry{Type: "step_retry", Seq: ev.Seq, Agent: ev.Agent}
+	if r := ev.StepRetry; r != nil {
+		j.Turn, j.Step, j.Attempt, j.Reason, j.From, j.Discarded = r.Turn, r.Step, r.Attempt, r.Reason, r.From, r.Discarded
+	}
+	return j
+}
+
 func queueJSON(ev agent.Event) jsonQueue {
 	j := jsonQueue{Type: "queue", Seq: ev.Seq, Event: string(ev.QueueChange), Position: ev.QueuePos}
 	if ev.Queue != nil {
@@ -263,6 +289,8 @@ func eventJSON(ev agent.Event) (any, bool) {
 		return replayJSON(ev), ev.Replay != nil
 	case agent.EventCompaction:
 		return compactionJSON(ev), ev.Compaction != nil
+	case agent.EventStepRetry:
+		return stepRetryJSON(ev), ev.StepRetry != nil
 	case agent.EventSubagent:
 		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:

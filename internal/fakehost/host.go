@@ -676,6 +676,14 @@ func (h *Host) Thought(agentID, text string) {
 	h.currentStub().Emit(agent.Event{Type: agent.EventThought, Agent: agentID, Text: text})
 }
 
+// StepRetry emits an EventStepRetry: a step's failed attempt, from Seq from on,
+// retracted.
+func (h *Host) StepRetry(agentID string, step, attempt int, reason string, from uint64) {
+	h.currentStub().Emit(agent.Event{Type: agent.EventStepRetry, Agent: agentID, StepRetry: &agent.StepRetryInfo{
+		Turn: 1, Step: step, Attempt: attempt, Total: attempt, Reason: reason, DelayMs: 5000, From: from, Discarded: true,
+	}})
+}
+
 // Tool emits an EventTool with the given id, name and status, agentID "" for
 // the main session.
 func (h *Host) Tool(agentID, id, name, status string) {
@@ -1130,6 +1138,12 @@ type opParams struct {
 	// stall_writes, advance_clock
 	MS int `json:"ms,omitempty"`
 
+	// step_retry: the step, the attempt, and the Seq the failed attempt began
+	// at; its reason is Reason.
+	Step    int    `json:"step,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+	From    uint64 `json:"from,omitempty"`
+
 	// stage_models: the list the next refresh takes up, each model as the
 	// info document's catalog model is written (id, name, recent).
 	Models []protocol.CatalogModel `json:"models,omitempty"`
@@ -1205,6 +1219,8 @@ func (h *Host) do(p opParams) error {
 		h.Thought(p.Agent, p.Text)
 	case "tool":
 		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status, p.Edited)
+	case "step_retry":
+		h.StepRetry(p.Agent, p.Step, p.Attempt, p.Reason, p.From)
 	case "permission":
 		opts := make([]PermOption, len(p.Options))
 		for i, o := range p.Options {

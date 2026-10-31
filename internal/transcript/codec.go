@@ -131,6 +131,7 @@ type wireTurn struct {
 	Origin    string          `json:"origin,omitempty"`
 	At        time.Time       `json:"at,omitzero"`
 	Foreign   json.RawMessage `json:"foreign,omitempty"`
+	Retries   int             `json:"retries,omitempty"`
 	Truncated bool            `json:"truncated,omitempty"`
 }
 
@@ -192,6 +193,7 @@ type wireEntry struct {
 	Interject bool            `json:"interject,omitempty"`
 	Streaming bool            `json:"streaming,omitempty"`
 	Cut       bool            `json:"cut,omitempty"`
+	Retracted bool            `json:"retracted,omitempty"`
 }
 
 // wireEntryErr is an entry's error beside its text, which is the message: the
@@ -349,8 +351,8 @@ func encodeHeader(jw *jsonWriter, s *Snapshot) ([]byte, error) {
 	for _, e := range s.Ended {
 		h.Ended = append(h.Ended, wireAskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
-	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Truncated {
-		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Truncated: t.Truncated}
+	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Retries != 0 || t.Truncated {
+		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated}
 		if h.Turn.Foreign, err = agent.EncodeForeignTurnInfo(t.Foreign); err != nil {
 			return nil, fail("turn", err)
 		}
@@ -429,7 +431,7 @@ func encodeEntry(jw *jsonWriter, e *Entry) ([]byte, error) {
 	w := wireEntry{
 		ID: e.ID.String(), Kind: kind, Text: e.Text,
 		At: e.At.UTC(), End: e.End.UTC(),
-		Open: e.Open, Interject: e.Interject, Streaming: e.Streaming, Cut: e.Cut,
+		Open: e.Open, Interject: e.Interject, Streaming: e.Streaming, Cut: e.Cut, Retracted: e.Retracted,
 	}
 	if w.Tool, err = agent.EncodeToolEvent(e.Tool); err != nil {
 		return nil, fmt.Errorf("transcript: encode entry %v: %w", e.ID, err)
@@ -756,7 +758,7 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 		s.Ended = append(s.Ended, AskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
 	if t := w.Turn; t != nil {
-		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Truncated: t.Truncated}
+		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated}
 		var err error
 		if s.Turn.Foreign, err = agent.DecodeForeignTurnInfo(t.Foreign); err != nil {
 			return fail("turn", err)
@@ -886,7 +888,7 @@ func (w *wireEntry) entry() (Entry, error) {
 	e := Entry{
 		ID: id, Kind: kind, Text: w.Text,
 		At: w.At.UTC(), End: w.End.UTC(),
-		Open: w.Open, Interject: w.Interject, Streaming: w.Streaming, Cut: w.Cut,
+		Open: w.Open, Interject: w.Interject, Streaming: w.Streaming, Cut: w.Cut, Retracted: w.Retracted,
 	}
 	if e.Tool, err = agent.DecodeToolEvent(w.Tool); err != nil {
 		return Entry{}, err

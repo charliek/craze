@@ -1274,6 +1274,7 @@ func readTurnBack(ctx context.Context, e rundir.Entry, sessionID, inc, turn stri
 			if err != nil {
 				return miss()
 			}
+			ev.Seq = it.Seq
 			switch tu := ev.Turn; {
 			case ev.Type == agent.EventTurn && tu != nil && tu.ID == turn && tu.Phase == agent.TurnStarted:
 				in = true
@@ -1325,6 +1326,7 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 		// A report carries the whole turn's spend so far, and no snapshot is
 		// read for it (settleLastTurn).
 		w.acc.usage = prev.usage
+		w.acc.retries = max(w.acc.retries, prev.retries)
 		if prev.returned {
 			w.acc.returned, w.acc.plan = true, prev.plan
 		}
@@ -1341,9 +1343,12 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 // last turn: every entry after the turn's boundary — its user row, or the
 // note a foreign turn opens with — the last assistant entry its message (the
 // open run when the snapshot ends inside it), its tool rows and its plan; and
-// whether any plan's ask has ended at all (lookApproved).
+// whether any plan's ask has ended at all (lookApproved). A row a retried step's
+// retraction marked is none of it, and an attempt the snapshot was cut in the
+// middle of is retracted when its event arrives (retract).
 func seedFromSnapshot(a *turnAccumulator, snap *transcript.Snapshot) {
 	a.noPlanEnded = !slices.ContainsFunc(snap.Ended, func(e transcript.AskEnding) bool { return e.Kind == agent.AskPlan })
+	a.retries = max(a.retries, snap.Turn.Retries)
 	entries := snap.Main.Entries
 	from := 0
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -1353,17 +1358,15 @@ func seedFromSnapshot(a *turnAccumulator, snap *transcript.Snapshot) {
 		}
 	}
 	seg := entries[from:]
-	for i := len(seg) - 1; i >= 0; i-- {
-		e := seg[i]
-		if e.Kind != transcript.KindAssistant {
+	for i, e := range seg {
+		if e.Retracted {
 			continue
 		}
-		open := e.Streaming && snap.Main.StreamOpen && i == len(seg)-1
-		a.seedMessage(e.Text, open, e.Cut || (e.Streaming && snap.Main.TailCut))
-		break
-	}
-	for _, e := range seg {
+		a.seq = e.ID.Seq
 		switch {
+		case e.Kind == transcript.KindAssistant:
+			open := e.Streaming && snap.Main.StreamOpen && i == len(seg)-1
+			a.seedRun(e.ID.Seq, e.Text, open, e.Cut || (e.Streaming && snap.Main.TailCut))
 		case e.Kind == transcript.KindTool && e.Tool != nil:
 			a.tool(*e.Tool)
 		case e.Kind == transcript.KindPlan && e.Plan != nil:

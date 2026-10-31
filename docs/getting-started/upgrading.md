@@ -43,7 +43,7 @@ end `it exits when idle`.
 **The waiting commands' JSON changes.** A program that reads `craze new --wait
 --json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
 Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn). `craze prompt
---json` is unchanged, and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
+--json` is unchanged but for [one new line](#a-stream-that-fails-partway), and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
 together: an error from an older host reads as kind `unknown`, retryable false, and
 a kind from a newer host that this craze does not know reads as `unknown` with the
 `retryable` that host sent.
@@ -222,6 +222,34 @@ the shell through, and shell writes are never in `files`: a program that must kn
 change diffs the workspace itself. See [what `files`
 lists](../reference/cli.md#what-files-lists). A waiter on a host from before this change
 reads `files: []`, whatever that host's turn edited, because the host is what decides.
+
+### A stream that fails partway
+
+**A native step now survives a mid-stream reset.** It used to cost the turn: an HTTP/2
+`RST_STREAM` or `GOAWAY`, an unexpected EOF or a server's error event after the model
+had begun answering was final. Such a step is now sent again from the same input, once
+by default: [`provider_retries`](../reference/configuration.md#native-provider-retries)
+(0 to 3) sets it, and `provider_retries = 0` keeps the old behaviour. Failures of
+another kind, and everything the ChatGPT plan's route says not to repeat, stay final.
+
+A waiting command's result reports the final attempt, and gains `retries`, absent for
+none. A turn's cost may now hold requests no report shows: a discarded attempt may
+have been billed.
+
+```json
+{"status":"completed","message":"The final attempt's answer.","toolCalls":1,"retries":1, "…":"…"}
+```
+
+**`craze prompt --json` gains one line type**, `step_retry`, and its other lines do
+not change. It says which lines already read to drop: the `text`, `thought` and `tool`
+lines of the same `agent` from `seq` `from` on. [A reader that ignores
+it](../reference/cli.md#a-retried-step-in-the-stream) reads the abandoned attempt's
+text before the final one's. Plain `craze prompt` cannot take back what it wrote, and
+says so on stderr.
+
+**A socket client** sees a new `step_retry` event and `retracted` on a snapshot's
+entries: [what they mean](../reference/protocol.md#a-steps-retry). One that ignores
+both draws the abandoned attempt as if it stood.
 
 ### Other commands
 

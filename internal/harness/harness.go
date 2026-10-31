@@ -202,6 +202,11 @@ type Options struct {
 	// the built-ins alone. A sub-agent has no agent tool, and this is not read
 	// for one.
 	Personas []Persona
+	// ProviderRetries is how many times a step's model request may be sent again
+	// after failing, before output or (for a transport or server failure) after
+	// it: `provider_retries`. nil is DefaultProviderRetries; 0 is none; anything
+	// past MaxProviderRetries is held to it. A child's is its parent's.
+	ProviderRetries *int
 	// Child opens the session as a sub-agent of another (child.go, plan 026
 	// §3.2); nil is an ordinary session. Only the runner that starts children
 	// sets it, and fills the rest of these Options with the parent's own
@@ -328,9 +333,11 @@ type Session struct {
 	// 028 §3.8 item 6, review r1-c9): defaultSummarizerAgent, with retries of
 	// its own switched off — the outer attempts loop is compact's whole retry
 	// budget, so three attempts send at most three provider requests, never
-	// Fantasy's own retry stacked on top of it (newAgent's, maxRetries). A
+	// Fantasy's own retry stacked on top of it (a turn's, providerRetries). A
 	// test may replace it before compact runs.
 	newSummarizerAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
+	// providerRetries is each step's retry budget (Options.ProviderRetries).
+	providerRetries int
 
 	closeOnce sync.Once
 	closeErr  error
@@ -495,12 +502,21 @@ func (s *Session) renderer() store.Renderer {
 }
 
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
-// one retry, and the session's tools in the profile's order.
+// its default retries (a turn's call says its own), and the session's tools in
+// the profile's order.
 func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
 	return fantasy.NewAgent(lm,
 		fantasy.WithSystemPrompt(system),
-		fantasy.WithMaxRetries(maxRetries),
+		fantasy.WithMaxRetries(DefaultProviderRetries),
 		fantasy.WithTools(tools...))
+}
+
+// providerRetries is the budget n asks for (Options.ProviderRetries).
+func providerRetries(n *int) int {
+	if n == nil {
+		return DefaultProviderRetries
+	}
+	return min(max(*n, 0), MaxProviderRetries)
 }
 
 // defaultSummarizerAgent is the summarizer's own agent (compact.go, plan 028
@@ -595,6 +611,7 @@ func Open(opts Options) (*Session, error) {
 		newModel:           opts.NewModel,
 		newAgent:           defaultAgent,
 		newSummarizerAgent: defaultSummarizerAgent,
+		providerRetries:    providerRetries(opts.ProviderRetries),
 		table:              opts.Table,
 		openTable:          opts.Table,
 		child:              child != nil,

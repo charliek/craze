@@ -12,6 +12,7 @@ import (
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/harness"
 )
 
 // HomeDir is the home directory craze reads the user-level skills and the
@@ -158,7 +159,41 @@ const (
 	// replay has only the ended of each stored compaction. No ACP provider
 	// emits it.
 	EventCompaction EventType = "compaction"
+	// EventStepRetry says a step's model request failed and will be sent again
+	// from the same input (StepRetryInfo): what its failed attempt streamed is
+	// not part of the answer, and no tool of it ran. Event.Agent names the
+	// sub-agent whose step it was, "" for the session's own. No ACP provider
+	// emits it.
+	EventStepRetry EventType = "step_retry"
 )
+
+// A native step's retry budget, `provider_retries`: the harness's own.
+const (
+	DefaultProviderRetries = harness.DefaultProviderRetries
+	MaxProviderRetries     = harness.MaxProviderRetries
+)
+
+// StepRetryInfo is Event.StepRetry: one retry of one step. Turn and Step are the
+// native harness's numbers for them, as a tool call's id spells them; Attempt
+// counts this step's retries, from 1, and Total the turn's, over all its steps.
+// Reason is the failure, on one line, and DelayMs the wait before the next
+// attempt.
+//
+// From is the Seq the failed attempt's events start at: of the events its
+// Agent's stream carries, every text, thought and tool since From is retracted,
+// and a consumer that holds them drops them. Discarded says there was something
+// to retract; a request that failed before its first output has nothing, and
+// its retry changes nothing but the count.
+type StepRetryInfo struct {
+	Turn      int
+	Step      int
+	Attempt   int
+	Total     int
+	Reason    string
+	DelayMs   int64
+	From      uint64
+	Discarded bool
+}
 
 // CompactionInfo is Event.Compaction: one end of one compaction (plan 028
 // §3.13). Phase is CompactionStarted or CompactionEnded. Reason is
@@ -702,7 +737,7 @@ type Event struct {
 	// carry the fact that it changed at all.
 	Mode string
 	// Agent is the child session id for EventText/Thought/Tool/User/
-	// Compaction that belong to a sub-agent. "" is the main session.
+	// Compaction/StepRetry that belong to a sub-agent. "" is the main session.
 	Agent          string
 	Tool           *ToolEvent
 	Todos          []Todo
@@ -734,6 +769,8 @@ type Event struct {
 	Compaction *CompactionInfo
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
 	Turn *TurnInfo
+	// StepRetry is set on EventStepRetry: one retry of one step.
+	StepRetry *StepRetryInfo
 	// Ask is set on EventAsk: how one ask ended (plan 021 §3.6). It carries
 	// the opening itself when no opening was ever published — a permission
 	// craze's policy allowed, a request the provider had already answered, one
@@ -1122,6 +1159,10 @@ type Options struct {
 	// care gets; the CLI fills it from config.toml. Only a native session
 	// reads it — no other provider's content is craze's to turn off.
 	Compat ClaudeCompat
+	// ProviderRetries is `provider_retries`, a native step's retry budget
+	// (harness.Options.ProviderRetries): nil is the harness's default. Only a
+	// native session reads it; an ACP agent keeps its own retries.
+	ProviderRetries *int
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -52,6 +53,21 @@ type turnAccumulator struct {
 	msg     []byte
 	runOpen bool
 	msgCut  bool
+	// msgSeq is the Seq of the event that opened msg's run, and seq the event
+	// being folded. behind is what a retried step's retraction uncovers
+	// (retract), oldest first: the message as it stood when the step's first run
+	// opened (holding says it is there), whatever the attempt goes on to say, and
+	// the one before it, since a report is no promise that no attempt is under way.
+	// So a follower holds at most two runs behind msg, each cut to resultMessageMax,
+	// however many runs an attempt has. A waiter seeded from a snapshot does not
+	// know where a step began: it holds every assistant entry the snapshot gave it,
+	// which that snapshot's budget bounds, until the next report (seedRun).
+	msgSeq  uint64
+	behind  []accRun
+	holding bool
+	seq     uint64
+	// retries is how many times the turn's steps were sent again.
+	retries int
 	// tools are the main session's tool calls by id, and toolOrder their ids as
 	// first seen. An update is a call's whole state, so a re-fold of one, or a
 	// snapshot's row, changes nothing but what the call last said.
@@ -92,11 +108,19 @@ type turnAccumulator struct {
 
 // accTool is one tool call's merged state: whether it reached completed or
 // failed, and what its host last said it changed: only a call that completed has
-// any (agent.ToolEvent.Edited).
+// any (agent.ToolEvent.Edited). seq is the Seq of the event that opened it.
 type accTool struct {
 	finished bool
 	failed   bool
 	edited   *agent.ToolEdited
+	seq      uint64
+}
+
+// accRun is an earlier assistant text run (turnAccumulator.behind).
+type accRun struct {
+	seq  uint64
+	text []byte
+	cut  bool
 }
 
 // autoAnswer is one automatic answer (`autoAnswered`): what was asked and
@@ -133,6 +157,8 @@ func runBoundary(ev agent.Event) bool {
 		return ev.Tool != nil && !ev.Tool.IsTodoTool()
 	case agent.EventDone:
 		return true
+	case agent.EventStepRetry:
+		return ev.StepRetry != nil && ev.StepRetry.Discarded
 	}
 	return false
 }
@@ -144,6 +170,7 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		// session only).
 		return
 	}
+	a.seq = ev.Seq
 	a.noteStep(ev)
 	if runBoundary(ev) {
 		a.split()
@@ -197,6 +224,13 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 		if ev.Compaction != nil {
 			a.split()
 		}
+	case agent.EventStepRetry:
+		if r := ev.StepRetry; r != nil {
+			a.retries = max(a.retries, r.Total)
+			if r.Discarded {
+				a.retract(r.From)
+			}
+		}
 	case agent.EventError:
 		if ev.Err != nil && ev.Err.Error() != "" {
 			a.split()
@@ -231,14 +265,61 @@ func (a *turnAccumulator) noteStep(ev agent.Event) {
 	case agent.EventMeta:
 		if st := ev.State; st != nil && st.Usage != nil {
 			a.stepOpen, a.stepNext = a.stepNext, false
+			a.reported()
 		}
 	case agent.EventTool:
 		a.stepOpen, a.stepNext = true, true
 	case agent.EventCompaction:
 		a.stepNext = true
+	case agent.EventStepRetry:
+		// The step goes on, and whatever its attempt called it will not now.
+		a.stepOpen = true
+		if r := ev.StepRetry; r != nil && r.Discarded {
+			a.stepNext = false
+		}
 	default:
 		a.stepOpen = true
 	}
+}
+
+// retract drops what a retried step's failed attempt said, every event of it
+// being from Seq from on: its unfinished and settled tool calls, and its text.
+// The message is then what it was before the attempt, the run the attempt's
+// first text pushed behind it. It holds for a run seeded from a snapshot cut
+// mid-attempt, by the entry's own Seq, as for one folded here.
+func (a *turnAccumulator) retract(from uint64) {
+	a.split()
+	if from == 0 {
+		return
+	}
+	for id, st := range a.tools {
+		if st.seq >= from {
+			delete(a.tools, id)
+		}
+	}
+	a.toolOrder = slices.DeleteFunc(a.toolOrder, func(id string) bool { return a.tools[id] == nil })
+	if a.msgSeq < from {
+		return
+	}
+	a.msg, a.msgCut, a.msgSeq, a.holding = nil, false, 0, false
+	for n := len(a.behind) - 1; n >= 0; n-- {
+		r := a.behind[n]
+		a.behind = a.behind[:n]
+		if r.seq < from {
+			a.msg, a.msgCut, a.msgSeq = r.text, r.cut, r.seq
+			return
+		}
+	}
+}
+
+// reported is a step's usage report: what lay behind the message before it is
+// done with, but for the newest (behind's comment), and the next run opened holds
+// the message it finds.
+func (a *turnAccumulator) reported() {
+	if n := len(a.behind); n > 1 {
+		a.behind = append(a.behind[:0], a.behind[n-1])
+	}
+	a.holding = false
 }
 
 // text grows the open run, or opens a new one: the last entry is this one.
@@ -247,10 +328,30 @@ func (a *turnAccumulator) text(s string) {
 		return
 	}
 	if !a.runOpen {
-		a.msg, a.msgCut, a.runOpen = a.msg[:0], false, true
+		a.newRun(a.seq)
 	}
 	a.msg = append(a.msg, s...)
 	a.compact()
+}
+
+// newRun opens an empty message at Seq seq. The message it replaces goes behind
+// it when it is the step's first run's to keep, and otherwise goes: a later run of
+// one attempt has nothing to uncover but what the first found.
+func (a *turnAccumulator) newRun(seq uint64) {
+	if !a.holding {
+		a.hold()
+	}
+	a.holding = true
+	a.msg, a.msgCut, a.msgSeq, a.runOpen = nil, false, seq, true
+}
+
+// hold puts the message behind it, cut to resultMessageMax.
+func (a *turnAccumulator) hold() {
+	if len(a.msg) == 0 {
+		return
+	}
+	tail, cut := messageTail(a.msg)
+	a.behind = append(a.behind, accRun{seq: a.msgSeq, text: tail, cut: a.msgCut || cut})
 }
 
 // compact cuts msg to its tail (messageTail) once it holds twice
@@ -279,11 +380,14 @@ func messageTail(msg []byte) ([]byte, bool) {
 // split ends the open run: the next text is a new entry.
 func (a *turnAccumulator) split() { a.runOpen = false }
 
-// seedMessage is a message already under way when the accumulator starts —
-// read from a snapshot: an entry's text, whether its run is still open, and
-// whether the entry lost its head.
-func (a *turnAccumulator) seedMessage(text string, open, cut bool) {
-	a.msg, a.runOpen, a.msgCut = append(a.msg[:0], text...), open, cut
+// seedRun is a run already under way or over when the accumulator starts, read
+// from a snapshot: an assistant entry's Seq and text, whether its run is still
+// open, and whether the entry lost its head. Each entry is the message until the
+// next, as the runs it was folded from were.
+func (a *turnAccumulator) seedRun(seq uint64, text string, open, cut bool) {
+	a.hold()
+	a.msg, a.msgSeq, a.runOpen, a.msgCut = append([]byte(nil), text...), seq, open, cut
+	a.holding = false
 	a.compact()
 }
 
@@ -294,7 +398,7 @@ func (a *turnAccumulator) tool(t agent.ToolEvent) {
 	}
 	st, ok := a.tools[t.ID]
 	if !ok {
-		st = &accTool{}
+		st = &accTool{seq: a.seq}
 		a.tools[t.ID] = st
 		a.toolOrder = append(a.toolOrder, t.ID)
 		// A call that opens after the approval is more work — but for one the
@@ -489,8 +593,11 @@ type turnResult struct {
 	Error       *resultError `json:"error,omitempty"`
 	PlanEnded   bool         `json:"planEnded,omitempty"`
 	ToolCalls   *int         `json:"toolCalls,omitempty"`
-	DurationMs  *int64       `json:"durationMs,omitempty"`
-	Files       *[]string    `json:"files,omitempty"`
+	// Retries is how many times the turn's steps were sent again after a
+	// provider failure: absent is none.
+	Retries    int       `json:"retries,omitempty"`
+	DurationMs *int64    `json:"durationMs,omitempty"`
+	Files      *[]string `json:"files,omitempty"`
 	// FilesTruncated, OutsideFiles and PlanFile sit beside Files: see
 	// agent.ToolEdited.
 	FilesTruncated bool            `json:"filesTruncated,omitempty"`
@@ -616,6 +723,7 @@ func (r *turnResult) fill(a *turnAccumulator) {
 		}
 		r.PlanEnded = r.Status == statusCompleted && a.planEnded(r.StopReason)
 	}
+	r.Retries = a.retries
 	r.Plan = a.plan
 	r.AutoAnswered = a.auto
 	r.setUsage(a.usage)

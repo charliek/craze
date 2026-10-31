@@ -155,9 +155,10 @@ that gx lacked.
 - H0 set `MaxRetries=0`, a 512-token output ceiling, per-request and
   per-attempt deadlines, and a pre-dispatch budget reservation. The ceiling
   was too low for high-effort reasoning models and caused the Meta failures
-  above. Production retry policy is D-32: Fantasy retries a step only before
-  its first byte of output (one retry in H1), never after output reached the
-  screen.
+  above. Production retry policy is D-32: Fantasy retries a step before its
+  first byte of output (one retry in H1); as amended by plan 048, a turn's step
+  also after output, for a transport or server failure, with the failed attempt
+  taken back from every consumer.
 - Meta's rate-limit headers (`x-ratelimit-remaining-requests`,
   `x-ratelimit-remaining-tokens`) are present on every response.
 - The GLM 5.3 Flash low-effort live variant passed with top-level

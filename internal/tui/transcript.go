@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -107,6 +108,10 @@ type entry struct {
 	// any other row and dropped when its entry closes (show).
 	gen uint64
 	md  *mdCheckpoint
+	// retracted marks a row of a step's attempt that failed and was sent again
+	// (transcript.Entry.Retracted): its text is struck through, and the note
+	// below it says why.
+	retracted bool
 
 	// rendered is the entry's physical lines (physicalLines: a row holding a
 	// line break is split into the lines it draws), and is never written to
@@ -178,6 +183,7 @@ func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
 	r.tool, r.plan = e.Tool, e.Plan
 	r.at, r.end = at, e.End
 	r.open, r.interject, r.streaming = e.Open, e.Interject, e.Streaming
+	r.retracted = e.Retracted
 	r.local = false
 	r.id = e.ID
 	r.dirty = true
@@ -382,6 +388,9 @@ func (m *Model) setViewportContent(stick bool) {
 var paintHook func(m *Model, tr *pane)
 
 func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
+	if e.retracted {
+		return m.retractedRows(e, key)
+	}
 	switch e.kind {
 	case entryUser:
 		// The mark carries the colour; the two-space continuation indent is
@@ -416,6 +425,26 @@ func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 		return m.shellRows(e, key)
 	}
 	return nil
+}
+
+// retractedRows is a retried attempt's row struck through: the text as it
+// arrived, not rendered as an answer, or a tool's name, since its call never ran.
+// A thought stays collapsed unless Ctrl+O reveals it, like any thought.
+func (m *Model) retractedRows(e *entry, key renderKey) []string {
+	st := styleFG(m.theme.Dim).Strikethrough(true)
+	switch e.kind {
+	case entryThought:
+		if !key.expanded {
+			return []string{renderSegs(key.width, seg{"+ Thought", st})}
+		}
+	case entryTool:
+		name := ""
+		if e.tool != nil {
+			name = cmp.Or(sanitizeLine(e.tool.Title), sanitizeLine(e.tool.Name), sanitizeLine(e.tool.ToolName))
+		}
+		return []string{renderSegs(key.width, seg{name, st})}
+	}
+	return hangingRows(e.text, "", "", key.width, st)
 }
 
 // thoughtRows collapses a whole thought run to one row; Ctrl+O reveals the text.

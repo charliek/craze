@@ -523,3 +523,28 @@ func TestConfigAgentBin(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigProviderRetriesTable is `provider_retries`' parsing rule: an integer
+// from 0 to 3, anything else the default with a line.
+func TestConfigProviderRetriesTable(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       int
+		why        string
+	}{
+		{"missing key", "theme = \"dark\"\n", 1, ""},
+		{"none", "provider_retries = 0\n", 0, ""},
+		{"the most", "provider_retries = 3\n", 3, ""},
+		{"past the most", "provider_retries = 4\n", 1, "config.toml provider_retries 4 is not between 0 and 3"},
+		{"negative", "provider_retries = -1\n", 1, "config.toml provider_retries -1 is not between 0 and 3"},
+		{"a string", "provider_retries = \"2\"\n", 1, "config.toml provider_retries is not an integer"},
+		{"malformed file", "this is not toml [[[\n", 1, "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got, why := ConfigProviderRetries(); got != tc.want || why != tc.why {
+				t.Fatalf("ConfigProviderRetries() = %d, %q; want %d, %q", got, why, tc.want, tc.why)
+			}
+		})
+	}
+}

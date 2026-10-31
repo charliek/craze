@@ -183,6 +183,10 @@ type Turn struct {
 	// Foreign is the last foreign-turn bracket: Running while the agent runs
 	// a turn of its own.
 	Foreign *agent.ForeignTurnInfo
+	// Retries is how many times the turn's steps have been sent again so far
+	// (agent.StepRetryInfo.Total), kept once the turn has ended, until the next
+	// starts. A waiter that attaches after a retry reads it here.
+	Retries int
 	// Truncated reports that the snapshot this model was restored from
 	// carried only the head of Text, over ItemCap (plan 024 §3.5), so a
 	// client can say so. A model folded from the event stream never sets it;
@@ -373,13 +377,17 @@ type Change struct {
 	AppendedFrom, AppendedTo EntryID
 	// Dropped is how many entries were trimmed off the front.
 	Dropped int
+	// RetractFrom says a step's attempt was retracted, 0 for none: the entries
+	// from this Seq on are re-read, however many there are, where Touched holds
+	// only two.
+	RetractFrom uint64
 	// State reports that the state projection (State) may have changed.
 	State bool
 }
 
 // Entries reports whether the fold changed any entry of Scope's transcript.
 func (c Change) Entries() bool {
-	return !c.Touched[0].IsZero() || !c.AppendedFrom.IsZero() || c.Dropped > 0
+	return !c.Touched[0].IsZero() || !c.AppendedFrom.IsZero() || c.Dropped > 0 || c.RetractFrom != 0
 }
 
 // foldCtx accumulates one Fold's Change. Ordinals, not ids, track the
@@ -391,6 +399,8 @@ type foldCtx struct {
 	from, to int
 	dropped  int
 	state    bool
+	// retractFrom is Change.RetractFrom.
+	retractFrom uint64
 }
 
 func (fc *foldCtx) reset() { *fc = foldCtx{from: -1, to: -1} }
@@ -414,6 +424,11 @@ func (m *Model) noteTouched(t *Transcript, id EntryID) {
 	}
 }
 
+func (m *Model) noteRetracted(t *Transcript, from uint64) {
+	m.fc.t = t
+	m.fc.retractFrom = from
+}
+
 func (m *Model) noteDropped(t *Transcript) {
 	if m.fc.t == nil {
 		m.fc.t = t
@@ -435,6 +450,7 @@ func (m *Model) finish() Change {
 	}
 	c.Scope = t.agent
 	c.Dropped = fc.dropped
+	c.RetractFrom = fc.retractFrom
 	if fc.dropped == 0 {
 		// Nothing left the transcript, so every touched entry is still in it.
 		c.Touched = fc.touched
@@ -812,7 +828,7 @@ func (c *cut) state() State {
 	}
 	addTools := func(agentID string, tc *transcriptCut) {
 		for _, e := range tc.entries {
-			if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
+			if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" || e.Retracted {
 				continue
 			}
 			if s.Tools == nil {
@@ -868,7 +884,7 @@ func (c *cut) tools() []agent.ToolEvent {
 // Mirror's, under the lock — a transcript's live ones.
 func appendTools(out []agent.ToolEvent, ents []*Entry) []agent.ToolEvent {
 	for _, e := range ents {
-		if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
+		if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" || e.Retracted {
 			continue
 		}
 		out = append(out, cloneTool(e.Tool))

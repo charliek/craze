@@ -1219,7 +1219,7 @@ func (s *Session) childOpenOptions(v tableView, alias, effort string, c *ChildOp
 		Home: s.base.home, Workspace: s.base.workspace, Table: v.table,
 		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Snapshot: s.base.snapshot, Child: c,
 		NewModel: s.newModel, Getenv: s.getenv, Now: s.base.now, Version: s.base.version,
-		MatchModel: v.match, Warn: s.warn,
+		MatchModel: v.match, Warn: s.warn, ProviderRetries: &s.providerRetries,
 		tools: s.base.seams,
 	}
 }

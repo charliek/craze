@@ -208,6 +208,12 @@ func convergenceFixtures() []convergenceFixture {
 			Phase: agent.CompactionEnded, Reason: agent.CompactionAuto, TokensBefore: 890_000, TokensAfter: 21_000}}), appends: true},
 		{name: "compaction fails", ev: ev(agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{
 			Phase: agent.CompactionEnded, Reason: agent.CompactionManual, TokensBefore: 890_000, Err: "provider failed"}}), appends: true},
+		{name: "a step goes again, having streamed", ev: ev(agent.Event{Type: agent.EventStepRetry,
+			StepRetry: &agent.StepRetryInfo{Step: 1, Attempt: 1, Total: 1, From: 1, Discarded: true}}), appends: true},
+		{name: "a step goes again, having streamed nothing", ev: ev(agent.Event{Type: agent.EventStepRetry,
+			StepRetry: &agent.StepRetryInfo{Step: 1, Attempt: 1, Total: 1, From: 1}})},
+		{name: "a child's step goes again", ev: ev(agent.Event{Type: agent.EventStepRetry, Agent: "sub-1",
+			StepRetry: &agent.StepRetryInfo{Step: 1, Attempt: 1, Total: 1, From: 1}})},
 		{name: "a child's compaction starts", ev: ev(agent.Event{Type: agent.EventCompaction, Agent: "sub-1",
 			Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionOverflow}})},
 	}

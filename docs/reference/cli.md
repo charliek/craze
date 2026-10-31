@@ -461,6 +461,7 @@ stderr if it is still going after that.
 | `queue` | One change to craze's own message queue |
 | `foreign_turn` | A turn the agent started without a craze prompt, bracketed |
 | `compaction` | One end of a native session's compaction of its context; `agent` as on `text` |
+| `step_retry` | A native step's model request failed and is being sent again; what its failed attempt streamed is not part of the answer ([below](#a-retried-step-in-the-stream)) |
 | `tool` | Tool call create/update, merged by id; `agent` as on `text`; a sub-agent tool also carries `task` |
 | `todos` | Todo list replace or merge |
 | `permission` / `question` / `plan` | Blocking request. A permission is answered by `--permission-decision` (none left: rejected); a question gets its first option; a plan is accepted |
@@ -535,6 +536,24 @@ a request the window refused, or for `/compact [focus]` sent as the prompt
 the context's estimated size before and after, `0` on a `started` line and
 for the after of one that failed, which carries `error` instead. `agent` and
 `error` are omitted when empty.
+
+#### A retried step in the stream
+
+`step_retry` is `{"type":"step_retry","seq":…,"turn":…,"step":…,"attempt":…,
+"reason":"…","from":…,"discarded":true|false}`, with `agent` for a sub-agent's. The
+step's model request failed and goes again from the same input ([which failures,
+how many times](configuration.md#native-provider-retries)). With `discarded`, the
+lines already printed for the failed attempt are not part of the answer and none of
+its tools ran: **drop the `text`, `thought` and `tool` lines of the same `agent` whose
+`seq` is `from` or more**. A reader that keeps only the last message, or accumulates
+text, is the reader this line is for; one that does not know the line reads both
+attempts' text, one after the other. `discarded` is `false` when the request failed
+before any output, and there is nothing to drop.
+
+Plain `craze prompt` writes text as it comes and cannot take it back: the next
+attempt's text starts a new paragraph, and stderr says the text just printed is not
+part of the answer. To be sure of the answer's text alone, use `--json` or `craze new
+--wait`.
 
 `done` is **not** EOF: it says the *turn* ended, not the sub-agents.
 Lifecycle lines for a still-running sub-agent may follow the turn's `done` —
@@ -1457,6 +1476,7 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | Key | |
 |-----|---|
 | `message`, `toolCalls`, `durationMs`, `files` | On `completed`, `failed`, `cancelled` and `dropped`, always: `""`, `0` and `[]` when there is none. `files` is the paths successful edit-tool calls reported changing inside the workspace ([below](#what-files-lists)) |
+| `retries` | How many times the turn's steps were [sent again](configuration.md#native-provider-retries) after a provider failure; absent for none. `message`, `toolCalls` and `files` hold the final attempts' alone. A discarded attempt may have cost something `usage` does not hold |
 | `outsideFiles` | Absolute paths successful edit-tool calls reported changing outside the workspace, when there were any |
 | `planFile` | The session's plan file, absolute, when the turn's edits wrote it; never in `files` or `outsideFiles` |
 | `filesTruncated` | `true` when one call named more than 64 paths, so the lists hold its first 64 |

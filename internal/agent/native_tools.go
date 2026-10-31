@@ -195,9 +195,14 @@ func (s *nativeSession) dropChildTools(owners []string) {
 		return
 	}
 	s.toolMu.Lock()
-	defer s.toolMu.Unlock()
 	for _, owner := range owners {
 		delete(s.childTools, owner)
+	}
+	s.toolMu.Unlock()
+	s.attempts.mu.Lock()
+	defer s.attempts.mu.Unlock()
+	for _, owner := range owners {
+		delete(s.attempts.from, owner)
 	}
 }
 

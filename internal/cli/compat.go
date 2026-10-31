@@ -30,3 +30,13 @@ func compatClaude(diag io.Writer) agent.ClaudeCompat {
 	}
 	return c
 }
+
+// providerRetries is `provider_retries` as a session's options carry it, a line
+// on the same lane when craze cannot use the value.
+func providerRetries(diag io.Writer) *int {
+	n, why := tui.ConfigProviderRetries()
+	if why != "" && diag != nil {
+		fmt.Fprintf(diag, "craze: %s\n", why)
+	}
+	return &n
+}

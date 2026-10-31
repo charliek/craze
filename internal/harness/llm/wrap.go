@@ -20,14 +20,20 @@ import (
 var ErrEmptyStep = errors.New("llm: the provider ended the step with no content and no usage")
 
 // MidStreamError replaces a provider error that arrives after the stream has
-// begun producing output. Fantasy retries a failed step by replaying it from
-// scratch, callbacks included, and it decides by type and text: a
-// *fantasy.ProviderError with a retryable status or flag, any net.Error, or
-// an error whose text looks like an HTTP/2 transport failure (retry.go:
-// 183-196, errors.go:137-175). A replay after text is on screen would show
-// that text twice. MidStreamError is none of those — it does not unwrap to
-// the original, and its Error text never contains the transport phrases — so
-// the step fails once, instead (D-32).
+// begun producing output, when the step is not to be tried again. Fantasy
+// retries a failed step by replaying it from scratch, callbacks included, and
+// it decides by type and text: a *fantasy.ProviderError with a retryable status
+// or flag, any net.Error, or an error whose text looks like an HTTP/2 transport
+// failure (retry.go: 183-196, errors.go:137-175). MidStreamError is none of
+// those — it does not unwrap to the original, and its Error text never contains
+// the transport phrases — so the step fails once.
+//
+// D-32, as amended: a step is retried after output only when the failure is the
+// transport's or the server's (streamFault), the caller can take back what the
+// failed attempt streamed (WithRetraction), the attempt holds no result of a
+// tool the provider ran itself, which a replay would run again, and the provider
+// did not ask to wait a minute or more (longWait). Every other failure after output
+// comes here.
 //
 // It keeps what the harness classifies by: the provider's message, scrubbed
 // of the key; the HTTP status; the auth flag; whether the provider said the
@@ -64,7 +70,7 @@ func (e *MidStreamError) Error() string {
 // exceeded the model's context window.
 func (e *MidStreamError) IsContextTooLarge() bool { return e.contextTooLarge }
 
-// model decorates a Fantasy LanguageModel with the four things the harness
+// model decorates a Fantasy LanguageModel with the things the harness
 // needs from every streamed step (plan 018 §3.5):
 //
 //  1. A "stop" finish becomes "tool-calls" when the step carried at least
@@ -76,12 +82,15 @@ func (e *MidStreamError) IsContextTooLarge() bool { return e.contextTooLarge }
 //  2. A "stop" finish with no output part and zero total usage becomes an
 //     error part carrying ErrEmptyStep (D-25).
 //  3. A provider error after output began becomes a *MidStreamError, which
-//     Fantasy does not retry (D-32). Before that, an error keeps its
-//     classification, so a failed connection or a 503 is retried as usual.
-//     Cancellation and deadline errors always pass through as themselves,
-//     and so does a *FinalError, scrubbed, before output or after: it is
-//     never retried either way, and its code is what the ChatGPT plan's
-//     usage latch and the harness's classification read (plan 033 §3.12).
+//     Fantasy does not retry — unless it is a transport or server fault on a
+//     step whose caller retracts what it streamed (WithRetraction), which
+//     stays retryable (D-32, as amended, at MidStreamError). Before that, an
+//     error keeps its classification, so a failed connection or a 503 is
+//     retried as usual. Cancellation and deadline errors always pass through
+//     as themselves, and so does a *FinalError, scrubbed, before output or
+//     after: it is never retried either way, and its code is what the ChatGPT
+//     plan's usage latch and the harness's classification read (plan 033
+//     §3.12).
 //  4. Every error leaving the model — from Stream itself, from an error
 //     part, and from Generate, GenerateObject and StreamObject — is
 //     scrubbed of the key and of URL query strings (see scrubber).
@@ -143,6 +152,7 @@ func (m *model) StreamObject(ctx context.Context, call fantasy.ObjectCall) (fant
 // nothing.
 func (m *model) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	call.Prompt = regroupToolImages(call.Prompt)
+	retractable := retracts(ctx)
 	inner, err := m.inner.Stream(ctx, call)
 	if err != nil {
 		return nil, m.scrub.err(err)
@@ -151,19 +161,26 @@ func (m *model) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamRe
 		// output is set by any part a consumer can observe as the answer —
 		// text, reasoning, tool input, tool calls and results, sources — and
 		// never by warnings, the finish or an error. Rules 2 and 3 share it:
-		// a step that produced nothing is both empty and safe to replay.
-		output, toolCalls := false, 0
+		// a step that produced nothing is both empty and safe to replay. ran
+		// is set by a result of a tool the provider ran itself, which a replay
+		// would run again, so rule 3 never replays the attempt that holds one.
+		output, ran, toolCalls := false, false, 0
 		for part := range inner {
 			switch part.Type {
 			case fantasy.StreamPartTypeWarnings:
 			case fantasy.StreamPartTypeError:
-				part.Error = m.stepError(part.Error, output)
+				// A step whose context has ended goes no further, whatever
+				// its transport said as it went.
+				part.Error = m.stepError(part.Error, output, retractable && !ran && ctx.Err() == nil)
 			case fantasy.StreamPartTypeFinish:
 				part = normalizeFinish(part, output, toolCalls)
 			default:
 				output = true
-				if part.Type == fantasy.StreamPartTypeToolCall {
+				switch {
+				case part.Type == fantasy.StreamPartTypeToolCall:
 					toolCalls++
+				case part.Type == fantasy.StreamPartTypeToolResult && part.ProviderExecuted:
+					ran = true
 				}
 			}
 			if !yield(part) {
@@ -173,10 +190,16 @@ func (m *model) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamRe
 	}, nil
 }
 
-// stepError is rule 3 plus the scrub.
-func (m *model) stepError(err error, output bool) error {
+// stepError is rule 3 plus the scrub. replayable says the step may be sent
+// again once it has produced output.
+func (m *model) stepError(err error, output, replayable bool) error {
 	var fe *FinalError
-	if !output || errors.As(err, &fe) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.As(err, &fe), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return m.scrub.err(err)
+	case m.scrub.fault(err) && (!output || replayable && !asksLongWait(err)):
+		return m.scrub.transient(err)
+	case !output:
 		return m.scrub.err(err)
 	}
 	return m.scrub.midStream(err)

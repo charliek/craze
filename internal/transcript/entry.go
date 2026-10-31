@@ -104,6 +104,13 @@ type Entry struct {
 	// tail, led by "…" (execution amendment X25). The open entry's is the
 	// run's so far.
 	Cut bool
+	// Retracted marks a row of a step's attempt that failed and was sent again
+	// (agent.EventStepRetry): an assistant, thought or tool entry that is not
+	// part of the answer, and whose call, if it is a tool's, never ran. It stays
+	// where it stands, so that what a client already drew and a restored model's
+	// accounting do not move, and a client draws it as what it is; nothing that
+	// reads the answer or a tool's state ever counts it.
+	Retracted bool
 	// Bytes is what this entry accounts for against its transcript's byte
 	// budget: its text plus every string its payload carries, or
 	// errValueBytes for an error value whose text the fold could not read. A

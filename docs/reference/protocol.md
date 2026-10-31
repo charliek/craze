@@ -1958,6 +1958,49 @@ that does not know them ignores the kind and the member (see [Tolerant
 inbound, strict outbound](#tolerant-inbound-strict-outbound)), and neither
 bumps a codec version.
 
+## A step's retry
+
+A native step whose model request fails may be sent again from the same input
+([which failures, and the budget](configuration.md#native-provider-retries)). What
+the failed attempt streamed has by then gone out as events, and it is not part of
+the answer. A `step_retry` event says so, after the last of them and before anything
+of the next attempt:
+
+```json
+{"type":"step_retry","stepRetry":{"turn":1,"step":2,"attempt":1,"total":1,"reason":"INTERNAL_ERROR (received from peer)","delayMs":5000,"from":41,"discarded":true},"at":"..."}
+```
+
+`turn` and `step` are the harness's numbers, the ones in a native tool call's id;
+`attempt` counts this step's retries from 1, `total` the turn's over all its steps;
+`reason` is the failure on one line, and `delayMs` the wait before the next attempt.
+`agent` on the event names the sub-agent whose step it was.
+
+`from` and `discarded` are what a consumer acts on. With `discarded`, every `text`,
+`thought` and `tool` event of the same `agent` from `seq` `from` on is retracted: none
+of its tools ran, and a call with the provider's same id in the next attempt is a new
+call under a new `tool.id`. An attempt's calls are settled (`failed`) before the
+event, as they would be if the client knew nothing of it. Without `discarded`, the
+request failed before any output, and only the count moved.
+
+The fold keeps a retracted row where it stands and marks it: a snapshot's entry
+carries `retracted: true`, and a `retried after a stream error` note follows the rows.
+A client may strike them out, as the TUI does; anything that reads the answer or a
+call's state skips them, as `Model.Tools`, the session list's last reply and a
+waiter's `message` and `toolCalls` do. The rows keep their ids and their bytes, so a
+retraction moves no trim, and a client that attached in the middle of the attempt
+holds what one that folded it all holds: `from` names the attempt by the `seq` its
+entry ids already carry. A `turn` section's `retries` is `total` as the fold last saw
+it, kept until the next turn starts, which is how a waiter that attaches after the
+retry still counts it.
+
+Nothing of a failed attempt reaches the session's transcript store: it holds finished
+steps, so a resumed session never replays one, and a replay carries no `step_retry`.
+A request's bytes do not change from one attempt to the next, so a provider's prefix
+cache sees the same request, and no reasoning signature of a failed attempt is sent.
+Both fields are additive: a client that does not know the kind ignores it (see
+[Tolerant inbound, strict outbound](#tolerant-inbound-strict-outbound)) and shows both
+attempts, as it would have shown a failed one; no codec version moves.
+
 ## What a tool call changed
 
 A `tool` event's `edited` is what the call changed, as its host judged it: the waiting

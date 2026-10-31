@@ -312,19 +312,20 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 // line starts, as --model does.
 func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p, launch agent.Provider, row sessions.Row) agent.Options {
 	opts := agent.Options{
-		Workspace:   ws,
-		Force:       f.force,
-		Model:       f.model,
-		Effort:      strings.TrimSpace(f.effort),
-		Fast:        f.fastSetting(),
-		Mode:        mode,
-		Stderr:      stderr,
-		Diag:        diag,
-		Env:         env,
-		PluginDirs:  f.pluginDirs,
-		Interactive: true,
-		Provider:    &p,
-		Compat:      compatClaude(diag),
+		Workspace:       ws,
+		Force:           f.force,
+		Model:           f.model,
+		Effort:          strings.TrimSpace(f.effort),
+		Fast:            f.fastSetting(),
+		Mode:            mode,
+		Stderr:          stderr,
+		Diag:            diag,
+		Env:             env,
+		PluginDirs:      f.pluginDirs,
+		Interactive:     true,
+		Provider:        &p,
+		Compat:          compatClaude(diag),
+		ProviderRetries: providerRetries(diag),
 		// The index's title and pin are seeded before Start so the composer
 		// rule shows the stored title through the replay and a /rename
 		// survives any number of --continues (§3.4).

@@ -176,6 +176,9 @@ func (t *pane) consume(ch transcript.Change, tr *transcript.Transcript, hide tra
 	if ch.Dropped > 0 {
 		t.dropGone(tr)
 	}
+	if ch.RetractFrom != 0 {
+		t.retract(tr, ch.RetractFrom)
+	}
 	rows := len(t.rows)
 	for _, id := range ch.Touched {
 		if !id.IsZero() {
@@ -192,6 +195,25 @@ func (t *pane) consume(ch transcript.Change, tr *transcript.Transcript, hide tra
 	}
 	if len(t.rows) > rows {
 		t.enforceCaps()
+	}
+}
+
+// retract re-reads the rows of a retried step's attempt, whose entries the model
+// has just marked: every shared row from Seq from on, newest first. A row that
+// did not get a mark — a steer's, a note's — shows as it did.
+func (t *pane) retract(tr *transcript.Transcript, from uint64) {
+	for i := len(t.rows) - 1; i >= 0; i-- {
+		r := t.rows[i]
+		if r.id.IsZero() {
+			continue
+		}
+		if r.id.Seq < from {
+			return
+		}
+		if e, ok := tr.Entry(r.id); ok && e.Retracted {
+			r.show(e, tr)
+			t.dirty = true
+		}
 	}
 }
 

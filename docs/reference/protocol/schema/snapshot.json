@@ -70,6 +70,7 @@
         "origin": {"type": "string"},
         "at": {"$ref": "event.json#/$defs/time"},
         "foreign": {"$ref": "event.json#/$defs/foreignTurn"},
+        "retries": {"type": "integer", "minimum": 0, "description": "How many times the turn's steps have been sent again so far, kept until the next turn starts (a step_retry event's total); absent for none."},
         "truncated": {"type": "boolean"}
       },
       "additionalProperties": false
@@ -164,7 +165,8 @@
         "open": {"type": "boolean"},
         "interject": {"type": "boolean"},
         "streaming": {"type": "boolean"},
-        "cut": {"type": "boolean"}
+        "cut": {"type": "boolean"},
+        "retracted": {"type": "boolean", "description": "An assistant, thought or tool row of a step's attempt that failed and was sent again (a step_retry event): not part of the answer, and its tool call never ran. A client may strike it out; what reads the answer skips it."}
       },
       "required": ["id"],
       "additionalProperties": false

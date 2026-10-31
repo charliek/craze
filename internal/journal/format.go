@@ -151,6 +151,14 @@ const (
 	// session.stop also has its connection's own control_conn stop note; this
 	// is the one record of why the host ended, whatever ended it.
 	DiagHostStop = "host_stop"
+	// DiagStepRetry is one retry of a native step (agent.EventStepRetry, whose
+	// own event record sits beside it): the turn, the step, the attempt and the
+	// turn's total; the reason and the wait before the next attempt; agent, the
+	// sub-agent whose step it was, "" for the session's own; and from and
+	// discarded, the Seq the failed attempt began at and whether it had streamed
+	// anything, all of which is then not part of the answer. An attempt's spend
+	// is in no usage report, so this is the one record that it may have spent.
+	DiagStepRetry = "step_retry"
 )
 
 // diagNoteTooLarge replaces a note that stays over MaxRecordBytes even with

@@ -261,6 +261,34 @@ func ConfigHostIdleExit() (HostIdleExit, string) {
 	return HostIdleExit{After: d}, ""
 }
 
+// ConfigProviderRetries reads `provider_retries`: how many times a native step's
+// model request is sent again after failing, 0 to 3. It fails safe as
+// ConfigHostIdleExit does: a config.toml that cannot be read or parsed, a value
+// that is not an integer, or one out of range is the default, 1, with a line
+// saying why; an absent key is the default and silent.
+func ConfigProviderRetries() (int, string) {
+	const def, most = agent.DefaultProviderRetries, agent.MaxProviderRetries
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return def, "config.toml could not be parsed"
+	case err != nil:
+		return def, "config.toml could not be read"
+	}
+	v, ok := cfg["provider_retries"]
+	if !ok {
+		return def, ""
+	}
+	n, ok := v.(int64)
+	if !ok {
+		return def, "config.toml provider_retries is not an integer"
+	}
+	if n < 0 || n > most {
+		return def, fmt.Sprintf("config.toml provider_retries %d is not between 0 and %d", n, most)
+	}
+	return int(n), ""
+}
+
 // ConfigCompatClaude is the [compat.claude] table — which classes of Claude's
 // own content a native session reads (plan 022 §3.5) — and the lines to say
 // about it. Every key defaults to true, so an absent table, a partial one and

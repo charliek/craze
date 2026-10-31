@@ -183,17 +183,18 @@ func headlessApproval(force bool) *agent.ApprovalPolicy {
 // and mode, and with neither flag the options are what they always were.
 func (o *promptOpts) agentOptions(ws string, approval *agent.ApprovalPolicy, prov *agent.Provider) agent.Options {
 	return agent.Options{
-		Workspace:  ws,
-		Force:      o.force,
-		Approval:   approval,
-		Model:      o.model,
-		Effort:     strings.TrimSpace(o.effort),
-		Fast:       fastFlags(o.fast, o.noFast),
-		Mode:       o.mode(),
-		Stderr:     o.stderr,
-		PluginDirs: o.pluginDirs,
-		Provider:   prov,
-		Compat:     compatClaude(o.stderr),
+		Workspace:       ws,
+		Force:           o.force,
+		Approval:        approval,
+		Model:           o.model,
+		Effort:          strings.TrimSpace(o.effort),
+		Fast:            fastFlags(o.fast, o.noFast),
+		Mode:            o.mode(),
+		Stderr:          o.stderr,
+		PluginDirs:      o.pluginDirs,
+		Provider:        prov,
+		Compat:          compatClaude(o.stderr),
+		ProviderRetries: providerRetries(o.stderr),
 		// Headless craze has one stream for its own notes, stderr, as it
 		// does for discoverPlugins' (Options.Diag falls back to it).
 		JournalDir: journalDir(o.stderr),
@@ -903,6 +904,11 @@ func (o *promptOpts) writeEvent(ev agent.Event) error {
 	}
 	if runBoundary(ev) {
 		o.plain.boundary()
+	}
+	if r := ev.StepRetry; r != nil && r.Discarded && ev.Agent == "" {
+		// Plain output is written as it comes and cannot be taken back: the
+		// step's next attempt follows it, so stderr says what it is.
+		fmt.Fprintf(o.stderr, "craze: the model's stream failed (%s); retrying: the text just printed is not part of the answer\n", r.Reason)
 	}
 	if ev.Type == agent.EventText && ev.Agent == "" {
 		_, err := io.WriteString(o.stdout, o.plain.text(ev.Text))

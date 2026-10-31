@@ -28,7 +28,8 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, Spend, ModelInfo)
+// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, StepRetryInfo, Spend,
+// ModelInfo)
 // are converted rather than copied field by field: their wire twins have the
 // same fields in the same order, so a field added to one of them stops this
 // file compiling until the twin has it too. Held by pointer, they convert as
@@ -376,6 +377,7 @@ type wireEvent struct {
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
 	Compaction     *wireCompaction  `json:"compaction,omitempty"`
+	StepRetry      *wireStepRetry   `json:"stepRetry,omitempty"`
 	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
@@ -838,6 +840,19 @@ type wireCompaction struct {
 	Err          string `json:"err,omitempty"`
 }
 
+// wireStepRetry is StepRetryInfo, field for field in the same order, so it
+// converts by a plain pointer cast like wireCompaction does.
+type wireStepRetry struct {
+	Turn      int    `json:"turn,omitempty"`
+	Step      int    `json:"step,omitempty"`
+	Attempt   int    `json:"attempt,omitempty"`
+	Total     int    `json:"total,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	DelayMs   int64  `json:"delayMs,omitempty"`
+	From      uint64 `json:"from,omitempty"`
+	Discarded bool   `json:"discarded,omitempty"`
+}
+
 // wireError is an Event.Err: always the first three keys, so a jq filter over a
 // journal can read .err.class without a default, and the rest — what the error
 // said of itself where it happened (errkind.Info) — each absent at its zero
@@ -904,6 +919,7 @@ func toWireEvent(ev Event) wireEvent {
 		Replay:         (*wireReplay)(ev.Replay),
 		Replayed:       ev.Replayed,
 		Compaction:     (*wireCompaction)(ev.Compaction),
+		StepRetry:      (*wireStepRetry)(ev.StepRetry),
 		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
 		At:             ev.At.UTC(),
@@ -1255,6 +1271,7 @@ func (w *wireEvent) event() Event {
 		Replay:         (*ReplayInfo)(w.Replay),
 		Replayed:       w.Replayed,
 		Compaction:     (*CompactionInfo)(w.Compaction),
+		StepRetry:      (*StepRetryInfo)(w.StepRetry),
 		Cause:          w.Cause,
 		StopReason:     w.StopReason,
 		At:             w.At.UTC(),

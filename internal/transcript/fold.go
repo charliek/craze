@@ -95,6 +95,7 @@ var kinds = map[agent.EventType]kindRow{
 	agent.EventReplay:      {class: classMarker | classStream, main: foldReplay, childIgnored: true},
 	agent.EventTurn:        {class: classState | classStream, main: foldTurn, childIgnored: true},
 	agent.EventCompaction:  {class: classMarker | classStream, main: foldCompaction, child: childCompaction},
+	agent.EventStepRetry:   {class: classMarker | classStream, main: foldStepRetry, child: childStepRetry},
 }
 
 // ------------------------------------------------------------ stream kinds
@@ -194,6 +195,32 @@ func childTool(t *Transcript, ev agent.Event) {
 	}
 	t.upsertTool(ev.Tool, ev.At)
 	t.model.fc.state = true
+}
+
+// foldStepRetry is a step of the turn going again: the turn's count, and the
+// failed attempt's rows (childStepRetry). The count is the event's, the turn's
+// own total, so a client restored after an earlier retry holds the same one.
+func foldStepRetry(m *Model, ev agent.Event) {
+	r := ev.StepRetry
+	if r == nil {
+		return
+	}
+	m.turn.Retries = max(m.turn.Retries, r.Total)
+	m.fc.state = true
+	childStepRetry(m.Main, ev)
+}
+
+// childStepRetry takes back what a failed attempt streamed: its rows, from the
+// event's From on, are retracted and a note follows them. An attempt that
+// streamed nothing changes nothing here, and ends no run.
+func childStepRetry(t *Transcript, ev agent.Event) {
+	r := ev.StepRetry
+	if r == nil || !r.Discarded {
+		return
+	}
+	at := t.model.stamp(ev.At)
+	t.retract(r.From, at)
+	t.addNote(NoteStepRetried, at)
 }
 
 // foldTodos keeps the list (empty clears it) and writes the tasks notes under
@@ -392,6 +419,7 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	m.fc.state = true
 	m.Main.closeStream(at)
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
+		m.turn.Retries = 0
 		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)
 		return
 	}
@@ -438,6 +466,7 @@ func foldTurn(m *Model, ev agent.Event) {
 	case agent.TurnStarted:
 		at := m.stamp(ev.At)
 		m.turn.ID, m.turn.Text, m.turn.Origin, m.turn.At = tu.ID, tu.Text, tu.Origin, at
+		m.turn.Retries = 0
 		// The event carries Text whole, so a head a snapshot truncated is gone.
 		m.turn.Truncated = false
 		m.fc.state = true

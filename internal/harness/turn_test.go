@@ -335,7 +335,7 @@ func TestRetryResetsTheDeltas(t *testing.T) {
 	}
 	equal(t, "events", ev.list(), []Event{
 		ThoughtDelta{Text: "stale thought"}, TextDelta{Text: "stale "},
-		Retrying{Delay: time.Millisecond, Attempt: 1, Reason: "HTTP 503: overloaded"},
+		Retrying{Delay: time.Millisecond, Turn: 1, Step: 1, Attempt: 1, Total: 1, Reason: "HTTP 503: overloaded", Discarded: true},
 		TextDelta{Text: "fresh"},
 	})
 	equal(t, "transcript", entries(transcript(t, s)), []string{

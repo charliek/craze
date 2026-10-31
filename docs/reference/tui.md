@@ -218,6 +218,15 @@ working, leaving a `cancelled` note. Headless `craze prompt` never
 sees any of this: every `run_in_background` call there runs in the
 foreground, as if the flag had not been set.
 
+### A retried step
+
+A native step whose stream fails after output began is [sent
+again](configuration.md#native-provider-retries), and what it had streamed is not part
+of the answer. Its rows stay where they are, struck through, with a dim `retried after
+a stream error` note below them, and the next attempt's text starts below that. A
+client attaching later draws the same. A resumed session shows the final attempt alone,
+since only that was saved.
+
 ### Background commands (bash jobs)
 
 On native, the `bash` tool can also run a command as a **job**: the model

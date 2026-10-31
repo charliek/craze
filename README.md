@@ -26,7 +26,7 @@ and want one fast, scriptable front end for several of them.
   [`craze new --load`](docs/reference/cli.md#craze-new-load)
 - **Scripting**: `craze new --wait`, `craze send` and `craze wait` run a task
   and print the result, with typed failures a program can branch on and retry,
-  and a stopped turn's usage so far.
+  a stopped turn's usage so far, and a step that survives a mid-stream reset.
   [`craze new`](docs/reference/cli.md#craze-new),
   [`craze wait`](docs/reference/cli.md#craze-wait),
   [failure kinds](docs/reference/cli.md#failure-kinds)

@@ -12,7 +12,7 @@ import (
 //
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
-//   - the turn's course: StepDone, Steered, Retrying, Diag;
+//   - the turn's course: StepStarted, StepDone, Steered, Retrying, Diag;
 //   - the harness's own state, projected: Todos, Compacted (plan 028 §3.13),
 //     and Spent, what the session has spent (§3.14), which only a session
 //     that is not a sub-agent emits;
@@ -264,14 +264,36 @@ type StepDone struct {
 // Result.Unanswered says which ones were not.
 type Steered struct{ Text string }
 
-// Retrying reports that the step failed before producing any output and will
-// be sent again after Delay (at most once a step: the runner allows one
-// retry). Attempt counts the retries of this step, from 1; Reason is the
-// failure, on one line. Nothing streamed before it belongs to the answer.
+// Retrying reports that the step's model request failed and will be sent again,
+// from the same input, after Delay: before it produced output, or after, when
+// the failure was the transport's or the server's (D-32, as amended, at
+// llm.MidStreamError). Nothing streamed since the attempt began belongs to the
+// answer, and no tool of it ran. It comes after everything the attempt streamed,
+// and its Abandoned calls' ToolFinished, and before the next attempt's first
+// event.
+//
+// Turn and Step are the turn's number and the step's, as a tool call's id
+// spells them; Attempt counts the retries of this step, from 1; Total the
+// turn's, over all its steps. Reason is the failure, on one line. Discarded says
+// the attempt had streamed something, and Abandoned names the calls it began.
 type Retrying struct {
-	Delay   time.Duration
-	Attempt int
-	Reason  string
+	Delay     time.Duration
+	Turn      int
+	Step      int
+	Attempt   int
+	Total     int
+	Reason    string
+	Discarded bool
+	Abandoned []string
+}
+
+// StepStarted reports that a step's first request is about to go out, so an
+// adapter that must later say which of its events a retried attempt owned can
+// mark where the attempt began. A retried attempt begins where its Retrying
+// ends, and has none of its own.
+type StepStarted struct {
+	Turn int
+	Step int
 }
 
 // Todos reports the harness's todo list, in full, after a todo_write call
@@ -480,6 +502,7 @@ func (ToolFinished) isEvent()        {}
 func (StepDone) isEvent()            {}
 func (Steered) isEvent()             {}
 func (Retrying) isEvent()            {}
+func (StepStarted) isEvent()         {}
 func (Diag) isEvent()                {}
 func (Todos) isEvent()               {}
 func (SubagentStarted) isEvent()     {}

@@ -329,7 +329,12 @@ type events struct {
 	all []Event
 }
 
+// sink keeps every event but the marks a step's start leaves for an adapter,
+// which a test of what a turn reports has nothing to say about.
 func (e *events) sink(ev Event) {
+	if _, mark := ev.(StepStarted); mark {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.all = append(e.all, ev)

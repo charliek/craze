@@ -240,6 +240,12 @@ type nativeSession struct {
 	// a paragraph after it, and otherwise the turn's only text. Each claim
 	// clears it; sink sets it, from the harness's turn with s.mu not held.
 	textShown atomic.Bool
+	// attempts is where each owner's current attempt at a step began
+	// (markAttempt).
+	attempts attemptMarks
+	// reportEnqueued says a usage report may still be in the outbox, for the next
+	// step's start to wait for (sink's StepStarted).
+	reportEnqueued atomic.Bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
 	// returns, which is what Cancel and Close wait on. turnToken is the
@@ -1221,6 +1227,8 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		Version:   version.Version,
 		Mode:      mode,
 		Resume:    s.opts.LoadSessionID,
+
+		ProviderRetries: s.opts.ProviderRetries,
 	}
 	if s.tweak != nil {
 		s.tweak(&hopts)
@@ -2417,13 +2425,14 @@ func nativeTitle(prompt string) string {
 // children's own tagged events and the agent row's task (native_subagents.go,
 // plan 026 §3.9), a compaction becomes its EventCompaction pair (plan 028
 // §3.13, compacted), and what the session has spent becomes the snapshot's
-// usage section and its state delta (§3.14, spent). StepDone, Retrying and
+// usage section and its state delta (§3.14, spent). StepDone and
 // Diag have no agent event and are dropped: a step's own usage goes to the
 // transcript, and reaches a client summed, through Spent — but for the
 // sub-agent usage an unsaved step could not record, which is journaled
-// (noteSubagentUsage) — the harness allows one silent retry (plan 018 §3.8),
-// and a Diag is for the journal and for diagnosis, not for a consumer (plan
-// 019 §3.5). ToolProgress never blocks here, since the harness drops a
+// (noteSubagentUsage) — and a Diag is for the journal and for diagnosis, not for
+// a consumer (plan 019 §3.5). A retry is an event of its own, which says what the
+// failed attempt's events retract (native_retry.go), and a step's start only
+// marks where the next attempt begins. ToolProgress never blocks here, since the harness drops a
 // snapshot rather than wait on it.
 //
 // It runs synchronously on Fantasy's callbacks — the tool ones on tool
@@ -2518,7 +2527,20 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.jobProgress(e)
 	case harness.JobFinished:
 		s.jobFinished(e)
-	case harness.Retrying, harness.Diag:
+	case harness.StepStarted:
+		// What the last step spent is enqueued (spent), and a step's own events
+		// are published: without this, step 1's report could land after step 2
+		// had begun, or after its retry, and read as step 2's own. A waiter's
+		// usageComplete stands on a report coming before the next step's first
+		// event. A closing session gives the barrier up; so does this. A step with
+		// no report before it, a turn's first, waits for nothing.
+		if s.reportEnqueued.Swap(false) {
+			_ = s.log.Flush(context.Background(), s.done)
+		}
+		s.markAttempt("")
+	case harness.Retrying:
+		s.stepRetried("", e)
+	case harness.Diag:
 		// Dropped (the function's comment).
 	case harness.Todos:
 		s.applyTodos(e)
@@ -2617,6 +2639,7 @@ func (s *nativeSession) spentLocked(e harness.Spent) {
 	// the event is encoded on the drainer's goroutine.
 	d := u
 	s.enqueueDeltaLocked("", Event{}, &StateDelta{Usage: &d})
+	s.reportEnqueued.Store(true)
 }
 
 // compacted is one end of a compaction of a session's context — the parent's

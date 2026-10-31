@@ -880,11 +880,13 @@ func contextWindowFull(requestID string) *fantasy.ProviderError {
 //   - Any other failure the server reported is a *fantasy.ProviderError
 //     (messagesProviderError).
 //   - A stream that ended before it said how, or broke the protocol, is
-//     Fantasy's retryable incomplete-stream error; a transport's failure — a
+//     Fantasy's retryable incomplete-stream error, a broken protocol under a title
+//     of its own, which the wrapper's rule 3 makes final after output; a
+//     transport's failure — a
 //     network error, an HTTP/2 reset or GOAWAY, which the client reports
 //     scrubbed and without its cause (messagesapi.IsTransport) — a retryable
-//     transport error. Both are tried again only before output: after it, the
-//     wrapper makes every failure final (rule 3).
+//     transport error. After output, the wrapper's rule 3 decides what is
+//     tried again.
 //   - Anything else — a request the client could not build — goes as it is,
 //     in Fantasy's transport wrapper when it is one.
 func messagesError(err error) error {
@@ -902,6 +904,10 @@ func messagesError(err error) error {
 			}
 		}
 		return messagesProviderError(me)
+	case messagesapi.IsViolation(err):
+		pe := fantasy.NewIncompleteStreamError()
+		pe.Title, pe.Message = protocolTitle, err.Error()
+		return pe
 	case errors.Is(err, messagesapi.ErrIncomplete):
 		return fantasy.NewIncompleteStreamError()
 	case messagesapi.IsTransport(err):
