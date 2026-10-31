@@ -1344,6 +1344,15 @@ stdout nobody reads pins nothing, then writes the result to stdout. It sends
 15 seconds** for the host's process to be gone, by its identity. The result says so:
 `stopping: true`, and `session stopping` in the plain footer.
 
+**15 seconds is not the most the command can take once the result is written.** The
+stages run one after another: up to 5 s to send the stop, 15 s for the host to go, 2 s
+for a host it had to kill, and about 7 s to [end what the host left
+running](#what-a-dead-host-leaves-running), so about 29 s of timer allowances, plus up to
+about 3.5 s as the command exits for a [sweep](#what-a-dead-host-leaves-running) still
+under way. `--timeout` covers none of it. These bound craze's own waits, not the wall
+clock: a call blocked on a stalled file system can take longer. A signal ends the 15 s,
+the 2 s, the 7 s and the sweep's wait, and never the 5 s.
+
 - **`needs_input` abandons the ask.** Nobody can answer it: the turn is cancelled with
   the session, and the result has no `handle`, there being nothing to follow. A caller
   that wants to answer asks must not pass this flag. That includes a prompt still queued
@@ -1797,7 +1806,12 @@ decides, then its process. A host writes `<hostId>.stop` in the [host logs'
 directory](configuration.md#host-logs) as it begins to stop, before it closes
 anything, and leaves it behind: so a stop whose ending never reached the command
 (a backlog the host's flush gave up on, a subscription dropped for overflow) is
-still told from a crash, after the host has gone.
+still told from a crash, after the host has gone. The record names the process that
+wrote it, and it counts only for that very host, as does a registry entry's stopping
+mark: one with no such name, or another host's under the same id, says nothing, and the
+host's process decides. A later host under the same id leaves an earlier record there
+until its own stop writes over it, so a command still following the earlier host then
+reads `host_exited`.
 
 | What happened | Status or kind | Exit | |
 |---|---|---|---|
@@ -1835,22 +1849,27 @@ otherwise by the next craze command.** Until then they run on, and if no craze e
 runs again nothing ends them. Each group gets `SIGTERM`, then `SIGKILL` 2 s later if
 anything in it is left. Each is read again straight before each of its signals.
 
-- **The waiter** that sees its host gone ends the host's commands before it reports
-  [`host_exited`](#no-ending-seen). **`host_exited` promises this much:** the waiter
-  has either finished with the record, or been cut short. Finished means each group
-  recognised in it has had its signals, not that every process has gone yet; it waits
-  for another craze already at the record, about 3.5 s at most, then takes up to about
-  3 s of its own. A `--timeout` or a further signal cuts that short, and so does a
-  stalled file system at about 7 s. `host_exited` is reported at once and the record
+- **The waiter** that finds its host gone, by the host's process and start time, ends
+  the host's commands before it reports anything: [`host_exited`](#no-ending-seen), or a
+  [`cancelled`](#a-turn-cut-short) result from a host killed part way through its stop.
+  What the report says does not decide this. A host still there, stopping or not, ends
+  its own commands, and the waiter leaves them to it. **Such a report promises this
+  much:** the waiter has either finished with the record, or been cut short. Finished
+  means each group recognised in it has had its signals, not that every process has gone
+  yet; it waits for another craze already at the record, about 3.5 s at most, then takes
+  up to about 3 s of its own. A `--timeout` or a further signal cuts that short, and so
+  does a stalled file system at about 7 s. The report is then made at once and the record
   stays for the next craze, with whatever had not been signalled still running.
+  `--exit-after-turn` does the same once the result is written, for a host that has gone
+  after its stop or before it.
 - **Every command that reads the host registry**, alongside its own work: `craze`,
   `attach`, `bridge`, `cancel`, `new`, `ps`, `send`, `stop` and `wait`. This never
   delays a command's start, is outside `--timeout`, and can't fail the command.
   A short command stays until the sweep is done once its output is written: a few
   milliseconds at most on a healthy machine, and when a group ignores `SIGTERM`, the
-  2 s grace before its `SIGKILL`. It waits about 3.5 s at most, and a `SIGINT` or
-  `SIGTERM` ends that wait at once with the exit code the command had already
-  determined. A process that exits before its `SIGKILL` goes out leaves the record for
+  2 s grace before its `SIGKILL`. It waits about 3.5 s at most, and a `SIGINT`,
+  `SIGTERM` or `SIGHUP` ends that wait at once with the exit code the command had
+  already determined. A process that exits before its `SIGKILL` goes out leaves the record for
   the next craze; the hub or a longer-running craze finishes it.
 - **The hub**, at its start and every ten minutes while it runs. When a host the hub
   started dies, the hub ends its groups at once: an agent's with `SIGKILL`, a shell

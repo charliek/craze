@@ -22,6 +22,7 @@ import (
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -167,6 +168,7 @@ func TestTheResultIsOutBeforeTheStop(t *testing.T) {
 	withExitBounds(t, stubWatchdog, 50*time.Millisecond)
 	r := newExitRig(t, endTurn())
 	conn, tp := r.dialTapped()
+	conn.entry.PIDStart = 0
 	job, out, errs := exitJob(t, make(chan os.Signal, 1))
 	sawResult := false
 	withStopBarrier(t, func() {
@@ -309,6 +311,77 @@ func TestAHostThatCannotBeKilledIsSaidToBeRunning(t *testing.T) {
 		if s := errs.String(); !strings.Contains(s, "may still be running") || !strings.Contains(s, "not permitted") {
 			t.Fatalf("stderr: %q", s)
 		}
+	})
+}
+
+// TestAHostFoundGoneIsReaped: --exit-after-turn, each way the host can turn out to have
+// gone with no kill of the command's: what it left running is ended, and the result
+// stands. Each with a real process for the host and a real command.
+func TestAHostFoundGoneIsReaped(t *testing.T) {
+	run := func(t *testing.T, r *exitRig, pid int, start uint64) *recordedCommand {
+		t.Helper()
+		conn := r.dial(nil)
+		conn.entry.PID, conn.entry.PIDStart = pid, start
+		c := recordCommand(t, r.env, conn.entry.HostID, groupOwner(t, pid, start), `exec sleep 120`)
+		job, out, errs := exitJob(t, make(chan os.Signal, 1))
+		if err := job.waitFor(conn); err != nil {
+			t.Fatalf("the exit: %v, stderr %q", err, errs)
+		}
+		if !strings.Contains(out.String(), `"stopping":true`) {
+			t.Fatalf("stdout: %q", out)
+		}
+		if s := errs.String(); s != "" {
+			t.Fatalf("stderr: %q", s)
+		}
+		return c
+	}
+	t.Run("gone once it has its stop", func(t *testing.T) {
+		pid, start, _ := liveProcess(t)
+		opts := control.Options{Workspace: "/w", ExitAfterTurn: true, Stop: func(control.StopRequest) { _ = syscall.Kill(pid, syscall.SIGKILL) }}
+		r := &exitRig{newWaitRigOn(t, opts, 0, endTurn()), nil}
+		run(t, r, pid, start).awaitReaped(t)
+	})
+	t.Run("gone before the stop is sent", func(t *testing.T) {
+		pid, start, gone := liveProcess(t)
+		r := newExitRig(t, endTurn())
+		withStopBarrier(t, func() { killAndAwait(t, pid, gone) })
+		run(t, r, pid, start).awaitReaped(t)
+		select {
+		case got := <-r.stops:
+			t.Fatalf("a stop went to a host gone: %+v", got)
+		default:
+		}
+	})
+	t.Run("gone as the kill looks", func(t *testing.T) {
+		env, _ := serveHome(t)
+		pid, start, gone := liveProcess(t)
+		id := rundir.NewHostID()
+		c := recordCommand(t, env, id, groupOwner(t, pid, start), `exec sleep 120`)
+		killAndAwait(t, pid, gone)
+		job, _, _ := exitJob(t, make(chan os.Signal, 1))
+		if err := job.killHost(rundir.Entry{HostID: id, PID: pid, PIDStart: start}); err != nil {
+			t.Fatalf("the kill: %v", err)
+		}
+		c.awaitReaped(t)
+	})
+	t.Run("a signal cuts it short", func(t *testing.T) {
+		env, _ := serveHome(t)
+		pid, start, gone := liveProcess(t)
+		id := rundir.NewHostID()
+		c := recordCommand(t, env, id, groupOwner(t, pid, start), `trap '' TERM; exec sleep 120`)
+		killAndAwait(t, pid, gone)
+		sigs := make(chan os.Signal, 1)
+		job, _, _ := exitJob(t, sigs)
+		sigs <- syscall.SIGTERM
+		waitFor(t, "the signal to be relayed", func() bool { return len(job.relayed) == 1 })
+		begun := time.Now()
+		if err := job.killHost(rundir.Entry{HostID: id, PID: pid, PIDStart: start}); err != nil {
+			t.Fatalf("the kill: %v", err)
+		}
+		if took := time.Since(begun); took >= hostspawn.ReapGrace {
+			t.Fatalf("the signal took %v to end a grace of %v", took, hostspawn.ReapGrace)
+		}
+		c.survives(t)
 	})
 }
 
@@ -674,8 +747,8 @@ func TestARealHostsStopSaysExitAfterTurn(t *testing.T) {
 	if err := r.result(t, serveStep); err != nil {
 		t.Fatalf("craze serve: %v", err)
 	}
-	if rec, ok := rundir.ReadStopRecord(env, e.HostID); !ok || rec.Cause != agent.StopCauseExitAfterTurn {
-		t.Fatalf("the record: %+v, %v", rec, ok)
+	if rec, ok := rundir.ReadStopRecord(env, e.HostID); !ok || rec.Cause != agent.StopCauseExitAfterTurn || !rec.OwnedBy(e.PID, e.PIDStart) {
+		t.Fatalf("the record: %+v, %v, the host %d, %d", rec, ok, e.PID, e.PIDStart)
 	}
 }
 

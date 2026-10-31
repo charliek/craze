@@ -79,6 +79,8 @@ import (
 //   - A stream lost with no word of a stop is told by the host's process (lost):
 //     gone, exit 1, host_exited; running, exit 1, connection_lost, the turn runs
 //     on in its host; one that cannot be named, the same kind, its state unknown.
+//   - Whatever the end, a host then gone by its identity has what it left running
+//     ended before the waiter returns (reapGone).
 //   - A signal or --timeout's end interrupts the waiter's work at once,
 //     reads in flight included (run's op). Past --timeout's end nothing read
 //     decides the target: it is running, with its handle (timedOut).
@@ -524,7 +526,19 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 			w.result.Model = w.session.model
 		}
 	}
+	w.reapGone(op)
 	return w.result, w.fail
+}
+
+// reapGone is the end of a wait, before anything is written, whatever it will say:
+// what the waiter reports is then true of the commands a host now gone left, with no
+// later craze needed to make it so. A host still there, stopping or not, ends its own.
+// ctx ending cuts it short, and leaves them to the next craze: a --timeout or a signal
+// ends the wait's work, and a further signal a signal's cleanup.
+func (w *turnWaiter) reapGone(ctx context.Context) {
+	if ctx.Err() == nil && readHost(w.conn.entry) == hostExited {
+		reapHostGroups(ctx, w.conn.entry.HostID)
+	}
 }
 
 // watchInterrupts hands each signal, and --timeout's end, to the waiter's
@@ -695,7 +709,7 @@ func pumpStream(ctx context.Context, st *remote.Stream, out chan<- pumped) {
 // item is one stream item.
 func (w *turnWaiter) item(ctx context.Context, p pumped) {
 	if p.err != nil {
-		w.lost(ctx, p.err)
+		w.lost(p.err)
 		return
 	}
 	it := p.it
@@ -725,13 +739,13 @@ func (w *turnWaiter) item(ctx context.Context, p pumped) {
 		// The host itself said the session has closed, so its process is not
 		// asked: it may yet be on its way out. Its record says of the target
 		// what the stream did not.
-		if rec, ok := rundir.ReadStopRecord(rundir.ProcessEnv(), w.conn.entry.HostID); ok && !w.closing {
+		if rec, ok := hostStopRecord(w.conn.entry); ok && !w.closing {
 			w.stopUnseen(&rec)
 			return
 		}
 		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
 	case remote.KindError:
-		w.lost(ctx, it.Err)
+		w.lost(it.Err)
 	}
 }
 
@@ -743,8 +757,10 @@ func (w *turnWaiter) item(ctx context.Context, p pumped) {
 // the registry: one gone exited with no ending seen, and what was folded of the
 // turn is all there will be; one running has a connection lost and a turn that
 // runs on (the handle follows it); one that cannot be named is never host_exited,
-// and nothing is claimed of its turn.
-func (w *turnWaiter) lost(ctx context.Context, err error) {
+// and nothing is claimed of its turn. A stop record and a stopping mark are the word
+// of the host they name alone: another's at this id says nothing (hostStopRecord,
+// hostMarkedStopping).
+func (w *turnWaiter) lost(err error) {
 	if err == nil || errors.Is(err, remote.ErrStreamClosed) {
 		err = errors.New("the stream closed")
 	}
@@ -753,7 +769,7 @@ func (w *turnWaiter) lost(ctx context.Context, err error) {
 		w.sessionGone(endedLine(w.session.id), errkind.Stopped)
 		return
 	}
-	if rec, ok := rundir.ReadStopRecord(rundir.ProcessEnv(), e.HostID); ok {
+	if rec, ok := hostStopRecord(e); ok {
 		w.stopUnseen(&rec)
 		return
 	}
@@ -764,16 +780,22 @@ func (w *turnWaiter) lost(ctx context.Context, err error) {
 	lost := "lost the connection to session " + psShort(w.session.id) + ": " + sanitizeLine(err.Error())
 	switch readHost(e) {
 	case hostExited:
-		// Before the failure is written: what the waiter reports is then true of
-		// the commands the host left, with no later craze needed to make it so. A
-		// --timeout or a signal cuts it short, and leaves them to the next craze.
-		reapHostGroups(ctx, e.HostID)
 		w.sessionGone("the session ended: its host exited with no ending for the turn"+reloadHint(matchCrazeID(indexCrazeIDs(), w.session.id)), errkind.HostExited)
 	case hostRunning:
 		w.fail = &waitFailure{msg: lost + "; the turn runs on in its host", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}
 	default:
 		w.fail = &waitFailure{msg: lost + "; its host's state is unknown, and the turn may have ended", kind: errkind.ConnectionLost, handle: w.handle(), follow: true}
 	}
+}
+
+// hostStopRecord is the stop record of the very host e names, and false for none: a
+// record with another owner, or none, is no evidence of this host's stop.
+func hostStopRecord(e rundir.Entry) (rundir.StopRecord, bool) {
+	rec, ok := rundir.ReadStopRecord(rundir.ProcessEnv(), e.HostID)
+	if !ok || !rec.OwnedBy(e.PID, e.PIDStart) {
+		return rundir.StopRecord{}, false
+	}
+	return rec, true
 }
 
 // stopUnseen is a stop whose ending never reached the waiter: a backlog the host's
@@ -2132,11 +2154,14 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 		}
 	}()
 	w.cleaning = true
+	// settled says the failure was chosen with no second signal yet, so not for one.
+	settled := false
 	defer func() {
 		// The watch stopped, and joined, first: a second signal it took as
 		// the cleanup ended is one all the same. A step that failed as the
 		// second signal cancelled it failed for that signal: say so, and
-		// exit without the detach.
+		// exit without the detach. A failure already settled stays as it is,
+		// and the signal only abandons the detach.
 		waitCleanupEnding(again)
 		close(stop)
 		<-watched
@@ -2144,7 +2169,7 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 		case <-again:
 			w.conn.abandon = true
 			switch {
-			case w.result != nil:
+			case w.result != nil, settled:
 			case w.buffering():
 				w.fail = &waitFailure{msg: "interrupted again before the prompt's answer; it may have reached the session", kind: errkind.Interrupted, handle: w.handle()}
 			case w.unsettled != nil:
@@ -2154,6 +2179,16 @@ func (w *turnWaiter) signalled(items <-chan pumped) {
 			}
 		default:
 		}
+	}()
+	// The signal has ended the wait's work, so this is the wait's last chance; and
+	// with the watch still up, a second signal ends it, and nothing more.
+	defer func() {
+		select {
+		case <-again:
+		default:
+			settled = w.fail != nil
+		}
+		w.reapGone(ctx)
 	}()
 	if w.buffering() {
 		waitAwaitingReply()

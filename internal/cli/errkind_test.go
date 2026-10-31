@@ -483,14 +483,14 @@ func TestTheWaitersOwnFailuresHaveTheirKinds(t *testing.T) {
 	t.Run("the socket lost, the host still listed", func(t *testing.T) {
 		r := newWaitRig(t, 0)
 		w := newTurnWaiter(r.dial(nil), waitStart{}, waitOptions{})
-		w.lost(context.Background(), errors.New("broken pipe"))
+		w.lost(errors.New("broken pipe"))
 		check(t, w.fail, errkind.ConnectionLost, true)
 	})
 	t.Run("the socket lost, the host gone", func(t *testing.T) {
 		serveHome(t)
 		w := waiterAt(nil)
 		w.conn.entry.PID = exitedPID(t)
-		w.lost(context.Background(), errors.New("broken pipe"))
+		w.lost(errors.New("broken pipe"))
 		check(t, w.fail, errkind.HostExited, true)
 	})
 	t.Run("the socket lost, the host gone, the wait cut short", func(t *testing.T) {
@@ -529,7 +529,8 @@ func TestTheWaitersOwnFailuresHaveTheirKinds(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		w.lost(ctx, errors.New("broken pipe"))
+		w.lost(errors.New("broken pipe"))
+		w.reapGone(ctx)
 		check(t, w.fail, errkind.HostExited, true)
 		if !fileExists(record) {
 			t.Fatal("the record was removed")

@@ -493,9 +493,11 @@ The launcher names it whenever a host could not start. A spawned host's
   boot or PID namespace, or whose host or groups cannot be read) goes after 7 days, and
   a line with no owner, from an older craze, goes after 10 minutes once its host's lock
   is free.
-- `<hostId>.stop` is written as a host begins to stop, saying why and which turn
-  was running, and stays behind it: it is how a waiting command that lost its
-  stream tells a stop from a crash. It goes with the host's logs.
+- `<hostId>.stop` is written as a host begins to stop, saying why, which turn was
+  running and which process wrote it, and stays behind it: it is how a waiting command
+  that lost its stream tells a stop from a crash. It counts only for the process it
+  names. A later host at the same id writes over it if that host stops; otherwise it
+  goes with the host's logs.
 - Every host **sweeps the directory as it starts**: the files of a host that
   is gone (decided by its own host lock, never by its registry entry) and that
   nobody has touched for 7 days are removed: its logs, its `.stop`, and any temporary

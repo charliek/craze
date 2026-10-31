@@ -330,7 +330,7 @@ func TestAStopRecordIsWhatWasWritten(t *testing.T) {
 	if _, ok := ReadStopRecord(env, id); ok {
 		t.Fatal("a record before any was written")
 	}
-	want := StopRecord{Cause: "stop", Turn: "turn-3", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	want := StopRecord{Cause: "stop", Turn: "turn-3", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), PID: 42, PIDStart: 7}
 	if err := WriteStopRecord(env, id, want); err != nil {
 		t.Fatal(err)
 	}
@@ -352,5 +352,66 @@ func TestAStopRecordIsWhatWasWritten(t *testing.T) {
 	}
 	if _, ok := ReadStopRecord(env, "../x"); ok {
 		t.Fatal("read a record under a name that is no host id's")
+	}
+}
+
+// TestAStopRecordIsItsOwners: a record is the word of the very process it names. One
+// with no owner, or half of one, an older craze's, is nobody's, and a process whose
+// start is not known owns none.
+func TestAStopRecordIsItsOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rec   StopRecord
+		pid   int
+		start uint64
+		want  bool
+	}{
+		{"its own", StopRecord{PID: 42, PIDStart: 7}, 42, 7, true},
+		{"another pid", StopRecord{PID: 42, PIDStart: 7}, 43, 7, false},
+		{"its pid another's since", StopRecord{PID: 42, PIDStart: 7}, 42, 8, false},
+		{"no owner", StopRecord{}, 42, 7, false},
+		{"no owner, a process with no identity", StopRecord{}, 0, 0, false},
+		{"no pid", StopRecord{PIDStart: 7}, 0, 7, false},
+		{"no start", StopRecord{PID: 42}, 42, 0, false},
+		{"a process whose start is not known", StopRecord{PID: 42, PIDStart: 7}, 42, 0, false},
+	} {
+		if got := tc.rec.OwnedBy(tc.pid, tc.start); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestABindLeavesAnEarlierHostsStopRecord: a host bound at an id, and one refused it,
+// leave the record there as it was: it is evidence for the earlier host's waiter, and
+// its owner says it is none of the new host's.
+func TestABindLeavesAnEarlierHostsStopRecord(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	old := StopRecord{Cause: "stop", Turn: "turn-1", At: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), PID: 42, PIDStart: 7}
+	if err := WriteStopRecord(env, id, old); err != nil {
+		t.Fatal(err)
+	}
+	self, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Skipf("no process identity here: %v", err)
+	}
+	h, err := Bind(env, id, Entry{StartedAt: time.Now(), PIDStart: self.Start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	got, ok := ReadStopRecord(env, id)
+	if !ok || got != old {
+		t.Fatalf("the record after a bind: %+v, %v", got, ok)
+	}
+	if got.OwnedBy(os.Getpid(), self.Start) {
+		t.Fatal("the bound host owns the earlier host's record")
+	}
+	if again, err := Bind(env, id, Entry{StartedAt: time.Now()}); err == nil {
+		_ = again.Close()
+		t.Fatal("a second bind of a live host's id")
+	}
+	if got, ok := ReadStopRecord(env, id); !ok || got != old {
+		t.Fatalf("the record after a refused bind: %+v, %v", got, ok)
 	}
 }

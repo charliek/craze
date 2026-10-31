@@ -149,7 +149,9 @@ var hostScanned = func() {}
 
 // hostMarkedStopping reports whether e's registry entry says its host has begun
 // to stop (rundir.Entry.Stopping). An entry that is missing, or that cannot be
-// read, says nothing: a killed host's is swept, by this very scan.
+// read, says nothing: a killed host's is swept, by this very scan. Nor does one of
+// another process at this host id, or either with no identity: the mark is the word
+// of the very host e names, as its stop record is (rundir.StopRecord.OwnedBy).
 func hostMarkedStopping(e rundir.Entry) bool {
 	entries, err := rundir.Hosts(rundir.ProcessEnv())
 	hostScanned()
@@ -157,7 +159,11 @@ func hostMarkedStopping(e rundir.Entry) bool {
 		return false
 	}
 	i := slices.IndexFunc(entries, func(r rundir.Entry) bool { return r.HostID == e.HostID })
-	return i >= 0 && entries[i].Stopping
+	if i < 0 || !entries[i].Stopping {
+		return false
+	}
+	r := entries[i]
+	return e.PID > 0 && e.PIDStart != 0 && r.PID == e.PID && r.PIDStart == e.PIDStart
 }
 
 // indexCrazeIDs is every craze id the session index holds a row for.

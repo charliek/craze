@@ -93,6 +93,79 @@ def _hosts_named(short: str) -> list[dict]:
     return [e for e in _entries(_home()) if e.get("crazeSessionId", "").endswith(short)]
 
 
+class Served:
+    """craze serve under a host id of the test's, with a craze send --wait following
+    the fake agent's long turn, held at its gate."""
+
+    def __init__(self, craze_bin: Path, tmp_path: Path, host_id: str, name: str) -> None:
+        gate = tmp_path / f"gate-{name}"
+        os.mkfifo(gate)
+        self.host = subprocess.Popen(
+            [str(craze_bin), "serve", "--provider", "cursor", "--workspace", str(_work(tmp_path)), "--host-id", host_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_env("long-turn", CRAZE_FAKE_GATE=str(gate)),
+        )
+        _until("the host to register", lambda: any(e["hostId"] == host_id and e.get("crazeSessionId") for e in _entries(_home())))
+        self.entry = next(e for e in _entries(_home()) if e["hostId"] == host_id)
+        self.short = self.entry["crazeSessionId"][-8:]
+        self.waiter = subprocess.Popen(
+            [str(craze_bin), "send", self.short, "--wait", "--json", "a long task"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        self.fd = _open_gate(gate, self.waiter)
+
+    def result(self) -> tuple[dict, int, bytes]:
+        stdout, stderr = self.waiter.communicate(timeout=6 * WAIT)
+        return json.loads(stdout), self.waiter.returncode, stderr
+
+    def close(self) -> None:
+        os.close(self.fd)
+        for proc in (self.waiter, self.host):
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+
+
+# ------------------------------------------------------------- a reused host id
+
+
+def test_a_reused_host_id_inherits_no_stop_record(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A host stops in its turn-1, leaving its record. Another starts at the same id and
+    leaves that record there as it was, for a waiter on the first. It says nothing of the
+    second host, whose own turn-1 is the turn it names: killed, that host reads as killed,
+    with no cause of the first's."""
+    _config(fake_agent_bin)
+    host_id = "0a0b0c0d0e0f"
+    first = Served(craze_bin, tmp_path, host_id, "first")
+    try:
+        _stop(craze_bin, first.short)
+        res, code, stderr = first.result()
+        assert code == 3 and res["status"] == "cancelled" and res["error"]["detail"]["cause"] == "stop", (res, stderr)
+    finally:
+        first.close()
+    record = _record(first.entry)
+    assert record["turn"] == "turn-1" and record["cause"] == "stop", record
+    assert (record["pid"], record["pidStart"]) == (first.entry["pid"], first.entry["pidStart"]), record
+    path = _home() / ".cache" / "craze" / "host-logs" / f"{host_id}.stop"
+    old = path.read_bytes()
+
+    second = Served(craze_bin, tmp_path, host_id, "second")
+    try:
+        assert path.read_bytes() == old, "the second host changed the first's stop record"
+        os.kill(second.entry["pid"], signal.SIGKILL)
+        res, code, stderr = second.result()
+        assert code == 1 and res["error"]["kind"] == "host_exited", (res, stderr)
+        assert "cause" not in res["error"].get("detail", {}), res
+        assert path.read_bytes() == old, "the first's stop record went with the second host"
+    finally:
+        second.close()
+
+
 # ------------------------------------------------------------- --exit-after-turn
 
 

@@ -70,8 +70,12 @@ func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTur
 		r.mu.Unlock()
 	}))
 	r.srv.SetEngine(r.eng)
+	self, err := rundir.ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
 	reg, err := rundir.Bind(env, "0000000000a1", rundir.Entry{StartedAt: time.Now(), CrazeSessionID: waitRigID,
-		Incarnation: r.eng.State().Incarnation, Provider: "grok", Workspace: "/w", Ready: true})
+		Incarnation: r.eng.State().Incarnation, Provider: "grok", Workspace: "/w", Ready: true, PIDStart: self.Start})
 	if err != nil {
 		t.Fatal(err)
 	}

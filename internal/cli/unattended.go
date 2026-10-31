@@ -568,7 +568,8 @@ var stopAfterTurn = func() {}
 // endWithTurn is --exit-after-turn's end, the stream given up and the result
 // written: session.stop over a connection of its own, the socket naming this very
 // host, within exitStopSendWait, whatever signal comes; then the host gone by its
-// process identity, within exitAfterTurnWait, a signal ending only that wait. A stop
+// process identity, within exitAfterTurnWait, a signal ending only that wait. A host
+// found gone, however it went, has what it left running ended (reapGone). A stop
 // refused or unreachable, or a host still there at the bound, is killed (killHost).
 // Whatever comes of it, the result and its exit code stand, and stderr says what was
 // done.
@@ -588,6 +589,7 @@ func (r *promptJob) endWithTurn(conn *waitConn) {
 		select {
 		case err := <-done:
 			if err == nil {
+				r.reapGone(e)
 				return
 			}
 		case <-r.relayed:
@@ -662,6 +664,7 @@ func askStop(ctx context.Context, e rundir.Entry, what, cause string) error {
 func (r *promptJob) killHost(e rundir.Entry) error {
 	switch readHost(e) {
 	case hostExited:
+		r.reapGone(e)
 		return nil
 	case hostUnnamed:
 		return errors.New("its process cannot be told from another's")
@@ -672,8 +675,26 @@ func (r *promptJob) killHost(e rundir.Entry) error {
 	if err := syscall.Kill(e.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := r.untilSignal()
 	defer cancel()
+	waitCtx, stop := context.WithTimeout(ctx, exitKillWait)
+	defer stop()
+	_ = waitHostGone(waitCtx, e)
+	reapHostGroups(ctx, e.HostID)
+	return nil
+}
+
+// reapGone ends what the host e names, seen gone, left running, as a waiter does
+// (reapHostGroups). A further signal cuts it short.
+func (r *promptJob) reapGone(e rundir.Entry) {
+	ctx, cancel := r.untilSignal()
+	defer cancel()
+	reapHostGroups(ctx, e.HostID)
+}
+
+// untilSignal is a context the command's next signal ends.
+func (r *promptJob) untilSignal() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		select {
 		case <-r.relayed:
@@ -681,9 +702,5 @@ func (r *promptJob) killHost(e rundir.Entry) error {
 		case <-ctx.Done():
 		}
 	}()
-	waitCtx, stop := context.WithTimeout(ctx, exitKillWait)
-	defer stop()
-	_ = waitHostGone(waitCtx, e)
-	reapHostGroups(ctx, e.HostID)
-	return nil
+	return ctx, cancel
 }

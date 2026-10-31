@@ -609,9 +609,11 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	ticks, now, stopTicks := idleTicks()
 	defer stopTicks()
 	idle := newIdleWatcher(ctl.server, eng, ctl.host.Lost, now, f.unattended, out)
-	// Before the engine is served: no stop reaches the host ahead of this.
+	// Before the engine is served: no stop reaches the host ahead of this. An
+	// identity that cannot be read leaves a record with no owner: no evidence.
+	self, _ := rundir.ProcessIdentity(os.Getpid())
 	lc.setRecord(func(cause string) {
-		r := rundir.StopRecord{Cause: cause, Turn: eng.State().Turn, At: time.Now().UTC()}
+		r := rundir.StopRecord{Cause: cause, Turn: eng.State().Turn, At: time.Now().UTC(), PID: os.Getpid(), PIDStart: self.Start}
 		if err := rundir.WriteStopRecord(runEnv, hostID, r); err != nil {
 			fmt.Fprintf(out, "craze serve: the stop's record: %v\n", err)
 		}

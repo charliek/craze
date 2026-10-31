@@ -52,13 +52,17 @@ func startHostSweep() {
 	go boundedSweep(done, func() { hostspawn.SweepDeadHosts(env, nil) })
 }
 
+// hostSweepJoining sees a join with its signals caught: a no-op, and the barrier a test
+// sends one at.
+var hostSweepJoining = func() {}
+
 // joinHostSweep waits for the sweep as the process exits, at most hostSweepBound, so
 // that a short command still lets the SIGKILL round happen with its output already
 // written. A long command has let it finish by now. On a healthy machine there is
-// nothing to wait for. A SIGINT or a SIGTERM here ends the wait at once: the command's
-// handlers are gone by now, and without this one the signal would take the exit code
-// the command has already determined. The record stays for the next sweep. It reports
-// whether a signal ended it.
+// nothing to wait for. A SIGINT, a SIGTERM or a SIGHUP here, what the waiting commands
+// and the TUI catch, ends the wait at once: the command's handlers are gone by now, and
+// without this one the signal would take the exit code the command has already
+// determined. The record stays for the next sweep. It reports whether a signal ended it.
 func joinHostSweep() (signalled bool) {
 	done := hostSweepDone.Swap(nil)
 	if done == nil {
@@ -70,8 +74,9 @@ func joinHostSweep() (signalled bool) {
 	default:
 	}
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
+	hostSweepJoining()
 	select {
 	case <-*done:
 	case <-sigs:

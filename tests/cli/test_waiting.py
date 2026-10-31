@@ -811,6 +811,44 @@ def test_a_waiter_reaps_its_killed_hosts_commands(craze_bin: Path, fake_agent_bi
     assert not left, left
 
 
+def test_a_waiter_reaps_a_host_killed_while_it_stopped(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A host that has begun to stop, its stop record written, SIGKILLed before its
+    teardown has ended its command: the waiter's report is the stop's, cancelled, exit
+    3, and the host's death has its command ended all the same, with no other craze.
+    The record is written here, as the host writes it, to hold the kill to that moment."""
+    command, leader_marker, child_marker = _command("fg", 7309)
+    leader = child = 0
+    with SSEFixture() as fixture:
+        fixture.set_script([call_step("bash", {"command": command, "timeout": 600000})])
+        waiter = _native_waiter(craze_bin, fake_agent_bin, tmp_path, fixture)
+        try:
+            leader, child = _pids_of(tmp_path / "proj", "fg", waiter)
+            assert until_alive(child, child_marker) and alive(leader, leader_marker)
+            (entry,) = _entries(_home())
+            stop = _record(entry["hostId"]).with_suffix(".stop")
+            stop.write_text(
+                json.dumps({"cause": "stop", "turn": "turn-1", "at": "2026-01-01T00:00:00Z", "pid": entry["pid"], "pidStart": entry["pidStart"]}),
+                encoding="utf-8",
+            )
+            os.kill(entry["pid"], signal.SIGKILL)
+            stdout, stderr = waiter.communicate(timeout=6 * WAIT)
+            res = json.loads(stdout)
+            assert waiter.returncode == 3 and res["status"] == "cancelled" and res["stopReason"] == "stopped", (stdout, stderr)
+            assert res["error"]["detail"]["cause"] == "stop", res
+            assert not _record(entry["hostId"]).exists(), "the waiter left the record"
+            gone(leader, leader_marker)
+            gone(child, child_marker)
+            # The record said enough that the waiter read no registry: the next look
+            # sweeps the killed host's entry.
+            assert _craze(craze_bin, "ps", "--json").returncode == 0
+        finally:
+            if waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate()
+            left = _kill_marked((leader, leader_marker), (child, child_marker))
+    assert not left, left
+
+
 def test_the_next_craze_reaps_a_killed_hosts_commands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """No waiter attached: the commands run on with their host gone, until the next
     craze that reads the registry, which signals them and removes the record, and

@@ -248,8 +248,10 @@ const stopRecordExt = "stop"
 // StopRecord is a host's word that it began to stop, written before it closes
 // anything and left behind it: a client that lost its stream with no ending, the
 // host's socket and registry entry gone by then, can still tell a stop from a
-// death. Host ids are never reused, so it can only be that host's. The sweep
-// takes it with the host's logs.
+// death. A host id can be used again, so the record says whose word it is, and is
+// evidence only of the host with that identity (OwnedBy). A later host at the id leaves
+// it for that host's waiter, until its own stop writes over it. The sweep takes it with
+// the host's logs.
 type StopRecord struct {
 	// Cause is what began the stop (agent.TurnInfo.Cause).
 	Cause string `json:"cause,omitempty"`
@@ -258,6 +260,16 @@ type StopRecord struct {
 	Turn string `json:"turn,omitempty"`
 	// At is when it began.
 	At time.Time `json:"at"`
+	// PID and PIDStart are the writer's process identity (ProcessIdentity), the
+	// same pair its registry entry has. Absent when it could not be read.
+	PID      int    `json:"pid,omitempty"`
+	PIDStart uint64 `json:"pidStart,omitempty"`
+}
+
+// OwnedBy says the record is the word of the process with this identity. A record
+// with no owner, and a process whose start is not known, are no match.
+func (r StopRecord) OwnedBy(pid int, start uint64) bool {
+	return r.PID > 0 && r.PIDStart != 0 && r.PID == pid && r.PIDStart == start
 }
 
 // WriteStopRecord writes host id's stop record, atomically, so that a reader
@@ -278,7 +290,8 @@ func WriteStopRecord(env Env, id string, r StopRecord) error {
 }
 
 // ReadStopRecord is host id's stop record, and false when it has none, or none
-// that can be read: no record is no evidence of a stop.
+// that can be read: no record is no evidence of a stop. Whose it is, is the
+// caller's to ask (OwnedBy).
 func ReadStopRecord(env Env, id string) (StopRecord, bool) {
 	var r StopRecord
 	if !ValidHostID(id) {
