@@ -61,7 +61,19 @@
         "output": {"$ref": "#/$defs/toolOutput"},
         "diffs": {"type": "array", "items": {"$ref": "#/$defs/diff"}},
         "task": {"$ref": "#/$defs/task"},
+        "edited": {"$ref": "#/$defs/toolEdited"},
         "at": {"$ref": "#/$defs/time"}
+      },
+      "additionalProperties": false
+    },
+    "toolEdited": {
+      "description": "What an edit call that completed reported changing (ToolEdited).",
+      "type": "object",
+      "properties": {
+        "files": {"type": "array", "items": {"type": "string"}},
+        "outsideFiles": {"type": "array", "items": {"type": "string"}},
+        "planFile": {"type": "string"},
+        "truncated": {"type": "boolean"}
       },
       "additionalProperties": false
     },

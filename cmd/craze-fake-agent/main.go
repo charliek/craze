@@ -101,6 +101,11 @@ Flags:
           grok-ask    x.ai/ask_user_question then complete
           grok-plan   x.ai/exit_plan_mode then complete
           grok-ask-wrapped wrapped _x.ai/ask_user_question then complete
+          edits       cursor: tool calls ending and naming paths every way a
+                      result's files is told from, then text "edited"
+          grok-edits  the same over the grok dialect: tool names, its plan file
+          edit-race   a completed edit before session/new's reply; its failed
+                      update after, once CRAZE_FAKE_GATE lets it
           long-turn   cursor: two 600 ms execute tools then DONE step1 step2;
                       a second prompt cancels the first and runs instead
           grok-long-turn same over the grok dialect, with x.ai/queue/changed at
@@ -274,7 +279,7 @@ func main() {
 		"hang", "hang-ack", "sigint-hold", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail", "long-reply",
-		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
+		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped", "edits", "grok-edits", "edit-race",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-two-hold", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-late-hold", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",

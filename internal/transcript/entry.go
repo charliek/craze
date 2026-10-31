@@ -165,6 +165,15 @@ func toolBytes(t *agent.ToolEvent) int {
 		n += len(k.Description) + len(k.Prompt) + len(k.Model) + len(k.AgentID) +
 			len(k.SubagentType) + len(k.Status)
 	}
+	if e := t.Edited; e != nil {
+		n += len(e.PlanFile)
+		for _, f := range e.Files {
+			n += len(f)
+		}
+		for _, f := range e.OutsideFiles {
+			n += len(f)
+		}
+	}
 	return n
 }
 

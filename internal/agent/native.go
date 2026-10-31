@@ -128,7 +128,10 @@ type nativeSession struct {
 	// harness. tools is the parent's set, Snapshot().Tools; childTools holds
 	// one set per sub-agent, by its id (plan 026 §3.9). A leaf: s.mu → toolMu,
 	// and never nested with rosterMu either way.
-	toolMu     sync.Mutex
+	toolMu sync.Mutex
+	// namedPaths is the paths each of the parent's calls has named, for its
+	// stamp (edited.go); under toolMu.
+	namedPaths callPaths
 	tools      nativeToolSet
 	childTools map[string]*nativeToolSet
 

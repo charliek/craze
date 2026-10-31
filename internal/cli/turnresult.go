@@ -34,8 +34,6 @@ const resultMessageMax = 1 << 20
 const (
 	toolCompleted = "completed"
 	toolFailed    = "failed"
-	// toolKindEdit is an edit-kind call's Kind: its paths are files.
-	toolKindEdit = "edit"
 )
 
 // turnAccumulator is one turn's result, folded from its events.
@@ -54,12 +52,11 @@ type turnAccumulator struct {
 	msg     []byte
 	runOpen bool
 	msgCut  bool
-	// tools are the main session's tool calls by id; touches every distinct
-	// (call, path) an update named, in first-touch order (files) — an ACP
-	// call's updates name its paths again and again, touched once each.
-	tools   map[string]*accTool
-	touches []accTouch
-	touched map[accTouch]bool
+	// tools are the main session's tool calls by id, and toolOrder their ids as
+	// first seen. An update is a call's whole state, so a re-fold of one, or a
+	// snapshot's row, changes nothing but what the call last said.
+	tools     map[string]*accTool
+	toolOrder []string
 	// usage is the last usage section folded (P6): before the ending, since
 	// the accumulator stops at it.
 	usage *agent.UsageState
@@ -93,16 +90,14 @@ type turnAccumulator struct {
 	noPlanEnded bool
 }
 
-// accTool is one tool call's merged state: its kind (an update may carry it
-// only later) and whether it reached completed or failed.
+// accTool is one tool call's merged state: whether it reached completed or
+// failed, and what its host last said it changed: only a call that completed has
+// any (agent.ToolEvent.Edited).
 type accTool struct {
-	kind     string
 	finished bool
 	failed   bool
+	edited   *agent.ToolEdited
 }
-
-// accTouch is one path a tool call named.
-type accTouch struct{ tool, path string }
 
 // autoAnswer is one automatic answer (`autoAnswered`): what was asked and
 // what craze's policy chose.
@@ -113,7 +108,7 @@ type autoAnswer struct {
 }
 
 func newTurnAccumulator() *turnAccumulator {
-	return &turnAccumulator{tools: map[string]*accTool{}, touched: map[accTouch]bool{}, stepOpen: true}
+	return &turnAccumulator{tools: map[string]*accTool{}, stepOpen: true}
 }
 
 // start is the turn's opening: its time.
@@ -301,31 +296,16 @@ func (a *turnAccumulator) tool(t agent.ToolEvent) {
 	if !ok {
 		st = &accTool{}
 		a.tools[t.ID] = st
+		a.toolOrder = append(a.toolOrder, t.ID)
 		// A call that opens after the approval is more work — but for one the
 		// harness refused because the plan was approved, which fails unrun.
 		a.planApproved = a.planApproved && t.Status == toolFailed
-	}
-	if t.Kind != "" {
-		st.kind = t.Kind
 	}
 	if t.Status == toolCompleted || t.Status == toolFailed {
 		st.finished = true
 		st.failed = t.Status == toolFailed
 	}
-	for _, p := range t.Locations {
-		a.touch(t.ID, p)
-	}
-	for _, d := range t.Diffs {
-		a.touch(t.ID, d.Path)
-	}
-}
-
-// touch notes that call id named path, the first time it does.
-func (a *turnAccumulator) touch(id, path string) {
-	if t := (accTouch{tool: id, path: path}); path != "" && !a.touched[t] {
-		a.touched[t] = true
-		a.touches = append(a.touches, t)
-	}
+	st.edited = t.Edited
 }
 
 // message is the last assistant text entry, and whether it lost its head.
@@ -345,15 +325,37 @@ func (a *turnAccumulator) toolCalls() int {
 	return n
 }
 
-// files is every distinct path an edit-kind call named, in first-touch order.
-func (a *turnAccumulator) files() []string {
-	out, seen := []string{}, map[string]bool{}
-	for _, t := range a.touches {
-		if st := a.tools[t.tool]; st == nil || st.kind != toolKindEdit || seen[t.path] {
+// editedFiles is what a turn's calls said they changed, each path once, in the
+// order the calls opened.
+type editedFiles struct {
+	files, outside []string
+	plan           string
+	truncated      bool
+}
+
+// edited is the turn's editedFiles; files is never nil, a result's `[]`.
+func (a *turnAccumulator) edited() editedFiles {
+	out := editedFiles{files: []string{}}
+	seen := map[string]bool{}
+	distinct := func(list *[]string, paths []string) {
+		for _, p := range paths {
+			if !seen[p] {
+				seen[p] = true
+				*list = append(*list, p)
+			}
+		}
+	}
+	for _, id := range a.toolOrder {
+		e := a.tools[id].edited
+		if e == nil {
 			continue
 		}
-		seen[t.path] = true
-		out = append(out, t.path)
+		distinct(&out.files, e.Files)
+		distinct(&out.outside, e.OutsideFiles)
+		if e.PlanFile != "" {
+			out.plan = e.PlanFile
+		}
+		out.truncated = out.truncated || e.Truncated
 	}
 	return out
 }
@@ -473,24 +475,29 @@ func terminalStatus(status string) bool {
 // (`[]` when none) and stopReason on a terminal status; the rest when present. A
 // key that is absent is never written as null or false.
 type turnResult struct {
-	Status      string          `json:"status"`
-	Session     string          `json:"session"`
-	Short       string          `json:"short"`
-	Provider    string          `json:"provider"`
-	Model       string          `json:"model,omitempty"`
-	Turn        string          `json:"turn,omitempty"`
-	Row         string          `json:"row,omitempty"`
-	Message     *string         `json:"message,omitempty"`
-	MessageCut  bool            `json:"messageCut,omitempty"`
-	MessageFile string          `json:"messageFile,omitempty"`
-	StopReason  string          `json:"stopReason,omitempty"`
-	Error       *resultError    `json:"error,omitempty"`
-	PlanEnded   bool            `json:"planEnded,omitempty"`
-	ToolCalls   *int            `json:"toolCalls,omitempty"`
-	DurationMs  *int64          `json:"durationMs,omitempty"`
-	Files       *[]string       `json:"files,omitempty"`
-	Plan        string          `json:"plan,omitempty"`
-	Usage       json.RawMessage `json:"usage,omitempty"`
+	Status      string       `json:"status"`
+	Session     string       `json:"session"`
+	Short       string       `json:"short"`
+	Provider    string       `json:"provider"`
+	Model       string       `json:"model,omitempty"`
+	Turn        string       `json:"turn,omitempty"`
+	Row         string       `json:"row,omitempty"`
+	Message     *string      `json:"message,omitempty"`
+	MessageCut  bool         `json:"messageCut,omitempty"`
+	MessageFile string       `json:"messageFile,omitempty"`
+	StopReason  string       `json:"stopReason,omitempty"`
+	Error       *resultError `json:"error,omitempty"`
+	PlanEnded   bool         `json:"planEnded,omitempty"`
+	ToolCalls   *int         `json:"toolCalls,omitempty"`
+	DurationMs  *int64       `json:"durationMs,omitempty"`
+	Files       *[]string    `json:"files,omitempty"`
+	// FilesTruncated, OutsideFiles and PlanFile sit beside Files: see
+	// agent.ToolEdited.
+	FilesTruncated bool            `json:"filesTruncated,omitempty"`
+	OutsideFiles   []string        `json:"outsideFiles,omitempty"`
+	PlanFile       string          `json:"planFile,omitempty"`
+	Plan           string          `json:"plan,omitempty"`
+	Usage          json.RawMessage `json:"usage,omitempty"`
 	// UsageComplete is only ever false (usageIncomplete): absent is the rule.
 	UsageComplete *bool        `json:"usageComplete,omitempty"`
 	AutoAnswered  []autoAnswer `json:"autoAnswered,omitempty"`
@@ -599,9 +606,10 @@ func newResult(s resultSession, status string) *turnResult {
 // the turn folded none (§3.1) — message, tools, files and duration.
 func (r *turnResult) fill(a *turnAccumulator) {
 	msg, cut := a.message()
-	n, d, files := a.toolCalls(), a.durationMs(), a.files()
+	n, d, edited := a.toolCalls(), a.durationMs(), a.edited()
 	if terminalStatus(r.Status) {
-		r.Message, r.ToolCalls, r.DurationMs, r.Files = &msg, &n, &d, &files
+		r.Message, r.ToolCalls, r.DurationMs, r.Files = &msg, &n, &d, &edited.files
+		r.FilesTruncated, r.OutsideFiles, r.PlanFile = edited.truncated, edited.outside, edited.plan
 		r.MessageCut = cut
 		if r.StopReason == "" {
 			r.StopReason = defaultStopReason(r.Status)
@@ -667,7 +675,8 @@ func plainBodyOf(msg, plan string) string {
 
 // footer is plain output's footer (§3.1): the status line —
 // `<status> · <s>s · <n> tool calls[ · $<turn cost>| · unpriced][ · context
-// <a>/<b>]` — then, each when there is one, the error, `files:`, one
+// <a>/<b>]` — then, each when there is one, the error, `files:` and what goes
+// with it, one
 // `auto-answered:` line per answer, the ask and what blocks the target, the
 // session line, and the exact next command for a running or needs_input
 // result.
@@ -698,6 +707,15 @@ func (r *turnResult) footer() string {
 	}
 	if r.Files != nil && len(*r.Files) > 0 {
 		lines = append(lines, "files: "+psLine(strings.Join(*r.Files, ", ")))
+	}
+	if len(r.OutsideFiles) > 0 {
+		lines = append(lines, "outside the workspace: "+psLine(strings.Join(r.OutsideFiles, ", ")))
+	}
+	if r.FilesTruncated {
+		lines = append(lines, "files: a call named more paths than are listed")
+	}
+	if r.PlanFile != "" {
+		lines = append(lines, "plan file: "+psLine(r.PlanFile))
 	}
 	for _, a := range r.AutoAnswered {
 		lines = append(lines, fmt.Sprintf("auto-answered: %s %q → %s", a.Kind, a.Summary, a.Choice))

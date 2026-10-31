@@ -678,12 +678,26 @@ func (h *Host) Thought(agentID, text string) {
 
 // Tool emits an EventTool with the given id, name and status, agentID "" for
 // the main session.
-func (h *Host) Tool(agentID, id, name, status string) { h.ToolTitled(agentID, id, name, "", status) }
+func (h *Host) Tool(agentID, id, name, status string) {
+	h.ToolTitled(agentID, id, name, "", status, nil)
+}
 
 // ToolTitled is Tool with the call's title — what a row's doing names a
 // running tool by (plan 030 §3.10) — "" for none, which is Tool.
-func (h *Host) ToolTitled(agentID, id, name, title, status string) {
-	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: &agent.ToolEvent{ID: id, Name: name, Title: title, Status: status}})
+func (h *Host) ToolTitled(agentID, id, name, title, status string, edited *EditedOp) {
+	t := &agent.ToolEvent{ID: id, Name: name, Title: title, Status: status}
+	if edited != nil {
+		t.Edited = &agent.ToolEdited{Files: edited.Files, OutsideFiles: edited.OutsideFiles, PlanFile: edited.PlanFile, Truncated: edited.Truncated}
+	}
+	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: t})
+}
+
+// EditedOp is a tool op's stamp (agent.ToolEdited).
+type EditedOp struct {
+	Files        []string `json:"files,omitempty"`
+	OutsideFiles []string `json:"outsideFiles,omitempty"`
+	PlanFile     string   `json:"planFile,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
 }
 
 // PermOption is one option a Permission call offers.
@@ -1091,7 +1105,9 @@ type opParams struct {
 
 	// tool
 	ToolName string `json:"toolName,omitempty"`
-	Status   string `json:"status,omitempty"`
+	// Edited is a tool's stamp.
+	Edited *EditedOp `json:"edited,omitempty"`
+	Status string    `json:"status,omitempty"`
 
 	// permission
 	Tool    string         `json:"tool,omitempty"`
@@ -1188,7 +1204,7 @@ func (h *Host) do(p opParams) error {
 	case "thought":
 		h.Thought(p.Agent, p.Text)
 	case "tool":
-		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status)
+		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status, p.Edited)
 	case "permission":
 		opts := make([]PermOption, len(p.Options))
 		for i, o := range p.Options {

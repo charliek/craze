@@ -190,6 +190,39 @@ sends neither: its stop reads with no `detail.cause`, and a prompt it withdrew r
 
 See [a turn cut short](../reference/cli.md#a-turn-cut-short).
 
+### `files`
+
+**`files` now lists only successful edits inside the workspace, spelled from it.** It
+used to list every path an edit-kind call named, however the call ended: an edit plan
+mode refused, a `search_replace` whose old text did not match and a permission denied
+were all in it. Agent-private files were too.
+
+```json
+{"files":["/work/proj/stats/core.py","/work/proj/refused.py","/home/me/.grok/sessions/%2Fwork%2Fproj/01a19050-6468-79c1-ac66-263c44a65a74/plan.md"]}
+```
+
+becomes
+
+```json
+{"files":["stats/core.py"],"planFile":"/home/me/.grok/sessions/%2Fwork%2Fproj/01a19050-6468-79c1-ac66-263c44a65a74/plan.md"}
+```
+
+- A program that opened a path from `files` joins it to the workspace first.
+- A program that filtered craze's or grok's plan file out of `files` can stop, and reads
+  `planFile`.
+- Edits elsewhere are in `outsideFiles`, absolute. `filesTruncated: true` says a call
+  named more than 64 paths.
+- grok's and gx's edits count by tool name (`search_replace`, `write`). A new grok edit
+  tool does not count until craze knows its name.
+- cursor's deletes and moves count, so a deleted file and both names of a rename are
+  listed. They used to be missing.
+
+`files` still says only what edit tools reported. Plan mode refuses edit tools but lets
+the shell through, and shell writes are never in `files`: a program that must know every
+change diffs the workspace itself. See [what `files`
+lists](../reference/cli.md#what-files-lists). A waiter on a host from before this change
+reads `files: []`, whatever that host's turn edited, because the host is what decides.
+
 ### Other commands
 
 **A usage error under `--json` prints an object.** Any command, exit 2 as before,

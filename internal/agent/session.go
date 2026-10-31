@@ -819,7 +819,21 @@ type ToolEvent struct {
 	Output      *ToolOutput
 	Diffs       []ToolDiff
 	Task        *TaskInfo
-	At          time.Time
+	// Edited is what the call changed, as its host judged it once it completed
+	// (edited.go); nil for every other call, and on every other status.
+	Edited *ToolEdited
+	At     time.Time
+}
+
+// ToolEdited is the paths an edit call that completed reported changing: Files
+// inside the workspace, spelled from it; OutsideFiles elsewhere, absolute;
+// PlanFile the session's plan file, in neither. Truncated says the call named
+// more than editedPathsCap paths and these are the first of them.
+type ToolEdited struct {
+	Files        []string
+	OutsideFiles []string
+	PlanFile     string
+	Truncated    bool
 }
 
 // ToolOutput is a tool_call rawOutput. Stdout/Stderr/Content are the 8 KiB

@@ -489,7 +489,7 @@ func wantResult(t *testing.T, res *turnResult, f *waitFailure, status string) *t
 // and matched to the target the reply names. The reply is held until the
 // waiter has buffered the ending.
 func TestWaitTurnMatchesEventsBeforeTheSubmitReply(t *testing.T) {
-	r := newWaitRig(t, 0, answerTurn(toolEv("t1", "edit", "completed", "a.go"), textEv("the answer")))
+	r := newWaitRig(t, 0, answerTurn(editEv("t1", "completed", stamp("a.go")), textEv("the answer")))
 	conn := r.dial(nil)
 	buffered := make(chan struct{})
 	var once sync.Once

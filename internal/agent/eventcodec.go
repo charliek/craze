@@ -395,7 +395,16 @@ type wireTool struct {
 	Output      *wireToolOutput `json:"output,omitempty"`
 	Diffs       []wireDiff      `json:"diffs,omitempty"`
 	Task        *wireTask       `json:"task,omitempty"`
+	Edited      *wireEdited     `json:"edited,omitempty"`
 	At          time.Time       `json:"at,omitzero"`
+}
+
+// wireEdited is ToolEdited.
+type wireEdited struct {
+	Files        []string `json:"files,omitempty"`
+	OutsideFiles []string `json:"outsideFiles,omitempty"`
+	PlanFile     string   `json:"planFile,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
 }
 
 type wireToolOutput struct {
@@ -1165,6 +1174,7 @@ func toWireTool(t *ToolEvent) *wireTool {
 		Locations:   t.Locations,
 		Output:      (*wireToolOutput)(t.Output),
 		Diffs:       convertSlice(t.Diffs, func(d ToolDiff) wireDiff { return wireDiff(d) }),
+		Edited:      (*wireEdited)(t.Edited),
 		At:          t.At.UTC(),
 	}
 	if k := t.Task; k != nil {
@@ -1349,6 +1359,7 @@ func (w *wireTool) tool() *ToolEvent {
 		Locations:   nilIfEmpty(w.Locations),
 		Output:      (*ToolOutput)(w.Output),
 		Diffs:       convertSlice(w.Diffs, func(d wireDiff) ToolDiff { return ToolDiff(d) }),
+		Edited:      (*ToolEdited)(w.Edited),
 		At:          w.At.UTC(),
 	}
 	if k := w.Task; k != nil {

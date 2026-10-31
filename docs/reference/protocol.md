@@ -1958,6 +1958,24 @@ that does not know them ignores the kind and the member (see [Tolerant
 inbound, strict outbound](#tolerant-inbound-strict-outbound)), and neither
 bumps a codec version.
 
+## What a tool call changed
+
+A `tool` event's `edited` is what the call changed, as its host judged it: the waiting
+commands' [`files`](cli.md#what-files-lists) are built from it. The host stamps a
+main-session call once it reports `completed`, if the call is one of its provider's edit
+calls and named a path, and every later update of the call carries the stamp; a status
+that leaves `completed` drops it. No other event has one, and a sub-agent's calls never do.
+
+| Member | |
+|--------|---|
+| `files` | Paths inside the workspace, spelled from it |
+| `outsideFiles` | Paths outside it, absolute and resolved |
+| `planFile` | The session's plan file, absolute and resolved; in neither list |
+| `truncated` | `true` when the call named more than 64 paths, and these are its first 64 |
+
+A row's own `locations` and `diffs` keep their caps (8 each), as a client draws them.
+A host from before `edited` sends none: a reader takes that as nothing reported.
+
 ## Usage
 
 A native session reports what it has spent and how full its context is: the

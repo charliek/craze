@@ -1427,7 +1427,8 @@ calls, then — for a native session — what the turn cost (`unpriced` when non
 of it had a price; `+` when some did not) and how full the context is. Then,
 each when there is one: `usage:` (a step's spend [left out](#a-turn-cut-short)),
 `error:` (a failed turn, a stopped one, or one interrupted before its prompt was
-sent), `files:` (the paths the turn's edits touched), one
+sent), [`files:`](#what-files-lists) (with `outside the workspace:` and `plan file:`
+when there are any), one
 `auto-answered:` line per question or plan craze's approval policy answered,
 `ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
 command to run next for a `running` or `needs_input` result.
@@ -1455,7 +1456,10 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 
 | Key | |
 |-----|---|
-| `message`, `toolCalls`, `durationMs`, `files` | On `completed`, `failed`, `cancelled` and `dropped`, always: `""`, `0` and `[]` when there is none |
+| `message`, `toolCalls`, `durationMs`, `files` | On `completed`, `failed`, `cancelled` and `dropped`, always: `""`, `0` and `[]` when there is none. `files` is the paths successful edit-tool calls reported changing inside the workspace ([below](#what-files-lists)) |
+| `outsideFiles` | Absolute paths successful edit-tool calls reported changing outside the workspace, when there were any |
+| `planFile` | The session's plan file, absolute, when the turn's edits wrote it; never in `files` or `outsideFiles` |
+| `filesTruncated` | `true` when one call named more than 64 paths, so the lists hold its first 64 |
 | `stopReason` | How the turn ended, on every terminal status ([below](#each-status)) |
 | `error` | Why it did not complete: the [object](#failures-and-kinds) `{message, kind, retryable, detail?}` |
 | `planEnded` | `true` when the turn ended at a plan it presented ([below](#each-status)) |
@@ -1474,6 +1478,58 @@ A key that does not apply is absent, never `null` or `false`:
 ```json
 {"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
 ```
+
+### What `files` lists
+
+`files` is the paths successful edit-tool calls reported changing inside the
+workspace. It is what the agent's tools said, not a look at the disk:
+
+- **Only a call that reported success counts:** one whose status ended `completed`.
+  A call that failed, was refused or was cancelled lists nothing, and neither does
+  one that started and never finished. So an edit plan mode refused, a
+  `search_replace` whose old text did not match, and a permission denied are not
+  listed. A later call that succeeds on the same path lists it.
+- **Only edit tools count.** Which calls those are depends on the provider:
+
+    | Provider | A call is an edit when |
+    |----------|------------------------|
+    | `native` | its kind is `edit` (`write`, `edit`) |
+    | `cursor` | its kind is `edit`, `delete` or `move`: a delete lists the deleted path, a rename both names |
+    | `grok`, `gx` | its tool is `search_replace` or `write`, whatever kind it reports; any other tool does not count |
+
+- **Shell writes are never in `files`.** Plan mode refuses edit tools but lets the
+  shell through, so a plan-mode turn can change the workspace with `files` empty.
+  **A caller that must know every change should diff the workspace itself.**
+- **A sub-agent's edits are not in its parent's `files`.** The list is the turn's own
+  calls.
+- **Paths are spelled from the workspace** (`stats/core.py`). A path is resolved before
+  it is judged, a component at a time as the OS walks it: every symlink on the way
+  followed, a `..` taken from where that left it (with `out` a link to `/elsewhere/sub`,
+  `out/../x` is `/elsewhere/x`), and the final element as it is, so a deleted file
+  resolves and an edit of a symlink names the link. A relative path is taken from the
+  workspace. Inside means below the resolved `-C` at a path boundary (`/a/bc` is not
+  inside `/a/b`), and a `-C` that is itself a symlink, as macOS's `/tmp` is, works. A
+  link re-pointed after the call can land elsewhere; craze accepts that race, as plan
+  mode's check of a path does.
+- **A `file:` URI is read as its path.** Any other location with a scheme
+  (`https://…`, `untitled:…`) names no file here and is left out, unless a file in the
+  workspace is spelled that way.
+- **A path is reported as it is,** not as a row shows it: JSON escapes what it must, so
+  `a\u200bb.go` and a name with a control character come back exact. Bytes that are not
+  UTF-8 are the exception. A path is judged on its bytes, so an edit inside is in
+  `files`, but JSON cannot carry them, and each reads as U+FFFD: use it to know that a
+  file changed, not to open it. Plain output's footer shows a sanitized line.
+- **`outsideFiles` is the same list for paths outside the workspace,** absolute.
+- **`planFile` is the session's plan file,** when the turn wrote it. It is told by
+  where the file is, never by its name: native's is the one under
+  `<craze home>/native/sessions`, and grok's and gx's is
+  `<GROK_HOME or ~/.grok>/sessions/<encoded cwd>/<session>/plan.md` (a relative
+  `GROK_HOME` is from the agent's working directory, the workspace), for the session id
+  the agent gave this session (`providerSessionId` in the [session info
+  document](protocol.md#the-session-info-document), not craze's). A `plan.md` anywhere
+  else is a file like any other. cursor's plan is not a file of its own, and it has no
+  `planFile`.
+- **One call lists at most 64 paths.** `filesTruncated: true` says one named more.
 
 ### Each status
 

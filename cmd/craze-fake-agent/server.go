@@ -524,6 +524,10 @@ func (s *server) onRequest(msg *acp.Message) {
 		if s.script == "preinstall" {
 			s.preinstallUpdates()
 		}
+		if s.script == "edit-race" {
+			s.editRaceBuffered()
+			go s.editRaceLive()
+		}
 		s.reply(msg.ID, map[string]any{
 			"sessionId": fakeSessionID,
 			"modes": map[string]any{
@@ -704,6 +708,10 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.grokAsk(msg.ID, true)
 	case "grok-plan":
 		s.grokPlan(msg.ID)
+	case "edits":
+		s.edits(msg.ID)
+	case "grok-edits":
+		s.grokEdits(msg.ID)
 	case "todos":
 		s.todos(msg.ID, true)
 	case "todos-notify":

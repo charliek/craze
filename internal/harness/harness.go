@@ -316,6 +316,7 @@ type Session struct {
 	// entry's for a resumed one (PromptSHA256).
 	promptSHA string
 	store     *store.Store
+	workspace string   // Options.Workspace
 	tools     *toolset // fixed at Open
 	getenv    func(string) string
 	newModel  func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -589,6 +590,7 @@ func Open(opts Options) (*Session, error) {
 	}
 	child := opts.Child
 	s := &Session{
+		workspace:          opts.Workspace,
 		getenv:             opts.Getenv,
 		newModel:           opts.NewModel,
 		newAgent:           defaultAgent,
@@ -1143,6 +1145,13 @@ func (s *Session) Current() (model, effort string) {
 
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
+
+// PlanPath is the session's plan file, fixed at Open; "" for a sub-agent, which
+// has none.
+func (s *Session) PlanPath() string { return s.modes.planPath }
+
+// Workspace is the session's working directory, absolute.
+func (s *Session) Workspace() string { return s.workspace }
 
 // PromptSize and PromptSHA256 describe the frozen system prompt — the
 // profile's text with Options.Prompt and the session-start section rendered

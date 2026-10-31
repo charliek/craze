@@ -105,19 +105,18 @@ func TestAccumulatorKeepsTheMessagesTail(t *testing.T) {
 }
 
 // TestAccumulatorToolsFilesAndAsks: toolCalls counts distinct ids that
-// finished (completed or failed); files are the edit-kind calls' paths in
-// first-touch order, a kind learnt from a later update included; the plan is
-// the last presented; automatic answers are listed, a sub-agent's tools are
-// not counted.
+// finished (completed or failed); files are what the calls' stamps say, in the
+// order the calls opened; the plan is the last presented; automatic answers are
+// listed, a sub-agent's tools are not counted.
 func TestAccumulatorToolsFilesAndAsks(t *testing.T) {
 	a := newTurnAccumulator()
 	for _, ev := range []agent.Event{
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Status: "pending", Locations: []string{"b.go"}}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "r1", Kind: "read", Status: "completed", Locations: []string{"z.go"}}},
-		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Kind: "edit", Status: "completed", Diffs: []agent.ToolDiff{{Path: "a.go"}, {Path: "b.go"}}}},
+		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "e1", Kind: "edit", Status: "completed", Edited: &agent.ToolEdited{Files: []string{"b.go", "a.go"}}}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "x1", Kind: "execute", Status: "failed"}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "x2", Kind: "execute", Status: "in_progress"}},
-		{Type: agent.EventTool, Agent: "child", Tool: &agent.ToolEvent{ID: "c1", Kind: "edit", Status: "completed", Locations: []string{"child.go"}}},
+		{Type: agent.EventTool, Agent: "child", Tool: &agent.ToolEvent{ID: "c1", Kind: "edit", Status: "completed", Edited: &agent.ToolEdited{Files: []string{"child.go"}}}},
 		{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Auto: true, Questions: []agent.Question{{ID: "q1", Prompt: "Pick one",
 			Options: []agent.Option{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}}}, Answers: map[string][]string{"q1": {"a"}}}},
 		{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "Refactor", Plan: "1. do it", Auto: true, Accepted: true}},
@@ -127,7 +126,7 @@ func TestAccumulatorToolsFilesAndAsks(t *testing.T) {
 	if n := a.toolCalls(); n != 3 {
 		t.Errorf("toolCalls = %d, want 3 (e1, r1, x1)", n)
 	}
-	if got := a.files(); !slices.Equal(got, []string{"b.go", "a.go"}) {
+	if got := a.edited().files; !slices.Equal(got, []string{"b.go", "a.go"}) {
 		t.Errorf("files = %q, want [b.go a.go]", got)
 	}
 	if a.plan != "1. do it" {

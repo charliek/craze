@@ -877,7 +877,7 @@ func appendTools(out []agent.ToolEvent, ents []*Entry) []agent.ToolEvent {
 }
 
 // cloneTool is a tool payload the caller owns: the struct and everything it
-// points at — Locations, Diffs, the Output and its ExitCode, the Task — copied,
+// points at — Locations, Diffs, the Output and its ExitCode, the Task, Edited — copied,
 // as agent's own snapshot copies a tool (agent's cloneTool, tools.go). A
 // retained payload is the event's own, shared with whatever else holds that
 // event, and is never written after it is folded; a caller of Tools may do as
@@ -901,6 +901,12 @@ func cloneTool(t *agent.ToolEvent) agent.ToolEvent {
 	if t.Task != nil {
 		task := *t.Task
 		out.Task = &task
+	}
+	if t.Edited != nil {
+		edited := *t.Edited
+		edited.Files = slices.Clone(t.Edited.Files)
+		edited.OutsideFiles = slices.Clone(t.Edited.OutsideFiles)
+		out.Edited = &edited
 	}
 	return out
 }

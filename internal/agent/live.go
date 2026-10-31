@@ -117,6 +117,12 @@ type session struct {
 	sessionID string
 	tools     map[string]ToolEvent
 	toolOrder []string
+	// namedPaths is the paths each main-session call has named, for its stamp
+	// (edited.go); under mu.
+	namedPaths callPaths
+	// toolPub keeps an update's merge, stamp and publish together
+	// (publishToolDelta). Never taken with mu held.
+	toolPub sync.Mutex
 	// taskReceipts holds cursor/task receipts whose tool_call has not landed
 	// yet; it is bounded and cleared at turn end so an unmatched receipt can
 	// never leak or attach itself to a later tool with a reused id.
@@ -1801,11 +1807,7 @@ func (s *session) closeInFlightTools(status string) {
 		// The in-flight check happens under the merge lock: a terminal
 		// update that lands between the scan and the merge wins.
 		st := status
-		tool, changed, extras := s.applyToolDelta("", toolDelta{id: id, status: &st, onlyIfInFlight: true})
-		if changed {
-			s.emit(Event{Type: EventTool, Tool: &tool})
-		}
-		s.emitAll(extras)
+		s.publishToolDelta(toolDelta{id: id, status: &st, onlyIfInFlight: true})
 	}
 }
 
@@ -3007,6 +3009,8 @@ func (s *session) onTaskReceipt(req acp.TaskRequest) {
 	if req.ToolCallID == "" {
 		return
 	}
+	s.toolPub.Lock()
+	defer s.toolPub.Unlock()
 	info := TaskInfo{
 		Description:  sanitizeText(req.Description),
 		Prompt:       truncateUTF8(sanitizeText(req.Prompt), taskPromptCap),
@@ -3084,11 +3088,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			return
 		}
 		delta.wireName = n.ToolName
-		tool, emit, extras := s.applyToolDelta("", delta)
-		if emit {
-			s.emit(Event{Type: EventTool, Tool: &tool})
-		}
-		s.emitAll(extras)
+		s.publishToolDelta(delta)
 	case acp.UpdateAvailableCommands:
 		commands := commandsFromUpdate(u.AvailableCommands)
 		s.mu.Lock()

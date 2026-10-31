@@ -23,9 +23,12 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote
+
+import pytest
 
 from conftest import PS_TIMEOUT, REMOVED_CONFIG_ENV, TEST_HOST_IDLE_EXIT, _argv, pid_alive
-from sse_fixture import SSEFixture, Step, answer, call_step, write_native_config
+from sse_fixture import SSEFixture, Step, answer, call_step, plan_path_in, write_native_config
 from test_detach import _entries
 
 WAIT = 10.0
@@ -598,3 +601,131 @@ def test_a_cancel_mid_step_reads_the_same(craze_bin: Path, fake_agent_bin: Path,
                 waiter.kill()
                 waiter.communicate()
         _stop(craze_bin, short)
+
+
+def _edits(craze_bin: Path, fake_agent_bin: Path, provider: str, workspace: Path, script: str) -> dict:
+    """A waiting turn of the fake agent's edits script, as provider, in workspace."""
+    _config(fake_agent_bin)
+    with (Path(os.environ["CRAZE_HOME"]) / "config.toml").open("a", encoding="utf-8") as f:
+        f.write(f'grok = "{fake_agent_bin}"\ngx = "{fake_agent_bin}"\n')
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", provider, "-C", str(workspace), "go", script=script)
+    assert out.returncode == 0, out
+    res = json.loads(out.stdout)
+    _stop(craze_bin, res["short"])
+    return res
+
+
+@pytest.mark.parametrize("through_a_symlink", [False, True])
+def test_files_from_a_cursor_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, through_a_symlink: bool) -> None:
+    """Every way a call ends and a path is spelled, through the binary: only what
+    completed with kind edit, delete or move, spelled from the workspace, with -C
+    itself a symlink; a file: URI decoded, any other left out, and a name kept whole."""
+    root = tmp_path.resolve()
+    real = root / "w"
+    real.mkdir()
+    workspace = real
+    if through_a_symlink:
+        workspace = root / "link"
+        workspace.symlink_to(real)
+    res = _edits(craze_bin, fake_agent_bin, "cursor", workspace, "edits")
+    many = [f"many/{i:02d}.txt" for i in range(64)]
+    assert res["files"] == [
+        "made.txt",
+        "rel/one.txt",
+        "real.txt",
+        "gone/dir/deleted.txt",
+        "again.txt",
+        "removed.txt",
+        "new-name.txt",
+        "old-name.txt",
+        "moved-from.txt",
+        "moved-to.txt",
+        "uri.txt",
+        "zero\u200bwidth.txt",
+        *many,
+    ], res["files"]
+    assert res["outsideFiles"] == [str(root / "escaped.txt"), f"{workspace}-sibling/x.txt"], res
+    assert res["filesTruncated"] is True, res
+    assert "planFile" not in res, res
+
+
+@pytest.mark.parametrize("provider", ["grok", "gx"])
+def test_files_from_a_grok_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, provider: str) -> None:
+    """grok's and gx's edit tools by name, whatever kind they say. The plan file is
+    the one under the session id the agent gave, which is not craze's, and it is in
+    neither list; another session's plan.md and a worktree's are files like others."""
+    workspace = tmp_path.resolve() / "w"
+    workspace.mkdir()
+    res = _edits(craze_bin, fake_agent_bin, provider, workspace, "grok-edits")
+    assert res["session"] != "fake-session-1", res
+    sessions = Path(os.environ["HOME"]).resolve() / ".grok" / "sessions" / quote(str(workspace), safe="")
+    assert res["planFile"] == str(sessions / "fake-session-1" / "plan.md"), res
+    assert res["files"] == ["plan.md", "made.txt", "written.txt"], res
+    assert res["outsideFiles"] == [str(sessions / "another-session" / "plan.md")], res
+    assert "filesTruncated" not in res, res
+
+
+def test_files_absent_and_the_plain_footer(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A turn with no edit: files is [] and the keys beside it are absent. Plain
+    output's footer says all three when there are some."""
+    workspace = tmp_path.resolve() / "w"
+    workspace.mkdir()
+    res = _edits(craze_bin, fake_agent_bin, "cursor", workspace, "echo")
+    assert res["files"] == [], res
+    assert not {"outsideFiles", "planFile", "filesTruncated"} & res.keys(), res
+    out = _craze(craze_bin, "new", "--wait", "--provider", "grok", "-C", str(workspace), "go", script="grok-edits")
+    assert out.returncode == 0, out
+    text = out.stdout.decode()
+    assert "\nfiles: plan.md, made.txt, written.txt\n" in text, text
+    assert "\noutside the workspace: " in text and "another-session/plan.md\n" in text, text
+    assert "fake-session-1/plan.md\n" in text and "\nplan file: " in text, text
+    _stop(craze_bin, re.search(r"^session (\S+) ·", text, re.M).group(1))
+
+
+def test_files_from_a_native_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A native turn in plan mode: the refused edit is not listed, the plan file is
+    planFile, and a shell's write is never in files, the rule the docs state. A turn
+    in agent mode lists its edit, and not one whose old text did not match."""
+    _config(fake_agent_bin)
+    workspace = tmp_path.resolve() / "w"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("alpha\n", encoding="utf-8")
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    with SSEFixture() as fixture:
+        write_native_config(craze_home / "native", fixture.base_url)
+        plans: list[str] = []
+
+        def write_the_plan(request) -> Step:
+            plans.append(plan_path_in(request))
+            return call_step("write", {"filePath": plans[0], "content": "# The plan\n"})
+
+        fixture.set_script(
+            [
+                call_step("write", {"filePath": "refused.txt", "content": "x"}),
+                call_step("bash", {"command": "echo x > shell.txt"}),
+                write_the_plan,
+                call_step("exit_plan_mode", {}),
+            ]
+        )
+        out = _craze(craze_bin, "new", "--wait", "--json", "--plan", "--provider", "native", "-C", str(workspace), "plan it")
+        assert out.returncode == 0, out
+        res = json.loads(out.stdout)
+        assert (workspace / "shell.txt").exists() and not (workspace / "refused.txt").exists(), res
+        assert res["files"] == [] and "outsideFiles" not in res, res
+        assert res["planFile"] == str(Path(plans[0]).resolve()), res
+        _stop(craze_bin, res["short"])
+
+        fixture.set_script(
+            [
+                call_step("edit", {"filePath": "notes.txt", "oldString": "not there", "newString": "x"}),
+                call_step("edit", {"filePath": "notes.txt", "oldString": "alpha", "newString": "beta"}),
+                call_step("write", {"filePath": str(workspace.parent / "o.txt"), "content": "x"}),
+                answer("done"),
+            ]
+        )
+        out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "native", "-C", str(workspace), "edit it")
+        assert out.returncode == 0, out
+        res = json.loads(out.stdout)
+        assert res["files"] == ["notes.txt"], res
+        assert res["outsideFiles"] == [str(workspace.parent / "o.txt")] and "planFile" not in res, res
+        _stop(craze_bin, res["short"])
