@@ -1,0 +1,25 @@
+version: 1
+targets:
+  cli:
+    kind: cli
+    # release.yml runs .goreleaser.yaml on v* tags: ./cmd/craze from go.mod,
+    # to the GitHub release, the tap's craze formula and (stable tags only)
+    # the apt-charliek dispatch. A prerelease tag skips the tap.
+    released: { tag_pattern: '^v\d+\.\d+\.\d+$', homebrew: craze }
+    ships: [go.mod]
+lockfiles:
+  # pyproject.toml has only the docs group (zensical and the docs theme): it
+  # builds the documentation site, which no release artifact contains.
+  uv.lock: { role: build-tool }
+  # crazeeval, the native harness evaluation (plan 029): recording proxy,
+  # sandboxed runners, tasks and checks. Nothing in it ships.
+  eval/uv.lock: { role: test }
+  # "This module has no code of its own": it keeps the eval fixtures and
+  # hidden tests out of the root module's go test and lint.
+  eval/go.mod: { role: test }
+  # Eval task fixtures, deliberately buggy workspaces the agent under test
+  # edits.
+  eval/fixtures/humanize/files/go.mod: { role: test }
+  eval/fixtures/kvstore/files/go.mod: { role: test }
+  eval/fixtures/lrucache/files/go.mod: { role: test }
+  eval/fixtures/quota/files/go.mod: { role: test }
