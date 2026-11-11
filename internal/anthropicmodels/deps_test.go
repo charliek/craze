@@ -33,8 +33,12 @@ var forbiddenDeps = []string{
 	// Charm's fork of the OpenAI SDK, which Fantasy v0.45 and later build on.
 	"github.com/charmbracelet/openai-go",
 	"github.com/anthropics/anthropic-sdk-go",
-	"github.com/charliek/craze/internal/harness/llm",
+	llmPackage,
 }
+
+// llmPackage is package llm's import path: forbidden itself, while its
+// subpackage messagesapi is allowed (allowedInternal).
+const llmPackage = "github.com/charliek/craze/internal/harness/llm"
 
 // beyondTheRule is every craze package pkg imports directly that the rule
 // does not allow, and every package of its dependency closure the rule
@@ -48,11 +52,23 @@ func beyondTheRule(t *testing.T, pkg string) []string {
 		}
 	}
 	for _, p := range goList(t, "-deps", "-f", "{{.ImportPath}}", pkg) {
-		if slices.Contains(forbiddenDeps, p) {
+		if forbiddenDep(p) {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// forbiddenDep says p is one of forbiddenDeps or a subpackage of one (an
+// SDK's option package, say), except under package llm, whose subpackage
+// messagesapi the cache is allowed.
+func forbiddenDep(p string) bool {
+	for _, f := range forbiddenDeps {
+		if p == f || (f != llmPackage && strings.HasPrefix(p, f+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestImportsOnlyTheClientTheTableAndAtomicfile: the cache imports, of

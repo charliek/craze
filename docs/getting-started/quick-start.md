@@ -62,7 +62,7 @@ sudo apt install ./craze_<version>_<arch>.deb
 
 ### From source
 
-Source installs require Go 1.27 or later on `PATH`; verify with `go version`.
+Source installs require Go 1.27.3 or later on `PATH`; verify with `go version`.
 
 ```bash
 go install github.com/charliek/craze/cmd/craze@latest
