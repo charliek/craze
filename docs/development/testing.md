@@ -275,7 +275,18 @@ that finish at once, which is what a frame of a *drained* queue needs.
 - `test_auth.py` — `craze auth login|logout|list` against a temp `CRAZE_HOME`:
   the messages, the refusals that save nothing, and canaries proving a stored
   key reaches the provider's wire and nothing else (the no-echo prompt is the
-  Go pty test's, `internal/cli/auth_test.go`)
+  Go pty test's, `internal/cli/auth_test.go`), and a key piped without a
+  trailing newline
+- `test_waiting.py` — the waiting commands (`craze new --wait`, `craze send`,
+  `craze wait`, `craze stop`) end to end over the fake agent: stops, killed
+  hosts and their reaped shell commands, `files`, the prompt's 512 KiB bound
+  and the busy session's refusal over 32 KiB, usage across a reload, and the
+  detached waiter, run as a driver runs it: no terminal, stdin `/dev/null`, a
+  session of its own (`start_new_session`, as macOS has no `setsid` binary),
+  its result and exit code read from files, across a host that idled out
+- `test_exit_after_turn.py` — `--exit-after-turn`, the unattended idle exit,
+  `stop` and `cancel` under `--json`, `cancel --turn`, `--session-file` and
+  `ps --brief`
 - `test_sessions.py` — the session list in real PTYs sharing one `HOME`, each
   in a directory of its own: groups, regrouping, `ctrl+x`, opening a session
   in place, quitting from the list, an unreachable host, resuming a saved

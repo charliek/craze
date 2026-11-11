@@ -2,6 +2,8 @@
 
 Needs craze 0.2.0 or newer. The full reference is `docs/reference/cli.md` in the craze repository.
 
+This page describes the release after 0.2.0. On craze 0.2.0 itself: a prompt is at most 32 KiB (over it is exit 2), a `--json` failure is `{"error":{"message":…}}` alone, a turn that stopped short has a `stopped:` footer line instead of `error:`, `stop` on a session that has ended is exit 1, and `cancel --turn` does not exist. `craze version` says which you have.
+
 ## Start a task: `craze new --wait`
 
 ```bash
@@ -15,12 +17,12 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 | `--provider <id>` | `native`, `cursor`, `grok` (or `gx`). Without it `provider` in `config.toml`; none configured is exit 1 |
 | `--model`, `--effort`, `--fast` / `--no-fast` | The start settings, where the model offers them |
 | `--plan` / `--ask` | Mode. `--ask` refuses edits and the shell. `--plan` refuses edits except its own plan file, lets the shell through, and **ends the turn at the plan** (`completed` with a `plan:` section, nothing implemented) |
-| `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 512 KiB is exit 2 |
+| `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 512 KiB (32 KiB on craze 0.2.0) is exit 2 |
 | `--remove-prompt-file` | Delete the prompt file once read |
 | `--timeout <d>` | Stop waiting after this long (`9m`): status `running`, exit 5, with a handle |
 | `--max-message <n>` | Print at most `n` characters of the message and plan together; the whole result goes to a file named in the output (`[… cut: full result in <path>]`). Use `20000` |
 | `--no-force` | Permissions are asked, not bypassed: an ask stays open (`needs_input`) |
-| `--json` | One JSON object instead of text; a failure is `{"error":{"message":…}}` |
+| `--json` | One JSON object instead of text; a failure is `{"error":{"message":…,"kind":…,"retryable":…}}`, its kind one of a closed set (failure kinds in `docs/reference/cli.md`) |
 | `-C <dir>` | The directory (default: the current one) |
 
 Questions the agent asks are answered with the first option (listed under `auto-answered:`); a plan it presents ends the turn and is returned, never accepted.
@@ -50,7 +52,7 @@ craze cancel 175bfe79
 craze stop 175bfe79
 ```
 
-`cancel` ends the running turn (the session and its queue go on); `nothing to cancel` is exit 0. `stop` ends the session (it stays in the index and can be sent to again).
+`cancel` ends the running turn (the session and its queue go on); `nothing to cancel` is exit 0. `cancel --turn <turn>` (a result's `turn`, `turn-3`) cancels only that turn, and only while it is the current one, so a cancel sent again never reaches the next queued turn. `stop` ends the session (it stays in the index and can be sent to again); `stop` on a session that has ended is exit 0. Both take `--json`.
 
 ## The result
 
@@ -62,14 +64,14 @@ files: stats/core.py
 session 175bfe79 · craze attach --session 175bfe79
 ```
 
-The message is the turn's last assistant message (`(no final message)` if none). A presented plan follows under `plan:`. The footer has the status, time, tool calls and cost; then, when there is one, `error:`, `stopped:`, `files:`, `auto-answered:`, `ask:`, `blocked by:`, the session line, and `next:` (the exact command to run next for `running` and `needs_input`).
+The message is the turn's last assistant message (`(no final message)` if none). A presented plan follows under `plan:`. The footer has the status, time, tool calls and cost; then, when there is one, `usage:` (a step was in flight, its spend not counted), `error:` (why it did not complete, a turn that stopped short included), `files:`, `outside the workspace:`, `plan file:`, `auto-answered:`, `ask:`, `blocked by:`, the session line, `session stopping (--exit-after-turn)`, and `next:` (the exact command to run next for `running` and `needs_input`).
 
 ## Statuses and exit codes
 
 | Exit | Status | Meaning |
 |---|---|---|
 | 0 | `completed`, `idle` | The turn ended normally; `idle`: the session has had no turn |
-| 1 | none | craze failed (no such session, session ended, unreachable, lost connection, a session that could not start, `--timeout` before the prompt was sent, a prompt that may not have arrived). The message is on stderr |
+| 1 | none | craze failed (no such session, session ended, unreachable, lost connection, a session that could not start, `--timeout` before the prompt was sent, a prompt that may not have arrived, a `send` over 32 KiB to a busy session). The message is on stderr; with `--json`, `error.kind` says which: `stopped` (the session ended), `connection_lost`, `host_exited`, `unobserved`, `start_failed`, `prompt` (the busy-session refusal) and others |
 | 2 | none | Usage error. An unknown flag or command means the craze is too old (needs 0.2.0 or newer) |
 | 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing, or the queued prompt was removed |
 | 4 | `needs_input` | An ask is open that nothing here answers; answer it in `craze attach`, or `craze cancel` / `craze stop` |
@@ -85,7 +87,7 @@ A `running` or `needs_input` result (and a no-wait `craze send`) prints a handle
 
 ## Large context
 
-Put a large context in a file in the project and name the file in the prompt; give the prompt itself through `--prompt-file`. A prompt can be up to 512 KiB, but a smaller one is cheaper (a native turn sends it again with every request). A `craze send` over 32 KiB to a session that is still running a turn is refused (exit 1, kind `prompt`, nothing queued): send it once the turn has ended.
+Put a large context in a file in the project and name the file in the prompt; give the prompt itself through `--prompt-file`. A prompt can be up to 512 KiB (32 KiB on craze 0.2.0), but a smaller one is cheaper (a native turn sends it again with every request). A `craze send` over 32 KiB to a session that is still running a turn is refused (exit 1, kind `prompt`, nothing queued): send it once the turn has ended.
 
 ## Parallel runs
 

@@ -187,6 +187,18 @@ is returned rather than accepted. The session's index row carries `unattended`
 as provenance, which is what makes `craze -c` skip it. See [`craze new
 --wait`](../reference/cli.md#craze-new-wait).
 
+An unattended host has an idle limit of its own,
+[`host_idle_exit_unattended`](../reference/configuration.md#host-idle-exit) (ten
+minutes by default), fixed as it starts, and an open ask does not hold it up.
+`--exit-after-turn` raises the session's exit fence with the prompt, so the
+session admits no other prompt and ends with its turn; a fenced session gets the
+unattended limit whatever host it runs on, which is what ends it if its waiter
+dies first ([ending with the turn](../reference/cli.md#ending-with-the-turn)).
+The waiter needs no terminal: `--session-file` names the session before the
+result, and a driver on another machine runs each round's waiter detached, with
+its result and exit code in files ([a waiter run
+detached](../reference/cli.md#a-waiter-run-detached)).
+
 ## Side questions (`/btw`)
 
 A side question is answered beside the session, never in it. The TUI sends a

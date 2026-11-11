@@ -4,22 +4,78 @@ Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest firs
 
 ## Unreleased
 
+The waiting commands become a contract a program can drive unattended: typed
+failures it can branch on and retry, a session that ends with its turn, a session
+file that names the session before the result, `stop` and `cancel` safe to send
+twice, and prompts up to 512 KiB. A program that reads `craze new --wait --json`,
+`craze send --wait --json` or `craze wait --json` needs changes: [Upgrading, since
+v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
+`~/.craze` needs migrating; restart a running hub after upgrading.
+
+### Behaviour changes
+
+- The waiting commands' JSON: `error` is one object, `{message, kind, retryable,
+  detail?}`, on a result and on an exit-1 failure alike (it was a string on a
+  result); a `failed` result always has one, and the plain footer's `stopped:`
+  line is folded into `error:`. `stopReason` is on every terminal status,
+  `model` is left out until it is resolved, and `planEnded` is new.
+- A turn a stop cuts short (`craze stop`, a `SIGTERM` to the host) is a
+  `cancelled` result, exit 3, with what it did and spent so far, `stopReason:
+  stopped` and `usageComplete: false` when a step was in flight. It was a
+  failure, exit 1. A killed host is told from a stop and from a lost connection.
+- `craze stop` on a session that has ended is exit 0 (`already_ended`); it was
+  exit 1.
+- `files` lists only successful edits inside the workspace, relative to it;
+  edits elsewhere move to `outsideFiles`, the session's plan file to `planFile`.
+- Unattended hosts (`craze new --wait`, and `craze send` reloading one) idle out
+  after `host_idle_exit_unattended`, ten minutes by default, and an open
+  permission ask no longer holds them up. They stayed for `host_idle_exit`, an
+  hour by default.
+- A usage error under `--json` prints an `{"error":{…}}` object on stdout, and
+  plain `craze new --json` gains `kind`.
+- A native host killed outright has its shell commands ended (`SIGTERM`, then
+  `SIGKILL`) by the waiter that sees it go or by the next craze command; every
+  native command has `CRAZE_HOST_ID` in its environment.
+
 ### Sessions and scripting
 
+- `--exit-after-turn` on `craze new --wait` and `craze send --wait` ends the
+  session with its turn: no other prompt is admitted, and the host is gone by
+  the command's exit.
+- `--session-file <path>` writes the session's identity (`session`, `short`,
+  `hostPid`, `hostId`) before the prompt is sent, and the round's `handle` once
+  it is taken.
+- `craze stop --json` and `craze cancel --json`, and `craze cancel --turn
+  <turn>`, which cancels that turn only while it is current, so a cancel sent
+  again never reaches the next queued turn.
+- `craze ps --json --brief` leaves out each session's model and mode
+  catalogs.
+- Failure kinds: each `error` names one of a closed set of kinds and whether it
+  may be retried (`provider`, `stopped`, `host_exited`, `connection_lost`,
+  `unobserved`, `prompt`, `config` and the rest); cursor's and grok's refusal of
+  `--model` reads `the agent refused model "x"`, kind `model_not_found`.
+- A native step that fails mid-stream (an HTTP/2 reset, an unexpected EOF, a
+  server error event) is sent again from the same input, once by default
+  (`provider_retries`, 0 to 3). The result gains `retries`; `craze prompt
+  --json` gains a `step_retry` line, and the control protocol a `step_retry`
+  event and `retracted` entries.
 - `craze new --wait` and `craze send` take a prompt of up to 512 KiB, from
   words, `--prompt-file` or stdin (was 32 KiB, #111). The bound fits the
   socket's 4 MiB request line with any JSON escaping; over it is still exit 2,
   kind `prompt`.
 - A `craze send` over 32 KiB to a session that is running a turn would have to
   wait in the session's queue, which still holds 32 KiB a row: the session
-  refuses it, exit 1, kind `prompt`, nothing queued, and the message now says
-  so (`it is over 32 KiB, the most a prompt can wait in the session's queue,
-  and the session was busy; send it once the turn has ended`) instead of
-  `agent: message too long`.
+  refuses it, exit 1, kind `prompt`, nothing queued, in words of its own (`it
+  is over 32 KiB, the most a prompt can wait in the session's queue, and the
+  session was busy; send it once the turn has ended`). On v0.2.0 any prompt
+  over 32 KiB was refused before anything was sent, a usage error, exit 2.
 - The CLI reference has a new section, "A waiter run detached", for a program
   that drives craze from elsewhere: run each round's waiter in a session of its
-  own with its result and exit code in files, `craze cancel` and `craze stop`
-  to end a round or the session, no `--timeout`, plain `craze wait` to read a
+  own with its result and exit code in files (the exit file marking the round's
+  end, and the round's pid telling a running round from a lost waiter; macOS,
+  which has no `setsid` binary, calls `setsid(2)` from the driving program),
+  `craze cancel` and `craze stop` to end a round or the session, no
+  `--timeout`, plain `craze wait` to read a
   lost round, `CRAZE_RUNTIME_DIR` on a machine people log in to, and the last
   round's `usage.session` as the session's total. End-to-end tests run it that
   way: detached, no terminal, across a host that idled out and was loaded

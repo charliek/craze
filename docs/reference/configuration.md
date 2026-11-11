@@ -471,7 +471,9 @@ limit, and a host's own `host_idle_exit` stands.
 Independently of the limit, a host whose socket file or registry entry has
 vanished (`/run/user` removed at the last logout, a registry swept by hand)
 stops at once, the ordinary way: it can no longer be reached, and stopping
-saves the session.
+saves the session. On a machine people also log in to, `CRAZE_RUNTIME_DIR` set
+to a directory outside `/run/user` ([below](#environment)) keeps a
+logout from stopping hosts mid-turn.
 
 ### Host logs
 
@@ -1869,7 +1871,7 @@ same turn is waited on again, and craze does not read them back.
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_HUB_IDLE` | How long [the hub](cli.md#the-hub) waits, with no client and no live host, before it exits: a Go duration (`"30s"`, `"5m"`). Default 60 seconds; a value that is not a positive duration gives the default. Mostly of use in tests |
-| `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
+| `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Set it, in the environment of every craze command, on a machine people also log in to, so a logout (which removes `/run/user/<uid>`) doesn't stop running hosts ([a waiter run detached](cli.md#a-waiter-run-detached)); tests use it too. See [Protocol reference](protocol.md#reaching-a-host) |
 | `ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY` / `ZAI_API_KEY` | API keys for the native provider's [shipped providers](#the-shipped-catalog), tried before any inline `api_key`; a value under 8 bytes is skipped with a warning |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |

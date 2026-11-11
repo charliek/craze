@@ -1281,6 +1281,9 @@ already came, `… was told to stop`: the stop is sent, and the command does not
 wait for the host to go. A prompt whose answer was lost, or cannot be read,
 may have reached the session, which is then never stopped.
 
+To run a waiter with no terminal, so that no signal reaches it, from a program that
+reads its result later, see [a waiter run detached](#a-waiter-run-detached).
+
 A provider that cannot start is exit 1 with the host's own words, and the
 session is stopped:
 
@@ -1436,11 +1439,30 @@ result from files later. What it needs to know:
   file, and its exit code to a file once it exits. No terminal is needed anywhere.
 
   ```sh
-  setsid -f sh -c 'craze new --wait --json --provider "$1" --session-file "$2/session.json" \
-    --prompt-file "$2/prompt.md" --remove-prompt-file >"$2/result.json" 2>"$2/stderr"
-    echo $? >"$2/exit"' _ native "$R" </dev/null >/dev/null 2>&1
+  setsid -f sh -c 'echo $$ >"$2/pid"
+    craze new --wait --json --provider "$1" --session-file "$2/session.json" \
+      --prompt-file "$2/prompt.md" --remove-prompt-file >"$2/result.json" 2>"$2/stderr"
+    echo $? >"$2/exit.tmp" && mv "$2/exit.tmp" "$2/exit"' _ native "$R" </dev/null >/dev/null 2>&1
   ```
 
+  `setsid(1)` is Linux's (util-linux); macOS has none. There, start the round in a new
+  session from the driving program instead, with `setsid(2)`: Python's
+  `subprocess.Popen(…, start_new_session=True)`, Go's `SysProcAttr{Setsid: true}`.
+- **The exit file is the round's end.** The redirect creates `result.json`, empty, as the
+  round starts, so read it only once `exit` is there. Written as above, `exit` appears
+  whole; a plain `echo $? >"$2/exit"` creates it empty before writing it, so then read it
+  only once it holds a line ending in a newline. By then `result.json` is one JSON object
+  on one line, whatever the exit code: a result, or for exit 1 and 2 a failure
+  `{"error":{…}}`. `stderr` holds the failure's line, and otherwise nothing but a warning
+  (a prompt file that could not be deleted, a session file that could not be rewritten).
+- **Whether the waiter is alive:** `pid` above is the round's shell, which waits for the
+  waiter and writes `exit` after it. While that process lives (`kill -0 <pid>`) and there
+  is no exit file, the round is running; with it gone and no exit file, the waiter was
+  lost (below). A program that calls `setsid(2)` itself records the pid of the child it
+  started. Pids are reused, so a pid alive long after its round should have ended may be
+  another process: pair the check with the exit file, and with the session's own state
+  (plain `craze wait`, below). `hostPid` in [the session file](#the-session-file) is the
+  session's host, not the waiter: it outlives the waiter, and runs on between rounds.
 - **[The session file](#the-session-file)** names the session before the result: read
   `session` from it to cancel or stop the round.
 - **The next round** is `craze send <id> --wait --json …`, run the same way. A host that
@@ -1453,10 +1475,14 @@ result from files later. What it needs to know:
 - **Don't pass `--timeout`** if "no exit file yet" is to mean "still running": at its end
   the waiter exits 5 and leaves the turn running with nobody following it. Bound a round
   with `craze cancel` instead.
-- **A waiter lost without an exit file** (killed, the machine restarted): plain `craze wait
-  <id> --timeout 10s --json` reads where the turn stands without owning it. It never
-  cancels the turn, on a signal or at its timeout: `running`, exit 5, while the turn
-  runs, or the last turn's (partial) result.
+- **A waiter lost without an exit file** (killed, say): while the session's host runs,
+  plain `craze wait <id> --timeout 10s --json` reads where the turn stands without owning
+  it. It never cancels the turn, on a signal or at its timeout: `running`, exit 5, while
+  the turn runs, or the last turn's (partial) result. When the host has gone (the machine
+  restarted, or the host [idled out](configuration.md#host-idle-exit) after the round), it
+  is exit 1, kind `stopped`: `craze wait: the session has ended (craze send <short>
+  <prompt> reloads it)`. The lost round's result can't be read then; `craze send` starts a
+  new round in the same session, with its context.
 - **Read `status` and `error.kind`,** not only the exit code: 3 covers `failed`,
   `cancelled` and `dropped`, and 1 every kind of craze's own failure.
 - **A machine people also log in to:** a host whose socket is under `/run/user/<uid>` (the
@@ -1473,7 +1499,12 @@ result from files later. What it needs to know:
   fetches its model list, which can take up to 30 seconds more.
 - **Spend:** a native session's result carries `usage`. `usage.turn` is the round's own,
   and `usage.session` is the whole session's, counted across reloads, so the last round's
-  `usage.session` is the total.
+  `usage.session` is the total. It is a floor when a round was cut short with a step in
+  flight (`usageComplete: false`), when a step was [sent again](configuration.md#native-provider-retries)
+  (`retries`: a discarded attempt may have been billed), or when some usage had no price
+  (`unpriced: true`, [Usage](protocol.md#usage)). A failure (exit 1) carries `usage` only
+  [when the session ended under a turn](#no-ending-seen), so keep the last `usage.session`
+  you read. cursor, grok and gx sessions report no usage.
 
 ## craze send
 
@@ -1511,7 +1542,8 @@ of it in the queue — and prints its result as `craze wait` does, with the same
 statuses, exit codes and signals as [`craze new --wait`](#craze-new-wait): a
 signal removes the prompt while it waits in the queue (`dropped`) or cancels
 its turn (`cancelled`), and one before the prompt was sent is `cancelled`
-too — the session left as it was.
+too — the session left as it was. A program driving rounds from elsewhere runs it
+detached ([a waiter run detached](#a-waiter-run-detached)).
 
 **A session that has ended is loaded again.** When no running session has
 the id, it is looked up in the [session index](configuration.md#session-index)
@@ -1614,7 +1646,8 @@ goes on the wire.
   has no stop reason and no `usage` — the session's last usage report need
   not be that turn's (a turn withdrawn before it opened reports none). It
   never touches the session: a signal (`Ctrl+C`, `SIGTERM`, `SIGHUP`) exits
-  1, and the turn goes on.
+  1, and the turn goes on. It is what a driver uses to read a round whose
+  [detached waiter](#a-waiter-run-detached) was lost.
 - **`--from <handle>`** follows exactly the turn or queued prompt a handle
   names, from the handle's place in the session's stream, so a turn that has
   ended since is still reported: whole when the handle's place is before the
