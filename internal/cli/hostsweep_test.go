@@ -449,7 +449,10 @@ func TestASecondSignalDuringTheReapLeavesASettledFailure(t *testing.T) {
 	}
 	killAndAwait(t, pid, gone)
 	sigs <- syscall.SIGTERM
-	waitFor(t, "the cleanup's cancel", func() bool { return len(tp.lines(protocol.MethodSessionCancel)) == 1 })
+	// The cancel's answer, not only its line: a close that beat the answer
+	// failed the cancel itself (outcome unknown, interrupted), never reading
+	// the stop this test is about.
+	waitFor(t, "the cleanup's cancel answered", func() bool { return tp.answered(protocol.MethodSessionCancel, 1) })
 	ctx, cancel := context.WithTimeout(context.Background(), serveStep)
 	defer cancel()
 	_ = r.srv.Close(ctx)

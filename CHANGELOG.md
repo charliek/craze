@@ -17,14 +17,21 @@ Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest firs
   OpenAI-compatible provider that reports reasoning tokens apart from output
   tokens has them counted in output (and spend), tool messages stay together
   when tool results carry images (craze's own regrouping is unchanged), and
-  JSON repair fixes. `bin/craze` is 44,292,802 bytes (was 42,484,176).
+  JSON repair fixes. `bin/craze` is 44,139,178 bytes (was 42,484,176).
 - **Held:** Fantasy v0.45.1 to v0.48.0. From v0.45.1 Fantasy no longer retries
   a step because a tool returned an error, and four of the native harness's
   cancel and callback tests fail against it; that is more than a version bump.
 - golang.org/x/sys v0.50.0, golang.org/x/image v0.48.0, spf13/pflag v1.1.0,
-  kaptinlin/jsonschema v0.9.10, charmbracelet/x/term v0.2.2,
-  charmbracelet/x/ansi v0.11.9, mattn/go-runewidth v0.0.31 and
-  charmbracelet/bubbles v1.0.0; no TUI golden or wire fixture moved.
+  kaptinlin/jsonschema v0.9.10 and charmbracelet/x/term v0.2.2; no TUI golden
+  or wire fixture moved.
+- **Held:** charmbracelet/x/ansi v0.11 (stays v0.10.1), and with it
+  charmbracelet/bubbles v1.0.0 (needs it; stays v0.21.0) and
+  mattn/go-runewidth (stays v0.0.16). x/ansi v0.11.9 measures some graphemes
+  (Devanagari with combining marks, keycap emoji) differently from the
+  grapheme walk the TUI copies and highlights with: copying a whole row like
+  `नमस्ते hello` dropped its last character, highlighting next to `1️⃣` erased
+  the character after it, and a clamped title could overrun its width by a
+  cell. A test now holds the TUI's width measures to one another.
 - GitHub Actions: actions/checkout v7, actions/setup-go v7, astral-sh/setup-uv
   v10.3.3.
 - Python locks: `eval/` takes aiohttp 3.14.5 (three advisories fixed in 3.14.4)
