@@ -23,7 +23,8 @@ Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest firs
   lost round, `CRAZE_RUNTIME_DIR` on a machine people log in to, and the last
   round's `usage.session` as the session's total. End-to-end tests run it that
   way: detached, no terminal, across a host that idled out and was loaded
-  again.
+  again, and a later `craze send --wait` round that a plain `craze wait` reads
+  without owning and `craze cancel` ends.
 - `craze auth login` from a pipe takes a key with no trailing newline (it
   always did; now tested and documented).
 

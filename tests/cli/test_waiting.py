@@ -1288,6 +1288,49 @@ def test_a_detached_round_is_cancelled_and_stopped(craze_bin: Path, fake_agent_b
     _stop_json(craze_bin, short)
 
 
+def test_a_detached_send_round_is_read_then_cancelled(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A later round as a program drives it: round 0 completes, round 1 is a
+    detached craze send --wait with a 40 KiB --prompt-file that the fake agent
+    holds (sigint-hold holds every turn after the first). Plain craze wait
+    --timeout reads it running, exit 5, without owning it: the round is still
+    running after. craze cancel ends it, and round 1 writes cancelled, exit 3,
+    for its own turn."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    r0 = tmp_path / "r0"
+    proc = _detached(craze_bin, r0, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work),
+                     "--session-file", str(r0 / "session.json"), "round zero", script="sigint-hold")
+    code, res = _round_done(proc, r0)
+    assert code == 0 and res["status"] == "completed", (code, res)
+    short = res["short"]
+
+    r1 = tmp_path / "r1"
+    _big(r1 / "prompt.md", "round one", 40 << 10)
+    proc = _detached(craze_bin, r1, "send", short, "--wait", "--json", "--session-file", str(r1 / "session.json"),
+                     "--prompt-file", str(r1 / "prompt.md"), "--remove-prompt-file", script="sigint-hold")
+    try:
+        deadline = time.monotonic() + WAIT
+        while True:
+            out = _craze(craze_bin, "wait", short, "--timeout", "1s", "--json", script="sigint-hold")
+            if _one_object(out).get("status") == "running":
+                break
+            assert time.monotonic() < deadline, ("round 1's turn never ran", out)
+        res = _one_object(out)
+        assert out.returncode == 5 and res["turn"] == "turn-2", out
+        assert proc.poll() is None and not (r1 / "exit").exists()
+
+        out = _craze(craze_bin, "cancel", short, "--json", script="sigint-hold")
+        assert out.returncode == 0 and _one_object(out)["result"] == "cancelled" and _one_object(out)["turn"] == "turn-2", out
+        code, res = _round_done(proc, r1)
+        assert code == 3 and res["status"] == "cancelled" and res["turn"] == "turn-2" and "error" not in res, (code, res)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    _stop_json(craze_bin, short)
+
+
 def test_a_big_prompt_to_a_busy_session_is_refused_with_words(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """A 40 KiB craze send to a session running a turn would have to wait in
     the queue, whose rows are 32 KiB at most: refused, exit 1, kind prompt, in
