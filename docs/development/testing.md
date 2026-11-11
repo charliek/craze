@@ -278,7 +278,8 @@ that finish at once, which is what a frame of a *drained* queue needs.
   Go pty test's, `internal/cli/auth_test.go`), and a key piped without a
   trailing newline
 - `test_waiting.py` — the waiting commands (`craze new --wait`, `craze send`,
-  `craze wait`, `craze stop`) end to end over the fake agent: stops, killed
+  `craze wait`, `craze stop`) end to end over the fake agent, and over a fake
+  model server (`sse_fixture.py`) for native sessions: stops, killed
   hosts and their reaped shell commands, `files`, the prompt's 512 KiB bound
   and the busy session's refusal over 32 KiB, usage across a reload, and the
   detached waiter, run as a driver runs it: no terminal, stdin `/dev/null`, a

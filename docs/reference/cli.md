@@ -1451,10 +1451,13 @@ result from files later. What it needs to know:
 - **The exit file is the round's end.** The redirect creates `result.json`, empty, as the
   round starts, so read it only once `exit` is there. Written as above, `exit` appears
   whole; a plain `echo $? >"$2/exit"` creates it empty before writing it, so then read it
-  only once it holds a line ending in a newline. By then `result.json` is one JSON object
-  on one line, whatever the exit code: a result, or for exit 1 and 2 a failure
-  `{"error":{…}}`. `stderr` holds the failure's line, and otherwise nothing but a warning
-  (a prompt file that could not be deleted, a session file that could not be rewritten).
+  only once it holds a line ending in a newline. When craze exits by itself (0 to 5),
+  `result.json` is by then one JSON object on one line: a result, or for exit 1 and 2 a
+  failure `{"error":{…}}`. `stderr` holds the failure's line, and otherwise nothing but a
+  warning (a prompt file that could not be deleted, a session file that could not be
+  rewritten). An exit code over 128 (137 for `SIGKILL`) is the shell's report that the
+  waiter itself was killed: `result.json` may be empty, and the round is read as a lost
+  waiter's (below).
 - **Whether the waiter is alive:** `pid` above is the round's shell, which waits for the
   waiter and writes `exit` after it. While that process lives (`kill -0 <pid>`) and there
   is no exit file, the round is running; with it gone and no exit file, the waiter was
@@ -1475,7 +1478,8 @@ result from files later. What it needs to know:
 - **Don't pass `--timeout`** if "no exit file yet" is to mean "still running": at its end
   the waiter exits 5 and leaves the turn running with nobody following it. Bound a round
   with `craze cancel` instead.
-- **A waiter lost without an exit file** (killed, say): while the session's host runs,
+- **A waiter lost** (killed: an exit code over 128, or no exit file and `pid` gone): while
+  the session's host runs,
   plain `craze wait <id> --timeout 10s --json` reads where the turn stands without owning
   it. It never cancels the turn, on a signal or at its timeout: `running`, exit 5, while
   the turn runs, or the last turn's (partial) result. When the host has gone (the machine
@@ -1486,7 +1490,8 @@ result from files later. What it needs to know:
 - **Read `status` and `error.kind`,** not only the exit code: 3 covers `failed`,
   `cancelled` and `dropped`, and 1 every kind of craze's own failure.
 - **A machine people also log in to:** a host whose socket is under `/run/user/<uid>` (the
-  default when `XDG_RUNTIME_DIR` or that directory is there) stops, saving the session,
+  default on Linux when `XDG_RUNTIME_DIR` is that directory, or is unset and the directory
+  is there) stops, saving the session,
   when logind removes that directory at the user's last logout — cutting a running turn
   short. Set `CRAZE_RUNTIME_DIR` (a short absolute path, a directory only you can write,
   `0700`; [the socket base](protocol.md#the-socket-base)) in the environment of every

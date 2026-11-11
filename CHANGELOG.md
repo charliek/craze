@@ -53,7 +53,8 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - Failure kinds: each `error` names one of a closed set of kinds and whether it
   may be retried (`provider`, `stopped`, `host_exited`, `connection_lost`,
   `unobserved`, `prompt`, `config` and the rest); cursor's and grok's refusal of
-  `--model` reads `the agent refused model "x"`, kind `model_not_found`.
+  `--model` reads `the agent refused model "x": <the agent's words>`, kind
+  `model_not_found`.
 - A native step that fails mid-stream (an HTTP/2 reset, an unexpected EOF, a
   server error event) is sent again from the same input, once by default
   (`provider_retries`, 0 to 3). The result gains `retries`; `craze prompt

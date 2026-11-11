@@ -191,9 +191,9 @@ An unattended host has an idle limit of its own,
 [`host_idle_exit_unattended`](../reference/configuration.md#host-idle-exit) (ten
 minutes by default), fixed as it starts, and an open ask does not hold it up.
 `--exit-after-turn` raises the session's exit fence with the prompt, so the
-session admits no other prompt and ends with its turn; a fenced session gets the
-unattended limit whatever host it runs on, which is what ends it if its waiter
-dies first ([ending with the turn](../reference/cli.md#ending-with-the-turn)).
+session admits no other prompt and ends with its turn; a fenced session has at
+most the unattended limit whatever host it runs on, which is what ends it if its
+waiter dies first ([ending with the turn](../reference/cli.md#ending-with-the-turn)).
 The waiter needs no terminal: `--session-file` names the session before the
 result, and a driver on another machine runs each round's waiter detached, with
 its result and exit code in files ([a waiter run
