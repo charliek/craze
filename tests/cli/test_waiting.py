@@ -1350,11 +1350,13 @@ def test_native_usage_survives_a_reload(craze_bin: Path, fake_agent_bin: Path, t
     """A native session's usage.session counts the whole session across a
     reload: round 0 (a 53 KB prompt) detached, its host idled out, round 1
     through a reloading craze send. Each round reports its own turn's usage,
-    and round 1's session is round 0's plus round 1's turn."""
+    and round 1's session is round 0's plus round 1's turn -- its spend
+    included: the model is priced at $3 in and $15 out per million tokens, so
+    a reload that kept the tokens but lost the cost would fail here."""
     _unattended_config(fake_agent_bin, "0")
     with SSEFixture() as fixture:
         fixture.set_script([answer("first", usage=(40, 3)), answer("second", usage=(50, 4))])
-        write_native_config(Path(os.environ["CRAZE_HOME"]) / "native", fixture.base_url)
+        write_native_config(Path(os.environ["CRAZE_HOME"]) / "native", fixture.base_url, cost=(3, 15))
         work = tmp_path / "proj"
         work.mkdir()
         r0 = tmp_path / "r0"
@@ -1374,6 +1376,11 @@ def test_native_usage_survives_a_reload(craze_bin: Path, fake_agent_bin: Path, t
     t0, s0 = first["usage"]["turn"], first["usage"]["session"]
     t1, s1 = second["usage"]["turn"], second["usage"]["session"]
     assert (t0["input"], t0["output"]) == (40, 3) and (t1["input"], t1["output"]) == (50, 4), (first["usage"], second["usage"])
+    # $3 and $15 per million tokens are 3e6 and 15e6 picodollars a token.
+    assert t0["costPicoUsd"] == 40 * 3_000_000 + 3 * 15_000_000, first["usage"]
+    assert t1["costPicoUsd"] == 50 * 3_000_000 + 4 * 15_000_000, second["usage"]
+    for usage in (t0, s0, t1, s1):
+        assert not usage.get("unpriced"), (first["usage"], second["usage"])
     assert s0 == t0, first["usage"]
     for key in ("input", "output", "reasoning", "cacheRead", "cacheCreation", "costPicoUsd"):
         assert s1[key] == s0[key] + t1[key], (key, first["usage"], second["usage"])

@@ -692,6 +692,7 @@ def write_native_config(
     wire_model: str = "fixture-wire-model",
     name: str = "Fixture Model",
     context_window: int = 0,
+    cost: tuple[float, float] | None = None,
 ) -> None:
     """Write providers.toml (0600) and models.toml (0644) in the version-1
     schema internal/harness/modeltable reads (modeltable.go's providerEntry
@@ -712,6 +713,10 @@ def write_native_config(
 
     driver is the provider's driver: openai-compat (Chat Completions, the
     default) or openai-responses (the fixture's Responses mode).
+
+    cost is the model's (input, output) price, $ per 1,000,000 tokens, written
+    as its [models."<alias>".cost] table; None (the default) leaves the model
+    unpriced.
     """
     native_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(native_dir, 0o700)
@@ -745,6 +750,8 @@ def write_native_config(
     ]
     if context_window:
         model_lines.append(f"context_window = {context_window}\n")
+    if cost is not None:
+        model_lines += ["\n", f"[models.{alias}.cost]\n", f"input = {cost[0]}\n", f"output = {cost[1]}\n"]
     models_path = native_dir / "models.toml"
     models_path.write_text("".join(model_lines), encoding="utf-8")
     os.chmod(models_path, 0o644)
