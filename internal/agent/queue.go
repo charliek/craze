@@ -8,11 +8,13 @@ import (
 )
 
 const (
-	// queueCap and queueTextCap bound craze's own queue. Both refuse rather
+	// queueCap and QueueTextCap bound craze's own queue. Both refuse rather
 	// than truncate: a queued message is the user's text on its way to the
 	// agent, not display metadata, and half of it is worse than none.
+	// QueueTextCap is exported so the CLI can name it when the host refuses
+	// a prompt that would have had to wait here (text_too_long).
 	queueCap     = 32
-	queueTextCap = 32 << 10
+	QueueTextCap = 32 << 10
 )
 
 var (
@@ -76,7 +78,7 @@ type PromptQueue struct {
 // Add appends text. A full queue or an oversized message is refused with
 // nothing mutated.
 func (q *PromptQueue) Add(text string, now time.Time) (QueuedPrompt, QueueEvent, error) {
-	if len(text) > queueTextCap {
+	if len(text) > QueueTextCap {
 		return QueuedPrompt{}, QueueEvent{}, ErrQueueTextTooLong
 	}
 	q.mu.Lock()
@@ -132,7 +134,7 @@ func (q *PromptQueue) Restore(p QueuedPrompt) QueueEvent {
 // Edit rewrites a row in place: the id and the position are the row's
 // identity and do not move, and Version records that it changed.
 func (q *PromptQueue) Edit(id, text string) (QueueEvent, error) {
-	if len(text) > queueTextCap {
+	if len(text) > QueueTextCap {
 		return QueueEvent{}, ErrQueueTextTooLong
 	}
 	q.mu.Lock()

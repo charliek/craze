@@ -16,6 +16,7 @@ import (
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -154,15 +155,59 @@ func TestAResumeOfAMarkedSessionIsInteractive(t *testing.T) {
 	}
 }
 
-// TestPromptTextMaxIsTheQueuesBound: the most a prompt craze new --wait or
-// craze send takes is exactly what the host's message queue admits.
-func TestPromptTextMaxIsTheQueuesBound(t *testing.T) {
-	var q agent.PromptQueue
-	if _, _, err := q.Add(strings.Repeat("x", promptTextMax), time.Now()); err != nil {
-		t.Fatalf("the queue refused promptTextMax bytes: %v", err)
+// TestPromptTextMaxFitsOneLine (issue #111): the biggest prompt craze new
+// --wait or craze send takes still fits the host's inbound line as the client
+// sends it — session.prompt's params encoded as the remote client encodes them
+// (protocol.MarshalLine, HTML escaping off), in its request envelope — with
+// the worst escaping there is: a control byte is \u0001, 6 bytes (an invalid
+// UTF-8 byte becomes U+FFFD, 3 bytes, or 6 as \ufffd — either way no more).
+// A longer session id and request id than any real one leave room to spare.
+func TestPromptTextMaxFitsOneLine(t *testing.T) {
+	for name, b := range map[string]string{"control bytes": "\x01", "invalid UTF-8": "\xff"} {
+		text := strings.Repeat(b, promptTextMax)
+		if got, err := checkPrompt("craze send", text, nil); err != nil || len(got) != promptTextMax {
+			t.Fatalf("%s: checkPrompt took %d bytes, %v", name, len(got), err)
+		}
+		params, err := protocol.MarshalLine(protocol.PromptParams{SessionID: strings.Repeat("s", 128), CommandID: strings.Repeat("9", 256),
+			Text: text, Mode: protocol.PromptQueue, ExitAfterTurn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, err := protocol.MarshalLine(protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(strings.Repeat("9", 256)),
+			Method: protocol.MethodSessionPrompt, Params: params[:len(params)-1]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == "\x01" && len(params) < 6*promptTextMax {
+			t.Fatalf("%s: the text encoded to %d bytes, not the worst case's %d", name, len(params), 6*promptTextMax)
+		}
+		if n := len(line) - 1; n > protocol.InboundLineMax {
+			t.Fatalf("%s: the request line is %d bytes, over the host's %d", name, n, protocol.InboundLineMax)
+		}
 	}
-	if _, _, err := q.Add(strings.Repeat("x", promptTextMax+1), time.Now()); !errors.Is(err, agent.ErrQueueTextTooLong) {
-		t.Fatalf("the queue took one byte past promptTextMax: %v", err)
+}
+
+// TestPromptBoundsHoldTogether: a source is read at least as far as the
+// biggest prompt; that prompt is bigger than the session's queue admits (the
+// point of #111: a prompt that starts at once is not held to the queue's
+// bound); and the queue still refuses one byte past its own bound, which is
+// what the host's text_too_long for a busy session's prompt is.
+func TestPromptBoundsHoldTogether(t *testing.T) {
+	if promptReadMax < promptTextMax {
+		t.Fatalf("promptReadMax %d is under promptTextMax %d", promptReadMax, promptTextMax)
+	}
+	if promptTextMax <= agent.QueueTextCap {
+		t.Fatalf("promptTextMax %d is not over the queue's %d", promptTextMax, agent.QueueTextCap)
+	}
+	var q agent.PromptQueue
+	if _, _, err := q.Add(strings.Repeat("x", agent.QueueTextCap), time.Now()); err != nil {
+		t.Fatalf("the queue refused its own bound: %v", err)
+	}
+	if _, _, err := q.Add(strings.Repeat("x", agent.QueueTextCap+1), time.Now()); !errors.Is(err, agent.ErrQueueTextTooLong) {
+		t.Fatalf("the queue took one byte past its bound: %v", err)
+	}
+	if !strings.Contains(queuedTooLong, " 32 KiB") {
+		t.Fatalf("the refusal's words do not name the queue's bound: %q", queuedTooLong)
 	}
 }
 

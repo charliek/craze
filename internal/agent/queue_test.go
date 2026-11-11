@@ -77,7 +77,7 @@ func TestQueueRefusesA33rdEntryWithoutMutating(t *testing.T) {
 
 func TestQueueRefusesAnOversizedMessageWithoutTruncating(t *testing.T) {
 	var q PromptQueue
-	big := strings.Repeat("x", queueTextCap+1)
+	big := strings.Repeat("x", QueueTextCap+1)
 	if _, _, err := q.Add(big, time.Now()); !errors.Is(err, ErrQueueTextTooLong) {
 		t.Fatalf("err %v", err)
 	}
@@ -85,7 +85,7 @@ func TestQueueRefusesAnOversizedMessageWithoutTruncating(t *testing.T) {
 		t.Fatalf("len %d: an oversized message must not be stored", q.Len())
 	}
 	// Exactly at the cap is allowed: the bound is a refusal, not a margin.
-	if _, _, err := q.Add(strings.Repeat("x", queueTextCap), time.Now()); err != nil {
+	if _, _, err := q.Add(strings.Repeat("x", QueueTextCap), time.Now()); err != nil {
 		t.Fatalf("at the cap: %v", err)
 	}
 	// An edit is bounded the same way, and leaves the row alone.
@@ -93,7 +93,7 @@ func TestQueueRefusesAnOversizedMessageWithoutTruncating(t *testing.T) {
 	if _, err := q.Edit(p.ID, big); !errors.Is(err, ErrQueueTextTooLong) {
 		t.Fatalf("edit err %v", err)
 	}
-	if got := q.List()[0]; got.Version != 0 || len(got.Text) != queueTextCap {
+	if got := q.List()[0]; got.Version != 0 || len(got.Text) != QueueTextCap {
 		t.Fatalf("row changed: version %d len %d", got.Version, len(got.Text))
 	}
 }
@@ -169,7 +169,7 @@ func TestQueuePushFrontIsExemptFromBothCaps(t *testing.T) {
 			t.Fatalf("Add %d: %v", i, err)
 		}
 	}
-	huge := strings.Repeat("x", queueTextCap+1)
+	huge := strings.Repeat("x", QueueTextCap+1)
 	// The control: neither cap lets Add through.
 	if _, _, err := q.Add("one more", now); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("control: Add on a full queue = %v, want ErrQueueFull", err)

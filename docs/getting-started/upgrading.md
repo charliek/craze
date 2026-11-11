@@ -252,6 +252,26 @@ says so on stderr.
 entries: [what they mean](../reference/protocol.md#a-steps-retry). One that ignores
 both draws the abandoned attempt as if it stood.
 
+### A prompt can be 512 KiB
+
+**`craze new --wait` and `craze send` take a prompt of up to 512 KiB** from any source
+(words, `--prompt-file`, stdin); it was 32 KiB. Over 512 KiB is the usage error it was,
+exit 2, kind `prompt`, now reading `the prompt is over 512 KiB`.
+
+**A `craze send` over 32 KiB to a busy session is refused in its own words.** A prompt
+that has to wait in the session's queue behind a running turn is still held to the
+queue's 32 KiB per row. That used to be refused before anything was sent; now the
+session refuses it: exit 1, kind `prompt`, nothing queued, with or without `--wait`:
+
+```text
+craze send: the prompt was refused: it is over 32 KiB, the most a prompt can wait in the session's queue, and the session was busy; send it once the turn has ended
+```
+
+A program that sends follow-ups only between rounds never meets it. [The
+prompt](../reference/cli.md#the-prompt) has the rules, and [a waiter run
+detached](../reference/cli.md#a-waiter-run-detached) what a program driving craze from
+elsewhere needs to know.
+
 ### Other commands
 
 **A usage error under `--json` prints an object.** Any command, exit 2 as before,

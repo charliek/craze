@@ -1424,6 +1424,57 @@ host it started by reloading, which another `craze send` may already have found.
 signal or `--timeout` before the prompt, a refused prompt). Otherwise the file stays,
 and names a real session whichever way the command ended.
 
+### A waiter run detached
+
+A program that drives craze from somewhere else — a service running each command through
+a remote exec with no terminal, say — runs each round's waiter detached and reads its
+result from files later. What it needs to know:
+
+- **The waiter owns its turn**: a `SIGHUP`, `SIGTERM` or `SIGINT` to it cancels the turn
+  ([Signals](#craze-new-wait)). So run it in a session of its own, so that the exec or
+  shell that started it ending sends it nothing: `setsid`, stdin `/dev/null`, stdout to a
+  file, and its exit code to a file once it exits. No terminal is needed anywhere.
+
+  ```sh
+  setsid -f sh -c 'craze new --wait --json --provider "$1" --session-file "$2/session.json" \
+    --prompt-file "$2/prompt.md" --remove-prompt-file >"$2/result.json" 2>"$2/stderr"
+    echo $? >"$2/exit"' _ native "$R" </dev/null >/dev/null 2>&1
+  ```
+
+- **[The session file](#the-session-file)** names the session before the result: read
+  `session` from it to cancel or stop the round.
+- **The next round** is `craze send <id> --wait --json …`, run the same way. A host that
+  has [idled out](configuration.md#host-idle-exit) between rounds
+  (`host_idle_exit_unattended`, ten minutes by default) is loaded again, unattended, with
+  the settings it started with. A prompt can be up to 512 KiB ([The prompt](#the-prompt));
+  send one only when no round is running, or one over 32 KiB is refused.
+- **`craze cancel <id>`** ends a round: the waiter then writes `cancelled`, exit 3.
+  **`craze stop <id>`** ends the session. Both take `--json`.
+- **Don't pass `--timeout`** if "no exit file yet" is to mean "still running": at its end
+  the waiter exits 5 and leaves the turn running with nobody following it. Bound a round
+  with `craze cancel` instead.
+- **A waiter lost without an exit file** (killed, the machine restarted): plain `craze wait
+  <id> --timeout 10s --json` reads where the turn stands without owning it. It never
+  cancels the turn, on a signal or at its timeout: `running`, exit 5, while the turn
+  runs, or the last turn's (partial) result.
+- **Read `status` and `error.kind`,** not only the exit code: 3 covers `failed`,
+  `cancelled` and `dropped`, and 1 every kind of craze's own failure.
+- **A machine people also log in to:** a host whose socket is under `/run/user/<uid>` (the
+  default when `XDG_RUNTIME_DIR` or that directory is there) stops, saving the session,
+  when logind removes that directory at the user's last logout — cutting a running turn
+  short. Set `CRAZE_RUNTIME_DIR` (a short absolute path, a directory only you can write,
+  `0700`; [the socket base](protocol.md#the-socket-base)) in the environment of every
+  command, so hosts outlive logins. The [registry](protocol.md#the-registry) is under
+  `$HOME` and names each socket, so every command finds the hosts whatever its own
+  runtime directory.
+- **A key for a native provider** is set up with `craze auth login <provider>`, which with
+  stdin not a terminal reads the key from stdin's first line (a trailing newline
+  optional; [craze auth login](#craze-auth-login)). Signing in to `anthropic` also
+  fetches its model list, which can take up to 30 seconds more.
+- **Spend:** a native session's result carries `usage`. `usage.turn` is the round's own,
+  and `usage.session` is the whole session's, counted across reloads, so the last round's
+  `usage.session` is the total.
+
 ## craze send
 
 ```bash
@@ -1450,6 +1501,10 @@ before the command gave up looking prints `next: craze wait <short>`, with no
 handle. With `--json`, one object: `status` (`started` or `queued`),
 `session`, `short`, `provider`, `turn` or `row` and `position` (absent when
 unknown), `handle`, `attach`.
+
+A prompt over 32 KiB is refused rather than queued when the session is busy
+(exit 1, kind `prompt`, [The prompt](#the-prompt)); an idle session takes up to
+512 KiB.
 
 With `--wait` it follows **this** prompt to its turn's end — not a turn ahead
 of it in the queue — and prints its result as `craze wait` does, with the same
@@ -1505,8 +1560,29 @@ source:
 
 Words and `--prompt-file` together are a usage error (exit 2), and so are no
 prompt at all, a prompt that is empty once the whitespace around it is gone,
-and one over 32 KiB — the most a queued prompt may be — each refused before
-anything is started or sent. `--remove-prompt-file` deletes the file once it
+and one over **512 KiB** (`the prompt is over 512 KiB; put the bulk of it in a
+file the task names`, kind `prompt`), each refused before anything is started
+or sent. The bound is the same for both commands and every source.
+
+**A prompt that has to wait has a smaller bound.** A prompt over 32 KiB is
+taken whenever the session starts it at once: `craze new --wait`'s always is,
+and `craze send`'s is when the session is idle. One that would have to wait in
+the session's queue behind a running turn meets the queue's own 32 KiB bound
+(each queued row is at most 32 KiB) and the session refuses it: exit 1, kind
+`prompt`, with `--wait` or without, and nothing is queued or run:
+
+```text
+craze send: the prompt was refused: it is over 32 KiB, the most a prompt can wait in the session's queue, and the session was busy; send it once the turn has ended
+```
+
+Send it again once the turn has ended (`craze wait <id>` waits for that), or
+put the bulk of it in a file and send a short prompt that names the file. A
+smaller prompt is also cheaper: a native turn sends it again with every
+request it makes.
+
+Words on a command line have the operating system's own bound as well (on
+Linux 128 KiB for one argument, the whole command line included in a larger
+one), so give a big prompt with `--prompt-file`, or on stdin. `--remove-prompt-file` deletes the file once it
 has been read, whatever the prompt turns out to be (empty, too long), and
 never a file it could not read; a file it cannot delete is said on stderr, and
 the command goes on. The prompt is read under the command's `--timeout` and
@@ -1994,7 +2070,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | `usage` | A flag or argument error (exit 2). At exit 1 too: an id several sessions match | false |
 | `config` | An unknown provider or model, bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
 | `workspace` | `-C` is missing or not a directory | false |
-| `prompt` | The prompt is unreadable, empty or too long (exit 2) | false |
+| `prompt` | The prompt is unreadable, empty or over 512 KiB (exit 2); or, exit 1, a prompt over 32 KiB that `craze send` gave a busy session, which the session refused ([The prompt](#the-prompt)) | false |
 | `start_failed` | The agent or host did not start | true |
 | `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
 | `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
@@ -2145,8 +2221,9 @@ echo is off from before the first prompt is drawn until the key is read, so
 nothing typed at either prompt shows, however quickly it comes: at the list,
 only a number on it is written back, so a key pasted there by mistake is never
 displayed. Ctrl-C at either prompt leaves the terminal's echo on. When stdin
-is not a terminal, the key is stdin's first line (at most 8 KiB), so a script
-can pipe it in. Surrounding whitespace is trimmed.
+is not a terminal, the key is stdin's first line (at most 8 KiB; the newline
+that ends it is optional), so a script can pipe it in. Surrounding whitespace
+is trimmed.
 
 ```bash
 craze auth login fireworks        # prompts; the key is not shown as you type
@@ -2545,8 +2622,8 @@ script can branch on the code alone:
 | Code | Status | When |
 |------|--------|------|
 | 0 | `completed`, `idle` | The turn ended `end_turn` with no error; `wait` on a session that has had no turn |
-| 1 | — | craze failed ([kinds](#failure-kinds)): no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal; for `new --wait` and `send`, a session that could not start or load, `--timeout` before the prompt was sent, and a prompt whose answer was lost (`the prompt may not have reached it`, never sent again) |
-| 2 | — | Usage error — for `new --wait` and `send`, no prompt, two prompts, an empty one or one over 32 KiB too |
+| 1 | — | craze failed ([kinds](#failure-kinds)): no such session, the session has ended, unreachable, a lost connection or an ending not observed (with the handle), the session ending while it waited, a cancel not confirmed after a signal; for `new --wait` and `send`, a session that could not start or load, `--timeout` before the prompt was sent, a prompt whose answer was lost (`the prompt may not have reached it`, never sent again), and for `send` a prompt over 32 KiB the busy session refused (kind `prompt`, nothing queued) |
+| 2 | — | Usage error — for `new --wait` and `send`, no prompt, two prompts, an empty one or one over 512 KiB too |
 | 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing; the queued prompt was removed before it ran; a `new --wait` or `send --wait` interrupted before its prompt was sent |
 | 4 | `needs_input` | An ask is open that nothing here answers |
 | 5 | `running` | `--timeout` passed; the turn goes on (`craze wait <id> --from <handle>` follows it) |

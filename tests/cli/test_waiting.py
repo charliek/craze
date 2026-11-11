@@ -293,7 +293,11 @@ def test_usage_errors_under_json(craze_bin: Path, fake_agent_bin: Path, tmp_path
     _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "  "), "prompt")
     _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work), "prompt")
     _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "--prompt-file", "/no/such/file"), "prompt")
-    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "x" * (33 << 10)), "prompt")
+    # Over 512 KiB, from a file: words that long are past the OS's own bound
+    # on one argument (Linux: 128 KiB).
+    over = tmp_path / "over.md"
+    over.write_text("x" * ((512 << 10) + 1), encoding="utf-8")
+    _usage_object(_craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", work, "--prompt-file", str(over)), "prompt")
     env = {**os.environ, REMOVED_CONFIG_ENV: "/x"}
     _usage_object(subprocess.run([str(craze_bin), "wait", "abcd1234", "--json"], capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=WAIT))
 
@@ -1151,3 +1155,225 @@ def test_a_clean_stop_ends_a_background_job_and_its_record(craze_bin: Path, fake
         finally:
             left = _kill_marked((leader, leader_marker), (child, child_marker))
     assert not left, left
+
+
+# ------------------------------------------------- the detached waiter (#111)
+#
+# A program driving craze on another machine (Nocturn, through a shed VM's
+# exec) runs each round's waiter in a session of its own, no terminal, stdin
+# /dev/null, its result and exit code written to files it reads later
+# (cli.md, "A waiter run detached"). These cases run it that way:
+# start_new_session is setsid(2) -- macOS has no setsid binary -- and the exit
+# code comes from the file, not from the process.
+
+_ROUND = '"$0" "$@" >"$R/result.json" 2>"$R/stderr"; echo $? >"$R/exit"'
+
+
+def _detached(craze_bin: Path, rdir: Path, *argv: str, script: str = "echo", env: dict[str, str] | None = None) -> subprocess.Popen[bytes]:
+    """craze argv run as a detached round: in a session of its own, no
+    terminal, stdin /dev/null, its stdout to rdir/result.json, its stderr to
+    rdir/stderr and its exit code to rdir/exit once it exits."""
+    rdir.mkdir(parents=True, exist_ok=True)
+    child = {**os.environ, "CRAZE_FAKE_SCRIPT": script, "R": str(rdir), **(env or {})}
+    return subprocess.Popen(
+        ["sh", "-c", _ROUND, str(craze_bin), *argv],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=child,
+    )
+
+
+def _round_done(proc: subprocess.Popen[bytes], rdir: Path, bound: float = 6 * WAIT) -> tuple[int, dict]:
+    """The round's exit code and result, read from its files once the exit
+    file is whole, within bound: one object on one line, nothing on stderr."""
+    deadline = time.monotonic() + bound
+    exit_file = rdir / "exit"
+    while not (exit_file.exists() and exit_file.read_text(encoding="utf-8").endswith("\n")):
+        assert time.monotonic() < deadline, ("the detached round never wrote its exit", (rdir / "stderr").read_bytes() if (rdir / "stderr").exists() else b"")
+        time.sleep(0.05)
+    proc.wait(timeout=WAIT)
+    stdout = (rdir / "result.json").read_bytes()
+    assert stdout.count(b"\n") == 1 and stdout.endswith(b"}\n"), stdout[:400]
+    assert (rdir / "stderr").read_bytes() == b"", (rdir / "stderr").read_bytes()
+    return int(exit_file.read_text(encoding="utf-8")), json.loads(stdout)
+
+
+def _unattended_config(fake_agent_bin: Path, idle: str) -> None:
+    """_config with host_idle_exit_unattended at idle."""
+    _config(fake_agent_bin)
+    config = Path(os.environ["CRAZE_HOME"]) / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8").replace(f'host_idle_exit_unattended = "{TEST_HOST_IDLE_EXIT}"', f'host_idle_exit_unattended = "{idle}"'), encoding="utf-8")
+
+
+def _big(path: Path, head: str, size: int) -> str:
+    """A prompt file of size bytes, head first, and the prompt it holds."""
+    text = head + " " + "x" * (size - len(head) - 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
+def _stop_json(craze_bin: Path, short: str) -> None:
+    """craze stop --json: exit 0, stopped or already_ended, and no host left."""
+    out = _craze(craze_bin, "stop", short, "--json")
+    assert out.returncode == 0 and _one_object(out)["result"] in ("stopped", "already_ended"), out
+    _hosts_gone()
+
+
+def test_a_detached_waiter_runs_rounds_over_an_idled_out_host(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """The shape a program drives craze in: round 0, a 40 KiB --prompt-file
+    (over the old 32 KiB bound) to a detached craze new --wait, completes; its
+    host idles out at once (host_idle_exit_unattended "0"); round 1, another
+    40 KiB to a detached craze send --wait, loads the session again and
+    completes there; craze stop --json ends it."""
+    _unattended_config(fake_agent_bin, "0")
+    work = tmp_path / "proj"
+    work.mkdir()
+
+    r0 = tmp_path / "r0"
+    prompt = _big(r0 / "prompt.md", "round zero", 40 << 10)
+    proc = _detached(craze_bin, r0, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work),
+                     "--session-file", str(r0 / "session.json"), "--prompt-file", str(r0 / "prompt.md"), "--remove-prompt-file")
+    code, res = _round_done(proc, r0)
+    assert code == 0 and res["status"] == "completed" and res["message"] == "echo: " + prompt, (code, {k: v for k, v in res.items() if k != "message"})
+    assert not (r0 / "prompt.md").exists()
+    ident = json.loads((r0 / "session.json").read_text(encoding="utf-8"))
+    assert ident["session"] == res["session"] and ident["short"] == res["short"] and ident["handle"], ident
+    session, short = res["session"], res["short"]
+    _hosts_gone()
+
+    r1 = tmp_path / "r1"
+    prompt = _big(r1 / "prompt.md", "round one", 40 << 10)
+    proc = _detached(craze_bin, r1, "send", short, "--wait", "--json", "--session-file", str(r1 / "session.json"),
+                     "--prompt-file", str(r1 / "prompt.md"), script="load")
+    code, res = _round_done(proc, r1)
+    assert code == 0 and res["status"] == "completed" and res["session"] == session, (code, {k: v for k, v in res.items() if k != "message"})
+    assert res["message"] == "echo: " + prompt
+    assert json.loads((r1 / "session.json").read_text(encoding="utf-8"))["session"] == session
+    _stop_json(craze_bin, short)
+
+
+def _detached_long_round(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> tuple[subprocess.Popen[bytes], Path, int, str]:
+    """Round 0 detached on the fake agent's turn held at its gate: the round,
+    its directory, the gate's write end, and the session's short id."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    gate = tmp_path / "gate"
+    os.mkfifo(gate)
+    r0 = tmp_path / "r0"
+    proc = _detached(craze_bin, r0, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "--session-file", str(r0 / "session.json"),
+                     "a long task", script="long-turn", env={"CRAZE_FAKE_GATE": str(gate)})
+    fd = _open_gate(gate, proc)
+    return proc, r0, fd, json.loads((r0 / "session.json").read_text(encoding="utf-8"))["short"]
+
+
+def test_a_detached_round_is_cancelled_and_stopped(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """craze cancel ends a detached round -- nothing signals the waiter -- and
+    the round writes cancelled, exit 3; the session goes on until craze stop."""
+    proc, r0, fd, short = _detached_long_round(craze_bin, fake_agent_bin, tmp_path)
+    try:
+        out = _craze(craze_bin, "cancel", short, "--json")
+        assert out.returncode == 0 and _one_object(out)["result"] == "cancelled" and _one_object(out)["turn"] == "turn-1", out
+        code, res = _round_done(proc, r0)
+        assert code == 3 and res["status"] == "cancelled" and res["stopReason"] == "cancelled" and "error" not in res, (code, res)
+        assert [e["crazeSessionId"][-8:] for e in _entries(_home())] == [short]
+    finally:
+        os.close(fd)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    _stop_json(craze_bin, short)
+
+
+def test_a_big_prompt_to_a_busy_session_is_refused_with_words(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A 40 KiB craze send to a session running a turn would have to wait in
+    the queue, whose rows are 32 KiB at most: refused, exit 1, kind prompt, in
+    words naming the queue, with --wait or without -- and nothing queued, so a
+    1 KiB prompt after it is the queue's first row."""
+    proc, r0, fd, short = _detached_long_round(craze_bin, fake_agent_bin, tmp_path)
+    try:
+        big = tmp_path / "big.md"
+        _big(big, "too big to wait", 40 << 10)
+        for wait in ([], ["--wait"]):
+            out = _craze(craze_bin, "send", short, "--json", *wait, "--prompt-file", str(big), script="long-turn")
+            err = _one_object(out)["error"]
+            assert out.returncode == 1 and err["kind"] == "prompt" and err["retryable"] is False, out
+            assert "over 32 KiB, the most a prompt can wait in the session's queue, and the session was busy" in err["message"], out
+            assert out.stderr.decode().rstrip("\n").endswith(err["message"]), out
+        out = _craze(craze_bin, "send", short, "--json", "s" * (1 << 10), script="long-turn")
+        res = _one_object(out)
+        assert out.returncode == 0 and res["status"] == "queued" and res["row"] == "q-1" and res["position"] == 1, out
+        assert proc.poll() is None and not (r0 / "exit").exists()
+    finally:
+        os.close(fd)
+    _stop_json(craze_bin, short)
+    code, res = _round_done(proc, r0)
+    assert code == 3 and res["status"] == "cancelled" and res["stopReason"] == "stopped", (code, res)
+
+
+def test_the_prompt_bound_is_512_kib(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """Issue #111's repro -- a plan review of about 53 KB through craze new
+    --wait --plan --prompt-file -- is taken; so is a prompt of exactly 512 KiB
+    once its surrounding whitespace is gone; one byte more is a usage error,
+    exit 2, kind prompt, and nothing is started."""
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+    review = tmp_path / "panel-prompt.md"
+    text = _big(review, "review this plan", 53_000)
+    out = _craze(craze_bin, "new", "--wait", "--json", "--plan", "--provider", "cursor", "-C", str(work), "--prompt-file", str(review))
+    res = _one_object(out)
+    assert out.returncode == 0 and res["status"] == "completed" and res["message"] == "echo: " + text, (out.returncode, out.stderr)
+    _stop_json(craze_bin, res["short"])
+
+    most = tmp_path / "most.md"
+    text = _big(most, "the most", 512 << 10)
+    most.write_text("\n" + text + "\n", encoding="utf-8")
+    out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "--prompt-file", str(most))
+    res = _one_object(out)
+    assert out.returncode == 0 and res["status"] == "completed" and res["message"] == "echo: " + text, (out.returncode, out.stderr)
+    _stop_json(craze_bin, res["short"])
+
+    over = tmp_path / "over.md"
+    _big(over, "one too many", (512 << 10) + 1)
+    for args in (["new", "--wait", "--json", "--provider", "cursor", "-C", str(work)], ["send", "abcd1234", "--json"]):
+        out = _craze(craze_bin, *args, "--prompt-file", str(over))
+        _usage_object(out, "prompt")
+        assert b"the prompt is over 512 KiB" in out.stderr, out
+    assert _entries(_home()) == []
+
+
+def test_native_usage_survives_a_reload(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A native session's usage.session counts the whole session across a
+    reload: round 0 (a 53 KB prompt) detached, its host idled out, round 1
+    through a reloading craze send. Each round reports its own turn's usage,
+    and round 1's session is round 0's plus round 1's turn."""
+    _unattended_config(fake_agent_bin, "0")
+    with SSEFixture() as fixture:
+        fixture.set_script([answer("first", usage=(40, 3)), answer("second", usage=(50, 4))])
+        write_native_config(Path(os.environ["CRAZE_HOME"]) / "native", fixture.base_url)
+        work = tmp_path / "proj"
+        work.mkdir()
+        r0 = tmp_path / "r0"
+        _big(r0 / "prompt.md", "round zero", 53_000)
+        proc = _detached(craze_bin, r0, "new", "--wait", "--json", "--provider", "native", "-C", str(work), "--prompt-file", str(r0 / "prompt.md"))
+        code, first = _round_done(proc, r0)
+        assert code == 0 and first["status"] == "completed" and first["message"] == "first", (code, first)
+        _hosts_gone()
+
+        r1 = tmp_path / "r1"
+        proc = _detached(craze_bin, r1, "send", first["short"], "--wait", "--json", "and on")
+        code, second = _round_done(proc, r1)
+        assert code == 0 and second["status"] == "completed" and second["message"] == "second", (code, second)
+        assert second["session"] == first["session"]
+        _stop_json(craze_bin, first["short"])
+
+    t0, s0 = first["usage"]["turn"], first["usage"]["session"]
+    t1, s1 = second["usage"]["turn"], second["usage"]["session"]
+    assert (t0["input"], t0["output"]) == (40, 3) and (t1["input"], t1["output"]) == (50, 4), (first["usage"], second["usage"])
+    assert s0 == t0, first["usage"]
+    for key in ("input", "output", "reasoning", "cacheRead", "cacheCreation", "costPicoUsd"):
+        assert s1[key] == s0[key] + t1[key], (key, first["usage"], second["usage"])

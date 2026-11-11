@@ -15,7 +15,7 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 | `--provider <id>` | `native`, `cursor`, `grok` (or `gx`). Without it `provider` in `config.toml`; none configured is exit 1 |
 | `--model`, `--effort`, `--fast` / `--no-fast` | The start settings, where the model offers them |
 | `--plan` / `--ask` | Mode. `--ask` refuses edits and the shell. `--plan` refuses edits except its own plan file, lets the shell through, and **ends the turn at the plan** (`completed` with a `plan:` section, nothing implemented) |
-| `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 32 KiB is exit 2 |
+| `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 512 KiB is exit 2 |
 | `--remove-prompt-file` | Delete the prompt file once read |
 | `--timeout <d>` | Stop waiting after this long (`9m`): status `running`, exit 5, with a handle |
 | `--max-message <n>` | Print at most `n` characters of the message and plan together; the whole result goes to a file named in the output (`[… cut: full result in <path>]`). Use `20000` |
@@ -85,7 +85,7 @@ A `running` or `needs_input` result (and a no-wait `craze send`) prints a handle
 
 ## Large context
 
-Put a large context in a file in the project and name the file in the prompt; give the prompt itself through `--prompt-file`. A prompt over 32 KiB is refused.
+Put a large context in a file in the project and name the file in the prompt; give the prompt itself through `--prompt-file`. A prompt can be up to 512 KiB, but a smaller one is cheaper (a native turn sends it again with every request). A `craze send` over 32 KiB to a session that is still running a turn is refused (exit 1, kind `prompt`, nothing queued): send it once the turn has ended.
 
 ## Parallel runs
 

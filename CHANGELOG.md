@@ -4,6 +4,29 @@ Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest firs
 
 ## Unreleased
 
+### Sessions and scripting
+
+- `craze new --wait` and `craze send` take a prompt of up to 512 KiB, from
+  words, `--prompt-file` or stdin (was 32 KiB, #111). The bound fits the
+  socket's 4 MiB request line with any JSON escaping; over it is still exit 2,
+  kind `prompt`.
+- A `craze send` over 32 KiB to a session that is running a turn would have to
+  wait in the session's queue, which still holds 32 KiB a row: the session
+  refuses it, exit 1, kind `prompt`, nothing queued, and the message now says
+  so (`it is over 32 KiB, the most a prompt can wait in the session's queue,
+  and the session was busy; send it once the turn has ended`) instead of
+  `agent: message too long`.
+- The CLI reference has a new section, "A waiter run detached", for a program
+  that drives craze from elsewhere: run each round's waiter in a session of its
+  own with its result and exit code in files, `craze cancel` and `craze stop`
+  to end a round or the session, no `--timeout`, plain `craze wait` to read a
+  lost round, `CRAZE_RUNTIME_DIR` on a machine people log in to, and the last
+  round's `usage.session` as the session's total. End-to-end tests run it that
+  way: detached, no terminal, across a host that idled out and was loaded
+  again.
+- `craze auth login` from a pipe takes a key with no trailing newline (it
+  always did; now tested and documented).
+
 ### Maintenance
 
 - Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint

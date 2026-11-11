@@ -617,6 +617,11 @@ func submitLastPrompt(conn *waitConn, text string, fence bool) func(context.Cont
 		switch {
 		case errors.Is(err, remote.ErrOutcomeUnknown):
 			return waitTarget{}, &submitError{msg: "the prompt may not have reached it" + follow, err: err, kind: errkind.Unobserved}
+		case refusedByHost(err) && refusalReason(err) == protocol.ReasonTextTooLong:
+			// A prompt the session could not start at once went to its
+			// queue, whose rows are bounded tighter than a prompt is
+			// (promptTextMax): nothing was queued, nothing ran.
+			return waitTarget{}, &submitError{msg: queuedTooLong, err: err, kind: errkind.Prompt}
 		case refusedByHost(err):
 			return waitTarget{}, &submitError{msg: "the prompt was refused: " + sanitizeLine(err.Error()), err: err, kind: refusalKind(err)}
 		case err != nil:
@@ -636,6 +641,21 @@ func submitLastPrompt(conn *waitConn, text string, fence bool) func(context.Cont
 		}
 		return waitTarget{}, &submitError{msg: "the prompt's answer names no turn and no queued row; it may have reached the session" + follow, kind: errkind.Unobserved}
 	}
+}
+
+// queuedTooLong is the host's text_too_long refusal of a prompt, in words: one
+// over the queue's bound that had to wait behind a running turn (a prompt
+// that starts at once is bounded only by promptTextMax).
+var queuedTooLong = "the prompt was refused: it is over " + strconv.Itoa(agent.QueueTextCap>>10) +
+	" KiB, the most a prompt can wait in the session's queue, and the session was busy; send it once the turn has ended"
+
+// refusalReason is the reason of the host's refusal err, or "".
+func refusalReason(err error) protocol.Reason {
+	var re *remote.Error
+	if errors.As(err, &re) {
+		return re.Reason
+	}
+	return ""
 }
 
 // submitError is submitPrompt's failure: its words, as the command says them,

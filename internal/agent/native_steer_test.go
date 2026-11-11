@@ -223,7 +223,7 @@ func TestNativeInterjectUnansweredComesBackInTheResult(t *testing.T) {
 	await(t, h.reached, "the held final step")
 	// Accepted during the final text step: there is no later step to take it
 	// up, so it comes back unanswered.
-	huge := strings.Repeat("x", queueTextCap+1)
+	huge := strings.Repeat("x", QueueTextCap+1)
 	for _, text := range []string{nativeSteer, huge} {
 		if err := s.Interject(context.Background(), text); err != nil {
 			t.Fatalf("Interject: %v", err)

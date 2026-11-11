@@ -29,11 +29,16 @@ import (
 // the command, exit 1, before anything is spawned. Plain craze new keeps its
 // own rule: words or nothing, and stdin is never read.
 
-// promptTextMax is the most a prompt may be, in bytes: the message queue's
-// own bound (internal/agent's queueTextCap), which a prompt queued behind a
-// running turn meets at the host — refused here first, before anything is
-// spawned (TestPromptTextMaxIsTheQueuesBound holds the two together).
-const promptTextMax = 32 << 10
+// promptTextMax is the most a prompt of craze new --wait or craze send may
+// be, in bytes, from any source (issue #111): refused here, before anything is
+// spawned or dialled. A prompt the host starts at once — new --wait's always,
+// send's to an idle session — has no other bound than the socket's line,
+// which this fits with any escaping (TestPromptTextMaxFitsOneLine: 6 bytes of
+// JSON per byte at worst, 3 MiB under protocol.InboundLineMax's 4 MiB; 1 MiB
+// would not fit). One that has to wait in the session's queue behind a
+// running turn meets the queue's own agent.QueueTextCap (32 KiB) at the host,
+// which refuses it, text_too_long (submitLastPrompt names it).
+const promptTextMax = 512 << 10
 
 // promptInput is --prompt-file and --remove-prompt-file.
 type promptInput struct {
@@ -157,7 +162,8 @@ func readPromptFile(path string) (string, error) {
 
 // promptReadMax bounds what is read of a prompt's source: a prompt is
 // promptTextMax once trimmed, and a source past this is over it whatever
-// whitespace surrounds it — read no further than that.
+// whitespace surrounds it — read no further than that. It is never below
+// promptTextMax (TestPromptBoundsHoldTogether).
 const promptReadMax = 1 << 20
 
 // errPromptTooLong is a source longer than promptReadMax.
