@@ -278,15 +278,16 @@ func (r *promptJob) spawn(opts spawnOptions, own bool) (hostRef, error) {
 		if own {
 			r.spawned = &ref
 		}
-		promptSpawned(ref)
+		promptSpawned(r, ref)
 	}
 	return ref, err
 }
 
 // promptSpawned sees each host a prompt's command spawned, once it answered
 // ok, before the command attaches to it: a no-op, and the barrier a test
-// sends a signal after when it means one before the prompt was sent.
-var promptSpawned = func(hostRef) {}
+// sends a signal at when it means one before the prompt was sent, waiting
+// there for r.relayed so the command's work has ended before it goes on.
+var promptSpawned = func(*promptJob, hostRef) {}
 
 // failBefore is a failure before the prompt was sent (err: the spawn's, the
 // reload's, the attach's): nothing of the command's reached any session, so

@@ -50,7 +50,14 @@ func TestSendNeverStopsTheHostItsReloadSpawned(t *testing.T) {
 	sigs := withWaitSignals(t)
 	spawned := make(chan hostRef, 1)
 	prev := promptSpawned
-	promptSpawned = func(ref hostRef) { spawned <- ref }
+	// The signal relayed, and so the command's work ended, before the reload's
+	// host is dialled: on a slow runner a signal sent after the hook returned
+	// could land after the fake agent's whole turn.
+	promptSpawned = func(r *promptJob, ref hostRef) {
+		spawned <- ref
+		sigs <- syscall.SIGINT
+		waitFor(t, "the signal to be relayed", func() bool { return len(r.relayed) == 1 })
+	}
 	t.Cleanup(func() { promptSpawned = prev })
 
 	run := goCraze("send", "00009009", "--wait", "--json", "never sent")
@@ -60,7 +67,6 @@ func TestSendNeverStopsTheHostItsReloadSpawned(t *testing.T) {
 	case <-time.After(serveStep):
 		t.Fatal("craze send never spawned a host to reload the session")
 	}
-	sigs <- syscall.SIGINT
 	stdout, stderr, code := run.wait(t)
 	m := decodeResult(t, stdout)
 	if code != 3 || m["status"] != "cancelled" || !errorIs(m, "interrupted before the prompt was sent", "interrupted", false) || stderr != "" {

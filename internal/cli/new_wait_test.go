@@ -439,7 +439,12 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	sigs := withWaitSignals(t)
 	spawned := make(chan hostRef, 1)
 	prev := promptSpawned
-	promptSpawned = func(ref hostRef) { spawned <- ref }
+	// The signal relayed, and so the command's work ended, before the host is attached to.
+	promptSpawned = func(r *promptJob, ref hostRef) {
+		spawned <- ref
+		sigs <- syscall.SIGINT
+		waitFor(t, "the signal to be relayed", func() bool { return len(r.relayed) == 1 })
+	}
 	t.Cleanup(func() { promptSpawned = prev })
 
 	run := goCraze("new", "--wait", "--json", "--provider", "cursor", "--model", "nope", "--effort", "low", "-C", ws, "never sent")
@@ -449,7 +454,6 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	case <-time.After(serveStep):
 		t.Fatal("craze new --wait never spawned its host")
 	}
-	sigs <- syscall.SIGINT
 	stdout, stderr, code := run.wait(t)
 	m := decodeResult(t, stdout)
 	if code != 3 || m["status"] != "cancelled" || m["session"] != ref.entry.CrazeSessionID || m["message"] != "" ||
