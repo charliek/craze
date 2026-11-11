@@ -2,6 +2,34 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## Unreleased
+
+### Maintenance
+
+- Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint
+  2.15.0 (was 2.13.2, which cannot read Go 1.27.2+'s export data). Its errcheck
+  now reports an error received from a channel and dropped; the three places
+  that did so wait without discarding a received error.
+- Fantasy v0.45.0 (was v0.43.2). Fantasy builds on Charm's fork of the OpenAI
+  SDK (`github.com/charmbracelet/openai-go`) from v0.45.0, so
+  `github.com/openai/openai-go/v3` leaves the build; the dependency-boundary
+  tests forbid the fork as they forbid the SDK. Through it: an
+  OpenAI-compatible provider that reports reasoning tokens apart from output
+  tokens has them counted in output (and spend), tool messages stay together
+  when tool results carry images (craze's own regrouping is unchanged), and
+  JSON repair fixes. `bin/craze` is 44,292,802 bytes (was 42,484,176).
+- **Held:** Fantasy v0.45.1 to v0.48.0. From v0.45.1 Fantasy no longer retries
+  a step because a tool returned an error, and four of the native harness's
+  cancel and callback tests fail against it; that is more than a version bump.
+- golang.org/x/sys v0.50.0, golang.org/x/image v0.48.0, spf13/pflag v1.1.0,
+  kaptinlin/jsonschema v0.9.10, charmbracelet/x/term v0.2.2,
+  charmbracelet/x/ansi v0.11.9, mattn/go-runewidth v0.0.31 and
+  charmbracelet/bubbles v1.0.0; no TUI golden or wire fixture moved.
+- GitHub Actions: actions/checkout v7, actions/setup-go v7, astral-sh/setup-uv
+  v10.3.3.
+- Python locks: `eval/` takes aiohttp 3.14.5 (three advisories fixed in 3.14.4)
+  and pytest 9.2.0; the docs site takes zensical 0.1.1.
+
 ## v0.2.0 — 2026-10-14
 
 Effort becomes a control of its own on native models (`/effort`, and a switch

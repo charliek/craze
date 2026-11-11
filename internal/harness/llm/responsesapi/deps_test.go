@@ -21,6 +21,8 @@ const thisPackage = "github.com/charliek/craze/internal/harness/llm/responsesapi
 var forbiddenDeps = []string{
 	"charm.land/fantasy",
 	"github.com/openai/openai-go",
+	// Charm's fork of the OpenAI SDK, which Fantasy v0.45 and later build on.
+	"github.com/charmbracelet/openai-go",
 	"github.com/charliek/craze/internal/harness/llm",
 }
 

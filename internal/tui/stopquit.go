@@ -235,7 +235,9 @@ func awaitStop(ctx context.Context, eng backend.Backend, stopped <-chan error) e
 	join := time.NewTimer(quitJoinWait)
 	defer join.Stop()
 	select {
-	case <-stopped:
+	case err := <-stopped:
+		// Joined only: the deadline is the quit's answer, not the stop's.
+		_ = err
 	case <-join.C:
 	}
 	return ctx.Err()

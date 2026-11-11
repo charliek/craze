@@ -45,7 +45,7 @@ import (
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
-	"github.com/openai/openai-go/v3/option"
+	"github.com/charmbracelet/openai-go/option"
 )
 
 // openRouterBaseURL is OpenRouter's Chat Completions endpoint, Fantasy's

@@ -185,8 +185,10 @@ func sentShape(t *testing.T, body []byte) []string {
 // OpenAI-compatible client (A9's shape): two images two parallel calls
 // returned go out as the step's two tool messages, together, then one user
 // message holding both images. The control is the same prompt through the
-// client unwrapped, Fantasy as shipped: a user message after each tool
-// message, splitting the run. The caller's prompt is untouched either way.
+// client unwrapped, Fantasy as shipped: since v0.44.0 (fantasy#366) the tool
+// messages stay together, but each image still goes out as a user message of
+// its own, two where the wrapper sends one. The caller's prompt is untouched
+// either way.
 func TestWrapperRegroupsToolImagesOnTheWire(t *testing.T) {
 	var c capture
 	srv := newServer(t, c.handler(t))
@@ -199,8 +201,8 @@ func TestWrapperRegroupsToolImagesOnTheWire(t *testing.T) {
 	before, _ := json.Marshal(prompt)
 
 	stream(t, released(t, srv.URL), prompt)
-	if got, want := sentShape(t, c.last(t)), []string{"user", "assistant", "tool", "user+1", "tool", "user+1"}; !slices.Equal(got, want) {
-		t.Fatalf("control: Fantasy as shipped sent %q; want %q (a user message splitting the run)", got, want)
+	if got, want := sentShape(t, c.last(t)), []string{"user", "assistant", "tool", "tool", "user+1", "user+1"}; !slices.Equal(got, want) {
+		t.Fatalf("control: Fantasy as shipped sent %q; want %q (a user message for each image)", got, want)
 	}
 
 	stream(t, wrapped(t, srv.URL), prompt)

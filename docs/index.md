@@ -74,7 +74,7 @@ To run craze you need:
       grok's `~/.grok` home (config, auth, sessions, skills), which is the
       fork's current behaviour, not a craze guarantee
 
-Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`) is needed only to build from
+Go 1.27.3+ (this repo pins 1.27.3 via `.mise.toml`) is needed only to build from
 source. Brew, apt and the release archives need no Go.
 
 Coming from v0.0.1? See [Upgrading](getting-started/upgrading.md).

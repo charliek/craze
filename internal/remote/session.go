@@ -893,13 +893,16 @@ func (s *Session) Stop(ctx context.Context, c engine.Command) error {
 	select {
 	case err = <-done:
 	case <-s.ended:
-		if !s.endedClean() {
-			err = <-done
-			break
+		// A clean end is the answer: the call is cancelled, joined, and
+		// its error dropped.
+		clean := s.endedClean()
+		if clean {
+			cancel()
 		}
-		cancel()
-		<-done
-		err = nil
+		err = <-done
+		if clean {
+			err = nil
+		}
 	}
 	if err != nil && s.endedClean() && !errors.Is(err, backend.ErrStopUnsupported) {
 		// The end came as the call failed for it: the end is the answer.
