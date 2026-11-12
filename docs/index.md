@@ -49,7 +49,7 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   and take prompts up to 512 KiB; a program on another machine runs them
   detached, reading each round's result from files
   ([a waiter run detached](reference/cli.md#a-waiter-run-detached)).
-  [`craze models`](reference/cli.md#craze-models) lists the native models as JSON
+  [`craze models --json`](reference/cli.md#craze-models) lists the native models as JSON
   (each release ships the catalog as `models.json`), and `craze new --wait`
   refuses a model, effort or `--fast` a native model cannot take before it starts
   a session ([model checks](reference/cli.md#model-checks)).

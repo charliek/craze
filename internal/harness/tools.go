@@ -90,6 +90,11 @@ type toolset struct {
 	// listed with are the tools its child gets. nil for a sub-agent. Fixed at
 	// Open.
 	offered []string
+	// parents are the models the agent tool's menu lists as the session's
+	// own (openTools' parents: on a resume, every alias it may continue on),
+	// which a call naming one is held to as the menu was (resolveChildModel,
+	// plan 050 review). nil for a sub-agent. Fixed at Open.
+	parents []string
 
 	// planPath is the session's plan file, which every plan-mode reminder
 	// hands the model verbatim (reminders.go). It is held here for one reason:
@@ -302,6 +307,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// toolset.offered): only a session that can start children has either.
 	if child == nil {
 		ts.types = agentTypes(personas)
+		ts.parents = slices.Clone(parents)
 		every := &ChildOptions{AllTools: true}
 		for _, t := range p.Tools {
 			if id := t.Spec().ID; every.keeps(id) {

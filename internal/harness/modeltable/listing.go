@@ -103,11 +103,19 @@ func (t *Table) AccountListRead(provider string) bool {
 
 // FromAccount says alias is a model the load learned from an account's own
 // list that the catalog has no seed for (plan 050 C2): every ChatGPT plan
-// model, and an Anthropic model the account lists that craze does not ship.
+// model, and an Anthropic model the account lists that craze does not ship —
+// while it is still the list's model. One the user's models.toml points at
+// another provider or wire model is the user's own (CatalogModel), whatever
+// the list said of its alias (plan 050 review).
 func (t *Table) FromAccount(alias string) bool {
 	_, discovered := t.discovered[alias]
-	return discovered || t.anthropicListed[alias]
+	return (discovered || t.anthropicListed[alias]) && t.catalogModels[alias]
 }
+
+// CatalogModel says alias is the catalog's own model (Resolved.CatalogModel):
+// a shipped alias, or one an account's list brought, that the user's
+// models.toml has not pointed at another provider or wire model.
+func (t *Table) CatalogModel(alias string) bool { return t.catalogModels[alias] }
 
 // RetiredRows are the catalog's [[retired]] rows, sorted by alias, each the
 // caller's own (plan 050 C2). A table loaded without a catalog, or built in

@@ -204,3 +204,37 @@ func TestResumedMenuListsTheResumedModel(t *testing.T) {
 		t.Fatalf("a session on another model lists deprecated test/b:\n%s", d)
 	}
 }
+
+// TestResumedCallHeldToTheMenusParents (plan 050 review): a resumed
+// session's agent tool lists every alias the transcript's model goes by as
+// its own (resumeParents), and a call naming one of them runs, as the menu
+// offered it — here test/b2, the same model as test/b under another alias,
+// deprecated and configured by nothing, while the session continues on
+// test/b. The control: a deprecated model the menu did not list is still
+// refused, naming the choice set.
+func TestResumedCallHeldToTheMenusParents(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	opts := f.options()
+	opts.tools.profiles = agentProfile
+	id := storedTurn(t, f, opts, func(s *Session) {
+		if err := s.SetModel("test/b"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	f.table.Models["test/b2"] = f.table.Models["test/b"]
+	deprecate(f.table.Models, "test/b2", "test/a")
+	deprecate(f.table.Models, "other/c", "test/a")
+	s := resumed(t, resumeOptions(opts, id))
+	if m, _ := s.Current(); m != "test/b" {
+		t.Fatalf("premise: resumed on %s, want test/b", m)
+	}
+	if d := specOf(t, s, "agent").Description; !strings.Contains(d, "\n- test/b2") {
+		t.Fatalf("premise: the resumed session's agent tool lists\n%s\nwant test/b2, the transcript's model by another alias", d)
+	}
+	if got, err := s.resolveChildModel(s.view(), childModelInput{Call: "test/b2", ParentAlias: "test/b"}, nil); err != nil || got != "test/b2" {
+		t.Fatalf("a call naming test/b2, which the menu listed = %q, %v; want it to run", got, err)
+	}
+	if got, err := s.resolveChildModel(s.view(), childModelInput{Call: "other/c", ParentAlias: "test/b"}, nil); err == nil || !strings.Contains(err.Error(), "Model not offered to sub-agents") {
+		t.Fatalf("a call naming deprecated other/c, which the menu did not list = %q, %v; want it refused", got, err)
+	}
+}

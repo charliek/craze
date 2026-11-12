@@ -128,6 +128,36 @@ func TestConnectSaysWhichSourceAMakersModelsComeFrom(t *testing.T) {
 	if got := signedInSessionNote(connectSources{}, applied); got != "The plan's models are in /model now." {
 		t.Errorf("a sign-in with nothing hidden: %q", got)
 	}
+
+	// Both source sentences speak of the state the refresh left (plan 050
+	// review): the present only once the session took the change up, the
+	// future while a turn runs, and new sessions' with no refresh — or one
+	// that changed nothing in this conversation.
+	current := &agent.ModelsRefresh{Status: agent.ModelsCurrent}
+	for _, tc := range []struct {
+		name string
+		r    *agent.ModelsRefresh
+		none string
+		wins string
+	}{
+		{"applied", applied, noneListed, planWins},
+		{"pending", pending,
+			"Connected OpenAI. None of its models will be listed after this turn: OpenAI models come from ChatGPT plan; they still run with --model (source_order in models.toml changes the order).",
+			"The plan's models will be in /model after this turn. OpenAI models will come from it after this turn; those of OpenAI will no longer be listed. They still run with --model (source_order in models.toml changes the order)."},
+		{"no refresh", nil,
+			"Connected OpenAI. New sessions list none of its models: OpenAI models come from ChatGPT plan; they still run with --model (source_order in models.toml changes the order).",
+			"New sessions offer the ChatGPT plan's models; to use them in this conversation, /exit and run craze -c. In new sessions OpenAI models come from it; those of OpenAI are not listed there. They still run with --model (source_order in models.toml changes the order)."},
+		{"nothing changed", current,
+			"Connected OpenAI. New sessions list none of its models: OpenAI models come from ChatGPT plan; they still run with --model (source_order in models.toml changes the order).",
+			"New sessions offer the ChatGPT plan's models; to use them in this conversation, /exit and run craze -c. In new sessions OpenAI models come from it; those of OpenAI are not listed there. They still run with --model (source_order in models.toml changes the order)."},
+	} {
+		if got := connectedNote("OpenAI", connectSourcesOf(plan, "openai", oa), tc.r); got != tc.none {
+			t.Errorf("%s, all hidden:\n%q\nwant\n%q", tc.name, got, tc.none)
+		}
+		if got := signedInSessionNote(connectSourcesOf(plan, modeltable.ChatGPTProvider, oa), tc.r); got != tc.wins {
+			t.Errorf("%s, a sign-in that takes a maker over:\n%q\nwant\n%q", tc.name, got, tc.wins)
+		}
+	}
 }
 
 // planList is a ChatGPT model list for shippedDir's account.

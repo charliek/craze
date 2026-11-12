@@ -2089,8 +2089,10 @@ one. A sub-agent works within its own model's context default.
 default_context = 100000   # optional, >= 0: tokens a session works within
 ```
 
-`default_context = 0` over a shipped value turns it off: the whole window is
-in force. A value at or above the model's `context_window` means the same,
+`default_context = 0` over a shipped value turns the default off: the whole
+window is in force, so compaction triggers at its share of the window again
+(automatic compaction itself is turned off with `[compaction] auto =
+false`). A value at or above the model's `context_window` means the same,
 and is not an error (you may lower a shipped window below the shipped
 default). On a model whose window craze does not know, it changes nothing:
 such a model never compacts on its own.
@@ -2269,7 +2271,10 @@ once its context passes 85% of the default (231,200 tokens under the 272,000
 tier, 40,800 tokens of headroom), but a step that adds more than the headroom,
 or the summarizer's own request over the history that crossed the trigger,
 can still go over the tier, and a request over it is priced at the tier.
-`default_context = 0` turns the trigger off.
+`default_context = 0` does not turn compaction off: it moves the trigger
+back to `threshold_percent` (85% by default) of the whole context window, so
+a session runs past the tier, every request above it priced at it. `[compaction] auto = false` turns automatic compaction off
+altogether.
 
 A session's transcript keeps what it needs to price the tier again on a
 resume: the part of a sub-agent's usage row, and of a compaction's usage,

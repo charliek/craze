@@ -305,13 +305,17 @@ func (m *responsesPhase) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// messageMetadata is a finished message's metadata: its phase, on a model
-// that replays one (phases), and nil otherwise, or when it has none.
-func (st *partState) messageMetadata(item responsesapi.OutputItem) fantasy.ProviderMetadata {
-	if !st.phases || item.Phase == "" {
+// messageMetadata is the metadata of the message at index idx, finished or
+// cut (item, as its end or the cut gave it): its phase — the end's, else the
+// one its output_item.added gave (began), which is all a message cut before
+// its end has — on a model that replays one (phases), and nil otherwise, or
+// when it has none.
+func (st *partState) messageMetadata(idx int, item responsesapi.OutputItem) fantasy.ProviderMetadata {
+	phase := cmp.Or(item.Phase, st.began[idx])
+	if !st.phases || phase == "" {
 		return nil
 	}
-	return fantasy.ProviderMetadata{typeResponsesMessage: &responsesPhase{Phase: item.Phase}}
+	return fantasy.ProviderMetadata{typeResponsesMessage: &responsesPhase{Phase: phase}}
 }
 
 // messagePhase is the phase a text part's metadata keeps, "" when none.
@@ -612,6 +616,10 @@ type partState struct {
 	// phases is the model's: a message's phase is kept in its text part's
 	// metadata only where it is replayed (messageMetadata).
 	phases bool
+	// began is each message's phase as its output_item.added gave it, by
+	// output_index: what a message the response was cut in keeps, its end
+	// never having said (plan 050 review).
+	began map[int]string
 }
 
 // cut ends a response that stopped short (cutShort) the way Fantasy's
@@ -648,6 +656,12 @@ func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart)
 		switch ev.Item.Type {
 		case "message":
 			st.ids[ev.Index] = cmp.Or(ev.Item.ID, fmt.Sprintf("item-%d", ev.Index))
+			if ev.Item.Phase != "" {
+				if st.began == nil {
+					st.began = make(map[int]string)
+				}
+				st.began[ev.Index] = ev.Item.Phase
+			}
 			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: st.ids[ev.Index]})
 		case "reasoning":
 			st.ids[ev.Index] = cmp.Or(ev.Item.ID, fmt.Sprintf("item-%d", ev.Index))
@@ -665,7 +679,7 @@ func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart)
 	case responsesapi.ItemDone:
 		switch ev.Item.Type {
 		case "message":
-			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Item)})
+			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Index, ev.Item)})
 		case "reasoning":
 			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: id,
 				ProviderMetadata: fantasy.ProviderMetadata{openai.Name: reasoningMetadata(ev.Item)}})
@@ -680,10 +694,11 @@ func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart)
 		// message keeps its text so far; a call cut mid-arguments is closed
 		// and never sent as a call, as Fantasy's OpenAI-compatible client
 		// closes one on a "length" finish; a reasoning item is left open,
-		// with no encrypted content to replay, and Fantasy drops it.
+		// with no encrypted content to replay, and Fantasy drops it. A cut
+		// message keeps the phase it began in (messageMetadata).
 		switch ev.Item.Type {
 		case "message":
-			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Item)})
+			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Index, ev.Item)})
 		case "function_call":
 			st.cutCalls++
 			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: id})

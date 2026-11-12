@@ -180,7 +180,7 @@ func overlayProvider(base Provider, o providerOverlay) Provider {
 	switch {
 	case o.EnvKeys != nil:
 		p.EnvKeys = nilIfEmpty(slices.Clone(*o.EnvKeys))
-	case p.Driver != base.Driver || p.BaseURL != base.BaseURL:
+	case p.Driver != base.Driver || !sameEndpoint(p.BaseURL, base.BaseURL):
 		p.EnvKeys = nil
 	}
 	if o.APIKey != nil {
@@ -630,7 +630,7 @@ func (m *merger) makers() {
 	moved := func(id string) bool {
 		shipped, ok := m.cat.Providers[id]
 		p := m.t.Providers[id]
-		return !ok || p.Driver != shipped.Driver || p.BaseURL != shipped.BaseURL
+		return !ok || p.Driver != shipped.Driver || !sameEndpoint(p.BaseURL, shipped.BaseURL)
 	}
 	for id, maker := range m.cat.ProviderMakers {
 		if !moved(id) {
@@ -837,7 +837,7 @@ func (m *merger) provider(id string, o providerOverlay) {
 		// entry carries goes with a base_url of its own that is dropped: it
 		// was written for that endpoint, not for craze's (plan 050 review).
 		instead := "craze's shipped driver and base_url are used"
-		if o.BaseURL != nil && !sameEndpoint(*o.BaseURL, shipped.BaseURL) && (o.APIKey != nil || o.EnvKeys != nil) {
+		if writesOtherEndpoint(o.BaseURL, shipped.BaseURL) && (o.APIKey != nil || o.EnvKeys != nil) {
 			instead += ", and the entry's api_key and env_keys are dropped with its base_url, so its key is not sent to craze's endpoint"
 			o.APIKey, o.EnvKeys = nil, nil
 		}
@@ -861,11 +861,23 @@ func (m *merger) provider(id string, o providerOverlay) {
 // writes one and no base_url (openai-compat for Meta, say) still lends its
 // key to the shipped endpoint, as it always has.
 func movesEndpoint(shipped Provider, o providerOverlay) bool {
-	return o.BaseURL != nil && !sameEndpoint(*o.BaseURL, shipped.BaseURL)
+	return writesOtherEndpoint(o.BaseURL, shipped.BaseURL)
+}
+
+// writesOtherEndpoint reports whether written, a base_url an entry writes (nil
+// for none), names another endpoint than shipped: one it writes, not empty —
+// an empty base_url names no endpoint at all (plan 050 review) — and not the
+// same endpoint once both are normalised (sameEndpoint).
+func writesOtherEndpoint(written *string, shipped string) bool {
+	return written != nil && *written != "" && !sameEndpoint(*written, shipped)
 }
 
 // sameEndpoint reports whether base URLs a and b address one endpoint: equal
-// once each is normalised (normalEndpoint).
+// once each is normalised (normalEndpoint). It is the merge's one test of
+// "the same endpoint": whether a key an entry carries may go there
+// (writesOtherEndpoint), whether the shipped variables still fund an entry
+// (overlayProvider), whether a provider keeps its maker (makers), and which
+// env_keys an unfunded driver change is told to add (unfundedDriver).
 func sameEndpoint(a, b string) bool { return normalEndpoint(a) == normalEndpoint(b) }
 
 // normalEndpoint is base URL u with what does not change where a request goes
@@ -938,7 +950,7 @@ func (m *merger) unfundedDriver(id string, shipped Provider, o providerOverlay, 
 		return // funded, or an env_keys of the user's own, even an empty one
 	}
 	add := "env_keys naming the variable that holds its key"
-	if p.BaseURL == shipped.BaseURL {
+	if sameEndpoint(p.BaseURL, shipped.BaseURL) {
 		names := make([]string, len(shipped.EnvKeys))
 		for i, n := range shipped.EnvKeys {
 			names[i] = strconv.Quote(n)

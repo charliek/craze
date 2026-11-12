@@ -1208,6 +1208,42 @@ func TestLegacyEntryAtTheShippedEndpointStillLends(t *testing.T) {
 	}
 }
 
+// TestAnEmptyBaseURLNamesNoEndpoint (plan 050 review): base_url = "" names
+// no endpoint, so a key written beside it was written for none other than
+// the provider's own and stays: on Anthropic's locked entry (the base_url
+// is dropped with its warning, the key kept), on an old import's entry (its
+// key lent, no warning), and on an entry whose empty base_url the driver
+// refuses (the shipped endpoint used, with the entry's key).
+func TestAnEmptyBaseURLNamesNoEndpoint(t *testing.T) {
+	const key = "sk-empty-base-0000010"
+	for _, tc := range []struct {
+		name, body, alias string
+		warns             [][]string
+	}{
+		{"Anthropic's locked entry", "[providers.anthropic]\nbase_url = \"\"\napi_key = \"" + key + "\"\n", "anthropic/claude-opus-5-5",
+			[][]string{{"providers.anthropic", "base_url", "endpoint is fixed"}}},
+		{"an old import's entry", "[providers.fireworks]\nbase_url = \"\"\napi_key = \"" + key + "\"\nsource = \"gx\"\n", "fireworks/kimi-k3p1-pro", nil},
+		{"an endpoint the driver refuses", "[providers.fireworks]\nbase_url = \"\"\napi_key = \"" + key + "\"\n", "fireworks/kimi-k3p1-pro",
+			[][]string{{"providers.fireworks", "base_url"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, err := Load(writeFiles(t, "version = 1\n\n"+tc.body, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWarnings(t, tbl, tc.warns...)
+			for _, w := range tbl.Warnings {
+				if strings.Contains(w, "go with it") || strings.Contains(w, "dropped with its base_url") {
+					t.Fatalf("an empty base_url took the key with it: %q", w)
+				}
+			}
+			if r, err := tbl.Resolve(tc.alias, fakeEnv(nil)); err != nil || r.APIKey.Reveal() != key {
+				t.Fatalf("Resolve(%s) = %v; want the entry's key", tc.alias, err)
+			}
+		})
+	}
+}
+
 // TestOpenAIEntryKeepsItsKeyAtItsEndpoint: openai became a shipped id in plan
 // 050, and an entry providers.toml already had for it lends its key only to
 // the endpoint it is at after the merge (the plan 050 review). An old

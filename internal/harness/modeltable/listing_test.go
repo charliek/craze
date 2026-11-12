@@ -3,6 +3,8 @@ package modeltable
 import (
 	"cmp"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -151,5 +153,48 @@ func TestRetiredRowsAndDeprecatedNotice(t *testing.T) {
 	}
 	if (&Table{}).RetiredRows() == nil {
 		t.Fatal("a table with no catalog's rows is nil, not empty")
+	}
+}
+
+// TestARepointedAliasIsTheUsersOwn (plan 050 review): an alias the user's
+// models.toml points at another provider or wire model is the user's own
+// model, whatever brought the alias — the ChatGPT plan's list, the Anthropic
+// key's list, or the catalog: neither FromAccount nor CatalogModel. The
+// controls: the same aliases untouched are the account's and the catalog's,
+// and a shipped alias overridden on another key only stays the catalog's.
+func TestARepointedAliasIsTheUsersOwn(t *testing.T) {
+	withAnthropicEnv(t, map[string]string{"ANTHROPIC_API_KEY": anthropicKeyA})
+	const repoint = "provider = \"openrouter\"\nwire_model = \"someone/else\"\n"
+	dir := signedInDir(t)
+	writeAnthropicList(t, dir, anthropicKeyA, append(seedEntries(t), opus6()))
+	untouched := loadShipped(t, dir)
+	for _, alias := range []string{"chatgpt/gpt-6-astra", "anthropic/claude-opus-6"} {
+		if !untouched.FromAccount(alias) || !untouched.CatalogModel(alias) {
+			t.Fatalf("control: %s from an account %v, the catalog's %v", alias, untouched.FromAccount(alias), untouched.CatalogModel(alias))
+		}
+	}
+	if !untouched.CatalogModel("fireworks/kimi-k3p1-pro") {
+		t.Fatal("control: a shipped model is not the catalog's")
+	}
+
+	models := "version = 1\n\n" +
+		"[models.\"chatgpt/gpt-6-astra\"]\n" + repoint + "\n" +
+		"[models.\"anthropic/claude-opus-6\"]\n" + repoint + "\n" +
+		"[models.\"fireworks/kimi-k3p1-pro\"]\nwire_model = \"accounts/me/models/my-kimi\"\n\n" +
+		"[models.\"fireworks/glm-5p3\"]\ndefault_effort = \"low\"\n"
+	if err := os.WriteFile(filepath.Join(dir, ModelsFile), []byte(models), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tbl := loadShipped(t, dir)
+	for _, alias := range []string{"chatgpt/gpt-6-astra", "anthropic/claude-opus-6", "fireworks/kimi-k3p1-pro"} {
+		if _, ok := tbl.Models[alias]; !ok {
+			t.Fatalf("%s is not in the table: %q", alias, tbl.Warnings)
+		}
+		if tbl.FromAccount(alias) || tbl.CatalogModel(alias) {
+			t.Errorf("%s, re-pointed: from an account %v, the catalog's %v; want the user's own", alias, tbl.FromAccount(alias), tbl.CatalogModel(alias))
+		}
+	}
+	if !tbl.CatalogModel("fireworks/glm-5p3") {
+		t.Error("a shipped model overridden on another key is no longer the catalog's")
 	}
 }

@@ -400,3 +400,48 @@ func TestOnlyOpenAIKeepsThePhase(t *testing.T) {
 		t.Fatalf("the ChatGPT route's text end = %v, want no metadata", got)
 	}
 }
+
+// TestACutCommentaryKeepsItsPhase (plan 050 review): a commentary message
+// cut by max_output_tokens after its text began — its output_item.done never
+// sent — keeps the phase its output_item.added gave, so the next request
+// replays it as commentary, not as an answer; and through Fantasy's
+// Generate the cut text carries it. Only where phases are kept: a model of
+// the user's own on provider openai keeps none for the same stream.
+func TestACutCommentaryKeepsItsPhase(t *testing.T) {
+	added := rxMessage("msg_c", "")
+	added["phase"] = "commentary"
+	stream := rxEvents(rxAdded(0, added), rxText(0, "msg_c", "Let me look"),
+		rxIncomplete("max_output_tokens", rxUsage(10, 0, 4, 0)))
+	prompt := fantasy.Prompt{fantasy.NewUserMessage("go")}
+	textEnd := func(parts []fantasy.StreamPart) fantasy.ProviderMetadata {
+		t.Helper()
+		for _, p := range parts {
+			if p.Type == fantasy.StreamPartTypeTextEnd {
+				return p.ProviderMetadata
+			}
+		}
+		t.Fatalf("no text end in %v", partKinds(parts))
+		return nil
+	}
+	srv := newRxServer(t, stream, stream)
+	lm := openaiModel(t, openaiRoute(srv.srv.URL+"/v1"))
+	md, ok := textEnd(openaiStep(t, lm, prompt))[typeResponsesMessage].(*responsesPhase)
+	if !ok || md.Phase != "commentary" {
+		t.Fatalf("the cut message's text end = %#v, want phase commentary", md)
+	}
+	resp, err := lm.Generate(context.Background(), fantasy.Call{Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := resp.Content[0].(fantasy.TextContent)
+	if resp.FinishReason != fantasy.FinishReasonLength || messagePhase(fantasy.TextPart{Text: text.Text, ProviderOptions: fantasy.ProviderOptions(text.ProviderMetadata)}) != "commentary" {
+		t.Fatalf("Generate: finish %q, content %#v; want the cut text with phase commentary", resp.FinishReason, resp.Content)
+	}
+
+	mineSrv := newRxServer(t, stream)
+	mine := openaiRoute(mineSrv.srv.URL + "/v1")
+	mine.CatalogModel = false
+	if got := textEnd(openaiStep(t, openaiModel(t, mine), prompt)); got != nil {
+		t.Fatalf("a model of the user's own: text end = %v, want no metadata", got)
+	}
+}

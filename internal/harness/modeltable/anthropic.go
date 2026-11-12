@@ -304,7 +304,7 @@ func lockAnthropic(cat *Catalog, ppath string, pd *providersOverlay) []string {
 		o.Driver = nil
 		if o.BaseURL != nil {
 			reason := fixedEndpoint(DriverAnthropic)
-			if !sameEndpoint(*o.BaseURL, AnthropicEndpoint) && (o.APIKey != nil || len(deref(o.EnvKeys)) > 0) {
+			if writesOtherEndpoint(o.BaseURL, AnthropicEndpoint) && (o.APIKey != nil || len(deref(o.EnvKeys)) > 0) {
 				// A key written beside another endpoint was written for it,
 				// not for Anthropic's (plan 050 review): it goes with the
 				// base_url, kept only for the redactor (withheld). An

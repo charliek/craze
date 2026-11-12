@@ -21,7 +21,8 @@ and want one fast, scriptable front end for several of them.
   no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
 - **One source per maker**: OpenAI's, Meta's, GLM's and DeepSeek's models are
   offered from your first funded source of them, in an order you can change,
-  and craze never moves a new session to a paid source on its own.
+  and while a ChatGPT sign-in is there but its models are not available, craze
+  does not move a new session to the OpenAI key's paid models on its own.
   [One source per maker](docs/reference/configuration.md#one-source-per-maker)
 - **`craze models`**: the native models, their status and replacement, efforts and
   context, and what is funded here, as a table or JSON; each release ships the

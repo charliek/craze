@@ -93,6 +93,10 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		{in.Persona, "the persona's model", false},
 		{v.table.Subagents.Model, "the configured sub-agent default model", false},
 	}
+	// The parents the menu was built from — every model the session may
+	// continue on, on a resume — and the parent's model now: a call naming
+	// one the menu listed is not refused for it (plan 050 review).
+	parents := append(slices.Clone(s.tools.parents), in.ParentAlias)
 	for _, c := range candidates {
 		if c.raw == "" {
 			continue
@@ -100,7 +104,7 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		got, recognized := v.resolveModelValue(c.raw, in.ParentAlias)
 		if !recognized {
 			if c.required {
-				listed := slices.Sorted(maps.Keys(subagentChoices(v.table, s.getenv, in.ParentAlias)))
+				listed := slices.Sorted(maps.Keys(subagentChoices(v.table, s.getenv, parents...)))
 				return "", unknownModelError(s.quoteRaw(c.raw), v.table, listed)
 			}
 			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
@@ -116,7 +120,7 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		if c.required {
 			// Never a hidden or deprecated model the owner did not configure
 			// just because the parent's model sent its name (the doc above).
-			choices := subagentChoices(v.table, s.getenv, in.ParentAlias)
+			choices := subagentChoices(v.table, s.getenv, parents...)
 			if !choices[got] {
 				return "", notOfferedModelError(s.quoteRaw(c.raw), v.table, slices.Sorted(maps.Keys(choices)))
 			}

@@ -2799,7 +2799,7 @@ alone) and `state` (the local forms' alone):
 | `name` | Its display name (the alias when it has none) |
 | `status` | `active`, or `deprecated`: it still runs when named, but no picker offers it and nothing chooses it for you ([deprecated models](configuration.md#deprecated-models)) |
 | `replacedBy` | A deprecated model's replacement |
-| `source` | Where the alias comes from: `catalog` (a model craze ships, your overrides of it included), `account` (one an account's own list brought that craze ships no entry for: every ChatGPT plan model, an Anthropic model the account lists that craze does not ship), or `user` (your own `models.toml` alias) |
+| `source` | Where the alias comes from: `catalog` (a model craze ships, your overrides of its other keys included), `account` (one an account's own list brought that craze ships no entry for: every ChatGPT plan model, an Anthropic model the account lists that craze does not ship), or `user` (your own `models.toml` alias, and any shipped or listed alias your `models.toml` points at another `provider` or `wire_model`, which is then your model) |
 | `efforts` | Its effort levels, in order; `[]` is no effort control: pass no `--effort` |
 | `defaultEffort` | The effort a session starts at with no `--effort`; `""` for none |
 | `fast` | Whether it has a fast variant: `false` on every native model, so `--fast` is [refused under `--wait`](#model-checks) |

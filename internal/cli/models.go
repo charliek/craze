@@ -323,14 +323,19 @@ func modelRowOf(t *modeltable.Table, alias string, getenv func(string) string, o
 }
 
 // modelSource is where alias comes from: an account's own list, the catalog
-// (the user's overrides of a shipped model included), or the user's files.
+// (a shipped model the user's files override field by field included), or
+// the user's files — any alias of the user's own, and any shipped or listed
+// alias the user's models.toml points at another provider or wire model,
+// which is then the user's model (modeltable.Table.CatalogModel).
 func modelSource(t *modeltable.Table, alias string) string {
 	if t.FromAccount(alias) {
 		return sourceAccount
 	}
 	switch t.ModelOrigin(alias) {
 	case modeltable.OriginShipped, modeltable.OriginOverridden, modeltable.OriginDiscovered:
-		return sourceCatalog
+		if t.CatalogModel(alias) {
+			return sourceCatalog
+		}
 	}
 	return sourceUser
 }

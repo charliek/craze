@@ -385,7 +385,9 @@ ctx` and the waiting footer's `context x/y` are that default, not the window,
 and automatic compaction runs at its share of it. The window sent to the
 provider and the price do not change. The [OpenAI](#an-openai-api-key) models
 have one, 272,000 tokens; `default_context = 0` under a model in `models.toml`
-turns it off.
+turns the default off, so the session compacts at its share of the whole
+window again (`[compaction] auto = false` is what turns automatic compaction
+off).
 `default_context` is a new `models.toml` key: a file that writes it does not
 load in an older craze.
 
@@ -501,7 +503,8 @@ Flash half of M3's), so craze never switches you to it.
   A session resumed after upgrading that already holds more than 231,200
   tokens compacts before its next turn, and until then its `NN% ctx` can read
   above 100%.
-  `default_context = 0` under a router in `models.toml` turns that off.
+  `default_context = 0` under a router in `models.toml` turns the default off:
+  the session then compacts at 85% of the whole window again, as before.
 - **Muse Ember 1.0** (`muse-ember-1.0`) joins Meta, with a context default of
   200,000 and Meta's price above it. It is not Meta's start.
 - **Claude Fable 5.2** (`anthropic/claude-fable-5-2`) is priced now: $8 input /

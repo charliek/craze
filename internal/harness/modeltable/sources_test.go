@@ -641,6 +641,46 @@ func TestSourceRuleOverTheShippedCatalog(t *testing.T) {
 	}
 }
 
+// TestOpenAIsOwnEndpointSpelledOtherwiseKeepsItsMaker (plan 050 review): a
+// [providers.openai] entry whose base_url is OpenAI's own endpoint spelled
+// otherwise — a trailing slash, the host in upper case — has not moved the
+// provider (sameEndpoint): its models keep their maker, so the source order
+// still hides them behind the ChatGPT plan's list, and with a ChatGPT
+// sign-in that has no list the paid-source guard still refuses to start on
+// the key's model. Its key funds them, and the shipped variable still does.
+func TestOpenAIsOwnEndpointSpelledOtherwiseKeepsItsMaker(t *testing.T) {
+	const key = "sk-openai-dummy-00000009"
+	for _, base := range []string{"https://api.openai.com/v1/", "HTTPS://API.OpenAI.com/v1"} {
+		t.Run(base, func(t *testing.T) {
+			load := func(s signIn) *Table {
+				t.Helper()
+				dir := writeFiles(t, "version = 1\n\n[providers.openai]\nbase_url = \""+base+"\"\napi_key = \""+key+"\"\n", "")
+				s.layDown(t, dir)
+				tbl, err := Load(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return tbl
+			}
+			listed := load(signedInList)
+			if m := listed.Models["openai/gpt-6.1-sol"]; m.Maker != "openai" {
+				t.Fatalf("openai/gpt-6.1-sol's maker = %q, want openai", m.Maker)
+			}
+			if p := listed.Providers["openai"]; !slices.Equal(p.EnvKeys, []string{"OPENAI_API_KEY"}) {
+				t.Fatalf("openai = %+v; want the shipped variable still its own", p)
+			}
+			if o := listed.Offers(fakeEnv(nil)); !o.Hidden["openai/gpt-6.1-sol"] || o.Offered["openai/gpt-6.1-sol"] {
+				t.Fatalf("openai/gpt-6.1-sol: hidden %v, offered %v; want hidden behind the plan's list", o.Hidden["openai/gpt-6.1-sol"], o.Offered["openai/gpt-6.1-sol"])
+			}
+			got, err := load(signedInNone).StartPick(nil, fakeEnv(nil))
+			var h *HeldError
+			if !errors.As(err, &h) || h.Alias != "openai/gpt-6.1-sol" || h.Source != ChatGPTProvider {
+				t.Fatalf("StartPick = %+v, %v; want openai/gpt-6.1-sol held by the sign-in", got, err)
+			}
+		})
+	}
+}
+
 // TestSourceRuleReadsTheSignInNow: the sets follow the sign-in as it is at
 // each call — a list written mid-process moves OpenAI's source to the plan
 // at the next call, with no new load (the list is the load's, so a load

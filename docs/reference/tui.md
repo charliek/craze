@@ -1995,7 +1995,14 @@ no provider has one ([below](#connect)).
   are no longer listed. They still run with --model (source_order in
   models.toml changes the order).` A sign-in's note does the same for the
   plan's models (`None of the ChatGPT plan's models are listed: OpenAI models
-  come from OpenAI; …` when `source_order` puts the key first). Another
+  come from OpenAI; …` when `source_order` puts the key first). Those two
+  sentences speak in the present only once the session has taken its models
+  up; while a turn runs they say what happens after it (`None of its models
+  will be listed after this turn: …`, `GLM models will come from it after this
+  turn; those of OpenRouter will no longer be listed.`), and when the session
+  could not take them up, what new sessions do (`New sessions list none of its
+  models: …`, `In new sessions GLM models come from it; those of OpenRouter
+  are not listed there.`). Another
   provider's stored key that
   cannot be used is kept as it was, and named in a note after it. A store that
   refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
