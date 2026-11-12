@@ -78,7 +78,8 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   `craze cancel` and `craze stop` to end a round or the session, no
   `--timeout`, plain `craze wait` to read a
   lost round, `CRAZE_RUNTIME_DIR` on a machine people log in to, and the last
-  round's `usage.session` as the session's total. End-to-end tests run it that
+  round's `usage.session` as the session's total (a floor when a step was cut
+  short, sent again or unpriced). End-to-end tests run it that
   way: detached, no terminal, across a host that idled out and was loaded
   again, and a later `craze send --wait` round that a plain `craze wait` reads
   without owning and `craze cancel` ends.

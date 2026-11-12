@@ -1437,6 +1437,8 @@ result from files later. What it needs to know:
   ([Signals](#craze-new-wait)). So run it in a session of its own, so that the exec or
   shell that started it ending sends it nothing: `setsid`, stdin `/dev/null`, stdout to a
   file, and its exit code to a file once it exits. No terminal is needed anywhere.
+  `$R` is a new directory for each round, with the prompt written to `$R/prompt.md`
+  first: an `exit` left there by an earlier round would read as this one's end.
 
   ```sh
   setsid -f sh -c 'echo $$ >"$2/pid"
@@ -1457,7 +1459,8 @@ result from files later. What it needs to know:
   warning (a prompt file that could not be deleted, a session file that could not be
   rewritten). An exit code over 128 (137 for `SIGKILL`) is the shell's report that the
   waiter itself was killed: `result.json` may be empty, and the round is read as a lost
-  waiter's (below).
+  waiter's (below). Any other code is the shell's own (127: it could not find `craze`),
+  with `result.json` empty and the shell's line in `stderr`.
 - **Whether the waiter is alive:** `pid` above is the round's shell, which waits for the
   waiter and writes `exit` after it. While that process lives (`kill -0 <pid>`) and there
   is no exit file, the round is running; with it gone and no exit file, the waiter was
@@ -1495,7 +1498,10 @@ result from files later. What it needs to know:
   when logind removes that directory at the user's last logout — cutting a running turn
   short. Set `CRAZE_RUNTIME_DIR` (a short absolute path, a directory only you can write,
   `0700`; [the socket base](protocol.md#the-socket-base)) in the environment of every
-  command, so hosts outlive logins. The [registry](protocol.md#the-registry) is under
+  command, so hosts outlive logins. That does not help where `logind.conf` sets
+  `KillUserProcesses=yes`: logind then kills a login session's processes at logout, and a
+  host started from that session is still in it (`setsid` does not move a process out of
+  its session's cgroup). The [registry](protocol.md#the-registry) is under
   `$HOME` and names each socket, so every command finds the hosts whatever its own
   runtime directory.
 - **A key for a native provider** is set up with `craze auth login <provider>`, which with
