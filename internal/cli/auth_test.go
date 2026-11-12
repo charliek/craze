@@ -383,7 +383,7 @@ func TestAuthList(t *testing.T) {
 	models := filepath.Join(native, "models.toml")
 	// A hand entry that repeats the shipped one (a default_model is the
 	// user's own pin since plan 038 §2.3, never a repeat of the catalog's).
-	if err := os.WriteFile(models, []byte("version = 1\n\n[models.\"fireworks/kimi-k3\"]\ndefault_effort = \"high\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(models, []byte("version = 1\n\n[models.\"fireworks/kimi-k3p1-pro\"]\ndefault_effort = \"high\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("FIREWORKS_API_KEY", authEnvK)
@@ -409,7 +409,7 @@ func TestAuthList(t *testing.T) {
 		t.Fatalf("list rows:\n%s\nwant:\n%s", stdout, wantRows)
 	}
 	wantNotes := "" +
-		"note: " + models + ": [models.\"fireworks/kimi-k3\"]: repeats craze's shipped entry — delete it to follow craze's updates\n" +
+		"note: " + models + ": [models.\"fireworks/kimi-k3p1-pro\"]: repeats craze's shipped entry — delete it to follow craze's updates\n" +
 		"note: ZHIPU_API_KEY is set to a value shorter than 8 bytes, which cannot be an API key; it is ignored\n"
 	if stderr != wantNotes {
 		t.Fatalf("list notes:\n%s\nwant:\n%s", stderr, wantNotes)

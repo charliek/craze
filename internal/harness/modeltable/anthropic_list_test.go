@@ -112,8 +112,8 @@ func TestAnthropicSeedsAlone(t *testing.T) {
 	env := withAnthropicEnv(t, map[string]string{"ANTHROPIC_API_KEY": anthropicKeyA})
 	tbl := loadShipped(t, t.TempDir())
 	wantWarnings(t, tbl)
-	if got := anthropicAliases(tbl); len(got) != 13 {
-		t.Fatalf("Anthropic models = %q, want the thirteen seeds", got)
+	if got := anthropicAliases(tbl); len(got) != 14 {
+		t.Fatalf("Anthropic models = %q, want the fourteen seeds", got)
 	}
 	for _, alias := range anthropicAliases(tbl) {
 		m := tbl.Models[alias]
@@ -281,8 +281,8 @@ func TestAnthropicListHidesUnnamedSeeds(t *testing.T) {
 	if _, ok := tbl.Models[hidden]; ok {
 		t.Fatalf("%s is offered though the account does not list it", hidden)
 	}
-	if got := len(anthropicAliases(tbl)); got != 12 {
-		t.Fatalf("%d Anthropic models, want 12", got)
+	if got := len(anthropicAliases(tbl)); got != 13 {
+		t.Fatalf("%d Anthropic models, want 13", got)
 	}
 	// Still a model craze knows: a user's own alias of it takes no thinking.
 	mine := writeFiles(t, "", "version = 1\n\n[models.mine]\nprovider = \"anthropic\"\nwire_model = \"claude-opus-4-5-20251101\"\n")
@@ -374,7 +374,7 @@ func TestAnthropicListNewest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"anthropic/claude-fable-5-1", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5"}
+	want := []string{"anthropic/claude-fable-5-2", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5"}
 	if got := anthropicAliases(seedsOnly); !slices.Equal(got, want) {
 		t.Fatalf("newest, the seeds alone: %q, want %q", got, want)
 	}
@@ -384,7 +384,7 @@ func TestAnthropicListNewest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"anthropic/claude-fable-5-1", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-6", "anthropic/claude-sonnet-5-5"}
+	want = []string{"anthropic/claude-fable-5-2", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-6", "anthropic/claude-sonnet-5-5"}
 	if got := anthropicAliases(listed); !slices.Equal(got, want) {
 		t.Fatalf("newest, with the list: %q, want %q", got, want)
 	}
@@ -406,8 +406,8 @@ func TestAnthropicListNewest(t *testing.T) {
 	}
 
 	// The control: "all".
-	if got := len(anthropicAliases(all)); got != 14 {
-		t.Fatalf("all: %d Anthropic models, want the thirteen seeds and Opus 6", got)
+	if got := len(anthropicAliases(all)); got != 15 {
+		t.Fatalf("all: %d Anthropic models, want the fourteen seeds and Opus 6", got)
 	}
 }
 
@@ -494,11 +494,11 @@ func TestAnthropicListEntries(t *testing.T) {
 		models = append(models, raw(e))
 	}
 	models = append(models,
-		json.RawMessage(`"not an entry"`),                         // models[14]
-		raw(AnthropicModel{ID: "bad id/x"}),                       // models[15]
-		raw(opus6()),                                              // models[16], twice
-		raw(AnthropicModel{ID: "claude-neg", MaxInputTokens: -1}), // models[17]
-		raw(old), // models[18]
+		json.RawMessage(`"not an entry"`),                         // models[15]
+		raw(AnthropicModel{ID: "bad id/x"}),                       // models[16]
+		raw(opus6()),                                              // models[17], twice
+		raw(AnthropicModel{ID: "claude-neg", MaxInputTokens: -1}), // models[18]
+		raw(old), // models[19]
 	)
 	write := func(dir string, doc any) {
 		if err := os.WriteFile(filepath.Join(dir, AnthropicModelsFile), raw(doc), 0o600); err != nil {
@@ -510,10 +510,10 @@ func TestAnthropicListEntries(t *testing.T) {
 	tbl := loadShipped(t, dir)
 	path := filepath.Join(dir, AnthropicModelsFile)
 	wantWarnings(t, tbl,
-		[]string{path, "models[14]", "not a model entry"},
-		[]string{path, "models[15]", "not one craze can name"},
-		[]string{path, "models[16]", `"claude-opus-6"`, "listed twice"},
-		[]string{path, "models[17]", `"claude-neg"`, "context_window"},
+		[]string{path, "models[15]", "not a model entry"},
+		[]string{path, "models[16]", "not one craze can name"},
+		[]string{path, "models[17]", `"claude-opus-6"`, "listed twice"},
+		[]string{path, "models[18]", `"claude-neg"`, "context_window"},
 	)
 	if m := tbl.Models["anthropic/claude-opus-4-6"]; m.Name != "Claude Opus 4.6 (deprecated)" || m.Cost == nil {
 		t.Fatalf("the deprecated seed = %+v", m)
@@ -546,8 +546,8 @@ func TestAnthropicListEntries(t *testing.T) {
 			setup(dir)
 			tbl := loadShipped(t, dir)
 			wantWarnings(t, tbl, []string{filepath.Join(dir, AnthropicModelsFile), "not an Anthropic model list"})
-			if got := len(anthropicAliases(tbl)); got != 13 {
-				t.Fatalf("%d Anthropic models, want the thirteen seeds", got)
+			if got := len(anthropicAliases(tbl)); got != 14 {
+				t.Fatalf("%d Anthropic models, want the fourteen seeds", got)
 			}
 		})
 	}
@@ -584,12 +584,12 @@ func TestAnthropicListWithNothingStandingIsIgnored(t *testing.T) {
 		cat          func(*testing.T) *Catalog
 		seeds        int
 	}{
-		{"models missing", "", nil, 13},
-		{"models null", "null", nil, 13},
-		{"models empty", "[]", nil, 13},
-		{"every entry broken", `["not an entry", 7, {"id": 5}]`, nil, 13},
-		{"every id one craze cannot name", `[{"id": "bad id"}, {"id": "../x"}]`, nil, 13},
-		{"every entry retired", `[{"id": "claude-opus-4-6"}]`, retired, 12},
+		{"models missing", "", nil, 14},
+		{"models null", "null", nil, 14},
+		{"models empty", "[]", nil, 14},
+		{"every entry broken", `["not an entry", 7, {"id": 5}]`, nil, 14},
+		{"every id one craze cannot name", `[{"id": "bad id"}, {"id": "../x"}]`, nil, 14},
+		{"every entry retired", `[{"id": "claude-opus-4-6"}]`, retired, 13},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -644,7 +644,7 @@ func TestAnthropicChoicesBlock(t *testing.T) {
 		"[models.\"anthropic/claude-unknown-1\"]\nprovider = \"anthropic\"\nwire_model = \"claude-unknown-1\"\n\n" +
 		"[models.mine]\nprovider = \"anthropic\"\nwire_model = \"claude-opus-5-5\"\nname = \"A Mine\"\n"
 	wantBlock := []string{
-		"anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1",
+		"anthropic/claude-fable-5-2", "anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1",
 		"anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "anthropic/claude-fable-5", "anthropic/claude-opus-4-8",
 		"anthropic/claude-opus-4-7", "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6",
 		"anthropic/claude-opus-4-5-20251101", "anthropic/claude-haiku-4-5-20251001", "anthropic/claude-unknown-1",

@@ -551,7 +551,14 @@ func TestALowerWindowTurnsAnInheritedTierOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantWarnings(t, again)
+	// Save writes the whole table, the four deprecated models of the catalog
+	// (plan 050 C4) among them, and a file's entry for a deprecated alias is a
+	// reference to it: one warning each, in alias order.
+	wantWarnings(t, again,
+		[]string{`models."fireworks/deepseek-v4p1-flash"`, "deprecated", "fireworks/deepseek-v4p1-flash-1017"},
+		[]string{`models."fireworks/kimi-k3"`, "deprecated", "fireworks/kimi-k3p1-pro"},
+		[]string{`models."openrouter/gemini-4-argon"`, "deprecated", "openrouter/gemini-pro-latest"},
+		[]string{`models."openrouter/minimax-m3"`, "deprecated", "openrouter/minimax-m3.1-flash"})
 	check(again)
 
 	for _, tc := range []struct {

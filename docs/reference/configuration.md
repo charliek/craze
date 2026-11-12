@@ -824,21 +824,44 @@ as `openrouter/mimo-v2.6-pro`, uses its numbered id. To stay on one numbered
 model, add it as a model of your own in [`models.toml`](#your-two-files),
 with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 
-`openrouter/gemini-4-argon` is Gemini 4 Argon, Google's flagship reasoning
-model, for complex coding and long agent work. It takes images, offers effort
-`low`, `medium` (its default) and `high`, and costs $2 per million input
+`openrouter/gemini-pro-latest` is OpenRouter's Gemini Pro router, which
+answers as Google's flagship reasoning model (Gemini 4 Carbon since
+2026-11-10), for complex coding and long agent work. It takes images, offers
+effort `low`, `medium` (its default) and `high`, and costs $2 per million input
 tokens and $10 per million output, against Gemini Flash Latest's $0.75 and
-$3.75. OpenRouter's Gemini Pro router does not point at it yet, so it is on
-its numbered id. It is not OpenRouter's start model: pick it with `/model`,
-`--model openrouter/gemini-4-argon`, a `default_model` pin or a sub-agent's
-model.
+$3.75. A request the Vertex endpoints cannot take may be answered by Gemini 4
+Argon, the router's fallback, at the same price. It is not OpenRouter's start
+model: pick it with `/model`, `--model openrouter/gemini-pro-latest`, a
+`default_model` pin or a sub-agent's model. It replaces
+`openrouter/gemini-4-argon`, which is [deprecated](#deprecated-models): out of
+the pickers, still runs by name. The other deprecations of this release are
+`openrouter/minimax-m3` (use `openrouter/minimax-m3.1-flash`, MiniMax's M3.1
+Flash, which lists efforts `low` to `max`, default `high`, at half M3's price),
+`fireworks/kimi-k3` (use `fireworks/kimi-k3p1-pro`) and
+`fireworks/deepseek-v4p1-flash` (use
+`fireworks/deepseek-v4p1-flash-1017`).
+
+**What a router costs.** A router's price is the one its *maker's own endpoint*
+charges on OpenRouter, not the one OpenRouter's model list shows: the list
+gives the cheapest endpoint's rate, but a request goes to whichever endpoint
+serves it, and requests on 2026-11-11 were billed 3 to 9 times the listing.
+So `openrouter/deepseek-flash-latest` is priced at DeepSeek's $0.30 per million
+input tokens and $1.20 output (cached input $0.006), and
+`openrouter/glm-flash-latest` and `openrouter/glm-latest` at Z.AI's: $0.15 and
+$0.50 (cached $0.03), and $1.40 and $4.40 (cached $0.26). The four GPT routers
+(`gpt-sol-latest`, `gpt-astra-latest`, `gpt-terra-latest`,
+`gpt-luna-latest`; Terra is new) carry OpenAI's prices with its tier above
+272,000 input tokens (the same as the rows in [OpenAI](#openai)) and, like the
+OpenAI models, a [context default](#native-context-default) of 272,000. They
+set no `cache_write` rate: OpenRouter lists cache-write rates for them, but its
+driver reports no cache-write tokens, so a rate would never apply.
 
 Meta's models are Muse Spark 1.3, `muse-spark-1.3` and its cheaper
 contributor tier `muse-spark-1.3-contributor` (Meta's start model), and
 `muse-wonder-1.0`, Muse Wonder 1.0, Meta's most capable model, for long,
 complex coding and agent work. Spark 1.3 offers effort from `minimal` to
 `max`; its contributor tier from `minimal` to `xhigh`, since Meta documents
-`max` for Spark 1.3 and Wonder only. Both default to `high`. Muse Wonder is in preview at Meta, costs more
+`max` for Spark 1.3, Wonder and Ember only. Both default to `high`. Muse Wonder is in preview at Meta, costs more
 ($4 per million input tokens and $20 per million output, against
 Spark 1.3's $1.25 and $4.25), has no contributor tier, and offers effort from
 `minimal` to `max` (default `high`). It is not Meta's start model, so a
@@ -847,6 +870,17 @@ machine with only a Meta key starts on Spark until you pick Wonder: with
 `--model muse-wonder-1.0`, a `default_model` pin or a sub-agent's model. Muse
 Wonder Full is a Muse Code subscription model, not on Meta's API, so craze
 does not offer it.
+
+`muse-ember-1.0`, Muse Ember 1.0, is Meta's smallest model, for the bounded
+work an agent repeats: sub-agent tasks, tool loops, routing. It takes images,
+offers effort `minimal` to `max` (default `high`), has an output ceiling of
+131,072 and costs $0.10 per million input tokens and $0.50 output (cached input
+$0.004). A request with more than 200,000 input tokens, cached ones included,
+is billed at $0.30 and $1.50 (cached $0.012) in full, so it has a [context
+default](#native-context-default) of 200,000 and a [long-context
+tier](#long-context-pricing) above it. It is not Meta's start model: pick it
+with `/model`, `--model muse-ember-1.0`, a `default_model` pin or a sub-agent's
+model.
 
 Meta's provider speaks Meta's Responses API, through the
 [`openai-responses` driver](#the-responses-api-driver), not Chat Completions.
@@ -869,13 +903,13 @@ starts](#model-memory-recentjson)):
 |------|----------|-------------|
 | 1 | `zai-coding-plan` | `glm-5.3` |
 | 2 | `chatgpt` | the first of `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
-| 3 | `fireworks` | `fireworks/ember-1` |
+| 3 | `fireworks` | `fireworks/kimi-k3p1-pro` |
 | 4 | `openrouter` | `openrouter/gemini-flash-latest` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
 | 6 | `anthropic` | the newest Opus the account lists (`anthropic/claude-opus-5-5` until it lists a newer one), at `medium` |
 | 7 | `openai` | `openai/gpt-6.1-sol`, at `medium` |
 
-So a machine with only a Fireworks key starts on `fireworks/ember-1`, one with
+So a machine with only a Fireworks key starts on `fireworks/kimi-k3p1-pro`, one with
 only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
 `anthropic/claude-opus-5-5`, one with only an OpenAI key on
 `openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan with a Fireworks
@@ -892,6 +926,11 @@ may be `openai/gpt-6-astra`. To keep craze off the key, write `env_keys = []`
 under `[providers.openai]` in `providers.toml`; to start on a model of your
 choosing, set `default_model`. `provider_order` in your
 `models.toml` changes the order; `default_model` picks one model outright.
+
+Fireworks' start model is Kimi K3.1 Pro, Moonshot's successor to Kimi K3,
+which is the owner's choice of 2026-11-11, not the result of an evaluation.
+It used to be `fireworks/ember-1`, which is still a model like any other:
+`default_model = "fireworks/ember-1"` in `models.toml` keeps the old start.
 
 With the catalog, a machine needs only a key: store one with
 [`craze auth login`](#keys), or export one of the variables above, and run
@@ -926,7 +965,7 @@ version = 1
 default_model = "muse-spark-1.3-contributor"   # optional: your pin, where a new session starts when it remembers nothing
 provider_order = ["fireworks", "zai-coding-plan"]   # optional: replaces craze's provider order (below)
 
-[models."fireworks/kimi-k3"]
+[models."fireworks/kimi-k3p1-pro"]
 default_effort = "max"        # everything else stays as shipped
 ```
 
@@ -956,6 +995,25 @@ context_window = 131072
 efforts        = ["low", "high"]
 default_effort = "high"
 ```
+
+**Fireworks' Nexus Auto router.** Fireworks offers a router, Nexus Auto, whose
+wire id is `auto`: it picks a model for each request. craze does not ship it,
+because it can neither price it nor tell which model answered. To use it, add
+an entry on the shipped `fireworks` provider, so that provider's key funds it:
+
+```toml
+# models.toml
+[models."fireworks/nexus-auto"]
+provider   = "fireworks"
+wire_model = "auto"
+name       = "Nexus Auto (Fireworks)"
+```
+
+Give it no `[cost]`: craze then shows its spend as unpriced (the tokens are
+counted, no dollars), and it does not record which model answered a turn.
+Be aware that a provider key connected to the Fireworks account (a key for
+another provider, added in the Fireworks console) lets the router move harder
+turns to that provider, and they are then billed there, not on Fireworks.
 
 A model alias is at most 256 bytes: a `models.toml` with a longer one does not
 load, and says which entry. A model's `efforts` list at most 8 levels, each at
@@ -1276,7 +1334,7 @@ kept out of the commands a native session runs, as every key variable is
 **Its models.** craze ships one for each Claude model the API offered when
 this version was made, each `anthropic/<Anthropic's id>` — Opus 5.5
 (`anthropic/claude-opus-5-5`), 5, 4.8, 4.7, 4.6 and 4.5; Sonnet 5.5, 5 and 4.6;
-Haiku 5.5 and 4.5; Fable 5.1 and 5 — named as Anthropic names them, with their
+Haiku 5.5 and 4.5; Fable 5.2, 5.1 and 5 — named as Anthropic names them, with their
 context windows, the efforts each takes (`low` to `max`; Haiku 4.5 has no
 effort control) and Anthropic's prices. Each model with effort control starts
 at `medium` (one rule for every Claude model; Anthropic's own default for some
@@ -1697,7 +1755,7 @@ on the first of:
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
    Fireworks, OpenRouter, Meta, Anthropic, OpenAI — that has a key, the
    provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
-   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/ember-1`;
+   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/kimi-k3p1-pro`;
    `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
    Opus the Anthropic account lists; `openai/gpt-6.1-sol`);
 4. otherwise the first model, by alias, whose provider has a key and that is
@@ -1760,7 +1818,7 @@ one [`craze auth login`](cli.md#craze-auth) takes: `zai-coding-plan/glm-5.3` is
 name as written matches no model (one that matches several stays ambiguous),
 with the same case and spacing rules, and only when the alias is that
 provider's. An alias that already carries its provider's prefix
-(`fireworks/kimi-k3`) is unchanged.
+(`fireworks/kimi-k3p1-pro`) is unchanged.
 
 ### Deprecated models
 
@@ -1857,7 +1915,7 @@ included. A model's optional `max_output_tokens` in `~/.craze/native/models.toml
 (or `$CRAZE_HOME/native/`) sets it:
 
 ```toml
-[models."fireworks/deepseek-v4p1-flash"]
+[models."fireworks/deepseek-v4p1-flash-1017"]
 max_output_tokens = 65536   # optional, >= 0; absent or 0 = the default below
 ```
 
@@ -1918,7 +1976,7 @@ what the [status row](tui.md#usage-and-cost) and the [usage
 section](protocol.md#usage) price a session's spend from:
 
 ```toml
-[models."fireworks/kimi-k3".cost]
+[models."fireworks/kimi-k3p1-pro".cost]
 input       = 0.60   # $ per 1,000,000 uncached input tokens
 output      = 2.50   # $ per 1,000,000 output tokens (reasoning included)
 cache_read  = 0.15
@@ -2010,10 +2068,16 @@ cache_write = 0.625
   `long_context_above = 0` turns the tier off, so every request is priced at
   the base rates.
 
-The shipped catalog gives a tier to Haiku 5.5 — the rates above, which are
-Anthropic's for prompts over 100,000 tokens — and to the four [OpenAI](#openai)
-models, OpenAI's for input over 272,000 tokens. Every other shipped model
-takes its whole context window at its standard price.
+The shipped catalog gives a tier to exactly these models: Haiku 5.5 — the
+rates above, which are Anthropic's for prompts over 100,000 tokens; the four
+[OpenAI](#openai) models and OpenRouter's four GPT routers
+(`openrouter/gpt-sol-latest`, `gpt-astra-latest`, `gpt-terra-latest`,
+`gpt-luna-latest`), OpenAI's for input over 272,000 tokens; and
+`muse-ember-1.0`, Meta's for input over 200,000 tokens. Every other shipped
+model takes its whole context window at its standard price. The models with a
+tier other than Haiku 5.5 also have a [context default](#native-context-default)
+at the threshold, so a session stays below the tier unless you turn the
+default off with `default_context = 0`.
 
 A session's transcript keeps what it needs to price the tier again on a
 resume: the part of a sub-agent's usage row, and of a compaction's usage,

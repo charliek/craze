@@ -126,6 +126,21 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   one JSON object (`schema` 1); `craze models <alias>` reads one as `--model`
   does, `--shipped` answers from the compiled-in catalog alone. Each release
   ships that as `models.json`, listed in `checksums.txt`.
+- Catalog refresh: `fireworks/kimi-k3p1-pro` (Fireworks' start now; set
+  `default_model = "fireworks/ember-1"` to keep the old one) and
+  `fireworks/deepseek-v4p1-flash-1017`, `openrouter/gemini-pro-latest`,
+  `openrouter/gpt-terra-latest`, `openrouter/minimax-m3.1-flash`,
+  `muse-ember-1.0` (a 200,000 context default and Meta's long-context tier) and
+  `anthropic/claude-fable-5-2` (priced) are new. Deprecated, so out of the
+  pickers but still running by name: `fireworks/kimi-k3`,
+  `fireworks/deepseek-v4p1-flash`, `openrouter/gemini-4-argon` and
+  `openrouter/minimax-m3`, each naming its replacement. OpenRouter's four GPT
+  routers gain OpenAI's 272,000 context default and long-context price; its
+  DeepSeek Flash, GLM Flash and GLM routers are priced at the maker's own
+  endpoint rate (the listing is the cheapest endpoint's, and requests were
+  billed 3 to 9 times it). Retired OpenRouter aliases that the catalog
+  replaced name their replacement. A Nexus Auto recipe (`wire_model = "auto"`)
+  is in the configuration reference.
 - `craze new --wait --provider native` checks `--model`, an explicit `--effort`
   and `--fast` before any host is spawned: an unknown or retired model, an effort
   the model does not list, and `--fast` (no native model has one) fail with exit

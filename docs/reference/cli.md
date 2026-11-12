@@ -1312,7 +1312,7 @@ reads instead of the message:
 | `fast_not_offered` | `--fast`: no native model has a fast variant. `--no-fast` is accepted, and changes nothing | `--fast: <alias> has no fast variant` |
 
 ```json
-{"error":{"message":"native: fireworks/kimi-k3 was retired; use fireworks/kimi-k3p1-pro","kind":"config","retryable":false,"detail":{"reason":"model_retired","model":"fireworks/kimi-k3","replaced_by":"fireworks/kimi-k3p1-pro"}}}
+{"error":{"message":"native: openrouter/gpt-6.1-sol was retired; use openrouter/gpt-sol-latest","kind":"config","retryable":false,"detail":{"reason":"model_retired","model":"openrouter/gpt-6.1-sol","replaced_by":"openrouter/gpt-sol-latest"}}}
 ```
 
 `detail.model` is always there on these four reasons: the model's alias as it

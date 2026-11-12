@@ -95,10 +95,13 @@ provider = "openrouter"
 
 # Replaced 2026-09-30 by OpenRouter's GPT-6.1 Sol (openai/gpt-6.1-sol).
 # openai/gpt-6-sol still answers, so, like the GPT-5.6 rows above, the alias
-# alone is retired (X6).
+# alone is retired (X6). Its replaced_by, here and on the 2026-10-09 rows
+# below, is today's active successor (plan 050, 2026-11-12): the router that
+# followed the family, not the numbered alias that was itself retired since.
 [[retired]]
 alias = "openrouter/gpt-6-sol"
 provider = "openrouter"
+replaced_by = "openrouter/gpt-sol-latest"
 
 # Replaced 2026-10-09 by OpenRouter's ~family-latest routers (the
 # openrouter/*-latest models below), which follow each family to its newest
@@ -106,22 +109,27 @@ provider = "openrouter"
 [[retired]]
 alias = "openrouter/gemini-3.8-flash"
 provider = "openrouter"
+replaced_by = "openrouter/gemini-flash-latest"
 
 [[retired]]
 alias = "openrouter/glm-5.3-flash"
 provider = "openrouter"
+replaced_by = "openrouter/glm-flash-latest"
 
 [[retired]]
 alias = "openrouter/gpt-6-astra"
 provider = "openrouter"
+replaced_by = "openrouter/gpt-astra-latest"
 
 [[retired]]
 alias = "openrouter/gpt-6-luna"
 provider = "openrouter"
+replaced_by = "openrouter/gpt-luna-latest"
 
 [[retired]]
 alias = "openrouter/gpt-6.1-sol"
 provider = "openrouter"
+replaced_by = "openrouter/gpt-sol-latest"
 
 # ---------------------------------------------------------------------------
 # Providers: a display name, the endpoint, and the environment variables a key
@@ -129,12 +137,16 @@ provider = "openrouter"
 # provider's own models a new session starts on when provider_order reaches
 # it, in order of preference: the first that resolves wins (plan 038 §2.2).
 
+# Fireworks' start is Kimi K3.1 Pro, the owner's choice of 2026-11-11 (plan
+# 050), not an eval result: no eval was run on it. It replaces Ember-1, which
+# stays an ordinary model, picked with /model or --model, or kept as the start
+# with default_model = "fireworks/ember-1".
 [providers.fireworks]
 name = "Fireworks"
 driver = "openai-compat"
 base_url = "https://api.fireworks.ai/inference/v1"
 env_keys = ["FIREWORKS_API_KEY"]
-start = ["fireworks/ember-1"]
+start = ["fireworks/kimi-k3p1-pro"]
 
 # Meta on its Responses API (2026-10-13, plan 047 D14): its encrypted
 # reasoning is replayed across a turn's tool steps, where Chat Completions
@@ -251,7 +263,7 @@ default_effort = "low"
 # list's included (D3: one rule for the family; Anthropic's own default for
 # some is high).
 # list: "all" offers every model the account lists (O3); "newest" offers only
-# each family's newest, the trim knob for when thirteen feels like too many.
+# each family's newest, the trim knob for when fourteen feels like too many.
 [anthropic_defaults]
 start_family = "opus"
 default_effort = "medium"
@@ -264,17 +276,20 @@ list = "all"
 
 # Anthropic's models (plan 044 §3.5): one seed for each model the account's
 # GET /v1/models listed on 2026-10-11 (plan 044 research/models-list-
-# 2026-10-11.json), its alias anthropic/<its API id>. name is the list's
+# 2026-10-11.json), thirteen, and Claude Fable 5.2 from the list of 2026-11-11
+# (plan 050), fourteen; its alias anthropic/<its API id>. name is the list's
 # display_name; context_window its max_input_tokens; max_output_tokens its
 # max_tokens up to 64,000 (a request's ceiling, not the model's); efforts the
 # levels it supports, low to max (Haiku 4.5 has none); vision its
 # image_input, which the four headline models (Opus 5.5, Sonnet 5.5, Haiku
-# 5.5, Fable 5.1) were also seen honouring live, describing an image (P31).
+# 5.5, Fable 5.1) were also seen honouring live, describing an image (P31);
+# Fable 5.2 was seen on 2026-11-11 running a tool turn and describing an image
+# through craze.
 # family (the list's line), released (the date it was created) and thinking
 # (adaptive where the list says the model takes adaptive thinking, else none)
 # are keys only the catalog has: models.toml cannot set them.
 #
-# Prices are Anthropic's own (platform.claude.com pricing, 2026-10-11): input,
+# Prices are Anthropic's own (platform.claude.com pricing, 2026-10-11; Fable 5.2's, 2026-11-11): input,
 # output, cache_read the cache hit and cache_write the 5-minute cache write,
 # the only TTL craze asks for. Haiku 5.5 alone has a long-context tier
 # (platform.claude.com/docs/en/about-claude/pricing, "Long context pricing",
@@ -325,6 +340,24 @@ input = 10.0
 output = 50.0
 cache_read = 0.25
 cache_write = 12.5
+
+[models."anthropic/claude-fable-5-2"]
+provider = "anthropic"
+wire_model = "claude-fable-5-2"
+name = "Claude Fable 5.2"
+family = "fable"
+released = "2026-11-09"
+thinking = "adaptive"
+context_window = 1000000
+max_output_tokens = 64000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+vision = true
+
+[models."anthropic/claude-fable-5-2".cost]
+input = 8.0
+output = 40.0
+cache_read = 0.2
+cache_write = 10.0
 
 [models."anthropic/claude-haiku-4-5-20251001"]
 provider = "anthropic"
@@ -530,6 +563,10 @@ output = 10.0
 cache_read = 0.1
 cache_write = 2.5
 
+# Deprecated since 2026-11-12 (plan 050): DeepSeek's 2026-10-17 snapshot,
+# fireworks/deepseek-v4p1-flash-1017 below, replaces this 2026-09-10 one at the
+# same price. Fireworks still serves it: it is out of the pickers and still
+# runs by name.
 [models."fireworks/deepseek-v4p1-flash"]
 provider = "fireworks"
 wire_model = "accounts/fireworks/models/deepseek-v4p1-flash"
@@ -538,8 +575,32 @@ context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+deprecated = true
+replaced_by = "fireworks/deepseek-v4p1-flash-1017"
 
 [models."fireworks/deepseek-v4p1-flash".cost]
+input = 0.3
+output = 1.2
+cache_read = 0.006
+
+# DeepSeek's 2026-10-17 snapshot of V4.1 Flash: on Fireworks a model of its
+# own beside the 2026-09-10 one (755B parameters to its 552B; each id answers
+# as itself), at the same price. Every effort from low to max is accepted and
+# reasons, and the level did not change how much on a fixed prompt (2026-11-11,
+# as on the older snapshot); the API also takes none, which turns reasoning
+# off. Seen live through craze on 2026-11-11: a tool loop, and an image read
+# from disk described. Its price is Fireworks' serverless row, with no cache
+# write fee.
+[models."fireworks/deepseek-v4p1-flash-1017"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+name = "DeepSeek V4.1 Flash 1017 (Fireworks)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."fireworks/deepseek-v4p1-flash-1017".cost]
 input = 0.3
 output = 1.2
 cache_read = 0.006
@@ -588,6 +649,9 @@ input = 0.15
 output = 0.5
 cache_read = 0.03
 
+# Deprecated since 2026-11-12 (plan 050): Kimi K3.1 Pro, fireworks/kimi-k3p1-pro
+# below, is Moonshot's successor to it, at two thirds of its price. Fireworks
+# still serves it: it is out of the pickers and still runs by name.
 [models."fireworks/kimi-k3"]
 provider = "fireworks"
 wire_model = "accounts/fireworks/models/kimi-k3"
@@ -596,11 +660,37 @@ context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+deprecated = true
+replaced_by = "fireworks/kimi-k3p1-pro"
 
 [models."fireworks/kimi-k3".cost]
 input = 3.0
 output = 15.0
 cache_read = 0.3
+
+# Kimi K3.1 Pro, Moonshot's successor to Kimi K3 (post-trained from it), on
+# Fireworks since 2026-11-02 at two thirds of K3's price. Every effort from
+# low to max is accepted and reasons, more from medium up (377, 366, 532, 668
+# and 823 reasoning tokens on one fixed prompt, 2026-11-11); the API also takes
+# none, which turns reasoning off. Its window is the API's contextLength
+# (1,048,576); Fireworks publishes no maximum output, so none is set, as for
+# its other models. Its price is Fireworks' serverless row ($2.00 / $0.20 /
+# $10.00), with no cache write fee. Seen live through craze on 2026-11-11: a
+# tool loop, and an image read from disk described. It is Fireworks' start
+# (see [providers.fireworks]).
+[models."fireworks/kimi-k3p1-pro"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/kimi-k3p1-pro"
+name = "Kimi K3.1 Pro (Fireworks)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."fireworks/kimi-k3p1-pro".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.2
 
 [models."fireworks/qwen3p8-max"]
 provider = "fireworks"
@@ -634,6 +724,41 @@ max_output_tokens = 131072
 efforts = ["low", "high", "max"]
 default_effort = "high"
 vision = true
+
+# Muse Ember is Meta's smallest model, for the bounded work an agent repeats:
+# sub-agent tasks, tool loops, routing. It is not Meta's start: Spark's
+# contributor tier stays the default, so Ember is picked with /model or
+# --model. Its window, efforts, vision and price are Meta's docs and live
+# probes on 2026-11-11: the API takes minimal to max and refuses none, and
+# every level reasons, max the most. Meta's own default is max; craze's is
+# the family's high. Meta's output limit is 524288; the ceiling stays the Muse
+# family's 131072, since it is held back from the window. A request with more
+# than 200K input tokens, cached ones included, is billed at the long-context
+# rates in full (Meta's docs; not exercised live), so a session works within
+# 200,000 (default_context), the true window kept for a request that runs
+# over. There is no contributor tier. Seen live through craze on 2026-11-11: a
+# tool loop, and an image read from disk described.
+[models."muse-ember-1.0"]
+provider = "meta"
+wire_model = "muse-ember-1.0"
+name = "Muse Ember 1.0 (Meta)"
+context_window = 1048576
+default_context = 200000
+max_output_tokens = 131072
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."muse-ember-1.0".cost]
+input = 0.1
+output = 0.5
+cache_read = 0.004
+long_context_above = 200000
+
+[models."muse-ember-1.0".cost.long_context]
+input = 0.3
+output = 1.5
+cache_read = 0.012
 
 # Spark's efforts (plan 047 D6, checked 2026-10-12): Meta's reasoning docs
 # list max for muse-spark-1.3 and muse-wonder-1.0 alone, and the API takes
@@ -814,13 +939,35 @@ cache_write = 2.5
 
 # The openrouter/*-latest models are OpenRouter's ~<family>-latest routers:
 # each answers as the newest model of its family, so a release there moves it
-# with no change here. Their window, efforts, vision and price are the
-# family's newest on 2026-10-09 (DeepSeek V4.1 Flash, Gemini 3.8 Flash, GLM
-# 5.3 Flash, GLM 5.3, GPT-6 Astra, GPT-6 Luna, GPT-6.1 Sol), and want a look
-# when the family moves on. Efforts are the router's supported_efforts in
-# OpenRouter's model list; a price is its listed one, its cheapest
-# endpoint's. Each was seen live through craze on 2026-10-09: a tool loop on
-# its ~ wire id, and every vision model described an image read from disk.
+# with no change here. Their window, efforts and vision are the family's
+# newest on 2026-10-09 (DeepSeek V4.1 Flash, Gemini 3.8 Flash, GLM 5.3 Flash,
+# GLM 5.3, GPT-6 Astra, GPT-6 Luna, GPT-6.1 Sol), and GPT-6.1 Terra on
+# 2026-11-11, and want a look when the family moves on. Efforts are the
+# router's supported_efforts in OpenRouter's model list. Each was seen live
+# through craze on 2026-10-09 (Terra on 2026-11-11): a tool loop on its ~ wire
+# id, and every vision model described an image read from disk.
+#
+# A router's price is its MAKER's own endpoint's, not the model list's. The
+# list gives the cheapest endpoint's rate (DeepSeek Flash $0.022 / $0.40 at
+# Morph, GLM Flash $0.0399 / $0.0784 at Relace, GLM $0.0699 / $1.40 at Wafer on
+# 2026-11-11), but a request goes to whichever endpoint serves it, and the
+# requests of 2026-11-11 were billed 3 to 9 times the listing (Relace, Cohere,
+# Reka and Decart endpoints among them). So the open-weight routers are priced
+# at the maker's own endpoint on OpenRouter, the rate a request can be
+# counted on to cost at most: DeepSeek $0.30 input / $1.20 output / $0.006
+# cache read (its endpoint's weekday rate; OpenRouter halves it overnight UTC
+# and at the weekend, not counted here), Z.AI $0.15 / $0.50 / $0.03 for GLM
+# Flash and $1.40 / $4.40 / $0.26 for GLM (Z.AI's endpoint, the same as
+# Fireworks' GLM rows). The GPT routers' prices are OpenAI's, the same as the
+# list's.
+#
+# The four GPT routers (Sol, Astra, Terra, Luna) carry OpenAI's tier: a prompt
+# over 272,000 tokens is billed at the long rates for the whole request, so a
+# session works within 272,000 (default_context) with the true window kept.
+# They set no cache_write: OpenRouter lists cache-write rates for them (Sol
+# 2.50, Astra 12.50, Terra 1.25, Luna 0.125), but the openrouter driver
+# reports no cache-write tokens, so a rate would never be applied; a left-out
+# rate prices any such token at the input rate.
 
 [models."openrouter/deepseek-flash-latest"]
 provider = "openrouter"
@@ -832,9 +979,9 @@ default_effort = "high"
 vision = true
 
 [models."openrouter/deepseek-flash-latest".cost]
-input = 0.016
-output = 0.6
-cache_read = 0.005
+input = 0.3
+output = 1.2
+cache_read = 0.006
 
 [models."openrouter/gemini-flash-latest"]
 provider = "openrouter"
@@ -851,6 +998,33 @@ input = 0.75
 output = 3.75
 cache_read = 0.075
 
+# Gemini Pro Latest is OpenRouter's router for Google's flagship reasoning
+# model: Gemini 4 Carbon since its release on 2026-11-10, replacing
+# openrouter/gemini-4-argon (deprecated, below). Its ceiling is 65536, what
+# Carbon's Vertex endpoints take. AI Studio's standard endpoint takes 32768
+# today, so a request goes to Vertex; one pinned to AI Studio at 65536 was
+# answered by Gemini 4 Argon, the router's fallback, at the same price, so a
+# request the Vertex endpoints cannot take may be answered by Gemini 4 Argon.
+# Efforts are its supported_efforts, at OpenRouter's default; low reported no
+# reasoning tokens on a probe, medium and high did. Its price is the model
+# list's, the standard tier (AI Studio's flex tier is cheaper, both priority
+# tiers dearer). Seen live through craze on 2026-11-11: a tool loop, and an
+# image read from disk described.
+[models."openrouter/gemini-pro-latest"]
+provider = "openrouter"
+wire_model = "~google/gemini-pro-latest"
+name = "Gemini Pro Latest (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 65536
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+vision = true
+
+[models."openrouter/gemini-pro-latest".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+
 [models."openrouter/glm-flash-latest"]
 provider = "openrouter"
 wire_model = "~z-ai/glm-flash-latest"
@@ -861,9 +1035,9 @@ default_effort = "high"
 vision = true
 
 [models."openrouter/glm-flash-latest".cost]
-input = 0.032
-output = 0.72
-cache_read = 0.01
+input = 0.15
+output = 0.5
+cache_read = 0.03
 
 # GLM 5.3 takes text only, as on Z.AI and Fireworks.
 [models."openrouter/glm-latest"]
@@ -875,15 +1049,16 @@ efforts = ["low", "high", "max"]
 default_effort = "max"
 
 [models."openrouter/glm-latest".cost]
-input = 0.039
-output = 4.8
-cache_read = 0.038
+input = 1.4
+output = 4.4
+cache_read = 0.26
 
 [models."openrouter/gpt-astra-latest"]
 provider = "openrouter"
 wire_model = "~openai/gpt-astra-latest"
 name = "GPT Astra Latest (OpenRouter)"
 context_window = 1050000
+default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
@@ -892,12 +1067,19 @@ vision = true
 input = 10.0
 output = 50.0
 cache_read = 1.0
+long_context_above = 272000
+
+[models."openrouter/gpt-astra-latest".cost.long_context]
+input = 20.0
+output = 75.0
+cache_read = 2.0
 
 [models."openrouter/gpt-luna-latest"]
 provider = "openrouter"
 wire_model = "~openai/gpt-luna-latest"
 name = "GPT Luna Latest (OpenRouter)"
 context_window = 1050000
+default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
@@ -906,12 +1088,19 @@ vision = true
 input = 0.1
 output = 0.5
 cache_read = 0.01
+long_context_above = 272000
+
+[models."openrouter/gpt-luna-latest".cost.long_context]
+input = 0.2
+output = 0.75
+cache_read = 0.02
 
 [models."openrouter/gpt-sol-latest"]
 provider = "openrouter"
 wire_model = "~openai/gpt-sol-latest"
 name = "GPT Sol Latest (OpenRouter)"
 context_window = 1050000
+default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
@@ -920,10 +1109,40 @@ vision = true
 input = 2.0
 output = 10.0
 cache_read = 0.1
+long_context_above = 272000
 
-# Gemini 4 Argon, Google's flagship reasoning model, released 2026-10-13. Its
-# family has no router: ~google/gemini-pro-latest still answers as Gemini 3.1
-# Pro Preview, so it is on its numbered id. Its ceiling is 65536, what its
+[models."openrouter/gpt-sol-latest".cost.long_context]
+input = 4.0
+output = 15.0
+cache_read = 0.2
+
+[models."openrouter/gpt-terra-latest"]
+provider = "openrouter"
+wire_model = "~openai/gpt-terra-latest"
+name = "GPT Terra Latest (OpenRouter)"
+context_window = 1050000
+default_context = 272000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+vision = true
+
+[models."openrouter/gpt-terra-latest".cost]
+input = 1.0
+output = 5.0
+cache_read = 0.05
+long_context_above = 272000
+
+[models."openrouter/gpt-terra-latest".cost.long_context]
+input = 2.0
+output = 7.5
+cache_read = 0.1
+
+# Gemini 4 Argon, Google's flagship reasoning model, released 2026-10-13. It
+# was on its numbered id because ~google/gemini-pro-latest still answered as
+# Gemini 3.1 Pro Preview then. Deprecated since 2026-11-12 (plan 050):
+# openrouter/gemini-pro-latest, above, now answers as Gemini 4 Carbon, Argon's
+# successor. google/gemini-4-argon still answers: the alias is out of the
+# pickers and still runs by name. Its ceiling is 65536, what its
 # Vertex endpoints take (AI Studio's take more), so a request may go to any of
 # them. Efforts are its supported_efforts, at OpenRouter's default; its price
 # is the model list's, the standard tier (AI Studio's flex tier is cheaper,
@@ -938,6 +1157,8 @@ max_output_tokens = 65536
 efforts = ["low", "medium", "high"]
 default_effort = "medium"
 vision = true
+deprecated = true
+replaced_by = "openrouter/gemini-pro-latest"
 
 [models."openrouter/gemini-4-argon".cost]
 input = 2.0
@@ -945,9 +1166,10 @@ output = 10.0
 cache_read = 0.1
 
 # OpenRouter lists no reasoning_effort for MiMo (its endpoints take only
-# reasoning on or off), so, like MiniMax M3, it offers no efforts. No
-# ~family-latest router exists for it, or for MiniMax. Seen live through craze
-# on 2026-10-09: a tool loop, and an image read from disk described.
+# reasoning on or off), so it offers no efforts (MiniMax M3, deprecated below,
+# offers none either; M3.1 Flash lists them). No ~family-latest router exists
+# for it, or for MiniMax. Seen live through craze on 2026-10-09: a tool loop,
+# and an image read from disk described.
 [models."openrouter/mimo-v2.6-pro"]
 provider = "openrouter"
 wire_model = "xiaomi/mimo-v2.6-pro"
@@ -960,14 +1182,41 @@ input = 0.435
 output = 0.87
 cache_read = 0.0036
 
+# Deprecated since 2026-11-12 (plan 050): MiniMax M3.1 Flash, below, replaces
+# it at half its price. minimax/minimax-m3 still answers: the alias is out of
+# the pickers and still runs by name.
 [models."openrouter/minimax-m3"]
 provider = "openrouter"
 wire_model = "minimax/minimax-m3"
 name = "MiniMax M3 (OpenRouter)"
 context_window = 1048576
 vision = true
+deprecated = true
+replaced_by = "openrouter/minimax-m3.1-flash"
 
 [models."openrouter/minimax-m3".cost]
 input = 0.3
 output = 1.2
 cache_read = 0.06
+
+# MiniMax M3.1 Flash (2026-10-19) replaces MiniMax M3 at half its price.
+# Unlike M3 it lists efforts, low to max, and it always reasons: on one fixed
+# prompt every level reasoned (about 1,900 to over 4,000 tokens) with no
+# order between the levels, so an effort is accepted but was not seen to
+# change how much it thinks. Its price is the model list's, MiniMax's own;
+# OpenRouter lists half that between 15:00 and 01:00 UTC. No ~family-latest
+# router exists for MiniMax. Seen live through craze on 2026-11-11: a tool
+# loop, and an image read from disk described.
+[models."openrouter/minimax-m3.1-flash"]
+provider = "openrouter"
+wire_model = "minimax/minimax-m3.1-flash"
+name = "MiniMax M3.1 Flash (OpenRouter)"
+context_window = 1048576
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+
+[models."openrouter/minimax-m3.1-flash".cost]
+input = 0.15
+output = 0.6
+cache_read = 0.015

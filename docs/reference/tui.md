@@ -366,7 +366,7 @@ has a key, at the effort last used on it. With no remembered model it can use,
 it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
-preferred model its account lists, `fireworks/ember-1`,
+preferred model its account lists, `fireworks/kimi-k3p1-pro`,
 `openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
 Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
 for an OpenAI key, in that order
@@ -1536,9 +1536,9 @@ be reached. For example:
 model  = ""   # optional default for children; "" = the parent's
 effort = ""   # optional default effort
 [subagents.tiers]   # optional: what a Claude tier name means here
-opus   = "fireworks/kimi-k3"
+opus   = "fireworks/kimi-k3p1-pro"
 sonnet = "glm-5.3"
-haiku  = "fireworks/deepseek-v4p1-flash"
+haiku  = "fireworks/deepseek-v4p1-flash-1017"
 ```
 
 The `agent` tool runs at most four children at once, background ones included.

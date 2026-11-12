@@ -449,6 +449,67 @@ replacement, efforts, context and whether it is funded and offered here
 (`--json` for a program, `--shipped` for the catalog alone). Each release ships
 the catalog as `models.json`, listed in `checksums.txt`.
 
+### Native model catalog refresh
+
+Nothing needs migrating. This release deprecates four models: each is out of
+the pickers (`/model`, the session list, the agent tool's list) and no new
+session starts on it for you, but it runs by name as before, with a
+[notice](../reference/cli.md#model-notices) on a waiting command's result. A
+[deprecated](../reference/configuration.md#deprecated-models) model is not
+retired; it is retired no earlier than the next minor release and 30 days
+later.
+
+| Deprecated (out of the pickers, still runs by name) | Use |
+|---|---|
+| `fireworks/kimi-k3` | `fireworks/kimi-k3p1-pro` |
+| `fireworks/deepseek-v4p1-flash` | `fireworks/deepseek-v4p1-flash-1017` |
+| `openrouter/gemini-4-argon` | `openrouter/gemini-pro-latest` |
+| `openrouter/minimax-m3` | `openrouter/minimax-m3.1-flash` |
+
+A replacement has its own price (Kimi K3.1 Pro is two thirds of Kimi K3's, M3.1
+Flash half of M3's), so craze never switches you to it.
+
+- **Fireworks starts on `fireworks/kimi-k3p1-pro`** (it was
+  `fireworks/ember-1`) for a new session that remembers nothing and has no
+  `default_model`. It is the owner's choice, not an evaluation's result. Write
+  `default_model = "fireworks/ember-1"` in `models.toml` to keep the old start;
+  a remembered model still wins, as before.
+- **A deprecated model is no fallback.** When craze must pick a funded model
+  by alias because no start model resolves, it no longer takes
+  `fireworks/deepseek-v4p1-flash`; it takes `fireworks/deepseek-v4p1-flash-1017`.
+- **A reference in `models.toml` to a deprecated model warns** at session start:
+  your `default_model`, the `[subagents]` model or a tier, or a `[models]` entry.
+  Point it at the replacement when you like.
+- **OpenRouter's routers are priced at their maker's own rate.**
+  `openrouter/deepseek-flash-latest` is $0.30 input / $1.20 output per million
+  tokens (cached input $0.006), `openrouter/glm-flash-latest` $0.15 / $0.50
+  ($0.03) and `openrouter/glm-latest` $1.40 / $4.40 ($0.26). The model list's
+  prices were the cheapest endpoint's, and requests on 2026-11-11 were billed 3
+  to 9 times them, so the spend craze shows for these three rises to what a
+  request costs. A price you wrote in `models.toml` still wins.
+- **The four GPT routers work within 272,000 tokens.**
+  `openrouter/gpt-sol-latest`, `gpt-astra-latest`, `gpt-luna-latest` and the new
+  `gpt-terra-latest` now have a [context
+  default](../reference/configuration.md#native-context-default) of 272,000 and
+  OpenAI's long-context price above it, as the [OpenAI](#an-openai-api-key)
+  models do: a session compacts at 85% of 272,000 rather than of the whole
+  window, and its `contextWindow` and `NN% ctx` are measured against it.
+  `default_context = 0` under a router in `models.toml` turns that off.
+- **Muse Ember 1.0** (`muse-ember-1.0`) joins Meta, with a context default of
+  200,000 and Meta's price above it. It is not Meta's start.
+- **Claude Fable 5.2** (`anthropic/claude-fable-5-2`) is priced now: $8 input /
+  $40 output per million tokens. Its spend was unpriced when only the
+  account's list named it. The `fable` tier word and `list = "newest"` pick it
+  without a fetched list.
+- **A retired alias now names its replacement** where the catalog knew one:
+  `openrouter/gpt-6.1-sol` and `openrouter/gpt-6-sol` point at
+  `openrouter/gpt-sol-latest`, `openrouter/gpt-6-astra` at
+  `openrouter/gpt-astra-latest`, `openrouter/gpt-6-luna` at
+  `openrouter/gpt-luna-latest`, `openrouter/gemini-3.8-flash` at
+  `openrouter/gemini-flash-latest` and `openrouter/glm-5.3-flash` at
+  `openrouter/glm-flash-latest`. `--model` naming one is refused as before,
+  now with `; use <replacement>` and `detail.replaced_by`.
+
 ### An OpenAI API key
 
 craze ships an [`openai` provider](../reference/configuration.md#openai):

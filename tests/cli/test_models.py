@@ -82,11 +82,15 @@ def _refused(out: subprocess.CompletedProcess[bytes], detail: dict, message: str
 def test_new_wait_refuses_before_any_host(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """Each pre-check refusal of craze new --wait on native: no host is spawned (the
     registry stays empty) and the provider's server sees no request. The shipped
-    catalog's retired alias is model_retired; an unknown one model_unknown."""
+    catalog's retired alias (with the replacement the catalog names) is model_retired; an unknown one model_unknown."""
     _config(fake_agent_bin)
     work = str(tmp_path)
     out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "native", "--model", "openrouter/gpt-6.1-sol", "-C", work, "go")
-    _refused(out, {"reason": "model_retired", "model": "openrouter/gpt-6.1-sol"}, "native: openrouter/gpt-6.1-sol was retired")
+    _refused(
+        out,
+        {"reason": "model_retired", "model": "openrouter/gpt-6.1-sol", "replaced_by": "openrouter/gpt-sol-latest"},
+        "native: openrouter/gpt-6.1-sol was retired; use openrouter/gpt-sol-latest",
+    )
     with SSEFixture() as fixture:
         _with_efforts(fixture.base_url)
         native = ("new", "--wait", "--json", "--provider", "native", "-C", work)

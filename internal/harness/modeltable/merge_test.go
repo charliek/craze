@@ -1101,9 +1101,16 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 		models    string
 		pin       string
 		redundant int
+		warns     [][]string
 	}{
-		{"models-2026-09-29.toml", "fireworks/deepseek-v4p1-flash", 1},
-		{"models-import-era.toml", "", 0},
+		// The 2026-09-29 file pins, and overrides, a model plan 050 C4 has
+		// since deprecated: two references, each warned of once (the file
+		// still loads and the model still runs).
+		{"models-2026-09-29.toml", "fireworks/deepseek-v4p1-flash", 1, [][]string{
+			{`models."fireworks/deepseek-v4p1-flash"`, "deprecated", "fireworks/deepseek-v4p1-flash-1017"},
+			{"default_model", "deprecated", "fireworks/deepseek-v4p1-flash-1017"},
+		}},
+		{"models-import-era.toml", "", 0, nil},
 	} {
 		t.Run(tc.models, func(t *testing.T) {
 			dir := writeFiles(t, providers, read(tc.models))
@@ -1111,7 +1118,7 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantWarnings(t, tbl)
+			wantWarnings(t, tbl, tc.warns...)
 			if tbl.DefaultModel != tc.pin {
 				t.Fatalf("default = %q, want %q", tbl.DefaultModel, tc.pin)
 			}

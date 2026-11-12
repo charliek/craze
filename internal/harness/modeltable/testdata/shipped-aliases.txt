@@ -49,3 +49,10 @@ openai/gpt-6-astra
 openai/gpt-6-luna
 openai/gpt-6.1-sol
 openai/gpt-6.1-terra
+anthropic/claude-fable-5-2
+fireworks/kimi-k3p1-pro
+fireworks/deepseek-v4p1-flash-1017
+openrouter/gemini-pro-latest
+openrouter/gpt-terra-latest
+openrouter/minimax-m3.1-flash
+muse-ember-1.0

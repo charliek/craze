@@ -571,12 +571,14 @@ func TestStartPickSteps(t *testing.T) {
 
 // TestStartModelOverTheShippedCatalog (plan 038 §4): where a new session with
 // nothing remembered starts on a home with the shipped catalog — Z.AI alone
-// on glm-5.3, Fireworks alone on fireworks/ember-1, OpenRouter alone on
+// on glm-5.3, Fireworks alone on fireworks/kimi-k3p1-pro (the owner's choice of
+// 2026-11-11, plan 050; Ember-1 was its start before), OpenRouter alone on
 // openrouter/gemini-flash-latest, Meta alone on muse-spark-1.3-contributor, and
 // with every key the eval winner, Z.AI; never on deepseek. The user's pin in
 // models.toml beats the order, the user's provider_order reorders it, and an
-// order that leaves out the funded provider falls back to the first funded
-// alias by name, which the caller notes. No key: ErrNothingFunded.
+// order that leaves out the funded provider falls back to the first funded,
+// offered alias by name (a deprecated model is not one), which the caller
+// notes. No key: ErrNothingFunded.
 func TestStartModelOverTheShippedCatalog(t *testing.T) {
 	const (
 		zai = "ZHIPU_API_KEY"
@@ -591,19 +593,21 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 		want   Start
 	}{
 		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.3", Effort: "max"}},
-		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/kimi-k3p1-pro", Effort: "high"}},
 		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-flash-latest", Effort: "medium"}},
 		{"Meta alone", "", []string{mt}, Start{Alias: "muse-spark-1.3-contributor", Effort: "high"}},
 		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.3", Effort: "max"}},
-		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/ember-1", Effort: "high"}},
-		{"a pin beats the order", `default_model = "fireworks/kimi-k3"`, []string{zai, fw},
-			Start{Alias: "fireworks/kimi-k3", Effort: "high"}},
-		{"an unfunded pin gives way to the order", `default_model = "fireworks/kimi-k3"`, []string{zai},
+		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/kimi-k3p1-pro", Effort: "high"}},
+		{"a pin beats the order", `default_model = "fireworks/ember-1"`, []string{zai, fw},
+			Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"a pin keeps Fireworks' old start", `default_model = "fireworks/ember-1"`, []string{fw},
+			Start{Alias: "fireworks/ember-1", Effort: "high"}},
+		{"an unfunded pin gives way to the order", `default_model = "fireworks/ember-1"`, []string{zai},
 			Start{Alias: "glm-5.3", Effort: "max"}},
 		{"the user's order", `provider_order = ["meta", "fireworks", "zai-coding-plan"]`, []string{zai, fw},
-			Start{Alias: "fireworks/ember-1", Effort: "high"}},
+			Start{Alias: "fireworks/kimi-k3p1-pro", Effort: "high"}},
 		{"an order without the funded provider", `provider_order = ["meta"]`, []string{fw},
-			Start{Alias: "fireworks/deepseek-v4p1-flash", Effort: "high", Fallback: true}},
+			Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high", Fallback: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			models := ""
@@ -625,6 +629,20 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 			}
 		})
 	}
+	// A pin on a model deprecated since (plan 050) still starts it, with one
+	// warning naming the replacement: a deprecated model is no start and no
+	// fallback, but a pin is the user's own word.
+	t.Run("a pin on a deprecated model", func(t *testing.T) {
+		tbl, err := Load(writeFiles(t, "", "version = 1\ndefault_model = \"fireworks/kimi-k3\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWarnings(t, tbl, []string{"fireworks/kimi-k3", "deprecated", "fireworks/kimi-k3p1-pro"})
+		got, err := tbl.StartPick(nil, fakeEnv(map[string]string{fw: "sk-start-dummy-0001"}))
+		if err != nil || got != (Start{Alias: "fireworks/kimi-k3", Effort: "high"}) {
+			t.Fatalf("StartPick = %+v, %v; want the pinned fireworks/kimi-k3", got, err)
+		}
+	})
 	t.Run("nothing funded", func(t *testing.T) {
 		tbl, err := Load(t.TempDir())
 		if err != nil {

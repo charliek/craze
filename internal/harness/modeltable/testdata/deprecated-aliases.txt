@@ -9,3 +9,7 @@
 # version.Version: so a release always ships an alias deprecated before a
 # later one retires it, and a deprecation and its retirement never ship in
 # the same release.
+fireworks/kimi-k3 0.2.0
+fireworks/deepseek-v4p1-flash 0.2.0
+openrouter/gemini-4-argon 0.2.0
+openrouter/minimax-m3 0.2.0

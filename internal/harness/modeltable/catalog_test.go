@@ -111,7 +111,7 @@ func TestShippedCatalog(t *testing.T) {
 	// OpenRouter *-latest routers (2026-10-09) keep their models' flags, and
 	// DeepSeek Flash Latest and MiMo V2.6 Pro were seen describing an image
 	// read from disk; GLM Latest, GLM 5.3 on OpenRouter, takes text only.
-	// Plan 044 adds the thirteen Anthropic seeds: each takes image input by
+	// Plan 044 adds the thirteen Anthropic seeds (plan 050 a fourteenth, Fable 5.2): each takes image input by
 	// the account's list (image_input), and the four headline models were seen
 	// describing an image live before they shipped (P31). Plan 045's Muse
 	// Wonder 1.0 named an image's colour live (MW-7) and read one from disk
@@ -130,7 +130,13 @@ func TestShippedCatalog(t *testing.T) {
 		"anthropic/claude-sonnet-4-6": true, "anthropic/claude-sonnet-5": true,
 		"anthropic/claude-sonnet-5-5":   true,
 		"fireworks/deepseek-v4p1-flash": true, "fireworks/kimi-k3": true,
-		"fireworks/ember-1": true, "fireworks/glm-5p3-flash": true,
+		// Plan 050's refresh, each seen describing an image read from disk
+		// through craze on 2026-11-11.
+		"anthropic/claude-fable-5-2": true, "fireworks/deepseek-v4p1-flash-1017": true,
+		"fireworks/kimi-k3p1-pro": true, "muse-ember-1.0": true,
+		"openrouter/gemini-pro-latest": true, "openrouter/gpt-terra-latest": true,
+		"openrouter/minimax-m3.1-flash": true,
+		"fireworks/ember-1":             true, "fireworks/glm-5p3-flash": true,
 		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
 		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
 		"muse-wonder-1.0":                  true,
@@ -260,7 +266,7 @@ func TestShippedCatalogHistory(t *testing.T) {
 // and the prices it fills. And OpenRouter's models (2026-10-09): each family
 // with a ~<family>-latest router is on it, so a new release needs no catalog
 // change, and the numbered aliases it replaced retire the alias only. And plan
-// 044: the Anthropic provider, last in the order (O4); its thirteen seeds;
+// 044: the Anthropic provider, next to last in the order (O4); its fourteen seeds;
 // [anthropic_defaults] — the newest Opus to start on (O1), medium effort for
 // every model (D3), every model offered (O3); a key alone starts a session
 // on anthropic/claude-opus-5-5 at medium; and the four headline prices (LF-8,
@@ -306,7 +312,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	wantStarts := map[string][]string{
 		"zai-coding-plan": {"glm-5.3"},
-		"fireworks":       {"fireworks/ember-1"},
+		"fireworks":       {"fireworks/kimi-k3p1-pro"},
 		"openrouter":      {"openrouter/gemini-flash-latest"},
 		"meta":            {"muse-spark-1.3-contributor"},
 		"openai":          {"openai/gpt-6.1-sol"},
@@ -321,13 +327,16 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
 		"openrouter/gemini-4-argon":        "google/gemini-4-argon",
 		"openrouter/gemini-flash-latest":   "~google/gemini-flash-latest",
+		"openrouter/gemini-pro-latest":     "~google/gemini-pro-latest",
 		"openrouter/glm-flash-latest":      "~z-ai/glm-flash-latest",
 		"openrouter/glm-latest":            "~z-ai/glm-latest",
 		"openrouter/gpt-astra-latest":      "~openai/gpt-astra-latest",
 		"openrouter/gpt-luna-latest":       "~openai/gpt-luna-latest",
 		"openrouter/gpt-sol-latest":        "~openai/gpt-sol-latest",
+		"openrouter/gpt-terra-latest":      "~openai/gpt-terra-latest",
 		"openrouter/mimo-v2.6-pro":         "xiaomi/mimo-v2.6-pro",
 		"openrouter/minimax-m3":            "minimax/minimax-m3",
+		"openrouter/minimax-m3.1-flash":    "minimax/minimax-m3.1-flash",
 	}
 	gotOpenRouter := map[string]string{}
 	for alias, m := range c.Models {
@@ -356,6 +365,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	// none, MW-6) at Spark's default, high, and its ceiling is the family's
 	// 131072, not the window (D2); the start above stays Spark's contributor.
 	wantMeta := map[string]string{
+		"muse-ember-1.0":             "muse-ember-1.0",
 		"muse-spark-1.3":             "muse-spark-1.3",
 		"muse-spark-1.3-contributor": "muse-spark-1.3-contributor",
 		"muse-wonder-1.0":            "muse-wonder-1.0",
@@ -401,19 +411,26 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	// The prices (§2.5, §2.6): input, output, cache read, per 1M tokens.
 	for alias, want := range map[string][3]float64{
-		"fireworks/ember-1":                {3.0, 15.0, 0.3},
-		"fireworks/glm-5p3":                {1.4, 4.4, 0.26},
-		"fireworks/glm-5p3-flash":          {0.15, 0.5, 0.03},
-		"fireworks/qwen3p8-max":            {2.0, 6.0, 0.25},
-		"openrouter/deepseek-flash-latest": {0.016, 0.6, 0.005},
-		"openrouter/gemini-4-argon":        {2.0, 10.0, 0.1},
-		"openrouter/gemini-flash-latest":   {0.75, 3.75, 0.075},
-		"openrouter/glm-flash-latest":      {0.032, 0.72, 0.01},
-		"openrouter/glm-latest":            {0.039, 4.8, 0.038},
-		"openrouter/mimo-v2.6-pro":         {0.435, 0.87, 0.0036},
-		"openrouter/minimax-m3":            {0.3, 1.2, 0.06},
-		"muse-spark-1.3-contributor":       {0.1, 0.2, 0.002},
-		"muse-wonder-1.0":                  {4.0, 20.0, 0.2},
+		"fireworks/ember-1":                  {3.0, 15.0, 0.3},
+		"fireworks/glm-5p3":                  {1.4, 4.4, 0.26},
+		"fireworks/glm-5p3-flash":            {0.15, 0.5, 0.03},
+		"fireworks/qwen3p8-max":              {2.0, 6.0, 0.25},
+		"openrouter/deepseek-flash-latest":   {0.3, 1.2, 0.006},
+		"openrouter/gemini-4-argon":          {2.0, 10.0, 0.1},
+		"openrouter/gemini-flash-latest":     {0.75, 3.75, 0.075},
+		"openrouter/glm-flash-latest":        {0.15, 0.5, 0.03},
+		"openrouter/glm-latest":              {1.4, 4.4, 0.26},
+		"openrouter/mimo-v2.6-pro":           {0.435, 0.87, 0.0036},
+		"openrouter/minimax-m3":              {0.3, 1.2, 0.06},
+		"openrouter/minimax-m3.1-flash":      {0.15, 0.6, 0.015},
+		"openrouter/gemini-pro-latest":       {2.0, 10.0, 0.1},
+		"fireworks/kimi-k3":                  {3.0, 15.0, 0.3},
+		"fireworks/kimi-k3p1-pro":            {2.0, 10.0, 0.2},
+		"fireworks/deepseek-v4p1-flash":      {0.3, 1.2, 0.006},
+		"fireworks/deepseek-v4p1-flash-1017": {0.3, 1.2, 0.006},
+		"muse-ember-1.0":                     {0.1, 0.5, 0.004},
+		"muse-spark-1.3-contributor":         {0.1, 0.2, 0.002},
+		"muse-wonder-1.0":                    {4.0, 20.0, 0.2},
 	} {
 		cost := c.Models[alias].Cost
 		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil ||
@@ -428,7 +445,8 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		}
 	}
 	// Anthropic (plan 044): the provider, its defaults, its seeds — the
-	// account's thirteen models of 2026-10-11 — and where a key alone starts.
+	// account's thirteen models of 2026-10-11 and the fourteenth, Fable 5.2, of
+	// 2026-11-11 — and where a key alone starts.
 	if p := c.Providers[AnthropicProvider]; p.Driver != DriverAnthropic || !slices.Equal(p.EnvKeys, []string{"ANTHROPIC_API_KEY"}) {
 		t.Fatalf("anthropic = %+v, want the anthropic driver on ANTHROPIC_API_KEY", p)
 	}
@@ -448,7 +466,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			}
 		}
 	}
-	wantSeeds := []string{"claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001", "claude-haiku-5-5",
+	wantSeeds := []string{"claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-haiku-4-5-20251001", "claude-haiku-5-5",
 		"claude-opus-4-5-20251101", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
 		"claude-opus-5-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5"}
 	if slices.Sort(seeds); !slices.Equal(seeds, wantSeeds) {
@@ -471,6 +489,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"anthropic/claude-sonnet-5-5": {2, 10, 0.1, 2.5},
 		"anthropic/claude-haiku-5-5":  {0.1, 0.5, 0.01, 0.125},
 		"anthropic/claude-fable-5-1":  {10, 50, 0.25, 12.5},
+		"anthropic/claude-fable-5-2":  {8, 40, 0.2, 10},
 	} {
 		cost := c.Models[alias].Cost
 		if cost == nil || cost.Input == nil || cost.Output == nil || cost.CacheRead == nil || cost.CacheWrite == nil ||
@@ -480,26 +499,31 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	// Haiku 5.5's long-context tier (plan 047 D10, LC-1…3, re-checked
 	// 2026-10-13): above 100,000 prompt tokens, input, output, cache hit and
-	// 5-minute write at 0.5, 2.5, 0.05 and 0.625. The OpenAI key's four seeds
-	// have one too (plan 050), checked below. No other shipped model has a
-	// tier.
+	// 5-minute write at 0.5, 2.5, 0.05 and 0.625. Exactly these shipped
+	// models have a tier, and no other: Haiku 5.5, the OpenAI key's four
+	// seeds and OpenRouter's four GPT routers (OpenAI's 272,000 tier, plan
+	// 050), and Muse Ember (Meta's 200,000 tier).
+	wantTiered := []string{
+		"anthropic/claude-haiku-5-5", "muse-ember-1.0",
+		"openai/gpt-6-astra", "openai/gpt-6-luna", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra",
+		"openrouter/gpt-astra-latest", "openrouter/gpt-luna-latest", "openrouter/gpt-sol-latest", "openrouter/gpt-terra-latest",
+	}
+	var tiered []string
 	for alias, m := range c.Models {
-		cost := m.Cost
-		if m.Provider == "openai" {
-			continue
+		if cost := m.Cost; cost != nil && (cost.LongContextAbove != nil || cost.LongContext != nil) {
+			tiered = append(tiered, alias)
 		}
-		if alias != "anthropic/claude-haiku-5-5" {
-			if cost != nil && (cost.LongContextAbove != nil || cost.LongContext != nil) {
-				t.Errorf("%s has a long-context tier (above %d): only Haiku 5.5 and the OpenAI seeds do", alias, deref(cost.LongContextAbove))
-			}
-			continue
-		}
+	}
+	if slices.Sort(tiered); !slices.Equal(tiered, wantTiered) {
+		t.Errorf("models with a long-context tier = %q, want exactly %q", tiered, wantTiered)
+	}
+	{
+		cost := c.Models["anthropic/claude-haiku-5-5"].Cost
 		l := cost.LongContext
 		if cost.LongContextAbove == nil || *cost.LongContextAbove != 100_000 || l == nil ||
 			l.Input == nil || l.Output == nil || l.CacheRead == nil || l.CacheWrite == nil ||
 			[4]float64{*l.Input, *l.Output, *l.CacheRead, *l.CacheWrite} != [4]float64{0.5, 2.5, 0.05, 0.625} {
-			t.Errorf("%s tier: above %v at %v; want above 100000 at [0.5 2.5 0.05 0.625]", alias, deref(cost.LongContextAbove),
-				[4]float64{deref(l.Input), deref(l.Output), deref(l.CacheRead), deref(l.CacheWrite)})
+			t.Errorf("Haiku 5.5 tier: above %v; want above 100000 at [0.5 2.5 0.05 0.625]", deref(cost.LongContextAbove))
 		}
 	}
 	if r, ok := tbl.Price(AnthropicProvider, "claude-haiku-5-5"); !ok || r != (Rates{
@@ -809,5 +833,157 @@ func TestLoadReportsABrokenCatalog(t *testing.T) {
 	var fe *FileError
 	if !errors.As(err, &fe) || fe.Table != "providers.meta" || fe.Key != "driver" {
 		t.Fatalf("err = %v, want the broken provider named", err)
+	}
+}
+
+// TestShippedCatalogRefresh pins plan 050 C4's catalog refresh as the owner
+// decided it (2026-11-11/12): four models deprecated (out of the pickers,
+// still resolvable with their key, naming an active replacement), Fireworks
+// starting on Kimi K3.1 Pro, each new entry's numbers, the GPT routers'
+// tier and context default, the open-weight routers at their maker's own
+// rate, and the backfilled replacements of the retired rows.
+func TestShippedCatalogRefresh(t *testing.T) {
+	tbl, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deprecated, not retired: the full entry stays, it resolves with its
+	// provider's key, names an active replacement, and is never offered.
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "fw-key-not-a-secret-01", "OPENROUTER_API_KEY": "or-key-not-a-secret-01"})
+	offered := tbl.Offered(env)
+	for old, replacement := range map[string]string{
+		"fireworks/kimi-k3":             "fireworks/kimi-k3p1-pro",
+		"fireworks/deepseek-v4p1-flash": "fireworks/deepseek-v4p1-flash-1017",
+		"openrouter/gemini-4-argon":     "openrouter/gemini-pro-latest",
+		"openrouter/minimax-m3":         "openrouter/minimax-m3.1-flash",
+	} {
+		m, ok := tbl.Models[old]
+		if !ok || !m.Deprecated || m.ReplacedBy != replacement {
+			t.Errorf("%s = %+v (present %v), want deprecated, replaced by %s", old, m, ok, replacement)
+		}
+		if r, ok := tbl.Models[replacement]; !ok || r.Deprecated {
+			t.Errorf("%s replaces %s but is %+v (present %v), want an active model", replacement, old, r, ok)
+		}
+		if r, err := tbl.Resolve(old, env); err != nil || !r.Deprecated || r.ReplacedBy != replacement {
+			t.Errorf("Resolve(%s) = %+v, %v; want it to run, deprecated, replaced by %s", old, r, err, replacement)
+		}
+		if _, err := tbl.Resolve(old, fakeEnv(nil)); err == nil {
+			t.Errorf("Resolve(%s) with no key succeeded", old)
+		}
+		if offered[old] {
+			t.Errorf("%s is deprecated but offered", old)
+		}
+		if !offered[replacement] {
+			t.Errorf("%s is not offered", replacement)
+		}
+	}
+	// Fireworks starts on Kimi K3.1 Pro; Ember-1 is an ordinary model.
+	if got := cat.Starts["fireworks"]; !slices.Equal(got, []string{"fireworks/kimi-k3p1-pro"}) {
+		t.Errorf("Fireworks starts on %q, want fireworks/kimi-k3p1-pro", got)
+	}
+	if m := tbl.Models["fireworks/ember-1"]; m.Deprecated || !offered["fireworks/ember-1"] {
+		t.Errorf("fireworks/ember-1 = %+v, offered %v; want an ordinary active model", m, offered["fireworks/ember-1"])
+	}
+
+	rates := func(alias string) [3]float64 {
+		cost := tbl.Models[alias].Cost
+		if cost == nil {
+			return [3]float64{-1}
+		}
+		return [3]float64{deref(cost.Input), deref(cost.Output), deref(cost.CacheRead)}
+	}
+	allEfforts := []string{"low", "medium", "high", "xhigh", "max"}
+	allSix := []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+	// Each new entry, as live-checked on 2026-11-11.
+	for alias, want := range map[string]struct {
+		wire, name      string
+		window, ceiling int
+		efforts         []string
+		effort          string
+		price           [3]float64
+	}{
+		"fireworks/kimi-k3p1-pro":            {"accounts/fireworks/models/kimi-k3p1-pro", "Kimi K3.1 Pro (Fireworks)", 1048576, 0, allEfforts, "high", [3]float64{2, 10, 0.2}},
+		"fireworks/deepseek-v4p1-flash-1017": {"accounts/fireworks/models/deepseek-v4p1-flash-1017", "DeepSeek V4.1 Flash 1017 (Fireworks)", 1048576, 0, allEfforts, "high", [3]float64{0.3, 1.2, 0.006}},
+		"openrouter/gemini-pro-latest":       {"~google/gemini-pro-latest", "Gemini Pro Latest (OpenRouter)", 1048576, 65536, []string{"low", "medium", "high"}, "medium", [3]float64{2, 10, 0.1}},
+		"openrouter/gpt-terra-latest":        {"~openai/gpt-terra-latest", "GPT Terra Latest (OpenRouter)", 1050000, 0, allEfforts, "medium", [3]float64{1, 5, 0.05}},
+		"openrouter/minimax-m3.1-flash":      {"minimax/minimax-m3.1-flash", "MiniMax M3.1 Flash (OpenRouter)", 1048576, 0, allEfforts, "high", [3]float64{0.15, 0.6, 0.015}},
+		"muse-ember-1.0":                     {"muse-ember-1.0", "Muse Ember 1.0 (Meta)", 1048576, 131072, allSix, "high", [3]float64{0.1, 0.5, 0.004}},
+		"anthropic/claude-fable-5-2":         {"claude-fable-5-2", "Claude Fable 5.2", 1000000, 64000, allEfforts, "medium", [3]float64{8, 40, 0.2}},
+	} {
+		m, ok := tbl.Models[alias]
+		if !ok || m.WireModel != want.wire || m.Name != want.name || m.ContextWindow != want.window || m.MaxOutputTokens != want.ceiling ||
+			!slices.Equal(m.Efforts, want.efforts) || m.DefaultEffort != want.effort || !m.Vision || m.Deprecated {
+			t.Errorf("%s = %+v (present %v)", alias, m, ok)
+		}
+		if got := rates(alias); got != want.price {
+			t.Errorf("%s prices at %v, want %v", alias, got, want.price)
+		}
+	}
+	if cost := tbl.Models["anthropic/claude-fable-5-2"].Cost; cost == nil || deref(cost.CacheWrite) != 10 || cost.LongContext != nil {
+		t.Errorf("Fable 5.2 cost = %+v, want cache_write 10 and no tier", cost)
+	}
+	if m := tbl.Models["anthropic/claude-fable-5-2"]; m.Family != "fable" || m.Released != "2026-11-09" || m.Thinking != ThinkingAdaptive {
+		t.Errorf("Fable 5.2 = %+v, want family fable, released 2026-11-09, adaptive thinking", m)
+	}
+
+	// Muse Ember: Meta's 200,000 tier, and a context default at it; not Meta's start.
+	ember := tbl.Models["muse-ember-1.0"]
+	if ember.DefaultContext != 200000 || ember.Cost.LongContextAbove == nil || *ember.Cost.LongContextAbove != 200000 ||
+		ember.Cost.LongContext == nil || [3]float64{deref(ember.Cost.LongContext.Input), deref(ember.Cost.LongContext.Output), deref(ember.Cost.LongContext.CacheRead)} != [3]float64{0.3, 1.5, 0.012} {
+		t.Errorf("muse-ember-1.0 = %+v, cost %+v; want default_context 200000 and a tier above 200000 at 0.3 / 1.5 / 0.012", ember, ember.Cost)
+	}
+	if slices.Contains(cat.Starts["meta"], "muse-ember-1.0") {
+		t.Errorf("Meta starts on %q: Ember is not a start", cat.Starts["meta"])
+	}
+
+	// The four GPT routers: OpenAI's 272,000 tier and context default, and
+	// no cache_write (the openrouter driver reports no cache-write tokens).
+	for alias, want := range map[string]struct{ base, long [3]float64 }{
+		"openrouter/gpt-sol-latest":   {[3]float64{2, 10, 0.1}, [3]float64{4, 15, 0.2}},
+		"openrouter/gpt-astra-latest": {[3]float64{10, 50, 1}, [3]float64{20, 75, 2}},
+		"openrouter/gpt-terra-latest": {[3]float64{1, 5, 0.05}, [3]float64{2, 7.5, 0.1}},
+		"openrouter/gpt-luna-latest":  {[3]float64{0.1, 0.5, 0.01}, [3]float64{0.2, 0.75, 0.02}},
+	} {
+		m := tbl.Models[alias]
+		if m.Cost == nil || m.Cost.LongContext == nil {
+			t.Errorf("%s has no tier: %+v", alias, m.Cost)
+			continue
+		}
+		l := m.Cost.LongContext
+		if m.ContextWindow != 1050000 || m.DefaultContext != 272000 || m.Cost.LongContextAbove == nil || *m.Cost.LongContextAbove != 272000 ||
+			rates(alias) != want.base ||
+			[3]float64{deref(l.Input), deref(l.Output), deref(l.CacheRead)} != want.long || m.Cost.CacheWrite != nil || l.CacheWrite != nil {
+			t.Errorf("%s = %+v, cost %+v, tier %+v; want window 1050000, default_context 272000, base rates %v, a tier above 272000 at %v, no cache_write", alias, m, m.Cost, l, want.base, want.long)
+		}
+	}
+	// The open-weight routers at their maker's own endpoint on OpenRouter.
+	for alias, want := range map[string][3]float64{
+		"openrouter/deepseek-flash-latest": {0.3, 1.2, 0.006},
+		"openrouter/glm-flash-latest":      {0.15, 0.5, 0.03},
+		"openrouter/glm-latest":            {1.4, 4.4, 0.26},
+	} {
+		if got := rates(alias); got != want {
+			t.Errorf("%s prices at %v, want its maker's endpoint rate %v", alias, got, want)
+		}
+	}
+
+	// The retired rows whose successors the catalog named point at today's
+	// active successor.
+	wantRepl := map[string]string{
+		"openrouter/gpt-6-sol":        "openrouter/gpt-sol-latest",
+		"openrouter/gpt-6.1-sol":      "openrouter/gpt-sol-latest",
+		"openrouter/gpt-6-astra":      "openrouter/gpt-astra-latest",
+		"openrouter/gpt-6-luna":       "openrouter/gpt-luna-latest",
+		"openrouter/gemini-3.8-flash": "openrouter/gemini-flash-latest",
+		"openrouter/glm-5.3-flash":    "openrouter/glm-flash-latest",
+	}
+	for _, r := range cat.Retired {
+		if r.ReplacedBy != wantRepl[r.Alias] {
+			t.Errorf("retired %s replaced_by = %q, want %q", r.Alias, r.ReplacedBy, wantRepl[r.Alias])
+		}
 	}
 }
