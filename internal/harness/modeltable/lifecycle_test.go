@@ -17,7 +17,8 @@ import (
 // clearing on a re-point, the warnings a reference to one gives), the offered
 // set and where it applies, the "<provider id>/<alias>" form, Save, and the
 // release rule's history files. The cases run over testCatalogV1 with a
-// deprecated model added, through LoadWith: the shipped catalog has none.
+// deprecated model added, through LoadWith, so they do not move with the
+// shipped catalog's deprecations.
 
 // lifecycleCatalog is testCatalogV1 with acme/dep, a deprecated model replaced
 // by acme/fast, a context default on acme/fast, and the retired acme/old
@@ -49,7 +50,7 @@ func lifecycle(t *testing.T) *Catalog {
 }
 
 // acmeEnv funds the test catalogs' acme provider, and router too.
-var acmeEnv = fakeEnv(map[string]string{"ACME_API_KEY": "sk-acme-dummy-0001", "ROUTER_API_KEY": "sk-router-dummy-0001"})
+var acmeEnv = keys(true, true)
 
 // TestCatalogLifecycleRules: what the catalog may say of a deprecated model,
 // a retired alias's replacement and a context default — and that the
@@ -245,8 +246,8 @@ func TestContextDefaultMerges(t *testing.T) {
 
 // withShipped replaces the shipped catalog with change applied to a copy of
 // it, for the rest of t: Save marks an explicit empty against the shipped
-// catalog alone, and C1 ships no model with a context default. No test of
-// the package runs in parallel.
+// catalog alone, and a test that sets its own context default does not move
+// with the shipped catalog's. No test of the package runs in parallel.
 func withShipped(t *testing.T, change func(*Catalog)) {
 	t.Helper()
 	orig, err := shippedCatalog()

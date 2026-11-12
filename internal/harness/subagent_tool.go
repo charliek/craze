@@ -155,7 +155,8 @@ func renderSubagentModels(table *modeltable.Table, getenv func(string) string, p
 
 // subagentChoices is the sub-agent choice set (plan 050 C1): the models the
 // agent tool's menu lists and its "Unknown model" error names — the table's
-// offered set (Table.Offered: funded and not deprecated), plus the models the
+// offered set (Table.Offered: funded, not deprecated and not hidden by the
+// source order), plus the models the
 // owner configured, each while it resolves: the [subagents] model, each tier
 // target, the default_model pin, and parents, the session's own model (on a
 // resume, every alias it may continue on; "" is none). A deprecated model is

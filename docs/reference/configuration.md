@@ -808,8 +808,10 @@ from, tried in order:
 Its models — aliases, wire model ids, context windows, efforts and costs — are
 in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
-a session's `/model` lists those whose provider has a key ([which models, in
-what order](tui.md#model-dialog)). Anthropic's are also the account's own:
+a session's `/model` lists those whose provider has a key, less
+[deprecated](#deprecated-models) ones and those the [source
+order](#one-source-per-maker) hides ([which models, in what
+order](tui.md#model-dialog)). Anthropic's are also the account's own:
 see [Anthropic](#anthropic). OpenAI's, on an API key, are in [OpenAI](#openai).
 [`craze models`](cli.md#craze-models) lists every model this machine's table has
 — your files' and the accounts' lists' included — with its status, efforts,
@@ -2032,7 +2034,9 @@ one stays, with a warning naming its replacement; and an `effort` the kept
 On the native provider a model may have a **context default**: the context a
 session on it works within, smaller than its context window. The catalog
 sets one where working in the whole window costs more than it gives (a price
-tier above a size, say): 272,000 tokens on the [OpenAI](#openai) models. It decides two things, and nothing else:
+tier above a size, say): 272,000 tokens on the [OpenAI](#openai) models and
+OpenRouter's four GPT routers, 200,000 on `muse-ember-1.0`. It decides two
+things, and nothing else:
 
 - [automatic compaction](tui.md#compaction): a session compacts at
   `threshold_percent` (85% by default) of the context default instead of the
@@ -2142,8 +2146,8 @@ shipped models carry Anthropic's prices — `cache_read` its cache hit,
 `cache_write` its five-minute cache write, the only one craze asks for — and a
 model only the Anthropic account's list names carries none until a release
 adds it ([Anthropic](#anthropic)). The [OpenAI](#openai) models carry
-OpenAI's, `cache_write` its cache write. Haiku 5.5 and the OpenAI models also
-have a long-context tier, below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
+OpenAI's, `cache_write` its cache write. Some shipped models also have a
+[long-context tier](#long-context-pricing), below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
 rate outside that range, or one that is not a finite number (`nan`, `inf`), is
 refused at load.
 

@@ -44,8 +44,9 @@ type Choice struct {
 
 // Choices is the models a picker offers from t, in order (plan 031 §3.6): every
 // model whose provider has a usable key — judged exactly as Resolve judges it,
-// with getenv (nil is os.Getenv) — that is not deprecated (Offered, plan 050
-// C1), plus current, the model the session runs on, deprecated or not,
+// with getenv (nil is os.Getenv) — that is offered (Offered: not deprecated,
+// plan 050 C1, and not hidden by the source order, C5), plus current, the
+// model the session runs on, offered or not,
 // whether its provider has a key or not (P7); "" is no current model, and an
 // alias t does not have adds nothing.
 //
@@ -87,7 +88,8 @@ func (t *Table) SessionChoices(recent []RecentEntry, memory map[string]string, g
 // model reach it, but nothing offers it. It is computed once per call, from
 // the table and the environment as they are now, never stored at load: a key
 // stored or a sign-in completed changes it at the next call. The one rule
-// every offering site goes through (SessionChoices, StartPick's steps 3 to 5,
+// every offering site goes through, here or through Offers (SessionChoices,
+// StartPick's steps 3 to 5,
 // the resume fallback, the agent tool's model menu, a switch's dropped row);
 // the session's current model is listed beside it by its caller, never by
 // it. The caller owns the map.

@@ -163,9 +163,9 @@ func hintCatalog() *modeltable.Catalog {
 // another kind of failure, a replayed one, an ACP session's, or one with no
 // other funded source.
 func TestAQuotaFailureIsFollowedByAHintNote(t *testing.T) {
-	prev := quotaHintTable
-	t.Cleanup(func() { quotaHintTable = prev })
-	quotaHintTable = func(dir string) (*modeltable.Table, error) { return modeltable.LoadWith(dir, hintCatalog()) }
+	prev := noteTable
+	t.Cleanup(func() { noteTable = prev })
+	noteTable = func(dir string) (*modeltable.Table, error) { return modeltable.LoadWith(dir, hintCatalog()) }
 	quota := fmt.Errorf("native: ChatGPT plan usage limit reached: %w", chatgptauth.ErrUsageLimited)
 	const want = "OpenAI models are also funded by your Router key (billed per token): router/sol. To use one, end this session with /exit, then run craze -c --model router/sol"
 

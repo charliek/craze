@@ -1331,8 +1331,8 @@ This check is the only strict one: plain `craze new`, `craze send` (which takes 
 `--model` or `--effort`, and never checks again — a reload starts with what the
 session recorded), `craze prompt`, the TUI, and the ACP providers keep the lenient
 rule of the [session flags](#flags). A model table this command cannot load checks
-nothing, and the host then refuses the start as it always has (the same message,
-with no `detail`). A stored session whose recorded `--model` has since been
+nothing, and the host then refuses the start as it always has (its own message,
+which lists the models for one that names nothing, with no `detail`). A stored session whose recorded `--model` has since been
 retired fails its reload on `craze send` with kind `config`, the replacement
 named; start a new session on it.
 
@@ -2793,7 +2793,7 @@ alone) and `state` (the local forms' alone):
 |---------|---|
 | `alias` | The model's alias: what `--model` takes |
 | `provider` | Its model provider's id: the id `craze auth login` takes, and the prefix `--model <provider id>/<alias>` takes |
-| `maker` | Who made the model, when craze offers it from [one source](configuration.md#one-source-per-maker): `openai`, `meta`, `zai`, `deepseek` or `anthropic`; `""` for a model of one source (Kimi, Gemini, MiniMax, …) and for a model of your own |
+| `maker` | Who made the model, when craze offers it from [one source](configuration.md#one-source-per-maker): `openai`, `meta`, `zai`, `deepseek` or `anthropic`; `""` for a model the catalog names no maker for (Kimi, Gemini, MiniMax, …) and for a model of your own |
 | `name` | Its display name (the alias when it has none) |
 | `status` | `active`, or `deprecated`: it still runs when named, but no picker offers it and nothing chooses it for you ([deprecated models](configuration.md#deprecated-models)) |
 | `replacedBy` | A deprecated model's replacement |

@@ -5425,9 +5425,10 @@ func (m *Model) sessionUp() {
 	m.noteDeprecatedModel()
 }
 
-// deprecationTable is the table noteDeprecatedModel's command reads: the
-// TUI's own native directory's. A seam: a test's synthetic catalog.
-var deprecationTable = modeltable.Load
+// noteTable is the table the commands of a native session's notes read
+// (noteDeprecatedModel, quotaHintCmd): the TUI's own native directory's. A
+// seam: a test's synthetic catalog.
+var noteTable = modeltable.Load
 
 // deprecatedNoteMsg is noteDeprecatedModel's command's answer: the sentence
 // to note, for the session it was issued under.
@@ -5450,7 +5451,7 @@ func (m *Model) noteDeprecatedModel() {
 	if alias == "" {
 		return
 	}
-	dir, load, stamp := m.nativeDir, deprecationTable, m.issue()
+	dir, load, stamp := m.nativeDir, noteTable, m.issue()
 	m.backCmd = tea.Batch(m.backCmd, func() tea.Msg {
 		t, err := load(dir)
 		if err != nil {
@@ -5463,10 +5464,6 @@ func (m *Model) noteDeprecatedModel() {
 		return deprecatedNoteMsg{issued: stamp, text: sanitizeLine(sentence)}
 	})
 }
-
-// quotaHintTable is the table quotaHintCmd's command reads: the TUI's own
-// native directory's. A seam: a test's synthetic catalog.
-var quotaHintTable = modeltable.Load
 
 // quotaHintMsg is quotaHintCmd's command's answer: the note to add after the
 // failure's row.
@@ -5492,7 +5489,7 @@ func (m *Model) quotaHintCmd(ev agent.Event) tea.Cmd {
 	if alias == "" {
 		return nil
 	}
-	dir, load, stamp := m.nativeDir, quotaHintTable, m.issue()
+	dir, load, stamp := m.nativeDir, noteTable, m.issue()
 	env := m.nativeEnv
 	if env == nil {
 		env = func(string) string { return "" }

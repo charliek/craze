@@ -362,7 +362,8 @@ place too; see [Compaction](#compaction).
 A **new** native session starts where you left off: a model or effort picked
 in any native session's [`/model`](#model-dialog) is remembered, and the next
 session with no `--model` starts on the newest remembered model whose provider
-has a key, at the effort last used on it. With no remembered model it can use,
+has a key and that the [source order](configuration.md#one-source-per-maker)
+does not hide, at the effort last used on it. With no remembered model it can use,
 it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
@@ -372,7 +373,9 @@ Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
 for an OpenAI key, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
-that has a key, with a note. `--model` picks the model for one start — at
+that has a key and is offered, with a note — a
+[deprecated](configuration.md#deprecated-models) one only when nothing else
+is funded ([the full rules](configuration.md#model-memory-recentjson)). `--model` picks the model for one start — at
 the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
@@ -1370,9 +1373,10 @@ nothing.
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
-  provider has a key, else your `default_model` when its provider has one,
-  else the start model of the first connected provider in the provider order;
-  else the first model (alphabetically) whose key resolves. With no
+  provider has a key and that the source order does not hide, else your
+  `default_model` when its provider has one, else the start model of the
+  first connected provider in the provider order; else the first offered
+  model (alphabetically) whose key resolves. With no
   provider funded it says so (`no model provider has an API key — run craze
   auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or
   set its API key variable`) and leaves the model to the agent's own.

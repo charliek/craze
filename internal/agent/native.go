@@ -1674,14 +1674,8 @@ func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.
 // stored session whose recorded --model was retired since is refused the
 // same way on its reload; craze never moves it to the replacement.
 func unknownNativeModelText(table *modeltable.Table, raw string, err error) string {
-	has := fmt.Sprintf("(the model table has %s)", strings.Join(table.Aliases(), ", "))
-	if r, ok := retiredNativeModel(table, raw); ok && errors.Is(err, errUnknownModel) {
-		if r.ReplacedBy != "" {
-			return fmt.Sprintf("native: %s was retired; use %s", sanitizeLine(r.Alias), sanitizeLine(r.ReplacedBy))
-		}
-		return fmt.Sprintf("native: %s was retired %s", sanitizeLine(r.Alias), has)
-	}
-	return fmt.Sprintf("native: %v %s", err, has)
+	msg, _, _ := NativeModelRefusal(table, raw, err)
+	return msg
 }
 
 // NativeModelRefusal is a --model raw that MatchNativeModel refused with err,
@@ -1691,7 +1685,17 @@ func unknownNativeModelText(table *modeltable.Table, raw string, err error) stri
 // host would, with the row's replacement as a fact beside it.
 func NativeModelRefusal(table *modeltable.Table, raw string, err error) (msg string, retired modeltable.Retired, isRetired bool) {
 	r, ok := retiredNativeModel(table, raw)
-	return unknownNativeModelText(table, raw, err), r, ok && errors.Is(err, errUnknownModel)
+	isRetired = ok && errors.Is(err, errUnknownModel)
+	has := fmt.Sprintf("(the model table has %s)", strings.Join(table.Aliases(), ", "))
+	switch {
+	case isRetired && r.ReplacedBy != "":
+		msg = fmt.Sprintf("native: %s was retired; use %s", sanitizeLine(r.Alias), sanitizeLine(r.ReplacedBy))
+	case isRetired:
+		msg = fmt.Sprintf("native: %s was retired %s", sanitizeLine(r.Alias), has)
+	default:
+		msg = fmt.Sprintf("native: %v %s", err, has)
+	}
+	return msg, r, isRetired
 }
 
 // retiredNativeModel is the [[retired]] row raw names, as written or as
@@ -3110,7 +3114,7 @@ func (s *nativeSession) resolvesLocked(table *modeltable.Table, alias string) bo
 // of the environment: the model switched away from keeps its row only while
 // it is, so the list a switch leaves matches the one a reload would publish —
 // a carried model whose key is gone loses it as it always did, and so does a
-// deprecated one. A session whose table a test's seam handed in is never
+// deprecated one, or one the source order hides (plan 050 C5). A session whose table a test's seam handed in is never
 // reloaded: true, as resolvesLocked says. modelsMu is held.
 func (s *nativeSession) offeredLocked(table *modeltable.Table, alias string) bool {
 	if alias == "" || !s.models.reloadable {

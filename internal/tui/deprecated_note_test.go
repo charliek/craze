@@ -30,14 +30,14 @@ func deprecatedCatalog() *modeltable.Catalog {
 // only when the command's answer is applied. An ACP session on a model of the
 // same name schedules nothing; a table that will not load answers nothing.
 func TestADeprecatedModelIsNotedAtOpen(t *testing.T) {
-	prev := deprecationTable
-	t.Cleanup(func() { deprecationTable = prev })
+	prev := noteTable
+	t.Cleanup(func() { noteTable = prev })
 	var reads atomic.Int32
 	load := func(dir string) (*modeltable.Table, error) {
 		reads.Add(1)
 		return modeltable.LoadWith(dir, deprecatedCatalog())
 	}
-	deprecationTable = load
+	noteTable = load
 	const want = "grok is deprecated; use acme/fast"
 
 	open := func(stub *Stub) Model {
@@ -69,7 +69,7 @@ func TestADeprecatedModelIsNotedAtOpen(t *testing.T) {
 	if m.backCmd != nil {
 		t.Fatal("an ACP session scheduled a deprecation note")
 	}
-	deprecationTable = func(string) (*modeltable.Table, error) { return nil, errors.New("will not load") }
+	noteTable = func(string) (*modeltable.Table, error) { return nil, errors.New("will not load") }
 	m = open(nativeStub())
 	m.noteDeprecatedModel()
 	if m.backCmd == nil || m.backCmd() != nil {

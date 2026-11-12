@@ -389,9 +389,9 @@ turns it off.
 `default_context` is a new `models.toml` key: a file that writes it does not
 load in an older craze.
 
-**A model can be deprecated.** A later release may mark a shipped model
+**A model can be deprecated.** A release may mark a shipped model
 [deprecated](../reference/configuration.md#deprecated-models), naming its
-replacement: it runs as before when named (`--model`, a pin, the model
+replacement ([this one deprecates four](#native-model-catalog-refresh)): it runs as before when named (`--model`, a pin, the model
 memory, a resumed session, a `[subagents]` model or tier), but `/model`, the
 session list, the agent tool's model list and a new session's own choice
 leave it out. Each reference your `models.toml` makes to one warns at session
@@ -418,8 +418,10 @@ the table, funded or not.
 **`craze new --wait` on the native provider checks its model flags before it
 starts a host.** It refused a `--model` that names nothing, or names a retired
 alias, from the host's start; it now refuses them [before any host is
-spawned](../reference/cli.md#model-checks), with the same message, still exit 1
-and kind `config`, and a `detail.reason` (`model_unknown`, `model_retired`, with
+spawned](../reference/cli.md#model-checks) — a retired alias with the same
+message, one that names nothing with `native: unknown model "<name>"; craze
+models lists the models` rather than every model (a session's own start error
+still lists them) — still exit 1 and kind `config`, and a `detail.reason` (`model_unknown`, `model_retired`, with
 `detail.replaced_by` when the catalog names the replacement). Two refusals are
 new:
 
@@ -444,9 +446,11 @@ stderr line (`craze new: <alias> is deprecated; use <replacement>`) and, with
 program that reads stderr line by line, or rejects unknown keys, sees them; the
 status and exit code do not change.
 
-**`craze models`** is new: the native models, each with its provider, status,
-replacement, efforts, context and whether it is funded and offered here
-(`--json` for a program, `--shipped` for the catalog alone). Each release ships
+**`craze models`** is new: the native models, each with its provider, maker,
+status, replacement, efforts, context and whether it is funded and offered here
+(`--json` for a program, `--shipped` for the catalog alone); the table ends
+with the warnings the model table gave on loading and a note for each maker
+whose models the [source order](#one-source-per-maker) hides. Each release ships
 the catalog as `models.json`, listed in `checksums.txt`.
 
 ### Native model catalog refresh
@@ -518,7 +522,8 @@ OpenAI's own API on an API key, billed per token, with four models
 `openai/gpt-6-luna`). It is not the ChatGPT plan, which is unchanged.
 
 - **An exported `OPENAI_API_KEY` now funds craze.** Its models are in
-  `/model`, and a session may run on them. To keep craze off it, write
+  `/model` (unless the ChatGPT plan offers OpenAI's: [One source per
+  maker](#one-source-per-maker)), and a session may run on them. To keep craze off it, write
   `env_keys = []` under `[providers.openai]` in `providers.toml`. The variable
   was already kept out of the commands a native session runs, as every key
   variable is.
@@ -622,7 +627,7 @@ older binary should not write it.
   earlier source of the same maker is set up but offers nothing: a ChatGPT
   sign-in with no usable model list (or another account's list, or plan usage
   off) and an exported `OPENAI_API_KEY`, with nothing remembered and no pin,
-  used to start on `openai/gpt-6.1-sol` with no word; it now refuses (kind
+  would otherwise start on `openai/gpt-6.1-sol` with no word; it refuses (kind
   `config`): `native: signed in to ChatGPT, but its models are not available,
   and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its
   own; sign in again with craze auth login chatgpt, or start with --model
@@ -640,15 +645,8 @@ older binary should not write it.
   note from its own table; the failure's message is unchanged, so a waiting
   command (`craze new --wait`, `craze send --wait`, `craze wait`) or `craze
   prompt` never receives it, whichever command started the session.
-- **`craze models`**: each row's `maker` is filled (`openai`, `meta`, `zai`,
-  `deepseek`, `anthropic`, or `""`), `state.offered` is false for a hidden
-  model, and the table and `craze auth list` end with a note for each maker
-  whose models are hidden; the table also notes the warnings the model table
-  gave on loading, as `craze auth list` does.
-- **An unknown `--model` under `craze new --wait`, and a miss of `craze models
-  <alias>`,** now say `native: unknown model "<name>"; craze models lists the
-  models` instead of listing every model; `detail.reason` and `detail.model`
-  are unchanged. A session's own start error still lists them.
+- **`craze auth list`** ends with a note for each maker whose models are
+  hidden, as [`craze models`](../reference/cli.md#craze-models) does.
 - **New:** `openrouter/muse-spark-1.3` and `openrouter/muse-wonder`, Meta's
   models on OpenRouter, offered when you have OpenRouter and no Meta key.
 

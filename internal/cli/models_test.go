@@ -20,9 +20,9 @@ import (
 )
 
 // Plan 050 C2: craze models, the waiting commands' model notices, and craze
-// new --wait's pre-check — over a small synthetic catalog (the shipped one has
-// no deprecated model, and fixtures must not move with every catalog
-// refresh), which also writes the orchestrator fixtures nocturn builds
+// new --wait's pre-check — over a small synthetic catalog (fixtures must not
+// move with every catalog refresh, which deprecates and retires shipped
+// models), which also writes the orchestrator fixtures nocturn builds
 // against (tests/cli/fixtures/orchestrator/v1, -update rewrites them).
 
 var updateFixtures = flag.Bool("update", false, "rewrite tests/cli/fixtures/orchestrator/v1 from the synthetic catalog")

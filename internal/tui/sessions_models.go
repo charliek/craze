@@ -289,7 +289,8 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 // F4) — as the table states them (plan 047 D2, D5); of the start model
 // (nativeDefaultModel's) for ""; and false when the model does not run:
 // unfunded, or not in the table. A model that runs and that the list does
-// not offer — a deprecated one — still has its levels (plan 050 C1): it is
+// not offer — a deprecated one (plan 050 C1), or one the source order hides
+// (C5) — still has its levels: it is
 // judged by Resolve, not by the picker's membership. alias is the model it
 // resolved model to. It reads the disk, and is called off the Update.
 func nativeModelLevels(dir string, getenv func(string) string, model string) (alias string, levels []string, ok bool) {

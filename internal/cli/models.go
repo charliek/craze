@@ -295,7 +295,7 @@ func modelsDocument(t *modeltable.Table, getenv func(string) string, crazeVersio
 		if p.Driver == modeltable.DriverChatGPT {
 			auth = authBySignIn
 		}
-		doc.Providers = append(doc.Providers, modelProvider{ID: id, Name: sanitizeLine(cmp.Or(p.Name, id)), Auth: auth, AccountModels: t.AccountModels(id)})
+		doc.Providers = append(doc.Providers, modelProvider{ID: id, Name: sanitizeLine(t.ProviderName(id)), Auth: auth, AccountModels: t.AccountModels(id)})
 	}
 	return doc
 }
