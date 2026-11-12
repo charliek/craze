@@ -9,6 +9,7 @@ import (
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // The model facts a waiting command reads for itself (plan 050 C2), from a
@@ -193,6 +194,27 @@ type resultWarning struct {
 	Model      string `json:"model"`
 	ReplacedBy string `json:"replacedBy"`
 	Message    string `json:"message"`
+}
+
+// storedAsked is the native model a reload asks for again, the --model an
+// unattended session's row recorded (row.Unattended.Model), matched as the
+// host's start matches it, for the notices to judge while the reloaded
+// session has named no model of its own — its reload failing included (plan
+// 050 review): "" when the row is not a native session's, recorded no model,
+// or names one the table (noticeTable) does not match.
+func storedAsked(row sessions.Row) string {
+	if row.Provider != agent.NativeProvider().Name() || row.Unattended == nil || row.Unattended.Model == "" {
+		return ""
+	}
+	t, err := noticeTable()
+	if err != nil {
+		return ""
+	}
+	alias, err := agent.MatchNativeModel(t, row.Unattended.Model)
+	if err != nil {
+		return ""
+	}
+	return alias
 }
 
 // noticeTable is the table the notices read: this process's own. A seam.

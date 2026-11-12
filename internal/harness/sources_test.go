@@ -125,10 +125,15 @@ func TestResumeFallbackHeldBySourceGuard(t *testing.T) {
 		signedIn bool
 		starts   []string
 		want     string // the model resumed on; "" for the refusal
+		pin      string // the default_model pin, set after the load
 	}{
-		{"signed out: the first start", false, []string{"other/c", "other/g"}, "other/c"},
-		{"signed in, no list: the start of no maker", true, []string{"other/c", "other/g"}, "other/g"},
-		{"signed in, no list, no other start: refused", true, []string{"other/c"}, ""},
+		{"signed out: the first start", false, []string{"other/c", "other/g"}, "other/c", ""},
+		{"signed in, no list: the start of no maker", true, []string{"other/c", "other/g"}, "other/g", ""},
+		{"signed in, no list, no other start: refused", true, []string{"other/c"}, "", ""},
+		// The pin is never held to the source order (plan 050): pinned on
+		// the held other/c, the resume continues there, neither on other/g
+		// nor refused.
+		{"signed in, no list: a held pin still continues", true, []string{"other/c", "other/g"}, "other/c", "other/c"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := sourcesFixture(t, tc.signedIn)
@@ -142,6 +147,7 @@ func TestResumeFallbackHeldBySourceGuard(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			table.DefaultModel = tc.pin // the catalog itself sets none
 			ropts := resumeOptions(f.options(), id)
 			ropts.Model, ropts.Table, ropts.Getenv = "", table, noTest
 			var warned []string

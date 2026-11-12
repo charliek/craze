@@ -33,6 +33,31 @@ func onOpenAI(f *fixture, base string) {
 	writeProviders(f, fmt.Sprintf("version = 1\n\n[providers.openai]\ndriver = \"openai-responses\"\nbase_url = %q\nenv_keys = [\"TEST_API_KEY\"]\n", base))
 }
 
+// onShippedOpenAI points the fixture at the catalog's own GPT-6.1 Sol, its
+// openai provider moved to base and funded by TEST_API_KEY: the catalog's
+// model, on which the phase is kept (Resolved.CatalogModel).
+func onShippedOpenAI(f *fixture, base string) {
+	f.t.Helper()
+	models := "version = 1\ndefault_model = \"openai/gpt-6.1-sol\"\n"
+	if err := os.WriteFile(filepath.Join(f.home, modeltable.ModelsFile), []byte(models), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	writeProviders(f, fmt.Sprintf("version = 1\n\n[providers.openai]\nbase_url = %q\nenv_keys = [\"TEST_API_KEY\"]\n", base))
+}
+
+// onOwnOpenAI is onOpenAI over the catalog: a model of the user's own,
+// mine/sol, on the user's override of the shipped openai provider — the shape
+// a providers.toml and models.toml written before craze shipped openai have,
+// which an older craze could have a session on.
+func onOwnOpenAI(f *fixture, base string) {
+	f.t.Helper()
+	models := "version = 1\ndefault_model = \"mine/sol\"\n\n[models.\"mine/sol\"]\nprovider = \"openai\"\nwire_model = \"gpt-6.1-sol\"\nmax_output_tokens = 4096\n"
+	if err := os.WriteFile(filepath.Join(f.home, modeltable.ModelsFile), []byte(models), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	writeProviders(f, fmt.Sprintf("version = 1\n\n[providers.openai]\ndriver = \"openai-responses\"\nbase_url = %q\nenv_keys = [\"TEST_API_KEY\"]\n", base))
+}
+
 // rsAnswer is a message written in phase.
 func rsAnswer(id, text, phase string) map[string]any {
 	m := rsMessage(id, text)
@@ -53,24 +78,29 @@ func assistantPhases(t *testing.T, body []byte) []any {
 	return out
 }
 
-// TestOpenAIMessagePhaseSurvivesAReopen: a turn on the OpenAI key's provider
-// — a commentary message beside a tool call, then the final answer — replays
-// the commentary's phase on its next step; the transcript keeps both phases
-// in the text parts' metadata; and a reopened session's first request replays
-// both, as the live session would. The control: the same turns on another
-// provider on the driver (Meta's shape, its stream carrying the phases) store
-// no phase metadata at all — the transcript is what it was before phases
-// were read, so an older craze still opens it — and send none. Negative
-// controls: a transcript that loses the metadata replays no phase after the
-// reopen; one that keeps it on every route fails the control.
+// TestOpenAIMessagePhaseSurvivesAReopen: a turn on the catalog's own model on
+// the OpenAI key's provider — a commentary message beside a tool call, then
+// the final answer — replays the commentary's phase on its next step; the
+// transcript keeps both phases in the text parts' metadata; and a reopened
+// session's first request replays both, as the live session would. The
+// controls: the same turns on another provider on the driver (Meta's shape,
+// its stream carrying the phases), or on a model of the user's own on a
+// provider named openai — alone, or over the catalog's overridden one (plan
+// 050 review) — store no phase metadata at all — the transcript is what it
+// was before phases were read, so an older craze still opens it — and send
+// none. Negative controls: a transcript that loses the metadata replays no
+// phase after the reopen; one that keeps it on every route fails the
+// controls.
 func TestOpenAIMessagePhaseSurvivesAReopen(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(*fixture, string)
 		sends bool
 	}{
-		{"the OpenAI key's provider", onOpenAI, true},
+		{"the catalog's model on the OpenAI key's provider", onShippedOpenAI, true},
 		{"another provider on the driver (control)", onKeyRoute, false},
+		{"the user's own model on a provider named openai (control)", onOpenAI, false},
+		{"the user's own model on the overridden openai provider (control)", onOwnOpenAI, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := newRsAPI(t,

@@ -498,6 +498,9 @@ Flash half of M3's), so craze never switches you to it.
   OpenAI's long-context price above it, as the [OpenAI](#an-openai-api-key)
   models do: a session compacts at 85% of 272,000 rather than of the whole
   window, and its `contextWindow` and `NN% ctx` are measured against it.
+  A session resumed after upgrading that already holds more than 231,200
+  tokens compacts before its next turn, and until then its `NN% ctx` can read
+  above 100%.
   `default_context = 0` under a router in `models.toml` turns that off.
 - **Muse Ember 1.0** (`muse-ember-1.0`) joins Meta, with a context default of
   200,000 and Meta's price above it. It is not Meta's start.
@@ -553,6 +556,14 @@ OpenAI's own API on an API key, billed per token, with four models
   `OPENAI_API_KEY` now wins over that key; one that changes `driver` or
   `base_url` without `env_keys` takes nothing from the variable. A model entry
   of yours under one of the four aliases changes only the keys it writes.
+  An old import's `[providers.openai]` (`source = "gx"`) whose `base_url`
+  points elsewhere (a LiteLLM proxy, say) now funds nothing, with one warning:
+  its `api_key` and `env_keys` are never sent to `api.openai.com` (remove
+  `source = "gx"` to use the entry as written), and an entry whose own
+  `base_url` the driver refuses falls back to OpenAI's endpoint without them.
+  Likewise a `[providers.anthropic]` entry with a `base_url` that is not
+  Anthropic's own (a gateway's) now loses its `api_key` and `env_keys` with
+  the `base_url`, with a warning: that key is no longer sent to Anthropic.
 - **Cache writes are counted and priced** on the Responses API routes (the
   OpenAI key's, Meta's and the ChatGPT plan's): tokens a request writes to the
   provider's cache are cache writes in the usage report, where they were
@@ -581,10 +592,14 @@ OpenAI's own API on an API key, billed per token, with four models
   below its long-context tier's threshold, writing no `long_context_above`,
   now stands with the tier off and one warning. It was dropped whole, with a
   warning, the shipped entry used.
-- **A session on the `openai` provider cannot be reopened by an older craze**:
-  its transcript keeps each message's phase in a form older versions do not
-  read (they have no `openai` provider either). Sessions on every other
-  provider keep their transcripts as before.
+- **A session on one of the shipped `openai/*` models cannot be reopened by an
+  older craze once this version has continued it**: its transcript keeps each
+  message's phase in a form older versions do not read. That includes a model
+  of your own that is spelled and wired exactly like a shipped one (an
+  `openai/gpt-6.1-sol` of yours on your own `[providers.openai]` with the same
+  `wire_model`), which now counts as the shipped model. Sessions on your other
+  models, on any provider (one you named `openai` included), and on every
+  other provider keep their transcripts as before.
 - **The Claude Code plugin's `craze:sol` and `craze:astra`** stay on the
   ChatGPT plan. With an OpenAI key alone, run `craze:delegate` with `target:
   native openai/gpt-6.1-sol effort=high` ([Claude Code](claude-code.md#the-agents)).
@@ -620,14 +635,21 @@ older binary should not write it.
 - **A remembered model on a hidden source no longer starts new sessions.**
   If you last picked, say, `openrouter/gpt-sol-latest` or `fireworks/glm-5p3`
   in `/model` and a higher source of that maker is connected (ChatGPT plan or
-  an OpenAI key; a Z.AI key), a new session now starts by the provider order
-  instead; the entry stays in `recent.json`. Pin it with `default_model` to
-  keep starting there. A remembered deprecated model still starts.
+  an OpenAI key; a Z.AI key), a new session passes over it and starts on the
+  next remembered model that is offered; your `default_model` applies only
+  when no remembered model is usable, and the provider order after that. The
+  entry stays in `recent.json`, and starts again once its source is the one
+  in force. To keep starting there, put its source first with `source_order`
+  in `models.toml` (`source_order = ["openrouter"]`, say), or pass `--model`
+  each time; `/model` cannot pick a hidden model. A remembered deprecated
+  model still starts.
 - **craze no longer moves a new session to a paid source on its own** when an
-  earlier source of the same maker is set up but offers nothing: a ChatGPT
-  sign-in with no usable model list (or another account's list, or plan usage
-  off) and an exported `OPENAI_API_KEY`, with nothing remembered and no pin,
-  would otherwise start on `openai/gpt-6.1-sol` with no word; it refuses (kind
+  earlier source of the same maker has a sign-in that is there but broken for
+  that maker — only the ChatGPT plan, with no usable model list, another
+  account's list, or plan usage off; a provider with a key never holds
+  anything back. With such a sign-in and an exported `OPENAI_API_KEY`, nothing
+  remembered and no pin, craze would otherwise start on `openai/gpt-6.1-sol`
+  with no word; it refuses (kind
   `config`): `native: signed in to ChatGPT, but its models are not available,
   and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its
   own; sign in again with craze auth login chatgpt, or start with --model

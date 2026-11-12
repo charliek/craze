@@ -132,9 +132,21 @@ var shortEscapes = map[rune]string{
 // bytes, but whatever decodes them gets the key back (review r4 major 1). A
 // key that is not valid UTF-8 has its bad bytes stand for U+FFFD, which the
 // pattern then matches in place of each, as regexp reads invalid input.
+//
+// Between two of its characters it also matches any run of format
+// characters (Unicode Cf: a zero-width space, a word joiner, a byte-order
+// mark, a soft hyphen, a bidi control) and of invalid bytes (read as U+FFFD),
+// which a display drops (agent's sanitizer, the harness's one-line cut): a
+// key the provider echoed split by them reads whole once they are gone, so
+// it is the whole key, separators and all, that the scrub replaces — before
+// anything cuts the text, which could otherwise leave its front part to be
+// put back together (plan 050 review).
 func keyPattern(key string) *regexp.Regexp {
 	var b strings.Builder
-	for _, r := range key {
+	for i, r := range key {
+		if i > 0 {
+			b.WriteString(keyGap)
+		}
 		b.WriteString("(?:" + regexp.QuoteMeta(string(r)))
 		if r1, r2 := utf16.EncodeRune(r); r1 != utf8.RuneError {
 			fmt.Fprintf(&b, `|\\u(?i:%04x)\\u(?i:%04x)`, r1, r2)
@@ -148,6 +160,11 @@ func keyPattern(key string) *regexp.Regexp {
 	}
 	return regexp.MustCompile(b.String())
 }
+
+// keyGap is what keyPattern lets stand between two of a key's characters:
+// format characters and invalid bytes, which draw as nothing once a display
+// drops them.
+const keyGap = `[\p{Cf}\x{FFFD}]*`
 
 // text scrubs one string: the key and every token value first, each in any
 // spelling (keyPattern), then every URL query string.

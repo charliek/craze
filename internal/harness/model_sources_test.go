@@ -138,6 +138,19 @@ func TestSubagentMenuHoldsToTheChoiceSet(t *testing.T) {
 	if got, err := s.resolveChildModel(s.view(), childModelInput{Persona: "other/c", ParentAlias: "test/a"}, nil); err != nil || got != "other/c" {
 		t.Fatalf("a persona naming deprecated other/c = %q, %v; want it to run", got, err)
 	}
+
+	// The default_model pin is configured too, and unrestricted (plan 050):
+	// pinned on deprecated other/c, which is not the parent's model, the
+	// menu lists it and a call naming it runs.
+	f.table.Subagents = modeltable.Subagents{}
+	f.table.DefaultModel = "other/c"
+	if pinned := renderSubagentModels(f.table, f.getenv, nil, red); !strings.Contains(pinned, "- other/c") {
+		t.Fatalf("the menu with the pin on deprecated other/c is\n%s\nwant the pin listed", pinned)
+	}
+	s.table.DefaultModel = "other/c"
+	if got, err := s.resolveChildModel(s.view(), childModelInput{Call: "other/c", ParentAlias: "test/a"}, nil); err != nil || got != "other/c" {
+		t.Fatalf("a call naming the pinned, deprecated other/c = %q, %v; want it to run", got, err)
+	}
 }
 
 // TestChildModelByProvider: with no matcher, a call's model written

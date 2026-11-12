@@ -101,11 +101,14 @@ There is no refresh between releases.
   user's own entry for that id is not dropped), and its `replaced_by`.
 - **The release rule.** Retire only an alias a previous *release* shipped
   deprecated, and no earlier than the next minor release and 30 days after
-  the release that deprecated it. The person cutting a release checks the
-  calendar half (no unit test reads the clock).
-  `TestDeprecationHistory` (part of `make test`) checks the rest from
-  checked-in files alone, so it runs in a `git archive` export and a shallow
-  clone: every deprecated model has a line in `deprecated-aliases.txt`, and
+  the release that deprecated it. The person cutting a release checks that
+  the retirement is at least the next minor release and 30 days after the
+  release that deprecated the alias, across prereleases too (no unit test
+  reads the clock or compares minor versions).
+  `TestDeprecationHistory` (part of `make test`) checks only that an earlier
+  release shipped it deprecated, from checked-in files alone, so it runs in a
+  `git archive` export and a shallow clone: every deprecated model has a line
+  in `deprecated-aliases.txt`, and
   every `[[retired]]` row not in `testdata/retired-grandfathered.txt` (the rows
   retired before deprecation existed, which never grows) has one whose version
   is below the current `Version` — so a deprecation and its retirement never

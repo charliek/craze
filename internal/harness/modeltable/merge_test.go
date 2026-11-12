@@ -434,16 +434,17 @@ func TestMergeStructuralProblemsStillFail(t *testing.T) {
 // TestMergeLegacyRule (plan 031 §3.3): an entry the former gx importer wrote
 // (source = "gx") yields to the catalog. A model entry is ignored when its
 // alias is shipped or retired, and kept as the user's own otherwise; a
-// provider entry for a shipped id gives only its key and any variable names
-// the catalog lacks, after the catalog's; for another id it is the user's
-// own.
+// provider entry for a shipped id at the shipped endpoint gives only its key
+// and any variable names the catalog lacks, after the catalog's (one at
+// another endpoint gives nothing: TestOpenAIEntryKeepsItsKeyAtItsEndpoint);
+// for another id it is the user's own.
 func TestMergeLegacyRule(t *testing.T) {
 	cat := testCatalog(t, testCatalogV1)
 	tbl, _ := loadOver(t, cat, `version = 1
 
 [providers.acme]
 driver = "openai-compat"
-base_url = "https://old.acme.example/v1"
+base_url = "https://api.acme.example/v1"
 env_keys = ["ACME_API_KEY", "ACME_OLD_KEY"]
 api_key = "legacy-acme-key-01"
 source = "gx"
@@ -1159,5 +1160,135 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 				t.Fatalf("RedundantOverrides = %q, want %d", tbl.RedundantOverrides(), tc.redundant)
 			}
 		})
+	}
+}
+
+// TestLegacyEntryAtTheShippedEndpointStillLends (plan 050 review): an old
+// import's entry is at another endpoint only when the base_url it writes is
+// not the shipped one once both are normalised — the scheme and the host in
+// any case, the default port, a trailing slash — so Meta's gx entry written
+// "https://api.meta.ai/v1/" or "HTTPS://API.Meta.AI:443/v1" still lends its
+// key, with no warning, and so does one that writes a driver and no base_url
+// (the legacy rule ignores an old import's driver). A real proxy lends
+// nothing. The path's case is significant: "/V1" is another endpoint.
+func TestLegacyEntryAtTheShippedEndpointStillLends(t *testing.T) {
+	const key = "meta-dummy-key-00000007"
+	entry := func(lines string) string {
+		return "version = 1\n\n[providers.meta]\n" + lines + "api_key = \"" + key + "\"\nsource = \"gx\"\n"
+	}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		funded bool
+	}{
+		{"a trailing slash", entry("driver = \"openai-compat\"\nbase_url = \"https://api.meta.ai/v1/\"\n"), true},
+		{"the host's case and the default port", entry("base_url = \"HTTPS://API.Meta.AI:443/v1\"\n"), true},
+		{"a driver and no base_url", entry("driver = \"openai-compat\"\n"), true},
+		{"another path's case", entry("base_url = \"https://api.meta.ai/V1\"\n"), false},
+		{"a proxy", entry("driver = \"openai-compat\"\nbase_url = \"https://litellm.internal/v1\"\n"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, err := Load(writeFiles(t, tc.body, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := tbl.Resolve("muse-spark-1.3-contributor", fakeEnv(nil))
+			if tc.funded {
+				wantWarnings(t, tbl)
+				if err != nil || r.APIKey.Reveal() != key || r.BaseURL != "https://api.meta.ai/v1" || r.Driver != DriverOpenAIResponses {
+					t.Fatalf("Resolve = %v; want the old import's key lent to Meta's own endpoint", err)
+				}
+				return
+			}
+			wantWarnings(t, tbl, []string{"[providers.meta] api_key", `remove source = "gx"`})
+			if !errors.Is(err, ErrNoAPIKey) {
+				t.Fatalf("Resolve = %v; want ErrNoAPIKey: the key was written for another endpoint", err)
+			}
+		})
+	}
+}
+
+// TestOpenAIEntryKeepsItsKeyAtItsEndpoint: openai became a shipped id in plan
+// 050, and an entry providers.toml already had for it lends its key only to
+// the endpoint it is at after the merge (the plan 050 review). An old
+// import's entry (source = "gx") pointed at a LiteLLM proxy funds nothing —
+// its key and its proxy variable are dropped with one warning naming the
+// provider and the keys, never the value — yet both stay credentials: the key
+// is among Keys, for the redactor, and the variable among CredentialEnvNames.
+// One at the shipped base_url, or writing none, still lends its key, as the
+// other gx entries do (TestOwnerFilesUpgrade). And an entry whose own
+// base_url the Responses driver refuses (a non-loopback http URL) falls back
+// to the shipped endpoint without the key written for that one.
+func TestOpenAIEntryKeepsItsKeyAtItsEndpoint(t *testing.T) {
+	const proxyKey = "sk-proxy-dummy-00000005"
+	noEnv := fakeEnv(nil)
+	proxied := `version = 1
+
+[providers.openai]
+driver = "openai-compat"
+base_url = "https://litellm.internal/v1"
+env_keys = ["PROXY_KEY"]
+api_key = "` + proxyKey + `"
+source = "gx"
+`
+	tbl, err := Load(writeFiles(t, proxied, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := tbl.Providers["openai"]; p.APIKey != "" || p.BaseURL != "https://api.openai.com/v1" || slices.Contains(p.EnvKeys, "PROXY_KEY") {
+		t.Fatalf("openai = %+v; want the shipped provider, lent neither the proxy's key nor its variable", p)
+	}
+	if _, err := tbl.Resolve("openai/gpt-6.1-sol", fakeEnv(map[string]string{"PROXY_KEY": "sk-proxy-exported-0006"})); !errors.Is(err, ErrNoAPIKey) {
+		t.Fatalf("Resolve(openai/gpt-6.1-sol) = %v; want ErrNoAPIKey: the proxy's key never goes to api.openai.com", err)
+	}
+	if len(tbl.Warnings) != 1 || !strings.Contains(tbl.Warnings[0], "[providers.openai] api_key and env_keys") ||
+		!strings.Contains(tbl.Warnings[0], `remove source = "gx"`) || strings.Contains(tbl.Warnings[0], proxyKey) {
+		t.Fatalf("warnings = %q; want one naming providers.openai, api_key and env_keys, never the value", tbl.Warnings)
+	}
+	keys, err := tbl.Keys(fakeEnv(map[string]string{"PROXY_KEY": "sk-proxy-exported-0006"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(keys, Secret(proxyKey)) || !slices.Contains(keys, Secret("sk-proxy-exported-0006")) {
+		t.Fatal("Keys lacks the dropped entry's inline key or its variable's value: the redactor would not know them")
+	}
+	if !slices.Contains(tbl.CredentialEnvNames(), "PROXY_KEY") {
+		t.Fatalf("CredentialEnvNames = %q; want PROXY_KEY kept from commands", tbl.CredentialEnvNames())
+	}
+
+	// At the shipped endpoint, or at none written, an old import still lends
+	// its key.
+	for _, body := range []string{
+		strings.Replace(proxied, "https://litellm.internal/v1", "https://api.openai.com/v1", 1),
+		strings.Replace(strings.Replace(proxied, "driver = \"openai-compat\"\n", "", 1), "base_url = \"https://litellm.internal/v1\"\n", "", 1),
+	} {
+		tbl, err := Load(writeFiles(t, body, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWarnings(t, tbl)
+		if r, err := tbl.Resolve("openai/gpt-6.1-sol", noEnv); err != nil || r.APIKey.Reveal() != proxyKey || r.BaseURL != "https://api.openai.com/v1" {
+			t.Fatalf("an old import at the shipped endpoint: Resolve = %v; want its key lent", err)
+		}
+	}
+
+	// A base_url of the entry's own that the driver refuses is dropped, and
+	// the key written for it with it.
+	refused := "version = 1\n\n[providers.openai]\nbase_url = \"http://my-box:4000/v1\"\napi_key = \"" + proxyKey + "\"\n"
+	tbl, err = Load(writeFiles(t, refused, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := tbl.Providers["openai"]; p.APIKey != "" || p.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("openai = %+v; want the shipped endpoint without the entry's key", p)
+	}
+	if _, err := tbl.Resolve("openai/gpt-6.1-sol", noEnv); !errors.Is(err, ErrNoAPIKey) {
+		t.Fatalf("Resolve(openai/gpt-6.1-sol) = %v; want ErrNoAPIKey", err)
+	}
+	if len(tbl.Warnings) != 1 || !strings.Contains(tbl.Warnings[0], "api_key and env_keys are dropped with its base_url") || strings.Contains(tbl.Warnings[0], proxyKey) {
+		t.Fatalf("warnings = %q; want one saying the key goes with the base_url", tbl.Warnings)
+	}
+	if keys, err := tbl.Keys(noEnv); err != nil || !slices.Contains(keys, Secret(proxyKey)) {
+		t.Fatalf("Keys = %d keys, %v; want the dropped key among them", len(keys), err)
 	}
 }

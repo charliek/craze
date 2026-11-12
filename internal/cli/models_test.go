@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/hostspawn"
@@ -268,6 +270,27 @@ func TestModelsLocalAndOneModel(t *testing.T) {
 		if !strings.HasPrefix(errOut, "craze models: ") || strings.Count(errOut, "\n") != 1 {
 			t.Errorf("models %q: stderr %q", tc.raw, errOut)
 		}
+	}
+
+	// --shipped with an alias answers from the catalog alone: a row with no
+	// state, an alias only models.toml defines is a miss, and a miss under an
+	// account-listed provider is unverifiable, since no list is read.
+	out, errOut, code := executeErr([]string{"models", "--shipped", "acme/sonic-1", "--json"})
+	if row := oneObject(t, out); code != 0 || errOut != "" || row["alias"] != "acme/sonic-1" || row["replacedBy"] != "acme/sonic" {
+		t.Errorf("models --shipped acme/sonic-1: exit %d, %q, %s", code, errOut, out)
+	} else if _, has := row["state"]; has {
+		t.Errorf("models --shipped acme/sonic-1 has a state: %s", out)
+	}
+	if _, _, code := executeErr([]string{"models", "mine", "--json"}); code != 0 {
+		t.Errorf("control: models mine: exit %d, want 0", code)
+	}
+	out, _, code = executeErr([]string{"models", "--shipped", "mine", "--json"})
+	if v := oneObject(t, out); code != 1 || v["error"].(map[string]any)["detail"].(map[string]any)["reason"] != reasonModelUnknown {
+		t.Errorf("models --shipped mine: exit %d, %s; want the model_unknown miss", code, out)
+	}
+	out, _, code = executeErr([]string{"models", "--shipped", "chatgpt/gpt-9", "--json"})
+	if v := oneObject(t, out); code != 1 || v["unverifiable"] != true {
+		t.Errorf("models --shipped chatgpt/gpt-9: exit %d, %s; want an unverifiable miss", code, out)
 	}
 
 	table, _, code := executeErr([]string{"models"})
@@ -760,4 +783,36 @@ func TestModelsTableNotesTheTablesWarnings(t *testing.T) {
 		t.Fatalf("--json: exit %d, %q", code, out)
 	}
 	oneObject(t, out)
+}
+
+// TestWaitingCommandsCarryTheNotice: the notices reach a completed result
+// through the real waiters — craze wait and craze send --wait, on a native
+// session whose model is deprecated, each exit 0 with the stderr line under
+// its own name and `warnings` under --json — and craze send's receipt
+// carries none.
+func TestWaitingCommandsCarryTheNotice(t *testing.T) {
+	withNoticeTable(t, fixtureTable)
+	r := newWaitRigAs(t, agent.NativeProvider().Name(), control.Options{Workspace: "/w"}, 0, answerTurn(textEv("done")))
+	r.s.mu.Lock()
+	r.s.model = "acme/sonic-1"
+	r.s.mu.Unlock()
+	model := "acme/sonic-1"
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Model: &model}})
+	const kind = `"kind":"model_deprecated","model":"acme/sonic-1","replacedBy":"acme/sonic"`
+
+	stdout, stderr, code := executeErr([]string{"send", waitRigShort, "--wait", "--json", "one"})
+	if m := decodeResult(t, stdout); code != 0 || m["status"] != "completed" || !strings.Contains(stdout, kind) ||
+		stderr != "craze send: acme/sonic-1 is deprecated; use acme/sonic\n" {
+		t.Fatalf("send --wait --json: exit %d, %s, %q", code, stdout, stderr)
+	}
+	stdout, stderr, code = executeErr([]string{"wait", waitRigShort, "--json"})
+	if m := decodeResult(t, stdout); code != 0 || m["status"] != "completed" || !strings.Contains(stdout, kind) ||
+		stderr != "craze wait: acme/sonic-1 is deprecated; use acme/sonic\n" {
+		t.Fatalf("wait --json: exit %d, %s, %q", code, stdout, stderr)
+	}
+	r.waitIdle()
+	stdout, stderr, code = executeErr([]string{"send", waitRigShort, "two"})
+	if code != 0 || stderr != "" || strings.Contains(stdout, "deprecated") {
+		t.Fatalf("send without --wait: exit %d, %q, %q; want the receipt alone", code, stdout, stderr)
+	}
 }

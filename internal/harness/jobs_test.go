@@ -1040,7 +1040,11 @@ func TestJobBlockEscapes(t *testing.T) {
 // none — no JobStarted — and a child is offered neither bash_output nor
 // bash_stop, which keeps the agent tool's list of a type's tools what it was
 // (childWithheld). The interactive session is the control: the same call
-// starts a job.
+// starts a job, its command held on a pipe the test writes once the turn has
+// ended — a job that ended before the turn's next step boundary is that
+// step's to deliver, and OnPending's handler would then find nothing pending
+// — and its timeout, a job's limit, bounding a regression that ran it in the
+// foreground, where it would wait on the pipe for the default two minutes.
 func TestJobsOnlyInInteractiveTopLevelSessions(t *testing.T) {
 	note := "This session does not run background jobs: run_in_background was ignored, and the command ran in the foreground with the foreground's timeout."
 	call := callStep(callParts("c1", "bash", input(t, map[string]any{"command": "echo hi", "run_in_background": true})))
@@ -1073,7 +1077,9 @@ func TestJobsOnlyInInteractiveTopLevelSessions(t *testing.T) {
 	if slices.Contains(b.s.tools.offered, "bash_output") || slices.Contains(b.s.tools.offered, "bash_stop") {
 		t.Fatalf("the tools a child may be given include the job tools: %v", b.s.tools.offered)
 	}
-	b.routers["test/a"].route("go", call, answerWith("started"))
+	gate := makeFIFO(t, b.workspace, "g1")
+	gated := input(t, map[string]any{"command": "read line < g1; echo hi", "run_in_background": true, "timeout": 10000})
+	b.routers["test/a"].route("go", callStep(callParts("c1", "bash", gated)), answerWith("started"))
 	var iev events
 	if _, err := b.s.Run(context.Background(), "go", iev.sink); err != nil {
 		t.Fatal(err)
@@ -1081,6 +1087,7 @@ func TestJobsOnlyInInteractiveTopLevelSessions(t *testing.T) {
 	if r := callResult(t, iev.list(), "t1.1.1"); !strings.HasPrefix(r.Text, "Started the command in the background as job `t1.1.1`.") {
 		t.Fatalf("control: an interactive session's call = %q; want a job started", r.Text)
 	}
+	openFIFO(t, gate)
 	if !await(t, b.pending, "the job's result") {
 		t.Fatal("nothing pending")
 	}
@@ -1331,16 +1338,78 @@ func makeFIFO(t *testing.T, dir, name string) string {
 	return path
 }
 
-// openFIFO writes a line to the named pipe path, waiting for its reader.
+// openFIFO writes a line to the named pipe path, waiting for its reader at
+// most fifoWait (writeFIFO): a reader that is gone — a job whose lifetime
+// ended while the test was stalled — fails the test rather than hang it.
 func openFIFO(t *testing.T, path string) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err := writeFIFO(path, fifoWait); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFIFO writes a line to the named pipe path once a process has it open
+// to read, waiting at most wait. The open is non-blocking, which on Linux and
+// macOS alike (POSIX) fails a write-only FIFO open with ENXIO while no
+// process has the pipe open for reading; once one has, O_NONBLOCK is cleared
+// before the write, so the line goes as a blocking open's would.
+func writeFIFO(path string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if err == nil {
+			defer func() { _ = syscall.Close(fd) }()
+			if err := syscall.SetNonblock(fd, false); err != nil {
+				return fmt.Errorf("clearing O_NONBLOCK on %s: %w", path, err)
+			}
+			_, err := syscall.Write(fd, []byte("x\n"))
+			return err
+		}
+		if !errors.Is(err, syscall.ENXIO) && !errors.Is(err, syscall.EINTR) {
+			return fmt.Errorf("opening %s to write: %w", path, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no process opened %s to read within %v: the command waiting on it is gone (its job's lifetime ended?)", path, wait)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestWriteFIFOIsBounded: writeFIFO with no reader fails at its deadline
+// rather than block for ever, as a blocking open would; with a reader it
+// writes the line whole, once the reader opens the pipe after the writer
+// began waiting.
+func TestWriteFIFOIsBounded(t *testing.T) {
+	path := makeFIFO(t, t.TempDir(), "p")
+	done := make(chan error, 1)
+	go func() { done <- writeFIFO(path, 200*time.Millisecond) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "no process opened") {
+			t.Fatalf("writeFIFO with no reader = %v; want the deadline's failure", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("writeFIFO with no reader did not return: it blocks on the open")
+	}
+
+	go func() { done <- writeFIFO(path, 10*time.Second) }()
+	time.Sleep(50 * time.Millisecond)
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = f.WriteString("x\n")
-	_ = f.Close()
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil || string(got) != "x\n" {
+		t.Fatalf("read %q, %v; want the line", got, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("writeFIFO with a reader = %v", err)
+	}
 }
+
+// fifoWait bounds openFIFO's wait for the pipe's reader.
+const fifoWait = 30 * time.Second
 
 // readPID waits for the command to write its pid to name in the workspace.
 func readPID(t *testing.T, b *bg, name string) int {

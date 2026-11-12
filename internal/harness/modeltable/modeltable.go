@@ -234,6 +234,16 @@ type Table struct {
 	// without a catalog or built in memory, whose providers' names are all
 	// there is.
 	credentialEnv []string
+	// credentialKeys is every inline api_key the user's providers.toml
+	// writes, whether or not a merged provider still holds it — an entry the
+	// merge dropped, or an old import's key it would not send to craze's
+	// endpoint (plan 050 review) — for Keys to redact; nil for a table
+	// loaded without a catalog or built in memory.
+	credentialKeys []Secret
+	// catalogModels are the aliases whose model is the catalog's own
+	// (Resolved.CatalogModel), stamped by the merge; nil for a table loaded
+	// without a catalog or built in memory.
+	catalogModels map[string]bool
 
 	// signIn is the directory whose ChatGPT sign-in funds the table's
 	// chatgpt provider (plan 033 §3.11, P34): the one LoadWith read, kept
@@ -608,6 +618,14 @@ type Resolved struct {
 	// model runs, and names the alias that replaces it.
 	Deprecated bool
 	ReplacedBy string
+	// CatalogModel is whether the model is the catalog's own: a shipped
+	// alias the user's models.toml has not pointed at another provider or
+	// wire model (a key it writes beside those, such as an effort, leaves it
+	// the catalog's). False for a model of the user's own, whatever its
+	// provider's id, and for every model of a table loaded without the
+	// catalog or built in memory. A behaviour an older craze cannot read back
+	// is kept to it (the OpenAI phase, llm's phasesFor; plan 050 review).
+	CatalogModel bool
 }
 
 // ContextInForce is the context, in tokens, a session on r works within
@@ -1561,6 +1579,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		Thinking:          t.thinkingOf(m, p),
 		Deprecated:        m.Deprecated,
 		ReplacedBy:        m.ReplacedBy,
+		CatalogModel:      t.catalogModels[alias],
 	}, nil
 }
 
@@ -1682,7 +1701,10 @@ func (t *Table) CredentialEnvNames() []string {
 // usable key — all of them, not only the first, which is the one Resolve
 // picks — and its inline api_key; then the value of every other variable
 // CredentialEnvNames lists (C2r2), which funds nothing but is a credential
-// all the same; each with surrounding whitespace trimmed. A nil getenv is
+// all the same; then every inline api_key providers.toml writes that no
+// provider holds (credentialKeys: an entry the merge dropped, or an old
+// import's key it would not send to craze's endpoint); each with surrounding
+// whitespace trimmed. A nil getenv is
 // os.Getenv.
 //
 // An env value that cannot be a key — under MinKeyLen bytes, or overlapping
@@ -1720,6 +1742,11 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 			continue
 		}
 		if k, err := envKey(getenv, name); err == nil && k != "" {
+			keys = append(keys, k)
+		}
+	}
+	for _, k := range t.credentialKeys {
+		if !slices.Contains(keys, k) {
 			keys = append(keys, k)
 		}
 	}

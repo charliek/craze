@@ -94,8 +94,9 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   replacement, which a `--model` naming it leads with (`<alias> was retired;
   use <replacement>`) and a dropped reference warns about. A model is retired
   no earlier than the next minor release and 30 days after a release shipped
-  it deprecated (RELEASING.md; `TestDeprecationHistory` holds the catalog to
-  the release half).
+  it deprecated (RELEASING.md: the person cutting a release checks both;
+  `TestDeprecationHistory` checks that an earlier release shipped it
+  deprecated).
 - `default_context`: a context smaller than the window that a session works
   within — compaction's threshold and the usage report's `contextWindow` are
   measured against it — set by the catalog and per model in `models.toml`
@@ -106,16 +107,17 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - An OpenAI API key: the `openai` provider (`OPENAI_API_KEY`, or `craze auth
   login openai`), last in the start order, with `openai/gpt-6.1-sol` (its
   start), `openai/gpt-6-astra`, `openai/gpt-6.1-terra` and `openai/gpt-6-luna`
-  on the Responses API, each working within 272,000 tokens and priced above it
-  at OpenAI's long-context rates. An exported `OPENAI_API_KEY` now funds craze
+  on the Responses API, each compacting at 85% of a 272,000-token context
+  default (a trigger, not a cap) and priced above 272,000 at OpenAI's
+  long-context rates. An exported `OPENAI_API_KEY` now funds craze
   (`env_keys = []` opts out).
 - Cache writes on the Responses API routes are counted as cache writes and
   priced at `cache_write`, or the input rate when a model has none.
 - On the `openai-responses` driver a 429 naming spent credit or a spend limit
   is final, kind `quota`, and so is the same code or type inside the stream;
-  an in-stream overload is retried; a message's phase is kept and replayed on
-  the `openai` provider alone (its transcripts are not readable by an older
-  craze).
+  an in-stream overload is retried; a message's phase is kept and replayed for
+  the shipped `openai/*` models alone (their transcripts are not readable by an
+  older craze; a model of your own on a provider named `openai` keeps none).
 - A key provider's 403 says the provider's own message before the key's
   advice, and a 400 or 403 with code `model_not_found` is kind
   `model_not_found` (Anthropic's and the ChatGPT plan's are unchanged).
@@ -155,10 +157,14 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   order (`zai-coding-plan`, `chatgpt`, `meta`, `openai`, `anthropic`,
   `fireworks`, `openrouter`); the others still run by name. `source_order` in
   `models.toml` goes before the catalog's (`[]` turns the rule off). A
-  remembered model on a hidden source no longer starts new sessions (the pin
-  still does). craze never starts a session on a later, paid source of a maker
-  while an earlier one is set up but offers none of its models — a ChatGPT
-  sign-in with no model list and an OpenAI key, say: the start is refused,
+  remembered model on a hidden source no longer starts new sessions: the next
+  remembered model that is offered does, then the pin, then the provider
+  order (`source_order` or `--model` keeps a hidden model as the start).
+  craze never starts a session on a later, paid source of a maker while an
+  earlier one has a sign-in that is there but broken for that maker — only
+  the ChatGPT plan with no usable model list, another account's list or plan
+  usage off; a provider with a key never holds anything back. With such a
+  sign-in and an OpenAI key, the start is refused,
   kind `config`, naming the sign-in and `--model`, and `craze providers` says
   `needs setup` with the same reason. A sub-agent call's model is held to the
   menu plus what you configured. In the TUI a quota or plan-limit failure is

@@ -60,6 +60,13 @@ func newWaitRig(t *testing.T, ring int, turns ...stubTurn) *waitRig {
 // newWaitRigOn is newWaitRig with its server built from opts.
 func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTurn) *waitRig {
 	t.Helper()
+	return newWaitRigAs(t, "grok", opts, ring, turns...)
+}
+
+// newWaitRigAs is newWaitRigOn with the registry naming provider as the
+// session's.
+func newWaitRigAs(t *testing.T, provider string, opts control.Options, ring int, turns ...stubTurn) *waitRig {
+	t.Helper()
 	env, _ := serveHome(t)
 	r := &waitRig{t: t, env: env}
 	r.s, r.eng = r.newEngine(ring, turns...)
@@ -75,7 +82,7 @@ func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTur
 		t.Fatal(err)
 	}
 	reg, err := rundir.Bind(env, "0000000000a1", rundir.Entry{StartedAt: time.Now(), CrazeSessionID: waitRigID,
-		Incarnation: r.eng.State().Incarnation, Provider: "grok", Workspace: "/w", Ready: true, PIDStart: self.Start})
+		Incarnation: r.eng.State().Incarnation, Provider: provider, Workspace: "/w", Ready: true, PIDStart: self.Start})
 	if err != nil {
 		t.Fatal(err)
 	}

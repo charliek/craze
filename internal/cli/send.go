@@ -302,6 +302,7 @@ func sendIndexRow(id, exact string) (sessions.Row, error) {
 func (r *promptJob) reload(row sessions.Row) (*waitConn, error) {
 	opts := spawnOptions{env: r.env, flags: reloadFlags(row), load: loadArg(row), unattended: row.Unattended != nil, shared: true, hubEnv: true, reparent: true}
 	r.session = resultSession{id: row.CrazeID, provider: row.Provider}
+	r.out.asked = storedAsked(row)
 	until := time.Now().Add(reloadWait)
 	for {
 		var (

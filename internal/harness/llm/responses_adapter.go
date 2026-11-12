@@ -79,8 +79,8 @@ type responsesModel struct {
 	// ChatGPT plan's driver", or the key route's provider's.
 	says string
 	// phases is whether a replayed assistant message carries the phase it
-	// was written in (plan 050 C3): on the key route for the OpenAI key's
-	// provider alone (phasesFor).
+	// was written in (plan 050 C3): on the key route for the catalog's own
+	// models on the OpenAI key's provider alone (phasesFor).
 	phases bool
 }
 
@@ -147,11 +147,18 @@ func responsesModelOn(r modeltable.Resolved, c *responsesapi.Client, route respo
 }
 
 // phasesFor reports whether r's key-route requests replay a message's phase
-// (plan 050 C3): for the OpenAI key's provider alone, whose API OpenAI
-// documents as wanting it kept when a caller replays its own history, and
-// which took it live (2026-11-11). Meta's stream gives a phase too, but craze
-// has never replayed one to it (plan 047 MR-5), and does not untested.
-func phasesFor(r modeltable.Resolved) bool { return r.ProviderID == modeltable.OpenAIProvider }
+// (plan 050 C3): for the catalog's own models on the OpenAI key's provider
+// alone, whose API OpenAI documents as wanting it kept when a caller replays
+// its own history, and which took it live (2026-11-11). Meta's stream gives a
+// phase too, but craze has never replayed one to it (plan 047 MR-5), and does
+// not untested. A model of the user's own on a provider the user named
+// openai is not one (plan 050 review): an older craze could have a session on
+// it, which the phase's metadata would make one it cannot read back — save
+// one spelled and wired exactly like a shipped model, which is counted as the
+// catalog's (responsesPhase).
+func phasesFor(r modeltable.Resolved) bool {
+	return r.ProviderID == modeltable.OpenAIProvider && r.CatalogModel
+}
 
 // boundCredentials are a sign-in's credentials for a model bound to the
 // account whose list it came from (modeltable.Resolved.Account; plan 033
@@ -252,13 +259,21 @@ const typeResponsesMessage = "craze.responses.message"
 // responsesPhase is the metadata a message's text part keeps (plan 050
 // C3): the phase the model wrote it in, as the stream's
 // response.output_item.done gave it. It is kept, and so stored in the
-// transcript, only where it is replayed — on the key route, for the OpenAI
-// key's provider (phasesFor) — so a reopened session replays it as the live
-// one would (assistantItems). Nowhere else: an older craze's Fantasy
-// registry refuses a provider-data type it does not know, so a Meta or
-// ChatGPT plan transcript holding one would load as corrupt there, or lose
-// its last turn as a torn tail; the openai provider is new, and no older
-// craze has a session on it to open.
+// transcript, only where it is replayed — on the key route, for the
+// catalog's own models on the OpenAI key's provider (phasesFor) — so a
+// reopened session replays it as the live one would (assistantItems).
+// Nowhere else: an older craze's Fantasy registry refuses a provider-data
+// type it does not know, so a Meta or ChatGPT plan transcript holding one
+// would load as corrupt there, or lose its last turn as a torn tail. The
+// catalog's openai models are new in plan 050's release, so an older craze has
+// a session on one only in one case, accepted: a user who had defined an alias
+// of their own spelled exactly like a shipped one, on their own provider named
+// openai with the same wire model, has it counted as the catalog's model
+// (modeltable.Resolved.CatalogModel), so continuing such a session writes the
+// phase and an older craze cannot reopen it then. Any other model of the
+// user's own on a provider named openai — another alias, or the shipped alias
+// pointed at another wire model — may well have a session an older craze
+// opens, and stores none.
 type responsesPhase struct {
 	Phase string `json:"phase,omitempty"`
 }

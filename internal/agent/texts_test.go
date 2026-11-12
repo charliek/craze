@@ -241,3 +241,46 @@ func TestAnthropicAccessTexts(t *testing.T) {
 		})
 	}
 }
+
+// TestEveryProviderMessageIsRedactedAfterSanitizing (plan 050 review): every
+// branch that shows a provider's own message — Anthropic's 403, Anthropic's
+// model-not-found, and the default for a 429 or a 5xx, beside the 403 of
+// TestRefusedText — redacts it after sanitizing as well as before, so a key
+// the scrub did not know, split by a format character that sanitizing drops,
+// never reads whole. The control: the message's other words still show.
+func TestEveryProviderMessageIsRedactedAfterSanitizing(t *testing.T) {
+	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
+		"anthropic": {Name: "Anthropic", Driver: modeltable.DriverAnthropic, EnvKeys: []string{"ANTHROPIC_API_KEY"}},
+		"fireworks": {Name: "Fireworks", EnvKeys: []string{"FIREWORKS_API_KEY"}},
+	}}
+	red := func(s string) string { return strings.ReplaceAll(s, nativeCanary, "[redacted]") }
+	half := len(nativeCanary) / 2
+	for _, sep := range []string{"\u200b", "\u2060", "\ufeff", "\u00ad"} {
+		msg := "denied: " + nativeCanary[:half] + sep + nativeCanary[half:]
+		for _, tc := range []struct {
+			name string
+			pe   *harness.ProviderError
+			is   error
+		}{
+			{"an Anthropic 403", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 403, Message: msg}, harness.ErrAuth},
+			{"an Anthropic 404", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 404, Message: msg}, harness.ErrModelNotFound},
+			{"a 429", &harness.ProviderError{Provider: "fireworks", Model: "fireworks/m", WireModel: "m",
+				Driver: modeltable.DriverOpenAICompat, StatusCode: 429, Message: msg}, nil},
+			{"a 500", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 500, Message: msg}, nil},
+		} {
+			t.Run(fmt.Sprintf("%s/U+%04X", tc.name, []rune(sep)[0]), func(t *testing.T) {
+				var err error = tc.pe
+				if tc.is != nil {
+					err = errors.Join(tc.pe, tc.is)
+				}
+				got := phraseTurnErrorRed(fmt.Errorf("turn: %w", err), table, red).Error()
+				if strings.Contains(got, nativeCanary) || !strings.Contains(got, "denied: [redacted]") {
+					t.Fatalf("phrased %q; want the message shown with the key redacted", got)
+				}
+			})
+		}
+	}
+}

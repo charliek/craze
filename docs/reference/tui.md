@@ -2301,8 +2301,10 @@ written `<provider id>/<alias>`), and refuses one whose provider has no key,
 saying how to give it one. The session list's `/model` offers the same models
 a session's list does. When the list would start a new native session on
 nothing because craze does not choose a later source of a maker for you
-while an earlier one is set up and funds none of its models (a ChatGPT
-sign-in with no model list and an OpenAI key, say), picking native says so —
+while an earlier one's sign-in is there but broken for that maker (only the
+ChatGPT plan with no usable model list, another account's list or plan usage
+off, with an OpenAI key; a provider with a key never holds anything back),
+picking native says so —
 `signed in to ChatGPT, but its models are not available, so craze does not
 pick openai/gpt-6.1-sol for you — run craze auth login chatgpt, or pick a
 model with /model` — and its `/model` still offers the model.

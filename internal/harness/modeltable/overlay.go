@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,6 +63,12 @@ const (
 type providersOverlay struct {
 	Version   int                        `toml:"version"`
 	Providers map[string]providerOverlay `toml:"providers"`
+	// withheld are the credentials a lock took out of an entry before the
+	// merge (lockAnthropic: a key written beside a base_url it dropped) — an
+	// api_key and env_keys alone — which fund nothing but are credentials all
+	// the same: credentialKeys and credentialNames read them as they read an
+	// entry. Never in a file.
+	withheld []providerOverlay `toml:"-"`
 }
 
 func (d *providersOverlay) version() int { return d.Version }
@@ -595,7 +603,22 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 	m.t.starts = cat.startAliases()
 	m.subagents(subagentsFromDoc(md.Subagents))
 	m.t.credentialEnv = credentialNames(cat, pd)
+	m.t.credentialKeys = credentialKeys(pd)
+	m.t.catalogModels = catalogModels(cat, m.t.Models)
 	return m.t
+}
+
+// catalogModels is every alias of models that is the catalog's own model
+// (Resolved.CatalogModel): a shipped alias whose merged provider and wire
+// model are still the shipped ones. nil for none.
+func catalogModels(cat *Catalog, models map[string]Model) map[string]bool {
+	var out map[string]bool
+	for alias, mod := range models {
+		if shipped, ok := cat.Models[alias]; ok && mod.Provider == shipped.Provider && mod.WireModel == shipped.WireModel {
+			put(&out, alias, true)
+		}
+	}
+	return out
 }
 
 // makers keeps the catalog's makers where the user's providers.toml left the
@@ -723,8 +746,33 @@ func credentialNames(cat *Catalog, pd *providersOverlay) []string {
 	for _, o := range pd.Providers {
 		names = append(names, deref(o.EnvKeys)...)
 	}
+	for _, o := range pd.withheld {
+		names = append(names, deref(o.EnvKeys)...)
+	}
 	slices.Sort(names)
 	return slices.Compact(names)
+}
+
+// credentialKeys is every inline api_key the user's providers.toml writes,
+// trimmed and without repeats: what a merged table redacts whether or not a
+// merged provider still holds it (Table.Keys) — the key of an entry the merge
+// dropped, or dropped from, is a credential all the same (C2r2's rule for
+// variables, carried to keys). checkOverlays refused any the rules refuse.
+func credentialKeys(pd *providersOverlay) []Secret {
+	var keys []Secret
+	entries := make([]providerOverlay, 0, len(pd.Providers)+len(pd.withheld))
+	for _, id := range slices.Sorted(maps.Keys(pd.Providers)) {
+		entries = append(entries, pd.Providers[id])
+	}
+	for _, o := range append(entries, pd.withheld...) {
+		if k := o.APIKey; k != nil {
+			v := strings.TrimSpace(*k)
+			if v != "" && keyProblem(v) == nil && !slices.Contains(keys, Secret(v)) {
+				keys = append(keys, Secret(v))
+			}
+		}
+	}
+	return keys
 }
 
 func (m *merger) provider(id string, o providerOverlay) {
@@ -759,9 +807,17 @@ func (m *merger) provider(id string, o providerOverlay) {
 		// An old import's copy of a provider craze now ships (§3.3): only
 		// its key counts, and any variable names the catalog lacks, after
 		// the catalog's own — a machine that relied on a gx-era variable
-		// stays funded.
+		// stays funded. Only when the entry is at the shipped endpoint,
+		// though: a key an entry carries is used only at the endpoint the
+		// entry is at after the merge, and one written for another endpoint
+		// (a proxy's, say) never goes to craze's (plan 050 review).
 		p := shipped
 		p.EnvKeys = slices.Clone(shipped.EnvKeys)
+		if movesEndpoint(shipped, o) {
+			m.legacyKeyDropped(id, shipped, o)
+			m.t.Providers[id] = p
+			return
+		}
 		if o.APIKey != nil {
 			p.APIKey = Secret(*o.APIKey)
 		}
@@ -777,8 +833,15 @@ func (m *merger) provider(id string, o providerOverlay) {
 	if err := validateProvider(m.ppath, id, p); err != nil {
 		// checkOverlays passed every value, and a pair the entry writes
 		// itself: what fails is the endpoint the entry half-writes against
-		// the shipped half. The shipped endpoint is always valid.
-		m.warn(err, "craze's shipped driver and base_url are used")
+		// the shipped half. The shipped endpoint is always valid. A key the
+		// entry carries goes with a base_url of its own that is dropped: it
+		// was written for that endpoint, not for craze's (plan 050 review).
+		instead := "craze's shipped driver and base_url are used"
+		if o.BaseURL != nil && !sameEndpoint(*o.BaseURL, shipped.BaseURL) && (o.APIKey != nil || o.EnvKeys != nil) {
+			instead += ", and the entry's api_key and env_keys are dropped with its base_url, so its key is not sent to craze's endpoint"
+			o.APIKey, o.EnvKeys = nil, nil
+		}
+		m.warn(err, instead)
 		o.Driver, o.BaseURL = nil, nil
 		p = overlayProvider(shipped, o)
 	} else {
@@ -789,6 +852,73 @@ func (m *merger) provider(id string, o providerOverlay) {
 	}
 	m.t.Providers[id] = p
 	m.t.providerOrigins[id] = OriginOverridden
+}
+
+// movesEndpoint reports whether o, an old import's entry (source = "gx") for
+// a shipped provider, names another endpoint than shipped's: a base_url it
+// writes that is not the shipped one (sameEndpoint). Its driver never did —
+// the legacy rule has always ignored an old import's driver, so an entry that
+// writes one and no base_url (openai-compat for Meta, say) still lends its
+// key to the shipped endpoint, as it always has.
+func movesEndpoint(shipped Provider, o providerOverlay) bool {
+	return o.BaseURL != nil && !sameEndpoint(*o.BaseURL, shipped.BaseURL)
+}
+
+// sameEndpoint reports whether base URLs a and b address one endpoint: equal
+// once each is normalised (normalEndpoint).
+func sameEndpoint(a, b string) bool { return normalEndpoint(a) == normalEndpoint(b) }
+
+// normalEndpoint is base URL u with what does not change where a request goes
+// taken out: the scheme and the host in lower case, the scheme's default port
+// (443 for https, 80 for http) elided, and a trailing slash on the path
+// dropped (the clients trim it themselves). The path's case, the user info, a
+// query and a fragment stay as written. A value that does not parse is
+// itself.
+func normalEndpoint(u string) string {
+	p, err := url.Parse(u)
+	if err != nil || p.Host == "" {
+		return u
+	}
+	p.Scheme = strings.ToLower(p.Scheme)
+	host, port := strings.ToLower(p.Hostname()), p.Port()
+	if (p.Scheme == "https" && port == "443") || (p.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	p.Host = host
+	if port != "" {
+		p.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		p.Host = "[" + host + "]"
+	}
+	p.Path = strings.TrimSuffix(p.Path, "/")
+	p.RawPath = strings.TrimSuffix(p.RawPath, "/")
+	return p.String()
+}
+
+// legacyKeyDropped warns that o, an old import's entry (source = "gx") for
+// the shipped provider id that points it at another endpoint, lends it
+// nothing: neither its api_key nor any variable name the catalog lacks, which
+// were written for that endpoint (plan 050 review). One warning, naming the
+// provider and the keys, never a value; none when the entry carries neither.
+// The key and the names are still credentials (Table.Keys,
+// CredentialEnvNames): redacted, and kept from the commands a session runs.
+func (m *merger) legacyKeyDropped(id string, shipped Provider, o providerOverlay) {
+	var keys []string
+	if o.APIKey != nil {
+		keys = append(keys, "api_key")
+	}
+	for _, name := range deref(o.EnvKeys) {
+		if !slices.Contains(shipped.EnvKeys, name) {
+			keys = append(keys, "env_keys")
+			break
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	m.warn(&FileError{File: m.ppath, Table: providerTable(id), Key: strings.Join(keys, " and "),
+		Reason: `dropped: this old import's entry (source = "gx") points the provider at another endpoint than craze's, so its key is not sent to craze's endpoint`},
+		fmt.Sprintf("craze's shipped %s provider is used without it; remove source = \"gx\" from the entry to use it as written", id))
 }
 
 // unfundedDriver warns when o, an entry for a shipped provider, moves it to

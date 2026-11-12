@@ -361,6 +361,39 @@ func TestScrubText(t *testing.T) {
 	}
 }
 
+// plan 050 review: a key echoed with format characters (Unicode Cf) or
+// invalid bytes between its characters — which a display drops, joining it
+// again — is replaced whole, separators and all, before anything cuts the
+// text; one split by anything else (a space, another letter) is not the key.
+func TestScrubTextFindsAKeySplitByFormatCharacters(t *testing.T) {
+	s := newScrubber(canary, nil)
+	spread := func(sep string) string {
+		var b strings.Builder
+		for i, r := range canary {
+			if i > 0 {
+				b.WriteString(sep)
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+	half := len(canary) / 2
+	for _, tc := range []struct{ name, in, want string }{
+		{"a zero-width space", "k " + canary[:half] + "\u200b" + canary[half:] + ".", "k " + redacted + "."},
+		{"a word joiner after every character", "k " + spread("\u2060"), "k " + redacted},
+		{"byte-order marks", spread("\ufeff\ufeff") + " k", redacted + " k"},
+		{"a soft hyphen", canary[:half] + "\u00ad" + canary[half:], redacted},
+		{"a bidi override", canary[:half] + "\u202e" + canary[half:], redacted},
+		{"an invalid byte", canary[:half] + "\xff" + canary[half:], redacted},
+		{"a space is no gap", canary[:half] + " " + canary[half:], canary[:half] + " " + canary[half:]},
+		{"before and after stand", "\u200b" + canary + "\u200b", "\u200b" + redacted + "\u200b"},
+	} {
+		if got := s.text(tc.in); got != tc.want {
+			t.Errorf("%s: text(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
 // review r4 major 1: the key is scrubbed in every spelling a JSON string can
 // give it — any subset of its characters \u-escaped, the hex in either case,
 // and a slash as \/ — and a spelling of anything else is left as it is.

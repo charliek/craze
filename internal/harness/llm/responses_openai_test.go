@@ -38,6 +38,7 @@ func openaiRoute(base string) modeltable.Resolved {
 		Efforts:         []string{"low", "medium", "high", "xhigh", "max"},
 		DefaultEffort:   "medium",
 		Vision:          true,
+		CatalogModel:    true,
 	}
 }
 
@@ -357,8 +358,11 @@ func TestKeyRouteRetriesAnOverloadBeforeOutput(t *testing.T) {
 // and on the ChatGPT route, a stream whose messages carry a phase gives text
 // parts with no metadata at all, as before phases were read, so their
 // transcripts stay ones an older craze can open (its registry refuses a
-// provider-data type it does not know). Negative control: keeping the phase
-// on every route fails the Meta and ChatGPT cases.
+// provider-data type it does not know). Nor on a model of the user's own on
+// a provider the user named openai (plan 050 review), which an older craze
+// could have a session on: only the catalog's own models keep it. Negative
+// control: keeping the phase on every route fails the Meta, ChatGPT and
+// user's-own cases.
 func TestOnlyOpenAIKeepsThePhase(t *testing.T) {
 	withPhase := func(id, text, phase string) map[string]any {
 		m := rxMessage(id, text)
@@ -380,6 +384,12 @@ func TestOnlyOpenAIKeepsThePhase(t *testing.T) {
 	openaiSrv := newRxServer(t, stream)
 	if got := metadata(openaiStep(t, openaiModel(t, openaiRoute(openaiSrv.srv.URL+"/v1")), prompt)); len(got) != 1 || got[0] == nil {
 		t.Fatalf("the OpenAI key's text end = %v, want the phase", got)
+	}
+	mineSrv := newRxServer(t, stream)
+	mine := openaiRoute(mineSrv.srv.URL + "/v1")
+	mine.Alias, mine.CatalogModel = "mine/sol", false
+	if got := metadata(openaiStep(t, openaiModel(t, mine), prompt)); len(got) != 1 || got[0] != nil {
+		t.Fatalf("a model of the user's own on provider openai: text end = %v, want no metadata", got)
 	}
 	meta := newRxServer(t, stream)
 	if got := metadata(openaiStep(t, meta.keyModel(t), prompt)); len(got) != 1 || got[0] != nil {

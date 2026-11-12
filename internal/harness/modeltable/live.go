@@ -35,7 +35,7 @@ import (
 // one, since every other model of the provider goes by it; from's is added
 // when t has none, so the entry always names a provider t has (a user's
 // provider removed from providers.toml while a session runs on it). Its
-// origins come with it. It reports false, and changes nothing, when from has
+// origins come with it, and whether it is the catalog's own model. It reports false, and changes nothing, when from has
 // no such model.
 //
 // The entry is carried even when t has the alias funded and pointing at the
@@ -70,6 +70,14 @@ func (t *Table) Carry(from *Table, alias string) bool {
 	if from.modelOrigins != nil {
 		put(&t.modelOrigins, alias, from.ModelOrigin(alias))
 	}
+	// Whether it is the catalog's own model (Resolved.CatalogModel) belongs
+	// to the definition carried, not to whatever t's files now say of the
+	// alias (plan 050 review).
+	if from.catalogModels[alias] {
+		put(&t.catalogModels, alias, true)
+	} else {
+		delete(t.catalogModels, alias)
+	}
 	if _, ok := t.Providers[m.Provider]; !ok {
 		p := from.Providers[m.Provider] // present: from resolved the model
 		p.EnvKeys = slices.Clone(p.EnvKeys)
@@ -101,6 +109,9 @@ func (t *Table) differs(from *Table, alias string) bool {
 		return true
 	}
 	if from.modelOrigins != nil && t.ModelOrigin(alias) != from.ModelOrigin(alias) {
+		return true
+	}
+	if t.catalogModels[alias] != from.catalogModels[alias] {
 		return true
 	}
 	ownAcct, ownBound := t.boundAccount(alias)
@@ -201,6 +212,9 @@ func (t *Table) WithholdFrozen(getenv func(string) string, frozen func(string) b
 		delete(t.Providers, id)
 		delete(t.providerOrigins, id)
 	}
+	// An inline key the merge kept only for redaction (credentialKeys) is no
+	// key Keys returns once frozen reports it, as a provider's own is not.
+	t.credentialKeys = slices.DeleteFunc(slices.Clone(t.credentialKeys), func(k Secret) bool { return frozen(k.Reveal()) })
 	if len(unkeyed) == 0 && len(dropped) == 0 {
 		return nil
 	}

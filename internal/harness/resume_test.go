@@ -397,6 +397,24 @@ func TestResumeModelPrecedence(t *testing.T) {
 			t.Fatalf("falling back to the default warned %q; want one warning naming both models", *warns)
 		}
 	})
+	t.Run("a deprecated pin still continues", func(t *testing.T) {
+		// The pin is unrestricted in the fallback (plan 050): deprecated,
+		// it is still where a resume whose model is gone continues.
+		f := newFixture(t, url)
+		id := storedTurn(t, f, f.options(), onB)
+		delete(f.table.Models, "test/b")
+		deprecate(f.table.Models, "test/a", "other/c")
+		if f.table.DefaultModel != "test/a" {
+			t.Fatalf("premise: the pin is %q, want test/a", f.table.DefaultModel)
+		}
+		opts := resumeOptions(f.options(), id)
+		warns := warned(&opts)
+		s := resumed(t, opts)
+		current(t, s, "test/a", "high")
+		if len(*warns) != 1 || !strings.Contains((*warns)[0], "continuing on test/a") {
+			t.Fatalf("falling back to a deprecated pin warned %q; want one warning naming test/a", *warns)
+		}
+	})
 	t.Run("no pin: the provider order's start", func(t *testing.T) {
 		// Plan 038 §2: a table over a catalog has no default model; with no
 		// pin, a resume whose model is gone continues on the first start

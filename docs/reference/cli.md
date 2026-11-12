@@ -2640,9 +2640,11 @@ How each is judged:
   key — what a native session would start on. With none it needs setup
   (`no model provider has a key`). It also needs setup when models are funded
   but craze would not choose one for you, because an earlier [source of their
-  maker](configuration.md#one-source-per-maker) is set up and funds none of
-  them: signed in to ChatGPT with no usable model list and an OpenAI key, say,
-  is `signed in to ChatGPT, but its models are not available`, fix `craze auth
+  maker](configuration.md#one-source-per-maker) has a sign-in that is there
+  but broken for that maker — only the ChatGPT plan with no usable model
+  list, another account's list or plan usage off; a provider with a key never
+  holds anything back. Signed in to ChatGPT with no usable model list and an
+  OpenAI key is `signed in to ChatGPT, but its models are not available`, fix `craze auth
   login chatgpt, or start with --model openai/gpt-6.1-sol`. The hub's create
   options say the same.
   `providers.toml` or `models.toml` that cannot be read makes it unavailable;

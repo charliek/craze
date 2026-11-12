@@ -3893,11 +3893,13 @@ const maxRefusalMessage = 300
 
 // phraseTurnErrorRed is phraseTurnErrorIn with red, the session's redactor
 // over every key it knows (harness.Session.Redact), nil when there is none.
-// The provider's own words a 403 shows go through it after they are
-// sanitized as well as before (nativeSafe.line, plan 050 C3 review): the
-// harness scrubbed them whole, but sanitizing drops format characters (a
-// zero-width space, a soft hyphen) and so can put back together a key the
-// provider echoed split by one.
+// Every provider message it shows goes through providerWords: redacted after
+// it is sanitized as well as before (nativeSafe.line, plan 050 C3 review).
+// The model's scrubber already replaced its own key whole, a run of format
+// characters inside it included, before the harness cut the message to its
+// bound (llm's keyPattern); sanitizing drops those characters (a zero-width
+// space, a soft hyphen), and the second redaction catches any other key the
+// session knows that dropping them puts back together.
 func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) string) error {
 	phrase := func(msg string) error { return &nativeError{msg: msg, cause: err} }
 	if errors.Is(err, harness.ErrEmptyStep) {
@@ -3942,7 +3944,7 @@ func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) str
 		// rejected (plan 044 §3.4, P27): a model the account or its
 		// organization is not allowed. Its 401 is the key's, below.
 		msg := fmt.Sprintf("native: Anthropic refused access to model %q%s", model, status)
-		if m := sanitizeLine(pe.Message); m != "" {
+		if m := providerWords(pe.Message, red); m != "" {
 			msg += ": " + m
 		}
 		return phrase(msg)
@@ -3962,7 +3964,7 @@ func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) str
 		// configured, so the words name the wire id the account was asked
 		// for, and Anthropic's own reason.
 		msg := fmt.Sprintf("native: the Anthropic account cannot use %s (HTTP %d", sanitizeLine(pe.WireModel), pe.StatusCode)
-		if m := sanitizeLine(pe.Message); m != "" {
+		if m := providerWords(pe.Message, red); m != "" {
 			msg += ": " + m
 		}
 		return phrase(msg + ")")
@@ -3979,7 +3981,7 @@ func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) str
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)
-	if m := sanitizeLine(pe.Message); m != "" {
+	if m := providerWords(pe.Message, red); m != "" {
 		msg += ": " + m
 	}
 	return phrase(msg)
@@ -3997,7 +3999,7 @@ func rejectedKeyText(table *modeltable.Table, id, status string) string {
 	return fmt.Sprintf(`native: %s rejected the API key%s; %s`, name, status, advice)
 }
 
-// providerWords is a provider's message as a 403 shows it: on one line,
+// providerWords is a provider's message as an error shows it: on one line,
 // sanitized, with every format character dropped (a soft hyphen the
 // sanitizer keeps draws as nothing, so a key split by one reads whole), then
 // redacted after both as well as before when there is a redactor (red), and

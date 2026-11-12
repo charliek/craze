@@ -256,3 +256,50 @@ func TestNativeQuotaHint(t *testing.T) {
 		t.Fatalf("the plan model's hint = %q", msg)
 	}
 }
+
+// TestNativeSwitchAwayDropsAModelNoLongerOffered (plan 050 C1, C5): a session
+// started on a model that runs but is not offered lists it while it runs on
+// it; a /model switch away drops its row, and the model cannot be switched
+// back to. Both kinds: one the source order hides (openai/gpt-6.1-sol behind
+// the ChatGPT plan's list) and a deprecated one (fireworks/kimi-k3). The
+// control: an offered model switched away from keeps its row.
+func TestNativeSwitchAwayDropsAModelNoLongerOffered(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		keys     map[string]string
+		layDown  func(dir string)
+		from, to string
+	}{
+		{"hidden by the source order", map[string]string{"OPENAI_API_KEY": dummyOpenAI, "OPENROUTER_API_KEY": dummyOpenRouter},
+			signedInWithList(t), "openai/gpt-6.1-sol", "chatgpt/gpt-5.6-sol"},
+		{"deprecated", map[string]string{"FIREWORKS_API_KEY": "fw-dummy-000000000001"}, nil, "fireworks/kimi-k3", "fireworks/kimi-k3p1-pro"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := shippedFixture(t, tc.keys, tc.layDown)
+			s := f.started(Options{Model: tc.from})
+			if ids := offeredIDs(s.Snapshot().Models); s.Snapshot().CurrentModel != tc.from || !slices.Contains(ids, tc.from) {
+				t.Fatalf("premise: a session on %s (current %q) lists %q", tc.from, s.Snapshot().CurrentModel, ids)
+			}
+			if _, err := s.SetModel(ctx, "", tc.to); err != nil {
+				t.Fatalf("SetModel(%s): %v", tc.to, err)
+			}
+			if ids := offeredIDs(s.Snapshot().Models); slices.Contains(ids, tc.from) || !slices.Contains(ids, tc.to) {
+				t.Fatalf("after switching to %s the list %q still has %s", tc.to, ids, tc.from)
+			}
+			if _, err := s.SetModel(ctx, "", tc.from); err == nil {
+				t.Fatalf("SetModel switched back to %s, which is no longer offered", tc.from)
+			}
+		})
+	}
+	t.Run("control: an offered model keeps its row", func(t *testing.T) {
+		f := shippedFixture(t, map[string]string{"FIREWORKS_API_KEY": "fw-dummy-000000000001"}, nil)
+		s := f.started(Options{Model: "fireworks/kimi-k3p1-pro"})
+		if _, err := s.SetModel(ctx, "", "fireworks/glm-5p3"); err != nil {
+			t.Fatal(err)
+		}
+		if ids := offeredIDs(s.Snapshot().Models); !slices.Contains(ids, "fireworks/kimi-k3p1-pro") {
+			t.Fatalf("after switching away from an offered model the list %q lacks it", ids)
+		}
+	})
+}
