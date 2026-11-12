@@ -1,0 +1,1 @@
+{"alias":"acme/sonic","provider":"acme","maker":"","name":"Acme Sonic","status":"active","source":"catalog","efforts":["low","medium","high"],"defaultEffort":"medium","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":272000,"state":{"funded":true,"offered":true}}

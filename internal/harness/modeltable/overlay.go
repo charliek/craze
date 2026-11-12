@@ -328,6 +328,7 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 		t = merge(c, ppath, mpath, &pd, &md)
 		t.discover(disc)
 		t.learned = learned
+		t.noteAccountLists(c, disc)
 		// Every entry of the user's that could not stand was dropped above,
 		// and every shipped entry passed TestShippedCatalog: a failure here is
 		// a bug in the catalog or the merge, reported rather than papered over.

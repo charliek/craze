@@ -1,0 +1,1 @@
+{"error":{"message":"native: acme/sonic-0 was retired; use acme/sonic","kind":"config","retryable":false,"detail":{"reason":"model_retired","model":"acme/sonic-0","replaced_by":"acme/sonic"}}}

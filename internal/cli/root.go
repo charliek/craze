@@ -50,6 +50,12 @@ func NewRootCmd() *cobra.Command {
 			if showVersion && cmd == cmd.Root() {
 				return nil
 			}
+			// craze models --shipped reads nothing of the machine or the
+			// environment (plan 050 C2): it answers the same anywhere, a stray
+			// removed config-file variable included.
+			if shippedModels(cmd) {
+				return nil
+			}
 			if err := paths.CheckEnv(); err != nil {
 				return usagef("craze: %v", err)
 			}
@@ -87,6 +93,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newPsCmd())
 	cmd.AddCommand(newProvidersCmd())
+	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newNewCmd())
 	cmd.AddCommand(newSendCmd())
 	cmd.AddCommand(newWaitCmd())

@@ -1681,6 +1681,16 @@ func unknownNativeModelText(table *modeltable.Table, raw string, err error) stri
 	return fmt.Sprintf("native: %v %s", err, has)
 }
 
+// NativeModelRefusal is a --model raw that MatchNativeModel refused with err,
+// as a native session's start refuses it (plan 050 C2): the start's own
+// message (unknownNativeModelText), and the [[retired]] row raw names when
+// that is why — a waiting command's pre-check and craze models say what the
+// host would, with the row's replacement as a fact beside it.
+func NativeModelRefusal(table *modeltable.Table, raw string, err error) (msg string, retired modeltable.Retired, isRetired bool) {
+	r, ok := retiredNativeModel(table, raw)
+	return unknownNativeModelText(table, raw, err), r, ok && errors.Is(err, errUnknownModel)
+}
+
 // retiredNativeModel is the [[retired]] row raw names, as written or as
 // --model's normalisation spells it (normalizeIdent: a retired alias is
 // lowercase, like every shipped one), when the table has one.

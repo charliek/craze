@@ -351,6 +351,10 @@ func (c *Catalog) applyAnthropicList(dir string, pd *providersOverlay) []string 
 		}
 	}
 	maps.Copy(c.Models, added)
+	c.anthropicListed = make(map[string]bool, len(added))
+	for alias := range added {
+		c.anthropicListed[alias] = true
+	}
 	for _, alias := range slices.Sorted(maps.Values(seeds)) {
 		if !named[alias] {
 			c.hide(alias)

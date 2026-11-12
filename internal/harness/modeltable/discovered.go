@@ -341,6 +341,11 @@ func minimumMet(min, pin string) bool {
 type discovered struct {
 	rank    map[string]int
 	account Account
+	// newer is how many entries the list holds that this craze leaves out
+	// for their minimum client version (minimumMet): a list fetched by
+	// another craze, which cannot tell a model it lacks from one it does not
+	// list (plan 050 C2, Table.AccountListRead).
+	newer int
 }
 
 // withDiscovered adds the ChatGPT plan's models to cat, the merge's own copy
@@ -433,6 +438,7 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 			// A list fetched by a newer craze whose pin is higher than this
 			// one's: an older binary never offers what it has not verified
 			// (plan 034 Q3). Silent, as a model the account does not list is.
+			d.newer++
 			continue
 		}
 		model := discoveredModel(m, cat.ChatGPT.Models[m.Slug])

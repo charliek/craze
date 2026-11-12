@@ -811,6 +811,10 @@ in
 a session's `/model` lists those whose provider has a key ([which models, in
 what order](tui.md#model-dialog)). Anthropic's are also the account's own:
 see [Anthropic](#anthropic). OpenAI's, on an API key, are in [OpenAI](#openai).
+[`craze models`](cli.md#craze-models) lists every model this machine's table has
+— your files' and the accounts' lists' included — with its status, efforts,
+context and whether it is funded and offered here; `craze models --shipped` lists
+the catalog alone.
 
 OpenRouter's models are its `~<family>-latest` routers where OpenRouter has
 one: `openrouter/gpt-sol-latest` sends `~openai/gpt-sol-latest`, which
@@ -1774,7 +1778,9 @@ one — `default_model`, the `[subagents]` model, a tier, a `[models]` entry for
 it — stands, with one warning at session start (and in `craze auth list`)
 naming the replacement and saying the reference is dropped when the model is
 retired. craze never moves you to the replacement on its own: it may have
-another price.
+another price. [`craze models`](cli.md#craze-models) shows a deprecated model's
+status and replacement; a waiting command's result on one carries a
+[notice](cli.md#model-notices), and the TUI notes it when a session opens on it.
 
 Then a later release — no earlier than the next minor release and 30 days
 after the one that deprecated it, unless the provider stops serving it first

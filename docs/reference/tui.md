@@ -2241,7 +2241,10 @@ A native session lists only the models of providers that have a key — an
 exported variable or a stored one ([Keys](configuration.md#keys)) — and never
 a [deprecated](configuration.md#deprecated-models) model, plus the model it is
 running on (deprecated or not); switching away from a model the list no
-longer offers drops its row. It says nothing about the providers that have none,
+longer offers drops its row. A session that opens on a deprecated model says
+so once, as a note, in the words the waiting commands print (`<alias> is
+deprecated; use <replacement>`, [model notices](cli.md#model-notices)), judged
+from this TUI's own craze directory. It says nothing about the providers that have none,
 except one row: while some provider has no key, the list ends with
 `Connect a provider…`, which `↑`/`↓` and a click reach like any row and which
 opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is

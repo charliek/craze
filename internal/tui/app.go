@@ -22,6 +22,7 @@ import (
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/transcript"
@@ -2661,6 +2662,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshSnapMsg:
 		m.recompute()
+		return m, nil
+
+	case deprecatedNoteMsg:
+		m.addNote(msg.text)
 		return m, nil
 
 	case effortNotAppliedMsg:
@@ -5411,6 +5416,46 @@ func (m *Model) sessionUp() {
 	// reconnect whose snapshot left the catalog out (A12) — without waiting
 	// for a bare "/".
 	m.rescanSkills()
+	m.noteDeprecatedModel()
+}
+
+// deprecationTable is the table noteDeprecatedModel's command reads: the
+// TUI's own native directory's. A seam: a test's synthetic catalog.
+var deprecationTable = modeltable.Load
+
+// deprecatedNoteMsg is noteDeprecatedModel's command's answer: the sentence
+// to note, for the session it was issued under.
+type deprecatedNoteMsg struct {
+	issued
+	text string
+}
+
+// noteDeprecatedModel is the note a native session's open says when its model
+// is deprecated (plan 050 C2): the sentence the waiting commands print on
+// stderr, from the TUI's own table, once (sessionUp runs once). The table is
+// read off the Update, by a command handed on through backCmd, whose answer
+// (deprecatedNoteMsg) adds the note. Nothing on any other provider, and no
+// answer when the table does not load or the model is not deprecated.
+func (m *Model) noteDeprecatedModel() {
+	if !m.connectOffered() || m.nativeDir == "" {
+		return
+	}
+	alias, _ := m.currentModel()
+	if alias == "" {
+		return
+	}
+	dir, load, stamp := m.nativeDir, deprecationTable, m.issue()
+	m.backCmd = tea.Batch(m.backCmd, func() tea.Msg {
+		t, err := load(dir)
+		if err != nil {
+			return nil
+		}
+		_, sentence, ok := t.DeprecatedNotice(alias)
+		if !ok {
+			return nil
+		}
+		return deprecatedNoteMsg{issued: stamp, text: sanitizeLine(sentence)}
+	})
 }
 
 // indexWriteText is the failure behind an engine.ErrIndexWrite as a transcript

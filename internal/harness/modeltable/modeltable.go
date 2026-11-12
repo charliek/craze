@@ -277,6 +277,15 @@ type Table struct {
 	// told, and the replacement the merge's warnings name. nil for a table
 	// loaded without a catalog or built in memory.
 	retired []Retired
+	// accountLists holds each provider whose models an account's own list
+	// brings (plan 050 C2: the catalog's ChatGPT plan and Anthropic
+	// providers), true when the load used that list, false when it had none
+	// it could use; anthropicListed are the models the Anthropic account's
+	// list added that have no seed. Read through AccountModels,
+	// AccountListRead and FromAccount; nil for a table loaded without a
+	// catalog or built in memory.
+	accountLists    map[string]bool
+	anthropicListed map[string]bool
 	// unkeyed are the variables WithholdFrozen found holding a value a
 	// session cannot redact out of what it has already sent: each reads as
 	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's

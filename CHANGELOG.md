@@ -121,6 +121,19 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   `model_not_found` (Anthropic's and the ChatGPT plan's are unchanged).
 - A `models.toml` entry that lowers a shipped window below its long-context
   threshold keeps the entry with the tier off, and warns.
+- `craze models` lists the native models — provider, status and replacement,
+  efforts, context, and whether each is funded and offered here — as a table or
+  one JSON object (`schema` 1); `craze models <alias>` reads one as `--model`
+  does, `--shipped` answers from the compiled-in catalog alone. Each release
+  ships that as `models.json`, listed in `checksums.txt`.
+- `craze new --wait --provider native` checks `--model`, an explicit `--effort`
+  and `--fast` before any host is spawned: an unknown or retired model, an effort
+  the model does not list, and `--fast` (no native model has one) fail with exit
+  1, kind `config` and a `detail.reason` (`model_unknown`, `model_retired`,
+  `effort_not_offered`, `fast_not_offered`). Other commands stay lenient.
+- A native result or failure on a deprecated model prints a stderr line and,
+  with `--json`, `warnings: [{kind: "model_deprecated", model, replacedBy,
+  message}]`; the TUI notes it once when the session opens.
 
 ### Maintenance
 

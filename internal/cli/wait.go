@@ -100,7 +100,7 @@ func runWait(cmd *cobra.Command, f *waitFlags, args []string, sigs <-chan os.Sig
 	// killing the command before its stderr line (craze new's rule).
 	ignoreSIGPIPE()
 	env := rundir.ProcessEnv()
-	out := resultOutput{what: waitWhat, json: f.json, maxMessage: f.maxMessage, env: env}
+	out := resultOutput{what: waitWhat, json: f.json, maxMessage: f.maxMessage, env: env, notes: cmd.ErrOrStderr()}
 	entry, err := resolveLive(env, waitWhat, id, true)
 	if err == nil {
 		id, err = entrySession(waitWhat, entry)

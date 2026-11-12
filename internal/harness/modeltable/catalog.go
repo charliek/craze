@@ -64,6 +64,11 @@ type Catalog struct {
 	// entry left over for one is ignored without a word (merger.model). nil
 	// for every catalog but such a copy; Clone never copies it.
 	listHidden map[string]Model
+	// anthropicListed says the load used the Anthropic account's list
+	// (applyAnthropicList; plan 050 C2): non-nil once the list is the
+	// effective set, holding the aliases of the models it added that have no
+	// seed. nil for every catalog but such a copy; Clone never copies it.
+	anthropicListed map[string]bool
 
 	// zeroContext are the aliases whose entry writes `default_context = 0`
 	// (plan 050 C1): Model.DefaultContext reads 0 for those and for an

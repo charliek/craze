@@ -1,0 +1,1 @@
+{"error":{"message":"--fast: acme/sonic has no fast variant","kind":"config","retryable":false,"detail":{"reason":"fast_not_offered","model":"acme/sonic"}}}

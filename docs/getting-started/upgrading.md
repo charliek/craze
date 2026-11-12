@@ -413,6 +413,42 @@ ones you configured (`[subagents]` model and tiers, `default_model`, the
 parent's own model). The "Unknown model" answer used to list every alias of
 the table, funded or not.
 
+### Strict model flags under `craze new --wait`, and `craze models`
+
+**`craze new --wait` on the native provider checks its model flags before it
+starts a host.** It refused a `--model` that names nothing, or names a retired
+alias, from the host's start; it now refuses them [before any host is
+spawned](../reference/cli.md#model-checks), with the same message, still exit 1
+and kind `config`, and a `detail.reason` (`model_unknown`, `model_retired`, with
+`detail.replaced_by` when the catalog names the replacement). Two refusals are
+new:
+
+- **`--fast` fails** (`fast_not_offered`): no native model has a fast variant. It
+  used to be ignored with a line in the session's diagnostics. Drop it; `--no-fast`
+  is still accepted.
+- **An `--effort` the model does not list fails** (`effort_not_offered`) when
+  `--model` is given, the message listing the model's levels (`… has no effort
+  control` for a model with none). It used to start at the model's own effort
+  with a diagnostic line. [`craze models <alias> --json`](../reference/cli.md#craze-models)
+  lists a model's `efforts`.
+
+Plain `craze new`, `craze send`, `craze prompt`, the TUI and the ACP providers keep
+the lenient rule. An error's `detail` may now hold `reason`, `model` and
+`replaced_by` besides `status`, `provider_code` and `cause`: ignore keys you do
+not know.
+
+**Deprecated models are noted.** A native result or exit-1 failure on a
+[deprecated](../reference/configuration.md#deprecated-models) model prints one
+stderr line (`craze new: <alias> is deprecated; use <replacement>`) and, with
+`--json`, a top-level [`warnings`](../reference/cli.md#model-notices) array. A
+program that reads stderr line by line, or rejects unknown keys, sees them; the
+status and exit code do not change.
+
+**`craze models`** is new: the native models, each with its provider, status,
+replacement, efforts, context and whether it is funded and offered here
+(`--json` for a program, `--shipped` for the catalog alone). Each release ships
+the catalog as `models.json`, listed in `checksums.txt`.
+
 ### An OpenAI API key
 
 craze ships an [`openai` provider](../reference/configuration.md#openai):

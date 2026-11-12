@@ -15,7 +15,7 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 | Flag | Meaning |
 |---|---|
 | `--provider <id>` | `native`, `cursor`, `grok` (or `gx`). Without it `provider` in `config.toml`; none configured is exit 1 |
-| `--model`, `--effort`, `--fast` / `--no-fast` | The start settings, where the model offers them |
+| `--model`, `--effort`, `--fast` / `--no-fast` | The start settings. On `native`, an unknown or retired `--model`, an `--effort` the model does not list (with `--model`) and `--fast` (no native model has one) fail before the session starts: exit 1, kind `config`, `error.detail.reason`. `craze models <alias> --json` shows a native model's efforts. ACP providers ignore a setting the model does not offer |
 | `--plan` / `--ask` | Mode. `--ask` refuses edits and the shell. `--plan` refuses edits except its own plan file, lets the shell through, and **ends the turn at the plan** (`completed` with a `plan:` section, nothing implemented) |
 | `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 512 KiB (32 KiB on craze 0.2.0) is exit 2 |
 | `--remove-prompt-file` | Delete the prompt file once read |
