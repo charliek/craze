@@ -46,7 +46,7 @@ func tiered(t *testing.T) *Catalog {
 func TestLongContextRates(t *testing.T) {
 	tbl, _ := loadOver(t, tiered(t), "", "")
 	r, ok := tbl.Price("acme", "acme-fast-1")
-	want := Rates{Input: 1_000_000, Output: 2_000_000, LongContextAbove: 50_000,
+	want := Rates{Input: 1_000_000, Output: 2_000_000, CacheWrite: 1_000_000, LongContextAbove: 50_000,
 		LongContext: TierRates{Input: 4_000_000, Output: 8_000_000, CacheRead: 400_000, CacheWrite: 5_000_000}}
 	if !ok || r != want {
 		t.Fatalf("Price = %+v, %v; want %+v", r, ok, want)
@@ -54,7 +54,7 @@ func TestLongContextRates(t *testing.T) {
 	if r.LongPrompt(50_000) || !r.LongPrompt(50_001) {
 		t.Fatalf("LongPrompt(50,000) = %v, LongPrompt(50,001) = %v; want base at the threshold, long one above", r.LongPrompt(50_000), r.LongPrompt(50_001))
 	}
-	if r.Long() != want.LongContext || r.Base() != (TierRates{Input: 1_000_000, Output: 2_000_000}) {
+	if r.Long() != want.LongContext || r.Base() != (TierRates{Input: 1_000_000, Output: 2_000_000, CacheWrite: 1_000_000}) {
 		t.Fatalf("Long = %+v, Base = %+v", r.Long(), r.Base())
 	}
 	none := Rates{Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4}
@@ -448,4 +448,138 @@ input = 6.0
 	if r, _ := tbl.Price("acme", "acme-fast-1"); r.LongContext != (TierRates{Input: 6_000_000, Output: 8_000_000, CacheRead: 400_000, CacheWrite: 5_000_000}) {
 		t.Fatalf("over the shipped tier: rates %+v; want the shipped tier's own cache rates", r.LongContext)
 	}
+}
+
+// TestALeftOutCacheWriteIsTheInputRate (plan 050 C3): a cache_write rate the
+// cost leaves out is priced at the input rate, never 0 — what cache-write
+// tokens cost as input before the Responses drivers counted them apart — in
+// the base tier and the long one, whose own falls back to the long
+// cache_write, then the base cache_write, then the long input rate. A
+// cache_write written as 0 is 0, in either tier. Negative control: pricing a
+// left-out cache_write at 0, as before, fails the first and the last cases.
+func TestALeftOutCacheWriteIsTheInputRate(t *testing.T) {
+	long := func(in, cw *float64) *LongContextCost {
+		return &LongContextCost{Input: in, Output: ptr(20.0), CacheWrite: cw}
+	}
+	for _, tc := range []struct {
+		name       string
+		cost       Cost
+		base, tier int64 // the base and the long tier's cache-write rates, p$/token
+	}{
+		{"left out, no tier", Cost{Input: ptr(2.0), Output: ptr(10.0)}, 2_000_000, 0},
+		{"written", Cost{Input: ptr(2.0), CacheWrite: ptr(2.5)}, 2_500_000, 0},
+		{"written as 0", Cost{Input: ptr(2.0), CacheWrite: ptr(0.0)}, 0, 0},
+		{"the tier's own", Cost{Input: ptr(2.0), CacheWrite: ptr(2.5), LongContextAbove: ptr(int64(100)), LongContext: long(ptr(4.0), ptr(5.0))}, 2_500_000, 5_000_000},
+		{"the tier's left out, the base written", Cost{Input: ptr(2.0), CacheWrite: ptr(2.5), LongContextAbove: ptr(int64(100)), LongContext: long(ptr(4.0), nil)}, 2_500_000, 2_500_000},
+		{"both left out", Cost{Input: ptr(2.0), LongContextAbove: ptr(int64(100)), LongContext: long(ptr(4.0), nil)}, 2_000_000, 4_000_000},
+		{"both left out, no long input", Cost{Input: ptr(2.0), LongContextAbove: ptr(int64(100)), LongContext: long(nil, nil)}, 2_000_000, 2_000_000},
+		{"the base written as 0", Cost{Input: ptr(2.0), CacheWrite: ptr(0.0), LongContextAbove: ptr(int64(100)), LongContext: long(ptr(4.0), nil)}, 0, 0},
+		{"the tier's written as 0", Cost{Input: ptr(2.0), LongContextAbove: ptr(int64(100)), LongContext: long(ptr(4.0), ptr(0.0))}, 2_000_000, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := tc.cost.Clone()
+			r := ratesFromCost(&tc.cost)
+			if r.CacheWrite != tc.base || (tc.cost.LongContext != nil && r.LongContext.CacheWrite != tc.tier) {
+				t.Fatalf("cache-write rates %d and %d; want %d and %d", r.CacheWrite, r.LongContext.CacheWrite, tc.base, tc.tier)
+			}
+			if !reflect.DeepEqual(&tc.cost, before) {
+				t.Fatal("pricing filled in the written cost")
+			}
+		})
+	}
+	// Through a load, a model whose cost leaves cache_write out prices it at
+	// its input rate; one whose file writes 0 does not.
+	tbl, _ := loadOver(t, tiered(t), "", `version = 1
+
+[models."acme/big".cost]
+input = 3.0
+output = 6.0
+cache_write = 0.0
+`)
+	wantWarnings(t, tbl)
+	if r, _ := tbl.Price("acme", "acme-fast-1"); r.CacheWrite != 1_000_000 || r.LongContext.CacheWrite != 5_000_000 {
+		t.Errorf("acme/fast: cache writes at %d and %d; want its input rate and its tier's own", r.CacheWrite, r.LongContext.CacheWrite)
+	}
+	if r, _ := tbl.Price("acme", "acme-big-1"); r.CacheWrite != 0 || r.Input != 3_000_000 {
+		t.Errorf("acme/big: %+v; want the cache_write = 0 it wrote", r)
+	}
+}
+
+// TestALowerWindowTurnsAnInheritedTierOff (plan 050 C3): a user's entry for a
+// shipped model with a long-context tier that lowers context_window below the
+// threshold, writing no long_context_above, stands with the tier off — no
+// prompt could reach it — and one warning naming long_context_above, instead
+// of the whole entry being dropped. The table saves it as
+// long_context_above = 0 and loads back the same, with no warning. The
+// controls: a window at the threshold, or an entry that writes its own
+// threshold, keeps a tier and warns of nothing; an entry whose own threshold
+// is above its window is still refused, the shipped entry standing. Negative
+// control: without the rule the first entry is dropped with a warning, the
+// shipped window standing.
+func TestALowerWindowTurnsAnInheritedTierOff(t *testing.T) {
+	const alias = "openai/gpt-6-luna"
+	dir := writeFiles(t, "", "version = 1\n\n[models.\""+alias+"\"]\ncontext_window = 200000\n")
+	tbl, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWarnings(t, tbl, []string{`models."openai/gpt-6-luna".cost`, "long_context_above", "272000", "200000", "the long-context tier is off"})
+	check := func(tbl *Table) {
+		t.Helper()
+		m := tbl.Models[alias]
+		if m.ContextWindow != 200000 || m.Cost == nil || m.Cost.LongContext != nil || m.Cost.LongContextAbove == nil ||
+			*m.Cost.LongContextAbove != 0 || deref(m.Cost.Input) != 0.1 || deref(m.Cost.CacheWrite) != 0.125 {
+			t.Fatalf("%s = window %d, cost %+v; want the lower window, the base rates and no tier", alias, m.ContextWindow, m.Cost)
+		}
+		if r, ok := tbl.Price(OpenAIProvider, "gpt-6-luna"); !ok || r.LongContextAbove != 0 || r.LongPrompt(1<<40) {
+			t.Fatalf("%s prices at %+v, %v; want no tier", alias, r, ok)
+		}
+	}
+	check(tbl)
+	if err := tbl.Validate(); err != nil {
+		t.Fatalf("the merged table is not valid: %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "native")
+	if err := Save(out, tbl); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(out, ModelsFile)); err != nil ||
+		!strings.Contains(string(b), "[models.\"openai/gpt-6-luna\".cost]\ninput = 0.1\noutput = 0.5\ncache_read = 0.01\ncache_write = 0.125\nlong_context_above = 0\n") {
+		t.Fatalf("the saved entry (%v):\n%s", err, b)
+	}
+	again, err := Load(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWarnings(t, again)
+	check(again)
+
+	for _, tc := range []struct {
+		name, entry string
+		above       int64
+	}{
+		{"a window at the threshold", "context_window = 272000\n", 272000},
+		{"a threshold of the entry's own", "context_window = 200000\n\n[models.\"" + alias + "\".cost]\nlong_context_above = 150000\n", 150000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, err := Load(writeFiles(t, "", "version = 1\n\n[models.\""+alias+"\"]\n"+tc.entry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWarnings(t, tbl)
+			if r, _ := tbl.Price(OpenAIProvider, "gpt-6-luna"); r.LongContextAbove != tc.above || r.LongContext.Input != 200_000 {
+				t.Fatalf("rates %+v; want the tier above %d", r, tc.above)
+			}
+		})
+	}
+	t.Run("a threshold of the entry's own above its window", func(t *testing.T) {
+		tbl, err := Load(writeFiles(t, "", "version = 1\n\n[models.\""+alias+"\"]\ncontext_window = 200000\n\n[models.\""+alias+"\".cost]\nlong_context_above = 250000\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWarnings(t, tbl, []string{"long_context_above", "craze's shipped entry is used"})
+		if m := tbl.Models[alias]; m.ContextWindow != 1048576 || deref(m.Cost.LongContextAbove) != 272000 {
+			t.Fatalf("%s = window %d, cost %+v; want the shipped entry", alias, m.ContextWindow, m.Cost)
+		}
+	})
 }

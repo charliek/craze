@@ -383,8 +383,9 @@ model with a [context default](../reference/configuration.md#native-context-defa
 stream's usage section, the waiting commands' `usage`), the status row's `NN%
 ctx` and the waiting footer's `context x/y` are that default, not the window,
 and automatic compaction runs at its share of it. The window sent to the
-provider and the price do not change. No model this release ships has one;
-`default_context = 0` under a model in `models.toml` turns a later one off.
+provider and the price do not change. The [OpenAI](#an-openai-api-key) models
+have one, 272,000 tokens; `default_context = 0` under a model in `models.toml`
+turns it off.
 `default_context` is a new `models.toml` key: a file that writes it does not
 load in an older craze.
 
@@ -411,6 +412,80 @@ replacement.
 ones you configured (`[subagents]` model and tiers, `default_model`, the
 parent's own model). The "Unknown model" answer used to list every alias of
 the table, funded or not.
+
+### An OpenAI API key
+
+craze ships an [`openai` provider](../reference/configuration.md#openai):
+OpenAI's own API on an API key, billed per token, with four models
+(`openai/gpt-6.1-sol`, `openai/gpt-6-astra`, `openai/gpt-6.1-terra`,
+`openai/gpt-6-luna`). It is not the ChatGPT plan, which is unchanged.
+
+- **An exported `OPENAI_API_KEY` now funds craze.** Its models are in
+  `/model`, and a session may run on them. To keep craze off it, write
+  `env_keys = []` under `[providers.openai]` in `providers.toml`. The variable
+  was already kept out of the commands a native session runs, as every key
+  variable is.
+- **A machine with only that variable starts.** It was `needs setup` with no
+  key; a new session now starts on `openai/gpt-6.1-sol`. A machine on which
+  another provider's start model resolves starts where it did: `openai` is
+  last in the provider order.
+- **Two machines with the variable do move**, both only when nothing is
+  remembered and no `default_model` is pinned:
+    - one whose only funded models are your own (a local provider, say) used
+      to start on the first of them by alias, the last resort; it now starts
+      on `openai/gpt-6.1-sol`, a paid model, because a provider's start model
+      is tried before the last resort. An exported `ANTHROPIC_API_KEY`
+      already does the same.
+    - one with a written `provider_order` that leaves `openai` out: its start
+      model is never tried, but the last resort still considers every funded
+      model by alias, and `openai/gpt-6-astra` sorts before `openrouter/…`
+      and most others.
+
+    To opt out, write `env_keys = []` under `[providers.openai]` in
+    `providers.toml`, or pin the model you want with `default_model`.
+- **A written `provider_order` must name `openai`** for a new session to start
+  on its start model.
+- **Your own `[providers.openai]` or `openai/...` entries** now merge over the
+  shipped ones ([how the files merge](../reference/configuration.md#how-the-files-merge)):
+  an entry that only sets an `api_key` inherits `env_keys`, so an exported
+  `OPENAI_API_KEY` now wins over that key; one that changes `driver` or
+  `base_url` without `env_keys` takes nothing from the variable. A model entry
+  of yours under one of the four aliases changes only the keys it writes.
+- **Cache writes are counted and priced** on the Responses API routes (the
+  OpenAI key's, Meta's and the ChatGPT plan's): tokens a request writes to the
+  provider's cache are cache writes in the usage report, where they were
+  input. A model with no `cache_write` rate prices them at its input rate, so
+  Meta's and your own models cost what they did; `cache_write = 0` written out
+  prices them at 0.
+- **A 429 or an in-stream error that says the account's credit or spend
+  limit is gone** ends the turn at once, kind `quota`, on the
+  `openai-responses` driver: OpenAI's
+  `insufficient_quota`, `credit_balance_exhausted`,
+  `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` and
+  `organization_usage_limit_exceeded`, in its code or its type. It used to be
+  sent again in the turn first, and the four new codes were kind `provider`,
+  retryable.
+- **A 403 on a key provider but Anthropic's** reads `native: <Name> refused the
+  request (HTTP 403): <the provider's message>; if the API key is the problem,
+  replace it with "craze auth login <id>"`. It read `<Name> rejected the API
+  key (HTTP 403)`, without the provider's message. Its kind is still `auth`.
+- **A 400 or 403 whose code is `model_not_found`** is kind `model_not_found` on
+  every key provider but Anthropic's; it was `provider` (a 400) or `auth` (a
+  403).
+- **An overload inside the stream** (`server_is_overloaded`,
+  `service_unavailable_error`) is retried before any output, and after it as a
+  server's fault, like a server error.
+- **A `models.toml` entry that lowers a shipped model's `context_window`**
+  below its long-context tier's threshold, writing no `long_context_above`,
+  now stands with the tier off and one warning. It was dropped whole, with a
+  warning, the shipped entry used.
+- **A session on the `openai` provider cannot be reopened by an older craze**:
+  its transcript keeps each message's phase in a form older versions do not
+  read (they have no `openai` provider either). Sessions on every other
+  provider keep their transcripts as before.
+- **The Claude Code plugin's `craze:sol` and `craze:astra`** stay on the
+  ChatGPT plan. With an OpenAI key alone, run `craze:delegate` with `target:
+  native openai/gpt-6.1-sol effort=high` ([Claude Code](claude-code.md#the-agents)).
 
 ## Since v0.1.1
 

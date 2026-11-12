@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/errkind"
@@ -3781,9 +3782,13 @@ const (
 // provider a rejected key is for, and where that key can come from.
 func (s *nativeSession) phraseTurn(err error) error {
 	s.mu.Lock()
-	table := s.table
+	table, hs := s.table, s.hs
 	s.mu.Unlock()
-	return phraseTurnErrorIn(err, table)
+	var red func(string) string
+	if hs != nil {
+		red = hs.Redact
+	}
+	return phraseTurnErrorRed(err, table, red)
 }
 
 // phraseTurnError is phraseTurnErrorIn with no model table: a rejected key's
@@ -3800,6 +3805,22 @@ func phraseTurnError(err error) error { return phraseTurnErrorIn(err, nil) }
 // table: a rejected key's advice names its provider and variables from it
 // (rejectedKeyText).
 func phraseTurnErrorIn(err error, table *modeltable.Table) error {
+	return phraseTurnErrorRed(err, table, nil)
+}
+
+// maxRefusalMessage bounds the provider's own words a 403 shows (refusedText):
+// the harness's bound on a provider message, which sanitizing and redacting
+// may only shorten.
+const maxRefusalMessage = 300
+
+// phraseTurnErrorRed is phraseTurnErrorIn with red, the session's redactor
+// over every key it knows (harness.Session.Redact), nil when there is none.
+// The provider's own words a 403 shows go through it after they are
+// sanitized as well as before (nativeSafe.line, plan 050 C3 review): the
+// harness scrubbed them whole, but sanitizing drops format characters (a
+// zero-width space, a soft hyphen) and so can put back together a key the
+// provider echoed split by one.
+func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) string) error {
 	phrase := func(msg string) error { return &nativeError{msg: msg, cause: err} }
 	if errors.Is(err, harness.ErrEmptyStep) {
 		// No output ceiling is ever sent on the ChatGPT plan (its route
@@ -3847,6 +3868,12 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 			msg += ": " + m
 		}
 		return phrase(msg)
+	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT && pe.StatusCode == 403:
+		// Another key-funded provider's 403 (plan 050 C3) is as often the
+		// account's as the key's — OpenAI's for an organization not verified
+		// for a model, or a country it does not serve — so its own words
+		// come first, and the key's advice after them.
+		return phrase(refusedText(table, pe.Provider, status, providerWords(pe.Message, red)))
 	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
 		// The plan has no key to check: its 401 is phraseChatGPT's, and any
 		// other refusal it flags is said as the provider's own, below.
@@ -3888,6 +3915,59 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 // names the provider by its display name, its id for the command, and its
 // variables by name, never a value.
 func rejectedKeyText(table *modeltable.Table, id, status string) string {
+	name, advice := keyAdvice(table, id)
+	return fmt.Sprintf(`native: %s rejected the API key%s; %s`, name, status, advice)
+}
+
+// providerWords is a provider's message as a 403 shows it: on one line,
+// sanitized, with every format character dropped (a soft hyphen the
+// sanitizer keeps draws as nothing, so a key split by one reads whole), then
+// redacted after both as well as before when there is a redactor (red), and
+// bounded. With no redactor — a caller with no session — a message the
+// cleaning changed is not shown at all: it held a character that could split
+// a key the scrub then missed.
+func providerWords(msg string, red func(string) string) string {
+	clean := func(s string) string { return dropFormat(sanitizeLine(s)) }
+	var out string
+	switch {
+	case red != nil:
+		out = red(clean(red(msg)))
+	case clean(msg) != strings.Join(strings.Fields(msg), " "):
+		return ""
+	default:
+		out = clean(msg)
+	}
+	return truncateUTF8(out, maxRefusalMessage)
+}
+
+// dropFormat is s without its format characters (Unicode Cf): zero-width
+// spaces and joiners, soft hyphens, bidi marks.
+func dropFormat(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// refusedText is a key-funded provider's 403 (plan 050 C3): the provider's
+// own message first, msg (already sanitized, "" for none), then the key's
+// advice, since a 403 may as well be the account's — a model it may not use,
+// a region it is not served in — as the key's.
+func refusedText(table *modeltable.Table, id, status, msg string) string {
+	name, advice := keyAdvice(table, id)
+	out := fmt.Sprintf("native: %s refused the request%s", name, status)
+	if msg != "" {
+		out += ": " + msg
+	}
+	return out + "; if the API key is the problem, " + advice
+}
+
+// keyAdvice is a provider's display name, sanitized, and what to do about
+// its key: store another with craze auth login, or check the variables it
+// may come from, by name, never a value.
+func keyAdvice(table *modeltable.Table, id string) (name, advice string) {
 	name, envs := id, []string(nil)
 	if table != nil {
 		if p, ok := table.Providers[id]; ok {
@@ -3897,12 +3977,11 @@ func rejectedKeyText(table *modeltable.Table, id, status string) string {
 			}
 		}
 	}
-	msg := fmt.Sprintf(`native: %s rejected the API key%s; replace it with "craze auth login %s"`,
-		sanitizeLine(name), status, sanitizeLine(id))
+	advice = fmt.Sprintf(`replace it with "craze auth login %s"`, sanitizeLine(id))
 	if len(envs) > 0 {
-		msg += ", or check " + sanitizeLine(joinEnvNames(envs))
+		advice += ", or check " + sanitizeLine(joinEnvNames(envs))
 	}
-	return msg
+	return sanitizeLine(name), advice
 }
 
 // joinEnvNames is variable names as a choice: "A", "A or B", "A, B or C".

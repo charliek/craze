@@ -819,6 +819,7 @@ func (m *merger) model(alias string, o modelOverlay) {
 	var mod Model
 	if isShipped {
 		mod = overlayModel(shipped, o)
+		m.unreachableTier(alias, o, &mod)
 	} else {
 		mod = o.complete()
 	}
@@ -881,6 +882,29 @@ func (m *merger) model(alias string, o modelOverlay) {
 		m.redundant(&FileError{File: m.mpath, Table: modelTable(alias),
 			Reason: "repeats craze's shipped entry — delete it to follow craze's updates"})
 	}
+}
+
+// unreachableTier turns off the long-context tier mod, a shipped model with
+// the user's entry o laid over it, inherited, when the entry lowered its
+// context_window below the tier's threshold without writing
+// long_context_above (plan 050 C3): no prompt can reach the tier then, and
+// left on it would fail the merged model's validation (validateTier), which
+// drops the whole entry. The entry stands, its tier off as
+// `long_context_above = 0` turns it off — which is how Save writes it — and
+// one warning names the key.
+func (m *merger) unreachableTier(alias string, o modelOverlay, mod *Model) {
+	c := mod.Cost
+	if c == nil || o.ContextWindow == nil || (o.Cost != nil && o.Cost.LongContextAbove != nil) {
+		return
+	}
+	above := deref(c.LongContextAbove)
+	if above <= 0 || mod.ContextWindow <= 0 || above <= int64(mod.ContextWindow) {
+		return
+	}
+	c.LongContextAbove, c.LongContext = new(int64), nil
+	m.warn(&FileError{File: m.mpath, Table: costTable(alias), Key: "long_context_above",
+		Reason: fmt.Sprintf("craze's shipped %d is above the entry's context_window, %d: no prompt could reach it", above, mod.ContextWindow)},
+		"the long-context tier is off; write long_context_above to keep one")
 }
 
 // sameAsShippedModel reports whether every field o writes (source aside)

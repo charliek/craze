@@ -89,11 +89,18 @@ type OutputItem struct {
 	// "completed" or "incomplete" (an item cut short), "" when it gave none.
 	// The key route holds an item that ended incomplete (ItemCut).
 	Status string
+	// Phase is a message's phase as its event gave it (plan 050 C3):
+	// "commentary" for a note the model wrote on its way to a tool call,
+	// "final_answer" for its answer, "" when it gave none. OpenAI's models
+	// send it, and Meta's; it is kept only as the short identifier it is
+	// meant to be.
+	Phase string
 }
 
-// Usage is what a response reported it used, as it reported it. Input
-// includes cached and cache-write tokens, and Output includes reasoning
-// tokens.
+// Usage is what a response reported it used, as it reported it.
+// InputTokens includes the cached and the cache-write tokens, each a part of
+// it (OpenAI's usage, seen live 2026-11-11, plan 050), and OutputTokens
+// includes the reasoning tokens.
 type Usage struct {
 	InputTokens      int64
 	CachedTokens     int64
@@ -570,6 +577,7 @@ type wireItem struct {
 	Namespace        string `json:"namespace"`
 	Arguments        string `json:"arguments"`
 	Status           string `json:"status"`
+	Phase            string `json:"phase"`
 }
 
 // UnmarshalJSON reads an item's type first, and its other fields only for
@@ -605,6 +613,7 @@ func (w *wireItem) output() OutputItem {
 		Namespace:        w.Namespace,
 		Arguments:        w.Arguments,
 		Status:           w.Status,
+		Phase:            ident(w.Phase),
 	}
 	var text strings.Builder
 	for _, c := range w.Content {

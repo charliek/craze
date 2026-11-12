@@ -859,7 +859,7 @@ func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	authNative(t)
 	f := useFakeSignIn(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-6]: ", "2")
+		typeAtPrompt(t, tail, ptmx, "Provider [1-7]: ", "2")
 		typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
 	}, "auth", "login")
 	if err != nil {
@@ -869,7 +869,7 @@ func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	if strings.Contains(got, "API key") {
 		t.Fatalf("a key was asked for:\n%s", got)
 	}
-	for _, want := range []string{"Provider [1-6]: 2\n", redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"} {
+	for _, want := range []string{"Provider [1-7]: 2\n", redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the screen lacks %q:\n%s", want, got)
 		}

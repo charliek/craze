@@ -801,6 +801,7 @@ from, tried in order:
 | `chatgpt` | ChatGPT plan | none: [signs in with ChatGPT](#the-chatgpt-plan) |
 | `fireworks` | Fireworks | `FIREWORKS_API_KEY` |
 | `meta` | Meta | `META_API_KEY` |
+| `openai` | OpenAI | `OPENAI_API_KEY` ([OpenAI](#openai)) |
 | `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
 | `zai-coding-plan` | Z.AI Coding Plan | `ZHIPU_API_KEY`, `ZAI_API_KEY` |
 
@@ -809,7 +810,7 @@ in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
 a session's `/model` lists those whose provider has a key ([which models, in
 what order](tui.md#model-dialog)). Anthropic's are also the account's own:
-see [Anthropic](#anthropic).
+see [Anthropic](#anthropic). OpenAI's, on an API key, are in [OpenAI](#openai).
 
 OpenRouter's models are its `~<family>-latest` routers where OpenRouter has
 one: `openrouter/gpt-sol-latest` sends `~openai/gpt-sol-latest`, which
@@ -868,11 +869,24 @@ starts](#model-memory-recentjson)):
 | 4 | `openrouter` | `openrouter/gemini-flash-latest` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
 | 6 | `anthropic` | the newest Opus the account lists (`anthropic/claude-opus-5-5` until it lists a newer one), at `medium` |
+| 7 | `openai` | `openai/gpt-6.1-sol`, at `medium` |
 
 So a machine with only a Fireworks key starts on `fireworks/ember-1`, one with
 only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
-`anthropic/claude-opus-5-5`, and one signed in to the ChatGPT plan with a
-Fireworks key as well on the plan's model. `provider_order` in your
+`anthropic/claude-opus-5-5`, one with only an OpenAI key on
+`openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan with a Fireworks
+key as well on the plan's model. OpenAI's key is last: a machine on which
+another provider's start model resolves starts there, as before. It does
+move two kinds of machine when `OPENAI_API_KEY` is exported (for another
+tool, say): one whose only funded models are your own (a local provider, say)
+used to start on the first of them by alias, and now starts on
+`openai/gpt-6.1-sol`, a paid model, since a provider's start model is tried
+before that last resort (an exported `ANTHROPIC_API_KEY` already did the
+same); and one whose `provider_order` leaves `openai` out, where no listed
+provider's start resolves, falls to the first funded model by alias, which
+may be `openai/gpt-6-astra`. To keep craze off the key, write `env_keys = []`
+under `[providers.openai]` in `providers.toml`; to start on a model of your
+choosing, set `default_model`. `provider_order` in your
 `models.toml` changes the order; `default_model` picks one model outright.
 
 With the catalog, a machine needs only a key: store one with
@@ -964,7 +978,12 @@ store a key with [`/connect`](tui.md#connect).
   rate on its own; one you leave out keeps it. An inherited rate cannot be
   cleared. A [long-context tier](#long-context-pricing) merges the same way —
   `long_context_above` and each `[cost.long_context]` rate on its own — and
-  `long_context_above = 0` turns a shipped tier off, its rates with it.
+  `long_context_above = 0` turns a shipped tier off, its rates with it. An
+  entry that lowers a shipped model's `context_window` below its tier's
+  `long_context_above`, and writes no `long_context_above` of its own, keeps
+  the lower window with the tier off — no prompt could reach it — and warns
+  once, naming `long_context_above`; craze saves it as `long_context_above =
+  0`. Before, the whole entry was dropped with a warning.
 - **Context default.** `default_context` merges as `context_window` does, and
   `default_context = 0` turns a shipped one off ([Native context
   default](#native-context-default)).
@@ -1032,7 +1051,11 @@ names as a key variable, even one no provider takes its key from any more —
 a shipped provider's after you point it at your own endpoint or give it
 `env_keys` of your own: it no longer funds anything, but its value is still a
 credential. A provider with no usable key leaves its models unusable, not the
-others.
+others. A shipped provider's variable funds it as soon as it is exported:
+`OPENAI_API_KEY`, which many shells set for other tools, funds the
+[`openai`](#openai) provider. `env_keys = []` under the provider in
+`providers.toml` opts out: the variable then funds nothing, and is still kept
+out of the commands a session runs.
 
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout
@@ -1045,7 +1068,10 @@ first use, as `native: <Name> rejected the API key (HTTP 401); replace it with
 "craze auth login <id>"`, followed by `, or check` and the provider's key
 variables when it has any — except that `craze auth login anthropic` then
 fetches the [account's model list](#anthropic), so a key Anthropic rejects is
-a note there and then. When they write, `login`,
+a note there and then. A 403 on any key provider but Anthropic's says the
+provider's own words first — it may as well be the account's as the key's —
+as `native: <Name> refused the request (HTTP 403): <the provider's message>;
+if the API key is the problem, replace it with "craze auth login <id>"`. When they write, `login`,
 `logout` and `/connect`:
 
 - **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
@@ -1338,13 +1364,88 @@ model that takes none answers every request with an HTTP 400 about the
 thinking field. Use a model `/model` offers instead: those are the ones the
 account lists, and craze knows each.
 
+### OpenAI
+
+The catalog's `openai` provider, **OpenAI**, runs OpenAI's models on OpenAI's
+own API with an API key, billed per token to the key's account at OpenAI's
+prices — not on a ChatGPT subscription, which is [the ChatGPT
+plan](#the-chatgpt-plan). Connect it like any key provider: export
+`OPENAI_API_KEY`, or store a key with [`craze auth login
+openai`](cli.md#craze-auth-login) or [`/connect`](tui.md#connect). It is the
+last provider in the [start order](#the-shipped-catalog), so it is where a new
+session starts only on a machine with no other provider funded.
+
+**Its models**, each on OpenAI's id of the same name:
+
+| Alias | Efforts | Default effort | $ per 1M input, cached input, cache write, output | Above 272,000 input tokens |
+|-------|---------|----------------|------------------------------|-----------|
+| `openai/gpt-6.1-sol` (its start) | `low` to `max` | `medium` | 2.00, 0.10, 2.50, 10.00 | 4.00, 0.20, 5.00, 15.00 |
+| `openai/gpt-6-astra` | `low` to `max` | `low` | 10.00, 1.00, 12.50, 50.00 | 20.00, 2.00, 25.00, 75.00 |
+| `openai/gpt-6.1-terra` | `none` to `max` | `medium` | 1.00, 0.05, 1.25, 5.00 | 2.00, 0.10, 2.50, 7.50 |
+| `openai/gpt-6-luna` | `none` to `max` | `medium` | 0.10, 0.01, 0.125, 0.50 | 0.20, 0.02, 0.25, 0.75 |
+
+Each takes images, has a context window of 1,048,576 tokens and an [output
+ceiling](#native-output-ceiling) of 128,000, OpenAI's own, which bounds
+reasoning as well. OpenAI documents a window of 1,050,000; the API was
+measured to refuse input of 921,907 tokens, so craze's is a little smaller,
+and a request its compaction lets through is one the API takes. None of them
+offers `minimal`, and Sol and Astra do not offer `none`: OpenAI refuses those
+with an HTTP 400. Their names end in `(OpenAI)`, so `--model gpt-6.1-sol` alone still names the
+ChatGPT plan's model; `--model openai/gpt-6.1-sol` names this one.
+
+**272,000 tokens.** OpenAI prices a request whose input is over 272,000 tokens
+at twice the input and cache rates and 1.5 times the output, for the whole
+request. So each model has a [context default](#native-context-default) of
+272,000: a session works within it — it compacts at 85% of it, 231,200 tokens
+— while the window sent to OpenAI stays the true one, and a request that runs
+over is priced at the [long-context tier](#long-context-pricing) above.
+`default_context = 0` under the model in `models.toml` works within the whole
+window instead.
+
+**Cache writes.** OpenAI charges for writing the prompt cache, 1.25 times the
+input rate, and reports the tokens written apart from the rest of the input:
+craze counts them as cache writes and prices them at the `cache_write` rate
+([Native cost](#native-cost)).
+
+**Requests** go to `https://api.openai.com/v1/responses` on the [Responses API
+driver](#the-responses-api-driver), with the session's id as
+`prompt_cache_key`, the reasoning's encrypted content replayed on the next
+request, and each message the model wrote replayed with its `phase`
+(`commentary` for a note on its way to a tool call, `final_answer` for an
+answer), which OpenAI asks a caller replaying its own history to keep.
+
+**Its entry is not locked**, unlike Anthropic's: a `[providers.openai]` entry
+may set a `driver` or `base_url` of its own under the usual [merge
+rules](#how-the-files-merge) — one that does takes no key from
+`OPENAI_API_KEY` unless it writes `env_keys` too. An entry of yours that
+only sets an `api_key` inherits `env_keys`, so an exported `OPENAI_API_KEY`
+still wins over it. `env_keys = []` opts out of the variable.
+
+**What craze cannot know.** OpenAI's model list (`GET /v1/models`) names ids
+alone — no window, effort or price — so craze imports nothing from it: an
+OpenAI model craze does not ship is one you [add](#your-two-files) with its
+`provider = "openai"`, `wire_model`, efforts and cost.
+
+**Failures** are the driver's, plus OpenAI's own: a 429, or an error inside
+the stream, that says the account's credit or spend limit is gone
+(`insufficient_quota`,
+`credit_balance_exhausted`, `organization_spend_limit_exceeded`,
+`project_spend_limit_exceeded`, `organization_usage_limit_exceeded`, as its
+code or its type, whatever the other says) ends the turn at once as kind
+[`quota`](cli.md#failure-kinds), not retried; a 400 or
+403 with code `model_not_found` (a model the Responses API does not take, or
+one the key's project may not use) is kind `model_not_found`; another 403 (an
+organization not verified for a model, a country OpenAI does not serve) shows
+OpenAI's message, then the key's advice.
+
 ### The Responses API driver
 
 The `openai-responses` driver speaks the OpenAI Responses API
 (`POST <base_url>/responses`) with an API key, through craze's own client. It
-is tested against Meta's Responses API, and the shipped `meta` provider uses
-it. Any provider of yours may use it too: give it a `base_url`, and fund it as
-any key provider, from `env_keys` or an inline `api_key`.
+is tested against Meta's Responses API and OpenAI's own, and the shipped `meta`
+and [`openai`](#openai) providers use it. Any provider of yours may use it
+too: give it a `base_url`, and fund it as any key provider, from `env_keys` or
+an inline `api_key`.
 
 **Where the key may go.** The driver sends a static key, so its `base_url`
 must be `https`, on any host, or plain `http` only to a loopback IP address
@@ -1371,13 +1472,29 @@ function, and:
 - the [output ceiling](#native-output-ceiling) as `max_output_tokens`;
 - the session's id as `prompt_cache_key`, on every request a session sends —
   each step, `/btw`, the summarizer — and each sub-agent's own id on its own,
-  since Meta caches nothing without a key.
+  since Meta caches nothing without a key;
+- on the `openai` provider alone, each replayed message's `phase`, when it is
+  `commentary` or `final_answer`. Only that provider's sessions keep a
+  message's phase in their transcript; Meta's stream gives a phase too, but
+  craze neither keeps nor sends it there, so a Meta or ChatGPT plan session's
+  transcript is what an older craze can read.
 
-**Failures.** A rejected key (HTTP 401 or 403) ends the turn with `native:
+The usage it reads counts the prompt cache's writes (`cache_write_tokens`)
+apart from the input, as cache writes, priced at the model's `cache_write`
+rate ([Native cost](#native-cost)).
+
+**Failures.** A rejected key (HTTP 401) ends the turn with `native:
 <provider> rejected the API key` and how to replace it, after one request; a
-404 says the provider does not serve the model's `wire_model`; a 400 is not
-retried. A 429 or a 5xx, and a rate limit or server error inside the stream,
-are retried before any output, honouring the provider's `Retry-After`. An
+403 with `native: <provider> refused the request (HTTP 403): <its message>`
+and the same advice after it. A 404, or a 400 or 403 whose code is
+`model_not_found`, says the provider does not serve the model's `wire_model`;
+a 400 is not retried. A 429 or a 5xx, and a rate limit, a server error or an
+overload (`server_is_overloaded`, `service_unavailable_error`) inside the
+stream, are retried before any output, honouring the provider's
+`Retry-After` — but a 429 or an in-stream error whose code or type says the
+account's credit or spend limit is gone ([OpenAI's five](#openai)) is final,
+whatever its other name says: it ends the turn after one request, kind
+`quota`. An
 answer that has begun is [retried](#native-provider-retries) only for a server
 error or a transport's failure. A response cut short by the output
 ceiling ends the turn as on Chat Completions, stopped at `max_tokens` with the
@@ -1574,13 +1691,15 @@ on the first of:
    fails for another reason is still used, so the session says why);
 3. for each provider in the provider order — your `provider_order`, else the
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
-   Fireworks, OpenRouter, Meta, Anthropic — that has a key, the provider's
-   start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
+   Fireworks, OpenRouter, Meta, Anthropic, OpenAI — that has a key, the
+   provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
    `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/ember-1`;
    `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
-   Opus the Anthropic account lists);
+   Opus the Anthropic account lists; `openai/gpt-6.1-sol`);
 4. otherwise the first model, by alias, whose provider has a key and that is
-   not [deprecated](#deprecated-models) — with a note saying so;
+   not [deprecated](#deprecated-models) — with a note saying so. This step
+   considers every funded model, a provider your `provider_order` leaves out
+   included;
 5. otherwise, when the only models funded are deprecated, the first of them by
    alias — with a note saying it is deprecated and what replaces it.
 
@@ -1699,7 +1818,7 @@ one stays, with a warning naming its replacement; and an `effort` the kept
 On the native provider a model may have a **context default**: the context a
 session on it works within, smaller than its context window. The catalog
 sets one where working in the whole window costs more than it gives (a price
-tier above a size, say). It decides two things, and nothing else:
+tier above a size, say): 272,000 tokens on the [OpenAI](#openai) models. It decides two things, and nothing else:
 
 - [automatic compaction](tui.md#compaction): a session compacts at
   `threshold_percent` (85% by default) of the context default instead of the
@@ -1797,7 +1916,7 @@ section](protocol.md#usage) price a session's spend from:
 input       = 0.60   # $ per 1,000,000 uncached input tokens
 output      = 2.50   # $ per 1,000,000 output tokens (reasoning included)
 cache_read  = 0.15
-cache_write = 0.0
+cache_write = 0.0    # 0 written out; left out, it is the input rate
 ```
 
 Every key is optional and independent; a model with no `[cost]` table saves
@@ -1808,8 +1927,9 @@ carry none, like the ChatGPT plan's: both are flat-rate plans. Anthropic's
 shipped models carry Anthropic's prices — `cache_read` its cache hit,
 `cache_write` its five-minute cache write, the only one craze asks for — and a
 model only the Anthropic account's list names carries none until a release
-adds it ([Anthropic](#anthropic)). Haiku 5.5 also has a long-context tier,
-below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
+adds it ([Anthropic](#anthropic)). The [OpenAI](#openai) models carry
+OpenAI's, `cache_write` its cache write. Haiku 5.5 and the OpenAI models also
+have a long-context tier, below. Each rate is dollars per 1,000,000 tokens, from 0 up to $10,000 — a
 rate outside that range, or one that is not a finite number (`nan`, `inf`), is
 refused at load.
 
@@ -1824,6 +1944,15 @@ lookup — not built once and cached at load. Two priced aliases of the same
 identity that set a *different* `cost` still load, with a warning naming
 both and saying which one's price is used. An identity with no priced alias
 is simply unpriced — its usage is still counted in tokens, but adds no cost.
+
+**Cache writes.** A model's `cache_write` rate prices the tokens a request
+writes to the provider's prompt cache, which Anthropic's and the Responses API
+drivers count apart from the rest of the input. A `cache_write` left out is
+priced at the model's `input` rate, never 0: those tokens are input the
+provider was sent, and before the Responses drivers counted them apart they
+were priced as input, so a model priced before then costs what it did. A
+provider that reports cache writes and charges nothing for them takes
+`cache_write = 0`, written out, which is honoured.
 
 The `cost` table is your own entry in `models.toml`, the same as
 [`[compaction]`](#native-compaction) above: craze reads it and never rewrites
@@ -1868,15 +1997,17 @@ cache_write = 0.625
   and, on a shipped model, by the shipped tier — falls back to the model's
   base rate for it, never to 0: a tier with `input` and `output` alone prices
   a long request's cache reads and writes at the base `cache_read` and
-  `cache_write`. A problem names the model, the table and the key.
+  `cache_write`. A long `cache_write` with no base one to fall back to is the
+  long `input` rate. A problem names the model, the table and the key.
 - **On a shipped model** the keys are an overlay like the rates: a
   `long_context` rate you write replaces that rate alone, and
   `long_context_above = 0` turns the tier off, so every request is priced at
   the base rates.
 
-The shipped catalog gives a tier to Haiku 5.5 alone — the rates above, which
-are Anthropic's for prompts over 100,000 tokens. Every other shipped Anthropic
-model takes its whole context window at its standard price.
+The shipped catalog gives a tier to Haiku 5.5 — the rates above, which are
+Anthropic's for prompts over 100,000 tokens — and to the four [OpenAI](#openai)
+models, OpenAI's for input over 272,000 tokens. Every other shipped model
+takes its whole context window at its standard price.
 
 A session's transcript keeps what it needs to price the tier again on a
 resume: the part of a sub-agent's usage row, and of a compaction's usage,

@@ -89,8 +89,14 @@ const (
 	// static key, so its base_url is stricter than openai-compat's
 	// (endpointProblem, P25): https on any host, or http only to a loopback
 	// IP literal. No provider owns it. It is tested against Meta's Responses
-	// API (the plan's live facts, MR-1…16).
+	// API (the plan's live facts, MR-1…16), and OpenAI's own (plan 050).
 	DriverOpenAIResponses = "openai-responses"
+
+	// OpenAIProvider is the id of the OpenAI key's shipped provider (plan
+	// 050): OpenAI's own Responses API on DriverOpenAIResponses. Unlike
+	// AnthropicProvider it owns no driver and its entry is not locked; the
+	// driver replays a message's phase to it alone (llm, plan 050 C3).
+	OpenAIProvider = "openai"
 
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
@@ -1755,7 +1761,8 @@ func (t *Table) QualifiedAlias(raw string, normalize func(string) string) (strin
 // number of trillionths of a dollar, so that a usage's cost is exact in
 // int64 (PD22): $1 per 1,000,000 tokens is 1,000,000 p$/token. Each is the
 // model's Cost rate rounded to the nearest picodollar exactly once, by
-// ratesFromCost; a rate the Cost left unset is 0.
+// ratesFromCost; a rate the Cost left unset is 0, but for a cache write's,
+// which is the input rate (plan 050 C3).
 //
 // LongContextAbove and LongContext are the cost's one tier (plan 047 D10):
 // the threshold, 0 for no tier, and the rates a request whose prompt is
@@ -1914,23 +1921,33 @@ func sortedIdentities[V any](m map[identity]V) []identity {
 // none (plan 047 D10). A tier rate the merged table leaves out is the base
 // rate for that field (orBase): a tier written with input and output alone
 // prices a long request's cache reads and writes at the base rates, never at
-// 0, which would under-report what was spent. The fallback is resolved here
-// alone: the Cost keeps what was written, so sameAs, the same-as-shipped
-// check and the conflict warning compare that.
+// 0, which would under-report what was spent.
+//
+// A cache_write rate left out is the input rate (plan 050 C3), in the base
+// tier and the long one, never 0: a driver that reports cache writes apart
+// from its input (the Responses drivers since plan 050) counted them as input
+// before, at the input rate, so a model priced before it learned of them
+// prices them as it did. The long tier's falls back to the long cache_write,
+// then the base cache_write, then the long input rate. A cache_write written
+// as 0, for a provider that reports cache writes and charges nothing for
+// them, is 0. The fallbacks are resolved here alone: the Cost keeps what was
+// written, so sameAs, the same-as-shipped check and the conflict warning
+// compare that.
 func ratesFromCost(c *Cost) Rates {
 	r := Rates{
 		Input:      picodollarsPerToken(c.Input),
 		Output:     picodollarsPerToken(c.Output),
 		CacheRead:  picodollarsPerToken(c.CacheRead),
-		CacheWrite: picodollarsPerToken(c.CacheWrite),
+		CacheWrite: picodollarsPerToken(orBase(c.CacheWrite, c.Input)),
 	}
 	if above, l := deref(c.LongContextAbove), c.LongContext; above > 0 && l != nil {
+		longInput := orBase(l.Input, c.Input)
 		r.LongContextAbove = above
 		r.LongContext = TierRates{
-			Input:      picodollarsPerToken(orBase(l.Input, c.Input)),
+			Input:      picodollarsPerToken(longInput),
 			Output:     picodollarsPerToken(orBase(l.Output, c.Output)),
 			CacheRead:  picodollarsPerToken(orBase(l.CacheRead, c.CacheRead)),
-			CacheWrite: picodollarsPerToken(orBase(l.CacheWrite, c.CacheWrite)),
+			CacheWrite: picodollarsPerToken(orBase(l.CacheWrite, orBase(c.CacheWrite, longInput))),
 		}
 	}
 	return r

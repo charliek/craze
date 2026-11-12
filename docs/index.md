@@ -60,7 +60,8 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   ([TUI reference](reference/tui.md#effort)).
 - **Native start models.** A new native session starts on the first provider
   you have connected, in the order Z.AI, ChatGPT plan, Fireworks, OpenRouter,
-  Meta ([Configuration](reference/configuration.md#the-shipped-catalog)).
+  Meta, Anthropic, and last an OpenAI API key
+  ([Configuration](reference/configuration.md#the-shipped-catalog)).
 - **A render check.** `craze frame` renders the TUI once for tests
   ([Testing](development/testing.md#craze-frame)).
 

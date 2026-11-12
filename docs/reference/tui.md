@@ -368,7 +368,8 @@ else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
 preferred model its account lists, `fireworks/ember-1`,
 `openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
-Claude Opus the Anthropic account lists (at `medium`), in that order
+Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
+for an OpenAI key, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
 that has a key, with a note. `--model` picks the model for one start — at
@@ -1932,7 +1933,9 @@ provider's `api_key` in `providers.toml` (see
 [Keys](configuration.md#keys)). Like `craze auth login` it never checks the
 key with the provider: a wrong one shows as an error on first use. The
 [ChatGPT plan](configuration.md#the-chatgpt-plan), which takes no key, is
-signed in to instead, in the same box (below).
+signed in to instead, in the same box (below). **OpenAI** in the list is
+OpenAI's API on a key, billed per token
+([OpenAI](configuration.md#openai)); the ChatGPT plan is the subscription.
 It exists in native sessions only: in a cursor, grok or gx session it is not in
 the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
 what the last row of native's [`/model`](#model-dialog) opens, while some

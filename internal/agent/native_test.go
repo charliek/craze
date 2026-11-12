@@ -606,7 +606,7 @@ func TestNativeStartRefusals(t *testing.T) {
 		// (§3.5).
 		{name: "an empty craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
-		}, want: []string{`native: no model provider has an API key — run "craze auth login" (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set one of ANTHROPIC_API_KEY, FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to `,
+		}, want: []string{`native: no model provider has an API key — run "craze auth login" (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set one of ANTHROPIC_API_KEY, FIREWORKS_API_KEY, META_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to `,
 			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "no craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", "")
@@ -1787,6 +1787,12 @@ func TestNativesFirstPromptTitleIsADelta(t *testing.T) {
 // in it one looks (plan 018 §7 criterion 8a), and each failure is phrased as
 // its kind.
 func TestNativeWireErrorsArePhrasedWithoutTheKey(t *testing.T) {
+	splitKey := func(status int, sep string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			half := len(nativeCanary) / 2
+			jsonError(w, status, "forbidden: "+nativeCanary[:half]+sep+nativeCanary[half:])
+		}
+	}
 	echo := func(status int, prefix string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("retry-after-ms", "1") // a retried status must not wait Fantasy's 5 s
@@ -1803,7 +1809,14 @@ func TestNativeWireErrorsArePhrasedWithoutTheKey(t *testing.T) {
 		{name: "401", replies: []http.HandlerFunc{echo(401, "invalid credentials: ")}, is: harness.ErrAuth,
 			want: `native: wire rejected the API key (HTTP 401); replace it with "craze auth login wire", or check NATIVE_WIRE_KEY`},
 		{name: "403", replies: []http.HandlerFunc{echo(403, "forbidden: ")}, is: harness.ErrAuth,
-			want: `rejected the API key (HTTP 403)`},
+			want: `native: wire refused the request (HTTP 403): forbidden: Bearer [redacted]; if the API key is the problem, replace it with "craze auth login wire"`},
+		// A key split by a format character the whole-key scrub does not
+		// match, which sanitizing would join again (plan 050 C3 review): the
+		// displayed 403 is redacted after the sanitizing too.
+		{name: "403 echoing the key split by a zero-width space", replies: []http.HandlerFunc{splitKey(403, "\u200b")}, is: harness.ErrAuth,
+			want: `native: wire refused the request (HTTP 403): forbidden: `},
+		{name: "403 echoing the key split by a soft hyphen", replies: []http.HandlerFunc{splitKey(403, "\u00ad")}, is: harness.ErrAuth,
+			want: `native: wire refused the request (HTTP 403): forbidden: `},
 		{name: "404", replies: []http.HandlerFunc{echo(404, "no model for ")}, is: harness.ErrModelNotFound,
 			want: `does not serve model "wire/m" (HTTP 404)`},
 		{name: "500 twice, retried once", replies: []http.HandlerFunc{echo(500, "overloaded: "), echo(500, "still overloaded: ")},

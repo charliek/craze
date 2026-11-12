@@ -165,7 +165,7 @@ func (r Request) body(route Route) ([]byte, error) {
 			w.Tools = []wireNamespace{{Type: "namespace", Name: Namespace, Description: namespaceDescription, Tools: fns}}
 		}
 	case RouteKey:
-		w.Input = plainCalls(w.Input)
+		w.Input = keyItems(w.Input)
 		w.PromptCacheKey = r.CacheKey
 		if r.MaxOutputTokens > 0 {
 			w.MaxOutputTokens = r.MaxOutputTokens
@@ -183,18 +183,27 @@ func (r Request) body(route Route) ([]byte, error) {
 	return encode(w)
 }
 
-// plainCalls is input with each function call marked to go without a
-// namespace, as the key route's tools have none (MR-9): a copy, so the
-// caller's items are as they were.
-func plainCalls(input []Item) []Item {
+// keyItems is input as the key route sends it: each function call marked to
+// go without a namespace, as the key route's tools have none (MR-9), and each
+// assistant message marked to send its phase, when it has one the API takes
+// (plan 050 C3). A copy, so the caller's items are as they were.
+func keyItems(input []Item) []Item {
 	out := slices.Clone(input)
 	for i := range out {
-		if out[i].kind == functionCall {
+		switch out[i].kind {
+		case functionCall:
 			out[i].plain = true
+		case assistantMessage:
+			out[i].sendPhase = true
 		}
 	}
 	return out
 }
+
+// phases are the phase values an assistant message is replayed with: OpenAI
+// refuses any other with a 400 ("Supported values are: 'commentary' and
+// 'final_answer'", seen live 2026-11-11).
+var phases = map[string]bool{"commentary": true, "final_answer": true}
 
 // toolChoice is tool_choice's value: a mode as itself, a tool's name as the
 // function choice that names it.
@@ -238,7 +247,9 @@ type Item struct {
 	callID    string
 	name      string
 	arguments string
-	plain     bool // a function call sent with no namespace: the key route's (plainCalls)
+	plain     bool   // a function call sent with no namespace: the key route's (keyItems)
+	phase     string // an assistant message's phase (AssistantMessagePhase)
+	sendPhase bool   // the phase goes with the message: the key route's (keyItems)
 }
 
 type itemKind int
@@ -257,6 +268,15 @@ func UserMessage(content ...Content) Item { return Item{kind: userMessage, conte
 
 // AssistantMessage is a message the model wrote, replayed as output_text.
 func AssistantMessage(text string) Item { return Item{kind: assistantMessage, text: text} }
+
+// AssistantMessagePhase is AssistantMessage with the phase the model wrote
+// it in (plan 050 C3), which OpenAI asks a caller replaying its own history
+// to keep: a commentary message is then never read as a final answer. It is
+// sent on the key route alone, and there only when it is "commentary" or
+// "final_answer"; never on the ChatGPT route.
+func AssistantMessagePhase(text, phase string) Item {
+	return Item{kind: assistantMessage, text: text, phase: phase}
+}
 
 // Reasoning is a reasoning item replayed to the model that produced it
 // (D-33): its id, its summary parts and its encrypted content, without which
@@ -292,11 +312,16 @@ func (it Item) MarshalJSON() ([]byte, error) {
 			Content []Content `json:"content"`
 		}{"message", "user", nonNil(it.content)})
 	case assistantMessage:
+		phase := ""
+		if it.sendPhase && phases[it.phase] {
+			phase = it.phase
+		}
 		return encode(struct {
 			Type    string    `json:"type"`
 			Role    string    `json:"role"`
 			Content []Content `json:"content"`
-		}{"message", "assistant", []Content{{kind: outputText, text: it.text}}})
+			Phase   string    `json:"phase,omitempty"`
+		}{"message", "assistant", []Content{{kind: outputText, text: it.text}}, phase})
 	case reasoningItem:
 		summary := make([]summaryText, 0, len(it.summary))
 		for _, s := range it.summary {
@@ -315,7 +340,7 @@ func (it Item) MarshalJSON() ([]byte, error) {
 		}
 		ns := Namespace
 		if it.plain {
-			ns = "" // the key route's: no namespace at all (plainCalls)
+			ns = "" // the key route's: no namespace at all (keyItems)
 		}
 		return encode(struct {
 			Type      string `json:"type"`

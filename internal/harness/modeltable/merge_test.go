@@ -1126,7 +1126,7 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 				}
 			}
 			for id, p := range cat.Providers {
-				if p.Driver == DriverChatGPT || id == AnthropicProvider {
+				if p.Driver == DriverChatGPT || id == AnthropicProvider || id == "openai" {
 					continue // signs in, or postdates the files: no inline key
 				}
 				if tbl.Providers[id].APIKey == "" {
@@ -1135,9 +1135,9 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 			}
 			for _, alias := range tbl.Aliases() {
 				_, err := tbl.Resolve(alias, fakeEnv(nil))
-				if tbl.Models[alias].Provider == AnthropicProvider {
+				if p := tbl.Models[alias].Provider; p == AnthropicProvider || p == "openai" {
 					if !errors.Is(err, ErrNoAPIKey) {
-						t.Errorf("%s: err = %v, want ErrNoAPIKey: no file funds Anthropic", alias, err)
+						t.Errorf("%s: err = %v, want ErrNoAPIKey: no file funds %s", alias, err, p)
 					}
 					continue
 				}

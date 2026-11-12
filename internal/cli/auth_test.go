@@ -208,9 +208,9 @@ func TestAuthLoginRefusals(t *testing.T) {
 		want  []string
 	}{
 		{"no provider, no terminal", authKey + "\n", []string{"auth", "login"}, 2,
-			[]string{"craze auth login: name a provider (anthropic, chatgpt, fireworks, meta, openrouter, zai-coding-plan)", "only on a terminal"}},
+			[]string{"craze auth login: name a provider (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan)", "only on a terminal"}},
 		{"an unknown provider", authKey + "\n", []string{"auth", "login", "nosuch"}, 2,
-			[]string{"craze auth login: no such provider; craze has anthropic, chatgpt, fireworks, meta, openrouter, zai-coding-plan"}},
+			[]string{"craze auth login: no such provider; craze has anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan"}},
 		{"a key where the provider goes", authKey + "\n", []string{"auth", "login", authKey2}, 2,
 			[]string{"no such provider"}},
 		{"empty stdin", "", []string{"auth", "login", "fireworks"}, 1,
@@ -225,7 +225,7 @@ func TestAuthLoginRefusals(t *testing.T) {
 		{"a line over 8 KiB", strings.Repeat("k", maxKeyLine+1), []string{"auth", "login", "fireworks"}, 1,
 			[]string{"the key is longer than 8 KiB; nothing was saved"}},
 		{"logout of nothing named", "", []string{"auth", "logout"}, 2,
-			[]string{"craze auth logout: name the provider whose stored key to remove (anthropic, chatgpt, fireworks, meta, openrouter, zai-coding-plan)"}},
+			[]string{"craze auth logout: name the provider whose stored key to remove (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan)"}},
 		{"logout of an unknown provider", "", []string{"auth", "logout", "nosuch"}, 2,
 			[]string{"craze auth logout: no such provider"}},
 		{"a mistyped subcommand", authKey + "\n", []string{"auth", "nosuch", "fireworks"}, 2,
@@ -402,6 +402,7 @@ func TestAuthList(t *testing.T) {
 		"ChatGPT plan      chatgpt          not signed in\n" +
 		"Fireworks         fireworks        env FIREWORKS_API_KEY\n" +
 		"Meta              meta             stored key\n" +
+		"OpenAI            openai           not connected\n" +
 		"OpenRouter        openrouter       env OPENROUTER_API_KEY\n" +
 		"Z.AI Coding Plan  zai-coding-plan  not connected\n"
 	if stdout != wantRows {
@@ -651,7 +652,7 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 	native := authNative(t)
 	t.Setenv("FIREWORKS_API_KEY", authEnvK)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-6]: ", "5")
+		typeAtPrompt(t, tail, ptmx, "Provider [1-7]: ", "6")
 		typeAtPrompt(t, tail, ptmx, "OpenRouter API key: ", authKey)
 	}, "auth", "login")
 	if err != nil {
@@ -664,9 +665,10 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 		"  2. ChatGPT plan\n",
 		"  3. Fireworks (connected)\n",
 		"  4. Meta\n",
-		"  5. OpenRouter\n",
-		"  6. Z.AI Coding Plan\n",
-		"Provider [1-6]: 5\nOpenRouter API key: \n",
+		"  5. OpenAI\n",
+		"  6. OpenRouter\n",
+		"  7. Z.AI Coding Plan\n",
+		"Provider [1-7]: 6\nOpenRouter API key: \n",
 	} {
 		if !strings.Contains(menu, line) {
 			t.Fatalf("the menu lacks %q:\n%s", line, maskKeys(menu))
@@ -684,10 +686,10 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 func TestAuthLoginMenuHidesAPastedKey(t *testing.T) {
 	native := authNative(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-6]: ", authKey)
+		typeAtPrompt(t, tail, ptmx, "Provider [1-7]: ", authKey)
 	}, "auth", "login")
 	wantExit(t, err, 2, "craze auth login: that is not a provider on the list; nothing was saved")
-	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-6]: \n") {
+	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-7]: \n") {
 		t.Fatalf("the prompt's line = %q; want it to end with the Enter alone", maskKeys(got))
 	}
 	if stdout != "" {

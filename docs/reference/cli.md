@@ -2117,11 +2117,11 @@ not promise that re-running a turn repeats no side effects already performed.
 | `prompt` | The prompt is unreadable, empty or over 512 KiB (exit 2); or, exit 1, a prompt over 32 KiB that `craze send` gave a busy session, which the session refused ([The prompt](#the-prompt)) | false |
 | `start_failed` | The agent or host did not start | true |
 | `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
-| `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
-| `auth` | The provider refused the credentials, or there are none to send | false |
-| `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so) | false |
+| `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error or overload (`server_is_overloaded`, `service_unavailable_error`) it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
+| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send | false |
+| `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so). On the `openai-responses` driver a 429 or an in-stream error whose code or type is `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` or `organization_usage_limit_exceeded` ends the turn after one request, never retried in it | false |
 | `context_too_large` | The request does not fit the model's context window | false |
-| `model_not_found` | The provider or agent does not serve the model | false |
+| `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found` | false |
 | `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
 | `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running, or a prompt refused because the session [ends with its turn](#ending-with-the-turn) | false |
 | `connection_lost` | The command lost its socket while the host is shown alive, or its state cannot be told: the turn then may have ended, and the message says which | true |
@@ -2273,6 +2273,7 @@ is trimmed.
 craze auth login fireworks        # prompts; the key is not shown as you type
 craze auth login                  # pick from the list, then the prompt
 printf '%s\n' "$FIREWORKS_KEY" | craze auth login fireworks
+printf '%s\n' "$KEY" | craze auth login openai   # an OpenAI API key, billed per token
 ```
 
 ```text
@@ -2495,9 +2496,14 @@ Anthropic         anthropic        env ANTHROPIC_API_KEY
 ChatGPT plan      chatgpt          signed in as you@example.com · ChatGPT plan · renews automatically
 Fireworks         fireworks        env FIREWORKS_API_KEY
 Meta              meta             stored key
+OpenAI            openai           env OPENAI_API_KEY
 OpenRouter        openrouter       not connected
 Z.AI Coding Plan  zai-coding-plan  not connected
 ```
+
+`openai` is OpenAI's API on a key, billed per token
+([OpenAI](configuration.md#openai)); `chatgpt` is the ChatGPT subscription. An
+exported `OPENAI_API_KEY` connects `openai` as any provider's variable does.
 
 Then notes, on stderr, each starting `note: `: a stored key that cannot be
 used, an entry of yours that [repeats what craze

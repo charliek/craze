@@ -34,10 +34,13 @@ version = 1
 # user's starts (plan 038 §2): the first provider here with a key, on the
 # first model of its start that resolves; "eval winner first". It names every
 # provider below exactly once. A user's models.toml provider_order replaces it
-# whole. Anthropic is last (plan 044 O4, the owner's pin): a machine that
-# funds any other provider starts there; one with only an Anthropic key starts
-# on the newest Opus.
-provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic"]
+# whole. Anthropic is next to last (plan 044 O4, the owner's pin): a machine
+# that funds any provider before it starts there; one with only an Anthropic
+# key starts on the newest Opus. OpenAI's key comes after it (plan 050, the
+# owner's pin): a machine that funds any other provider starts there, so an
+# OPENAI_API_KEY that was already exported moves no machine that starts
+# today; one with only an OpenAI key starts on GPT-6.1 Sol.
+provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic", "openai"]
 
 # ---------------------------------------------------------------------------
 # Retired aliases. A user's entry an old import left for one (source = "gx") is
@@ -184,6 +187,23 @@ driver = "chatgpt"
 name = "Anthropic"
 driver = "anthropic"
 env_keys = ["ANTHROPIC_API_KEY"]
+
+# OpenAI's own API, funded by an API key (plan 050): the Responses API at its
+# endpoint, on the openai-responses driver Meta is on, which keeps the
+# encrypted reasoning across a turn's tool steps (store false) and caches the
+# session's prompt (prompt_cache_key). Seen live through craze on 2026-11-11:
+# a tool loop, an image read from disk, and the reasoning replayed across
+# tool steps, a turn, a reload and parallel calls. Unlike Anthropic's, its
+# entry is not locked: a user's providers.toml may point it elsewhere under
+# the usual rules (an entry that changes the driver or base_url takes none of
+# its key variables). GET /v1/models lists ids alone, with no window, effort
+# or price, so its models are the seeds below and nothing is imported.
+[providers.openai]
+name = "OpenAI"
+driver = "openai-responses"
+base_url = "https://api.openai.com/v1"
+env_keys = ["OPENAI_API_KEY"]
+start = ["openai/gpt-6.1-sol"]
 
 # craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
 # over the account's list: never models of the catalog's, so they need no
@@ -674,6 +694,123 @@ vision = true
 input = 4.0
 output = 20.0
 cache_read = 0.2
+
+# OpenAI's models on the key (plan 050), each seen live through craze on
+# 2026-11-11 on its wire id: a tool loop, its encrypted reasoning replayed
+# across the steps; Luna also read an image from disk through craze, and each
+# named an image's colour sent straight to the API. Efforts are what the API
+# took on each, measured one by one: minimal is refused (HTTP 400) on all
+# four, and none on Sol and Astra; the defaults are the API's own, medium,
+# but for Astra, which starts at low as the ChatGPT plan's Astra does. The
+# window is measured, not the documented 1,050,000: on Luna input of 920,577
+# tokens was taken and 921,907 refused, with or without the 128,000 ceiling,
+# so 1048576 less the ceiling (the most compaction ever lets a request reach)
+# is under what the API takes. max_output_tokens is OpenAI's documented
+# ceiling, written out: without it craze sends 32,000, which at OpenAI also
+# caps the reasoning. Every request above 272,000 input tokens pays the
+# long-context rates for the whole request, so a session works within 272,000
+# (default_context), the true window kept for a request that runs over.
+# Prices are OpenAI's pricing page (2026-11-11): input, output, cache_read the
+# cached input, and cache_write the cache write, 1.25 times the input rate,
+# which OpenAI reports as cache_write_tokens inside input_tokens; above
+# 272,000 input tokens, twice the input and cache rates and 1.5 times the
+# output.
+
+[models."openai/gpt-6-astra"]
+provider = "openai"
+wire_model = "gpt-6-astra"
+name = "GPT-6 Astra (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "low"
+vision = true
+
+[models."openai/gpt-6-astra".cost]
+input = 10.0
+output = 50.0
+cache_read = 1.0
+cache_write = 12.5
+long_context_above = 272000
+
+[models."openai/gpt-6-astra".cost.long_context]
+input = 20.0
+output = 75.0
+cache_read = 2.0
+cache_write = 25.0
+
+[models."openai/gpt-6-luna"]
+provider = "openai"
+wire_model = "gpt-6-luna"
+name = "GPT-6 Luna (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+vision = true
+
+[models."openai/gpt-6-luna".cost]
+input = 0.1
+output = 0.5
+cache_read = 0.01
+cache_write = 0.125
+long_context_above = 272000
+
+[models."openai/gpt-6-luna".cost.long_context]
+input = 0.2
+output = 0.75
+cache_read = 0.02
+cache_write = 0.25
+
+[models."openai/gpt-6.1-sol"]
+provider = "openai"
+wire_model = "gpt-6.1-sol"
+name = "GPT-6.1 Sol (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+vision = true
+
+[models."openai/gpt-6.1-sol".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+cache_write = 2.5
+long_context_above = 272000
+
+[models."openai/gpt-6.1-sol".cost.long_context]
+input = 4.0
+output = 15.0
+cache_read = 0.2
+cache_write = 5.0
+
+[models."openai/gpt-6.1-terra"]
+provider = "openai"
+wire_model = "gpt-6.1-terra"
+name = "GPT-6.1 Terra (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+vision = true
+
+[models."openai/gpt-6.1-terra".cost]
+input = 1.0
+output = 5.0
+cache_read = 0.05
+cache_write = 1.25
+long_context_above = 272000
+
+[models."openai/gpt-6.1-terra".cost.long_context]
+input = 2.0
+output = 7.5
+cache_read = 0.1
+cache_write = 2.5
 
 # The openrouter/*-latest models are OpenRouter's ~<family>-latest routers:
 # each answers as the newest model of its family, so a release there moves it

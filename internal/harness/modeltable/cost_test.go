@@ -285,11 +285,13 @@ input = 0.60
 // between the configured costs, not the rounded rates — 0.0000001 and
 // 0.0000002 are different prices the owner wrote down, though both round to
 // 0 p$/token, so the table still warns naming both aliases. A rate one alias
-// sets and the other leaves out is a conflict too, even at 0.
+// sets and the other leaves out is a conflict too, even when it prices alike:
+// a cache_write written at the input rate, which is what one left out is
+// priced at (plan 050 C3).
 func TestConflictingConfiguredPricesWarnEvenWhenTheyRoundAlike(t *testing.T) {
 	for _, tc := range []struct{ name, a, b string }{
 		{"round alike", "input = 0.0000001\n", "input = 0.0000002\n"},
-		{"set vs left out", "input = 0.60\ncache_write = 0.0\n", "input = 0.60\n"},
+		{"set vs left out", "input = 0.60\ncache_write = 0.60\n", "input = 0.60\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			models := `version = 1

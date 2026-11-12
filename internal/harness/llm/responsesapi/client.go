@@ -46,11 +46,15 @@
 //     never renewed and never sent again.
 //   - The body (Request.body): every function tool a plain top-level
 //     function, a replayed call with no namespace (MR-9), the call's output
-//     ceiling as max_output_tokens (MR-8), and the session's id as
-//     prompt_cache_key, which the route needs to cache at all (MR-6).
-//   - Errors (Error.Route): nothing is final everywhere; a rate limit or a
-//     server's fault may be tried again before any output, in a status or
-//     inside the stream, and every other refusal is left to its status.
+//     ceiling as max_output_tokens (MR-8), the session's id as
+//     prompt_cache_key, which the route needs to cache at all (MR-6), and a
+//     replayed message's phase when the caller kept one (plan 050 C3).
+//   - Errors (Error.Route): nothing is final but a 429 or a failure inside
+//     the stream that says the account's credit or spend limit is gone (plan
+//     050 C3); a rate limit, a
+//     server's fault or an overload may be tried again before any output, in
+//     a status or inside the stream, and every other refusal is left to its
+//     status.
 //
 // What both routes share is the rest: store false and stream true, the
 // encrypted reasoning included and replayed, instructions and input_image

@@ -260,8 +260,8 @@ func withShipped(t *testing.T, change func(*Catalog)) {
 }
 
 // TestSaveKeepsAContextDefaultTurnedOff: `default_context = 0` over a shipped
-// value survives a Save and a reload, as `efforts = []` does; a value left
-// as shipped is not written.
+// value survives a Save and a reload, as `efforts = []` does, and is the one
+// `default_context = 0` the file writes (a shipped value saves as itself).
 func TestSaveKeepsAContextDefaultTurnedOff(t *testing.T) {
 	withShipped(t, func(c *Catalog) {
 		setEntry(c.Models, "glm-5.3", func(m *Model) { m.DefaultContext = m.ContextWindow / 2 })
@@ -289,8 +289,8 @@ func TestSaveKeepsAContextDefaultTurnedOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(b), "default_context"); n != 1 {
-		t.Fatalf("the saved models.toml writes default_context %d times, want once (the override):\n%s", n, b)
+	if n := strings.Count(string(b), "default_context = 0\n"); n != 1 {
+		t.Fatalf("the saved models.toml writes default_context = 0 %d times, want once (the override):\n%s", n, b)
 	}
 }
 

@@ -17,8 +17,8 @@ and want one fast, scriptable front end for several of them.
 - **The TUI**: transcript, queued messages, tasks, sub-agent rows, cards, mouse
   and copy. [TUI reference](docs/reference/tui.md)
 - **Native providers and the ChatGPT plan**: Anthropic (Claude), Fireworks,
-  Meta, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in; no
-  agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
+  Meta, OpenAI, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in;
+  no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
 - **Sessions that outlive the terminal**: `craze ps`, `craze attach`,
   `craze new`. [Sessions](docs/reference/cli.md#sessions-outlive-their-terminal)
 - **Resume a saved session through the hub**: `craze ps --saved` and

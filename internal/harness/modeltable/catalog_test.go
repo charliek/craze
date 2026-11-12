@@ -116,8 +116,12 @@ func TestShippedCatalog(t *testing.T) {
 	// describing an image live before they shipped (P31). Plan 045's Muse
 	// Wonder 1.0 named an image's colour live (MW-7) and read one from disk
 	// through craze. Gemini 4 Argon on OpenRouter (2026-10-13) described an
-	// image read from disk through craze.
+	// image read from disk through craze. Plan 050's four OpenAI models each
+	// named an image's colour live (2026-11-11), and Luna described one read
+	// from disk through craze.
 	seesImages := map[string]bool{
+		"openai/gpt-6-astra": true, "openai/gpt-6-luna": true,
+		"openai/gpt-6.1-sol": true, "openai/gpt-6.1-terra": true,
 		"anthropic/claude-fable-5": true, "anthropic/claude-fable-5-1": true,
 		"anthropic/claude-haiku-4-5-20251001": true, "anthropic/claude-haiku-5-5": true,
 		"anthropic/claude-opus-4-5-20251101": true, "anthropic/claude-opus-4-6": true,
@@ -149,6 +153,22 @@ func TestShippedCatalog(t *testing.T) {
 	for alias, md := range tbl.Models {
 		if md.Vision && !seesImages[alias] {
 			t.Errorf("%s is marked vision but is not on X57's list", alias)
+		}
+	}
+	// The OpenAI key's seeds (plan 050) are named so that a bare
+	// gpt-6.1-sol never binds to the key route: --model matches a display
+	// name as the agent normalises it (lowercase, spaces and underscores as
+	// dashes, agent.normalizeIdent), and the ChatGPT plan's models are named
+	// for the bare slug. Only the openai seeds: Claude Fable 5, Opus 5 and
+	// Sonnet 5 normalise to their aliases' suffixes, harmlessly.
+	normalize := strings.NewReplacer(" ", "-", "_", "-")
+	for alias, m := range c.Models {
+		if m.Provider != "openai" {
+			continue
+		}
+		_, rest, _ := strings.Cut(alias, "/")
+		if normalize.Replace(strings.ToLower(m.Name)) == rest {
+			t.Errorf("%s is named %q, which a bare %s would match", alias, m.Name, rest)
 		}
 	}
 }
@@ -248,6 +268,8 @@ func TestShippedCatalogHistory(t *testing.T) {
 // Meta, with Spark still Meta's start (the owner's pin). And plan 047 D14:
 // Meta on its Responses API (driver openai-responses), at its own endpoint and
 // variable. And Gemini 4 Argon on OpenRouter (2026-10-13), on its numbered id.
+// And plan 050: the OpenAI key's provider, last in the order, and its four
+// seeds, each with a long-context tier.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -260,7 +282,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("provider %q ships MODEL_API_KEY", id)
 		}
 	}
-	want := map[string]string{"anthropic": "Anthropic", "chatgpt": "ChatGPT plan", "fireworks": "Fireworks", "meta": "Meta", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
+	want := map[string]string{"anthropic": "Anthropic", "chatgpt": "ChatGPT plan", "fireworks": "Fireworks", "meta": "Meta", "openai": "OpenAI", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
 	if !maps.Equal(names, want) {
 		t.Fatalf("providers = %v, want %v", names, want)
 	}
@@ -279,7 +301,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("%s is a shipped model of the ChatGPT plan; its models are the account's own", alias)
 		}
 	}
-	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic"}; !slices.Equal(c.ProviderOrder, want) {
+	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic", "openai"}; !slices.Equal(c.ProviderOrder, want) {
 		t.Fatalf("provider_order = %q, want %q", c.ProviderOrder, want)
 	}
 	wantStarts := map[string][]string{
@@ -287,6 +309,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"fireworks":       {"fireworks/ember-1"},
 		"openrouter":      {"openrouter/gemini-flash-latest"},
 		"meta":            {"muse-spark-1.3-contributor"},
+		"openai":          {"openai/gpt-6.1-sol"},
 	}
 	if !reflect.DeepEqual(c.Starts, wantStarts) {
 		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
@@ -457,13 +480,17 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	// Haiku 5.5's long-context tier (plan 047 D10, LC-1…3, re-checked
 	// 2026-10-13): above 100,000 prompt tokens, input, output, cache hit and
-	// 5-minute write at 0.5, 2.5, 0.05 and 0.625. No other shipped model has
-	// a tier.
+	// 5-minute write at 0.5, 2.5, 0.05 and 0.625. The OpenAI key's four seeds
+	// have one too (plan 050), checked below. No other shipped model has a
+	// tier.
 	for alias, m := range c.Models {
 		cost := m.Cost
+		if m.Provider == "openai" {
+			continue
+		}
 		if alias != "anthropic/claude-haiku-5-5" {
 			if cost != nil && (cost.LongContextAbove != nil || cost.LongContext != nil) {
-				t.Errorf("%s has a long-context tier (above %d): only Haiku 5.5 does", alias, deref(cost.LongContextAbove))
+				t.Errorf("%s has a long-context tier (above %d): only Haiku 5.5 and the OpenAI seeds do", alias, deref(cost.LongContextAbove))
 			}
 			continue
 		}
@@ -480,6 +507,61 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		LongContext: TierRates{Input: 500_000, Output: 2_500_000, CacheRead: 50_000, CacheWrite: 625_000},
 	}) {
 		t.Errorf("Haiku 5.5 prices at %+v, %v", r, ok)
+	}
+	// The OpenAI key (plan 050): its provider, last in the order, on Meta's
+	// Responses driver at OpenAI's endpoint; its four seeds with the efforts
+	// the API took (minimal nowhere, none on Terra and Luna alone), the
+	// measured window, the documented ceiling written out, a 272,000 context
+	// default, and OpenAI's prices with the cache write and the tier above
+	// 272,000 input tokens (twice the input and cache rates, 1.5 times the
+	// output).
+	if p := c.Providers["openai"]; p.Driver != DriverOpenAIResponses || p.BaseURL != "https://api.openai.com/v1" ||
+		!slices.Equal(p.EnvKeys, []string{"OPENAI_API_KEY"}) {
+		t.Fatalf("openai = %+v, want driver %q at https://api.openai.com/v1 on OPENAI_API_KEY", p, DriverOpenAIResponses)
+	}
+	lowToMax := []string{"low", "medium", "high", "xhigh", "max"}
+	noneToMax := append([]string{"none"}, lowToMax...)
+	for alias, want := range map[string]struct {
+		name    string
+		efforts []string
+		effort  string
+		base    [4]float64 // input, output, cache_read, cache_write
+		long    [4]float64
+	}{
+		"openai/gpt-6.1-sol":   {"GPT-6.1 Sol (OpenAI)", lowToMax, "medium", [4]float64{2, 10, 0.1, 2.5}, [4]float64{4, 15, 0.2, 5}},
+		"openai/gpt-6-astra":   {"GPT-6 Astra (OpenAI)", lowToMax, "low", [4]float64{10, 50, 1, 12.5}, [4]float64{20, 75, 2, 25}},
+		"openai/gpt-6.1-terra": {"GPT-6.1 Terra (OpenAI)", noneToMax, "medium", [4]float64{1, 5, 0.05, 1.25}, [4]float64{2, 7.5, 0.1, 2.5}},
+		"openai/gpt-6-luna":    {"GPT-6 Luna (OpenAI)", noneToMax, "medium", [4]float64{0.1, 0.5, 0.01, 0.125}, [4]float64{0.2, 0.75, 0.02, 0.25}},
+	} {
+		m := c.Models[alias]
+		if m.Provider != "openai" || "openai/"+m.WireModel != alias || m.Name != want.name || m.ContextWindow != 1048576 ||
+			m.DefaultContext != 272000 || m.MaxOutputTokens != 128000 || !slices.Equal(m.Efforts, want.efforts) ||
+			m.DefaultEffort != want.effort || !m.Vision || m.Deprecated {
+			t.Errorf("%s = %+v", alias, m)
+			continue
+		}
+		cost := m.Cost
+		if cost == nil || deref(cost.LongContextAbove) != 272000 || cost.LongContext == nil {
+			t.Errorf("%s cost = %+v: want a tier above 272000", alias, cost)
+			continue
+		}
+		l := cost.LongContext
+		if got := [4]float64{deref(cost.Input), deref(cost.Output), deref(cost.CacheRead), deref(cost.CacheWrite)}; got != want.base {
+			t.Errorf("%s base rates = %v, want %v", alias, got, want.base)
+		}
+		if got := [4]float64{deref(l.Input), deref(l.Output), deref(l.CacheRead), deref(l.CacheWrite)}; got != want.long {
+			t.Errorf("%s long rates = %v, want %v", alias, got, want.long)
+		}
+	}
+	// An OpenAI key alone starts on Sol at medium; beside an Anthropic key it
+	// moves nothing: openai is last.
+	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret"}))
+	if err != nil || start != (Start{Alias: "openai/gpt-6.1-sol", Effort: "medium"}) {
+		t.Fatalf("an OpenAI key alone starts on %+v, %v; want openai/gpt-6.1-sol at medium", start, err)
+	}
+	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret", "ANTHROPIC_API_KEY": anthropicKey}))
+	if err != nil || start.Alias != "anthropic/claude-opus-5-5" {
+		t.Fatalf("an OpenAI and an Anthropic key start on %+v, %v; want anthropic/claude-opus-5-5", start, err)
 	}
 	// Aliases the owner dropped while their wire ids still answer retire the
 	// alias only (plan 031 X6): a hand entry pointing at the live id stays the

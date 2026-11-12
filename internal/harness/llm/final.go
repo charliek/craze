@@ -13,7 +13,9 @@ import (
 // (fantasy errors.go:81-100) — for any 400, and for the codes OpenAI's Sign
 // in with ChatGPT docs say not to repeat (subscription_sharing_user_not_eligible,
 // …_unsupported_capability, …_route_not_supported, chatpass_v2_*), in an
-// HTTP status or inside the stream alike.
+// HTTP status or inside the stream alike. The key route's Responses driver
+// returns it for a 429 that says the account's credit or spend limit is gone
+// (plan 050 C3), and Anthropic's for a failure marked x-should-retry: false.
 //
 // Fantasy retries a *fantasy.ProviderError it judges retryable, any
 // net.Error, and an error whose text holds an HTTP/2 transport phrase

@@ -103,6 +103,24 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - `--model <provider id>/<alias>`: `zai-coding-plan/glm-5.3` is `glm-5.3`.
 - The agent tool's model list and its "Unknown model" answer hold to the
   models `/model` offers plus the ones you configured.
+- An OpenAI API key: the `openai` provider (`OPENAI_API_KEY`, or `craze auth
+  login openai`), last in the start order, with `openai/gpt-6.1-sol` (its
+  start), `openai/gpt-6-astra`, `openai/gpt-6.1-terra` and `openai/gpt-6-luna`
+  on the Responses API, each working within 272,000 tokens and priced above it
+  at OpenAI's long-context rates. An exported `OPENAI_API_KEY` now funds craze
+  (`env_keys = []` opts out).
+- Cache writes on the Responses API routes are counted as cache writes and
+  priced at `cache_write`, or the input rate when a model has none.
+- On the `openai-responses` driver a 429 naming spent credit or a spend limit
+  is final, kind `quota`, and so is the same code or type inside the stream;
+  an in-stream overload is retried; a message's phase is kept and replayed on
+  the `openai` provider alone (its transcripts are not readable by an older
+  craze).
+- A key provider's 403 says the provider's own message before the key's
+  advice, and a 400 or 403 with code `model_not_found` is kind
+  `model_not_found` (Anthropic's and the ChatGPT plan's are unchanged).
+- A `models.toml` entry that lowers a shipped window below its long-context
+  threshold keeps the entry with the tier off, and warns.
 
 ### Maintenance
 

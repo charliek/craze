@@ -207,6 +207,8 @@ func TestInBandFailuresAfterOutput(t *testing.T) {
 
 		{"response.failed with a server error", "responses, the key route", rxFailed("server_error", ""), retries},
 		{"response.failed with an api error", "responses, the key route", rxFailed("", "api_error"), retries},
+		{"response.failed with OpenAI's overload", "responses, the key route", rxFailed("server_is_overloaded", "service_unavailable_error"), retries},
+		{"OpenAI's overload by its type alone", "responses, the key route", rxFailed("", "service_unavailable_error"), retries},
 		{"a request refused", "responses, the key route", rxFailed("invalid_prompt", "invalid_request_error"), midStream},
 		{"a rate limit", "responses, the key route", rxFailed("rate_limit_exceeded", ""), midStream},
 

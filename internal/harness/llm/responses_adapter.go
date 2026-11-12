@@ -78,6 +78,10 @@ type responsesModel struct {
 	// says is how the driver is named in what it tells a person: "the
 	// ChatGPT plan's driver", or the key route's provider's.
 	says string
+	// phases is whether a replayed assistant message carries the phase it
+	// was written in (plan 050 C3): on the key route for the OpenAI key's
+	// provider alone (phasesFor).
+	phases bool
 }
 
 // newResponsesModel builds r's model on auth, sending to the API at baseURL
@@ -137,9 +141,17 @@ func responsesModelOn(r modeltable.Resolved, c *responsesapi.Client, route respo
 	}
 	if route == responsesapi.RouteKey {
 		m.ids, m.says = keyItemID, fmt.Sprintf("provider %q's Responses driver", r.ProviderID)
+		m.phases = phasesFor(r)
 	}
 	return m
 }
+
+// phasesFor reports whether r's key-route requests replay a message's phase
+// (plan 050 C3): for the OpenAI key's provider alone, whose API OpenAI
+// documents as wanting it kept when a caller replays its own history, and
+// which took it live (2026-11-11). Meta's stream gives a phase too, but craze
+// has never replayed one to it (plan 047 MR-5), and does not untested.
+func phasesFor(r modeltable.Resolved) bool { return r.ProviderID == modeltable.OpenAIProvider }
 
 // boundCredentials are a sign-in's credentials for a model bound to the
 // account whose list it came from (modeltable.Resolved.Account; plan 033
@@ -179,7 +191,8 @@ func (b *boundCredentials) Invalidate(ctx context.Context, gen uint64) error {
 // (responsesError) — and, for the plan's usage limit, the latch set first,
 // before anything above sees the failure (P33): the usage-limit code is final
 // wherever it arrives, before the stream or inside it. The key route has no
-// latch, and nothing final.
+// latch: its one final failure, a quota's (plan 050 C3), ends the turn and
+// leaves the next request to find out for itself.
 func (m *responsesModel) fail(err error) error {
 	out := responsesError(err)
 	var fe *FinalError
@@ -231,6 +244,69 @@ func (o *responsesOptions) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// typeResponsesMessage is responsesPhase's id in Fantasy's provider-data
+// registry, and the key a text part keeps it under: it names no provider id,
+// so no other driver's metadata is ever read as this one's.
+const typeResponsesMessage = "craze.responses.message"
+
+// responsesPhase is the metadata a message's text part keeps (plan 050
+// C3): the phase the model wrote it in, as the stream's
+// response.output_item.done gave it. It is kept, and so stored in the
+// transcript, only where it is replayed — on the key route, for the OpenAI
+// key's provider (phasesFor) — so a reopened session replays it as the live
+// one would (assistantItems). Nowhere else: an older craze's Fantasy
+// registry refuses a provider-data type it does not know, so a Meta or
+// ChatGPT plan transcript holding one would load as corrupt there, or lose
+// its last turn as a torn tail; the openai provider is new, and no older
+// craze has a session on it to open.
+type responsesPhase struct {
+	Phase string `json:"phase,omitempty"`
+}
+
+func init() {
+	fantasy.RegisterProviderType(typeResponsesMessage, func(data []byte) (fantasy.ProviderOptionsData, error) {
+		var v responsesPhase
+		if err := json.Unmarshal(data, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	})
+}
+
+func (*responsesPhase) Options() {}
+
+func (m responsesPhase) MarshalJSON() ([]byte, error) {
+	type plain responsesPhase
+	return fantasy.MarshalProviderType(typeResponsesMessage, plain(m))
+}
+
+func (m *responsesPhase) UnmarshalJSON(data []byte) error {
+	type plain responsesPhase
+	var p plain
+	if err := fantasy.UnmarshalProviderType(data, &p); err != nil {
+		return err
+	}
+	*m = responsesPhase(p)
+	return nil
+}
+
+// messageMetadata is a finished message's metadata: its phase, on a model
+// that replays one (phases), and nil otherwise, or when it has none.
+func (st *partState) messageMetadata(item responsesapi.OutputItem) fantasy.ProviderMetadata {
+	if !st.phases || item.Phase == "" {
+		return nil
+	}
+	return fantasy.ProviderMetadata{typeResponsesMessage: &responsesPhase{Phase: item.Phase}}
+}
+
+// messagePhase is the phase a text part's metadata keeps, "" when none.
+func messagePhase(p fantasy.TextPart) string {
+	if md, ok := p.ProviderOptions[typeResponsesMessage].(*responsesPhase); ok && md != nil {
+		return md.Phase
+	}
+	return ""
+}
+
 // WithCacheKey is the provider options one request on r's model carries,
 // given opts, the model's own (EffortOptions), and key, the id of the
 // session that sends it (plan 047 D12, P20). For the openai-responses driver
@@ -263,7 +339,7 @@ func WithCacheKey(r modeltable.Resolved, opts fantasy.ProviderOptions, key strin
 // route: the client's route decides whether they are sent
 // (responsesapi.Request.Body), and the ChatGPT route never sends them.
 func (m *responsesModel) request(call fantasy.Call) (responsesapi.Request, []fantasy.CallWarning) {
-	instructions, input, warnings := responsesInput(call.Prompt, m.ids)
+	instructions, input, warnings := responsesInput(call.Prompt, m.ids, m.phases)
 	req := responsesapi.Request{
 		Model:             m.model,
 		Instructions:      instructions,
@@ -299,7 +375,8 @@ func (m *responsesModel) request(call fantasy.Call) (responsesapi.Request, []fan
 //   - System messages' text, joined, is the instructions.
 //   - A user message's text and images are input_text and input_image parts;
 //     an empty one is dropped.
-//   - An assistant message's text is an assistant message; its tool calls are
+//   - An assistant message's text is an assistant message, with the phase it
+//     was written in when phases is set (plan 050 C3); its tool calls are
 //     function calls with their call ids; and its reasoning is replayed as a
 //     reasoning item (D-33: the store keeps reasoning only for the model that
 //     produced it) when it can be — see replayable — with an id ids
@@ -311,7 +388,7 @@ func (m *responsesModel) request(call fantasy.Call) (responsesapi.Request, []fan
 //     for every driver, so the image goes as user input_image, the shape the
 //     route was seen to take (spike); the content form is for a caller that
 //     did not wrap.
-func responsesInput(prompt fantasy.Prompt, ids *regexp.Regexp) (string, []responsesapi.Item, []fantasy.CallWarning) {
+func responsesInput(prompt fantasy.Prompt, ids *regexp.Regexp, phases bool) (string, []responsesapi.Item, []fantasy.CallWarning) {
 	var system []string
 	var items []responsesapi.Item
 	var warnings []fantasy.CallWarning
@@ -343,7 +420,7 @@ func responsesInput(prompt fantasy.Prompt, ids *regexp.Regexp) (string, []respon
 				items = append(items, responsesapi.UserMessage(content...))
 			}
 		case fantasy.MessageRoleAssistant:
-			items = append(items, assistantItems(msg, ids)...)
+			items = append(items, assistantItems(msg, ids, phases)...)
 		case fantasy.MessageRoleTool:
 			for _, part := range msg.Content {
 				r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
@@ -366,8 +443,10 @@ func responsesInput(prompt fantasy.Prompt, ids *regexp.Regexp) (string, []respon
 // ids, and only when an output item of the same response — text or a tool
 // call — follows it in the message: the route pairs a reasoning item with
 // what it led to, and one that led to nothing (a step cut off after it) is
-// dropped.
-func assistantItems(msg fantasy.Message, ids *regexp.Regexp) []responsesapi.Item {
+// dropped. A text part goes with the phase its metadata keeps when phases is
+// set; the client sends it only on the key route, and only when it is one the
+// API takes (responsesapi.AssistantMessagePhase).
+func assistantItems(msg fantasy.Message, ids *regexp.Regexp, phases bool) []responsesapi.Item {
 	last := -1 // the last output part's index
 	for i, part := range msg.Content {
 		if p, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok && p.Text != "" {
@@ -383,7 +462,11 @@ func assistantItems(msg fantasy.Message, ids *regexp.Regexp) []responsesapi.Item
 				items = append(items, responsesapi.Reasoning(md.ItemID, md.Summary, *md.EncryptedContent))
 			}
 		} else if p, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok && p.Text != "" {
-			items = append(items, responsesapi.AssistantMessage(p.Text))
+			if phase := messagePhase(p); phases && phase != "" {
+				items = append(items, responsesapi.AssistantMessagePhase(p.Text, phase))
+			} else {
+				items = append(items, responsesapi.AssistantMessage(p.Text))
+			}
 		} else if p, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](part); ok && !p.ProviderExecuted {
 			items = append(items, responsesapi.FunctionCall(p.ToolCallID, p.ToolName, p.Input))
 		}
@@ -461,7 +544,7 @@ func (m *responsesModel) Stream(ctx context.Context, call fantasy.Call) (fantasy
 			return
 		}
 		defer func() { _ = s.Close() }()
-		st := partState{ids: map[int]string{}}
+		st := partState{ids: map[int]string{}, phases: m.phases}
 		for s.Next() {
 			if !st.parts(s.Event(), yield) {
 				return
@@ -511,6 +594,9 @@ type partState struct {
 	ids      map[int]string // each item's part id, by output_index
 	calls    bool           // a function call finished
 	cutCalls int            // function calls the response was cut in (ItemCut)
+	// phases is the model's: a message's phase is kept in its text part's
+	// metadata only where it is replayed (messageMetadata).
+	phases bool
 }
 
 // cut ends a response that stopped short (cutShort) the way Fantasy's
@@ -564,7 +650,7 @@ func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart)
 	case responsesapi.ItemDone:
 		switch ev.Item.Type {
 		case "message":
-			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id})
+			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Item)})
 		case "reasoning":
 			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: id,
 				ProviderMetadata: fantasy.ProviderMetadata{openai.Name: reasoningMetadata(ev.Item)}})
@@ -582,7 +668,7 @@ func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart)
 		// with no encrypted content to replay, and Fantasy drops it.
 		switch ev.Item.Type {
 		case "message":
-			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id})
+			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: id, ProviderMetadata: st.messageMetadata(ev.Item)})
 		case "function_call":
 			st.cutCalls++
 			return yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: id})
@@ -614,33 +700,45 @@ func reasoningMetadata(item responsesapi.OutputItem) *openai.ResponsesReasoningM
 	return md
 }
 
-// fantasyUsage is a response's usage as Fantasy counts it (plan 033 §3.9):
-// cached tokens are CacheRead and not also Input, which the API's
-// input_tokens includes them in, so the harness's context sum (Input +
-// CacheRead + CacheCreation + Output, autocompact.go) counts each token once;
-// Output includes reasoning, as the API's does, and Reasoning reports it.
-// cache_write_tokens is not mapped: the spike only ever saw 0, and how it
-// relates to input_tokens is unknown, so CacheCreation could count it twice.
+// fantasyUsage is a response's usage as Fantasy counts it (plan 033 §3.9,
+// plan 050 C3): cached tokens are CacheRead and cache-write tokens
+// CacheCreation, and neither is also Input, which the API's input_tokens
+// includes both in (OpenAI's usage, seen live 2026-11-11: input_tokens 5594
+// with cache_write_tokens 5591 on the write and cached_tokens 5591 on the
+// read), so the harness's context sum (Input + CacheRead + CacheCreation +
+// Output, autocompact.go) counts each token once, and the three add up to
+// input_tokens. Each is held to what is left of input_tokens — cached first,
+// then written — so a count that is negative, larger than input_tokens or
+// overlapping the cached one never counts a token twice. Output includes
+// reasoning, as the API's does, and Reasoning reports it. A model priced
+// with no cache_write rate prices CacheCreation at its input rate
+// (modeltable ratesFromCost), what those tokens cost as Input before.
 func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
-	cached := min(max(u.CachedTokens, 0), u.InputTokens)
+	input := max(u.InputTokens, 0)
+	cached := min(max(u.CachedTokens, 0), input)
+	written := min(max(u.CacheWriteTokens, 0), input-cached)
 	total := u.TotalTokens
 	if total == 0 {
 		total = u.InputTokens + u.OutputTokens
 	}
 	return fantasy.Usage{
-		InputTokens:     u.InputTokens - cached,
-		OutputTokens:    u.OutputTokens,
-		TotalTokens:     total,
-		ReasoningTokens: u.ReasoningTokens,
-		CacheReadTokens: cached,
+		InputTokens:         input - cached - written,
+		OutputTokens:        u.OutputTokens,
+		TotalTokens:         total,
+		ReasoningTokens:     u.ReasoningTokens,
+		CacheReadTokens:     cached,
+		CacheCreationTokens: written,
 	}
 }
 
 // responsesError is err, from the driver's core, as the error Fantasy and the
 // harness classify:
 //
-//   - A final failure (responsesapi.Error.Final: every 429, every 400, and
-//     the codes not to repeat) is a *FinalError, which nothing retries.
+//   - A final failure (responsesapi.Error.Final: on the ChatGPT route every
+//     429, every 400 and the codes not to repeat; on the key route a 429, or
+//     a failure inside the stream, that says the account's credit or spend
+//     limit is gone) is a *FinalError,
+//     which nothing retries.
 //   - Any other failure the server reported is a *fantasy.ProviderError with
 //     its status, its headers (a Retry-After), its auth and context flags,
 //     and a body holding the standard error object, from which the scrubber
@@ -656,10 +754,12 @@ func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
 //     sentinel intact), a transport failure — goes as it is, a transport
 //     failure in Fantasy's retryable wrapper when it is one.
 //
-// On the key route (the failure's Route; plan 047 D12, P19) nothing is final
-// — the ChatGPT plan's codes mean nothing there — and a failure the server
-// reported is keyProviderError's: the classification the Chat Completions
-// drivers get, which the harness already words and retries. Whatever is
+// On the key route (the failure's Route; plan 047 D12, P19) the ChatGPT
+// plan's codes mean nothing, and a failure the server reported is
+// keyProviderError's — the classification the Chat Completions drivers get,
+// which the harness already words and retries — but for a quota's failure,
+// final there too (plan 050 C3), as Anthropic's x-should-retry: false is on its
+// driver (messagesError): the harness classes it quota. Whatever is
 // retryable on either route is so before any output: after it, the wrapper's
 // rule 3 decides (D-32).
 func responsesError(err error) error {
@@ -736,7 +836,8 @@ func responsesProviderError(re *responsesapi.Error) *fantasy.ProviderError {
 //     them, by status.
 //   - Retryable when the client calls it transient (responsesapi.Error.Transient
 //     on the key route): a 429 or a 5xx, and inside the stream a rate limit or
-//     a server's fault.
+//     a server's fault. A quota's failure never reaches here: it is final
+//     (responsesError).
 //   - Of its headers only the wait a retryable failure asked for is kept,
 //     retry-after and retry-after-ms, which Fantasy honours; never
 //     x-should-retry, which would make Fantasy retry whatever the status, and
