@@ -12,11 +12,21 @@
 # TestShippedCatalog (catalog_test.go, run by `make test` and CI) checks every
 # rule the merge relies on.
 #
-# A change here is a release (RELEASING.md): to rename a model, add the new
-# alias and retire the old one (a [[retired]] row with no wire_models when the
-# new alias keeps the wire id, which stays live); to retire a model, remove it
-# and add a [[retired]] row naming its alias, its provider and every wire model
-# id it has pointed at.
+# A change here is a release (RELEASING.md). An alias is a model's permanent
+# address: it is never renamed while its wire id stays (two aliases may not
+# share an identity). A model is replaced in two releases (plan 050): first
+# deprecate its alias — deprecated = true and replaced_by naming the active
+# model that replaces it; the entry stays whole, it runs by name and is never
+# offered, and it is no provider's start — with a line in
+# testdata/deprecated-aliases.txt; then, in a later release, retire it:
+# remove the entry and add a [[retired]] row naming its alias, its provider,
+# every wire model id it has pointed at that no longer answers, and its
+# replaced_by. Every replaced_by names an active model, so deprecating a model
+# means re-pointing every replaced_by aimed at it. If a provider stops serving
+# a deprecated model before then, the next release retires it with its
+# wire_models: the waiting rule limits craze's choice, not a provider's
+# shutdown. default_context, below context_window, is the context a session
+# on the model works within.
 
 version = 1
 
@@ -34,7 +44,10 @@ provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta
 # ignored, a [subagents] model or default_model naming one is dropped
 # silently, and any user model entry whose (provider, wire model) is one of
 # these identities is dropped silently: a dead wire id is dead whoever wrote it
-# (plan 031 §3.3).
+# (plan 031 §3.3). A row's optional replaced_by names the active model that
+# replaces the alias (plan 050): a --model naming the alias is refused with
+# it first, and a reference in the user's files is dropped with a warning
+# naming it instead of silently.
 # Wire ids from the owner's models.toml backups (2026-09-18 to 2026-09-29), gx's
 # Fireworks presets (grok-build providers_cmd.rs) and D-24 (deepseek-v4-pro-0813).
 

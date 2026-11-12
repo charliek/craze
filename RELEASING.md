@@ -81,11 +81,38 @@ is embedded in the binary, so a catalog change is a release: an ordinary gated
 commit, shipped by the next tag (a patch release when nothing else changed).
 There is no refresh between releases.
 
-- **Rename** a model: add the new alias and retire the old one.
+- **An alias is permanent.** It is never renamed while its wire id stays (two
+  aliases may not share an identity), so there is no rename: a model is
+  *replaced*, in two releases.
+- **Deprecate** a model: keep its entry whole and add `deprecated = true` and
+  `replaced_by = "<alias>"`, naming the active model that replaces it, and
+  append a line `<alias> <version>` to
+  `internal/harness/modeltable/testdata/deprecated-aliases.txt`, where
+  `<version>` is `internal/version/version.go`'s `Version` (the last release)
+  in that commit. A deprecated model runs by name (`--model`, a pin, the model
+  memory, a resumed session) but is never offered, and it may not be a
+  provider's `start`. Every `replaced_by` — on a deprecated model and on a
+  `[[retired]]` row — names an active alias, so deprecating a model means
+  re-pointing every `replaced_by` aimed at it. Note it in
+  `docs/getting-started/upgrading.md` with its replacement.
 - **Retire** a model: remove it from `[models]` and add its alias to
   `[[retired]]`, listing every wire id that alias has pointed at (an alias
   retired because its wire id still answers carries no `wire_models`, so a
-  user's own entry for that id is not dropped).
+  user's own entry for that id is not dropped), and its `replaced_by`.
+- **The release rule.** Retire only an alias a previous *release* shipped
+  deprecated, and no earlier than the next minor release and 30 days after
+  the release that deprecated it. The person cutting a release checks the
+  calendar half (no unit test reads the clock).
+  `TestDeprecationHistory` (part of `make test`) checks the rest from
+  checked-in files alone, so it runs in a `git archive` export and a shallow
+  clone: every deprecated model has a line in `deprecated-aliases.txt`, and
+  every `[[retired]]` row not in `testdata/retired-grandfathered.txt` (the rows
+  retired before deprecation existed, which never grows) has one whose version
+  is below the current `Version` — so a deprecation and its retirement never
+  ship in the same release. `deprecated-aliases.txt` is **append-only**.
+- **A provider shut a deprecated model down early:** the next release
+  retires it, with its `wire_models`, whatever the rule above: the rule limits
+  craze's choice, not a provider's shutdown.
 - **Add** a model: add its alias to
   `internal/harness/modeltable/testdata/shipped-aliases.txt`, the history of
   every alias craze has shipped.
@@ -111,8 +138,11 @@ There is no refresh between releases.
   exactly once, a provider `start` that is not that provider's own models, two
   aliases sharing an identity, a retired alias that is still a model, a
   shipped model whose identity is retired, an Anthropic seed without its
-  `family`, `released` and `thinking`, and an `[anthropic_defaults]`
-  `start_family` no seed has. Adding a provider means adding it to
+  `family`, `released` and `thinking`, an `[anthropic_defaults]`
+  `start_family` no seed has, a deprecated model with no `replaced_by` (or a
+  `replaced_by` on an active one), a `replaced_by` that does not name an active
+  model, a deprecated `start`, and a `default_context` that is not above 0 and
+  below the model's `context_window` (an explicit 0 included). Adding a provider means adding it to
   `provider_order`; removing a model a `start` names means changing that
   `start`.
 

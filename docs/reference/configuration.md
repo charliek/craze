@@ -943,6 +943,7 @@ A model alias is at most 256 bytes: a `models.toml` with a longer one does not
 load, and says which entry. A model's `efforts` list at most 8 levels, each at
 most 32 bytes and one printable line (no newline, control or bidi character);
 one past those does not load either, naming the entry and the key. A model's other optional keys are documented below:
+[`default_context`](#native-context-default),
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 [`vision`](#native-vision) and [`tool_profile`](#native-tool-profile);
 `models.toml` also takes
@@ -964,6 +965,15 @@ store a key with [`/connect`](tui.md#connect).
   cleared. A [long-context tier](#long-context-pricing) merges the same way —
   `long_context_above` and each `[cost.long_context]` rate on its own — and
   `long_context_above = 0` turns a shipped tier off, its rates with it.
+- **Context default.** `default_context` merges as `context_window` does, and
+  `default_context = 0` turns a shipped one off ([Native context
+  default](#native-context-default)).
+- **What the catalog says of an alias.** Whether a shipped model is
+  [deprecated](#deprecated-models), and what replaces it, belongs to the
+  catalog: no file of yours can set either. An entry of yours for a deprecated
+  alias that points it at another `provider` or `wire_model` makes it your
+  model, no longer deprecated; one that changes anything else keeps it
+  deprecated, and warns.
 - **Efforts and the default effort.** An `efforts` list without a
   `default_effort` keeps the shipped default if the new list has it, and
   otherwise the model has none.
@@ -1569,11 +1579,16 @@ on the first of:
    `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/ember-1`;
    `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
    Opus the Anthropic account lists);
-4. otherwise the first model, by alias, whose provider has a key — with a note
-   saying so.
+4. otherwise the first model, by alias, whose provider has a key and that is
+   not [deprecated](#deprecated-models) — with a note saying so;
+5. otherwise, when the only models funded are deprecated, the first of them by
+   alias — with a note saying it is deprecated and what replaces it.
 
-Steps 2 to 4 start at the model's `default_effort`. With no provider funded
-at all the session does not start, and says how to connect one.
+Steps 2 to 5 start at the model's `default_effort`. Steps 3 to 5 are craze
+choosing for you, and never take a deprecated model while another is funded;
+steps 1 and 2 are your own choices, and a remembered or pinned deprecated
+model still starts. With no provider funded at all the session does not
+start, and says how to connect one.
 
 A remembered model is found by its alias while that alias still names the
 same provider and wire model, and otherwise by its provider and wire model,
@@ -1613,28 +1628,101 @@ variable the catalog lacks. Any other entry — `source = "manual"`, or none —
 is your own, as above. A hand-copied entry that repeats the shipped one is a
 no-op.
 
+### Naming a model by its provider
+
+`--model` (and a sub-agent call's `model`, and the session list's `/model`)
+also takes an alias written `<provider id>/<alias>`, the provider id being the
+one [`craze auth login`](cli.md#craze-auth) takes: `zai-coding-plan/glm-5.3` is
+`glm-5.3`, `meta/muse-spark-1.3` is `muse-spark-1.3`. It is tried only when the
+name as written matches no model (one that matches several stays ambiguous),
+with the same case and spacing rules, and only when the alias is that
+provider's. An alias that already carries its provider's prefix
+(`fireworks/kimi-k3`) is unchanged.
+
+### Deprecated models
+
+An alias is a model's permanent address: craze never renames one. A model is
+replaced in two steps, a release apart at least. First a release
+**deprecates** it: the catalog marks it `deprecated` and names its
+replacement (`replaced_by`). A deprecated model still runs by name — through
+`--model`, your `default_model` pin, the model memory, a resumed session, a
+`[subagents]` model or tier, or a sub-agent call that names it — but craze
+never offers it: no `/model` list shows it (but the one of a session running
+on it, as its current model), and nothing starts a new session on it for you
+while another model is funded (see [Where a new session
+starts](#model-memory-recentjson)). Each reference your `models.toml` makes to
+one — `default_model`, the `[subagents]` model, a tier, a `[models]` entry for
+it — stands, with one warning at session start (and in `craze auth list`)
+naming the replacement and saying the reference is dropped when the model is
+retired. craze never moves you to the replacement on its own: it may have
+another price.
+
+Then a later release — no earlier than the next minor release and 30 days
+after the one that deprecated it, unless the provider stops serving it first
+— **retires** it (below).
+
 ### Retired models
 
-When a release retires a model (or renames one, retiring the old alias), the
-catalog records the alias and every *dead* wire model id it pointed at; an
-alias whose wire id still answers is retired by alias alone, with no wire ids
-listed, so an entry of yours pointing at that id is not dropped. A retired
-alias disappears from an untouched directory with no warning: a `source =
-"gx"` entry for it is ignored, a `default_model` naming it is no pin (a new
-session starts by the provider order), and a `[subagents]` model or tier
-naming it falls back to its default (the parent's model). Any model entry of
-yours, under any alias, whose provider and wire model are a retired pair is
-dropped silently too — a
-dead wire id is dead whoever wrote it. An entry of yours for a retired alias
-that points at a live wire id is your own model and stays.
+When a release retires a model, the catalog records the alias, every *dead*
+wire model id it pointed at, and the model that replaces it, when there is
+one; an alias whose wire id still answers is retired by alias alone, with no
+wire ids listed, so an entry of yours pointing at that id is not dropped.
+
+- `--model` naming a retired alias does not start (kind `config`, before any
+  request is sent), and the message leads with the replacement:
+  `native: <alias> was retired; use <replacement>`. A stored session whose
+  recorded `--model` was retired since is refused the same way when it is
+  reloaded (`craze send` to a stopped session); craze does not move it to the
+  replacement — start a new session.
+- A `default_model` naming it is no pin (a new session starts by the provider
+  order), and a `[subagents]` model or tier naming it falls back to its
+  default (the parent's model); an entry of yours for it that is not a
+  complete model of its own is ignored. Each says so in a warning naming the
+  replacement when the catalog names one, and goes silently when it does not
+  (as a `source = "gx"` entry for it always does).
+- Any model entry of yours, under any alias, whose provider and wire model
+  are a retired pair is dropped too — a dead wire id is dead whoever wrote it.
+  An entry of yours for a retired alias that points at a live wire id is your
+  own model and stays: `--model` runs it.
 
 ### Sub-agent settings
 
 `[subagents]` (see [Sub-agent models](tui.md#sub-agent-models)) never stops a
 session for what the catalog changed: a `model` or tier target that is not a
-model is dropped — silently for a retired alias, with a warning otherwise —
-and falls through to the defaults, and an `effort` the kept `model` does not
-offer is dropped with a warning.
+model is dropped — silently for a retired alias with no replacement named,
+with a warning otherwise — and falls through to the defaults; a deprecated
+one stays, with a warning naming its replacement; and an `effort` the kept
+`model` does not offer is dropped with a warning.
+
+## Native context default
+
+On the native provider a model may have a **context default**: the context a
+session on it works within, smaller than its context window. The catalog
+sets one where working in the whole window costs more than it gives (a price
+tier above a size, say). It decides two things, and nothing else:
+
+- [automatic compaction](tui.md#compaction): a session compacts at
+  `threshold_percent` (85% by default) of the context default instead of the
+  window, still never above the window less the [output
+  ceiling](#native-output-ceiling);
+- the usage report: the status row's `NN% ctx`, `craze new --wait`'s `context
+  x/y` and the [usage section](protocol.md#usage)'s `contextWindow` are
+  measured against it.
+
+The window sent to the provider, the output ceiling and the price stay the
+model's own. A sub-agent works within its own model's context default.
+`default_context` in `models.toml` sets it, or turns it off:
+
+```toml
+[models."local/qwen"]
+default_context = 100000   # optional, >= 0: tokens a session works within
+```
+
+`default_context = 0` over a shipped value turns it off: the whole window is
+in force. A value at or above the model's `context_window` means the same,
+and is not an error (you may lower a shipped window below the shipped
+default). On a model whose window craze does not know, it changes nothing:
+such a model never compacts on its own.
 
 ## Native output ceiling
 
@@ -1685,7 +1773,8 @@ controls:
 ```toml
 [compaction]
 auto              = true    # optional; compact on its own at all
-threshold_percent = 85      # optional, 1-99: % of the model's context window
+threshold_percent = 85      # optional, 1-99: % of the context a session works
+                             # within (its context default, else its window)
 tail_tokens       = 20000   # optional, >= 0: the most, in tokens, of a
                              # verbatim tail a compaction keeps (whole steps
                              # only), also capped at a quarter of the threshold

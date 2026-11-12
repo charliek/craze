@@ -266,6 +266,11 @@ type Table struct {
 	// a model is looked up in by its identity (factsOf). nil for a table
 	// loaded without a catalog or built in memory.
 	learned map[identity]learnedFacts
+	// retired are the catalog's [[retired]] rows (plan 050 C1), read through
+	// Retired: what a start that names an alias the table does not have is
+	// told, and the replacement the merge's warnings name. nil for a table
+	// loaded without a catalog or built in memory.
+	retired []Retired
 	// unkeyed are the variables WithholdFrozen found holding a value a
 	// session cannot redact out of what it has already sent: each reads as
 	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's
@@ -293,11 +298,20 @@ type Provider struct {
 
 // Model is one model: shipped, overridden in models.toml, or the user's own.
 type Model struct {
-	Provider        string // a key of Table.Providers
-	WireModel       string // the model id the provider's API expects
-	Name            string // display name; "" shows the alias
-	ContextWindow   int    // tokens; 0 = unknown
-	MaxOutputTokens int    // 0 = absent: Resolve supplies DefaultMaxOutputTokens, or less on a small window
+	Provider      string // a key of Table.Providers
+	WireModel     string // the model id the provider's API expects
+	Name          string // display name; "" shows the alias
+	ContextWindow int    // tokens; 0 = unknown
+	// DefaultContext is default_context (plan 050 C1): the context, in
+	// tokens, a session on the model works within — what it compacts at and
+	// what its usage reports as its window — when it is set and below
+	// ContextWindow (Resolved.ContextInForce); 0, or a value at or above the
+	// window, is the whole window. The catalog sets it below the window; a
+	// user's models.toml may set any value of 0 or more, 0 turning a shipped
+	// one off. The window the API is sent, the output ceiling and the price
+	// tier stay the true window's.
+	DefaultContext  int
+	MaxOutputTokens int // 0 = absent: Resolve supplies DefaultMaxOutputTokens, or less on a small window
 	// Efforts are the reasoning-effort levels the model accepts, in display
 	// order. Empty means the model has no effort control: none is shown or
 	// sent.
@@ -332,6 +346,17 @@ type Model struct {
 	// identity (Table.factsOf).
 	Family   string
 	Released string
+	// Deprecated and ReplacedBy are the catalog's deprecated and replaced_by
+	// (plan 050 C1): a deprecated model still resolves and runs by name, but
+	// is never offered (Table.Offered) — no picker lists it and nothing
+	// chooses it for the user but StartPick's last resort — and ReplacedBy
+	// names the active alias that replaces it. They are bound to the shipped
+	// alias, not to its identity: set from the catalog alone (no user file
+	// has a key for either), and cleared when the user's entry for the alias
+	// points it at another provider or wire model (overlayModel), so a user's
+	// own model is never deprecated.
+	Deprecated bool
+	ReplacedBy string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -519,10 +544,13 @@ type Resolved struct {
 	// source's at each one, so a session (or a sub-agent) already open on it
 	// sends nothing with another account's token after a switch
 	// (ErrOtherAccount).
-	Account         Account
-	WireModel       string
-	Name            string // the model's name, or its alias when it has none
-	ContextWindow   int
+	Account       Account
+	WireModel     string
+	Name          string // the model's name, or its alias when it has none
+	ContextWindow int
+	// DefaultContext is the model's default_context (plan 050 C1), 0 for
+	// none; ContextInForce is what a session works within.
+	DefaultContext  int
 	MaxOutputTokens int // the ceiling every request sends: the file's value, else the default (outputCeiling)
 	Efforts         []string
 	DefaultEffort   string
@@ -537,6 +565,23 @@ type Resolved struct {
 	// thinking the table does not know is ThinkingAdaptive. "" on every other
 	// driver.
 	Thinking string
+	// Deprecated and ReplacedBy are the model's (plan 050 C1): a deprecated
+	// model runs, and names the alias that replaces it.
+	Deprecated bool
+	ReplacedBy string
+}
+
+// ContextInForce is the context, in tokens, a session on r works within
+// (plan 050 C1): its DefaultContext when that is set and below its window,
+// else the window itself — 0 when the window is unknown, whatever the
+// default says. Compaction's threshold and the usage report's window are
+// judged by it; the window a request is sent, its output ceiling and its
+// price tier stay the true window's.
+func (r Resolved) ContextInForce() int {
+	if r.DefaultContext > 0 && r.DefaultContext < r.ContextWindow {
+		return r.DefaultContext
+	}
+	return r.ContextWindow
 }
 
 // The on-disk shapes Save writes. They are separate from the public types so
@@ -605,10 +650,14 @@ type subagentsDoc struct {
 }
 
 type modelEntry struct {
-	Provider        string   `toml:"provider"`
-	WireModel       string   `toml:"wire_model"`
-	Name            string   `toml:"name,omitempty"`
-	ContextWindow   int      `toml:"context_window,omitzero"`
+	Provider      string `toml:"provider"`
+	WireModel     string `toml:"wire_model"`
+	Name          string `toml:"name,omitempty"`
+	ContextWindow int    `toml:"context_window,omitzero"`
+	// DefaultContext is left out at 0; encodeModels writes an explicit
+	// `default_context = 0` over a shipped value, so turning it off survives
+	// a reload (plan 050 C1), as `efforts = []` does.
+	DefaultContext  int      `toml:"default_context,omitzero"`
 	MaxOutputTokens int      `toml:"max_output_tokens,omitzero"`
 	Efforts         []string `toml:"efforts"`
 	DefaultEffort   string   `toml:"default_effort,omitempty"`
@@ -624,6 +673,9 @@ type modelEntry struct {
 	Thinking string `toml:"-"`
 	Family   string `toml:"-"`
 	Released string `toml:"-"`
+	// Deprecated and ReplacedBy are catalog-only too (plan 050 C1).
+	Deprecated bool   `toml:"-"`
+	ReplacedBy string `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -834,6 +886,12 @@ func (t *Table) encodeModels() ([]byte, error) {
 		fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id})
 		if err := toml.NewEncoder(&buf).Encode(e); err != nil {
 			return nil, fmt.Errorf("modeltable: encoding: %w", err)
+		}
+		if e.DefaultContext == 0 && cat != nil && cat.Models[id].DefaultContext > 0 {
+			// An explicit `default_context = 0` over the shipped value (plan
+			// 050 C1), which omitzero would leave out: the key's line, inside
+			// the alias's own table, before any cost table opens.
+			buf.WriteString("default_context = 0\n")
 		}
 		if cost != nil {
 			// The long-context table likewise goes at its own full path
@@ -1246,6 +1304,12 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	if m.ContextWindow < 0 {
 		return at("context_window", "must not be negative")
 	}
+	if m.DefaultContext < 0 {
+		// Any other value stands: one at or above the window is the whole
+		// window (Resolved.ContextInForce), never an error, since a user may
+		// lower a shipped window under a shipped default (plan 050 C1).
+		return at("default_context", "must not be negative")
+	}
 	if m.MaxOutputTokens < 0 {
 		return at("max_output_tokens", "must not be negative")
 	}
@@ -1439,6 +1503,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		WireModel:         m.WireModel,
 		Name:              name,
 		ContextWindow:     m.ContextWindow,
+		DefaultContext:    m.DefaultContext,
 		MaxOutputTokens:   outputCeiling(m),
 		Efforts:           slices.Clone(m.Efforts),
 		DefaultEffort:     m.DefaultEffort,
@@ -1446,6 +1511,8 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		ToolProfile:       m.ToolProfile,
 		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
 		Thinking:          t.thinkingOf(m, p),
+		Deprecated:        m.Deprecated,
+		ReplacedBy:        m.ReplacedBy,
 	}, nil
 }
 
@@ -1636,6 +1703,52 @@ func (t *Table) EnvWarnings(getenv func(string) string) []string {
 // Aliases returns every model alias, sorted.
 func (t *Table) Aliases() []string {
 	return slices.Sorted(maps.Keys(t.Models))
+}
+
+// Retired is the catalog's [[retired]] row for alias, and whether there is
+// one (plan 050 C1): what a start that names an alias the table does not
+// have is told, the replacement first. A table loaded without a catalog, or
+// built in memory, retires nothing. The row's WireModels are the caller's.
+func (t *Table) Retired(alias string) (Retired, bool) {
+	for _, r := range t.retired {
+		if r.Alias == alias {
+			r.WireModels = slices.Clone(r.WireModels)
+			return r, true
+		}
+	}
+	return Retired{}, false
+}
+
+// QualifiedAlias is the alias raw names in the form "<provider id>/<alias>"
+// (plan 050 C1): raw cut at its first "/", the head a provider id of t and
+// the rest an alias of t on that provider — so `zai-coding-plan/glm-5.3` is
+// glm-5.3 and `meta/muse-spark-1.3` is muse-spark-1.3, while an alias that
+// is already prefixed is found the same way under its own prefix. normalize
+// is applied to the head and to the rest alike, and to each provider id and
+// alias they are compared with (nil compares them as they are): the agent
+// passes the normalisation its --model matching uses. A caller asks only
+// after its own match found nothing. Ids and aliases are tried in sorted
+// order, so the same raw always finds the same alias.
+func (t *Table) QualifiedAlias(raw string, normalize func(string) string) (string, bool) {
+	if normalize == nil {
+		normalize = func(s string) string { return s }
+	}
+	head, rest, ok := strings.Cut(raw, "/")
+	if !ok || head == "" || rest == "" {
+		return "", false
+	}
+	head, rest = normalize(head), normalize(rest)
+	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
+		if normalize(id) != head {
+			continue
+		}
+		for _, alias := range t.Aliases() {
+			if t.Models[alias].Provider == id && normalize(alias) == rest {
+				return alias, true
+			}
+		}
+	}
+	return "", false
 }
 
 // Rates is one identity's per-token rates, in picodollars — an integer

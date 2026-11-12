@@ -726,7 +726,7 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		s.base.top = start.top
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), opts.Prompt, start, opts.Personas, child, s.subs, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

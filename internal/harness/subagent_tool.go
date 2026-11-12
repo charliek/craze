@@ -64,7 +64,8 @@ func (d *describedTool) Spec() tool.Spec {
 // agentTail is the session's tail: the agent types in types (agentTypes), each
 // with the tools it gives a child out of offered — the child tools of the
 // session's profile, in its order — and the models of table a child can run
-// on, getenv deciding which have a key.
+// on, getenv deciding which have a key, parents the models the session may
+// run on as its own (openTools).
 //
 // Every field is folded onto one line and redacted with red on its own, and
 // the budgets are measured over that (X14's rule); openTools then redacts the
@@ -72,8 +73,8 @@ func (d *describedTool) Spec() tool.Spec {
 // or across a field and the words around it — at the price, as in the
 // system prompt's extras, that such a key can grow a section a little past its
 // budget.
-func agentTail(types []tool.Persona, offered []string, table *modeltable.Table, getenv func(string) string, red *redact.Replacer) string {
-	return renderAgentTypes(types, offered, red) + "\n" + renderSubagentModels(table, getenv, red)
+func agentTail(types []tool.Persona, offered []string, table *modeltable.Table, getenv func(string) string, parents []string, red *redact.Replacer) string {
+	return renderAgentTypes(types, offered, red) + "\n" + renderSubagentModels(table, getenv, parents, red)
 }
 
 // renderAgentTypes is the types section: a row per type, in the list's order —
@@ -126,17 +127,16 @@ func typeRow(p tool.Persona, offered []string, red *redact.Replacer) string {
 // "… and N more" when cut, then the tier line (tiersLine), which the rows'
 // budget makes room for first.
 //
-// Only a model whose provider has a key now is listed, and only a tier mapped
-// to one: a call naming any other fails with its provider named (§3.6), and
-// listing it would spend the budget offering the model a choice it cannot
-// make. The list is fixed at Open like the rest of the tools; a key exported
-// later is used when a call names the model anyway, since resolution reads the
-// environment at the call.
-func renderSubagentModels(table *modeltable.Table, getenv func(string) string, red *redact.Replacer) string {
-	usable := func(alias string) bool {
-		_, err := table.Resolve(alias, getenv)
-		return err == nil
-	}
+// Only a model of the sub-agent choice set is listed (subagentChoices: one
+// whose provider has a key now, offered or configured by the owner), and only
+// a tier mapped to one: a call naming any other fails with its provider named
+// (§3.6), and listing it would spend the budget offering the model a choice
+// it cannot make. The list is fixed at Open like the rest of the tools; a key
+// exported later is used when a call names the model anyway, since resolution
+// reads the environment at the call.
+func renderSubagentModels(table *modeltable.Table, getenv func(string) string, parents []string, red *redact.Replacer) string {
+	choices := subagentChoices(table, getenv, parents...)
+	usable := func(alias string) bool { return choices[alias] }
 	var rows []string
 	hidden := 0
 	for _, alias := range subagentModelOrder(table) {
@@ -151,6 +151,32 @@ func renderSubagentModels(table *modeltable.Table, getenv func(string) string, r
 	}
 	tiers := tiersLine(table, usable, red)
 	return modelsHeading + fitRows(rows, hidden, maxModelsSection-len(modelsHeading)-len(tiers)) + tiers
+}
+
+// subagentChoices is the sub-agent choice set (plan 050 C1): the models the
+// agent tool's menu lists and its "Unknown model" error names — the table's
+// offered set (Table.Offered: funded and not deprecated), plus the models the
+// owner configured, each while it resolves: the [subagents] model, each tier
+// target, the default_model pin, and parents, the session's own model (on a
+// resume, every alias it may continue on; "" is none). A deprecated model is
+// listed only when the owner configured it or the session runs on it.
+// Resolution itself is not held to it: a call naming any table alias still
+// runs it.
+func subagentChoices(table *modeltable.Table, getenv func(string) string, parents ...string) map[string]bool {
+	set := table.Offered(getenv)
+	configured := append([]string{table.Subagents.Model, table.DefaultModel}, parents...)
+	for _, tier := range tierOrder(table.Subagents.Tiers) {
+		configured = append(configured, table.Subagents.Tiers[tier])
+	}
+	for _, alias := range configured {
+		if alias == "" || set[alias] {
+			continue
+		}
+		if _, err := table.Resolve(alias, getenv); err == nil {
+			set[alias] = true
+		}
+	}
+	return set
 }
 
 // subagentModelOrder is the table's aliases in the order the section lists

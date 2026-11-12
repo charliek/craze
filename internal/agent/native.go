@@ -1321,10 +1321,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// model's display name, still finds it.
 		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
-			return nil, nativeOpened{}, none, &nativeConfigError{
-				msg:   fmt.Sprintf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", ")),
-				cause: err,
-			}
+			return nil, nativeOpened{}, none, &nativeConfigError{msg: unknownNativeModelText(table, s.opts.Model, err), cause: err}
 		}
 		hopts.Model = alias
 	}
@@ -1650,13 +1647,48 @@ func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.
 		return "", "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
 	}
 	if start.Fallback {
+		started := fmt.Sprintf("starting on %q", start.Alias)
+		if m := table.Models[start.Alias]; m.Deprecated {
+			// StartPick's last resort (plan 050 C1): only deprecated models
+			// are funded.
+			started += fmt.Sprintf(", which is deprecated (replaced by %q)", m.ReplacedBy)
+		}
 		if table.DefaultModel != "" {
-			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; starting on %q", table.DefaultModel, start.Alias))
+			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; %s", table.DefaultModel, started))
 		} else {
-			s.note(fmt.Sprintf("no start model in the provider order is available; starting on %q", start.Alias))
+			s.note(fmt.Sprintf("no start model in the provider order is available; %s", started))
 		}
 	}
 	return start.Alias, start.Effort, nil
+}
+
+// unknownNativeModelText is the start error for a --model raw that table
+// does not match (err): the table's aliases after the error — unless raw names
+// an alias the catalog retired (plan 050 C1), which leads instead, its
+// replacement first when the catalog names one and then nothing more: a
+// script reading the message meets the alias to use before anything else. A
+// stored session whose recorded --model was retired since is refused the
+// same way on its reload; craze never moves it to the replacement.
+func unknownNativeModelText(table *modeltable.Table, raw string, err error) string {
+	has := fmt.Sprintf("(the model table has %s)", strings.Join(table.Aliases(), ", "))
+	if r, ok := retiredNativeModel(table, raw); ok && errors.Is(err, errUnknownModel) {
+		if r.ReplacedBy != "" {
+			return fmt.Sprintf("native: %s was retired; use %s", sanitizeLine(r.Alias), sanitizeLine(r.ReplacedBy))
+		}
+		return fmt.Sprintf("native: %s was retired %s", sanitizeLine(r.Alias), has)
+	}
+	return fmt.Sprintf("native: %v %s", err, has)
+}
+
+// retiredNativeModel is the [[retired]] row raw names, as written or as
+// --model's normalisation spells it (normalizeIdent: a retired alias is
+// lowercase, like every shipped one), when the table has one.
+func retiredNativeModel(table *modeltable.Table, raw string) (modeltable.Retired, bool) {
+	raw = strings.TrimSpace(raw)
+	if r, ok := table.Retired(raw); ok {
+		return r, true
+	}
+	return table.Retired(normalizeIdent(raw))
 }
 
 // nothingFundedText is the start error when no model's provider has a key
@@ -1785,11 +1817,26 @@ func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, cata
 // because they go back to SetModel verbatim.
 // MatchNativeModel is raw, a model as --model names it, resolved against every
 // model of table the way a native session's start resolves --model:
-// MatchModel over the table's aliases and names. The session list resolves
-// a typed /model by it too (plan 047 D5), so it finds the model a session
-// started from it runs.
+// MatchModel over the table's aliases and names, and, only when that finds no
+// model (not when it finds several), raw as "<provider id>/<alias>"
+// (Table.QualifiedAlias, plan 050 C1) under the same normalisation, so
+// `zai-coding-plan/glm-5.3` is glm-5.3. The session list resolves a typed
+// /model by it too (plan 047 D5), so it finds the model a session started
+// from it runs, and so does a sub-agent's model (nativeModelMatcher).
 func MatchNativeModel(table *modeltable.Table, raw string) (string, error) {
-	return MatchModel(Snapshot{Models: tableModels(table)}, raw)
+	return matchNative(table, Snapshot{Models: tableModels(table)}, raw)
+}
+
+// matchNative is MatchNativeModel over snap, table's models as tableModels
+// lists them.
+func matchNative(table *modeltable.Table, snap Snapshot, raw string) (string, error) {
+	alias, err := MatchModel(snap, raw)
+	if errors.Is(err, errUnknownModel) {
+		if q, ok := table.QualifiedAlias(strings.TrimSpace(raw), normalizeIdent); ok {
+			return q, nil
+		}
+	}
+	return alias, err
 }
 
 func tableModels(table *modeltable.Table) []ModelInfo {
@@ -2994,7 +3041,7 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 		if err := sw.hs.SetModelEffort(alias, landing); err != nil {
 			return switched{}, phraseSetupError(err, sw.table, alias)
 		}
-		if alias != current && !s.resolvesLocked(sw.table, current) {
+		if alias != current && !s.offeredLocked(sw.table, current) {
 			drop = current
 		}
 		sw.left = alias != current && sw.table.Shadowed(current)
@@ -3024,6 +3071,22 @@ func (s *nativeSession) resolvesLocked(table *modeltable.Table, alias string) bo
 	defer release()
 	_, err := table.Resolve(alias, getenv)
 	return err == nil
+}
+
+// offeredLocked reports whether table, the one the session holds, offers
+// alias now (modeltable.Table.Offered, plan 050 C1), with one sealed reading
+// of the environment: the model switched away from keeps its row only while
+// it is, so the list a switch leaves matches the one a reload would publish —
+// a carried model whose key is gone loses it as it always did, and so does a
+// deprecated one. A session whose table a test's seam handed in is never
+// reloaded: true, as resolvesLocked says. modelsMu is held.
+func (s *nativeSession) offeredLocked(table *modeltable.Table, alias string) bool {
+	if alias == "" || !s.models.reloadable {
+		return true
+	}
+	getenv, release := sealedGetenv(s.models.getenv)
+	defer release()
+	return table.Offered(getenv)[alias]
 }
 
 // relistLocked is list ranked again and its effort facts judged again (plan

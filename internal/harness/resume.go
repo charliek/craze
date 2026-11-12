@@ -76,7 +76,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// the gate; the session's own is set below, before it is handed out.
 	ws := filepath.Clean(opts.Workspace)
 	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.Asker, opts.Table, s.getenv,
-		profileRef(profile), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
+		profileRef(profile), resumeParents(opts, path), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -395,9 +395,11 @@ func (r *turnReader) numbered() int { return max(r.largest, r.inferred) }
 //     model, which would switch models under the conversation (D-33);
 //   - the table's pin, its DefaultModel (the user's default_model);
 //   - each provider's start model, in the provider order (Table.StartAliases,
-//     plan 038 §2): where a new session with nothing remembered and no funded
-//     pin starts. Never the first funded alias by name, which is a new
-//     session's last resort, not a model chosen for the owner.
+//     plan 038 §2), that is offered (Table.Offered, plan 050 C1: never a
+//     deprecated one, which craze does not choose for the owner): where a
+//     new session with nothing remembered and no funded pin starts. Never the
+//     first funded alias by name, which is a new session's last resort, not a
+//     model chosen for the owner.
 //
 // None is ErrResumeModel, naming why each failed. Landing anywhere but on the
 // transcript's own model is reported to Options.Warn.
@@ -411,10 +413,21 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		candidates = identityAliases(table, was.model)
 	}
 	own := len(candidates)
-	for _, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
-		if alias != "" && !slices.Contains(candidates, alias) {
-			candidates = append(candidates, alias)
+	offered := table.Offered(s.getenv)
+	for i, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
+		if alias == "" || slices.Contains(candidates, alias) {
+			continue
 		}
+		if i > 0 && !offered[alias] {
+			// A start model that runs but is not offered — a deprecated one
+			// (plan 050 C1) — is not chosen for the owner, and is passed over
+			// without a word; one that does not run stays, so the refusal
+			// says why it could not be used.
+			if _, err := table.Resolve(alias, s.getenv); err == nil {
+				continue
+			}
+		}
+		candidates = append(candidates, alias)
 	}
 	var why []string
 	for i, alias := range candidates {
@@ -438,6 +451,34 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		reason = strings.Join(why, "; ")
 	}
 	return model{}, s.tools.redactErr(fmt.Errorf("%w (tool profile %q): %s", ErrResumeModel, s.tools.profile, reason))
+}
+
+// resumeParents is every model a resume of the session at path may continue
+// on as its own, for the agent tool's menu (plan 050 C1), which openTools
+// fixes before the store's Open has read the transcript under its lock:
+// Options.Model when the caller set it, else every alias that names the
+// transcript's last model by its identity (identityAliases) — whichever of
+// them resumeModel takes. Its other fallbacks, the pin and the offered start
+// models, are in the menu already. The transcript is read here without the
+// lock, for the menu alone: which model the session runs on is still
+// resumeModel's, from the locked read, and a file that cannot be read here
+// adds nothing, leaving Open to report it.
+func resumeParents(opts Options, path string) []string {
+	if opts.Model != "" {
+		return []string{opts.Model}
+	}
+	tr, err := store.Load(path)
+	if err != nil {
+		return nil
+	}
+	branch, err := tr.Branch(tr.Leaf())
+	if err != nil {
+		return nil
+	}
+	if was := readPath(branch); was.hasModel {
+		return identityAliases(opts.Table, was.model)
+	}
+	return nil
 }
 
 // eligible builds alias's model when the session may run on it: the alias

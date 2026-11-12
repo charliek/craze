@@ -235,7 +235,12 @@ type toolset struct {
 // it may resume on (plan 028 §3.3). The mode only seeds the gate: a resumed
 // session learns its own from the transcript and sets it (newModes) before it
 // is handed out.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
+//
+// parents are the models the agent tool's menu lists as the session's own
+// (subagentChoices, plan 050 C1): the model a new session opens on, or every
+// alias a resume may continue on (resumeParents), since the menu is fixed
+// here, before a resume has settled its model.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, parents []string, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -336,7 +341,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		// the header hashes and the dispatcher's tool are the one decorated
 		// tool. A child never gets here: keeps withheld the tool from it.
 		if s.ID == tool.AgentTool {
-			t = &describedTool{Tool: t, tail: agentTail(ts.types, ts.offered, table, getenv, red)}
+			t = &describedTool{Tool: t, tail: agentTail(ts.types, ts.offered, table, getenv, parents, red)}
 			s = t.Spec()
 		}
 		tools = append(tools, t)

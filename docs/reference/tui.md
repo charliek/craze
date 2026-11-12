@@ -1514,11 +1514,19 @@ provider, where the tier names are Claude's own families: there an unmapped
 the session's model table has (`model: haiku` under Claude Opus 5.5 runs on
 Claude Haiku 5.5), and on the parent's model when it has none.
 `[subagents.tiers]` still wins on every parent, and the `agent` tool's
-description lists only the tiers it maps. Every alias
+description lists only the tiers it maps. The models that description lists —
+and that its "Unknown model" answer names — are the ones a `/model` list would
+offer (funded, not [deprecated](configuration.md#deprecated-models)) plus the
+ones you configured: the `[subagents]` model, each tier's model, your
+`default_model` pin and the parent's own model; a call naming any other model
+of the table still runs it. A child works within its own model's
+[context default](configuration.md#native-context-default). Every alias
 named in `[subagents]` or `[subagents.tiers]` should be a model — one craze
 ships or one in `models.toml`; one that is not falls back to the default,
-never stopping the session: silently for a model a release retired, with a
-warning for any other unknown name (see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
+never stopping the session: silently for a model a release retired with no
+replacement named, with a warning naming the replacement for one retired with
+one, and with a warning for any other unknown name; a deprecated model stays,
+with a warning naming its replacement (see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
 itself is refused as a tier key, since a tier mapping to `inherit` could never
 be reached. For example:
 
@@ -1541,8 +1549,10 @@ sub-agent slots are in use…`).
 
 On the native provider (`--provider native`), a long session
 summarizes its own context rather than growing it forever. Once the context
-reaches 85% of the model's context window — capped at the window less its
-[output ceiling](configuration.md#native-output-ceiling) — craze summarizes the
+reaches 85% of the context the model works within — its
+[context default](configuration.md#native-context-default) when it has one,
+else its context window — capped at the window less its
+[output ceiling](configuration.md#native-output-ceiling), craze summarizes the
 conversation so far and carries on from the summary in place of it. The
 check runs before a turn's first request and again after every step that
 called a tool, so a turn that crosses the line partway through splits into
@@ -1635,6 +1645,11 @@ spent, the turn's amount then the session's:
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
 | no usage yet (ACP, or before native's first step) | no part at all |
+
+`NN% ctx` is the context's share of the context the model works within: its
+[context default](configuration.md#native-context-default) when it has one,
+else its context window — the same measure automatic
+[compaction](#compaction) uses.
 
 Money is to the cent, rounded half up, and reads `<$0.01` for an amount
 above nothing that would otherwise round to nothing. A `+` on an amount
@@ -2220,8 +2235,10 @@ Anthropic's together newest first, each block placed by its provider's name
 group.
 
 A native session lists only the models of providers that have a key — an
-exported variable or a stored one ([Keys](configuration.md#keys)) — plus the
-model it is running on, and says nothing about the providers that have none,
+exported variable or a stored one ([Keys](configuration.md#keys)) — and never
+a [deprecated](configuration.md#deprecated-models) model, plus the model it is
+running on (deprecated or not); switching away from a model the list no
+longer offers drops its row. It says nothing about the providers that have none,
 except one row: while some provider has no key, the list ends with
 `Connect a provider…`, which `↑`/`↓` and a click reach like any row and which
 opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is
@@ -2235,8 +2252,10 @@ never has the row, and never asks. A model you pick in this session moves up in
 this session's list at once — the switch republishes the list, ranked again —
 and in the next session's. A typed `/model <alias>` naming a model the list
 leaves out fails as an unknown model does; `--model <alias>` at start still
-resolves against every model craze knows, and refuses one whose provider has
-no key, saying how to give it one.
+resolves against every model craze knows, a deprecated one included (also
+written `<provider id>/<alias>`), and refuses one whose provider has no key,
+saying how to give it one. The session list's `/model` offers the same models
+a session's list does.
 
 **The effort row follows the highlight on native.** A native session states
 every model's effort levels in its model list (the session capability

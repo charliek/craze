@@ -349,7 +349,7 @@
       "additionalProperties": false
     },
     "usage": {
-      "description": "The usage section (UsageState; native only, absent for every ACP session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context window of the model it goes to (contextWindow, 0 when unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key.",
+      "description": "The usage section (UsageState; native only, absent for every ACP session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context the model it goes to works within (contextWindow: its default_context when that is below its context window, else the window; 0 when the window is unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key.",
       "type": "object",
       "properties": {
         "contextTokens": {"type": "integer"},

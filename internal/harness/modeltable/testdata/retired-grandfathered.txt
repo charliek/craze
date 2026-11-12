@@ -1,0 +1,18 @@
+# The [[retired]] rows the catalog held before deprecation existed (plan 050
+# C1: the rows at commit 26181d1), which no release shipped deprecated first.
+# TestDeprecationHistory exempts exactly these from its rule; every row
+# retired since needs its line in deprecated-aliases.txt. Never add a line.
+fireworks/deepseek-v4-flash
+fireworks/deepseek-v4-pro
+fireworks/kimi-k2p7-code
+fireworks/glm-5p3-fast
+fireworks/kimi-k3-fast
+openrouter/gpt-5.6-luna
+openrouter/gpt-5.6-sol
+openrouter/gpt-5.6-terra
+openrouter/gpt-6-sol
+openrouter/gemini-3.8-flash
+openrouter/glm-5.3-flash
+openrouter/gpt-6-astra
+openrouter/gpt-6-luna
+openrouter/gpt-6.1-sol

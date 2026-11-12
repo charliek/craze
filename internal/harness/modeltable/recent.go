@@ -336,10 +336,11 @@ func (t *Table) StartModel(recent []RecentEntry, getenv func(string) string) (al
 // whether it is the last step's fallback.
 type Start struct {
 	Alias, Effort string
-	// Fallback says the model is the first funded alias in sorted order, the
-	// last step: nothing remembered resolves, no pin is funded, and no
-	// provider in the order has a start that resolves. The caller says the
-	// session did not start where it would have.
+	// Fallback says the model is the first offered alias in sorted order, the
+	// fourth step — nothing remembered resolves, no pin is funded, and no
+	// provider in the order has a start that is offered — or the first
+	// deprecated alias that resolves, the last resort (plan 050 C1). The
+	// caller says the session did not start where it would have.
 	Fallback bool
 }
 
@@ -355,13 +356,21 @@ type Start struct {
 //     the answer, left for the caller's open to report, so the user sees it
 //     (plan 018 §3.8);
 //  3. for each provider in StartOrder, the first of its start models that
-//     resolves, at its default_effort — the ChatGPT plan's when the account
-//     lists it and the sign-in funds it (plan 034 Q4): an owner starts on
-//     the chosen model of the first provider they fund, not on whichever
-//     sorts first;
-//  4. the first alias in sorted order that resolves, at its default_effort,
-//     with Fallback set: one unfunded choice must not lock the owner out of
-//     the others.
+//     is offered (Offered: it resolves and is not deprecated), at its
+//     default_effort — the ChatGPT plan's when the account lists it and the
+//     sign-in funds it (plan 034 Q4): an owner starts on the chosen model of
+//     the first provider they fund, not on whichever sorts first;
+//  4. the first alias in sorted order that is offered, at its
+//     default_effort, with Fallback set: one unfunded choice must not lock
+//     the owner out of the others;
+//  5. the last resort (plan 050 C1): the first deprecated alias in sorted
+//     order that resolves, at its default_effort, with Fallback set — a
+//     machine whose only funded models are deprecated still starts, and
+//     says so, rather than report that nothing is funded.
+//
+// Steps 1 and 2 are the owner's own choices and judge only Resolve: a
+// remembered or pinned deprecated model still starts. Steps 3 to 5 are craze
+// choosing for the owner (plan 050's eligible set).
 //
 // With none of them — a fresh machine with the shipped catalog and no key —
 // the error is ErrNothingFunded, which also unwraps to the ErrNoAPIKey of the
@@ -374,12 +383,17 @@ func (t *Table) StartPick(recent []RecentEntry, getenv func(string) string) (Sta
 		}
 	}
 	var unfunded error // the first ErrNoAPIKey met, which ErrNothingFunded wraps
+	offered := t.Offered(getenv)
 	try := func(alias string) bool {
-		_, err := t.Resolve(alias, getenv)
-		if unfunded == nil && errors.Is(err, ErrNoAPIKey) {
-			unfunded = err
+		if offered[alias] {
+			return true
 		}
-		return err == nil
+		if unfunded == nil {
+			if _, err := t.Resolve(alias, getenv); errors.Is(err, ErrNoAPIKey) {
+				unfunded = err
+			}
+		}
+		return false
 	}
 	if pin := t.DefaultModel; pin != "" {
 		_, err := t.Resolve(pin, getenv)
@@ -395,6 +409,14 @@ func (t *Table) StartPick(recent []RecentEntry, getenv func(string) string) (Sta
 	}
 	for _, alias := range t.Aliases() {
 		if try(alias) {
+			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort, Fallback: true}, nil
+		}
+	}
+	for _, alias := range t.Aliases() {
+		if !t.Models[alias].Deprecated {
+			continue
+		}
+		if _, err := t.Resolve(alias, getenv); err == nil {
 			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort, Fallback: true}, nil
 		}
 	}

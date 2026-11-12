@@ -96,7 +96,8 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		got, recognized := v.resolveModelValue(c.raw, in.ParentAlias)
 		if !recognized {
 			if c.required {
-				return "", unknownModelError(s.quoteRaw(c.raw), v.table)
+				listed := slices.Sorted(maps.Keys(subagentChoices(v.table, s.getenv, in.ParentAlias)))
+				return "", unknownModelError(s.quoteRaw(c.raw), v.table, listed)
 			}
 			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
 			continue
@@ -206,7 +207,11 @@ func (v tableView) tierAlias(raw, parentAlias string) (alias string, isTier bool
 // matchModelAlias is raw matched against the table's aliases: the view's
 // matcher (the adapter's `--model` normalisation) when set, else an exact,
 // case-sensitive alias match, which is what Options.MatchModel's doc
-// promises for a nil matcher.
+// promises for a nil matcher, and when that finds nothing, raw as
+// "<provider id>/<alias>" (Table.QualifiedAlias, plan 050 C1), compared as
+// written. The adapter's matcher tries the same form itself, under its own
+// normalisation and only when its match found nothing rather than too much
+// (agent.MatchNativeModel), which a bare ok cannot tell this caller.
 func (v tableView) matchModelAlias(raw string) (alias string, ok bool) {
 	if v.match != nil {
 		return v.match(raw)
@@ -214,7 +219,7 @@ func (v tableView) matchModelAlias(raw string) (alias string, ok bool) {
 	if _, ok := v.table.Models[raw]; ok {
 		return raw, true
 	}
-	return "", false
+	return v.table.QualifiedAlias(raw, nil)
 }
 
 // warnLine calls warn with msg when warn is not nil; resolveChildModel and
@@ -243,12 +248,12 @@ const unknownModelCap = 1024
 const unknownModelRawCap = 200
 
 // unknownModelError is a call's `model` naming neither a table alias, a
-// recognised tier, nor "inherit": every alias and every configured tier
-// mapping, so the parent's model can retry with a name that exists (plan 026
-// §3.6). raw is never omitted: the model needs to see what it sent to
-// correct it.
-func unknownModelError(raw string, table *modeltable.Table) error {
-	aliases := table.Aliases() // sorted
+// recognised tier, nor "inherit": aliases — the sub-agent choice set, sorted
+// (subagentChoices, plan 050 C1: what the agent tool's menu offers, not every
+// alias the table has) — and every configured tier mapping, so the parent's
+// model can retry with a name that exists (plan 026 §3.6). raw is never
+// omitted: the model needs to see what it sent to correct it.
+func unknownModelError(raw string, table *modeltable.Table, aliases []string) error {
 	var tierParts []string
 	for _, name := range slices.Sorted(maps.Keys(table.Subagents.Tiers)) {
 		tierParts = append(tierParts, fmt.Sprintf("%s → %s", name, table.Subagents.Tiers[name]))

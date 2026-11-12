@@ -2097,8 +2097,11 @@ them, and shows it as a read-out.
 ```
 
 - `contextTokens` is the estimated size of what the session's next request
-  sends; `contextWindow` is the window of the model it goes to, `0` when craze
-  does not know it.
+  sends; `contextWindow` is the context the model it goes to works within: its
+  [context default](configuration.md#native-context-default) when it has one
+  below its window, otherwise its context window, and `0` when craze does not
+  know the window. It is what automatic compaction is measured against, so
+  `contextTokens / contextWindow` is the share a client shows.
 - `turn` is what the turn the report followed spent — after a load, the last
   turn the stored session recorded — and `session` what the whole session has:
   its own requests, its compactions' (a `/compact` is a turn of its own), and

@@ -96,6 +96,7 @@ type modelOverlay struct {
 	WireModel       *string   `toml:"wire_model"`
 	Name            *string   `toml:"name"`
 	ContextWindow   *int      `toml:"context_window"`
+	DefaultContext  *int      `toml:"default_context"`
 	MaxOutputTokens *int      `toml:"max_output_tokens"`
 	Efforts         *[]string `toml:"efforts"`
 	DefaultEffort   *string   `toml:"default_effort"`
@@ -185,9 +186,13 @@ func overlayProvider(base Provider, o providerOverlay) Provider {
 // and otherwise clears it. Each cost rate overrides on its own, and so do
 // long_context_above and each long-context rate (plan 047 D10); an entry that
 // writes long_context_above = 0 and no long-context table of its own turns
-// the shipped tier off, its table going with it. An entry that points the
-// model at another provider or wire model makes it another model, so what
-// craze learned of the one it was is forgotten (forgetLearned).
+// the shipped tier off, its table going with it. default_context merges as
+// context_window does, and 0 turns a shipped one off (plan 050 C1). An entry
+// that points the model at another provider or wire model makes it another
+// model, so what craze learned of the one it was is forgotten
+// (forgetLearned), and so is what the catalog says of the alias it was
+// shipped as: deprecated and replaced_by belong to the shipped model, not to
+// the alias the user has taken over (plan 050 C1).
 func overlayModel(base Model, o modelOverlay) Model {
 	m := cloneModel(base)
 	if o.Provider != nil {
@@ -198,12 +203,16 @@ func overlayModel(base Model, o modelOverlay) Model {
 	}
 	if m.Provider != base.Provider || m.WireModel != base.WireModel {
 		m.forgetLearned()
+		m.Deprecated, m.ReplacedBy = false, ""
 	}
 	if o.Name != nil {
 		m.Name = *o.Name
 	}
 	if o.ContextWindow != nil {
 		m.ContextWindow = *o.ContextWindow
+	}
+	if o.DefaultContext != nil {
+		m.DefaultContext = *o.DefaultContext
 	}
 	if o.MaxOutputTokens != nil {
 		m.MaxOutputTokens = *o.MaxOutputTokens
@@ -492,6 +501,8 @@ func checkModelOverlay(file, alias string, o modelOverlay) error {
 		return at("wire_model", "missing: the model id the provider's API expects")
 	case o.ContextWindow != nil && *o.ContextWindow < 0:
 		return at("context_window", "must not be negative")
+	case o.DefaultContext != nil && *o.DefaultContext < 0:
+		return at("default_context", "must not be negative")
 	case o.MaxOutputTokens != nil && *o.MaxOutputTokens < 0:
 		return at("max_output_tokens", "must not be negative")
 	}
@@ -546,6 +557,7 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 			Compaction:      compactionFromDoc(md.Compaction),
 			providerOrigins: make(map[string]Origin),
 			modelOrigins:    make(map[string]Origin),
+			retired:         cat.Retired, // the merge's own copy
 		},
 	}
 	for id, p := range cat.Providers {
@@ -569,6 +581,48 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 	m.subagents(subagentsFromDoc(md.Subagents))
 	m.t.credentialEnv = credentialNames(cat, pd)
 	return m.t
+}
+
+// deprecatedRef warns that the user's models.toml refers, at table and key,
+// to alias, a deprecated model (plan 050 C1): one line per reference, naming
+// the replacement. The reference still works; the retirement a later
+// release makes drops it.
+func (m *merger) deprecatedRef(table, key, alias string) {
+	m.warn(&FileError{File: m.mpath, Table: table, Key: key,
+		Reason: fmt.Sprintf("%q is deprecated; use %q", alias, m.t.Models[alias].ReplacedBy)},
+		"it still runs, but a later craze release retires it and then drops this reference")
+}
+
+// userRef judges the reference the user's models.toml makes, at table and
+// key, to alias — the pin, the [subagents] model or a tier target: true when
+// alias is a merged model, which stands (with deprecatedRef's warning when it
+// is deprecated); false when it is not, which the caller drops and which does
+// instead — with retiredRef's word for a retired alias, a warning for
+// anything else (plan 031 §3.2, §3.3; plan 050 C1).
+func (m *merger) userRef(table, key, alias, instead string) bool {
+	switch {
+	case hasModel(m.t.Models, alias):
+		if m.t.Models[alias].Deprecated {
+			m.deprecatedRef(table, key, alias)
+		}
+		return true
+	case m.retiredAlias[alias]:
+		m.retiredRef(table, key, alias, instead)
+	default:
+		m.warn(&FileError{File: m.mpath, Table: table, Key: key, Reason: fmt.Sprintf("%q is not a model", alias)}, instead)
+	}
+	return false
+}
+
+// retiredRef warns that the user's models.toml refers, at table and key, to
+// alias, a retired alias the catalog names a replacement for, and that the
+// merge does instead (plan 050 C1). A reference to an alias retired with no
+// replacement is dropped silently, as it always was (plan 031 §3.3).
+func (m *merger) retiredRef(table, key, alias, instead string) {
+	if r, _ := m.t.Retired(alias); r.ReplacedBy != "" {
+		m.warn(&FileError{File: m.mpath, Table: table, Key: key,
+			Reason: fmt.Sprintf("%q was retired; use %q", alias, r.ReplacedBy)}, instead)
+	}
 }
 
 // startAliases is every provider's start as aliases of a merged table (plan
@@ -771,14 +825,22 @@ func (m *merger) model(alias string, o modelOverlay) {
 	_, hidden := m.cat.listHidden[alias]
 	if m.retiredID[identity{mod.Provider, mod.WireModel}] {
 		// A dead wire id is dead whoever wrote it (§3.3). For a shipped alias
-		// the shipped definition stays (r2-6); only the user's entry goes.
+		// the shipped definition stays (r2-6); only the user's entry goes —
+		// with a word when it is a retired alias's entry and the catalog
+		// names the alias's replacement (plan 050 C1).
+		if retiredAlias {
+			m.retiredRef(modelTable(alias), "", alias, "the entry is ignored")
+		}
 		return
 	}
 	if !isShipped && (mod.Provider == "" || mod.WireModel == "") {
-		// A retired alias's leftover override goes silently, as does one of
-		// an Anthropic model the account's list hides (plan 044 §3.5): the
-		// entry stands again when the model is offered again.
-		if !retiredAlias && !hidden {
+		// A retired alias's leftover override goes silently — unless the
+		// catalog names its replacement (plan 050 C1) — as does one of an
+		// Anthropic model the account's list hides (plan 044 §3.5): the entry
+		// stands again when the model is offered again.
+		if retiredAlias {
+			m.retiredRef(modelTable(alias), "", alias, "the entry is ignored")
+		} else if !hidden {
 			m.warn(&FileError{File: m.mpath, Table: modelTable(alias),
 				Reason: "craze does not ship this model, so its entry needs provider and wire_model"}, "the entry is ignored")
 		}
@@ -810,6 +872,11 @@ func (m *merger) model(alias string, o modelOverlay) {
 		return
 	}
 	m.t.modelOrigins[alias] = OriginOverridden
+	if mod.Deprecated {
+		// An override of a deprecated model that still is one: the entry
+		// does not re-point the alias (plan 050 C1).
+		m.deprecatedRef(modelTable(alias), "", alias)
+	}
 	if clean && sameAsShippedModel(shipped, o) {
 		m.redundant(&FileError{File: m.mpath, Table: modelTable(alias),
 			Reason: "repeats craze's shipped entry — delete it to follow craze's updates"})
@@ -823,6 +890,7 @@ func (m *merger) model(alias string, o modelOverlay) {
 func sameAsShippedModel(s Model, o modelOverlay) bool {
 	if differs(o.Provider, s.Provider) || differs(o.WireModel, s.WireModel) ||
 		differs(o.Name, s.Name) || differs(o.ContextWindow, s.ContextWindow) ||
+		differs(o.DefaultContext, s.DefaultContext) ||
 		differs(o.MaxOutputTokens, s.MaxOutputTokens) || listDiffers(o.Efforts, s.Efforts) ||
 		differs(o.DefaultEffort, s.DefaultEffort) || differs(o.Vision, s.Vision) ||
 		differs(o.ToolProfile, s.ToolProfile) {
@@ -860,41 +928,29 @@ func writesShipped[T comparable](written, shipped *T) bool {
 
 // defaultModel is the user's default_model — their pin (plan 038 §2.3) — when
 // it names a merged model, and otherwise none: dropped silently when it names
-// a retired alias, with a warning for anything else (plan 031 §3.2). The
+// a retired alias, with a warning for anything else (plan 031 §3.2). A pin
+// on a deprecated model stands with a warning, and one on a retired alias
+// whose replacement the catalog names is dropped with one (plan 050 C1). The
 // catalog has no default of its own; with no pin a new session starts by the
 // provider order (StartModel).
 func (m *merger) defaultModel(user *string) {
-	if user == nil {
-		return
-	}
-	switch u := *user; {
-	case hasModel(m.t.Models, u):
-		m.t.DefaultModel = u
-	case m.retiredAlias[u]:
-	default:
-		m.warn(&FileError{File: m.mpath, Key: "default_model", Reason: fmt.Sprintf("%q is not a model", u)},
-			"a new session starts by craze's provider order")
+	if user != nil && m.userRef("", "default_model", *user, "a new session starts by craze's provider order") {
+		m.t.DefaultModel = *user
 	}
 }
 
 // subagents degrades [subagents] instead of failing the load (plan 031 §3.3):
 // a model or tier target that is not a merged model is dropped — silently for
-// a retired alias — falling through to plan 026 §3.6's defaults, and an
-// effort the model it is set with does not offer is dropped with a warning.
+// a retired alias with no replacement named (plan 050 C1) — falling through
+// to plan 026 §3.6's defaults, and an effort the model it is set with does
+// not offer is dropped with a warning. A model or tier target that is a
+// deprecated model stands, with a warning naming its replacement.
 func (m *merger) subagents(s Subagents) {
-	if s.Model != "" && !hasModel(m.t.Models, s.Model) {
-		if !m.retiredAlias[s.Model] {
-			m.warn(&FileError{File: m.mpath, Table: "subagents", Key: "model", Reason: fmt.Sprintf("%q is not a model", s.Model)},
-				"a sub-agent defaults to its parent's model")
-		}
+	if s.Model != "" && !m.userRef("subagents", "model", s.Model, "a sub-agent defaults to its parent's model") {
 		s.Model = ""
 	}
 	for _, tier := range slices.Sorted(maps.Keys(s.Tiers)) {
-		if alias := s.Tiers[tier]; !hasModel(m.t.Models, alias) {
-			if !m.retiredAlias[alias] {
-				m.warn(&FileError{File: m.mpath, Table: "subagents.tiers", Key: tier, Reason: fmt.Sprintf("%q is not a model", alias)},
-					"the tier means the parent's model")
-			}
+		if !m.userRef("subagents.tiers", tier, s.Tiers[tier], "the tier means the parent's model") {
 			delete(s.Tiers, tier)
 		}
 	}

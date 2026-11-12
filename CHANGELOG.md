@@ -86,6 +86,24 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - `craze auth login` from a pipe takes a key with no trailing newline (it
   always did; now tested and documented).
 
+### The native provider
+
+- A shipped model can be deprecated (`deprecated` and `replaced_by` in the
+  catalog): it runs when named, is never offered or chosen for you, and each
+  `models.toml` reference to it warns. A `[[retired]]` row can name its
+  replacement, which a `--model` naming it leads with (`<alias> was retired;
+  use <replacement>`) and a dropped reference warns about. A model is retired
+  no earlier than the next minor release and 30 days after a release shipped
+  it deprecated (RELEASING.md; `TestDeprecationHistory` holds the catalog to
+  the release half).
+- `default_context`: a context smaller than the window that a session works
+  within — compaction's threshold and the usage report's `contextWindow` are
+  measured against it — set by the catalog and per model in `models.toml`
+  (`0` turns it off).
+- `--model <provider id>/<alias>`: `zai-coding-plan/glm-5.3` is `glm-5.3`.
+- The agent tool's model list and its "Unknown model" answer hold to the
+  models `/model` offers plus the ones you configured.
+
 ### Maintenance
 
 - Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint

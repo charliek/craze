@@ -283,9 +283,11 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 // nativeModelLevels is the effort levels of native model model — named as
 // --model names it, and resolved as a native session's start resolves
 // --model (agent.MatchNativeModel), so `SPARK` is spark (plan 047 C2 review
-// F4) — as the list's /model offers it (Table.Choices, plan 047 D2, D5); of
-// the start model (nativeDefaultModel's) for ""; and false when the table
-// does not offer that model: unfunded, or not in it. alias is the model it
+// F4) — as the table states them (plan 047 D2, D5); of the start model
+// (nativeDefaultModel's) for ""; and false when the model does not run:
+// unfunded, or not in the table. A model that runs and that the list does
+// not offer — a deprecated one — still has its levels (plan 050 C1): it is
+// judged by Resolve, not by the picker's membership. alias is the model it
 // resolved model to. It reads the disk, and is called off the Update.
 func nativeModelLevels(dir string, getenv func(string) string, model string) (alias string, levels []string, ok bool) {
 	table, err := modeltable.Load(dir)
@@ -301,12 +303,11 @@ func nativeModelLevels(dir string, getenv func(string) string, model string) (al
 	if err != nil {
 		return "", nil, false
 	}
-	for _, c := range table.Choices(recent, getenv, "") {
-		if c.Alias == alias {
-			return alias, c.Efforts, true
-		}
+	r, err := table.Resolve(alias, getenv)
+	if err != nil {
+		return alias, nil, false
 	}
-	return alias, nil, false
+	return alias, r.Efforts, true
 }
 
 // readNativeLevels reads the levels of native model model ("" the start

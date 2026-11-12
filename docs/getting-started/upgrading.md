@@ -375,6 +375,43 @@ start on used to read `json-rpc error -32602: Invalid params`, and now says `the
 agent refused model "x": Invalid params`, kind `model_not_found`. The agent's own
 data on that error, which can quote its request, stays out of it, as it always has.
 
+### Native models: deprecation and the context default
+
+**`usage.contextWindow` is the context a session works within.** On a native
+model with a [context default](../reference/configuration.md#native-context-default)
+— a context smaller than its window — the usage report's `contextWindow` (the
+stream's usage section, the waiting commands' `usage`), the status row's `NN%
+ctx` and the waiting footer's `context x/y` are that default, not the window,
+and automatic compaction runs at its share of it. The window sent to the
+provider and the price do not change. No model this release ships has one;
+`default_context = 0` under a model in `models.toml` turns a later one off.
+`default_context` is a new `models.toml` key: a file that writes it does not
+load in an older craze.
+
+**A model can be deprecated.** A later release may mark a shipped model
+[deprecated](../reference/configuration.md#deprecated-models), naming its
+replacement: it runs as before when named (`--model`, a pin, the model
+memory, a resumed session, a `[subagents]` model or tier), but `/model`, the
+session list, the agent tool's model list and a new session's own choice
+leave it out. Each reference your `models.toml` makes to one warns at session
+start. It is retired no earlier than the next minor release and 30 days later.
+
+**A retired `--model` names its replacement.** `--model` naming a retired alias
+fails as before (kind `config`), but when the catalog names a replacement the
+message is `native: <alias> was retired; use <replacement>`, with no alias list
+after it. A `default_model`, `[subagents]` model or tier, or `[models]` entry
+naming such an alias is still dropped, now with a warning naming the
+replacement.
+
+**`--model` takes `<provider id>/<alias>`.** `zai-coding-plan/glm-5.3` runs
+`glm-5.3`; an alias that already has its prefix is unchanged.
+
+**The agent tool's model list.** The `agent` tool's description, and its
+"Unknown model" answer, list the models a `/model` list would offer plus the
+ones you configured (`[subagents]` model and tiers, `default_model`, the
+parent's own model). The "Unknown model" answer used to list every alias of
+the table, funded or not.
+
 ## Since v0.1.1
 
 Nothing needs migrating.
