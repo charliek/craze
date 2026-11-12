@@ -926,6 +926,10 @@ may be `openai/gpt-6-astra`. To keep craze off the key, write `env_keys = []`
 under `[providers.openai]` in `providers.toml`; to start on a model of your
 choosing, set `default_model`. `provider_order` in your
 `models.toml` changes the order; `default_model` picks one model outright.
+A start model is taken only while it is offered: of a maker several providers
+reach, only its first funded source's models are, and craze passes over a
+later source while an earlier one is set up but offers none of its models
+([One source per maker](#one-source-per-maker)).
 
 Fireworks' start model is Kimi K3.1 Pro, Moonshot's successor to Kimi K3,
 which is the owner's choice of 2026-11-11, not the result of an evaluation.
@@ -964,6 +968,7 @@ api_key = "fw_..."            # an inline key (craze auth login writes this); an
 version = 1
 default_model = "muse-spark-1.3-contributor"   # optional: your pin, where a new session starts when it remembers nothing
 provider_order = ["fireworks", "zai-coding-plan"]   # optional: replaces craze's provider order (below)
+source_order = ["openai"]     # optional: goes before craze's source order (One source per maker)
 
 [models."fireworks/kimi-k3p1-pro"]
 default_effort = "max"        # everything else stays as shipped
@@ -1073,6 +1078,15 @@ store a key with [`/connect`](tui.md#connect).
   Earlier versions shipped `fireworks/deepseek-v4p1-flash` as the catalog's
   default; a `default_model` line naming it, written then, is now a pin like
   any other: delete it to follow the provider order.
+- **Makers.** A shipped model's maker belongs to the catalog, as its
+  deprecation does: no file of yours can set one, and an entry that points the
+  alias at another `provider` or `wire_model`, or a provider entry that moves
+  its `driver` or `base_url`, clears it ([One source per
+  maker](#one-source-per-maker)).
+- **`source_order`** goes before the catalog's source order, whose other
+  providers follow; `source_order = []` turns the rule off. A name that is not
+  a provider is passed over with a warning ([One source per
+  maker](#one-source-per-maker)).
 - **`provider_order`** replaces the catalog's order whole: a new session
   that remembers nothing and has no funded pin tries only the providers it
   lists, in its order, each on that provider's start model, which only the
@@ -1086,7 +1100,7 @@ cannot be one (below), or a value no entry could hold (an unknown driver, a
 negative window, an effort listed twice, more than 8 efforts or one over 32
 bytes or not one printable line, a `default_effort` outside the
 `efforts` the same entry lists, a cost out of range, a provider listed twice in
-`provider_order`). What an entry gets wrong only against the catalog is
+`provider_order` or `source_order`). What an entry gets wrong only against the catalog is
 dropped with a warning at session start, naming
 the file, the table and the key, and the session carries on: a model whose
 provider no longer exists, a `default_effort` the model no longer offers, a
@@ -1747,7 +1761,8 @@ no memory at all. The next switch replaces a file that is not a
 **Where a new session starts.** With no `--model`, a new native session starts
 on the first of:
 
-1. the newest remembered model whose provider has a key, at its remembered
+1. the newest remembered model whose provider has a key and that the
+   [source order](#one-source-per-maker) does not hide, at its remembered
    effort when the model still offers it (its `default_effort` otherwise);
 2. your `default_model`, when you set one and its provider has a key (one that
    fails for another reason is still used, so the session says why);
@@ -1766,10 +1781,14 @@ on the first of:
    alias — with a note saying it is deprecated and what replaces it.
 
 Steps 2 to 5 start at the model's `default_effort`. Steps 3 to 5 are craze
-choosing for you, and never take a deprecated model while another is funded;
-steps 1 and 2 are your own choices, and a remembered or pinned deprecated
-model still starts. With no provider funded at all the session does not
-start, and says how to connect one.
+choosing for you: they never take a deprecated model while another is
+funded, never a model the source order hides, and never a model whose maker
+has an earlier source that is set up but funds none of its models ([One
+source per maker](#one-source-per-maker)); steps 1 and 2 are your own
+choices, and a remembered or pinned deprecated model still starts. With no
+provider funded at all the session does not start, and says how to connect
+one; when only that last rule left nothing, it says which sign-in or key to
+repair and which `--model` to pass.
 
 A remembered model is found by its alias while that alias still names the
 same provider and wire model, and otherwise by its provider and wire model,
@@ -1820,6 +1839,137 @@ with the same case and spacing rules, and only when the alias is that
 provider's. An alias that already carries its provider's prefix
 (`fireworks/kimi-k3p1-pro`) is unchanged.
 
+### One source per maker
+
+Some makers' models are reachable through several providers: OpenAI's through
+the ChatGPT plan, the OpenAI key and OpenRouter; Meta's through Meta and
+OpenRouter; GLM through the Z.AI Coding Plan, Fireworks and OpenRouter;
+DeepSeek through Fireworks and OpenRouter. craze offers each maker's models
+from **one source**: the first provider in the **source order** that funds at
+least one of that maker's models that is not [deprecated](#deprecated-models).
+The other sources' models of that maker leave `/model`, the session list's
+`/model`, the agent tool's model menu and a new session's start. They are
+**not removed**: each still runs by name — `--model`, your `default_model`
+pin, a resumed session, a persona's `model:` or a `[subagents]` model — and
+`craze models` lists them with `state.offered` false. Hiding is per maker, not
+model by model: once the ChatGPT plan funds one OpenAI model, every
+`openai/*` and `openrouter/gpt-*-latest` row is hidden, including one the
+plan's list does not have (`openai/gpt-6.1-terra`, say). The source is judged
+by models that **resolve**, never by a provider being connected: a ChatGPT
+sign-in whose model list is missing, is another account's, or has plan usage
+off funds none of its models, so the next source wins.
+
+The catalog's order is `zai-coding-plan`, `chatgpt`, `meta`, `openai`,
+`anthropic`, `fireworks`, `openrouter`, and its makers are:
+
+| Maker | Sources, in order | Models |
+|---|---|---|
+| OpenAI (`openai`) | `chatgpt`, `openai`, `openrouter` | `chatgpt/*` (the account's list), `openai/*`, `openrouter/gpt-{sol,astra,luna,terra}-latest` |
+| Meta (`meta`) | `meta`, `openrouter` | `muse-*`, `openrouter/muse-spark-1.3`, `openrouter/muse-wonder` |
+| GLM (`zai`) | `zai-coding-plan`, `fireworks`, `openrouter` | `glm-5.3`, `glm-5.3-flash`, `fireworks/glm-5p3`, `fireworks/glm-5p3-flash`, `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
+| DeepSeek (`deepseek`) | `fireworks`, `openrouter` | `fireworks/deepseek-v4p1-flash-1017` (and the deprecated `fireworks/deepseek-v4p1-flash`), `openrouter/deepseek-flash-latest` |
+| Anthropic (`anthropic`) | `anthropic` | `anthropic/*` (one source: nothing is hidden) |
+
+Kimi, Gemini, MiniMax, MiMo, Qwen and Fireworks' own `fireworks/ember-1` have
+one source each and no maker: they are never hidden. A model of your own has
+no maker either, nor does a shipped alias your `models.toml` points at
+another `provider` or `wire_model`: the maker belongs to the shipped model,
+and no file of yours can set one. A shipped provider your `providers.toml`
+moves to another `driver` or `base_url` is your own endpoint: every model on
+it loses its maker, a model that names its maker in the catalog included, so
+its models are never hidden and never take a maker's place.
+
+What each combination of credentials stops listing (each row still runs by
+name):
+
+| Connected | Not listed |
+|---|---|
+| ChatGPT plan (with its model list) + OpenAI key | `openai/*` |
+| ChatGPT plan (with its model list) or OpenAI key, + OpenRouter | `openrouter/gpt-*-latest` |
+| Z.AI Coding Plan + Fireworks | `fireworks/glm-5p3`, `fireworks/glm-5p3-flash` |
+| Z.AI Coding Plan or Fireworks, + OpenRouter | `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
+| Fireworks + OpenRouter | `openrouter/deepseek-flash-latest` |
+| Meta + OpenRouter | `openrouter/muse-spark-1.3`, `openrouter/muse-wonder` |
+
+`craze auth list` and `craze models` (the table) end with a note for each
+maker whose models the order hides, naming where they come from and how many
+each other source has; `/connect` says so too when the provider you connected
+takes a maker's models over, or is not their source.
+
+**`source_order` in `models.toml`** changes the order. It is not
+`provider_order`, on purpose:
+
+| | `provider_order` | `source_order` |
+|---|---|---|
+| A list you write | replaces the catalog's whole | goes first; the catalog's other providers follow in the catalog's order |
+| `[]` | tries no provider | turns the rule **off**: every source is offered |
+| A name that is no provider | passed over silently | passed over, with one warning |
+| A provider listed twice | the file does not load | the file does not load |
+
+So `source_order = ["openai"]` means "the OpenAI key first": with a key and a
+ChatGPT sign-in, `openai/*` is listed and `chatgpt/*` is not. It decides only
+what is offered and what craze may choose for you, never where an explicit
+name resolves. An older craze does not know the key: a `models.toml` that
+writes it stops an older craze from reading the directory.
+
+**The model memory follows the order.** A [remembered
+model](#model-memory-recentjson) that the order hides does not start a new
+session: the next step decides, and the entry stays in `recent.json` (it
+starts again once its source is the one in force). A remembered deprecated
+model still starts. Your `default_model` pin is never held to the order: it is
+the way to keep a hidden model as your start.
+
+**craze never moves a new session to another payer on its own.** When craze
+chooses for you — a provider's start model, the first funded model by alias,
+the last resort over deprecated models, or the model a resumed session falls
+back to — it passes over a model whose maker has an **earlier** source whose
+sign-in is there but broken for that maker: the ChatGPT plan signed in with
+no usable model list, another account's list or plan usage off. A provider
+with a key never holds anything back: its key resolves its models, and one
+that funds none of a maker's current models has left that maker (its models
+there are deprecated), so craze starts on the replacement elsewhere. So a lapsed
+ChatGPT list with an exported `OPENAI_API_KEY` never quietly starts sessions
+billed per token. Another maker's start model still starts (with a Fireworks
+key, say). When that leaves nothing, the session does not start, kind
+`config`, and says why instead of "no model provider has an API key":
+
+```
+native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; sign in again with craze auth login chatgpt, or start with --model openai/gpt-6.1-sol
+```
+
+[`craze providers`](cli.md#craze-providers) and the hub's create options show
+native as `needs setup` with the reason `signed in to ChatGPT, but its models
+are not available` and the fix `craze auth login chatgpt, or start with
+--model openai/gpt-6.1-sol`, and the session list
+says so when you pick native. "Earlier" is in the order in force, or the
+catalog's while `source_order = []` has the hiding off: turning hiding off
+does not let craze choose a later source for you. The memory and the pin are
+your own choices, and are not held back.
+
+**Sub-agents.** The model an agent-tool call names is held to what the menu
+offers, plus what you configured — the `[subagents]` model and tiers, your
+`default_model` and the session's own model: a hidden or deprecated model
+outside that is refused, naming the models it may use. A persona's `model:`
+and the `[subagents]` settings resolve any model, as before.
+
+**When a plan or a key runs out.** In the TUI, a native turn that fails on a
+quota or plan limit is followed by a note — after the failure's row, never
+inside it — naming the other sources of the model's maker that are funded,
+who pays for each, and the route, for example:
+
+```
+OpenAI models are also funded by your OpenAI key (billed per token): openai/gpt-6-astra, openai/gpt-6-luna, openai/gpt-6.1-sol, openai/gpt-6.1-terra. To use one, end this session with /exit, then run craze -c --model openai/gpt-6.1-sol
+```
+
+It is text only: craze never switches for you. The TUI works it out from its
+own craze directory, so the failure itself reads as it always did, and no
+failure a program reads — `craze new --wait`, `craze send --wait`, `craze
+wait`, `craze prompt`, whoever started the session — carries it, since a
+program reading it could move work to a payer billed per token. `/model` cannot switch a running session to a
+hidden model (it lists what is offered); end the session with `/exit` and
+continue it with `craze -c --model <alias>` — a running host ignores
+`--model` on `craze -c`, so the session must end first.
+
 ### Deprecated models
 
 An alias is a model's permanent address: craze never renames one. A model is
@@ -1827,7 +1977,7 @@ replaced in two steps, a release apart at least. First a release
 **deprecates** it: the catalog marks it `deprecated` and names its
 replacement (`replaced_by`). A deprecated model still runs by name — through
 `--model`, your `default_model` pin, the model memory, a resumed session, a
-`[subagents]` model or tier, or a sub-agent call that names it — but craze
+`[subagents]` model or tier, or a persona's `model:` — but craze
 never offers it: no `/model` list shows it (but the one of a session running
 on it, as its current model), and nothing starts a new session on it for you
 while another model is funded (see [Where a new session

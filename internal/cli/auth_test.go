@@ -410,7 +410,12 @@ func TestAuthList(t *testing.T) {
 	}
 	wantNotes := "" +
 		"note: " + models + ": [models.\"fireworks/kimi-k3p1-pro\"]: repeats craze's shipped entry — delete it to follow craze's updates\n" +
-		"note: ZHIPU_API_KEY is set to a value shorter than 8 bytes, which cannot be an API key; it is ignored\n"
+		"note: ZHIPU_API_KEY is set to a value shorter than 8 bytes, which cannot be an API key; it is ignored\n" +
+		// Plan 050 C5: Fireworks comes before OpenRouter for DeepSeek's and
+		// GLM's models, and Meta's own key before it for Meta's.
+		"note: DeepSeek models come from Fireworks; 1 model of OpenRouter is not listed and still runs by name (source_order in models.toml changes the order)\n" +
+		"note: Meta models come from Meta; 2 models of OpenRouter are not listed and still run by name (source_order in models.toml changes the order)\n" +
+		"note: GLM models come from Fireworks; 2 models of OpenRouter are not listed and still run by name (source_order in models.toml changes the order)\n"
 	if stderr != wantNotes {
 		t.Fatalf("list notes:\n%s\nwant:\n%s", stderr, wantNotes)
 	}

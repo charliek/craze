@@ -77,28 +77,22 @@ func (t *Table) SessionChoices(recent []RecentEntry, memory map[string]string, g
 }
 
 // Offered is the set of t's models a picker lists, and that craze may choose
-// for the user (plan 050 C1's offered set): every model that resolves —
-// judged exactly as Resolve judges it, with getenv (nil is os.Getenv) — and
-// is not deprecated. It is a subset of what runs by name: a deprecated model
-// still resolves, and --model, the pin, the model memory, resume by identity
-// and a sub-agent's configured model reach it, but nothing offers it. It is
-// computed once per call, from the table and the environment as they are
-// now, never stored at load: a key stored or a sign-in completed changes it
-// at the next call. The one rule every offering site goes through
-// (SessionChoices, StartPick's steps 3 and 4, the resume fallback, the agent
-// tool's model menu, a switch's dropped row); the session's current model is
-// listed beside it by its caller, never by it. The caller owns the map.
+// for the user (plan 050's offered set): every model that resolves — judged
+// exactly as Resolve judges it, with getenv (nil is os.Getenv) — that is not
+// deprecated (C1), and that the source order does not hide (C5): of a maker
+// reachable through several providers, only the first source in the order
+// in force that funds one of its active models is offered (Offers). It is a
+// subset of what runs by name: a deprecated or hidden model still resolves,
+// and --model, the pin, resume by identity and a sub-agent's configured
+// model reach it, but nothing offers it. It is computed once per call, from
+// the table and the environment as they are now, never stored at load: a key
+// stored or a sign-in completed changes it at the next call. The one rule
+// every offering site goes through (SessionChoices, StartPick's steps 3 to 5,
+// the resume fallback, the agent tool's model menu, a switch's dropped row);
+// the session's current model is listed beside it by its caller, never by
+// it. The caller owns the map.
 func (t *Table) Offered(getenv func(string) string) map[string]bool {
-	out := make(map[string]bool, len(t.Models))
-	for alias, m := range t.Models {
-		if m.Deprecated {
-			continue
-		}
-		if _, err := t.Resolve(alias, getenv); err == nil {
-			out[alias] = true
-		}
-	}
-	return out
+	return t.Offers(getenv).Offered
 }
 
 // Relist is the choices of exactly aliases — the models a session's list

@@ -124,9 +124,19 @@ func TestSubagentMenuHoldsToTheChoiceSet(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Models: test/a, test/b;") {
 		t.Fatalf("the unknown-model error = %v; want the choice set, test/a and the configured test/b", err)
 	}
-	// A deprecated model still runs when a call names it.
-	if got, err := s.resolveChildModel(s.view(), childModelInput{Call: "other/c", ParentAlias: "test/a"}, nil); err != nil || got != "other/c" {
-		t.Fatalf("a call naming deprecated other/c = %q, %v; want it to run", got, err)
+	// A call's model is held to the same set (plan 050 C5): a deprecated
+	// model the owner did not configure is refused, naming the set; the
+	// configured one runs.
+	got, err := s.resolveChildModel(s.view(), childModelInput{Call: "other/c", ParentAlias: "test/a"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "Model not offered to sub-agents `other/c`. Models: test/a, test/b;") {
+		t.Fatalf("a call naming deprecated other/c = %q, %v; want it refused, naming the choice set", got, err)
+	}
+	if got, err := s.resolveChildModel(s.view(), childModelInput{Call: "test/b", ParentAlias: "test/a"}, nil); err != nil || got != "test/b" {
+		t.Fatalf("a call naming the configured test/b = %q, %v; want it to run", got, err)
+	}
+	// A persona's model keeps full resolution.
+	if got, err := s.resolveChildModel(s.view(), childModelInput{Persona: "other/c", ParentAlias: "test/a"}, nil); err != nil || got != "other/c" {
+		t.Fatalf("a persona naming deprecated other/c = %q, %v; want it to run", got, err)
 	}
 }
 

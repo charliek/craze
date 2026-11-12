@@ -1644,6 +1644,9 @@ func sealedGetenv(getenv func(string) string) (read func(string) string, release
 // the table was read from.
 func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.RecentEntry, getenv func(string) string, dir string) (alias, effort string, err error) {
 	start, err := table.StartPick(recent, getenv)
+	if held := (*modeltable.HeldError)(nil); errors.As(err, &held) {
+		return "", "", &nativeConfigError{msg: heldText(table, held), cause: err}
+	}
 	if err != nil {
 		return "", "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
 	}
@@ -1700,6 +1703,24 @@ func retiredNativeModel(table *modeltable.Table, raw string) (modeltable.Retired
 		return r, true
 	}
 	return table.Retired(normalizeIdent(raw))
+}
+
+// heldText is the start error when the paid-source guard held back every
+// model craze could have chosen (modeltable.HeldError, plan 050 C5): a key
+// is there, but the ChatGPT plan, an earlier source of the model's maker, is
+// signed in and offers none of its models (no usable list, another
+// account's, or plan usage off), and craze does not move a new session to
+// another payer on its own. It names the sign-in to repair and the model to
+// pass, never a token.
+func heldText(table *modeltable.Table, held *modeltable.HeldError) string {
+	via := ""
+	if m, ok := table.Models[held.Alias]; ok {
+		if p := table.Providers[m.Provider]; p.Name != "" {
+			via = " (" + sanitizeLine(p.Name) + ")"
+		}
+	}
+	return fmt.Sprintf("native: %s, and craze does not start a new session on %s%s on its own; sign in again with craze auth login %s, or start with --model %s",
+		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), via, sanitizeLine(held.Source), sanitizeLine(held.Alias))
 }
 
 // nothingFundedText is the start error when no model's provider has a key
@@ -3799,6 +3820,49 @@ func (s *nativeSession) phraseTurn(err error) error {
 		red = hs.Redact
 	}
 	return phraseTurnErrorRed(err, table, red)
+}
+
+// maxHintAliases bounds the models QuotaHint names for one source.
+const maxHintAliases = 4
+
+// QuotaHint is what a person whose native turn on alias hit a quota or a
+// plan limit is told of the other sources of the model's maker that are
+// funded (plan 050 C5): who pays for each, its models, and the route —
+// /exit, then craze -c --model, since a live host ignores --model on craze
+// -c. "" when there is none: a model of no maker, or no other funded
+// source. It is text only, craze never moves the session, and it is never
+// part of a failure: the TUI notes it beside the failure's row, from its own
+// table, so no failure object a waiting command reads can carry it. Every
+// name goes through the one-line sanitizer.
+func QuotaHint(table *modeltable.Table, alias string, getenv func(string) string) string {
+	m, ok := table.Models[alias]
+	if !ok {
+		return ""
+	}
+	routes := table.OtherSources(alias, getenv)
+	if len(routes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(routes))
+	for _, r := range routes {
+		payer := "your " + sanitizeLine(r.ProviderName) + " key"
+		switch {
+		case r.SignIn:
+			payer = "your " + sanitizeLine(r.ProviderName)
+		case r.Priced:
+			payer += " (billed per token)"
+		}
+		names := make([]string, 0, maxHintAliases)
+		for _, a := range r.Aliases[:min(len(r.Aliases), maxHintAliases)] {
+			names = append(names, sanitizeLine(a))
+		}
+		if more := len(r.Aliases) - len(names); more > 0 {
+			names = append(names, fmt.Sprintf("and %d more", more))
+		}
+		parts = append(parts, payer+": "+strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("%s models are also funded by %s. To use one, end this session with /exit, then run craze -c --model %s",
+		sanitizeLine(modeltable.MakerName(m.Maker)), strings.Join(parts, "; and by "), sanitizeLine(routes[0].First))
 }
 
 // phraseTurnError is phraseTurnErrorIn with no model table: a rejected key's

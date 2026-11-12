@@ -495,8 +495,9 @@ func pickerAvailabilityFor(def agent.Provider, explicitBin string) func() []tui.
 // picker's rows: every listed provider, and def, the picker's configured
 // default, even when it is a gx whose binary is missing, which is then
 // unavailable rather than left out (§3.1's gx row) — the row tui.New always
-// adds for it (pickerRows). Native needing setup has the TUI's fix
-// (nativeNoKeyFixTUI, X23): in the TUI picking it is the way to set it up.
+// adds for it (pickerRows). Native needing a key has the TUI's fix
+// (nativeNoKeyFixTUI, X23): in the TUI picking it is the way to set it up;
+// the paid-source guard's refusal keeps its own (plan 050 C5).
 // It reads the disk: the TUI calls it off its Update.
 func pickerAvailability(launch agent.Provider, explicitBin string, def agent.Provider) []tui.ProviderAvail {
 	in := processAvailInputs(launch, explicitBin)
@@ -510,7 +511,7 @@ func pickerAvailability(launch agent.Provider, explicitBin string, def agent.Pro
 	out := make([]tui.ProviderAvail, 0, len(avail))
 	for _, a := range avail {
 		fix := a.Fix
-		if a.P.Name() == agent.NativeProvider().Name() && a.State == availNeedsSetup {
+		if a.P.Name() == agent.NativeProvider().Name() && a.State == availNeedsSetup && a.Reason == nativeNoKeyReason {
 			fix = nativeNoKeyFixTUI
 		}
 		out = append(out, tui.ProviderAvail{ID: a.P.Name(), State: tui.AvailState(a.State), Reason: a.Reason, Fix: fix})

@@ -395,11 +395,13 @@ func (r *turnReader) numbered() int { return max(r.largest, r.inferred) }
 //     model, which would switch models under the conversation (D-33);
 //   - the table's pin, its DefaultModel (the user's default_model);
 //   - each provider's start model, in the provider order (Table.StartAliases,
-//     plan 038 §2), that is offered (Table.Offered, plan 050 C1: never a
-//     deprecated one, which craze does not choose for the owner): where a
-//     new session with nothing remembered and no funded pin starts. Never the
-//     first funded alias by name, which is a new session's last resort, not a
-//     model chosen for the owner.
+//     plan 038 §2), that is eligible (Table.Offers, plan 050: never a
+//     deprecated one or one the source order hides, which craze does not
+//     choose for the owner, nor one the paid-source guard holds back — the
+//     refusal names it): where a new session with nothing remembered and no
+//     funded pin starts. Never the first funded alias by name, which is a new
+//     session's last resort, not a model chosen for the owner. The pin is
+//     never held to the source order.
 //
 // None is ErrResumeModel, naming why each failed. Landing anywhere but on the
 // transcript's own model is reported to Options.Warn.
@@ -413,19 +415,26 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		candidates = identityAliases(table, was.model)
 	}
 	own := len(candidates)
-	offered := table.Offered(s.getenv)
+	offers := table.Offers(s.getenv)
+	var held []string // why a start model craze would have chosen was not
 	for i, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
 		if alias == "" || slices.Contains(candidates, alias) {
 			continue
 		}
-		if i > 0 && !offered[alias] {
+		if i > 0 && !offers.Offered[alias] && offers.Runs[alias] {
 			// A start model that runs but is not offered — a deprecated one
-			// (plan 050 C1) — is not chosen for the owner, and is passed over
-			// without a word; one that does not run stays, so the refusal
-			// says why it could not be used.
-			if _, err := table.Resolve(alias, s.getenv); err == nil {
-				continue
-			}
+			// (plan 050 C1), or one the source order hides (C5) — is not
+			// chosen for the owner, and is passed over without a word; one
+			// that does not run stays, so the refusal says why it could not
+			// be used.
+			continue
+		}
+		if h := offers.Held[alias]; i > 0 && h != nil {
+			// Nor one the paid-source guard holds back (plan 050 C5): an
+			// earlier source of its maker is set up and offers none of its
+			// models. The refusal names it, should nothing else run.
+			held = append(held, fmt.Sprintf("%s: not chosen for you: %s; %s", alias, h.Reason(), h.Fix()))
+			continue
 		}
 		candidates = append(candidates, alias)
 	}
@@ -447,7 +456,7 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		return m, nil
 	}
 	reason := "the transcript names no model the table has, and the table has no default_model and no start model"
-	if len(why) > 0 {
+	if why = append(why, held...); len(why) > 0 {
 		reason = strings.Join(why, "; ")
 	}
 	return model{}, s.tools.redactErr(fmt.Errorf("%w (tool profile %q): %s", ErrResumeModel, s.tools.profile, reason))

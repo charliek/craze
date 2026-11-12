@@ -1,6 +1,7 @@
 package modeltable
 
 import (
+	"cmp"
 	"errors"
 	"maps"
 	"os"
@@ -145,6 +146,11 @@ func TestShippedCatalog(t *testing.T) {
 		"openrouter/gpt-astra-latest": true, "openrouter/gpt-luna-latest": true,
 		"openrouter/gpt-sol-latest": true, "openrouter/mimo-v2.6-pro": true,
 		"openrouter/minimax-m3": true,
+		// Plan 050 C5's Muse models through OpenRouter: vision as OpenRouter's
+		// model list says and Meta's direct entries are (both take image
+		// input); live through craze on 2026-11-11 only a tool loop was run on
+		// these routes.
+		"openrouter/muse-spark-1.3": true, "openrouter/muse-wonder": true,
 	}
 	for alias := range seesImages {
 		if md, ok := tbl.Models[alias]; !ok || !md.Vision {
@@ -310,6 +316,45 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	if want := []string{"zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic", "openai"}; !slices.Equal(c.ProviderOrder, want) {
 		t.Fatalf("provider_order = %q, want %q", c.ProviderOrder, want)
 	}
+	// Plan 050 C5: one source per maker, in the owner's order of 2026-11-11,
+	// and the makers as the plan's table tags them — a provider's for every
+	// model of it, a host's or an aggregator's model its own. Kimi, Gemini,
+	// MiniMax, MiMo, Qwen and Fireworks' own Ember-1 have no maker (one
+	// source each).
+	if want := []string{"zai-coding-plan", "chatgpt", "meta", "openai", "anthropic", "fireworks", "openrouter"}; !slices.Equal(c.SourceOrder, want) {
+		t.Fatalf("source_order = %q, want %q", c.SourceOrder, want)
+	}
+	if want := map[string]string{"chatgpt": "openai", "openai": "openai", "meta": "meta", "zai-coding-plan": "zai", "anthropic": "anthropic"}; !maps.Equal(c.ProviderMakers, want) {
+		t.Fatalf("provider makers = %v, want %v", c.ProviderMakers, want)
+	}
+	wantModelMakers := map[string]string{
+		"openrouter/gpt-sol-latest": "openai", "openrouter/gpt-astra-latest": "openai",
+		"openrouter/gpt-luna-latest": "openai", "openrouter/gpt-terra-latest": "openai",
+		"fireworks/glm-5p3": "zai", "fireworks/glm-5p3-flash": "zai",
+		"openrouter/glm-latest": "zai", "openrouter/glm-flash-latest": "zai",
+		"fireworks/deepseek-v4p1-flash-1017": "deepseek", "fireworks/deepseek-v4p1-flash": "deepseek",
+		"openrouter/deepseek-flash-latest": "deepseek",
+		"openrouter/muse-spark-1.3":        "meta", "openrouter/muse-wonder": "meta",
+	}
+	gotModelMakers := map[string]string{}
+	for alias, m := range c.Models {
+		if m.Maker != "" {
+			gotModelMakers[alias] = m.Maker
+		}
+	}
+	if !maps.Equal(gotModelMakers, wantModelMakers) {
+		t.Fatalf("model makers = %v, want %v", gotModelMakers, wantModelMakers)
+	}
+	shippedTable, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for alias, m := range shippedTable.Models {
+		want := cmp.Or(wantModelMakers[alias], c.ProviderMakers[m.Provider])
+		if m.Maker != want {
+			t.Errorf("%s loads with maker %q, want %q", alias, m.Maker, want)
+		}
+	}
 	wantStarts := map[string][]string{
 		"zai-coding-plan": {"glm-5.3"},
 		"fireworks":       {"fireworks/kimi-k3p1-pro"},
@@ -322,7 +367,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	// OpenRouter's models and their wire ids: a family's router where
 	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon,
-	// MiMo, MiniMax).
+	// MiMo, MiniMax, Meta's Muse models).
 	wantOpenRouter := map[string]string{
 		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
 		"openrouter/gemini-4-argon":        "google/gemini-4-argon",
@@ -337,6 +382,8 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"openrouter/mimo-v2.6-pro":         "xiaomi/mimo-v2.6-pro",
 		"openrouter/minimax-m3":            "minimax/minimax-m3",
 		"openrouter/minimax-m3.1-flash":    "minimax/minimax-m3.1-flash",
+		"openrouter/muse-spark-1.3":        "meta/muse-spark-1.3",
+		"openrouter/muse-wonder":           "meta/muse-wonder",
 	}
 	gotOpenRouter := map[string]string{}
 	for alias, m := range c.Models {
@@ -879,6 +926,20 @@ func TestShippedCatalogRefresh(t *testing.T) {
 		}
 		if !offered[replacement] {
 			t.Errorf("%s is not offered", replacement)
+		}
+	}
+	// With both keys, plan 050 C5's source order also hides OpenRouter's
+	// DeepSeek and GLM routers behind Fireworks, which comes first for both
+	// makers: they still run by name, and are not offered. OpenRouter's
+	// models of no maker stay offered.
+	for _, alias := range []string{"openrouter/deepseek-flash-latest", "openrouter/glm-latest", "openrouter/glm-flash-latest"} {
+		if _, err := tbl.Resolve(alias, env); err != nil || offered[alias] {
+			t.Errorf("%s: resolves %v, offered %v; want it to run and not be offered", alias, err, offered[alias])
+		}
+	}
+	for _, alias := range []string{"fireworks/glm-5p3", "openrouter/gemini-flash-latest", "openrouter/mimo-v2.6-pro"} {
+		if !offered[alias] {
+			t.Errorf("%s is not offered", alias)
 		}
 	}
 	// Fireworks starts on Kimi K3.1 Pro; Ember-1 is an ordinary model.

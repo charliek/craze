@@ -271,6 +271,9 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 	if errors.Is(err, modeltable.ErrNothingFunded) {
 		return agent.ModelInfo{}, errNativeNothingFunded
 	}
+	if held := (*modeltable.HeldError)(nil); errors.As(err, &held) {
+		return agent.ModelInfo{}, nativeHeldError(held)
+	}
 	if err != nil {
 		return agent.ModelInfo{}, err
 	}
@@ -323,6 +326,17 @@ func readNativeLevels(gen uint64, dir string, getenv func(string) string, model 
 // provider has an API key: the popup's note (`native has no models: …`) and
 // /provider native's warning (`its model table: …`) both carry it.
 var errNativeNothingFunded = errors.New(`no model provider has an API key — run craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set its API key variable`)
+
+// nativeHeldError is what the list says when the paid-source guard held
+// back every model a new native session could start on (plan 050 C5,
+// modeltable.HeldError): something is funded, so not errNativeNothingFunded's
+// "no model provider has an API key", but an earlier source of its maker is
+// set up and offers none of its models. The list's /model still offers the
+// model by name.
+func nativeHeldError(held *modeltable.HeldError) error {
+	return fmt.Errorf("%s, so craze does not pick %s for you — run craze auth login %s, or pick a model with /model",
+		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), sanitizeLine(held.Source))
+}
 
 // nativeModelName is a native model as the list names it: its table name,
 // cleaned for the terminal, else its alias.

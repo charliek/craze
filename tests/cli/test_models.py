@@ -65,6 +65,7 @@ def test_models_reads_this_craze_directory(craze_bin: Path, tmp_path: Path) -> N
         err = _one_object(out)["error"]
         assert out.returncode == 1 and err["kind"] == "config", out
         assert err["detail"] == {"reason": "model_unknown", "model": "no-such-model"}, err
+        assert err["message"] == 'native: unknown model "no-such-model"; craze models lists the models', err
         assert out.stderr.decode() == f"craze models: {err['message']}\n", out
         assert fixture.requests == []
 
@@ -99,7 +100,8 @@ def test_new_wait_refuses_before_any_host(craze_bin: Path, fake_agent_bin: Path,
         out = _craze(craze_bin, *native, "--model", "fixture-model", "--fast", "go")
         _refused(out, {"reason": "fast_not_offered", "model": "fixture-model"}, "--fast: fixture-model has no fast variant")
         out = _craze(craze_bin, *native, "--model", "nope-model", "go")
-        _refused(out, {"reason": "model_unknown", "model": "nope-model"}, 'native: unknown model "nope-model"')
+        _refused(out, {"reason": "model_unknown", "model": "nope-model"}, 'native: unknown model "nope-model"; craze models lists the models')
+        assert _one_object(out)["error"]["message"] == 'native: unknown model "nope-model"; craze models lists the models', out
         assert fixture.requests == [] and _entries(_home()) == []
 
         # The control: the same model at a level it lists, in another case, runs.

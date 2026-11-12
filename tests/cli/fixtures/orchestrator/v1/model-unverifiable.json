@@ -1,1 +1,1 @@
-{"error":{"message":"native: unknown model \"chatgpt/gpt-9\" (the model table has acme/plain, acme/sonic, acme/sonic-1)","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}
+{"error":{"message":"native: unknown model \"chatgpt/gpt-9\"; craze models lists the models","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}

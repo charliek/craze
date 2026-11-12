@@ -149,6 +149,27 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - A native result or failure on a deprecated model prints a stderr line and,
   with `--json`, `warnings: [{kind: "model_deprecated", model, replacedBy,
   message}]`; the TUI notes it once when the session opens.
+- One source per maker: when OpenAI's, Meta's, GLM's or DeepSeek's models are
+  reachable through several providers, the pickers, a new session's start and
+  the agent tool's menu offer them from the first funded source in the source
+  order (`zai-coding-plan`, `chatgpt`, `meta`, `openai`, `anthropic`,
+  `fireworks`, `openrouter`); the others still run by name. `source_order` in
+  `models.toml` goes before the catalog's (`[]` turns the rule off). A
+  remembered model on a hidden source no longer starts new sessions (the pin
+  still does). craze never starts a session on a later, paid source of a maker
+  while an earlier one is set up but offers none of its models — a ChatGPT
+  sign-in with no model list and an OpenAI key, say: the start is refused,
+  kind `config`, naming the sign-in and `--model`, and `craze providers` says
+  `needs setup` with the same reason. A sub-agent call's model is held to the
+  menu plus what you configured. In the TUI a quota or plan-limit failure is
+  followed by a note naming the maker's other funded sources and how to
+  continue on one (never part of the failure a waiting command reads); `craze auth
+  list`, `craze models` and `/connect` say where each maker's models come from.
+  `craze models` rows carry their `maker`, and its table notes the model
+  table's warnings. An unknown `--model` under `craze new --wait`, and a miss
+  of `craze models <alias>`, say `craze models lists the models` instead of
+  listing every one. New: `openrouter/muse-spark-1.3` and
+  `openrouter/muse-wonder`, Meta's models on OpenRouter.
 
 ### Maintenance
 

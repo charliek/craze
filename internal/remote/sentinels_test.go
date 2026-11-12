@@ -750,6 +750,8 @@ var tuiSites = []tuiSite{
 	// environment — and the hint line's word for one that could not be
 	// read; the disk's answers, never a Backend's.
 	{"sessions_models.go", "nativeDefaultModel", "Is", "modeltable.ErrNothingFunded", 1, proofLocal},
+	// The paid-source guard's refusal (plan 050 C5), from the same StartModel.
+	{"sessions_models.go", "nativeDefaultModel", "As", "&held", 1, proofLocal},
 	{"sessions_models.go", "sessNativeDefault", "Error", "msg.err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 	// The side question's failure, as its error row words it (plan 040

@@ -338,6 +338,32 @@ func TestNativeAvailability(t *testing.T) {
 			setup: func(t *testing.T, dir string) { signedInNative(t, dir, false) },
 			want:  availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix},
 		},
+		// Plan 050 C5: an OpenAI key behind a sign-in that offers none of
+		// OpenAI's models — plan usage off, or no model list — is held back
+		// by the paid-source guard, and the reason says so: not "no model
+		// provider has a key".
+		{
+			name:   "a ChatGPT sign-in with plan usage off and an OpenAI key",
+			setup:  func(t *testing.T, dir string) { signedInNative(t, dir, false) },
+			getenv: openAIKeyOnly,
+			want:   nativeHeld,
+		},
+		{
+			name: "a ChatGPT sign-in with no model list and an OpenAI key",
+			setup: func(t *testing.T, dir string) {
+				signedInNative(t, dir, true)
+				if err := os.Remove(filepath.Join(dir, modeltable.ChatGPTModelsFile)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			getenv: openAIKeyOnly,
+			want:   nativeHeld,
+		},
+		{
+			name:   "an OpenAI key and no sign-in",
+			getenv: openAIKeyOnly,
+			want:   nativeReady,
+		},
 		{
 			name:  "a broken providers.toml",
 			setup: writes(modeltable.ProvidersFile, "version = 1\n\n[providers.openrouter]\n"+availSecretKey+" = \"x\"\n"),
@@ -378,6 +404,19 @@ func TestNativeAvailability(t *testing.T) {
 		})
 	}
 }
+
+// openAIKeyOnly is an environment holding an OpenAI key alone.
+func openAIKeyOnly(k string) string {
+	if k == "OPENAI_API_KEY" {
+		return "sk-avail-openai-0003"
+	}
+	return ""
+}
+
+// nativeHeld is native's entry when the paid-source guard held its start back
+// (plan 050 C5).
+var nativeHeld = availEntry{"native", "needs_setup", "signed in to ChatGPT, but its models are not available",
+	"craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"}
 
 // TestNativeAvailabilityNamesTheFileOnly (plan 036 §3.1, A1): a model table
 // whose providers.toml has an unknown key that looks like a secret fails to

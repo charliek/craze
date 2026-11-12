@@ -27,6 +27,7 @@ var errInfoSentinels = []struct {
 	{modeltable.ErrNotSignedIn, errkind.New(errkind.Auth)},
 	{modeltable.ErrPlanUsageDisabled, errkind.New(errkind.Config)},
 	{modeltable.ErrOtherAccount, errkind.New(errkind.Config)},
+	{modeltable.ErrSourceHeld, errkind.New(errkind.Config)},
 	{modeltable.ErrNothingFunded, errkind.New(errkind.Auth)},
 	{harness.ErrNoAPIKey, errkind.New(errkind.Auth)},
 	{harness.ErrUnknownModel, errkind.New(errkind.Config)},

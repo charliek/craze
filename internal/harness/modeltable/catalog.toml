@@ -42,6 +42,17 @@ version = 1
 # today; one with only an OpenAI key starts on GPT-6.1 Sol.
 provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic", "openai"]
 
+# One source per maker (plan 050, the owner's order of 2026-11-11): when a
+# maker's models are reachable through several providers — a provider's own
+# maker below, or a model's — only the first provider here that funds one of
+# its active models is offered, in the pickers and for a new session's start;
+# the others still run by name. Hiding is per maker, not model by model. It
+# names every provider exactly once. A user's models.toml source_order goes
+# before it (the rest follow in this order), and `source_order = []` turns the
+# rule off. Unlike provider_order, it decides only what is offered: never
+# where an explicit name resolves.
+source_order = ["zai-coding-plan", "chatgpt", "meta", "openai", "anthropic", "fireworks", "openrouter"]
+
 # ---------------------------------------------------------------------------
 # Retired aliases. A user's entry an old import left for one (source = "gx") is
 # ignored, a [subagents] model or default_model naming one is dropped
@@ -164,6 +175,7 @@ driver = "openai-responses"
 base_url = "https://api.meta.ai/v1"
 env_keys = ["META_API_KEY"]
 start = ["muse-spark-1.3-contributor"]
+maker = "meta"
 
 # OpenRouter's start is Gemini: its other models overlap with ones a cheaper
 # provider ships.
@@ -179,6 +191,7 @@ driver = "openai-compat"
 base_url = "https://api.z.ai/api/coding/paas/v4"
 env_keys = ["ZHIPU_API_KEY", "ZAI_API_KEY"]
 start = ["glm-5.3"]
+maker = "zai"
 
 # The ChatGPT plan (plan 033 §3.11): OpenAI's Responses API at its fixed
 # endpoint, funded by Sign in with ChatGPT (craze auth login chatgpt, or
@@ -189,6 +202,7 @@ start = ["glm-5.3"]
 [providers.chatgpt]
 name = "ChatGPT plan"
 driver = "chatgpt"
+maker = "openai"
 
 # Anthropic's Claude API (plan 044): the Messages API at its fixed endpoint,
 # through craze's own client, funded by an API key. Its entry is locked: a
@@ -199,6 +213,7 @@ driver = "chatgpt"
 name = "Anthropic"
 driver = "anthropic"
 env_keys = ["ANTHROPIC_API_KEY"]
+maker = "anthropic"
 
 # OpenAI's own API, funded by an API key (plan 050): the Responses API at its
 # endpoint, on the openai-responses driver Meta is on, which keeps the
@@ -216,6 +231,7 @@ driver = "openai-responses"
 base_url = "https://api.openai.com/v1"
 env_keys = ["OPENAI_API_KEY"]
 start = ["openai/gpt-6.1-sol"]
+maker = "openai"
 
 # craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
 # over the account's list: never models of the catalog's, so they need no
@@ -577,6 +593,7 @@ default_effort = "high"
 vision = true
 deprecated = true
 replaced_by = "fireworks/deepseek-v4p1-flash-1017"
+maker = "deepseek"
 
 [models."fireworks/deepseek-v4p1-flash".cost]
 input = 0.3
@@ -599,6 +616,7 @@ context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+maker = "deepseek"
 
 [models."fireworks/deepseek-v4p1-flash-1017".cost]
 input = 0.3
@@ -629,6 +647,7 @@ name = "GLM 5.3 (Fireworks)"
 context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "max"
+maker = "zai"
 
 [models."fireworks/glm-5p3".cost]
 input = 1.4
@@ -643,6 +662,7 @@ context_window = 1048576
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "high"
 vision = true
+maker = "zai"
 
 [models."fireworks/glm-5p3-flash".cost]
 input = 0.15
@@ -977,6 +997,7 @@ context_window = 1048576
 efforts = ["low", "high", "max"]
 default_effort = "high"
 vision = true
+maker = "deepseek"
 
 [models."openrouter/deepseek-flash-latest".cost]
 input = 0.3
@@ -1033,6 +1054,7 @@ context_window = 1048576
 efforts = ["low", "high", "max"]
 default_effort = "high"
 vision = true
+maker = "zai"
 
 [models."openrouter/glm-flash-latest".cost]
 input = 0.15
@@ -1047,6 +1069,7 @@ name = "GLM Latest (OpenRouter)"
 context_window = 1048576
 efforts = ["low", "high", "max"]
 default_effort = "max"
+maker = "zai"
 
 [models."openrouter/glm-latest".cost]
 input = 1.4
@@ -1062,6 +1085,7 @@ default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
+maker = "openai"
 
 [models."openrouter/gpt-astra-latest".cost]
 input = 10.0
@@ -1083,6 +1107,7 @@ default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
+maker = "openai"
 
 [models."openrouter/gpt-luna-latest".cost]
 input = 0.1
@@ -1104,6 +1129,7 @@ default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
+maker = "openai"
 
 [models."openrouter/gpt-sol-latest".cost]
 input = 2.0
@@ -1125,6 +1151,7 @@ default_context = 272000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
+maker = "openai"
 
 [models."openrouter/gpt-terra-latest".cost]
 input = 1.0
@@ -1220,3 +1247,43 @@ vision = true
 input = 0.15
 output = 0.6
 cache_read = 0.015
+
+# Meta's Muse models through OpenRouter, for a machine with no Meta key (plan
+# 050). They are Meta's (maker = "meta"): with a Meta key the source order
+# offers Meta's own and hides these, which still run by name. OpenRouter has
+# no ~meta router, so each is on its own id. Window, efforts, vision and price
+# are the model list's on 2026-11-11, the same prices Meta charges; the
+# ceiling and default effort are the direct entries'. This is Chat
+# Completions, not Meta's Responses API: a tool loop cached one step in three
+# here. Seen live through craze on 2026-11-11: a tool loop.
+[models."openrouter/muse-spark-1.3"]
+provider = "openrouter"
+wire_model = "meta/muse-spark-1.3"
+name = "Muse Spark 1.3 (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 131072
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+maker = "meta"
+
+[models."openrouter/muse-spark-1.3".cost]
+input = 1.25
+output = 4.25
+cache_read = 0.15
+
+[models."openrouter/muse-wonder"]
+provider = "openrouter"
+wire_model = "meta/muse-wonder"
+name = "Muse Wonder (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 131072
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+default_effort = "high"
+vision = true
+maker = "meta"
+
+[models."openrouter/muse-wonder".cost]
+input = 4.0
+output = 20.0
+cache_read = 0.2

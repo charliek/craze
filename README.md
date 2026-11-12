@@ -19,6 +19,10 @@ and want one fast, scriptable front end for several of them.
 - **Native providers and the ChatGPT plan**: Anthropic (Claude), Fireworks,
   Meta, OpenAI, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in;
   no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
+- **One source per maker**: OpenAI's, Meta's, GLM's and DeepSeek's models are
+  offered from your first funded source of them, in an order you can change,
+  and craze never moves a new session to a paid source on its own.
+  [One source per maker](docs/reference/configuration.md#one-source-per-maker)
 - **`craze models`**: the native models, their status and replacement, efforts and
   context, and what is funded here, as a table or JSON; each release ships the
   catalog as `models.json`. [`craze models`](docs/reference/cli.md#craze-models)

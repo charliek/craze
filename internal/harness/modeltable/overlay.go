@@ -83,10 +83,13 @@ type modelsOverlay struct {
 	DefaultModel *string `toml:"default_model"`
 	// ProviderOrder is provider_order (plan 038 §2.4): written, it replaces
 	// the catalog's whole.
-	ProviderOrder *[]string               `toml:"provider_order"`
-	Subagents     *subagentsDoc           `toml:"subagents"`
-	Compaction    *compactionDoc          `toml:"compaction"`
-	Models        map[string]modelOverlay `toml:"models"`
+	ProviderOrder *[]string `toml:"provider_order"`
+	// SourceOrder is source_order (plan 050 C5): written, it goes before
+	// the catalog's; `[]` turns the source rule off.
+	SourceOrder *[]string               `toml:"source_order"`
+	Subagents   *subagentsDoc           `toml:"subagents"`
+	Compaction  *compactionDoc          `toml:"compaction"`
+	Models      map[string]modelOverlay `toml:"models"`
 }
 
 func (d *modelsOverlay) version() int { return d.Version }
@@ -191,8 +194,8 @@ func overlayProvider(base Provider, o providerOverlay) Provider {
 // that points the model at another provider or wire model makes it another
 // model, so what craze learned of the one it was is forgotten
 // (forgetLearned), and so is what the catalog says of the alias it was
-// shipped as: deprecated and replaced_by belong to the shipped model, not to
-// the alias the user has taken over (plan 050 C1).
+// shipped as: deprecated, replaced_by and the maker belong to the shipped
+// model, not to the alias the user has taken over (plan 050 C1, C5).
 func overlayModel(base Model, o modelOverlay) Model {
 	m := cloneModel(base)
 	if o.Provider != nil {
@@ -203,7 +206,7 @@ func overlayModel(base Model, o modelOverlay) Model {
 	}
 	if m.Provider != base.Provider || m.WireModel != base.WireModel {
 		m.forgetLearned()
-		m.Deprecated, m.ReplacedBy = false, ""
+		m.Deprecated, m.ReplacedBy, m.Maker = false, "", ""
 	}
 	if o.Name != nil {
 		m.Name = *o.Name
@@ -399,6 +402,7 @@ func loadAlone(dir, ppath, mpath string, pHas, mHas bool, pd *providersOverlay, 
 	t := &Table{
 		DefaultModel:  deref(md.DefaultModel),
 		ProviderOrder: userOrder(md.ProviderOrder),
+		SourceOrder:   userOrder(md.SourceOrder),
 		Providers:     make(map[string]Provider, len(pd.Providers)),
 		Models:        make(map[string]Model, len(md.Models)),
 		Subagents:     subagentsFromDoc(md.Subagents),
@@ -438,6 +442,9 @@ func checkOverlays(ppath, mpath string, pd *providersOverlay, md *modelsOverlay)
 	}
 	if r := providerOrderProblem(deref(md.ProviderOrder)); r != "" {
 		return &FileError{File: mpath, Key: "provider_order", Reason: r}
+	}
+	if r := providerOrderProblem(deref(md.SourceOrder)); r != "" {
+		return &FileError{File: mpath, Key: "source_order", Reason: r}
 	}
 	if err := validateTierNames(mpath, subagentsFromDoc(md.Subagents)); err != nil {
 		return err
@@ -566,6 +573,11 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 		m.t.providerOrigins[id] = OriginShipped
 	}
 	for alias, mod := range cat.Models {
+		// The maker is stamped on the catalog's own copy (plan 050 C5), the
+		// models an account's list added to it included, so an override laid
+		// over a shipped model below starts from it.
+		mod.Maker = cmp.Or(mod.Maker, cat.ProviderMakers[mod.Provider])
+		cat.Models[alias] = mod
 		m.t.Models[alias] = mod
 		m.t.modelOrigins[alias] = OriginShipped
 	}
@@ -575,13 +587,56 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 	for _, alias := range slices.Sorted(maps.Keys(md.Models)) {
 		m.model(alias, md.Models[alias])
 	}
+	m.makers()
 	m.defaultModel(md.DefaultModel)
 	m.t.ProviderOrder = userOrder(md.ProviderOrder)
+	m.sourceOrder(md.SourceOrder)
 	m.t.catalogOrder = slices.Clone(cat.ProviderOrder)
 	m.t.starts = cat.startAliases()
 	m.subagents(subagentsFromDoc(md.Subagents))
 	m.t.credentialEnv = credentialNames(cat, pd)
 	return m.t
+}
+
+// makers keeps the catalog's makers where the user's providers.toml left the
+// provider's endpoint as shipped (plan 050 C5): a provider moved to another
+// driver or base_url is another source, so it loses its maker and each of its
+// models loses theirs — the same rule that keeps the shipped variables from
+// funding it (overlayProvider).
+func (m *merger) makers() {
+	moved := func(id string) bool {
+		shipped, ok := m.cat.Providers[id]
+		p := m.t.Providers[id]
+		return !ok || p.Driver != shipped.Driver || p.BaseURL != shipped.BaseURL
+	}
+	for id, maker := range m.cat.ProviderMakers {
+		if !moved(id) {
+			if m.t.providerMakers == nil {
+				m.t.providerMakers = make(map[string]string)
+			}
+			m.t.providerMakers[id] = maker
+		}
+	}
+	for alias, mod := range m.t.Models {
+		if mod.Maker != "" && moved(mod.Provider) {
+			mod.Maker = ""
+			m.t.Models[alias] = mod
+		}
+	}
+}
+
+// sourceOrder is the user's source_order over the catalog's (plan 050 C5):
+// kept as written — checkOverlays refused a blank or repeated name — with
+// one warning for each name that is no provider of the table, which the rule
+// passes over.
+func (m *merger) sourceOrder(written *[]string) {
+	m.t.SourceOrder = userOrder(written)
+	m.t.catalogSources = slices.Clone(m.cat.SourceOrder)
+	for _, id := range m.t.SourceOrder {
+		if !hasProvider(m.t.Providers, id) {
+			m.warn(&FileError{File: m.mpath, Key: "source_order", Reason: fmt.Sprintf("%q is not a provider", id)}, "the name is passed over")
+		}
+	}
 }
 
 // deprecatedRef warns that the user's models.toml refers, at table and key,

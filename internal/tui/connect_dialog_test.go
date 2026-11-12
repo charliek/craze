@@ -937,7 +937,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	if m.dialog != dialogConnect || m.cdlg.openField() != field || m.cdlg.key.Value() != connectCanary {
 		t.Fatalf("a save's answer touched the box opened since: dialog %v", m.dialog)
 	}
-	if notes, errs := texts(m, entryNote), texts(m, entryError); !slices.Equal(notes, []string{connectedNote("Alpha", nil)}) ||
+	if notes, errs := texts(m, entryNote), texts(m, entryError); !slices.Equal(notes, []string{connectedNote("Alpha", connectSources{}, nil)}) ||
 		!slices.Equal(errs, []string{"/connect: the key store did not answer in time"}) {
 		t.Fatalf("a save's answers wrote notes %q, errors %q", notes, errs)
 	}
@@ -948,7 +948,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	before := m.shownGen
 	m = m.withSession(sessionSeed{workspace: m.cwd, provider: "native"})
 	m.shownGen++
-	if m = applyMsg(t, m, connectSavedMsg{shownGen: before, name: "Beta"}); slices.Contains(texts(m, entryNote), connectedNote("Beta", nil)) {
+	if m = applyMsg(t, m, connectSavedMsg{shownGen: before, name: "Beta"}); slices.Contains(texts(m, entryNote), connectedNote("Beta", connectSources{}, nil)) {
 		t.Fatal("a save's answer from the conversation left behind was written in this one")
 	}
 
@@ -1007,7 +1007,7 @@ func TestConnectDoubleEnterSavesOnce(t *testing.T) {
 	if got, ok := storedKey(t, dir, "gamma"); !ok || got != connectCanary {
 		t.Fatalf("gamma's key was not stored as pasted (stored: %v)", ok)
 	}
-	if notes := texts(r.m, entryNote); !slices.Equal(notes, []string{connectedNote("Gamma", nil)}) {
+	if notes := texts(r.m, entryNote); !slices.Equal(notes, []string{connectedNote("Gamma", connectSources{}, nil)}) {
 		t.Fatalf("notes %q, want one notice", notes)
 	}
 	if errs := texts(r.m, entryError); len(errs) != 0 || len(stub.Prompts()) != 0 {

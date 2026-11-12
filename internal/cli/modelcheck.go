@@ -94,15 +94,20 @@ func refusalDetail(err error) *errorDetail {
 }
 
 // nativeModelMiss is raw, a --model MatchNativeModel refused with err, as a
-// refusal: in the host's own words (agent.NativeModelRefusal), model_retired
-// with the row's alias and replacement when raw names a retired alias, and
-// otherwise model_unknown with raw as given, held to an alias's characters.
+// refusal on the two paths a program reads (a waiting command's pre-check,
+// craze models <alias>): model_retired with the row's alias and replacement
+// when raw names a retired alias, in the host's own words
+// (agent.NativeModelRefusal); and otherwise model_unknown with raw as given,
+// held to an alias's characters, its message short — the miss and where the
+// models are listed, not the whole table, which would be most of what a
+// program's one-line reason shows (the host's own start error, which a
+// person reads, keeps the list).
 func nativeModelMiss(t *modeltable.Table, raw string, err error) *modelRefusal {
 	msg, r, retired := agent.NativeModelRefusal(t, raw, err)
 	if retired {
 		return &modelRefusal{msg: msg, reason: reasonModelRetired, model: detailModel(r.Alias), replacedBy: detailModel(r.ReplacedBy)}
 	}
-	return &modelRefusal{msg: msg, reason: reasonModelUnknown, model: detailModel(raw)}
+	return &modelRefusal{msg: "native: " + err.Error() + "; craze models lists the models", reason: reasonModelUnknown, model: detailModel(raw)}
 }
 
 // detailModel is s as a detail's model: its ASCII letters, digits and

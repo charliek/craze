@@ -108,12 +108,14 @@ func TestDiscoveredModels(t *testing.T) {
 	want := map[string]Model{
 		"chatgpt/gpt-6-astra": {Provider: "chatgpt", WireModel: "gpt-6-astra", Name: "GPT-6 Astra (ChatGPT plan)",
 			ContextWindow: 272000, Efforts: []string{"low", "medium", "high"}, DefaultEffort: "low", // craze's, over the list's medium
-			Vision: true, ParallelToolCalls: &yes},
+			Vision: true, ParallelToolCalls: &yes, Maker: "openai"},
 		"chatgpt/gpt-5.6-sol": {Provider: "chatgpt", WireModel: "gpt-5.6-sol", Name: "GPT-5.6 Sol (ChatGPT plan)",
 			ContextWindow: 272000, Efforts: []string{"low", "medium", "high", "xhigh"}, DefaultEffort: "medium",
-			ParallelToolCalls: &no},
+			ParallelToolCalls: &no, Maker: "openai"},
 		// ultra alone: no effort a request can carry, so no effort control.
-		"chatgpt/gpt-5.6-luna": {Provider: "chatgpt", WireModel: "gpt-5.6-luna", Name: "GPT-5.6 Luna (ChatGPT plan)", ContextWindow: 128000},
+		// Each is OpenAI's: the provider's maker, stamped on the list's
+		// models (plan 050 C5).
+		"chatgpt/gpt-5.6-luna": {Provider: "chatgpt", WireModel: "gpt-5.6-luna", Name: "GPT-5.6 Luna (ChatGPT plan)", ContextWindow: 128000, Maker: "openai"},
 	}
 	if got := planAliases(tbl); !slices.Equal(got, []string{"chatgpt/gpt-5.6-luna", "chatgpt/gpt-5.6-sol", "chatgpt/gpt-6-astra"}) {
 		t.Fatalf("plan models = %q", got)

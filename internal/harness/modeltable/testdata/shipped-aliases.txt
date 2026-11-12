@@ -56,3 +56,5 @@ openrouter/gemini-pro-latest
 openrouter/gpt-terra-latest
 openrouter/minimax-m3.1-flash
 muse-ember-1.0
+openrouter/muse-spark-1.3
+openrouter/muse-wonder

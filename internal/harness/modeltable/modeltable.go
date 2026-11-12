@@ -183,6 +183,13 @@ type Table struct {
 	// one, replaces the catalog's whole. A name that is no provider, or one
 	// with no start, is passed over (StartOrder).
 	ProviderOrder []string
+	// SourceOrder is the user's source_order (plan 050 C5): nil when
+	// models.toml writes none, so the catalog's holds. Unlike ProviderOrder
+	// a list does not replace the catalog's: it goes first, and the catalog's
+	// other providers follow in the catalog's order (EffectiveSourceOrder);
+	// an empty list, the one exception, turns the source rule off. A name
+	// that is no provider is passed over with a warning.
+	SourceOrder []string
 	// Providers is keyed by provider id, Models by alias (the key users
 	// select, which may differ from the wire id).
 	Providers map[string]Provider
@@ -252,6 +259,14 @@ type Table struct {
 	// table loaded without a catalog or built in memory.
 	catalogOrder []string
 	starts       map[string][]string
+	// catalogSources is the catalog's source_order, and providerMakers each
+	// provider's maker from the catalog less a provider the user's
+	// providers.toml moved to another driver or base_url (plan 050 C5): what
+	// the source rule reads (EffectiveSourceOrder, sources.go). Both nil for
+	// a table loaded without a catalog, built in memory, or over a catalog
+	// that names no maker.
+	catalogSources []string
+	providerMakers map[string]string
 
 	// carried binds each model Carry put in this table to the ChatGPT account
 	// its entry was bound to where it came from — the zero Account for one
@@ -372,6 +387,15 @@ type Model struct {
 	// own model is never deprecated.
 	Deprecated bool
 	ReplacedBy string
+	// Maker is who made the model (plan 050 C5): the catalog's maker of the
+	// model, else of its provider, stamped when a load merges the catalog —
+	// the models an account's list adds included — and "" for none. Like
+	// Deprecated it is bound to the shipped alias: no user file has a key
+	// for it, it is cleared when the user's entry points the alias at another
+	// provider or wire model, or moves its provider's driver or base_url, and
+	// a user's own model has none. The source order offers a maker's models
+	// from one source (Table.Offered).
+	Maker string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -637,6 +661,10 @@ type modelsDoc struct {
 	// left out, and a non-nil empty list — an explicit empty order — is
 	// written as `[]` (plan 038 §2.4).
 	ProviderOrder []string `toml:"provider_order"`
+	// SourceOrder is source_order, written as ProviderOrder is: nil left
+	// out, an explicit empty list — the source rule off — as `[]` (plan 050
+	// C5).
+	SourceOrder []string `toml:"source_order"`
 	// Subagents is nil whenever Table.Subagents is its zero value, so a
 	// table with no sub-agent configuration saves byte-identically to a
 	// models.toml written before this section existed (plan 026 §3.6).
@@ -688,9 +716,11 @@ type modelEntry struct {
 	Thinking string `toml:"-"`
 	Family   string `toml:"-"`
 	Released string `toml:"-"`
-	// Deprecated and ReplacedBy are catalog-only too (plan 050 C1).
+	// Deprecated and ReplacedBy are catalog-only too (plan 050 C1), and so
+	// is Maker (C5).
 	Deprecated bool   `toml:"-"`
 	ReplacedBy string `toml:"-"`
+	Maker      string `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -883,7 +913,7 @@ func (t *Table) encodeModels() ([]byte, error) {
 		}
 		entries[alias] = e
 	}
-	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, ProviderOrder: t.ProviderOrder,
+	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, ProviderOrder: t.ProviderOrder, SourceOrder: t.SourceOrder,
 		Subagents: subagentsToDoc(t.Subagents), Compaction: compactionToDoc(t.Compaction)}
 	if t.NoCatalog {
 		top.Catalog = new(bool)
@@ -1022,6 +1052,9 @@ func validate(t *Table, pfile, mfile string, needDefault bool) error {
 	}
 	if r := providerOrderProblem(t.ProviderOrder); r != "" {
 		return &FileError{File: mfile, Key: "provider_order", Reason: r}
+	}
+	if r := providerOrderProblem(t.SourceOrder); r != "" {
+		return &FileError{File: mfile, Key: "source_order", Reason: r}
 	}
 	if err := validateSubagents(mfile, t.Subagents, t.Models); err != nil {
 		return err

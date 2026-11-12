@@ -416,7 +416,7 @@ func TestNewWaitPreCheck(t *testing.T) {
 		detail string
 		msg    string
 	}{
-		{"unknown", []string{"--model", "acme/nope"}, `{"reason":"model_unknown","model":"acme/nope"}`, `native: unknown model "acme/nope" (the model table has acme/plain, acme/sonic, acme/sonic-1)`},
+		{"unknown", []string{"--model", "acme/nope"}, `{"reason":"model_unknown","model":"acme/nope"}`, `native: unknown model "acme/nope"; craze models lists the models`},
 		{"retired", []string{"--model", "acme/sonic-0"}, `{"reason":"model_retired","model":"acme/sonic-0","replaced_by":"acme/sonic"}`, "native: acme/sonic-0 was retired; use acme/sonic"},
 		{"retired, no replacement", []string{"--model", "ACME/ancient"}, `{"reason":"model_retired","model":"acme/ancient"}`, "native: acme/ancient was retired (the model table has"},
 		{"an effort not listed", []string{"--model", "acme/sonic", "--effort", "minimal"}, `{"reason":"effort_not_offered","model":"acme/sonic"}`, "--effort minimal: acme/sonic offers low, medium, high"},
@@ -674,4 +674,90 @@ func TestOrchestratorFixtures(t *testing.T) {
 			t.Errorf("%s is no fixture this test writes", e.Name())
 		}
 	}
+}
+
+// TestModelsMakerAndSourceNotes (plan 050 C5): every row's maker is its
+// model's — a provider's for each model of it, a host's model its own, ""
+// for none — in the shipped and the local forms; with Fireworks and
+// OpenRouter keys the local rows OpenRouter's DeepSeek and GLM routers hide
+// behind are funded and not offered, and the table form says where each
+// maker's models come from.
+func TestModelsMakerAndSourceNotes(t *testing.T) {
+	crazeHome(t)
+	for _, name := range modeltable.CatalogEnvNames() {
+		t.Setenv(name, "")
+	}
+	t.Setenv("FIREWORKS_API_KEY", "fw-models-dummy-0001")
+	t.Setenv("OPENROUTER_API_KEY", "or-models-dummy-0001")
+	for _, args := range [][]string{{"models", "--shipped", "--json"}, {"models", "--json"}} {
+		stdout, _, code := executeErr(args)
+		var doc modelsDoc
+		if err := json.Unmarshal([]byte(stdout), &doc); code != 0 || err != nil {
+			t.Fatalf("%q: exit %d, %v", args, code, err)
+		}
+		rows := map[string]modelRow{}
+		for _, r := range doc.Models {
+			rows[r.Alias] = r
+		}
+		for alias, want := range map[string]string{
+			"openrouter/gpt-sol-latest": "openai", "openai/gpt-6.1-sol": "openai", "glm-5.3": "zai",
+			"muse-wonder-1.0": "meta", "openrouter/muse-wonder": "meta", "fireworks/glm-5p3": "zai",
+			"openrouter/deepseek-flash-latest": "deepseek", "anthropic/claude-opus-5-5": "anthropic",
+			"fireworks/kimi-k3p1-pro": "", "openrouter/gemini-flash-latest": "", "fireworks/ember-1": "",
+		} {
+			if got := rows[alias].Maker; got != want {
+				t.Errorf("%q: %s maker = %q, want %q", args, alias, got, want)
+			}
+		}
+		if args[1] == "--json" {
+			for _, alias := range []string{"openrouter/glm-latest", "openrouter/deepseek-flash-latest"} {
+				if st := rows[alias].State; st == nil || !st.Funded || st.Offered {
+					t.Errorf("%s state = %+v, want funded and not offered", alias, st)
+				}
+			}
+			if st := rows["fireworks/glm-5p3"].State; st == nil || !st.Offered {
+				t.Errorf("fireworks/glm-5p3 state = %+v, want offered", st)
+			}
+		}
+	}
+	table, _, code := executeErr([]string{"models"})
+	for _, w := range []string{
+		"note: DeepSeek models come from Fireworks; 1 model of OpenRouter is not listed and still runs by name (source_order in models.toml changes the order)\n",
+		"note: GLM models come from Fireworks; 2 models of OpenRouter are not listed and still run by name (source_order in models.toml changes the order)\n",
+	} {
+		if code != 0 || !strings.Contains(table, w) {
+			t.Errorf("the table lacks %q (exit %d):\n%s", w, code, table)
+		}
+	}
+	if strings.Contains(table, "note: Meta") || strings.Contains(table, "note: OpenAI") {
+		t.Errorf("the table notes a maker it hides nothing of:\n%s", table)
+	}
+}
+
+// TestModelsTableNotesTheTablesWarnings (review P3): the table form prints the
+// warnings the table's load gave — an unknown name in source_order among
+// them — as notes, as craze auth list does, with the craze directory's path
+// left out; --json stays one object, with none of them.
+func TestModelsTableNotesTheTablesWarnings(t *testing.T) {
+	crazeHome(t)
+	for _, name := range modeltable.CatalogEnvNames() {
+		t.Setenv(name, "")
+	}
+	native := filepath.Join(os.Getenv("CRAZE_HOME"), "native")
+	if err := os.MkdirAll(native, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(native, modeltable.ModelsFile), []byte("version = 1\nsource_order = [\"nope\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	table, _, code := executeErr([]string{"models"})
+	const want = "note: models.toml: source_order: \"nope\" is not a provider; the name is passed over\n"
+	if code != 0 || !strings.Contains(table, want) || strings.Contains(table, native) {
+		t.Fatalf("exit %d, the table:\n%s\nwant %q and no path", code, table, want)
+	}
+	out, _, code := executeErr([]string{"models", "--json"})
+	if code != 0 || strings.Contains(out, "nope") {
+		t.Fatalf("--json: exit %d, %q", code, out)
+	}
+	oneObject(t, out)
 }

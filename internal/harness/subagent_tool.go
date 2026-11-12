@@ -159,9 +159,9 @@ func renderSubagentModels(table *modeltable.Table, getenv func(string) string, p
 // owner configured, each while it resolves: the [subagents] model, each tier
 // target, the default_model pin, and parents, the session's own model (on a
 // resume, every alias it may continue on; "" is none). A deprecated model is
-// listed only when the owner configured it or the session runs on it.
-// Resolution itself is not held to it: a call naming any table alias still
-// runs it.
+// listed only when the owner configured it or the session runs on it, and so
+// is a model the source order hides (plan 050 C5). A call's model is held to
+// it (resolveChildModel); a persona's model: and [subagents] are not.
 func subagentChoices(table *modeltable.Table, getenv func(string) string, parents ...string) map[string]bool {
 	set := table.Offered(getenv)
 	configured := append([]string{table.Subagents.Model, table.DefaultModel}, parents...)

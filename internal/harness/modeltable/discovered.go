@@ -207,8 +207,7 @@ func signInState(dir string) (KeySource, Account) {
 		return KeyNone, Account{}
 	}
 	account := Account{Subject: c.Subject, ClientID: c.ClientID}
-	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
-	tokens := err == nil && info.Mode().IsRegular() && info.Size() > 0
+	tokens := hasTokenFile(dir)
 	switch {
 	case tokens && c.PlanUsage:
 		return KeySignedIn, account
@@ -216,6 +215,25 @@ func signInState(dir string) (KeySource, Account) {
 		return KeyPlanDisabled, account
 	}
 	return KeyNone, account
+}
+
+// hasTokenFile says dir's sign-in token file is there: a non-empty regular
+// file, stat'ed and never read.
+func hasTokenFile(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0
+}
+
+// signedInAtAll says someone is signed in to the ChatGPT plan in dir, whether
+// or not it funds the plan's models: a registration and a token file — plan
+// usage granted or not (plan 050 C5's "set up" source). A registration a
+// sign-out left behind, with no tokens, is not.
+func signedInAtAll(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, ok := readChatGPTClient(dir)
+	return ok && hasTokenFile(dir)
 }
 
 // Account names a ChatGPT account's registration as the model list is bound

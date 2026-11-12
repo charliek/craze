@@ -1306,7 +1306,7 @@ reads instead of the message:
 
 | `detail.reason` | When | Message |
 |-----------------|------|---------|
-| `model_unknown` | `--model` names no model (matched exactly as the session would match it, `<provider id>/<alias>` included) | `native: unknown model "<model>" (the model table has …)` |
+| `model_unknown` | `--model` names no model (matched exactly as the session would match it, `<provider id>/<alias>` included) | `native: unknown model "<model>"; craze models lists the models` (a session's own start error, which a person reads, lists them) |
 | `model_retired` | `--model` names an alias the catalog retired; `detail.replaced_by` names the replacement when the catalog has one | `native: <alias> was retired; use <replacement>` — the replacement before anything else |
 | `effort_not_offered` | With `--model`, an `--effort` the model does not list (its levels in any case) | `--effort minimal: openai/gpt-6.1-sol offers low, medium, high, xhigh, max`, or `… has no effort control` |
 | `fast_not_offered` | `--fast`: no native model has a fast variant. `--no-fast` is accepted, and changes nothing | `--fast: <alias> has no fast variant` |
@@ -2579,8 +2579,13 @@ exported `OPENAI_API_KEY` connects `openai` as any provider's variable does.
 Then notes, on stderr, each starting `note: `: a stored key that cannot be
 used, an entry of yours that [repeats what craze
 ships](configuration.md#how-the-files-merge) (delete it to follow craze's
-updates), the warnings a native session prints when it starts, and — when the
-model table does not load, a broken `models.toml` say — why. The rows need
+updates), the warnings a native session prints when it starts, one line for
+each maker whose models the [source
+order](configuration.md#one-source-per-maker) hides — `note: GLM models come
+from Fireworks; 2 models of OpenRouter are not listed and still run by name
+(source_order in models.toml changes the order)` (`1 model of OpenRouter is
+not listed and still runs by name` for one) — and, when the model table
+does not load, a broken `models.toml` say, why. The rows need
 only `providers.toml` and the catalog, so they are listed either way. No key,
 nor any part of one, is ever printed.
 
@@ -2632,7 +2637,14 @@ How each is judged:
   reported first. Elsewhere the session is not known, and nothing is marked
   for it.
 - **native** is ready when its model table loads and a model's provider has a
-  key — what a native session would start on. With none it needs setup.
+  key — what a native session would start on. With none it needs setup
+  (`no model provider has a key`). It also needs setup when models are funded
+  but craze would not choose one for you, because an earlier [source of their
+  maker](configuration.md#one-source-per-maker) is set up and funds none of
+  them: signed in to ChatGPT with no usable model list and an OpenAI key, say,
+  is `signed in to ChatGPT, but its models are not available`, fix `craze auth
+  login chatgpt, or start with --model openai/gpt-6.1-sol`. The hub's create
+  options say the same.
   `providers.toml` or `models.toml` that cannot be read makes it unavailable;
   the reason names the file and nothing from it, since the error can quote a
   pasted key's name, and `craze auth list` shows the error. So does a machine
@@ -2727,7 +2739,7 @@ under `env -i` and under any environment, even one every other command refuses
 | Form | Reads | Prints |
 |------|-------|--------|
 | `craze models --shipped` | The catalog compiled into this craze, and nothing else: no file, no environment, no account list. It answers the same under `env -i` with no `HOME`, and is each release's `models.json` asset | The document below, with no `state` |
-| `craze models` | This craze directory's model table, as a session loads it: your `providers.toml` and `models.toml` over the catalog, and the cached ChatGPT plan and Anthropic account lists | A table; with `--json`, the document, each row with its `state` |
+| `craze models` | This craze directory's model table, as a session loads it: your `providers.toml` and `models.toml` over the catalog, and the cached ChatGPT plan and Anthropic account lists | A table, then on stdout a `note:` line for each warning the table gave on loading (as `craze auth list` notes them, a file named without its directory: `note: models.toml: source_order: "nope" is not a provider; the name is passed over`) and one for each maker whose models the [source order](configuration.md#one-source-per-maker) hides, naming where they come from; with `--json`, the document, each row with its `state`, and no note |
 | `craze models <alias>` | As the previous, or the catalog alone with `--shipped` | That model's row; a miss is exit 1 |
 
 `<alias>` is read exactly as [`--model`](#flags) reads it: an alias or a model's
@@ -2749,7 +2761,7 @@ cannot be read, one bound to another account or key, one that gave no model
 or no key or sign-in to bind one to, is no list read.
 
 ```json
-{"error":{"message":"native: unknown model \"chatgpt/gpt-9\" (the model table has …)","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}
+{"error":{"message":"native: unknown model \"chatgpt/gpt-9\"; craze models lists the models","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}
 ```
 
 | Flag | Description |
@@ -2781,7 +2793,7 @@ alone) and `state` (the local forms' alone):
 |---------|---|
 | `alias` | The model's alias: what `--model` takes |
 | `provider` | Its model provider's id: the id `craze auth login` takes, and the prefix `--model <provider id>/<alias>` takes |
-| `maker` | Who made the model; `""` for every model today |
+| `maker` | Who made the model, when craze offers it from [one source](configuration.md#one-source-per-maker): `openai`, `meta`, `zai`, `deepseek` or `anthropic`; `""` for a model of one source (Kimi, Gemini, MiniMax, …) and for a model of your own |
 | `name` | Its display name (the alias when it has none) |
 | `status` | `active`, or `deprecated`: it still runs when named, but no picker offers it and nothing chooses it for you ([deprecated models](configuration.md#deprecated-models)) |
 | `replacedBy` | A deprecated model's replacement |
@@ -2792,7 +2804,7 @@ alone) and `state` (the local forms' alone):
 | `vision` | Whether it takes images |
 | `contextWindow` | Its window in tokens; `0` when unknown |
 | `defaultContext` | The context a session works within when that is smaller than the window ([context default](configuration.md#native-context-default)); `0` for the whole window |
-| `state` | This machine's: `funded` — a key or sign-in funds it, judged with no network call, so it is `true` as soon as `craze auth login <provider>` has stored a key — and `offered`, whether a picker lists it (funded and not deprecated) |
+| `state` | This machine's: `funded` — a key or sign-in funds it, judged with no network call, so it is `true` as soon as `craze auth login <provider>` has stored a key — and `offered`, whether a picker lists it (funded, not deprecated, and not hidden by the [source order](configuration.md#one-source-per-maker)) |
 
 | Provider key | |
 |--------------|---|

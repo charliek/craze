@@ -72,12 +72,16 @@ type childModelInput struct {
 // key it does not control.
 //
 // The call is the one candidate a failure to resolve is fatal for: an
-// unrecognised value is the "Unknown model" error, naming every alias and
-// tier the table has; one with no key errors naming the provider (never the
-// key). A persona or default candidate that fails either way falls through
-// to the next one with a single warn line, because content is not the
-// model's choice. Every candidate is read against v, the call's one reading
-// of the table (tableView).
+// unrecognised value is the "Unknown model" error, naming the sub-agent
+// choice set and the tiers; one with no key errors naming the provider (never
+// the key); and one that runs but that the choice set does not hold — a
+// model the source order hides, a deprecated one the owner did not configure
+// — is refused with the same list (plan 050 C5). A persona's model and the
+// configured default keep full resolution: the owner wrote them. A persona or
+// default candidate that fails either way falls through to the next one with
+// a single warn line, because content is not the model's choice. Every
+// candidate is read against v, the call's one reading of the table
+// (tableView).
 func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(string)) (alias string, err error) {
 	type candidate struct {
 		raw      string
@@ -108,6 +112,14 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 			}
 			warnLine(warn, fmt.Sprintf("%s %q resolves to %q, which has no usable API key; falling through to the next default", c.label, c.raw, got))
 			continue
+		}
+		if c.required {
+			// Never a hidden or deprecated model the owner did not configure
+			// just because the parent's model sent its name (the doc above).
+			choices := subagentChoices(v.table, s.getenv, in.ParentAlias)
+			if !choices[got] {
+				return "", notOfferedModelError(s.quoteRaw(c.raw), v.table, slices.Sorted(maps.Keys(choices)))
+			}
 		}
 		return got, nil
 	}
@@ -254,6 +266,19 @@ const unknownModelRawCap = 200
 // model can retry with a name that exists (plan 026 §3.6). raw is never
 // omitted: the model needs to see what it sent to correct it.
 func unknownModelError(raw string, table *modeltable.Table, aliases []string) error {
+	return modelListError("Unknown model", raw, table, aliases)
+}
+
+// notOfferedModelError is a call's `model` naming a model that runs but that
+// the sub-agent choice set does not hold (plan 050 C5): one the source order
+// hides, or a deprecated one the owner did not configure. It names the same
+// list unknownModelError does, so the parent's model can retry with one.
+func notOfferedModelError(raw string, table *modeltable.Table, aliases []string) error {
+	return modelListError("Model not offered to sub-agents", raw, table, aliases)
+}
+
+// modelListError is unknownModelError's message under lead.
+func modelListError(lead, raw string, table *modeltable.Table, aliases []string) error {
 	var tierParts []string
 	for _, name := range slices.Sorted(maps.Keys(table.Subagents.Tiers)) {
 		tierParts = append(tierParts, fmt.Sprintf("%s → %s", name, table.Subagents.Tiers[name]))
@@ -262,12 +287,12 @@ func unknownModelError(raw string, table *modeltable.Table, aliases []string) er
 	if len(tierParts) > 0 {
 		tiers = strings.Join(tierParts, ", ")
 	}
-	msg := fmt.Sprintf("Unknown model `%s`. Models: %s; tiers: %s. Omit `model` to use the parent's.",
-		raw, strings.Join(aliases, ", "), tiers)
+	msg := fmt.Sprintf("%s `%s`. Models: %s; tiers: %s. Omit `model` to use the parent's.",
+		lead, raw, strings.Join(aliases, ", "), tiers)
 	if len(msg) <= unknownModelCap {
 		return errors.New(msg)
 	}
-	return errors.New(capModelList(raw, aliases, tierParts))
+	return errors.New(capModelList(lead, raw, aliases, tierParts))
 }
 
 // capModelList is unknownModelError's message cut to fit unknownModelCap,
@@ -282,8 +307,8 @@ func unknownModelError(raw string, table *modeltable.Table, aliases []string) er
 // aliases cut first, from the front, the same "… and N more" shape as
 // before; only once dropping every alias still does not fit does the tier
 // clause give way too, the same way.
-func capModelList(raw string, aliases, tierParts []string) string {
-	prefix := fmt.Sprintf("Unknown model `%s`. Models: ", cutRawValue(raw))
+func capModelList(lead, raw string, aliases, tierParts []string) string {
+	prefix := fmt.Sprintf("%s `%s`. Models: ", lead, cutRawValue(raw))
 	for tierKeep := len(tierParts); tierKeep >= 0; tierKeep-- {
 		tiers := "none configured"
 		if len(tierParts) > 0 {

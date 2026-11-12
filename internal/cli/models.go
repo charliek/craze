@@ -205,7 +205,11 @@ func runModels(cmd *cobra.Command, f modelsFlags, args []string) error {
 		if f.json {
 			return writeModelsJSON(out, doc)
 		}
-		return writeModelsTable(out, doc)
+		var notes []string
+		if getenv != nil {
+			notes = append(tableWarnings(t), sourceNotes(t, getenv)...)
+		}
+		return writeModelsTable(out, doc, notes)
 	}
 	raw := strings.TrimSpace(args[0])
 	alias, err := agent.MatchNativeModel(t, raw)
@@ -223,7 +227,7 @@ func runModels(cmd *cobra.Command, f modelsFlags, args []string) error {
 	if f.json {
 		return writeModelsJSON(out, doc.Models[i])
 	}
-	return writeModelsTable(out, modelsDoc{Models: doc.Models[i : i+1]})
+	return writeModelsTable(out, modelsDoc{Models: doc.Models[i : i+1]}, nil)
 }
 
 // modelsTable is the table a form reads: the catalog alone, or this craze
@@ -301,7 +305,7 @@ func modelsDocument(t *modeltable.Table, getenv func(string) string, crazeVersio
 func modelRowOf(t *modeltable.Table, alias string, getenv func(string) string, offered map[string]bool) modelRow {
 	m := t.Models[alias]
 	row := modelRow{
-		Alias: alias, Provider: m.Provider, Name: sanitizeLine(cmp.Or(m.Name, alias)), Status: modelActive,
+		Alias: alias, Provider: m.Provider, Maker: m.Maker, Name: sanitizeLine(cmp.Or(m.Name, alias)), Status: modelActive,
 		Source: modelSource(t, alias), Efforts: append([]string{}, m.Efforts...), DefaultEffort: m.DefaultEffort,
 		Vision: m.Vision, ContextWindow: m.ContextWindow,
 	}
@@ -344,8 +348,9 @@ func writeModelsJSON(out io.Writer, v any) error {
 }
 
 // writeModelsTable writes doc as craze models' table: a row a model — with
-// its state, when the rows have one — then a line a retired alias.
-func writeModelsTable(out io.Writer, doc modelsDoc) error {
+// its state, when the rows have one — then a line a retired alias, then a
+// "note: " line each of notes (sourceNotes).
+func writeModelsTable(out io.Writer, doc modelsDoc, notes []string) error {
 	local := len(doc.Models) > 0 && doc.Models[0].State != nil
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	header := "ALIAS\tPROVIDER\tSTATUS\tEFFORTS\tCONTEXT"
@@ -370,16 +375,73 @@ func writeModelsTable(out io.Writer, doc modelsDoc) error {
 	if err := tw.Flush(); err != nil {
 		return exitf(1, "%s: %v", modelsWhat, err)
 	}
+	var lines []string
 	for _, r := range doc.Retired {
 		line := "retired: " + r.Alias
 		if r.ReplacedBy != "" {
 			line += " (use " + r.ReplacedBy + ")"
 		}
-		if _, err := fmt.Fprintln(out, sanitizeLine(line)); err != nil {
+		lines = append(lines, sanitizeLine(line))
+	}
+	for _, line := range notes {
+		lines = append(lines, "note: "+line)
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(out, line); err != nil {
 			return exitf(1, "%s: %v", modelsWhat, err)
 		}
 	}
 	return nil
+}
+
+// tableWarnings are the warnings a session prints when this craze
+// directory's table loads (an unknown name in source_order, an entry the
+// catalog dropped, …), as craze auth list notes them, each on one line with
+// the craze directory's path left out — craze models prints no path — so a
+// file is named by its base name.
+func tableWarnings(t *modeltable.Table) []string {
+	dir := paths.NativeDir()
+	out := make([]string, 0, len(t.Warnings))
+	for _, w := range t.Warnings {
+		if dir != "" {
+			w = strings.ReplaceAll(w, dir+string(os.PathSeparator), "")
+		}
+		out = append(out, sanitizeLine(strings.TrimPrefix(w, "modeltable: ")))
+	}
+	return out
+}
+
+// sourceNotes is one line for each maker whose funded models the source
+// order hides now (plan 050 C5, modeltable.Table.HiddenSources): which source
+// its models come from, and which others' are not listed, with how many — so
+// a person who sees fewer rows than they have keys for knows why, that each
+// still runs by name, and where the order is changed. craze auth list and
+// craze models' table print it; --json has each row's state.offered instead.
+func sourceNotes(t *modeltable.Table, getenv func(string) string) []string {
+	name := func(id string) string { return sanitizeLine(t.ProviderName(id)) }
+	var out []string
+	for _, ms := range t.HiddenSources(getenv) {
+		hidden := make([]string, 0, len(ms.Hidden))
+		total := 0
+		for i, h := range ms.Hidden {
+			total += h.Count
+			switch {
+			case i > 0:
+				hidden = append(hidden, fmt.Sprintf("%d of %s", h.Count, name(h.Provider)))
+			case h.Count == 1:
+				hidden = append(hidden, "1 model of "+name(h.Provider))
+			default:
+				hidden = append(hidden, fmt.Sprintf("%d models of %s", h.Count, name(h.Provider)))
+			}
+		}
+		verb := "are not listed and still run"
+		if total == 1 {
+			verb = "is not listed and still runs"
+		}
+		out = append(out, fmt.Sprintf("%s models come from %s; %s %s by name (source_order in models.toml changes the order)",
+			sanitizeLine(modeltable.MakerName(ms.Maker)), name(ms.Winner), strings.Join(hidden, " and "), verb))
+	}
+	return out
 }
 
 // contextCell is a row's context as the table says it: the context a session

@@ -584,6 +584,74 @@ OpenAI's own API on an API key, billed per token, with four models
   ChatGPT plan. With an OpenAI key alone, run `craze:delegate` with `target:
   native openai/gpt-6.1-sol effort=high` ([Claude Code](claude-code.md#the-agents)).
 
+### One source per maker
+
+Nothing needs migrating. When one maker's models are reachable through
+several providers, craze now offers them from the first one you fund in the
+[source order](../reference/configuration.md#one-source-per-maker)
+(`zai-coding-plan`, `chatgpt`, `meta`, `openai`, `anthropic`, `fireworks`,
+`openrouter`). The others' rows leave `/model`, the session list's `/model`
+and the agent tool's menu, and no new session starts on them for you; each
+still runs by name (`--model`, `default_model`, a resume, a persona's
+`model:`, `[subagents]`). With unchanged credentials, these rows leave
+`/model`:
+
+| You have | Rows that leave `/model` |
+|---|---|
+| A ChatGPT sign-in (with its model list) and an OpenAI key | `openai/*` |
+| A ChatGPT sign-in (with its model list) or an OpenAI key, and OpenRouter | `openrouter/gpt-sol-latest`, `gpt-astra-latest`, `gpt-luna-latest`, `gpt-terra-latest` |
+| Z.AI Coding Plan and Fireworks | `fireworks/glm-5p3`, `fireworks/glm-5p3-flash` |
+| Z.AI Coding Plan or Fireworks, and OpenRouter | `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
+| Fireworks and OpenRouter | `openrouter/deepseek-flash-latest` |
+| Meta and OpenRouter | `openrouter/muse-spark-1.3`, `openrouter/muse-wonder` (new in this release) |
+
+Hiding is per maker: with the ChatGPT plan's list, every `openai/*` row
+leaves, including a model the plan does not list. `source_order = []` in
+`models.toml` brings every row back; `source_order = ["openai"]` puts the key
+first. **A `models.toml` that writes `source_order` cannot be read by an older
+craze** (it refuses keys it does not know), so a directory shared with an
+older binary should not write it.
+
+- **A remembered model on a hidden source no longer starts new sessions.**
+  If you last picked, say, `openrouter/gpt-sol-latest` or `fireworks/glm-5p3`
+  in `/model` and a higher source of that maker is connected (ChatGPT plan or
+  an OpenAI key; a Z.AI key), a new session now starts by the provider order
+  instead; the entry stays in `recent.json`. Pin it with `default_model` to
+  keep starting there. A remembered deprecated model still starts.
+- **craze no longer moves a new session to a paid source on its own** when an
+  earlier source of the same maker is set up but offers nothing: a ChatGPT
+  sign-in with no usable model list (or another account's list, or plan usage
+  off) and an exported `OPENAI_API_KEY`, with nothing remembered and no pin,
+  used to start on `openai/gpt-6.1-sol` with no word; it now refuses (kind
+  `config`): `native: signed in to ChatGPT, but its models are not available,
+  and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its
+  own; sign in again with craze auth login chatgpt, or start with --model
+  openai/gpt-6.1-sol`. Another maker's start still starts (with a Fireworks or
+  OpenRouter key too, the session starts there, as before). `craze providers`
+  and the hub show native as `needs setup` with that reason, not "no model
+  provider has a key". A resumed session whose own model no longer runs does
+  not fall back to such a model either.
+- **A sub-agent call naming a hidden or deprecated model** that you did not
+  configure is refused, naming the models it may use. It used to run. A
+  persona's `model:` and `[subagents]` still resolve any model.
+- **A quota or plan-limit failure in the TUI** is followed by a note naming
+  the maker's other funded sources and how to continue on one (`/exit`, then
+  `craze -c --model <alias>`); craze never switches for you. The TUI adds the
+  note from its own table; the failure's message is unchanged, so a waiting
+  command (`craze new --wait`, `craze send --wait`, `craze wait`) or `craze
+  prompt` never receives it, whichever command started the session.
+- **`craze models`**: each row's `maker` is filled (`openai`, `meta`, `zai`,
+  `deepseek`, `anthropic`, or `""`), `state.offered` is false for a hidden
+  model, and the table and `craze auth list` end with a note for each maker
+  whose models are hidden; the table also notes the warnings the model table
+  gave on loading, as `craze auth list` does.
+- **An unknown `--model` under `craze new --wait`, and a miss of `craze models
+  <alias>`,** now say `native: unknown model "<name>"; craze models lists the
+  models` instead of listing every model; `detail.reason` and `detail.model`
+  are unchanged. A session's own start error still lists them.
+- **New:** `openrouter/muse-spark-1.3` and `openrouter/muse-wonder`, Meta's
+  models on OpenRouter, offered when you have OpenRouter and no Meta key.
+
 ## Since v0.1.1
 
 Nothing needs migrating.
