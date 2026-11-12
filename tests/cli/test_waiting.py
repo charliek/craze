@@ -398,23 +398,42 @@ def test_a_plan_returned_says_its_turn_ended_there(craze_bin: Path, fake_agent_b
 
 def _long_turn_waiter(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> tuple[subprocess.Popen[bytes], int, dict]:
     """craze new --wait --json on the fake agent's turn held at its gate: the
-    waiter, the gate's write end, and the host's registry entry, the turn running."""
+    waiter, the gate's write end, and the host's registry entry, the turn running
+    and the waiter following it. The agent at its gate says only that the host
+    started the turn: its answer to the prompt can still be on its way, and a host
+    lost before it arrives is `the prompt may not have reached it`, `unobserved`.
+    The session file's handle, written once the host has answered the prompt, says
+    the waiter has the turn."""
     _config(fake_agent_bin)
     work = tmp_path / "proj"
     work.mkdir()
     gate = tmp_path / "gate"
     os.mkfifo(gate)
+    file = tmp_path / "session.json"
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = "long-turn"
     env["CRAZE_FAKE_GATE"] = str(gate)
     waiter = subprocess.Popen(
-        [str(craze_bin), "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "a long task"],
+        [str(craze_bin), "new", "--wait", "--json", "--provider", "cursor", "-C", str(work), "--session-file", str(file), "a long task"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
     )
     fd = _open_gate(gate, waiter)
+    deadline = time.monotonic() + WAIT
+    try:
+        while not (file.exists() and "handle" in json.loads(file.read_text(encoding="utf-8"))):
+            assert waiter.poll() is None, ("craze new --wait exited", waiter.returncode, waiter.communicate())
+            assert time.monotonic() < deadline, "the host's answer to the prompt never reached the waiter"
+            time.sleep(0.02)
+    except BaseException:
+        # The callers' own cleanup starts only once this helper has returned,
+        # so a waiter that never got its handle is ended and reaped here.
+        os.close(fd)
+        waiter.kill()
+        waiter.communicate(timeout=WAIT)
+        raise
     (entry,) = _entries(_home())
     return waiter, fd, entry
 
@@ -786,6 +805,20 @@ def _record(host_id: str) -> Path:
     return _home() / ".cache" / "craze" / "host-logs" / f"{host_id}.pgids"
 
 
+def _exited(pid: int) -> bool:
+    """Whether pid has exited with every thread of its own: reaped, or a zombie alone
+    in its thread group. A SIGKILLed host's first thread can be a zombie while the
+    others are still on their way out, holding its files and the registry lock with
+    them, and until the lock is let go every craze lists the host as live."""
+    if pid_alive(pid):
+        return False
+    try:
+        threads = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace").rsplit(")", 1)[1].split()[17]
+    except (OSError, IndexError):
+        return True  # reaped; or no /proc (macOS), where pid_alive waits for the reap
+    return threads == "1"
+
+
 def test_a_waiter_reaps_its_killed_hosts_commands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """The host SIGKILLed under a running shell command: by the time its waiter has
     reported host_exited, the shell and the shell's child have been signalled and the
@@ -871,7 +904,7 @@ def test_the_next_craze_reaps_a_killed_hosts_commands(craze_bin: Path, fake_agen
             os.kill(entry["pid"], signal.SIGKILL)
             # The host's gone, and nothing has looked: its commands are running.
             deadline = time.monotonic() + WAIT
-            while pid_alive(entry["pid"]):
+            while not _exited(entry["pid"]):
                 assert time.monotonic() < deadline, "the SIGKILLed host is still there"
                 time.sleep(0.02)
             assert alive(leader, leader_marker) and alive(child, child_marker), "a command went with its host"
@@ -909,7 +942,7 @@ def test_the_next_craze_finds_a_group_whose_shell_has_exited(craze_bin: Path, fa
             waiter.communicate()
             os.kill(entry["pid"], signal.SIGKILL)
             deadline = time.monotonic() + WAIT
-            while pid_alive(entry["pid"]):
+            while not _exited(entry["pid"]):
                 assert time.monotonic() < deadline, "the SIGKILLed host is still there"
                 time.sleep(0.02)
             fd = os.open(tmp_path / "proj" / "gate", os.O_WRONLY)
@@ -943,7 +976,7 @@ def _a_dead_hosts_stubborn_command(craze_bin: Path, fake_agent_bin: Path, tmp_pa
         waiter.communicate()
     os.kill(entry["pid"], signal.SIGKILL)
     deadline = time.monotonic() + WAIT
-    while pid_alive(entry["pid"]):
+    while not _exited(entry["pid"]):
         assert time.monotonic() < deadline, "the SIGKILLed host is still there"
         time.sleep(0.02)
     return entry, leader, child, leader_marker, child_marker
@@ -1126,6 +1159,12 @@ def test_a_killed_hosts_background_job_is_reaped(craze_bin: Path, fake_agent_bin
         try:
             entry, leader, child, leader_marker, child_marker = _background_job(craze_bin, fake_agent_bin, tmp_path, fixture, 7304)
             os.kill(entry["pid"], signal.SIGKILL)
+            # A SIGKILL takes effect in its own time: the next craze must find the host
+            # dead by its process, which is what its sweep goes by.
+            deadline = time.monotonic() + WAIT
+            while pid_alive(entry["pid"]):
+                assert time.monotonic() < deadline, "the SIGKILLed host is still there"
+                time.sleep(0.02)
             out = _craze(craze_bin, "ps", "--json")
             assert out.returncode == 0, out
             gone(leader, leader_marker)
@@ -1134,6 +1173,15 @@ def test_a_killed_hosts_background_job_is_reaped(craze_bin: Path, fake_agent_bin
             while _record(entry["hostId"]).exists():
                 assert time.monotonic() < deadline, "the record was left"
                 time.sleep(0.02)
+            # Its registry entry goes by its lock, which is let go as the host's last
+            # thread exits, a moment after its process can read as dead: a later craze
+            # sweeps it if that one came too soon.
+            deadline = time.monotonic() + WAIT
+            while any(e["hostId"] == entry["hostId"] for e in _entries(_home())):
+                assert time.monotonic() < deadline, ("no craze swept the dead host's entry", out)
+                time.sleep(0.05)
+                out = _craze(craze_bin, "ps", "--json")
+                assert out.returncode == 0, out
         finally:
             left = _kill_marked((leader, leader_marker), (child, child_marker))
     assert not left, left
