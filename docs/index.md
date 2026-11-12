@@ -19,8 +19,8 @@ against a model provider's API or a ChatGPT plan, and needs no other CLI (see
 
 ## Current Scope
 
-Early-stage software: v0.1.x is released (Homebrew, apt and release archives)
-for Linux and macOS. `craze` opens a TUI; `craze prompt --json` is the headless
+Early-stage software, released for Linux and macOS (Homebrew, apt and release
+archives). `craze` opens a TUI; `craze prompt --json` is the headless
 path. Sessions run in a detached host and outlive the
 terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
 `craze new` starts one in the background through the per-machine hub, and
@@ -41,7 +41,14 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   ([CLI reference](reference/cli.md#craze-new-load)).
 - **Scripted and background use.** `craze prompt --json` runs one turn;
   `craze new`, `send`, `wait`, `cancel` and `stop` drive sessions without a
-  terminal ([CLI reference](reference/cli.md#craze-new)).
+  terminal ([CLI reference](reference/cli.md#craze-new)). The waiting commands
+  give typed failures a program can branch on and retry
+  ([failure kinds](reference/cli.md#failure-kinds)), end a session with its
+  turn ([`--exit-after-turn`](reference/cli.md#ending-with-the-turn)), name the
+  session before the result ([`--session-file`](reference/cli.md#the-session-file))
+  and take prompts up to 512 KiB; a program on another machine runs them
+  detached, reading each round's result from files
+  ([a waiter run detached](reference/cli.md#a-waiter-run-detached)).
 - **Claude Code sub-agents.** A plugin hands a task to a craze session on a
   native, Grok or Cursor model, and returns the result ([Claude Code](getting-started/claude-code.md)).
 - **Side questions.** `/btw <question>` asks a quick question without adding to
@@ -74,15 +81,15 @@ To run craze you need:
       grok's `~/.grok` home (config, auth, sessions, skills), which is the
       fork's current behaviour, not a craze guarantee
 
-Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`) is needed only to build from
+Go 1.27.3+ (this repo pins 1.27.3 via `.mise.toml`) is needed only to build from
 source. Brew, apt and the release archives need no Go.
 
-Coming from v0.0.1? See [Upgrading](getting-started/upgrading.md).
+Upgrading from an earlier release? See [Upgrading](getting-started/upgrading.md).
 
 ## Next Steps
 
 - [Quick Start](getting-started/quick-start.md) — install and first run
-- [Upgrading](getting-started/upgrading.md) — what changed since v0.0.1 and since v0.1.0
+- [Upgrading](getting-started/upgrading.md) — what changed in each release
 - [Claude Code](getting-started/claude-code.md) — craze sessions as Claude Code sub-agents
 - [CLI Reference](reference/cli.md) — commands and flags
 - [TUI Reference](reference/tui.md) — keys, cards, slash commands

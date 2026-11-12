@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
+	"github.com/rivo/uniseg"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -959,6 +960,11 @@ func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
 		{"wide, clean edges", "A界B", 0, 2},
 		{"one cell", "alpha", 2, 2},
 		{"whole row", bold.Render("A界B"), 0, 3},
+		// The two below are where a bump of x/ansi (v0.11.9) and uniseg
+		// disagreed: the keycap's head and tail cuts lost the "a" after it,
+		// and the Devanagari row measured a cell short of what cutCells walks.
+		{"keycap at the left edge", "1️⃣abcdef", 0, 0},
+		{"combining marks, whole row", bold.Render("नमस्ते hello"), 0, 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := highlightSpan(tc.line, tc.lo, tc.hi, bg)
@@ -973,5 +979,37 @@ func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
 				t.Fatalf("painted %q, the copy takes %q", painted, want)
 			}
 		})
+	}
+}
+
+// TestTheTUIsWidthsAgree: selectionText measures a row with ansi.StringWidth
+// and copies it with cutCells, which walks uniseg's graphemes, and clampWidth
+// measures with lipgloss and cuts with ansi.Truncate. Each pair has to agree,
+// or a whole-row copy drops its last cells and a clamped title overruns its
+// budget. x/ansi v0.11.9 disagreed with uniseg on both rows below, which is why
+// it is held (plan 049); a bump of either library that splits them fails here.
+func TestTheTUIsWidthsAgree(t *testing.T) {
+	for _, s := range []string{
+		"plain ascii",
+		"A界B wide",
+		"नमस्ते hello",
+		"1️⃣abcdef",
+		"abc1️⃣def",
+		"e\u0301 combining",
+		"👍🏽 skin tone",
+		"🇯🇵 flag",
+	} {
+		w := ansi.StringWidth(s)
+		if u := uniseg.StringWidth(s); u != w {
+			t.Errorf("%q: ansi.StringWidth %d, uniseg %d", s, w, u)
+		}
+		if got := cutCells(s, 0, w); got != s {
+			t.Errorf("%q: the whole-row cut copies %q", s, got)
+		}
+		for budget := 1; budget < w; budget++ {
+			if got := clampWidth(s, budget); lipgloss.Width(got) > budget {
+				t.Errorf("%q clamped to %d is %q, %d cells", s, budget, got, lipgloss.Width(got))
+			}
+		}
 	}
 }

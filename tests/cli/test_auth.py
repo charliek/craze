@@ -227,6 +227,17 @@ def test_surplus_arguments_and_bad_flags_are_not_quoted(craze_bin: Path, args: l
     assert not (craze_home() / "native").exists()
 
 
+def test_login_from_a_pipe_with_no_newline(craze_bin: Path) -> None:
+    """A program setting a key up unattended -- `printf %s "$KEY" | craze auth
+    login <provider>`, no terminal and no trailing newline -- has it saved
+    whole, 0600, exit 0."""
+    proc = run_craze(craze_bin, "auth", "login", "fireworks", stdin=CANARY)
+    assert (proc.returncode, proc.stderr) == (0, ""), proc.stdout + proc.stderr
+    assert proc.stdout == f"Saved the Fireworks key in {providers_toml()}.\n"
+    assert providers_toml().stat().st_mode & 0o777 == 0o600
+    assert f'"{CANARY}"' in providers_toml().read_text(encoding="utf-8")
+
+
 def test_symlinked_providers_toml_is_refused(craze_bin: Path, tmp_path: Path) -> None:
     target = tmp_path / "elsewhere.toml"
     target.write_text('version = 1\n\n[providers.meta]\nname = "Meta (mine)"\n', encoding="utf-8")

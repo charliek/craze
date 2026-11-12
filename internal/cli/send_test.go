@@ -167,8 +167,10 @@ func TestSendJSONWithoutWait(t *testing.T) {
 // anything): one source — words, --prompt-file (`-` for stdin), or stdin when
 // it is not a terminal; a file and words together, none (stdin a terminal —
 // /dev/null is a character device, which is what craze takes a terminal to
-// be), an empty prompt and one over 32 KiB are usage errors, exit 2, and
-// nothing is sent; --remove-prompt-file deletes the file once it is read.
+// be), an empty prompt and one over 512 KiB are usage errors, exit 2, and
+// nothing is sent; --remove-prompt-file deletes the file once it is read. A
+// prompt of exactly 512 KiB — well over the queue's 32 KiB, issue #111 — is
+// taken by an idle session.
 func TestPromptInputRules(t *testing.T) {
 	r := newWaitRig(t, 0, answerTurn(textEv("taken")))
 	dir := t.TempDir()
@@ -187,6 +189,7 @@ func TestPromptInputRules(t *testing.T) {
 	task := write("task.md", "  from a file\n")
 	empty := write("empty.md", " \n\t\n")
 	big := write("big.md", strings.Repeat("x", promptTextMax+1))
+	most := write("most.md", "\n"+strings.Repeat("y", promptTextMax)+"\n")
 	for _, tc := range []struct {
 		name  string
 		argv  []string
@@ -198,7 +201,7 @@ func TestPromptInputRules(t *testing.T) {
 		{"empty words", []string{"  "}, nil, "the prompt is empty"},
 		{"an empty file", []string{"--prompt-file", empty}, nil, "the prompt is empty"},
 		{"empty stdin", []string{"--prompt-file", "-"}, strings.NewReader("\n"), "the prompt is empty"},
-		{"over 32 KiB", []string{"--prompt-file", big}, nil, "the prompt is over 32 KiB"},
+		{"over 512 KiB", []string{"--prompt-file", big}, nil, "the prompt is over 512 KiB"},
 		{"a missing file", []string{"--prompt-file", filepath.Join(dir, "nope")}, nil, "the prompt cannot be read"},
 		{"remove with no file", []string{"--remove-prompt-file", "words"}, nil, "--remove-prompt-file needs --prompt-file"},
 		{"remove stdin", []string{"--prompt-file", "-", "--remove-prompt-file"}, strings.NewReader("x"), "removes a file, not stdin"},
@@ -231,13 +234,14 @@ func TestPromptInputRules(t *testing.T) {
 		{"stdin by -", []string{"--prompt-file", "-"}, strings.NewReader("by dash\n"), "by dash"},
 		{"stdin, not a terminal", nil, strings.NewReader("  piped in\n"), "piped in"},
 		{"words, stdin left unread", []string{"the", "words"}, strings.NewReader("not this"), "the words"},
+		{"512 KiB from a file, its whitespace trimmed", []string{"--prompt-file", most}, devNull, strings.Repeat("y", promptTextMax)},
 	} {
 		stdout, stderr, code := executeIn(append([]string{"send", waitRigShort, "--wait"}, tc.argv...), tc.stdin)
 		if code != 0 || stderr != "" || !strings.Contains(stdout, "\ncompleted · ") {
 			t.Fatalf("%s: exit %d, %q %q", tc.name, code, stdout, stderr)
 		}
 		if got := r.s.sent(); len(got) != i+1 || got[i] != tc.want {
-			t.Fatalf("%s: the session was prompted %q, want %q last", tc.name, got, tc.want)
+			t.Fatalf("%s: the session was prompted %.80q (%d), want %.80q last", tc.name, got, len(got), tc.want)
 		}
 	}
 	if _, err := os.Stat(task); !os.IsNotExist(err) {
@@ -294,6 +298,49 @@ func TestSendWaitSignalDropsItsQueuedPrompt(t *testing.T) {
 	r.waitIdle()
 	if got := r.s.sent(); !slices.Equal(got, []string{"someone else's"}) {
 		t.Fatalf("the session was prompted %q", got)
+	}
+}
+
+// TestABigPromptToABusySessionIsRefusedInWords (issue #111): a prompt over
+// the queue's 32 KiB, sent while the session runs a turn, would have to wait
+// in the queue — the host refuses it, text_too_long, and craze send says so
+// in its own words, kind prompt, exit 1, with --wait or without; nothing is
+// queued and nothing runs. A small prompt to the same busy session still
+// queues.
+func TestABigPromptToABusySessionIsRefusedInWords(t *testing.T) {
+	r := newWaitRig(t, 0)
+	g := r.gate()
+	r.script(heldTurn(g, textEv("the first")), answerTurn(textEv("small")))
+	r.submit("someone else's")
+	r.waitStarted("turn-1")
+	big := filepath.Join(t.TempDir(), "big.md")
+	if err := os.WriteFile(big, []byte(strings.Repeat("x", 40<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{{"--json"}, {"--wait", "--json"}} {
+		stdout, stderr, code := executeIn(append([]string{"send", waitRigShort, "--prompt-file", big}, argv...), strings.NewReader(""))
+		m := decodeResult(t, stdout)
+		e, _ := m["error"].(map[string]any)
+		if code != 1 || e == nil || e["kind"] != "prompt" || e["retryable"] != false {
+			t.Fatalf("send %v: exit %d, %v, %q", argv, code, m, stderr)
+		}
+		msg, _ := e["message"].(string)
+		if !strings.Contains(msg, queuedTooLong) || !strings.Contains(msg, "over 32 KiB, the most a prompt can wait in the session's queue") ||
+			!strings.Contains(stderr, queuedTooLong) {
+			t.Fatalf("send %v: the refusal reads %q, stderr %q", argv, msg, stderr)
+		}
+		if st := r.eng.State(); st.Turn != "turn-1" || len(st.Queue) != 0 {
+			t.Fatalf("send %v: turn %q, queue %d after the refusal", argv, st.Turn, len(st.Queue))
+		}
+	}
+	stdout, stderr, code := executeIn([]string{"send", waitRigShort, "--json", strings.Repeat("s", 1<<10)}, strings.NewReader(""))
+	if m := decodeResult(t, stdout); code != 0 || m["status"] != "queued" || stderr != "" {
+		t.Fatalf("a small prompt to the busy session: exit %d, %v, %q", code, m, stderr)
+	}
+	g.open()
+	r.waitIdle()
+	if got := r.s.sent(); len(got) != 2 || got[0] != "someone else's" || got[1] != strings.Repeat("s", 1<<10) {
+		t.Fatalf("the session was prompted %.80q", got)
 	}
 }
 

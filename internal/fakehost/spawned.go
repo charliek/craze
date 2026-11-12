@@ -124,8 +124,11 @@ func RunSpawnedWith(a SpawnArgs, env rundir.Env, o Options, prepare func(*Host),
 		_ = h.Close(context.Background())
 		return fail(err)
 	}
-	served := make(chan error, 1)
-	go func() { served <- h.Serve(reg.Listener()) }()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = h.Serve(reg.Listener())
+	}()
 	writeReady(ready, hostspawn.ReadyLine{OK: true, HostID: o.HostID, Socket: reg.Socket(),
 		CrazeSessionID: o.CrazeSessionID, CrazeVersion: spawnedVersion})
 	for done := false; !done; {

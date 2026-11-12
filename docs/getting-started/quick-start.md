@@ -62,7 +62,7 @@ sudo apt install ./craze_<version>_<arch>.deb
 
 ### From source
 
-Source installs require Go 1.27 or later on `PATH`; verify with `go version`.
+Source installs require Go 1.27.3 or later on `PATH`; verify with `go version`.
 
 ```bash
 go install github.com/charliek/craze/cmd/craze@latest
@@ -95,7 +95,7 @@ make build
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
 is for tests; a live session uses the native provider, or `cursor-agent`, `grok`
-or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27+ (this repo pins 1.27.1 via
+or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27.3+ (this repo pins 1.27.3 via
 `.mise.toml`; `mise install`).
 
 ## First run
@@ -237,6 +237,12 @@ commands.
 To use craze from Claude Code, as a sub-agent that runs a task on another
 model, see [Claude Code sub-agents](claude-code.md).
 
+To drive sessions from a program, `craze new --wait`, `craze send --wait` and
+`craze wait` print a result and exit with its status ([`craze new
+--wait`](../reference/cli.md#craze-new-wait), [failure
+kinds](../reference/cli.md#failure-kinds)); a program on another machine runs
+them detached ([a waiter run detached](../reference/cli.md#a-waiter-run-detached)).
+
 ## Exit codes
 
 craze exits **nonzero when the session never started** — not logged in to the
@@ -251,6 +257,6 @@ turn's result instead: see [Waiting commands](../reference/cli.md#waiting-comman
 
 - [CLI](../reference/cli.md) — flags for `craze` and `craze prompt`, and `craze auth`
 - [TUI](../reference/tui.md) — keys, cards, slash commands
-- [Upgrading](upgrading.md) — what changed since v0.0.1 and since v0.1.0
+- [Upgrading](upgrading.md) — what changed in each release
 - [Claude Code](claude-code.md) — craze sessions as Claude Code sub-agents
 - [Configuration](../reference/configuration.md) — themes and `~/.craze/config.toml`

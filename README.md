@@ -28,12 +28,15 @@ and want one fast, scriptable front end for several of them.
   and print the result, with typed failures a program can branch on and retry,
   a stopped turn's usage so far, a step that survives a mid-stream reset, a
   killed native host's shell commands ended rather than left running, a session that ends
-  with its turn, and `stop` and `cancel --turn` safe to send twice.
+  with its turn, `stop` and `cancel --turn` safe to send twice, prompts up to
+  512 KiB, and waiters that run detached with no terminal for a program driving
+  craze from elsewhere.
   [`craze new`](docs/reference/cli.md#craze-new),
   [`craze wait`](docs/reference/cli.md#craze-wait),
   [ending with the turn](docs/reference/cli.md#ending-with-the-turn),
   [failure kinds](docs/reference/cli.md#failure-kinds),
-  [what a dead host leaves running](docs/reference/cli.md#what-a-dead-host-leaves-running)
+  [what a dead host leaves running](docs/reference/cli.md#what-a-dead-host-leaves-running),
+  [a waiter run detached](docs/reference/cli.md#a-waiter-run-detached)
 - **Claude Code sub-agents**: a plugin that hands a task to a craze session.
   [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - **`/btw` side questions**: ask without adding to the session.
@@ -125,8 +128,8 @@ See [setup](docs/development/setup.md) and [testing](docs/development/testing.md
 
 ## Status
 
-Early-stage software, released as v0.1.x for Linux and macOS (Homebrew, apt and
-release archives). `craze` opens a TUI; `craze prompt --json` is the headless
+Early-stage software, released for Linux and macOS (Homebrew, apt and release
+archives). `craze` opens a TUI; `craze prompt --json` is the headless
 path, and `craze new --wait` and `craze send` drive sessions from other programs.
 
 ## License

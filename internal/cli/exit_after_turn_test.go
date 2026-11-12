@@ -836,7 +836,7 @@ func TestASignalBeforeThePromptTakesTheFileWithIt(t *testing.T) {
 	sigs := withWaitSignals(t)
 	var host rundir.Entry
 	prev, prevKnown := promptSpawned, newWaitHostKnown
-	promptSpawned = func(ref hostRef) { host = ref.entry }
+	promptSpawned = func(_ *promptJob, ref hostRef) { host = ref.entry }
 	wrote := false
 	// The signal relayed, and so the command's work ended, before anything is dialled:
 	// the prompt cannot be sent.

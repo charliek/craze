@@ -277,8 +277,10 @@ func RawFinish(md fantasy.ProviderMetadata) (reason fantasy.FinishReason, ok boo
 // then go out as tool, user, tool, user: the step's run of tool messages, the
 // answers to the assistant's tool calls, is split by a user message, which
 // providers that want every call answered before anything else refuse or
-// misread. So here, before the client encodes the request, each run of
-// consecutive tool messages is rewritten:
+// misread. (Fantasy v0.44.0 and later keep the run contiguous themselves,
+// charmbracelet/fantasy#366, but still send one user message per image after
+// it, with nothing naming the calls.) So here, before the client encodes the
+// request, each run of consecutive tool messages is rewritten:
 //
 //   - a tool result whose output is an image (a fantasy.ToolResultOutputContentMedia
 //     of an image/* type) becomes a text result of its text — or, with none,

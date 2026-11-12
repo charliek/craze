@@ -54,7 +54,9 @@ its own model's tools.
 
 The task must stand alone: the session has not seen the conversation. Give it
 the goal, the paths and what to return, and put a large context in a file in
-the project that the task names.
+the project that the task names. The task itself can be up to 512 KiB (32 KiB on
+craze 0.2.0; [the prompt](../reference/cli.md#the-prompt)), but a smaller one is
+cheaper: a native turn sends it again with every request.
 
 ### The result
 
@@ -84,6 +86,12 @@ A call waits up to nine minutes (`--timeout 9m`, under a Bash `timeout` of
 SendMessage to the agent continues the same session with its context: the
 agent runs `craze send <short> --wait` ([reference](../reference/cli.md#craze-send)).
 A session whose host has since exited is loaded again from the session index.
+A follow-up sent while the session is still working (after the agent gave up
+on a `running` turn, say) waits behind that turn, and one over 32 KiB is
+refused, exit 1, which the agent passes back: `the prompt was refused: it is
+over 32 KiB, the most a prompt can wait in the session's queue, and the session
+was busy; send it once the turn has ended`. Send it once the turn has ended, or
+put the bulk in a file.
 
 To watch or answer a session, run `craze attach --session <short>` (the footer
 prints it). A session that stops on a question or a permission request that

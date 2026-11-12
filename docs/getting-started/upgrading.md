@@ -43,7 +43,10 @@ end `it exits when idle`.
 
 **The waiting commands' JSON changes.** A program that reads `craze new --wait
 --json`, `craze send --wait --json` or `craze wait --json` needs the changes below.
-Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn) and [`craze stop` on a session that has ended](#other-commands). `craze prompt
+Exit codes do not change but for [a stop mid-turn](#a-stop-mid-turn), [`craze stop` on a
+session that has ended](#other-commands), and [a prompt over 32
+KiB](#a-prompt-can-be-512-kib): one up to 512 KiB now runs, and one that `craze send` gives
+a busy session is exit 1 (it was exit 2). `craze prompt
 --json` is unchanged but for [one new line](#a-stream-that-fails-partway), and so is plain `craze new --json` but for one new key. A waiter and a host of different versions work
 together: an error from an older host reads as kind `unknown`, retryable false, and
 a kind from a newer host that this craze does not know reads as `unknown` with the
@@ -251,6 +254,26 @@ says so on stderr.
 **A socket client** sees a new `step_retry` event and `retracted` on a snapshot's
 entries: [what they mean](../reference/protocol.md#a-steps-retry). One that ignores
 both draws the abandoned attempt as if it stood.
+
+### A prompt can be 512 KiB
+
+**`craze new --wait` and `craze send` take a prompt of up to 512 KiB** from any source
+(words, `--prompt-file`, stdin); it was 32 KiB. Over 512 KiB is the usage error it was,
+exit 2, kind `prompt`, now reading `the prompt is over 512 KiB`.
+
+**A `craze send` over 32 KiB to a busy session is refused in its own words.** A prompt
+that has to wait in the session's queue behind a running turn is still held to the
+queue's 32 KiB per row. That used to be refused before anything was sent, as a usage
+error, exit 2; now the session refuses it: exit 1, kind `prompt`, nothing queued, with or without `--wait`:
+
+```text
+craze send: the prompt was refused: it is over 32 KiB, the most a prompt can wait in the session's queue, and the session was busy; send it once the turn has ended
+```
+
+A program that sends follow-ups only between rounds never meets it. [The
+prompt](../reference/cli.md#the-prompt) has the rules, and [a waiter run
+detached](../reference/cli.md#a-waiter-run-detached) what a program driving craze from
+elsewhere needs to know.
 
 ### Other commands
 

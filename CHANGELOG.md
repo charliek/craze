@@ -2,6 +2,123 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## Unreleased
+
+The waiting commands become a contract a program can drive unattended: typed
+failures it can branch on and retry, a session that ends with its turn, a session
+file that names the session before the result, `stop` and `cancel` safe to send
+twice, and prompts up to 512 KiB. A program that reads `craze new --wait --json`,
+`craze send --wait --json` or `craze wait --json` needs changes: [Upgrading, since
+v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
+`~/.craze` needs migrating; restart a running hub after upgrading.
+
+### Behaviour changes
+
+- The waiting commands' JSON: `error` is one object, `{message, kind, retryable,
+  detail?}`, on a result and on an exit-1 failure alike (it was a string on a
+  result); a `failed` result always has one, and the plain footer's `stopped:`
+  line is folded into `error:`. `stopReason` is on every terminal status,
+  `model` is left out until it is resolved, and `planEnded` is new.
+- A turn a stop cuts short (`craze stop`, a `SIGTERM` to the host) is a
+  `cancelled` result, exit 3, with what it did and spent so far, `stopReason:
+  stopped` and `usageComplete: false` when a step was in flight. It was a
+  failure, exit 1. A killed host is told from a stop and from a lost connection.
+- `craze stop` on a session that has ended is exit 0 (`already_ended`); it was
+  exit 1.
+- `files` lists only successful edits inside the workspace, relative to it;
+  edits elsewhere move to `outsideFiles`, the session's plan file to `planFile`.
+- Unattended hosts (`craze new --wait`, and `craze send` reloading one) idle out
+  after `host_idle_exit_unattended`, ten minutes by default, and an open
+  permission ask no longer holds them up. They stayed for `host_idle_exit`, an
+  hour by default.
+- A usage error under `--json` prints an `{"error":{…}}` object on stdout, and
+  plain `craze new --json` gains `kind`.
+- A native host killed outright has its shell commands ended (`SIGTERM`, then
+  `SIGKILL`) by the waiter that sees it go or by the next craze command; every
+  native command has `CRAZE_HOST_ID` in its environment.
+
+### Sessions and scripting
+
+- `--exit-after-turn` on `craze new --wait` and `craze send --wait` ends the
+  session with its turn: no other prompt is admitted, and the host is gone by
+  the command's exit.
+- `--session-file <path>` writes the session's identity (`session`, `short`,
+  `hostPid`, `hostId`) before the prompt is sent, and the round's `handle` once
+  it is taken.
+- `craze stop --json` and `craze cancel --json`, and `craze cancel --turn
+  <turn>`, which cancels that turn only while it is current, so a cancel sent
+  again never reaches the next queued turn.
+- `craze ps --json --brief` leaves out each session's model and mode
+  catalogs.
+- Failure kinds: each `error` names one of a closed set of kinds and whether it
+  may be retried (`provider`, `stopped`, `host_exited`, `connection_lost`,
+  `unobserved`, `prompt`, `config` and the rest); cursor's and grok's refusal of
+  `--model` reads `the agent refused model "x": <the agent's words>`, kind
+  `model_not_found`.
+- A native step that fails mid-stream (an HTTP/2 reset, an unexpected EOF, a
+  server error event) is sent again from the same input, once by default
+  (`provider_retries`, 0 to 3). The result gains `retries`; `craze prompt
+  --json` gains a `step_retry` line, and the control protocol a `step_retry`
+  event and `retracted` entries.
+- `craze new --wait` and `craze send` take a prompt of up to 512 KiB, from
+  words, `--prompt-file` or stdin (was 32 KiB, #111). The bound fits the
+  socket's 4 MiB request line with any JSON escaping; over it is still exit 2,
+  kind `prompt`.
+- A `craze send` over 32 KiB to a session that is running a turn would have to
+  wait in the session's queue, which still holds 32 KiB a row: the session
+  refuses it, exit 1, kind `prompt`, nothing queued, in words of its own (`it
+  is over 32 KiB, the most a prompt can wait in the session's queue, and the
+  session was busy; send it once the turn has ended`). On v0.2.0 any prompt
+  over 32 KiB was refused before anything was sent, a usage error, exit 2.
+- The CLI reference has a new section, "A waiter run detached", for a program
+  that drives craze from elsewhere: run each round's waiter in a session of its
+  own with its result and exit code in files (the exit file marking the round's
+  end, and the round's pid telling a running round from a lost waiter; macOS,
+  which has no `setsid` binary, calls `setsid(2)` from the driving program),
+  `craze cancel` and `craze stop` to end a round or the session, no
+  `--timeout`, plain `craze wait` to read a
+  lost round, `CRAZE_RUNTIME_DIR` on a machine people log in to, and the last
+  round's `usage.session` as the session's total (a floor when a step was cut
+  short, sent again or unpriced). End-to-end tests run it that
+  way: detached, no terminal, across a host that idled out and was loaded
+  again, and a later `craze send --wait` round that a plain `craze wait` reads
+  without owning and `craze cancel` ends.
+- `craze auth login` from a pipe takes a key with no trailing newline (it
+  always did; now tested and documented).
+
+### Maintenance
+
+- Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint
+  2.15.0 (was 2.13.2, which cannot read Go 1.27.2+'s export data). Its errcheck
+  now reports an error received from a channel and dropped; the three places
+  that did so wait without discarding a received error.
+- Fantasy v0.45.0 (was v0.43.2). Fantasy builds on Charm's fork of the OpenAI
+  SDK (`github.com/charmbracelet/openai-go`) from v0.45.0, so
+  `github.com/openai/openai-go/v3` leaves the build; the dependency-boundary
+  tests forbid the fork as they forbid the SDK. Through it: an
+  OpenAI-compatible provider that reports reasoning tokens apart from output
+  tokens has them counted in output (and spend), tool messages stay together
+  when tool results carry images (craze's own regrouping is unchanged), and
+  JSON repair fixes. `bin/craze` is 44,139,178 bytes (was 42,484,176).
+- **Held:** Fantasy v0.45.1 to v0.48.0. From v0.45.1 Fantasy no longer retries
+  a step because a tool returned an error, and four of the native harness's
+  cancel and callback tests fail against it; that is more than a version bump.
+- golang.org/x/sys v0.50.0, golang.org/x/image v0.48.0, spf13/pflag v1.1.0,
+  kaptinlin/jsonschema v0.9.10 and charmbracelet/x/term v0.2.2; no TUI golden
+  or wire fixture moved.
+- **Held:** charmbracelet/x/ansi v0.11 (stays v0.10.1), and with it
+  charmbracelet/bubbles v1.0.0 (needs it; stays v0.21.0) and
+  mattn/go-runewidth (stays v0.0.16). x/ansi v0.11.9 measures some graphemes
+  (Devanagari with combining marks, keycap emoji) differently from the
+  grapheme walk the TUI copies and highlights with: copying a whole row like
+  `नमस्ते hello` dropped its last character, highlighting next to `1️⃣` erased
+  the character after it, and a clamped title could overrun its width by a
+  cell. A test now holds the TUI's width measures to one another.
+- GitHub Actions: actions/checkout v7, actions/setup-go v7, astral-sh/setup-uv
+  v10.3.3.
+- Python locks: `eval/` takes aiohttp 3.14.5 (three advisories fixed in 3.14.4)
+  and pytest 9.2.0; the docs site takes zensical 0.1.1.
+
 ## v0.2.0 — 2026-10-14
 
 Effort becomes a control of its own on native models (`/effort`, and a switch
