@@ -63,6 +63,7 @@ from crazeeval import judging
 from crazeeval import keys as keymod
 from crazeeval import paths
 from crazeeval import report as rp
+from crazeeval.config import harness_executable
 from crazeeval.judge import judge_hash, task_judge_hashes
 from crazeeval.tasks import Task
 
@@ -237,7 +238,9 @@ def calibration_summary(batch: Path, global_now: str) -> dict | None:
 def run_row(r: dict, info: dict) -> dict:
     m = r.get("metrics") or {}
     h = r.get("harness")
-    ex = (info.get("executables") or {}).get(h) or {}
+    # An arm (craze-web) keeps its own name and reports the executable it ran (craze's).
+    exe = harness_executable(h) if isinstance(h, str) else h
+    ex = (info.get("executables") or {}).get(exe) or {}
     row = {
         "campaign": info.get("campaign"),
         "batch": info.get("name"),
@@ -266,7 +269,7 @@ def run_row(r: dict, info: dict) -> dict:
         "list_cost": m.get("list_cost"),
         "tokens": m.get("tokens"),
     }
-    if h == rp.NATIVE:
+    if exe == rp.NATIVE:
         row["craze_build"] = info.get("craze_build")
     return row
 

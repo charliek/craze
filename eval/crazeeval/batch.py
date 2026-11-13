@@ -384,7 +384,10 @@ class Batch:
         # Unique per batch (the batch directory carries its timestamp), so neither the
         # ledger's per-run grouping nor the per-run cap mixes two batches that share a label.
         run_id = f"{cfg.out.name}:{spec.key}:a{n}"
-        route = self.proxy.register_run(run_id, spec.harness, {em.wire_model}, adir / cap.CAPTURE_PLAIN)
+        # Only craze-web's route carries the task's corpus: every other run's web route
+        # is refused (craze plan 051 E3).
+        route = self.proxy.register_run(run_id, spec.harness, {em.wire_model}, adir / cap.CAPTURE_PLAIN,
+                                        corpus=task.web_corpus if runner.web else None)
         stdout, stderr = adir / "stdout.jsonl", adir / "stderr.txt"
         launch_error = None
         cmd: list[str] = []

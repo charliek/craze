@@ -18,7 +18,9 @@
   irrelevant call (``python --version``) that completed, and with the right call
   attempted but never answered;
 - explain / answer / plan: fact checks pass on the reference and fail on the decoy,
-  and the no-writes check passes untouched and fails with a planted edit.
+  and the no-writes check passes untouched and fails with a planted edit;
+- a web task (any category) also passes its lint (web_lint): its needs are in its
+  corpus and its reference patch, and in neither its prompt nor its fixture.
 """
 
 from __future__ import annotations
@@ -42,8 +44,8 @@ from crazeeval.checks import (
     check_tests,
 )
 from crazeeval.sandbox import Toolchains
-from crazeeval.tasks import ANSWER_LIKE, IMPLEMENTATION, Task
-from crazeeval.workspace import git, ignores_for, materialise
+from crazeeval.tasks import ANSWER_LIKE, IMPLEMENTATION, WEB_SPLIT, Task
+from crazeeval.workspace import fixture_dir, git, ignores_for, materialise
 
 
 @dataclass
@@ -143,11 +145,62 @@ async def validate_task(task: Task, tc: Toolchains | None, cache: Path | None = 
     return v
 
 
+DISTRACTORS_PER_RELEVANT = 3
+
+
+def _added_lines(patch: str) -> str:
+    return "\n".join(line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++"))
+
+
+def web_lint(task: Task) -> list[str]:
+    """A web task's problems (craze plan 051 E4), empty when it is sound: at least
+    DISTRACTORS_PER_RELEVANT distractor pages per relevant one, and every need in a
+    relevant page and in the reference patch's added lines -- and, ignoring case, in
+    neither the prompt nor any file of the fixture (its files and fixture.toml, whose
+    message is the start commit's), by content or by name, so the decisive facts reach
+    a run only through the corpus."""
+    corpus = task.web_corpus
+    if corpus is None:
+        return ["not a web task"]
+    problems = []
+    relevant = [p for p in corpus.pages if p.file in task.relevant]
+    distractors = len(corpus.pages) - len(relevant)
+    if distractors < DISTRACTORS_PER_RELEVANT * len(relevant):
+        problems.append(f"{distractors} distractor pages for {len(relevant)} relevant: "
+                        f"needs {DISTRACTORS_PER_RELEVANT} per relevant page")
+    ref = task.validate.get("reference_patch")
+    added = _added_lines(task.testdata(ref).read_text()) if ref else ""
+    if not ref:
+        problems.append("no validate.reference_patch")
+    fdir = fixture_dir(task.fixture or "")
+    fixture = [(str(p.relative_to(fdir)), p.read_text(errors="replace").casefold())
+               for p in sorted(fdir.rglob("*")) if p.is_file()]
+    prompt = task.prompt.casefold()
+    for need in task.needs:
+        if not any(need in p.title or need in p.body for p in relevant):
+            problems.append(f"need {need!r} is in no relevant corpus page")
+        if ref and need not in added:
+            problems.append(f"need {need!r} is not in the reference patch's added lines")
+        if need.casefold() in prompt:
+            problems.append(f"need {need!r} is in the prompt")
+        problems += [f"need {need!r} is in the fixture's {name}" for name, text in fixture if need.casefold() in text]
+        # A file's name is copied into the workspace and its git tree as surely.
+        problems += [f"need {need!r} is in the fixture's file name {name}" for name, _ in fixture
+                     if need.casefold() in name.casefold()]
+    return problems
+
+
 async def _validate(task: Task, v: Validation, work: Path, tc, cache) -> None:
     val = task.validate
     by_type = {}
     for c in task.checks:
         by_type.setdefault(c["type"], []).append(c)
+
+    # A web task's lint: its needs reach a run only through its corpus.
+    if task.split == WEB_SPLIT:
+        problems = web_lint(task)
+        v.controls.append(Control("web lint: needs only in the corpus, distractors", True, not problems,
+                                  "; ".join(problems)))
 
     # Answer controls (facts): reference passes, decoy fails.
     if "facts" in by_type:

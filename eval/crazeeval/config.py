@@ -10,7 +10,20 @@ from pathlib import Path
 
 from crazeeval import paths
 
-HARNESSES = ("craze", "gx", "opencode", "codex")
+# What a run selects when it names no harness, and every harness it may name: craze-web
+# (craze with web search answered from a web task's corpus, craze plan 051 E2) runs only
+# when named.
+DEFAULT_HARNESSES = ("craze", "gx", "opencode", "codex")
+SUPPORTED_HARNESSES = DEFAULT_HARNESSES + ("craze-web",)
+HARNESSES = DEFAULT_HARNESSES
+# An arm that runs another harness's executable, by the name batch identity and the
+# manifest record it under (manifest.executables): craze-web runs the craze binary.
+ARM_EXECUTABLE = {"craze-web": "craze"}
+
+
+def harness_executable(harness: str) -> str:
+    """The executable ``harness`` runs, as manifests and batch identity name it."""
+    return ARM_EXECUTABLE.get(harness, harness)
 
 # The source craze's former gx importer wrote on every entry it made (craze's
 # modeltable legacySource): such an entry for a provider craze ships yields to the
@@ -74,7 +87,7 @@ class EvalModel:
     def supports(self, harness: str) -> bool:
         if harness == "codex":
             return bool(self.codex and self.codex_provider)
-        return harness in HARNESSES
+        return harness in SUPPORTED_HARNESSES
 
 
 def load_models(path: Path | None = None) -> dict[str, EvalModel]:

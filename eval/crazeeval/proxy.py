@@ -22,6 +22,12 @@ the usage still arrives and is reconciled.
 
 Besides TCP (the standalone proxy for the live smoke) it listens on a Unix socket,
 which is all an agent's sandbox can reach (sandbox.py's relay).
+
+One route forwards nothing (craze plan 051 E3): ``/r/<token>/web/mcp`` answers craze's
+web tools from the run's own frozen corpus (webcorpus.py), for a run registered with
+one, and is refused for every other. It is handled before upstream routing and never
+touches the run's capture, its request counters or the ledger: its calls are journaled
+to their own ``web.jsonl`` beside the capture, and counted in the summary's ``web``.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from typing import Any, Mapping
 import aiohttp
 from aiohttp import web
 
+from crazeeval import webcorpus
 from crazeeval.capture import CaptureWriter, SSEParser, usage_and_model
 from crazeeval.keys import KeyRing, Provider
 from crazeeval.ledger import BUDGET_STOP, Ledger
@@ -92,6 +99,35 @@ MULTI_COMPLETION = "multi-completion"
 UNBOUNDED_INPUT = "unbounded-input"
 NO_KEY = "no-key"
 EXPIRED = "expired-token"
+# The web route's refusals (never in the capture): a run with no corpus, a path or
+# method the route does not answer, and a body over webcorpus.BODY_LIMIT.
+WEB_NOT_AVAILABLE = "web-not-available"
+WEB_NOT_ALLOWED = "web-not-allowed"
+WEB_TOO_LARGE = "web-body-too-large"
+WEB_JOURNAL = "web.jsonl"
+
+
+class WebJournal:
+    """A run's web calls, one JSON line each, scrubbed of every loaded key: a file of its
+    own, never the model capture (every capture record is a model exchange to its
+    readers: capture.assemble, capture.metrics)."""
+
+    def __init__(self, path: Path, scrub):
+        self.path = Path(path)
+        self._scrub = scrub
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a", encoding="utf-8")
+
+    def write(self, record: dict) -> None:
+        if self._fh.closed:
+            return
+        # ASCII escapes: a line is always encodable, whatever a string holds (review C9
+        # item 1); the scrub still sees every key, which is ASCII.
+        self._fh.write(self._scrub(json.dumps(record, ensure_ascii=True, default=str)) + "\n")
+        self._fh.flush()
+
+    def close(self) -> None:
+        self._fh.close()
 
 
 @dataclass
@@ -106,10 +142,26 @@ class RouteState:
     counters: dict = field(default_factory=lambda: {"requests": 0, "forwarded": 0, "refused": {}, "upstream_errors": 0})
     flags: set = field(default_factory=set)
     inflight: set = field(default_factory=set)
+    # The run's web corpus, bound once by register_run (None: the web route is
+    # refused), and the web route's journal and counters.
+    corpus: webcorpus.Corpus | None = None
+    web_journal: WebJournal | None = None
+    web: dict = field(default_factory=lambda: {"searches": 0, "fetches": 0, "misses": 0, "bytes_served": 0,
+                                                "malformed": 0, "refused": 0})
+    web_seq: int = 0
+
+    def __setattr__(self, name, value):
+        if name == "corpus" and "corpus" in self.__dict__:
+            raise AttributeError("a route's corpus is bound once, by register_run")
+        super().__setattr__(name, value)
 
     def next_seq(self) -> int:
         self.seq += 1
         return self.seq
+
+    def next_web_seq(self) -> int:
+        self.web_seq += 1
+        return self.web_seq
 
     def refused(self, reason: str) -> None:
         self.counters["refused"][reason] = self.counters["refused"].get(reason, 0) + 1
@@ -125,6 +177,8 @@ class RouteState:
             "key_exposure_refusals": self.counters["refused"].get(KEY_EXPOSURE, 0),
             "upstream_errors": self.counters["upstream_errors"],
             "flags": sorted(self.flags),
+            # Only for a run with a corpus: every other run's summary is as it was.
+            **({"web": dict(self.web)} if self.corpus is not None else {}),
         }
 
 
@@ -289,7 +343,13 @@ class Proxy:
 
     # -- runs ------------------------------------------------------------------
 
-    def register_run(self, run_id: str, harness: str, models: set[str] | frozenset[str], capture_path: Path) -> RouteState:
+    def register_run(self, run_id: str, harness: str, models: set[str] | frozenset[str], capture_path: Path,
+                     corpus: webcorpus.Corpus | None = None) -> RouteState:
+        """A run's route. With ``corpus``, its web route answers from that corpus, and
+        only from it, journaling to ``web.jsonl`` beside the capture; without one, the
+        web route is refused."""
+        if corpus is not None and not isinstance(corpus, webcorpus.Corpus):
+            raise TypeError("corpus must be a webcorpus.Corpus")
         token = secrets.token_hex(16)
         route = RouteState(
             token=token,
@@ -297,9 +357,16 @@ class Proxy:
             harness=harness,
             models=frozenset(models),
             capture=CaptureWriter(Path(capture_path), self.keyring.scrub),
+            corpus=corpus,
+            web_journal=WebJournal(Path(capture_path).with_name(WEB_JOURNAL), self.keyring.scrub) if corpus else None,
         )
         self._routes[token] = route
         return route
+
+    def web_url(self, route: RouteState) -> str:
+        """The run's web route, which craze's CRAZE_TEST_EXA_MCP names (homes.web_mcp_url
+        derives the same URL from the run's base URL)."""
+        return f"http://{self.host}:{self.port}/r/{route.token}/{webcorpus.WEB_HOST}/{webcorpus.WEB_PATH}"
 
     def base_url(self, route: RouteState, provider: str) -> str:
         p = self.providers[provider]
@@ -327,6 +394,9 @@ class Proxy:
                 t.cancel()
             await asyncio.gather(*still, return_exceptions=True)
         route.capture.close()
+        if route.web_journal is not None:
+            route.web_journal.write({"kind": "summary", "run_id": route.run_id, **route.web})
+            route.web_journal.close()
         self._routes.pop(route.token, None)
         self._expired[route.token] = route.run_id
         return route.summary()
@@ -412,6 +482,10 @@ class Proxy:
             route.inflight.discard(task)
 
     async def _handle_route(self, request: web.Request, route: RouteState, host: str, rest: str) -> web.StreamResponse:
+        if host == webcorpus.WEB_HOST:
+            # Before anything a model request touches: no capture record, no request
+            # count, no ledger.
+            return await self._handle_web(request, route, rest)
         t0 = time.monotonic()
         route.counters["requests"] += 1
         rec: dict[str, Any] = {
@@ -430,8 +504,7 @@ class Proxy:
         # Authorization among them -- is a key exposure before anything else is decided,
         # so no later refusal can echo it (review c4c5 finding 4). The dummy key is not a
         # loaded one.
-        header_blob = "\n".join(f"{k}: {v}" for k, v in request.headers.items())
-        if any(self.keyring.contains_key(part) for part in (request.path, request.query_string, header_blob)):
+        if self._request_carries_key(request):
             return self._key_exposure(route, rec, b"")
         provider = self._match_provider(host, rest)
         if provider is None:
@@ -575,6 +648,75 @@ class Proxy:
             ex.mark_gone()
             return response if response is not None else web.Response(status=499)
 
+    # -- the web route ----------------------------------------------------------------
+
+    def _web_refuse(self, route: RouteState, status: int, reason: str, message: str, **extra) -> web.Response:
+        route.web["refused"] += 1
+        assert route.web_journal is not None
+        route.web_journal.write({"kind": "refused", "ts": time.time(), "seq": route.next_web_seq(), "status": status,
+                                 "reason": reason, **extra})
+        return self._error(status, reason, message)
+
+    def _web_key_exposure(self, route: RouteState) -> web.Response:
+        route.flags.add(KEY_EXPOSURE)
+        route.refused(KEY_EXPOSURE)
+        return self._web_refuse(route, 403, KEY_EXPOSURE, "the request carries a provider key")
+
+    async def _handle_web(self, request: web.Request, route: RouteState, rest: str) -> web.StreamResponse:
+        """``POST /r/<token>/web/mcp``: the run's own corpus answers craze's web tools
+        (webcorpus.answer). A run registered without a corpus is refused, in the refusal
+        log only; a token reaches its own run's corpus and no other."""
+        if route.corpus is None:
+            self._log_unrouted({"ts": time.time(), "method": request.method, "reason": WEB_NOT_AVAILABLE,
+                                "run_id": route.run_id, "host": webcorpus.WEB_HOST})
+            return self._error(403, WEB_NOT_AVAILABLE, "this run has no web corpus")
+        # A loaded key anywhere in the request is a key exposure here too: flagged and
+        # counted in the run's summary, journaled scrubbed.
+        if self._request_carries_key(request):
+            return self._web_key_exposure(route)
+        path_ok = rest.rstrip("/") == webcorpus.WEB_PATH and not request.query_string
+        if not path_ok or request.method != "POST":
+            return self._web_refuse(route, 405 if path_ok else 404, WEB_NOT_ALLOWED,
+                                    "the web route answers POST …/web/mcp only", method=request.method)
+        if (request.content_length or 0) > webcorpus.BODY_LIMIT:
+            return self._web_refuse(route, 413, WEB_TOO_LARGE, "request body too large")
+        # Read as it arrives and stop past the limit, so a body with no Content-Length
+        # (chunked) is never buffered beyond it either (the app's own limit is the
+        # model route's, far larger).
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(16 * 1024):
+            body += chunk
+            if len(body) > webcorpus.BODY_LIMIT:
+                return self._web_refuse(route, 413, WEB_TOO_LARGE, "request body too large")
+        body = bytes(body)
+        if self.keyring.contains_key(body):
+            return self._web_key_exposure(route)
+        req = webcorpus.decode(body)
+        # A key the raw body carried only escaped (sk-…), as the model route checks
+        # (review C9 item 7): refused before anything could echo it (the id).
+        if not isinstance(req, webcorpus.Reply) and self.keyring.json_contains_key(req):
+            return self._web_key_exposure(route)
+        # The route may have closed while the body was read; nothing awaits after this
+        # check until the reply is handed back.
+        if not route.active:
+            return self._error(403, EXPIRED, "this route closed")
+        reply = req if isinstance(req, webcorpus.Reply) else webcorpus.respond(route.corpus, req)
+        # The journal line first: a counter never counts a call the journal lacks.
+        assert route.web_journal is not None
+        route.web_journal.write({"kind": "call", "ts": time.time(), "seq": route.next_web_seq(), **reply.entry,
+                                 "status": reply.status, "bytes": len(reply.body)})
+        w = route.web
+        op = reply.entry["op"]
+        if op == "search":
+            w["searches"] += 1
+        elif op == "fetch":
+            w["fetches"] += 1
+            w["misses"] += 0 if reply.entry["hit"] else 1
+        else:
+            w["malformed"] += 1
+        w["bytes_served"] += len(reply.body)
+        return web.Response(status=reply.status, body=reply.body, headers={"Content-Type": reply.content_type})
+
     @staticmethod
     async def _write(ex: Exchange, response: web.StreamResponse, data: bytes) -> None:
         if ex.gone:
@@ -586,6 +728,11 @@ class Proxy:
         if not reason or self.keyring.contains_key(reason) or "\r" in reason or "\n" in reason:
             return None
         return reason
+
+    def _request_carries_key(self, request: web.Request) -> bool:
+        """A loaded key in the request's path, query or any header."""
+        header_blob = "\n".join(f"{k}: {v}" for k, v in request.headers.items())
+        return any(self.keyring.contains_key(part) for part in (request.path, request.query_string, header_blob))
 
     def _key_exposure(self, route: RouteState, rec: dict, body: bytes) -> web.Response:
         route.flags.add(KEY_EXPOSURE)

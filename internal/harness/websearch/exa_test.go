@@ -89,6 +89,63 @@ func TestCapturedFetch(t *testing.T) {
 	}
 }
 
+// TestEvalCorpusReplies: the replies the eval's corpus route sends (plan 051
+// E3; eval/crazeeval/webcorpus.py, for the mini-corpus in
+// eval/tests/web-corpus, kept byte for byte by
+// eval/tests/test_web_route.py) read as craze reads Exa's. The search is its
+// three results in rank order — the long page's content its first 1,500
+// characters, a "---" inside a page's content kept as content, Published N/A
+// as none — and a search matching nothing (an empty content list) is no
+// results, not a failure; a fetch is the page's text as sent, non-ASCII
+// included, and a fetch of a URL the corpus lacks (one empty text block) is
+// an empty page, not a failure.
+func TestEvalCorpusReplies(t *testing.T) {
+	tides := "Tide tables for the inner harbor are published every Monday.\n\n---\n\nHigh water at the north quay is about forty minutes after the outer buoy."
+	results, err := search(overridden(t, newFake(t, replay(t, "eval-corpus-search.body")), ""), "harbor tide schedule")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	want := []tool.WebResult{
+		{Title: "Harbor guide", URL: "https://docs.example.org/harbor-guide"},
+		{Title: "Tide tables", URL: "https://docs.example.org/tides", Content: tides},
+		{Title: "Tide tables", URL: "https://mirror.example.org/tides", Content: tides},
+	}
+	if len(results) != len(want) {
+		t.Fatalf("%d results, want %d: %+v", len(results), len(want), results)
+	}
+	for i, r := range results {
+		w := want[i]
+		if i == 0 {
+			w.Content = r.Content
+		}
+		if r != w {
+			t.Errorf("result %d = %+v, want %+v", i, r, w)
+		}
+	}
+	if c := results[0].Content; len(c) != 1500 || !strings.HasPrefix(c, "# Moorings\n\nThe harbor guide covers moorings") {
+		t.Errorf("result 0's content: %d bytes, starting %.60q", len(c), c)
+	}
+	empty, err := search(overridden(t, newFake(t, replay(t, "eval-corpus-search-empty.body")), ""), "zzz no such words")
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Errorf("the empty search = %#v, %v; want no results and no error", empty, err)
+	}
+	for name, page := range map[string]struct{ url, text string }{
+		"eval-corpus-fetch.body": {
+			"https://docs.example.org/de/haefen/#gezeiten",
+			"# Häfen – Überblick\nURL: https://docs.example.org/de/haefen\n\nDie Liegeplätze im Hafen werden täglich vergeben. Gezeiten: siehe Tabelle.",
+		},
+		"eval-corpus-fetch-miss.body": {"https://docs.example.org/nowhere", ""},
+	} {
+		got, err := overridden(t, newFake(t, replay(t, name)), "").Fetch(context.Background(), page.url)
+		if err != nil {
+			t.Fatalf("%s: Fetch: %v", name, err)
+		}
+		if got.URL != page.url || got.Text != page.text || got.Text != capturedText(t, name) {
+			t.Errorf("%s: page %q, text %q", name, got.URL, got.Text)
+		}
+	}
+}
+
 // TestParseExa: the search text's edges. A "---" that is not followed by a
 // Title: line is content; Text: stands for Highlights:; a header line Exa did
 // not write starts the content; a block with no URL is dropped; text before

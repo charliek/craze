@@ -1,0 +1,40 @@
+diff --git a/quayside.py b/quayside.py
+index d613032..1d45731 100644
+--- a/quayside.py
++++ b/quayside.py
+@@ -38,7 +38,34 @@ class Client:
+         self.api_key = api_key
+         self.timeout = timeout
+ 
++    def _get(self, path: str, params: dict[str, str]) -> dict:
++        """GET ``path`` with ``params``, authenticated with the X-Quayside-Key header."""
++        url = f"{self.base_url}{path}?{urllib.parse.urlencode(params)}"
++        req = urllib.request.Request(url, headers={"X-Quayside-Key": self.api_key, "Accept": "application/json"})
++        try:
++            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
++                body = resp.read()
++        except urllib.error.HTTPError as e:
++            raise QuaysideError(f"HTTP {e.code} for {path}") from None
++        except urllib.error.URLError as e:
++            raise QuaysideError(f"cannot reach the API: {e.reason}") from None
++        try:
++            return json.loads(body)
++        except ValueError:
++            raise QuaysideError(f"{path} did not answer JSON") from None
++
+     def berth_schedule(self, harbor: str, day: str) -> list[Slot]:
+         """Every berth slot booked at ``harbor`` on ``day`` (YYYY-MM-DD), in the order
+         the API lists them."""
+-        raise NotImplementedError("berth_schedule is not written yet")
++        # GET /v3/harbors/{harbor}/berth-slots?service_date=..., paged: each page's
++        # next_page_mark is the next request's page_mark, until it is null.
++        path = f"/v3/harbors/{urllib.parse.quote(harbor, safe='')}/berth-slots"
++        params = {"service_date": day}
++        slots: list[Slot] = []
++        while True:
++            page = self._get(path, params)
++            slots += [Slot.from_json(obj) for obj in page.get("slots") or []]
++            mark = page.get("next_page_mark")
++            if not mark:
++                return slots
++            params = {"service_date": day, "page_mark": mark}

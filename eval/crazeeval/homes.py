@@ -9,6 +9,10 @@ under the user's files, which would otherwise add every shipped model to the run
 An Anthropic model (craze plan 047 D11) is the exception to "the files point at the
 route": craze's Anthropic endpoint is fixed, so its route reaches craze as
 ``CRAZE_TEST_ANTHROPIC_API`` in the run's environment instead (anthropic_api).
+
+craze-web's home (craze plan 051 E2) is craze's plus the one ``config.toml`` any home
+here writes for craze, turning web search on; its provider's endpoint reaches craze as
+``CRAZE_TEST_EXA_MCP``, the proxy's web route on the run's token (web_mcp_url).
 """
 
 from __future__ import annotations
@@ -16,12 +20,13 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import tomli_w
 
-from crazeeval import paths
+from crazeeval import paths, webcorpus
 from crazeeval.config import EvalModel, Snapshot, shipped_driver
 from crazeeval.keys import ANTHROPIC, ANTHROPIC_DRIVER
 
@@ -56,14 +61,19 @@ def anthropic_api(base_url: str) -> str:
     here: ``…/r/<token>/api.anthropic.com/v1`` becomes ``…/r/<token>/api.anthropic.com``.
     """
     u = urlsplit(base_url)
+    if not _loopback_http(u) or not u.path.endswith("/v1"):
+        raise ValueError("an Anthropic route for craze must be http://<loopback IP>:<port>/.../v1")
+    return base_url[: -len("/v1")]
+
+
+def _loopback_http(u) -> bool:
+    """Whether a split URL is one craze honours for a test endpoint: ``http`` on a
+    loopback IP literal (not a name), with no user, query or fragment."""
     try:
         loopback = ipaddress.ip_address(u.hostname or "").is_loopback
     except ValueError:
-        loopback = False
-    if (u.scheme != "http" or not loopback or u.username is not None or u.query or u.fragment
-            or not u.path.endswith("/v1")):
-        raise ValueError("an Anthropic route for craze must be http://<loopback IP>:<port>/.../v1")
-    return base_url[: -len("/v1")]
+        return False
+    return u.scheme == "http" and loopback and u.username is None and not u.query and not u.fragment
 
 
 def craze_env(em: EvalModel, base_url: str) -> dict[str, str]:
@@ -121,6 +131,37 @@ def craze_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict
     providers = {"version": 1, "providers": {em.provider: _craze_provider(m, em, base_url)}}
     _write_craze_native(home / ".craze", models, providers)
     return {"CRAZE_HOME": f"{H}/.craze", **craze_env(em, base_url)}
+
+
+# craze's override of its web search provider's endpoint (internal/harness/websearch:
+# TestEndpointEnv), and the config.toml that turns web search on (internal/tui:
+# ConfigWebSearch's [websearch] table form).
+EXA_MCP_ENV = "CRAZE_TEST_EXA_MCP"
+WEB_CONFIG = '[websearch]\nprovider = "exa"\n'
+_ROUTE_RE = re.compile(r"^/r/[^/]+/")
+
+
+def web_mcp_url(base_url: str) -> str:
+    """``CRAZE_TEST_EXA_MCP`` for a run: the proxy's web route on the run's own token,
+    ``http://<loopback IP>:<port>/r/<token>/web/mcp``, from the run's base URL (the
+    same host, port and token; proxy.Proxy.web_url is the same URL). craze honours only
+    an ``http`` URL on a loopback IP literal with no user, query or fragment."""
+    u = urlsplit(base_url)
+    m = _ROUTE_RE.match(u.path)
+    if not _loopback_http(u) or not m:
+        raise ValueError("a craze-web route must be http://<loopback IP>:<port>/r/<token>/...")
+    return f"http://{u.netloc}{m.group(0)}{webcorpus.WEB_HOST}/{webcorpus.WEB_PATH}"
+
+
+def craze_web_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict[str, str]:
+    """The craze home plus web search (craze plan 051 E2): a ``config.toml`` whose
+    ``[websearch]`` table turns it on, and its provider's endpoint pointed at the run's
+    web route, which answers from the task's corpus. Nothing else differs from
+    craze_home: no state file (the config decides), no key."""
+    web_url = web_mcp_url(base_url)
+    env = craze_home(home, em, snap, base_url)
+    _write(home / ".craze" / "config.toml", WEB_CONFIG, mode=0o600)
+    return {**env, EXA_MCP_ENV: web_url}
 
 
 def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_urls: dict[str, str]) -> dict[str, str]:
@@ -279,7 +320,8 @@ def codex_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict
     return {"CODEX_HOME": f"{H}/.codex", paths.DUMMY_KEY_VAR: paths.DUMMY_KEY}
 
 
-HOMES = {"craze": craze_home, "gx": gx_home, "opencode": opencode_home, "codex": codex_home}
+HOMES = {"craze": craze_home, "gx": gx_home, "opencode": opencode_home, "codex": codex_home,
+         "craze-web": craze_web_home}
 
 
 def generated_files(home: Path) -> list[Path]:
