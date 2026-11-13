@@ -251,6 +251,10 @@ func TestAsideIDsAreReservedOnTheReader(t *testing.T) {
 	if got := ok[protocol.AsideResult](t, a.call(protocol.MethodSessionAside, asideParams(h, "x.1_-Z", "again"))); got.Text != "second" {
 		t.Fatalf("the id used again: %+v", got)
 	}
+	// The reply is on the wire a moment before its aside's reservation is
+	// given back (the reply is offered, then committed), so the count is
+	// waited for.
+	waitFor(t, "the answered aside's reservation to be given back", func() bool { return h.srv.Asides() == 0 })
 	if n, calls := h.srv.Asides(), s.calls.Load(); n != 0 || calls != 2 {
 		t.Fatalf("%d asides reserved, %d asked; want 0 and 2", n, calls)
 	}
@@ -357,6 +361,10 @@ func TestADelayedCancelLeavesAReusedIDAlone(t *testing.T) {
 	if got := ok[protocol.AsideResult](t, a.reply(id)); got.Text != "second" {
 		t.Fatalf("the second aside: %+v", got)
 	}
+	// The reply is on the wire a moment before its aside's reservation is
+	// given back (the reply is offered, then committed), so the count is
+	// waited for.
+	waitFor(t, "the answered aside's reservation to be given back", func() bool { return h.srv.Asides() == 0 })
 	if n, calls := h.srv.Asides(), s.calls.Load(); n != 0 || calls != 2 {
 		t.Fatalf("%d asides reserved, %d asked; want 0 and 2", n, calls)
 	}
