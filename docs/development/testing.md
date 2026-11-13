@@ -165,6 +165,17 @@ and points the variable at it: `t.Setenv` in Go, the child's environment in
 scripted Messages streams and records every request
 (`test_anthropic.py`).
 
+No test reaches Exa, the native web search's provider, either. A native
+session's web service takes its endpoint from `CRAZE_TEST_EXA_MCP` when it is
+set, on the same terms: a loopback `http` URL with an IP literal
+(`http://127.0.0.1:<port>/mcp`), and anything else turns web search off for
+the session, with a line saying so, instead of reaching Exa; `EXA_API_KEY` is
+never sent to it. The `TestMain` of `internal/agent`, `internal/cli` and
+`internal/tui`, and `tests/cli`'s `conftest.py`, unset `EXA_API_KEY` (it is not
+a catalog variable, so the catalog loop does not) and point
+`CRAZE_TEST_EXA_MCP` at a loopback port nothing serves. A test that wants the
+web starts a fake MCP server and points the variable at it.
+
 To drive a plugin command through the JSON interface:
 
 ```bash

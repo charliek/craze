@@ -1703,6 +1703,16 @@ reported again only when you come back to it.
 A question card's option may carry a description, drawn dimmed on its own
 line under the label.
 
+A native session that has not decided about [web
+search](configuration.md#native-web-search) asks once, with an ordinary
+question card titled **Web search**, the first time its model calls
+`websearch` or `webfetch`: *Allow craze to search the web and fetch pages for
+up-to-date information?*, with **Allow via Exa** (described *Queries and URLs
+are sent to Exa (exa.ai).*) and **Disable web search**. Both answers are
+remembered for later sessions. `Esc` skips it as any question: web search is
+declined for this session only, and the card is not shown again until the
+next one. A session that answers its questions itself never shows this card.
+
 `Esc` means two different things on purpose. On a question it is *skipped*: the
 agent is told you declined to answer and the turn carries on. On a plan or a
 permission it cancels the turn, because cancelling is the only way those two

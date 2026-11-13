@@ -13,7 +13,7 @@ import (
 )
 
 // The service (plan 051 §B, C1): when the key is sent, the test override, and
-// the provider table. Consent is not here yet (§C).
+// the provider table. Consent is consent_test.go's (§C.4).
 
 // TestTheKeyIsSentOnlyWhenUsable: a key the session's redactor could not hold
 // — too short, overlapping the marker, blank — is never sent, as if there

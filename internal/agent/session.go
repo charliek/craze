@@ -1174,6 +1174,13 @@ type Options struct {
 	// (harness.Options.ProviderRetries): nil is the harness's default. Only a
 	// native session reads it; an ACP agent keeps its own retries.
 	ProviderRetries *int
+	// WebSearch is config.toml's `websearch` (plan 051 §C.1), which the CLI
+	// reads (tui.ConfigWebSearch): half of whether a native session is
+	// offered the web tools (DecideWeb). The zero value is no key, which
+	// defers to the remembered choice. Only a native session reads it, and
+	// says the reading's line (an invalid or unreadable value) when it opens:
+	// the CLI says nothing about it.
+	WebSearch WebConfig
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

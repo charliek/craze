@@ -229,8 +229,11 @@ func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
 	// The process environment is what a command inherits, so the test sets it
 	// rather than a Getenv of its own: nothing from the developer's shell,
 	// then the one shipped variable, and a copy under a name no provider
-	// declares, which is what `env` then finds.
-	for _, name := range modeltable.CatalogEnvNames() {
+	// declares, which is what `env` then finds. The web search's key (plan
+	// 051 §B) is a credential of every table but not a catalog name, so it is
+	// unset by name; its endpoint needs no fence here, since a harness test
+	// that leaves WebEndpoint nil builds no web service.
+	for _, name := range append(modeltable.CatalogEnvNames(), modeltable.ExaKeyEnv) {
 		t.Setenv(name, "")
 		_ = os.Unsetenv(name)
 	}

@@ -18,7 +18,7 @@ const thisPackage = "github.com/charliek/craze/internal/harness/websearch"
 // §B, S8, R2): the tool framework whose seam (tool.Web) it implements, the
 // Messages API client for its key pattern (messagesapi.KeyPattern, whose own
 // closure messagesapi/deps_test.go pins), the redactor for its marker, and
-// the atomic write and lock its remembered choice will be written with.
+// the atomic write its remembered choice is written with.
 // Nothing else of craze's — not the parent harness, whose sessions call it,
 // not package llm and its Fantasy, nor the model table, the agent, the CLI
 // or the TUI.
@@ -29,13 +29,13 @@ var allowedInternal = []string{
 	"github.com/charliek/craze/internal/atomicfile",
 }
 
-// imported are the allowed packages the service already imports: what the
-// listing must see for the check not to pass vacuously. atomicfile joins
-// them with the remembered choice (plan 051 §C).
+// imported are the allowed packages the service imports: what the listing
+// must see for the check not to pass vacuously.
 var imported = []string{
 	"github.com/charliek/craze/internal/harness/tool",
 	"github.com/charliek/craze/internal/harness/llm/messagesapi",
 	"github.com/charliek/craze/internal/harness/redact",
+	"github.com/charliek/craze/internal/atomicfile",
 }
 
 // forbiddenDeps are what nothing it depends on, directly or not, may be:

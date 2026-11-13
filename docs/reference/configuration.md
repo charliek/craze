@@ -9,6 +9,7 @@ of what happened in it, which can contain secrets and can be turned off.
 `config.toml` also holds the switches `journal`, `control_socket`, `detach`,
 `host_idle_exit`, `host_idle_exit_unattended`, `terminal_title`, `background`, `host_status` and
 [`provider_retries`](#native-provider-retries), the
+[`websearch`](#native-web-search) setting, the
 [`[agents]`](#agent-binaries) table, and the
 [`[compat.claude]`](#claude-content-compatclaude) table that says which of
 Claude's own files a native session reads. Session flags (`--workspace`, `--model`, `--effort`, `--fast` / `--no-fast`,
@@ -61,7 +62,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
-| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
+| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `websearch.json` (the remembered [web search](#native-web-search) choice), `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -1144,9 +1145,12 @@ kept out of the commands a session runs.
 a `models.toml` with `catalog = false` included: its value is redacted from
 tool output, and the commands a session runs (a sub-agent's and a background
 command's included) are started without the variable. It funds no model; it
-holds a key for Exa, the web search provider of the native harness. A value
+holds a key for Exa, the provider of the native harness's [web
+search](#native-web-search), which works without one: set, it raises Exa's
+rate limit for anonymous use. It is read once when a session opens and sent
+only to Exa's own endpoint, in a request header, never in a URL. A value
 that cannot be a key (shorter than 8 bytes, or overlapping the redaction
-marker) is ignored, as any variable's is.
+marker) is ignored, as any variable's is, and never sent.
 
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout
@@ -2384,8 +2388,9 @@ rest.
 
 A native session offers its model a set of tools and a system prompt written
 for them: a **tool profile**. craze ships one, `opencode` (the file tools
-`read`, `write` and `edit`, then `bash`, `grep`, `glob` and the others), and
-it is the default for every model. A model entry in `models.toml` may name a
+`read`, `write` and `edit`, then `bash`, `grep`, `glob` and the others, with
+`websearch` and `webfetch` when a session is offered [web
+search](#native-web-search)), and it is the default for every model. A model entry in `models.toml` may name a
 profile with `tool_profile`:
 
 ```toml
@@ -2402,6 +2407,140 @@ because the system prompt is frozen for the session, and is recorded in the
 transcript's header: switching with `/model` to a model whose profile differs
 from the session's is refused, and a resumed session keeps the profile it
 started with. With one profile today, the key changes nothing yet.
+
+## Native web search
+
+A native session can search the web and read pages with two tools,
+`websearch` (a query, answered with each result's title, link, date and an
+excerpt) and `webfetch` (an `http` or `https` URL, answered with the page's
+text). Both go through [Exa](https://exa.ai)'s hosted endpoint,
+`https://mcp.exa.ai/mcp`, which works without a key; an exported
+[`EXA_API_KEY`](#keys) raises its rate limit. Both are read-only, so a session
+in [ask or plan mode](tui.md#modes) may use them too. `webfetch` refuses a URL
+with a user name or password in it, and one whose host is `localhost`, a
+`*.localhost` name, or a loopback, link-local, private or unspecified IP
+address written as such: the page is fetched by Exa, not by your machine, and
+an address inside your network means nothing there. craze looks up no names,
+so a public name that resolves to a private address is not caught.
+
+Whether a session is offered the tools is decided once, when it opens, and
+holds for the session (its tools are fixed then, as its system prompt is). In
+this order:
+
+1. **`config.toml` says.** `websearch = false` turns web search off; a
+   `[websearch]` table naming the provider turns it on. Either one beats
+   everything below.
+2. **You answered before.** The answer to the consent question below is
+   remembered in `websearch.json`.
+3. **Otherwise it asks**, where it can: a session whose questions reach a
+   person (the TUI's, or any session with the ask policy, which waits for
+   someone to attach) is offered the tools, and the first time the model
+   calls one craze asks you. A session that answers its questions itself —
+   [`craze prompt`](cli.md#craze-prompt), [`craze new
+   --wait`](cli.md#craze-new), an unattended host — **never asks, and is
+   offered no web tools** unless someone decided already: `[websearch]` in
+   `config.toml`, or a remembered Allow. It never answers the question for
+   you.
+
+A sub-agent is given the tools only when its parent opened with web search on
+(by the config or a remembered Allow), and through the parent's own: a
+sub-agent of a session that has not been asked yet has nobody to ask, and
+gets none. A resumed session is decided again from the settings as they are
+when it opens; a transcript that holds web calls resumes into a session
+without the tools as well as into one with them.
+
+### The `websearch` key
+
+Two forms are valid. Off:
+
+```toml
+websearch = false
+```
+
+On, through Exa (the only provider there is):
+
+```toml
+[websearch]
+provider = "exa"
+```
+
+Anything else — `websearch = true`, a string, an empty `[websearch]` table, a
+table with another key, a `provider` that is not one craze has — is **off**,
+and the session says so in one line naming the two valid forms. So is a
+`config.toml` craze cannot read or parse: a remembered Allow never outvotes an
+off you mistyped. With no `websearch` key at all, the remembered choice
+decides. craze never writes this key.
+
+### The consent question
+
+The question is an ordinary [question card](tui.md#cards), asked on the first
+web call of a session that has not decided, and only once in a session however
+many calls arrive together:
+
+> Allow craze to search the web and fetch pages for up-to-date information?
+
+| Option | What it does |
+|---|---|
+| **Allow via Exa** (its description: *Queries and URLs are sent to Exa (exa.ai).*) | The call goes ahead, and so does every later one. Remembered: later sessions are offered the tools and never ask. |
+| **Disable web search** | This call and every later one in the session answer `Web search is disabled`. Remembered: later sessions are offered no web tools. |
+| `Esc` (skip), or no answer | Declined for this session only: the calls answer `Web search was not approved in this session`, the card is not shown again in this session, and nothing is remembered, so the next session asks again. |
+
+A turn cancelled while the card is up takes no answer, even one picked just as
+it was cancelled: the asking call and every call waiting on the card end as
+aborted, nothing reaches Exa, nothing is remembered, and the next web call asks
+again. Time spent on the card does not count against a
+call's 25-second limit.
+
+### The remembered choice: `websearch.json`
+
+The answer lives in `websearch.json` beside the model files
+(`~/.craze/native/websearch.json`, or `$CRAZE_HOME/native/`):
+
+```json
+{"version":1,"provider":"exa"}
+```
+
+or, after **Disable web search**, `{"version":1,"provider":false}`. It is
+written whole, atomically, at `0600` (the directory `0700`); two sessions
+answering at once leave the last answer, and each keeps its own. A file craze
+cannot use — unreadable, not JSON, larger than 4 KiB, a version or provider it
+does not know — counts as no answer, with one line saying so (never the
+file's contents). If it cannot be written, the answer still holds for the
+session that was asked, a line says so, and the next session asks again.
+Delete the file to be asked again; `websearch = false` in `config.toml` wins
+over it whatever it says.
+
+The file tools refuse `websearch.json` as they refuse `providers.toml` — `read`,
+`write` and `edit`, by any spelling, through a symlink or a hard link — and
+`grep` and `glob` never show it, so the model cannot turn its own web search
+on with them. `bash` is not a file tool: a command can still write the file.
+
+### What leaves your machine
+
+To Exa: each search's query, each URL fetched, and, when it is set, your
+`EXA_API_KEY` (in a header, never under a test override). Not your files, your
+conversation or any other key. Queries and URLs are kept wherever every tool's
+input is kept: in the transcript's tool calls and, while the
+[session journal](#session-journal) is on (the default), in the journal too,
+so deleting a transcript leaves the journal's copy. The web search itself logs
+nothing more. A call has 25
+seconds and a reply at most 256 KiB; a rate limit, a refusal or a timeout is
+an error the model reads, never an empty result.
+
+The risks, which consent does not remove:
+
+- **Pages and results are untrusted.** A page can carry instructions written
+  for the model; the tools' descriptions tell it not to follow them, which is
+  a request, not a guarantee. What a page says can steer a later `bash` call.
+- **A query or a URL can carry data out.** Whatever the model puts in one
+  reaches Exa and, for a fetch, the site — text from your workspace included,
+  if a page talked it into that. In ask mode these are the session's only way
+  out.
+- **The choice can be changed from inside.** The file tools cannot write
+  `websearch.json`, but a `bash` command can, and a session that wrote an
+  Allow there gets web tools from its next session on. `websearch = false` in
+  `config.toml` beats the file; a session that should never search is best
+  started with that set.
 
 ## Cached results of waiting commands
 

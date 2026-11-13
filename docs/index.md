@@ -69,6 +69,11 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   moves a new session on its own to a per-token provider after it in that
   order, nor onto an `OPENAI_API_KEY` that is only in the environment
   ([Configuration](reference/configuration.md#the-shipped-catalog)).
+- **Native web search.** A native session can search the web and fetch pages
+  through Exa, no key needed; it asks you once before the first search and
+  remembers the answer, a session nobody answers never asks, and
+  `websearch = false` turns it off
+  ([Configuration](reference/configuration.md#native-web-search)).
 - **A render check.** `craze frame` renders the TUI once for tests
   ([Testing](development/testing.md#craze-frame)).
 

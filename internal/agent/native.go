@@ -1397,6 +1397,13 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	if hopts.Warn == nil {
 		hopts.Warn = s.harnessWarn(red, &opened)
 	}
+	// The web tools (plan 051 §C.3): decided once, here, after the asker is
+	// settled — whether anybody can be asked is half of the decision — and
+	// for a resume as for a new session, from the settings as they are now.
+	// The seam keeps its last word on the state and on the endpoint.
+	if err := s.decideWeb(&hopts); err != nil {
+		return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
+	}
 	// Background children (plan 026 §3.11), each left to tweak's last word
 	// like the seams above: on only for an interactive session, which has a
 	// wake worker to deliver a result nobody typed for — headless `craze

@@ -13,6 +13,7 @@ import (
 // a key is skipped, as any variable's is; a provider that declares the same
 // variable has its value once; and once WithholdFrozen marks the value
 // frozen, Keys no longer returns it while CredentialEnvNames still names it.
+// WebSearchKey, what the web search sends, follows Keys at every step.
 func TestExaKeyIsACredential(t *testing.T) {
 	const exaKey = "3f1c2a9e-8b7d-4c6e-9f0a-1b2c3d4e5f60"
 	cat := testCatalog(t, testCatalogV1)
@@ -51,10 +52,21 @@ wire_model = "x"
 			if n := countKey(keys, exaKey); n != 1 {
 				t.Fatalf("Keys holds the Exa key %d times, want once, trimmed", n)
 			}
+			// What the web search sends (R3): the value Keys hands the
+			// redactor, trimmed, and nothing for an unset or unusable one.
+			if got := tbl.WebSearchKey(env).Reveal(); got != exaKey {
+				t.Fatalf("WebSearchKey = %q, want the key, trimmed", got)
+			}
+			if got := tbl.WebSearchKey(fakeEnv(nil)); got != "" {
+				t.Fatalf("WebSearchKey with nothing set = %q", got)
+			}
 			for _, unusable := range []string{"short", "redacted-credential"} {
 				keys, err := tbl.Keys(fakeEnv(map[string]string{ExaKeyEnv: unusable}))
 				if err != nil || countKey(keys, unusable) != 0 {
 					t.Fatalf("Keys with an unusable %s = %d of it, %v", ExaKeyEnv, countKey(keys, unusable), err)
+				}
+				if got := tbl.WebSearchKey(fakeEnv(map[string]string{ExaKeyEnv: unusable})); got != "" {
+					t.Fatalf("WebSearchKey with an unusable %s = %q: it would be sent", ExaKeyEnv, got)
 				}
 			}
 			if name != "a provider declares it too" {
@@ -67,6 +79,9 @@ wire_model = "x"
 			keys, err = tbl.Keys(env)
 			if err != nil || countKey(keys, exaKey) != 0 {
 				t.Fatalf("after WithholdFrozen, Keys holds the frozen Exa key %d times (%v)", countKey(keys, exaKey), err)
+			}
+			if got := tbl.WebSearchKey(env); got != "" {
+				t.Fatal("after WithholdFrozen, WebSearchKey still returns the frozen Exa key: it would be sent")
 			}
 			names := tbl.CredentialEnvNames()
 			if !slices.Contains(names, ExaKeyEnv) || len(slices.Compact(slices.Clone(names))) != len(names) {

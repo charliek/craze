@@ -104,10 +104,12 @@ func missing(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// isCredentials reports whether real, a path realPath resolved, is the
-// harness's key file (plan 019 §3.8) or in its sign-in directory (plan 033
-// §3.12): by name and directory, or, when real exists (info is its), by
-// identity, so a hard link to either is refused too.
+// isCredentials reports whether real, a path realPath resolved, is one of
+// the harness's protected files — its key file (plan 019 §3.8) or the web
+// search's remembered choice (plan 051 §C.2), protectedFiles — or in its
+// sign-in directory (plan 033 §3.12): by name and directory, or, when real
+// exists (info is its), by identity, so a hard link to any of them is refused
+// too.
 //
 // The name is compared ignoring case and the directory by identity. On a
 // case-insensitive file system (macOS's APFS, by default) a file has many
@@ -116,21 +118,29 @@ func missing(err error) bool {
 // another spelling of Home — would otherwise create it. Refusing those
 // names on a case-sensitive file system costs nothing.
 func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
-	cred := filepath.Join(env.Home, CredentialsFile)
-	if r, err := realPath(cred); err == nil {
-		cred = r
+	for _, name := range protectedFiles {
+		if isProtectedFile(env, name, real, info) {
+			return true
+		}
 	}
-	if strings.EqualFold(filepath.Base(real), filepath.Base(cred)) && sameDir(filepath.Dir(real), filepath.Dir(cred)) {
-		return true
+	return inAuthDir(env, real, info)
+}
+
+// isProtectedFile is isCredentials for one file under Home, by name and
+// directory, and by identity when real exists.
+func isProtectedFile(env tool.Env, name, real string, info fs.FileInfo) bool {
+	p := filepath.Join(env.Home, name)
+	if r, err := realPath(p); err == nil {
+		p = r
 	}
-	if inAuthDir(env, real, info) {
+	if strings.EqualFold(filepath.Base(real), filepath.Base(p)) && sameDir(filepath.Dir(real), filepath.Dir(p)) {
 		return true
 	}
 	if info == nil {
 		return false
 	}
-	ci, err := os.Stat(cred)
-	return err == nil && os.SameFile(info, ci)
+	pi, err := os.Stat(p)
+	return err == nil && os.SameFile(info, pi)
 }
 
 // searchGuard is isCredentials for the many paths one search turns up (plan

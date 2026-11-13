@@ -28,6 +28,17 @@ const Name = "opencode"
 // pins the two together.
 const CredentialsFile = "providers.toml"
 
+// WebSearchStateFile is the name of the web search's remembered choice
+// under Env.Home (plan 051 §C.2), which the file tools refuse as they refuse
+// the key file, so a model cannot turn its own web search on. It is
+// websearch.StateFile, which this package may not import; a test there pins
+// the two together. bash is not a file tool and can still write it.
+const WebSearchStateFile = "websearch.json"
+
+// protectedFiles are the files under Env.Home the file tools refuse by name,
+// place and identity (isCredentials).
+var protectedFiles = []string{CredentialsFile, WebSearchStateFile}
+
 // AuthDir is the name of the harness's sign-in directory under Env.Home, the
 // ChatGPT plan's tokens and registration (plan 033 §3.12), which the file
 // tools refuse whole. It is modeltable.ChatGPTAuthDir (and chatgptauth's), a

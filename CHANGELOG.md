@@ -91,6 +91,17 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 
 ### The native provider
 
+- Web search: `websearch` and `webfetch` search the web and fetch pages through
+  Exa's hosted endpoint, with no key needed (`EXA_API_KEY` raises its rate
+  limit). Decided when a session opens: `websearch = false` in `config.toml`
+  turns it off and a `[websearch]` table with `provider = "exa"` on; otherwise
+  the answer remembered in `native/websearch.json`; otherwise a session whose
+  questions reach a person asks once, on the first call (**Allow via Exa**,
+  **Disable web search**, both remembered; a skip declines for the session).
+  A session that answers its own questions (`craze prompt`, `craze new
+  --wait`, an unattended host) never asks and is offered no web tools until
+  someone has decided, so its requests are unchanged. A sub-agent gets them
+  only when its parent opened on. The file tools refuse `websearch.json`.
 - A shipped model can be deprecated (`deprecated` and `replaced_by` in the
   catalog): it runs when named, is never offered or chosen for you, and each
   `models.toml` reference to it warns. A `[[retired]]` row can name its

@@ -95,13 +95,33 @@ type Config struct {
 	// redirects refused. CallTimeout bounds each call whatever it sets.
 	HTTPClient *http.Client
 
+	// Undecided is a session that opened with nothing decided (plan 051
+	// §C.3): its first call asks the consent question, when CanAsk. False
+	// is a session that opened on — by config.toml, the remembered choice or
+	// the caller's flag — whose calls never ask.
+	Undecided bool
+	// CanAsk is the session's question policy, fixed at Open: a person is
+	// asked (the ask policy, with an asker wired). An undecided service with
+	// it false never asks and never writes StatePath, whatever Asker it
+	// holds — an automatic first-option answer is never consent — and
+	// answers DeclinedText.
+	CanAsk bool
+	// Asker is who the consent question goes to.
+	Asker tool.Asker
+	// StatePath is where the answer is remembered (StateFile in the native
+	// directory); "" remembers nothing.
+	StatePath string
+	// Warn is told, in words that hold no path or value, when the answer
+	// cannot be remembered. nil says nothing.
+	Warn func(string)
+
 	// timeout replaces CallTimeout, for the package's tests.
 	timeout time.Duration
 }
 
-// Service is the web search service: a tool.Web over one provider. It is
-// safe for concurrent use. It asks no one anything yet: consent comes with
-// the tools being offered (plan 051 §C).
+// Service is the web search service: a tool.Web over one provider, behind
+// the session's consent (consent.go, plan 051 §C.4). It is safe for
+// concurrent use.
 type Service struct {
 	p       Provider
 	keyEnv  string
@@ -110,6 +130,8 @@ type Service struct {
 	// scrub is the caller's scrubber, for the words of a failure, which
 	// carry the query or the page's URL as the caller gave it.
 	scrub *scrubber
+	// consent is what every call passes before the provider is called.
+	consent *consent
 }
 
 var _ tool.Web = (*Service)(nil)
@@ -144,11 +166,15 @@ func New(cfg Config) (*Service, error) {
 	// server has no business echoing it, and one that does is scrubbed.
 	scrub := newScrubber(configured)
 	c := newCaller(endpoint, key, scrub, cfg.HTTPClient, timeout)
-	return &Service{p: e.build(c), keyEnv: e.keyEnv, keyed: key != "", timeout: timeout, scrub: scrub}, nil
+	return &Service{p: e.build(c), keyEnv: e.keyEnv, keyed: key != "", timeout: timeout, scrub: scrub, consent: newConsent(cfg, id)}, nil
 }
 
-// Search runs query on the provider. Every error is a *tool.WebError.
+// Search runs query on the provider, once the session's consent lets it.
+// Every error is a *tool.WebError.
 func (s *Service) Search(ctx context.Context, query string) ([]tool.WebResult, error) {
+	if werr := s.consent.pass(ctx); werr != nil {
+		return nil, werr
+	}
 	results, err := s.p.Search(ctx, query)
 	if err != nil {
 		return nil, s.webError(err, "Unable to search the web for "+query)
@@ -159,9 +185,12 @@ func (s *Service) Search(ctx context.Context, query string) ([]tool.WebResult, e
 	return results, nil
 }
 
-// Fetch fetches the page at pageURL through the provider. Every error is a
-// *tool.WebError.
+// Fetch fetches the page at pageURL through the provider, once the session's
+// consent lets it. Every error is a *tool.WebError.
 func (s *Service) Fetch(ctx context.Context, pageURL string) (tool.WebPage, error) {
+	if werr := s.consent.pass(ctx); werr != nil {
+		return tool.WebPage{}, werr
+	}
 	page, err := s.p.Fetch(ctx, pageURL)
 	if err != nil {
 		return tool.WebPage{}, s.webError(err, "Unable to fetch "+pageURL)

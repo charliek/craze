@@ -115,6 +115,13 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     # reaching Anthropic. A case that wants the fixture sets the variable in
     # its child's environment (test_anthropic.py).
     monkeypatch.setenv("CRAZE_TEST_ANTHROPIC_API", "http://127.0.0.1:9")
+    # The native web search (plan 051 §B) the same way. Its key, EXA_API_KEY,
+    # is not a catalog name, so the loop above leaves it: it goes by name. Its
+    # endpoint override is aimed at the same dead port, so a session offered
+    # the web tools gets a refused connection instead of reaching Exa; a case
+    # with a fake MCP server sets the variable in its child's environment.
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("CRAZE_TEST_EXA_MCP", "http://127.0.0.1:9/mcp")
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the

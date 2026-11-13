@@ -16,6 +16,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/tui"
 )
 
 const (
@@ -195,6 +196,7 @@ func (o *promptOpts) agentOptions(ws string, approval *agent.ApprovalPolicy, pro
 		Provider:        prov,
 		Compat:          compatClaude(o.stderr),
 		ProviderRetries: providerRetries(o.stderr),
+		WebSearch:       tui.ConfigWebSearch(),
 		// Headless craze has one stream for its own notes, stderr, as it
 		// does for discoverPlugins' (Options.Diag falls back to it).
 		JournalDir: journalDir(o.stderr),

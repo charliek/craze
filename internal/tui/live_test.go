@@ -21,6 +21,7 @@ import (
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/websearch"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -389,6 +390,7 @@ func TestTheLoginSessionIsPinned(t *testing.T) {
 // unsetCatalogEnv unsets every variable the shipped model catalog takes a key
 // from (plan 031 §3.13), and stops the run if there are none to unset — a
 // catalog that names none is broken, and the scrub would silently do nothing.
+// It fences the web search off the same way.
 func unsetCatalogEnv() {
 	names := modeltable.CatalogEnvNames()
 	if len(names) == 0 {
@@ -398,6 +400,12 @@ func unsetCatalogEnv() {
 	for _, name := range names {
 		_ = os.Unsetenv(name)
 	}
+	// The web search's key (plan 051 §B) is not a catalog name, so it is
+	// unset by name, and its endpoint is aimed at a loopback port nothing
+	// serves, so a session offered the web tools gets a refused connection
+	// instead of reaching Exa.
+	_ = os.Unsetenv(modeltable.ExaKeyEnv)
+	_ = os.Setenv(websearch.TestEndpointEnv, chatgptFence+"/mcp")
 }
 
 var (

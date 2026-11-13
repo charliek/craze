@@ -708,6 +708,33 @@ value is redacted from what the tools return. **A script of yours that reads
 `EXA_API_KEY` no longer finds it when a native session's shell runs it**; run
 it outside craze. The variable funds no model.
 
+### Native web search
+
+Nothing needs migrating. A native session gains two tools, `websearch` and
+`webfetch`, which search the web and fetch pages through Exa
+([Native web search](../reference/configuration.md#native-web-search)). What
+changes for you:
+
+- **In the TUI**, a native session is offered them, and the first time its
+  model calls one, a question card asks you: **Allow via Exa** or **Disable
+  web search**. The answer is remembered in a new file,
+  `~/.craze/native/websearch.json` (`0600`), and later sessions do not ask;
+  `Esc` declines for that session only. The model's search queries and the
+  URLs it fetches go to Exa once you allow it.
+- **Headless runs do not change.** `craze prompt`, `craze new --wait` and an
+  unattended host answer their own questions, so they never ask and are
+  offered no web tools — their model requests carry exactly the tools they
+  did — unless you allowed web search before or turned it on in
+  `config.toml`.
+- **To turn it off** everywhere, whatever was remembered:
+  `websearch = false` in `~/.craze/config.toml`. To turn it on without being
+  asked: a `[websearch]` table with `provider = "exa"`. Any other value under
+  `websearch` is read as off, with a line saying so.
+- **`EXA_API_KEY`**, when exported, is sent to Exa to raise its rate limit
+  (see [above](#exa_api_key-is-kept-out-of-native-commands) for what else
+  craze does with it).
+- The file tools refuse `websearch.json` as they refuse `providers.toml`.
+
 ## Since v0.1.1
 
 Nothing needs migrating.

@@ -18,7 +18,7 @@ func IsWebTool(id string) bool { return id == WebSearchTool || id == WebFetchToo
 // package may not import the service that implements it
 // (internal/harness/websearch). The tools own the call's input and how a
 // result is written for the model; the service owns the provider, the call
-// on the wire and, later, consent and what it remembers.
+// on the wire, consent and what it remembers.
 //
 // Every error either method returns is a *WebError, whose Text is already
 // fit for the model to read; anything else is read as a tool_error with no

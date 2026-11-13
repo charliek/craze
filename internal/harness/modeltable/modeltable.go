@@ -1727,6 +1727,21 @@ func (t *Table) CredentialEnvNames() []string {
 // loaded.
 var webCredentialEnv = []string{ExaKeyEnv}
 
+// WebSearchKey is the key the web search sends (plan 051 §B, R3): ExaKeyEnv's
+// value as t reads the environment — a variable WithholdFrozen marked reads
+// as unset (envOf) — trimmed, and "" when it is unset or cannot be a key
+// (keyProblem: too short, or overlapping the redaction marker), so a value
+// Keys would not hand the redactor is never sent. Read once, at Open, with
+// the getenv the session's redactor is built from, so the key sent is always
+// one the redactor holds. A nil getenv is os.Getenv.
+func (t *Table) WebSearchKey(getenv func(string) string) Secret {
+	k, err := envKey(t.envOf(getenv), ExaKeyEnv)
+	if err != nil {
+		return ""
+	}
+	return k
+}
+
 // Keys returns every key the table knows of, for the redactor that keeps
 // them out of tool output (plan 019 §3.8): for every provider, used or not,
 // the value of each of its env_keys variables that getenv reports set to a

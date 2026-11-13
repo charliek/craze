@@ -206,8 +206,10 @@ type Options struct {
 	// webfetch, and the service they reach the web through (WebState, plan
 	// 051 §C.3), decided by the adapter once, at Open. The zero value
 	// withholds them: the session is offered exactly what it was before they
-	// existed. A child's is its parent's when the parent opened on and
-	// withheld otherwise (WebState.forChild), whatever is set here.
+	// existed. A state that offers them with no Service gets one built at
+	// Open when WebEndpoint is set (WebState.withService). A child's is its
+	// parent's when the parent opened on and withheld otherwise
+	// (WebState.forChild), whatever is set here.
 	Web WebState
 	// ProviderRetries is how many times a step's model request may be sent again
 	// after failing, before output or (for a transport or server failure) after
@@ -254,6 +256,16 @@ type Options struct {
 	// sub-agent's, and the summarizer's, side question's and wake's requests
 	// on the session's model, go where the session's own do.
 	AnthropicAPIBase func() (string, error)
+	// WebEndpoint answers the endpoint the web service a session builds at
+	// Open calls (WebState.withService, plan 051 §B): in production the
+	// adapter's reading of websearch.Override — "" for the provider's own,
+	// or a test's loopback override — read once, when the service is built.
+	// An error refuses Open; the adapter has already turned an invalid
+	// override into withheld web tools, so it never hands one in. nil builds
+	// no service: a state that offers the tools with none then answers each
+	// call with a tool_error, which is what keeps a harness test that sets
+	// only a mode from reaching the network.
+	WebEndpoint func() (string, error)
 	// Getenv looks up the environment variables that hold API keys; nil is
 	// os.Getenv. The ACP child's environment (agent.Options.Env) is not the
 	// harness's, and tests never read the real one (plan 018 §3.5).
@@ -664,6 +676,21 @@ func Open(opts Options) (*Session, error) {
 		s.now = time.Now
 	}
 	s.sleep = defaultSleep
+	// A child is offered the web tools only when its parent opened on, with
+	// the parent's service (plan 051 §C.3): the runner passes it so
+	// (childOpenOptions), and a child opened any other way is held to the
+	// same rule. Otherwise the web service is built once, before anything is
+	// kept of opts.Web: the session's tools, its children (childBase) and a
+	// resumed session's tools all reach the web through the one service, and
+	// so share one consent.
+	if child != nil {
+		opts.Web = opts.Web.forChild()
+	}
+	built, err := opts.Web.withService(&opts, s.getenv)
+	if err != nil {
+		return nil, err
+	}
+	opts.Web = built
 	// A session that is not a sub-agent can start them: its runner exists
 	// before its tools, which hand it to the agent tool (Env.Subagents), and
 	// reads the rest of the session only when a call arrives, by which time
@@ -733,15 +760,7 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		s.base.top = start.top
 	}
-	// A child is offered the web tools only when its parent opened on, with
-	// the parent's service (plan 051 §C.3): the runner passes it so
-	// (childOpenOptions), and a child opened any other way is held to the
-	// same rule.
-	web := opts.Web
-	if child != nil {
-		web = web.forChild()
-	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, web, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.Web, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

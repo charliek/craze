@@ -1,6 +1,12 @@
 package harness
 
-import "github.com/charliek/craze/internal/harness/tool"
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/websearch"
+)
 
 // WebMode is whether a session offers the web tools, websearch and webfetch
 // (plan 051 §C.3). The agent layer decides it once, at Open; the harness only
@@ -22,10 +28,21 @@ const (
 
 // WebState is a session's web tools at Open: the mode, and the service the
 // tools reach the web through (tool.Env.Web). A mode that offers the tools
-// with no service still offers them; each then answers with a tool_error.
+// with no service, where Options.WebEndpoint is set, has one built at Open
+// (withService); with neither, the tools are still offered, and each answers
+// with a tool_error.
 type WebState struct {
 	Mode    WebMode
 	Service tool.Web
+	// Provider is the search provider a built service calls
+	// (websearch.Providers); "" is the default.
+	Provider string
+	// CanAsk is the session's question policy at Open, as the adapter read
+	// it: a person is asked (plan 051 §C.3). A built service asks the
+	// consent question only when it is set, whatever the mode — so an
+	// automatic answer is never taken for consent — and remembers nothing
+	// when it is not.
+	CanAsk bool
 }
 
 // offered reports whether the session offers the web tools. Any mode but on
@@ -41,6 +58,44 @@ func (w WebState) forChild() WebState {
 		return w
 	}
 	return WebState{}
+}
+
+// withService is w with the web service a top-level session's tools reach
+// the web through, built at Open (plan 051 §B, §C.4) when w offers the tools,
+// has no service of its own and o.WebEndpoint is set (the adapter always
+// sets it; a harness test that leaves it nil builds nothing and so reaches
+// no network). The service calls w's provider at o.WebEndpoint's answer
+// ("" is the provider's own endpoint) with the table's key for it, read once
+// here through getenv — the reading the session's redactor is built from, so
+// the key sent is one it holds — and asks o.Asker the consent question on its
+// first call when w is asking and can ask, remembering the answer in
+// websearch.StateFile under o.Home and reporting a failed write to o.Warn.
+// A child's state comes from its parent with the parent's service
+// (forChild), so a child never builds one, and never reads or writes the
+// remembered choice.
+func (w WebState) withService(o *Options, getenv func(string) string) (WebState, error) {
+	if !w.offered() || w.Service != nil || o.WebEndpoint == nil || o.Child != nil {
+		return w, nil
+	}
+	endpoint, err := o.WebEndpoint()
+	if err != nil {
+		return w, fmt.Errorf("harness: web search: %w", err)
+	}
+	svc, err := websearch.New(websearch.Config{
+		Provider:  w.Provider,
+		Key:       o.Table.WebSearchKey(getenv).Reveal(),
+		Endpoint:  endpoint,
+		Undecided: w.Mode == WebAsking,
+		CanAsk:    w.CanAsk,
+		Asker:     o.Asker,
+		StatePath: filepath.Join(o.Home, websearch.StateFile),
+		Warn:      o.Warn,
+	})
+	if err != nil {
+		return w, fmt.Errorf("harness: web search: %w", err)
+	}
+	w.Service = svc
+	return w, nil
 }
 
 // withWeb is tools less the web tools when w does not offer them, in the

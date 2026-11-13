@@ -619,6 +619,7 @@ var tuiSites = []tuiSite{
 	{"config.go", "ConfigHostIdleExit", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigHostIdleExitUnattended", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigProviderRetries", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigWebSearch", "Is", "ErrConfigMalformed", 1, proofLocal},
 	// /connect's (plan 031 §3.9): the TUI's own key store, read and written
 	// in this process through Config.NativeDir — never a Backend call's
 	// answer — and the rule a key is judged by before it is stored.
