@@ -574,7 +574,7 @@ var bashVars = map[string]string{
 func TestDescriptions(t *testing.T) {
 	vars := map[string]map[string]string{"bash": bashVars}
 	rendered := map[string]string{}
-	for _, name := range []string{"read", "write", "edit", "bash", "grep", "glob"} {
+	for _, name := range []string{"read", "write", "edit", "bash", "grep", "glob", "websearch", "webfetch"} {
 		d, err := description(name, vars[name])
 		if err != nil {
 			t.Fatal(err)

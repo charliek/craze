@@ -34,11 +34,28 @@ const CredentialsFile = "providers.toml"
 // test in internal/agent pins the three together.
 const AuthDir = "auth"
 
+// Option changes what Profile builds.
+type Option func(*options)
+
+type options struct{ web bool }
+
+// WithWeb adds the web tools, websearch and webfetch, at their places in the
+// order (plan 051 §A). Without it Profile is the thirteen tools every session
+// was offered before them, byte for byte; the harness registers the profile
+// with them and withholds them from a session whose web state does not offer
+// them, before anything is built from the list, so such a session offers
+// exactly what Profile() returns.
+func WithWeb() Option { return func(o *options) { o.web = true } }
+
 // Profile returns the opencode profile with a fresh set of its tools. A
 // session builds its own, so grep and glob share one ripgrep, and look for
 // rg on PATH once per session. Its System func is the system prompt written
-// for these tools (System).
-func Profile() (tool.Profile, error) {
+// for these tools (System); the web tools do not change it.
+func Profile(opts ...Option) (tool.Profile, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	system, err := systemFunc()
 	if err != nil {
 		return tool.Profile{}, fmt.Errorf("opencode: %w", err)
@@ -60,6 +77,18 @@ func Profile() (tool.Profile, error) {
 	// difference: opencode offers its question tool first of all, and here it
 	// follows the six, so that a session's requests still open with the tools
 	// every earlier session's did.
+	//
+	// The web tools (plan 051 §A, WithWeb) are at opencode's places for them:
+	// webfetch after the agent tools, as opencode's webfetch follows its task
+	// tool, and websearch after todo_write. A session that is not offered
+	// them has them removed from this list, which leaves it the list it had
+	// before they existed.
+	web := func(build func() (tool.Tool, error)) func() (tool.Tool, error) {
+		if !o.web {
+			return nil
+		}
+		return build
+	}
 	builders := []func() (tool.Tool, error){
 		newBash,
 		newBashOutput,
@@ -71,12 +100,17 @@ func Profile() (tool.Profile, error) {
 		newWrite,
 		newAgent,
 		newAgentOutput,
+		web(newWebFetch),
 		newTodoWrite,
+		web(newWebSearch),
 		newAskUserQuestion,
 		newExitPlanMode,
 	}
 	p := tool.Profile{Name: Name, System: system}
 	for _, build := range builders {
+		if build == nil {
+			continue
+		}
 		t, err := build()
 		if err != nil {
 			return tool.Profile{}, fmt.Errorf("opencode: %w", err)

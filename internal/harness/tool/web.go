@@ -2,6 +2,17 @@ package tool
 
 import "context"
 
+// The web tools' ids (plan 051 §A), beside AgentTool and the jobs' tools: a
+// session offers them only when its web state does (the harness withholds
+// them otherwise, before anything is built from its profile).
+const (
+	WebSearchTool = "websearch"
+	WebFetchTool  = "webfetch"
+)
+
+// IsWebTool reports whether id is one of the web tools.
+func IsWebTool(id string) bool { return id == WebSearchTool || id == WebFetchTool }
+
 // Web is how the websearch and webfetch tools reach the web (plan 051 §B): a
 // narrow seam of the same kind as TodoStore, Asker and Subagents, since this
 // package may not import the service that implements it

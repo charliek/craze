@@ -202,6 +202,13 @@ type Options struct {
 	// the built-ins alone. A sub-agent has no agent tool, and this is not read
 	// for one.
 	Personas []Persona
+	// Web is whether the session offers the web tools, websearch and
+	// webfetch, and the service they reach the web through (WebState, plan
+	// 051 §C.3), decided by the adapter once, at Open. The zero value
+	// withholds them: the session is offered exactly what it was before they
+	// existed. A child's is its parent's when the parent opened on and
+	// withheld otherwise (WebState.forChild), whatever is set here.
+	Web WebState
 	// ProviderRetries is how many times a step's model request may be sent again
 	// after failing, before output or (for a transport or server failure) after
 	// it: `provider_retries`. nil is DefaultProviderRetries; 0 is none; anything
@@ -666,7 +673,7 @@ func Open(opts Options) (*Session, error) {
 		s.subs.background, s.subs.sink, s.subs.onPending = opts.Background, opts.Sink, opts.OnPending
 		s.base = childBase{
 			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
-			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools,
+			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools, web: opts.Web,
 		}
 	}
 	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
@@ -726,7 +733,15 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		s.base.top = start.top
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.tools); err != nil {
+	// A child is offered the web tools only when its parent opened on, with
+	// the parent's service (plan 051 §C.3): the runner passes it so
+	// (childOpenOptions), and a child opened any other way is held to the
+	// same rule.
+	web := opts.Web
+	if child != nil {
+		web = web.forChild()
+	}
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, web, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
