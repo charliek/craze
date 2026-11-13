@@ -206,8 +206,9 @@ them connected:
     `openai/gpt-6.1-sol`). An `OPENAI_API_KEY` already exported for other
     tools runs OpenAI's models, but craze does not choose one for a new
     session on its own until you store the key with `craze auth login
-    openai`; naming a model once (`--model openai/gpt-6.1-sol`, which the
-    model memory then starts again) or a `default_model` is the other way.
+    openai`. Until then, pass `--model openai/gpt-6.1-sol`, pick one with
+    `/model` (the model memory then starts it again), or set a
+    `default_model`.
     `env_keys = []` under `[providers.openai]` in `providers.toml` turns the
     variable off.
     OpenRouter's models are its `~<family>-latest` routers, so an alias there
