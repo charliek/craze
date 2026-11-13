@@ -430,9 +430,11 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 			continue
 		}
 		if h := offers.Held[alias]; i > 0 && h != nil {
-			// Nor one the paid-source guard holds back (plan 050 C5): an
-			// earlier source of its maker is set up and offers none of its
-			// models. The refusal names it, should nothing else run.
+			// Nor one the paid-source guard holds back (plan 050 C5): a
+			// ChatGPT sign-in before it is set up and offers none of its
+			// models, or its key is found only in the environment. The
+			// refusal names it, with the guard's reason and fix, should
+			// nothing else run.
 			held = append(held, fmt.Sprintf("%s: not chosen for you: %s; %s", alias, h.Reason(), h.Fix()))
 			continue
 		}

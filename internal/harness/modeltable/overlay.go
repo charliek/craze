@@ -621,11 +621,13 @@ func catalogModels(cat *Catalog, models map[string]Model) map[string]bool {
 	return out
 }
 
-// makers keeps the catalog's makers where the user's providers.toml left the
-// provider's endpoint as shipped (plan 050 C5): a provider moved to another
-// driver or base_url is another source, so it loses its maker and each of its
-// models loses theirs — the same rule that keeps the shipped variables from
-// funding it (overlayProvider).
+// makers keeps the catalog's makers, and its env_key_by_name_only marks,
+// where the user's providers.toml left the provider's endpoint as shipped
+// (plan 050 C5): a provider moved to another driver or base_url is another
+// source, so it loses its maker and its mark, and each of its models loses
+// its maker — the same rule that keeps the shipped variables from funding it
+// (overlayProvider). The endpoint is then the user's own, and so is what
+// funds it.
 func (m *merger) makers() {
 	moved := func(id string) bool {
 		shipped, ok := m.cat.Providers[id]
@@ -634,10 +636,12 @@ func (m *merger) makers() {
 	}
 	for id, maker := range m.cat.ProviderMakers {
 		if !moved(id) {
-			if m.t.providerMakers == nil {
-				m.t.providerMakers = make(map[string]string)
-			}
-			m.t.providerMakers[id] = maker
+			put(&m.t.providerMakers, id, maker)
+		}
+	}
+	for id, on := range m.cat.EnvKeyByNameOnly {
+		if on && !moved(id) {
+			put(&m.t.envKeyByNameOnly, id, true)
 		}
 	}
 	for alias, mod := range m.t.Models {

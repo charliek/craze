@@ -22,6 +22,8 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 )
 
 // redacted is what a scrubbed key or URL query string reads as.
@@ -163,8 +165,9 @@ func keyPattern(key string) *regexp.Regexp {
 
 // keyGap is what keyPattern lets stand between two of a key's characters:
 // format characters and invalid bytes, which draw as nothing once a display
-// drops them.
-const keyGap = `[\p{Cf}\x{FFFD}]*`
+// drops them. It is the Messages API client's own (messagesapi.KeyGap), so
+// every scrub of a key in craze reads the same characters as nothing.
+const keyGap = messagesapi.KeyGap
 
 // text scrubs one string: the key and every token value first, each in any
 // spelling (keyPattern), then every URL query string.

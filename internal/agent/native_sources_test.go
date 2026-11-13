@@ -92,7 +92,7 @@ func TestNativeStartHeldBySourceGuard(t *testing.T) {
 	f := shippedFixture(t, map[string]string{"OPENAI_API_KEY": dummyOpenAI}, signedInNoList(t))
 	s := f.session(Options{})
 	err := s.Start(context.Background())
-	want := "native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; sign in again with craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"
+	want := "native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"
 	if err == nil || err.Error() != want {
 		t.Fatalf("Start = %v;\nwant %s", err, want)
 	}
@@ -105,6 +105,35 @@ func TestNativeStartHeldBySourceGuard(t *testing.T) {
 	explicit := f.started(Options{Model: "openai/gpt-6.1-sol"})
 	if got := explicit.Snapshot().CurrentModel; got != "openai/gpt-6.1-sol" {
 		t.Fatalf("--model openai/gpt-6.1-sol started on %q", got)
+	}
+}
+
+// TestNativeStartHeldByAnEnvOnlyKey (guard 2, G1): with OPENAI_API_KEY in
+// the environment alone, nothing remembered and no pin, a new session is
+// refused with the same sentence form as the sign-in's — the variable's
+// name, never its value, and the fix that stores the key or names the model
+// — kind config; --model starts it, and so does a key stored for openai.
+func TestNativeStartHeldByAnEnvOnlyKey(t *testing.T) {
+	f := shippedFixture(t, map[string]string{"OPENAI_API_KEY": dummyOpenAI}, nil)
+	err := f.session(Options{}).Start(context.Background())
+	want := "native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.1-sol"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Start = %v;\nwant %s", err, want)
+	}
+	if !errors.Is(err, modeltable.ErrSourceHeld) || errors.Is(err, harness.ErrNoAPIKey) || strings.Contains(err.Error(), dummyOpenAI) {
+		t.Fatalf("Start's error %v: want ErrSourceHeld, not a missing key, and no key in it", err)
+	}
+	if got := StartErrorKind(err); got != errkind.Config {
+		t.Fatalf("StartErrorKind = %s, want config", got)
+	}
+	if got := f.started(Options{Model: "openai/gpt-6.1-sol"}).Snapshot().CurrentModel; got != "openai/gpt-6.1-sol" {
+		t.Fatalf("--model openai/gpt-6.1-sol started on %q", got)
+	}
+	if err := modeltable.SetKey(f.dir, "openai", dummyOpenAI); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.started(Options{}).Snapshot().CurrentModel; got != "openai/gpt-6.1-sol" {
+		t.Fatalf("with the key stored, a new session started on %q", got)
 	}
 }
 

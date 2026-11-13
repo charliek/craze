@@ -204,8 +204,12 @@ them connected:
     own start model ([the table](../reference/configuration.md#the-shipped-catalog);
     Anthropic's is the newest Claude Opus your account lists, OpenAI's
     `openai/gpt-6.1-sol`). An `OPENAI_API_KEY` already exported for other
-    tools connects OpenAI too; `env_keys = []` under `[providers.openai]` in
-    `providers.toml` turns that off.
+    tools runs OpenAI's models, but craze does not choose one for a new
+    session on its own until you store the key with `craze auth login
+    openai`; naming a model once (`--model openai/gpt-6.1-sol`, which the
+    model memory then starts again) or a `default_model` is the other way.
+    `env_keys = []` under `[providers.openai]` in `providers.toml` turns the
+    variable off.
     OpenRouter's models are its `~<family>-latest` routers, so an alias there
     may resolve to a newer model after OpenRouter updates the router.
 

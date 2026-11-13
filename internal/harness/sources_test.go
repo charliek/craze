@@ -172,3 +172,56 @@ func TestResumeFallbackHeldBySourceGuard(t *testing.T) {
 		})
 	}
 }
+
+// TestResumeFallbackHeldByAnEnvOnlyKey (guard 2, G1): with other marked
+// env_key_by_name_only and its key in the environment alone, a stored
+// session whose model no longer runs is not moved to other's start on the
+// owner's behalf: the refusal names the variable, the provider to store a
+// key for and the alias, in the sign-in's sentence form. A stored session
+// on other's own model continues on it by identity: that is the owner's
+// conversation, not craze's choice.
+func TestResumeFallbackHeldByAnEnvOnlyKey(t *testing.T) {
+	noTest := func(name string) string {
+		if name == "TEST_API_KEY" {
+			return ""
+		}
+		return testEnv[name]
+	}
+	marked := func() *modeltable.Catalog {
+		cat := sourcesCatalog("http://127.0.0.1:1/v1")
+		cat.Starts["other"] = []string{"other/c"}
+		cat.EnvKeyByNameOnly = map[string]bool{"other": true}
+		return cat
+	}
+	f := sourcesFixture(t, false)
+	opts := f.options()
+	opts.Model = "test/a"
+	id := storedTurn(t, f, opts, nil)
+	table, err := modeltable.LoadWith(f.home, marked())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ropts := resumeOptions(f.options(), id)
+	ropts.Model, ropts.Table, ropts.Getenv = "", table, noTest
+	_, err = Open(ropts)
+	const want = "other/c: not chosen for you: OTHER_API_KEY is set in the environment, but no key is stored for Other; craze auth login other, or start with --model other/c"
+	if !errors.Is(err, ErrResumeModel) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), canaryOther) {
+		t.Fatalf("resume = %v; want ErrResumeModel naming %q", err, want)
+	}
+
+	opts.Model = "other/c"
+	onOther := storedTurn(t, f, opts, nil)
+	ropts = resumeOptions(f.options(), onOther)
+	ropts.Model, ropts.Table, ropts.Getenv = "", table, noTest
+	if table.Offers(noTest).Held["other/c"] == nil {
+		t.Fatal("premise: other/c is not held")
+	}
+	s, err := Open(ropts)
+	if err != nil {
+		t.Fatalf("resume on other/c by identity: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got, _ := s.Current(); got != "other/c" {
+		t.Fatalf("resumed on %s, want other/c", got)
+	}
+}

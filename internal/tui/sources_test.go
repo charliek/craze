@@ -46,8 +46,10 @@ func envOf(vars map[string]string) func(string) string {
 // TestTheListsStartHeldBySourceGuard: signed in to the ChatGPT plan with no
 // model list and an OpenAI key, native's default for the list is the guard's
 // own refusal — naming the sign-in and /model — not "no model provider has an
-// API key"; its /model still offers the OpenAI key's models; signed out it
-// is the key's Sol.
+// API key"; its /model still offers the OpenAI key's models. Signed out, the
+// key in the environment alone is held too (guard 2, G1), naming the
+// variable and the provider to store a key for, and /model still offers its
+// models; with the key stored, the default is the key's Sol.
 func TestTheListsStartHeldBySourceGuard(t *testing.T) {
 	env := envOf(map[string]string{"OPENAI_API_KEY": "sk-openai-tui-dummy-0001"})
 	_, err := nativeDefaultModel(shippedDir(t, true), env)
@@ -59,8 +61,20 @@ func TestTheListsStartHeldBySourceGuard(t *testing.T) {
 	if err != nil || len(models) != 4 || !strings.HasPrefix(models[0].ID, "openai/") {
 		t.Fatalf("nativeModelChoices = %+v, %v; want the four OpenAI models", models, err)
 	}
-	if md, err := nativeDefaultModel(shippedDir(t, false), env); err != nil || md.ID != "openai/gpt-6.1-sol" {
-		t.Fatalf("signed out: %+v, %v; want openai/gpt-6.1-sol", md, err)
+	_, err = nativeDefaultModel(shippedDir(t, false), env)
+	want = "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, so craze does not pick openai/gpt-6.1-sol for you — run craze auth login openai, or pick a model with /model"
+	if err == nil || err.Error() != want || strings.Contains(err.Error(), "sk-openai-tui-dummy-0001") {
+		t.Fatalf("signed out, the key in the environment: %v;\nwant %s", err, want)
+	}
+	if models, err := nativeModelChoices(shippedDir(t, false), env); err != nil || len(models) != 4 || !strings.HasPrefix(models[0].ID, "openai/") {
+		t.Fatalf("signed out, the key in the environment: nativeModelChoices = %+v, %v; want the four OpenAI models", models, err)
+	}
+	stored := shippedDir(t, false)
+	if err := modeltable.SetKey(stored, "openai", "sk-openai-tui-dummy-0001"); err != nil {
+		t.Fatal(err)
+	}
+	if md, err := nativeDefaultModel(stored, envOf(nil)); err != nil || md.ID != "openai/gpt-6.1-sol" {
+		t.Fatalf("signed out, the key stored: %+v, %v; want openai/gpt-6.1-sol", md, err)
 	}
 }
 

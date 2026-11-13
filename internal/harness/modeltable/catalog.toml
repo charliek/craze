@@ -38,10 +38,15 @@ version = 1
 # that funds any provider before it starts there; one with only an Anthropic
 # key starts on the newest Opus. OpenAI's key comes after it (plan 050, the
 # owner's pin): a machine on which another provider's start model resolves
-# starts there, as before. A machine whose only funded models are the user's
-# own now starts on GPT-6.1 Sol, and one whose provider_order leaves openai
-# out may fall back to an OpenAI model by alias. One with only an OpenAI key
-# starts on GPT-6.1 Sol.
+# starts there. A key stored for openai starts on GPT-6.1 Sol when nothing
+# before it is funded; OPENAI_API_KEY in the environment alone never does
+# (env_key_by_name_only, below): such a machine starts on the user's own
+# model when it has one, and otherwise is told to store the key or name the
+# model. A ChatGPT plan that is signed in but offers none of its models holds
+# back every model billed per token (on a provider whose models are priced)
+# of a provider after it here, or of one the user's provider_order leaves
+# out: craze does not move a new session from the plan to a per-token bill
+# on its own.
 provider_order = ["zai-coding-plan", "chatgpt", "fireworks", "openrouter", "meta", "anthropic", "openai"]
 
 # One source per maker (plan 050, the owner's order of 2026-11-11): when a
@@ -227,6 +232,14 @@ maker = "anthropic"
 # the usual rules (an entry that changes the driver or base_url takes none of
 # its key variables). GET /v1/models lists ids alone, with no window, effort
 # or price, so its models are the seeds below and nothing is imported.
+#
+# env_key_by_name_only (catalog-only, on this provider alone): OPENAI_API_KEY
+# is exported on many machines for other tools, so a key found only there is
+# no consent to bill craze's sessions to it. Its models still run by name
+# (--model, default_model, the model memory, a sub-agent's model), but craze
+# never chooses one for the owner while the key is in the environment alone;
+# a key stored with craze auth login openai (or an api_key) lifts that. An
+# entry that moves the driver or base_url drops the mark with the variable.
 [providers.openai]
 name = "OpenAI"
 driver = "openai-responses"
@@ -234,6 +247,7 @@ base_url = "https://api.openai.com/v1"
 env_keys = ["OPENAI_API_KEY"]
 start = ["openai/gpt-6.1-sol"]
 maker = "openai"
+env_key_by_name_only = true
 
 # craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
 # over the account's list: never models of the catalog's, so they need no

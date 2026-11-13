@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	fakehttp2 "github.com/charliek/craze/internal/harness/llm/messagesapi/internal/http2"
 )
@@ -307,6 +309,103 @@ func TestKeyPattern(t *testing.T) {
 	if err := sec.err(io.ErrUnexpectedEOF); err != io.ErrUnexpectedEOF {
 		t.Errorf("a class itself was wrapped: %T", err)
 	}
+}
+
+// metaKey is a dummy key full of regular-expression metacharacters: the
+// pattern must read each as itself.
+const metaKey = `sk-(a.b)*+?[c]{2}|^$\x-0001`
+
+// gapCase is one input of TestKeyPatternReadsFormatCharactersAsNothing, and
+// what the scrub makes of it.
+type gapCase struct{ name, in, want string }
+
+// gapCases are the inputs for key: the key split by a zero-width space, a
+// soft hyphen, an invalid byte or a word joiner after every character —
+// which a display drops, joining it again — is replaced whole; one split by a
+// space, a part of it, and ordinary text with those characters are not. The
+// last is a long input of the key's front parts each followed by a format
+// character, then the key: the scrub's time grows with the input, never
+// faster (RE2), so it finishes, and only the key is replaced. The same
+// inputs pin the model wrapper's scrub (llm) and the Anthropic list's cache
+// (anthropicmodels) to this one.
+func gapCases(key string) []gapCase {
+	h := len(key) / 2
+	spread := func(sep string) string {
+		var b strings.Builder
+		for i, r := range key {
+			if i > 0 {
+				b.WriteString(sep)
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+	long := strings.Repeat(key[:len(key)-1]+"\u200b", 20000)
+	return []gapCase{
+		{"a zero-width space", "k " + key[:h] + "\u200b" + key[h:] + ".", "k " + redacted + "."},
+		{"a soft hyphen", key[:h] + "\u00ad" + key[h:], redacted},
+		{"an invalid byte", key[:h] + "\xff" + key[h:], redacted},
+		{"a word joiner after every character", "x " + spread("\u2060") + " y", "x " + redacted + " y"},
+		{"before and after stand", "\u200b" + key + "\u00ad", "\u200b" + redacted + "\u00ad"},
+		{"a space is no gap", key[:h] + " " + key[h:], key[:h] + " " + key[h:]},
+		{"a part of the key", key[:h] + "\u200b", key[:h] + "\u200b"},
+		{"ordinary text", "soft\u00adhyphen, zero\u200bwidth, a \xff byte", "soft\u00adhyphen, zero\u200bwidth, a \xff byte"},
+		{"a long input", long + key, long + redacted},
+	}
+}
+
+// TestKeyPatternReadsFormatCharactersAsNothing (guard 2, G3): the client's
+// scrub replaces a key with format characters or invalid bytes between its
+// characters, as the model wrapper's does, a key of metacharacters included,
+// and nothing else; and an error's text keeps no key once those are gone.
+func TestKeyPatternReadsFormatCharactersAsNothing(t *testing.T) {
+	for _, key := range []string{testKey, metaKey} {
+		sec := newSecret(key)
+		for _, tc := range gapCases(key) {
+			if got := sec.text(tc.in); got != tc.want {
+				t.Errorf("%s: text(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+			}
+			if tc.want != tc.in {
+				msg := sec.err(errors.New(tc.in)).Error()
+				if gone := strings.Map(dropFormat, msg); strings.Contains(gone, key) || !strings.Contains(msg, redacted) {
+					t.Errorf("%s: err = %q", tc.name, msg)
+				}
+			}
+		}
+	}
+	// The metacharacters are themselves: text they would match as a pattern
+	// is not the key.
+	if v := "sk-(aXb)*+?[c]{2}|^$\\x-0001"; newSecret(metaKey).text(v) != v {
+		t.Errorf("%q, which is not the key, was scrubbed", v)
+	}
+}
+
+// TestKeyPatternReadsAnInvalidBytePercentEncoded (guard 2 review F2): a key
+// byte that is not UTF-8 is matched percent-encoded as itself (%FF, either
+// case), as a URL escapes it, as well as raw and as U+FFFD; a valid key's
+// percent spelling is unchanged.
+func TestKeyPatternReadsAnInvalidBytePercentEncoded(t *testing.T) {
+	const bad = "sk-ant+abcdef0123456789\xff"
+	re := KeyPattern(bad)
+	for _, v := range []string{"sk-ant+abcdef0123456789%FF", "sk-ant%2Babcdef0123456789%ff", bad, "sk-ant+abcdef0123456789\ufffd", "sk-ant+abcdef0123456789%EF%BF%BD"} {
+		if got := re.ReplaceAllLiteralString("<"+v+">", redacted); got != "<"+redacted+">" {
+			t.Errorf("%q scrubs to %q", v, got)
+		}
+	}
+	if v := "sk-ant+abcdef0123456789%FE"; re.ReplaceAllLiteralString(v, redacted) != v {
+		t.Errorf("%q, another byte, was scrubbed", v)
+	}
+	if v := "sk-ant%2Fk1"; KeyPattern("sk-ant/k1").ReplaceAllLiteralString(v, redacted) != redacted {
+		t.Errorf("a valid key's percent spelling %q is no longer scrubbed", v)
+	}
+}
+
+// dropFormat drops a format character and U+FFFD, as a display would.
+func dropFormat(r rune) rune {
+	if unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
+		return -1
+	}
+	return r
 }
 
 // TestScrubbedErrorsClassify (review c1r2 2): a scrubbed error never

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rivo/uniseg"
 
@@ -292,7 +293,10 @@ func signedInNative(t *testing.T, dir string, planUsage bool) {
 // through the real modeltable.Load and StartModel, on scratch native
 // directories — a funded key (stored, or in the environment) and a ChatGPT
 // sign-in with plan usage are ready; no key, and a sign-in with plan usage
-// off, need setup; a providers.toml or a models.toml that does not load — an
+// off, need setup, and so does a funded start the paid-source guard holds
+// back — an OpenAI key in the environment alone, or a key behind a sign-in
+// that offers none of its models — with its own reason and fix; a
+// providers.toml or a models.toml that does not load — an
 // unknown key, a value of the wrong type, a syntax error — is unavailable,
 // naming the file and nothing of the error; no directory at all is
 // unavailable.
@@ -359,10 +363,50 @@ func TestNativeAvailability(t *testing.T) {
 			getenv: openAIKeyOnly,
 			want:   nativeHeld,
 		},
+		// Guard 2, G1: an OpenAI key found only in the environment is never
+		// chosen for the owner, and the reason names the variable, not its
+		// value; a key stored for openai is ready.
 		{
-			name:   "an OpenAI key and no sign-in",
+			name:   "an OpenAI key in the environment and no sign-in",
+			getenv: openAIKeyOnly,
+			want:   nativeEnvHeld,
+		},
+		// Review F3: the model memory, as the host reads it, starts a
+		// remembered model on the variable alone, so native is ready.
+		{
+			name: "an OpenAI key in the environment and a remembered openai/gpt-6.1-sol",
+			setup: func(t *testing.T, dir string) {
+				if err := modeltable.Remember(dir, modeltable.RecentEntry{Alias: "openai/gpt-6.1-sol", Provider: "openai", WireModel: "gpt-6.1-sol"}, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			},
 			getenv: openAIKeyOnly,
 			want:   nativeReady,
+		},
+		{
+			name:  "an OpenAI key stored and no sign-in",
+			setup: writes(modeltable.ProvidersFile, "version = 1\n\n[providers.openai]\napi_key = \"sk-avail-openai-0004\"\n"),
+			want:  nativeReady,
+		},
+		{
+			name:   "an OpenAI key in the environment and the same key stored",
+			setup:  writes(modeltable.ProvidersFile, "version = 1\n\n[providers.openai]\napi_key = \"sk-avail-openai-0003\"\n"),
+			getenv: openAIKeyOnly,
+			want:   nativeReady,
+		},
+		// Guard 2, G2: a sign-in that offers none of its models holds back a
+		// per-token provider after it in the start order, whatever its maker.
+		{
+			name:  "a ChatGPT sign-in with plan usage off and a Fireworks key",
+			setup: func(t *testing.T, dir string) { signedInNative(t, dir, false) },
+			getenv: func(k string) string {
+				if k == "FIREWORKS_API_KEY" {
+					return "fw-avail-canary-0005"
+				}
+				return ""
+			},
+			want: availEntry{"native", "needs_setup", "signed in to ChatGPT, but its models are not available",
+				"craze auth login chatgpt, or start with --model fireworks/kimi-k3p1-pro"},
 		},
 		{
 			name:  "a broken providers.toml",
@@ -417,6 +461,11 @@ func openAIKeyOnly(k string) string {
 // (plan 050 C5).
 var nativeHeld = availEntry{"native", "needs_setup", "signed in to ChatGPT, but its models are not available",
 	"craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"}
+
+// nativeEnvHeld is native's entry when the only key is OPENAI_API_KEY in
+// the environment (guard 2, G1).
+var nativeEnvHeld = availEntry{"native", "needs_setup", "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI",
+	"craze auth login openai, or start with --model openai/gpt-6.1-sol"}
 
 // TestNativeAvailabilityNamesTheFileOnly (plan 036 §3.1, A1): a model table
 // whose providers.toml has an unknown key that looks like a secret fails to

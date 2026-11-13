@@ -2,6 +2,8 @@ package modeltable
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,6 +165,12 @@ func TestCatalogMakerRules(t *testing.T) {
 			setEntry(c.Models, "router/gem", func(m *Model) { m.Maker = "Google!" })
 		}, `models."router/gem"`, "maker"},
 		{"a maker for no provider", func(c *Catalog) { c.ProviderMakers["gone"] = "openai" }, "providers.gone", "maker"},
+		{"env_key_by_name_only for no provider", func(c *Catalog) {
+			c.EnvKeyByNameOnly = map[string]bool{"gone": true}
+		}, "providers.gone", "env_key_by_name_only"},
+		{"env_key_by_name_only on a sign-in, which names no variable", func(c *Catalog) {
+			c.EnvKeyByNameOnly = map[string]bool{"chatgpt": true}
+		}, "providers.chatgpt", "env_key_by_name_only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := testCatalog(t, makerCatalog).Clone()
@@ -177,6 +185,10 @@ func TestCatalogMakerRules(t *testing.T) {
 	}
 	if clone := c.Clone(); !slices.Equal(clone.SourceOrder, c.SourceOrder) || clone.ProviderMakers["acme"] != "openai" {
 		t.Fatalf("Clone dropped the source rule: %+v", clone)
+	}
+	marked := testCatalog(t, strings.Replace(makerCatalog, "start = [\"acme/sol\"]\n", "start = [\"acme/sol\"]\nenv_key_by_name_only = true\n", 1))
+	if clone := marked.Clone(); !maps.Equal(marked.EnvKeyByNameOnly, map[string]bool{"acme": true}) || !maps.Equal(clone.EnvKeyByNameOnly, marked.EnvKeyByNameOnly) {
+		t.Fatalf("env_key_by_name_only decoded as %v, cloned as %v; want acme's", marked.EnvKeyByNameOnly, clone.EnvKeyByNameOnly)
 	}
 }
 
@@ -563,6 +575,320 @@ func TestHeldErrorText(t *testing.T) {
 	if strings.Contains(h.Error(), "API key") || !strings.Contains(h.Error(), "openai/gpt-6.1-sol") {
 		t.Errorf("Error = %q", h.Error())
 	}
+	// The environment's kind (guard 2, G1): the variable's name, the
+	// provider's display name, and the same fix, which stores the key.
+	env := &HeldError{Alias: "openai/gpt-6.1-sol", Maker: "openai", Source: "openai", SourceName: "OpenAI", EnvVar: "OPENAI_API_KEY"}
+	if got, want := env.Reason(), "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI"; got != want {
+		t.Errorf("Reason = %q, want %q", got, want)
+	}
+	if got, want := env.Fix(), "craze auth login openai, or start with --model openai/gpt-6.1-sol"; got != want {
+		t.Errorf("Fix = %q, want %q", got, want)
+	}
+	if got, want := env.Error(), "modeltable: "+env.Reason()+", so craze does not choose openai/gpt-6.1-sol on its own"; got != want {
+		t.Errorf("Error = %q, want %q", got, want)
+	}
+	if !errors.Is(env, ErrSourceHeld) {
+		t.Error("the environment's kind does not unwrap to ErrSourceHeld")
+	}
+}
+
+// guardLocal is a providers.toml with a provider of the user's own, funded
+// by a stored dummy key, and guardLocalModel a models.toml line set giving
+// it an unpriced model whose alias sorts after every shipped one.
+const (
+	guardLocal = `version = 1
+
+[providers.local]
+name = "Local"
+driver = "openai-compat"
+base_url = "http://127.0.0.1:8080/v1"
+api_key = "sk-guard-local-dummy-0001"
+`
+	guardLocalModel = `[models.zz-local]
+provider = "local"
+wire_model = "qwen"
+`
+)
+
+// TestPaidSourceGuardOverTheShippedCatalog (guard 2): where a new session
+// with no --model starts on the machines the owner named, over the shipped
+// catalog. G2: a ChatGPT sign-in that is set up but offers none of its
+// models holds back every model billed per token — it, or any model of its
+// provider, has a price — of a provider after it in the start order or left
+// out of it, whatever its maker; a provider before it, a provider none of
+// whose models has a price, the model memory and the pin are not held. The
+// load's Anthropic key is read from the case's own environment
+// (withAnthropicEnv), never the real one. G1: a key for openai
+// found only in the environment is never chosen; stored, it is. A model held
+// for both reasons names the sign-in. `source_order = []` changes none of
+// it: the guard is not the hiding.
+func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
+	const (
+		oaKey = "sk-guard-openai-dummy-0001"
+		fw    = "FIREWORKS_API_KEY"
+		or    = "OPENROUTER_API_KEY"
+		zai   = "ZHIPU_API_KEY"
+		an    = "ANTHROPIC_API_KEY"
+	)
+	storedOpenAI := "version = 1\n\n[providers.openai]\napi_key = \"" + oaKey + "\"\n"
+	type held struct{ alias, source, envVar string }
+	for _, tc := range []struct {
+		name         string
+		s            signIn
+		keys         []string // set to dummy keys of their own
+		openai       string   // OPENAI_API_KEY's value, "" unset
+		providers    string   // providers.toml, "" none
+		models       string   // models.toml's lines after its version
+		remember     string   // the model memory's one entry, "" none
+		start        string
+		fallback     bool
+		held         held
+		holdsNothing bool // Offers holds no model back at all
+		sourceOrder  bool // models writes its own source_order: no `source_order = []` run
+		opus6        bool // the Anthropic account's list, bound to the case's key, names the seeds and Opus 6
+	}{
+		// G2: a broken ChatGPT sign-in.
+		{name: "broken ChatGPT and a Fireworks key", s: signedInNone, keys: []string{fw},
+			held: held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+		{name: "broken ChatGPT and an OpenRouter key", s: signedInNone, keys: []string{or},
+			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
+		{name: "another account's list and a Fireworks key", s: otherAccount, keys: []string{fw},
+			held: held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+		{name: "plan usage off and an OpenRouter key", s: planOff, keys: []string{or},
+			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
+		{name: "broken ChatGPT and a Z.AI key, which comes before it", s: signedInNone, keys: []string{zai}, start: "glm-5.3"},
+		{name: "broken ChatGPT and the user's unpriced local model", s: signedInNone, providers: guardLocal, models: guardLocalModel,
+			start: "zz-local", fallback: true},
+		{name: "broken ChatGPT after Fireworks in the user's provider_order", s: signedInNone, keys: []string{fw},
+			models: `provider_order = ["fireworks", "chatgpt"]` + "\n", start: "fireworks/kimi-k3p1-pro"},
+		// A model with no price of its own on a provider whose models are
+		// priced is billed per token all the same (review F1): an Opus only
+		// the account's list names, and an entry of the user's on Fireworks.
+		{name: "broken ChatGPT, an Anthropic key and an unseeded Opus the account lists", s: signedInNone, keys: []string{an},
+			opus6: true, held: held{"anthropic/claude-opus-6", ChatGPTProvider, ""}},
+		{name: "broken ChatGPT, a Fireworks key and the user's unpriced model on Fireworks", s: signedInNone, keys: []string{fw},
+			models: "[models.\"fireworks/aaa-mine\"]\nprovider = \"fireworks\"\nwire_model = \"accounts/me/models/mine\"\n",
+			held:   held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+		// A provider the user's provider_order leaves out is held; a sign-in
+		// it leaves out holds nothing (review F4).
+		{name: "broken ChatGPT and a Fireworks key the user's provider_order leaves out", s: signedInNone, keys: []string{fw},
+			models: `provider_order = ["zai-coding-plan", "chatgpt"]` + "\n", held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
+		{name: "broken ChatGPT left out of the user's provider_order and a Fireworks key", s: signedInNone, keys: []string{fw},
+			models: `provider_order = ["zai-coding-plan", "fireworks"]` + "\n", start: "fireworks/kimi-k3p1-pro"},
+		{name: "broken ChatGPT and a remembered Fireworks model", s: signedInNone, keys: []string{fw},
+			remember: "fireworks/kimi-k3p1-pro", start: "fireworks/kimi-k3p1-pro"},
+		{name: "broken ChatGPT and a pin on OpenRouter", s: signedInNone, keys: []string{or},
+			models: `default_model = "openrouter/gemini-flash-latest"` + "\n", start: "openrouter/gemini-flash-latest"},
+		{name: "a working ChatGPT sign-in", s: signedInList, keys: []string{fw, or, an},
+			start: "chatgpt/gpt-5.6-sol", holdsNothing: true},
+		{name: "a registration a sign-out left", s: signedOutOff, keys: []string{fw, or},
+			start: "fireworks/kimi-k3p1-pro", holdsNothing: true},
+		// G1: OPENAI_API_KEY.
+		{name: "OPENAI_API_KEY alone", s: signedOut, openai: oaKey,
+			held: held{"openai/gpt-6.1-sol", "openai", "OPENAI_API_KEY"}},
+		{name: "the user's local model and OPENAI_API_KEY", s: signedOut, openai: oaKey, providers: guardLocal, models: guardLocalModel,
+			start: "zz-local", fallback: true},
+		{name: "OPENAI_API_KEY and the same key stored", s: signedOut, openai: oaKey, providers: storedOpenAI,
+			start: "openai/gpt-6.1-sol", holdsNothing: true},
+		{name: "an unusable OPENAI_API_KEY and a key stored", s: signedOut, openai: "short", providers: storedOpenAI,
+			start: "openai/gpt-6.1-sol", holdsNothing: true},
+		{name: "a key stored for openai alone", s: signedOut, providers: storedOpenAI, start: "openai/gpt-6.1-sol", holdsNothing: true},
+		{name: "OPENAI_API_KEY and a remembered openai/gpt-6-luna", s: signedOut, openai: oaKey,
+			remember: "openai/gpt-6-luna", start: "openai/gpt-6-luna"},
+		{name: "OPENAI_API_KEY and a pin on openai/gpt-6.1-terra", s: signedOut, openai: oaKey,
+			models: `default_model = "openai/gpt-6.1-terra"` + "\n", start: "openai/gpt-6.1-terra"},
+		{name: "OPENAI_API_KEY and a Fireworks key", s: signedOut, openai: oaKey, keys: []string{fw}, start: "fireworks/kimi-k3p1-pro"},
+		{name: "FIREWORKS_API_KEY alone", s: signedOut, keys: []string{fw}, start: "fireworks/kimi-k3p1-pro", holdsNothing: true},
+		{name: "OPENROUTER_API_KEY alone", s: signedOut, keys: []string{or}, start: "openrouter/gemini-flash-latest", holdsNothing: true},
+		{name: "ANTHROPIC_API_KEY alone", s: signedOut, keys: []string{an}, start: "anthropic/claude-opus-5-5", holdsNothing: true},
+		// Both reasons: the sign-in's wins — the per-maker rule's, and,
+		// with the key first in the user's source_order, where that rule
+		// holds nothing, the start order's.
+		{name: "plan usage off and OPENAI_API_KEY", s: planOff, openai: oaKey,
+			held: held{"openai/gpt-6.1-sol", ChatGPTProvider, ""}},
+		{name: "plan usage off, OPENAI_API_KEY and the key first in source_order", s: planOff, openai: oaKey,
+			models: `source_order = ["openai"]` + "\n", sourceOrder: true, held: held{"openai/gpt-6.1-sol", ChatGPTProvider, ""}},
+	} {
+		for _, hidingOff := range []bool{false, true} {
+			if hidingOff && tc.sourceOrder {
+				continue
+			}
+			name := tc.name
+			if hidingOff {
+				name += ", source_order = []"
+			}
+			t.Run(name, func(t *testing.T) {
+				models := ""
+				if hidingOff {
+					models = "source_order = []\n"
+				}
+				if models += tc.models; models != "" {
+					models = "version = 1\n" + models
+				}
+				vars := map[string]string{}
+				for i, k := range tc.keys {
+					vars[k] = fmt.Sprintf("sk-guard-dummy-%04d", i+1)
+				}
+				if tc.openai != "" {
+					vars["OPENAI_API_KEY"] = tc.openai
+				}
+				env := withAnthropicEnv(t, vars)
+				dir := writeFiles(t, tc.providers, models)
+				tc.s.layDown(t, dir)
+				if tc.opus6 {
+					writeAnthropicList(t, dir, vars[an], append(seedEntries(t), opus6()))
+				}
+				tbl, err := Load(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.opus6 {
+					if m, ok := tbl.Models["anthropic/claude-opus-6"]; !ok || m.Cost != nil {
+						t.Fatalf("premise: anthropic/claude-opus-6 = %+v (present %v), want a model with no price", m, ok)
+					}
+				}
+				if strings.Contains(tc.models, "aaa-mine") {
+					if m, ok := tbl.Models["fireworks/aaa-mine"]; !ok || m.Cost != nil || !tbl.Offers(env).Offered["fireworks/aaa-mine"] {
+						t.Fatalf("premise: fireworks/aaa-mine = %+v (present %v), want an offered model with no price", m, ok)
+					}
+				}
+				var recent []RecentEntry
+				if tc.remember != "" {
+					m := tbl.Models[tc.remember]
+					recent = []RecentEntry{{Alias: tc.remember, Provider: m.Provider, WireModel: m.WireModel}}
+				}
+				if tc.holdsNothing {
+					if h := tbl.Offers(env).Held; len(h) != 0 {
+						t.Fatalf("Held = %v, want nothing held", h)
+					}
+				}
+				got, err := tbl.StartPick(recent, env)
+				if tc.held.alias == "" {
+					if err != nil || got.Alias != tc.start || got.Fallback != tc.fallback {
+						t.Fatalf("StartPick = %+v, %v; want %s, fallback %v", got, err, tc.start, tc.fallback)
+					}
+					return
+				}
+				var h *HeldError
+				if !errors.As(err, &h) || !errors.Is(err, ErrSourceHeld) || errors.Is(err, ErrNothingFunded) || errors.Is(err, ErrNoAPIKey) {
+					t.Fatalf("StartPick = %+v, %v; want a *HeldError only", got, err)
+				}
+				if h.Alias != tc.held.alias || h.Source != tc.held.source || h.EnvVar != tc.held.envVar {
+					t.Fatalf("HeldError = %+v, want %+v", h, tc.held)
+				}
+				if strings.Contains(err.Error(), oaKey) || strings.Contains(err.Error(), "sk-guard-dummy") {
+					t.Fatalf("%q carries a key", err)
+				}
+			})
+		}
+	}
+}
+
+// TestEnvOnlyKeyIsHeldNotHidden (guard 2, G1): an openai key found only in
+// the environment changes what craze chooses, never what runs or what is
+// offered: each of openai's models still resolves and is listed, and only
+// the guard holds it — the deprecated ones too — with the environment's
+// reason. A key stored for it, alone or beside the variable, holds nothing.
+func TestEnvOnlyKeyIsHeldNotHidden(t *testing.T) {
+	const key = "sk-guard-openai-dummy-0002"
+	env := withAnthropicEnv(t, map[string]string{"OPENAI_API_KEY": key})
+	tbl, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := tbl.Offers(env)
+	n := 0
+	for _, alias := range tbl.Aliases() {
+		if tbl.Models[alias].Provider != "openai" {
+			continue
+		}
+		n++
+		h := o.Held[alias]
+		if !o.Runs[alias] || h == nil || h.EnvVar != "OPENAI_API_KEY" || h.Source != "openai" || h.SourceName != "OpenAI" || h.Maker != "openai" {
+			t.Errorf("%s: runs %v, held %+v; want it to run, held by the environment", alias, o.Runs[alias], h)
+		}
+		if !tbl.Models[alias].Deprecated && !o.Offered[alias] {
+			t.Errorf("%s is not offered", alias)
+		}
+		if _, err := tbl.Resolve(alias, env); err != nil {
+			t.Errorf("%s does not resolve: %v", alias, err)
+		}
+	}
+	if n == 0 {
+		t.Fatal("the shipped catalog has no openai model; the case proves nothing")
+	}
+	if len(o.Held) != n {
+		t.Fatalf("Held = %v; want openai's %d models alone", o.Held, n)
+	}
+	stored, err := Load(writeFiles(t, "version = 1\n\n[providers.openai]\napi_key = \""+key+"\"\n", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []func(string) string{fakeEnv(nil), env} {
+		if h := stored.Offers(e).Held; len(h) != 0 {
+			t.Fatalf("with a key stored, Held = %v", h)
+		}
+	}
+}
+
+// TestEnvKeyByNameOnlyIsTheCatalogs (guard 2, G1): env_key_by_name_only is
+// treated as a provider's maker is — read from the catalog only, refused in
+// a user's providers.toml as an unknown key, never written by Save, kept by
+// an entry that leaves the endpoint as shipped (spelled otherwise
+// included), and dropped by one that moves the driver or base_url, whose
+// endpoint, and key, are then the user's own.
+func TestEnvKeyByNameOnlyIsTheCatalogs(t *testing.T) {
+	const key = "sk-guard-openai-dummy-0003"
+	env := withAnthropicEnv(t, map[string]string{"OPENAI_API_KEY": key})
+	dir := writeFiles(t, "version = 1\n\n[providers.openai]\nenv_key_by_name_only = false\n", "")
+	_, err := Load(dir)
+	if fe := wantFileError(t, err, filepath.Join(dir, ProvidersFile), "providers.openai", "env_key_by_name_only"); fe.Reason != "unknown key" {
+		t.Fatalf("%v, want an unknown key", err)
+	}
+	for _, tc := range []struct {
+		name, providers string
+		marked          bool
+	}{
+		{"no entry", "", true},
+		{"a new name", "version = 1\n\n[providers.openai]\nname = \"Mine\"\n", true},
+		{"the endpoint spelled otherwise", "version = 1\n\n[providers.openai]\nbase_url = \"HTTPS://API.OpenAI.com/v1/\"\n", true},
+		{"a moved base_url", "version = 1\n\n[providers.openai]\nbase_url = \"https://gateway.example/v1\"\nenv_keys = [\"OPENAI_API_KEY\"]\n", false},
+		{"a moved driver", "version = 1\n\n[providers.openai]\ndriver = \"openai-compat\"\nbase_url = \"https://api.openai.com/v1\"\nenv_keys = [\"OPENAI_API_KEY\"]\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, err := Load(writeFiles(t, tc.providers, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tbl.envKeyByNameOnly["openai"] != tc.marked {
+				t.Fatalf("openai marked %v, want %v", tbl.envKeyByNameOnly["openai"], tc.marked)
+			}
+			_, err = tbl.StartPick(nil, env)
+			if held := errors.Is(err, ErrSourceHeld); held != tc.marked {
+				t.Fatalf("StartPick: %v; want held %v", err, tc.marked)
+			}
+			out := filepath.Join(t.TempDir(), "native")
+			if err := Save(out, tbl); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{ProvidersFile, ModelsFile} {
+				b, err := os.ReadFile(filepath.Join(out, f))
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(b), "env_key_by_name_only") {
+					t.Fatalf("Save wrote env_key_by_name_only into %s:\n%s", f, b)
+				}
+			}
+			again, err := Load(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if again.envKeyByNameOnly["openai"] != tc.marked {
+				t.Fatalf("after Save, openai marked %v, want %v", again.envKeyByNameOnly["openai"], tc.marked)
+			}
+		})
+	}
 }
 
 // TestSourceRuleOverTheShippedCatalog: the shipped order and makers on the
@@ -590,10 +916,11 @@ func TestSourceRuleOverTheShippedCatalog(t *testing.T) {
 	}{
 		{"ChatGPT with its list, an OpenAI key and an OpenRouter key", signedInList, []string{oa, or}, "chatgpt/gpt-5.6-sol", "",
 			append(slices.Clone(planListed), museRouters...), append(slices.Clone(openaiKey), gptRouters...)},
-		{"ChatGPT with no list, an OpenAI key and an OpenRouter key", signedInNone, []string{oa, or}, "openrouter/gemini-flash-latest", "",
+		// The sign-in with no list holds OpenRouter's start back too: it is
+		// priced per token and after chatgpt in the start order (guard 2).
+		{"ChatGPT with no list, an OpenAI key and an OpenRouter key", signedInNone, []string{oa, or}, "", "openrouter/gemini-flash-latest",
 			append(slices.Clone(openaiKey), museRouters...), gptRouters},
 		{"plan usage off and an OpenAI key", planOff, []string{oa}, "", "openai/gpt-6.1-sol", openaiKey, nil},
-		{"an OpenAI key alone", signedOut, []string{oa}, "openai/gpt-6.1-sol", "", openaiKey, nil},
 		{"an OpenRouter key alone", signedOut, []string{or}, "openrouter/gemini-flash-latest", "",
 			append(slices.Clone(gptRouters), append(museRouters, glmRouters...)...), nil},
 		{"Z.AI and Fireworks", signedOut, []string{zai, fw}, "glm-5.3", "",

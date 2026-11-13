@@ -20,9 +20,11 @@ and want one fast, scriptable front end for several of them.
   Meta, OpenAI, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in;
   no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
 - **One source per maker**: OpenAI's, Meta's, GLM's and DeepSeek's models are
-  offered from your first funded source of them, in an order you can change,
-  and while a ChatGPT sign-in is there but its models are not available, craze
-  does not move a new session to the OpenAI key's paid models on its own.
+  offered from your first funded source of them, in an order you can change;
+  while a ChatGPT sign-in is there but its models are not available, craze
+  does not move a new session on its own to a per-token provider after it
+  in the start order, and an `OPENAI_API_KEY` exported for other tools is
+  never chosen without a key stored for craze.
   [One source per maker](docs/reference/configuration.md#one-source-per-maker)
 - **`craze models`**: the native models, their status and replacement, efforts and
   context, and what is funded here, as a table or JSON; each release ships the

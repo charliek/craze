@@ -82,6 +82,15 @@ type Catalog struct {
 	// stamped onto the models when a load merges the catalog (merge), the
 	// ones an account's list adds included.
 	ProviderMakers map[string]string
+	// EnvKeyByNameOnly are the providers whose key, found only in the
+	// environment, never has craze choose one of their models for the owner
+	// (env_key_by_name_only; the paid-source guard, Table.Offers): a variable
+	// such as OPENAI_API_KEY is exported for other tools on many machines,
+	// and it is no consent to run craze's sessions on that bill. A key stored
+	// for the provider is. Each model still runs by name. Catalog-only, as a
+	// provider's maker is, and dropped with it where a user's entry moves the
+	// provider's driver or base_url (merger.makers). nil for none.
+	EnvKeyByNameOnly map[string]bool
 
 	// zeroContext are the aliases whose entry writes `default_context = 0`
 	// (plan 050 C1): Model.DefaultContext reads 0 for those and for an
@@ -233,6 +242,8 @@ type catalogProviderEntry struct {
 	Start []string `toml:"start"`
 	// Maker is catalog-only (plan 050 C5): who makes the provider's models.
 	Maker string `toml:"maker"`
+	// EnvKeyByNameOnly is catalog-only too (Catalog.EnvKeyByNameOnly).
+	EnvKeyByNameOnly bool `toml:"env_key_by_name_only"`
 }
 
 type catalogModelEntry struct {
@@ -285,6 +296,9 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 				c.ProviderMakers = make(map[string]string)
 			}
 			c.ProviderMakers[id] = e.Maker
+		}
+		if e.EnvKeyByNameOnly {
+			put(&c.EnvKeyByNameOnly, id, true)
 		}
 		if e.Start != nil {
 			// Written, even as `start = []`, which validate refuses.
@@ -389,11 +403,12 @@ func (c *Catalog) Clone() *Catalog {
 		return nil
 	}
 	out := &Catalog{
-		ProviderOrder:  slices.Clone(c.ProviderOrder),
-		SourceOrder:    slices.Clone(c.SourceOrder),
-		ProviderMakers: maps.Clone(c.ProviderMakers),
-		Providers:      make(map[string]Provider, len(c.Providers)),
-		Models:         make(map[string]Model, len(c.Models)),
+		ProviderOrder:    slices.Clone(c.ProviderOrder),
+		SourceOrder:      slices.Clone(c.SourceOrder),
+		ProviderMakers:   maps.Clone(c.ProviderMakers),
+		EnvKeyByNameOnly: maps.Clone(c.EnvKeyByNameOnly),
+		Providers:        make(map[string]Provider, len(c.Providers)),
+		Models:           make(map[string]Model, len(c.Models)),
 	}
 	for id, p := range c.Providers {
 		p.EnvKeys = slices.Clone(p.EnvKeys)
@@ -679,10 +694,12 @@ var makerPattern = familyPattern
 
 // validateMakers checks the makers and source_order (plan 050 C5): each maker
 // a provider or a model names is a lowercase word, the provider's a provider
-// of the catalog; and source_order, required once any maker is named, names
-// every provider exactly once and nothing else, as provider_order does. A
-// catalog that names no maker may leave it out, and then has no source rule.
-// Providers are checked in sorted order, then models.
+// of the catalog; env_key_by_name_only is on a provider of the catalog that
+// names a variable in env_keys; and source_order, required once any maker is
+// named, names every provider exactly once and nothing else, as
+// provider_order does. A catalog that names no maker may leave it out, and
+// then has no source rule. Providers are checked in sorted order, then
+// models.
 func (c *Catalog) validateMakers(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -697,6 +714,16 @@ func (c *Catalog) validateMakers(name string) error {
 			return at(providerTable(id), "maker", fmt.Sprintf("%q %s", maker, wordRule))
 		}
 		tagged = true
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.EnvKeyByNameOnly)) {
+		switch p, ok := c.Providers[id]; {
+		case !c.EnvKeyByNameOnly[id]:
+			continue
+		case !ok:
+			return at(providerTable(id), "env_key_by_name_only", "is for a provider the catalog does not have")
+		case len(p.EnvKeys) == 0:
+			return at(providerTable(id), "env_key_by_name_only", "is for a provider funded by a variable: this one names none in env_keys")
+		}
 	}
 	for _, alias := range slices.Sorted(maps.Keys(c.Models)) {
 		if maker := c.Models[alias].Maker; maker != "" {

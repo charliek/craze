@@ -23,14 +23,25 @@ import (
 //   - offered: the models a picker lists — they resolve, are not deprecated,
 //     and are not hidden by the source order (Offered);
 //   - eligible to start automatically: offered, less what the paid-source
-//     guard holds back (Offers.Held): a model whose maker has an earlier
-//     source whose credential is there but broken for the maker — the
-//     ChatGPT plan signed in with no usable list, another account's list, or
-//     plan usage off — so a plan whose model list is missing never silently
-//     moves new sessions to a key billed per token. A key provider never
-//     holds anything back: a usable key resolves its models, so one that
-//     funds none of a maker's active models has left that maker (its models
-//     there are deprecated), and the replacement elsewhere is the way on.
+//     guard holds back (Offers.Held), for one of three reasons:
+//     1. a model whose maker has an earlier source whose credential is
+//     there but broken for the maker — the ChatGPT plan signed in with no
+//     usable list, another account's list, or plan usage off — so a plan
+//     whose model list is missing never silently moves new sessions to a
+//     key billed per token of the same maker;
+//     2. any model billed per token — it, or any model of its provider, has
+//     a price — of a provider that comes after such a broken sign-in in the
+//     start order (StartOrder) or is not in it, whatever its maker: a
+//     provider before the sign-in would have been chosen first anyway, and
+//     a provider none of whose models has a price is not a bill;
+//     3. a model of a provider the catalog marks env_key_by_name_only whose
+//     key is found only in the environment: an exported OPENAI_API_KEY is
+//     often there for other tools, and only a stored key is the owner's
+//     consent to bill craze's sessions to it.
+//     A key provider that funds none of a maker's active models holds
+//     nothing back: a usable key resolves its models, so it has left that
+//     maker (its models there are deprecated), and the replacement
+//     elsewhere is the way on.
 //
 // Each is computed once per call from the table and the environment as they
 // are now (Offers), never stored at load: a key stored or a sign-in completed
@@ -39,17 +50,28 @@ import (
 // ErrSourceHeld is StartPick's error when the guard left nothing to start on
 // (HeldError): something is funded, but craze does not choose it for the
 // owner. It is not ErrNothingFunded, and not ErrNoAPIKey: a key is there.
-var ErrSourceHeld = errors.New("modeltable: craze does not start on a later source of a maker while an earlier one is set up and offers none of its models")
+var ErrSourceHeld = errors.New("modeltable: craze does not choose a funded model for the owner while the paid-source guard holds it back")
 
 // HeldError is why craze does not choose Alias for the owner (plan 050 C5's
-// paid-source guard): Source, the ChatGPT plan, an earlier source of the
-// model's Maker in the source order, is signed in but resolves none of the
-// maker's active models. It unwraps to ErrSourceHeld. Its text names a
-// provider and an alias, never a token.
+// paid-source guard), of one of two kinds:
+//
+//   - the sign-in's (EnvVar ""): Source, the ChatGPT plan, is signed in but
+//     resolves none of its models, and is an earlier source of the model's
+//     Maker in the source order, or is in the start order before the
+//     model's provider, which a model billed per token is on, or which the
+//     order leaves out (Maker may then be "": a model of no maker);
+//   - the environment's (EnvVar set): Source, the model's own provider, is
+//     funded only by the variable EnvVar and has no key stored, and the
+//     catalog marks it env_key_by_name_only. SourceName is its display name.
+//
+// It unwraps to ErrSourceHeld. Its text names a provider, a variable's name
+// and an alias, never a token or a key.
 type HeldError struct {
-	Alias  string // the model craze would have chosen
-	Maker  string
-	Source string // the earlier source's provider id: the sign-in's
+	Alias      string // the model craze would have chosen
+	Maker      string
+	Source     string // the provider to set up: the sign-in's, or the model's own
+	SourceName string // Source's display name, for the environment's kind
+	EnvVar     string // the variable that alone funds Source; "" for the sign-in's kind
 }
 
 func (e *HeldError) Error() string {
@@ -59,12 +81,17 @@ func (e *HeldError) Error() string {
 func (e *HeldError) Unwrap() error { return ErrSourceHeld }
 
 // Reason is why nothing started, for a person: "signed in to ChatGPT, but its
-// models are not available".
+// models are not available", or "OPENAI_API_KEY is set in the environment,
+// but no key is stored for OpenAI".
 func (e *HeldError) Reason() string {
+	if e.EnvVar != "" {
+		return fmt.Sprintf("%s is set in the environment, but no key is stored for %s", e.EnvVar, cmp.Or(e.SourceName, e.Source))
+	}
 	return "signed in to " + chatgptShortName + ", but its models are not available"
 }
 
-// Fix is what to do about it: sign in again, or name the model.
+// Fix is what to do about it, for either kind: sign in again or store the
+// key, or name the model.
 func (e *HeldError) Fix() string {
 	return fmt.Sprintf("craze auth login %s, or start with --model %s", e.Source, e.Alias)
 }
@@ -125,8 +152,10 @@ type Offers struct {
 	// maker's winner is another provider. A deprecated model is judged too.
 	Hidden map[string]bool
 	// Held is why craze may not choose a model that runs and is not hidden
-	// for the owner (the paid-source guard), by alias; a model not here is
-	// eligible.
+	// for the owner (the paid-source guard, for any of its three reasons),
+	// by alias; a model not here is eligible. A model held for more than one
+	// reason holds the sign-in's: the per-maker rule's, then the start
+	// order's, then the environment's.
 	Held map[string]*HeldError
 	// Winners is each maker's source: the first provider in the source order
 	// with an active model of the maker that resolves. A maker with none has
@@ -138,12 +167,14 @@ type Offers struct {
 func (t *Table) Offers(getenv func(string) string) Offers {
 	o := Offers{Runs: map[string]bool{}, Offered: map[string]bool{}, Hidden: map[string]bool{}, Held: map[string]*HeldError{}, Winners: map[string]string{}}
 	type source struct{ provider, maker string }
-	funds := map[source]bool{} // the provider funds an active model of the maker
+	funds := map[source]bool{}  // the provider funds an active model of the maker
+	active := map[string]bool{} // the provider funds an active model of any maker
 	for alias, m := range t.Models {
 		if _, err := t.Resolve(alias, getenv); err == nil {
 			o.Runs[alias] = true
 			if !m.Deprecated {
 				funds[source{m.Provider, m.Maker}] = true
+				active[m.Provider] = true
 			}
 		}
 	}
@@ -194,7 +225,86 @@ func (t *Table) Offers(getenv func(string) string) Offers {
 			break
 		}
 	}
+	t.holdAfterBrokenSignIn(o, active, isSignedIn)
+	t.holdEnvOnlyKeys(o, getenv)
 	return o
+}
+
+// holdAfterBrokenSignIn is the guard's second reason (see the file's
+// comment): the first sign-in in StartOrder that is signed in and resolves
+// no active model of its own (active, by provider) holds back every model
+// billed per token of a provider after it in StartOrder or not in it at
+// all, deprecated ones included, which o does not hide or hold already. A
+// model is billed per token when it has a price (its Cost set, as
+// Route.Priced reads it) or any model of its provider in t does, whatever
+// its state: a model of a paid provider with no price of its own — one only
+// the Anthropic account's list names, or an entry of the user's on a
+// shipped provider — is billed all the same. A provider none of whose
+// models has a price (a local server, a flat plan) is not. A sign-in
+// StartOrder leaves out is never a start, so it holds nothing; a working
+// one, or a registration a sign-out left, holds nothing either. The order is
+// the start order, not the source order: `source_order = []` changes
+// nothing here.
+func (t *Table) holdAfterBrokenSignIn(o Offers, active map[string]bool, isSignedIn func(string) bool) {
+	order := t.StartOrder()
+	at := slices.IndexFunc(order, func(p string) bool { return !active[p] && isSignedIn(p) })
+	if at < 0 {
+		return
+	}
+	priced := map[string]bool{} // a provider with a model that has a price
+	for _, m := range t.Models {
+		if m.Cost != nil {
+			priced[m.Provider] = true
+		}
+	}
+	for alias := range o.Runs {
+		m := t.Models[alias]
+		if (m.Cost == nil && !priced[m.Provider]) || o.Hidden[alias] || o.Held[alias] != nil {
+			continue
+		}
+		if i := slices.Index(order, m.Provider); i < 0 || i > at {
+			o.Held[alias] = &HeldError{Alias: alias, Maker: m.Maker, Source: order[at]}
+		}
+	}
+}
+
+// holdEnvOnlyKeys is the guard's third reason (see the file's comment): each
+// model, deprecated ones included, of a provider marked env_key_by_name_only
+// that is funded by a variable alone — one of its env_keys set to a usable
+// key, as Resolve and Providers judge it, and no usable api_key stored —
+// which o does not hide or hold already, so a sign-in's reason wins. A
+// provider with a stored key is not held even where the variable is the key
+// Resolve takes: storing one is the owner's consent.
+func (t *Table) holdEnvOnlyKeys(o Offers, getenv func(string) string) {
+	envOnly := map[string]string{} // provider id → the variable that alone funds it
+	for id, on := range t.envKeyByNameOnly {
+		p, ok := t.Providers[id]
+		if !on || !ok || storedKeyUsable(p.APIKey) {
+			continue
+		}
+		if name, _, _ := firstEnvKey(t.envOf(getenv), p.EnvKeys); name != "" {
+			envOnly[id] = name
+		}
+	}
+	if len(envOnly) == 0 {
+		return
+	}
+	for alias := range o.Runs {
+		m := t.Models[alias]
+		name, ok := envOnly[m.Provider]
+		if !ok || o.Hidden[alias] || o.Held[alias] != nil {
+			continue
+		}
+		o.Held[alias] = &HeldError{Alias: alias, Maker: m.Maker, Source: m.Provider, SourceName: t.ProviderName(m.Provider), EnvVar: name}
+	}
+}
+
+// storedKeyUsable says k, an inline api_key, is one Resolve would take and
+// Providers would call stored: not blank once trimmed, and one KeyProblem
+// accepts.
+func storedKeyUsable(k Secret) bool {
+	v := strings.TrimSpace(k.Reveal())
+	return v != "" && KeyProblem(v) == nil
 }
 
 // makerSources is each maker's sources: every provider whose maker it is

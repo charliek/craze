@@ -331,8 +331,10 @@ var errNativeNothingFunded = errors.New(`no model provider has an API key — ru
 // nativeHeldError is what the list says when the paid-source guard held
 // back every model a new native session could start on (plan 050 C5,
 // modeltable.HeldError): something is funded, so not errNativeNothingFunded's
-// "no model provider has an API key", but an earlier source of its maker is
-// set up and offers none of its models. The list's /model still offers the
+// "no model provider has an API key", but either the ChatGPT plan is signed
+// in and offers none of its models, or the model's key is found only in the
+// environment. craze auth login of the held error's Source answers either:
+// it signs in again, or stores the key. The list's /model still offers the
 // model by name.
 func nativeHeldError(held *modeltable.HeldError) error {
 	return fmt.Errorf("%s, so craze does not pick %s for you — run craze auth login %s, or pick a model with /model",

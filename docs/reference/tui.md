@@ -370,7 +370,7 @@ you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
 preferred model its account lists, `fireworks/kimi-k3p1-pro`,
 `openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
 Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
-for an OpenAI key, in that order
+for an OpenAI key stored with `craze auth login openai`, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
 that has a key and is offered, with a note — a
@@ -2307,14 +2307,18 @@ resolves against every model craze knows, a deprecated one included (also
 written `<provider id>/<alias>`), and refuses one whose provider has no key,
 saying how to give it one. The session list's `/model` offers the same models
 a session's list does. When the list would start a new native session on
-nothing because craze does not choose a later source of a maker for you
-while an earlier one's sign-in is there but broken for that maker (only the
-ChatGPT plan with no usable model list, another account's list or plan usage
-off, with an OpenAI key; a provider with a key never holds anything back),
-picking native says so —
-`signed in to ChatGPT, but its models are not available, so craze does not
-pick openai/gpt-6.1-sol for you — run craze auth login chatgpt, or pick a
-model with /model` — and its `/model` still offers the model.
+nothing because craze does not choose the funded models for you ([craze never
+moves a new session to another payer on its own](configuration.md#one-source-per-maker)),
+picking native says why and which `craze auth login` sets it up, and its
+`/model` still offers the model. A ChatGPT sign-in that offers none of its
+models (no usable model list, another account's list or plan usage off),
+with an OpenAI key, is `signed in to ChatGPT, but its models are not
+available, so craze does not pick openai/gpt-6.1-sol for you — run craze auth
+login chatgpt, or pick a model with /model`; an `OPENAI_API_KEY` in the
+environment with no key stored for `openai` is `OPENAI_API_KEY is set in the
+environment, but no key is stored for OpenAI, so craze does not pick
+openai/gpt-6.1-sol for you — run craze auth login openai, or pick a model
+with /model`.
 
 **The effort row follows the highlight on native.** A native session states
 every model's effort levels in its model list (the session capability

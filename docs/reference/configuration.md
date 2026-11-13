@@ -913,27 +913,28 @@ starts](#model-memory-recentjson)):
 
 So a machine with only a Fireworks key starts on `fireworks/kimi-k3p1-pro`, one with
 only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
-`anthropic/claude-opus-5-5`, one with only an OpenAI key on
-`openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan with a Fireworks
-key as well on the plan's model. OpenAI's key is last: a machine on which
-another provider's start model resolves starts there, as before. It does
-move two kinds of machine when `OPENAI_API_KEY` is exported (for another
-tool, say): one whose only funded models are your own (a local provider, say)
-used to start on the first of them by alias, and now starts on
-`openai/gpt-6.1-sol`, a paid model, since a provider's start model is tried
-before that last resort (an exported `ANTHROPIC_API_KEY` already did the
+`anthropic/claude-opus-5-5`, one with only an OpenAI key stored (`craze auth
+login openai`) on `openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan
+with a Fireworks key as well on the plan's model. OpenAI's key is last: a
+machine on which another provider's start model resolves starts there. An
+`OPENAI_API_KEY` found only in the environment (exported for another tool,
+say) is never where craze starts a session for you ([OpenAI](#openai)): a
+machine whose only other funded models are your own (a local provider, say)
+starts on the first of them by alias, and one with nothing else is told to
+store the key or name the model. With the key stored, such a machine starts
+on `openai/gpt-6.1-sol`, a paid model, since a provider's start model is
+tried before that last resort (an exported `ANTHROPIC_API_KEY` does the
 same); and one whose `provider_order` leaves `openai` out, where no listed
 provider's start resolves, falls to the first funded model by alias, which
-may be `openai/gpt-6-astra`. To keep craze off the key, write `env_keys = []`
-under `[providers.openai]` in `providers.toml`; to start on a model of your
-choosing, set `default_model`. `provider_order` in your
-`models.toml` changes the order; `default_model` picks one model outright.
-A start model is taken only while it is offered: of a maker several providers
-reach, only its first funded source's models are, and craze passes over a
-later source while an earlier one's sign-in is there but broken for that
-maker — only the ChatGPT plan with no usable model list, another account's
-list or plan usage off; a provider with a key never holds anything back ([One
-source per maker](#one-source-per-maker)).
+may be `openai/gpt-6-astra`. To start on a model of your choosing, set
+`default_model`. `provider_order` in your `models.toml` changes the order;
+`default_model` picks one model outright. A start model is taken only while
+it is offered and craze may choose it: of a maker several providers reach,
+only its first funded source's models are offered, and craze passes over a
+model that a ChatGPT sign-in before it offering none of its models holds
+back, or whose only key is an `OPENAI_API_KEY` in the environment ([craze
+never moves a new session to another payer on its
+own](#one-source-per-maker)).
 
 Fireworks' start model is Kimi K3.1 Pro, Moonshot's successor to Kimi K3,
 which is the owner's choice of 2026-11-11, not the result of an evaluation.
@@ -1133,9 +1134,11 @@ a shipped provider's after you point it at your own endpoint or give it
 credential. A provider with no usable key leaves its models unusable, not the
 others. A shipped provider's variable funds it as soon as it is exported:
 `OPENAI_API_KEY`, which many shells set for other tools, funds the
-[`openai`](#openai) provider. `env_keys = []` under the provider in
-`providers.toml` opts out: the variable then funds nothing, and is still kept
-out of the commands a session runs.
+[`openai`](#openai) provider, whose models then run by name — but craze never
+chooses one of them for you while that variable is its only key (store one
+with `craze auth login openai` for that). `env_keys = []` under the provider
+in `providers.toml` opts out: the variable then funds nothing, and is still
+kept out of the commands a session runs.
 
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout
@@ -1459,10 +1462,34 @@ plan](#the-chatgpt-plan). Connect it like any key provider: export
 openai`](cli.md#craze-auth-login) or [`/connect`](tui.md#connect). It is the
 last provider in the [start order](#the-shipped-catalog), so a machine on
 which another provider's start model resolves starts there. A new session
-starts on OpenAI's start model when no other provider's does: on a machine
-with only an OpenAI key, and on one whose only other funded models are your
-own (a provider's start model is tried before the last resort, the first
-funded model by alias).
+starts on OpenAI's start model when no other provider's does and a key is
+stored for `openai`: on a machine with only that key, and on one whose only
+other funded models are your own (a provider's start model is tried before
+the last resort, the first funded model by alias).
+
+**A key in the environment alone.** `OPENAI_API_KEY` is exported on many
+machines for other tools, and that is no consent to bill craze's sessions to
+it. So while the variable is the provider's only key — no key stored for
+`openai` — craze never chooses an OpenAI model for you: not as a new
+session's start, not as the first funded model by alias, and not as the
+model a resumed session falls back to. Each model still runs and is still
+listed: `--model openai/gpt-6.1-sol`, a `default_model` pin, a model you
+picked with `/model` (the model memory starts it again), a sub-agent's
+configured model and a resumed session on its own model all run on the
+variable. With nothing else to start on, a new session does not start, kind
+`config`:
+
+```
+native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.1-sol
+```
+
+and [`craze providers`](cli.md#craze-providers) shows native as `needs
+setup` with that reason and fix. Storing the key (`craze auth login openai`,
+or `/connect`) is the consent: then craze chooses OpenAI's models like any
+provider's, even with the variable still set. This is the catalog's own
+`env_key_by_name_only` mark, on `openai` and no other provider; no file of
+yours can set it, and an entry that moves the provider's `driver` or
+`base_url` drops it with the shipped variable.
 
 **Its models**, each on OpenAI's id of the same name:
 
@@ -1507,9 +1534,11 @@ answer), which OpenAI asks a caller replaying its own history to keep.
 **Its entry is not locked**, unlike Anthropic's: a `[providers.openai]` entry
 may set a `driver` or `base_url` of its own under the usual [merge
 rules](#how-the-files-merge) — one that does takes no key from
-`OPENAI_API_KEY` unless it writes `env_keys` too. An entry of yours that
-only sets an `api_key` inherits `env_keys`, so an exported `OPENAI_API_KEY`
-still wins over it. `env_keys = []` opts out of the variable.
+`OPENAI_API_KEY` unless it writes `env_keys` too, and is your own endpoint:
+a variable it names funds it, and is chosen, like any provider's. An entry
+of yours that only sets an `api_key` inherits `env_keys`, so an exported
+`OPENAI_API_KEY` is still the key its requests send; the stored key makes
+its models ones craze may choose. `env_keys = []` opts out of the variable.
 
 **What craze cannot know.** OpenAI's model list (`GET /v1/models`) names ids
 alone — no window, effort or price — so craze imports nothing from it: an
@@ -1802,11 +1831,14 @@ on the first of:
 
 Steps 2 to 5 start at the model's `default_effort`. Steps 3 to 5 are craze
 choosing for you: they never take a deprecated model while another is
-funded, never a model the source order hides, and never a model whose maker
-has an earlier source that is signed in but offers none of its models ([One
-source per maker](#one-source-per-maker): only the ChatGPT plan's broken
-sign-in; a provider with a key never holds anything back); steps 1 and 2 are your own
-choices, and a remembered or pinned deprecated model still starts. With no
+funded, never a model the source order hides, never a model the ChatGPT
+plan's broken sign-in holds back (one whose maker it is an earlier source of,
+or one billed per token on a provider after it in the provider order or left
+out of that order), and
+never an `openai` model whose only key is `OPENAI_API_KEY` in the environment
+([craze never moves a new session to another payer on its
+own](#one-source-per-maker)); steps 1 and 2 are your own choices, and a
+remembered or pinned deprecated model still starts. With no
 provider funded at all the session does not start, and says how to connect
 one; when only that last rule left nothing, it says which sign-in or key to
 repair and which `--model` to pass.
@@ -1954,29 +1986,54 @@ time. `/model` cannot pick a hidden model.
 **craze never moves a new session to another payer on its own.** When craze
 chooses for you — a provider's start model, the first funded model by alias,
 the last resort over deprecated models, or the model a resumed session falls
-back to — it passes over a model whose maker has an **earlier** source whose
-sign-in is there but broken for that maker: the ChatGPT plan signed in with
-no usable model list, another account's list or plan usage off. A provider
-with a key never holds anything back: its key resolves its models, and one
-that funds none of a maker's current models has left that maker (its models
-there are deprecated), so craze starts on the replacement elsewhere. So a lapsed
-ChatGPT list with an exported `OPENAI_API_KEY` never quietly starts sessions
-billed per token. Another maker's start model still starts (with a Fireworks
-key, say). When that leaves nothing, the session does not start, kind
-`config`, and says why instead of "no model provider has an API key":
+back to — it passes over a model for any of three reasons:
+
+- its maker has an **earlier** source whose sign-in is there but broken for
+  that maker: the ChatGPT plan signed in with no usable model list, another
+  account's list or plan usage off. "Earlier" is in the source order in
+  force, or the catalog's while `source_order = []` has the hiding off:
+  turning hiding off does not let craze choose a later source for you;
+- such a broken ChatGPT sign-in is in the [start
+  order](#the-shipped-catalog) (`provider_order`), the model's provider comes
+  after it there or is left out of it, and the model is billed per token,
+  whatever its maker: it is on a provider whose models are priced — it has a
+  price, or any model of its provider does (an Anthropic model only the
+  account's list names, or one of yours on `fireworks`, is billed all the
+  same). A provider before the sign-in would have been chosen first anyway,
+  so with the catalog's order a Z.AI key still starts on `glm-5.3`; a
+  provider none of whose models has a price (your own local server, say) is
+  no bill and still starts. A sign-in your `provider_order` leaves out is
+  never a start, so this rule holds nothing back for it — but the first
+  rule, which follows the source order, still holds OpenAI's models on a
+  later source;
+- it is `openai`'s and `OPENAI_API_KEY` in the environment is that
+  provider's only key ([a key in the environment alone](#openai)).
+
+A provider with a key never holds anything back for its own maker: its key
+resolves its models, and one that funds none of a maker's current models has
+left that maker (its models there are deprecated), so craze starts on the
+replacement elsewhere. So a lapsed ChatGPT list never quietly starts sessions
+billed per token on a provider after the plan in the start order or left out
+of it — with the catalog's order, not on the OpenAI key, and not on
+Fireworks, OpenRouter, Meta or Anthropic either. When that leaves nothing,
+the session does not
+start, kind `config`, and says why instead of "no model provider has an API
+key", naming the first model it passed over:
 
 ```
-native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; sign in again with craze auth login chatgpt, or start with --model openai/gpt-6.1-sol
+native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.1-sol
 ```
 
 [`craze providers`](cli.md#craze-providers) and the hub's create options show
 native as `needs setup` with the reason `signed in to ChatGPT, but its models
 are not available` and the fix `craze auth login chatgpt, or start with
---model openai/gpt-6.1-sol`, and the session list
-says so when you pick native. "Earlier" is in the order in force, or the
-catalog's while `source_order = []` has the hiding off: turning hiding off
-does not let craze choose a later source for you. The memory and the pin are
-your own choices, and are not held back.
+--model openai/gpt-6.1-sol` (with a Fireworks key instead, `--model
+fireworks/kimi-k3p1-pro`), and the session list says so when you pick
+native. When a model is passed over for more than one reason, the sign-in's
+is the one given. The memory and the pin are your own choices, and are not
+held back: a remembered `fireworks/kimi-k3p1-pro`, or `default_model =
+"openrouter/gemini-flash-latest"`, still starts beside a broken sign-in, and
+`provider_order = ["fireworks", "chatgpt"]` puts Fireworks before it.
 
 **Sub-agents.** The model an agent-tool call names is held to what the menu
 offers, plus what you configured — the `[subagents]` model and tiers, your

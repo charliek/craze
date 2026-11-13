@@ -359,7 +359,9 @@ type Start struct {
 //     (plan 018 §3.8);
 //  3. for each provider in StartOrder, the first of its start models that
 //     is eligible (offered — it resolves, is not deprecated and is not
-//     hidden — and not held back by the paid-source guard, Offers), at its
+//     hidden — and not held back by the paid-source guard, Offers: a
+//     broken ChatGPT sign-in before it, or a key found only in the
+//     environment for a provider the catalog marks), at its
 //     default_effort — the ChatGPT plan's when the account lists it and the
 //     sign-in funds it (plan 034 Q4): an owner starts on the chosen model of
 //     the first provider they fund, not on whichever sorts first;

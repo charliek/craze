@@ -2356,6 +2356,12 @@ The second line only when that variable is set. Nothing is saved, and craze
 exits 1, when the key is empty, shorter than 8 bytes, or overlaps craze's
 redaction marker — the error names the rule, never the key.
 
+`craze auth login openai` is also how craze may start a new session on
+OpenAI's models for you: an `OPENAI_API_KEY` found only in the environment
+runs them by name but is never chosen on its own ([a key in the environment
+alone](configuration.md#openai)). A stored key is, even while the variable is
+set too.
+
 `craze auth login anthropic` then fetches the [Anthropic account's model
 list](configuration.md#anthropic) (`GET /v1/models`, at most 30 seconds) with
 the key that funds Anthropic — the one just saved, or `ANTHROPIC_API_KEY` when
@@ -2574,7 +2580,9 @@ Z.AI Coding Plan  zai-coding-plan  not connected
 
 `openai` is OpenAI's API on a key, billed per token
 ([OpenAI](configuration.md#openai)); `chatgpt` is the ChatGPT subscription. An
-exported `OPENAI_API_KEY` connects `openai` as any provider's variable does.
+exported `OPENAI_API_KEY` connects `openai` as any provider's variable does,
+and its models run by name; but with no key stored as well, craze never
+chooses one of them for a new session on its own (`craze providers` says so).
 
 Then notes, on stderr, each starting `note: `: a stored key that cannot be
 used, an entry of yours that [repeats what craze
@@ -2639,13 +2647,20 @@ How each is judged:
 - **native** is ready when its model table loads and a model's provider has a
   key — what a native session would start on. With none it needs setup
   (`no model provider has a key`). It also needs setup when models are funded
-  but craze would not choose one for you, because an earlier [source of their
-  maker](configuration.md#one-source-per-maker) has a sign-in that is there
-  but broken for that maker — only the ChatGPT plan with no usable model
-  list, another account's list or plan usage off; a provider with a key never
-  holds anything back. Signed in to ChatGPT with no usable model list and an
-  OpenAI key is `signed in to ChatGPT, but its models are not available`, fix `craze auth
-  login chatgpt, or start with --model openai/gpt-6.1-sol`. The hub's create
+  but craze would not choose one for you ([craze never moves a new session to
+  another payer on its own](configuration.md#one-source-per-maker)), each
+  reason with its own fix. When the ChatGPT plan is signed in but offers none
+  of its models (no usable model list, another account's list, or plan usage
+  off) and every funded model is OpenAI's on another source or billed per
+  token (on a provider whose models are priced) after `chatgpt` in the start
+  order or on a provider left out of it, it is `signed in to
+  ChatGPT, but its models are not available`, fix `craze auth login chatgpt,
+  or start with --model openai/gpt-6.1-sol` (with only a Fireworks key, the
+  fix names `fireworks/kimi-k3p1-pro`). When the only funded models are
+  `openai`'s, by an `OPENAI_API_KEY` in the environment with no key stored,
+  it is `OPENAI_API_KEY is set in the environment, but no key is stored for
+  OpenAI`, fix `craze auth login openai, or start with --model
+  openai/gpt-6.1-sol`; the variable's value is never shown. The hub's create
   options say the same.
   `providers.toml` or `models.toml` that cannot be read makes it unavailable;
   the reason names the file and nothing from it, since the error can quote a

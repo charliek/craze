@@ -109,8 +109,13 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   start), `openai/gpt-6-astra`, `openai/gpt-6.1-terra` and `openai/gpt-6-luna`
   on the Responses API, each compacting at 85% of a 272,000-token context
   default (a trigger, not a cap) and priced above 272,000 at OpenAI's
-  long-context rates. An exported `OPENAI_API_KEY` now funds craze
-  (`env_keys = []` opts out).
+  long-context rates. An exported `OPENAI_API_KEY` runs its models by name
+  (`--model`, `default_model`, the model memory, a sub-agent's model), but
+  while it is the provider's only key craze never chooses one of them for you:
+  a new session with nothing else funded is refused, kind `config`, naming the
+  variable and `craze auth login openai`, which stores the key and lifts that
+  (the catalog's `env_key_by_name_only`, on `openai` alone). `env_keys = []`
+  opts out of the variable altogether.
 - Cache writes on the Responses API routes are counted as cache writes and
   priced at `cache_write`, or the input rate when a model has none.
 - On the `openai-responses` driver a 429 naming spent credit or a spend limit
@@ -160,13 +165,16 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   remembered model on a hidden source no longer starts new sessions: the next
   remembered model that is offered does, then the pin, then the provider
   order (`source_order` or `--model` keeps a hidden model as the start).
-  craze never starts a session on a later, paid source of a maker while an
-  earlier one has a sign-in that is there but broken for that maker — only
-  the ChatGPT plan with no usable model list, another account's list or plan
-  usage off; a provider with a key never holds anything back. With such a
-  sign-in and an OpenAI key, the start is refused,
-  kind `config`, naming the sign-in and `--model`, and `craze providers` says
-  `needs setup` with the same reason. A sub-agent call's model is held to the
+  While the ChatGPT plan is signed in but offers none of its models (no usable
+  model list, another account's list or plan usage off), craze never starts a
+  session for you on OpenAI's models from another source, nor on any model
+  billed per token (on a provider whose models are priced) of a provider
+  after `chatgpt` in the start order or left out of it (Fireworks,
+  OpenRouter, Meta, Anthropic, OpenAI in the catalog's): with such a sign-in
+  and only those keys the start is refused, kind `config`, naming the sign-in
+  and `--model`, and `craze providers` says `needs setup` with the same
+  reason. A Z.AI key, a provider of your own none of whose models has a
+  price, the model memory, `default_model` and `--model` still start. A sub-agent call's model is held to the
   menu plus what you configured. In the TUI a quota or plan-limit failure is
   followed by a note naming the maker's other funded sources and how to
   continue on one (never part of the failure a waiting command reads); `craze auth

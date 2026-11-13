@@ -527,37 +527,48 @@ OpenAI's own API on an API key, billed per token, with four models
 (`openai/gpt-6.1-sol`, `openai/gpt-6-astra`, `openai/gpt-6.1-terra`,
 `openai/gpt-6-luna`). It is not the ChatGPT plan, which is unchanged.
 
-- **An exported `OPENAI_API_KEY` now funds craze.** Its models are in
-  `/model` (unless the ChatGPT plan offers OpenAI's: [One source per
-  maker](#one-source-per-maker)), and a session may run on them. To keep craze off it, write
+- **An exported `OPENAI_API_KEY` runs OpenAI's models, but craze never
+  chooses one with it alone.** Its models are in `/model` (unless the ChatGPT
+  plan offers OpenAI's: [One source per maker](#one-source-per-maker)), and
+  `--model openai/gpt-6.1-sol`, a `default_model` pin, a model you pick with
+  `/model` (the model memory then starts it again) and a sub-agent's
+  configured model run on the variable. But many machines export it for other
+  tools, so while it is the provider's only key craze never starts a new
+  session on an OpenAI model for you, nor falls back to one: a machine whose
+  only key it is stays `needs setup`, now with the reason `OPENAI_API_KEY is
+  set in the environment, but no key is stored for OpenAI` and the fix
+  `craze auth login openai, or start with --model openai/gpt-6.1-sol`, and a
+  new session with no `--model` is refused with that reason (kind `config`).
+  Storing the key with `craze auth login openai` (or `/connect`) lets craze
+  choose its models; to keep craze off the variable altogether, write
   `env_keys = []` under `[providers.openai]` in `providers.toml`. The variable
   was already kept out of the commands a native session runs, as every key
   variable is.
-- **A machine with only that variable starts.** It was `needs setup` with no
-  key; a new session now starts on `openai/gpt-6.1-sol`. A machine on which
-  another provider's start model resolves starts where it did: `openai` is
-  last in the provider order.
-- **Two machines with the variable do move**, both only when nothing is
-  remembered and no `default_model` is pinned:
-    - one whose only funded models are your own (a local provider, say) used
-      to start on the first of them by alias, the last resort; it now starts
-      on `openai/gpt-6.1-sol`, a paid model, because a provider's start model
-      is tried before the last resort. An exported `ANTHROPIC_API_KEY`
-      already does the same.
+- **A machine with only an OpenAI key stored starts** on
+  `openai/gpt-6.1-sol`. A machine on which another provider's start model
+  resolves starts where it did: `openai` is last in the provider order.
+- **Two machines with an OpenAI key stored do move**, both only when nothing
+  is remembered and no `default_model` is pinned:
+    - one whose only other funded models are your own (a local provider, say)
+      starts on `openai/gpt-6.1-sol`, a paid model, rather than on the first
+      of yours by alias, the last resort, because a provider's start model is
+      tried before the last resort. An exported `ANTHROPIC_API_KEY` already
+      does the same.
     - one with a written `provider_order` that leaves `openai` out: its start
       model is never tried, but the last resort still considers every funded
       model by alias, and `openai/gpt-6-astra` sorts before `openrouter/…`
       and most others.
 
-    To opt out, write `env_keys = []` under `[providers.openai]` in
-    `providers.toml`, or pin the model you want with `default_model`.
+    To keep either where it was, pin the model you want with
+    `default_model`. With the variable alone, neither moves.
 - **A written `provider_order` must name `openai`** for a new session to start
   on its start model.
 - **Your own `[providers.openai]` or `openai/...` entries** now merge over the
   shipped ones ([how the files merge](../reference/configuration.md#how-the-files-merge)):
   an entry that only sets an `api_key` inherits `env_keys`, so an exported
-  `OPENAI_API_KEY` now wins over that key; one that changes `driver` or
-  `base_url` without `env_keys` takes nothing from the variable. A model entry
+  `OPENAI_API_KEY` is the key its requests send, while the stored key lets
+  craze choose its models; one that changes `driver` or `base_url` without
+  `env_keys` takes nothing from the variable. A model entry
   of yours under one of the four aliases changes only the keys it writes.
   An old import's `[providers.openai]` (`source = "gx"`) whose `base_url`
   points elsewhere (a LiteLLM proxy, say) now funds nothing, with one warning:
@@ -605,7 +616,8 @@ OpenAI's own API on an API key, billed per token, with four models
   other provider keep their transcripts as before.
 - **The Claude Code plugin's `craze:sol` and `craze:astra`** stay on the
   ChatGPT plan. With an OpenAI key alone, run `craze:delegate` with `target:
-  native openai/gpt-6.1-sol effort=high` ([Claude Code](claude-code.md#the-agents)).
+  native openai/gpt-6.1-sol effort=high`, which names the model, so a key
+  only in the environment runs it too ([Claude Code](claude-code.md#the-agents)).
 
 ### One source per maker
 
@@ -646,21 +658,31 @@ older binary should not write it.
   in `models.toml` (`source_order = ["openrouter"]`, say), or pass `--model`
   each time; `/model` cannot pick a hidden model. A remembered deprecated
   model still starts.
-- **craze no longer moves a new session to a paid source on its own** when an
-  earlier source of the same maker has a sign-in that is there but broken for
-  that maker — only the ChatGPT plan, with no usable model list, another
-  account's list, or plan usage off; a provider with a key never holds
-  anything back. With such a sign-in and an exported `OPENAI_API_KEY`, nothing
-  remembered and no pin, craze would otherwise start on `openai/gpt-6.1-sol`
-  with no word; it refuses (kind
+- **craze no longer moves a new session to a per-token bill on its own while
+  the ChatGPT plan is signed in but offers none of its models** — no usable
+  model list, another account's list, or plan usage off. It then passes over
+  OpenAI's models on every other source, and every model billed per token —
+  on a provider whose models are priced, an account-listed or hand-added
+  model with no price of its own included — on a provider after `chatgpt` in
+  the start order or left out of it: with the catalog's order, Fireworks,
+  OpenRouter, Meta, Anthropic and OpenAI. **This moves machines
+  that started before:** with such a sign-in and a Fireworks key (or an
+  OpenRouter, Meta or Anthropic key), nothing remembered and no pin, a new
+  session no longer starts on that provider's start model; it refuses (kind
   `config`): `native: signed in to ChatGPT, but its models are not available,
-  and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its
-  own; sign in again with craze auth login chatgpt, or start with --model
-  openai/gpt-6.1-sol`. Another maker's start still starts (with a Fireworks or
-  OpenRouter key too, the session starts there, as before). `craze providers`
-  and the hub show native as `needs setup` with that reason, not "no model
-  provider has a key". A resumed session whose own model no longer runs does
-  not fall back to such a model either.
+  and craze does not start a new session on fireworks/kimi-k3p1-pro
+  (Fireworks) on its own; run craze auth login chatgpt, or start with --model
+  fireworks/kimi-k3p1-pro`. Signing in again fixes it; so do `--model`, a
+  `default_model` pin, a model you picked with `/model` (the model memory),
+  or a `provider_order` that lists that provider before `chatgpt`. A Z.AI key,
+  before the plan in the order, still starts on `glm-5.3`, and a model on a
+  provider of your own none of whose models has a price still starts. A
+  registration a sign-out left behind holds nothing back. A sign-in your
+  `provider_order` leaves out holds back no other maker's models, but still
+  holds OpenAI's models on a later source (the source order's rule). `craze
+  providers` and the hub show native as `needs setup` with that reason, not
+  "no model provider has a key". A resumed session whose own model no longer
+  runs does not fall back to such a model either.
 - **A sub-agent call naming a hidden or deprecated model** that you did not
   configure is refused, naming the models it may use. It used to run. A
   persona's `model:` and `[subagents]` still resolve any model.

@@ -277,6 +277,11 @@ type Table struct {
 	// that names no maker.
 	catalogSources []string
 	providerMakers map[string]string
+	// envKeyByNameOnly are the catalog's env_key_by_name_only providers less
+	// one the user's providers.toml moved, as providerMakers are: a key
+	// found only in the environment for one of them never has craze choose
+	// its models for the owner (Offers). nil for a table with none.
+	envKeyByNameOnly map[string]bool
 
 	// carried binds each model Carry put in this table to the ChatGPT account
 	// its entry was bound to where it came from — the zero Account for one

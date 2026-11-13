@@ -22,21 +22,24 @@ const redacted = "[redacted]"
 // (P13): a server that echoes the key in an error's message, a request id
 // that holds it, a transport or a body that names it. ListModels runs
 // outside the model wrapper's scrubber, so the client takes it out itself.
-// A nil secret hides nothing. The key is matched exactly, plain, JSON-escaped
-// or percent-encoded (keyPattern); a server that puts other valid characters
-// inside it (a NUL, a zero-width space) is not matched — an accepted limit.
+// A nil secret hides nothing. The key is matched plain, JSON-escaped or
+// percent-encoded, with format characters or invalid bytes between its
+// characters (KeyPattern); a server that puts other characters inside it (a
+// NUL, a space) is not matched — an accepted limit: those do not draw as
+// nothing.
 type secret struct{ re *regexp.Regexp }
 
 func newSecret(key string) *secret {
 	if key == "" {
 		return nil
 	}
-	return &secret{re: keyPattern(key)}
+	return &secret{re: KeyPattern(key)}
 }
 
-// text is v with every spelling of the key replaced by redacted. v must be
-// valid text already (valid): a byte the scrub cannot see past, dropped
-// after it, would join the key back together (review c1r2 1).
+// text is v with every spelling of the key replaced by redacted, format
+// characters and invalid bytes inside it included (KeyGap). A message shown
+// to a person is made valid text before it (valid), so nothing dropped after
+// the scrub can join a key back together (review c1r2 1).
 func (s *secret) text(v string) string {
 	if s == nil {
 		return v
@@ -202,16 +205,28 @@ var jsonEscapes = map[rune]string{
 	'"': `\"`, '\\': `\\`, '/': `\/`, '\b': `\b`, '\f': `\f`, '\n': `\n`, '\r': `\r`, '\t': `\t`,
 }
 
-// keyPattern matches key as itself and in every spelling an error's text
+// KeyPattern matches key as itself and in every spelling an error's text
 // can give it, character by character: as it is, as a JSON \u escape (hex in
 // either case, a surrogate pair beyond the BMP), as its short JSON escape
 // where it has one, or percent-encoded (hex in either case) — so a server
 // that echoed the key escaped, in any subset of its characters, has not
 // slipped it past (the rule of the model wrapper's keyPattern, llm/scrub.go,
-// which this package may not import).
-func keyPattern(key string) *regexp.Regexp {
+// which this package may not import). A key that is not valid UTF-8 has its
+// bad bytes stand for U+FFFD, which the pattern matches in place of each,
+// along with each byte's own percent-encoding (%FF), as a URL escapes it.
+//
+// Between two of its characters it also matches any run of KeyGap: format
+// characters and invalid bytes, which a display drops, joining the key
+// again — so the whole key, separators and all, is what a scrub replaces,
+// before anything cuts the text. It is this client's scrub, and the one the
+// Anthropic model list's cache (internal/anthropicmodels), which runs outside
+// it, takes the same key out of its own errors with.
+func KeyPattern(key string) *regexp.Regexp {
 	var b strings.Builder
-	for _, r := range key {
+	for i, r := range key {
+		if i > 0 {
+			b.WriteString(KeyGap)
+		}
 		b.WriteString("(?:" + regexp.QuoteMeta(string(r)))
 		if r1, r2 := utf16.EncodeRune(r); r1 != utf8.RuneError {
 			fmt.Fprintf(&b, `|\\u(?i:%04x)\\u(?i:%04x)`, r1, r2)
@@ -225,7 +240,20 @@ func keyPattern(key string) *regexp.Regexp {
 		for _, c := range []byte(string(r)) {
 			fmt.Fprintf(&b, `%%(?i:%02x)`, c)
 		}
+		if _, size := utf8.DecodeRuneInString(key[i:]); r == utf8.RuneError && size == 1 {
+			// An invalid byte percent-encodes as itself (%FF), not as the
+			// U+FFFD it is read as.
+			fmt.Fprintf(&b, `|%%(?i:%02x)`, key[i])
+		}
 		b.WriteString(")")
 	}
 	return regexp.MustCompile(b.String())
 }
+
+// KeyGap is what KeyPattern lets stand between two of a key's characters:
+// format characters (Unicode Cf: a zero-width space, a word joiner, a
+// byte-order mark, a soft hyphen, a bidi control) and invalid bytes (read as
+// U+FFFD), which draw as nothing once a display drops them. The model
+// wrapper's own keyPattern (llm/scrub.go) takes its gap from here, so every
+// scrub of a key reads the same characters as nothing.
+const KeyGap = `[\p{Cf}\x{FFFD}]*`

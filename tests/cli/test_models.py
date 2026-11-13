@@ -7,8 +7,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import subprocess
+import threading
 from pathlib import Path
+
+import pytest
 
 from sse_fixture import SSEFixture, write_native_config
 from test_detach import _entries
@@ -109,6 +113,104 @@ def test_new_wait_refuses_before_any_host(craze_bin: Path, fake_agent_bin: Path,
         res = json.loads(out.stdout)
         assert out.returncode == 0 and res["status"] == "completed" and "warnings" not in res, out
         assert len(fixture.requests) == 1
+
+
+class _ProxyRecorder:
+    """A proxy that answers nothing: it records the first line of every
+    connection made to it (an HTTPS request's CONNECT names its host) and
+    closes it. With HTTPS_PROXY and HTTP_PROXY aimed here, a request any craze
+    process makes to a provider's endpoint arrives here first. Read lines only
+    after the with block: leaving it stops the thread, then accepts whatever
+    is still queued on the listening socket, so no connection is missed."""
+
+    def __init__(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(16)
+        self._sock.settimeout(0.2)
+        self.lines: list[bytes] = []
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+
+    def _serve(self) -> None:
+        while not self._done.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                continue
+            self._record(conn)
+
+    def _record(self, conn: socket.socket) -> None:
+        with conn:
+            conn.settimeout(1.0)
+            try:
+                self.lines.append(conn.recv(4096).split(b"\r\n", 1)[0])
+            except OSError:
+                self.lines.append(b"")
+
+    def __enter__(self) -> _ProxyRecorder:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join(timeout=WAIT)
+        assert not self._thread.is_alive(), "the proxy recorder's thread did not stop"
+        # Drain: a connection the kernel queued after the thread's last accept.
+        self._sock.setblocking(False)
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except (BlockingIOError, OSError):
+                break
+            self._record(conn)
+        self._sock.close()
+
+
+def test_an_openai_key_in_the_environment_alone_is_not_chosen(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard 2 (G1) through the built binary, in a scratch craze directory whose
+    only key is a dummy OPENAI_API_KEY: craze providers --json reports native
+    needs_setup, naming the variable (never its value) and the fix; craze new
+    --wait --json with no --model is the session start's kind config refusal,
+    with the same reason and fix, and leaves no session; no request leaves for
+    any provider. With the key stored for openai, native is ready."""
+    _config(fake_agent_bin)
+    dummy = "sk-guard-openai-dummy-0001"
+    monkeypatch.setenv("OPENAI_API_KEY", dummy)
+    reason = "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI"
+    fix = "craze auth login openai, or start with --model openai/gpt-6.1-sol"
+    with _ProxyRecorder() as proxy:
+        for name in ("HTTPS_PROXY", "HTTP_PROXY"):
+            monkeypatch.setenv(name, proxy.url)
+        for name in ("https_proxy", "http_proxy", "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        out = _craze(craze_bin, "providers", "--json")
+        assert out.returncode == 0, out
+        native = {p["id"]: p for p in _one_object(out)["providers"]}["native"]
+        assert native == {"id": "native", "label": "native", "state": "needs_setup", "reason": reason, "fix": fix}, native
+
+        out = _craze(craze_bin, "new", "--wait", "--json", "--provider", "native", "-C", str(tmp_path), "go")
+        assert out.returncode == 1, out
+        err = _one_object(out)["error"]
+        assert set(err) == {"message", "kind", "retryable"} and err["kind"] == "config" and err["retryable"] is False, err
+        assert f"native: {reason}, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run {fix}" in err["message"], err
+        assert dummy.encode() not in out.stdout + out.stderr, out
+        assert _entries(_home()) == []
+    assert proxy.lines == [], proxy.lines
+
+    native_dir = Path(os.environ["CRAZE_HOME"]) / "native"
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "providers.toml").write_text(f'version = 1\n\n[providers.openai]\napi_key = "{dummy}"\n', encoding="utf-8")
+    (native_dir / "providers.toml").chmod(0o600)
+    out = _craze(craze_bin, "providers", "--json")
+    assert out.returncode == 0, out
+    assert {p["id"]: p for p in _one_object(out)["providers"]}["native"] == {"id": "native", "label": "native", "state": "ready"}, out
 
 
 def test_the_lenient_entry_points(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:

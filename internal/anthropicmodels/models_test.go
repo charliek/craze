@@ -459,6 +459,84 @@ func TestErrorsCarryNoKey(t *testing.T) {
 	}
 }
 
+// TestScrubReadsFormatCharactersAsNothing (guard 2, G3): the cache's scrub
+// replaces a key with format characters (U+200B, U+00AD, a word joiner) or
+// an invalid byte between its characters, which a display drops, joining
+// it again — a key of metacharacters included — and leaves a key split by a
+// space, a part of the key, and ordinary text with those characters alone.
+// It behaves as the Messages API client's own scrub (messagesapi.KeyPattern,
+// whose test has the same inputs) on every input, and the long one finishes
+// with only the key replaced. A key too short to be one hides nothing.
+func TestScrubReadsFormatCharactersAsNothing(t *testing.T) {
+	const metaKey = `sk-(a.b)*+?[c]{2}|^$\x-0001`
+	for _, key := range []string{keyA, metaKey} {
+		h := len(key) / 2
+		var spread strings.Builder
+		for i, r := range key {
+			if i > 0 {
+				spread.WriteString("\u2060")
+			}
+			spread.WriteRune(r)
+		}
+		long := strings.Repeat(key[:len(key)-1]+"\u200b", 20000)
+		client := messagesapi.KeyPattern(key)
+		for _, tc := range []struct{ name, in, want string }{
+			{"a zero-width space", "k " + key[:h] + "\u200b" + key[h:] + ".", "k " + redacted + "."},
+			{"a soft hyphen", key[:h] + "\u00ad" + key[h:], redacted},
+			{"an invalid byte", key[:h] + "\xff" + key[h:], redacted},
+			{"a word joiner after every character", "x " + spread.String() + " y", "x " + redacted + " y"},
+			{"before and after stand", "\u200b" + key + "\u00ad", "\u200b" + redacted + "\u00ad"},
+			{"a space is no gap", key[:h] + " " + key[h:], key[:h] + " " + key[h:]},
+			{"a part of the key", key[:h] + "\u200b", key[:h] + "\u200b"},
+			{"ordinary text", "soft\u00adhyphen, zero\u200bwidth, a \xff byte", "soft\u00adhyphen, zero\u200bwidth, a \xff byte"},
+			{"a long input", long + key, long + redacted},
+		} {
+			got := scrubText(tc.in, key)
+			if got != tc.want {
+				t.Errorf("%s: scrubText(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+			}
+			if same := client.ReplaceAllLiteralString(tc.in, redacted); got != same {
+				t.Errorf("%s: the cache scrubs to %q, the client to %q", tc.name, got, same)
+			}
+			if err := scrub(errors.New(tc.in), key); err.Error() != tc.want {
+				t.Errorf("%s: scrub = %q, want %q", tc.name, err, tc.want)
+			}
+		}
+	}
+	if v := "sk-(aXb)*+?[c]{2}|^$\\x-0001"; scrubText(v, metaKey) != v {
+		t.Errorf("%q, which is not the key, was scrubbed", v)
+	}
+	if short := "sk-\u200b1"; scrubText(short, "sk-1") != short {
+		t.Errorf("a key too short to be one hid %q", short)
+	}
+	// The one spelling the client's pattern does not read: a query string's
+	// "+" for a space.
+	if got := scrubText("?k="+url.QueryEscape("sk-ant canary 0001"), "sk-ant canary 0001"); got != "?k="+redacted {
+		t.Errorf("a query-encoded key with a space scrubs to %q", got)
+	}
+}
+
+// TestScrubKeepsEveryURLSpelling (guard 2 review F2): a key with an invalid
+// byte and a character a path leaves as it is ("+"), echoed path-escaped —
+// its bad byte as %FF — is replaced; and a key with spaces, echoed in a query
+// string's spelling ("+" for each) with a format character inside, is
+// replaced whole.
+func TestScrubKeepsEveryURLSpelling(t *testing.T) {
+	const bad = "sk-ant+abcdef0123456789\xff"
+	if esc := url.PathEscape(bad); esc != "sk-ant+abcdef0123456789%FF" {
+		t.Fatalf("premise: the path spelling is %q", esc)
+	}
+	for _, v := range []string{"sk-ant+abcdef0123456789%FF", "sk-ant+abcdef0123456789%ff"} {
+		if got := scrubText("/v1/"+v+"/x", bad); got != "/v1/"+redacted+"/x" {
+			t.Errorf("the path spelling %q scrubs to %q", v, got)
+		}
+	}
+	const spaced = "sk-ant canary 0001"
+	if got := scrubText("?k=sk-ant+can\u200bary+0001&x=1", spaced); got != "?k="+redacted+"&x=1" {
+		t.Errorf("the query spelling split by a format character scrubs to %q", got)
+	}
+}
+
 // TestTheRealClient: the default fetch is the Messages API client against
 // this process's origin — here a fake on loopback, named by the test
 // override (P21, P30): it lists, the key goes in x-api-key, and a 401 that

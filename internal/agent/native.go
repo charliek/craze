@@ -1711,11 +1711,13 @@ func retiredNativeModel(table *modeltable.Table, raw string) (modeltable.Retired
 
 // heldText is the start error when the paid-source guard held back every
 // model craze could have chosen (modeltable.HeldError, plan 050 C5): a key
-// is there, but the ChatGPT plan, an earlier source of the model's maker, is
-// signed in and offers none of its models (no usable list, another
-// account's, or plan usage off), and craze does not move a new session to
-// another payer on its own. It names the sign-in to repair and the model to
-// pass, never a token.
+// is there, but either the ChatGPT plan is signed in and offers none of its
+// models (no usable list, another account's, or plan usage off), and craze
+// does not move a new session to another payer on its own; or the model's
+// key is found only in the environment, which is no consent to bill it. One
+// sentence serves both: the held error's reason, then its fix — the sign-in
+// or the key to set up, and the model to pass. It names a provider, a
+// variable's name and a model, never a token or a key.
 func heldText(table *modeltable.Table, held *modeltable.HeldError) string {
 	via := ""
 	if m, ok := table.Models[held.Alias]; ok {
@@ -1723,8 +1725,8 @@ func heldText(table *modeltable.Table, held *modeltable.HeldError) string {
 			via = " (" + sanitizeLine(p.Name) + ")"
 		}
 	}
-	return fmt.Sprintf("native: %s, and craze does not start a new session on %s%s on its own; sign in again with craze auth login %s, or start with --model %s",
-		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), via, sanitizeLine(held.Source), sanitizeLine(held.Alias))
+	return fmt.Sprintf("native: %s, and craze does not start a new session on %s%s on its own; run %s",
+		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), via, sanitizeLine(held.Fix()))
 }
 
 // nothingFundedText is the start error when no model's provider has a key

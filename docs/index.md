@@ -64,7 +64,10 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   ([TUI reference](reference/tui.md#effort)).
 - **Native start models.** A new native session starts on the first provider
   you have connected, in the order Z.AI, ChatGPT plan, Fireworks, OpenRouter,
-  Meta, Anthropic, and last an OpenAI API key
+  Meta, Anthropic, and last an OpenAI API key stored with `craze auth login
+  openai`; while a ChatGPT sign-in offers none of its models, craze never
+  moves a new session on its own to a per-token provider after it in that
+  order, nor onto an `OPENAI_API_KEY` that is only in the environment
   ([Configuration](reference/configuration.md#the-shipped-catalog)).
 - **A render check.** `craze frame` renders the TUI once for tests
   ([Testing](development/testing.md#craze-frame)).

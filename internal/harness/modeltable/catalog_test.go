@@ -327,6 +327,12 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	if want := map[string]string{"chatgpt": "openai", "openai": "openai", "meta": "meta", "zai-coding-plan": "zai", "anthropic": "anthropic"}; !maps.Equal(c.ProviderMakers, want) {
 		t.Fatalf("provider makers = %v, want %v", c.ProviderMakers, want)
 	}
+	// A key found only in the environment is never chosen for the owner on
+	// openai, and on no other provider: marking a released one would refuse
+	// starts that work today (the owner's decision of 2026-11-12).
+	if want := map[string]bool{"openai": true}; !maps.Equal(c.EnvKeyByNameOnly, want) {
+		t.Fatalf("env_key_by_name_only = %v, want %v", c.EnvKeyByNameOnly, want)
+	}
 	wantModelMakers := map[string]string{
 		"openrouter/gpt-sol-latest": "openai", "openrouter/gpt-astra-latest": "openai",
 		"openrouter/gpt-luna-latest": "openai", "openrouter/gpt-terra-latest": "openai",
@@ -624,11 +630,20 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("%s long rates = %v, want %v", alias, got, want.long)
 		}
 	}
-	// An OpenAI key alone starts on Sol at medium; beside an Anthropic key it
-	// moves nothing: openai is last.
-	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret"}))
+	// An OpenAI key stored alone starts on Sol at medium; one found only in
+	// the environment is never chosen (env_key_by_name_only); beside an
+	// Anthropic key it moves nothing: openai is last.
+	stored, err := Load(writeFiles(t, "version = 1\n\n[providers.openai]\napi_key = \"sk-openai-canary-not-a-secret\"\n", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err = stored.StartPick(nil, fakeEnv(nil))
 	if err != nil || start != (Start{Alias: "openai/gpt-6.1-sol", Effort: "medium"}) {
-		t.Fatalf("an OpenAI key alone starts on %+v, %v; want openai/gpt-6.1-sol at medium", start, err)
+		t.Fatalf("an OpenAI key stored alone starts on %+v, %v; want openai/gpt-6.1-sol at medium", start, err)
+	}
+	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret"}))
+	if h := (*HeldError)(nil); !errors.As(err, &h) || h.EnvVar != "OPENAI_API_KEY" || h.Alias != "openai/gpt-6.1-sol" {
+		t.Fatalf("an OpenAI key in the environment alone starts on %+v, %v; want openai/gpt-6.1-sol held", start, err)
 	}
 	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret", "ANTHROPIC_API_KEY": anthropicKey}))
 	if err != nil || start.Alias != "anthropic/claude-opus-5-5" {
