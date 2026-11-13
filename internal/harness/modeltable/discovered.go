@@ -207,8 +207,7 @@ func signInState(dir string) (KeySource, Account) {
 		return KeyNone, Account{}
 	}
 	account := Account{Subject: c.Subject, ClientID: c.ClientID}
-	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
-	tokens := err == nil && info.Mode().IsRegular() && info.Size() > 0
+	tokens := hasTokenFile(dir)
 	switch {
 	case tokens && c.PlanUsage:
 		return KeySignedIn, account
@@ -216,6 +215,25 @@ func signInState(dir string) (KeySource, Account) {
 		return KeyPlanDisabled, account
 	}
 	return KeyNone, account
+}
+
+// hasTokenFile says dir's sign-in token file is there: a non-empty regular
+// file, stat'ed and never read.
+func hasTokenFile(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0
+}
+
+// signedInAtAll says someone is signed in to the ChatGPT plan in dir, whether
+// or not it funds the plan's models: a registration and a token file — plan
+// usage granted or not (plan 050 C5's "set up" source). A registration a
+// sign-out left behind, with no tokens, is not.
+func signedInAtAll(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, ok := readChatGPTClient(dir)
+	return ok && hasTokenFile(dir)
 }
 
 // Account names a ChatGPT account's registration as the model list is bound
@@ -341,6 +359,11 @@ func minimumMet(min, pin string) bool {
 type discovered struct {
 	rank    map[string]int
 	account Account
+	// newer is how many entries the list holds that this craze leaves out
+	// for their minimum client version (minimumMet): a list fetched by
+	// another craze, which cannot tell a model it lacks from one it does not
+	// list (plan 050 C2, Table.AccountListRead).
+	newer int
 }
 
 // withDiscovered adds the ChatGPT plan's models to cat, the merge's own copy
@@ -433,6 +456,7 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 			// A list fetched by a newer craze whose pin is higher than this
 			// one's: an older binary never offers what it has not verified
 			// (plan 034 Q3). Silent, as a model the account does not list is.
+			d.newer++
 			continue
 		}
 		model := discoveredModel(m, cat.ChatGPT.Models[m.Slug])

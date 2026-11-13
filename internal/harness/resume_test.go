@@ -397,6 +397,24 @@ func TestResumeModelPrecedence(t *testing.T) {
 			t.Fatalf("falling back to the default warned %q; want one warning naming both models", *warns)
 		}
 	})
+	t.Run("a deprecated pin still continues", func(t *testing.T) {
+		// The pin is unrestricted in the fallback (plan 050): deprecated,
+		// it is still where a resume whose model is gone continues.
+		f := newFixture(t, url)
+		id := storedTurn(t, f, f.options(), onB)
+		delete(f.table.Models, "test/b")
+		deprecate(f.table.Models, "test/a", "other/c")
+		if f.table.DefaultModel != "test/a" {
+			t.Fatalf("premise: the pin is %q, want test/a", f.table.DefaultModel)
+		}
+		opts := resumeOptions(f.options(), id)
+		warns := warned(&opts)
+		s := resumed(t, opts)
+		current(t, s, "test/a", "high")
+		if len(*warns) != 1 || !strings.Contains((*warns)[0], "continuing on test/a") {
+			t.Fatalf("falling back to a deprecated pin warned %q; want one warning naming test/a", *warns)
+		}
+	})
 	t.Run("no pin: the provider order's start", func(t *testing.T) {
 		// Plan 038 §2: a table over a catalog has no default model; with no
 		// pin, a resume whose model is gone continues on the first start
@@ -422,6 +440,35 @@ func TestResumeModelPrecedence(t *testing.T) {
 		current(t, s, "other/c", "")
 		if len(*warns) != 1 || !strings.Contains((*warns)[0], "continuing on other/c") {
 			t.Fatalf("falling back to the start model warned %q; want one warning naming it", *warns)
+		}
+	})
+	t.Run("a start model that is not offered is passed over", func(t *testing.T) {
+		// Plan 050 C1: the fallback over the start models takes only an
+		// offered one. other/c runs but is deprecated (a catalog built in
+		// memory, which LoadWith takes as it is), so the resume continues on
+		// the next start; the transcript's own model, by identity, would
+		// still be taken whatever its state.
+		f := newFixture(t, url)
+		id := storedTurn(t, f, f.options(), onB)
+		models := maps.Clone(f.table.Models)
+		delete(models, "test/b")
+		deprecate(models, "other/c", "test/a")
+		cat := &modeltable.Catalog{
+			ProviderOrder: []string{"other", "test"},
+			Starts:        map[string][]string{"other": {"other/c"}, "test": {"test/a"}},
+			Providers:     f.table.Providers, Models: models,
+		}
+		table, err := modeltable.LoadWith(t.TempDir(), cat)
+		if err != nil || !table.Models["other/c"].Deprecated {
+			t.Fatalf("control: the table over the catalog = %v, other/c deprecated %v", err, table.Models["other/c"].Deprecated)
+		}
+		f.table = table
+		opts := resumeOptions(f.options(), id)
+		warns := warned(&opts)
+		s := resumed(t, opts)
+		current(t, s, "test/a", "high")
+		if len(*warns) != 1 || !strings.Contains((*warns)[0], "continuing on test/a") {
+			t.Fatalf("falling back past a deprecated start warned %q; want one warning naming test/a", *warns)
 		}
 	})
 	t.Run("an explicit model that does not resolve refuses", func(t *testing.T) {

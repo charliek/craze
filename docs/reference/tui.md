@@ -362,16 +362,20 @@ place too; see [Compaction](#compaction).
 A **new** native session starts where you left off: a model or effort picked
 in any native session's [`/model`](#model-dialog) is remembered, and the next
 session with no `--model` starts on the newest remembered model whose provider
-has a key, at the effort last used on it. With no remembered model it can use,
+has a key and that the [source order](configuration.md#one-source-per-maker)
+does not hide, at the effort last used on it. With no remembered model it can use,
 it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
-preferred model its account lists, `fireworks/ember-1`,
+preferred model its account lists, `fireworks/kimi-k3p1-pro`,
 `openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
-Claude Opus the Anthropic account lists (at `medium`), in that order
+Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
+for an OpenAI key stored with `craze auth login openai`, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
-that has a key, with a note. `--model` picks the model for one start — at
+that has a key and is offered, with a note — a
+[deprecated](configuration.md#deprecated-models) one only when nothing else
+is funded ([the full rules](configuration.md#model-memory-recentjson)). `--model` picks the model for one start — at
 the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
@@ -1369,9 +1373,10 @@ nothing.
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
-  provider has a key, else your `default_model` when its provider has one,
-  else the start model of the first connected provider in the provider order;
-  else the first model (alphabetically) whose key resolves. With no
+  provider has a key and that the source order does not hide, else your
+  `default_model` when its provider has one, else the start model of the
+  first connected provider in the provider order; else the first offered
+  model (alphabetically) whose key resolves. With no
   provider funded it says so (`no model provider has an API key — run craze
   auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or
   set its API key variable`) and leaves the model to the agent's own.
@@ -1514,11 +1519,23 @@ provider, where the tier names are Claude's own families: there an unmapped
 the session's model table has (`model: haiku` under Claude Opus 5.5 runs on
 Claude Haiku 5.5), and on the parent's model when it has none.
 `[subagents.tiers]` still wins on every parent, and the `agent` tool's
-description lists only the tiers it maps. Every alias
+description lists only the tiers it maps. The models that description lists —
+and that its "Unknown model" answer names — are the ones a `/model` list would
+offer (funded, not [deprecated](configuration.md#deprecated-models), not
+hidden by the [source order](configuration.md#one-source-per-maker)) plus the
+ones you configured: the `[subagents]` model, each tier's model, your
+`default_model` pin and the parent's own model. A call's `model` is held to
+that list: a call naming any other model of the table — a hidden or
+deprecated one you did not configure — is refused with `Model not offered to
+sub-agents`, naming the list. A persona's `model:` and the `[subagents]`
+settings still resolve any model. A child works within its own model's
+[context default](configuration.md#native-context-default). Every alias
 named in `[subagents]` or `[subagents.tiers]` should be a model — one craze
 ships or one in `models.toml`; one that is not falls back to the default,
-never stopping the session: silently for a model a release retired, with a
-warning for any other unknown name (see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
+never stopping the session: silently for a model a release retired with no
+replacement named, with a warning naming the replacement for one retired with
+one, and with a warning for any other unknown name; a deprecated model stays,
+with a warning naming its replacement (see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
 itself is refused as a tier key, since a tier mapping to `inherit` could never
 be reached. For example:
 
@@ -1527,9 +1544,9 @@ be reached. For example:
 model  = ""   # optional default for children; "" = the parent's
 effort = ""   # optional default effort
 [subagents.tiers]   # optional: what a Claude tier name means here
-opus   = "fireworks/kimi-k3"
+opus   = "fireworks/kimi-k3p1-pro"
 sonnet = "glm-5.3"
-haiku  = "fireworks/deepseek-v4p1-flash"
+haiku  = "fireworks/deepseek-v4p1-flash-1017"
 ```
 
 The `agent` tool runs at most four children at once, background ones included.
@@ -1541,8 +1558,10 @@ sub-agent slots are in use…`).
 
 On the native provider (`--provider native`), a long session
 summarizes its own context rather than growing it forever. Once the context
-reaches 85% of the model's context window — capped at the window less its
-[output ceiling](configuration.md#native-output-ceiling) — craze summarizes the
+reaches 85% of the context the model works within — its
+[context default](configuration.md#native-context-default) when it has one,
+else its context window — capped at the window less its
+[output ceiling](configuration.md#native-output-ceiling), craze summarizes the
 conversation so far and carries on from the summary in place of it. The
 check runs before a turn's first request and again after every step that
 called a tool, so a turn that crosses the line partway through splits into
@@ -1635,6 +1654,11 @@ spent, the turn's amount then the session's:
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
 | no usage yet (ACP, or before native's first step) | no part at all |
+
+`NN% ctx` is the context's share of the context the model works within: its
+[context default](configuration.md#native-context-default) when it has one,
+else its context window — the same measure automatic
+[compaction](#compaction) uses.
 
 Money is to the cent, rounded half up, and reads `<$0.01` for an amount
 above nothing that would otherwise round to nothing. A `+` on an amount
@@ -1917,7 +1941,9 @@ provider's `api_key` in `providers.toml` (see
 [Keys](configuration.md#keys)). Like `craze auth login` it never checks the
 key with the provider: a wrong one shows as an error on first use. The
 [ChatGPT plan](configuration.md#the-chatgpt-plan), which takes no key, is
-signed in to instead, in the same box (below).
+signed in to instead, in the same box (below). **OpenAI** in the list is
+OpenAI's API on a key, billed per token
+([OpenAI](configuration.md#openai)); the ChatGPT plan is the subscription.
 It exists in native sessions only: in a cursor, grok or gx session it is not in
 the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
 what the last row of native's [`/model`](#model-dialog) opens, while some
@@ -1956,7 +1982,27 @@ no provider has one ([below](#connect)).
   says `Connected <Name>. New sessions offer its models; to use them in this
   conversation, /exit and run craze -c.`, and when its host reads another
   craze directory, `Connected <Name> in this craze directory, but this
-  session's host reads another one, so it does not see its models.` Another
+  session's host reads another one, so it does not see its models.` The
+  note follows the [source order](configuration.md#one-source-per-maker):
+  when some of the provider's models come from another source it says so
+  instead of calling them in `/model` — `Connected OpenRouter. Its models are
+  in /model now, except its Meta models, which come from Meta; they still run
+  with --model (source_order in models.toml changes the order).` — and when
+  all of them do, `Connected OpenAI. None of its models are listed: OpenAI
+  models come from ChatGPT plan; they still run with --model (source_order in
+  models.toml changes the order).` When the provider takes a maker's models
+  over, a sentence follows: `GLM models come from it now; those of OpenRouter
+  are no longer listed. They still run with --model (source_order in
+  models.toml changes the order).` A sign-in's note does the same for the
+  plan's models (`None of the ChatGPT plan's models are listed: OpenAI models
+  come from OpenAI; …` when `source_order` puts the key first). Those two
+  sentences speak in the present only once the session has taken its models
+  up; while a turn runs they say what happens after it (`None of its models
+  will be listed after this turn: …`, `GLM models will come from it after this
+  turn; those of OpenRouter will no longer be listed.`), and when the session
+  could not take them up, what new sessions do (`New sessions list none of its
+  models: …`, `In new sessions GLM models come from it; those of OpenRouter
+  are not listed there.`). Another
   provider's stored key that
   cannot be used is kept as it was, and named in a note after it. A store that
   refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
@@ -2130,7 +2176,9 @@ notice says depends on the answer:
 | nothing had changed, or the files could not be read | the old note | the old note |
 | it cannot take up models (an ACP session, or a host from before the method), or did not answer | the old note, and no call is made on a session that cannot | the old note |
 
-The old note is `New sessions offer its models; to use them in this
+Each of these says only what the [source
+order](configuration.md#one-source-per-maker) lists, as above. The old note is
+`New sessions offer its models; to use them in this
 conversation, /exit and run craze -c.` (`…the ChatGPT plan's models…` for a
 sign-in): the models are in the next session, or in this conversation after
 `/exit` and `craze -c`. The *another craze directory* case is a session
@@ -2220,8 +2268,28 @@ Anthropic's together newest first, each block placed by its provider's name
 group.
 
 A native session lists only the models of providers that have a key — an
-exported variable or a stored one ([Keys](configuration.md#keys)) — plus the
-model it is running on, and says nothing about the providers that have none,
+exported variable or a stored one ([Keys](configuration.md#keys)) — never
+a [deprecated](configuration.md#deprecated-models) model, and, of a maker
+whose models several providers reach (OpenAI, Meta, GLM, DeepSeek), only the
+models of its first funded source in the [source
+order](configuration.md#one-source-per-maker): with the ChatGPT plan's list and
+an OpenAI key, the plan's models and no `openai/*` row. It also lists the
+model it is running on (deprecated or hidden, or not); switching away from a
+model the list no longer offers drops its row. A key stored or a sign-in
+completed while the session runs can move a maker's source: the list follows
+it, and the current model keeps running and stays listed. To run a hidden
+model, end the session with `/exit` and continue it with `craze -c --model
+<alias>` (a running host ignores `--model` on `craze -c`); `/model` does not
+switch to one. A native turn that fails on a quota or plan limit is followed by
+a note, after the failure's row, naming the other funded sources of the
+model's maker, who pays for each, and that route (`OpenAI models are also
+funded by your OpenAI key (billed per token): openai/gpt-6-astra, … To use
+one, end this session with /exit, then run craze -c --model
+openai/gpt-6.1-sol`); the TUI works it out from its own craze directory, and
+the failure's own message is unchanged. A session that opens on a deprecated model says
+so once, as a note, in the words the waiting commands print (`<alias> is
+deprecated; use <replacement>`, [model notices](cli.md#model-notices)), judged
+from this TUI's own craze directory. It says nothing about the providers that have none,
 except one row: while some provider has no key, the list ends with
 `Connect a provider…`, which `↑`/`↓` and a click reach like any row and which
 opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is
@@ -2235,8 +2303,22 @@ never has the row, and never asks. A model you pick in this session moves up in
 this session's list at once — the switch republishes the list, ranked again —
 and in the next session's. A typed `/model <alias>` naming a model the list
 leaves out fails as an unknown model does; `--model <alias>` at start still
-resolves against every model craze knows, and refuses one whose provider has
-no key, saying how to give it one.
+resolves against every model craze knows, a deprecated one included (also
+written `<provider id>/<alias>`), and refuses one whose provider has no key,
+saying how to give it one. The session list's `/model` offers the same models
+a session's list does. When the list would start a new native session on
+nothing because craze does not choose the funded models for you ([craze never
+moves a new session to another payer on its own](configuration.md#one-source-per-maker)),
+picking native says why and which `craze auth login` sets it up, and its
+`/model` still offers the model. A ChatGPT sign-in that offers none of its
+models (no usable model list, another account's list or plan usage off),
+with an OpenAI key, is `signed in to ChatGPT, but its models are not
+available, so craze does not pick openai/gpt-6.1-sol for you — run craze auth
+login chatgpt, or pick a model with /model`; an `OPENAI_API_KEY` in the
+environment with no key stored for `openai` is `OPENAI_API_KEY is set in the
+environment, but no key is stored for OpenAI, so craze does not pick
+openai/gpt-6.1-sol for you — run craze auth login openai, or pick a model
+with /model`.
 
 **The effort row follows the highlight on native.** A native session states
 every model's effort levels in its model list (the session capability

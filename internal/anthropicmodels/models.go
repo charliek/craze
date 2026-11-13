@@ -33,6 +33,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -325,16 +327,17 @@ var classes = []error{ErrNoKey, ErrIncomplete, ErrEmpty, ErrTooLarge,
 // scrub is err with the key taken out (P13): the Messages API client scrubs
 // what it returns, but a fetch runs outside the model wrapper and a
 // replacement fetch need not, so every error is rebuilt from its text with
-// each spelling of the key — plain, trimmed, JSON-escaped, percent-encoded —
-// replaced, and never keeps its cause, whose fields may hold what its text
-// does not show. It keeps what a caller classifies by: the class its cause is
-// (classes), and an API error's status and type, as a copy whose texts are
-// scrubbed too (an *messagesapi.Error, through errors.As).
+// each spelling of the key replaced (scrubber), and never keeps its cause,
+// whose fields may hold what its text does not show. It keeps what a caller
+// classifies by: the class its cause is (classes), and an API error's status
+// and type, as a copy whose texts are scrubbed too (an *messagesapi.Error,
+// through errors.As).
 func scrub(err error, key string) error {
 	if err == nil {
 		return nil
 	}
-	s := &scrubbedError{msg: scrubText(err.Error(), key)}
+	hide := scrubber(key)
+	s := &scrubbedError{msg: hide(err.Error())}
 	for _, c := range classes {
 		if errors.Is(err, c) {
 			s.class = c
@@ -343,25 +346,48 @@ func scrub(err error, key string) error {
 	}
 	if apiErr, ok := errors.AsType[*messagesapi.Error](err); ok {
 		c := *apiErr
-		c.Type, c.Message, c.RequestID = scrubText(c.Type, key), scrubText(c.Message, key), scrubText(c.RequestID, key)
+		c.Type, c.Message, c.RequestID = hide(c.Type), hide(c.Message), hide(c.RequestID)
 		s.api = &c
 	}
 	return s
 }
 
-// scrubText is v with every spelling of key replaced by redacted.
-func scrubText(v, key string) string {
+// scrubText is v with every spelling of key replaced by redacted
+// (scrubber).
+func scrubText(v, key string) string { return scrubber(key)(v) }
+
+// scrubber replaces every spelling of key, trimmed, in a text with
+// redacted: the Messages API client's own pattern (messagesapi.KeyPattern) —
+// the key plain, JSON-escaped or percent-encoded in any of its characters,
+// with format characters or invalid bytes between them, which a display
+// drops — and, for a key with a space, the same pattern over the key with
+// "+" for each space, a query string's spelling of it; then the key's whole
+// query and path encodings, as written. A key too short to be one hides
+// nothing: Fetch and Refresh refuse it before any request.
+func scrubber(key string) func(string) string {
 	if !usable(key) {
-		return v // no key: Fetch and Refresh refuse it before any request
+		return func(v string) string { return v }
 	}
 	k := strings.TrimSpace(key)
-	quoted, _ := json.Marshal(k)
-	for _, form := range []string{key, k, string(quoted[1 : len(quoted)-1]), url.QueryEscape(k), url.PathEscape(k)} {
-		if form != "" {
-			v = strings.ReplaceAll(v, form, redacted)
+	patterns := []*regexp.Regexp{messagesapi.KeyPattern(k)}
+	if strings.Contains(k, " ") {
+		patterns = append(patterns, messagesapi.KeyPattern(strings.ReplaceAll(k, " ", "+")))
+	}
+	var forms []string
+	for _, f := range []string{url.QueryEscape(k), url.PathEscape(k)} {
+		if f != "" && f != k && !slices.Contains(forms, f) {
+			forms = append(forms, f)
 		}
 	}
-	return v
+	return func(v string) string {
+		for _, re := range patterns {
+			v = re.ReplaceAllLiteralString(v, redacted)
+		}
+		for _, f := range forms {
+			v = strings.ReplaceAll(v, f, redacted)
+		}
+		return v
+	}
 }
 
 // scrubbedError is an error rebuilt from another's scrubbed text: it

@@ -336,6 +336,9 @@ type connectSavedMsg struct {
 	name     string
 	err      string
 	notes    []string
+	// sources is what the source order makes of the provider's models now
+	// (plan 050 C5, connectSourcesOf), which the connected note says.
+	sources connectSources
 }
 
 // connectRowMsg says whether the model dialog numbered gen ends with the
@@ -453,6 +456,9 @@ func saveConnectKey(shown uint64, dir string, getenv func(string) string, p mode
 				}
 			}
 		}
+		if table, err := modeltable.Load(dir); err == nil {
+			msg.sources = connectSourcesOf(table, p.ID, getenv)
+		}
 		return msg
 	}
 }
@@ -532,7 +538,7 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		// and the notice says what came of it; the other providers' notes
 		// follow it, as they always have.
 		return m.thenRefreshModels(func(m Model, r *agent.ModelsRefresh) Model {
-			m.addNote(connectedNote(msg.name, r))
+			m.addNote(connectedNote(msg.name, msg.sources, r))
 			for _, n := range msg.notes {
 				m.addNote(n)
 			}

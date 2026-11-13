@@ -23,6 +23,7 @@ Dispatch them with the Agent tool, `subagent_type` `craze:<name>`. The prompt is
 
 - `craze:delegate` takes a first line `target: <provider> [<model>] [effort=<low|medium|high|xhigh|max>] [mode=plan|ask]`, then the task. Providers: `native`, `cursor`, `grok`. Example: `target: native chatgpt/gpt-6.1-sol effort=high mode=plan`.
 - The presets take an optional first line `mode=plan` or `mode=ask`, then the task.
+- `craze:sol` and `craze:astra` run on a ChatGPT plan sign-in. With an OpenAI API key instead (billed per token; a craze newer than 0.2.0), use `craze:delegate` with `target: native openai/gpt-6.1-sol effort=high` (or `openai/gpt-6-astra`).
 - The task must stand alone. The session has not seen this conversation: give it the goal, the paths, the constraints and what to return. Put a large context (a diff, a log, a spec) in a file in the project and name the file in the task.
 - The session works in the **current directory**, with its own model's tools, instructions and permissions.
 - To continue a session, send the agent a follow-up with SendMessage: it runs `craze send` on the same session, and the model keeps its context. The agent forwards every message you send it, a recap or a question about an earlier turn included; it never answers from the earlier results.

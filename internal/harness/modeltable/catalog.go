@@ -64,6 +64,40 @@ type Catalog struct {
 	// entry left over for one is ignored without a word (merger.model). nil
 	// for every catalog but such a copy; Clone never copies it.
 	listHidden map[string]Model
+	// anthropicListed says the load used the Anthropic account's list
+	// (applyAnthropicList; plan 050 C2): non-nil once the list is the
+	// effective set, holding the aliases of the models it added that have no
+	// seed. nil for every catalog but such a copy; Clone never copies it.
+	anthropicListed map[string]bool
+
+	// SourceOrder is source_order (plan 050 C5): every provider once, in the
+	// order the sources of one maker's models are offered in — of a maker
+	// reachable through several providers, only the first source in this
+	// order that funds one of its models is offered (Table.Offered). Required
+	// when any provider or model names a maker, absent otherwise (validate).
+	SourceOrder []string
+	// ProviderMakers is each provider's maker (plan 050 C5), by provider id:
+	// every model of the provider is that maker's unless the model names
+	// another (Model.Maker). A provider with none has no key here. It is
+	// stamped onto the models when a load merges the catalog (merge), the
+	// ones an account's list adds included.
+	ProviderMakers map[string]string
+	// EnvKeyByNameOnly are the providers whose key, found only in the
+	// environment, never has craze choose one of their models for the owner
+	// (env_key_by_name_only; the paid-source guard, Table.Offers): a variable
+	// such as OPENAI_API_KEY is exported for other tools on many machines,
+	// and it is no consent to run craze's sessions on that bill. A key stored
+	// for the provider is. Each model still runs by name. Catalog-only, as a
+	// provider's maker is, and dropped with it where a user's entry moves the
+	// provider's driver or base_url (merger.makers). nil for none.
+	EnvKeyByNameOnly map[string]bool
+
+	// zeroContext are the aliases whose entry writes `default_context = 0`
+	// (plan 050 C1): Model.DefaultContext reads 0 for those and for an
+	// entry that leaves the key out alike, and validate refuses the first —
+	// a shipped context default is above 0; 0 is the user file's way to turn
+	// one off. nil for none, and for a catalog built in memory.
+	zeroContext []string
 }
 
 // AnthropicDefaults is the catalog's [anthropic_defaults] (plan 044 §3.5).
@@ -138,10 +172,17 @@ type ChatGPTModelDefaults struct {
 // entry an old import left for the alias is ignored, a [subagents] model or
 // the user's default_model naming it is dropped silently, and any user model whose
 // (provider, wire model) is one of these identities is dropped silently.
+//
+// ReplacedBy is the row's replaced_by (plan 050 C1): the active model that
+// replaces the alias, "" for none. A start that names the alias is told to
+// use it, and a reference in the user's files that the merge drops warns,
+// naming it, where one with no replacement drops silently. craze never
+// follows it on its own: the replacement has another price.
 type Retired struct {
 	Alias      string
 	Provider   string
 	WireModels []string
+	ReplacedBy string
 }
 
 // The catalog's own on-disk shape. It has no api_key, source, catalog,
@@ -151,6 +192,7 @@ type Retired struct {
 type catalogDoc struct {
 	Version       int                             `toml:"version"`
 	ProviderOrder []string                        `toml:"provider_order"`
+	SourceOrder   []string                        `toml:"source_order"`
 	Retired       []catalogRetiredEntry           `toml:"retired"`
 	Providers     map[string]catalogProviderEntry `toml:"providers"`
 	Models        map[string]catalogModelEntry    `toml:"models"`
@@ -188,6 +230,7 @@ type catalogRetiredEntry struct {
 	Alias      string   `toml:"alias"`
 	Provider   string   `toml:"provider"`
 	WireModels []string `toml:"wire_models"`
+	ReplacedBy string   `toml:"replaced_by"`
 }
 
 type catalogProviderEntry struct {
@@ -197,13 +240,20 @@ type catalogProviderEntry struct {
 	EnvKeys []string `toml:"env_keys"`
 	// Start is catalog-only (plan 038 §2.2): no user file has the key.
 	Start []string `toml:"start"`
+	// Maker is catalog-only (plan 050 C5): who makes the provider's models.
+	Maker string `toml:"maker"`
+	// EnvKeyByNameOnly is catalog-only too (Catalog.EnvKeyByNameOnly).
+	EnvKeyByNameOnly bool `toml:"env_key_by_name_only"`
 }
 
 type catalogModelEntry struct {
-	Provider        string   `toml:"provider"`
-	WireModel       string   `toml:"wire_model"`
-	Name            string   `toml:"name"`
-	ContextWindow   int      `toml:"context_window"`
+	Provider      string `toml:"provider"`
+	WireModel     string `toml:"wire_model"`
+	Name          string `toml:"name"`
+	ContextWindow int    `toml:"context_window"`
+	// DefaultContext is a pointer so an explicit 0, which validate refuses,
+	// differs from a key left out (plan 050 C1).
+	DefaultContext  *int     `toml:"default_context"`
 	MaxOutputTokens int      `toml:"max_output_tokens"`
 	Efforts         []string `toml:"efforts"`
 	DefaultEffort   string   `toml:"default_effort"`
@@ -215,6 +265,13 @@ type catalogModelEntry struct {
 	Family   string `toml:"family"`
 	Released string `toml:"released"`
 	Thinking string `toml:"thinking"`
+	// Deprecated and ReplacedBy are catalog-only (plan 050 C1): no user file
+	// has a key for either.
+	Deprecated bool   `toml:"deprecated"`
+	ReplacedBy string `toml:"replaced_by"`
+	// Maker is catalog-only too (plan 050 C5): the model's maker, over its
+	// provider's.
+	Maker string `toml:"maker"`
 }
 
 // parseCatalog strict-decodes one catalog file. It does not validate the
@@ -228,11 +285,21 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 	}
 	c := &Catalog{
 		ProviderOrder: nilIfEmpty(d.ProviderOrder),
+		SourceOrder:   d.SourceOrder,
 		Providers:     make(map[string]Provider, len(d.Providers)),
 		Models:        make(map[string]Model, len(d.Models)),
 	}
 	for id, e := range d.Providers {
 		c.Providers[id] = Provider{Name: e.Name, Driver: e.Driver, BaseURL: e.BaseURL, EnvKeys: nilIfEmpty(e.EnvKeys)}
+		if e.Maker != "" {
+			if c.ProviderMakers == nil {
+				c.ProviderMakers = make(map[string]string)
+			}
+			c.ProviderMakers[id] = e.Maker
+		}
+		if e.EnvKeyByNameOnly {
+			put(&c.EnvKeyByNameOnly, id, true)
+		}
 		if e.Start != nil {
 			// Written, even as `start = []`, which validate refuses.
 			if c.Starts == nil {
@@ -244,14 +311,18 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 	for alias, e := range d.Models {
 		c.Models[alias] = Model{
 			Provider: e.Provider, WireModel: e.WireModel, Name: e.Name,
-			ContextWindow: e.ContextWindow, MaxOutputTokens: e.MaxOutputTokens,
+			ContextWindow: e.ContextWindow, DefaultContext: deref(e.DefaultContext), MaxOutputTokens: e.MaxOutputTokens,
 			Efforts: nilIfEmpty(e.Efforts), DefaultEffort: e.DefaultEffort,
 			Vision: e.Vision, ToolProfile: e.ToolProfile, Cost: e.Cost,
 			Family: e.Family, Released: e.Released, Thinking: e.Thinking,
+			Deprecated: e.Deprecated, ReplacedBy: e.ReplacedBy, Maker: e.Maker,
+		}
+		if e.DefaultContext != nil && *e.DefaultContext == 0 {
+			c.zeroContext = append(c.zeroContext, alias)
 		}
 	}
 	for _, r := range d.Retired {
-		c.Retired = append(c.Retired, Retired{Alias: r.Alias, Provider: r.Provider, WireModels: nilIfEmpty(r.WireModels)})
+		c.Retired = append(c.Retired, Retired{Alias: r.Alias, Provider: r.Provider, WireModels: nilIfEmpty(r.WireModels), ReplacedBy: r.ReplacedBy})
 	}
 	if g := d.ChatGPT; g != nil {
 		c.ChatGPT.Start = g.Start
@@ -332,9 +403,12 @@ func (c *Catalog) Clone() *Catalog {
 		return nil
 	}
 	out := &Catalog{
-		ProviderOrder: slices.Clone(c.ProviderOrder),
-		Providers:     make(map[string]Provider, len(c.Providers)),
-		Models:        make(map[string]Model, len(c.Models)),
+		ProviderOrder:    slices.Clone(c.ProviderOrder),
+		SourceOrder:      slices.Clone(c.SourceOrder),
+		ProviderMakers:   maps.Clone(c.ProviderMakers),
+		EnvKeyByNameOnly: maps.Clone(c.EnvKeyByNameOnly),
+		Providers:        make(map[string]Provider, len(c.Providers)),
+		Models:           make(map[string]Model, len(c.Models)),
 	}
 	for id, p := range c.Providers {
 		p.EnvKeys = slices.Clone(p.EnvKeys)
@@ -353,6 +427,7 @@ func (c *Catalog) Clone() *Catalog {
 		r.WireModels = slices.Clone(r.WireModels)
 		out.Retired = append(out.Retired, r)
 	}
+	out.zeroContext = slices.Clone(c.zeroContext)
 	out.ChatGPT.Start = slices.Clone(c.ChatGPT.Start)
 	out.ChatGPT.startSet = c.ChatGPT.startSet
 	out.ChatGPT.ModelsClientVersion = c.ChatGPT.ModelsClientVersion
@@ -411,11 +486,14 @@ func hasModel(models map[string]Model, alias string) bool {
 // has a name, a valid driver and base URL, and at least one env_keys name and
 // no key — but the ChatGPT plan's, which signs in and names no variable (plan
 // 033 §3.11); each model validates against the catalog's own providers, as a
-// models.toml entry would; no two aliases share an identity; provider_order
-// and each provider's start are valid (validateStarts, plan 038 §2); the
-// retired aliases are unique, none is a model, and no model's identity is a
-// retired one; and [chatgpt_defaults] and [anthropic_defaults] are valid
-// (validateChatGPT, validateAnthropic). Errors are *FileErrors against name.
+// models.toml entry would, and its deprecated state and context default are
+// sound (validateLifecycle, plan 050 C1); no two aliases share an identity;
+// provider_order and each provider's start are valid (validateStarts, plan
+// 038 §2), no start deprecated; the retired aliases are unique, none is a
+// model, no model's identity is a retired one, and a row's replaced_by names
+// an active model; [chatgpt_defaults] and [anthropic_defaults] are valid
+// (validateChatGPT, validateAnthropic); and the makers and source_order are
+// valid (validateMakers, plan 050 C5). Errors are *FileErrors against name.
 func (c *Catalog) validate(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -449,6 +527,9 @@ func (c *Catalog) validate(name string) error {
 		if key := anthropicOnlyKey(m); key != "" && c.Providers[m.Provider].Driver != DriverAnthropic {
 			return at(modelTable(alias), key, fmt.Sprintf("is for a model of a provider on driver %q, what craze knows of an Anthropic model", DriverAnthropic))
 		}
+		if err := c.validateLifecycle(name, alias, m); err != nil {
+			return err
+		}
 		id := identity{m.Provider, m.WireModel}
 		if other, ok := byIdentity[id]; ok {
 			return at(modelTable(alias), "wire_model",
@@ -471,6 +552,8 @@ func (c *Catalog) validate(name string) error {
 			return at(table, "alias", r.Alias+" is still a model: a retired alias is one the catalog no longer ships")
 		case r.Provider == "":
 			return at(table, "provider", r.Alias+" names no provider")
+		case r.ReplacedBy != "" && c.replacementProblem(r.ReplacedBy) != "":
+			return at(table, "replaced_by", r.Alias+"'s "+c.replacementProblem(r.ReplacedBy))
 		}
 		seen[r.Alias] = true
 		for _, w := range r.WireModels {
@@ -482,7 +565,51 @@ func (c *Catalog) validate(name string) error {
 	if err := c.validateChatGPT(name); err != nil {
 		return err
 	}
-	return c.validateAnthropic(name)
+	if err := c.validateAnthropic(name); err != nil {
+		return err
+	}
+	return c.validateMakers(name)
+}
+
+// validateLifecycle checks alias's deprecated state and context default (plan
+// 050 C1): a deprecated model names the model that replaces it in
+// replaced_by, and replaced_by is for a deprecated model alone; the
+// replacement is a model of the catalog that is not deprecated itself
+// (replacementProblem), so every pointer names an active alias and
+// deprecating a model means re-pointing every replaced_by aimed at it; and a
+// default_context, when written, is above 0 and below the model's
+// context_window, which
+// the model must declare — the catalog ships a smaller context, never a
+// meaningless one (a user's models.toml may write any value of 0 or more).
+func (c *Catalog) validateLifecycle(name, alias string, m Model) error {
+	at := func(key, reason string) error {
+		return &FileError{File: name, Table: modelTable(alias), Key: key, Reason: reason}
+	}
+	switch {
+	case m.Deprecated && m.ReplacedBy == "":
+		return at("replaced_by", "missing: a deprecated model names the active model that replaces it")
+	case !m.Deprecated && m.ReplacedBy != "":
+		return at("replaced_by", "is only for a deprecated model: write deprecated = true, or leave replaced_by out")
+	case m.ReplacedBy != "" && c.replacementProblem(m.ReplacedBy) != "":
+		return at("replaced_by", c.replacementProblem(m.ReplacedBy))
+	case slices.Contains(c.zeroContext, alias):
+		return at("default_context", "is 0: a shipped context default is above 0 and below context_window; leave the key out for none (0 is a models.toml override's way to turn one off)")
+	case m.DefaultContext != 0 && m.DefaultContext >= m.ContextWindow:
+		return at("default_context", fmt.Sprintf("%d is not below the model's context_window, %d: a shipped context default is a smaller part of a known window", m.DefaultContext, m.ContextWindow))
+	}
+	return nil
+}
+
+// replacementProblem is why target cannot be a replaced_by, "" when it can:
+// it is no model of the catalog, or a deprecated one (plan 050 C1).
+func (c *Catalog) replacementProblem(target string) string {
+	switch m, ok := c.Models[target]; {
+	case !ok:
+		return fmt.Sprintf("%q is not a model in the catalog", target)
+	case m.Deprecated:
+		return fmt.Sprintf("%q is deprecated too: name the active model that replaces it", target)
+	}
+	return ""
 }
 
 // anthropicOnlyKey is the first catalog-only key of an Anthropic model's that
@@ -505,7 +632,8 @@ func anthropicOnlyKey(m Model) string {
 // once and nothing else; and each provider's start — never the ChatGPT
 // plan's, which is [chatgpt_defaults] start, nor Anthropic's, which is the
 // newest model of [anthropic_defaults] start_family (plan 044 §3.5) — is a
-// non-empty list of models of that provider, each listed once. The order is
+// non-empty list of models of that provider, each listed once, none
+// deprecated (plan 050 C1). The order is
 // checked entry by entry, then the providers it misses, sorted; the starts by
 // provider, sorted.
 func (c *Catalog) validateStarts(name string) error {
@@ -549,12 +677,87 @@ func (c *Catalog) validateStarts(name string) error {
 				return at(table, "start", fmt.Sprintf("entry %d, %q, is not a model in the catalog", i+1, alias))
 			case m.Provider != id:
 				return at(table, "start", fmt.Sprintf("entry %d, %q, is a model of provider %q, not of %q", i+1, alias, m.Provider, id))
+			case m.Deprecated:
+				// Never offered, so never a start (plan 050 C1).
+				return at(table, "start", fmt.Sprintf("entry %d, %q, is deprecated: start on the model that replaces it", i+1, alias))
 			case slices.Contains(start[:i], alias):
 				return at(table, "start", fmt.Sprintf("lists %q twice", alias))
 			}
 		}
 	}
 	return nil
+}
+
+// makerPattern is what a maker must look like: a lowercase word, as a
+// family is ("openai", "meta", "zai").
+var makerPattern = familyPattern
+
+// validateMakers checks the makers and source_order (plan 050 C5): each maker
+// a provider or a model names is a lowercase word, the provider's a provider
+// of the catalog; env_key_by_name_only is on a provider of the catalog that
+// names a variable in env_keys; and source_order, required once any maker is
+// named, names every provider exactly once and nothing else, as
+// provider_order does. A catalog that names no maker may leave it out, and
+// then has no source rule. Providers are checked in sorted order, then
+// models.
+func (c *Catalog) validateMakers(name string) error {
+	at := func(table, key, reason string) error {
+		return &FileError{File: name, Table: table, Key: key, Reason: reason}
+	}
+	const wordRule = "is not a maker: a lowercase word of letters, digits and hyphens, at most 32"
+	tagged := false
+	for _, id := range slices.Sorted(maps.Keys(c.ProviderMakers)) {
+		switch maker := c.ProviderMakers[id]; {
+		case !hasProvider(c.Providers, id):
+			return at(providerTable(id), "maker", "is for a provider the catalog does not have")
+		case !makerPattern.MatchString(maker):
+			return at(providerTable(id), "maker", fmt.Sprintf("%q %s", maker, wordRule))
+		}
+		tagged = true
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.EnvKeyByNameOnly)) {
+		switch p, ok := c.Providers[id]; {
+		case !c.EnvKeyByNameOnly[id]:
+			continue
+		case !ok:
+			return at(providerTable(id), "env_key_by_name_only", "is for a provider the catalog does not have")
+		case len(p.EnvKeys) == 0:
+			return at(providerTable(id), "env_key_by_name_only", "is for a provider funded by a variable: this one names none in env_keys")
+		}
+	}
+	for _, alias := range slices.Sorted(maps.Keys(c.Models)) {
+		if maker := c.Models[alias].Maker; maker != "" {
+			if !makerPattern.MatchString(maker) {
+				return at(modelTable(alias), "maker", fmt.Sprintf("%q %s", maker, wordRule))
+			}
+			tagged = true
+		}
+	}
+	if c.SourceOrder == nil {
+		if tagged {
+			return at("", "source_order", "missing: a catalog that names a maker lists every provider, in the order one maker's sources are offered in")
+		}
+		return nil
+	}
+	for i, id := range c.SourceOrder {
+		switch {
+		case !hasProvider(c.Providers, id):
+			return at("", "source_order", fmt.Sprintf("entry %d, %q, is not a provider in the catalog", i+1, id))
+		case slices.Contains(c.SourceOrder[:i], id):
+			return at("", "source_order", fmt.Sprintf("lists %q twice", id))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.Providers)) {
+		if !slices.Contains(c.SourceOrder, id) {
+			return at("", "source_order", fmt.Sprintf("does not list provider %q: name every provider once", id))
+		}
+	}
+	return nil
+}
+
+func hasProvider(providers map[string]Provider, id string) bool {
+	_, ok := providers[id]
+	return ok
 }
 
 // validateChatGPT checks [chatgpt_defaults] (plan 033 §3.11): it is only for a

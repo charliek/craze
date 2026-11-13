@@ -962,6 +962,9 @@ type signInFinishedMsg struct {
 	aliases   []string
 	modelsErr string
 	noticeErr string
+	// sources is what the source order makes of the plan's models once the
+	// list is written (plan 050 C5, connectSourcesOf).
+	sources connectSources
 }
 
 // signInStamp names a sign-in's run for an answer that outlives its step: the
@@ -1188,7 +1191,7 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		// to take it up (plan 034 §3.4), and the last note says what came of
 		// it.
 		return m.thenRefreshModels(func(m Model, r *agent.ModelsRefresh) Model {
-			m.addNote(signedInSessionNote(r))
+			m.addNote(signedInSessionNote(msg.sources, r))
 			return m
 		})
 	}
@@ -1238,7 +1241,7 @@ func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event))
 		m.addNote(chatgptauth.NoticeTitle)
 		m.addNote(chatgptauth.Notice)
 	}
-	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, res.ShowNotice, observe, signInStamp{})
+	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, m.nativeEnv, res.ShowNotice, observe, signInStamp{})
 }
 
 // finishSignInCmd is the work after a sign-in, off the Update: the notice
@@ -1252,7 +1255,7 @@ func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event))
 // fetch's outcome — fetched, empty or failed, cancelled by the end itself —
 // is the attempt's last record (review r6 #1). One that would start after
 // that end does nothing.
-func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event), st signInStamp) tea.Cmd {
+func finishSignInCmd(runs *signInRuns, shown uint64, dir string, getenv func(string) string, noticeShown bool, observe func(chatgptauth.Event), st signInStamp) tea.Cmd {
 	mark, fetch := markNoticeShown, fetchPlanModels
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), signInFinishTimeout)
@@ -1275,6 +1278,9 @@ func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown boo
 		}
 		for _, md := range models.Models {
 			msg.aliases = append(msg.aliases, modeltable.ChatGPTAliasPrefix+md.Slug)
+		}
+		if table, err := modeltable.Load(dir); err == nil && getenv != nil {
+			msg.sources = connectSourcesOf(table, modeltable.ChatGPTProvider, getenv)
 		}
 		return msg
 	}

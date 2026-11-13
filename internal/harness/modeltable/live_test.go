@@ -271,3 +271,57 @@ func TestWithholdFrozen(t *testing.T) {
 		t.Fatal("the running model is not listed (P7)")
 	}
 }
+
+// TestCarryKeepsWhetherItIsTheCatalogsModel (plan 050 review): whether a
+// model is the catalog's own (Resolved.CatalogModel, which decides the OpenAI
+// phase) belongs to the definition Carry puts in, in both directions. A
+// session on the shipped openai/gpt-6.1-sol whose models.toml then points the
+// alias at another wire model keeps resolving the carried shipped model as
+// the catalog's; one on a re-pointed alias whose files then drop the entry
+// keeps resolving it as the user's. Either carry differs from the files'
+// entry, so it is shadowed.
+func TestCarryKeepsWhetherItIsTheCatalogsModel(t *testing.T) {
+	const alias = "openai/gpt-6.1-sol"
+	providers := "version = 1\n\n[providers.openai]\napi_key = \"sk-openai-dummy-00000008\"\n"
+	repointed := "version = 1\n\n[models.\"" + alias + "\"]\nwire_model = \"my-own-sol\"\n"
+	load := func(models string) *Table {
+		t.Helper()
+		tbl, err := Load(writeFiles(t, providers, models))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tbl
+	}
+	catalog := func(tbl *Table) bool {
+		t.Helper()
+		r, err := tbl.Resolve(alias, fakeEnv(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.CatalogModel
+	}
+	shipped, mine := load(""), load(repointed)
+	if !catalog(shipped) || catalog(mine) {
+		t.Fatalf("control: shipped %v, re-pointed %v; want true, false", catalog(shipped), catalog(mine))
+	}
+	for _, tc := range []struct {
+		name     string
+		from, to *Table
+		want     bool
+	}{
+		{"the shipped model, carried over a re-pointed entry", shipped, load(repointed), true},
+		{"a re-pointed model, carried over the shipped entry", mine, load(""), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.to.Carry(tc.from, alias) {
+				t.Fatal("Carry = false")
+			}
+			if got := catalog(tc.to); got != tc.want {
+				t.Fatalf("CatalogModel = %v, want %v: the carried definition's", got, tc.want)
+			}
+			if !tc.to.Shadowed(alias) {
+				t.Fatal("the carry is not shadowed")
+			}
+		})
+	}
+}

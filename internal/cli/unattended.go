@@ -242,6 +242,11 @@ func newPromptJob(cmd *cobra.Command, what, text string, wait bool, started time
 	env := rundir.ProcessEnv()
 	r := &promptJob{what: what, cmd: cmd, wait: wait, env: env, text: text,
 		out: resultOutput{what: what, json: json, maxMessage: maxMessage, env: env}}
+	if wait {
+		// A waiting form's result and failure carry the model notices
+		// (modelcheck.go); craze send's receipt does not.
+		r.out.notes = cmd.ErrOrStderr()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if timeout > 0 {
 		r.deadline = started.Add(timeout)

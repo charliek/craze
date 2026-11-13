@@ -123,6 +123,17 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 			return fail(errkind.Config, "config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
 		}
 	}
+	if provider == agent.NativeProvider().Name() {
+		// The pre-check (plan 050 C2, modelcheck.go): what the host would
+		// refuse of --model, and the strict --effort and --fast, refused here
+		// before a host is spawned, with a reason a program reads.
+		// The alias it matched is what the notices are about, a refusal's too.
+		asked, err := nativeStartCheck(newWhat, strings.TrimSpace(f.model), strings.TrimSpace(f.effort), f.fast)
+		r.out.asked = asked
+		if err != nil {
+			return failJSON(stdout, r.out, err)
+		}
+	}
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
 		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
 	// No model: --model is only what was asked for, which the agent may yet

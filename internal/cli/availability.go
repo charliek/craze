@@ -262,10 +262,14 @@ const (
 // nativeAvailability is native's state from its directory dir and its
 // environment getenv, by the pair native's own start runs (agent/native.go):
 // modeltable.Load — an error is unavailable, naming the file — then
-// StartModel with no model memory — an error, nothing funded, is
-// needs_setup. Neither reaches the network or the keychain. A dir of "" (no
-// home directory) is unavailable: Load would refuse it too, with no file to
-// name.
+// StartModel over the model memory in dir (recent.json, which a native
+// host reads from the same directory, paths.NativeDir) — an error, nothing
+// funded, is needs_setup, and so is the paid-source guard's refusal, with
+// its own reason and fix (plan 050 C5); a remembered model the guard does
+// not hold, which the host would start on, is ready. Neither reaches the
+// network or the keychain. A dir
+// of "" (no home directory) is unavailable: Load would refuse it too, with no
+// file to name.
 func nativeAvailability(dir string, getenv func(string) string) (availState, string, string) {
 	if dir == "" {
 		return availUnavailable, nativeNoDirReason, nativeUnreadFix
@@ -274,7 +278,13 @@ func nativeAvailability(dir string, getenv func(string) string) (availState, str
 	if err != nil {
 		return availUnavailable, loadErrFile(err, dir) + " could not be read", nativeUnreadFix
 	}
-	if _, _, err := table.StartModel(nil, getenv); err != nil {
+	_, _, err = table.StartModel(modeltable.ReadRecent(dir), getenv)
+	if held := (*modeltable.HeldError)(nil); errors.As(err, &held) {
+		// Something is funded: its own answer, never "no model provider has
+		// a key".
+		return availNeedsSetup, sanitizeLine(held.Reason()), sanitizeLine(held.Fix())
+	}
+	if err != nil {
 		return availNeedsSetup, nativeNoKeyReason, nativeNoKeyFix
 	}
 	return availReady, "", ""

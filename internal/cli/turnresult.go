@@ -617,8 +617,11 @@ type turnResult struct {
 	Partial       bool         `json:"partial,omitempty"`
 	Handle        string       `json:"handle,omitempty"`
 	// Stopping says --exit-after-turn stops the session as this result is written.
-	Stopping bool   `json:"stopping,omitempty"`
-	Attach   string `json:"attach"`
+	Stopping bool `json:"stopping,omitempty"`
+	// Warnings are the result's model notices (plan 050 C2, resultOutput.notice):
+	// absent when there are none.
+	Warnings []resultWarning `json:"warnings,omitempty"`
+	Attach   string          `json:"attach"`
 
 	// usage is Usage decoded, for the plain footer.
 	usage *agent.UsageState
@@ -646,11 +649,19 @@ type resultError struct {
 // errorDetail is resultError's detail: names and numbers only, each cleaned
 // again here whatever host sent it, so no text from outside craze — a key, a
 // path, a piece of a request — can ride in it. Cause is what began the stop, on
-// kind stopped.
+// kind stopped. Reason, Model and ReplacedBy are a model-shaped config
+// failure's (plan 050 C2, modelRefusal): what failed, of a closed set, the
+// model's alias, and a retired one's replacement; the waiter's own, never a
+// host's.
 type errorDetail struct {
 	Status       int    `json:"status,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
 	Cause        string `json:"cause,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	// Model is set exactly when Reason is, so the key is there on those
+	// failures alone, "" included.
+	Model      *string `json:"model,omitempty"`
+	ReplacedBy string  `json:"replaced_by,omitempty"`
 }
 
 // newResultError is msg as a resultError saying info. A kind a reader does not
@@ -946,12 +957,20 @@ type resultOutput struct {
 	maxMessage int
 	// env is where the cut's whole result is written (rundir.ResultsDir).
 	env rundir.Env
+	// notes is where the command says its model notices (notice): its stderr,
+	// or nil for a command that says none — craze send without --wait.
+	notes io.Writer
+	// asked is the native model craze new --wait's pre-check matched --model
+	// to (nativeStartCheck): what the notices are about while the session has
+	// named no model of its own; "" for none.
+	asked string
 }
 
 // writeResult prints res and answers its status's exit (statusExit): nil for
 // 0, else an exit with no line of its own — the result on stdout says it. A
 // result that cannot be written is the command's failure, exit 1.
 func writeResult(stdout, stderr io.Writer, o resultOutput, res *turnResult) error {
+	res.Warnings = o.notice(res.Provider, res.Model)
 	if o.maxMessage > 0 {
 		o.cut(stderr, res)
 	}
@@ -1103,6 +1122,8 @@ type failureBody struct {
 	Handle        string          `json:"handle,omitempty"`
 	Usage         json.RawMessage `json:"usage,omitempty"`
 	UsageComplete *bool           `json:"usageComplete,omitempty"`
+	// Warnings are as a result's (turnResult.Warnings).
+	Warnings []resultWarning `json:"warnings,omitempty"`
 }
 
 // writeFailure prints a wait's exit-1 failure (§3.1): with --json, one
@@ -1116,10 +1137,14 @@ func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure
 	if kind == "" {
 		kind = errkind.Internal
 	}
+	warnings := o.notice(f.provider, f.model)
 	if o.json {
-		body := failureBody{Error: kindError(msg, kind), Handle: f.handle, UsageComplete: usageIncomplete(f.inFlight)}
-		if kind == errkind.Stopped {
+		body := failureBody{Error: kindError(msg, kind), Handle: f.handle, UsageComplete: usageIncomplete(f.inFlight), Warnings: warnings}
+		switch {
+		case kind == errkind.Stopped:
 			body.Error = stoppedError(msg, f.cause)
+		case f.detail != nil:
+			body.Error.Detail = f.detail
 		}
 		if f.usage != nil {
 			if raw, err := agent.EncodeUsageState(f.usage); err == nil {
@@ -1140,14 +1165,21 @@ func writeFailure(stdout io.Writer, o resultOutput, short string, f *waitFailure
 }
 
 // failJSON is an exit-1 error before the wait began, with --json's object
-// first (writeFailure); any other error — a usage error stays plain — as it
-// is.
+// first (writeFailure) and, either way, the model notices about the model
+// craze new --wait's pre-check matched; any other error — a usage error stays
+// plain — as it is.
 func failJSON(stdout io.Writer, o resultOutput, err error) error {
 	var ee *exitError
-	if !errors.As(err, &ee) || ee.code != 1 || !o.json {
+	if !errors.As(err, &ee) || ee.code != 1 {
 		return err
 	}
-	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err), kind: failureKind(err)})
+	if !o.json {
+		// The notices are said whatever the output's form (writeFailure says
+		// them under --json).
+		o.notice("", "")
+		return err
+	}
+	_ = writeFailure(stdout, o, "", &waitFailure{msg: o.exitMessage(err), kind: failureKind(err), detail: refusalDetail(err)})
 	return err
 }
 

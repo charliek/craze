@@ -34,7 +34,7 @@ func collect(stream fantasy.StreamResponse, err error) (*fantasy.Response, error
 			}
 		case fantasy.StreamPartTypeTextEnd:
 			if b := text[part.ID]; b != nil {
-				resp.Content = append(resp.Content, fantasy.TextContent{Text: b.String()})
+				resp.Content = append(resp.Content, fantasy.TextContent{Text: b.String(), ProviderMetadata: part.ProviderMetadata})
 			}
 		case fantasy.StreamPartTypeReasoningStart:
 			reasoning[part.ID] = &strings.Builder{}

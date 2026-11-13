@@ -44,7 +44,9 @@ type Choice struct {
 
 // Choices is the models a picker offers from t, in order (plan 031 §3.6): every
 // model whose provider has a usable key — judged exactly as Resolve judges it,
-// with getenv (nil is os.Getenv) — plus current, the model the session runs on,
+// with getenv (nil is os.Getenv) — that is offered (Offered: not deprecated,
+// plan 050 C1, and not hidden by the source order, C5), plus current, the
+// model the session runs on, offered or not,
 // whether its provider has a key or not (P7); "" is no current model, and an
 // alias t does not have adds nothing.
 //
@@ -71,13 +73,28 @@ func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, curren
 // 047 D1) — which each choice's switch effort is judged with
 // (Table.SwitchEffort). memory is not written to.
 func (t *Table) SessionChoices(recent []RecentEntry, memory map[string]string, getenv func(string) string, current string) []Choice {
-	return t.choices(recent, memory, func(alias string) bool {
-		if alias == current {
-			return true
-		}
-		_, err := t.Resolve(alias, getenv)
-		return err == nil
-	})
+	offered := t.Offered(getenv)
+	return t.choices(recent, memory, func(alias string) bool { return alias == current || offered[alias] })
+}
+
+// Offered is the set of t's models a picker lists, and that craze may choose
+// for the user (plan 050's offered set): every model that resolves — judged
+// exactly as Resolve judges it, with getenv (nil is os.Getenv) — that is not
+// deprecated (C1), and that the source order does not hide (C5): of a maker
+// reachable through several providers, only the first source in the order
+// in force that funds one of its active models is offered (Offers). It is a
+// subset of what runs by name: a deprecated or hidden model still resolves,
+// and --model, the pin, resume by identity and a sub-agent's configured
+// model reach it, but nothing offers it. It is computed once per call, from
+// the table and the environment as they are now, never stored at load: a key
+// stored or a sign-in completed changes it at the next call. The one rule
+// every offering site goes through, here or through Offers (SessionChoices,
+// StartPick's steps 3 to 5,
+// the resume fallback, the agent tool's model menu, a switch's dropped row);
+// the session's current model is listed beside it by its caller, never by
+// it. The caller owns the map.
+func (t *Table) Offered(getenv func(string) string) map[string]bool {
+	return t.Offers(getenv).Offered
 }
 
 // Relist is the choices of exactly aliases — the models a session's list

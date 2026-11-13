@@ -89,8 +89,14 @@ const (
 	// static key, so its base_url is stricter than openai-compat's
 	// (endpointProblem, P25): https on any host, or http only to a loopback
 	// IP literal. No provider owns it. It is tested against Meta's Responses
-	// API (the plan's live facts, MR-1…16).
+	// API (the plan's live facts, MR-1…16), and OpenAI's own (plan 050).
 	DriverOpenAIResponses = "openai-responses"
+
+	// OpenAIProvider is the id of the OpenAI key's shipped provider (plan
+	// 050): OpenAI's own Responses API on DriverOpenAIResponses. Unlike
+	// AnthropicProvider it owns no driver and its entry is not locked; the
+	// driver replays a message's phase to it alone (llm, plan 050 C3).
+	OpenAIProvider = "openai"
 
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
@@ -177,6 +183,13 @@ type Table struct {
 	// one, replaces the catalog's whole. A name that is no provider, or one
 	// with no start, is passed over (StartOrder).
 	ProviderOrder []string
+	// SourceOrder is the user's source_order (plan 050 C5): nil when
+	// models.toml writes none, so the catalog's holds. Unlike ProviderOrder
+	// a list does not replace the catalog's: it goes first, and the catalog's
+	// other providers follow in the catalog's order (EffectiveSourceOrder);
+	// an empty list, the one exception, turns the source rule off. A name
+	// that is no provider is passed over with a warning.
+	SourceOrder []string
 	// Providers is keyed by provider id, Models by alias (the key users
 	// select, which may differ from the wire id).
 	Providers map[string]Provider
@@ -221,6 +234,16 @@ type Table struct {
 	// without a catalog or built in memory, whose providers' names are all
 	// there is.
 	credentialEnv []string
+	// credentialKeys is every inline api_key the user's providers.toml
+	// writes, whether or not a merged provider still holds it — an entry the
+	// merge dropped, or an old import's key it would not send to craze's
+	// endpoint (plan 050 review) — for Keys to redact; nil for a table
+	// loaded without a catalog or built in memory.
+	credentialKeys []Secret
+	// catalogModels are the aliases whose model is the catalog's own
+	// (Resolved.CatalogModel), stamped by the merge; nil for a table loaded
+	// without a catalog or built in memory.
+	catalogModels map[string]bool
 
 	// signIn is the directory whose ChatGPT sign-in funds the table's
 	// chatgpt provider (plan 033 §3.11, P34): the one LoadWith read, kept
@@ -246,6 +269,26 @@ type Table struct {
 	// table loaded without a catalog or built in memory.
 	catalogOrder []string
 	starts       map[string][]string
+	// catalogSources is the catalog's source_order, and providerMakers each
+	// provider's maker from the catalog less a provider the user's
+	// providers.toml moved to another driver or base_url (plan 050 C5): what
+	// the source rule reads (EffectiveSourceOrder, sources.go). Both nil for
+	// a table loaded without a catalog, built in memory, or over a catalog
+	// that names no maker.
+	catalogSources []string
+	providerMakers map[string]string
+	// envKeyByNameOnly are the catalog's env_key_by_name_only providers less
+	// one the user's providers.toml moved, as providerMakers are: a key
+	// found only in the environment for one of them never has craze choose
+	// its models for the owner (Offers). nil for a table with none.
+	envKeyByNameOnly map[string]bool
+	// billedProviders are the providers the catalog prices a model of —
+	// one the account's list took out of the table included (a seed the
+	// Anthropic account does not list) — less one the user's providers.toml
+	// moved: with the table's own priced models, the providers the
+	// paid-source guard reads as billed per token (holdAfterBrokenSignIn).
+	// nil for a table with none.
+	billedProviders map[string]bool
 
 	// carried binds each model Carry put in this table to the ChatGPT account
 	// its entry was bound to where it came from — the zero Account for one
@@ -266,6 +309,20 @@ type Table struct {
 	// a model is looked up in by its identity (factsOf). nil for a table
 	// loaded without a catalog or built in memory.
 	learned map[identity]learnedFacts
+	// retired are the catalog's [[retired]] rows (plan 050 C1), read through
+	// Retired: what a start that names an alias the table does not have is
+	// told, and the replacement the merge's warnings name. nil for a table
+	// loaded without a catalog or built in memory.
+	retired []Retired
+	// accountLists holds each provider whose models an account's own list
+	// brings (plan 050 C2: the catalog's ChatGPT plan and Anthropic
+	// providers), true when the load used that list, false when it had none
+	// it could use; anthropicListed are the models the Anthropic account's
+	// list added that have no seed. Read through AccountModels,
+	// AccountListRead and FromAccount; nil for a table loaded without a
+	// catalog or built in memory.
+	accountLists    map[string]bool
+	anthropicListed map[string]bool
 	// unkeyed are the variables WithholdFrozen found holding a value a
 	// session cannot redact out of what it has already sent: each reads as
 	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's
@@ -293,11 +350,20 @@ type Provider struct {
 
 // Model is one model: shipped, overridden in models.toml, or the user's own.
 type Model struct {
-	Provider        string // a key of Table.Providers
-	WireModel       string // the model id the provider's API expects
-	Name            string // display name; "" shows the alias
-	ContextWindow   int    // tokens; 0 = unknown
-	MaxOutputTokens int    // 0 = absent: Resolve supplies DefaultMaxOutputTokens, or less on a small window
+	Provider      string // a key of Table.Providers
+	WireModel     string // the model id the provider's API expects
+	Name          string // display name; "" shows the alias
+	ContextWindow int    // tokens; 0 = unknown
+	// DefaultContext is default_context (plan 050 C1): the context, in
+	// tokens, a session on the model works within — what it compacts at and
+	// what its usage reports as its window — when it is set and below
+	// ContextWindow (Resolved.ContextInForce); 0, or a value at or above the
+	// window, is the whole window. The catalog sets it below the window; a
+	// user's models.toml may set any value of 0 or more, 0 turning a shipped
+	// one off. The window the API is sent, the output ceiling and the price
+	// tier stay the true window's.
+	DefaultContext  int
+	MaxOutputTokens int // 0 = absent: Resolve supplies DefaultMaxOutputTokens, or less on a small window
 	// Efforts are the reasoning-effort levels the model accepts, in display
 	// order. Empty means the model has no effort control: none is shown or
 	// sent.
@@ -332,6 +398,26 @@ type Model struct {
 	// identity (Table.factsOf).
 	Family   string
 	Released string
+	// Deprecated and ReplacedBy are the catalog's deprecated and replaced_by
+	// (plan 050 C1): a deprecated model still resolves and runs by name, but
+	// is never offered (Table.Offered) — no picker lists it and nothing
+	// chooses it for the user but StartPick's last resort — and ReplacedBy
+	// names the active alias that replaces it. They are bound to the shipped
+	// alias, not to its identity: set from the catalog alone (no user file
+	// has a key for either), and cleared when the user's entry for the alias
+	// points it at another provider or wire model (overlayModel), so a user's
+	// own model is never deprecated.
+	Deprecated bool
+	ReplacedBy string
+	// Maker is who made the model (plan 050 C5): the catalog's maker of the
+	// model, else of its provider, stamped when a load merges the catalog —
+	// the models an account's list adds included — and "" for none. Like
+	// Deprecated it is bound to the shipped alias: no user file has a key
+	// for it, it is cleared when the user's entry points the alias at another
+	// provider or wire model, or moves its provider's driver or base_url, and
+	// a user's own model has none. The source order offers a maker's models
+	// from one source (Table.Offered).
+	Maker string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -519,10 +605,13 @@ type Resolved struct {
 	// source's at each one, so a session (or a sub-agent) already open on it
 	// sends nothing with another account's token after a switch
 	// (ErrOtherAccount).
-	Account         Account
-	WireModel       string
-	Name            string // the model's name, or its alias when it has none
-	ContextWindow   int
+	Account       Account
+	WireModel     string
+	Name          string // the model's name, or its alias when it has none
+	ContextWindow int
+	// DefaultContext is the model's default_context (plan 050 C1), 0 for
+	// none; ContextInForce is what a session works within.
+	DefaultContext  int
 	MaxOutputTokens int // the ceiling every request sends: the file's value, else the default (outputCeiling)
 	Efforts         []string
 	DefaultEffort   string
@@ -537,6 +626,31 @@ type Resolved struct {
 	// thinking the table does not know is ThinkingAdaptive. "" on every other
 	// driver.
 	Thinking string
+	// Deprecated and ReplacedBy are the model's (plan 050 C1): a deprecated
+	// model runs, and names the alias that replaces it.
+	Deprecated bool
+	ReplacedBy string
+	// CatalogModel is whether the model is the catalog's own: a shipped
+	// alias the user's models.toml has not pointed at another provider or
+	// wire model (a key it writes beside those, such as an effort, leaves it
+	// the catalog's). False for a model of the user's own, whatever its
+	// provider's id, and for every model of a table loaded without the
+	// catalog or built in memory. A behaviour an older craze cannot read back
+	// is kept to it (the OpenAI phase, llm's phasesFor; plan 050 review).
+	CatalogModel bool
+}
+
+// ContextInForce is the context, in tokens, a session on r works within
+// (plan 050 C1): its DefaultContext when that is set and below its window,
+// else the window itself — 0 when the window is unknown, whatever the
+// default says. Compaction's threshold and the usage report's window are
+// judged by it; the window a request is sent, its output ceiling and its
+// price tier stay the true window's.
+func (r Resolved) ContextInForce() int {
+	if r.DefaultContext > 0 && r.DefaultContext < r.ContextWindow {
+		return r.DefaultContext
+	}
+	return r.ContextWindow
 }
 
 // The on-disk shapes Save writes. They are separate from the public types so
@@ -577,6 +691,10 @@ type modelsDoc struct {
 	// left out, and a non-nil empty list — an explicit empty order — is
 	// written as `[]` (plan 038 §2.4).
 	ProviderOrder []string `toml:"provider_order"`
+	// SourceOrder is source_order, written as ProviderOrder is: nil left
+	// out, an explicit empty list — the source rule off — as `[]` (plan 050
+	// C5).
+	SourceOrder []string `toml:"source_order"`
 	// Subagents is nil whenever Table.Subagents is its zero value, so a
 	// table with no sub-agent configuration saves byte-identically to a
 	// models.toml written before this section existed (plan 026 §3.6).
@@ -605,10 +723,14 @@ type subagentsDoc struct {
 }
 
 type modelEntry struct {
-	Provider        string   `toml:"provider"`
-	WireModel       string   `toml:"wire_model"`
-	Name            string   `toml:"name,omitempty"`
-	ContextWindow   int      `toml:"context_window,omitzero"`
+	Provider      string `toml:"provider"`
+	WireModel     string `toml:"wire_model"`
+	Name          string `toml:"name,omitempty"`
+	ContextWindow int    `toml:"context_window,omitzero"`
+	// DefaultContext is left out at 0; encodeModels writes an explicit
+	// `default_context = 0` over a shipped value, so turning it off survives
+	// a reload (plan 050 C1), as `efforts = []` does.
+	DefaultContext  int      `toml:"default_context,omitzero"`
 	MaxOutputTokens int      `toml:"max_output_tokens,omitzero"`
 	Efforts         []string `toml:"efforts"`
 	DefaultEffort   string   `toml:"default_effort,omitempty"`
@@ -624,6 +746,11 @@ type modelEntry struct {
 	Thinking string `toml:"-"`
 	Family   string `toml:"-"`
 	Released string `toml:"-"`
+	// Deprecated and ReplacedBy are catalog-only too (plan 050 C1), and so
+	// is Maker (C5).
+	Deprecated bool   `toml:"-"`
+	ReplacedBy string `toml:"-"`
+	Maker      string `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -816,7 +943,7 @@ func (t *Table) encodeModels() ([]byte, error) {
 		}
 		entries[alias] = e
 	}
-	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, ProviderOrder: t.ProviderOrder,
+	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, ProviderOrder: t.ProviderOrder, SourceOrder: t.SourceOrder,
 		Subagents: subagentsToDoc(t.Subagents), Compaction: compactionToDoc(t.Compaction)}
 	if t.NoCatalog {
 		top.Catalog = new(bool)
@@ -834,6 +961,12 @@ func (t *Table) encodeModels() ([]byte, error) {
 		fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id})
 		if err := toml.NewEncoder(&buf).Encode(e); err != nil {
 			return nil, fmt.Errorf("modeltable: encoding: %w", err)
+		}
+		if e.DefaultContext == 0 && cat != nil && cat.Models[id].DefaultContext > 0 {
+			// An explicit `default_context = 0` over the shipped value (plan
+			// 050 C1), which omitzero would leave out: the key's line, inside
+			// the alias's own table, before any cost table opens.
+			buf.WriteString("default_context = 0\n")
 		}
 		if cost != nil {
 			// The long-context table likewise goes at its own full path
@@ -949,6 +1082,9 @@ func validate(t *Table, pfile, mfile string, needDefault bool) error {
 	}
 	if r := providerOrderProblem(t.ProviderOrder); r != "" {
 		return &FileError{File: mfile, Key: "provider_order", Reason: r}
+	}
+	if r := providerOrderProblem(t.SourceOrder); r != "" {
+		return &FileError{File: mfile, Key: "source_order", Reason: r}
 	}
 	if err := validateSubagents(mfile, t.Subagents, t.Models); err != nil {
 		return err
@@ -1246,6 +1382,12 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	if m.ContextWindow < 0 {
 		return at("context_window", "must not be negative")
 	}
+	if m.DefaultContext < 0 {
+		// Any other value stands: one at or above the window is the whole
+		// window (Resolved.ContextInForce), never an error, since a user may
+		// lower a shipped window under a shipped default (plan 050 C1).
+		return at("default_context", "must not be negative")
+	}
 	if m.MaxOutputTokens < 0 {
 		return at("max_output_tokens", "must not be negative")
 	}
@@ -1439,6 +1581,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		WireModel:         m.WireModel,
 		Name:              name,
 		ContextWindow:     m.ContextWindow,
+		DefaultContext:    m.DefaultContext,
 		MaxOutputTokens:   outputCeiling(m),
 		Efforts:           slices.Clone(m.Efforts),
 		DefaultEffort:     m.DefaultEffort,
@@ -1446,6 +1589,9 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		ToolProfile:       m.ToolProfile,
 		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
 		Thinking:          t.thinkingOf(m, p),
+		Deprecated:        m.Deprecated,
+		ReplacedBy:        m.ReplacedBy,
+		CatalogModel:      t.catalogModels[alias],
 	}, nil
 }
 
@@ -1567,7 +1713,10 @@ func (t *Table) CredentialEnvNames() []string {
 // usable key — all of them, not only the first, which is the one Resolve
 // picks — and its inline api_key; then the value of every other variable
 // CredentialEnvNames lists (C2r2), which funds nothing but is a credential
-// all the same; each with surrounding whitespace trimmed. A nil getenv is
+// all the same; then every inline api_key providers.toml writes that no
+// provider holds (credentialKeys: an entry the merge dropped, or an old
+// import's key it would not send to craze's endpoint); each with surrounding
+// whitespace trimmed. A nil getenv is
 // os.Getenv.
 //
 // An env value that cannot be a key — under MinKeyLen bytes, or overlapping
@@ -1608,6 +1757,11 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 			keys = append(keys, k)
 		}
 	}
+	for _, k := range t.credentialKeys {
+		if !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
 	return keys, nil
 }
 
@@ -1638,11 +1792,58 @@ func (t *Table) Aliases() []string {
 	return slices.Sorted(maps.Keys(t.Models))
 }
 
+// Retired is the catalog's [[retired]] row for alias, and whether there is
+// one (plan 050 C1): what a start that names an alias the table does not
+// have is told, the replacement first. A table loaded without a catalog, or
+// built in memory, retires nothing. The row's WireModels are the caller's.
+func (t *Table) Retired(alias string) (Retired, bool) {
+	for _, r := range t.retired {
+		if r.Alias == alias {
+			r.WireModels = slices.Clone(r.WireModels)
+			return r, true
+		}
+	}
+	return Retired{}, false
+}
+
+// QualifiedAlias is the alias raw names in the form "<provider id>/<alias>"
+// (plan 050 C1): raw cut at its first "/", the head a provider id of t and
+// the rest an alias of t on that provider — so `zai-coding-plan/glm-5.3` is
+// glm-5.3 and `meta/muse-spark-1.3` is muse-spark-1.3, while an alias that
+// is already prefixed is found the same way under its own prefix. normalize
+// is applied to the head and to the rest alike, and to each provider id and
+// alias they are compared with (nil compares them as they are): the agent
+// passes the normalisation its --model matching uses. A caller asks only
+// after its own match found nothing. Ids and aliases are tried in sorted
+// order, so the same raw always finds the same alias.
+func (t *Table) QualifiedAlias(raw string, normalize func(string) string) (string, bool) {
+	if normalize == nil {
+		normalize = func(s string) string { return s }
+	}
+	head, rest, ok := strings.Cut(raw, "/")
+	if !ok || head == "" || rest == "" {
+		return "", false
+	}
+	head, rest = normalize(head), normalize(rest)
+	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
+		if normalize(id) != head {
+			continue
+		}
+		for _, alias := range t.Aliases() {
+			if t.Models[alias].Provider == id && normalize(alias) == rest {
+				return alias, true
+			}
+		}
+	}
+	return "", false
+}
+
 // Rates is one identity's per-token rates, in picodollars — an integer
 // number of trillionths of a dollar, so that a usage's cost is exact in
 // int64 (PD22): $1 per 1,000,000 tokens is 1,000,000 p$/token. Each is the
 // model's Cost rate rounded to the nearest picodollar exactly once, by
-// ratesFromCost; a rate the Cost left unset is 0.
+// ratesFromCost; a rate the Cost left unset is 0, but for a cache write's,
+// which is the input rate (plan 050 C3).
 //
 // LongContextAbove and LongContext are the cost's one tier (plan 047 D10):
 // the threshold, 0 for no tier, and the rates a request whose prompt is
@@ -1801,23 +2002,33 @@ func sortedIdentities[V any](m map[identity]V) []identity {
 // none (plan 047 D10). A tier rate the merged table leaves out is the base
 // rate for that field (orBase): a tier written with input and output alone
 // prices a long request's cache reads and writes at the base rates, never at
-// 0, which would under-report what was spent. The fallback is resolved here
-// alone: the Cost keeps what was written, so sameAs, the same-as-shipped
-// check and the conflict warning compare that.
+// 0, which would under-report what was spent.
+//
+// A cache_write rate left out is the input rate (plan 050 C3), in the base
+// tier and the long one, never 0: a driver that reports cache writes apart
+// from its input (the Responses drivers since plan 050) counted them as input
+// before, at the input rate, so a model priced before it learned of them
+// prices them as it did. The long tier's falls back to the long cache_write,
+// then the base cache_write, then the long input rate. A cache_write written
+// as 0, for a provider that reports cache writes and charges nothing for
+// them, is 0. The fallbacks are resolved here alone: the Cost keeps what was
+// written, so sameAs, the same-as-shipped check and the conflict warning
+// compare that.
 func ratesFromCost(c *Cost) Rates {
 	r := Rates{
 		Input:      picodollarsPerToken(c.Input),
 		Output:     picodollarsPerToken(c.Output),
 		CacheRead:  picodollarsPerToken(c.CacheRead),
-		CacheWrite: picodollarsPerToken(c.CacheWrite),
+		CacheWrite: picodollarsPerToken(orBase(c.CacheWrite, c.Input)),
 	}
 	if above, l := deref(c.LongContextAbove), c.LongContext; above > 0 && l != nil {
+		longInput := orBase(l.Input, c.Input)
 		r.LongContextAbove = above
 		r.LongContext = TierRates{
-			Input:      picodollarsPerToken(orBase(l.Input, c.Input)),
+			Input:      picodollarsPerToken(longInput),
 			Output:     picodollarsPerToken(orBase(l.Output, c.Output)),
 			CacheRead:  picodollarsPerToken(orBase(l.CacheRead, c.CacheRead)),
-			CacheWrite: picodollarsPerToken(orBase(l.CacheWrite, c.CacheWrite)),
+			CacheWrite: picodollarsPerToken(orBase(l.CacheWrite, orBase(c.CacheWrite, longInput))),
 		}
 	}
 	return r

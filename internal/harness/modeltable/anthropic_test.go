@@ -55,7 +55,11 @@ const anthropicKey = "sk-ant-canary-not-a-secret-0001"
 // TestAnthropicProviderRules (§3.3, P22): over a catalog that ships it, the
 // Anthropic provider's entry may set name, env_keys and api_key — kept — and a
 // driver or base_url written for it is dropped with a warning naming the key
-// and never a value; a provider of the user's on the anthropic driver under
+// and never a value. A base_url that is not Anthropic's own takes the entry's
+// api_key and env_keys with it (plan 050 review): a key written beside a
+// proxy's endpoint never goes to Anthropic, yet it is still redacted and its
+// variable still kept from commands; one written beside Anthropic's own
+// endpoint, spelled otherwise, stays. A provider of the user's on the anthropic driver under
 // another id is dropped, as is the driver written for a shipped provider of
 // another id. With the catalog off the same entries fail the load, and the
 // provider alone loads and resolves (the control).
@@ -68,8 +72,19 @@ func TestAnthropicProviderRules(t *testing.T) {
 	tbl, _ := loadOver(t, cat, providers, "")
 	p := tbl.Providers[AnthropicProvider]
 	if p.Name != "My Claude" || p.Driver != DriverAnthropic || p.BaseURL != "" ||
-		!slices.Equal(p.EnvKeys, []string{"MY_CLAUDE_KEY"}) || p.APIKey.Reveal() != anthropicKey {
-		t.Fatalf("anthropic = %+v; want its name, env_keys and api_key overridden, its driver and endpoint craze's", p)
+		!slices.Equal(p.EnvKeys, []string{"ANTHROPIC_API_KEY"}) || p.APIKey != "" {
+		t.Fatalf("anthropic = %+v; want its name overridden, its driver, endpoint and variable craze's, and the proxy's key and variable dropped", p)
+	}
+	env := map[string]string{"MY_CLAUDE_KEY": "sk-ant-from-the-env-0002"}
+	if _, err := tbl.Resolve("anthropic/claude-test-5", fakeEnv(env)); !errors.Is(err, ErrNoAPIKey) {
+		t.Fatalf("Resolve = %v; want ErrNoAPIKey: the proxy's key never goes to Anthropic", err)
+	}
+	keys, err := tbl.Keys(fakeEnv(env))
+	if err != nil || !slices.Contains(keys, Secret(anthropicKey)) || !slices.Contains(keys, Secret("sk-ant-from-the-env-0002")) {
+		t.Fatalf("Keys = %d keys, %v; want the dropped key and the dropped variable's value among them", len(keys), err)
+	}
+	if !slices.Contains(tbl.CredentialEnvNames(), "MY_CLAUDE_KEY") {
+		t.Fatalf("CredentialEnvNames = %q; want MY_CLAUDE_KEY kept from commands", tbl.CredentialEnvNames())
 	}
 	if _, ok := tbl.Providers["mine"]; ok {
 		t.Fatal("a provider of the user's on the anthropic driver was kept")
@@ -79,7 +94,7 @@ func TestAnthropicProviderRules(t *testing.T) {
 	}
 	wantWarnings(t, tbl,
 		[]string{"providers.anthropic", "driver", "always driver", "only name, env_keys and api_key"},
-		[]string{"providers.anthropic", "base_url", "endpoint is fixed", "only name, env_keys and api_key"},
+		[]string{"providers.anthropic", "base_url", "endpoint is fixed", "api_key and env_keys go with it", "only name, env_keys and api_key"},
 		[]string{"providers.acme", "driver", "alone", "shipped driver"},
 		[]string{"providers.mine", "driver", "alone", "ignored"},
 	)
@@ -88,9 +103,20 @@ func TestAnthropicProviderRules(t *testing.T) {
 			t.Fatalf("a warning quotes a value: %q", w)
 		}
 	}
-	r, err := tbl.Resolve("anthropic/claude-test-5", fakeEnv(map[string]string{"MY_CLAUDE_KEY": "sk-ant-from-the-env-0002"}))
-	if err != nil || r.Driver != DriverAnthropic || r.BaseURL != "" || r.APIKey.Reveal() != "sk-ant-from-the-env-0002" {
-		t.Fatalf("Resolve = %+v, %v; want the anthropic driver on the user's variable", r, err)
+	r, err := tbl.Resolve("anthropic/claude-test-5", fakeEnv(map[string]string{"ANTHROPIC_API_KEY": "sk-ant-from-the-env-0003"}))
+	if err != nil || r.Driver != DriverAnthropic || r.BaseURL != "" || r.APIKey.Reveal() != "sk-ant-from-the-env-0003" {
+		t.Fatalf("Resolve = %+v, %v; want the anthropic driver on its own variable", r, err)
+	}
+
+	// Anthropic's own endpoint, spelled otherwise: the base_url is dropped,
+	// the key written beside it kept.
+	own, _ := loadOver(t, cat, "version = 1\n\n[providers.anthropic]\nbase_url = \"HTTPS://API.Anthropic.com/\"\nenv_keys = [\"MY_CLAUDE_KEY\"]\napi_key = \""+anthropicKey+"\"\n", "")
+	wantWarnings(t, own, []string{"providers.anthropic", "base_url", "endpoint is fixed"})
+	if strings.Contains(own.Warnings[0], "go with it") {
+		t.Fatalf("Anthropic's own endpoint took the key with it: %q", own.Warnings[0])
+	}
+	if p := own.Providers[AnthropicProvider]; p.APIKey.Reveal() != anthropicKey || !slices.Equal(p.EnvKeys, []string{"MY_CLAUDE_KEY"}) {
+		t.Fatalf("anthropic = %+v; want the entry's key and variable kept", p)
 	}
 
 	// The control: an entry that writes only what it may draws no warning.

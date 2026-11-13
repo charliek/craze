@@ -257,6 +257,20 @@ jobs:
             test "$count" = "1"
             tar -tzf "$archive" | grep -qx 'craze'
           done
+      # models.json (plan 050 C2): the catalog an orchestrator pins by version
+      # and sha256, made by the before-hook of .goreleaser.yaml. It is no
+      # artifact (the counts above stay what they were), but it must be in the
+      # checksums, and its crazeVersion must be the version packaged.
+      - name: models.json is checksummed and carries the snapshot's version
+        run: |
+          set -euo pipefail
+          grep -qE '^[0-9a-f]{64}  models\.json$' dist/checksums.txt
+          want=$(jq -r '.version' dist/metadata.json)
+          got=$(jq -r '.crazeVersion' bin/release/models.json)
+          echo "metadata=$want models.json=$got"
+          [[ "$want" == *SNAPSHOT* ]]
+          test "$got" = "$want"
+          test "$(jq '.schema' bin/release/models.json)" = "1"
       - name: extracted binary reports a snapshot version
         run: |
           set -euo pipefail

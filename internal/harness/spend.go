@@ -228,7 +228,7 @@ func (s *Session) stepSpent(turn int, m model, d StepDone) (Spent, []Diag) {
 
 // spent is the Spent the session reports now: turn's spend and the
 // session's, and the context the next request sends to next's model — its
-// size (§3.7) and that model's window. Its Seq is taken first, before
+// size (§3.7) and the context that model works within (plan 050 C1). Its Seq is taken first, before
 // anything is read (plan 040 §3.4; nextSeqLocked): turn and next are the
 // caller's own — a turn's, or a Replay's read before it — so nothing the
 // report is built from was read before it. The diags report each usage on
@@ -246,7 +246,7 @@ func (s *Session) spent(turn int, next modeltable.Resolved) (Spent, []Diag) {
 func (s *Session) spentAt(seq uint64, turn int, next modeltable.Resolved) (Spent, []Diag) {
 	tokens, _ := s.contextTokensOn(next)
 	inTurn, session, diags := s.spend(turn)
-	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session, Seq: seq}, diags
+	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextInForce()), Turn: inTurn, Session: session, Seq: seq}, diags
 }
 
 // nextSeqLocked numbers a report about to be built (Spent.Seq) and settles

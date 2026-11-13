@@ -187,7 +187,10 @@ func TestCancelRightAfterSubmitWithdrawsThePrompt(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 	// What a client reading it afterwards has to tell it from a cancel mid-step.
-	if lt := e.State().LastTurn; lt == nil || lt.Outcome != TurnCancelled || !lt.Withdrawn {
+	// A subscription is handed the ending before the observer that keeps the
+	// last turn runs (agent.EventLog.commitLocked), so seeing it is not yet a
+	// read of it: Sync is, as for every other last turn (rig.lastTurn).
+	if lt := r.lastTurn(); lt == nil || lt.Outcome != TurnCancelled || !lt.Withdrawn {
 		t.Fatalf("the last turn: %+v", lt)
 	}
 }

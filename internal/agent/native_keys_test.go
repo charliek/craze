@@ -633,12 +633,12 @@ func TestNativeRefusedWakeDoesNotLoop(t *testing.T) {
 	}
 }
 
-// TestNativeFirstTurnLearnsAKeyTheMergeDropped: the first turn's look always
-// reads the file. An inline key whose entry the merge dropped — a provider of
-// the user's own with no driver, ignored with a warning — is in no table, so
-// Open never knew it (the control); the first turn learns it, and redacts it
-// from its tool output. A look that trusted the file to be the one the table
-// was loaded from would leave it raw for the whole session.
+// TestNativeFirstTurnLearnsAKeyTheMergeDropped: an inline key whose entry the
+// merge dropped — a provider of the user's own with no driver, ignored with a
+// warning — is in no provider, but it is a credential all the same: the load
+// keeps it for the redactor (modeltable's credentialKeys, plan 050 review),
+// so Open knows it, and the first turn's look, which always reads the file,
+// keeps it; the turn redacts it from its tool output.
 func TestNativeFirstTurnLearnsAKeyTheMergeDropped(t *testing.T) {
 	const dropped = "sk-in-a-dropped-entry-0113"
 	f := newNativeFixture(t)
@@ -674,8 +674,8 @@ wire_model = "wire-a"
 	if !strings.Contains(diag.String(), "the entry is ignored") {
 		t.Fatalf("control: the merge did not drop the entry, so the case proves nothing: %q", diag.String())
 	}
-	if got := s.hs.Redact(dropped); got != dropped {
-		t.Fatal("control: Open already knew the dropped entry's key")
+	if got := s.hs.Redact(dropped); got == dropped {
+		t.Fatal("Open does not know the dropped entry's key: it is raw until the first turn's look")
 	}
 	if _, err := s.Prompt(context.Background(), "read key.txt"); err != nil {
 		t.Fatal(err)

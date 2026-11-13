@@ -271,6 +271,9 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 	if errors.Is(err, modeltable.ErrNothingFunded) {
 		return agent.ModelInfo{}, errNativeNothingFunded
 	}
+	if held := (*modeltable.HeldError)(nil); errors.As(err, &held) {
+		return agent.ModelInfo{}, nativeHeldError(held)
+	}
 	if err != nil {
 		return agent.ModelInfo{}, err
 	}
@@ -283,9 +286,12 @@ func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo
 // nativeModelLevels is the effort levels of native model model — named as
 // --model names it, and resolved as a native session's start resolves
 // --model (agent.MatchNativeModel), so `SPARK` is spark (plan 047 C2 review
-// F4) — as the list's /model offers it (Table.Choices, plan 047 D2, D5); of
-// the start model (nativeDefaultModel's) for ""; and false when the table
-// does not offer that model: unfunded, or not in it. alias is the model it
+// F4) — as the table states them (plan 047 D2, D5); of the start model
+// (nativeDefaultModel's) for ""; and false when the model does not run:
+// unfunded, or not in the table. A model that runs and that the list does
+// not offer — a deprecated one (plan 050 C1), or one the source order hides
+// (C5) — still has its levels: it is
+// judged by Resolve, not by the picker's membership. alias is the model it
 // resolved model to. It reads the disk, and is called off the Update.
 func nativeModelLevels(dir string, getenv func(string) string, model string) (alias string, levels []string, ok bool) {
 	table, err := modeltable.Load(dir)
@@ -301,12 +307,11 @@ func nativeModelLevels(dir string, getenv func(string) string, model string) (al
 	if err != nil {
 		return "", nil, false
 	}
-	for _, c := range table.Choices(recent, getenv, "") {
-		if c.Alias == alias {
-			return alias, c.Efforts, true
-		}
+	r, err := table.Resolve(alias, getenv)
+	if err != nil {
+		return alias, nil, false
 	}
-	return alias, nil, false
+	return alias, r.Efforts, true
 }
 
 // readNativeLevels reads the levels of native model model ("" the start
@@ -322,6 +327,19 @@ func readNativeLevels(gen uint64, dir string, getenv func(string) string, model 
 // provider has an API key: the popup's note (`native has no models: …`) and
 // /provider native's warning (`its model table: …`) both carry it.
 var errNativeNothingFunded = errors.New(`no model provider has an API key — run craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan), or set its API key variable`)
+
+// nativeHeldError is what the list says when the paid-source guard held
+// back every model a new native session could start on (plan 050 C5,
+// modeltable.HeldError): something is funded, so not errNativeNothingFunded's
+// "no model provider has an API key", but either the ChatGPT plan is signed
+// in and offers none of its models, or the model's key is found only in the
+// environment. craze auth login of the held error's Source answers either:
+// it signs in again, or stores the key. The list's /model still offers the
+// model by name.
+func nativeHeldError(held *modeltable.HeldError) error {
+	return fmt.Errorf("%s, so craze does not pick %s for you — run craze auth login %s, or pick a model with /model",
+		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), sanitizeLine(held.Source))
+}
 
 // nativeModelName is a native model as the list names it: its table name,
 // cleaned for the terminal, else its alias.

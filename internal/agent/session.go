@@ -491,8 +491,10 @@ type SendNowState struct {
 // current turn and in all.
 //
 // ContextTokens is the estimated size, in tokens, of what the session's next
-// request sends; ContextWindow is the context window of the model it goes to,
-// 0 when craze does not know it. Turn is the spend of the turn the report
+// request sends; ContextWindow is the context the model it goes to works
+// within — on a native model with a default_context below its window, that
+// default (plan 050 C1), else the context window — 0 when craze does not
+// know it. Turn is the spend of the turn the report
 // followed — after a load, the last turn the stored session recorded — and
 // Session the whole session's: its own requests, its compactions' and the
 // sub-agents its turns ran (a child's own transcript is never added in).

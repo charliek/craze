@@ -32,18 +32,20 @@ func (s *Session) compactionConfig() modeltable.Compaction {
 }
 
 // compactionThreshold is the context size, in tokens, at which a session on
-// r compacts on its own (plan 028 §3.6, P32): percent of r's context window,
-// rounded down, and never more than the window less r's output ceiling, the
-// room a request must leave for its answer. It is 0 — no automatic
-// compaction — when the window is unknown (PD12; /compact and the recovery
-// from an overflow still work), and when the ceiling takes the whole window,
-// which no request could fit either.
+// r compacts on its own (plan 028 §3.6, P32): percent of the context r works
+// within (Resolved.ContextInForce: its default_context when that is below
+// the window, plan 050 C1, else the window), rounded down, and never more
+// than the true window less r's output ceiling, the room a request must
+// leave for its answer. It is 0 — no automatic compaction — when the window
+// is unknown (PD12; /compact and the recovery from an overflow still work),
+// a default_context notwithstanding, and when the ceiling takes the whole
+// window, which no request could fit either.
 func compactionThreshold(r modeltable.Resolved, percent int) int64 {
 	if r.ContextWindow <= 0 {
 		return 0
 	}
 	window := int64(r.ContextWindow)
-	t := window * int64(percent) / 100
+	t := int64(r.ContextInForce()) * int64(percent) / 100
 	if r.MaxOutputTokens > 0 {
 		t = min(t, window-int64(r.MaxOutputTokens))
 	}

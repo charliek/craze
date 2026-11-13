@@ -136,7 +136,7 @@ craze refuses to start the TUI on a non-tty. For a scripted turn, use
 The native provider (`--provider native`) runs the agent inside craze itself,
 talking to a model provider's API: there is no agent CLI to install, only an
 API key or a ChatGPT plan sign-in to give it. craze ships a catalog of models
-from five API-key providers, and can also use a ChatGPT plan; it needs one of
+from six API-key providers, and can also use a ChatGPT plan; it needs one of
 them connected:
 
 | Provider | Id for `craze auth` | Or export |
@@ -145,6 +145,7 @@ them connected:
 | ChatGPT plan | `chatgpt` | none: `craze auth login chatgpt` signs in with your ChatGPT account |
 | Fireworks | `fireworks` | `FIREWORKS_API_KEY` |
 | Meta | `meta` | `META_API_KEY` |
+| OpenAI (API key, billed per token) | `openai` | `OPENAI_API_KEY` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
 | Z.AI Coding Plan | `zai-coding-plan` | `ZHIPU_API_KEY` or `ZAI_API_KEY` |
 
@@ -199,9 +200,17 @@ them connected:
 
     With no `--model` and nothing remembered, a new session starts on the
     first provider you have connected, in this order: Z.AI Coding Plan,
-    ChatGPT plan, Fireworks, OpenRouter, Meta, Anthropic, each on its own
-    start model ([the table](../reference/configuration.md#the-shipped-catalog);
-    Anthropic's is the newest Claude Opus your account lists).
+    ChatGPT plan, Fireworks, OpenRouter, Meta, Anthropic, OpenAI, each on its
+    own start model ([the table](../reference/configuration.md#the-shipped-catalog);
+    Anthropic's is the newest Claude Opus your account lists, OpenAI's
+    `openai/gpt-6.1-sol`). An `OPENAI_API_KEY` already exported for other
+    tools runs OpenAI's models, but craze does not choose one for a new
+    session on its own until you store the key with `craze auth login
+    openai`. Until then, pass `--model openai/gpt-6.1-sol`, pick one with
+    `/model` (the model memory then starts it again), or set a
+    `default_model`.
+    `env_keys = []` under `[providers.openai]` in `providers.toml` turns the
+    variable off.
     OpenRouter's models are its `~<family>-latest` routers, so an alias there
     may resolve to a newer model after OpenRouter updates the router.
 

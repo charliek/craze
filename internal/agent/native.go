@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/errkind"
@@ -1321,10 +1322,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// model's display name, still finds it.
 		alias, err := MatchNativeModel(table, s.opts.Model)
 		if err != nil {
-			return nil, nativeOpened{}, none, &nativeConfigError{
-				msg:   fmt.Sprintf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", ")),
-				cause: err,
-			}
+			return nil, nativeOpened{}, none, &nativeConfigError{msg: unknownNativeModelText(table, s.opts.Model, err), cause: err}
 		}
 		hopts.Model = alias
 	}
@@ -1646,17 +1644,89 @@ func sealedGetenv(getenv func(string) string) (read func(string) string, release
 // the table was read from.
 func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.RecentEntry, getenv func(string) string, dir string) (alias, effort string, err error) {
 	start, err := table.StartPick(recent, getenv)
+	if held := (*modeltable.HeldError)(nil); errors.As(err, &held) {
+		return "", "", &nativeConfigError{msg: heldText(table, held), cause: err}
+	}
 	if err != nil {
 		return "", "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
 	}
 	if start.Fallback {
+		started := fmt.Sprintf("starting on %q", start.Alias)
+		if m := table.Models[start.Alias]; m.Deprecated {
+			// StartPick's last resort (plan 050 C1): only deprecated models
+			// are funded.
+			started += fmt.Sprintf(", which is deprecated (replaced by %q)", m.ReplacedBy)
+		}
 		if table.DefaultModel != "" {
-			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; starting on %q", table.DefaultModel, start.Alias))
+			s.note(fmt.Sprintf("the default model %q has no usable API key or sign-in; %s", table.DefaultModel, started))
 		} else {
-			s.note(fmt.Sprintf("no start model in the provider order is available; starting on %q", start.Alias))
+			s.note(fmt.Sprintf("no start model in the provider order is available; %s", started))
 		}
 	}
 	return start.Alias, start.Effort, nil
+}
+
+// unknownNativeModelText is the start error for a --model raw that table
+// does not match (err): the table's aliases after the error — unless raw names
+// an alias the catalog retired (plan 050 C1), which leads instead, its
+// replacement first when the catalog names one and then nothing more: a
+// script reading the message meets the alias to use before anything else. A
+// stored session whose recorded --model was retired since is refused the
+// same way on its reload; craze never moves it to the replacement.
+func unknownNativeModelText(table *modeltable.Table, raw string, err error) string {
+	msg, _, _ := NativeModelRefusal(table, raw, err)
+	return msg
+}
+
+// NativeModelRefusal is a --model raw that MatchNativeModel refused with err,
+// as a native session's start refuses it (plan 050 C2): the start's own
+// message (unknownNativeModelText), and the [[retired]] row raw names when
+// that is why — a waiting command's pre-check and craze models say what the
+// host would, with the row's replacement as a fact beside it.
+func NativeModelRefusal(table *modeltable.Table, raw string, err error) (msg string, retired modeltable.Retired, isRetired bool) {
+	r, ok := retiredNativeModel(table, raw)
+	isRetired = ok && errors.Is(err, errUnknownModel)
+	has := fmt.Sprintf("(the model table has %s)", strings.Join(table.Aliases(), ", "))
+	switch {
+	case isRetired && r.ReplacedBy != "":
+		msg = fmt.Sprintf("native: %s was retired; use %s", sanitizeLine(r.Alias), sanitizeLine(r.ReplacedBy))
+	case isRetired:
+		msg = fmt.Sprintf("native: %s was retired %s", sanitizeLine(r.Alias), has)
+	default:
+		msg = fmt.Sprintf("native: %v %s", err, has)
+	}
+	return msg, r, isRetired
+}
+
+// retiredNativeModel is the [[retired]] row raw names, as written or as
+// --model's normalisation spells it (normalizeIdent: a retired alias is
+// lowercase, like every shipped one), when the table has one.
+func retiredNativeModel(table *modeltable.Table, raw string) (modeltable.Retired, bool) {
+	raw = strings.TrimSpace(raw)
+	if r, ok := table.Retired(raw); ok {
+		return r, true
+	}
+	return table.Retired(normalizeIdent(raw))
+}
+
+// heldText is the start error when the paid-source guard held back every
+// model craze could have chosen (modeltable.HeldError, plan 050 C5): a key
+// is there, but either the ChatGPT plan is signed in and offers none of its
+// models (no usable list, another account's, or plan usage off), and craze
+// does not move a new session to another payer on its own; or the model's
+// key is found only in the environment, which is no consent to bill it. One
+// sentence serves both: the held error's reason, then its fix — the sign-in
+// or the key to set up, and the model to pass. It names a provider, a
+// variable's name and a model, never a token or a key.
+func heldText(table *modeltable.Table, held *modeltable.HeldError) string {
+	via := ""
+	if m, ok := table.Models[held.Alias]; ok {
+		if p := table.Providers[m.Provider]; p.Name != "" {
+			via = " (" + sanitizeLine(p.Name) + ")"
+		}
+	}
+	return fmt.Sprintf("native: %s, and craze does not start a new session on %s%s on its own; run %s",
+		sanitizeLine(held.Reason()), sanitizeLine(held.Alias), via, sanitizeLine(held.Fix()))
 }
 
 // nothingFundedText is the start error when no model's provider has a key
@@ -1785,11 +1855,26 @@ func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, cata
 // because they go back to SetModel verbatim.
 // MatchNativeModel is raw, a model as --model names it, resolved against every
 // model of table the way a native session's start resolves --model:
-// MatchModel over the table's aliases and names. The session list resolves
-// a typed /model by it too (plan 047 D5), so it finds the model a session
-// started from it runs.
+// MatchModel over the table's aliases and names, and, only when that finds no
+// model (not when it finds several), raw as "<provider id>/<alias>"
+// (Table.QualifiedAlias, plan 050 C1) under the same normalisation, so
+// `zai-coding-plan/glm-5.3` is glm-5.3. The session list resolves a typed
+// /model by it too (plan 047 D5), so it finds the model a session started
+// from it runs, and so does a sub-agent's model (nativeModelMatcher).
 func MatchNativeModel(table *modeltable.Table, raw string) (string, error) {
-	return MatchModel(Snapshot{Models: tableModels(table)}, raw)
+	return matchNative(table, Snapshot{Models: tableModels(table)}, raw)
+}
+
+// matchNative is MatchNativeModel over snap, table's models as tableModels
+// lists them.
+func matchNative(table *modeltable.Table, snap Snapshot, raw string) (string, error) {
+	alias, err := MatchModel(snap, raw)
+	if errors.Is(err, errUnknownModel) {
+		if q, ok := table.QualifiedAlias(strings.TrimSpace(raw), normalizeIdent); ok {
+			return q, nil
+		}
+	}
+	return alias, err
 }
 
 func tableModels(table *modeltable.Table) []ModelInfo {
@@ -2994,7 +3079,7 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 		if err := sw.hs.SetModelEffort(alias, landing); err != nil {
 			return switched{}, phraseSetupError(err, sw.table, alias)
 		}
-		if alias != current && !s.resolvesLocked(sw.table, current) {
+		if alias != current && !s.offeredLocked(sw.table, current) {
 			drop = current
 		}
 		sw.left = alias != current && sw.table.Shadowed(current)
@@ -3024,6 +3109,22 @@ func (s *nativeSession) resolvesLocked(table *modeltable.Table, alias string) bo
 	defer release()
 	_, err := table.Resolve(alias, getenv)
 	return err == nil
+}
+
+// offeredLocked reports whether table, the one the session holds, offers
+// alias now (modeltable.Table.Offered, plan 050 C1), with one sealed reading
+// of the environment: the model switched away from keeps its row only while
+// it is, so the list a switch leaves matches the one a reload would publish —
+// a carried model whose key is gone loses it as it always did, and so does a
+// deprecated one, or one the source order hides (plan 050 C5). A session whose table a test's seam handed in is never
+// reloaded: true, as resolvesLocked says. modelsMu is held.
+func (s *nativeSession) offeredLocked(table *modeltable.Table, alias string) bool {
+	if alias == "" || !s.models.reloadable {
+		return true
+	}
+	getenv, release := sealedGetenv(s.models.getenv)
+	defer release()
+	return table.Offered(getenv)[alias]
 }
 
 // relistLocked is list ranked again and its effort facts judged again (plan
@@ -3718,9 +3819,56 @@ const (
 // provider a rejected key is for, and where that key can come from.
 func (s *nativeSession) phraseTurn(err error) error {
 	s.mu.Lock()
-	table := s.table
+	table, hs := s.table, s.hs
 	s.mu.Unlock()
-	return phraseTurnErrorIn(err, table)
+	var red func(string) string
+	if hs != nil {
+		red = hs.Redact
+	}
+	return phraseTurnErrorRed(err, table, red)
+}
+
+// maxHintAliases bounds the models QuotaHint names for one source.
+const maxHintAliases = 4
+
+// QuotaHint is what a person whose native turn on alias hit a quota or a
+// plan limit is told of the other sources of the model's maker that are
+// funded (plan 050 C5): who pays for each, its models, and the route —
+// /exit, then craze -c --model, since a live host ignores --model on craze
+// -c. "" when there is none: a model of no maker, or no other funded
+// source. It is text only, craze never moves the session, and it is never
+// part of a failure: the TUI notes it beside the failure's row, from its own
+// table, so no failure object a waiting command reads can carry it. Every
+// name goes through the one-line sanitizer.
+func QuotaHint(table *modeltable.Table, alias string, getenv func(string) string) string {
+	m, ok := table.Models[alias]
+	if !ok {
+		return ""
+	}
+	routes := table.OtherSources(alias, getenv)
+	if len(routes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(routes))
+	for _, r := range routes {
+		payer := "your " + sanitizeLine(r.ProviderName) + " key"
+		switch {
+		case r.SignIn:
+			payer = "your " + sanitizeLine(r.ProviderName)
+		case r.Priced:
+			payer += " (billed per token)"
+		}
+		names := make([]string, 0, maxHintAliases)
+		for _, a := range r.Aliases[:min(len(r.Aliases), maxHintAliases)] {
+			names = append(names, sanitizeLine(a))
+		}
+		if more := len(r.Aliases) - len(names); more > 0 {
+			names = append(names, fmt.Sprintf("and %d more", more))
+		}
+		parts = append(parts, payer+": "+strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("%s models are also funded by %s. To use one, end this session with /exit, then run craze -c --model %s",
+		sanitizeLine(modeltable.MakerName(m.Maker)), strings.Join(parts, "; and by "), sanitizeLine(routes[0].First))
 }
 
 // phraseTurnError is phraseTurnErrorIn with no model table: a rejected key's
@@ -3737,6 +3885,24 @@ func phraseTurnError(err error) error { return phraseTurnErrorIn(err, nil) }
 // table: a rejected key's advice names its provider and variables from it
 // (rejectedKeyText).
 func phraseTurnErrorIn(err error, table *modeltable.Table) error {
+	return phraseTurnErrorRed(err, table, nil)
+}
+
+// maxRefusalMessage bounds the provider's own words a 403 shows (refusedText):
+// the harness's bound on a provider message, which sanitizing and redacting
+// may only shorten.
+const maxRefusalMessage = 300
+
+// phraseTurnErrorRed is phraseTurnErrorIn with red, the session's redactor
+// over every key it knows (harness.Session.Redact), nil when there is none.
+// Every provider message it shows goes through providerWords: redacted after
+// it is sanitized as well as before (nativeSafe.line, plan 050 C3 review).
+// The model's scrubber already replaced its own key whole, a run of format
+// characters inside it included, before the harness cut the message to its
+// bound (llm's keyPattern); sanitizing drops those characters (a zero-width
+// space, a soft hyphen), and the second redaction catches any other key the
+// session knows that dropping them puts back together.
+func phraseTurnErrorRed(err error, table *modeltable.Table, red func(string) string) error {
 	phrase := func(msg string) error { return &nativeError{msg: msg, cause: err} }
 	if errors.Is(err, harness.ErrEmptyStep) {
 		// No output ceiling is ever sent on the ChatGPT plan (its route
@@ -3780,10 +3946,16 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 		// rejected (plan 044 §3.4, P27): a model the account or its
 		// organization is not allowed. Its 401 is the key's, below.
 		msg := fmt.Sprintf("native: Anthropic refused access to model %q%s", model, status)
-		if m := sanitizeLine(pe.Message); m != "" {
+		if m := providerWords(pe.Message, red); m != "" {
 			msg += ": " + m
 		}
 		return phrase(msg)
+	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT && pe.StatusCode == 403:
+		// Another key-funded provider's 403 (plan 050 C3) is as often the
+		// account's as the key's — OpenAI's for an organization not verified
+		// for a model, or a country it does not serve — so its own words
+		// come first, and the key's advice after them.
+		return phrase(refusedText(table, pe.Provider, status, providerWords(pe.Message, red)))
 	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
 		// The plan has no key to check: its 401 is phraseChatGPT's, and any
 		// other refusal it flags is said as the provider's own, below.
@@ -3794,7 +3966,7 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 		// configured, so the words name the wire id the account was asked
 		// for, and Anthropic's own reason.
 		msg := fmt.Sprintf("native: the Anthropic account cannot use %s (HTTP %d", sanitizeLine(pe.WireModel), pe.StatusCode)
-		if m := sanitizeLine(pe.Message); m != "" {
+		if m := providerWords(pe.Message, red); m != "" {
 			msg += ": " + m
 		}
 		return phrase(msg + ")")
@@ -3811,7 +3983,7 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)
-	if m := sanitizeLine(pe.Message); m != "" {
+	if m := providerWords(pe.Message, red); m != "" {
 		msg += ": " + m
 	}
 	return phrase(msg)
@@ -3825,6 +3997,59 @@ func phraseTurnErrorIn(err error, table *modeltable.Table) error {
 // names the provider by its display name, its id for the command, and its
 // variables by name, never a value.
 func rejectedKeyText(table *modeltable.Table, id, status string) string {
+	name, advice := keyAdvice(table, id)
+	return fmt.Sprintf(`native: %s rejected the API key%s; %s`, name, status, advice)
+}
+
+// providerWords is a provider's message as an error shows it: on one line,
+// sanitized, with every format character dropped (a soft hyphen the
+// sanitizer keeps draws as nothing, so a key split by one reads whole), then
+// redacted after both as well as before when there is a redactor (red), and
+// bounded. With no redactor — a caller with no session — a message the
+// cleaning changed is not shown at all: it held a character that could split
+// a key the scrub then missed.
+func providerWords(msg string, red func(string) string) string {
+	clean := func(s string) string { return dropFormat(sanitizeLine(s)) }
+	var out string
+	switch {
+	case red != nil:
+		out = red(clean(red(msg)))
+	case clean(msg) != strings.Join(strings.Fields(msg), " "):
+		return ""
+	default:
+		out = clean(msg)
+	}
+	return truncateUTF8(out, maxRefusalMessage)
+}
+
+// dropFormat is s without its format characters (Unicode Cf): zero-width
+// spaces and joiners, soft hyphens, bidi marks.
+func dropFormat(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// refusedText is a key-funded provider's 403 (plan 050 C3): the provider's
+// own message first, msg (already sanitized, "" for none), then the key's
+// advice, since a 403 may as well be the account's — a model it may not use,
+// a region it is not served in — as the key's.
+func refusedText(table *modeltable.Table, id, status, msg string) string {
+	name, advice := keyAdvice(table, id)
+	out := fmt.Sprintf("native: %s refused the request%s", name, status)
+	if msg != "" {
+		out += ": " + msg
+	}
+	return out + "; if the API key is the problem, " + advice
+}
+
+// keyAdvice is a provider's display name, sanitized, and what to do about
+// its key: store another with craze auth login, or check the variables it
+// may come from, by name, never a value.
+func keyAdvice(table *modeltable.Table, id string) (name, advice string) {
 	name, envs := id, []string(nil)
 	if table != nil {
 		if p, ok := table.Providers[id]; ok {
@@ -3834,12 +4059,11 @@ func rejectedKeyText(table *modeltable.Table, id, status string) string {
 			}
 		}
 	}
-	msg := fmt.Sprintf(`native: %s rejected the API key%s; replace it with "craze auth login %s"`,
-		sanitizeLine(name), status, sanitizeLine(id))
+	advice = fmt.Sprintf(`replace it with "craze auth login %s"`, sanitizeLine(id))
 	if len(envs) > 0 {
-		msg += ", or check " + sanitizeLine(joinEnvNames(envs))
+		advice += ", or check " + sanitizeLine(joinEnvNames(envs))
 	}
-	return msg
+	return sanitizeLine(name), advice
 }
 
 // joinEnvNames is variable names as a choice: "A", "A or B", "A, B or C".

@@ -72,12 +72,16 @@ type childModelInput struct {
 // key it does not control.
 //
 // The call is the one candidate a failure to resolve is fatal for: an
-// unrecognised value is the "Unknown model" error, naming every alias and
-// tier the table has; one with no key errors naming the provider (never the
-// key). A persona or default candidate that fails either way falls through
-// to the next one with a single warn line, because content is not the
-// model's choice. Every candidate is read against v, the call's one reading
-// of the table (tableView).
+// unrecognised value is the "Unknown model" error, naming the sub-agent
+// choice set and the tiers; one with no key errors naming the provider (never
+// the key); and one that runs but that the choice set does not hold — a
+// model the source order hides, a deprecated one the owner did not configure
+// — is refused with the same list (plan 050 C5). A persona's model and the
+// configured default keep full resolution: the owner wrote them. A persona or
+// default candidate that fails either way falls through to the next one with
+// a single warn line, because content is not the model's choice. Every
+// candidate is read against v, the call's one reading of the table
+// (tableView).
 func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(string)) (alias string, err error) {
 	type candidate struct {
 		raw      string
@@ -89,6 +93,10 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		{in.Persona, "the persona's model", false},
 		{v.table.Subagents.Model, "the configured sub-agent default model", false},
 	}
+	// The parents the menu was built from — every model the session may
+	// continue on, on a resume — and the parent's model now: a call naming
+	// one the menu listed is not refused for it (plan 050 review).
+	parents := append(slices.Clone(s.tools.parents), in.ParentAlias)
 	for _, c := range candidates {
 		if c.raw == "" {
 			continue
@@ -96,7 +104,8 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 		got, recognized := v.resolveModelValue(c.raw, in.ParentAlias)
 		if !recognized {
 			if c.required {
-				return "", unknownModelError(s.quoteRaw(c.raw), v.table)
+				listed := slices.Sorted(maps.Keys(subagentChoices(v.table, s.getenv, parents...)))
+				return "", unknownModelError(s.quoteRaw(c.raw), v.table, listed)
 			}
 			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
 			continue
@@ -107,6 +116,14 @@ func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(s
 			}
 			warnLine(warn, fmt.Sprintf("%s %q resolves to %q, which has no usable API key; falling through to the next default", c.label, c.raw, got))
 			continue
+		}
+		if c.required {
+			// Never a hidden or deprecated model the owner did not configure
+			// just because the parent's model sent its name (the doc above).
+			choices := subagentChoices(v.table, s.getenv, parents...)
+			if !choices[got] {
+				return "", notOfferedModelError(s.quoteRaw(c.raw), v.table, slices.Sorted(maps.Keys(choices)))
+			}
 		}
 		return got, nil
 	}
@@ -206,7 +223,11 @@ func (v tableView) tierAlias(raw, parentAlias string) (alias string, isTier bool
 // matchModelAlias is raw matched against the table's aliases: the view's
 // matcher (the adapter's `--model` normalisation) when set, else an exact,
 // case-sensitive alias match, which is what Options.MatchModel's doc
-// promises for a nil matcher.
+// promises for a nil matcher, and when that finds nothing, raw as
+// "<provider id>/<alias>" (Table.QualifiedAlias, plan 050 C1), compared as
+// written. The adapter's matcher tries the same form itself, under its own
+// normalisation and only when its match found nothing rather than too much
+// (agent.MatchNativeModel), which a bare ok cannot tell this caller.
 func (v tableView) matchModelAlias(raw string) (alias string, ok bool) {
 	if v.match != nil {
 		return v.match(raw)
@@ -214,7 +235,7 @@ func (v tableView) matchModelAlias(raw string) (alias string, ok bool) {
 	if _, ok := v.table.Models[raw]; ok {
 		return raw, true
 	}
-	return "", false
+	return v.table.QualifiedAlias(raw, nil)
 }
 
 // warnLine calls warn with msg when warn is not nil; resolveChildModel and
@@ -243,12 +264,25 @@ const unknownModelCap = 1024
 const unknownModelRawCap = 200
 
 // unknownModelError is a call's `model` naming neither a table alias, a
-// recognised tier, nor "inherit": every alias and every configured tier
-// mapping, so the parent's model can retry with a name that exists (plan 026
-// §3.6). raw is never omitted: the model needs to see what it sent to
-// correct it.
-func unknownModelError(raw string, table *modeltable.Table) error {
-	aliases := table.Aliases() // sorted
+// recognised tier, nor "inherit": aliases — the sub-agent choice set, sorted
+// (subagentChoices, plan 050 C1: what the agent tool's menu offers, not every
+// alias the table has) — and every configured tier mapping, so the parent's
+// model can retry with a name that exists (plan 026 §3.6). raw is never
+// omitted: the model needs to see what it sent to correct it.
+func unknownModelError(raw string, table *modeltable.Table, aliases []string) error {
+	return modelListError("Unknown model", raw, table, aliases)
+}
+
+// notOfferedModelError is a call's `model` naming a model that runs but that
+// the sub-agent choice set does not hold (plan 050 C5): one the source order
+// hides, or a deprecated one the owner did not configure. It names the same
+// list unknownModelError does, so the parent's model can retry with one.
+func notOfferedModelError(raw string, table *modeltable.Table, aliases []string) error {
+	return modelListError("Model not offered to sub-agents", raw, table, aliases)
+}
+
+// modelListError is unknownModelError's message under lead.
+func modelListError(lead, raw string, table *modeltable.Table, aliases []string) error {
 	var tierParts []string
 	for _, name := range slices.Sorted(maps.Keys(table.Subagents.Tiers)) {
 		tierParts = append(tierParts, fmt.Sprintf("%s → %s", name, table.Subagents.Tiers[name]))
@@ -257,12 +291,12 @@ func unknownModelError(raw string, table *modeltable.Table) error {
 	if len(tierParts) > 0 {
 		tiers = strings.Join(tierParts, ", ")
 	}
-	msg := fmt.Sprintf("Unknown model `%s`. Models: %s; tiers: %s. Omit `model` to use the parent's.",
-		raw, strings.Join(aliases, ", "), tiers)
+	msg := fmt.Sprintf("%s `%s`. Models: %s; tiers: %s. Omit `model` to use the parent's.",
+		lead, raw, strings.Join(aliases, ", "), tiers)
 	if len(msg) <= unknownModelCap {
 		return errors.New(msg)
 	}
-	return errors.New(capModelList(raw, aliases, tierParts))
+	return errors.New(capModelList(lead, raw, aliases, tierParts))
 }
 
 // capModelList is unknownModelError's message cut to fit unknownModelCap,
@@ -277,8 +311,8 @@ func unknownModelError(raw string, table *modeltable.Table) error {
 // aliases cut first, from the front, the same "… and N more" shape as
 // before; only once dropping every alias still does not fit does the tier
 // clause give way too, the same way.
-func capModelList(raw string, aliases, tierParts []string) string {
-	prefix := fmt.Sprintf("Unknown model `%s`. Models: ", cutRawValue(raw))
+func capModelList(lead, raw string, aliases, tierParts []string) string {
+	prefix := fmt.Sprintf("%s `%s`. Models: ", lead, cutRawValue(raw))
 	for tierKeep := len(tierParts); tierKeep >= 0; tierKeep-- {
 		tiers := "none configured"
 		if len(tierParts) > 0 {

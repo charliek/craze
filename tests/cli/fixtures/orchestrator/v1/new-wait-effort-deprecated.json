@@ -1,0 +1,1 @@
+{"error":{"message":"--effort minimal: acme/sonic-1 offers low, high","kind":"config","retryable":false,"detail":{"reason":"effort_not_offered","model":"acme/sonic-1"}},"warnings":[{"kind":"model_deprecated","model":"acme/sonic-1","replacedBy":"acme/sonic","message":"acme/sonic-1 is deprecated; use acme/sonic"}]}

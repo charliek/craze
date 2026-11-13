@@ -1,0 +1,15 @@
+# Every alias craze's catalog has shipped deprecated (plan 050 C1;
+# RELEASING.md "Model catalog changes"), one line each: the alias, a space,
+# and the craze version internal/version.Version held (the last release) in
+# the commit that deprecated it — "fireworks/kimi-k3 0.2.0".
+#
+# APPEND-ONLY: never delete or edit a line. TestDeprecationHistory requires a
+# line for every deprecated model, and one for every [[retired]] row that is
+# not in retired-grandfathered.txt, whose version is below the current
+# version.Version: so a release always ships an alias deprecated before a
+# later one retires it, and a deprecation and its retirement never ship in
+# the same release.
+fireworks/kimi-k3 0.2.0
+fireworks/deepseek-v4p1-flash 0.2.0
+openrouter/gemini-4-argon 0.2.0
+openrouter/minimax-m3 0.2.0

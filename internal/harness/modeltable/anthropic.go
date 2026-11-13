@@ -267,6 +267,12 @@ func (c *Catalog) validateAnthropic(name string) error {
 
 // anthropicLockReason ends the warning for each key of the Anthropic
 // provider's entry the lock drops: what the entry may set instead.
+// AnthropicEndpoint is Anthropic's own API, the fixed endpoint of the
+// anthropic driver (messagesapi.DefaultBaseURL): a base_url written for the
+// Anthropic provider that is this one, once normalised, names no other
+// endpoint (lockAnthropic).
+const AnthropicEndpoint = "https://api.anthropic.com"
+
 const anthropicLockReason = "craze's own Anthropic provider takes only name, env_keys and api_key"
 
 // lockAnthropic locks pd's entries for the providers cat ships on the
@@ -274,8 +280,11 @@ const anthropicLockReason = "craze's own Anthropic provider takes only name, env
 // — a driver other than the anthropic driver, base_url, source — with one
 // warning line per key, naming it and never its value. It runs before the
 // user's files are checked, so a key the lock drops cannot fail the load
-// first: a gateway's base_url, an unknown driver. An env_keys of the user's
-// stays, an explicit empty one included: that is how an exported
+// first: a gateway's base_url, an unknown driver. A base_url that is not
+// Anthropic's own takes the entry's api_key and env_keys with it (withheld:
+// still redacted, still kept from commands), since a key written beside a
+// gateway's endpoint was written for the gateway (plan 050 review). Otherwise
+// an env_keys of the user's stays, an explicit empty one included: that is how an exported
 // ANTHROPIC_API_KEY is kept from funding craze (P24), and a source would let
 // an old import's path restore the shipped variables over it (merger.provider).
 func lockAnthropic(cat *Catalog, ppath string, pd *providersOverlay) []string {
@@ -294,7 +303,20 @@ func lockAnthropic(cat *Catalog, ppath string, pd *providersOverlay) []string {
 		}
 		o.Driver = nil
 		if o.BaseURL != nil {
-			drop("base_url", fixedEndpoint(DriverAnthropic))
+			reason := fixedEndpoint(DriverAnthropic)
+			if writesOtherEndpoint(o.BaseURL, AnthropicEndpoint) && (o.APIKey != nil || len(deref(o.EnvKeys)) > 0) {
+				// A key written beside another endpoint was written for it,
+				// not for Anthropic's (plan 050 review): it goes with the
+				// base_url, kept only for the redactor (withheld). An
+				// explicit env_keys = [] names no key, and stays (P24).
+				reason += ", and the entry's api_key and env_keys go with it, so its key is not sent to Anthropic"
+				pd.withheld = append(pd.withheld, providerOverlay{APIKey: o.APIKey, EnvKeys: o.EnvKeys})
+				o.APIKey = nil
+				if len(deref(o.EnvKeys)) > 0 {
+					o.EnvKeys = nil
+				}
+			}
+			drop("base_url", reason)
 			o.BaseURL = nil
 		}
 		if o.Source != nil {

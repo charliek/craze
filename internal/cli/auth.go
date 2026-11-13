@@ -367,6 +367,11 @@ func (a *authRun) list() error {
 	for _, line := range slices.Concat(table.RedundantOverrides(), table.Warnings, table.EnvWarnings(a.getenv)) {
 		a.note(strings.TrimPrefix(line, "modeltable: "))
 	}
+	// Which source each maker's models come from, where the source order
+	// hides another's (plan 050 C5).
+	for _, line := range sourceNotes(table, a.getenv) {
+		a.note(line)
+	}
 	return nil
 }
 

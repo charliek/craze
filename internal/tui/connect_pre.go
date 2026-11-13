@@ -277,7 +277,7 @@ func (m Model) preSignInDone(msg signInDoneMsg) (Model, tea.Cmd) {
 	run := m.cdlg.field
 	m.cdlg.step, m.cdlg.key, m.cdlg.keyErr, m.cdlg.signIn = connectFinishing, textinput.Model{}, "", signInState{}
 	m.cdlg.signed = preSigned{email: email, notice: msg.res.ShowNotice}
-	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, false, msg.observe, signInStamp{gen: m.cdlg.gen, run: run, pre: true})
+	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, m.nativeEnv, false, msg.observe, signInStamp{gen: m.cdlg.gen, run: run, pre: true})
 }
 
 // preSignInFinished is the work after a pre-session sign-in (signInFinishedMsg:

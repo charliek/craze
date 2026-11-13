@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -124,6 +125,56 @@ func TestKeyRouteBody(t *testing.T) {
 	}
 }
 
+// TestKeyRouteSendsAMessagesPhase (plan 050 C3): an assistant message built
+// with its phase sends it on the key route when it is "commentary" or
+// "final_answer", the two values OpenAI takes, and never another, nor an
+// empty one; the ChatGPT route sends none, whatever the item holds; and the
+// caller's items are as they were after either body was built. Negative
+// control: a body that sent every phase sends "bogus", which OpenAI refuses
+// with a 400.
+func TestKeyRouteSendsAMessagesPhase(t *testing.T) {
+	r := fullRequest()
+	r.Input = []Item{
+		UserMessage(InputText("go")),
+		AssistantMessagePhase("Working on it.", "commentary"),
+		AssistantMessagePhase("Done.", "final_answer"),
+		AssistantMessagePhase("Odd.", "bogus"),
+		AssistantMessagePhase("Plain.", ""),
+		AssistantMessage("Older."),
+	}
+	before := slices.Clone(r.Input)
+	phases := func(body []byte) []any {
+		var input []map[string]any
+		if err := json.Unmarshal(topLevel(t, body)["input"], &input); err != nil {
+			t.Fatal(err)
+		}
+		var out []any
+		for _, it := range input {
+			if it["role"] == "assistant" {
+				out = append(out, it["phase"])
+			}
+		}
+		return out
+	}
+	body, err := r.body(RouteKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := phases(body); !slices.Equal(got, []any{"commentary", "final_answer", nil, nil, nil}) {
+		t.Fatalf("the key route's phases = %v", got)
+	}
+	chat, err := r.Body()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := phases(chat); !slices.Equal(got, []any{nil, nil, nil, nil, nil}) || strings.Contains(string(chat), "phase") {
+		t.Fatalf("the ChatGPT route's phases = %v:\n%s", got, chat)
+	}
+	if !reflect.DeepEqual(r.Input, before) {
+		t.Fatal("building a body changed the caller's items")
+	}
+}
+
 // TestKeyRouteClientConfig: the key route needs its key and takes no token
 // source; the ChatGPT route takes no key. The base URL is required, https on
 // any host or http to a loopback IP literal, with no user info, query or
@@ -239,41 +290,65 @@ func TestKeyRouteNeverFollowsARedirect(t *testing.T) {
 	}
 }
 
-// TestKeyRouteErrorClassification: on the key route nothing is final in the
-// ChatGPT plan's sense; a 429 and a 5xx may be tried again before any
-// output, as may a rate limit or a server's fault inside the stream; a 400,
-// 401, 403 and 404 never, whatever code they carry. The control: each error
-// judged on the ChatGPT route keeps that route's answer (a 429 final, the
-// in-stream rate limit final, a 500 left to the caller).
+// TestKeyRouteErrorClassification: on the key route a 429 and a 5xx may be
+// tried again before any output, as may a rate limit, a server's fault or
+// OpenAI's overload inside the stream; a 400, 401, 403 and 404 never,
+// whatever code they carry. Nothing is final in the ChatGPT plan's sense but a
+// 429 whose code or type says the account's credit or spend limit is gone
+// (plan 050 C3), which is final and so never transient — Final and Transient
+// are judged together, never both — and so is such a code or type inside the
+// stream, whatever the other says (a rate-limit type beside a quota code). The control: each error judged on the
+// ChatGPT route keeps that route's answer (a 429 final, the in-stream rate
+// limit final, a 500 left to the caller).
 func TestKeyRouteErrorClassification(t *testing.T) {
 	for _, tc := range []struct {
 		status, kind      string
 		e                 Error
-		transient         bool
+		final, transient  bool
 		chatFinal, chatTr bool
 	}{
-		{"429", "", Error{StatusCode: 429}, true, true, false},
-		{"429", "rate_limit_exceeded", Error{StatusCode: 429, Code: "rate_limit_exceeded"}, true, true, false},
-		{"500", "", Error{StatusCode: 500}, true, false, false},
-		{"502", "", Error{StatusCode: 502}, true, false, false},
-		{"503", "", Error{StatusCode: 503}, true, false, true},
-		{"400", "", Error{StatusCode: 400, Code: "invalid_request_error"}, false, true, false},
-		{"401", "server_error", Error{StatusCode: 401, Code: "server_error"}, false, false, true},
-		{"403", "", Error{StatusCode: 403}, false, false, false},
-		{"404", "model_not_found", Error{StatusCode: 404, Code: "model_not_found"}, false, false, false},
-		{"307", "", Error{StatusCode: 307}, false, false, false},
-		{"stream", "rate_limit_exceeded", Error{Event: "error", Code: "rate_limit_exceeded"}, true, true, false},
-		{"stream", "rate_limit_error type", Error{Event: "error", Type: "rate_limit_error"}, true, false, false},
-		{"stream", "server_error", Error{Event: "response.failed", Code: "server_error"}, true, false, true},
-		{"stream", "overloaded_error type", Error{Event: "error", Type: "overloaded_error"}, true, false, true},
-		{"stream", "invalid_request_error", Error{Event: "error", Code: "invalid_request_error"}, false, false, false},
-		{"stream", "an incomplete response", Error{Event: "response.incomplete", Reason: "max_output_tokens"}, false, false, false},
-		{"stream", "the plan's usage limit", Error{Event: "response.failed", Code: "subscription_sharing_usage_limit_exceeded"}, false, true, false},
+		{"429", "", Error{StatusCode: 429}, false, true, true, false},
+		{"429", "rate_limit_exceeded", Error{StatusCode: 429, Code: "rate_limit_exceeded"}, false, true, true, false},
+		{"429", "insufficient_quota", Error{StatusCode: 429, Code: "insufficient_quota", Type: "insufficient_quota"}, true, false, true, false},
+		{"429", "credit_balance_exhausted", Error{StatusCode: 429, Code: "credit_balance_exhausted"}, true, false, true, false},
+		{"429", "organization_spend_limit_exceeded", Error{StatusCode: 429, Code: "organization_spend_limit_exceeded", Type: "requests"}, true, false, true, false},
+		{"429", "project_spend_limit_exceeded", Error{StatusCode: 429, Code: "project_spend_limit_exceeded"}, true, false, true, false},
+		{"429", "organization_usage_limit_exceeded", Error{StatusCode: 429, Code: "organization_usage_limit_exceeded"}, true, false, true, false},
+		{"429", "insufficient_quota type", Error{StatusCode: 429, Type: "insufficient_quota"}, true, false, true, false},
+		{"429", "credit_balance_exhausted type", Error{StatusCode: 429, Type: "credit_balance_exhausted"}, true, false, true, false},
+		{"500", "", Error{StatusCode: 500}, false, true, false, false},
+		{"502", "", Error{StatusCode: 502}, false, true, false, false},
+		{"503", "", Error{StatusCode: 503}, false, true, false, true},
+		{"503", "server_is_overloaded", Error{StatusCode: 503, Code: "server_is_overloaded", Type: "service_unavailable_error"}, false, true, false, true},
+		{"400", "", Error{StatusCode: 400, Code: "invalid_request_error"}, false, false, true, false},
+		{"401", "server_error", Error{StatusCode: 401, Code: "server_error"}, false, false, false, true},
+		{"401", "insufficient_quota", Error{StatusCode: 401, Code: "insufficient_quota"}, false, false, false, false},
+		{"403", "", Error{StatusCode: 403}, false, false, false, false},
+		{"404", "model_not_found", Error{StatusCode: 404, Code: "model_not_found"}, false, false, false, false},
+		{"307", "", Error{StatusCode: 307}, false, false, false, false},
+		{"stream", "rate_limit_exceeded", Error{Event: "error", Code: "rate_limit_exceeded"}, false, true, true, false},
+		{"stream", "rate_limit_error type", Error{Event: "error", Type: "rate_limit_error"}, false, true, false, false},
+		{"stream", "server_error", Error{Event: "response.failed", Code: "server_error"}, false, true, false, true},
+		{"stream", "overloaded_error type", Error{Event: "error", Type: "overloaded_error"}, false, true, false, true},
+		{"stream", "server_is_overloaded", Error{Event: "error", Code: "server_is_overloaded"}, false, true, false, false},
+		{"stream", "service_unavailable_error type", Error{Event: "response.failed", Type: "service_unavailable_error"}, false, true, false, false},
+		{"stream", "insufficient_quota", Error{Event: "response.failed", Code: "insufficient_quota"}, true, false, false, false},
+		{"stream", "a quota code beside a rate-limit type", Error{Event: "response.failed", Code: "project_spend_limit_exceeded", Type: "rate_limit_error"}, true, false, false, false},
+		{"stream", "a rate-limit code beside a quota type", Error{Event: "error", Code: "rate_limit_exceeded", Type: "insufficient_quota"}, true, false, true, false},
+		{"429", "a quota code beside a rate-limit type", Error{StatusCode: 429, Code: "credit_balance_exhausted", Type: "rate_limit_error"}, true, false, true, false},
+		{"429", "a rate-limit code beside a quota type", Error{StatusCode: 429, Code: "rate_limit_exceeded", Type: "organization_spend_limit_exceeded"}, true, false, true, false},
+		{"500", "a quota code", Error{StatusCode: 500, Code: "insufficient_quota"}, false, true, false, false},
+		{"stream", "invalid_request_error", Error{Event: "error", Code: "invalid_request_error"}, false, false, false, false},
+		{"stream", "an incomplete response", Error{Event: "response.incomplete", Reason: "max_output_tokens"}, false, false, false, false},
+		{"stream", "the plan's usage limit", Error{Event: "response.failed", Code: "subscription_sharing_usage_limit_exceeded"}, false, false, true, false},
 	} {
 		key := tc.e
 		key.Route = RouteKey
-		if key.Final() || key.Transient() != tc.transient {
-			t.Errorf("key route, %s %s: final %v transient %v, want false %v", tc.status, tc.kind, key.Final(), key.Transient(), tc.transient)
+		if key.Final() != tc.final || key.Transient() != tc.transient {
+			t.Errorf("key route, %s %s: final %v transient %v, want %v %v", tc.status, tc.kind, key.Final(), key.Transient(), tc.final, tc.transient)
+		}
+		if key.Final() && key.Transient() {
+			t.Errorf("key route, %s %s: both final and transient", tc.status, tc.kind)
 		}
 		chat := tc.e
 		if chat.Final() != tc.chatFinal || chat.Transient() != tc.chatTr {

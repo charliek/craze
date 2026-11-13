@@ -46,6 +46,15 @@ The provider is `native`, `cursor` or `grok`; the model, effort (`low`,
 presets take the task alone, or an optional first line `mode=plan` or
 `mode=ask`.
 
+`craze:sol` and `craze:astra` run on a [ChatGPT plan](../reference/configuration.md#the-chatgpt-plan)
+sign-in. With an [OpenAI API key](../reference/configuration.md#openai)
+instead, billed per token, name the key's model with `craze:delegate`:
+
+```text
+target: native openai/gpt-6.1-sol effort=high
+Review internal/cache/evict.go for races. Report each one with the line and a fix.
+```
+
 The agents run on Haiku and only forward: each writes the task to a file under
 `/tmp`, runs one `craze new --wait` ([reference](../reference/cli.md#craze-new-wait))
 and returns what it printed. They never do the task themselves, and never retry

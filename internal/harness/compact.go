@@ -654,9 +654,19 @@ var quotaExhaustedPattern = regexp.MustCompile(
 // quotaExhaustedCodes are the structured error codes and types (lowercase)
 // that name a failure as the account's quota or credit being gone — a 429's
 // or an in-band stream error's alike (ProviderError.Code, .Type):
-// OpenAI-family "insufficient_quota", and the ChatGPT plan's usage limit
+// OpenAI-family "insufficient_quota", OpenAI's billing codes for a 429 (plan
+// 050 C3: no prepaid credit left, an organization's or a project's spend
+// limit, an organization's usage limit), which its key route also makes
+// final (responsesapi keyQuotaCodes), and the ChatGPT plan's usage limit
 // (plan 033 §3.12), which a retry cannot lift either.
-var quotaExhaustedCodes = map[string]bool{"insufficient_quota": true, CodeUsageLimit: true}
+var quotaExhaustedCodes = map[string]bool{
+	"insufficient_quota":                true,
+	"credit_balance_exhausted":          true,
+	"organization_spend_limit_exceeded": true,
+	"project_spend_limit_exceeded":      true,
+	"organization_usage_limit_exceeded": true,
+	CodeUsageLimit:                      true,
+}
 
 // transientClientStatus reports whether a classified 4xx failure is worth
 // retrying rather than ending the summarizer at once (plan 028 §3.8 decision

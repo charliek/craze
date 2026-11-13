@@ -312,11 +312,13 @@ func (e *ProviderError) Unwrap() []error {
 
 // transientNames are the provider's own names (lowercase) for a failure on its
 // side that a fresh request may not meet again, for an error with no status: an
-// in-band stream error rides in a 200 response.
+// in-band stream error rides in a 200 response. OpenAI's overload,
+// server_is_overloaded of type service_unavailable_error, is one (plan 050 C3).
 var transientNames = map[string]bool{
 	"server_error": true, "internal_error": true, "api_error": true,
 	"overloaded_error": true, "rate_limit_error": true, "rate_limit_exceeded": true,
 	"timeout": true, "timeout_error": true,
+	"server_is_overloaded": true, "service_unavailable_error": true,
 }
 
 // ErrorInfo is the failure as the waiting commands report it (internal/errkind):
@@ -385,6 +387,9 @@ func (e *ProviderError) transient() bool {
 //   - Anything else — a connection that failed, the sign-in's own failure —
 //     is a ProviderError with no status, carrying the error's text, and the
 //     sign-in's sentinel when the scrubber kept one (llm.AuthSentinel).
+//   - On a driver other than the ChatGPT plan's and Anthropic's, a 400 or a
+//     403 whose code is model_not_found is ErrModelNotFound
+//     (modelNotFoundByCode, plan 050 C3).
 //
 // The error is never Compacted: only the turn knows whether it compacted
 // for an overflow (turn.classify).
@@ -424,8 +429,25 @@ func classify(err error, r modeltable.Resolved) error {
 		pe.Message = err.Error()
 		pe.signIn = llm.AuthSentinel(err)
 	}
+	if modelNotFoundByCode(pe) {
+		pe.kind = ErrModelNotFound
+	}
 	pe.Message = oneLine(pe.Message, maxMessageBytes)
 	return pe
+}
+
+// modelNotFoundByCode reports whether pe, of a key-funded driver other than
+// Anthropic's, names a model the provider does not serve by its code rather
+// than its status (plan 050 C3): OpenAI answers a model its Responses API
+// does not take with a 400, and a project without access to a model with a
+// 403, each with code model_not_found — not a request to fix, nor a key to
+// replace. A 401 is the key's whatever its code, and the ChatGPT plan's and
+// Anthropic's failures keep their own words (phraseChatGPT, anthropicUnknown).
+func modelNotFoundByCode(pe *ProviderError) bool {
+	if pe.Driver == modeltable.DriverChatGPT || pe.Driver == modeltable.DriverAnthropic {
+		return false
+	}
+	return strings.ToLower(pe.Code) == "model_not_found" && (pe.StatusCode == 400 || pe.StatusCode == 403)
 }
 
 // badToolCalls is the error a turn ends with when a step's tool calls had an

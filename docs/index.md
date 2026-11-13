@@ -49,6 +49,10 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   and take prompts up to 512 KiB; a program on another machine runs them
   detached, reading each round's result from files
   ([a waiter run detached](reference/cli.md#a-waiter-run-detached)).
+  [`craze models --json`](reference/cli.md#craze-models) lists the native models as JSON
+  (each release ships the catalog as `models.json`), and `craze new --wait`
+  refuses a model, effort or `--fast` a native model cannot take before it starts
+  a session ([model checks](reference/cli.md#model-checks)).
 - **Claude Code sub-agents.** A plugin hands a task to a craze session on a
   native, Grok or Cursor model, and returns the result ([Claude Code](getting-started/claude-code.md)).
 - **Side questions.** `/btw <question>` asks a quick question without adding to
@@ -60,7 +64,11 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   ([TUI reference](reference/tui.md#effort)).
 - **Native start models.** A new native session starts on the first provider
   you have connected, in the order Z.AI, ChatGPT plan, Fireworks, OpenRouter,
-  Meta ([Configuration](reference/configuration.md#the-shipped-catalog)).
+  Meta, Anthropic, and last an OpenAI API key stored with `craze auth login
+  openai`; while a ChatGPT sign-in offers none of its models, craze never
+  moves a new session on its own to a per-token provider after it in that
+  order, nor onto an `OPENAI_API_KEY` that is only in the environment
+  ([Configuration](reference/configuration.md#the-shipped-catalog)).
 - **A render check.** `craze frame` renders the TUI once for tests
   ([Testing](development/testing.md#craze-frame)).
 

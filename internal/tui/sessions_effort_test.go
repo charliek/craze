@@ -405,3 +405,33 @@ func TestTheDefaultModelsLevelsAreReadAgain(t *testing.T) {
 		t.Fatalf("/model default again, the memory wonder: /effort lists %v (from %q)", got, m.sessPick.levels.alias)
 	}
 }
+
+// TestNativeLevelsOfAModelNotOffered (plan 050 C1, C5): a model that runs but
+// that the list does not offer still has its levels — judged by Resolve, not
+// by the picker's membership: a deprecated one (fireworks/kimi-k3) and one
+// the source order hides (openrouter/deepseek-flash-latest, behind the
+// Fireworks key). Negative control: the same aliases unfunded have none.
+func TestNativeLevelsOfAModelNotOffered(t *testing.T) {
+	dir := shippedDir(t, false)
+	keys := envOf(map[string]string{"FIREWORKS_API_KEY": "fw-dummy-000000000001", "OPENROUTER_API_KEY": "sk-or-dummy-000000000001"})
+	for model, want := range map[string][]string{
+		"fireworks/kimi-k3":                {"low", "medium", "high", "xhigh", "max"},
+		"openrouter/deepseek-flash-latest": {"low", "high", "max"},
+	} {
+		alias, levels, ok := nativeModelLevels(dir, keys, model)
+		if !ok || alias != model || !slices.Equal(levels, want) {
+			t.Errorf("%s: %q, %v, %v; want its levels %v", model, alias, levels, ok, want)
+		}
+		if _, _, ok := nativeModelLevels(dir, envOf(nil), model); ok {
+			t.Errorf("%s unfunded has levels", model)
+		}
+	}
+	table, err := modeltable.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := table.Offered(keys)
+	if offered["fireworks/kimi-k3"] || offered["openrouter/deepseek-flash-latest"] {
+		t.Fatalf("premise: a model not offered is offered: %v", offered)
+	}
+}

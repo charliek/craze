@@ -144,7 +144,7 @@ func TestNoCapabilityNoRefresh(t *testing.T) {
 		t.Fatalf("notes %q, want today's", got)
 	}
 	m = applyMsg(t, m, signInFinishedMsg{shownGen: m.shownGen, aliases: []string{"chatgpt/gpt-5.6-sol"}})
-	if notes := texts(m, entryNote); notes[len(notes)-1] != signedInSessionNote(nil) || strings.Contains(notes[len(notes)-1], "/model") {
+	if notes := texts(m, entryNote); notes[len(notes)-1] != signedInSessionNote(connectSources{}, nil) || strings.Contains(notes[len(notes)-1], "/model") {
 		t.Fatalf("the sign-in's last note is %q, want today's", notes[len(notes)-1])
 	}
 	m, _ = typeCommand(t, m, "/model")

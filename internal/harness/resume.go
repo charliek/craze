@@ -76,7 +76,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// the gate; the session's own is set below, before it is handed out.
 	ws := filepath.Clean(opts.Workspace)
 	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.Asker, opts.Table, s.getenv,
-		profileRef(profile), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
+		profileRef(profile), resumeParents(opts, path), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -395,9 +395,13 @@ func (r *turnReader) numbered() int { return max(r.largest, r.inferred) }
 //     model, which would switch models under the conversation (D-33);
 //   - the table's pin, its DefaultModel (the user's default_model);
 //   - each provider's start model, in the provider order (Table.StartAliases,
-//     plan 038 §2): where a new session with nothing remembered and no funded
-//     pin starts. Never the first funded alias by name, which is a new
-//     session's last resort, not a model chosen for the owner.
+//     plan 038 §2), that is eligible (Table.Offers, plan 050: never a
+//     deprecated one or one the source order hides, which craze does not
+//     choose for the owner, nor one the paid-source guard holds back — the
+//     refusal names it): where a new session with nothing remembered and no
+//     funded pin starts. Never the first funded alias by name, which is a new
+//     session's last resort, not a model chosen for the owner. The pin is
+//     never held to the source order.
 //
 // None is ErrResumeModel, naming why each failed. Landing anywhere but on the
 // transcript's own model is reported to Options.Warn.
@@ -411,10 +415,30 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		candidates = identityAliases(table, was.model)
 	}
 	own := len(candidates)
-	for _, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
-		if alias != "" && !slices.Contains(candidates, alias) {
-			candidates = append(candidates, alias)
+	offers := table.Offers(s.getenv)
+	var held []string // why a start model craze would have chosen was not
+	for i, alias := range append([]string{table.DefaultModel}, table.StartAliases()...) {
+		if alias == "" || slices.Contains(candidates, alias) {
+			continue
 		}
+		if i > 0 && !offers.Offered[alias] && offers.Runs[alias] {
+			// A start model that runs but is not offered — a deprecated one
+			// (plan 050 C1), or one the source order hides (C5) — is not
+			// chosen for the owner, and is passed over without a word; one
+			// that does not run stays, so the refusal says why it could not
+			// be used.
+			continue
+		}
+		if h := offers.Held[alias]; i > 0 && h != nil {
+			// Nor one the paid-source guard holds back (plan 050 C5): a
+			// ChatGPT sign-in before it is set up and offers none of its
+			// models, or its key is found only in the environment. The
+			// refusal names it, with the guard's reason and fix, should
+			// nothing else run.
+			held = append(held, fmt.Sprintf("%s: not chosen for you: %s; %s", alias, h.Reason(), h.Fix()))
+			continue
+		}
+		candidates = append(candidates, alias)
 	}
 	var why []string
 	for i, alias := range candidates {
@@ -434,10 +458,38 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 		return m, nil
 	}
 	reason := "the transcript names no model the table has, and the table has no default_model and no start model"
-	if len(why) > 0 {
+	if why = append(why, held...); len(why) > 0 {
 		reason = strings.Join(why, "; ")
 	}
 	return model{}, s.tools.redactErr(fmt.Errorf("%w (tool profile %q): %s", ErrResumeModel, s.tools.profile, reason))
+}
+
+// resumeParents is every model a resume of the session at path may continue
+// on as its own, for the agent tool's menu (plan 050 C1), which openTools
+// fixes before the store's Open has read the transcript under its lock:
+// Options.Model when the caller set it, else every alias that names the
+// transcript's last model by its identity (identityAliases) — whichever of
+// them resumeModel takes. Its other fallbacks, the pin and the offered start
+// models, are in the menu already. The transcript is read here without the
+// lock, for the menu alone: which model the session runs on is still
+// resumeModel's, from the locked read, and a file that cannot be read here
+// adds nothing, leaving Open to report it.
+func resumeParents(opts Options, path string) []string {
+	if opts.Model != "" {
+		return []string{opts.Model}
+	}
+	tr, err := store.Load(path)
+	if err != nil {
+		return nil
+	}
+	branch, err := tr.Branch(tr.Leaf())
+	if err != nil {
+		return nil
+	}
+	if was := readPath(branch); was.hasModel {
+		return identityAliases(opts.Table, was.model)
+	}
+	return nil
 }
 
 // eligible builds alias's model when the session may run on it: the alias

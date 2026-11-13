@@ -336,10 +336,11 @@ func (t *Table) StartModel(recent []RecentEntry, getenv func(string) string) (al
 // whether it is the last step's fallback.
 type Start struct {
 	Alias, Effort string
-	// Fallback says the model is the first funded alias in sorted order, the
-	// last step: nothing remembered resolves, no pin is funded, and no
-	// provider in the order has a start that resolves. The caller says the
-	// session did not start where it would have.
+	// Fallback says the model is the first offered alias in sorted order, the
+	// fourth step — nothing remembered resolves, no pin is funded, and no
+	// provider in the order has a start that is offered — or the first
+	// deprecated alias that resolves, the last resort (plan 050 C1). The
+	// caller says the session did not start where it would have.
 	Fallback bool
 }
 
@@ -348,38 +349,71 @@ type Start struct {
 //
 //  1. the newest entry of recent (through Recent) whose model resolves —
 //     its provider has a usable key, judged exactly as Resolve judges it with
-//     getenv — at the effort remembered with it when the model still offers
-//     it, and otherwise at its default_effort;
+//     getenv — and that the source order does not hide (plan 050 C5: the
+//     entry stays in the file, and comes back when its source is the one in
+//     force again), at the effort remembered with it when the model still
+//     offers it, and otherwise at its default_effort;
 //  2. the user's pin, DefaultModel, at its default_effort, unless its
 //     provider has no key. A pin that fails for any other reason is still
 //     the answer, left for the caller's open to report, so the user sees it
 //     (plan 018 §3.8);
 //  3. for each provider in StartOrder, the first of its start models that
-//     resolves, at its default_effort — the ChatGPT plan's when the account
-//     lists it and the sign-in funds it (plan 034 Q4): an owner starts on
-//     the chosen model of the first provider they fund, not on whichever
-//     sorts first;
-//  4. the first alias in sorted order that resolves, at its default_effort,
-//     with Fallback set: one unfunded choice must not lock the owner out of
-//     the others.
+//     is eligible (offered — it resolves, is not deprecated and is not
+//     hidden — and not held back by the paid-source guard, Offers: a
+//     broken ChatGPT sign-in before it, or a key found only in the
+//     environment for a provider the catalog marks), at its
+//     default_effort — the ChatGPT plan's when the account lists it and the
+//     sign-in funds it (plan 034 Q4): an owner starts on the chosen model of
+//     the first provider they fund, not on whichever sorts first;
+//  4. the first alias in sorted order that is eligible, at its
+//     default_effort, with Fallback set: one unfunded choice must not lock
+//     the owner out of the others;
+//  5. the last resort (plan 050 C1): the first deprecated alias in sorted
+//     order that resolves, is not hidden and is not held back, at its
+//     default_effort, with Fallback set — a machine whose only funded models
+//     are deprecated still starts, and says so, rather than report that
+//     nothing is funded.
 //
-// With none of them — a fresh machine with the shipped catalog and no key —
-// the error is ErrNothingFunded, which also unwraps to the ErrNoAPIKey of the
-// first model it tried that has no key: the pin's, else the first start
-// model's, else the first alias's. A nil getenv is os.Getenv.
+// Steps 1 and 2 are the owner's own choices: a remembered or pinned
+// deprecated model still starts, and the pin is never held to the source
+// order. Steps 3 to 5 are craze choosing for the owner (plan 050's eligible
+// set).
+//
+// With none of them, the error is a *HeldError (ErrSourceHeld) when the
+// guard held back a model that would otherwise have started — the first
+// one, which the error names — and otherwise ErrNothingFunded — a fresh
+// machine with the shipped catalog and no key — which also unwraps to the
+// ErrNoAPIKey of the first model it tried that has no key: the pin's, else
+// the first start model's, else the first alias's. A nil getenv is
+// os.Getenv.
 func (t *Table) StartPick(recent []RecentEntry, getenv func(string) string) (Start, error) {
+	o := t.Offers(getenv)
 	for _, e := range t.Recent(recent) {
-		if _, err := t.Resolve(e.Alias, getenv); err == nil {
+		if o.Runs[e.Alias] && !o.Hidden[e.Alias] {
 			return Start{Alias: e.Alias, Effort: cmp.Or(t.offeredEffort(e.Alias, e.Effort), t.Models[e.Alias].DefaultEffort)}, nil
 		}
 	}
-	var unfunded error // the first ErrNoAPIKey met, which ErrNothingFunded wraps
-	try := func(alias string) bool {
-		_, err := t.Resolve(alias, getenv)
-		if unfunded == nil && errors.Is(err, ErrNoAPIKey) {
-			unfunded = err
+	var unfunded error  // the first ErrNoAPIKey met, which ErrNothingFunded wraps
+	var held *HeldError // the first model the guard held back
+	eligible := func(alias string) bool {
+		if h := o.Held[alias]; h != nil {
+			if held == nil {
+				held = h
+			}
+			return false
 		}
-		return err == nil
+		return true
+	}
+	try := func(alias string) bool {
+		if o.Offered[alias] {
+			return eligible(alias)
+		}
+		if unfunded == nil {
+			if _, err := t.Resolve(alias, getenv); errors.Is(err, ErrNoAPIKey) {
+				unfunded = err
+			}
+		}
+		return false
 	}
 	if pin := t.DefaultModel; pin != "" {
 		_, err := t.Resolve(pin, getenv)
@@ -398,7 +432,15 @@ func (t *Table) StartPick(recent []RecentEntry, getenv func(string) string) (Sta
 			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort, Fallback: true}, nil
 		}
 	}
-	if unfunded == nil {
+	for _, alias := range t.Aliases() {
+		if t.Models[alias].Deprecated && o.Runs[alias] && !o.Hidden[alias] && eligible(alias) {
+			return Start{Alias: alias, Effort: t.Models[alias].DefaultEffort, Fallback: true}, nil
+		}
+	}
+	switch {
+	case held != nil:
+		return Start{}, held
+	case unfunded == nil:
 		return Start{}, ErrNothingFunded
 	}
 	return Start{}, fmt.Errorf("%w (%w)", ErrNothingFunded, unfunded)

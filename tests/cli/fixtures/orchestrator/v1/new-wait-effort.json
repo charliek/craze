@@ -1,0 +1,1 @@
+{"error":{"message":"--effort minimal: acme/sonic offers low, medium, high","kind":"config","retryable":false,"detail":{"reason":"effort_not_offered","model":"acme/sonic"}}}

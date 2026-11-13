@@ -1,0 +1,1 @@
+{"error":{"message":"native: unknown model \"chatgpt/gpt-9\"; craze models lists the models","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}

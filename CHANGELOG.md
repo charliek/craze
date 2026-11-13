@@ -86,6 +86,105 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - `craze auth login` from a pipe takes a key with no trailing newline (it
   always did; now tested and documented).
 
+### The native provider
+
+- A shipped model can be deprecated (`deprecated` and `replaced_by` in the
+  catalog): it runs when named, is never offered or chosen for you, and each
+  `models.toml` reference to it warns. A `[[retired]]` row can name its
+  replacement, which a `--model` naming it leads with (`<alias> was retired;
+  use <replacement>`) and a dropped reference warns about. A model is retired
+  no earlier than the next minor release and 30 days after a release shipped
+  it deprecated (RELEASING.md: the person cutting a release checks both;
+  `TestDeprecationHistory` checks that an earlier release shipped it
+  deprecated).
+- `default_context`: a context smaller than the window that a session works
+  within — compaction's threshold and the usage report's `contextWindow` are
+  measured against it — set by the catalog and per model in `models.toml`
+  (`0` turns it off).
+- `--model <provider id>/<alias>`: `zai-coding-plan/glm-5.3` is `glm-5.3`.
+- The agent tool's model list and its "Unknown model" answer hold to the
+  models `/model` offers plus the ones you configured.
+- An OpenAI API key: the `openai` provider (`OPENAI_API_KEY`, or `craze auth
+  login openai`), last in the start order, with `openai/gpt-6.1-sol` (its
+  start), `openai/gpt-6-astra`, `openai/gpt-6.1-terra` and `openai/gpt-6-luna`
+  on the Responses API, each compacting at 85% of a 272,000-token context
+  default (a trigger, not a cap) and priced above 272,000 at OpenAI's
+  long-context rates. An exported `OPENAI_API_KEY` runs its models by name
+  (`--model`, `default_model`, the model memory, a sub-agent's model), but
+  while it is the provider's only key craze never chooses one of them for you:
+  a new session with nothing else funded is refused, kind `config`, naming the
+  variable and `craze auth login openai`, which stores the key and lifts that
+  (the catalog's `env_key_by_name_only`, on `openai` alone). `env_keys = []`
+  opts out of the variable altogether.
+- Cache writes on the Responses API routes are counted as cache writes and
+  priced at `cache_write`, or the input rate when a model has none.
+- On the `openai-responses` driver a 429 naming spent credit or a spend limit
+  is final, kind `quota`, and so is the same code or type inside the stream;
+  an in-stream overload is retried; a message's phase is kept and replayed for
+  the shipped `openai/*` models alone (their transcripts are not readable by an
+  older craze; a model of your own on a provider named `openai` keeps none).
+- A key provider's 403 says the provider's own message before the key's
+  advice, and a 400 or 403 with code `model_not_found` is kind
+  `model_not_found` (Anthropic's and the ChatGPT plan's are unchanged).
+- A `models.toml` entry that lowers a shipped window below its long-context
+  threshold keeps the entry with the tier off, and warns.
+- `craze models` lists the native models — provider, status and replacement,
+  efforts, context, and whether each is funded and offered here — as a table or
+  one JSON object (`schema` 1); `craze models <alias>` reads one as `--model`
+  does, `--shipped` answers from the compiled-in catalog alone. Each release
+  ships that as `models.json`, listed in `checksums.txt`.
+- Catalog refresh: `fireworks/kimi-k3p1-pro` (Fireworks' start now; set
+  `default_model = "fireworks/ember-1"` to keep the old one) and
+  `fireworks/deepseek-v4p1-flash-1017`, `openrouter/gemini-pro-latest`,
+  `openrouter/gpt-terra-latest`, `openrouter/minimax-m3.1-flash`,
+  `muse-ember-1.0` (a 200,000 context default and Meta's long-context tier) and
+  `anthropic/claude-fable-5-2` (priced) are new. Deprecated, so out of the
+  pickers but still running by name: `fireworks/kimi-k3`,
+  `fireworks/deepseek-v4p1-flash`, `openrouter/gemini-4-argon` and
+  `openrouter/minimax-m3`, each naming its replacement. OpenRouter's four GPT
+  routers gain OpenAI's 272,000 context default and long-context price; its
+  DeepSeek Flash, GLM Flash and GLM routers are priced at the maker's own
+  endpoint rate (the listing is the cheapest endpoint's, and requests were
+  billed 3 to 9 times it). Retired OpenRouter aliases that the catalog
+  replaced name their replacement. A Nexus Auto recipe (`wire_model = "auto"`)
+  is in the configuration reference.
+- `craze new --wait --provider native` checks `--model`, an explicit `--effort`
+  and `--fast` before any host is spawned: an unknown or retired model, an effort
+  the model does not list, and `--fast` (no native model has one) fail with exit
+  1, kind `config` and a `detail.reason` (`model_unknown`, `model_retired`,
+  `effort_not_offered`, `fast_not_offered`). Other commands stay lenient.
+- A native result or failure on a deprecated model prints a stderr line and,
+  with `--json`, `warnings: [{kind: "model_deprecated", model, replacedBy,
+  message}]`; the TUI notes it once when the session opens.
+- One source per maker: when OpenAI's, Meta's, GLM's or DeepSeek's models are
+  reachable through several providers, the pickers, a new session's start and
+  the agent tool's menu offer them from the first funded source in the source
+  order (`zai-coding-plan`, `chatgpt`, `meta`, `openai`, `anthropic`,
+  `fireworks`, `openrouter`); the others still run by name. `source_order` in
+  `models.toml` goes before the catalog's (`[]` turns the rule off). A
+  remembered model on a hidden source no longer starts new sessions: the next
+  remembered model that is offered does, then the pin, then the provider
+  order (`source_order` or `--model` keeps a hidden model as the start).
+  While the ChatGPT plan is signed in but offers none of its models (no usable
+  model list, another account's list or plan usage off), craze never starts a
+  session for you on OpenAI's models from another source, nor on any model
+  billed per token (on a provider whose models are priced) of a provider
+  after `chatgpt` in the start order or left out of it (Fireworks,
+  OpenRouter, Meta, Anthropic, OpenAI in the catalog's): with such a sign-in
+  and only those keys the start is refused, kind `config`, naming the sign-in
+  and `--model`, and `craze providers` says `needs setup` with the same
+  reason. A Z.AI key, a provider of your own none of whose models has a
+  price, the model memory, `default_model` and `--model` still start. A sub-agent call's model is held to the
+  menu plus what you configured. In the TUI a quota or plan-limit failure is
+  followed by a note naming the maker's other funded sources and how to
+  continue on one (never part of the failure a waiting command reads); `craze auth
+  list`, `craze models` and `/connect` say where each maker's models come from.
+  `craze models` rows carry their `maker`, and its table notes the model
+  table's warnings. An unknown `--model` under `craze new --wait`, and a miss
+  of `craze models <alias>`, say `craze models lists the models` instead of
+  listing every one. New: `openrouter/muse-spark-1.3` and
+  `openrouter/muse-wonder`, Meta's models on OpenRouter.
+
 ### Maintenance
 
 - Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint

@@ -55,6 +55,7 @@ SHIPPED_ROWS = [
     ["Anthropic", "anthropic"],
     ["Fireworks", "fireworks"],
     ["Meta", "meta"],
+    ["OpenAI", "openai"],
     ["OpenRouter", "openrouter"],
     ["Z.AI Coding Plan", "zai-coding-plan"],
 ]
@@ -187,7 +188,7 @@ def test_login_list_logout(craze_bin: Path) -> None:
 @pytest.mark.parametrize(
     ("args", "stdin", "code", "says"),
     [
-        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has anthropic, chatgpt, fireworks, meta, openrouter, zai-coding-plan"),
+        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan"),
         (["login", KEY], KEY + "\n", 2, "no such provider"),
         (["login", "fireworks"], "", 1, "no key given; nothing was saved"),
         (["login", "fireworks"], "abc\n", 1, "was not saved: shorter than 8 bytes"),

@@ -33,9 +33,9 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | Flag | Description |
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
-| `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
-| `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line in the session's diagnostics (below). Applies to this start only — a `--continue` or `--resume` load included — and is never remembered |
-| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below) |
+| `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not, [deprecated](configuration.md#deprecated-models) or not — and a model whose provider has no key refuses to start, saying how to give it one. An alias may also be written `<provider id>/<alias>`, the provider id being the one `craze auth login` takes (`zai-coding-plan/glm-5.3` is `glm-5.3`), when the name alone matches no model. An alias craze has [retired](configuration.md#retired-models) is refused (kind `config`) with its replacement first (`native: <alias> was retired; use <replacement>`, and nothing after it); a stored session whose recorded `--model` was retired since is refused the same way when it reloads, and is never moved to the replacement: start a new session. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
+| `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line in the session's diagnostics (below). Applies to this start only — a `--continue` or `--resume` load included — and is never remembered. `craze new --wait` on the native provider is strict instead: with `--model`, a level the model does not list is [refused](#model-checks) |
+| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below). No native model has one: `craze new --wait` on the native provider [refuses `--fast`](#model-checks) |
 | `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
@@ -1257,7 +1257,7 @@ the settings it started with.
 |------|-------------|
 | `-C`, `--dir <dir>` | The session's directory (default: the current one) |
 | `--provider <id>` | The session's provider; without it `provider` in `config.toml`, and with none configured exit 1 (`no default provider yet; pass --provider …`) |
-| `--model`, `--effort`, `--fast` / `--no-fast`, `--no-force` | As plain `craze new`'s |
+| `--model`, `--effort`, `--fast` / `--no-fast`, `--no-force` | As plain `craze new`'s, but on the native provider `--model`, an explicit `--effort` and `--fast` are [checked before the host starts](#model-checks): a model that is not there, an effort the model does not list, and `--fast` are refused, exit 1 |
 | `--title <title>` | As plain `craze new`'s: the session's name from its start, pinned, normalized the same way (one that comes to nothing is a usage error). No hub is asked, so no hub's `createTitle` is needed: the host this starts is named directly |
 | `--plan`, `--ask` | Start in plan or ask mode — for a native session, `--ask` refuses edits and the shell, and `--plan` refuses edits but the agent's own plan file and lets the shell through; a task that says "read-only" is a request, not a rule. **The turn ends at the plan, on every provider**: the result is `completed` with the plan (`plan`), the session still in plan mode. A native session accepts its own plan and stops; on cursor and grok craze accepts nothing — it answers the plan cancelled and ends the turn (its stop reason `cancelled`, the plan auto-answered `returned`) — since an ACP agent told its plan is accepted goes on to carry it out. A plain `craze wait` afterwards reports such a turn the same way while its host still holds the turn's events, and `cancelled` once it does not; `craze wait --from <handle>` — the handle `craze send` prints — recognises it whenever its replay is honoured |
 | `--prompt-file <path>` | Read the prompt from this file, `-` for stdin ([The prompt](#the-prompt)) |
@@ -1294,6 +1294,47 @@ craze new: session 8327352e did not start: agent binary not found: /opt/cursor/a
 A prompt whose answer was lost with its connection is never sent again: exit
 1, `the prompt may not have reached it; craze wait <short> follows the
 session`.
+
+#### Model checks
+
+On the native provider (`--provider native`, or `provider = "native"` in
+`config.toml`), the command checks what it was asked for against the native model
+table it loads itself — the one [`craze models`](#craze-models) reads — **before
+any host is spawned**, so a refusal starts no session and sends no request to a
+model provider. Each refusal is exit 1, kind `config`, with a `detail` a program
+reads instead of the message:
+
+| `detail.reason` | When | Message |
+|-----------------|------|---------|
+| `model_unknown` | `--model` names no model (matched exactly as the session would match it, `<provider id>/<alias>` included) | `native: unknown model "<model>"; craze models lists the models` (a session's own start error, which a person reads, lists them) |
+| `model_retired` | `--model` names an alias the catalog retired; `detail.replaced_by` names the replacement when the catalog has one | `native: <alias> was retired; use <replacement>` — the replacement before anything else |
+| `effort_not_offered` | With `--model`, an `--effort` the model does not list (its levels in any case) | `--effort minimal: openai/gpt-6.1-sol offers low, medium, high, xhigh, max`, or `… has no effort control` |
+| `fast_not_offered` | `--fast`: no native model has a fast variant. `--no-fast` is accepted, and changes nothing | `--fast: <alias> has no fast variant` |
+
+```json
+{"error":{"message":"native: openrouter/gpt-6.1-sol was retired; use openrouter/gpt-sol-latest","kind":"config","retryable":false,"detail":{"reason":"model_retired","model":"openrouter/gpt-6.1-sol","replaced_by":"openrouter/gpt-sol-latest"}}}
+```
+
+`detail.model` is always there on these four reasons: the model's alias as it
+resolved, or as given when nothing did (only an alias's characters, at most 256
+bytes), and `""` when nothing was named (`--fast` with no `--model`) or the name
+held none of an alias's characters. `detail.replaced_by` is there only with
+`model_retired`, when the catalog names a replacement. A refusal on a
+[deprecated](configuration.md#deprecated-models) model carries its [notice](#model-notices)
+too. With no `--model`, the session's start model is the host's to choose,
+and `--effort` is not checked: a level it does not offer leaves the model's own,
+as everywhere else. With no `--effort`, the model starts at its remembered effort
+when the model memory has one, else at its default (`defaultEffort` in [`craze
+models`](#the-models-document)); a waiting command never writes the memory.
+
+This check is the only strict one: plain `craze new`, `craze send` (which takes no
+`--model` or `--effort`, and never checks again — a reload starts with what the
+session recorded), `craze prompt`, the TUI, and the ACP providers keep the lenient
+rule of the [session flags](#flags). A model table this command cannot load checks
+nothing, and the host then refuses the start as it always has (its own message,
+which lists the models for one that names nothing, with no `detail`). A stored session whose recorded `--model` has since been
+retired fails its reload on `craze send` with kind `config`, the replacement
+named; start a new session on it.
 
 ### Ending with the turn
 
@@ -1751,7 +1792,7 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | `error` | Why it did not complete: the [object](#failures-and-kinds) `{message, kind, retryable, detail?}` |
 | `planEnded` | `true` when the turn ended at a plan it presented ([below](#each-status)) |
 | `plan` | The text of a plan the turn presented, accepted automatically or not |
-| `usage` | The last usage report before the turn's end (native sessions), as the [stream's usage section](protocol.md#usage) carries it: `{contextTokens, contextWindow, turn, session}`. A partial result settled from where the session stands carries only what was seen of the turn itself — none for an idle session's last turn |
+| `usage` | The last usage report before the turn's end (native sessions), as the [stream's usage section](protocol.md#usage) carries it: `{contextTokens, contextWindow, turn, session}`, where `contextWindow` is the context the model works within — its [context default](configuration.md#native-context-default) when it has one, else its window. A partial result settled from where the session stands carries only what was seen of the turn itself — none for an idle session's last turn |
 | `usageComplete` | `false` when a step was in flight as the turn was cut short, so its spend is not in `usage` ([below](#a-turn-cut-short)); never `true`, and otherwise absent |
 | `autoAnswered` | `[{kind, summary, choice}]`: each question or plan craze's approval policy answered |
 | `ask`, `blockedBy` | `needs_input`: the open ask, `{id, kind, summary}`, and for a queued prompt the turn holding it up |
@@ -1760,12 +1801,37 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | `partial` | `true` when some of the turn's events were not seen |
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
 | `messageFile` | `--max-message`'s file, holding the whole result, when it cut or left out the message or the plan; `message` and `plan` are then what was kept |
+| `warnings` | [Model notices](#model-notices): `[{kind, model, replacedBy, message}]`, at most 8; absent when there are none |
 
 A key that does not apply is absent, never `null` or `false`:
 
 ```json
 {"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
 ```
+
+### Model notices
+
+A native session's result on a [deprecated](configuration.md#deprecated-models)
+model says so — from `craze wait`, `craze new --wait` and `craze send --wait`, on a
+result and on an exit-1 failure alike: one line on stderr, and with `--json` a
+top-level `warnings` array on the object (absent when it is empty, at most 8
+entries; stdout stays one object on one line):
+
+```text
+craze new: fireworks/kimi-k3 is deprecated; use fireworks/kimi-k3p1-pro
+```
+
+```json
+"warnings":[{"kind":"model_deprecated","model":"fireworks/kimi-k3","replacedBy":"fireworks/kimi-k3p1-pro","message":"fireworks/kimi-k3 is deprecated; use fireworks/kimi-k3p1-pro"}]
+```
+
+`model_deprecated` is the one `kind`; `model` is the session's model, `replacedBy`
+its replacement and `message` the stderr line's words. The command judges it from
+the native model table it loads itself; a table it cannot load says nothing, and
+never changes a status or an exit code. An ACP session's model is never judged
+against it. The model still runs: craze never moves a session to its replacement,
+which has another price. The TUI shows the same sentence once, as a note, when a
+session opens on such a model.
 
 ### What `files` lists
 
@@ -2059,11 +2125,16 @@ it is one object:
 ```
 
 `message` is for people, on one line. `kind` and `retryable` are for a program.
-`detail` is present only when there is more to say, and holds only `status` (the
-provider's HTTP status), `provider_code` (its own short name for the failure) and
-`cause` ([what began a stop](#what-began-a-stop)): names and numbers, never text, a
-key or a piece of a request. An ACP agent's JSON-RPC code is not an HTTP status, and
-is not reported as one.
+`detail` is present only when there is more to say, and holds `status` (the
+provider's HTTP status), `provider_code` (its own short name for the failure),
+`cause` ([what began a stop](#what-began-a-stop)), and, on a model-shaped `config`
+failure of [`craze new --wait`'s checks](#model-checks) or [`craze
+models`](#craze-models), `reason` (`model_unknown`, `model_retired`,
+`effort_not_offered` or `fast_not_offered`, a closed set no other failure
+carries), `model` and `replaced_by`: names and numbers, never text, a key or a
+piece of a request. Consumers must ignore keys they do not know: a later craze may
+add one. An ACP agent's JSON-RPC code is not an HTTP status, and is not reported
+as one.
 
 A failure is exit 1 with one line, and with `--json` one object on stdout first,
 `handle` beside it when there is one, and `usage` and `usageComplete` [when the
@@ -2112,16 +2183,16 @@ not promise that re-running a turn repeats no side effects already performed.
 | Kind | When | Retryable |
 |------|------|-----------|
 | `usage` | A flag or argument error (exit 2). At exit 1 too: an id several sessions match | false |
-| `config` | An unknown provider or model, bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
+| `config` | An unknown provider or model (on the native provider under `--wait`, a retired one, an `--effort` the model does not list or `--fast` too, each with a [`detail.reason`](#model-checks)), bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
 | `workspace` | `-C` is missing or not a directory | false |
 | `prompt` | The prompt is unreadable, empty or over 512 KiB (exit 2); or, exit 1, a prompt over 32 KiB that `craze send` gave a busy session, which the session refused ([The prompt](#the-prompt)) | false |
 | `start_failed` | The agent or host did not start | true |
 | `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
-| `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
-| `auth` | The provider refused the credentials, or there are none to send | false |
-| `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so) | false |
+| `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error or overload (`server_is_overloaded`, `service_unavailable_error`) it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
+| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send | false |
+| `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so). On the `openai-responses` driver a 429 or an in-stream error whose code or type is `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` or `organization_usage_limit_exceeded` ends the turn after one request, never retried in it | false |
 | `context_too_large` | The request does not fit the model's context window | false |
-| `model_not_found` | The provider or agent does not serve the model | false |
+| `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found` | false |
 | `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
 | `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running, or a prompt refused because the session [ends with its turn](#ending-with-the-turn) | false |
 | `connection_lost` | The command lost its socket while the host is shown alive, or its state cannot be told: the turn then may have ended, and the message says which | true |
@@ -2273,6 +2344,7 @@ is trimmed.
 craze auth login fireworks        # prompts; the key is not shown as you type
 craze auth login                  # pick from the list, then the prompt
 printf '%s\n' "$FIREWORKS_KEY" | craze auth login fireworks
+printf '%s\n' "$KEY" | craze auth login openai   # an OpenAI API key, billed per token
 ```
 
 ```text
@@ -2283,6 +2355,12 @@ FIREWORKS_API_KEY is set in this environment; craze uses it before the stored ke
 The second line only when that variable is set. Nothing is saved, and craze
 exits 1, when the key is empty, shorter than 8 bytes, or overlaps craze's
 redaction marker — the error names the rule, never the key.
+
+`craze auth login openai` is also how craze may start a new session on
+OpenAI's models for you: an `OPENAI_API_KEY` found only in the environment
+runs them by name but is never chosen on its own ([a key in the environment
+alone](configuration.md#openai)). A stored key is, even while the variable is
+set too.
 
 `craze auth login anthropic` then fetches the [Anthropic account's model
 list](configuration.md#anthropic) (`GET /v1/models`, at most 30 seconds) with
@@ -2495,15 +2573,27 @@ Anthropic         anthropic        env ANTHROPIC_API_KEY
 ChatGPT plan      chatgpt          signed in as you@example.com · ChatGPT plan · renews automatically
 Fireworks         fireworks        env FIREWORKS_API_KEY
 Meta              meta             stored key
+OpenAI            openai           env OPENAI_API_KEY
 OpenRouter        openrouter       not connected
 Z.AI Coding Plan  zai-coding-plan  not connected
 ```
 
+`openai` is OpenAI's API on a key, billed per token
+([OpenAI](configuration.md#openai)); `chatgpt` is the ChatGPT subscription. An
+exported `OPENAI_API_KEY` connects `openai` as any provider's variable does,
+and its models run by name; but with no key stored as well, craze never
+chooses one of them for a new session on its own (`craze providers` says so).
+
 Then notes, on stderr, each starting `note: `: a stored key that cannot be
 used, an entry of yours that [repeats what craze
 ships](configuration.md#how-the-files-merge) (delete it to follow craze's
-updates), the warnings a native session prints when it starts, and — when the
-model table does not load, a broken `models.toml` say — why. The rows need
+updates), the warnings a native session prints when it starts, one line for
+each maker whose models the [source
+order](configuration.md#one-source-per-maker) hides — `note: GLM models come
+from Fireworks; 2 models of OpenRouter are not listed and still run by name
+(source_order in models.toml changes the order)` (`1 model of OpenRouter is
+not listed and still runs by name` for one) — and, when the model table
+does not load, a broken `models.toml` say, why. The rows need
 only `providers.toml` and the catalog, so they are listed either way. No key,
 nor any part of one, is ever printed.
 
@@ -2555,7 +2645,23 @@ How each is judged:
   reported first. Elsewhere the session is not known, and nothing is marked
   for it.
 - **native** is ready when its model table loads and a model's provider has a
-  key — what a native session would start on. With none it needs setup.
+  key — what a native session would start on. With none it needs setup
+  (`no model provider has a key`). It also needs setup when models are funded
+  but craze would not choose one for you ([craze never moves a new session to
+  another payer on its own](configuration.md#one-source-per-maker)), each
+  reason with its own fix. When the ChatGPT plan is signed in but offers none
+  of its models (no usable model list, another account's list, or plan usage
+  off) and every funded model is OpenAI's on another source or billed per
+  token (on a provider whose models are priced) after `chatgpt` in the start
+  order or on a provider left out of it, it is `signed in to
+  ChatGPT, but its models are not available`, fix `craze auth login chatgpt,
+  or start with --model openai/gpt-6.1-sol` (with only a Fireworks key, the
+  fix names `fireworks/kimi-k3p1-pro`). When the only funded models are
+  `openai`'s, by an `OPENAI_API_KEY` in the environment with no key stored,
+  it is `OPENAI_API_KEY is set in the environment, but no key is stored for
+  OpenAI`, fix `craze auth login openai, or start with --model
+  openai/gpt-6.1-sol`; the variable's value is never shown. The hub's create
+  options say the same.
   `providers.toml` or `models.toml` that cannot be read makes it unavailable;
   the reason names the file and nothing from it, since the error can quote a
   pasted key's name, and `craze auth list` shows the error. So does a machine
@@ -2624,6 +2730,119 @@ stop it now with kill <pid> (no session ends)`), exit 1, and left running.
 `craze providers` exits 0 whenever it answered, whatever the states say; 1 on
 an error, `--hub` with no hub to ask included; and 2 for an argument or a
 flag it does not take.
+
+## craze models
+
+```bash
+./bin/craze models
+./bin/craze models --json
+./bin/craze models openai/gpt-6.1-sol --json
+env -i ./bin/craze models --shipped --json
+```
+
+Lists the models craze's built-in agent (the native provider) can run: each
+alias, its model provider, whether it is active or deprecated and what replaces
+it, its efforts and context, and on this machine whether a key or sign-in funds
+it and a picker offers it. It answers from files alone: no form makes a network
+request, reads a token or refreshes an account's list, and the document never
+carries a key, a base URL or a path. A model table that does not load is exit 1,
+kind `config`, naming the file alone — `craze models: models.toml could not be
+read; run "craze auth list" for the error` — never anything from it, since the
+error can quote a key pasted into it; `craze auth list` shows the error. With
+`--shipped` the command reads no environment at all: it answers the same bytes
+under `env -i` and under any environment, even one every other command refuses
+(the removed config-file variable).
+
+| Form | Reads | Prints |
+|------|-------|--------|
+| `craze models --shipped` | The catalog compiled into this craze, and nothing else: no file, no environment, no account list. It answers the same under `env -i` with no `HOME`, and is each release's `models.json` asset | The document below, with no `state` |
+| `craze models` | This craze directory's model table, as a session loads it: your `providers.toml` and `models.toml` over the catalog, and the cached ChatGPT plan and Anthropic account lists | A table, then on stdout a `note:` line for each warning the table gave on loading (as `craze auth list` notes them, a file named without its directory: `note: models.toml: source_order: "nope" is not a provider; the name is passed over`) and one for each maker whose models the [source order](configuration.md#one-source-per-maker) hides, naming where they come from; with `--json`, the document, each row with its `state`, and no note |
+| `craze models <alias>` | As the previous, or the catalog alone with `--shipped` | That model's row; a miss is exit 1 |
+
+`<alias>` is read exactly as [`--model`](#flags) reads it: an alias or a model's
+name in any case, or `<provider id>/<alias>` (`zai-coding-plan/glm-5.3` is
+`glm-5.3`). A model that is not there is exit 1, and with `--json` the
+[error object](#failures-and-kinds) the [pre-check of `craze new
+--wait`](#model-checks) gives: kind `config`, `detail.reason` `model_retired`
+(with `detail.replaced_by` when the catalog names a replacement, and the
+message leading with it) or `model_unknown`, and `detail.model`. A miss under a
+provider whose models are an account's own (`accountModels` not `none`) while
+craze has no list of that account it can read carries `"unverifiable":true`
+beside `error`: craze could not check, which is not the same as no such model.
+The ChatGPT plan's list counts as read only when it is bound to the account
+signed in, at least one of its entries was accepted as a model, and none was
+left out for needing a newer craze; Anthropic's only when it is bound to the key
+that funds the provider and at least one entry stands. So no file, one that
+cannot be read, one bound to another account or key, one that gave no model
+(empty, or every entry rejected), one holding a model this craze is too old for,
+or no key or sign-in to bind one to, is no list read.
+
+```json
+{"error":{"message":"native: unknown model \"chatgpt/gpt-9\"; craze models lists the models","kind":"config","retryable":false,"detail":{"reason":"model_unknown","model":"chatgpt/gpt-9"}},"unverifiable":true}
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print one JSON object on one line instead of the table |
+| `--shipped` | Answer from the catalog compiled into this craze alone |
+
+Exit 0 when it answered, 1 for a model that is not there or a model table that
+does not load (kind `config`), 2 for a usage error.
+
+### The models document
+
+```json
+{"schema":1,"crazeVersion":"0.2.0","models":[{"alias":"fireworks/kimi-k3","provider":"fireworks","maker":"","name":"Kimi K3 (Fireworks)","status":"deprecated","replacedBy":"fireworks/kimi-k3p1-pro","source":"catalog","efforts":["low","medium","high","xhigh","max"],"defaultEffort":"high","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":0,"state":{"funded":true,"offered":false}}],"retired":[{"alias":"openrouter/gpt-6.1-sol","replacedBy":"openrouter/gpt-sol-latest"}],"providers":[{"id":"chatgpt","name":"ChatGPT plan","auth":"sign-in","accountModels":"only"},{"id":"openai","name":"OpenAI","auth":"key","accountModels":"none"}]}
+```
+
+| Key | |
+|-----|---|
+| `schema` | An integer that only increases; `1` today. A consumer must ignore keys it does not know, here and in every object below |
+| `crazeVersion` | The version of the craze that printed it |
+| `models` | One row a model, sorted by alias |
+| `retired` | The aliases the catalog retired, sorted: `alias`, and `replacedBy` when the catalog names a replacement. A retired alias is in no row, and `--model` refuses it — but for one exception the catalog has always had: a complete entry of your own in `models.toml` under a retired alias, pointing at a live provider and wire model, is your model ([retired models](configuration.md#retired-models)): it is a row, `source` `user`, and runs |
+| `providers` | The **model** providers, sorted by `id` — what [`craze auth list`](#craze-auth-list) lists, not the agent providers [`craze providers`](#craze-providers) lists |
+
+Each row carries every key below, always, but `replacedBy` (a deprecated row's
+alone) and `state` (the local forms' alone):
+
+| Row key | |
+|---------|---|
+| `alias` | The model's alias: what `--model` takes |
+| `provider` | Its model provider's id: the id `craze auth login` takes, and the prefix `--model <provider id>/<alias>` takes |
+| `maker` | Who made the model, when craze offers it from [one source](configuration.md#one-source-per-maker): `openai`, `meta`, `zai`, `deepseek` or `anthropic`; `""` for a model the catalog names no maker for (Kimi, Gemini, MiniMax, …) and for a model of your own |
+| `name` | Its display name (the alias when it has none) |
+| `status` | `active`, or `deprecated`: it still runs when named, but no picker offers it and nothing chooses it for you ([deprecated models](configuration.md#deprecated-models)) |
+| `replacedBy` | A deprecated model's replacement |
+| `source` | Where the alias comes from: `catalog` (a model craze ships, your overrides of its other keys included), `account` (one an account's own list brought that craze ships no entry for: every ChatGPT plan model, an Anthropic model the account lists that craze does not ship), or `user` (your own `models.toml` alias, and any shipped or listed alias your `models.toml` points at another `provider` or `wire_model`, which is then your model) |
+| `efforts` | Its effort levels, in order; `[]` is no effort control: pass no `--effort` |
+| `defaultEffort` | The effort a session starts at with no `--effort`; `""` for none |
+| `fast` | Whether it has a fast variant: `false` on every native model, so `--fast` is [refused under `--wait`](#model-checks) |
+| `vision` | Whether it takes images |
+| `contextWindow` | Its window in tokens; `0` when unknown |
+| `defaultContext` | The context a session works within when that is smaller than the window ([context default](configuration.md#native-context-default)); `0` for the whole window |
+| `state` | This machine's: `funded` — a key or sign-in funds it, judged with no network call, so it is `true` as soon as `craze auth login <provider>` has stored a key — and `offered`, whether a picker lists it (funded, not deprecated, and not hidden by the [source order](configuration.md#one-source-per-maker)) |
+
+| Provider key | |
+|--------------|---|
+| `id` | The provider's id |
+| `name` | Its display name |
+| `auth` | `key` (an API key) or `sign-in` (the ChatGPT plan) |
+| `accountModels` | `none` (the catalog's and your files' models), `also` (the catalog's, and the account's own list's when craze has one: Anthropic), or `only` (the account's own list alone: the ChatGPT plan) |
+
+Without `--json` it is a table, a model a row, with `FUNDED` and `OFFERED` on the
+local form, then a `retired:` line a retired alias:
+
+```text
+ALIAS               PROVIDER   STATUS                                    EFFORTS                    CONTEXT            FUNDED  OFFERED
+fireworks/kimi-k3   fireworks  deprecated (use fireworks/kimi-k3p1-pro)  low,medium,high,xhigh,max  1048576            yes     no
+openai/gpt-6.1-sol  openai     active                                    low,medium,high,xhigh,max  272000 of 1048576  yes     yes
+retired: openrouter/gpt-6.1-sol (use openrouter/gpt-sol-latest)
+```
+
+Each release publishes `craze models --shipped --json` as `models.json`, listed in
+its `checksums.txt`, with `crazeVersion` the release's own version: what a
+machine that pins a release can read before installing it.
 
 ## craze version
 

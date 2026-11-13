@@ -375,6 +375,328 @@ start on used to read `json-rpc error -32602: Invalid params`, and now says `the
 agent refused model "x": Invalid params`, kind `model_not_found`. The agent's own
 data on that error, which can quote its request, stays out of it, as it always has.
 
+### Native models: deprecation and the context default
+
+**`usage.contextWindow` is the context a session works within.** On a native
+model with a [context default](../reference/configuration.md#native-context-default)
+— a context smaller than its window — the usage report's `contextWindow` (the
+stream's usage section, the waiting commands' `usage`), the status row's `NN%
+ctx` and the waiting footer's `context x/y` are that default, not the window,
+and automatic compaction runs at its share of it. The window sent to the
+provider and the price do not change. The [OpenAI](#an-openai-api-key) models
+have one, 272,000 tokens; `default_context = 0` under a model in `models.toml`
+turns the default off, so the session compacts at its share of the whole
+window again (`[compaction] auto = false` is what turns automatic compaction
+off).
+`default_context` is a new `models.toml` key: a file that writes it does not
+load in an older craze.
+
+**A model can be deprecated.** A release may mark a shipped model
+[deprecated](../reference/configuration.md#deprecated-models), naming its
+replacement ([this one deprecates four](#native-model-catalog-refresh)): it runs as before when named (`--model`, a pin, the model
+memory, a resumed session, a `[subagents]` model or tier), but `/model`, the
+session list, the agent tool's model list and a new session's own choice
+leave it out. Each reference your `models.toml` makes to one warns at session
+start. It is retired no earlier than the next minor release and 30 days later.
+
+**A retired `--model` names its replacement.** `--model` naming a retired alias
+fails as before (kind `config`), but when the catalog names a replacement the
+message is `native: <alias> was retired; use <replacement>`, with no alias list
+after it. A `default_model`, `[subagents]` model or tier, or `[models]` entry
+naming such an alias is still dropped, now with a warning naming the
+replacement.
+
+**`--model` takes `<provider id>/<alias>`.** `zai-coding-plan/glm-5.3` runs
+`glm-5.3`; an alias that already has its prefix is unchanged.
+
+**The agent tool's model list.** The `agent` tool's description, and its
+"Unknown model" answer, list the models a `/model` list would offer plus the
+ones you configured (`[subagents]` model and tiers, `default_model`, the
+parent's own model). The "Unknown model" answer used to list every alias of
+the table, funded or not.
+
+### Strict model flags under `craze new --wait`, and `craze models`
+
+**`craze new --wait` on the native provider checks its model flags before it
+starts a host.** It refused a `--model` that names nothing, or names a retired
+alias, from the host's start; it now refuses them [before any host is
+spawned](../reference/cli.md#model-checks) — a retired alias with the same
+message, one that names nothing with `native: unknown model "<name>"; craze
+models lists the models` rather than every model (a session's own start error
+still lists them) — still exit 1 and kind `config`, and a `detail.reason` (`model_unknown`, `model_retired`, with
+`detail.replaced_by` when the catalog names the replacement). Two refusals are
+new:
+
+- **`--fast` fails** (`fast_not_offered`): no native model has a fast variant. It
+  used to be ignored with a line in the session's diagnostics. Drop it; `--no-fast`
+  is still accepted.
+- **An `--effort` the model does not list fails** (`effort_not_offered`) when
+  `--model` is given, the message listing the model's levels (`… has no effort
+  control` for a model with none). It used to start at the model's own effort
+  with a diagnostic line. [`craze models <alias> --json`](../reference/cli.md#craze-models)
+  lists a model's `efforts`.
+
+Plain `craze new`, `craze send`, `craze prompt`, the TUI and the ACP providers keep
+the lenient rule. An error's `detail` may now hold `reason`, `model` and
+`replaced_by` besides `status`, `provider_code` and `cause`: ignore keys you do
+not know.
+
+**Deprecated models are noted.** A native result or exit-1 failure on a
+[deprecated](../reference/configuration.md#deprecated-models) model prints one
+stderr line (`craze new: <alias> is deprecated; use <replacement>`) and, with
+`--json`, a top-level [`warnings`](../reference/cli.md#model-notices) array. A
+program that reads stderr line by line, or rejects unknown keys, sees them; the
+status and exit code do not change.
+
+**`craze models`** is new: the native models, each with its provider, maker,
+status, replacement, efforts, context and whether it is funded and offered here
+(`--json` for a program, `--shipped` for the catalog alone); the table ends
+with the warnings the model table gave on loading and a note for each maker
+whose models the [source order](#one-source-per-maker) hides. Each release ships
+the catalog as `models.json`, listed in `checksums.txt`.
+
+### Native model catalog refresh
+
+Nothing needs migrating. This release deprecates four models: each is out of
+the pickers (`/model`, the session list, the agent tool's list) and no new
+session starts on it for you, but it runs by name as before, with a
+[notice](../reference/cli.md#model-notices) on a waiting command's result. A
+[deprecated](../reference/configuration.md#deprecated-models) model is not
+retired; it is retired no earlier than the next minor release and 30 days
+later.
+
+| Deprecated (out of the pickers, still runs by name) | Use |
+|---|---|
+| `fireworks/kimi-k3` | `fireworks/kimi-k3p1-pro` |
+| `fireworks/deepseek-v4p1-flash` | `fireworks/deepseek-v4p1-flash-1017` |
+| `openrouter/gemini-4-argon` | `openrouter/gemini-pro-latest` |
+| `openrouter/minimax-m3` | `openrouter/minimax-m3.1-flash` |
+
+A replacement has its own price (Kimi K3.1 Pro is two thirds of Kimi K3's, M3.1
+Flash half of M3's), so craze never switches you to it.
+
+- **Fireworks starts on `fireworks/kimi-k3p1-pro`** (it was
+  `fireworks/ember-1`) for a new session that remembers nothing and has no
+  `default_model`. It is the owner's choice, not an evaluation's result. Write
+  `default_model = "fireworks/ember-1"` in `models.toml` to keep the old start;
+  a remembered model still wins, as before.
+- **A deprecated model is no fallback.** When craze must pick a funded model
+  by alias because no start model resolves, it no longer takes
+  `fireworks/deepseek-v4p1-flash`; it takes `fireworks/deepseek-v4p1-flash-1017`.
+- **A reference in `models.toml` to a deprecated model warns** at session start:
+  your `default_model`, the `[subagents]` model or a tier, or a `[models]` entry.
+  Point it at the replacement when you like.
+- **OpenRouter's routers are priced at their maker's own rate.**
+  `openrouter/deepseek-flash-latest` is $0.30 input / $1.20 output per million
+  tokens (cached input $0.006), `openrouter/glm-flash-latest` $0.15 / $0.50
+  ($0.03) and `openrouter/glm-latest` $1.40 / $4.40 ($0.26). The model list's
+  prices were the cheapest endpoint's, and requests on 2026-11-11 were billed 3
+  to 9 times them, so the spend craze shows for these three rises to what a
+  request costs. A price you wrote in `models.toml` still wins.
+- **The four GPT routers work within 272,000 tokens.**
+  `openrouter/gpt-sol-latest`, `gpt-astra-latest`, `gpt-luna-latest` and the new
+  `gpt-terra-latest` now have a [context
+  default](../reference/configuration.md#native-context-default) of 272,000 and
+  OpenAI's long-context price above it, as the [OpenAI](#an-openai-api-key)
+  models do: a session compacts at 85% of 272,000 rather than of the whole
+  window, and its `contextWindow` and `NN% ctx` are measured against it.
+  A session resumed after upgrading that already holds more than 231,200
+  tokens compacts before its next turn, and until then its `NN% ctx` can read
+  above 100%.
+  `default_context = 0` under a router in `models.toml` turns the default off:
+  the session then compacts at 85% of the whole window again, as before.
+- **Muse Ember 1.0** (`muse-ember-1.0`) joins Meta, with a context default of
+  200,000 and Meta's price above it. It is not Meta's start.
+- **Claude Fable 5.2** (`anthropic/claude-fable-5-2`) is priced now: $8 input /
+  $40 output per million tokens. Its spend was unpriced when only the
+  account's list named it. The `fable` tier word and `list = "newest"` pick it
+  without a fetched list.
+- **A retired alias now names its replacement** where the catalog knew one:
+  `openrouter/gpt-6.1-sol` and `openrouter/gpt-6-sol` point at
+  `openrouter/gpt-sol-latest`, `openrouter/gpt-6-astra` at
+  `openrouter/gpt-astra-latest`, `openrouter/gpt-6-luna` at
+  `openrouter/gpt-luna-latest`, `openrouter/gemini-3.8-flash` at
+  `openrouter/gemini-flash-latest` and `openrouter/glm-5.3-flash` at
+  `openrouter/glm-flash-latest`. `--model` naming one is refused as before,
+  now with `; use <replacement>` and `detail.replaced_by`.
+
+### An OpenAI API key
+
+craze ships an [`openai` provider](../reference/configuration.md#openai):
+OpenAI's own API on an API key, billed per token, with four models
+(`openai/gpt-6.1-sol`, `openai/gpt-6-astra`, `openai/gpt-6.1-terra`,
+`openai/gpt-6-luna`). It is not the ChatGPT plan, which is unchanged.
+
+- **An exported `OPENAI_API_KEY` runs OpenAI's models, but craze never
+  chooses one with it alone.** Its models are in `/model` (unless the ChatGPT
+  plan offers OpenAI's: [One source per maker](#one-source-per-maker)), and
+  `--model openai/gpt-6.1-sol`, a `default_model` pin, a model you pick with
+  `/model` (the model memory then starts it again) and a sub-agent's
+  configured model run on the variable. But many machines export it for other
+  tools, so while it is the provider's only key craze never starts a new
+  session on an OpenAI model for you, nor falls back to one: a machine whose
+  only key it is stays `needs setup`, now with the reason `OPENAI_API_KEY is
+  set in the environment, but no key is stored for OpenAI` and the fix
+  `craze auth login openai, or start with --model openai/gpt-6.1-sol`, and a
+  new session with no `--model` is refused with that reason (kind `config`).
+  Storing the key with `craze auth login openai` (or `/connect`) lets craze
+  choose its models; to keep craze off the variable altogether, write
+  `env_keys = []` under `[providers.openai]` in `providers.toml`. The variable
+  was already kept out of the commands a native session runs, as every key
+  variable is.
+- **A machine with only an OpenAI key stored starts** on
+  `openai/gpt-6.1-sol`. A machine on which another provider's start model
+  resolves starts where it did: `openai` is last in the provider order.
+- **Two machines with an OpenAI key stored do move**, both only when nothing
+  is remembered and no `default_model` is pinned:
+    - one whose only other funded models are your own (a local provider, say)
+      starts on `openai/gpt-6.1-sol`, a paid model, rather than on the first
+      of yours by alias, the last resort, because a provider's start model is
+      tried before the last resort. An exported `ANTHROPIC_API_KEY` already
+      does the same.
+    - one with a written `provider_order` that leaves `openai` out: its start
+      model is never tried, but the last resort still considers every funded
+      model by alias, and `openai/gpt-6-astra` sorts before `openrouter/…`
+      and most others.
+
+    To keep either where it was, pin the model you want with
+    `default_model`. With the variable alone, neither moves.
+- **A written `provider_order` must name `openai`** for a new session to start
+  on its start model.
+- **Your own `[providers.openai]` or `openai/...` entries** now merge over the
+  shipped ones ([how the files merge](../reference/configuration.md#how-the-files-merge)):
+  an entry that only sets an `api_key` inherits `env_keys`, so an exported
+  `OPENAI_API_KEY` is the key its requests send, while the stored key lets
+  craze choose its models; one that changes `driver` or `base_url` without
+  `env_keys` takes nothing from the variable. A model entry
+  of yours under one of the four aliases changes only the keys it writes.
+  An old import's `[providers.openai]` (`source = "gx"`) whose `base_url`
+  points elsewhere (a LiteLLM proxy, say) now funds nothing, with one warning:
+  its `api_key` and `env_keys` are never sent to `api.openai.com` (remove
+  `source = "gx"` to use the entry as written), and an entry whose own
+  `base_url` the driver refuses falls back to OpenAI's endpoint without them.
+  Likewise a `[providers.anthropic]` entry with a `base_url` that is not
+  Anthropic's own (a gateway's) now loses its `api_key` and `env_keys` with
+  the `base_url`, with a warning: that key is no longer sent to Anthropic.
+- **Cache writes are counted and priced** on the Responses API routes (the
+  OpenAI key's, Meta's and the ChatGPT plan's): tokens a request writes to the
+  provider's cache are cache writes in the usage report, where they were
+  input. A model with no `cache_write` rate prices them at its input rate, so
+  Meta's and your own models cost what they did; `cache_write = 0` written out
+  prices them at 0.
+- **A 429 or an in-stream error that says the account's credit or spend
+  limit is gone** ends the turn at once, kind `quota`, on the
+  `openai-responses` driver: OpenAI's
+  `insufficient_quota`, `credit_balance_exhausted`,
+  `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` and
+  `organization_usage_limit_exceeded`, in its code or its type. It used to be
+  sent again in the turn first, and the four new codes were kind `provider`,
+  retryable.
+- **A 403 on a key provider but Anthropic's** reads `native: <Name> refused the
+  request (HTTP 403): <the provider's message>; if the API key is the problem,
+  replace it with "craze auth login <id>"`. It read `<Name> rejected the API
+  key (HTTP 403)`, without the provider's message. Its kind is still `auth`.
+- **A 400 or 403 whose code is `model_not_found`** is kind `model_not_found` on
+  every key provider but Anthropic's; it was `provider` (a 400) or `auth` (a
+  403).
+- **An overload inside the stream** (`server_is_overloaded`,
+  `service_unavailable_error`) is retried before any output, and after it as a
+  server's fault, like a server error.
+- **A `models.toml` entry that lowers a shipped model's `context_window`**
+  below its long-context tier's threshold, writing no `long_context_above`,
+  now stands with the tier off and one warning. It was dropped whole, with a
+  warning, the shipped entry used.
+- **A session on one of the shipped `openai/*` models cannot be reopened by an
+  older craze once this version has continued it**: its transcript keeps each
+  message's phase in a form older versions do not read. That includes a model
+  of your own that is spelled and wired exactly like a shipped one (an
+  `openai/gpt-6.1-sol` of yours on your own `[providers.openai]` with the same
+  `wire_model`), which now counts as the shipped model. Sessions on your other
+  models, on any provider (one you named `openai` included), and on every
+  other provider keep their transcripts as before.
+- **The Claude Code plugin's `craze:sol` and `craze:astra`** stay on the
+  ChatGPT plan. With an OpenAI key alone, run `craze:delegate` with `target:
+  native openai/gpt-6.1-sol effort=high`, which names the model, so a key
+  only in the environment runs it too ([Claude Code](claude-code.md#the-agents)).
+
+### One source per maker
+
+Nothing needs migrating. When one maker's models are reachable through
+several providers, craze now offers them from the first one you fund in the
+[source order](../reference/configuration.md#one-source-per-maker)
+(`zai-coding-plan`, `chatgpt`, `meta`, `openai`, `anthropic`, `fireworks`,
+`openrouter`). The others' rows leave `/model`, the session list's `/model`
+and the agent tool's menu, and no new session starts on them for you; each
+still runs by name (`--model`, `default_model`, a resume, a persona's
+`model:`, `[subagents]`). With unchanged credentials, these rows leave
+`/model`:
+
+| You have | Rows that leave `/model` |
+|---|---|
+| A ChatGPT sign-in (with its model list) and an OpenAI key | `openai/*` |
+| A ChatGPT sign-in (with its model list) or an OpenAI key, and OpenRouter | `openrouter/gpt-sol-latest`, `gpt-astra-latest`, `gpt-luna-latest`, `gpt-terra-latest` |
+| Z.AI Coding Plan and Fireworks | `fireworks/glm-5p3`, `fireworks/glm-5p3-flash` |
+| Z.AI Coding Plan or Fireworks, and OpenRouter | `openrouter/glm-latest`, `openrouter/glm-flash-latest` |
+| Fireworks and OpenRouter | `openrouter/deepseek-flash-latest` |
+| Meta and OpenRouter | `openrouter/muse-spark-1.3`, `openrouter/muse-wonder` (new in this release) |
+
+Hiding is per maker: with the ChatGPT plan's list, every `openai/*` row
+leaves, including a model the plan does not list. `source_order = []` in
+`models.toml` brings every row back; `source_order = ["openai"]` puts the key
+first. **A `models.toml` that writes `source_order` cannot be read by an older
+craze** (it refuses keys it does not know), so a directory shared with an
+older binary should not write it.
+
+- **A remembered model on a hidden source no longer starts new sessions.**
+  If you last picked, say, `openrouter/gpt-sol-latest` or `fireworks/glm-5p3`
+  in `/model` and a higher source of that maker is connected (ChatGPT plan or
+  an OpenAI key; a Z.AI key), a new session passes over it and starts on the
+  next remembered model that is offered; your `default_model` applies only
+  when no remembered model is usable, and the provider order after that. The
+  entry stays in `recent.json`, and starts again once its source is the one
+  in force. To keep starting there, put its source first with `source_order`
+  in `models.toml` (`source_order = ["openrouter"]`, say), or pass `--model`
+  each time; `/model` cannot pick a hidden model. A remembered deprecated
+  model still starts.
+- **craze no longer moves a new session to a per-token bill on its own while
+  the ChatGPT plan is signed in but offers none of its models** — no usable
+  model list, another account's list, or plan usage off. It then passes over
+  OpenAI's models on every other source, and every model billed per token —
+  on a provider whose models are priced, an account-listed or hand-added
+  model with no price of its own included — on a provider after `chatgpt` in
+  the start order or left out of it: with the catalog's order, Fireworks,
+  OpenRouter, Meta, Anthropic and OpenAI. **This moves machines
+  that started before:** with such a sign-in and a Fireworks key (or an
+  OpenRouter, Meta or Anthropic key), nothing remembered and no pin, a new
+  session no longer starts on that provider's start model; it refuses (kind
+  `config`): `native: signed in to ChatGPT, but its models are not available,
+  and craze does not start a new session on fireworks/kimi-k3p1-pro
+  (Fireworks) on its own; run craze auth login chatgpt, or start with --model
+  fireworks/kimi-k3p1-pro`. Signing in again fixes it; so do `--model`, a
+  `default_model` pin, a model you picked with `/model` (the model memory),
+  or a `provider_order` that lists that provider before `chatgpt`. A Z.AI key,
+  before the plan in the order, still starts on `glm-5.3`, and a model on a
+  provider of your own none of whose models has a price still starts. A
+  registration a sign-out left behind holds nothing back. A sign-in your
+  `provider_order` leaves out holds back no other maker's models, but still
+  holds OpenAI's models on a later source (the source order's rule). `craze
+  providers` and the hub show native as `needs setup` with that reason, not
+  "no model provider has a key". A resumed session whose own model no longer
+  runs does not fall back to such a model either.
+- **A sub-agent call naming a hidden or deprecated model** that you did not
+  configure is refused, naming the models it may use. It used to run. A
+  persona's `model:` and `[subagents]` still resolve any model.
+- **A quota or plan-limit failure in the TUI** is followed by a note naming
+  the maker's other funded sources and how to continue on one (`/exit`, then
+  `craze -c --model <alias>`); craze never switches for you. The TUI adds the
+  note from its own table; the failure's message is unchanged, so a waiting
+  command (`craze new --wait`, `craze send --wait`, `craze wait`) or `craze
+  prompt` never receives it, whichever command started the session.
+- **`craze auth list`** ends with a note for each maker whose models are
+  hidden, as [`craze models`](../reference/cli.md#craze-models) does.
+- **New:** `openrouter/muse-spark-1.3` and `openrouter/muse-wonder`, Meta's
+  models on OpenRouter, offered when you have OpenRouter and no Meta key.
+
 ## Since v0.1.1
 
 Nothing needs migrating.

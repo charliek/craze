@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -173,5 +174,52 @@ func TestCLIReferenceDocumentsEveryCommandAndFlag(t *testing.T) {
 			continue
 		}
 		checkFlags(c, `the section headed "`+sec.text+`"`, sec)
+	}
+}
+
+// structJSONKeys is every JSON key of t's fields, and of the structs they hold
+// (through pointers and slices), each once.
+func structJSONKeys(t reflect.Type, into map[string]bool) {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		into[name] = true
+		structJSONKeys(f.Type, into)
+	}
+}
+
+// TestCLIReferenceNamesEveryModelsKey keeps docs/reference/cli.md current
+// with plan 050 C2's contract: every key of craze models' document and its
+// miss object, of a failure object and its `warnings` (a result's too), and
+// of the model refusal's `detail` is named in it, in backticks.
+func TestCLIReferenceNamesEveryModelsKey(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(docsModuleRoot(t), "docs", "reference", "cli.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, v := range []any{modelsDoc{}, modelsMiss{}, failureBody{}, errorDetail{}} {
+		structJSONKeys(reflect.TypeOf(v), keys)
+	}
+	for _, k := range []string{warningModelDeprecated, reasonModelUnknown, reasonModelRetired, reasonEffortNotOffered, reasonFastNotOffered,
+		modelActive, modelDeprecated, sourceCatalog, sourceAccount, sourceUser, authByKey, authBySignIn} {
+		keys[k] = true
+	}
+	for k := range keys {
+		if !strings.Contains(string(raw), "`"+k+"`") && !strings.Contains(string(raw), `"`+k+`"`) {
+			t.Errorf("docs/reference/cli.md does not name %q", k)
+		}
+	}
+	if !keys["warnings"] || !keys["replaced_by"] || !keys["unverifiable"] || !keys["accountModels"] {
+		t.Fatalf("premise: the walk missed keys: %v", keys)
 	}
 }

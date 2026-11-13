@@ -255,6 +255,11 @@ type waitFailure struct {
 	cause    string
 	usage    *agent.UsageState
 	inFlight bool
+	// provider and model are the session's, as far as the waiter learnt them:
+	// what a failure's notices are about (resultOutput.notice). detail is a
+	// model refusal's (refusalDetail), nil for every other failure.
+	provider, model string
+	detail          *errorDetail
 }
 
 // pumped is one stream item as the pump hands it over, or why the stream
@@ -411,7 +416,12 @@ func newTurnWaiter(conn *waitConn, start waitStart, opts waitOptions) *turnWaite
 // until the target's result, a failure, --timeout, or a signal, and answers
 // either the result or the failure. It closes nothing: conn is the caller's.
 func waitTurn(ctx context.Context, conn *waitConn, start waitStart, opts waitOptions) (*turnResult, *waitFailure) {
-	return newTurnWaiter(conn, start, opts).run(ctx)
+	w := newTurnWaiter(conn, start, opts)
+	res, wf := w.run(ctx)
+	if wf != nil {
+		wf.provider, wf.model = w.session.provider, w.session.model
+	}
+	return res, wf
 }
 
 // run is waitTurn.

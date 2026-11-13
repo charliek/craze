@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charliek/craze/internal/harness"
@@ -54,11 +55,12 @@ func TestMissingAgentBinarySaysWhatToDo(t *testing.T) {
 }
 
 // TestRejectedKeyText is plan 037 LC-8: a provider's refusal of its key — a
-// 401, a 403, or an authentication failure it flagged — names the provider
-// by its display name, keeps the status as the provider sent it, says to
-// replace the key with craze auth login <id>, and names the variable the key
-// may come from instead: one, several, or none. A variable's name, never a
-// value; the provider's own message never.
+// 401, or an authentication failure it flagged — names the provider by its
+// display name, keeps the status as the provider sent it, says to replace the
+// key with craze auth login <id>, and names the variable the key may come
+// from instead: one, several, or none. A variable's name, never a value; the
+// provider's own message never. (A 403 says the provider's message first:
+// TestRefusedText.)
 func TestRejectedKeyText(t *testing.T) {
 	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
 		"fireworks": {Name: "Fireworks", EnvKeys: []string{"FIREWORKS_API_KEY"}},
@@ -75,8 +77,8 @@ func TestRejectedKeyText(t *testing.T) {
 	}{
 		{"401, one variable", table, "fireworks", 401,
 			`native: Fireworks rejected the API key (HTTP 401); replace it with "craze auth login fireworks", or check FIREWORKS_API_KEY`},
-		{"403, two variables", table, "zhipu", 403,
-			`native: Zhipu AI rejected the API key (HTTP 403); replace it with "craze auth login zhipu", or check ZHIPU_API_KEY or ZAI_API_KEY`},
+		{"401, two variables", table, "zhipu", 401,
+			`native: Zhipu AI rejected the API key (HTTP 401); replace it with "craze auth login zhipu", or check ZHIPU_API_KEY or ZAI_API_KEY`},
 		{"a flagged failure, three variables", table, "three", 400,
 			`native: Three rejected the API key (HTTP 400); replace it with "craze auth login three", or check A_KEY, B_KEY or C_KEY`},
 		{"no status", table, "fireworks", 0,
@@ -96,6 +98,64 @@ func TestRejectedKeyText(t *testing.T) {
 			got := phraseTurnErrorIn(fmt.Errorf("turn: %w", err), tc.table)
 			if got.Error() != tc.want || !errors.Is(got, harness.ErrAuth) {
 				t.Fatalf("phrased %q\nwant    %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRefusedText is plan 050 C3: a 403 on a key-funded driver other than
+// Anthropic's is as often the account's as the key's — OpenAI's for an
+// organization not verified for a model, or a region it does not serve — so
+// it says the provider refused the request, the provider's own message first
+// (sanitized, then redacted again, bounded), and the key's advice after it,
+// its kind still ErrAuth. With no message the advice follows the status. A
+// key the provider echoed split by a zero-width space or a soft hyphen —
+// which the harness's whole-key scrub does not match, and sanitizing would
+// join again — never appears; with no redactor to run after sanitizing, a
+// message sanitizing changes is not shown at all. The control: a 401 on the
+// same driver is LC-8's words, with no message. Negative control: sanitizing
+// after the last redaction shows the canary in the split cases.
+func TestRefusedText(t *testing.T) {
+	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
+		"openai": {Name: "OpenAI", Driver: modeltable.DriverOpenAIResponses, EnvKeys: []string{"OPENAI_API_KEY"}},
+	}}
+	red := func(s string) string { return strings.ReplaceAll(s, nativeCanary, "[redacted]") }
+	half := len(nativeCanary) / 2
+	split := func(sep string) string { return nativeCanary[:half] + sep + nativeCanary[half:] }
+	const advice = `if the API key is the problem, replace it with "craze auth login openai", or check OPENAI_API_KEY`
+	for _, tc := range []struct {
+		name   string
+		status int
+		msg    string
+		red    func(string) string
+		want   string
+	}{
+		{"a 403 with a message", 403, "Your organization must be verified to use the model `gpt-6-astra`.\x1b[2J", red,
+			"native: OpenAI refused the request (HTTP 403): Your organization must be verified to use the model `gpt-6-astra`.; " + advice},
+		{"a key split by a zero-width space", 403, "forbidden: " + split("\u200b"), red,
+			"native: OpenAI refused the request (HTTP 403): forbidden: [redacted]; " + advice},
+		{"a key split by a soft hyphen", 403, "forbidden: " + split("\u00ad"), red,
+			"native: OpenAI refused the request (HTTP 403): forbidden: [redacted]; " + advice},
+		{"a long message, bounded", 403, strings.Repeat("x", 400), red,
+			"native: OpenAI refused the request (HTTP 403): " + strings.Repeat("x", maxRefusalMessage-len("…")) + "…; " + advice},
+		{"no redactor, a plain message", 403, "Country, region, or territory not supported", nil,
+			"native: OpenAI refused the request (HTTP 403): Country, region, or territory not supported; " + advice},
+		{"no redactor, a message sanitizing changes", 403, "forbidden: " + split("\u200b"), nil,
+			"native: OpenAI refused the request (HTTP 403); " + advice},
+		{"a 403 with none", 403, "", red,
+			"native: OpenAI refused the request (HTTP 403); " + advice},
+		{"a 401 (control)", 401, "Incorrect API key provided: sk-proj-****0000.", red,
+			`native: OpenAI rejected the API key (HTTP 401); replace it with "craze auth login openai", or check OPENAI_API_KEY`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pe := &harness.ProviderError{Provider: "openai", Model: "openai/gpt-6-astra", WireModel: "gpt-6-astra",
+				Driver: modeltable.DriverOpenAIResponses, StatusCode: tc.status, Message: tc.msg}
+			got := phraseTurnErrorRed(fmt.Errorf("turn: %w", errors.Join(pe, harness.ErrAuth)), table, tc.red)
+			if got.Error() != tc.want || !errors.Is(got, harness.ErrAuth) {
+				t.Fatalf("phrased %q\nwant    %q", got, tc.want)
+			}
+			if strings.Contains(got.Error(), nativeCanary) {
+				t.Fatalf("the key is in %q", got)
 			}
 		})
 	}
@@ -135,8 +195,9 @@ func TestNothingFundedTextNamesTheChatGPTPlan(t *testing.T) {
 // Anthropic's reason — and a 404 a wire id the account cannot use — "the
 // Anthropic account cannot use <wire model>" with its reason — rather than
 // the key's and models.toml's words, while a 401 is still the key's; each
-// keeps its sentinel. The controls: the same 403 and 404 on another driver
-// keep LC-8's and the models.toml words byte for byte.
+// keeps its sentinel. The controls: the same 404 on another driver keeps the
+// models.toml words byte for byte, and its 403 says the provider's own
+// message before the key's advice (plan 050 C3, TestRefusedText).
 func TestAnthropicAccessTexts(t *testing.T) {
 	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
 		"anthropic": {Name: "Anthropic", Driver: modeltable.DriverAnthropic, EnvKeys: []string{"ANTHROPIC_API_KEY"}},
@@ -167,7 +228,7 @@ func TestAnthropicAccessTexts(t *testing.T) {
 		{"an Anthropic 401", anthropic(401, "invalid x-api-key"), harness.ErrAuth,
 			`native: Anthropic rejected the API key (HTTP 401); replace it with "craze auth login anthropic", or check ANTHROPIC_API_KEY`},
 		{"another driver's 403 (control)", other(403, "forbidden"), harness.ErrAuth,
-			`native: Fireworks rejected the API key (HTTP 403); replace it with "craze auth login fireworks", or check FIREWORKS_API_KEY`},
+			`native: Fireworks refused the request (HTTP 403): forbidden; if the API key is the problem, replace it with "craze auth login fireworks", or check FIREWORKS_API_KEY`},
 		{"another driver's 404 (control)", other(404, "no such model"), harness.ErrModelNotFound,
 			`native: provider "fireworks" does not serve model "fireworks/m" (HTTP 404); check its wire_model in models.toml`},
 	} {
@@ -178,5 +239,48 @@ func TestAnthropicAccessTexts(t *testing.T) {
 				t.Fatalf("phrased %q\nwant    %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEveryProviderMessageIsRedactedAfterSanitizing (plan 050 review): every
+// branch that shows a provider's own message — Anthropic's 403, Anthropic's
+// model-not-found, and the default for a 429 or a 5xx, beside the 403 of
+// TestRefusedText — redacts it after sanitizing as well as before, so a key
+// the scrub did not know, split by a format character that sanitizing drops,
+// never reads whole. The control: the message's other words still show.
+func TestEveryProviderMessageIsRedactedAfterSanitizing(t *testing.T) {
+	table := &modeltable.Table{Providers: map[string]modeltable.Provider{
+		"anthropic": {Name: "Anthropic", Driver: modeltable.DriverAnthropic, EnvKeys: []string{"ANTHROPIC_API_KEY"}},
+		"fireworks": {Name: "Fireworks", EnvKeys: []string{"FIREWORKS_API_KEY"}},
+	}}
+	red := func(s string) string { return strings.ReplaceAll(s, nativeCanary, "[redacted]") }
+	half := len(nativeCanary) / 2
+	for _, sep := range []string{"\u200b", "\u2060", "\ufeff", "\u00ad"} {
+		msg := "denied: " + nativeCanary[:half] + sep + nativeCanary[half:]
+		for _, tc := range []struct {
+			name string
+			pe   *harness.ProviderError
+			is   error
+		}{
+			{"an Anthropic 403", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 403, Message: msg}, harness.ErrAuth},
+			{"an Anthropic 404", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 404, Message: msg}, harness.ErrModelNotFound},
+			{"a 429", &harness.ProviderError{Provider: "fireworks", Model: "fireworks/m", WireModel: "m",
+				Driver: modeltable.DriverOpenAICompat, StatusCode: 429, Message: msg}, nil},
+			{"a 500", &harness.ProviderError{Provider: "anthropic", Model: "anthropic/c", WireModel: "c",
+				Driver: modeltable.DriverAnthropic, StatusCode: 500, Message: msg}, nil},
+		} {
+			t.Run(fmt.Sprintf("%s/U+%04X", tc.name, []rune(sep)[0]), func(t *testing.T) {
+				var err error = tc.pe
+				if tc.is != nil {
+					err = errors.Join(tc.pe, tc.is)
+				}
+				got := phraseTurnErrorRed(fmt.Errorf("turn: %w", err), table, red).Error()
+				if strings.Contains(got, nativeCanary) || !strings.Contains(got, "denied: [redacted]") {
+					t.Fatalf("phrased %q; want the message shown with the key redacted", got)
+				}
+			})
+		}
 	}
 }

@@ -100,14 +100,24 @@ class Served:
     def __init__(self, craze_bin: Path, tmp_path: Path, host_id: str, name: str) -> None:
         gate = tmp_path / f"gate-{name}"
         os.mkfifo(gate)
-        self.host = subprocess.Popen(
-            [str(craze_bin), "serve", "--provider", "cursor", "--workspace", str(_work(tmp_path)), "--host-id", host_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_env("long-turn", CRAZE_FAKE_GATE=str(gate)),
-        )
-        _until("the host to register", lambda: any(e["hostId"] == host_id and e.get("crazeSessionId") for e in _entries(_home())))
+        err = tmp_path / f"serve-{name}.err"
+        with err.open("wb") as f:
+            self.host = subprocess.Popen(
+                [str(craze_bin), "serve", "--provider", "cursor", "--workspace", str(_work(tmp_path)), "--host-id", host_id],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=f,
+                env=_env("long-turn", CRAZE_FAKE_GATE=str(gate)),
+            )
+
+        def registered() -> bool:
+            if any(e["hostId"] == host_id and e.get("crazeSessionId") for e in _entries(_home())):
+                return True
+            # A host that could not come up says why on its stderr.
+            assert self.host.poll() is None, ("craze serve exited unregistered", self.host.returncode, err.read_bytes())
+            return False
+
+        _until("the host to register", registered)
         self.entry = next(e for e in _entries(_home()) if e["hostId"] == host_id)
         self.short = self.entry["crazeSessionId"][-8:]
         self.waiter = subprocess.Popen(
@@ -146,6 +156,11 @@ def test_a_reused_host_id_inherits_no_stop_record(craze_bin: Path, fake_agent_bi
         _stop(craze_bin, first.short)
         res, code, stderr = first.result()
         assert code == 3 and res["status"] == "cancelled" and res["error"]["detail"]["cause"] == "stop", (res, stderr)
+        # The id is used again only once the first host has exited on its own. Its
+        # entry goes before its socket: killed between the two, it leaves a socket no
+        # later host at that id can bind (ids are never reused, protocol.md).
+        _until("the first host never exited after its stop", lambda: first.host.poll() is not None)
+        assert first.host.returncode == 0, first.host.returncode
     finally:
         first.close()
     record = _record(first.entry)

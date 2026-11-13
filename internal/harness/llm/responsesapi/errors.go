@@ -128,26 +128,48 @@ func (e *Error) CutShort() bool {
 // keyTransientCodes are the codes and types the key route may try again
 // before any output when they arrive inside the stream (plan 047 D12): a
 // server's own fault or a rate limit, as Fantasy's TransientStreamErrorTypes
-// lists them, and OpenAI's rate_limit_exceeded, the code the standard error
-// object gives a 429.
+// lists them, OpenAI's rate_limit_exceeded, the code the standard error
+// object gives a 429, and OpenAI's overload, server_is_overloaded of type
+// service_unavailable_error, a 503's in a status (plan 050 C3).
 var keyTransientCodes = map[string]bool{
-	"server_error":        true,
-	"internal_error":      true,
-	"overloaded_error":    true,
-	"api_error":           true,
-	"rate_limit_error":    true,
-	"rate_limit_exceeded": true,
+	"server_error":              true,
+	"internal_error":            true,
+	"overloaded_error":          true,
+	"api_error":                 true,
+	"rate_limit_error":          true,
+	"rate_limit_exceeded":       true,
+	"server_is_overloaded":      true,
+	"service_unavailable_error": true,
+}
+
+// keyQuotaCodes are the codes and types of a key-route failure that say the
+// account's credit or spend limit is gone rather than that it is going too
+// fast (plan 050 C3): OpenAI's insufficient_quota, and the billing codes its
+// error-codes page lists for a 429, whose type "can still be"
+// insufficient_quota. OpenAI's docs: "Retrying billing, spend, or quota errors
+// won't restore API access."
+var keyQuotaCodes = map[string]bool{
+	"insufficient_quota":                true,
+	"credit_balance_exhausted":          true,
+	"organization_spend_limit_exceeded": true,
+	"project_spend_limit_exceeded":      true,
+	"organization_usage_limit_exceeded": true,
 }
 
 // Final reports whether the failure must never be retried (plan 033 §3.9):
 // on the ChatGPT route, every 429 and every 400 — the same body would be
 // refused again — and the codes OpenAI's docs say not to repeat (finalCodes,
 // and every chatpass_v2_* code), in a status or inside the stream alike. On
-// the key route nothing is final in this sense (plan 047 D12): a refusal is
-// left to its status, as on Chat Completions, and a rate limit is retried.
+// the key route a refusal is left to its status, as on Chat Completions, and
+// a rate limit is retried (plan 047 D12), with one exception (plan 050 C3): a
+// failure whose code or type says the account's credit or spend limit is gone
+// (keyQuotaCodes), which no retry lifts — a 429, which Fantasy would retry by
+// its status, or one inside the stream — whatever its other name says: a
+// quota code beside a rate-limit type, or the reverse, is the quota's.
 func (e *Error) Final() bool {
 	if e.Route == RouteKey {
-		return false
+		quota := keyQuotaCodes[e.Code] || keyQuotaCodes[e.Type]
+		return quota && (e.StatusCode == http.StatusTooManyRequests || e.StatusCode == 0)
 	}
 	if e.StatusCode == http.StatusTooManyRequests || e.StatusCode == http.StatusBadRequest {
 		return true
@@ -160,12 +182,16 @@ func (e *Error) Final() bool {
 // usage check that could not run), or a code or type transientCodes names;
 // other HTTP statuses are left to the caller's own rule for them (Fantasy
 // retries 408, 409 and 5xx), and a final failure is never transient. On the
-// key route (plan 047 D12): a 429 or a 5xx, and inside the stream a code or
-// type keyTransientCodes names; never another status — a 401 above all,
-// whatever its body says, since the same key would be refused again.
+// key route (plan 047 D12): a 429 that is not final (a quota's, plan 050 C3)
+// or a 5xx, and inside the stream a code or type keyTransientCodes names,
+// unless the other names a quota (final);
+// never another status — a 401 above all, whatever its body says, since the
+// same key would be refused again.
 func (e *Error) Transient() bool {
 	if e.Route == RouteKey {
 		switch {
+		case e.Final():
+			return false
 		case e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= http.StatusInternalServerError:
 			return true
 		case e.StatusCode != 0:

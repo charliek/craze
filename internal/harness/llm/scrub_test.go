@@ -20,6 +20,8 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+
+	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 )
 
 // leaks lists every place needle can be found from v: its formatted forms,
@@ -358,6 +360,78 @@ func TestScrubText(t *testing.T) {
 	}
 	if got := newScrubber("", nil).text("key " + canary); got != "key "+canary {
 		t.Errorf("a scrubber with no key changed %q to %q", "key "+canary, got)
+	}
+}
+
+// plan 050 review: a key echoed with format characters (Unicode Cf) or
+// invalid bytes between its characters — which a display drops, joining it
+// again — is replaced whole, separators and all, before anything cuts the
+// text; one split by anything else (a space, another letter) is not the key.
+func TestScrubTextFindsAKeySplitByFormatCharacters(t *testing.T) {
+	s := newScrubber(canary, nil)
+	spread := func(sep string) string {
+		var b strings.Builder
+		for i, r := range canary {
+			if i > 0 {
+				b.WriteString(sep)
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+	half := len(canary) / 2
+	for _, tc := range []struct{ name, in, want string }{
+		{"a zero-width space", "k " + canary[:half] + "\u200b" + canary[half:] + ".", "k " + redacted + "."},
+		{"a word joiner after every character", "k " + spread("\u2060"), "k " + redacted},
+		{"byte-order marks", spread("\ufeff\ufeff") + " k", redacted + " k"},
+		{"a soft hyphen", canary[:half] + "\u00ad" + canary[half:], redacted},
+		{"a bidi override", canary[:half] + "\u202e" + canary[half:], redacted},
+		{"an invalid byte", canary[:half] + "\xff" + canary[half:], redacted},
+		{"a space is no gap", canary[:half] + " " + canary[half:], canary[:half] + " " + canary[half:]},
+		{"before and after stand", "\u200b" + canary + "\u200b", "\u200b" + redacted + "\u200b"},
+	} {
+		if got := s.text(tc.in); got != tc.want {
+			t.Errorf("%s: text(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestKeyScrubsAgree (guard 2, G3): the model wrapper's scrub and the
+// Messages API client's (messagesapi.KeyPattern, which the Anthropic model
+// list's cache uses too) replace the same text on the same inputs — a key
+// split by a zero-width space, a soft hyphen, an invalid byte or a word
+// joiner after every character; a key of metacharacters; a key split by a
+// space, a part of it, and ordinary text with those characters, which
+// neither replaces; and a long input, which each finishes. The inputs are
+// the client's own test's (gapCases there).
+func TestKeyScrubsAgree(t *testing.T) {
+	for _, key := range []string{canary, `sk-(a.b)*+?[c]{2}|^$\x-0001`} {
+		h := len(key) / 2
+		var spread strings.Builder
+		for i, r := range key {
+			if i > 0 {
+				spread.WriteString("\u2060")
+			}
+			spread.WriteRune(r)
+		}
+		long := strings.Repeat(key[:len(key)-1]+"\u200b", 20000)
+		s, client := newScrubber(key, nil), messagesapi.KeyPattern(key)
+		for _, tc := range []struct{ name, in, want string }{
+			{"a zero-width space", "k " + key[:h] + "\u200b" + key[h:] + ".", "k " + redacted + "."},
+			{"a soft hyphen", key[:h] + "\u00ad" + key[h:], redacted},
+			{"an invalid byte", key[:h] + "\xff" + key[h:], redacted},
+			{"a word joiner after every character", "x " + spread.String() + " y", "x " + redacted + " y"},
+			{"before and after stand", "\u200b" + key + "\u00ad", "\u200b" + redacted + "\u00ad"},
+			{"a space is no gap", key[:h] + " " + key[h:], key[:h] + " " + key[h:]},
+			{"a part of the key", key[:h] + "\u200b", key[:h] + "\u200b"},
+			{"ordinary text", "soft\u00adhyphen, zero\u200bwidth, a \xff byte", "soft\u00adhyphen, zero\u200bwidth, a \xff byte"},
+			{"a long input", long + key, long + redacted},
+		} {
+			got, other := s.text(tc.in), client.ReplaceAllLiteralString(tc.in, redacted)
+			if got != tc.want || other != tc.want {
+				t.Errorf("%s: the wrapper scrubs %q to %q, the client to %q; want %q", tc.name, tc.in, got, other, tc.want)
+			}
+		}
 	}
 }
 

@@ -624,6 +624,17 @@ func attachedIs(t *testing.T, h *host, want int, when string) {
 	}
 }
 
+// attachedFallsTo waits for the server's count of attachments to be want,
+// then holds it to that (attachedIs). A client reads an attachment's reset as
+// soon as the server has queued it, which is a moment before the server takes
+// the attachment out of its count (forwarder.queueReset: the offer, then
+// closedLocked), so a count read straight after the reset can still hold it.
+func attachedFallsTo(t *testing.T, h *host, want int, when string) {
+	t.Helper()
+	waitFor(t, "the server's count of attachments "+when, func() bool { return h.srv.Attached() == want })
+	attachedIs(t, h, want, when)
+}
+
 // TestTheAttachmentCountFallsOnceOnEveryClose (§3.6: "Attached counts every
 // attachment the server holds in any state"; astra r2-c1 3): an attachment
 // leaves the count exactly once, by every route it can close by — besides a
@@ -666,7 +677,7 @@ func TestTheAttachmentCountFallsOnceOnEveryClose(t *testing.T) {
 		// The live attachment ends reset{session_replaced}; the pending one
 		// was closed by the replacement itself.
 		x.untilReset(protocol.ResetSessionReplaced)
-		attachedIs(t, h, 0, "after the replacement")
+		attachedFallsTo(t, h, 0, "after the replacement")
 		g.release()
 		waitFor(t, "the replaced attach's handler to return", func() bool { return h.srv.Handlers() == 0 })
 		attachedIs(t, h, 0, "after the replaced attach was abandoned too")
@@ -690,7 +701,7 @@ func TestTheAttachmentCountFallsOnceOnEveryClose(t *testing.T) {
 		}
 		gate.open()
 		a.untilReset(protocol.ResetSlowConsumer)
-		attachedIs(t, h, 0, "after reset{slow_consumer}")
+		attachedFallsTo(t, h, 0, "after reset{slow_consumer}")
 	})
 	t.Run("live attachments reset session_closed", func(t *testing.T) {
 		h := newHost(t)
@@ -705,9 +716,10 @@ func TestTheAttachmentCountFallsOnceOnEveryClose(t *testing.T) {
 		}
 		x.untilReset(protocol.ResetSessionClosed)
 		a.untilReset(protocol.ResetSessionClosed)
-		attachedIs(t, h, 0, "after both reset{session_closed}")
+		attachedFallsTo(t, h, 0, "after both reset{session_closed}")
 		x.expectClosed()
 		a.expectClosed()
+		attachedIs(t, h, 0, "with both connections closed")
 	})
 	t.Run("the server's shutdown, a live attachment and a pending one", func(t *testing.T) {
 		g := newArmedHold()

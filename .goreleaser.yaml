@@ -5,6 +5,19 @@ project_name: craze
 # No `before.hooks: go mod tidy` (prox has one): CI's lint job already fails
 # the build on go.mod/go.sum drift, so re-running tidy here would only mask
 # the same problem later than it should be caught.
+#
+# The one hook writes the release's models.json (plan 050 C2): `craze models
+# --shipped --json`, the catalog compiled into this release, which an
+# orchestrator pins by version and sha256. The builds below cross-compile, so
+# the hook makes its own build for the machine it runs on, with the release's
+# version ldflag (crazeVersion is the packaged version), and runs it under
+# `env -i`: no HOME, no key, no CRAZE_HOME can reach it. It lands in bin/
+# (ignored by git, and untouched by --clean, which empties dist/ after the
+# hooks have run), and the checksum and release sections below pick it up.
+before:
+  hooks:
+    - sh -c 'mkdir -p bin/release && CGO_ENABLED=0 go build -ldflags "-X github.com/charliek/craze/internal/version.Version={{ .Version }}" -o bin/release/craze-models ./cmd/craze && env -i bin/release/craze-models models --shipped --json > bin/release/models.json'
+
 builds:
   - id: craze
     binary: craze
@@ -81,6 +94,8 @@ brews:
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+  extra_files:
+    - glob: ./bin/release/models.json
 
 release:
   github:
@@ -89,6 +104,8 @@ release:
   draft: false
   prerelease: auto
   mode: replace
+  extra_files:
+    - glob: ./bin/release/models.json
 
 changelog:
   use: github

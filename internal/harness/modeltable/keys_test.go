@@ -716,7 +716,7 @@ func TestProvidersStructuralErrorsNameNoValue(t *testing.T) {
 // TestSetKeyOverTheShippedCatalog: the exported store over the catalog this
 // binary ships. A key stored for fireworks in an empty directory funds its
 // models through Load — a new session starts on Fireworks' start,
-// fireworks/ember-1 (plan 038 §2.2) — and Providers says so; RemoveKey takes
+// fireworks/kimi-k3p1-pro (plan 038 §2.2; plan 050 moved it from Ember-1) — and Providers says so; RemoveKey takes
 // it back.
 func TestSetKeyOverTheShippedCatalog(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "native")
@@ -735,8 +735,8 @@ func TestSetKeyOverTheShippedCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias, _, err := tbl.StartModel(nil, fakeEnv(nil))
-	if err != nil || alias != "fireworks/ember-1" {
-		t.Fatalf("StartModel = %q, %v; want Fireworks' start fireworks/ember-1", alias, err)
+	if err != nil || alias != "fireworks/kimi-k3p1-pro" {
+		t.Fatalf("StartModel = %q, %v; want Fireworks' start fireworks/kimi-k3p1-pro", alias, err)
 	}
 	got, err := tbl.Resolve(alias, fakeEnv(nil))
 	if err != nil || got.APIKey.Reveal() != key {

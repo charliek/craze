@@ -22,6 +22,8 @@ import (
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/transcript"
@@ -2663,6 +2665,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recompute()
 		return m, nil
 
+	case deprecatedNoteMsg:
+		m.addNote(msg.text)
+		return m, nil
+
+	case quotaHintMsg:
+		m.addNote(msg.text)
+		return m, nil
+
 	case effortNotAppliedMsg:
 		// The model step landed and the effort did not follow it: nothing of
 		// the effort was written, so the note says why.
@@ -4861,6 +4871,7 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// The text the fold drew the row with, read once.
 			m.err = errText
 		}
+		return m.quotaHintCmd(ev)
 	case agent.EventMeta:
 		if ev.State != nil {
 			// A state delta: the engine's, or the session's own. The send-now
@@ -5411,6 +5422,89 @@ func (m *Model) sessionUp() {
 	// reconnect whose snapshot left the catalog out (A12) — without waiting
 	// for a bare "/".
 	m.rescanSkills()
+	m.noteDeprecatedModel()
+}
+
+// noteTable is the table the commands of a native session's notes read
+// (noteDeprecatedModel, quotaHintCmd): the TUI's own native directory's. A
+// seam: a test's synthetic catalog.
+var noteTable = modeltable.Load
+
+// deprecatedNoteMsg is noteDeprecatedModel's command's answer: the sentence
+// to note, for the session it was issued under.
+type deprecatedNoteMsg struct {
+	issued
+	text string
+}
+
+// noteDeprecatedModel is the note a native session's open says when its model
+// is deprecated (plan 050 C2): the sentence the waiting commands print on
+// stderr, from the TUI's own table, once (sessionUp runs once). The table is
+// read off the Update, by a command handed on through backCmd, whose answer
+// (deprecatedNoteMsg) adds the note. Nothing on any other provider, and no
+// answer when the table does not load or the model is not deprecated.
+func (m *Model) noteDeprecatedModel() {
+	if !m.connectOffered() || m.nativeDir == "" {
+		return
+	}
+	alias, _ := m.currentModel()
+	if alias == "" {
+		return
+	}
+	dir, load, stamp := m.nativeDir, noteTable, m.issue()
+	m.backCmd = tea.Batch(m.backCmd, func() tea.Msg {
+		t, err := load(dir)
+		if err != nil {
+			return nil
+		}
+		_, sentence, ok := t.DeprecatedNotice(alias)
+		if !ok {
+			return nil
+		}
+		return deprecatedNoteMsg{issued: stamp, text: sanitizeLine(sentence)}
+	})
+}
+
+// quotaHintMsg is quotaHintCmd's command's answer: the note to add after the
+// failure's row.
+type quotaHintMsg struct {
+	issued
+	text string
+}
+
+// quotaHintCmd is the note a native turn's quota or plan-limit failure
+// (kind quota) earns a person (plan 050 C5): the other funded sources of the
+// model's maker, who pays for each, and how to continue on one
+// (agent.QuotaHint), from the TUI's own table and environment, read off the
+// Update. It is a note of this TUI's beside the failure's row, never part
+// of the failure, so no failure object a waiting command reads — whoever
+// started the host — can carry it. nil for another provider, a replayed
+// failure, another kind, or no model; the command answers nothing when the
+// table does not load or there is no other source.
+func (m *Model) quotaHintCmd(ev agent.Event) tea.Cmd {
+	if ev.Err == nil || ev.Replayed || !m.connectOffered() || m.nativeDir == "" || agent.ErrorInfo(ev.Err).Kind != errkind.Quota {
+		return nil
+	}
+	alias, _ := m.currentModel()
+	if alias == "" {
+		return nil
+	}
+	dir, load, stamp := m.nativeDir, noteTable, m.issue()
+	env := m.nativeEnv
+	if env == nil {
+		env = func(string) string { return "" }
+	}
+	return func() tea.Msg {
+		t, err := load(dir)
+		if err != nil {
+			return nil
+		}
+		text := agent.QuotaHint(t, alias, env)
+		if text == "" {
+			return nil
+		}
+		return quotaHintMsg{issued: stamp, text: text}
+	}
 }
 
 // indexWriteText is the failure behind an engine.ErrIndexWrite as a transcript

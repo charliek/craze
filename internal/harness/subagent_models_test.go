@@ -185,8 +185,10 @@ func TestResolveChildModelMatrix(t *testing.T) {
 }
 
 // TestResolveChildModelUnknownListsEveryAliasAndTier pins the exact shape of
-// the call-position error text (plan 026 §3.6): every alias, the configured
-// tier mappings, and the instruction to omit `model`.
+// the call-position error text (plan 026 §3.6): every alias of the sub-agent
+// choice set — the models the agent tool's menu offers, so not nokey/d,
+// whose provider has no key (plan 050 C1) — the configured tier mappings,
+// and the instruction to omit `model`.
 func TestResolveChildModelUnknownListsEveryAliasAndTier(t *testing.T) {
 	s := resolverSession(t, map[string]string{"speedy": "test/b", "careful": "test/a"}, "", "", nil)
 	_, err := s.resolveChildModel(s.view(), childModelInput{Call: "nope", ParentAlias: "test/a"}, nil)
@@ -196,13 +198,16 @@ func TestResolveChildModelUnknownListsEveryAliasAndTier(t *testing.T) {
 	msg := err.Error()
 	for _, want := range []string{
 		"Unknown model `nope`.",
-		"test/a", "test/b", "other/c", "nokey/d", // every alias
+		"test/a", "test/b", "other/c", // every alias the menu offers
 		"careful → test/a", "speedy → test/b", // sorted by tier name
 		"Omit `model` to use the parent's.",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("err = %q, want it to contain %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "nokey/d") {
+		t.Fatalf("err = %q lists a model whose provider has no key", msg)
 	}
 }
 
@@ -220,7 +225,7 @@ func TestResolveChildModelUnknownCapsTheList(t *testing.T) {
 		Providers:    map[string]modeltable.Provider{"p": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://x", EnvKeys: []string{"X"}}},
 		Models:       models,
 	}
-	err := unknownModelError("nope", tbl)
+	err := unknownModelError("nope", tbl, tbl.Aliases())
 	if err == nil {
 		t.Fatal("err = nil")
 	}
@@ -256,7 +261,7 @@ func TestResolveChildModelUnknownCapsTheTierList(t *testing.T) {
 		},
 		Subagents: modeltable.Subagents{Tiers: tiers},
 	}
-	err := unknownModelError("nope", tbl)
+	err := unknownModelError("nope", tbl, tbl.Aliases())
 	if err == nil {
 		t.Fatal("err = nil")
 	}
@@ -290,7 +295,7 @@ func TestResolveChildModelUnknownCapsTheRawValue(t *testing.T) {
 		Subagents: modeltable.Subagents{Tiers: map[string]string{"opus": "test/a"}},
 	}
 	raw := strings.Repeat("x\n", 1<<10) // 2 KiB, all newlines between the x's
-	err := unknownModelError(raw, tbl)
+	err := unknownModelError(raw, tbl, tbl.Aliases())
 	if err == nil {
 		t.Fatal("err = nil")
 	}

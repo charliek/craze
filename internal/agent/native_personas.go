@@ -613,13 +613,14 @@ func (o pluginParseOpts) warnf(format string, args ...any) {
 
 // nativeModelMatcher is harness.Options.MatchModel for table: a sub-agent's
 // model named the way --model names one (MatchModel's normalisation — case,
-// spaces, a display name), so the model's "Model A" and the flag's reach the
-// same alias (plan 026 §3.6). The list is built once; the table is the
+// spaces, a display name — and the "<provider id>/<alias>" form, plan 050
+// C1), so the model's "Model A" and the flag's reach the same alias (plan 026
+// §3.6). The list is built once; the table is the
 // session's and never changes.
 func nativeModelMatcher(table *modeltable.Table) func(string) (string, bool) {
 	snap := Snapshot{Models: tableModels(table)}
 	return func(raw string) (string, bool) {
-		alias, err := MatchModel(snap, raw)
+		alias, err := matchNative(table, snap, raw)
 		return alias, err == nil
 	}
 }

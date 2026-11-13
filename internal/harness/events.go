@@ -191,7 +191,10 @@ const (
 // ContextTokens is the size, in tokens, of what the next request sends
 // (§3.7): the last reported usage and the estimate of what the context has
 // gained since, or the whole context's estimate. ContextWindow is the context
-// window of the model that request goes to, 0 when the table does not know it.
+// the model that request goes to works within — its default_context when
+// that is below its window, else the window (Resolved.ContextInForce, plan
+// 050 C1) — so a share of it means what compaction's threshold means; 0 when
+// the table does not know the window.
 //
 // Seq numbers the reports of one session in the order their data was read
 // (plan 040 §3.4): a report with a higher Seq never reflects older data than

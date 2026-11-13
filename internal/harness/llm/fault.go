@@ -41,14 +41,18 @@ const protocolTitle = "stream protocol error"
 
 // serverFaults are the provider's names for a failure of its own, in the
 // stream: Fantasy's TransientStreamErrorTypes less rate_limit_error, which is
-// the account's limit and no transport failure. A code or type the set does not
+// the account's limit and no transport failure, and OpenAI's overload,
+// server_is_overloaded of type service_unavailable_error (plan 050 C3). A
+// code or type the set does not
 // hold — a content filter, a schema refusal, a context too large — is the
 // request's, and the same request would meet it again.
 var serverFaults = map[string]bool{
-	"server_error":     true,
-	"internal_error":   true,
-	"overloaded_error": true,
-	"api_error":        true,
+	"server_error":              true,
+	"internal_error":            true,
+	"overloaded_error":          true,
+	"api_error":                 true,
+	"server_is_overloaded":      true,
+	"service_unavailable_error": true,
 }
 
 // streamFault reports whether err, what a step's stream ended with, is the

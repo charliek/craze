@@ -234,7 +234,7 @@ func TestAgentDescriptionBudgets(t *testing.T) {
 		table.Subagents.Tiers["haiku"] = "q/keyless"
 		getenv := func(string) string { return "" }
 
-		section := renderSubagentModels(table, getenv, red)
+		section := renderSubagentModels(table, getenv, nil, red)
 		if len(section) > maxModelsSection || !strings.HasPrefix(section, modelsHeading) {
 			t.Fatalf("the models section is %d bytes (budget %d)", len(section), maxModelsSection)
 		}
@@ -267,7 +267,7 @@ func TestAgentDescriptionBudgets(t *testing.T) {
 			"q/keyless":                            table.Models["q/keyless"],
 		}
 		small.DefaultModel, small.Subagents = "p/long-name", modeltable.Subagents{}
-		if got := renderSubagentModels(&small, getenv, red); got != modelsHeading+"- p/long-name: low; default low\n… and 1 more\n" {
+		if got := renderSubagentModels(&small, getenv, nil, red); got != modelsHeading+"- p/long-name: low; default low\n… and 1 more\n" {
 			t.Fatalf("the small section is\n%s", got)
 		}
 	})

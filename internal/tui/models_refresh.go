@@ -2,11 +2,15 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
 // Models picked up live, the TUI's half (plan 034 §3.4 "TUI (C6)", Q13/Q14):
@@ -80,31 +84,161 @@ func sessionHomeDiffers(r *agent.ModelsRefresh) bool {
 //   - anything else (current, failed, unsupported, no refresh): the old note,
 //     plan 031's P8 — new sessions offer them, this one after /exit and
 //     craze -c.
-func connectedNote(name string, r *agent.ModelsRefresh) string {
-	head := "Connected " + name + ". "
-	old := head + "New sessions offer its models; to use them in this conversation, /exit and run craze -c."
-	switch {
-	case sessionHomeDiffers(r):
+//
+// cs is what the source order makes of the provider's models (plan 050 C5,
+// connectSourcesOf): models of a maker another source supplies are not said
+// to be in /model, and a maker whose models now come from this provider says
+// which other source's no longer are.
+func connectedNote(name string, cs connectSources, r *agent.ModelsRefresh) string {
+	if sessionHomeDiffers(r) {
 		return "Connected " + name + " in this craze directory, but this session's host reads another one, so it does not see its models."
-	case r != nil && r.Status == agent.ModelsApplied:
-		return head + "Its models are in /model now."
-	case r != nil && r.Status == agent.ModelsPending:
-		return head + "Its models will be in /model after this turn."
 	}
-	return old
+	return "Connected " + name + ". " + cs.sentence(r, "Its models", "its models", "its") + cs.takesText(r)
 }
 
 // signedInSessionNote is what a sign-in means for this conversation, as
-// connectedNote is for a key's save: the ChatGPT plan's models for the plan.
-func signedInSessionNote(r *agent.ModelsRefresh) string {
-	old := "New sessions offer the ChatGPT plan's models; to use them in this conversation, /exit and run craze -c."
-	switch {
-	case sessionHomeDiffers(r):
+// connectedNote is for a key's save: the ChatGPT plan's models for the plan,
+// with the source order's say over them (cs) as there.
+func signedInSessionNote(cs connectSources, r *agent.ModelsRefresh) string {
+	if sessionHomeDiffers(r) {
 		return "The sign-in is saved in this craze directory, but this session's host reads another one, so it does not see the plan's models."
-	case r != nil && r.Status == agent.ModelsApplied:
-		return "The plan's models are in /model now."
-	case r != nil && r.Status == agent.ModelsPending:
-		return "The plan's models will be in /model after this turn."
 	}
-	return old
+	return cs.sentence(r, "The plan's models", "the ChatGPT plan's models", "the plan's") + cs.takesText(r)
+}
+
+// connectSources is what the source order makes of one provider's models now
+// (plan 050 C5): how many of its funded, active models the list offers;
+// each maker whose models of it are hidden, with the provider they come from
+// instead; and each maker whose models now come from it, with the providers
+// whose models of that maker are no longer listed. Every name is sanitized.
+// Its zero value is nothing hidden either way.
+type connectSources struct {
+	listed int
+	hidden []hiddenMaker
+	takes  []hiddenMaker
+}
+
+// hiddenMaker is one maker in connectSources: its name, and the providers on
+// the other side (the source its models come from, or the ones it hides).
+type hiddenMaker struct {
+	maker     string
+	providers []string
+}
+
+// connectSourcesOf is what the source order makes of provider id's models in
+// table, its funding judged with getenv (Table.Offers, HiddenSources).
+func connectSourcesOf(table *modeltable.Table, id string, getenv func(string) string) connectSources {
+	var cs connectSources
+	for alias, ok := range table.Offers(getenv).Offered {
+		if ok && table.Models[alias].Provider == id {
+			cs.listed++
+		}
+	}
+	name := func(p string) string { return sanitizeLine(table.ProviderName(p)) }
+	for _, ms := range table.HiddenSources(getenv) {
+		maker := sanitizeLine(modeltable.MakerName(ms.Maker))
+		if ms.Winner == id {
+			hm := hiddenMaker{maker: maker}
+			for _, h := range ms.Hidden {
+				hm.providers = append(hm.providers, name(h.Provider))
+			}
+			cs.takes = append(cs.takes, hm)
+			continue
+		}
+		if slices.ContainsFunc(ms.Hidden, func(h modeltable.HiddenSource) bool { return h.Provider == id }) {
+			cs.hidden = append(cs.hidden, hiddenMaker{maker: maker, providers: []string{name(ms.Winner)}})
+		}
+	}
+	return cs
+}
+
+// refreshTense is the state a note about the session's models speaks of:
+// ModelsApplied when the session took the change up, ModelsPending while a
+// turn runs and it takes it up as the turn ends, and "" otherwise — no
+// refresh, or one that changed nothing in this conversation — where only new
+// sessions see it.
+func refreshTense(r *agent.ModelsRefresh) agent.ModelsStatus {
+	if r != nil && (r.Status == agent.ModelsApplied || r.Status == agent.ModelsPending) {
+		return r.Status
+	}
+	return ""
+}
+
+// sourceOrderTail ends a sentence that says some models are not listed.
+const sourceOrderTail = "they still run with --model (source_order in models.toml changes the order)."
+
+// sentence is what the provider's models are now in this conversation:
+// Subject ("Its models") and subject ("its models") are the provider's
+// models, of the possessive ("its"). With none of them listed it says so and
+// where they come from; with some hidden, where those come from; and
+// otherwise the refresh's word, r, as it always was.
+func (cs connectSources) sentence(r *agent.ModelsRefresh, Subject, subject, of string) string {
+	if len(cs.hidden) > 0 && cs.listed == 0 {
+		switch refreshTense(r) {
+		case agent.ModelsApplied:
+			return "None of " + subject + " are listed: " + cs.comeFrom("") + "; " + sourceOrderTail
+		case agent.ModelsPending:
+			return "None of " + subject + " will be listed after this turn: " + cs.comeFrom("") + "; " + sourceOrderTail
+		}
+		return "New sessions list none of " + subject + ": " + cs.comeFrom("") + "; " + sourceOrderTail
+	}
+	except := ""
+	if len(cs.hidden) > 0 {
+		except = ", except " + cs.comeFrom(of)
+	}
+	switch {
+	case r != nil && r.Status == agent.ModelsApplied:
+		if except != "" {
+			return Subject + " are in /model now" + except + "; " + sourceOrderTail
+		}
+		return Subject + " are in /model now."
+	case r != nil && r.Status == agent.ModelsPending:
+		if except != "" {
+			return Subject + " will be in /model after this turn" + except + "; " + sourceOrderTail
+		}
+		return Subject + " will be in /model after this turn."
+	}
+	if except != "" {
+		return "New sessions offer " + subject + except + "; " + sourceOrderTail + " To use the listed ones in this conversation, /exit and run craze -c."
+	}
+	return "New sessions offer " + subject + "; to use them in this conversation, /exit and run craze -c."
+}
+
+// comeFrom is the hidden makers and where their models come from: with of
+// ("its"), "its OpenAI models, which come from ChatGPT plan"; without,
+// "OpenAI models come from ChatGPT plan". Several are joined with "and".
+func (cs connectSources) comeFrom(of string) string {
+	parts := make([]string, 0, len(cs.hidden))
+	for _, h := range cs.hidden {
+		if of != "" {
+			parts = append(parts, fmt.Sprintf("%s %s models, which come from %s", of, h.maker, strings.Join(h.providers, " and ")))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s models come from %s", h.maker, strings.Join(h.providers, " and ")))
+		}
+	}
+	return strings.Join(parts, ", and ")
+}
+
+// takesText is one sentence for each maker whose models now come from the
+// provider, naming the providers whose models of it are no longer listed,
+// each after a space, and — unless sentence said it already — that those
+// still run by name; "" for none. Its tense is the refresh's, r, as
+// sentence's is (refreshTense): now when the session took the change up,
+// after this turn while one runs, and new sessions' otherwise.
+func (cs connectSources) takesText(r *agent.ModelsRefresh) string {
+	format := " In new sessions %s models come from it; those of %s are not listed there."
+	switch refreshTense(r) {
+	case agent.ModelsApplied:
+		format = " %s models come from it now; those of %s are no longer listed."
+	case agent.ModelsPending:
+		format = " %s models will come from it after this turn; those of %s will no longer be listed."
+	}
+	var out string
+	for _, t := range cs.takes {
+		out += fmt.Sprintf(format, t.maker, strings.Join(t.providers, " and "))
+	}
+	if out != "" && len(cs.hidden) == 0 {
+		out += " They still run with --model (source_order in models.toml changes the order)."
+	}
+	return out
 }

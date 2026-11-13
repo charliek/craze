@@ -1,0 +1,1 @@
+{"alias":"acme/sonic-1","provider":"acme","maker":"","name":"Acme Sonic 1","status":"deprecated","replacedBy":"acme/sonic","source":"catalog","efforts":["low","high"],"defaultEffort":"high","fast":false,"vision":false,"contextWindow":200000,"defaultContext":0,"state":{"funded":true,"offered":false}}
