@@ -43,8 +43,16 @@ Review internal/cache/evict.go for races. Report each one with the line and a fi
 
 The provider is `native`, `cursor` or `grok`; the model, effort (`low`,
 `medium`, `high`, `xhigh`, `max`) and mode (`plan` or `ask`) are optional. The
-presets take the task alone, or an optional first line `mode=plan` or
-`mode=ask`.
+native presets take the task alone, or an optional first line of `mode=plan` or
+`mode=ask` and `web=on` or `web=off`, in either order; `craze:grok` and `craze:cursor` take
+`mode=` only.
+
+`web=on` (native only, `target:` line included: `target: native … web=on`) gives the session
+web search and page fetch, for information newer than the model's training or not in the
+repository. Queries and fetched URLs go to Exa, so leave it off for confidential work. With no
+`web=` the home's own setting applies. `web=off` guarantees no web tools. It needs a craze newer
+than 0.2.0; the choice is fixed when the session is created. See
+[`--web-search`](../reference/cli.md#web-search-flags) and the result's `webSearch` object.
 
 `craze:sol` and `craze:astra` run on a [ChatGPT plan](../reference/configuration.md#the-chatgpt-plan)
 sign-in. With an [OpenAI API key](../reference/configuration.md#openai)
