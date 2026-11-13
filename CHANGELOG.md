@@ -36,6 +36,9 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - A native host killed outright has its shell commands ended (`SIGTERM`, then
   `SIGKILL`) by the waiter that sees it go or by the next craze command; every
   native command has `CRAZE_HOST_ID` in its environment.
+- A native session treats an exported `EXA_API_KEY` as a key in every
+  configuration, `catalog = false` included: the commands it runs are started
+  without it, and its value is redacted from tool output.
 
 ### Sessions and scripting
 

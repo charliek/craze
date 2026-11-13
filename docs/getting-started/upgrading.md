@@ -697,6 +697,17 @@ older binary should not write it.
 - **New:** `openrouter/muse-spark-1.3` and `openrouter/muse-wonder`, Meta's
   models on OpenRouter, offered when you have OpenRouter and no Meta key.
 
+### `EXA_API_KEY` is kept out of native commands
+
+Nothing needs migrating. A native session now treats an exported
+`EXA_API_KEY` as a key, as it treats every provider's variable
+([Keys](../reference/configuration.md#keys)), in every configuration — a
+`models.toml` with `catalog = false` included: the commands it runs (`bash`, a
+background command, a sub-agent's) are started without the variable, and its
+value is redacted from what the tools return. **A script of yours that reads
+`EXA_API_KEY` no longer finds it when a native session's shell runs it**; run
+it outside craze. The variable funds no model.
+
 ## Since v0.1.1
 
 Nothing needs migrating.

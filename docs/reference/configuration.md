@@ -1140,6 +1140,14 @@ with `craze auth login openai` for that). `env_keys = []` under the provider
 in `providers.toml` opts out: the variable then funds nothing, and is still
 kept out of the commands a session runs.
 
+`EXA_API_KEY` is a key to every native session too, whatever your files say —
+a `models.toml` with `catalog = false` included: its value is redacted from
+tool output, and the commands a session runs (a sub-agent's and a background
+command's included) are started without the variable. It funds no model; it
+holds a key for Exa, the web search provider of the native harness. A value
+that cannot be a key (shorter than 8 bytes, or overlapping the redaction
+marker) is ignored, as any variable's is.
+
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout
 <provider>`](cli.md#craze-auth-logout) removes it, and [`craze auth

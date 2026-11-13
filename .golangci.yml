@@ -57,6 +57,31 @@ linters:
               desc: "the tool framework imports nothing from craze except internal/atomicfile and internal/harness/redact; toolbridge.go in the harness adapts it to Fantasy (plan 019 §3.1)"
             - pkg: charm.land/fantasy
               desc: "tools are craze's own contract: only internal/harness/toolbridge.go knows both a Tool and Fantasy (plan 019 §3.1, Seam 1)"
+        # The web search service's tighter boundary inside the harness (plan
+        # 051 §B). As with harness-tool, these files answer to `harness`
+        # above as well: here, of craze, only the tool framework whose seam
+        # it implements, the Messages API client (for its key pattern alone),
+        # the redactor (its marker) and internal/atomicfile; never the parent
+        # harness, package llm and its Fantasy, or the model table. Non-test
+        # files only, as protocol's rule below: its tests hold its key rule to
+        # the model table's. depguard sees direct imports only;
+        # internal/harness/websearch's deps_test.go checks the whole
+        # dependency closure.
+        harness-websearch:
+          list-mode: lax
+          files:
+            - "**/internal/harness/websearch/**"
+            - "!$test"
+          allow:
+            - github.com/charliek/craze/internal/harness/tool
+            - github.com/charliek/craze/internal/harness/llm/messagesapi
+            - github.com/charliek/craze/internal/harness/redact
+            - github.com/charliek/craze/internal/atomicfile
+          deny:
+            - pkg: github.com/charliek/craze/internal
+              desc: "the web search service imports nothing from craze except the tool framework, messagesapi's key pattern, the redactor and internal/atomicfile; the harness hands it what it needs (plan 051 §B)"
+            - pkg: charm.land/fantasy
+              desc: "the web search service speaks MCP over net/http itself; Fantasy is the model loop's (plan 051 §B)"
         # The redactor is a leaf under everything: the standard library only.
         harness-redact:
           list-mode: strict

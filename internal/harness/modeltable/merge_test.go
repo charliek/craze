@@ -821,7 +821,7 @@ env_keys = ["BROKEN_API_KEY"]
 `, "")
 	wantWarnings(t, tbl, []string{"providers.broken", "ignored"})
 
-	want := []string{"ACME_API_KEY", "BROKEN_API_KEY", "MY_ROUTER_KEY", "ROUTER_API_KEY"}
+	want := []string{"ACME_API_KEY", "BROKEN_API_KEY", ExaKeyEnv, "MY_ROUTER_KEY", "ROUTER_API_KEY"}
 	if got := tbl.CredentialEnvNames(); !slices.Equal(got, want) {
 		t.Errorf("CredentialEnvNames = %q, want %q", got, want)
 	}
@@ -891,7 +891,8 @@ env_keys = ["BROKEN_API_KEY"]
 	}
 
 	// `catalog = false`: the directory's files are the whole table, and the
-	// catalog's names are not among its credentials.
+	// catalog's names are not among its credentials; the web search's key
+	// variable is, as it is for every table (plan 051 §B).
 	alone, _ := loadOver(t, cat, `version = 1
 
 [providers.acme]
@@ -906,13 +907,13 @@ default_model = "acme/x"
 provider = "acme"
 wire_model = "x"
 `)
-	if got := alone.CredentialEnvNames(); len(got) != 0 {
-		t.Fatalf("catalog = false: CredentialEnvNames = %q, want none", got)
+	if got := alone.CredentialEnvNames(); !slices.Equal(got, []string{ExaKeyEnv}) {
+		t.Fatalf("catalog = false: CredentialEnvNames = %q, want only %s", got, ExaKeyEnv)
 	}
 	// A table built in memory knows its providers' names, as they are now.
 	mem := validTable()
 	setProvider(mem, "fireworks", func(p *Provider) { p.EnvKeys = append(p.EnvKeys, "FW_EXTRA_KEY") })
-	if got, want := mem.CredentialEnvNames(), envKeyNames(mem.Providers); !slices.Equal(got, want) || !slices.Contains(got, "FW_EXTRA_KEY") {
+	if got, want := mem.CredentialEnvNames(), slices.Sorted(slices.Values(append(envKeyNames(mem.Providers), ExaKeyEnv))); !slices.Equal(got, want) || !slices.Contains(got, "FW_EXTRA_KEY") {
 		t.Fatalf("in memory: CredentialEnvNames = %q, want %q", got, want)
 	}
 	if got := tbl.CredentialEnvNames(); len(got) > 0 {

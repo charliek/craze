@@ -224,18 +224,7 @@ func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A shipped model on a key-funded provider: the start model of the first
-	// such provider in the shipped order (plan 038 §2).
-	var id, alias string
-	for _, p := range cat.ProviderOrder {
-		if len(cat.Providers[p].EnvKeys) > 0 && len(cat.Starts[p]) > 0 {
-			id, alias = p, cat.Starts[p][0]
-			break
-		}
-	}
-	if alias == "" {
-		t.Fatal("control: the shipped catalog has no start model on a key-funded provider")
-	}
+	id, alias := keyFundedStart(t, cat)
 	shippedVar := cat.Providers[id].EnvKeys[0]
 	// The process environment is what a command inherits, so the test sets it
 	// rather than a Getenv of its own: nothing from the developer's shell,
@@ -262,34 +251,10 @@ func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
 		t.Error("the instruction file's copy of the exported key was not redacted out of the prompt")
 	}
 
-	bash := func(cmd string) string { return input(t, map[string]any{"command": cmd}) }
-	f.models[alias].push(
-		callStep(
-			callParts("c0", "bash", bash("env")),
-			callParts("c1", "bash", bash(`for i in $(seq 3000); do echo "$i $CRAZE_CANARY_COPY"; done`)),
-		),
-		answerWith("done"),
-	)
-	var ev events
-	if res, err := s.Run(context.Background(), "look around", ev.sink); err != nil || res.StopReason != StopEndTurn {
-		t.Fatalf("Run = %+v, %v", res, err)
-	}
-	evs := ev.list()
-	fin := of[ToolFinished](evs)
-	if len(fin) != 2 {
-		t.Fatalf("%d calls finished, want 2: %v", len(fin), seq(evs))
-	}
+	evs, envOut, spill := runEnvAndSpill(t, f, s, alias)
 	// Value-free from here on: a failure names the place, never the text.
-	envOut := fin[0].Result.Text
 	if strings.Contains(envOut, shippedVar+"=") {
 		t.Errorf("the command's environment kept %s", shippedVar)
-	}
-	if !strings.Contains(envOut, "CRAZE_CANARY_COPY="+redact.Marker) {
-		t.Error("control: env's output does not show the copy, redacted")
-	}
-	spill := fin[1].Result.Trunc.Spill
-	if spill == "" {
-		t.Fatal("control: the long output did not spill, so the spill file is not checked")
 	}
 	requests := f.models[alias].requests()
 	if len(requests) != 2 {
@@ -315,6 +280,126 @@ func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSecretsCanaryExaKey (plan 051 §B, C1): the web search's key, exported
+// as EXA_API_KEY, is a credential of every session's table whether or not web
+// search is on — under a `catalog = false` table, whose names are its own
+// files' alone (the fixture's, and the eval's), and under one merged over the
+// shipped catalog. The model runs `env` and prints a copy of the key under a
+// name no provider declares, long enough to spill: the variable is not in the
+// command's environment, the copy is redacted, and the key reaches no event,
+// the transcript, the spill file or any request.
+func TestSecretsCanaryExaKey(t *testing.T) {
+	const exaCanary = "3f1c2a9e-8b7d-4c6e-9f0a-c0ffee000008" // Exa's keys are UUIDs
+	for _, tc := range []struct {
+		name string
+		// open returns the session and the alias its model runs on.
+		open func(t *testing.T) (*fixture, *Session, string)
+	}{
+		{"catalog = false", func(t *testing.T) (*fixture, *Session, string) {
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			if _, ok := f.table.Providers["test"]; !ok || len(f.table.Models) != 4 {
+				t.Fatal("control: the fixture's table is not its own files alone")
+			}
+			opts := f.options()
+			opts.Getenv = keyEnv(modeltable.ExaKeyEnv, exaCanary)
+			return f, f.open(opts), "test/a"
+		}},
+		{"merged over the shipped catalog", func(t *testing.T) (*fixture, *Session, string) {
+			cat, err := modeltable.ShippedCatalog()
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, alias := keyFundedStart(t, cat)
+			for _, name := range modeltable.CatalogEnvNames() {
+				t.Setenv(name, "")
+				_ = os.Unsetenv(name)
+			}
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			f.movedEndpoint(nil, id, "sk-stored-canary-0009")
+			opts := f.options()
+			opts.Getenv = os.Getenv
+			opts.Model = alias
+			return f, f.open(opts), alias
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// What a command inherits is the process's environment.
+			t.Setenv(modeltable.ExaKeyEnv, exaCanary)
+			t.Setenv("CRAZE_CANARY_COPY", exaCanary)
+			f, s, alias := tc.open(t)
+			if !slices.Contains(f.table.CredentialEnvNames(), modeltable.ExaKeyEnv) {
+				t.Fatalf("control: the table does not list %s", modeltable.ExaKeyEnv)
+			}
+			evs, envOut, spill := runEnvAndSpill(t, f, s, alias)
+			if strings.Contains(envOut, modeltable.ExaKeyEnv+"=") {
+				t.Errorf("the command's environment kept %s", modeltable.ExaKeyEnv)
+			}
+			if found := leaks(evs, exaCanary); len(found) > 0 {
+				t.Errorf("the Exa key reached an event at %v", found)
+			}
+			for label, path := range map[string]string{"the transcript": s.store.Path(), "the spill file": spill} {
+				if b, err := os.ReadFile(path); err != nil {
+					t.Fatal(err)
+				} else if bytes.Contains(b, []byte(exaCanary)) {
+					t.Errorf("the Exa key is in %s", label)
+				}
+			}
+			for i, c := range f.models[alias].requests() {
+				if strings.Contains(requestText(c, false), exaCanary) {
+					t.Errorf("request %d sent the model the Exa key", i+1)
+				}
+			}
+		})
+	}
+}
+
+// keyFundedStart is a shipped model on a key-funded provider, and the
+// provider's id: the start model of the first such provider in the shipped
+// order (plan 038 §2).
+func keyFundedStart(t *testing.T, cat *modeltable.Catalog) (id, alias string) {
+	t.Helper()
+	for _, p := range cat.ProviderOrder {
+		if len(cat.Providers[p].EnvKeys) > 0 && len(cat.Starts[p]) > 0 {
+			return p, cat.Starts[p][0]
+		}
+	}
+	t.Fatal("control: the shipped catalog has no start model on a key-funded provider")
+	return "", ""
+}
+
+// runEnvAndSpill has the model on alias run `env`, then print
+// $CRAZE_CANARY_COPY on enough lines to spill, and returns the turn's
+// events, env's output and the spill file's path. The controls: the copy
+// shows in env's output, redacted, and the long output did spill.
+func runEnvAndSpill(t *testing.T, f *fixture, s *Session, alias string) (evs []Event, envOut, spill string) {
+	t.Helper()
+	bash := func(cmd string) string { return input(t, map[string]any{"command": cmd}) }
+	f.models[alias].push(
+		callStep(
+			callParts("c0", "bash", bash("env")),
+			callParts("c1", "bash", bash(`for i in $(seq 3000); do echo "$i $CRAZE_CANARY_COPY"; done`)),
+		),
+		answerWith("done"),
+	)
+	var ev events
+	if res, err := s.Run(context.Background(), "look around", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	evs = ev.list()
+	fin := of[ToolFinished](evs)
+	if len(fin) != 2 {
+		t.Fatalf("%d calls finished, want 2: %v", len(fin), seq(evs))
+	}
+	envOut, spill = fin[0].Result.Text, fin[1].Result.Trunc.Spill
+	if !strings.Contains(envOut, "CRAZE_CANARY_COPY="+redact.Marker) {
+		t.Error("control: env's output does not show the copy, redacted")
+	}
+	if spill == "" {
+		t.Fatal("control: the long output did not spill, so the spill file is not checked")
+	}
+	return evs, envOut, spill
 }
 
 // TestMovedEndpointsShippedKeyInTheFrozenPrompt (plan 031 §3.2, C2r2): the

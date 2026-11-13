@@ -116,6 +116,15 @@ const (
 	// so (plan 031 §3.2).
 	MinKeyLen = 8
 
+	// ExaKeyEnv is the variable the native harness's web search reads an Exa
+	// key from (plan 051 §B; internal/harness/websearch, which may not import
+	// this package, names it too). It funds no model, but it holds a
+	// credential: every table, whatever its kind — merged over the catalog,
+	// loaded alone (`catalog = false`) or built in memory — lists it among
+	// CredentialEnvNames and reads it in Keys (webCredentialEnv), whether or
+	// not web search is on.
+	ExaKeyEnv = "EXA_API_KEY"
+
 	// MaxAliasLen is the longest model alias a table holds, in bytes (plan
 	// 034 C4r3, r14 #a): the bound a native session's published catalog
 	// holds a model's id to, since an id cut short would be one no
@@ -1698,22 +1707,34 @@ func envKeyNames(providers map[string]Provider) []string {
 // runs is started without (tool.ChildEnviron), and the set Keys reads values
 // from for the redactor.
 //
+// It also holds webCredentialEnv, the web search's key variable, for every
+// table (plan 051 §B): a table loaded with `catalog = false` has no catalog
+// names, and its commands must still be started without that key.
+//
 // Funding is never decided here: Resolve, Choices, StartModel, Providers and
 // EnvWarnings read the providers' own env_keys, and nothing else. The caller
 // owns the slice.
 func (t *Table) CredentialEnvNames() []string {
 	names := append(envKeyNames(t.Providers), t.credentialEnv...)
+	names = append(names, webCredentialEnv...)
 	slices.Sort(names)
 	return slices.Compact(names)
 }
+
+// webCredentialEnv are the variables that hold a key for something other than
+// a model — the web search's provider (plan 051 §B) — which every table lists
+// among its credentials, independent of its providers and of how it was
+// loaded.
+var webCredentialEnv = []string{ExaKeyEnv}
 
 // Keys returns every key the table knows of, for the redactor that keeps
 // them out of tool output (plan 019 §3.8): for every provider, used or not,
 // the value of each of its env_keys variables that getenv reports set to a
 // usable key — all of them, not only the first, which is the one Resolve
 // picks — and its inline api_key; then the value of every other variable
-// CredentialEnvNames lists (C2r2), which funds nothing but is a credential
-// all the same; then every inline api_key providers.toml writes that no
+// CredentialEnvNames lists (C2r2) — the web search's key variable among
+// them, for every table (webCredentialEnv) — which funds nothing but is a
+// credential all the same; then every inline api_key providers.toml writes that no
 // provider holds (credentialKeys: an entry the merge dropped, or an old
 // import's key it would not send to craze's endpoint); each with surrounding
 // whitespace trimmed. A nil getenv is
@@ -1749,7 +1770,7 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 		}
 	}
 	funding := envKeyNames(t.Providers)
-	for _, name := range t.credentialEnv {
+	for _, name := range t.CredentialEnvNames() {
 		if _, read := slices.BinarySearch(funding, name); read {
 			continue
 		}
