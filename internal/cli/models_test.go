@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/hostspawn"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/version"
 )
 
@@ -680,6 +682,22 @@ func TestOrchestratorFixtures(t *testing.T) {
 		t.Fatalf("stderr = %q", errs.String())
 	}
 	got["wait-result-warnings.json"] = out.String()
+	// A native result with web search offered and used (plan 051 F.4.5):
+	// offered and the turn's tally, written as that one is.
+	webRes := newResult(resultSession{id: "0199c0de-1111-7000-8000-397e175bfe79", provider: "native", model: "acme/sonic",
+		web: &protocol.WebSearchInfo{Offered: true}}, statusCompleted)
+	webRes.Turn = "turn-1"
+	webAcc := newTurnAccumulator()
+	webAcc.takeWeb(&agent.WebSearchState{Searches: 2, Fetches: 1, Failed: 1,
+		URLs: []string{"https://go.dev/doc/devel/release", "https://go.dev/blog/go1.27"}}, 7)
+	webRes.fill(webAcc)
+	webMsg := "done"
+	webRes.Message = &webMsg
+	out.Reset()
+	if err := writeResult(&out, io.Discard, resultOutput{what: waitWhat, json: true}, webRes); err != nil {
+		t.Fatal(err)
+	}
+	got["wait-result-web-search.json"] = out.String()
 
 	for name, body := range got {
 		path := filepath.Join(orchestratorFixtures, name)
@@ -824,5 +842,37 @@ func TestWaitingCommandsCarryTheNotice(t *testing.T) {
 	stdout, stderr, code = executeErr([]string{"send", waitRigShort, "two"})
 	if code != 0 || stderr != "" || strings.Contains(stdout, "deprecated") {
 		t.Fatalf("send without --wait: exit %d, %q, %q; want the receipt alone", code, stdout, stderr)
+	}
+}
+
+// TestTheModelsDocumentSaysItHasWebSearch (plan 051 S6): `craze models --json`
+// and `--shipped --json` share the document, and both end with capabilities
+// {"webSearch": true}, set whatever the table holds; the one-model form and the
+// table are not the document and say nothing of it.
+func TestTheModelsDocumentSaysItHasWebSearch(t *testing.T) {
+	withFixtureCatalog(t, true)
+	if err := os.MkdirAll(filepath.Join(os.Getenv("CRAZE_HOME"), "native"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"models", "--json"}, {"models", "--shipped", "--json"}} {
+		stdout, stderr, code := executeErr(args)
+		if code != 0 {
+			t.Fatalf("%q: exit %d, %q", args, code, stderr)
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+		if got := string(doc["capabilities"]); got != `{"webSearch":true}` {
+			t.Errorf("%q: capabilities = %s", args, got)
+		}
+		if !strings.HasSuffix(strings.TrimSpace(stdout), `"capabilities":{"webSearch":true}}`) {
+			t.Errorf("%q: capabilities is not the document's last key: %s", args, stdout)
+		}
+	}
+	for _, args := range [][]string{{"models", "acme/sonic", "--json"}, {"models"}, {"models", "--shipped"}} {
+		if stdout, _, _ := executeErr(args); strings.Contains(stdout, "capabilities") || strings.Contains(stdout, "webSearch") {
+			t.Errorf("%q names the capability: %s", args, stdout)
+		}
 	}
 }

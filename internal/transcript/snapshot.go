@@ -998,6 +998,9 @@ func Restore(s *Snapshot, o Options) *Model {
 		m.ended.upsert(e)
 	}
 	m.turn = s.Turn
+	// The turn's web tally is the model's own (plan 051 F.4.3): a caller
+	// writing through the snapshot it restored from changes nothing here.
+	m.turn.WebSearch = s.Turn.WebSearch.clone()
 	m.replaying = s.Replaying
 	m.settings = s.Settings
 	if u := s.Settings.Usage; u != nil {

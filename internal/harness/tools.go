@@ -337,7 +337,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		ts.types = agentTypes(personas)
 		ts.parents = slices.Clone(parents)
 		every := &ChildOptions{AllTools: true}
-		toChild := web.forChild().offered()
+		toChild := web.forChild().Offered()
 		for _, t := range p.Tools {
 			if id := t.Spec().ID; every.keeps(id) && (toChild || !tool.IsWebTool(id)) {
 				ts.offered = append(ts.offered, id)
@@ -522,7 +522,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// And for the web service: only a session offered the web tools gets one
 	// (plan 051 §C.3); with none Env.Web is a nil interface, which the tools
 	// answer with a tool_error.
-	if web.offered() && web.Service != nil {
+	if web.Offered() && web.Service != nil {
 		env.Web = web.Service
 	}
 	ts.environ, ts.envNames = env.Environ, keyNames

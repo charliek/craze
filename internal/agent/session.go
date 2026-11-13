@@ -406,6 +406,15 @@ type StateDelta struct {
 	// reloaded has sent none (its list is the one it started with, revision
 	// 0).
 	Catalog *CatalogState
+	// WebSearch is the open turn's web tally (plan 051 F.4.3): the native
+	// session's count of the web service's calls whose reports reached it
+	// while the turn's window was open, cumulative — each delta carries the
+	// whole tally so far, and REPLACES what a fold holds; it never adds. It
+	// names no turn: a fold stamps it with the turn running in the log as it
+	// arrives (a running foreign bracket's id first, else the engine turn's).
+	// Only a native session sends one, and only inside a turn's window; no
+	// ACP session ever does. The delta's own copy, never written after.
+	WebSearch *WebSearchState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it
 	// may stand alone, with every section nil: that is a delta whose news is the
@@ -503,6 +512,34 @@ type UsageState struct {
 	ContextWindow int64
 	Turn          Spend
 	Session       Spend
+}
+
+// WebSearchState is a turn's web tally (plan 051 F.4.1): completion-window
+// activity accounting, not provenance of an answer. Searches and Fetches are
+// the calls the web service handled whatever their outcome, and Failed those
+// that returned an error. URLs are the URLs of successful results, with the
+// provider key scrubbed and the session's redactor applied, each cut to at
+// most 500 bytes at a UTF-8 boundary, listed once each, first seen first, at
+// most 100; URLsTruncated says a URL was cut or a distinct one was dropped.
+type WebSearchState struct {
+	Searches, Fetches, Failed int
+	URLs                      []string
+	URLsTruncated             bool
+}
+
+// Empty says the tally counts nothing.
+func (w WebSearchState) Empty() bool {
+	return w.Searches == 0 && w.Fetches == 0 && w.Failed == 0 && len(w.URLs) == 0 && !w.URLsTruncated
+}
+
+// Clone is a copy of w that shares nothing with it: its own URL list.
+func (w *WebSearchState) Clone() *WebSearchState {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	c.URLs = slices.Clone(w.URLs)
+	return &c
 }
 
 // Spend is a sum of token usage and what it cost: the token counts, as the
@@ -1586,6 +1623,40 @@ type SlashCataloger interface {
 // the assertion trusted alone.
 type EffortFactser interface {
 	PublishesEffortFacts() bool
+}
+
+// WebSearcher is a session that may offer the web tools (plan 051 F.4.3):
+// the native session. WebSearch answers whether websearch and webfetch were
+// in this incarnation's tool list at Open — offered, whatever a consent card
+// answered since — and known, false until Open has decided. Like
+// EffortFactser it is optional and found by a type assertion: an ACP session
+// does not implement it, and its info document carries no webSearch.
+type WebSearcher interface {
+	WebSearch() (offered, known bool)
+}
+
+// WebTallyFreezer is a session that keeps a turn's web tally (plan 051
+// F.4.2): the native session. The engine's Close calls FreezeWebTally once,
+// under its own lock, after it raised the admission fence and before it
+// enqueues the synthetic closing ending of the turn it finds running —
+// turnCurrent says it found one. The session publishes the tally a waiter on
+// that turn must hold (the open window's, or the released prompt's while
+// turnCurrent) through the log's outbox, ahead of the ending in the same
+// FIFO, then counts nothing more: the close's cutoff.
+//
+// The engine's settlement calls RestateWebTally the same way, under its own
+// lock and before it enqueues the turn's ended: the session publishes the
+// released prompt window's tally once more, through the same outbox, so a
+// waiter whose cursor fell after the release's restatement — in the gap
+// before the settlement — still meets the count ahead of the ending. It
+// freezes nothing.
+//
+// Both take only the session's own lock and the outbox's leaf, and never
+// block or flush. Optional, found by a type assertion as ModelsRefresher is:
+// a session without it is settled and closed as before.
+type WebTallyFreezer interface {
+	FreezeWebTally(turnCurrent bool)
+	RestateWebTally()
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

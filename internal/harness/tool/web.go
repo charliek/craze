@@ -59,3 +59,19 @@ type WebError struct {
 }
 
 func (e *WebError) Error() string { return e.Text }
+
+// WebCall is one call the web service handled, reported once its outcome is
+// known (plan 051 F.4.1): a search or a fetch (Fetch), whether it returned an
+// error (Failed: a provider error, a rate limit, a declined, disabled or
+// cancelled consent, a cancellation in flight), and the URLs it contributes —
+// a successful search's result URLs in result order, a successful fetch's
+// requested URL when the page's text was not empty, and none for a failed
+// call — each with the provider key already scrubbed out. A call refused
+// before it reached the service (a bad or non-public URL) is never reported.
+// The service knows nothing of turns: who counts a report, and in which turn,
+// is the session's.
+type WebCall struct {
+	Fetch  bool
+	Failed bool
+	URLs   []string
+}

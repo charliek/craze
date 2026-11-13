@@ -349,7 +349,10 @@ type turnWaiter struct {
 	// the row (handle); a turn met running mid-way (a reconcile's snapshot)
 	// is named by the turn, whose cursor is past the link.
 	rowLinked bool
-	// foreign is the id of the agent's own turn running now, for blockedBy.
+	// foreign is the id of the agent's own turn running at the stream's
+	// place, "" for none or not known: from the stream's brackets and the
+	// snapshots the waiter starts or follows from. A web section while one
+	// runs is that turn's, never an engine turn's (ownWeb).
 	foreign string
 	// closing says a close's ending has gone by on the stream (any turn's, the
 	// target still a row), and closeCause what it said began the stop: the
@@ -901,6 +904,16 @@ func (w *turnWaiter) attached(ctx context.Context, r *protocol.AttachResult) {
 		// client has left by the time it is written is never sent at all
 		// (remote's BOUND TO AN IDENTITY), so a prompt never runs in an
 		// incarnation other than the one whose events the waiter buffers.
+		if r.Snapshot != nil {
+			// A wake running at the attachment: the stream will not show it
+			// start, and its sections are not the turn's (ownWeb) — under
+			// `craze prompt`'s chain policy the prompt starts a turn inside
+			// it. A snapshot that cannot be read says nothing here; the
+			// stream's own brackets still do.
+			if snap, err := transcript.DecodeSnapshot(r.Snapshot); err == nil {
+				w.foreign = runningForeign(snap)
+			}
+		}
 		ch, submit, base := make(chan submitAnswer, 1), w.start.submit, w.base
 		c, sid, inc := w.conn.c, w.session.id, w.inc
 		w.submitted = ch
@@ -951,6 +964,9 @@ func (w *turnWaiter) adoptInfo(info protocol.SessionInfo) {
 	if info.Provider.Name != "" {
 		w.session.provider = info.Provider.Name
 	}
+	// webSearch is replaced whole, nil included: the document describes the
+	// host the stream now comes from (plan 051 F.4.4).
+	w.session.web = info.WebSearch
 }
 
 // restored is a re-attach's snapshot (internal/remote's Restore): the stream
@@ -1095,7 +1111,6 @@ func (w *turnWaiter) plainStart(ctx context.Context, r *protocol.AttachResult) {
 		w.followFrom(snap, r.After.Seq, false)
 	case snap.Turn.Foreign != nil && snap.Turn.Foreign.Running:
 		w.target = waitTarget{kind: targetForeign, id: snap.Turn.Foreign.ID}
-		w.foreign = snap.Turn.Foreign.ID
 		w.partial = true
 		w.followFrom(snap, r.After.Seq, false)
 	default:
@@ -1167,7 +1182,7 @@ func (w *turnWaiter) finishIdle(ctx context.Context, look *idleScan) {
 // before its first step, reports none, and the one before it stands (P6). A
 // usage the waiter folded from the turn's own events, before a gap, stays.
 func (w *turnWaiter) settleLastTurn(ctx context.Context, lt *protocol.LastTurn, snap *transcript.Snapshot) {
-	seedFromSnapshot(w.acc, snap)
+	seedFromSnapshot(w.acc, snap, w.target.id)
 	w.acc.end(lt.EndedAt)
 	w.partial = true
 	w.settleOutcome(ctx, lt)
@@ -1405,12 +1420,19 @@ func readTurnBack(ctx context.Context, e rundir.Entry, sessionID, inc, turn stri
 func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool) {
 	prev := w.acc
 	w.folding = true
+	// What runs at the snapshot's seq, the stream's place from here on: a
+	// wake's sections are its own (ownWeb), as its tally there is (seedWeb).
+	w.foreign = runningForeign(snap)
 	w.acc = newTurnAccumulator()
 	if w.target.kind == targetTurn && !snap.Turn.At.IsZero() {
 		w.acc.start(snap.Turn.At)
 	}
-	seedFromSnapshot(w.acc, snap)
+	seedFromSnapshot(w.acc, snap, w.target.id)
 	if same {
+		// The web tally the waiter folded is kept when it is newer than the
+		// snapshot's (the seq rule): it never is after a reconcile's
+		// snapshot, which the rule makes a property, not an assumption.
+		w.acc.takeWeb(prev.web, prev.webSeq)
 		w.acc.auto = append(prev.auto, w.acc.auto...)
 		// A report carries the whole turn's spend so far, and no snapshot is
 		// read for it (settleLastTurn).
@@ -1435,8 +1457,10 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 // open run when the snapshot ends inside it), its tool rows and its plan; and
 // whether any plan's ask has ended at all (lookApproved). A row a retried step's
 // retraction marked is none of it, and an attempt the snapshot was cut in the
-// middle of is retracted when its event arrives (retract).
-func seedFromSnapshot(a *turnAccumulator, snap *transcript.Snapshot) {
+// middle of is retracted when its event arrives (retract). The snapshot's web
+// tally is taken, at its seq, only when it names target (seedWeb).
+func seedFromSnapshot(a *turnAccumulator, snap *transcript.Snapshot, target string) {
+	a.seedWeb(snap, target)
 	a.noPlanEnded = !slices.ContainsFunc(snap.Ended, func(e transcript.AskEnding) bool { return e.Kind == agent.AskPlan })
 	a.planAnsweredInTurn = !snap.Turn.At.IsZero() && slices.ContainsFunc(snap.Ended, func(e transcript.AskEnding) bool {
 		return e.Kind == agent.AskPlan && e.Outcome == agent.AskAutomatic && !e.At.Before(snap.Turn.At)
@@ -1498,10 +1522,13 @@ func (w *turnWaiter) synchronized(ctx context.Context) {
 // event is one event of the stream, in order.
 func (w *turnWaiter) event(ctx context.Context, ev agent.Event) {
 	if ft := ev.ForeignTurn; ev.Type == agent.EventForeignTurn && ft != nil {
-		if ft.Running {
+		switch {
+		case ft.Running:
 			w.foreign = ft.ID
-		} else if w.foreign == ft.ID {
+		case w.foreign == ft.ID:
 			w.foreign = ""
+		default:
+			w.foreignUnseen()
 		}
 	}
 	if st := ev.State; ev.Type == agent.EventMeta && st != nil && st.Model != nil {
@@ -1604,9 +1631,49 @@ func (w *turnWaiter) runningEvent(ctx context.Context, ev agent.Event) {
 		w.lastQueuedID, w.lastQueuedSeq = q.ID, ev.Seq
 	}
 	if w.folding {
-		w.acc.fold(ev)
+		w.acc.fold(w.ownWeb(ev))
 	}
 	w.opening(ctx, ev)
+}
+
+// ownWeb is ev with its web section taken out when the section is not the
+// target's (plan 051 F.4.3's rule, the transcript fold's): a section is the
+// tally of the turn running in the log as it arrives, a running foreign
+// bracket's first, else craze's own turn. A wake inside an engine turn's
+// bracket — the turn admitted, its claim refused and kept current under
+// ChainPolicy.RetryForeignTurn — is its own turn, and its calls are never the
+// engine turn's: on the stream as in a snapshot, whose turn.webSearch the fold
+// stamps with the wake's id (seedWeb). A foreign target is folded only while it
+// runs, so every section then is its own.
+func (w *turnWaiter) ownWeb(ev agent.Event) agent.Event {
+	if st := ev.State; ev.Type != agent.EventMeta || st == nil || st.WebSearch == nil || w.target.kind != targetTurn || w.foreign == "" {
+		return ev
+	}
+	st := *ev.State
+	st.WebSearch = nil
+	ev.State = &st
+	return ev
+}
+
+// foreignUnseen is a foreign bracket the waiter learns of without having seen
+// it start — its ending on the stream, or a look that shows it running — while
+// it folds an engine turn: a wait from a handle whose replay began inside the
+// bracket (the cursor honoured, so no snapshot said it ran). The bracket can be
+// inside the target's only because the turn's claim was refused while it ran,
+// so the turn has made no call of its own before it ends: every web section the
+// waiter took from the stream so far was the bracket's, and is dropped.
+func (w *turnWaiter) foreignUnseen() {
+	if w.target.kind == targetTurn && w.folding {
+		w.acc.dropWeb()
+	}
+}
+
+// runningForeign is the foreign bracket a snapshot shows running, "" for none.
+func runningForeign(snap *transcript.Snapshot) string {
+	if f := snap.Turn.Foreign; f != nil && f.Running {
+		return f.ID
+	}
+	return ""
 }
 
 // turnStarted is the target turn's own start: what its duration counts
@@ -1813,6 +1880,7 @@ func (w *turnWaiter) askCheck(ctx context.Context) {
 		w.stale = true
 		return
 	}
+	w.lookedAt(snap)
 	i := slices.IndexFunc(snap.Asks, func(a transcript.Ask) bool { return !autoAsk(a.Body) })
 	if i < 0 {
 		return
@@ -1833,6 +1901,26 @@ func (w *turnWaiter) askCheck(ctx context.Context) {
 		}
 	}
 	w.finish(res)
+}
+
+// lookedAt is what a look standing at the target says of its web tally.
+func (w *turnWaiter) lookedAt(snap *transcript.Snapshot) {
+	// A wake running that the stream has not shown start: a look is never
+	// behind the stream, so it started before the handle the waiter replays
+	// from (foreignUnseen), or it is ahead of the stream — and then, inside
+	// the target's bracket, before any call of the target's — and its
+	// sections from here on are its own (ownWeb).
+	if f := runningForeign(snap); f != "" && w.foreign == "" && w.target.kind == targetTurn {
+		w.foreign = f
+		w.foreignUnseen()
+	}
+	// A look standing at a running turn or bracket seeds its web tally (plan
+	// 051 F.4.4), ahead of the stream: the seq rule keeps the older deltas the
+	// stream then replays from lowering it. A row is never seeded: its
+	// accumulator holds nothing of the turn that blocks it.
+	if w.target.kind == targetTurn || w.target.kind == targetForeign {
+		w.acc.seedWeb(snap, w.target.id)
+	}
 }
 
 // standsAtTarget says a look finds the session still at the target

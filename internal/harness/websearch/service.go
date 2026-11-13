@@ -114,6 +114,12 @@ type Config struct {
 	// Warn is told, in words that hold no path or value, when the answer
 	// cannot be remembered. nil says nothing.
 	Warn func(string)
+	// Report is told of every call the service handled, exactly once, after
+	// its outcome is known (plan 051 F.4.1): from the calling goroutine, with
+	// none of the service's own locks held, so it may be called concurrently.
+	// A call that failed its consent counts as handled and failed. Every URL
+	// it carries has the key scrubbed out. nil reports nothing.
+	Report func(tool.WebCall)
 
 	// timeout replaces CallTimeout, for the package's tests.
 	timeout time.Duration
@@ -132,6 +138,8 @@ type Service struct {
 	scrub *scrubber
 	// consent is what every call passes before the provider is called.
 	consent *consent
+	// report is Config.Report, nil for none.
+	report func(tool.WebCall)
 }
 
 var _ tool.Web = (*Service)(nil)
@@ -166,36 +174,74 @@ func New(cfg Config) (*Service, error) {
 	// server has no business echoing it, and one that does is scrubbed.
 	scrub := newScrubber(configured)
 	c := newCaller(endpoint, key, scrub, cfg.HTTPClient, timeout)
-	return &Service{p: e.build(c), keyEnv: e.keyEnv, keyed: key != "", timeout: timeout, scrub: scrub, consent: newConsent(cfg, id)}, nil
+	return &Service{p: e.build(c), keyEnv: e.keyEnv, keyed: key != "", timeout: timeout, scrub: scrub, consent: newConsent(cfg, id), report: cfg.Report}, nil
 }
 
 // Search runs query on the provider, once the session's consent lets it.
-// Every error is a *tool.WebError.
-func (s *Service) Search(ctx context.Context, query string) ([]tool.WebResult, error) {
+// Every error is a *tool.WebError. The call is reported once, however it
+// returns (reportCall).
+func (s *Service) Search(ctx context.Context, query string) (results []tool.WebResult, err error) {
+	call := tool.WebCall{}
+	defer func() { s.reportCall(call, err) }()
 	if werr := s.consent.pass(ctx); werr != nil {
 		return nil, werr
 	}
-	results, err := s.p.Search(ctx, query)
+	results, err = s.p.Search(ctx, query)
 	if err != nil {
 		return nil, s.webError(err, "Unable to search the web for "+query)
 	}
 	if results == nil {
 		results = []tool.WebResult{}
 	}
+	if s.report != nil {
+		for _, r := range results {
+			// The provider's text was scrubbed before it was parsed (R1); a
+			// second pass over the URL alone is idempotent, and the URL is
+			// the one value of the reply the session keeps beyond the call.
+			if u := s.scrub.text(r.URL); u != "" {
+				call.URLs = append(call.URLs, u)
+			}
+		}
+	}
 	return results, nil
 }
 
 // Fetch fetches the page at pageURL through the provider, once the session's
-// consent lets it. Every error is a *tool.WebError.
-func (s *Service) Fetch(ctx context.Context, pageURL string) (tool.WebPage, error) {
+// consent lets it. Every error is a *tool.WebError. The call is reported
+// once, however it returns (reportCall).
+func (s *Service) Fetch(ctx context.Context, pageURL string) (page tool.WebPage, err error) {
+	call := tool.WebCall{Fetch: true}
+	defer func() { s.reportCall(call, err) }()
 	if werr := s.consent.pass(ctx); werr != nil {
 		return tool.WebPage{}, werr
 	}
-	page, err := s.p.Fetch(ctx, pageURL)
+	page, err = s.p.Fetch(ctx, pageURL)
 	if err != nil {
 		return tool.WebPage{}, s.webError(err, "Unable to fetch "+pageURL)
 	}
+	// The requested URL, as the tool accepted it and with the key scrubbed
+	// out (F.4.1), never one parsed from the provider's text; a page whose
+	// text was empty is a fetch that contributes none.
+	if s.report != nil && strings.TrimSpace(page.Text) != "" {
+		if u := s.scrub.text(pageURL); u != "" {
+			call.URLs = []string{u}
+		}
+	}
 	return page, nil
+}
+
+// reportCall is Config.Report, deferred by Search and Fetch so that every
+// handled call is reported exactly once, whichever way it returns — failed,
+// with no URLs, when err is set — from the calling goroutine, holding no
+// lock of the service's.
+func (s *Service) reportCall(call tool.WebCall, err error) {
+	if s.report == nil {
+		return
+	}
+	if err != nil {
+		call.Failed, call.URLs = true, nil
+	}
+	s.report(call)
 }
 
 // webError is err in the model's words (plan 051 §B): a rate limit, an

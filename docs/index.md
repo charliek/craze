@@ -73,7 +73,9 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   through Exa, no key needed; it asks you once before the first search and
   remembers the answer, a session nobody answers never asks, and
   `websearch = false` turns it off
-  ([Configuration](reference/configuration.md#native-web-search)).
+  ([Configuration](reference/configuration.md#native-web-search)); a waiting
+  command's result reports each turn's searches, fetches and the URLs they
+  returned ([web search counts](reference/cli.md#web-search-counts)).
 - **A render check.** `craze frame` renders the TUI once for tests
   ([Testing](development/testing.md#craze-frame)).
 

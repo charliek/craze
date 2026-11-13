@@ -456,6 +456,22 @@ type nativeSession struct {
 	// it waits for the side questions. **A test seam: nil in production**,
 	// set only by a test in this package before Start.
 	asideSeam func(stage string)
+
+	// The web tally (native_webtally.go, plan 051 F.4.2): the open window's
+	// tally and whether one is open, the calls reported while none was, the
+	// released prompt window's final tally, and the close's cutoff. Under
+	// s.mu.
+	web, webIdle, webLast WebSearchState
+	webOpen, webFrozen    bool
+	// webOffered is whether this incarnation's tool list held the web tools
+	// at Open, and webKnown whether Open has decided it (WebSearch). Under
+	// s.mu.
+	webOffered, webKnown bool
+	// webReportSeam runs in webReport once the redactor is read and the URLs
+	// are cut, and before s.mu is taken to count the call: the attribution
+	// point's window. **A test seam: nil in production**, set only by a test
+	// in this package before the first report.
+	webReportSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -1417,6 +1433,16 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	if err := s.decideWeb(&hopts); err != nil {
 		return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
 	}
+	s.mu.Lock()
+	s.webOffered = hopts.Web.Offered()
+	s.webKnown = true
+	s.mu.Unlock()
+	// Every call the web service handles is reported to the session, which
+	// counts it in the turn whose window is open (native_webtally.go); a
+	// child shares its parent's service, so its calls report here too.
+	if hopts.OnWebCall == nil {
+		hopts.OnWebCall = s.webReport
+	}
 	// Background children (plan 026 §3.11), each left to tweak's last word
 	// like the seams above: on only for an interactive session, which has a
 	// wake worker to deliver a result nobody typed for — headless `craze
@@ -2102,6 +2128,10 @@ func (s *nativeSession) unstarted() error {
 func (s *nativeSession) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Every Begin, whatever it answers, ends the released prompt's claim on
+	// the close's freeze (webLast): a new engine turn may be current from
+	// here, and the freeze must never restate another turn's tally for it.
+	s.webLast = WebSearchState{}
 	if s.wake {
 		return func(context.Context) (Result, error) { return Result{}, ErrForeignTurn }
 	}
@@ -2154,6 +2184,10 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 			s.released = nil
 		}
 		close(rel)
+		// The turn's web window closes with its claim (native_webtally.go):
+		// its tally restated as its last delta, ahead of the engine's ended,
+		// and kept as webLast for a close before the engine settles it.
+		s.closeWebLocked(true)
 		// A reload of the model table this turn held back is read in the
 		// section that releases the claim, so one marked owed after this
 		// reading finds the claim released and swaps on its own
@@ -2203,6 +2237,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	s.textShown.Store(false)
 	s.turnCancel = cancel
 	s.turnToken = tok
+	// The turn's web window opens here, the engine's started already in the
+	// outbox ahead of anything it enqueues (native_webtally.go).
+	s.openWebLocked()
 	// /compact [focus] is the harness's own turn, never a prompt to the model
 	// (plan 028 §3.12, PD15): it names nothing — a session is not called
 	// "/compact" — and expands nothing.
@@ -2891,6 +2928,10 @@ func (s *nativeSession) Close() error {
 		s.mu.Lock()
 		s.closed = true
 		close(s.done)
+		// The web tally's own cutoff, for a session closed without an engine
+		// (whose Close froze it first): nothing counted or restated from
+		// here, and the calls still idle discarded (native_webtally.go).
+		s.freezeWebLocked()
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
 		worker, unsubscribe := s.wakeDone, s.unsubscribe
 		s.mu.Unlock()

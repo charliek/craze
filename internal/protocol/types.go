@@ -291,6 +291,20 @@ type SessionInfo struct {
 	// the host's clock: what a client counts the session's elapsed time
 	// from. Absent when the host does not say.
 	StartedAt time.Time `json:"startedAt,omitzero"`
+	// WebSearch is whether the session offered the web tools (plan 051
+	// F.4.3): present only once the session is ready, for a session that may
+	// offer them (native); absent for an ACP session, the fake host's by
+	// default, one not ready yet, and an older host.
+	WebSearch *WebSearchInfo `json:"webSearch,omitempty"`
+}
+
+// WebSearchInfo is the info document's webSearch: Offered says websearch and
+// webfetch were in this incarnation's tool list at Open — on, or undecided
+// with a person to ask — and stays true when a consent card answers "Disable"
+// since (the tools stay listed and answer disabled). It is always written,
+// true or false.
+type WebSearchInfo struct {
+	Offered bool `json:"offered"`
 }
 
 // PermissionMode is how a session's agent handles permission requests (plan

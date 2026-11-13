@@ -420,6 +420,7 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	m.Main.closeStream(at)
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
 		m.turn.Retries = 0
+		m.turn.WebSearch = nil
 		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)
 		return
 	}
@@ -467,6 +468,7 @@ func foldTurn(m *Model, ev agent.Event) {
 		at := m.stamp(ev.At)
 		m.turn.ID, m.turn.Text, m.turn.Origin, m.turn.At = tu.ID, tu.Text, tu.Origin, at
 		m.turn.Retries = 0
+		m.turn.WebSearch = nil
 		// The event carries Text whole, so a head a snapshot truncated is gone.
 		m.turn.Truncated = false
 		m.fc.state = true
@@ -769,6 +771,28 @@ var deltaFields = []deltaField{
 		if c := st.Catalog; c != nil && (m.settings.Catalog == nil || c.Revision >= m.settings.Catalog.Revision) {
 			m.settings.Catalog = cloneCatalog(c)
 		}
+	}},
+	// WebSearch (plan 051 F.4.3): the open turn's web tally, cumulative, so a
+	// replacement — never an addition, which is what keeps a snapshot and the
+	// replay after it from counting twice. The section names no turn: it is
+	// stamped with the turn running in the log as it arrives, a running
+	// foreign bracket's id first (a native wake's), else the engine turn's,
+	// and a copy of the delta's is kept. A section with neither running is
+	// ignored: a native session sends none outside a turn's window, and the
+	// rule guards against any other author. It is not a Settings section: it
+	// lives on the turn, with Retries' lifetime (foldTurn, foldForeignTurn).
+	{name: "WebSearch", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
+		if st.WebSearch == nil {
+			return
+		}
+		id := m.turn.ID
+		if f := m.turn.Foreign; f != nil && f.Running {
+			id = f.ID
+		}
+		if id == "" {
+			return
+		}
+		m.turn.WebSearch = &TurnWebSearch{TurnID: id, WebSearchState: *st.WebSearch.Clone()}
 	}},
 	// Reason names what happened to a send-now; alone it draws nothing, and
 	// its words are the client's toasts, never rows.

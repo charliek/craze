@@ -26,6 +26,11 @@ const (
 	WebAsking
 )
 
+// WebCall is one call the web service handled (tool.WebCall, plan 051
+// F.4.1), as Options.OnWebCall is told of it: an alias, so harness.go stays
+// clear of the tool framework (TestSeamOne).
+type WebCall = tool.WebCall
+
 // WebState is a session's web tools at Open: the mode, and the service the
 // tools reach the web through (tool.Env.Web). A mode that offers the tools
 // with no service, where Options.WebEndpoint is set, has one built at Open
@@ -45,9 +50,9 @@ type WebState struct {
 	CanAsk bool
 }
 
-// offered reports whether the session offers the web tools. Any mode but on
+// Offered reports whether the session offers the web tools. Any mode but on
 // and asking withholds them.
-func (w WebState) offered() bool { return w.Mode == WebOn || w.Mode == WebAsking }
+func (w WebState) Offered() bool { return w.Mode == WebOn || w.Mode == WebAsking }
 
 // forChild is the state a child of a session in w opens with (plan 051 §C.3,
 // "Children"): the parent's own, sharing its service, when it opened on, and
@@ -76,7 +81,7 @@ func (w WebState) forChild() WebState {
 // (forChild), so a child never builds one, and never reads or writes the
 // remembered choice.
 func (w WebState) withService(o *Options, getenv func(string) string) (WebState, error) {
-	if !w.offered() || w.Service != nil || o.WebEndpoint == nil || o.Child != nil {
+	if !w.Offered() || w.Service != nil || o.WebEndpoint == nil || o.Child != nil {
 		return w, nil
 	}
 	endpoint, err := o.WebEndpoint()
@@ -92,6 +97,7 @@ func (w WebState) withService(o *Options, getenv func(string) string) (WebState,
 		Asker:     o.Asker,
 		StatePath: filepath.Join(o.Home, websearch.StateFile),
 		Warn:      o.Warn,
+		Report:    o.OnWebCall,
 	})
 	if err != nil {
 		return w, fmt.Errorf("harness: web search: %w", err)
@@ -111,7 +117,7 @@ var newWebService = websearch.New
 // what toolset.check holds a switch's model to. A new slice when one is
 // dropped; tools itself is never changed.
 func withWeb(tools []tool.Tool, w WebState) []tool.Tool {
-	if w.offered() {
+	if w.Offered() {
 		return tools
 	}
 	out := make([]tool.Tool, 0, len(tools))

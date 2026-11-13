@@ -38,6 +38,7 @@ func mirrorPrefix() []agent.Event {
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t1", Status: "completed", Locations: []string{"a.go"}}},
 		{Type: agent.EventText, Text: strings.Repeat("streaming ", 20)},
 		{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "f1", Running: true}},
+		{Type: agent.EventMeta, State: &agent.StateDelta{WebSearch: &agent.WebSearchState{Searches: 1, URLs: []string{"https://a.example", "https://b.example"}}}},
 	}
 }
 
@@ -61,7 +62,8 @@ func TestTheMirrorIsStatesFieldsAndTools(t *testing.T) {
 		}
 	}
 	mr := m.Mirror()
-	if len(mr.Queue) != 2 || len(mr.Agents) != 2 || len(mr.Tools) != 3 || mr.Turn.Foreign == nil || !mr.Settings.SendNow.Armed {
+	if len(mr.Queue) != 2 || len(mr.Agents) != 2 || len(mr.Tools) != 3 || mr.Turn.Foreign == nil || !mr.Settings.SendNow.Armed ||
+		mr.Turn.WebSearch == nil || len(mr.Turn.WebSearch.URLs) != 2 {
 		t.Fatalf("fixture: the prefix did not reach every field: %+v", mr)
 	}
 }
@@ -94,6 +96,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 	child.ID, child.Status = "c1", agent.SubagentRunning
 	foreign := filled[agent.ForeignTurnInfo](t)
 	foreign.Running = true
+	web := filled[agent.WebSearchState](t)
 	return sequenced([]agent.Event{
 		{Type: agent.EventMeta, State: &agent.StateDelta{
 			Title: &title, Mode: &mode, Model: &model,
@@ -112,6 +115,9 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 		{Type: agent.EventTool, Tool: ownedTool(t, "t1")},
 		{Type: agent.EventTool, Agent: "c1", Tool: ownedTool(t, "ct1")},
 		{Type: agent.EventForeignTurn, ForeignTurn: &foreign},
+		// The running bracket's web tally (plan 051 F.4.3), URLs and all: a
+		// Turn.WebSearch or URL list Mirror shared would go red here.
+		{Type: agent.EventMeta, State: &agent.StateDelta{WebSearch: &web}},
 	})
 }
 

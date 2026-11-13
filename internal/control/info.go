@@ -134,6 +134,12 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 		for _, m := range st.Modes {
 			info.Catalogs.Modes = append(info.Catalogs.Modes, protocol.CatalogMode{ID: m.ID, Name: m.Name, Description: m.Description})
 		}
+		// webSearch, beside the catalogs and like them only once ready (plan
+		// 051 F.4.3): whether the session offered the web tools, for a
+		// session that decides it (native); absent for any other.
+		if offered, known := eng.WebSearch(); known {
+			info.WebSearch = &protocol.WebSearchInfo{Offered: offered}
+		}
 	}
 	return info, st, ready
 }

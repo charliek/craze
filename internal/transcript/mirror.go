@@ -75,6 +75,8 @@ func (m *Model) Mirror() Mirror {
 		cf := *f
 		mr.Turn.Foreign = &cf
 	}
+	// The turn's web tally, its URL list included (plan 051 F.4.3).
+	mr.Turn.WebSearch = m.turn.WebSearch.clone()
 	if len(m.agentOrder) > 0 {
 		mr.Agents = make([]agent.SubagentInfo, 0, len(m.agentOrder))
 		for _, id := range m.agentOrder {

@@ -266,6 +266,15 @@ type Options struct {
 	// call with a tool_error, which is what keeps a harness test that sets
 	// only a mode from reaching the network.
 	WebEndpoint func() (string, error)
+	// OnWebCall is told of every call the web service built at Open handled,
+	// once each, after its outcome is known (WebCall, plan 051 F.4.1):
+	// the session's own calls and its children's alike, since a child shares
+	// its parent's service (WebState.forChild). It is called from the calling
+	// goroutine — a turn's tool, a child's runner, a background worker — with
+	// no lock of the harness's or the service's held, possibly concurrently,
+	// and must not block. nil reports nothing. Not read for a sub-agent, and
+	// not for a service a caller hands in (WebState.Service).
+	OnWebCall func(WebCall)
 	// Getenv looks up the environment variables that hold API keys; nil is
 	// os.Getenv. The ACP child's environment (agent.Options.Env) is not the
 	// harness's, and tests never read the real one (plan 018 §3.5).

@@ -463,6 +463,11 @@ func TestNewWaitSignalBeforeItsPromptStopsTheSession(t *testing.T) {
 	if model, ok := m["model"]; ok {
 		t.Fatalf("a model never resolved is on the result: %v", model)
 	}
+	// Built with no waiter, so with no info document: no webSearch (plan 051
+	// F.4.5, notSent).
+	if web, ok := m["webSearch"]; ok {
+		t.Fatalf("a result no waiter built has webSearch: %v", web)
+	}
 	waitReaped(t, ref.entry.PID)
 	if entries, err := rundir.Hosts(env); err != nil || len(entries) != 0 {
 		t.Fatalf("the registry after the stop: %+v, %v", entries, err)

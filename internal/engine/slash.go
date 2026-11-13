@@ -26,3 +26,16 @@ func (e *Engine) PublishesEffortFacts() bool {
 	c, ok := e.sess.(agent.EffortFactser)
 	return ok && c.PublishesEffortFacts()
 }
+
+// WebSearch reports whether the session offered the web tools at Open (plan
+// 051 F.4.3) — offered — and whether that is decided yet — known, false
+// before the native Open has decided and for a session that is not an
+// agent.WebSearcher (an ACP session, the fake host's by default). It waits on
+// nothing but the session's own lock.
+func (e *Engine) WebSearch() (offered, known bool) {
+	w, ok := e.sess.(agent.WebSearcher)
+	if !ok {
+		return false, false
+	}
+	return w.WebSearch()
+}

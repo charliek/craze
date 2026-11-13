@@ -129,6 +129,20 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   stored key, else none (the keyless endpoint), resolved once when a session
   opens; every native session redacts the stored key, learns one stored while
   it runs at its next turn, and the file tools refuse `credentials.toml`.
+- Web search counts: a native session's waiting-command result carries
+  `webSearch` — `offered` (always written, `true` or `false`) and the target
+  turn's `searches`, `fetches`, `failed`, `urls` (successful results' URLs,
+  key scrubbed and redacted, at most 100 of at most 500 bytes) and
+  `urlsTruncated` — on every status, never on an exit-1 envelope, and the plain
+  footer gains `web: 1 search, 2 fetches (1 failed)`. The counts are activity
+  accounting for the turn's window, not a statement of which sources an answer
+  used: a background sub-agent's calls count in the turn they finished in, and a
+  close is the cutoff. On the wire, a `webSearch` state section (cumulative, a
+  replacement, stamped by the client with the running turn), the snapshot's
+  `turn.webSearch` with its `turnId`, and the info document's
+  `webSearch.offered` (once ready, native only); no codec version moves.
+  `craze models --json` and `--shipped --json` gain `capabilities:
+  {"webSearch": true}`.
 - A shipped model can be deprecated (`deprecated` and `replaced_by` in the
   catalog): it runs when named, is never offered or chosen for you, and each
   `models.toml` reference to it warns. A `[[retired]]` row can name its

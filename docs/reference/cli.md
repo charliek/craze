@@ -1815,7 +1815,9 @@ of it had a price; `+` when some did not) and how full the context is. Then,
 each when there is one: `usage:` (a step's spend [left out](#a-turn-cut-short)),
 `error:` (a failed turn, a stopped one, or one interrupted before its prompt was
 sent), [`files:`](#what-files-lists) (with `outside the workspace:` and `plan file:`
-when there are any), one
+when there are any), `web:` — the turn's [web calls](#web-search-counts), as
+`web: 1 search, 2 fetches`, with ` (1 failed)` after it when any failed, and only
+when the turn made one; its URLs are not printed — one
 `auto-answered:` line per question or plan craze's approval policy answered,
 `ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
 command to run next for a `running` or `needs_input` result; `session stopping`
@@ -1864,12 +1866,81 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
 | `messageFile` | `--max-message`'s file, holding the whole result, when it cut or left out the message or the plan; `message` and `plan` are then what was kept |
 | `warnings` | [Model notices](#model-notices): `[{kind, model, replacedBy, message}]`, at most 8; absent when there are none |
+| `webSearch` | A native session's [web search](#web-search-counts): `{"offered": <bool>, "searches": n, "fetches": n, "failed": n, "urls": [...], "urlsTruncated": true}` — `offered` always, the turn's counts when it made web calls. Absent for a non-native session, a host older than this craze, and every exit-1 envelope |
 
-A key that does not apply is absent, never `null` or `false`:
+A key that does not apply is absent, never `null` or `false` — but for
+`webSearch`'s `offered`, which is always written, `true` or `false`, whenever
+`webSearch` is there (`usageComplete` is written only as `false`):
 
 ```json
-{"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
+{"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"webSearch":{"offered":false},"attach":"craze attach --session 175bfe79"}
 ```
+
+### Web search counts
+
+A native session's result carries `webSearch` — on every status, from every
+command that waits (`craze wait`, `craze new --wait`, `craze send --wait`) — once
+the waiter has read a host of this craze. `offered` says the session's tool list
+held `websearch` and `webfetch` when it opened (web search on, or undecided with a
+person to ask); a consent card answered *Disable* since leaves it `true`. The
+rest is the target turn's tally, each member absent when zero or empty:
+
+| Member | |
+|--------|---|
+| `searches`, `fetches` | The web calls the session's web service handled, whatever their outcome — a call cancelled in flight and one that waited on the consent card included. A call refused before it reached the service (a bad or non-public URL) is an ordinary failed tool call and not counted; a retried step adds nothing |
+| `failed` | Those of them that returned an error: a provider error, a rate limit, a declined, disabled or cancelled consent, a cancellation in flight |
+| `urls` | The URLs of successful results: a search's result URLs in result order, and a fetch's requested URL when the page had text (never one parsed from the page). The provider key is scrubbed and the session's redactor applied; each is cut to at most 500 bytes at a character's boundary, listed once, first seen first, at most 100 |
+| `urlsTruncated` | `true` when a URL was cut or a distinct one was left out |
+
+**What the numbers mean.** They are activity accounting for the turn's window —
+the calls whose report reached the session while the turn ran, its sub-agents'
+included — and **not a statement of which sources an answer used**. Zero counts
+prove nothing about sources: a background sub-agent can search during one turn
+and deliver its result in a later one, which then reports none; a count does not
+mean the result reached the model (the call may be a child's whose result comes
+later, or never); and a background child's search counts in the turn it
+completed in, whichever turn started the child. Calls that finish while no turn
+runs are counted in the session's next turn — the wake that delivers a background
+result, or the next prompt.
+
+Where the counts are complete, and where they are not:
+
+| Result | `webSearch` |
+|--------|-------------|
+| `completed`, `failed`, `cancelled` (a close's `stopped` included) of a turn or a wake | `offered` and the turn's counts, complete up to the turn's cutoff: its end, or, for a turn a session's close cut short, the close (one exception, a window one event wide: *the one-event window*, below) |
+| `cancelled`, `stopped`, `partial`, no ending seen (the host's stop record names the turn, or no record and the host marked stopping) | `offered` and whatever was seen: no completeness promise |
+| `running` (`--timeout`) or `needs_input` of a turn | `offered` and the counts so far (a call waiting on the consent card is not counted yet) |
+| `running`, `needs_input` (`blockedBy`) or `dropped` of a queued prompt | `offered` alone: never the counts of the turn ahead of it |
+| `idle` with no last turn | `offered` alone |
+| `idle` with a last turn | that turn's, as above |
+
+A wait that attaches late is complete for a turn still running, or for the last
+one while no other has started; one whose turn's ending was missed and another
+turn has started is [`unobserved`](#failures-and-kinds) (exit 1) and carries no
+`webSearch`. A partial result settled from where the session stands may be
+short, never another turn's. A close is the cutoff: a call that finishes after it
+is in no result. The counts belong to the session's incarnation, as turn ids do:
+a reloaded session starts again from zero, and nothing is kept across a reload.
+
+**The one-event window.** A `running` result's handle can fall after the last
+event that carries the turn's counts: the session restates them just before the
+turn's ending (or the close's), but a snapshot is cut at a committed event, so a
+wait whose snapshot was cut exactly at that restating event and which timed out
+before the very next event gets a handle past it. A `craze wait --from` that
+handle, if the turn's ending is the first thing it reads (before it has caught
+up with the session and looked at it), returns the ending without the counts:
+`webSearch` is `offered` alone. The window is that one event wide, and the same
+for a prompt's turn, a wake and a close; a `--from` that catches up first, or
+any other timing, has the whole count.
+
+A wake that runs while a turn waits to be claimed (`craze prompt`'s turn held
+behind the agent's own, or any turn started while a wake held the session) is
+its own turn: its calls are never in that turn's result, whether the turn
+completes after it or the wait times out or the session closes while it runs.
+One exception: a `craze wait --from` whose handle lies inside such a wake, which
+times out or sees the session close before it has caught up with the session and
+before the wake's ending arrives, cannot tell the wake is running and can report
+the wake's counts as the turn's.
 
 ### Model notices
 
@@ -2929,7 +3000,7 @@ does not load (kind `config`), 2 for a usage error.
 ### The models document
 
 ```json
-{"schema":1,"crazeVersion":"0.2.0","models":[{"alias":"fireworks/kimi-k3","provider":"fireworks","maker":"","name":"Kimi K3 (Fireworks)","status":"deprecated","replacedBy":"fireworks/kimi-k3p1-pro","source":"catalog","efforts":["low","medium","high","xhigh","max"],"defaultEffort":"high","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":0,"state":{"funded":true,"offered":false}}],"retired":[{"alias":"openrouter/gpt-6.1-sol","replacedBy":"openrouter/gpt-sol-latest"}],"providers":[{"id":"chatgpt","name":"ChatGPT plan","auth":"sign-in","accountModels":"only"},{"id":"openai","name":"OpenAI","auth":"key","accountModels":"none"}]}
+{"schema":1,"crazeVersion":"0.2.0","models":[{"alias":"fireworks/kimi-k3","provider":"fireworks","maker":"","name":"Kimi K3 (Fireworks)","status":"deprecated","replacedBy":"fireworks/kimi-k3p1-pro","source":"catalog","efforts":["low","medium","high","xhigh","max"],"defaultEffort":"high","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":0,"state":{"funded":true,"offered":false}}],"retired":[{"alias":"openrouter/gpt-6.1-sol","replacedBy":"openrouter/gpt-sol-latest"}],"providers":[{"id":"chatgpt","name":"ChatGPT plan","auth":"sign-in","accountModels":"only"},{"id":"openai","name":"OpenAI","auth":"key","accountModels":"none"}],"capabilities":{"webSearch":true}}
 ```
 
 | Key | |
@@ -2939,6 +3010,7 @@ does not load (kind `config`), 2 for a usage error.
 | `models` | One row a model, sorted by alias |
 | `retired` | The aliases the catalog retired, sorted: `alias`, and `replacedBy` when the catalog names a replacement. A retired alias is in no row, and `--model` refuses it — but for one exception the catalog has always had: a complete entry of your own in `models.toml` under a retired alias, pointing at a live provider and wire model, is your model ([retired models](configuration.md#retired-models)): it is a row, `source` `user`, and runs |
 | `providers` | The **model** providers, sorted by `id` — what [`craze auth list`](#craze-auth-list) lists, not the agent providers [`craze providers`](#craze-providers) lists |
+| `capabilities` | What this craze can do for a caller choosing among its models: `{"webSearch": true}` — it takes [`--web-search`](#web-search-flags) and reports a native turn's [web search counts](#web-search-counts) in a waiting command's result. The same in every form of the document (`--json` and `--shipped --json`; not `craze models <alias> --json`), and always `true` on a craze that has the key: a craze older than this one has no `capabilities` at all |
 
 Each row carries every key below, always, but `replacedBy` (a deprecated row's
 alone) and `state` (the local forms' alone):
@@ -2979,7 +3051,9 @@ retired: openrouter/gpt-6.1-sol (use openrouter/gpt-sol-latest)
 
 Each release publishes `craze models --shipped --json` as `models.json`, listed in
 its `checksums.txt`, with `crazeVersion` the release's own version: what a
-machine that pins a release can read before installing it.
+machine that pins a release can read before installing it — its `capabilities`
+included, so a caller can tell before installing whether that release reports web
+search.
 
 ## craze version
 

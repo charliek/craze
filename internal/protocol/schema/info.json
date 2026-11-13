@@ -18,9 +18,19 @@
         "capabilities": {"$ref": "#/$defs/sessionCapabilities"},
         "retryHorizon": {"$ref": "#/$defs/retryHorizon"},
         "permissionMode": {"$ref": "#/$defs/permissionMode"},
-        "startedAt": {"$ref": "event.json#/$defs/time", "description": "When the host started serving the session, in UTC: what a client counts elapsed time from. Absent when the host does not say (an older host)."}
+        "startedAt": {"$ref": "event.json#/$defs/time", "description": "When the host started serving the session, in UTC: what a client counts elapsed time from. Absent when the host does not say (an older host)."},
+        "webSearch": {"$ref": "#/$defs/webSearchInfo"}
       },
       "required": ["sessionId", "providerSessionId", "incarnation", "hostId", "workspace", "provider", "catalogs", "capabilities", "retryHorizon"]
+    },
+    "webSearchInfo": {
+      "description": "Whether the session offered the web tools (plan 051): offered, always written, says websearch and webfetch were in this incarnation's tool list at Open (on, or undecided with a person to ask), and stays true when a consent card answers Disable since. Present only once the session is ready, and only for a session that may offer them (native); absent for an ACP session, one not ready yet, and an older host.",
+      "type": "object",
+      "properties": {
+        "offered": {"type": "boolean"}
+      },
+      "required": ["offered"],
+      "additionalProperties": false
     },
     "sessionInfo": {
       "description": "The session info document: the session's static facts, final once the session is up (the attach reply's session, a ready notification's). Its catalogs are empty until then.",

@@ -605,9 +605,14 @@ type wireState struct {
 	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
 	Usage    *wireUsage       `json:"usage,omitempty"`
 	Catalog  *wireCatalog     `json:"catalog,omitempty"`
-	Reason   string           `json:"reason,omitempty"`
-	Detail   string           `json:"detail,omitempty"`
-	IndexErr string           `json:"indexErr,omitempty"`
+	// WebSearch is the open turn's web tally (plan 051 F.4.3), absent when
+	// nil: a section an older decoder ignores, as it does any key it does not
+	// know (the slash section's precedent), which leaves every other section
+	// folded the same.
+	WebSearch *WireWebSearch `json:"webSearch,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+	IndexErr  string         `json:"indexErr,omitempty"`
 }
 
 // wireSlash is a SlashCatalog (plan 043 §3.2, D4): the session's slash
@@ -814,6 +819,30 @@ type wireUsage struct {
 	Session       wireSpend `json:"session"`
 }
 
+// WireWebSearch is a WebSearchState on the wire (plan 051 F.4.3): the state
+// section `webSearch`, and the members a snapshot's turn.webSearch carries
+// beside its turnId (internal/transcript). Each member is omitted when zero,
+// empty or false.
+type WireWebSearch struct {
+	Searches      int      `json:"searches,omitempty"`
+	Fetches       int      `json:"fetches,omitempty"`
+	Failed        int      `json:"failed,omitempty"`
+	URLs          []string `json:"urls,omitempty"`
+	URLsTruncated bool     `json:"urlsTruncated,omitempty"`
+}
+
+// ToWireWebSearch is w on the wire, nil for nil; its URL list is its own.
+// WireWebSearch is WebSearchState field for field, in the same order, so it
+// converts by a plain conversion, as wireSpend does.
+func ToWireWebSearch(w *WebSearchState) *WireWebSearch {
+	return (*WireWebSearch)(w.Clone())
+}
+
+// State is w back as a WebSearchState, nil for nil; its URL list is its own.
+func (w *WireWebSearch) State() *WebSearchState {
+	return (*WebSearchState)(w).Clone()
+}
+
 // wireSpend is Spend, field for field in the same order, so it converts by a
 // plain conversion; every key always written, as wireUsage's are.
 type wireSpend struct {
@@ -968,6 +997,7 @@ func toWireEvent(ev Event) wireEvent {
 		w.State.Plugins = toWirePlugins(s.Plugins)
 		w.State.Slash = toWireSlash(s.Slash)
 		w.State.Catalog = toWireCatalog(s.Catalog)
+		w.State.WebSearch = ToWireWebSearch(s.WebSearch)
 	}
 	w.Err = toWireError(ev.Err)
 	return w
@@ -1322,6 +1352,7 @@ func (w *wireEvent) event() Event {
 		ev.State.Plugins = s.Plugins.plugins()
 		ev.State.Slash = s.Slash.slash()
 		ev.State.Catalog = s.Catalog.catalog()
+		ev.State.WebSearch = s.WebSearch.State()
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code, Info: e.Info}

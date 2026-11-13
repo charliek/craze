@@ -48,6 +48,14 @@ type waitRig struct {
 
 	mu       sync.Mutex
 	attached int
+
+	// wrap, when set, is the session the engine drives in place of the
+	// scripted one, built over it (newWaitRigWrapped): a session that adds an
+	// optional interface of its own, the web stub's (turnwait_web_test.go).
+	wrap func(*stubSession) agent.Session
+	// chain is every engine's chain policy (newWaitRigChained): the zero
+	// value, a TUI's, unless a test asks for `craze prompt`'s.
+	chain engine.ChainPolicy
 }
 
 // newWaitRig is a rig whose session's event log keeps ring events (0: the
@@ -67,8 +75,22 @@ func newWaitRigOn(t *testing.T, opts control.Options, ring int, turns ...stubTur
 // session's.
 func newWaitRigAs(t *testing.T, provider string, opts control.Options, ring int, turns ...stubTurn) *waitRig {
 	t.Helper()
+	return newWaitRigWrapped(t, provider, opts, ring, nil, turns...)
+}
+
+// newWaitRigWrapped is newWaitRigAs with every engine's session wrap's, built
+// over its scripted one (nil: the scripted one itself).
+func newWaitRigWrapped(t *testing.T, provider string, opts control.Options, ring int, wrap func(*stubSession) agent.Session, turns ...stubTurn) *waitRig {
+	t.Helper()
+	return newWaitRigChained(t, provider, opts, ring, wrap, engine.ChainPolicy{}, turns...)
+}
+
+// newWaitRigChained is newWaitRigWrapped with every engine's chain policy
+// chain's.
+func newWaitRigChained(t *testing.T, provider string, opts control.Options, ring int, wrap func(*stubSession) agent.Session, chain engine.ChainPolicy, turns ...stubTurn) *waitRig {
+	t.Helper()
 	env, _ := serveHome(t)
-	r := &waitRig{t: t, env: env}
+	r := &waitRig{t: t, env: env, wrap: wrap, chain: chain}
 	r.s, r.eng = r.newEngine(ring, turns...)
 	r.srv = control.New(opts)
 	t.Cleanup(r.srv.AddAttachmentsListener(func(n int) {
@@ -104,7 +126,11 @@ func newWaitRigAs(t *testing.T, provider string, opts control.Options, ring int,
 func (r *waitRig) newEngine(ring int, turns ...stubTurn) (*stubSession, *engine.Engine) {
 	r.t.Helper()
 	s := newStubSessionOn(r.t, agent.EventLogOptions{RingEvents: ring, NoPrimary: true}, turns...)
-	eng, err := engine.New(s, engine.Options{CrazeSessionID: waitRigID})
+	var sess agent.Session = s
+	if r.wrap != nil {
+		sess = r.wrap(s)
+	}
+	eng, err := engine.New(sess, engine.Options{CrazeSessionID: waitRigID, Chain: r.chain})
 	if err != nil {
 		r.t.Fatal(err)
 	}

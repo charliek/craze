@@ -126,13 +126,40 @@ type wireAskEnding struct {
 }
 
 type wireTurn struct {
-	ID        string          `json:"id,omitempty"`
-	Text      string          `json:"text,omitempty"`
-	Origin    string          `json:"origin,omitempty"`
-	At        time.Time       `json:"at,omitzero"`
-	Foreign   json.RawMessage `json:"foreign,omitempty"`
-	Retries   int             `json:"retries,omitempty"`
-	Truncated bool            `json:"truncated,omitempty"`
+	ID      string          `json:"id,omitempty"`
+	Text    string          `json:"text,omitempty"`
+	Origin  string          `json:"origin,omitempty"`
+	At      time.Time       `json:"at,omitzero"`
+	Foreign json.RawMessage `json:"foreign,omitempty"`
+	Retries int             `json:"retries,omitempty"`
+	// WebSearch is Turn.WebSearch (plan 051 F.4.3): the web tally of the turn
+	// its turnId names, absent when the model holds none. Each URL is at most
+	// 500 bytes, far under ItemCap, so nothing of it is capped.
+	WebSearch *wireTurnWebSearch `json:"webSearch,omitempty"`
+	Truncated bool               `json:"truncated,omitempty"`
+}
+
+// wireTurnWebSearch is a TurnWebSearch: the turnId, always written, and the
+// event codec's own webSearch members beside it.
+type wireTurnWebSearch struct {
+	TurnID string `json:"turnId"`
+	agent.WireWebSearch
+}
+
+// toWireTurnWebSearch is w on the wire, nil for nil.
+func toWireTurnWebSearch(w *TurnWebSearch) *wireTurnWebSearch {
+	if w == nil {
+		return nil
+	}
+	return &wireTurnWebSearch{TurnID: w.TurnID, WireWebSearch: *agent.ToWireWebSearch(&w.WebSearchState)}
+}
+
+// turnWebSearch is w back as a TurnWebSearch, nil for nil.
+func (w *wireTurnWebSearch) turnWebSearch() *TurnWebSearch {
+	if w == nil {
+		return nil
+	}
+	return &TurnWebSearch{TurnID: w.TurnID, WebSearchState: *w.State()}
 }
 
 // wireSettings keeps each list section under the event codec's own section
@@ -351,8 +378,9 @@ func encodeHeader(jw *jsonWriter, s *Snapshot) ([]byte, error) {
 	for _, e := range s.Ended {
 		h.Ended = append(h.Ended, wireAskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
-	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Retries != 0 || t.Truncated {
-		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated}
+	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Retries != 0 || t.WebSearch != nil || t.Truncated {
+		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated,
+			WebSearch: toWireTurnWebSearch(t.WebSearch)}
 		if h.Turn.Foreign, err = agent.EncodeForeignTurnInfo(t.Foreign); err != nil {
 			return nil, fail("turn", err)
 		}
@@ -758,7 +786,8 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 		s.Ended = append(s.Ended, AskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
 	if t := w.Turn; t != nil {
-		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated}
+		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated,
+			WebSearch: t.WebSearch.turnWebSearch()}
 		var err error
 		if s.Turn.Foreign, err = agent.DecodeForeignTurnInfo(t.Foreign); err != nil {
 			return fail("turn", err)

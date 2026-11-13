@@ -889,6 +889,50 @@ func TestInstancesValidate(t *testing.T) {
 		inst{"any line: a notification", "envelope.json", "", `{"jsonrpc":"2.0","method":"ready","params":{}}`, true},
 		inst{"any line: a batch", "envelope.json", "", `[{"jsonrpc":"2.0","id":1,"method":"hello"}]`, false},
 	)
+	// Plan 051 F.4.3: the info document's webSearch (offered always written,
+	// required), a state delta's webSearch section and a snapshot's
+	// turn.webSearch (turnId required); counts are non-negative integers,
+	// URLs strings, urlsTruncated a boolean.
+	webOn, webOff := info, info
+	webOn.Provider = protocol.Provider{Name: "native", Label: "Native"}
+	webOff.Provider = webOn.Provider
+	webOn.WebSearch, webOff.WebSearch = &protocol.WebSearchInfo{Offered: true}, &protocol.WebSearchInfo{Offered: false}
+	webEvent := func(section string) string {
+		return `{"subscription":"s-1","seq":8,"event":{"type":"meta","state":{"webSearch":` + section + `}}}`
+	}
+	webSnap := func(turn string) string {
+		return `{"snapshot":{"version":1,"incarnation":"inc-1","seq":7,"turn":{"id":"turn-2","webSearch":` + turn + `},"main":{}}}`
+	}
+	const tally = `"searches":2,"fetches":1,"failed":1,"urls":["https://a.example","https://b.example"],"urlsTruncated":true`
+	cases = append(cases,
+		inst{"an info document offering web search", "info.json", "sessionInfo", jsonOf(t, webOn), true},
+		inst{"an info document not offering web search", "info.json", "sessionInfo", jsonOf(t, webOff), true},
+		inst{"an info document with no webSearch", "info.json", "sessionInfo", jsonOf(t, info), true},
+		inst{"the attach reply offering web search", "session.attach.json", "result",
+			jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: webOn, After: protocol.Cursor{Incarnation: "inc-1"}}), true},
+		inst{"a sessions.list row not offering web search", "info.json", "sessionRow",
+			jsonOf(t, protocol.SessionRow{SessionInfo: webOff, Title: "t", Activity: protocol.ActivityIdle}), true},
+		inst{"an info document's webSearch without offered", "info.json", "sessionInfo",
+			strings.Replace(jsonOf(t, webOn), `"webSearch":{"offered":true}`, `"webSearch":{}`, 1), false},
+		inst{"an info document's offered that is no boolean", "info.json", "sessionInfo",
+			strings.Replace(jsonOf(t, webOn), `"offered":true`, `"offered":"yes"`, 1), false},
+		inst{"an info document's webSearch with a member it does not define", "info.json", "sessionInfo",
+			strings.Replace(jsonOf(t, webOn), `"offered":true`, `"offered":true,"searches":1`, 1), false},
+		inst{"a state delta carrying the webSearch section", "notification.event.json", "params", webEvent(`{` + tally + `}`), true},
+		inst{"a state delta carrying an empty webSearch section", "notification.event.json", "params", webEvent(`{}`), true},
+		inst{"a webSearch section with a string count", "notification.event.json", "params", webEvent(`{"searches":"2"}`), false},
+		inst{"a webSearch section with a negative count", "notification.event.json", "params", webEvent(`{"failed":-1}`), false},
+		inst{"a webSearch section with a URL that is no string", "notification.event.json", "params", webEvent(`{"urls":[7]}`), false},
+		inst{"a webSearch section with urlsTruncated no boolean", "notification.event.json", "params", webEvent(`{"urlsTruncated":"yes"}`), false},
+		inst{"a webSearch section naming a turn", "notification.event.json", "params", webEvent(`{"turnId":"turn-1"}`), false},
+		inst{"a snapshot carrying turn.webSearch", "session.snapshot.json", "result", webSnap(`{"turnId":"turn-2",` + tally + `}`), true},
+		inst{"a snapshot carrying a tally of nothing", "session.snapshot.json", "result", webSnap(`{"turnId":"wake-1"}`), true},
+		inst{"a snapshot's turn.webSearch without turnId", "session.snapshot.json", "result", webSnap(`{` + tally + `}`), false},
+		inst{"a snapshot's tally with a string count", "session.snapshot.json", "result", webSnap(`{"turnId":"turn-2","fetches":"1"}`), false},
+		inst{"a snapshot's tally with a negative count", "session.snapshot.json", "result", webSnap(`{"turnId":"turn-2","searches":-2}`), false},
+		inst{"a snapshot's tally with a URL that is no string", "session.snapshot.json", "result", webSnap(`{"turnId":"turn-2","urls":[{"u":1}]}`), false},
+		inst{"a snapshot's tally with urlsTruncated no boolean", "session.snapshot.json", "result", webSnap(`{"turnId":"turn-2","urlsTruncated":1}`), false},
+	)
 
 	c := newCompiler()
 	for _, tc := range cases {
