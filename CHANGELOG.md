@@ -102,6 +102,15 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   --wait`, an unattended host) never asks and is offered no web tools until
   someone has decided, so its requests are unchanged. A sub-agent gets them
   only when its parent opened on. The file tools refuse `websearch.json`.
+- A stored Exa key: `craze auth login websearch/exa` (bare `exa` too, unless a
+  model provider has that name) keeps one in `native/credentials.toml`
+  (`0600`, its own lock, unknown tables and keys kept, read leniently with
+  value-free diagnostics); `craze auth logout websearch/exa` removes it, and
+  `craze auth list` shows it under a new "Web search" section, even when
+  `providers.toml` cannot be read. The search sends `EXA_API_KEY`, else the
+  stored key, else none (the keyless endpoint), resolved once when a session
+  opens; every native session redacts the stored key, learns one stored while
+  it runs at its next turn, and the file tools refuse `credentials.toml`.
 - A shipped model can be deprecated (`deprecated` and `replaced_by` in the
   catalog): it runs when named, is never offered or chosen for you, and each
   `models.toml` reference to it warns. A `[[retired]]` row can name its

@@ -208,7 +208,7 @@ func TestAuthLoginRefusals(t *testing.T) {
 		want  []string
 	}{
 		{"no provider, no terminal", authKey + "\n", []string{"auth", "login"}, 2,
-			[]string{"craze auth login: name a provider (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan)", "only on a terminal"}},
+			[]string{"craze auth login: name a provider (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan, websearch/exa)", "only on a terminal"}},
 		{"an unknown provider", authKey + "\n", []string{"auth", "login", "nosuch"}, 2,
 			[]string{"craze auth login: no such provider; craze has anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan"}},
 		{"a key where the provider goes", authKey + "\n", []string{"auth", "login", authKey2}, 2,
@@ -225,7 +225,7 @@ func TestAuthLoginRefusals(t *testing.T) {
 		{"a line over 8 KiB", strings.Repeat("k", maxKeyLine+1), []string{"auth", "login", "fireworks"}, 1,
 			[]string{"the key is longer than 8 KiB; nothing was saved"}},
 		{"logout of nothing named", "", []string{"auth", "logout"}, 2,
-			[]string{"craze auth logout: name the provider whose stored key to remove (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan)"}},
+			[]string{"craze auth logout: name the provider whose stored key to remove (anthropic, chatgpt, fireworks, meta, openai, openrouter, zai-coding-plan, websearch/exa)"}},
 		{"logout of an unknown provider", "", []string{"auth", "logout", "nosuch"}, 2,
 			[]string{"craze auth logout: no such provider"}},
 		{"a mistyped subcommand", authKey + "\n", []string{"auth", "nosuch", "fireworks"}, 2,
@@ -396,7 +396,7 @@ func TestAuthList(t *testing.T) {
 	}
 	// The ChatGPT plan's row is its sign-in's (plan 033 §3.11): no key to
 	// have, and nobody signed in here. Anthropic (plan 044) sorts first by
-	// its display name.
+	// its display name. The web search's section follows (plan 051 §F.5).
 	wantRows := "" +
 		"Anthropic         anthropic        not connected\n" +
 		"ChatGPT plan      chatgpt          not signed in\n" +
@@ -404,7 +404,10 @@ func TestAuthList(t *testing.T) {
 		"Meta              meta             stored key\n" +
 		"OpenAI            openai           not connected\n" +
 		"OpenRouter        openrouter       env OPENROUTER_API_KEY\n" +
-		"Z.AI Coding Plan  zai-coding-plan  not connected\n"
+		"Z.AI Coding Plan  zai-coding-plan  not connected\n" +
+		"\n" +
+		"Web search\n" +
+		"Exa  websearch/exa  no key (keyless endpoint)\n"
 	if stdout != wantRows {
 		t.Fatalf("list rows:\n%s\nwant:\n%s", stdout, wantRows)
 	}
@@ -480,17 +483,34 @@ func TestAuthLoginKeepsAndReportsOtherBrokenKeys(t *testing.T) {
 	}
 }
 
-// TestAuthPick: a menu answer is a number on the list, or an id or a name;
-// anything else is refused without being quoted back.
+// TestAuthPick: a menu answer is a number on the list — the providers', then
+// the web search's (plan 051 §F.5) — or an id or a name, the web search's by
+// its full name, or its bare one when no provider has it; anything else is
+// refused without being quoted back.
 func TestAuthPick(t *testing.T) {
 	a := &authRun{name: "craze auth login"}
 	infos := []modeltable.ProviderInfo{{ID: "fireworks", Name: "Fireworks"}, {ID: "zai-coding-plan", Name: "Z.AI Coding Plan"}}
-	for answer, want := range map[string]string{"1": "fireworks", " 2 ": "zai-coding-plan", "z.ai coding plan": "zai-coding-plan", "FIREWORKS": "fireworks"} {
-		if p, err := a.pick(infos, answer); err != nil || p.ID != want {
-			t.Fatalf("pick %q = %v, %v; want %s", answer, p.ID, err, want)
+	for answer, want := range map[string]string{"1": "fireworks", " 2 ": "zai-coding-plan", "z.ai coding plan": "zai-coding-plan", "FIREWORKS": "fireworks",
+		"3": "websearch/exa", "WebSearch/Exa": "websearch/exa", " exa ": "websearch/exa"} {
+		ch, err := a.pick(infos, answer)
+		got := ch.p.ID
+		if ch.web != nil {
+			got = ch.web.FullName()
+		}
+		if err != nil || got != want {
+			t.Fatalf("pick %q = %v, %v; want %s", answer, got, err, want)
 		}
 	}
-	for _, answer := range []string{"0", "3", authKey, "-1"} {
+	// A provider named exa shadows the bare name; the full name still picks
+	// the web search.
+	shadow := append(infos, modeltable.ProviderInfo{ID: "exa", Name: "Exa Models"})
+	if ch, err := a.pick(shadow, "exa"); err != nil || ch.web != nil || ch.p.ID != "exa" {
+		t.Fatalf("pick exa with a provider exa = %+v, %v; want the provider", ch, err)
+	}
+	if ch, err := a.pick(shadow, "4"); err != nil || ch.web == nil {
+		t.Fatalf("pick 4 with three providers = %+v, %v; want the web search", ch, err)
+	}
+	for _, answer := range []string{"0", "4", authKey, "-1"} {
 		_, err := a.pick(infos, answer)
 		wantExit(t, err, 2, "that is not a provider on the list; nothing was saved")
 		if strings.Contains(err.Error(), answer) {
@@ -657,7 +677,7 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 	native := authNative(t)
 	t.Setenv("FIREWORKS_API_KEY", authEnvK)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-7]: ", "6")
+		typeAtPrompt(t, tail, ptmx, "Provider [1-8]: ", "6")
 		typeAtPrompt(t, tail, ptmx, "OpenRouter API key: ", authKey)
 	}, "auth", "login")
 	if err != nil {
@@ -673,7 +693,8 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 		"  5. OpenAI\n",
 		"  6. OpenRouter\n",
 		"  7. Z.AI Coding Plan\n",
-		"Provider [1-7]: 6\nOpenRouter API key: \n",
+		"Web search:\n  8. Exa (websearch/exa)\n",
+		"Provider [1-8]: 6\nOpenRouter API key: \n",
 	} {
 		if !strings.Contains(menu, line) {
 			t.Fatalf("the menu lacks %q:\n%s", line, maskKeys(menu))
@@ -691,10 +712,10 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 func TestAuthLoginMenuHidesAPastedKey(t *testing.T) {
 	native := authNative(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-7]: ", authKey)
+		typeAtPrompt(t, tail, ptmx, "Provider [1-8]: ", authKey)
 	}, "auth", "login")
 	wantExit(t, err, 2, "craze auth login: that is not a provider on the list; nothing was saved")
-	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-7]: \n") {
+	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-8]: \n") {
 		t.Fatalf("the prompt's line = %q; want it to end with the Enter alone", maskKeys(got))
 	}
 	if stdout != "" {

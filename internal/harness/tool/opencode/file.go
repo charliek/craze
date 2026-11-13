@@ -105,8 +105,9 @@ func missing(err error) bool {
 }
 
 // isCredentials reports whether real, a path realPath resolved, is one of
-// the harness's protected files — its key file (plan 019 §3.8) or the web
-// search's remembered choice (plan 051 §C.2), protectedFiles — or in its
+// the harness's protected files — its key file (plan 019 §3.8), the web
+// search's remembered choice (plan 051 §C.2) or its stored key (§F.5),
+// protectedFiles — or in its
 // sign-in directory (plan 033 §3.12): by name and directory, or, when real
 // exists (info is its), by identity, so a hard link to any of them is refused
 // too.

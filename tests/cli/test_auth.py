@@ -127,13 +127,23 @@ def run_craze(
     return proc
 
 
+def split_rows(lines: list[str]) -> list[list[str]]:
+    """Rows of `craze auth list`, each split on its column gaps (2+ spaces)."""
+    return [[c.strip() for c in line.split("  ") if c.strip()] for line in lines]
+
+
 def list_rows(stdout: str) -> list[list[str]]:
-    """`craze auth list`'s rows, each split on its column gaps (2+ spaces)."""
-    rows = []
-    for line in stdout.splitlines():
-        cells = [c for c in line.split("  ") if c.strip()]
-        rows.append([c.strip() for c in cells])
-    return rows
+    """`craze auth list`'s provider rows: everything before the blank line
+    and the "Web search" section after it (plan 051 §F.5)."""
+    providers, _, _ = stdout.partition("\n\nWeb search\n")
+    return split_rows(providers.splitlines())
+
+
+def web_rows(stdout: str) -> list[list[str]]:
+    """`craze auth list`'s "Web search" rows, after its heading."""
+    _, heading, web = stdout.partition("Web search\n")
+    assert heading, stdout
+    return split_rows(web.splitlines())
 
 
 def provider_row(stdout: str, provider: str) -> list[str]:
@@ -314,6 +324,156 @@ def test_stored_key_funds_a_native_session(craze_bin: Path, tmp_path: Path, fixt
     holding = files_holding(Path(os.environ["HOME"]), CANARY.encode())
     if holding:
         pytest.fail(f"the key is in {holding} under HOME", pytrace=False)
+
+
+# ---------------------------------------------------------------------------
+# The web search's key (plan 051 §F.5): native/credentials.toml, addressed as
+# websearch/exa (or a bare exa no model provider shadows), listed under "Web
+# search". The key is CANARY, and run_craze fails a case on it in either
+# stream.
+
+
+def credentials_toml() -> Path:
+    return craze_home() / "native" / "credentials.toml"
+
+
+KEYLESS = ["Exa", "websearch/exa", "no key (keyless endpoint)"]
+STORED = ["Exa", "websearch/exa", "stored key"]
+
+
+def test_web_search_key_login_list_logout(craze_bin: Path) -> None:
+    proc = run_craze(craze_bin, "auth", "list")
+    assert proc.returncode == 0, proc.stderr
+    assert web_rows(proc.stdout) == [KEYLESS], proc.stdout
+
+    proc = run_craze(craze_bin, "auth", "login", "websearch/exa", stdin=CANARY)
+    assert (proc.returncode, proc.stderr) == (0, ""), proc.stdout + proc.stderr
+    assert proc.stdout == f"Saved the Exa web search key in {credentials_toml()}.\n"
+    assert credentials_toml().stat().st_mode & 0o777 == 0o600
+    assert (craze_home() / "native").stat().st_mode & 0o777 == 0o700
+    assert not providers_toml().exists()
+    holding = files_holding(craze_home(), CANARY.encode())
+    if holding != [credentials_toml()]:
+        pytest.fail(f"the key is in {holding}; want it in {credentials_toml()} alone", pytrace=False)
+
+    proc = run_craze(craze_bin, "auth", "list")
+    assert web_rows(proc.stdout) == [STORED], proc.stdout
+    assert list_rows(proc.stdout)[-1] == ["Z.AI Coding Plan", "zai-coding-plan", "not connected"], proc.stdout
+
+    # The variable first; one that cannot be a key is skipped, and said.
+    exported = {"EXA_API_KEY": "exa-exported-not-a-secret-0003"}
+    proc = run_craze(craze_bin, "auth", "list", env=exported)
+    assert web_rows(proc.stdout) == [["Exa", "websearch/exa", "env EXA_API_KEY"]], proc.stdout
+    proc = run_craze(craze_bin, "auth", "login", "exa", stdin=CANARY + "\n", env=exported)
+    assert proc.stdout.endswith("EXA_API_KEY is set in this environment; craze uses it before the stored key.\n"), proc.stdout
+    short = {"EXA_API_KEY": "abc"}
+    proc = run_craze(craze_bin, "auth", "list", env=short)
+    assert web_rows(proc.stdout) == [["Exa", "websearch/exa", "stored key; EXA_API_KEY is set but unusable"]], proc.stdout
+    assert proc.stderr.count("EXA_API_KEY is set to a value shorter than 8 bytes") == 1, proc.stderr
+    assert "abc" not in proc.stderr
+    proc = run_craze(craze_bin, "auth", "login", "websearch/exa", stdin=CANARY + "\n", env=short)
+    assert proc.stdout.endswith(
+        "EXA_API_KEY is set in this environment to a value that cannot be a key "
+        "(it is shorter than 8 bytes); craze skips it and uses the stored key.\n"
+    ), proc.stdout
+
+    proc = run_craze(craze_bin, "auth", "logout", "websearch/exa", env=exported)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "Removed the stored Exa web search key.\nExa web search is still connected through EXA_API_KEY.\n"
+    no_canary("craze auth logout websearch/exa", str(credentials_toml()), credentials_toml().read_text(encoding="utf-8"))
+    proc = run_craze(craze_bin, "auth", "logout", "exa")
+    assert (proc.returncode, proc.stdout) == (0, "No stored Exa web search key.\n")
+    proc = run_craze(craze_bin, "auth", "list")
+    assert web_rows(proc.stdout) == [KEYLESS], proc.stdout
+
+
+def test_web_search_key_refusals_save_nothing(craze_bin: Path) -> None:
+    for stdin, says in [("", "no key given; nothing was saved"), ("abc\n", "the key for websearch/exa was not saved: shorter than 8 bytes")]:
+        proc = run_craze(craze_bin, "auth", "login", "websearch/exa", stdin=stdin)
+        assert proc.returncode == 1, proc.stdout
+        assert says in proc.stderr, proc.stderr
+        assert "abc" not in proc.stderr
+        assert not (craze_home() / "native").exists()
+    proc = run_craze(craze_bin, "auth", "login", "nosuch", stdin=CANARY + "\n")
+    assert proc.returncode == 2
+    assert "zai-coding-plan, websearch/exa" in proc.stderr, proc.stderr
+
+
+def test_a_provider_named_exa_shadows_the_bare_name(craze_bin: Path) -> None:
+    """A model provider named exa takes the bare name, before and after a
+    search key was stored; websearch/exa still reaches the search key, which
+    keeps working and is removed by its full name."""
+    proc = run_craze(craze_bin, "auth", "login", "exa", stdin=CANARY + "\n")
+    assert proc.returncode == 0, proc.stderr
+    (craze_home() / "native" / "providers.toml").write_text(
+        'version = 1\n\n[providers.exa]\ndriver = "openai-compat"\n'
+        'base_url = "https://exa-models.example/v1"\nenv_keys = ["EXA_MODELS_KEY"]\n',
+        encoding="utf-8",
+    )
+    other = "sk-exa-models-not-a-secret-0004"
+    proc = run_craze(craze_bin, "auth", "login", "EXA", stdin=other + "\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"Saved the exa key in {providers_toml()}.\n"
+    assert other in providers_toml().read_text(encoding="utf-8")
+    proc = run_craze(craze_bin, "auth", "list")
+    assert provider_row(proc.stdout, "exa") == ["exa", "exa", "stored key"]
+    assert web_rows(proc.stdout) == [STORED], proc.stdout
+    if CANARY not in credentials_toml().read_text(encoding="utf-8"):
+        pytest.fail("the search key stored before the provider is gone", pytrace=False)
+
+    proc = run_craze(craze_bin, "auth", "logout", "exa")
+    assert proc.stdout == "Removed the stored exa key.\n", proc.stdout
+    proc = run_craze(craze_bin, "auth", "list")
+    assert web_rows(proc.stdout) == [STORED], proc.stdout
+    proc = run_craze(craze_bin, "auth", "logout", "websearch/exa")
+    assert proc.stdout == "Removed the stored Exa web search key.\n", proc.stdout
+    no_canary("craze auth logout websearch/exa", str(credentials_toml()), credentials_toml().read_text(encoding="utf-8"))
+
+
+def test_a_broken_credentials_file_never_shows_its_key(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A credentials.toml whose broken line holds the key: login and logout
+    refuse it and write nothing, list shows no key and names the file, and a
+    native session starts past it -- every output scanned (run_craze), and
+    the key in no file but credentials.toml."""
+    native = craze_home() / "native"
+    native.mkdir(parents=True)
+    body = f'[exa]\napi_key = "{CANARY}\n'
+    credentials_toml().write_text(body, encoding="utf-8")
+    credentials_toml().chmod(0o600)
+    for args in (["login", "websearch/exa"], ["logout", "websearch/exa"]):
+        proc = run_craze(craze_bin, "auth", *args, stdin="exa-replacement-key-0005\n")
+        assert proc.returncode == 1, proc.stdout
+        assert f"{credentials_toml()}: line 2: not valid TOML" in proc.stderr, masked(proc.stderr)
+        assert credentials_toml().read_text(encoding="utf-8") == body
+    proc = run_craze(craze_bin, "auth", "list")
+    assert proc.returncode == 0, masked(proc.stderr)
+    assert web_rows(proc.stdout) == [KEYLESS], masked(proc.stdout)
+    assert proc.stderr.count(str(credentials_toml())) == 1, masked(proc.stderr)
+
+    fixture_server.set_ok(text_parts=["started past it"])
+    providers_toml().write_text(
+        "version = 1\n\n[providers.fixture]\n"
+        'driver = "openai-compat"\n'
+        f'base_url = "{fixture_server.base_url}"\n'
+        'api_key = "sk-fixture-not-a-secret-0006"\n',
+        encoding="utf-8",
+    )
+    (native / "models.toml").write_text(
+        'version = 1\ncatalog = false\ndefault_model = "fixture-model"\n\n'
+        '[models.fixture-model]\nprovider = "fixture"\nwire_model = "fixture-wire-model"\n',
+        encoding="utf-8",
+    )
+    proc = run_craze(
+        craze_bin, "prompt", "--json", "--provider", "native", "--workspace", str(tmp_path), "hi", timeout=15
+    )
+    assert proc.returncode == 0, masked(proc.stderr)
+    assert "started past it" in proc.stdout
+    assert "credentials.toml" in proc.stderr + proc.stdout, "the session did not say the file is broken"
+    holding = files_holding(craze_home(), CANARY.encode())
+    if holding != [credentials_toml()]:
+        pytest.fail(f"the key is in {holding}; want it in {credentials_toml()} alone", pytrace=False)
 
 
 # ---------------------------------------------------------------------------

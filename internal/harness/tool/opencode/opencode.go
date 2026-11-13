@@ -35,9 +35,15 @@ const CredentialsFile = "providers.toml"
 // the two together. bash is not a file tool and can still write it.
 const WebSearchStateFile = "websearch.json"
 
+// WebCredentialsFile is the name of the stored web search keys' file under
+// Env.Home (plan 051 §F.5), which the file tools refuse as they refuse the
+// key file. It is modeltable.CredentialsFile, which this package may not
+// import; a test there pins the two together.
+const WebCredentialsFile = "credentials.toml"
+
 // protectedFiles are the files under Env.Home the file tools refuse by name,
 // place and identity (isCredentials).
-var protectedFiles = []string{CredentialsFile, WebSearchStateFile}
+var protectedFiles = []string{CredentialsFile, WebSearchStateFile, WebCredentialsFile}
 
 // AuthDir is the name of the harness's sign-in directory under Env.Home, the
 // ChatGPT plan's tokens and registration (plan 033 §3.12), which the file

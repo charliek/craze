@@ -2302,7 +2302,8 @@ craze auth list
 ```
 
 Manages the API keys of the [native provider](configuration.md#native-models-and-providers)'s
-model providers, and the [ChatGPT plan](configuration.md#the-chatgpt-plan)'s
+model providers, the native web search's key (`websearch/exa`, below), and the
+[ChatGPT plan](configuration.md#the-chatgpt-plan)'s
 sign-in. A key is stored as its provider's `api_key` in
 `native/providers.toml` in the craze directory (`~/.craze`, or `$CRAZE_HOME`),
 written at `0600`; a provider's environment variable, when it holds a usable
@@ -2318,12 +2319,29 @@ ChatGPT, so for it `login` [signs in](#signing-in-to-the-chatgpt-plan), `logout`
 signs out, and `list` shows the sign-in. Those talk to OpenAI's sign-in
 service, and nothing else does.
 
+The native [web search](configuration.md#native-web-search)'s Exa key is not a model
+provider's: it is named **`websearch/exa`**, and stored as `api_key` in the
+`[exa]` table of `native/credentials.toml` (`0600`), a file of its own beside
+`providers.toml` ([The stored web search key](configuration.md#the-stored-web-search-key)).
+`EXA_API_KEY`, when it holds a usable key, is used before it; with neither,
+the search uses Exa's keyless endpoint. `websearch/exa`, in any case, is always
+the search key — `login` and `logout` take it before `providers.toml` is even
+read, so a `providers.toml` craze cannot read never stops it being stored or
+removed. Bare `exa` (or `Exa`) means the same **unless a model provider has
+that id or display name**: then bare `exa` is that provider, exactly as any
+provider name is, and the search key is reached as `websearch/exa`. Which name
+reaches it changes nothing else: a search key stored before a provider named
+`exa` appeared keeps working, and stays removable as `websearch/exa`. Bare
+`exa` with a `providers.toml` craze cannot read fails as any provider name
+does (exit 1), and the error says to name it `websearch/exa`.
+
 A provider is named by its id or its display name, in any case: `fireworks`,
 `Fireworks`, `"z.ai coding plan"`. The providers are the
 [catalog's](configuration.md#the-shipped-catalog) and any of your own in
 `providers.toml` (a directory whose `models.toml` says
 [`catalog = false`](configuration.md#isolated-setups-catalog-false) has only
-its own). All three exit 1 when there is no craze directory (neither `HOME`
+its own). The usage errors that list what can be named end with
+`websearch/exa`. All three exit 1 when there is no craze directory (neither `HOME`
 nor `CRAZE_HOME` is set). An argument too many, or a flag a command does not
 take, is exit 2, and what was typed is not repeated back: it may be a key.
 
@@ -2380,6 +2398,38 @@ without a terminal, or a name that matches none, is exit 2; the name is not
 repeated back, in case what was typed there was the key. Another provider's
 stored key that cannot be used is kept as it is and named in a note on
 stderr, so it can be replaced or removed next.
+
+`craze auth login websearch/exa` (or `exa`, unshadowed) stores the web
+search's Exa key, read the same way — stdin's first line, or the no-echo
+prompt `Exa API key: `. On a terminal with nothing named, the numbered list
+has the web search after the providers, numbered on, under its own heading
+(`Web search:` / `8. Exa (websearch/exa)`); typing `websearch/exa` there picks
+the web search even when a model provider's display name is `websearch/exa`.
+The key is held to the same rules (empty, shorter than 8 bytes, or overlapping
+the redaction marker) and must be valid UTF-8 — otherwise exit 1, nothing
+saved, `the key for websearch/exa was not saved: …` — and only `api_key` in
+`[exa]` changes: every other table and key in the file — yours, or a later
+craze's — is written back, and the file is rewritten whole, at `0600`, under
+its own lock (`credentials.toml.lock`). A `credentials.toml` craze cannot read
+— not valid TOML, a symlink, not a regular file, larger than 1 MiB — or whose
+`exa` is not a table is refused (exit 1, nothing written), the error naming
+the file and the line or key, never a value.
+
+```bash
+printf '%s\n' "$EXA_KEY" | craze auth login websearch/exa
+```
+
+```text
+Saved the Exa web search key in /home/you/.craze/native/credentials.toml.
+EXA_API_KEY is set in this environment; craze uses it before the stored key.
+```
+
+The second line only when `EXA_API_KEY` holds a usable key; when it is set to
+one that cannot be a key, it says so instead (`EXA_API_KEY is set in this
+environment to a value that cannot be a key (it is shorter than 8 bytes);
+craze skips it and uses the stored key.`). A session already running keeps the
+search key it opened with: a key stored now is sent from the next session (the
+running one only learns it, to [redact](configuration.md#the-stored-web-search-key) it).
 
 #### Signing in to the ChatGPT plan
 
@@ -2558,6 +2608,15 @@ settings, under Apps. Not signed in, it prints `Not signed in to ChatGPT.`
 A key someone wrote for the plan in `providers.toml`, which it never uses, is
 removed as well.
 
+`craze auth logout websearch/exa` (or `exa`, unshadowed) removes the stored
+web search key, and only `api_key`: anything else in `[exa]`, and every other
+table, stays (an `[exa]` left empty is dropped). `Removed the stored Exa web
+search key.`, or `No stored Exa web search key.` — with no `credentials.toml`,
+nothing is written, not even the directory — then `Exa web search is still
+connected through EXA_API_KEY.` while that variable holds a usable key. A file
+craze cannot read, or whose `exa` is not a table, is refused as `login`
+refuses it.
+
 ### craze auth list
 
 One row per provider, by display name: its name, its id, and how it is
@@ -2576,7 +2635,20 @@ Meta              meta             stored key
 OpenAI            openai           env OPENAI_API_KEY
 OpenRouter        openrouter       not connected
 Z.AI Coding Plan  zai-coding-plan  not connected
+
+Web search
+Exa  websearch/exa  stored key
 ```
+
+After the providers, a blank line and a **Web search** section: one row per
+web search credential, by its full name — `env EXA_API_KEY`, `stored key`, or
+`no key (keyless endpoint)`, in the order the search takes them. A variable set
+to a value that cannot be a key is skipped, and shown: `stored key;
+EXA_API_KEY is set but unusable` (or `no key (keyless endpoint); EXA_API_KEY
+is set but unusable`), with a note naming the rule. The section needs only
+`credentials.toml` and the environment, so it is printed even when
+`providers.toml` cannot be read — then it is all of stdout, and the command
+still exits 1 with that file's error.
 
 `openai` is OpenAI's API on a key, billed per token
 ([OpenAI](configuration.md#openai)); `chatgpt` is the ChatGPT subscription. An
@@ -2584,8 +2656,10 @@ exported `OPENAI_API_KEY` connects `openai` as any provider's variable does,
 and its models run by name; but with no key stored as well, craze never
 chooses one of them for a new session on its own (`craze providers` says so).
 
-Then notes, on stderr, each starting `note: `: a stored key that cannot be
-used, an entry of yours that [repeats what craze
+Then notes, on stderr, each starting `note: ` and each said once: a stored key that cannot be
+used, a `credentials.toml` craze cannot read (or an entry in it of the wrong
+shape, or a stored web search key that cannot be one) — naming the file and
+the line or key, never a value — an entry of yours that [repeats what craze
 ships](configuration.md#how-the-files-merge) (delete it to follow craze's
 updates), the warnings a native session prints when it starts, one line for
 each maker whose models the [source

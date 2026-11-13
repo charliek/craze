@@ -66,8 +66,10 @@ func (w WebState) forChild() WebState {
 // sets it; a harness test that leaves it nil builds nothing and so reaches
 // no network). The service calls w's provider at o.WebEndpoint's answer
 // ("" is the provider's own endpoint) with the table's key for it, read once
-// here through getenv — the reading the session's redactor is built from, so
-// the key sent is one it holds — and asks o.Asker the consent question on its
+// here through getenv — the variable, else the key credentials.toml stored
+// when the table was loaded (modeltable.WebSearchKey, plan 051 §F.5): the
+// reading the session's redactor is built from, so the key sent is one it
+// holds, fixed until the session opens again — and asks o.Asker the consent question on its
 // first call when w is asking and can ask, remembering the answer in
 // websearch.StateFile under o.Home and reporting a failed write to o.Warn.
 // A child's state comes from its parent with the parent's service
@@ -81,7 +83,7 @@ func (w WebState) withService(o *Options, getenv func(string) string) (WebState,
 	if err != nil {
 		return w, fmt.Errorf("harness: web search: %w", err)
 	}
-	svc, err := websearch.New(websearch.Config{
+	svc, err := newWebService(websearch.Config{
 		Provider:  w.Provider,
 		Key:       o.Table.WebSearchKey(getenv).Reveal(),
 		Endpoint:  endpoint,
@@ -97,6 +99,12 @@ func (w WebState) withService(o *Options, getenv func(string) string) (WebState,
 	w.Service = svc
 	return w, nil
 }
+
+// newWebService builds the service withService hands the session: a seam for
+// the tests that read the configuration a session built it from (the key it
+// resolved) without reaching the provider's own endpoint; websearch.New in
+// production.
+var newWebService = websearch.New
 
 // withWeb is tools less the web tools when w does not offer them, in the
 // same order: the list openTools builds everything of a session from, and

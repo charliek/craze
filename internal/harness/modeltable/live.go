@@ -164,8 +164,9 @@ func (t *Table) boundAccount(alias string) (Account, bool) {
 // nothing resolves it; and every variable whose value frozen reports reads as
 // unset to t from then on (envOf) — it funds nothing and is no key Keys
 // returns — while CredentialEnvNames still names it, so a command the session
-// runs is still started without it. getenv is read as Keys reads it (nil is
-// os.Getenv).
+// runs is still started without it. A stored web search key frozen reports
+// (webKeys, plan 051 §F.5) is dropped too: neither Keys nor WebSearchKey
+// returns it. getenv is read as Keys reads it (nil is os.Getenv).
 //
 // keep is the model the session runs on, already carried in (Carry): it and
 // its provider are never dropped, whatever the provider's keys hold — the
@@ -215,6 +216,10 @@ func (t *Table) WithholdFrozen(getenv func(string) string, frozen func(string) b
 	// An inline key the merge kept only for redaction (credentialKeys) is no
 	// key Keys returns once frozen reports it, as a provider's own is not.
 	t.credentialKeys = slices.DeleteFunc(slices.Clone(t.credentialKeys), func(k Secret) bool { return frozen(k.Reveal()) })
+	// So is a stored web search key (plan 051 §F.5): neither returned by Keys
+	// nor sent by WebSearchKey.
+	t.webKeys = maps.Clone(t.webKeys)
+	maps.DeleteFunc(t.webKeys, func(_ string, k Secret) bool { return frozen(k.Reveal()) })
 	if len(unkeyed) == 0 && len(dropped) == 0 {
 		return nil
 	}

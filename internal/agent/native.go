@@ -338,6 +338,12 @@ type nativeSession struct {
 	// the first turn. It exists so a test can write the file in exactly the
 	// window that decides which stamp a look must record.
 	keysSeam func()
+	// loadedSeam runs in open between the model table's load and the
+	// recording of what that load said of credentials.toml
+	// (openedWithCredentials). **A test seam: nil in production**, set only
+	// by a test in this package before Start, so a test can change the file
+	// in exactly that window.
+	loadedSeam func()
 
 	// signIn is the process's ChatGPT token source for the Home the harness
 	// was opened with (chatgptauth.Source, plan 033 §3.12), handed to the
@@ -1293,6 +1299,13 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 			return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
 		}
 		hopts.Table = table
+		if s.loadedSeam != nil {
+			s.loadedSeam()
+		}
+		// The table's warnings, said below, say a credentials.toml that
+		// cannot be read (plan 051 §F.5); the first turn's look does not say
+		// it again.
+		s.keys.openedWithCredentials(table)
 		// Set under modelsMu, like everything the reloads keep, though none
 		// can run before the harness is installed.
 		s.modelsMu.Lock()

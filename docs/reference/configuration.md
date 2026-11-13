@@ -62,7 +62,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
-| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `websearch.json` (the remembered [web search](#native-web-search) choice), `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
+| `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `websearch.json` (the remembered [web search](#native-web-search) choice), `credentials.toml` (the [stored web search key](#the-stored-web-search-key)), `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -1163,7 +1163,11 @@ search](#native-web-search), which works without one: set, it raises Exa's
 rate limit for anonymous use. It is read once when a session opens and sent
 only to Exa's own endpoint, in a request header, never in a URL. A value
 that cannot be a key (shorter than 8 bytes, or overlapping the redaction
-marker) is ignored, as any variable's is, and never sent.
+marker) is ignored, as any variable's is, never sent, and named in one line
+at session start. A key for Exa can also be stored, with [`craze auth login
+websearch/exa`](cli.md#craze-auth-login), in a file of its own: the variable
+comes first, then the stored key, then none — [The stored web search
+key](#the-stored-web-search-key).
 
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout
@@ -1220,7 +1224,11 @@ inline key it did not know and redacts it from then on, as it redacts every
 key it knows — tool output and spill files included. A value that cannot be a
 key (shorter than 8 bytes, or overlapping the redaction marker) is ignored
 with one line naming the provider, never the value; a file that no longer
-parses is one line too, and nothing in it is learned until it is fixed.
+parses is one line too, and nothing in it is learned until it is fixed. The
+same look reads the [stored web search key](#the-stored-web-search-key)'s
+`credentials.toml`, whether or not the model table loads, and learns its key
+the same way — to redact it and to check it against the frozen prompt; the web
+search itself keeps the key it opened with.
 
 If a newly stored key turns out to be inside what the session sends with every
 request — its system prompt (which names the working directory), its tool
@@ -2428,7 +2436,8 @@ A native session can search the web and read pages with two tools,
 excerpt) and `webfetch` (an `http` or `https` URL, answered with the page's
 text). Both go through [Exa](https://exa.ai)'s hosted endpoint,
 `https://mcp.exa.ai/mcp`, which works without a key; an exported
-[`EXA_API_KEY`](#keys) raises its rate limit. Both are read-only, so a session
+[`EXA_API_KEY`](#keys), or a key [stored](#the-stored-web-search-key) with
+`craze auth login websearch/exa`, raises its rate limit. Both are read-only, so a session
 in [ask or plan mode](tui.md#modes) may use them too. `webfetch` refuses a URL
 with a user name or password in it, and one whose host is `localhost`, a
 `*.localhost` name, or a loopback, link-local, private or unspecified IP
@@ -2530,10 +2539,70 @@ The file tools refuse `websearch.json` as they refuse `providers.toml` — `read
 `grep` and `glob` never show it, so the model cannot turn its own web search
 on with them. `bash` is not a file tool: a command can still write the file.
 
+### The stored web search key
+
+[`craze auth login websearch/exa`](cli.md#craze-auth-login) stores a key for
+Exa in `credentials.toml` beside the model files
+(`~/.craze/native/credentials.toml`, or `$CRAZE_HOME/native/`), at `0600`: one
+table per credential, here `[exa]` holding `api_key`.
+
+```toml
+[exa]
+api_key = "…"
+```
+
+It is not a provider entry and not a table of `providers.toml` (which is read
+strictly, so an older craze sharing the directory would refuse it): an older
+craze never reads this file. The key a session's web search sends is decided
+when the session opens, in this order:
+
+1. `EXA_API_KEY`, when it holds a usable key;
+2. else the stored key, when it is a usable key;
+3. else none: Exa's keyless endpoint.
+
+A value that cannot be a key — shorter than 8 bytes, or overlapping craze's
+redaction marker — is skipped wherever it is, never sent, and named in one
+line (the variable, or the file and `[exa] api_key`), never quoted. The stored
+key is also a credential like any other: every native session redacts it from
+tool output, whatever its `models.toml` says (`catalog = false` included) and
+whether or not web search is on. It is read with the model table when a
+session opens, and that one reading is both what the session redacts and what
+its web search sends, so the search never sends a key the session would not
+redact. A key stored while a session runs is learned at its next turn to be
+redacted ([Keys stored while a session runs](#keys-stored-while-a-session-runs)),
+and sent from the next session on: the running session's search keeps the key
+it opened with.
+
+craze reads the file leniently: tables and keys it does not know are ignored,
+so a later craze can add to it. A file it cannot read — not valid TOML, a
+symlink, not a regular file, larger than 1 MiB — gives no stored key, and an
+`exa` that is not a table, or an `api_key` that is not a string, gives none
+either; each is one line at session start and in `craze auth list`, naming the
+file and the line or the key and never a value (a parser's own message, which
+can quote the line holding the key, is never shown). A running session says
+such a line once when the file changes to it, at its next turn. Such a file
+never stops a session from starting. A regular file group or others can read
+is made `0600` when a session opens, whether or not craze can parse it, with a
+line saying so (a symlink's target is left alone).
+
+Only the keys craze can read from the file are redacted: the file tools refuse
+`credentials.toml`, but `bash` does not, so a command that prints it shows a
+value in a table craze does not know, or every value in a file with a syntax
+error, unredacted.
+
+`craze auth login` and `logout` write it under its own lock,
+`credentials.toml.lock`: they refuse a file they cannot read (nothing is
+written; fix or remove it by hand), and an `exa` that is not a table; they
+change only `[exa]`'s `api_key`, keep every other table and key, and rewrite
+the file whole, atomically, at `0600` — comments are not kept, and the header
+they write says so. The file tools refuse `credentials.toml` as they refuse
+`providers.toml` and `websearch.json`, and `grep` and `glob` never show it.
+
 ### What leaves your machine
 
-To Exa: each search's query, each URL fetched, and, when it is set, your
-`EXA_API_KEY` (in a header, never under a test override). Not your files, your
+To Exa: each search's query, each URL fetched, and, when there is one, your
+Exa key — `EXA_API_KEY`, or the [stored](#the-stored-web-search-key) one — (in
+a header, never under a test override). Not your files, your
 conversation or any other key. Queries and URLs are kept wherever every tool's
 input is kept: in the transcript's tool calls and, while the
 [session journal](#session-journal) is on (the default), in the journal too,

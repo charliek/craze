@@ -84,7 +84,9 @@ func KeyProblem(k string) error { return keyProblem(strings.TrimSpace(k)) }
 // The key store (plan 031 §3.7, P1): `craze auth` keeps a provider's key where
 // a hand-written one has always lived, as the inline api_key of its
 // providers.toml entry, which Resolve tries after the provider's env_keys. No
-// other file, no keychain. Three operations, each on the one file:
+// keychain, and no other file for a provider's key — the web search's key,
+// which is no provider's, is kept in credentials.toml (credentials.go, plan
+// 051 §F.5). Three operations, each on the one file:
 //
 //   - Providers lists every provider a key can be given to — the catalog's
 //     and the user file's own — and how each is funded now. It is structural:
@@ -134,7 +136,8 @@ var (
 	ErrUnknownProvider = errors.New("modeltable: unknown provider")
 
 	// ErrSymlinkedKeyFile is SetKey's and RemoveKey's error for a
-	// providers.toml that is a symlink.
+	// providers.toml that is a symlink (credentials.toml's is
+	// ErrSymlinkedCredentialsFile).
 	ErrSymlinkedKeyFile = errors.New("modeltable: providers.toml is a symlink")
 
 	// ErrSignInProvider is SetKey's refusal of a key for the ChatGPT plan's
@@ -329,7 +332,7 @@ func setKeyWith(dir, id, key string, cat *Catalog) error {
 		rule = ErrEmptyKey
 	}
 	if rule != nil {
-		return &keyRefusedError{provider: id, rule: rule}
+		return &keyRefusedError{what: fmt.Sprintf("provider %q", id), rule: rule}
 	}
 	return editKeyFile(dir, id, cat, true, func(doc *providersOverlay) (bool, error) {
 		if signInDriver(dir, id, cat, *doc) {
@@ -519,11 +522,13 @@ func catalogOff(dir string) bool {
 	return d.Catalog != nil && !*d.Catalog
 }
 
-// keyRefusedError is SetKey's error for a key it will not store: the
-// provider and the rule, never the value. It unwraps to the rule.
+// keyRefusedError is SetKey's and SetCredential's error for a key it will
+// not store: what the key was for — `provider "fireworks"`, or a web search
+// credential's full name — and the rule, never the value. It unwraps to the
+// rule.
 type keyRefusedError struct {
-	provider string
-	rule     error
+	what string
+	rule error
 }
 
 func (e *keyRefusedError) Error() string {
@@ -531,7 +536,7 @@ func (e *keyRefusedError) Error() string {
 	if !errors.Is(e.rule, ErrEmptyKey) {
 		why = keyReason(e.rule)
 	}
-	return fmt.Sprintf("modeltable: the key for provider %q was not saved: %s", e.provider, why)
+	return fmt.Sprintf("modeltable: the key for %s was not saved: %s", e.what, why)
 }
 
 func (e *keyRefusedError) Unwrap() error { return e.rule }

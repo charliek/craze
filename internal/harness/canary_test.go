@@ -358,6 +358,60 @@ func TestSecretsCanaryExaKey(t *testing.T) {
 	}
 }
 
+// TestSecretsCanaryStoredExaKey (plan 051 §F.5): a web search key stored in
+// credentials.toml — under a `catalog = false` table, whose credentials are
+// its own files' alone — is a credential of the session like an exported
+// one: the model prints a copy of it, long enough to spill, and runs `env`,
+// with EXA_API_KEY exported to another key. The variable is not in the
+// command's environment; the stored key reaches no event, the transcript,
+// the spill file or any request (runEnvAndSpill's control: env shows the
+// copy redacted, which only the stored key's place in the redactor does).
+// The file tools' refusal of the file is opencode's
+// TestFileToolsRefuseTheWebCredentialsFile.
+func TestSecretsCanaryStoredExaKey(t *testing.T) {
+	const (
+		storedCanary   = "3f1c2a9e-8b7d-4c6e-9f0a-c0ffee000010"
+		exportedCanary = "3f1c2a9e-8b7d-4c6e-9f0a-c0ffee000011"
+	)
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	if !f.table.NoCatalog {
+		t.Fatal("control: the fixture's table is not `catalog = false`")
+	}
+	if err := os.WriteFile(filepath.Join(f.home, modeltable.CredentialsFile), []byte("[exa]\napi_key = \""+storedCanary+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.table = f.load()
+	if f.table.WebSearchKey(f.getenv).Reveal() != storedCanary {
+		t.Fatal("control: the table did not read the stored key")
+	}
+	t.Setenv(modeltable.ExaKeyEnv, exportedCanary)
+	t.Setenv("CRAZE_CANARY_COPY", storedCanary)
+	opts := f.options()
+	opts.Getenv = keyEnv(modeltable.ExaKeyEnv, exportedCanary)
+	s := f.open(opts)
+	evs, envOut, spill := runEnvAndSpill(t, f, s, "test/a")
+	if strings.Contains(envOut, modeltable.ExaKeyEnv+"=") {
+		t.Errorf("the command's environment kept %s", modeltable.ExaKeyEnv)
+	}
+	for label, key := range map[string]string{"the stored key": storedCanary, "the exported key": exportedCanary} {
+		if found := leaks(evs, key); len(found) > 0 {
+			t.Errorf("%s reached an event at %v", label, found)
+		}
+		for where, path := range map[string]string{"the transcript": s.store.Path(), "the spill file": spill} {
+			if b, err := os.ReadFile(path); err != nil {
+				t.Fatal(err)
+			} else if bytes.Contains(b, []byte(key)) {
+				t.Errorf("%s is in %s", label, where)
+			}
+		}
+		for i, c := range f.models["test/a"].requests() {
+			if strings.Contains(requestText(c, false), key) {
+				t.Errorf("request %d sent the model %s", i+1, label)
+			}
+		}
+	}
+}
+
 // keyFundedStart is a shipped model on a key-funded provider, and the
 // provider's id: the start model of the first such provider in the shipped
 // order (plan 038 §2).

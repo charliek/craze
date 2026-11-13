@@ -353,6 +353,12 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 			break
 		}
 	}
+	// The stored web search keys (plan 051 §F.5), read leniently whatever
+	// kind of table this is: a credentials.toml craze cannot read is a
+	// warning, never a failed load, and every line is value-free.
+	creds, webKeys, webWarnings := loadCredentials(dir)
+	t.webKeys, t.credsErr, t.credsProblems = webKeys, creds.err, creds.problems
+	warnings = append(warnings, webWarnings...)
 	t.Warnings = append(warnings, t.Warnings...)
 	_, priceWarnings := pricedIdentities(t.Models)
 	t.Warnings = append(t.Warnings, priceWarnings...)

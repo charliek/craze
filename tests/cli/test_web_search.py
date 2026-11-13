@@ -12,6 +12,7 @@ session that cannot ask a person is never offered the tools undecided
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from test_native import (
     fixture_server,  # noqa: F401 (a fixture, used by name)
     joined,
     last_tools,
+    native_env,
     parse_events,
     run_native,
     tool_results,
@@ -134,3 +136,45 @@ def test_undecided_headless_session_is_offered_no_web_tools(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert fixture_server.requests[0].tool_names == WITHOUT_WEB, fixture_server.requests[0].tool_names
     assert exa.calls == [], exa.calls
+
+
+def test_a_stored_key_never_goes_to_the_override(
+    craze_bin: Path,
+    tmp_path: Path,
+    fixture_server: SSEFixture,  # noqa: F811
+    exa: ExaFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 051 §F.5: a key stored with `craze auth login websearch/exa` is the
+    search's credential, but the test override is never sent one -- the
+    search round-trips through the fake with no x-api-key -- and the key is in
+    no output and no file but credentials.toml. (That the stored key is what
+    the provider's own endpoint is sent is the harness's
+    TestWebServiceSendsTheStoredKey.)"""
+    key = "exa-stored-for-the-override-0301"
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    (craze_home / "config.toml").write_text('[websearch]\nprovider = "exa"\n', encoding="utf-8")
+    monkeypatch.setenv("CRAZE_TEST_EXA_MCP", exa.url)
+    login = subprocess.run(
+        [str(craze_bin), "auth", "login", "websearch/exa"],
+        input=key + "\n",
+        capture_output=True,
+        text=True,
+        env=native_env(craze_home),
+        timeout=10,
+        check=False,
+    )
+    assert login.returncode == 0, login.stderr
+    credentials = craze_home / "native" / "credentials.toml"
+    assert key in credentials.read_text(encoding="utf-8")
+    fixture_server.set_script([call_step("websearch", {"query": "anything"}), answer("searched")])
+
+    proc = run_native(craze_bin, craze_home, ws, "look it up", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert exa.tools_called() == ["web_search_exa"], exa.tools_called()
+    assert all("x-api-key" not in c.headers for c in exa.calls), [sorted(c.headers) for c in exa.calls]
+    assert key not in proc.stdout + proc.stderr + login.stdout + login.stderr
+    holding = sorted(p for p in craze_home.rglob("*") if p.is_file() and key.encode() in p.read_bytes())
+    assert holding == [credentials], holding

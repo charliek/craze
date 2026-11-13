@@ -733,7 +733,23 @@ changes for you:
 - **`EXA_API_KEY`**, when exported, is sent to Exa to raise its rate limit
   (see [above](#exa_api_key-is-kept-out-of-native-commands) for what else
   craze does with it).
-- The file tools refuse `websearch.json` as they refuse `providers.toml`.
+- **A stored Exa key.** `craze auth login websearch/exa` (or `exa`, when no
+  model provider of yours is called that) stores one in a new file,
+  `~/.craze/native/credentials.toml` (`0600`); `craze auth logout
+  websearch/exa` removes it. `EXA_API_KEY` still comes first, then the stored
+  key, then Exa's keyless endpoint
+  ([The stored web search key](../reference/configuration.md#the-stored-web-search-key)).
+  An older craze sharing the directory never reads the file, and
+  `providers.toml` is not touched.
+- **`craze auth list` gains a section**: after the providers, a blank line,
+  `Web search`, and one row, `Exa  websearch/exa  <how it is keyed>`. A script
+  that parses the list's rows stops at the blank line. The numbered list `craze
+  auth login` shows on a terminal gains the web search after the providers
+  (`Provider [1-8]`), and the usage errors that list provider ids end with
+  `websearch/exa`. If a provider of yours is called `exa`, bare `exa` stays
+  that provider.
+- The file tools refuse `websearch.json` and `credentials.toml` as they refuse
+  `providers.toml`.
 - **Sub-agent personas.** A bare `WebSearch` or `WebFetch` in a persona's
   `tools` used to be dropped; it now names `websearch` or `webfetch`, which
   the sub-agent has when its parent's session opened with web search on (not
