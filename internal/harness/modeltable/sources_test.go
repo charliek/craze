@@ -646,6 +646,7 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 		holdsNothing bool // Offers holds no model back at all
 		sourceOrder  bool // models writes its own source_order: no `source_order = []` run
 		opus6        bool // the Anthropic account's list, bound to the case's key, names the seeds and Opus 6
+		opus6Alone   bool // that list names Opus 6 and no seed, so the table holds no priced Anthropic model
 	}{
 		// G2: a broken ChatGPT sign-in.
 		{name: "broken ChatGPT and a Fireworks key", s: signedInNone, keys: []string{fw},
@@ -666,6 +667,10 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 		// the account's list names, and an entry of the user's on Fireworks.
 		{name: "broken ChatGPT, an Anthropic key and an unseeded Opus the account lists", s: signedInNone, keys: []string{an},
 			opus6: true, held: held{"anthropic/claude-opus-6", ChatGPTProvider, ""}},
+		// The list can name no seed at all: every priced Anthropic model is
+		// then out of the table, and the provider is billed all the same.
+		{name: "broken ChatGPT, an Anthropic key and a list of one unseeded Opus alone", s: signedInNone, keys: []string{an},
+			opus6Alone: true, held: held{"anthropic/claude-opus-6", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT, a Fireworks key and the user's unpriced model on Fireworks", s: signedInNone, keys: []string{fw},
 			models: "[models.\"fireworks/aaa-mine\"]\nprovider = \"fireworks\"\nwire_model = \"accounts/me/models/mine\"\n",
 			held:   held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
@@ -738,11 +743,21 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 				if tc.opus6 {
 					writeAnthropicList(t, dir, vars[an], append(seedEntries(t), opus6()))
 				}
+				if tc.opus6Alone {
+					writeAnthropicList(t, dir, vars[an], []AnthropicModel{opus6()})
+				}
 				tbl, err := Load(dir)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tc.opus6 {
+				if tc.opus6Alone {
+					for alias, m := range tbl.Models {
+						if m.Provider == AnthropicProvider && m.Cost != nil {
+							t.Fatalf("premise: %s is a priced Anthropic model in the table, want none", alias)
+						}
+					}
+				}
+				if tc.opus6 || tc.opus6Alone {
 					if m, ok := tbl.Models["anthropic/claude-opus-6"]; !ok || m.Cost != nil {
 						t.Fatalf("premise: anthropic/claude-opus-6 = %+v (present %v), want a model with no price", m, ok)
 					}

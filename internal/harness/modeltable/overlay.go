@@ -644,6 +644,15 @@ func (m *merger) makers() {
 			put(&m.t.envKeyByNameOnly, id, true)
 		}
 	}
+	// A provider the catalog prices a model of is billed per token even when
+	// the account's list has taken every priced one out of the table.
+	for _, models := range []map[string]Model{m.cat.Models, m.cat.listHidden} {
+		for _, mod := range models {
+			if mod.Cost != nil && !moved(mod.Provider) {
+				put(&m.t.billedProviders, mod.Provider, true)
+			}
+		}
+	}
 	for alias, mod := range m.t.Models {
 		if mod.Maker != "" && moved(mod.Provider) {
 			mod.Maker = ""

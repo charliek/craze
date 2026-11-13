@@ -282,6 +282,13 @@ type Table struct {
 	// found only in the environment for one of them never has craze choose
 	// its models for the owner (Offers). nil for a table with none.
 	envKeyByNameOnly map[string]bool
+	// billedProviders are the providers the catalog prices a model of —
+	// one the account's list took out of the table included (a seed the
+	// Anthropic account does not list) — less one the user's providers.toml
+	// moved: with the table's own priced models, the providers the
+	// paid-source guard reads as billed per token (holdAfterBrokenSignIn).
+	// nil for a table with none.
+	billedProviders map[string]bool
 
 	// carried binds each model Carry put in this table to the ChatGPT account
 	// its entry was bound to where it came from — the zero Account for one

@@ -236,8 +236,9 @@ func (t *Table) Offers(getenv func(string) string) Offers {
 // billed per token of a provider after it in StartOrder or not in it at
 // all, deprecated ones included, which o does not hide or hold already. A
 // model is billed per token when it has a price (its Cost set, as
-// Route.Priced reads it) or any model of its provider in t does, whatever
-// its state: a model of a paid provider with no price of its own — one only
+// Route.Priced reads it) or any model of its provider does, in t whatever
+// its state or in the catalog (billedProviders: the account's list can take
+// every priced seed out of t): a model of a paid provider with no price of its own — one only
 // the Anthropic account's list names, or an entry of the user's on a
 // shipped provider — is billed all the same. A provider none of whose
 // models has a price (a local server, a flat plan) is not. A sign-in
@@ -251,7 +252,13 @@ func (t *Table) holdAfterBrokenSignIn(o Offers, active map[string]bool, isSigned
 	if at < 0 {
 		return
 	}
-	priced := map[string]bool{} // a provider with a model that has a price
+	// A provider with a model that has a price: in the table, or in the
+	// catalog (billedProviders), where the account's list may have taken the
+	// priced ones out of the table.
+	priced := maps.Clone(t.billedProviders)
+	if priced == nil {
+		priced = map[string]bool{}
+	}
 	for _, m := range t.Models {
 		if m.Cost != nil {
 			priced[m.Provider] = true
