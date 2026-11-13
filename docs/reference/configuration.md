@@ -152,6 +152,19 @@ project's and your own entries, a plugin's being `plugins`' alone. `agents =
 false` removes the personas from all three of their sources, a plugin's
 included.
 
+A persona's `tools` and `disallowedTools` are read in Claude's vocabulary:
+`Read`, `LS`, `Write`, `Edit`, `MultiEdit`, `Bash`, `Glob`, `Grep` and the
+native ids name the child's file and shell tools, and a bare `WebSearch` or
+`WebFetch` names `websearch` and `webfetch`, which the child has only when its
+parent's session opened with web search on, not while the parent is still
+undecided (see [Native web search](#native-web-search)); otherwise the names
+are dropped silently. Tools craze has no counterpart
+for (`TodoWrite`, `NotebookEdit`, `Task`, MCP names and the like) are dropped
+silently too. Any other name, and any restricted entry in `tools`
+(`Bash(git status:*)`, `WebFetch(domain:example.com)`), is reported in one line
+and grants nothing, so a persona never gets more than it wrote; in
+`disallowedTools` a restricted entry takes the whole tool away.
+
 A value that is not a bool leaves the class on and adds one line to the
 session's diagnostics: `config.toml compat.claude.<key> is not a bool; leaving
 it on`. These keys fail open, unlike `journal` and `control_socket`: a typo
@@ -2442,7 +2455,9 @@ this order:
    `config.toml`, or a remembered Allow. It never answers the question for
    you.
 
-A sub-agent is given the tools only when its parent opened with web search on
+A sub-agent persona that lists `WebSearch` or `WebFetch` (see [Claude
+content](#claude-content-compatclaude)) gets them under the same rule. A
+sub-agent is given the tools only when its parent opened with web search on
 (by the config or a remembered Allow), and through the parent's own: a
 sub-agent of a session that has not been asked yet has nobody to ask, and
 gets none. A resumed session is decided again from the settings as they are

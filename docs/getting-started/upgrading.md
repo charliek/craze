@@ -734,6 +734,14 @@ changes for you:
   (see [above](#exa_api_key-is-kept-out-of-native-commands) for what else
   craze does with it).
 - The file tools refuse `websearch.json` as they refuse `providers.toml`.
+- **Sub-agent personas.** A bare `WebSearch` or `WebFetch` in a persona's
+  `tools` used to be dropped; it now names `websearch` or `webfetch`, which
+  the sub-agent has when its parent's session opened with web search on (not
+  while the parent is still waiting on the consent card). A persona that listed
+  only those names, and so ran with no tools, now has them in such a session.
+  A restricted entry (`WebFetch(domain:example.com)`) in `tools` is reported
+  as a name craze cannot map and grants nothing; in `disallowedTools` it
+  removes `webfetch`.
 
 ## Since v0.1.1
 

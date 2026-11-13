@@ -516,7 +516,8 @@ func TestPersonaToolsFailClosed(t *testing.T) {
 		{name: "only commas", fm: "tools: ,\n"},
 		{name: "a flow sequence that never closes", fm: "tools: [Read, Grep\nmodel: opus\n"},
 		{name: "a shape the reader does not take", fm: "tools:\n  Read, Grep\n"},
-		{name: "every name dropped", fm: "tools: WebFetch, Agent(x), TodoWrite\n"},
+		{name: "every name dropped", fm: "tools: NotebookEdit, Agent(x), TodoWrite\n"},
+		{name: "a restricted web name is refused", fm: "tools: WebFetch(domain:example.com)\n", unknown: true},
 		{name: "every name unknown", fm: "tools: Frobnicate, Bash(git status:*)\n", unknown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -535,6 +536,25 @@ func TestPersonaToolsFailClosed(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("bare web names map; a restricted deny removes the tool (plan 051 §D)", func(t *testing.T) {
+		f := contentTree(t, map[string]string{
+			".claude/agents/a.md": personaDoc("a", "d", "tools: Read, WebSearch, WebFetch"),
+			".claude/agents/b.md": personaDoc("b", "d", "disallowedTools: WebFetch(domain:example.com)"),
+		}, nil)
+		got, lines := f.discoverPersonas(ClaudeCompat{})
+		wantNoLines(t, lines)
+		byName := map[string]harness.Persona{}
+		for _, p := range got {
+			byName[p.Name] = p
+		}
+		if a := byName["a"]; a.AllTools || !slices.Equal(a.Tools, []string{"read", "websearch", "webfetch"}) {
+			t.Errorf("a is %+v, want read, websearch, webfetch", a)
+		}
+		if b := byName["b"]; !b.AllTools || !slices.Equal(b.DisallowedTools, []string{"webfetch"}) {
+			t.Errorf("b is %+v, want every tool less webfetch", b)
+		}
+	})
 
 	t.Run("an absent key is every tool", func(t *testing.T) {
 		f := contentTree(t, map[string]string{".claude/agents/p.md": personaDoc("p", "d", "model: opus")}, nil)

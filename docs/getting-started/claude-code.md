@@ -178,5 +178,13 @@ Claude Code applies `Edit` rules to its Write tool, and `//` marks an absolute p
 | Shows in `craze -c` | n/a | no: `craze -c` skips it, and the resume picker and session list show it dimmed or tagged |
 | Overhead per call | none | a few seconds, plus a Haiku turn to forward |
 
+A native session also reads Claude's own agent definitions (`.claude/agents`).
+In one, a bare `WebSearch` or `WebFetch` in `tools` now names craze's native
+`websearch` and `webfetch` when the session is offered them ([Native web
+search](../reference/configuration.md#native-web-search)), and is dropped as
+before when it is not. A restricted entry such as `WebFetch(domain:example.com)`
+is refused in `tools` (craze has no domain restriction) and removes the whole
+tool in `disallowedTools`.
+
 A session left running when Claude Code is interrupted keeps going until its
 turn ends; `craze ps` lists it and `craze stop <short>` ends it.
