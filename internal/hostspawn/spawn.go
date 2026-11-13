@@ -164,6 +164,10 @@ type Spec struct {
 	// own default.
 	Effort string
 	Fast   *bool
+	// WebSearch is --web-search ("on") or --no-web-search ("off"), passed
+	// only when set (plan 051 F.1): a new session's web search choice, which
+	// its host records on the session's row. "" passes neither.
+	WebSearch string
 	// PluginDirs is --plugin-dir, once each.
 	PluginDirs []string
 	// NoForce is --no-force: the session handles permission requests
@@ -233,6 +237,12 @@ func Args(s Spec) []string {
 		} else {
 			argv = append(argv, "--no-fast")
 		}
+	}
+	switch s.WebSearch {
+	case "on":
+		argv = append(argv, "--web-search")
+	case "off":
+		argv = append(argv, "--no-web-search")
 	}
 	str("agent-bin", s.AgentBin)
 	for _, d := range s.PluginDirs {

@@ -549,7 +549,8 @@ func runPsSaved(cmd *cobra.Command, f psFlags) error {
 func psSavedFromHub(env rundir.Env, q protocol.SavedParams) (json.RawMessage, protocol.SavedResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
 	defer cancel()
-	sock, err := hub.Find(ctx, env, hub.ReopenNeed())
+	// A listing reopens nothing: reopen alone, whatever the rows record.
+	sock, err := hub.Find(ctx, env, hub.ReopenNeed(""))
 	if err != nil {
 		return nil, protocol.SavedResult{}, err
 	}

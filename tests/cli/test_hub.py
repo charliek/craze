@@ -131,6 +131,9 @@ def test_a_hub_serves_its_hello_and_stops_on_sigterm(craze_bin: Path, tmp_path: 
     assert result["capabilities"]["createOptions"] is True, result["capabilities"]
     # And sessions.saved and session.reopen both (plan 046 B1): reopen.
     assert result["capabilities"]["reopen"] is True, result["capabilities"]
+    # Its hosts apply a session's recorded web search choice on a load (plan
+    # 051 F.3): reopenWebSearch, beside reopen.
+    assert result["capabilities"]["reopenWebSearch"] is True, result["capabilities"]
     assert "clientId" not in result
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=WAIT) == 0

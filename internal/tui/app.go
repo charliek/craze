@@ -174,6 +174,15 @@ type Config struct {
 	// resume picker has the row in hand and carries the id itself; a new
 	// session leaves this empty and the engine mints one.
 	CrazeSessionID string
+	// WebSearch is the web search choice recorded on the row Session was
+	// built to load (sessions.Row.WebSearch, plan 051 F.3): "on", "off" or
+	// "" for none. internal/cli resolves --continue's row, and its session
+	// already applies the choice (agent.Options.WebFlag); this is how the
+	// engine's index writer carries it on every row it writes, so a row the
+	// index's cap evicted while the session ran comes back with it (C6
+	// review F2). The resume picker carries its row's itself, as it does the
+	// craze id; a new session leaves this empty.
+	WebSearch string
 	// TerminalTitle turns on the tab title the Update wrapper maintains
 	// (§3.10). It defaults false, which is what every test Config and the
 	// frame runner leave it — the frame runner's tea.WithoutRenderer() makes
@@ -259,8 +268,8 @@ type Config struct {
 	// session another host holds is that host's backend.
 	//
 	// Either set is the launch flow, and Session, NewSession, LoadSession,
-	// ClaimSession, OnEngine, SessionIndex and CrazeSessionID — the
-	// in-process path's — are not read: the host builds the engine and owns
+	// ClaimSession, OnEngine, SessionIndex, CrazeSessionID and WebSearch —
+	// the in-process path's — are not read: the host builds the engine and owns
 	// its claim, its index row and its provider's persistence. A failure is
 	// the session's start failing (startErr, exactly as Start's), except a
 	// *Refusal of a picker's choice, which brings that picker back with the
@@ -554,8 +563,12 @@ type Model struct {
 	// loaded, for the engine to keep rather than mint a new one (SD-22). The
 	// resume picker has the row itself and passes its id to setSession
 	// directly.
+	//
+	// webSearch is Config.WebSearch, the --continue row's recorded web search
+	// choice, carried the same way (setLoadedSession).
 	sessionIndex SessionIndex
 	crazeID      string
+	webSearch    string
 
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
@@ -1577,11 +1590,23 @@ func (o *sessionOwner) current() backend.Backend {
 // which the engine mints an id for. The provider picker builds a NEW session
 // and so passes "" deliberately.
 func (m *Model) setSession(s agent.Session, crazeID string) {
+	m.setLoadedSession(s, crazeID, "")
+}
+
+// setLoadedSession is setSession for a session built to load a row, with the
+// web search choice recorded on it (sessions.Row.WebSearch, plan 051 F.3):
+// the engine's index writer carries it on every row it writes, as craze serve
+// --load's does, so a row the index's cap evicted while the session ran is
+// recreated with it rather than without (C6 review F2). "" writes none, which
+// is every new session's: the in-process TUI takes no web flag.
+func (m *Model) setLoadedSession(s agent.Session, crazeID, webSearch string) {
 	m.dropSession()
 	if s == nil {
 		return
 	}
-	eng, err := engine.New(s, engine.HostOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
+	opts := engine.HostOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name())
+	opts.Index.WebSearch = webSearch
+	eng, err := engine.New(s, opts)
 	if err != nil {
 		// m.eng stays the untyped nil it was set to above: a failure leaves no
 		// backend, never a nil *engineBackend that would read as one.
@@ -1803,6 +1828,7 @@ func New(cfg Config) Model {
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		crazeID:         cfg.CrazeSessionID,
+		webSearch:       cfg.WebSearch,
 		terminalTitle:   cfg.TerminalTitle,
 		host:            cfg.Host,
 		viewer:          cfg.Viewer,
@@ -1882,7 +1908,7 @@ func New(cfg Config) Model {
 		// the in-process path's alone.
 		m.localPresence = nil
 	} else {
-		m.setSession(sess, m.crazeID)
+		m.setLoadedSession(sess, m.crazeID, m.webSearch)
 	}
 	if checked {
 		// Init asks it, and cannot record the request: New does.

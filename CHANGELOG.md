@@ -102,6 +102,24 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   --wait`, an unattended host) never asks and is offered no web tools until
   someone has decided, so its requests are unchanged. A sub-agent gets them
   only when its parent opened on. The file tools refuse `websearch.json`.
+- `--web-search` and `--no-web-search` on `craze new --wait`, `craze prompt`
+  and `craze serve` decide web search for one session: `--no-web-search`
+  withholds the tools whatever the home says (never refused, a no-op off
+  native); `--web-search` offers them over a remembered Disable with no
+  question and nothing remembered, and is refused — exit 1, kind `config` —
+  by an explicit off in `config.toml` or a provider other than native. Under
+  `craze new --wait` the refusal comes before the prompt is read, with
+  `detail.reason` `web_search_not_offered` (no `detail.model`), and wins over
+  a model refusal; `craze prompt` reports it as its startup `error` event.
+  Both together, or either on plain `craze new` or with `--load`, are usage
+  errors. The choice is recorded on the session's index row (`webSearch`,
+  outside `unattended`) and applied on every load: a `craze send` reload, a
+  hub reopen (through a hub whose `hello` says `reopenWebSearch`: an older
+  hub still running is reported, not reopened through), `--continue`, the
+  resume picker and the session list. A
+  recorded `--web-search` that `config.toml` has since turned off refuses a
+  reload nobody attends, and opens a person's resume without web tools, with
+  a line saying why.
 - A stored Exa key: `craze auth login websearch/exa` (bare `exa` too, unless a
   model provider has that name) keeps one in `native/credentials.toml`
   (`0600`, its own lock, unknown tables and keys kept, read leniently with

@@ -726,6 +726,25 @@ changes for you:
   offered no web tools — their model requests carry exactly the tools they
   did — unless you allowed web search before or turned it on in
   `config.toml`.
+- **A caller can decide per run**: `--web-search` and `--no-web-search` on
+  `craze new --wait`, `craze prompt` and `craze serve`
+  ([Web search flags](../reference/cli.md#web-search-flags)).
+  `--no-web-search` guarantees no web tools, whatever the home says;
+  `--web-search` offers them without asking, and is refused (exit 1, kind
+  `config`, `detail.reason` `web_search_not_offered` under `craze new --wait
+  --json`) by `websearch = false` in `config.toml` or on a provider other than
+  native. The choice is recorded on the session's index row (`webSearch`) and
+  every later load keeps it, `craze send`'s reload included. An older craze
+  rejects either flag as an unknown flag (exit 2), and keeps a row's
+  `webSearch` key as it found it. A hub still running from before the
+  upgrade does not reopen a session that records a choice: `craze new
+  --load` says `this hub (craze <v>) cannot reopen a session created with
+  --web-search or --no-web-search; …`, exit 1, until that hub exits or is
+  stopped ([`reopenWebSearch`](../reference/protocol.md#the-hubs-result)).
+- **`detail.reason` has a fifth value**, `web_search_not_offered`, and it comes
+  with no `detail.model`: the model is there on the four model reasons only. A
+  program that took `model` to be present with every `reason` must allow for
+  its absence.
 - **To turn it off** everywhere, whatever was remembered:
   `websearch = false` in `~/.craze/config.toml`. To turn it on without being
   asked: a `[websearch]` table with `provider = "exa"`. Any other value under

@@ -31,11 +31,16 @@ type tuiFlags struct {
 	model     string
 	// effort is --effort, and fast and noFast --fast and --no-fast (plan 032
 	// §3.11): the session's start settings, read through fastSetting.
-	effort   string
-	fast     bool
-	noFast   bool
-	agentBin string
-	provider string
+	effort string
+	fast   bool
+	noFast bool
+	// webSearch and noWebSearch are --web-search and --no-web-search (plan
+	// 051 F.1), read through webSearchSetting. Only craze serve registers
+	// them (registerServeFlags): the root's stay false.
+	webSearch   bool
+	noWebSearch bool
+	agentBin    string
+	provider    string
 	// pluginDirs are extra plugin roots, cursor-agent's --plugin-dir spelled
 	// the same way. They are craze's own: the child agent is never told.
 	pluginDirs []string
@@ -75,8 +80,19 @@ func (f *tuiFlags) mode() string {
 // start (Config.RefuseLoad). So no route to a session lets --agent-bin,
 // CRAZE_AGENT_BIN or --ask/--plan through that `--provider` would have refused
 // (plan 028 §3.5 and §3.16, C19a).
+//
+// craze serve's --web-search is asked here too (plan 051 S3), before a new
+// session's id is minted: the refusals that do not depend on whether anybody
+// attends it — a provider that is not native, config.toml off, invalid or
+// unreadable, an invalid CRAZE_TEST_EXA_MCP — exit 1, kind config. Whether it
+// is attended is settled later, and the whole decision runs again then
+// (serveSession). The root never has the flag, so for the TUI this is
+// refuseInProcess alone.
 func (f *tuiFlags) refuse(p agent.Provider) error {
-	return refuseInProcess("craze", p, f.agentBin, f.mode())
+	if err := refuseInProcess("craze", p, f.agentBin, f.mode()); err != nil {
+		return err
+	}
+	return webStartCheck("craze", f.webSearchSetting(), agent.WebFlagGiven, false, p)
 }
 
 // resumeRowLimit is how many rows --resume offers. The dialog caps at the
@@ -310,6 +326,14 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 // are p's only when p is it, and [agents].<p> or p's PATH candidates
 // otherwise. --effort and --fast/--no-fast go to every session the command
 // line starts, as --model does.
+//
+// The web search choice (plan 051 F.3) is the command line's for a new
+// session (craze serve's --web-search/--no-web-search, given now) and the
+// row's for a load (recorded when the session was created): every load path —
+// craze send's reload, a hub reopen, --continue, the resume picker, the
+// session list — reaches a session through here, so each applies it, and no
+// argv has to carry it again. The decision is the session's own, at Open, once
+// the unattended policy has settled whether a person is opening it.
 func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p, launch agent.Provider, row sessions.Row) agent.Options {
 	opts := agent.Options{
 		Workspace:       ws,
@@ -333,6 +357,10 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		LoadSessionID: row.SessionID,
 		Title:         row.Title,
 		TitlePinned:   row.Pinned,
+	}
+	opts.WebFlag, opts.WebFlagOrigin = f.webSearchSetting(), agent.WebFlagGiven
+	if opts.WebFlag == agent.WebFlagAbsent {
+		opts.WebFlag, opts.WebFlagOrigin = agent.ParseWebFlag(row.WebSearch), agent.WebFlagRecorded
 	}
 	agentBinary(p, launch, f.agentBin, diag).apply(&opts)
 	return opts
@@ -419,6 +447,11 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	// when no id could be written is it empty, and then the engine mints one
 	// that the row gains on its next write.
 	cfg.CrazeSessionID = row.CrazeID
+	// Its recorded web search choice the same way (plan 051 F.3): the session
+	// built from the row applies it (sessionOptions), and the engine's index
+	// writer carries it on every row it writes, so a row the index's cap
+	// evicts while the session runs is recreated with it (C6 review F2).
+	cfg.WebSearch = row.WebSearch
 	cfg.Session = build(p, row)
 	return nil
 }

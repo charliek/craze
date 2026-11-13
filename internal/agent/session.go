@@ -1181,6 +1181,17 @@ type Options struct {
 	// says the reading's line (an invalid or unreadable value) when it opens:
 	// the CLI says nothing about it.
 	WebSearch WebConfig
+	// WebFlag is --web-search (on) or --no-web-search (off), or neither
+	// (plan 051 F.1), and WebFlagOrigin where it came from (F.3): given on the
+	// command line that starts this session, or recorded on the row of the
+	// session it loads (sessions.Row.WebSearch). A native session decides
+	// its web tools from them at Open (DecideWeb), with Interactive as the
+	// final word on whether a person is opening it: a flag that cannot be
+	// honoured fails the start, except a recorded on that a person resumes,
+	// which opens without web tools and says why. Every other provider
+	// ignores them; the CLI refuses --web-search for one before it starts.
+	WebFlag       WebFlag
+	WebFlagOrigin WebFlagOrigin
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

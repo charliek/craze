@@ -844,10 +844,17 @@ func (r *reopening) spawn() holderLook {
 
 // ------------------------------------------------------------ the client
 
-// ReopenNeed is what a hub must say in its hello to take a reopen (Ensure's
-// need, and Reopen's own check): reopen (plan 046 B1).
-func ReopenNeed() protocol.ConnectionCapabilities {
-	return protocol.ConnectionCapabilities{Reopen: true}
+// ReopenNeed is what a hub must say in its hello to take a reopen of a session
+// whose row records webSearch (Ensure's need, and Reopen's own check): reopen
+// (plan 046 B1), and — for a session that records a web search choice, "on"
+// or "off" — reopenWebSearch (plan 051 F.3, C6 review F1). A hub from before
+// the record reopens through its own craze serve --load, which would open the
+// session without the choice: such a hub is reported (LacksError), never
+// reopened through, as a hub without createTitle is for a titled create.
+// "" — a session that records none, or a caller with no session yet (craze ps
+// --saved's Find) — needs reopen alone.
+func ReopenNeed(webSearch string) protocol.ConnectionCapabilities {
+	return protocol.ConnectionCapabilities{Reopen: true, ReopenWebSearch: webSearch != ""}
 }
 
 // Reopen asks the hub at socket to ensure the saved session id is running —
@@ -858,15 +865,16 @@ func ReopenNeed() protocol.ConnectionCapabilities {
 // wrapping the hub's *protocol.Error; a connection that ends before the
 // answer, one wrapping ErrUnanswered — the reopen may have run, and sending
 // the same id again is safe (retry by session); a hub whose hello does not
-// say reopen, a *LacksError, nothing asked. The hello is the zero value when
+// say reopen — or, for a session whose row records webSearch, reopenWebSearch
+// (ReopenNeed) — a *LacksError, nothing asked. The hello is the zero value when
 // the connection never got one.
-func Reopen(ctx context.Context, socket string, who protocol.ClientInfo, id string) (json.RawMessage, protocol.HubHelloResult, error) {
+func Reopen(ctx context.Context, socket string, who protocol.ClientInfo, id, webSearch string) (json.RawMessage, protocol.HubHelloResult, error) {
 	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
 		return nil, protocol.HubHelloResult{}, err
 	}
 	defer hc.close()
-	if missing := missing(hello.Capabilities, ReopenNeed()); len(missing) > 0 {
+	if missing := missing(hello.Capabilities, ReopenNeed(webSearch)); len(missing) > 0 {
 		return nil, hello, lacking(hello.Endpoint, missing)
 	}
 	res, err := hc.call(protocol.MethodSessionReopen, protocol.ReopenParams{ID: id})

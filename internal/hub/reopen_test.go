@@ -173,6 +173,83 @@ func TestReopenIsServedByAHubGivenItsAnswer(t *testing.T) {
 	}
 }
 
+// TestTheHelloSaysReopenWebSearchOfAHubWhoseHostsApplyIt (plan 051 F.3, C6
+// review F1): reopenWebSearch is said beside reopen, by a hub whose hosts
+// apply a session's recorded web search choice (Creates.WebSearch), and
+// omitted — the member absent, as a hub from before it writes none — by one
+// whose hosts may not, and by one that does not say reopen.
+func TestTheHelloSaysReopenWebSearchOfAHubWhoseHostsApplyIt(t *testing.T) {
+	applies := reopenCreates(newTargets())
+	applies.WebSearch = true
+	noReopen := creates("cursor")
+	noReopen.WebSearch = true
+	for _, tc := range []struct {
+		name string
+		cr   *Creates
+		says bool
+	}{
+		{"hosts that apply it", applies, true},
+		{"hosts that may not", reopenCreates(newTargets()), false},
+		{"no reopen", noReopen, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rn := runWith(t, testEnv(t), nil, tc.cr)
+			c := dial(t, rn.line(t).Socket)
+			resp := c.call(t, protocol.MethodHello, protocol.HelloParams{Protocols: []int{1}, Client: protocol.ClientInfo{Kind: "test"}})
+			if resp.Error != nil || strings.Contains(string(resp.Result), "reopenWebSearch") != tc.says {
+				t.Fatalf("hello = %s (%v), want reopenWebSearch said %v", resp.Result, resp.Error, tc.says)
+			}
+		})
+	}
+}
+
+// TestEnsureReportsAHubThatCannotReopenAWebSearch is C6 review F1 at Ensure
+// (§3.8 step 1): a running hub without reopenWebSearch — one that outlived an
+// upgrade, whose own craze serve --load would open the session without its
+// recorded choice — asked for a reopen of a session that records one
+// (ReopenNeed("on"/"off")), is reported in LacksError's words, not used, not
+// replaced and not signalled; asked for a session that records none (the
+// negative control) it is used. Reopen itself checks the same need on the
+// connection it reopens through, and asks nothing of such a hub.
+func TestEnsureReportsAHubThatCannotReopenAWebSearch(t *testing.T) {
+	env := processEnv(t)
+	noCommand(t)
+	pid := sleeper(t)
+	hubID := rundir.NewHubID()
+	older := protocol.HubCapabilities()
+	older.Reopen = true
+	d := newDecoy(t, decoyAnswer, hubResult(hubID, "0.9.1", older))
+	writeRecord(t, env, rundir.HubRecord{HubID: hubID, PID: pid, StartToken: token(t, pid), Socket: d.path})
+	const words = "reopen a session created with --web-search or --no-web-search"
+	for _, rec := range []string{"on", "off"} {
+		need := ReopenNeed(rec)
+		if !need.Reopen || !need.ReopenWebSearch {
+			t.Fatalf("a reopen of a recorded %s needs %+v", rec, need)
+		}
+		_, err := ensure(t, env, need)
+		var lacks *LacksError
+		if !errors.As(err, &lacks) || err.Error() != lacksWords("0.9.1", words, 1) {
+			t.Fatalf("Ensure for a reopen of a recorded %s = %v; want the older hub reported", rec, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), step)
+		_, _, err = Reopen(ctx, d.path, protocol.ClientInfo{Kind: "test"}, "s-1", rec)
+		cancel()
+		if !errors.As(err, &lacks) || !slices.Equal(lacks.Missing, []string{words}) {
+			t.Fatalf("Reopen of a recorded %s through the older hub = %v; want LacksError, nothing asked", rec, err)
+		}
+	}
+	if !alive(t, pid) {
+		t.Fatal("Ensure signalled an older hub")
+	}
+	if need := ReopenNeed(""); need.ReopenWebSearch {
+		t.Fatalf("a reopen of a session with no record needs %+v", need)
+	}
+	sock, err := ensure(t, env, ReopenNeed(""))
+	if err != nil || sock != d.path {
+		t.Fatalf("Ensure for a reopen with no record = %q, %v; want the older hub, which can", sock, err)
+	}
+}
+
 // TestReopenRefusesBadParams (B9's wire negatives): params the schema or the
 // hub refuses are bad_request — unknown_field for a member it does not
 // define — each resolving nothing and spawning nothing. The negative control:

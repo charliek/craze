@@ -90,11 +90,14 @@ type newFlags struct {
 	load string
 
 	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
-	wait       bool
-	plan, ask  bool
-	timeout    time.Duration
-	maxMessage int
-	prompt     promptInput
+	wait      bool
+	plan, ask bool
+	// webSearch and noWebSearch are --web-search and --no-web-search (plan
+	// 051 F.1): the new session's web tools, and its row's record of them.
+	webSearch, noWebSearch bool
+	timeout                time.Duration
+	maxMessage             int
+	prompt                 promptInput
 	// exitAfterTurn and sessionFile are --exit-after-turn and --session-file.
 	exitAfterTurn bool
 	sessionFile   string
@@ -102,7 +105,8 @@ type newFlags struct {
 
 // newWaitOnly is every flag only craze new --wait takes: on plain craze new
 // each is a usage error.
-var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask", "exit-after-turn", "session-file"}
+var newWaitOnly = []string{"timeout", "max-message", "prompt-file", "remove-prompt-file", "plan", "ask", "exit-after-turn", "session-file",
+	"web-search", "no-web-search"}
 
 func newNewCmd() *cobra.Command {
 	f := &newFlags{}
@@ -154,6 +158,9 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "start an unattended session here, without the hub, send it the prompt, and wait for its turn's result")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "with --wait: start in plan mode")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "with --wait: start in ask mode")
+	// --web-search/--no-web-search (plan 051 F.1): --wait's alone. A plain
+	// craze new's session is a person's, whose session asks.
+	registerWebSearchFlags(cmd, &f.webSearch, &f.noWebSearch, "with --wait: ")
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 0, "with --wait: stop waiting after this long (from the command's start): the result is running, exit 5, with a handle to follow it (default: no limit)")
 	cmd.Flags().IntVar(&f.maxMessage, "max-message", 0, "with --wait: print at most this many characters of the message and the plan together, and write the whole result to a file named in the output (default: no limit)")
 	registerExitFlags(cmd, &f.exitAfterTurn, &f.sessionFile)

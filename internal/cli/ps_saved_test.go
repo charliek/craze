@@ -249,9 +249,10 @@ func TestTheHubServesSavedSessions(t *testing.T) {
 		savedRow("", "grok", "p-2", ws, "two", 3*time.Minute),
 	)
 	// reopen (plan 046 B1): the hub serves sessions.saved and session.reopen
-	// both.
+	// both; and its hosts apply a session's recorded web search choice on a
+	// load (reopenWebSearch, plan 051 F.3).
 	want := protocol.HubCapabilities()
-	want.CreateOptions, want.CreateTitle, want.Reopen = true, true, true
+	want.CreateOptions, want.CreateTitle, want.Reopen, want.ReopenWebSearch = true, true, true, true
 	if hello := hubHello(t, sock); hello.Capabilities != want {
 		t.Fatalf("the hub's hello %+v, want %+v", hello.Capabilities, want)
 	}

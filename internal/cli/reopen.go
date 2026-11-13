@@ -123,7 +123,8 @@ const (
 // starts a new session, and what --wait takes. A reopen sends no prompt, and
 // its session's provider, directory and settings are its own.
 var newLoadNot = []string{"prompt-file", "remove-prompt-file", "provider", "model", "effort", "fast", "no-fast", "no-force",
-	"title", "dir", "wait", "plan", "ask", "timeout", "max-message", "exit-after-turn", "session-file"}
+	"title", "dir", "wait", "plan", "ask", "timeout", "max-message", "exit-after-turn", "session-file",
+	"web-search", "no-web-search"}
 
 // runNewLoad is craze new --load (the comment above).
 func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {
@@ -154,7 +155,7 @@ func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {
 		return fail(errkind.Config, err, "%s", err.Error())
 	}
 	env := rundir.ProcessEnv()
-	raw, hello, err := reopenThroughHub(ctx, env, roster.SavedID(row))
+	raw, hello, err := reopenThroughHub(ctx, env, roster.SavedID(row), row.WebSearch)
 	if err != nil {
 		return fail(hubFailureKind(err), err, "%s", newFailure(err, hello))
 	}
@@ -184,15 +185,20 @@ func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {
 // id, through Ensure again — a reopen is safe to send again (its retry safety
 // is the session's claim) — and only that. It answers too the hello of the
 // hub that took the reopen's own connection, for newFailure (plan 046 U2).
-func reopenThroughHub(ctx context.Context, env rundir.Env, id string) (json.RawMessage, protocol.HubHelloResult, error) {
+// webSearch is the web search choice the session's row records ("" for
+// none): a session with one needs a hub whose hosts apply it (ReopenNeed's
+// reopenWebSearch, C6 review F1) — a hub that outlived an upgrade, running an
+// older craze whose serve --load ignores the record, is reported rather than
+// reopened through, and Ensure neither uses nor replaces it.
+func reopenThroughHub(ctx context.Context, env rundir.Env, id, webSearch string) (json.RawMessage, protocol.HubHelloResult, error) {
 	for retried := false; ; retried = true {
 		ectx, cancel := context.WithTimeout(ctx, hubBudget)
-		sock, err := hub.Ensure(ectx, env, hub.ReopenNeed())
+		sock, err := hub.Ensure(ectx, env, hub.ReopenNeed(webSearch))
 		cancel()
 		if err != nil {
 			return nil, protocol.HubHelloResult{}, err
 		}
-		raw, hello, err := hub.Reopen(ctx, sock, newClient, id)
+		raw, hello, err := hub.Reopen(ctx, sock, newClient, id, webSearch)
 		if err == nil || retried || !errors.Is(err, hub.ErrUnanswered) || ctx.Err() != nil {
 			return raw, hello, err
 		}

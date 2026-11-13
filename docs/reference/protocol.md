@@ -205,7 +205,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true,"reopenWebSearch":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -252,6 +252,21 @@ same way: absent on a host, on a hub from before the two methods, and on one
 given no answer to either. A client hides its resume entry without it, and
 `craze new --load` reports such a hub as one that "cannot reopen a saved
 session".
+
+`reopenWebSearch` says the hosts the hub starts for a
+[`session.reopen`](#sessionreopen) apply the web search choice a session's row
+records (`webSearch`, [the session index](configuration.md#session-index)):
+the hub's own `craze serve --load` opens the session with it. It is said only
+beside `reopen`, and omitted when `false` in the same way: absent on a host,
+on a hub without `reopen`, and on a hub from before the record — which, since
+a hub starts its hosts from its own executable, may be an older craze that
+outlived an upgrade and would open the session without the choice. A client
+reopening a session that records one checks it first: `craze new --load`
+reports such a hub as one that "cannot reopen a session created with
+--web-search or --no-web-search" and reopens nothing (the hub exits once no
+session runs and no client is connected, and the next `craze new --load`
+starts a current one); a session that records none is reopened through it as
+before.
 
 ### Client ids and resume
 
@@ -1348,8 +1363,13 @@ disconnects does not cancel it.
      a person's session with the plain defaults, a sub-agent's (unattended)
      session with its recorded mode, permission mode, model and effort, and
      `--unattended`. Never `--provider`, `--workspace` or `--title`: the row
-     decides where and as what the session runs. The host's ready line
-     decides what follows:
+     decides where and as what the session runs. Nor `--web-search` or
+     `--no-web-search`: the host applies the web search choice the row
+     records (`webSearch`, [the session index](configuration.md#session-index)),
+     as every load does, and refuses a recorded `on` that `config.toml` has
+     since turned off when the session is a sub-agent's (unattended) — a
+     refusal of the session, below — while a person's session opens without
+     web tools. The host's ready line decides what follows:
      - `ok`: the session's own host. Its start is waited for (below), and a
        start that fails or runs past the budget stops it, as a create stops
        its own; so does its row naming another session, and the hub looks

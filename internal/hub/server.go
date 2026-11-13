@@ -402,6 +402,10 @@ func (c *conn) hello(req *request) bool {
 	// reopen (plan 046 B1): a hub given the answers to both sessions.saved
 	// and session.reopen, a client's whole resume; omitted otherwise.
 	caps.Reopen = h.savedAnswer() != nil && h.reopenAnswer() != nil
+	// reopenWebSearch (plan 051 F.3, C6 review F1): beside reopen, a hub
+	// whose hosts apply a session's recorded web search choice on a load
+	// (Creates.WebSearch); omitted otherwise, as a hub from before it omits it.
+	caps.ReopenWebSearch = caps.Reopen && h.cr.o.WebSearch
 	return c.reply(req.id, protocol.HubHelloResult{
 		Protocol: version,
 		Endpoint: protocol.Endpoint{Kind: protocol.EndpointHub, HostID: h.id,

@@ -649,17 +649,18 @@ type resultError struct {
 // errorDetail is resultError's detail: names and numbers only, each cleaned
 // again here whatever host sent it, so no text from outside craze — a key, a
 // path, a piece of a request — can ride in it. Cause is what began the stop, on
-// kind stopped. Reason, Model and ReplacedBy are a model-shaped config
-// failure's (plan 050 C2, modelRefusal): what failed, of a closed set, the
-// model's alias, and a retired one's replacement; the waiter's own, never a
-// host's.
+// kind stopped. Reason, Model and ReplacedBy are a start check's config
+// failure's, the waiter's own, never a host's: what failed, of a closed set;
+// on a model refusal (plan 050 C2, modelRefusal) the model's alias and a
+// retired one's replacement; on web_search_not_offered (plan 051 S1,
+// configRefusal) the reason alone.
 type errorDetail struct {
 	Status       int    `json:"status,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
 	Cause        string `json:"cause,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	// Model is set exactly when Reason is, so the key is there on those
-	// failures alone, "" included.
+	// Model is set on a model refusal, so the key is there on those failures
+	// alone, "" included; it is absent for web_search_not_offered.
 	Model      *string `json:"model,omitempty"`
 	ReplacedBy string  `json:"replaced_by,omitempty"`
 }

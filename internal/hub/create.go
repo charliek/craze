@@ -192,6 +192,15 @@ type Creates struct {
 	// from before titles refuses one, so a client's older-hub path can be
 	// driven against the real hub.
 	Title bool
+	// WebSearch says the hosts this hub spawns apply the web search choice a
+	// session's row records (sessions.Row.WebSearch) when they load it — the
+	// craze serve --load of a craze with plan 051 F.3: its hello says
+	// reopenWebSearch beside reopen, and a client reopening a session that
+	// records one needs it (ReopenNeed; C6 review F1). Every craze hub's are
+	// (internal/cli's hubCreates); false is a hub whose hosts may not — a
+	// test's, standing for a hub from before the record, which a client
+	// reports rather than reopening the session without its choice.
+	WebSearch bool
 }
 
 // HostCommand builds a created session's host command, `craze serve …`, from

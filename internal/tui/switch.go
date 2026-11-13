@@ -140,6 +140,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		// closures, the launch flow's spawns and the session list.
 		sessionIndex:    m.sessionIndex,
 		crazeID:         m.crazeID,
+		webSearch:       m.webSearch,
 		resume:          m.resume,
 		loadSession:     m.loadSession,
 		claimSession:    m.claimSession,

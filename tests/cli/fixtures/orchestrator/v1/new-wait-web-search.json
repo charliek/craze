@@ -1,0 +1,1 @@
+{"error":{"message":"--web-search cannot be honoured: config.toml turns web search off (websearch = false)","kind":"config","retryable":false,"detail":{"reason":"web_search_not_offered"}}}

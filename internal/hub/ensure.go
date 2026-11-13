@@ -252,6 +252,14 @@ const lacksCreateTitle = "set a title at create"
 // --load then says "this hub (craze …) cannot reopen a saved session".
 const lacksReopen = "reopen a saved session"
 
+// lacksReopenWebSearch is a hub without the capability reopenWebSearch (plan
+// 051 F.3, C6 review F1) — one from before the web search record, whose own
+// craze serve --load would open the session without its choice — in
+// LacksError's words: craze new --load of a session that records one then says
+// "this hub (craze …) cannot reopen a session created with --web-search or
+// --no-web-search", and reopens nothing.
+const lacksReopenWebSearch = "reopen a session created with --web-search or --no-web-search"
+
 // missing is what have lacks of need, in LacksError's words.
 func missing(have, need protocol.ConnectionCapabilities) []string {
 	var out []string
@@ -264,6 +272,7 @@ func missing(have, need protocol.ConnectionCapabilities) []string {
 	check(need.CreateOptions, have.CreateOptions, lacksCreateOptions)
 	check(need.CreateTitle, have.CreateTitle, lacksCreateTitle)
 	check(need.Reopen, have.Reopen, lacksReopen)
+	check(need.ReopenWebSearch, have.ReopenWebSearch, lacksReopenWebSearch)
 	check(need.RosterSubscribe, have.RosterSubscribe, "subscribe to the session roster")
 	check(need.Connect, have.Connect, "connect to a session")
 	check(need.Multiplex, have.Multiplex, "multiplex sessions")

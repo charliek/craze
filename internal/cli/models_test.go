@@ -433,6 +433,9 @@ func newWait(t *testing.T, args ...string) (stdout, stderr string, code int) {
 func TestNewWaitPreCheck(t *testing.T) {
 	withFixtureCatalog(t, true)
 	spawns := noSpawns(t)
+	// web_search_not_offered (plan 051 S1): config.toml turns web search off,
+	// which only a --web-search row reads.
+	writeFileT(t, filepath.Join(os.Getenv("CRAZE_HOME"), "config.toml"), "websearch = false\n")
 	for _, tc := range []struct {
 		name   string
 		args   []string
@@ -446,6 +449,10 @@ func TestNewWaitPreCheck(t *testing.T) {
 		{"no effort control", []string{"--model", "acme/plain", "--effort", "high"}, `{"reason":"effort_not_offered","model":"acme/plain"}`, "--effort high: acme/plain has no effort control"},
 		{"fast", []string{"--model", "acme/sonic", "--fast"}, `{"reason":"fast_not_offered","model":"acme/sonic"}`, "--fast: acme/sonic has no fast variant"},
 		{"fast, no model", []string{"--fast"}, `{"reason":"fast_not_offered","model":""}`, "--fast: no native model has a fast variant"},
+		{"web search", []string{"--web-search"}, `{"reason":"web_search_not_offered"}`,
+			"--web-search cannot be honoured: config.toml turns web search off (websearch = false)"},
+		{"web search before a model refusal", []string{"--web-search", "--model", "acme/sonic-1", "--effort", "minimal"}, `{"reason":"web_search_not_offered"}`,
+			"--web-search cannot be honoured: config.toml turns web search off (websearch = false)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, code := newWait(t, tc.args...)
@@ -659,6 +666,9 @@ func TestOrchestratorFixtures(t *testing.T) {
 	run("new-wait-effort.json", 1, "new", "--wait", "--json", "--provider", "native", "--model", "acme/sonic", "--effort", "minimal", "-C", dir, "go")
 	run("new-wait-fast.json", 1, "new", "--wait", "--json", "--provider", "native", "--model", "acme/sonic", "--fast", "-C", dir, "go")
 	run("new-wait-effort-deprecated.json", 1, "new", "--wait", "--json", "--provider", "native", "--model", "acme/sonic-1", "--effort", "minimal", "-C", dir, "go")
+	// web_search_not_offered (plan 051 S1): the reason alone, no model.
+	writeFileT(t, filepath.Join(os.Getenv("CRAZE_HOME"), "config.toml"), "websearch = false\n")
+	run("new-wait-web-search.json", 1, "new", "--wait", "--json", "--provider", "native", "--web-search", "-C", dir, "go")
 	if spawns.Load() != 0 {
 		t.Fatalf("%d hosts spawned", spawns.Load())
 	}

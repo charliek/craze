@@ -84,7 +84,7 @@ func (c Config) launching() Config {
 	c.ClaimSession, c.OnEngine, c.OnQuit = nil, nil, nil
 	c.LocalPresence = nil
 	c.SessionIndex = nil
-	c.CrazeSessionID = ""
+	c.CrazeSessionID, c.WebSearch = "", ""
 	if c.Backend != nil {
 		c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
 	}

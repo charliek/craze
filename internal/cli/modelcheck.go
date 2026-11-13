@@ -24,18 +24,26 @@ import (
 //     changed, nothing is recorded for a reload, and craze send, a reload, the
 //     TUI, craze prompt and a plain craze new stay lenient. A table this
 //     process cannot load skips it, and the host reports as it always did.
+//     A --web-search that cannot be honoured (plan 051 S2) is refused ahead
+//     of it, before the prompt is read, and wins over a model refusal:
+//     kind config too, its reason web_search_not_offered (configRefusal).
 //   - The notices: a result or an exit-1 failure about a native session whose
 //     model is deprecated says so on stderr and, under --json, in `warnings`.
 //     Best-effort: a table that does not load says nothing, and never changes
 //     a status or an exit code.
 
-// The reasons a model-shaped config failure gives in its detail (plan 050
-// C2): a closed set, and no other failure carries one.
+// The reasons a start check's config failure gives in its detail: a closed
+// set, and no other failure carries one. The first four are a model's (plan
+// 050 C2), and carry the model too (modelRefusal); web_search_not_offered is
+// a --web-search that cannot be honoured (plan 051 F.2, S1), which is about
+// no model and carries the reason alone (configRefusal). cli.md lists them
+// all (TestCLIReferenceNamesEveryReason).
 const (
-	reasonModelUnknown     = "model_unknown"
-	reasonModelRetired     = "model_retired"
-	reasonEffortNotOffered = "effort_not_offered"
-	reasonFastNotOffered   = "fast_not_offered"
+	reasonModelUnknown        = "model_unknown"
+	reasonModelRetired        = "model_retired"
+	reasonEffortNotOffered    = "effort_not_offered"
+	reasonFastNotOffered      = "fast_not_offered"
+	reasonWebSearchNotOffered = "web_search_not_offered"
 )
 
 // modelsCatalog is the catalog every model fact the CLI reads is merged over:
@@ -81,15 +89,45 @@ func (e *modelRefusal) detail() *errorDetail {
 
 // exit is the refusal as command what's exit 1, kind config, its message on
 // one line.
-func (e *modelRefusal) exit(what string) error {
-	return &exitError{code: 1, msg: what + ": " + sanitizeLine(e.msg), kind: errkind.Config, cause: e}
+func (e *modelRefusal) exit(what string) error { return refusalExit(what, e) }
+
+// refusalExit is a start check's refusal e as command what's exit 1, kind
+// config, its message on one line, e its cause (refusalDetail reads it).
+func refusalExit(what string, e error) error {
+	return &exitError{code: 1, msg: what + ": " + sanitizeLine(e.Error()), kind: errkind.Config, cause: e}
 }
 
-// refusalDetail is the detail err's model refusal gives, nil when err is none.
+// configRefusal is a start check's config failure that is not about a model
+// (plan 051 S1): web_search_not_offered. Its detail is the reason alone — no
+// model, which modelRefusal always gives.
+type configRefusal struct {
+	msg    string
+	reason string
+}
+
+func (e *configRefusal) Error() string { return e.msg }
+
+func (e *configRefusal) detail() *errorDetail { return &errorDetail{Reason: e.reason} }
+
+// webRefusal is a --web-search that cannot be honoured (err, an
+// *agent.WebRefusal: agent.CheckWebFlag's) as command what's exit 1, kind
+// config, reason web_search_not_offered — which only a waiting command's
+// --json prints (refusalDetail). craze serve's refusal reaches its spawner as
+// its message alone, so craze new --wait's backstop has no detail.
+func webRefusal(what string, err error) error {
+	return refusalExit(what, &configRefusal{msg: err.Error(), reason: reasonWebSearchNotOffered})
+}
+
+// refusalDetail is the detail err's start-check refusal gives — a model's or
+// another config failure's — nil when err is none.
 func refusalDetail(err error) *errorDetail {
 	var r *modelRefusal
 	if errors.As(err, &r) {
 		return r.detail()
+	}
+	var c *configRefusal
+	if errors.As(err, &c) {
+		return c.detail()
 	}
 	return nil
 }

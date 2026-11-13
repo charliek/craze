@@ -97,6 +97,10 @@ func hubCreates() *hub.Creates {
 		},
 		Reopen: reopenTarget,
 		Title:  true,
+		// This craze's serve --load applies a session's recorded web search
+		// choice (sessionOptions; plan 051 F.3): the hello says
+		// reopenWebSearch.
+		WebSearch: true,
 	}
 }
 

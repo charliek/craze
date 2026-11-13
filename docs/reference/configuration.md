@@ -236,6 +236,24 @@ One JSON object per line:
     records how the session started, not how it runs next: opening it from
     `--resume` or the session list, or `craze send` to a session of your own,
     runs an ordinary interactive session.
+- `webSearch` is the [web search](#native-web-search) choice a session was
+  created with: `"on"` for `--web-search`, `"off"` for `--no-web-search`
+  ([`craze new --wait`](cli.md#web-search-flags) or `craze serve`, attended or
+  not), and no key when neither was given:
+
+    ```json
+    {"sessionId":"…","provider":"native","cwd":"/abs/workspace","title":"look it up","pinned":false,"crazeId":"…","webSearch":"on","createdAt":"…","updatedAt":"…"}
+    ```
+
+    Unlike `unattended` it marks nothing about who runs the session; it is
+    what every load applies — a `craze send` reload, a `craze new --load`
+    reopen, `--continue`, `--resume`, the session list — whoever opens it:
+    `off` always holds, and `on` holds unless `config.toml` has turned web
+    search off since (a load nobody attends is then refused; a person's
+    resume opens without web tools, with a line saying why). It is never
+    removed or changed once written, a row of the same session written later
+    carries it too, and `craze send` has no flag to change it. A value other
+    than `on` or `off` (a later craze's) is read as none and kept.
 
     A marked row is a **sub-agent's session**: `--continue` (and `craze
     serve -c`) skips it and loads the newest session that is not one, the
@@ -2447,22 +2465,45 @@ so a public name that resolves to a private address is not caught.
 
 Whether a session is offered the tools is decided once, when it opens, and
 holds for the session (its tools are fixed then, as its system prompt is). In
-this order:
+this order, the first that applies deciding:
 
-1. **`config.toml` says.** `websearch = false` turns web search off; a
-   `[websearch]` table naming the provider turns it on. Either one beats
-   everything below.
-2. **You answered before.** The answer to the consent question below is
+1. **`--no-web-search`** — a flag of [`craze new
+   --wait`](cli.md#web-search-flags), [`craze prompt`](cli.md#craze-prompt) and
+   [`craze serve`](cli.md#craze-serve) — withholds the tools, whatever the home
+   says: it beats `[websearch]` in `config.toml` and a remembered Allow, and is
+   never refused (on a provider other than native it changes nothing).
+2. **`config.toml` turns it off.** `websearch = false`, an invalid `websearch`
+   value, or a `config.toml` craze cannot read: off. This is the one switch
+   a caller's flag cannot override: `--web-search` against it is **refused**,
+   exit 1 — the command fails rather than run without the tools it asked
+   for.
+3. **`--web-search`** offers the tools: over a remembered Disable, with no
+   consent question, and with nothing remembered (no `websearch.json` is
+   written). It is refused, too, on a provider other than native.
+4. **`config.toml` turns it on**: a `[websearch]` table naming the provider.
+5. **You answered before.** The answer to the consent question below is
    remembered in `websearch.json`.
-3. **Otherwise it asks**, where it can: a session whose questions reach a
+6. **Otherwise it asks**, where it can: a session whose questions reach a
    person (the TUI's, or any session with the ask policy, which waits for
    someone to attach) is offered the tools, and the first time the model
    calls one craze asks you. A session that answers its questions itself —
    [`craze prompt`](cli.md#craze-prompt), [`craze new
    --wait`](cli.md#craze-new), an unattended host — **never asks, and is
-   offered no web tools** unless someone decided already: `[websearch]` in
-   `config.toml`, or a remembered Allow. It never answers the question for
-   you.
+   offered no web tools** unless someone decided already: `--web-search`,
+   `[websearch]` in `config.toml`, or a remembered Allow. It never answers
+   the question for you.
+
+A flag is the session's for good: it is recorded on the session's
+[index row](#session-index) (`webSearch`), and every later load applies it
+again — a [`craze send`](cli.md#craze-send) that reloads the session, a
+[`craze new --load`](cli.md#craze-new-load), `--continue`, `--resume` and the
+session list — whoever opens it. `--no-web-search` holds on every load. So
+does `--web-search`, until `config.toml` turns web search off: then a load
+nobody attends — `craze send`'s reload or `craze new --load`'s reopen of a
+session [`craze new --wait`](cli.md#craze-new-wait) started — is refused,
+exit 1, kind `config`, until the config changes, and a person resuming the
+session gets it without web tools and one line saying why. A session started with neither
+flag is decided again at each load from the settings as they are then.
 
 A sub-agent persona that lists `WebSearch` or `WebFetch` (see [Claude
 content](#claude-content-compatclaude)) gets them under the same rule. A

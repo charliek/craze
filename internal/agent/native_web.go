@@ -10,8 +10,9 @@ import (
 // The web tools' decision (plan 051 §C.3, F.2): whether a native session is
 // offered websearch and webfetch, made once, at Open, from the caller's flag,
 // config.toml, the test override, the remembered choice and whether anybody
-// can be asked. One function, DecideWeb, makes it, for Open now and for the
-// callers' early refusals later (the flags are plan 051 C6).
+// can be asked. One function, DecideWeb, makes it: at Open, and before any
+// session is built, for the callers' early refusals (CheckWebFlag): craze new
+// --wait's pre-check, craze serve's hooks and craze prompt's validation.
 
 // WebSetting is what config.toml's `websearch` says (plan 051 §C.1).
 type WebSetting int
@@ -52,6 +53,29 @@ const (
 	WebFlagOn
 	WebFlagOff
 )
+
+// ParseWebFlag is a flag as the CLI, the spawn's argv and the session index
+// spell it: "on", "off", or "" (absent). Anything else is absent.
+func ParseWebFlag(s string) WebFlag {
+	switch s {
+	case "on":
+		return WebFlagOn
+	case "off":
+		return WebFlagOff
+	}
+	return WebFlagAbsent
+}
+
+// String is the flag as ParseWebFlag reads it: "on", "off" or "".
+func (f WebFlag) String() string {
+	switch f {
+	case WebFlagOn:
+		return "on"
+	case WebFlagOff:
+		return "off"
+	}
+	return ""
+}
 
 // WebFlagOrigin is where a flag came from (F.2, F.3): given on this command
 // line, or recorded on the session's row when it was created.
@@ -191,6 +215,31 @@ func webRefusal(in WebInputs) string {
 	return ""
 }
 
+// CheckWebFlag is DecideWeb's refusal half, for a caller that decides before
+// any session is built (plan 051 F.2, S2–S4): craze new --wait's pre-check,
+// craze serve's hooks and craze prompt's early validation. It is DecideWeb
+// over what such a caller knows — the flag, where it came from, whether the
+// session is attended, whether its provider is native, config.toml's reading
+// and the test override, read through getenv (nil is the process's own) —
+// and never the remembered choice or canAsk, which decide no refusal: a
+// --web-search no refusal stops is on, whatever is remembered or askable. Only
+// --web-search is ever refused, so with any other flag it reads nothing.
+func CheckWebFlag(flag WebFlag, origin WebFlagOrigin, attended, native bool, config func() WebConfig, getenv func(string) string) error {
+	if flag != WebFlagOn {
+		return nil
+	}
+	_, overrideErr := websearch.Override(getenv)
+	_, err := DecideWeb(WebInputs{
+		Flag:            flag,
+		Origin:          origin,
+		Attended:        attended,
+		Native:          native,
+		Config:          config(),
+		OverrideInvalid: overrideErr != nil,
+	})
+	return err
+}
+
 func webRefusalText(origin WebFlagOrigin, why string) string {
 	if origin == WebFlagRecorded {
 		return "this session was created with --web-search, which cannot be honoured: " + why
@@ -217,8 +266,8 @@ func (s *nativeSession) decideWeb(hopts *harness.Options) error {
 	canAsk := hopts.Asker != nil && EffectiveApproval(s.opts).Question == ApprovalAsk
 	remembered, why := websearch.ReadChoice(filepath.Join(hopts.Home, websearch.StateFile))
 	d, err := DecideWeb(WebInputs{
-		// The flags are plan 051 C6's: until then there is never one.
-		Flag:            WebFlagAbsent,
+		Flag:            s.opts.WebFlag,
+		Origin:          s.opts.WebFlagOrigin,
 		Attended:        s.opts.Interactive,
 		Native:          true,
 		Config:          s.opts.WebSearch,

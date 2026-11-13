@@ -82,6 +82,29 @@ func TestArgsPassUnattendedOnlyWhenSet(t *testing.T) {
 	}
 }
 
+// TestArgsPassWebSearchOnlyWhenSet (plan 051 F.1): the tri-state reaches craze
+// serve as --web-search for "on", --no-web-search for "off", and neither for
+// "" — or for a value that is neither, which no spawner sets.
+func TestArgsPassWebSearchOnlyWhenSet(t *testing.T) {
+	for v, want := range map[string][]string{
+		"on":    {"--web-search"},
+		"off":   {"--no-web-search"},
+		"":      nil,
+		"maybe": nil,
+	} {
+		argv := Args(Spec{HostID: "0123456789ab", Log: "/l", WebSearch: v})
+		var got []string
+		for _, a := range argv {
+			if strings.Contains(a, "web-search") {
+				got = append(got, a)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("WebSearch %q: %q, want %q", v, got, want)
+		}
+	}
+}
+
 // TestArgsPassOutliveSpawnerOnlyWhenSet (plan 041 C3 review r2, 1): craze
 // send's reload hands its host --outlive-spawner; every other spawn passes
 // none.

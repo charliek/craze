@@ -190,6 +190,7 @@ type ConnectionCapabilities struct {
 	CreateOptions   bool `json:"createOptions,omitempty"`
 	CreateTitle     bool `json:"createTitle,omitempty"`
 	Reopen          bool `json:"reopen,omitempty"`
+	ReopenWebSearch bool `json:"reopenWebSearch,omitempty"`
 }
 
 // HostCapabilities is a session host's connection capabilities in protocol
@@ -214,7 +215,12 @@ func HostCapabilities() ConnectionCapabilities {
 // take a title (Creates.Title; plan 043 D8) — every craze hub's, and no test
 // hub's that does not say so, so no hello from before it moves. So is Reopen:
 // the hub sets it only when it is given the answers to both sessions.saved and
-// session.reopen (Creates.Saved and Creates.Reopen; plan 046 B1).
+// session.reopen (Creates.Saved and Creates.Reopen; plan 046 B1). So is
+// ReopenWebSearch: the hub sets it only beside Reopen, when the hosts it
+// spawns apply the web search choice a session's row records on a load
+// (Creates.WebSearch; plan 051 F.3, C6 review F1) — a client reopening a
+// session with one needs it, since a hub from before the record would reopen
+// it through its own craze serve, which ignores it.
 func HubCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }

@@ -294,6 +294,10 @@ func TestInstancesValidate(t *testing.T) {
 	// craze hub's from it on.
 	reopenHub := titleHub
 	reopenHub.Capabilities.Reopen = true
+	// A hub whose reopens apply a session's recorded web search choice (plan
+	// 051 F.3, C6 review F1): every craze hub's from it on, beside reopen.
+	webHub := reopenHub
+	webHub.Capabilities.ReopenWebSearch = true
 	errResp := func(code protocol.Code, reason protocol.Reason) string {
 		return jsonOf(t, protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`7`),
 			Error: &protocol.Error{Code: protocol.RPCRefused, Message: "refused", Data: protocol.ErrorData{Code: code, Reason: reason}}})
@@ -344,6 +348,9 @@ func TestInstancesValidate(t *testing.T) {
 		{"a hub's hello serving reopen", "hello.json", "result", jsonOf(t, reopenHub), true},
 		{"a hub's hello whose reopen is no boolean", "hello.json", "result",
 			strings.Replace(jsonOf(t, reopenHub), `"reopen":true`, `"reopen":"yes"`, 1), false},
+		{"a hub's hello whose reopens apply a recorded web search", "hello.json", "result", jsonOf(t, webHub), true},
+		{"a hub's hello whose reopenWebSearch is no boolean", "hello.json", "result",
+			strings.Replace(jsonOf(t, webHub), `"reopenWebSearch":true`, `"reopenWebSearch":"yes"`, 1), false},
 		{"a hub's hello carrying clientId", "hello.json", "result", with(jsonOf(t, hub), "clientId", `"c-1"`), false},
 		{"a hub's hello carrying resumed", "hello.json", "result", with(jsonOf(t, hub), "resumed", "false"), false},
 		{"a hub's hello carrying retryHorizon", "hello.json", "result",
