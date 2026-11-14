@@ -199,6 +199,13 @@ def test_a_messages_body_and_its_tool_calls():
            "messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
                                                       "content": [{"type": "text", "text": "ok  craze 0.4s"}]}]}]}
     assert tool_results([{"request": req}]) == {"toolu_1": "ok  craze 0.4s"}
+    # ... and counts as one roundtrip: the call's result went back to the model.
+    from crazeeval.batch import tool_roundtrips
+
+    records = [{"seq": 1, "request": {"model": OPUS, "messages": []}, "response": {"events": messages_events(OPUS)}},
+               {"seq": 2, "request": req, "response": {"body": body}}]
+    assert tool_roundtrips(records) == 1
+    assert tool_roundtrips(records[:1]) == 0  # the call alone, its result never sent
     assert request_effort(req) == {"thinking": {"type": "adaptive"}, "output_config.effort": "medium"}
     assert classify({"request": {**req, "tools": [{"name": "bash"}]}}) == "aux"  # the title prompt, by its system
 
@@ -427,6 +434,24 @@ def test_the_anthropic_provider_is_read_as_craze_reads_it(tmp_path):
     (tmp_path / "p.toml").write_text("version = 1\n")
     table, ring = load_providers(tmp_path / "p.toml", env={"ANTHROPIC_API_KEY": "sk-ant-env-value-0123456789"})
     assert "anthropic" in table and ring.key_for("anthropic") == "sk-ant-env-value-0123456789"
+
+
+def test_a_batch_manifest_samples_an_anthropic_models_configs(tmp_path):
+    """The manifest's sample configs are built on a placeholder route. An Anthropic
+    model's craze home takes its route apart (homes.anthropic_api), so the placeholder
+    must have a real route's shape: a batch with a Claude model stopped here before any
+    run (2026-11-13)."""
+    from crazeeval.manifest import sample_configs
+
+    snap = fake_snapshot(tmp_path)
+    ms = load_models()
+    models = [ms["anthropic/claude-haiku-5-5"], ms["glm-5.3-flash"]]
+    out = sample_configs(models, ["craze", "craze-web", "opencode", "gx"], snap)
+    assert set(out) == {f"{h}/{em.key}" for em in models for h in ("craze", "craze-web", "opencode", "gx")}
+    haiku = out["craze/anthropic/claude-haiku-5-5"][".craze/native/providers.toml"]
+    assert 'driver = "anthropic"' in haiku and "base_url" not in haiku
+    # Another provider's placeholder is as it was: the upstream's name, no /v1 added.
+    assert "<zai-coding-plan-upstream>\"" in out["craze/glm-5.3-flash"][".craze/native/providers.toml"]
 
 
 def test_the_snapshot_needs_no_entry_for_the_locked_provider(tmp_path):

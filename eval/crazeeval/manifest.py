@@ -10,6 +10,7 @@ from pathlib import Path
 from crazeeval import paths
 from crazeeval.config import EvalModel, Snapshot
 from crazeeval.homes import HOMES, generated_files
+from crazeeval.keys import ANTHROPIC
 from crazeeval.sandbox import Toolchains
 from crazeeval.workspace import craze_template, fixture_hash, git, sha256_file, template_check
 
@@ -67,6 +68,10 @@ def sample_configs(models: list[EvalModel], harnesses: list[str], snap: Snapshot
                     continue
                 home = Path(td) / h / em.slug
                 base = f"http://127.0.0.1:PORT/r/TOKEN/<{em.provider}-upstream>"
+                if em.provider == ANTHROPIC:
+                    # craze's Anthropic override is the route without its /v1
+                    # (homes.anthropic_api), which refuses a route that has none.
+                    base += "/v1"
                 HOMES[h](home, em, snap, base)
                 out[f"{h}/{em.key}"] = {
                     str(p.relative_to(home)): p.read_text(errors="replace") for p in generated_files(home)

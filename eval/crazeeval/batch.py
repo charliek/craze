@@ -631,7 +631,9 @@ def tool_roundtrips(records: list[dict]) -> int:
         if not isinstance(req, dict):
             continue
         blob = json.dumps(req.get("messages") or req.get("input") or [])
-        if '"tool_call_id"' in blob or "function_call_output" in blob or '"role": "tool"' in blob:
+        # Chat Completions, Responses, and the Messages API's tool_result block.
+        if ('"tool_call_id"' in blob or "function_call_output" in blob or '"role": "tool"' in blob
+                or '"tool_use_id"' in blob):
             returned.append((r.get("seq") or 0, blob))
     return sum(
         1
