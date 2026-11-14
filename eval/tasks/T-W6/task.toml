@@ -1,0 +1,69 @@
+# T-W6 web-troubleshooting-retry (craze plan 051 E4, an error whose fix is on a
+# troubleshooting page): a booking client for a fictional rail-pass API fails with
+# 409 booking.hold_pending. The documented fix -- a de-duplication header on every
+# booking, a resend carrying the quota claim in a second header, the claim's and the
+# wait's field names, the wait's unit (centiseconds), the window before the claim lapses,
+# and which answers end the resends -- is only in the corpus (testdata/corpus/, served to
+# craze-web by the proxy's web route); the hidden tests' fake server finishes a held
+# booking only for that exact resend, sent no earlier than each answer's own wait (its late
+# bound is far wider than the documented 3 s, so load cannot fail a correct client), and
+# one hold answers hold_pending thirty times with short, differing waits, so no fixed
+# pause passes (one traveller needs >= 3.6 s; thirty of those exceed the tests' timeout),
+# nor a fixed resend limit.
+# The changelog (a distractor) names the preview's stale fields, hold_token and
+# retry_after_ms, which the server never sends. Scored by the hidden tests alone; the
+# judge is not used for this split.
+id = "T-W6"
+name = "web-troubleshooting-retry"
+category = "bugfix"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`orvelline.py` is our travel desk's client for the Orvelline Passes API (version 2). Since the busy season began, some calls to `Client.book_pass` fail with `OrvellineError: 409 booking.hold_pending` and the traveller ends up with no pass. Fix `book_pass` so that a booking that gets this answer is completed the way Orvelline says it must be, without ever risking booking (and charging for) the same pass twice; every other error must still be raised as `OrvellineError` straight away. Use only the standard library, as the rest of the module does. Orvelline's API documentation, including its troubleshooting guides, is published at https://docs.orvelline.example; follow it exactly, since the client will be pointed at the real API. Run the tests when you are done.
+"""
+rubric = [
+    "Sends a fresh de-duplication key, in the header the API documents, on every booking and reuses it on that booking's resends.",
+    "On 409 booking.hold_pending, waits the documented time (details.settle_cs, in centiseconds) and promptly resends the same booking with the quota claim in the documented header, until the booking is made or the claim ends.",
+    "Raises OrvellineError for every other error, and never starts a second booking for the same request.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["troubleshooting-hold-pending.md", "idempotent-requests.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["Orvelline-Dedup-Key", "Orvelline-Resume-Hold", "quota_claim", "settle_cs"]
+
+[repo]
+kind = "fixture"
+name = "orvelline"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_orvelline.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_held_bookings.py::test_an_off_peak_booking",
+    "tests/test_hidden_held_bookings.py::test_a_held_booking_is_finished",
+    "tests/test_hidden_held_bookings.py::test_a_hold_still_pending_on_the_first_resend",
+    "tests/test_hidden_held_bookings.py::test_a_long_hold_is_resent_until_it_is_decided",
+    "tests/test_hidden_held_bookings.py::test_a_released_hold_is_an_error",
+    "tests/test_hidden_held_bookings.py::test_each_booking_has_its_own_key",
+    "tests/test_hidden_held_bookings.py::test_an_unknown_pass_is_an_error_at_once",
+    "tests/test_hidden_held_bookings.py::test_an_overlapping_pass_is_an_error_at_once",
+    "tests/test_orvelline.py::test_booking_from_json",
+    "tests/test_orvelline.py::test_client_keeps_its_settings",
+    "tests/test_orvelline.py::test_an_error_body_is_parsed",
+    "tests/test_orvelline.py::test_an_error_body_that_is_not_json",
+]
+
+[checks.add]
+"tests/test_hidden_held_bookings.py" = "testdata/hidden/test_hidden_held_bookings.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

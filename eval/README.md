@@ -669,6 +669,11 @@ the facts; no fictional library is vendored (its source would leak them).
 | id | name | category | split | repo | objective checks |
 |---|---|---|---|---|---|
 | T-W1 | web-api-reference | feature | web | `quayside` | 5 hidden + 2 trusted tests: the v3 berth-slots endpoint, its auth header, its paging; corpus of 11 pages (2 relevant) |
+| T-W2 | web-api-reference-telemetry | feature | web | `skerrywind` | 6 hidden + 2 trusted tests: the v4 tranche upload's path and body, its seal header and what it covers, the measurement fields' integer units, the already-stored conflict code; corpus of 13 pages (3 relevant) |
+| T-W3 | web-changelog-migration | feature | web | `bindlewick` | 7 hidden + 3 trusted tests: a v1 client moved to v2 per the changelog (the renamed resource and paths, the branch header, the copy field, the due timestamp, the renewal-limit code); corpus of 10 pages (2 relevant) |
+| T-W4 | web-changelog-breaking-auth | feature | web | `tallowmere` | 7 hidden + 3 trusted tests: a retired v2 client moved to v3 (the key's header, the renamed resource, a newly required field in minutes, renamed response fields, an empty 204 on cancel); corpus of 14 pages (3 relevant) |
+| T-W5 | web-troubleshooting-error | bugfix | web | `tessaroot` | 6 hidden + 3 trusted tests: error TSR-7719 handled by the troubleshooting page's single follow-up (its query parameter and header, the error body's reference) and the readings it flags as provisional; corpus of 10 pages (1 relevant) |
+| T-W6 | web-troubleshooting-retry | bugfix | web | `orvelline` | 8 hidden + 4 trusted tests: 409 booking.hold_pending finished as the troubleshooting guide says (a de-duplication header on every booking, the resend's claim header, each answer's wait in centiseconds, resending for as long as the hold is pending); corpus of 11 pages (2 relevant) |
 
 **What a web campaign measures**, and what it cannot. It shows whether a model uses
 the web tools to solve tasks it otherwise cannot -- craze-web's pass rate against plain

@@ -1,0 +1,4 @@
+# T-W6 (web-troubleshooting-retry): a client for a fictional rail-pass booking API whose
+# documented fix for one booking error is only in the task's corpus.
+initial_message = "orvelline: a small client for the Orvelline Passes API"
+initial_date = "2026-09-21T08:30:00+00:00"

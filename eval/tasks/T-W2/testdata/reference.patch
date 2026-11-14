@@ -1,0 +1,76 @@
+diff --git a/skerrywind.py b/skerrywind.py
+--- a/skerrywind.py
++++ b/skerrywind.py
+@@ -6,6 +6,8 @@
+ 
+ from __future__ import annotations
+ 
++import hashlib
++import hmac
+ import json
+ import urllib.error
+ import urllib.parse
+@@ -34,6 +36,16 @@
+         when, temp, pressure, wind = line.split()
+         return cls(when, float(temp), float(pressure), float(wind))
+ 
++    def to_sample(self) -> dict:
++        """The reading as a version 4 sample: integers in decikelvin, decapascals and
++        centimetres per second, each rounded to the nearest integer."""
++        return {
++            "taken_utc": self.when,
++            "air_temp_dk": round((self.temp_c + 273.15) * 10),
++            "station_pres_dapa": round(self.pressure_hpa * 10),
++            "wind_speed_cms": round(self.wind_ms * 100),
++        }
++
+ 
+ class Client:
+     def __init__(self, base_url: str, station_id: str, signing_secret: str, timeout: float = 10.0):
+@@ -46,4 +58,45 @@
+         """Upload ``readings`` for this client's station and return the receipt the API
+         issues for them. ``batch_id`` is the gateway's own id for this upload; it sends
+         the same id again when it retries."""
+-        raise NotImplementedError("upload is not written yet")
++        # POST /v4/stations/{station}/tranches, sealed: Skw-Tranche-Seal is s1=<hex
++        # HMAC-SHA256, keyed with the signing secret, of station id + "\n" + body bytes>.
++        path = f"/v4/stations/{urllib.parse.quote(self.station_id, safe='')}/tranches"
++        body = json.dumps({"tranche_ref": batch_id, "samples": [r.to_sample() for r in readings]}).encode()
++        message = self.station_id.encode() + b"\n" + body
++        mac = hmac.new(self.signing_secret.encode(), message, hashlib.sha256).hexdigest()
++        req = urllib.request.Request(self.base_url + path, data=body, method="POST", headers={
++            "Content-Type": "application/json",
++            "Accept": "application/json",
++            "Skw-Tranche-Seal": f"s1={mac}",
++        })
++        try:
++            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
++                reply = self._json(resp.read(), path)
++        except urllib.error.HTTPError as e:
++            reply = self._json(e.read(), path, status=e.code)
++            code = (reply.get("error") or {}).get("code", "unknown")
++            # A retried tranche that is already stored: a success, with the first receipt.
++            # tranche.ref_reused is also a 409 with an acknowledgement, and is an error.
++            if e.code == 409 and code == "tranche.replayed":
++                return self._receipt(reply, path)
++            raise SkerrywindError(f"HTTP {e.code} ({code}) for {path}") from None
++        except urllib.error.URLError as e:
++            raise SkerrywindError(f"cannot reach the API: {e.reason}") from None
++        return self._receipt(reply, path)
++
++    @staticmethod
++    def _json(raw: bytes, path: str, status: int | None = None) -> dict:
++        try:
++            doc = json.loads(raw)
++        except ValueError:
++            raise SkerrywindError(f"{path} did not answer JSON" + (f" (HTTP {status})" if status else "")) from None
++        if not isinstance(doc, dict):
++            raise SkerrywindError(f"{path} answered JSON that is not an object")
++        return doc
++
++    @staticmethod
++    def _receipt(reply: dict, path: str) -> str:
++        receipt = (reply.get("acknowledgement") or {}).get("id")
++        if not isinstance(receipt, str):
++            raise SkerrywindError(f"{path} answered without an acknowledgement id")
++        return receipt

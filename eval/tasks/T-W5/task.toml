@@ -1,0 +1,59 @@
+# T-W5 web-troubleshooting-error (craze plan 051 E4, an error whose fix is on a
+# troubleshooting page): a client for a fictional greenhouse-sensor API raises on an
+# opaque error code. The code's meaning and its fix -- the error body's field naming the
+# hold, the follow-up's query parameter and header, and the field marking revisable
+# readings -- are only on one troubleshooting page of the corpus (testdata/corpus/, served
+# to craze-web by the proxy's web route); the hidden tests' fake server keeps refusing
+# anything else, so retrying with backoff fails. Scored by the hidden tests alone; the
+# judge is not used for this split.
+id = "T-W5"
+name = "web-troubleshooting-error"
+category = "bugfix"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`tessaroot.py` is a client for the Tessaroot greenhouse-sensor API (version 2). Since the gateway firmware update in March, `Client.readings(house, sensor, start, end)` fails for some greenhouses with `TessarootError: TSR-7719: range held` (HTTP 409), mostly for houses whose gateway was offline for a while, and the nursery's dashboards then show nothing for those houses. Fix the client so `readings` handles this error the way Tessaroot documents and returns the readings for the requested range instead of raising, with every reading the API says may still be revised marked `provisional`. Every other error must still raise `TessarootError`. Use only the standard library, as the rest of the module does. Tessaroot's API documentation is published at https://docs.tessaroot.example; follow it exactly, since the client will be pointed at the real API. Run the tests when you are done.
+"""
+rubric = [
+    "Handles TSR-7719 with the single follow-up request the troubleshooting page documents, for the same range, naming the hold the error body gives.",
+    "Marks the readings the API flags as still revisable as provisional, and the others not.",
+    "Still raises TessarootError for every other error, without retrying it.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["troubleshooting-tsr-7719.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["backfill_ref", "Tessaroot-Backfill-Ref", "unsettled", "settle_state"]
+
+[repo]
+kind = "fixture"
+name = "tessaroot"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_tessaroot.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_held_range.py::test_a_settled_range_is_one_request",
+    "tests/test_hidden_held_range.py::test_a_held_range_returns_its_readings",
+    "tests/test_hidden_held_range.py::test_a_held_range_takes_one_follow_up",
+    "tests/test_hidden_held_range.py::test_another_conflict_is_still_an_error",
+    "tests/test_hidden_held_range.py::test_a_rejected_token_is_an_error",
+    "tests/test_hidden_held_range.py::test_an_unknown_house_is_an_error",
+    "tests/test_tessaroot.py::test_reading_from_json",
+    "tests/test_tessaroot.py::test_client_keeps_its_settings",
+    "tests/test_tessaroot.py::test_error_from_body",
+]
+
+[checks.add]
+"tests/test_hidden_held_range.py" = "testdata/hidden/test_hidden_held_range.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

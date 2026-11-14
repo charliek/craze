@@ -1,0 +1,59 @@
+# T-W4 web-changelog-breaking-auth (craze plan 051 E4, a changelog's breaking change): a
+# client for a fictional parcel-locker API, written against version 2, which is retired.
+# What version 3 changed -- the key's header, the renamed resource's paths, a renamed and a
+# newly required request field (in other units), the renamed response fields and an empty
+# 204 on cancel -- is only in the corpus (testdata/corpus/, served to craze-web by the
+# proxy's web route); the hidden tests' fake server answers /v2/ with 410 and v3 only as
+# documented. Scored by the hidden tests alone; the judge is not used for this split.
+id = "T-W4"
+name = "web-changelog-breaking-auth"
+category = "feature"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`tallowmere.py` is our client for the Tallowmere parcel-locker API. It was written against version 2 of the API, which Tallowmere has since retired, and the live API now refuses every request the client sends. Move the client to the current API version so that `Client.reserve` and `Client.cancel` work against it, following Tallowmere's changelog and API reference exactly: the authentication, the endpoints, and the request and response bodies. Keep the module's public interface as it is: the `Reservation` dataclass and its fields, the signatures of `Client.reserve` and `Client.cancel`, and `TallowmereError` raised for any error response. Use only the standard library, as the rest of the module does. Tallowmere's API documentation is published at https://docs.tallowmere.example. Run the tests when you are done.
+"""
+rubric = [
+    "Authenticates every request the way the current API version documents.",
+    "Creates and cancels at the current version's endpoints, with the current request fields (including the newly required one, in its unit) and reads the renamed response fields.",
+    "Treats an empty successful cancel as success and raises TallowmereError for an error response.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["changelog.md", "v3-authentication.md", "v3-holds.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["TM-Access-Key", "/holds", "consignment_id", "hold_minutes", "hold_id", "release_pin"]
+
+[repo]
+kind = "fixture"
+name = "tallowmere"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_tallowmere.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_holds.py::test_reserve_returns_the_hold",
+    "tests/test_hidden_holds.py::test_the_hold_length_is_sent_in_minutes",
+    "tests/test_hidden_holds.py::test_cancel_gives_the_compartment_back",
+    "tests/test_hidden_holds.py::test_cancelling_an_unknown_hold_is_an_error",
+    "tests/test_hidden_holds.py::test_every_request_carries_the_key",
+    "tests/test_hidden_holds.py::test_a_rejected_key_is_an_error",
+    "tests/test_hidden_holds.py::test_a_full_locker_is_an_error",
+    "tests/test_tallowmere.py::test_reservation_is_a_value",
+    "tests/test_tallowmere.py::test_client_keeps_its_settings",
+    "tests/test_tallowmere.py::test_an_unknown_size_is_refused_before_any_request",
+]
+
+[checks.add]
+"tests/test_hidden_holds.py" = "testdata/hidden/test_hidden_holds.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"
