@@ -197,6 +197,17 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 		if err := h.eng.Start(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		// What Start enqueued — an InstallOnStart Stub's install delta — is
+		// committed by the log's drainer on its own goroutine: committed
+		// here, as fakehost does, so an attach's snapshot always holds it
+		// rather than racing it and meeting it as a live event before
+		// synchronized (a macOS CI flake of the slash catalog's test).
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := h.eng.Sync(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("committing what Start enqueued: %v", err)
+		}
 	}
 	cfg.opts.Log = h.logs.log
 	cfg.opts.Workspace = "/work"
