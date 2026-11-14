@@ -155,16 +155,21 @@ replaced_by = "openrouter/gpt-sol-latest"
 # provider's own models a new session starts on when provider_order reaches
 # it, in order of preference: the first that resolves wins (plan 038 §2.2).
 
-# Fireworks' start is Kimi K3.1 Pro, the owner's choice of 2026-11-11 (plan
-# 050), not an eval result: no eval was run on it. It replaces Ember-1, which
-# stays an ordinary model, picked with /model or --model, or kept as the start
-# with default_model = "fireworks/ember-1".
+# Fireworks' start is DeepSeek V4.1 Flash 1017, the owner's choice of
+# 2026-11-14 from the November 2026 start-model eval (issue #118;
+# eval/results/2026-11-start-models/README.md). It passed 34 of 34 runs for
+# $1.49 at list price. Kimi K3.1 Pro, the start before it, passed 15 of 17
+# tasks to Kimi K3's 16.5 at about two and a half times K3's cost, and on two
+# questions about a large repository reached the $3 run limit without an
+# answer. Answer quality was not judged: no judge ran. Kimi K3.1 Pro and
+# Ember-1 stay ordinary models, picked with /model or --model, or kept as the
+# start with default_model = "fireworks/kimi-k3p1-pro" or "fireworks/ember-1".
 [providers.fireworks]
 name = "Fireworks"
 driver = "openai-compat"
 base_url = "https://api.fireworks.ai/inference/v1"
 env_keys = ["FIREWORKS_API_KEY"]
-start = ["fireworks/kimi-k3p1-pro"]
+start = ["fireworks/deepseek-v4p1-flash-1017"]
 
 # Meta on its Responses API (2026-10-13, plan 047 D14): its encrypted
 # reasoning is replayed across a turn's tool steps, where Chat Completions
@@ -623,7 +628,7 @@ cache_read = 0.006
 # as on the older snapshot); the API also takes none, which turns reasoning
 # off. Seen live through craze on 2026-11-11: a tool loop, and an image read
 # from disk described. Its price is Fireworks' serverless row, with no cache
-# write fee.
+# write fee. It is Fireworks' start (see [providers.fireworks]).
 [models."fireworks/deepseek-v4p1-flash-1017"]
 provider = "fireworks"
 wire_model = "accounts/fireworks/models/deepseek-v4p1-flash-1017"
@@ -712,8 +717,8 @@ cache_read = 0.3
 # (1,048,576); Fireworks publishes no maximum output, so none is set, as for
 # its other models. Its price is Fireworks' serverless row ($2.00 / $0.20 /
 # $10.00), with no cache write fee. Seen live through craze on 2026-11-11: a
-# tool loop, and an image read from disk described. It is Fireworks' start
-# (see [providers.fireworks]).
+# tool loop, and an image read from disk described. It is not Fireworks'
+# start (see [providers.fireworks]).
 [models."fireworks/kimi-k3p1-pro"]
 provider = "fireworks"
 wire_model = "accounts/fireworks/models/kimi-k3p1-pro"

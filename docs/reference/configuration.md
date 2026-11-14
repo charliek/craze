@@ -937,13 +937,13 @@ starts](#model-memory-recentjson)):
 |------|----------|-------------|
 | 1 | `zai-coding-plan` | `glm-5.3` |
 | 2 | `chatgpt` | the first of `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
-| 3 | `fireworks` | `fireworks/kimi-k3p1-pro` |
+| 3 | `fireworks` | `fireworks/deepseek-v4p1-flash-1017` |
 | 4 | `openrouter` | `openrouter/gemini-flash-latest` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
 | 6 | `anthropic` | the newest Opus the account lists (`anthropic/claude-opus-5-5` until it lists a newer one), at `medium` |
 | 7 | `openai` | `openai/gpt-6.1-sol`, at `medium` |
 
-So a machine with only a Fireworks key starts on `fireworks/kimi-k3p1-pro`, one with
+So a machine with only a Fireworks key starts on `fireworks/deepseek-v4p1-flash-1017`, one with
 only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
 `anthropic/claude-opus-5-5`, one with only an OpenAI key stored (`craze auth
 login openai`) on `openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan
@@ -968,10 +968,23 @@ back, or whose only key is an `OPENAI_API_KEY` in the environment ([craze
 never moves a new session to another payer on its
 own](#one-source-per-maker)).
 
-Fireworks' start model is Kimi K3.1 Pro, Moonshot's successor to Kimi K3,
-which is the owner's choice of 2026-11-11, not the result of an evaluation.
-It used to be `fireworks/ember-1`, which is still a model like any other:
-`default_model = "fireworks/ember-1"` in `models.toml` keeps the old start.
+Fireworks' start model is DeepSeek V4.1 Flash 1017, the owner's choice of
+2026-11-14 from the November 2026 start-model evaluation (issue #118; its
+results are in `eval/results/2026-11-start-models/README.md` in the
+repository). It passed 34 of 34 runs, for $1.49 at list price. Kimi K3.1 Pro
+passed 15 of 17 tasks to Kimi K3's 16.5, at about two and a half times K3's
+cost, and on two questions about a large repository reached the $3 run limit
+without an answer. The evaluation checked whether each task passed; it did not
+judge the quality of the answers. `fireworks/kimi-k3p1-pro` and
+`fireworks/ember-1` (Fireworks' start in v0.2.0) are still models like any
+other: `default_model = "fireworks/kimi-k3p1-pro"` (or `"fireworks/ember-1"`)
+in `models.toml` keeps one of them as the start. DeepSeek is a maker that
+OpenRouter reaches as well, and craze's source order puts Fireworks first. If
+your own `source_order` puts `openrouter` before `fireworks` and you have an
+OpenRouter key, OpenRouter becomes DeepSeek's source and this start model is
+hidden: a new session then goes on through [the start rules](#model-memory-recentjson) as if
+Fireworks had no start model (with the shipped provider order, to OpenRouter's
+start model).
 
 With the catalog, a machine needs only a key: store one with
 [`craze auth login`](#keys), or export one of the variables above, and run
@@ -1870,7 +1883,7 @@ on the first of:
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
    Fireworks, OpenRouter, Meta, Anthropic, OpenAI — that has a key, the
    provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
-   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/kimi-k3p1-pro`;
+   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/deepseek-v4p1-flash-1017`;
    `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
    Opus the Anthropic account lists; `openai/gpt-6.1-sol`);
 4. otherwise the first model, by alias, whose provider has a key and that is
@@ -2079,7 +2092,7 @@ native: signed in to ChatGPT, but its models are not available, and craze does n
 native as `needs setup` with the reason `signed in to ChatGPT, but its models
 are not available` and the fix `craze auth login chatgpt, or start with
 --model openai/gpt-6.1-sol` (with a Fireworks key instead, `--model
-fireworks/kimi-k3p1-pro`), and the session list says so when you pick
+fireworks/deepseek-v4p1-flash-1017`), and the session list says so when you pick
 native. When a model is passed over for more than one reason, the sign-in's
 is the one given. The memory and the pin are your own choices, and are not
 held back: a remembered `fireworks/kimi-k3p1-pro`, or `default_model =

@@ -134,8 +134,8 @@ were stopped by the batch's budget guard after 112 and 132 tool calls, at $1.39 
   the ceiling for every harness, and that is true here: the six models with two full reps
   scored 16 or more of 17, and K3.1 Pro 15.
 - **Anything blind about the held-out tasks.** These eight were already read in plan
-  029's final. Nothing in craze was changed from this campaign's results, but the set is
-  still due the rotation `eval/RUNBOOK.md` §6 describes before the next tuning loop.
+  029's final. No prompt or tool in craze was tuned from this campaign's results (the
+  one change is the Fireworks start model, below), but the set is still due the rotation `eval/RUNBOOK.md` §6 describes before the next tuning loop.
 
 ## What it does show
 
@@ -175,13 +175,14 @@ For the next campaign: run a lane per provider so one model's reservations canno
 the others, give an expensive model its own lane with `--cap-other 1`, and leave headroom
 of at least three of its reservations.
 
-## Open
+## What changed because of it
 
-- The Fireworks `start` in `catalog.toml` is still Kimi K3.1 Pro. Issue #118 says to
-  change it if K3.1 Pro is not at least as good as K3 on the suite; that is the owner's
-  decision. The candidates this campaign ran are `fireworks/kimi-k3` (deprecated in the
-  catalog) and `fireworks/deepseek-v4p1-flash-1017`.
-- Not run: K3.1 Pro's second rep on 13 tasks, and K3.1 Pro at a lower effort.
+On 2026-11-14 the owner changed the Fireworks `start` in `catalog.toml` from
+`fireworks/kimi-k3p1-pro` to `fireworks/deepseek-v4p1-flash-1017`, on the results above.
+Kimi K3.1 Pro stays an ordinary model.
+
+Not run: K3.1 Pro's second rep on 13 tasks, K3.1 Pro at a lower effort, and any judged
+comparison of DeepSeek's answers with Kimi's.
 
 ## How this record was made
 
@@ -202,5 +203,5 @@ uv run crazeeval summarize --report $CRAZEEVAL_CAMPAIGN_DIR/report \
 (1.5 times list for the Fireworks models), where the tables above use list price, and its
 `statuses` omit the runs a stopped batch never started. Its medians for Kimi K3.1 Pro
 include the two runs that hit the run limit, where the results table counts finished runs
-only. The per-run figures in the Kimi tables come from each run's `result.json`. The full archive has not been published to
-`charliek/craze-evals` yet; the raw runs are local.
+only. The per-run figures in the Kimi tables come from each run's `result.json`. The full archive is in the private repository
+`charliek/craze-evals` at `campaigns/2026-11-start-models/`; the raw runs are local.

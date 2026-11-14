@@ -188,9 +188,10 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   one JSON object (`schema` 1); `craze models <alias>` reads one as `--model`
   does, `--shipped` answers from the compiled-in catalog alone. Each release
   ships that as `models.json`, listed in `checksums.txt`.
-- Catalog refresh: `fireworks/kimi-k3p1-pro` (Fireworks' start now; set
+- Catalog refresh: `fireworks/deepseek-v4p1-flash-1017` (Fireworks' start
+  now, chosen from the November 2026 start-model evaluation; set
   `default_model = "fireworks/ember-1"` to keep the old one) and
-  `fireworks/deepseek-v4p1-flash-1017`, `openrouter/gemini-pro-latest`,
+  `fireworks/kimi-k3p1-pro`, `openrouter/gemini-pro-latest`,
   `openrouter/gpt-terra-latest`, `openrouter/minimax-m3.1-flash`,
   `muse-ember-1.0` (a 200,000 context default and Meta's long-context tier) and
   `anthropic/claude-fable-5-2` (priced) are new. Deprecated, so out of the

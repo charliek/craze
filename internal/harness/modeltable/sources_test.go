@@ -650,18 +650,18 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 	}{
 		// G2: a broken ChatGPT sign-in.
 		{name: "broken ChatGPT and a Fireworks key", s: signedInNone, keys: []string{fw},
-			held: held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+			held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT and an OpenRouter key", s: signedInNone, keys: []string{or},
 			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
 		{name: "another account's list and a Fireworks key", s: otherAccount, keys: []string{fw},
-			held: held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+			held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		{name: "plan usage off and an OpenRouter key", s: planOff, keys: []string{or},
 			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT and a Z.AI key, which comes before it", s: signedInNone, keys: []string{zai}, start: "glm-5.3"},
 		{name: "broken ChatGPT and the user's unpriced local model", s: signedInNone, providers: guardLocal, models: guardLocalModel,
 			start: "zz-local", fallback: true},
 		{name: "broken ChatGPT after Fireworks in the user's provider_order", s: signedInNone, keys: []string{fw},
-			models: `provider_order = ["fireworks", "chatgpt"]` + "\n", start: "fireworks/kimi-k3p1-pro"},
+			models: `provider_order = ["fireworks", "chatgpt"]` + "\n", start: "fireworks/deepseek-v4p1-flash-1017"},
 		// A model with no price of its own on a provider whose models are
 		// priced is billed per token all the same (review F1): an Opus only
 		// the account's list names, and an entry of the user's on Fireworks.
@@ -673,13 +673,13 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 			opus6Alone: true, held: held{"anthropic/claude-opus-6", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT, a Fireworks key and the user's unpriced model on Fireworks", s: signedInNone, keys: []string{fw},
 			models: "[models.\"fireworks/aaa-mine\"]\nprovider = \"fireworks\"\nwire_model = \"accounts/me/models/mine\"\n",
-			held:   held{"fireworks/kimi-k3p1-pro", ChatGPTProvider, ""}},
+			held:   held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		// A provider the user's provider_order leaves out is held; a sign-in
 		// it leaves out holds nothing (review F4).
 		{name: "broken ChatGPT and a Fireworks key the user's provider_order leaves out", s: signedInNone, keys: []string{fw},
 			models: `provider_order = ["zai-coding-plan", "chatgpt"]` + "\n", held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT left out of the user's provider_order and a Fireworks key", s: signedInNone, keys: []string{fw},
-			models: `provider_order = ["zai-coding-plan", "fireworks"]` + "\n", start: "fireworks/kimi-k3p1-pro"},
+			models: `provider_order = ["zai-coding-plan", "fireworks"]` + "\n", start: "fireworks/deepseek-v4p1-flash-1017"},
 		{name: "broken ChatGPT and a remembered Fireworks model", s: signedInNone, keys: []string{fw},
 			remember: "fireworks/kimi-k3p1-pro", start: "fireworks/kimi-k3p1-pro"},
 		{name: "broken ChatGPT and a pin on OpenRouter", s: signedInNone, keys: []string{or},
@@ -687,7 +687,7 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 		{name: "a working ChatGPT sign-in", s: signedInList, keys: []string{fw, or, an},
 			start: "chatgpt/gpt-5.6-sol", holdsNothing: true},
 		{name: "a registration a sign-out left", s: signedOutOff, keys: []string{fw, or},
-			start: "fireworks/kimi-k3p1-pro", holdsNothing: true},
+			start: "fireworks/deepseek-v4p1-flash-1017", holdsNothing: true},
 		// G1: OPENAI_API_KEY.
 		{name: "OPENAI_API_KEY alone", s: signedOut, openai: oaKey,
 			held: held{"openai/gpt-6.1-sol", "openai", "OPENAI_API_KEY"}},
@@ -702,8 +702,8 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 			remember: "openai/gpt-6-luna", start: "openai/gpt-6-luna"},
 		{name: "OPENAI_API_KEY and a pin on openai/gpt-6.1-terra", s: signedOut, openai: oaKey,
 			models: `default_model = "openai/gpt-6.1-terra"` + "\n", start: "openai/gpt-6.1-terra"},
-		{name: "OPENAI_API_KEY and a Fireworks key", s: signedOut, openai: oaKey, keys: []string{fw}, start: "fireworks/kimi-k3p1-pro"},
-		{name: "FIREWORKS_API_KEY alone", s: signedOut, keys: []string{fw}, start: "fireworks/kimi-k3p1-pro", holdsNothing: true},
+		{name: "OPENAI_API_KEY and a Fireworks key", s: signedOut, openai: oaKey, keys: []string{fw}, start: "fireworks/deepseek-v4p1-flash-1017"},
+		{name: "FIREWORKS_API_KEY alone", s: signedOut, keys: []string{fw}, start: "fireworks/deepseek-v4p1-flash-1017", holdsNothing: true},
 		{name: "OPENROUTER_API_KEY alone", s: signedOut, keys: []string{or}, start: "openrouter/gemini-flash-latest", holdsNothing: true},
 		{name: "ANTHROPIC_API_KEY alone", s: signedOut, keys: []string{an}, start: "anthropic/claude-opus-5-5", holdsNothing: true},
 		// Both reasons: the sign-in's wins — the per-maker rule's, and,
@@ -942,7 +942,7 @@ func TestSourceRuleOverTheShippedCatalog(t *testing.T) {
 			[]string{"glm-5.3", "glm-5.3-flash", "fireworks/deepseek-v4p1-flash-1017"}, []string{"fireworks/glm-5p3", "fireworks/glm-5p3-flash"}},
 		{"Meta and OpenRouter", signedOut, []string{mt, or}, "openrouter/gemini-flash-latest", "",
 			[]string{"muse-spark-1.3", "muse-wonder-1.0", "openrouter/gpt-sol-latest"}, museRouters},
-		{"Fireworks and OpenRouter", signedOut, []string{fw, or}, "fireworks/kimi-k3p1-pro", "",
+		{"Fireworks and OpenRouter", signedOut, []string{fw, or}, "fireworks/deepseek-v4p1-flash-1017", "",
 			[]string{"fireworks/glm-5p3", "fireworks/deepseek-v4p1-flash-1017", "openrouter/gpt-sol-latest", "openrouter/muse-wonder"},
 			append(slices.Clone(glmRouters), "openrouter/deepseek-flash-latest")},
 	} {

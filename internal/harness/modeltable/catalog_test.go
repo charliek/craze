@@ -363,7 +363,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	}
 	wantStarts := map[string][]string{
 		"zai-coding-plan": {"glm-5.3"},
-		"fireworks":       {"fireworks/kimi-k3p1-pro"},
+		"fireworks":       {"fireworks/deepseek-v4p1-flash-1017"},
 		"openrouter":      {"openrouter/gemini-flash-latest"},
 		"meta":            {"muse-spark-1.3-contributor"},
 		"openai":          {"openai/gpt-6.1-sol"},
@@ -900,8 +900,9 @@ func TestLoadReportsABrokenCatalog(t *testing.T) {
 
 // TestShippedCatalogRefresh pins plan 050 C4's catalog refresh as the owner
 // decided it (2026-11-11/12): four models deprecated (out of the pickers,
-// still resolvable with their key, naming an active replacement), Fireworks
-// starting on Kimi K3.1 Pro, each new entry's numbers, the GPT routers'
+// still resolvable with their key, naming an active replacement), Fireworks'
+// start (Kimi K3.1 Pro then; DeepSeek V4.1 Flash 1017 since 2026-11-14),
+// each new entry's numbers, the GPT routers'
 // tier and context default, the open-weight routers at their maker's own
 // rate, and the backfilled replacements of the retired rows.
 func TestShippedCatalogRefresh(t *testing.T) {
@@ -957,12 +958,16 @@ func TestShippedCatalogRefresh(t *testing.T) {
 			t.Errorf("%s is not offered", alias)
 		}
 	}
-	// Fireworks starts on Kimi K3.1 Pro; Ember-1 is an ordinary model.
-	if got := cat.Starts["fireworks"]; !slices.Equal(got, []string{"fireworks/kimi-k3p1-pro"}) {
-		t.Errorf("Fireworks starts on %q, want fireworks/kimi-k3p1-pro", got)
+	// Fireworks starts on DeepSeek V4.1 Flash 1017 (the owner's choice of
+	// 2026-11-14, from the November 2026 start-model eval); Kimi K3.1 Pro,
+	// its start before, and Ember-1, the one before that, are ordinary models.
+	if got := cat.Starts["fireworks"]; !slices.Equal(got, []string{"fireworks/deepseek-v4p1-flash-1017"}) {
+		t.Errorf("Fireworks starts on %q, want fireworks/deepseek-v4p1-flash-1017", got)
 	}
-	if m := tbl.Models["fireworks/ember-1"]; m.Deprecated || !offered["fireworks/ember-1"] {
-		t.Errorf("fireworks/ember-1 = %+v, offered %v; want an ordinary active model", m, offered["fireworks/ember-1"])
+	for _, alias := range []string{"fireworks/kimi-k3p1-pro", "fireworks/ember-1"} {
+		if m := tbl.Models[alias]; m.Deprecated || !offered[alias] {
+			t.Errorf("%s = %+v, offered %v; want an ordinary active model", alias, m, offered[alias])
+		}
 	}
 
 	rates := func(alias string) [3]float64 {
