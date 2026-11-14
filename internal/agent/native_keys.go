@@ -37,10 +37,10 @@ import (
 // redactor from this turn on, and refuses every turn from here if one is in
 // the session's frozen prompt (harness.ErrStoredKeyFrozen). The first turn's
 // look always reads. The keys the file held when the table was loaded are
-// known already — learning them again changes nothing but what a sub-agent
-// opened later starts with — all but one the merge dropped with its entry (an
-// incomplete provider of the user's own, say), which is never sent either and
-// which this is how the session first learns to redact.
+// known already, and recorded as learned from Open (Table.StoredInlineKeys,
+// the merge's dropped entries included), so a sub-agent opened after the key
+// was rotated and the table reloaded still starts with the one the session
+// opened with: learning them again changes nothing.
 //
 // A shell or a sub-agent already running keeps the redactor it began with
 // (R1), and a key stored during a turn is learned at the next: the residual

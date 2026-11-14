@@ -1,0 +1,12 @@
+# T-WS2 web-api-reference-telemetry-search (craze plan 051 follow-up): T-W2, its docs
+# site unnamed. The prompt names only the product, and the setup patch takes the docs
+# site's address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W2's
+# (variant_of).
+id = "T-WS2"
+name = "web-api-reference-telemetry-search"
+variant_of = "T-W2"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`skerrywind.py` uploads weather-station readings to the Skerrywind telemetry API (version 4), but `Client.upload(readings, batch_id)` is still a stub. Implement it: upload the readings for the client's station in a single request, authenticated with the station's signing secret the way the API requires, with every measurement in the members and units the API expects (the gateway logs Celsius, hectopascals and metres per second), and return the receipt the API issues. Gateways resend an upload with the same id after a timeout, so a resent upload that the API already holds must not fail; any other error response raises `SkerrywindError`. Use only the standard library, as the rest of the module does. Skerrywind's API documentation is published on the web; get the endpoint, the request body, the authentication, the units and the retry behaviour exactly right, since the client will be pointed at the real API. Run the tests when you are done.
+"""

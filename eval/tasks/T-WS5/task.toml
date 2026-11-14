@@ -1,0 +1,12 @@
+# T-WS5 web-troubleshooting-error-search (craze plan 051 follow-up): T-W5, its docs site
+# unnamed. The prompt names only the product, and the setup patch takes the docs site's
+# address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W5's
+# (variant_of).
+id = "T-WS5"
+name = "web-troubleshooting-error-search"
+variant_of = "T-W5"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`tessaroot.py` is a client for the Tessaroot greenhouse-sensor API (version 2). Since the gateway firmware update in March, `Client.readings(house, sensor, start, end)` fails for some greenhouses with `TessarootError: TSR-7719: range held` (HTTP 409), mostly for houses whose gateway was offline for a while, and the nursery's dashboards then show nothing for those houses. Fix the client so `readings` handles this error the way Tessaroot documents and returns the readings for the requested range instead of raising, with every reading the API says may still be revised marked `provisional`. Every other error must still raise `TessarootError`. Use only the standard library, as the rest of the module does. Tessaroot's API documentation is published on the web; follow it exactly, since the client will be pointed at the real API. Run the tests when you are done.
+"""

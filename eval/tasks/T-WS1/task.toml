@@ -1,0 +1,12 @@
+# T-WS1 web-api-reference-search (craze plan 051 follow-up): T-W1, its docs site
+# unnamed. The prompt names only the product, and the setup patch takes the docs site's
+# address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W1's
+# (variant_of).
+id = "T-WS1"
+name = "web-api-reference-search"
+variant_of = "T-W1"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`quayside.py` is a client for the Quayside harbour-operations API (version 3), but `Client.berth_schedule(harbor, day)` is still a stub. Implement it: it must return every berth slot booked at that harbour on that day as `Slot` objects, in the order the API lists them, following the API's paging until there are no more pages, and raise `QuaysideError` for any error response. Use only the standard library, as the rest of the module does. Quayside's API documentation is published on the web; get the endpoint, the authentication and the paging exactly right, since the client will be pointed at the real API. Run the tests when you are done.
+"""

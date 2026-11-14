@@ -339,7 +339,8 @@ def test_a_task_commit_enters_the_fingerprint_only_off_the_base_commit(tmp_path,
     on_base = [t for t in tasks.values() if t.craze_commit in (None, FINGERPRINT_BASE_COMMIT)]
     assert len(on_base) == len(tasks)
     for t in on_base:
-        assert task_fingerprint(t) == tree_hash(t.dir), t.id
+        if t.base_dir is None:  # a variant folds in its base's tree (test_web_variants)
+            assert task_fingerprint(t) == tree_hash(t.dir), t.id
     t = tasks["T-E1"]
     moved = dataclasses.replace(t, commit=rev(f"{paths.CRAZE_TEMPLATE_COMMIT}~1"))  # a default that moved
     assert task_fingerprint(moved) != tree_hash(t.dir)

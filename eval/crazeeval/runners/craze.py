@@ -40,6 +40,12 @@ class CrazeRunner(Runner):
     def home(self, home, em, snap, base_url):
         return homes.craze_home(home, em, snap, base_url)
 
+    def task_home(self, home, task):
+        # Web search off on a web task (homes.craze_web_off); every other task's home is
+        # craze_home's alone.
+        if task.web_corpus is not None:
+            homes.craze_web_off(home)
+
     def command(self, em, task, ws_inside, snap):
         cmd = [TOOL_INSIDE["craze"], "prompt", "--provider", "native", "--model", em.craze, "--workspace", ws_inside, "--json"]
         if task.is_plan:
@@ -68,3 +74,7 @@ class CrazeWebRunner(CrazeRunner):
 
     def home(self, home, em, snap, base_url):
         return homes.craze_web_home(home, em, snap, base_url)
+
+    def task_home(self, home, task):
+        # craze_web_home's config.toml turns web search on; nothing to add.
+        pass

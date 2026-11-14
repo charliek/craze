@@ -50,6 +50,10 @@ class Runner:
     def home(self, home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict[str, str]:
         raise NotImplementedError
 
+    def task_home(self, home: Path, task: Task) -> None:
+        """What the task adds to the home ``home`` built: nothing, but for plain craze on
+        a web task (CrazeRunner)."""
+
     def command(self, em: EvalModel, task: Task, ws_inside: str, snap: Snapshot) -> list[str]:
         raise NotImplementedError
 

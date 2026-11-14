@@ -1,0 +1,11 @@
+diff --git a/README.md b/README.md
+index 6b52573..3bec748 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,4 @@ booking = client.book_pass("tr_51c0aa", "ZONE-AB-7D", "2026-10-03")
+ print(booking.reference, booking.pass_code, booking.starts_on, booking.price_cents)
+ ```
+ 
+-The API's documentation is at https://docs.orvelline.example.
+-
+ Run the tests with `python -m pytest`.

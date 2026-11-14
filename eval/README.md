@@ -703,6 +703,24 @@ the facts; no fictional library is vendored (its source would leak them).
   nor any fixture file, by content or by name. With the usual controls (the untouched
   fixture fails, the reference passes), it proves a task scoreable and its facts
   corpus-only.
+- **Variants** (`variant_of`): a web task's search-only form, whose `task.toml` sets only
+  `id`, `name`, `variant_of` (the base web task), `prompt` and optionally `setup_patch`
+  (in its own directory). Everything else -- fixture, checks, corpus, needs, hidden
+  tests, reference patch -- is the base's, read from the base's directory; its
+  fingerprint folds in the base's tree. The setup patch is applied to the fixture's files
+  before the initial commit, so the start commit carries it with no trace in the
+  history (any fixture task's `[repo] setup_patch` is applied the same way). A variant's
+  lint adds one rule: the host of no corpus page is in its prompt or its start files.
+  T-WS1–T-WS6 are T-W1–T-W6 with the docs site unnamed: the prompt says the
+  documentation "is published on the web" and the setup patch takes the address out of
+  the fixture's README, so a craze-web run has to search before it can fetch (C12's
+  T-W runs never searched: every prompt named the site).
+- **Plain craze's home on a web task** adds a `config.toml` that turns web search off
+  (`websearch = false`); every other task's craze home is unchanged, byte for byte. The
+  run's own session is offered no web tools either way (its requests are the same), but
+  a nested `craze prompt --web-search` a model runs through bash is refused at once
+  (`web_search_not_offered`) instead of offering web tools to a request through the
+  proxy -- what Muse tried on C12's plain arm.
 - **Scoring** is the hidden tests alone; the judge is not used for this split.
 
 | id | name | category | split | repo | objective checks |
@@ -713,6 +731,7 @@ the facts; no fictional library is vendored (its source would leak them).
 | T-W4 | web-changelog-breaking-auth | feature | web | `tallowmere` | 7 hidden + 3 trusted tests: a retired v2 client moved to v3 (the key's header, the renamed resource, a newly required field in minutes, renamed response fields, an empty 204 on cancel); corpus of 14 pages (3 relevant) |
 | T-W5 | web-troubleshooting-error | bugfix | web | `tessaroot` | 6 hidden + 3 trusted tests: error TSR-7719 handled by the troubleshooting page's single follow-up (its query parameter and header, the error body's reference) and the readings it flags as provisional; corpus of 10 pages (1 relevant) |
 | T-W6 | web-troubleshooting-retry | bugfix | web | `orvelline` | 8 hidden + 4 trusted tests: 409 booking.hold_pending finished as the troubleshooting guide says (a de-duplication header on every booking, the resend's claim header, each answer's wait in centiseconds, resending for as long as the hold is pending); corpus of 11 pages (2 relevant) |
+| T-WS1–T-WS6 | `<base name>-search` | as the base | web | as the base | T-W1–T-W6 with the docs site unnamed (`variant_of`): the base's checks and corpus; the prompt names only the product and a setup patch removes the docs address from the fixture's README |
 
 **What a web campaign measures**, and what it cannot. It shows whether a model uses
 the web tools to solve tasks it otherwise cannot -- craze-web's pass rate against plain

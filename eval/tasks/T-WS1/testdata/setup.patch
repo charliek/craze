@@ -1,0 +1,11 @@
+diff --git a/README.md b/README.md
+index 29b7fff..b526b31 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,4 @@ for slot in client.berth_schedule("rotterdam-maasvlakte", "2026-03-14"):
+     print(slot.berth, slot.vessel, slot.start, slot.end)
+ ```
+ 
+-The API's documentation is at https://docs.quayside.example.
+-
+ Run the tests with `python -m pytest`.

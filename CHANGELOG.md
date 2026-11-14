@@ -241,6 +241,12 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
   listing every one. New: `openrouter/muse-spark-1.3` and
   `openrouter/muse-wonder`, Meta's models on OpenRouter.
 
+### Fixes
+
+- A native sub-agent started after a `providers.toml` key was rotated before
+  the session's first turn redacts the key the session opened with too; it
+  knew only the new one, so a copy of the old key it read reached its model.
+
 ### Maintenance
 
 - Go 1.27.3 (was 1.27.1; `go.mod`'s floor is now `go 1.27.3`) and golangci-lint
