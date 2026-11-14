@@ -18,9 +18,11 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"charm.land/fantasy"
 
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 	"github.com/charliek/craze/internal/harness/websearch"
 )
@@ -172,11 +174,33 @@ type webTallies struct {
 	open, frozen    bool
 }
 
-// webSnap is a copy of the session's tallies.
+// webSnap is a copy of the session's tallies, their URLs as held.
 func webSnap(s *nativeSession) webTallies {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return webTallies{web: *s.web.Clone(), idle: *s.webIdle.Clone(), last: *s.webLast.Clone(), open: s.webOpen, frozen: s.webFrozen}
+	var held *redact.Replacer // no key: the URLs as held
+	return webTallies{web: *s.web.state(held), idle: *s.webIdle.state(held), last: *s.webLast.state(held), open: s.webOpen, frozen: s.webFrozen}
+}
+
+// webHeldText is the text of a held URL.
+func webHeldText(u webHeld) string { return u.text }
+
+// noKeys is a redactor that knows no key.
+var noKeys *redact.Replacer
+
+// tallyOf is a tally of calls, as the session holds it, reported with no key
+// to redact.
+func tallyOf(calls ...tool.WebCall) *webTally {
+	t := &webTally{}
+	for _, c := range calls {
+		t.add(c, noKeys)
+	}
+	return t
+}
+
+// published is t's published value with no key to redact.
+func published(t *webTally) WebSearchState {
+	return *t.state(noKeys)
 }
 
 // heldPrompt is a started session (its webReportSeam seam, nil for none) with
@@ -238,9 +262,7 @@ func endedCtx() context.Context {
 // equal after the cut listed once with urlsTruncated; the 101st distinct URL
 // dropped with urlsTruncated, and exactly 100 kept without it.
 func TestWebTallyURLRules(t *testing.T) {
-	var tl WebSearchState
-	addWebCall(&tl, search("https://b.example/", "https://a.example/", "https://b.example/"), []string{"https://b.example/", "https://a.example/", "https://b.example/"}, false)
-	addWebCall(&tl, search(), []string{"https://a.example/", "https://c.example/"}, false)
+	tl := published(tallyOf(search("https://b.example/", "https://a.example/", "https://b.example/"), search("https://a.example/", "https://c.example/")))
 	if want := []string{"https://b.example/", "https://a.example/", "https://c.example/"}; !slices.Equal(tl.URLs, want) || tl.URLsTruncated || tl.Searches != 2 {
 		t.Fatalf("tally %+v; want %v, first seen first, nothing truncated", tl, want)
 	}
@@ -257,33 +279,251 @@ func TestWebTallyURLRules(t *testing.T) {
 	}
 
 	base := "https://x.example/" + strings.Repeat("a", 600)
-	var cutT WebSearchState
-	for _, u := range []string{base + "1", base + "2"} {
-		v, did := cutWebURL(u)
-		addWebCall(&cutT, search(u), []string{v}, did)
-	}
-	if len(cutT.URLs) != 1 || !cutT.URLsTruncated {
+	if cutT := published(tallyOf(search(base+"1"), search(base+"2"))); len(cutT.URLs) != 1 || !cutT.URLsTruncated {
 		t.Fatalf("two URLs equal after the cut: %d listed, truncated=%v; want 1, true", len(cutT.URLs), cutT.URLsTruncated)
 	}
 
-	var hundred, more WebSearchState
+	hundred, more := &webTally{}, &webTally{}
 	for i := range 101 {
 		u := fmt.Sprintf("https://n.example/%d", i)
 		if i < 100 {
-			addWebCall(&hundred, search(u), []string{u}, false)
+			hundred.add(search(u), noKeys)
 		}
-		addWebCall(&more, search(u), []string{u}, false)
+		more.add(search(u), noKeys)
 	}
-	if len(hundred.URLs) != 100 || hundred.URLsTruncated {
-		t.Fatalf("100 distinct URLs: %d kept, truncated=%v", len(hundred.URLs), hundred.URLsTruncated)
+	if h := published(hundred); len(h.URLs) != 100 || h.URLsTruncated {
+		t.Fatalf("100 distinct URLs: %d kept, truncated=%v", len(h.URLs), h.URLsTruncated)
 	}
-	if len(more.URLs) != 100 || !more.URLsTruncated || more.URLs[99] != "https://n.example/99" || more.Searches != 101 {
-		t.Fatalf("101 distinct URLs: %d kept, truncated=%v, last %q", len(more.URLs), more.URLsTruncated, more.URLs[len(more.URLs)-1])
+	if m := published(more); len(m.URLs) != 100 || !m.URLsTruncated || m.URLs[99] != "https://n.example/99" || m.Searches != 101 {
+		t.Fatalf("101 distinct URLs: %d kept, truncated=%v, last %q", len(m.URLs), m.URLsTruncated, m.URLs[len(m.URLs)-1])
 	}
 	// A duplicate past the cap is not a dropped distinct value.
-	addWebCall(&hundred, search(), []string{"https://n.example/3"}, false)
-	if hundred.URLsTruncated {
+	hundred.add(search("https://n.example/3"), noKeys)
+	if published(hundred).URLsTruncated {
 		t.Fatal("a duplicate at the cap marked the list truncated")
+	}
+	if len(more.urls) != webURLsMax {
+		t.Fatalf("101 distinct URLs: %d held; want the %d published", len(more.urls), webURLsMax)
+	}
+}
+
+// TestWebTallyRedactsAtEachPublication (review fix1, fix3): the tally holds a
+// URL as the service returned it, and publishes it redacted with the
+// publication's redactor — in the session, the tally's own, which holds every
+// key of the report's and those learned since (TestWebChildKey… cover that
+// union) — at most webURLHeld bytes held, one per published form at the
+// report, so URLs that collapse into one form leave room for a later distinct
+// one; and a published list is its own.
+func TestWebTallyRedactsAtEachPublication(t *testing.T) {
+	const early, late = "sk-known-at-the-report-0321", "sk-learned-after-it-0322"
+	knowsEarly, knowsLate := redact.New(early), redact.New(late)
+	tl := &webTally{}
+	tl.add(search("https://e.example/?k="+early, "https://l.example/?k="+late), knowsEarly)
+	if tl.urls[0].text != "https://e.example/?k="+early || tl.urls[1].text != "https://l.example/?k="+late {
+		t.Fatalf("the tally holds %q, %q; want the URLs as returned", tl.urls[0].text, tl.urls[1].text)
+	}
+	want := []string{"https://e.example/?k=" + redact.Marker, "https://l.example/?k=" + redact.Marker}
+	if got := tl.state(knowsEarly.Union(knowsLate)); !slices.Equal(got.URLs, want) {
+		t.Fatalf("published with the report's keys and the later one: %q; want both keys redacted", got.URLs)
+	}
+
+	// The held bound: a long URL is held to webURLHeld bytes at a UTF-8
+	// boundary, and published cut to webURLMax.
+	long := &webTally{}
+	long.add(search("https://long.example/"+strings.Repeat("é", 4*webURLHeld)), noKeys)
+	if h := long.urls[0]; len(long.urls) != 1 || !h.cut || len(h.text) > webURLHeld || len(h.text) < webURLHeld-utf8.UTFMax || !utf8.ValidString(h.text) {
+		t.Fatalf("a long URL is held as %d bytes (cut=%v)", len(h.text), h.cut)
+	}
+	if got := published(long); len(got.URLs[0]) > webURLMax || !got.URLsTruncated {
+		t.Fatalf("a long URL is published as %d bytes, truncated=%v", len(got.URLs[0]), got.URLsTruncated)
+	}
+
+	// 400 URLs with one published form hold one slot; a distinct one after
+	// them is held and published.
+	base := "https://same.example/" + strings.Repeat("s", webURLMax)
+	collapse := &webTally{}
+	for i := range 400 {
+		collapse.add(search(fmt.Sprintf("%s/%d", base, i)), noKeys)
+	}
+	collapse.add(search("https://other.example/"), noKeys)
+	if got := published(collapse); len(collapse.urls) != 2 || !slices.Equal(got.URLs, []string{base[:webURLMax], "https://other.example/"}) || !got.URLsTruncated {
+		t.Fatalf("collapsing URLs: %d held, published %q, truncated=%v", len(collapse.urls), got.URLs, got.URLsTruncated)
+	}
+
+	// Two held URLs that differ only in keys learned later are published once.
+	fold := tallyOf(search("https://f.example/?k=k001-secret", "https://f.example/?k=k002-secret"))
+	got := fold.state(redact.New("k001-secret", "k002-secret"))
+	if !slices.Equal(got.URLs, []string{"https://f.example/?k=" + redact.Marker}) {
+		t.Fatalf("folded by later keys: %q", got.URLs)
+	}
+	got = fold.state(noKeys)
+	got.URLs[0] = "mutated"
+	if fold.urls[0].text != "https://f.example/?k=k001-secret" || published(fold).URLs[0] == "mutated" {
+		t.Fatal("a published list shares its backing array with the tally")
+	}
+}
+
+// TestWebTallyHeldCutHidesAKeysStart (review fix2 #2): a URL held cut at
+// webURLHeld bytes ends in the first bytes of a key B that its report did
+// not know; ten occurrences of a 400-byte key A come before it. Both learned
+// before the publication, A's redaction pulls what follows it forward by
+// thousands of bytes — B's start included, into the first 500 — so the
+// publication must treat a held URL that was cut as the start of a longer
+// text: B's halved start is not shown.
+func TestWebTallyHeldCutHidesAKeysStart(t *testing.T) {
+	keyA := "qa-" + strings.Repeat("0123456789", 40)[:397]
+	const keyB = "zb7-the-second-key-0331"
+	head := "https://x.example/?a=" + strings.Repeat(keyA, 10) + "&pad="
+	raw := head + strings.Repeat("p", 4088-len(head)) + keyB + "&tail"
+	if len(keyA) != 400 || strings.Index(raw, keyB) != 4088 {
+		t.Fatalf("fixture: A is %d bytes, B at %d", len(keyA), strings.Index(raw, keyB))
+	}
+	tl := tallyOf(search(raw))
+	got := tl.state(redact.New(keyA, keyB))
+	if len(got.URLs) != 1 || strings.Contains(got.URLs[0], keyA[:8]) || strings.Contains(got.URLs[0], keyB[:8]) {
+		t.Fatalf("published %q; want both keys redacted and no piece of either", got.URLs)
+	}
+}
+
+// TestWebTallyOverlappingKeyLearnedLater (review fix3 #1): a URL holds key B,
+// which begins with key A. Its report knows A alone; B is learned before the
+// publication. Published, the URL is redacted as if B had been known at the
+// report — B whole, its private tail with it — since the tally publishes
+// from the URL as the service returned it, not from the report's redaction
+// (which would have left B's tail behind A's marker, where B no longer
+// matches).
+func TestWebTallyOverlappingKeyLearnedLater(t *testing.T) {
+	const keyA = "qz9k-base-secret-051"
+	const keyB = keyA + "-new-private-tail"
+	tl := &webTally{}
+	tl.add(search("https://example.com/?k="+keyB), redact.New(keyA))
+	got := tl.state(redact.New(keyA, keyB))
+	if want := []string{"https://example.com/?k=" + redact.Marker}; !slices.Equal(got.URLs, want) {
+		t.Fatalf("published %q; want %q", got.URLs, want)
+	}
+}
+
+// TestWebTallyStoresByPublishedForm (review fix3 #2): 100 URLs, each cut at
+// webURLHeld bytes inside a different long key the redactor knows, publish as
+// one form — Head hides each halved key — so they take one slot of the
+// tally's 100, and a distinct URL reported after them is still published.
+func TestWebTallyStoresByPublishedForm(t *testing.T) {
+	const base = "https://same.example/"
+	keys := make([]string, webURLsMax)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("qz9k-%03d-", i) + strings.Repeat("p", 4100)
+	}
+	red := redact.New(keys...)
+	tl := &webTally{}
+	for _, k := range keys {
+		tl.add(search(base+k[:webURLHeld-len(base)]+"X"), red)
+	}
+	tl.add(search("https://other.example/"), red)
+	got := tl.state(red)
+	if want := []string{base, "https://other.example/"}; !slices.Equal(got.URLs, want) || !got.URLsTruncated {
+		t.Fatalf("published %d URLs (first %.40q), truncated=%v; want %q, truncated", len(got.URLs), got.URLs[0], got.URLsTruncated, want)
+	}
+}
+
+// TestWebTallyFoldedDuplicatesAreTruncated (review fix4): a URL admission
+// folds into a held one with the same published form is left out, and the
+// tally says so — urlsTruncated — whenever what was left out was not that
+// very URL: two URLs that differ only behind keys the redactor knows now,
+// which a key learned later tells apart again; and a URL of 500 bytes then
+// the same URL one byte longer, which the cut folds into it. The same URL
+// reported twice leaves nothing out.
+func TestWebTallyFoldedDuplicatesAreTruncated(t *testing.T) {
+	const keyA, keyB = "qz9k-alpha-secret-051", "qz9k-bravo-secret-051"
+	known := redact.New(keyA, keyB)
+	folded := &webTally{}
+	folded.add(search("https://example.com/?k="+keyA+"-tail"), known)
+	folded.add(search("https://example.com/?k="+keyB+"-tail"), known)
+	if len(folded.urls) != 1 {
+		t.Fatalf("fixture: %d held; want the two folded into one", len(folded.urls))
+	}
+	got := folded.state(known.Union(redact.New(keyA + "-tail")))
+	if !slices.Equal(got.URLs, []string{"https://example.com/?k=" + redact.Marker}) || !got.URLsTruncated {
+		t.Errorf("published %q, truncated=%v; want the held URL alone, truncated: the other is told apart now", got.URLs, got.URLsTruncated)
+	}
+
+	u := "https://cut.example/" + strings.Repeat("u", webURLMax-len("https://cut.example/"))
+	cut := tallyOf(search(u), search(u+"z"))
+	if got := published(cut); !slices.Equal(got.URLs, []string{u}) || !got.URLsTruncated {
+		t.Errorf("a %d-byte URL then one byte longer: published %d URLs, truncated=%v; want one, truncated", len(u), len(got.URLs), got.URLsTruncated)
+	}
+
+	twice := tallyOf(search("https://same.example/a"), search("https://same.example/a"))
+	if got := published(twice); !slices.Equal(got.URLs, []string{"https://same.example/a"}) || got.URLsTruncated {
+		t.Errorf("the same URL twice: published %q, truncated=%v; want it once, nothing truncated", got.URLs, got.URLsTruncated)
+	}
+}
+
+// TestWebTallyHeldURLsOwnTheirBytes (review fix2 #3): a held URL cut from a
+// long one is a copy, not a slice of it, so the tally keeps webURLHeld bytes
+// per URL, never the reply the URL came in: 100 distinct URLs of about 200 KiB
+// each are held in strings none of which points into its input.
+func TestWebTallyHeldURLsOwnTheirBytes(t *testing.T) {
+	tl := &webTally{}
+	inputs := make([]string, webURLsMax)
+	for i := range inputs {
+		inputs[i] = fmt.Sprintf("https://big.example/%03d/", i) + strings.Repeat("b", 200<<10)
+		tl.add(search(inputs[i]), noKeys)
+	}
+	if len(tl.urls) != webURLsMax {
+		t.Fatalf("%d held; want %d", len(tl.urls), webURLsMax)
+	}
+	for i, u := range tl.urls {
+		in := inputs[i]
+		start, end := uintptr(unsafe.Pointer(unsafe.StringData(in))), uintptr(unsafe.Pointer(unsafe.StringData(in)))+uintptr(len(in))
+		if p := uintptr(unsafe.Pointer(unsafe.StringData(webHeldText(u)))); p >= start && p < end {
+			t.Fatalf("held URL %d (%d bytes) points into its %d-byte input", i, len(webHeldText(u)), len(in))
+		}
+	}
+}
+
+// TestWebChildKeyCoveredAtAPublicationStaysCovered (review fix2 #1): the
+// parent reports a URL holding K before any child knows K, so its report
+// leaves K raw; a child that opens knowing K then reports a call, and that
+// publication — the harness's redactor covering K while the child runs —
+// redacts K in the earlier URL. Coverage once had is kept: after the child
+// retires and the parent's turn returns, the restatement still redacts K.
+func TestWebChildKeyCoveredAtAPublicationStaysCovered(t *testing.T) {
+	const childKey = "sk-the-child-learns-it-later-0341"
+	f, r := routedNative(t)
+	env := newLearnableEnv(f)
+	s := f.started(Options{})
+	w := newNativeWatcher(t, s)
+	env.set("NATIVE_NOKEY_KEY", childKey)
+	a := r["test/a"]
+	a.route("go", func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+		s.webReport(search("https://k.example/?key=" + childKey))
+		callsStep(agentCall(t, "a1", "looks", "look it up"))(ctx, yield)
+	}, answer("noted"))
+	a.route("look it up", func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+		s.webReport(search("https://other.example/"))
+		answer("found it")(ctx, yield)
+	})
+	s.log.Enqueue(turnEv("turn-1", TurnStarted))
+	if _, err := s.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	s.log.Enqueue(turnEv("turn-1", TurnEnded))
+	evs := mark(t, s, w)
+	if s.hs.Redact(childKey) != childKey {
+		t.Fatal("control: the parent learned the key")
+	}
+	at := webAt(evs)
+	if len(at) < 3 {
+		t.Fatalf("%d web deltas; want the parent's report's, the child's and the restatement", len(at))
+	}
+	if got := webOf(evs[at[0]]); !slices.Equal(got.URLs, []string{"https://k.example/?key=" + childKey}) {
+		t.Fatalf("control: the parent's report published %q; want the key raw, which nothing knew yet", got.URLs)
+	}
+	want := []string{"https://k.example/?key=" + redact.Marker, "https://other.example/"}
+	for _, i := range at[1:] {
+		if got := webOf(evs[i]); !slices.Equal(got.URLs, want) {
+			t.Fatalf("a web delta after the child's report is %q; want %q", got.URLs, want)
+		}
 	}
 }
 
@@ -391,6 +631,177 @@ func TestWebKeyInAURLIsNeverPublished(t *testing.T) {
 	}
 	if !sawWeb {
 		t.Fatal("the journal holds no web section: the check above checked nothing")
+	}
+}
+
+// webLearnedKey is a web search key the session learns only after a URL
+// holding it was counted; its first bytes are a spelling nothing else holds.
+const webLearnedKey = "qz9k-learned-after-the-count-0301"
+
+// idleKeyURLs are two URLs holding key: one with it in its query, and one
+// over the 500-byte cut with it straddling byte 500.
+func idleKeyURLs(t *testing.T, key string) (short, straddle string) {
+	t.Helper()
+	short = "https://idle.example/?k=" + key
+	pad := "https://idle.example/?q=" + strings.Repeat("p", webURLMax-12-len("https://idle.example/?q="))
+	straddle = pad + key + "&tail"
+	if i := strings.Index(straddle, key); i >= webURLMax || i+len(key) <= webURLMax {
+		t.Fatalf("fixture: the key is at %d..%d, not across the cut", i, i+len(key))
+	}
+	return short, straddle
+}
+
+// checkLearnedKeyRedacted checks that every web delta in evs holds both idle
+// URLs with key redacted — the short one whole, the straddling one redacted,
+// then cut, so the cut falls inside the marker — and no piece of key: the
+// last of them is the restatement a waiting command's result reads.
+func checkLearnedKeyRedacted(t *testing.T, evs []Event, key, short, straddle string) {
+	t.Helper()
+	at := webAt(evs)
+	if len(at) == 0 {
+		t.Fatal("no web delta")
+	}
+	wantLong, _ := cutWebURL(strings.ReplaceAll(straddle, key, redact.Marker))
+	if i := strings.LastIndex(wantLong, "["); i < 0 || len(wantLong)-i >= len(redact.Marker) || !strings.HasPrefix(redact.Marker, wantLong[i:]) {
+		t.Fatalf("fixture: the cut does not fall inside the marker: %q", wantLong[len(wantLong)-20:])
+	}
+	want := []string{strings.ReplaceAll(short, key, redact.Marker), wantLong}
+	for _, i := range at {
+		got := webOf(evs[i])
+		for _, u := range got.URLs {
+			if strings.Contains(u, key[:4]) {
+				t.Fatalf("a web delta %+v carries a piece of the key learned before it was published: %q", got, u)
+			}
+		}
+		if !slices.Equal(got.URLs, want) || !got.URLsTruncated || got.Searches != 1 {
+			t.Fatalf("a web delta is %+v; want %q, the learned key redacted and the long URL then cut", got, want)
+		}
+	}
+}
+
+// TestWebIdleURLRedactedWithAKeyLearnedSince (review branch F1): a URL counted
+// while no window was open, holding a key stored after it was counted, is
+// published with that key redacted by the next prompt: the prompt's start
+// learns the key before its window opens, so the opening delta — which
+// carries the idle URL — and the restatement both redact it; a key straddling
+// the 500-byte cut leaves no piece of itself, since the redactor runs before
+// the cut at each publication.
+func TestWebIdleURLRedactedWithAKeyLearnedSince(t *testing.T) {
+	f := newNativeFixture(t)
+	f.models["test/a"].push(answer("one"), answer("two"))
+	s := f.started(Options{})
+	w := newNativeWatcher(t, s)
+	if _, err := s.Prompt(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	short, straddle := idleKeyURLs(t, webLearnedKey)
+	s.webReport(search(short, straddle))
+	storeWebKey(t, f.dir, webLearnedKey)
+	s.mu.Lock()
+	hs := s.hs
+	s.mu.Unlock()
+	if got := hs.Redact(webLearnedKey); got != webLearnedKey {
+		t.Fatal("control: the key was learned before the prompt started")
+	}
+
+	s.log.Enqueue(turnEv("turn-2", TurnStarted))
+	if _, err := s.Prompt(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	s.log.Enqueue(turnEv("turn-2", TurnEnded))
+	evs := mark(t, s, w)
+	if at := webAt(evs); len(at) != 2 {
+		t.Fatalf("%d web deltas; want the opening's and the restatement", len(at))
+	}
+	checkLearnedKeyRedacted(t, evs, webLearnedKey, short, straddle)
+}
+
+// TestWebIdleURLRedactedWithAKeyAWakeLearned (review branch F1): an idle
+// background child's URL holding a key stored after it was counted — the
+// wake learns the key before it opens its window — is published with the key
+// redacted in the wake's opening delta and its restatement.
+func TestWebIdleURLRedactedWithAKeyAWakeLearned(t *testing.T) {
+	rig, _ := webWakeRig(t)
+	s := rig.s
+	child := newHeld(t)
+	id := rig.spawnOne(child, answer("noted"), answer("later"))
+	short, straddle := idleKeyURLs(t, webLearnedKey)
+	s.webReport(search(short, straddle))
+	storeWebKey(t, rig.f.dir, webLearnedKey)
+	rig.finish(child, id)
+	rig.awaitDecided(true, "the result pending")
+	rig.bracket(false, 1, "wake-1")
+	evs := mark(t, s, rig.w)
+	op, en := bracketAt(evs, "wake-1", true), bracketAt(evs, "wake-1", false)
+	at := webAt(evs)
+	if len(at) != 2 || at[0] <= op || at[1] >= en {
+		t.Fatalf("web deltas at %v (wake %d..%d); want the carried call's and the restatement inside the wake", at, op, en)
+	}
+	checkLearnedKeyRedacted(t, evs, webLearnedKey, short, straddle)
+}
+
+// TestWebChildKeyStaysRedactedAfterTheChildRetires (review fix1 F1): a URL a
+// running child's call reported holds a key only that child knows. The
+// harness's redactor covers it while the child runs and for the rest of the
+// parent's harness turn, and no longer once that turn has returned — before
+// the window's restatement. Redacted when it was reported, the URL stays
+// redacted in every delta, the restatement (what a result reads) included.
+func TestWebChildKeyStaysRedactedAfterTheChildRetires(t *testing.T) {
+	const childKey = "sk-only-the-child-knows-it-0311"
+	f, r := routedNative(t)
+	env := newLearnableEnv(f)
+	s := f.started(Options{})
+	w := newNativeWatcher(t, s)
+	env.set("NATIVE_NOKEY_KEY", childKey)
+	a := r["test/a"]
+	a.route("go", callsStep(agentCall(t, "a1", "looks", "look it up")), answer("noted"))
+	var during string
+	a.route("look it up", func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+		during = s.hs.Redact(childKey)
+		s.webReport(search("https://k.example/?key=" + childKey))
+		answer("found it")(ctx, yield)
+	})
+	s.log.Enqueue(turnEv("turn-1", TurnStarted))
+	if _, err := s.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	s.log.Enqueue(turnEv("turn-1", TurnEnded))
+	evs := mark(t, s, w)
+	if during != redact.Marker || s.hs.Redact(childKey) != childKey {
+		t.Fatalf("control: the parent's redactor held the child's key %q while it ran and %q after; want it while it ran only",
+			during, s.hs.Redact(childKey))
+	}
+	at := webAt(evs)
+	if len(at) < 2 {
+		t.Fatalf("%d web deltas; want the report's and the restatement", len(at))
+	}
+	for _, i := range at {
+		if got := webOf(evs[i]); !slices.Equal(got.URLs, []string{"https://k.example/?key=" + redact.Marker}) {
+			t.Fatalf("a web delta is %+v; want the child's key redacted", got)
+		}
+	}
+}
+
+// TestWebCollapsingURLsKeepALaterDistinctOne (review fix1 F3): 400 distinct
+// URLs that share their first 500 bytes publish as one value, cut; a distinct
+// URL reported after them is still published beside it.
+func TestWebCollapsingURLsKeepALaterDistinctOne(t *testing.T) {
+	s, w, h, out := heldPrompt(t, "", nil)
+	base := "https://same.example/" + strings.Repeat("s", webURLMax)
+	for i := range 400 {
+		s.webReport(search(fmt.Sprintf("%s/%d", base, i)))
+	}
+	s.webReport(search("https://other.example/"))
+	close(h.release)
+	await(t, out, "the turn")
+	evs := mark(t, s, w)
+	at := webAt(evs)
+	if len(at) == 0 {
+		t.Fatal("no web delta")
+	}
+	want := []string{base[:webURLMax], "https://other.example/"}
+	if got := webOf(evs[at[len(at)-1]]); !slices.Equal(got.URLs, want) || !got.URLsTruncated || got.Searches != 401 {
+		t.Fatalf("the restatement is %d searches, URLs %q, truncated %v; want %d searches and %q, truncated", got.Searches, got.URLs, got.URLsTruncated, 401, want)
 	}
 }
 
@@ -636,8 +1047,8 @@ func TestWebPublishedDeltaIsItsOwn(t *testing.T) {
 }
 
 // TestWebAttributionPoint: a report belongs to the window open when it takes
-// s.mu, not when its call returned: held after it read the redactor and
-// released once the window has closed, it lands in webIdle; released after
+// s.mu, not when its call returned: held before it takes s.mu and released
+// once the window has closed, it lands in webIdle; released after
 // the freeze, it is dropped.
 func TestWebAttributionPoint(t *testing.T) {
 	for _, tc := range []struct {
@@ -1086,7 +1497,7 @@ func TestWebSettleRestatesInTheReleaseGap(t *testing.T) {
 	}
 	// Frozen: nothing, whatever webLast holds.
 	s.mu.Lock()
-	s.webLast = WebSearchState{Searches: 2}
+	s.webLast = webTally{searches: 2}
 	s.mu.Unlock()
 	s.RestateWebTally()
 	if evs := mark(t, s, w); len(webAt(evs)) != len(at) {
@@ -1114,7 +1525,7 @@ func TestWebLastIsClearedByEveryBegin(t *testing.T) {
 	_, _ = run(context.Background())
 	// And a refused Begin clears it too.
 	s.mu.Lock()
-	s.webLast = WebSearchState{Searches: 3}
+	s.webLast = webTally{searches: 3}
 	s.wake = true
 	s.mu.Unlock()
 	refused := s.Begin("refused")
@@ -1125,7 +1536,7 @@ func TestWebLastIsClearedByEveryBegin(t *testing.T) {
 	if _, err := refused(context.Background()); err != ErrForeignTurn {
 		t.Fatalf("the refused Begin = %v", err)
 	}
-	if !last.Empty() {
+	if !last.empty() {
 		t.Fatalf("webLast after a refused Begin = %+v", last)
 	}
 }

@@ -275,7 +275,9 @@ func TestWebSearchResults(t *testing.T) {
 }
 
 // TestWebFetchResults: the page's text as the service gave it; an empty page
-// is "No content returned for <url>". The card's title is the URL.
+// is "No content returned for <url>", the URL the service returned (the
+// requested one with its key scrubbed), never the requested one, and with no
+// URL when the service returned none. The card's title is the URL.
 func TestWebFetchResults(t *testing.T) {
 	text := "# A page\n\nSome *markdown*, kept as it is.  \n"
 	web := &fakeWeb{page: tool.WebPage{URL: "https://example.com/a", Text: text}}
@@ -292,7 +294,17 @@ func TestWebFetchResults(t *testing.T) {
 	if got := ok(t, res); got != "No content returned for https://example.com/a" {
 		t.Fatalf("an empty page read %q", got)
 	}
-	if !slices.Equal(web.urls, []string{"https://example.com/a", "https://example.com/a"}) {
+	web.page.URL = "https://example.com/a?k=" + redact.Marker
+	_, res = f.call(t, "webfetch", map[string]any{"url": "https://example.com/a?k=%41%42"})
+	if got := ok(t, res); got != "No content returned for https://example.com/a?k="+redact.Marker {
+		t.Fatalf("an empty page read %q; want the service's URL, not the requested one", got)
+	}
+	web.page.URL = ""
+	_, res = f.call(t, "webfetch", map[string]any{"url": "https://example.com/a?k=%41%42"})
+	if got := ok(t, res); got != "No content returned" {
+		t.Fatalf("an empty page with no URL read %q", got)
+	}
+	if !slices.Equal(web.urls, []string{"https://example.com/a", "https://example.com/a", "https://example.com/a?k=%41%42", "https://example.com/a?k=%41%42"}) {
 		t.Fatalf("the service was asked for %q", web.urls)
 	}
 }
@@ -692,7 +704,8 @@ func TestWebLineGrownByRedaction(t *testing.T) {
 // its start, not the truncation notice alone.
 func TestWebFetchLongURLEmptyPage(t *testing.T) {
 	url := "https://example.com/" + strings.Repeat("p", 51200)
-	f := newWebFixture(t, &fakeWeb{}, nil)
+	// The service returns the requested URL, scrubbed: here, as it was.
+	f := newWebFixture(t, &fakeWeb{page: tool.WebPage{URL: url}}, nil)
 	_, res := f.call(t, "webfetch", map[string]any{"url": url})
 	got := ok(t, res)
 	head, _, _ := strings.Cut(got, "\n\n...")

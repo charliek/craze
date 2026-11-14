@@ -236,6 +236,12 @@ One JSON object per line:
     records how the session started, not how it runs next: opening it from
     `--resume` or the session list, or `craze send` to a session of your own,
     runs an ordinary interactive session.
+
+    A row marked `unattended` is a **sub-agent's session**: `--continue` (and
+    `craze serve -c`) skips it and loads the newest session that is not one,
+    the `--resume` picker lists such rows after the others, the picker and the
+    session list tag them `sub-agent`, and when the index reaches its 500-row
+    cap they are dropped before any other row (the oldest first).
 - `webSearch` is the [web search](#native-web-search) choice a session was
   created with: `"on"` for `--web-search`, `"off"` for `--no-web-search`
   ([`craze new --wait`](cli.md#web-search-flags) or `craze serve`, attended or
@@ -254,12 +260,6 @@ One JSON object per line:
     removed or changed once written, a row of the same session written later
     carries it too, and `craze send` has no flag to change it. A value other
     than `on` or `off` (a later craze's) is read as none and kept.
-
-    A marked row is a **sub-agent's session**: `--continue` (and `craze
-    serve -c`) skips it and loads the newest session that is not one, the
-    `--resume` picker lists such rows after the others, the picker and the
-    session list tag them `sub-agent`, and when the index reaches its 500-row
-    cap they are dropped before any other row (the oldest first).
 
 **A `--continue` or `--resume` never changes the persisted default
 provider.** Loading yesterday's grok thread is not a decision about

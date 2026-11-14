@@ -151,8 +151,11 @@ func TestEvalCorpusReplies(t *testing.T) {
 // not write starts the content; a block with no URL is dropped; text before
 // the first block is no result; CRLF reads as LF. Text with no block, or
 // with blocks none of which has a URL, is a failure — never no results —
-// and empty text is no results.
+// and empty text is no results, as is exactly the sentence exa-mcp-server's
+// web_search_exa answers a search that found nothing with, trimmed (any
+// other spelling of it, or the sentence with more, is still a failure).
 func TestParseExa(t *testing.T) {
+	const exaNoResults = "No search results found. Please try a different query."
 	for _, tc := range []struct {
 		name string
 		text string
@@ -193,6 +196,11 @@ func TestParseExa(t *testing.T) {
 			ok:   true,
 		},
 		{name: "empty text is no results", text: " \n\n", ok: true},
+		{name: "exa-mcp-server's no-results sentence is no results", text: exaNoResults, ok: true},
+		{name: "the no-results sentence, padded, is no results", text: "\r\n  " + exaNoResults + "  \n\n", ok: true},
+		{name: "the no-results sentence with more text", text: exaNoResults + "\nTry again later."},
+		{name: "the no-results sentence in another case", text: strings.ToLower(exaNoResults)},
+		{name: "the no-results sentence's first half", text: "No search results found."},
 		{name: "text with no block", text: "No results found for your query."},
 		{name: "blocks none of which has a URL", text: "Title: x\nHighlights:\ny"},
 	} {
@@ -203,8 +211,9 @@ func TestParseExa(t *testing.T) {
 			}
 		})
 	}
-	// Through the service: a failure is unable, empty text is no results.
-	for text, wantErr := range map[string]bool{"No results found for your query.": true, "": false} {
+	// Through the service: a failure is unable; empty text, and the sentence
+	// exa-mcp-server answers a search that found nothing with, are no results.
+	for text, wantErr := range map[string]bool{"No results found for your query.": true, "": false, exaNoResults: false, exaNoResults + " Or not.": true} {
 		f := newFake(t, replyText(text))
 		results, err := search(overridden(t, f, ""), "q")
 		if (err != nil) != wantErr || (err == nil && (results == nil || len(results) != 0)) {

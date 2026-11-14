@@ -460,16 +460,20 @@ type nativeSession struct {
 	// The web tally (native_webtally.go, plan 051 F.4.2): the open window's
 	// tally and whether one is open, the calls reported while none was, the
 	// released prompt window's final tally, and the close's cutoff. Under
-	// s.mu.
-	web, webIdle, webLast WebSearchState
+	// s.mu. Their URLs are held as the web service returned them; only a
+	// publication's value, redacted then, leaves the session.
+	web, webIdle, webLast webTally
 	webOpen, webFrozen    bool
+	// webRed is the tally's own redactor, which only ever widens: every web
+	// report and every publication of a tally adds the harness's keys as they
+	// stand then (native_webtally.go). Under s.mu.
+	webRed *redact.Replacer
 	// webOffered is whether this incarnation's tool list held the web tools
 	// at Open, and webKnown whether Open has decided it (WebSearch). Under
 	// s.mu.
 	webOffered, webKnown bool
-	// webReportSeam runs in webReport once the redactor is read and the URLs
-	// are cut, and before s.mu is taken to count the call: the attribution
-	// point's window. **A test seam: nil in production**, set only by a test
+	// webReportSeam runs in webReport before s.mu is taken to count the
+	// call: the attribution point's window. **A test seam: nil in production**, set only by a test
 	// in this package before the first report.
 	webReportSeam func()
 }
@@ -2131,7 +2135,7 @@ func (s *nativeSession) claim(text string) func(context.Context) (Result, error)
 	// Every Begin, whatever it answers, ends the released prompt's claim on
 	// the close's freeze (webLast): a new engine turn may be current from
 	// here, and the freeze must never restate another turn's tally for it.
-	s.webLast = WebSearchState{}
+	s.webLast = webTally{}
 	if s.wake {
 		return func(context.Context) (Result, error) { return Result{}, ErrForeignTurn }
 	}
@@ -2208,6 +2212,28 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		s.kickWake()
 	}()
 
+	// The keys stored since this session started are learned first
+	// (native_keys.go, plan 031 §3.8): before the turn's web window opens
+	// below, whose opening publishes the calls counted while idle with the
+	// session's redactor as it stands then (native_webtally.go, review branch
+	// F1) — a wake learns before it opens its window too (wakeTurn) — and so
+	// before anything of this turn is redacted — the command bodies a prompt
+	// expands and a /compact's focus, both through hs.Redact below — or sent.
+	// A key found inside the frozen prompt puts the harness in its refusal
+	// state, and the Run or Compact below is refused with nothing sent. The
+	// look runs with no lock of the adapter's held, so the harness is read in
+	// a section of its own; a claim already withdrawn, a closed session or one
+	// not started learns nothing here, and the section below answers it.
+	s.mu.Lock()
+	learned := s.hs
+	if s.cancelling || s.closed || s.loading {
+		learned = nil
+	}
+	s.mu.Unlock()
+	if learned != nil {
+		s.learnStoredKeys(learned)
+	}
+
 	s.mu.Lock()
 	if s.cancelling {
 		// Cancelled since the claim, and the turn is not open: withdraw.
@@ -2238,7 +2264,8 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	s.turnCancel = cancel
 	s.turnToken = tok
 	// The turn's web window opens here, the engine's started already in the
-	// outbox ahead of anything it enqueues (native_webtally.go).
+	// outbox ahead of anything it enqueues (native_webtally.go), and the keys
+	// stored since the last turn already learned (above).
 	s.openWebLocked()
 	// /compact [focus] is the harness's own turn, never a prompt to the model
 	// (plan 028 §3.12, PD15): it names nothing — a session is not called
@@ -2319,13 +2346,12 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	if behindAWake {
 		_ = s.log.Flush(context.Background(), s.done)
 	}
-	// The keys stored in providers.toml since this session started are learned
-	// before anything of this turn is redacted — the command bodies a prompt
-	// expands and a /compact's focus, both through hs.Redact below — or sent
-	// (native_keys.go, plan 031 §3.8). A key found inside the frozen prompt
-	// puts the harness in its refusal state, and the Run or Compact below is
-	// refused with nothing sent.
-	s.learnStoredKeys(hs)
+	// The look above found the session still loading, and the section above
+	// found it started: the look is made here, before anything of this turn is
+	// redacted or sent, as it always was.
+	if learned != hs {
+		s.learnStoredKeys(hs)
+	}
 	// Then the models funded since the last turn (plan 034 §3.4, Q14 a):
 	// after the keys, so a table that names a key just stored is read by a
 	// session that already redacts it, and under this turn's claim, before

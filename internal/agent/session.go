@@ -518,9 +518,12 @@ type UsageState struct {
 // activity accounting, not provenance of an answer. Searches and Fetches are
 // the calls the web service handled whatever their outcome, and Failed those
 // that returned an error. URLs are the URLs of successful results, with the
-// provider key scrubbed and the session's redactor applied, each cut to at
+// provider key scrubbed and, as this value was published, every key the
+// session's redactor had held at any report or publication of the session
+// so far redacted (native_webtally.go) — each cut to at
 // most 500 bytes at a UTF-8 boundary, listed once each, first seen first, at
-// most 100; URLsTruncated says a URL was cut or a distinct one was dropped.
+// most 100; URLsTruncated says a URL was cut or left out, or two were folded
+// into one that a later key could tell apart.
 type WebSearchState struct {
 	Searches, Fetches, Failed int
 	URLs                      []string

@@ -347,3 +347,61 @@ func TestWebServiceSendsTheStoredKey(t *testing.T) {
 		})
 	}
 }
+
+// TestWebFetchEmptyPageNamesTheScrubbedURL (review branch F2): a fetch whose
+// page comes back empty answers "No content returned for <url>" with the URL
+// the service returned — the requested one with the key scrubbed out — never
+// the requested one: the key percent-encoded byte by byte in the requested
+// URL is a spelling the session's exact-value redactor does not know, and
+// only the service's scrub takes it out. The real service, built at Open with
+// the key, over a fake MCP endpoint whose fetch answers nothing.
+func TestWebFetchEmptyPageNamesTheScrubbedURL(t *testing.T) {
+	const key = "3f1c2a9e-8b7d-4c6e-9f0a-c0ffee000051" // Exa's keys are UUIDs
+	var encoded strings.Builder
+	for i := range len(key) {
+		fmt.Fprintf(&encoded, "%%%02X", key[i])
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var call struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(body, &call)
+		res, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": map[string]any{
+			"content": []map[string]any{{"type": "text", "text": ""}}}})
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", res)
+	}))
+	t.Cleanup(srv.Close)
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	opts := f.options()
+	opts.Getenv = keyEnv("EXA_API_KEY", key)
+	opts.WebEndpoint = func() (string, error) { return srv.URL + "/mcp", nil }
+	opts.Web = WebState{Mode: WebOn, Provider: "exa"}
+	s := f.open(opts)
+	if s.Redact("k "+key) != "k "+redact.Marker || s.Redact(encoded.String()) != encoded.String() {
+		t.Fatal("control: the session's redactor does not hold the key, or holds its encoded spelling")
+	}
+	a := f.models["test/a"]
+	a.push(callStep(callParts("w1", tool.WebFetchTool, input(t, map[string]any{"url": "https://example.com/page?k=" + encoded.String()}))), answerWith("done"))
+	run(t, s, "fetch it")
+	// The tool's answer, as the model's next request carries it: the call's
+	// own arguments, which the model wrote, hold the URL as it wrote it.
+	var answer string
+	for _, line := range promptOf(a.requests()[1]) {
+		if strings.HasPrefix(line, "tool: ") {
+			answer += line + "\n"
+		}
+	}
+	if want := "[result w1: No content returned for https://example.com/page?k=" + redact.Marker + "]"; strings.TrimSpace(answer) != "tool: "+want {
+		t.Fatalf("the empty page answered %q; want %q", answer, want)
+	}
+	for name, sp := range map[string]string{
+		"the key": key, "its byte-by-byte encoding": encoded.String(),
+		"its lowercase encoding": strings.ToLower(encoded.String()), "its last block": key[len(key)-12:],
+	} {
+		if strings.Contains(answer, sp) {
+			t.Fatalf("the tool's answer carries %s", name)
+		}
+	}
+}

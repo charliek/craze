@@ -22,6 +22,11 @@ const (
 	// exaMaxCharacters is the most of a page a fetch asks for; the
 	// dispatcher cuts what the model reads after it.
 	exaMaxCharacters = 50000
+	// exaNoResultsText is the whole text web_search_exa answers a search that
+	// found nothing with (exa-mcp-server's webSearch.ts): no results, not a
+	// failure. Only exactly this sentence; any other text with no result in it
+	// is still a failure.
+	exaNoResultsText = "No search results found. Please try a different query."
 )
 
 // exa is the Exa provider.
@@ -65,10 +70,10 @@ func (e *exa) Fetch(ctx context.Context, url string) (tool.WebPage, error) {
 //
 // ok is false for text that holds something but no result: no block parses,
 // or none has a URL — a failure, never "no results". Empty text is no
-// results.
+// results, and so is exaNoResultsText, trimmed, exactly.
 func parseExa(text string) (results []tool.WebResult, ok bool) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
-	if strings.TrimSpace(text) == "" {
+	if t := strings.TrimSpace(text); t == "" || t == exaNoResultsText {
 		return nil, true
 	}
 	lines := strings.Split(text, "\n")

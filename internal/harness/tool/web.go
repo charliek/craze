@@ -42,7 +42,8 @@ type WebResult struct {
 	Content   string
 }
 
-// WebPage is a fetched page: the URL it was fetched for and its text, as the
+// WebPage is a fetched page: the URL it was fetched for — with the provider
+// key taken out, so it is the one a tool may show — and its text, as the
 // provider returned it ("" when it returned none).
 type WebPage struct {
 	URL  string

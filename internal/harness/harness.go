@@ -1420,6 +1420,13 @@ func (s *Session) AddSecrets(values ...string) {
 // taken: Redact's own limit, for one call.
 func (s *Session) Redactor() func(string) string { return s.redactor().String }
 
+// Replacer is Redactor's Replacer itself, for a caller that keeps a redactor
+// of its own which only ever widens (redact.Replacer.Union) — so a key a
+// sub-agent knew stays covered after the sub-agent's turn has detached — or
+// that redacts the start of a longer text (redact.Replacer.Head). Redactor's
+// limit is its own: it cannot cover a key learned after it was taken.
+func (s *Session) Replacer() *redact.Replacer { return s.redactor() }
+
 // redactor is the replacer Redact applies: the widest one while no sub-agent
 // knows a key the session does not, and otherwise one over both sessions'
 // keys together. The toolset's lock and the runner's are each taken alone

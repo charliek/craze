@@ -129,11 +129,17 @@ func (c *webFetchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	}
 	// The provider's text as it is (opencode's webfetch returns its
 	// converted body as it is, webfetch.ts:185-192).
-	// An empty page's answer names the URL, which can be longer than the
-	// limit: it is guarded as a page's long line is.
+	// An empty page's answer names the URL the service returned — the one
+	// requested with the provider key scrubbed out, in any spelling — never
+	// c.url, in which only the session's exact-value redactor would look for
+	// it (review branch F2). That URL can be longer than the limit: it is
+	// guarded as a page's long line is.
 	text := page.Text
 	if text == "" {
-		text = "No content returned for " + c.url
+		text = "No content returned"
+		if page.URL != "" {
+			text += " for " + page.URL
+		}
 	}
 	return tool.Result{Text: cutFirstLine(text, env)}
 }

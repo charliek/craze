@@ -1889,8 +1889,8 @@ rest is the target turn's tally, each member absent when zero or empty:
 |--------|---|
 | `searches`, `fetches` | The web calls the session's web service handled, whatever their outcome — a call cancelled in flight and one that waited on the consent card included. A call refused before it reached the service (a bad or non-public URL) is an ordinary failed tool call and not counted; a retried step adds nothing |
 | `failed` | Those of them that returned an error: a provider error, a rate limit, a declined, disabled or cancelled consent, a cancellation in flight |
-| `urls` | The URLs of successful results: a search's result URLs in result order, and a fetch's requested URL when the page had text (never one parsed from the page). The provider key is scrubbed and the session's redactor applied; each is cut to at most 500 bytes at a character's boundary, listed once, first seen first, at most 100 |
-| `urlsTruncated` | `true` when a URL was cut or a distinct one was left out |
+| `urls` | The URLs of successful results: a search's result URLs in result order, and a fetch's requested URL when the page had text (never one parsed from the page). The provider key is scrubbed, and each publication of the count redacts from the URL as returned every key the session has held at any count or publication so far — a sub-agent's included, which stays covered after it ends (a key learned while a count is being published is covered from the next one); each is then cut to at most 500 bytes at a character's boundary, listed once, first seen first, at most 100 |
+| `urlsTruncated` | `true` when a URL was cut or left out, or two were folded into one that a later key could tell apart |
 
 **What the numbers mean.** They are activity accounting for the turn's window —
 the calls whose report reached the session while the turn ran, its sub-agents'

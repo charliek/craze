@@ -2168,9 +2168,17 @@ section**, `state.webSearch` on a `meta` event:
   A call refused before it reached the service is not counted.
 - `urls` are the URLs of successful results — a search's result URLs in order,
   a fetch's requested URL when its page had text — with the provider key
-  scrubbed and the session's redactor applied, each cut to at most 500 bytes at
-  a UTF-8 boundary, distinct, first seen first, at most 100; `urlsTruncated` is
-  `true` when one was cut or a distinct one left out.
+  scrubbed, and each section redacts from the URL as returned every key the
+  session's redactor has held at any count or section so far — its own and its
+  sub-agents', a sub-agent's staying covered after the sub-agent ends: once
+  covered, always covered for the session. A section covers the keys learned
+  before it began; one learned while a section is being made is covered from
+  the next one on. Each URL is then cut to at most 500 bytes at a UTF-8
+  boundary (a URL already held to its first 4 KiB loses any trailing start of
+  a known key), listed once, first seen first, at most 100 (distinct by that
+  form as it was when counted);
+  `urlsTruncated` is `true` when a URL was cut or left out, or two were folded
+  into one that a later key could tell apart.
 - Each member is absent when zero, empty or `false`. No ACP session sends the
   section.
 
