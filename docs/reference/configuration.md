@@ -1275,7 +1275,9 @@ printed before. A sub-agent already running — a background one goes on while
 the conversation idles — redacts it at once from what its tools return next,
 so a file it reads afterwards reaches its model with the key redacted; what
 its tools returned before the key was learned is not rewritten. One started
-after the key was learned redacts it from the start.
+after the key was learned redacts it from the start. A key is never forgotten
+by a running session: a sub-agent started after you rotate or remove a key
+still redacts the one the session opened with.
 
 ### The ChatGPT plan
 

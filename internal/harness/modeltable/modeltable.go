@@ -1806,6 +1806,31 @@ func (t *Table) StoredWebKeys() []Secret {
 	return out
 }
 
+// StoredInlineKeys are the usable inline api_keys providers.toml stored when
+// t was loaded — every provider's, then every one the merge dropped
+// (credentialKeys) — trimmed, without repeats, each one Keys returns too, and
+// nil when there are none. The harness records them as known from Open, as it
+// does StoredWebKeys (plan 051 follow-up, review C5 item 1's twin): a key the
+// session opened with is inherited by every sub-agent it opens later, even
+// once a reloaded table — after a rotation before the first turn — no longer
+// holds it. An inline key that cannot be a key is left out: Load refuses one,
+// and Keys fails on one in a table built in memory.
+func (t *Table) StoredInlineKeys() []Secret {
+	var out []Secret
+	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
+		v := Secret(strings.TrimSpace(t.Providers[id].APIKey.Reveal()))
+		if v != "" && keyProblem(string(v)) == nil && !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	for _, k := range t.credentialKeys {
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // Keys returns every key the table knows of, for the redactor that keeps
 // them out of tool output (plan 019 §3.8): for every provider, used or not,
 // the value of each of its env_keys variables that getenv reports set to a

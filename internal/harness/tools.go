@@ -289,13 +289,14 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if child == nil {
 		ts.todos = newSessionTodos()
 	}
-	// The web search keys credentials.toml stored when the table was loaded
-	// (plan 051 §F.5, review C5 item 1) are recorded as learned from Open: a
-	// rotation the turn-start look learns, and a reload whose table holds
-	// only the new key, would otherwise leave a sub-agent opened later —
-	// which starts from the current table and the learned keys — without the
-	// key this session has known since it opened.
-	for _, k := range table.StoredWebKeys() {
+	// The keys the user's files stored when the table was loaded — the
+	// inline api_keys of providers.toml and the web search keys of
+	// credentials.toml (plan 051 §F.5, review C5 item 1) — are recorded as
+	// learned from Open: a rotation the turn-start look learns, and a reload
+	// whose table holds only the new key, would otherwise leave a sub-agent
+	// opened later — which starts from the current table and the learned keys
+	// — without the key this session has known since it opened.
+	for _, k := range slices.Concat(table.StoredInlineKeys(), table.StoredWebKeys()) {
 		if v := k.Reveal(); slices.Contains(vals, v) && !slices.Contains(ts.learned, v) {
 			ts.learned = append(ts.learned, v)
 		}

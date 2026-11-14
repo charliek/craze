@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -682,5 +683,83 @@ wire_model = "wire-a"
 	}
 	if content := readOf(t, drained(s), "t1.1.1"); strings.Contains(content, dropped) || !strings.Contains(content, "dropped "+redact.Marker) {
 		t.Fatalf("the first turn's read = %q; want the dropped entry's key learned and redacted", content)
+	}
+}
+
+// TestNativeChildAfterAProvidersRotationKeepsTheStartupKey (plan 051
+// follow-up; the providers.toml twin of review C5 item 1): the inline key
+// providers.toml stored when the session opened (A) is one the session knows
+// from Open; rotated to B before the first turn, the table reloads at that
+// turn's start (providers.toml changed) and holds B alone, and the look learns
+// B alone. A sub-agent that turn opens still starts with A: its command
+// printing A shows the marker in its row, its spill file and its next
+// request. The control is a value never stored.
+func TestNativeChildAfterAProvidersRotationKeepsTheStartupKey(t *testing.T) {
+	const (
+		startup = "sk-stored-at-open-0131"
+		rotated = "sk-rotated-before-turn-one-0132"
+		control = "sk-never-stored-0133"
+	)
+	f, r := routedNative(t)
+	ws := nativeWorkspaceWith(t, map[string]string{"key.txt": strings.Repeat("the key "+startup+" not "+control+"\n", 3000)})
+	a := r["test/a"]
+	a.route("go", callsStep(agentCall(t, "a1", "look", "child work")), answer("done"))
+	a.route("child work", nativeCallStep("k1", "bash", nativeArgs(t, map[string]any{"command": "cat key.txt"})), answer("child done"))
+	if err := modeltable.SetKey(f.dir, "nokey", startup); err != nil {
+		t.Fatal(err)
+	}
+	s := f.started(Options{Workspace: ws})
+	if s.hs.Redact(startup) == startup {
+		t.Fatal("control: the session's Open does not know the stored key")
+	}
+	if err := modeltable.SetKey(f.dir, "nokey", rotated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	evs := drained(s)
+	id := spawnedWith(t, evs, "child work")
+	rows := 0
+	for _, ev := range evs {
+		if ev.Type == EventTool && ev.Agent == id {
+			rows++
+		}
+	}
+	if rows == 0 {
+		t.Fatal("no tool row of the child's")
+	}
+	if found := nativeLeaks(evs, startup); len(found) > 0 {
+		t.Fatalf("the startup key reached an event at %v", found)
+	}
+	spills, err := filepath.Glob(filepath.Join(f.dir, "tool-output", "*"))
+	if err != nil || len(spills) == 0 {
+		t.Fatalf("no spill file (%v), so the child's is not checked", err)
+	}
+	for _, p := range spills {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte(startup)) || !bytes.Contains(b, []byte(redact.Marker+" not "+control)) {
+			t.Fatalf("the spill file %s: want the startup key redacted and the unstored value raw", filepath.Base(p))
+		}
+	}
+	childReqs := 0
+	for _, c := range a.requests() {
+		if firstUserPrompt(c) != "child work" {
+			continue
+		}
+		childReqs++
+		b, err := json.Marshal(c.Prompt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte(startup)) {
+			t.Fatalf("the child's request %d carries the startup key", childReqs)
+		}
+	}
+	if childReqs < 2 {
+		t.Fatalf("%d child requests; want its next request after the command", childReqs)
 	}
 }
