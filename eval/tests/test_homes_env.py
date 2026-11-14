@@ -27,8 +27,14 @@ FAKE = {
 }
 
 
-def owner_tree(tmp: Path) -> tuple[Path, Path]:
-    """Fake owner files shaped like the real ones, with fake keys in every key field."""
+def owner_tree(tmp: Path, craze_models: bool = True, gx_models: bool = True) -> tuple[Path, Path]:
+    """Fake owner files shaped like the real ones, with fake keys in every key field.
+
+    ``craze_models``: a models.toml overriding every eval model's shipped entry (the
+    owner's own entries, no ``source``, so craze lays them over its catalog: name "x",
+    context 1000000, default_effort "low"); False writes none, as craze no longer needs
+    one. ``gx_models``: gx tables naming every eval model; False names none (its
+    providers stay)."""
     craze = tmp / "owner" / ".craze" / "native"
     grok = tmp / "owner" / ".grok"
     craze.mkdir(parents=True)
@@ -40,8 +46,9 @@ def owner_tree(tmp: Path) -> tuple[Path, Path]:
     for em in models.values():
         lines += [f'[models."{em.craze}"]', f'provider = "{em.provider}"', f'wire_model = "{em.wire_model}"',
                   'name = "x"', "context_window = 1000000", 'efforts = ["low", "medium", "high", "xhigh", "max"]',
-                  'default_effort = "low"', 'source = "gx"', ""]
-    (craze / "models.toml").write_text("\n".join(lines))
+                  'default_effort = "low"', ""]
+    if craze_models:
+        (craze / "models.toml").write_text("\n".join(lines))
     pl = ["version = 1", ""]
     for name, url in prov_urls.items():
         pl += [f"[providers.{name}]", 'driver = "openai-compat"', f'base_url = "{url}"', 'env_keys = ["NOPE_KEY_VAR"]',
@@ -58,7 +65,7 @@ def owner_tree(tmp: Path) -> tuple[Path, Path]:
     gl += ['[model_providers."anthropic"]', 'base_url = "https://api.anthropic.com/v1"', 'api_backend = "messages"',
            '[model_providers."anthropic".extra_headers]', f'x-api-key = "{FAKE["anthropic"]}"',
            'anthropic-version = "2023-06-01"', ""]
-    for em in models.values():
+    for em in models.values() if gx_models else ():
         gl += [f'[model."{em.gx}"]', f'model = "{em.wire_model}"', f'model_provider = "{em.provider}"',
                f'api_key = "{FAKE[em.provider]}"', 'env_key = "ANOTHER_KEY"', 'reasoning_effort = "low"',
                'reasoning_efforts = ["low", "high", "max"]', "context_window = 1000", ""]
@@ -213,7 +220,7 @@ def test_a_gx_import_of_a_provider_craze_does_not_ship_keeps_its_driver(tmp_path
     on: a home for one whose entry names none is refused."""
     craze, grok = owner_tree(tmp_path)
     with (craze / "models.toml").open("a") as f:
-        f.write('\n[models."acme-m"]\nprovider = "acme"\nwire_model = "acme-1"\nsource = "gx"\n')
+        f.write('\n[models."acme-m"]\nprovider = "acme"\nwire_model = "acme-1"\nefforts = ["high"]\nsource = "gx"\n')
     with (craze / "providers.toml").open("a") as f:
         f.write('\n[providers.acme]\nsource = "gx"\ndriver = "openai-compat"\nbase_url = "https://api.acme.example/v1"\n')
     with (grok / "config.toml").open("a") as f:

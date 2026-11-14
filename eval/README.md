@@ -294,12 +294,13 @@ allow-list, nothing fetched, nothing leaves the host.
   (Haiku 5.5) whose body is over the threshold, at the dearer tier's rates, plus the
   **largest** of `max_tokens`, `max_completion_tokens` and
   `max_output_tokens` at the output price. A request that names no limit is reserved at
-  the **model's maximum output** -- the largest of every limit that applies: the owner's
-  craze `max_output_tokens`, gx `max_completion_tokens` and the snapshot's models.dev
+  the **model's maximum output** -- the largest of every limit that applies: the snapshot's
+  craze `max_output_tokens`, gx `max_completion_tokens` (when it has a gx entry) and its models.dev
   `limit.output` (deepseek-v4p1-flash lists 384000); 131072 when none is known -- and is
   forwarded unchanged (the proxy never adds a limit). Only one completion per request is admitted.
   At Kimi K3's ledger price an unbounded request reserves about $2.95 of output, so a Kimi
-  run needs `--run-cap` above the $3 default.
+  K3 run needs `--run-cap` above the $3 default; Kimi K3.1 Pro's output price, and so its
+  reservation, is two thirds of K3's.
 - **Reconciliation:** after the request, the reservation is replaced by the reported usage:
   uncached input, cache reads, cache writes and output each at its own ledger price, at
   the tier the request's whole prompt (uncached, cache reads and writes together) falls
@@ -332,10 +333,16 @@ allow-list, nothing fetched, nothing leaves the host.
   pinned reasoning effort, and each harness's id for it. The `craze` and `gx` aliases are
   kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
   so a renamed or retired alias has to be changed in both places. codex runs only where the provider
-  serves `/responses` (Meta, Fireworks; not Z.AI or Anthropic).
+  serves `/responses` (Meta, Fireworks; not Z.AI or Anthropic). The Fireworks models are
+  Kimi K3.1 Pro (`fireworks/kimi-k3p1-pro`, craze's Fireworks start; GitHub issue #118)
+  with Kimi K3 (`fireworks/kimi-k3`) as its baseline, both `last = true` so they run in
+  the same place in a batch, and DeepSeek V4.1 Flash in both snapshots
+  (`fireworks/deepseek-v4p1-flash-1017` and the older `fireworks/deepseek-v4p1-flash`).
+  K3 and the older DeepSeek are deprecated in craze's catalog but still run by name.
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
-  - It copies the target definitions from the owner's craze and gx tables into
+  - It copies the target definitions from craze's model table (below), the owner's craze
+    `providers.toml` and the owner's gx config into
     `<campaign>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
     fields are copied: no key, env-key name, auth helper or header. An old gx import's entry
     (`source = "gx"`) for a provider craze ships gives the catalog's `driver` and `base_url`
@@ -343,11 +350,42 @@ allow-list, nothing fetched, nothing leaves the host.
     `catalog = false`), as the catalog resolves them at snapshot time. Each snapshot so
     freezes its routes: `run` refuses a model whose route now (the proxy's, by craze's
     rules) has another driver or `base_url` than the snapshot recorded -- the owner's entry
-    or a new craze catalog moved it -- and says to re-run `snapshot-config`. It reads the alias
-    entries of the owner's `~/.craze/native/models.toml` (and gx's config). craze ships its
-    own model catalog and the owner's `models.toml` may shrink to overrides, which would
-    leave an alias this reads missing: trimming that file needs follow-up SF-a first (the
-    snapshot reading the merged view, craze plan 031 §9 R4).
+    or a new craze catalog moved it -- and says to re-run `snapshot-config`.
+  - **The craze fields** (`provider`, `wire_model`, `name`, `context_window`,
+    `default_context`, `max_output_tokens`, `efforts`, `default_effort`, `vision`,
+    `tool_profile`) come from craze's model table as craze builds it (`config.craze_models`,
+    after craze plan 031 §9 R4). With the catalog on, that is the shipped catalog's
+    `[models]` (each Claude model given `[anthropic_defaults] default_effort`, as craze gives
+    it), with the owner's `~/.craze/native/models.toml` -- optional; the owner needs
+    none -- laid over it by craze's rule (`internal/harness/modeltable/overlay.go`): an old
+    gx import's entry (`source = "gx"`) for a shipped alias is ignored; any other entry for
+    a shipped alias overrides only the keys it writes, one that writes `efforts` drops
+    the shipped `default_effort` when the new list lacks it and it writes none, and a
+    `default_effort` the model does not offer is ignored; an entry for an alias the
+    catalog does not ship is taken whole, whatever its `source`. With `catalog = false`,
+    the owner's file alone. An alias found in neither is an error, and so are an entry
+    whose provider or wire model is not the eval's and one that does not offer the eval's
+    pinned effort (the generated home pins it, and craze refuses a default the model does
+    not offer).
+  - **Where the snapshot can differ from craze.** The merge is the eval's own copy of
+    craze's rule, and it does not run craze's validation: craze drops an entry pointing at
+    a retired wire id, and keeps its shipped entry when an override fails a rule (a bad
+    `cost` table, a `default_context` over the window), where the snapshot takes the
+    override. `snapshot-config` prints a `note:` line for every eval model whose entry came
+    through an owner override, naming the keys: compare it with `craze models <alias>`.
+    With no owner `models.toml` there is nothing to compare. A generated home also cannot
+    carry the catalog-only `thinking` key, and craze reads a Claude model without it as
+    adaptive; `tests/test_snapshot_view.py` fails if an eval model ships another mode.
+  - **The gx fields** come from the owner's gx config (`~/.grok/config.toml`, with
+    `providers.toml` merged over it), and are optional per model: an alias it does not
+    name is recorded as `gx: null` (with `gx_provider_id` and `gx_provider`), and
+    `snapshot-config` prints `gx=- (not in the owner's gx tables)` for it. `run` with `gx`
+    among `--harness` then stops before starting anything (exit 2), one line per such
+    model saying to drop gx or add the model to the gx config and re-run `snapshot-config`;
+    craze, craze-web, opencode and codex run on it as usual, and `proxy --harness gx` is
+    refused the same way. `probe` builds the homes a run would, so it builds no gx home
+    for such a model. An alias the gx config does name must
+    still name a provider it defines and the eval's wire model.
   - It saves a models.dev catalog for opencode (`OPENCODE_MODELS_PATH`), and records which
     `--variant`s opencode offers per model, asked of opencode itself in a sandbox.
   - Every run uses the snapshot and records its hash; runs never read the owner's live files.

@@ -91,7 +91,28 @@ list_output = 15.00
 prior_run_cost = 3.00
 source = "docs.fireworks.ai/serverless/pricing"
 
+[models."accounts/fireworks/models/kimi-k3p1-pro"]
+# Ledger = the US serverless rate (x1.5 of list), as for kimi-k3.
+input = 3.00
+cached_input = 0.30
+output = 15.00
+list_input = 2.00
+list_cached_input = 0.20
+list_output = 10.00
+prior_run_cost = 2.00
+source = "docs.fireworks.ai/serverless/pricing"
+
 [models."accounts/fireworks/models/deepseek-v4p1-flash"]
+input = 0.45
+cached_input = 0.009
+output = 1.80
+list_input = 0.30
+list_cached_input = 0.006
+list_output = 1.20
+prior_run_cost = 0.35
+source = "docs.fireworks.ai/serverless/pricing"
+
+[models."accounts/fireworks/models/deepseek-v4p1-flash-1017"]
 input = 0.45
 cached_input = 0.009
 output = 1.80

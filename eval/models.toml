@@ -4,8 +4,10 @@
 # wire_model   the `model` every request must name (the proxy's allowlist).
 # effort       the one pinned reasoning effort per model -- the default craze and gx
 #              already share (reasoning-effort parity).
-# craze / gx   the alias in each tool's model table (copied from the owner's tables
-#              by `crazeeval snapshot-config`).
+# craze / gx   the alias in each tool's model table, copied by `crazeeval snapshot-config`:
+#              craze's from its shipped catalog with the owner's models.toml merged over
+#              it; gx's from the owner's gx config, where it is optional (a model it does
+#              not name cannot run the gx harness).
 # opencode     <provider>/<model> in opencode's own ids (its built-in providers).
 # codex        the wire model, only where the provider serves the Responses API
 #              (Meta, Fireworks; Z.AI and Anthropic do not -- §2.6). Absent = codex does
@@ -72,6 +74,23 @@ codex_provider = "fireworks"
 # Dominates cost (plan 029 §9): one rep, last in each batch.
 last = true
 
+# Kimi K3.1 Pro, Moonshot's successor to K3 and Fireworks' start model in craze's catalog
+# (GitHub issue #118: evaluate it as that start). K3 above, deprecated in craze's catalog
+# but still run by name, is its comparison baseline. Its opencode id is in the models.dev
+# catalog (checked 2026-11-14).
+[models."fireworks/kimi-k3p1-pro"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/kimi-k3p1-pro"
+effort = "high"
+craze = "fireworks/kimi-k3p1-pro"
+gx = "fireworks/kimi-k3p1-pro"
+opencode = "fireworks-ai/accounts/fireworks/models/kimi-k3p1-pro"
+codex = "accounts/fireworks/models/kimi-k3p1-pro"
+codex_provider = "fireworks"
+# Batched as K3 is, last in each batch, so the two are compared like for like (same
+# position, after the cheap models' runs).
+last = true
+
 [models."fireworks/deepseek-v4p1-flash"]
 provider = "fireworks"
 wire_model = "accounts/fireworks/models/deepseek-v4p1-flash"
@@ -80,6 +99,19 @@ craze = "fireworks/deepseek-v4p1-flash"
 gx = "fireworks/deepseek-v4p1-flash"
 opencode = "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash"
 codex = "accounts/fireworks/models/deepseek-v4p1-flash"
+codex_provider = "fireworks"
+
+# DeepSeek's 2026-10-17 snapshot of V4.1 Flash, which replaces the 2026-09-10 one above
+# in craze's catalog (deprecated there, still run by name) at the same price. Its
+# opencode id is in the models.dev catalog (checked 2026-11-14).
+[models."fireworks/deepseek-v4p1-flash-1017"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+effort = "high"
+craze = "fireworks/deepseek-v4p1-flash-1017"
+gx = "fireworks/deepseek-v4p1-flash-1017"
+opencode = "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017"
+codex = "accounts/fireworks/models/deepseek-v4p1-flash-1017"
 codex_provider = "fireworks"
 
 # Anthropic's Messages API (craze plan 044; plan 047 D11). effort is craze's default for

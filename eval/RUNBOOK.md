@@ -104,9 +104,12 @@ at startup and never writes or forwards them anywhere else. Nothing under `~/.cr
 written by the eval; a campaign only ever reads them.
 
 ```shell
-# Once per campaign, and again whenever the owner's model tables change. It reads
-# allowlisted fields of the owner's native models.toml, so trimming that file to
-# overrides needs follow-up SF-a (a merged view; craze plan 031 §9 R4) first:
+# Once per campaign, again whenever the owner's model or provider files change, and
+# again after building a craze whose shipped catalog changed. Each model's craze fields
+# come from craze's shipped catalog with the owner's native models.toml (optional)
+# merged over it by craze's own rule, or from the owner's file alone when it says
+# `catalog = false`. A model the owner's gx config does not name gets no gx entry, and
+# a run of the gx harness on it is refused:
 uv run crazeeval snapshot-config
 
 # Every task's category controls must pass before the task may run:
@@ -127,6 +130,30 @@ model, keyed the same way — a wire model missing from `prices.toml` is refused
 proxy). Both files are commented inline with what each field means; copy an existing
 entry and adjust it. Re-run `snapshot-config` afterwards so the new model's provider
 config is in the current snapshot.
+
+The `craze` alias must be one craze's shipped catalog
+(`internal/harness/modeltable/catalog.toml`) has with the same provider and wire model
+(`tests/test_snapshot_view.py` checks every eval model against it, and that each wire
+model has a price), or one the
+owner's `~/.craze/native/models.toml` defines in full. `snapshot-config` builds the craze
+fields as craze does: the catalog's entry, with any owner entry for the alias overriding
+the keys it writes (an old gx import's copy of a shipped alias, marked `source = "gx"`, is
+ignored), or the owner's file alone when it says `catalog = false`. The owner needs no
+`models.toml` at all. The merge is the eval's copy of craze's rule and does not run craze's
+validation, so `snapshot-config` prints a `note:` line for each eval model whose entry came
+through an owner override: check that `craze models <alias>` shows the same values, since
+craze keeps its shipped entry when it rejects an override. The entry must offer the eval's
+pinned `effort`, or `snapshot-config` stops.
+
+The `gx` alias is optional on the owner's side. When the owner's gx config
+(`~/.grok/config.toml`, `providers.toml`) has no `[model."<alias>"]`, the snapshot records
+`gx` as none for that model, `snapshot-config` prints `gx=- (not in the owner's gx
+tables)`, and `run` with `gx` among `--harness` stops before starting anything (exit 2),
+naming the model, as does `proxy --harness gx`; every other harness runs on it as usual. `probe` builds the homes a run
+would, so on such a model it builds no gx home and checks the rest. To run gx, add the
+model (and its `[model_providers.*]`) to the owner's gx config and re-run
+`snapshot-config`. An alias the gx config does name must still name a provider it defines
+and the eval's wire model.
 
 The generated craze homes carry `catalog = false` in `models.toml` (craze plan 031): craze ships
 its own model catalog, and without that line every shipped model would join the run and the
@@ -161,13 +188,16 @@ Per-harness support limits to know about before adding a model:
     through `crazeeval proxy --craze-home` must export the `craze_env` it prints.
   - *opencode* uses its built-in `anthropic` provider; *gx* its `messages` backend
     (`api_backend = "messages"`, which its user guide documents). gx on Anthropic is not
-    yet verified live: smoke it before a batch, and drop its `gx` ids from `models.toml`
-    if it cannot run. *codex* does not run (no Responses API).
-  - *snapshot-config* needs the owner's gx config to name the models: a
-    `[model_providers.anthropic]` with `base_url = "https://api.anthropic.com/v1"` and
-    `api_backend = "messages"`, and a `[model."anthropic/claude-…-5-5"]` per model naming it
-    (`model = "claude-…-5-5"`); and, until follow-up SF-a (§2), craze entries for the
-    aliases in the owner's `models.toml`.
+    yet verified live: smoke it before a batch, and leave `gx` out of `--harness` for these
+    models if it cannot run. *codex* does not run (no Responses API).
+  - *snapshot-config* takes the craze entries from craze's shipped catalog, which ships
+    all three, and needs no `[providers.anthropic]` (an exported key is enough). For gx
+    to run, the owner's gx config must name the models: a `[model_providers.anthropic]`
+    with `base_url = "https://api.anthropic.com/v1"` and `api_backend = "messages"`, and a
+    `[model."anthropic/claude-…-5-5"]` per model naming it (`model = "claude-…-5-5"`).
+    Without the `[model.…]` table the snapshot has no gx entry for the model and a gx run
+    on it is refused; a table that names a provider the gx config does not define stops
+    `snapshot-config`.
   - *Accounting.* Cache reads are priced at `cached_input`, cache writes
     (`cache_creation_input_tokens`) at `cache_write`, the 5-minute write -- the only TTL
     craze asks for. A 1-hour write costs 2× input and would be priced as a 5-minute one, so
@@ -181,6 +211,16 @@ Per-harness support limits to know about before adding a model:
 - **Muse Wonder** (`muse-wonder-1.0`, Meta's preview flagship) is set like Spark, at
   `high`. It costs 40× contributor's input and 100× its output, so smoke it on one task and
   budget from that run, not from contributor's.
+- **Kimi K3.1 Pro** (`fireworks/kimi-k3p1-pro`) is craze's Fireworks start model and
+  Moonshot's successor to Kimi K3; GitHub issue #118 asks for it to be evaluated as that
+  start. `fireworks/kimi-k3` stays in `models.toml` as its baseline (craze's catalog marks
+  it deprecated, but Fireworks still serves it and craze still runs it by name). Both
+  have `last = true`, so they run after the other models in a batch, in the same
+  position. K3.1 Pro's prices are two thirds of K3's (`prior_run_cost` 2.00).
+- **DeepSeek V4.1 Flash 1017** (`fireworks/deepseek-v4p1-flash-1017`) is DeepSeek's
+  2026-10-17 snapshot, which replaces `fireworks/deepseek-v4p1-flash` in craze's catalog
+  at the same price. Both stay in `models.toml`; the older one is deprecated in craze's
+  catalog and still runs by name.
 - If a provider offers two tiers of what's functionally the same served model (plan 029's
   Meta case: `muse-spark-1.3` and a much cheaper `muse-spark-1.3-contributor`), and a
   baseline run shows the same served model id and near-identical objective counts across

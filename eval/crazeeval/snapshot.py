@@ -1,8 +1,12 @@
 """``crazeeval snapshot-config``: a versioned, secret-free copy of the target
 definitions (plan 029 §3.1.4).
 
-Reads the owner's craze and gx model tables (read-only) and keeps, per eval model,
-only allowlisted fields -- never a key, an env-key name, an auth helper or a header.
+Reads craze's model table as craze builds it (its shipped catalog with the owner's
+models.toml laid over it, or the owner's file alone with ``catalog = false``:
+config.craze_models), the owner's craze providers.toml and gx model tables (read-only),
+and keeps, per eval model, only allowlisted fields -- never a key, an env-key name, an
+auth helper or a header. A model the owner's gx tables do not name gets no gx entry
+(``"gx": None``); a run of the gx harness on it is refused (config.gx_problems).
 Saves a models.dev catalog for opencode (``OPENCODE_MODELS_PATH``). Every run uses a
 snapshot and records its hash; runs never read the owner's live files.
 """
@@ -18,14 +22,14 @@ import urllib.request
 from pathlib import Path
 
 from crazeeval import paths
-from crazeeval.config import EvalModel, catalog_on, shipped_providers, snapshot_hash, yields_to_catalog
+from crazeeval.config import EvalModel, catalog_on, craze_models, shipped_providers, snapshot_hash, yields_to_catalog
 from crazeeval.keys import LOCKED, legacy_entry
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 
 CRAZE_MODEL_FIELDS = (
-    "provider", "wire_model", "name", "context_window", "max_output_tokens", "efforts", "default_effort", "vision",
-    "tool_profile",
+    "provider", "wire_model", "name", "context_window", "default_context", "max_output_tokens", "efforts",
+    "default_effort", "vision", "tool_profile",
 )
 CRAZE_PROVIDER_FIELDS = ("driver", "base_url")
 GX_MODEL_FIELDS = (
@@ -52,10 +56,10 @@ def build_snapshot(
 ) -> dict:
     craze_dir = Path(craze_dir or paths.OWNER_CRAZE_NATIVE)
     grok_dir = Path(grok_dir or paths.OWNER_GROK)
-    cm = _load(craze_dir / "models.toml").get("models") or {}
+    catalog = catalog_on(craze_dir)
+    cm = craze_models(craze_dir)
     cp = _load(craze_dir / "providers.toml").get("providers") or {}
     shipped = shipped_providers()
-    catalog = catalog_on(craze_dir)
     gx_models: dict = {}
     gx_providers: dict = {}
     # providers.toml deep-merges over config.toml (gx's user layer).
@@ -70,12 +74,19 @@ def build_snapshot(
     out = {"version": 1, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "models": {}}
     for key, em in models.items():
         if em.craze not in cm:
-            raise KeyError(f"{key}: craze alias {em.craze!r} not in the owner's models.toml")
+            where = ("in neither craze's shipped catalog nor the owner's models.toml" if catalog
+                     else "not in the owner's models.toml (catalog = false)")
+            raise KeyError(f"{key}: craze alias {em.craze!r} is {where}")
         centry = take(cm[em.craze], CRAZE_MODEL_FIELDS)
         if centry.get("provider") != em.provider:
             raise ValueError(f"{key}: craze provider {centry.get('provider')!r} != eval provider {em.provider!r}")
         if centry.get("wire_model") != em.wire_model:
             raise ValueError(f"{key}: craze wire model {centry.get('wire_model')!r} != {em.wire_model!r}")
+        if em.effort not in (centry.get("efforts") or []):
+            # A generated craze home pins default_effort to the eval's effort
+            # (homes._craze_model); craze refuses a default the model does not offer.
+            raise ValueError(f"{key}: the eval pins effort {em.effort!r}, which craze's entry for {em.craze!r} "
+                             f"does not offer ({centry.get('efforts') or 'no efforts'})")
         if em.provider in LOCKED:
             # craze's locked provider (Anthropic): its driver and endpoint are craze's own,
             # whatever the owner's entry says, and it may have no entry (an env-only key).
@@ -93,14 +104,18 @@ def build_snapshot(
             cprov = take(legacy_entry(cp[em.provider], shipped[em.provider]), CRAZE_PROVIDER_FIELDS)
         else:
             cprov = take(cp[em.provider], CRAZE_PROVIDER_FIELDS)
-        if em.gx not in gx_models:
-            raise KeyError(f"{key}: gx alias {em.gx!r} not in the owner's gx model tables")
-        gentry = take(gx_models[em.gx], GX_MODEL_FIELDS)
-        gpid = gentry.get("model_provider")
-        if not gpid or gpid not in gx_providers:
-            raise KeyError(f"{key}: gx provider {gpid!r} not found")
-        if gentry.get("model", em.gx) != em.wire_model:
-            raise ValueError(f"{key}: gx wire model {gentry.get('model')!r} != {em.wire_model!r}")
+        # A gx entry is optional per model: none when the owner's gx tables do not name
+        # the alias (a gx run on it is refused: config.gx_problems). One they name must
+        # be complete and the eval's.
+        gentry = gpid = gprov = None
+        if em.gx in gx_models:
+            gentry = take(gx_models[em.gx], GX_MODEL_FIELDS)
+            gpid = gentry.get("model_provider")
+            if not gpid or gpid not in gx_providers:
+                raise KeyError(f"{key}: gx provider {gpid!r} not found")
+            if gentry.get("model", em.gx) != em.wire_model:
+                raise ValueError(f"{key}: gx wire model {gentry.get('model')!r} != {em.wire_model!r}")
+            gprov = take(gx_providers[gpid], GX_PROVIDER_FIELDS)
         out["models"][key] = {
             "eval": {
                 "provider": em.provider,
@@ -116,7 +131,7 @@ def build_snapshot(
             "craze_provider": cprov,
             "gx": gentry,
             "gx_provider_id": gpid,
-            "gx_provider": take(gx_providers[gpid], GX_PROVIDER_FIELDS),
+            "gx_provider": gprov,
         }
     return out
 
