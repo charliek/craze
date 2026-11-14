@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -581,7 +582,9 @@ func TestWebKeyInAURLIsNeverPublished(t *testing.T) {
 		"Title: Long\nURL: " + long + url.QueryEscape(key) + "\nText: d",
 	}, "\n---\n"))
 	f.models["test/a"].push(searchStep(t, "w1", "leak"), answer("done"))
-	opts.JournalDir = t.TempDir()
+	// The journal makes its own directory at 0700 (a bare t.TempDir is subject
+	// to the umask, 0755 on CI's runner), as the other journal tests do.
+	opts.JournalDir = filepath.Join(t.TempDir(), "journal")
 	s := f.session(opts)
 	jw := journalOf(t, s.log)
 	if err := s.Start(context.Background()); err != nil {
