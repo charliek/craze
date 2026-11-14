@@ -33,6 +33,7 @@ defaulting to ``./smoke-captures/`` (git-ignored), relative to the repo root
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import shlex
 import shutil
@@ -74,6 +75,37 @@ MODE_CHIPS = ("\u25c6 agent", "\u25c6 plan", "\u25c6 ask", "\u25c6 default")
 PERMISSION_CHIPS = ("\u25b8\u25b8 ", "\u25b8 ")
 
 TMUX = shutil.which("tmux")
+
+
+@functools.cache
+def _utf8_locale() -> str | None:
+    """A UTF-8 locale ``locale -a`` lists — C.UTF-8 on Linux, en_US.UTF-8 on
+    macOS, else any UTF-8 one — or None. The tmux server takes its locale from
+    the client that starts it, and under C it draws every non-ASCII character
+    (a pane title's, a chip's) as ``_``, which fails the cases that look for
+    one; the panes inherit it from the server, so craze gets it too."""
+    try:
+        names = subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True, timeout=10
+        ).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    by_lower = {n.lower().replace("utf-8", "utf8"): n for n in names}
+    prefer = ("en_us", "c") if sys.platform == "darwin" else ("c", "en_us")
+    for base in prefer:
+        if f"{base}.utf8" in by_lower:
+            return by_lower[f"{base}.utf8"]
+    return next((n for n in names if n.lower().endswith((".utf-8", ".utf8"))), None)
+
+
+def _tmux_env() -> dict[str, str]:
+    """The environment for a tmux client: this one's, under a UTF-8 locale
+    when there is one (built per call, so a test's monkeypatched HOME holds)."""
+    env = dict(os.environ)
+    loc = _utf8_locale()
+    if loc:
+        env["LC_ALL"] = loc
+    return env
 ENABLED = os.environ.get("CRAZE_TMUX", "") not in ("", "0")
 SKIP_REASON = (
     "tmux smoke is opt-in: needs tmux on PATH and CRAZE_TMUX=1 (never in CI)"
@@ -753,12 +785,14 @@ class TmuxPane:
         # Every tmux call is bounded: without a timeout a wedged tmux blocks
         # the polling loop for ever and WAIT_TIMEOUT never gets a chance to
         # fire, so a stuck case hangs the suite instead of failing it.
+        # Every call runs under a UTF-8 locale (_utf8_locale).
         try:
             proc = subprocess.run(
                 [TMUX, "-f", "/dev/null", "-L", self.socket, *args],
                 capture_output=True,
                 text=True,
                 timeout=TMUX_TIMEOUT,
+                env=_tmux_env(),
             )
         except subprocess.TimeoutExpired as err:
             raise SmokeFailure(

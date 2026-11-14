@@ -4,9 +4,13 @@ transcript -- role, tool name, a slice of the input/result/text -- plus the
 mode, model and effort changes and each step's usage, so a live smoke can be
 read without the TUI's scrollback (the TUI runs in the alternate screen).
 
-The transcripts are $CRAZE_HOME/native/sessions/<slug>/<UTC stamp>_<session
-id>.jsonl, so one session is *_<session id>.jsonl (a scratch CRAZE_HOME in a
-smoke, never the owner's ~/.craze). Taken from Plan 023's
+The transcripts are $CRAZE_HOME/native/sessions/<workspace dir>/<UTC
+stamp>_<provider session id>.jsonl, so one session is
+$CRAZE_HOME/native/sessions/*/*_<provider session id>.jsonl (a scratch
+CRAZE_HOME in a smoke, never the owner's ~/.craze). The id is the provider's
+(sessions.jsonl's sessionId, `craze ps --json`'s .row.providerSessionId), not
+the craze id `craze ps` prints. A tool result carries only its call's id, so
+its tool name comes from that earlier call. Taken from Plan 023's
 smoke/dump.py. Stdlib only.
 """
 import json
@@ -17,6 +21,7 @@ def main(argv):
     if len(argv) != 2 or argv[1] in ("-h", "--help"):
         print(__doc__.strip())
         return 0 if len(argv) == 2 else 2
+    names = {}  # tool_call_id -> tool_name, from the calls seen so far
     with open(argv[1], encoding="utf-8") as f:
         for line in f:
             e = json.loads(line)
@@ -38,10 +43,14 @@ def main(argv):
                 d = p.get("data", {})
                 k = p["type"]
                 if k == "tool-call":
+                    if d.get("tool_call_id"):
+                        names[d["tool_call_id"]] = d.get("tool_name")
                     print(f"{role:9} CALL   {d.get('tool_name')}  {str(d.get('input'))[:150]}")
                 elif k == "tool-result":
                     out = d.get("result") or d.get("output") or d
-                    print(f"{role:9} RESULT {d.get('tool_name')}  {json.dumps(out)[:200]}")
+                    # A result without an id stays unresolved (None).
+                    name = d.get("tool_name") or (names.get(d["tool_call_id"]) if d.get("tool_call_id") else None)
+                    print(f"{role:9} RESULT {name}  {json.dumps(out)[:200]}")
                 elif k == "text":
                     print(f"{role:9} TEXT   {d.get('text', '')[:200]!r}")
                 elif k == "reasoning":
