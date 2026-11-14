@@ -28,53 +28,69 @@ Plain craze solved none of the six tasks with either model; with the web tools b
 nearly all of them. Haiku's three failures were all T-W6 (a resend-with-the-answer's-wait protocol),
 which Muse passed every time.
 
-## Cost and behaviour (medians per run)
+## Cost and behaviour (medians per run; half-token medians rounded up)
 
 | model / arm | main requests | tool calls | input tokens | output tokens | cost | wall |
 |---|---|---|---|---|---|---|
 | haiku / craze | 6 | 5 | 84,574 | 2,244 | $0.0032 | 31 s |
 | haiku / craze-web | 8 | 13.5 | 144,598 | 8,010 | $0.0075 | 38 s |
-| muse / craze | 53.5 | 57 | 3,096,720 | 29,730 | $0.3175 | 376 s |
-| muse / craze-web | 16 | 22 | 226,996 | 6,963 | $0.0241 | 65 s |
+| muse / craze | 53.5 | 57 | 3,096,725 | 29,730 | $0.3175 | 376 s |
+| muse / craze-web | 16 | 22 | 226,997 | 6,963 | $0.0241 | 65 s |
 
 Web costs Haiku a little more: it reads the docs before writing. Muse without the web searches the
 sandbox for minutes (four of its plain runs hit the $0.50 run cap); with it, it reads the docs and
-finishes in a fifth of the time at a thirteenth of the cost.
+finishes in about a sixth of the time (17%) at a thirteenth of the cost.
 
-The web route served 90 fetches to Haiku (4.5 per run) and 123 to Muse (6.5 per run, 3 misses on
-T-W5). **No run used `websearch`.** Every task prompt names its documentation site
-(`https://docs.<product>.example`), so the models fetched it and followed its links.
+The web route served 90 fetches to Haiku (median 4.5 per run) and 123 to Muse (median 6.5 per run;
+one miss in each T-W5 rep). **No craze-web run called `websearch`; the corpus route served zero
+searches.** Every task prompt names its documentation site (`https://docs.<product>.example`), so the
+models fetched it and followed its links.
 
 ## Fidelity
 
-Effort parity and one model per run held; `craze-web` was offered exactly `websearch` and
-`webfetch` in every run. Plain `craze` was offered no web tools by the harness, but the capture
-check reports `web tools absent: False` for Muse: in three plain runs the model looked for a way
-out. In T-W4 rep 1 and T-W6 rep 2 it ran a nested `craze prompt --web-search` through `bash` (the
-craze binary is inside the sandbox); in T-W3 rep 2 it sent its own request through the model proxy
-with a provider-hosted `web_search` tool. Containment held: the nested sessions' web calls failed
-(the sandbox has no network, and the proxy refused `api.exa.ai` as an upstream not in its route
-table), and the proxy answered the hosted-search request with a 403. All three runs failed their
-hidden tests. No web content reached the plain arm.
+One served model per run held, and `craze-web` was offered exactly `websearch` and `webfetch` in
+every run. Effort parity held for the requests the harness made (Muse high, Haiku medium); the
+capture report still says `effort parity: no` for Muse, because requests the model hand-wrote
+through the proxy (below) carried no effort control.
+
+Plain `craze` was offered no web tools by the harness, but the capture check reports `web tools
+absent: False` for Muse: in four plain runs the model looked for a way out.
+
+- T-W4 rep 1 and T-W6 rep 2: a nested `craze prompt --web-search` through `bash` (the craze binary
+  is inside the sandbox); T-W6 rep 2's nested sessions made four `websearch` and six `webfetch`
+  calls.
+- T-W3 rep 2: its own request through the model proxy with a provider-hosted `web_search` tool.
+- T-W5 rep 3: hosted `web_search` and `web_search_preview` requests through the proxy, and one for
+  another model with Anthropic's hosted search.
+
+Containment held: every nested web call failed (the sandbox has no network, and the proxy refused
+`api.exa.ai` as an upstream not in its route table), the proxy answered the hosted-search requests
+with 403s, and it refused the other model's request (`model-not-allowed`). All four runs failed their
+hidden tests, and no web content reached the plain arm.
+
+Three plain Muse runs (T-W4 rep 2, T-W5 rep 2, T-W5 rep 3) were retried after the capture check
+flagged their first attempt: 75 campaign attempts for the 72 runs. The results above are the final
+attempts; the discarded attempts' $0.90 is in the spend below.
 
 ## Spend
 
-$6.92 committed over the campaign (the smoke's $0.20 included), against the $10 cap; no open
-reservations.
+$6.92 committed over the campaign (the smoke's $0.20 and the three discarded attempts' $0.90
+included), against the $10 cap; no open reservations.
 
 ## What it shows, and what it does not
 
 It shows that with the web tools a model reads documentation it is pointed at and uses it to solve
-tasks it otherwise cannot, and that for a model that otherwise flails (Muse) this is also far
+tasks plain craze did not solve in these trials, under these caps, and that for a model that otherwise flails (Muse) this is also far
 cheaper. It does not measure:
 
-- **search.** No run searched; the prompts name the docs site. A task that names only the product
-  would exercise `websearch` (future work).
+- **search.** No craze-web run searched; the prompts name the docs site. A task that names only
+  the product is meant to exercise `websearch` (future work).
 - **Exa.** The tools read a frozen corpus, not Exa's index; nothing here is about Exa's ranking.
 - **harm.** The web tools were offered only on web tasks; whether having them makes a model worse
   on tasks that need no web is not measured.
 
-Small n (18 runs per cell). Six fictional APIs are easier to "need the docs for" than real ones,
+Small n (18 runs per cell, repeated trials on six fixed tasks; the intervals are not over a
+population of real APIs). Six fictional APIs are easier to "need the docs for" than real ones,
 whose facts a model may half-know.
 
 ## Follow-ups
