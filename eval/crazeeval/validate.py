@@ -182,6 +182,8 @@ def web_lint(task: Task) -> list[str]:
             if host in prompt:
                 problems.append(f"corpus host {host!r} is in the prompt")
             problems += [f"corpus host {host!r} is in the fixture's {name}" for name, text in fixture if host in text]
+            problems += [f"corpus host {host!r} is in the fixture's file name {name}" for name, _ in fixture
+                         if host in name.casefold()]
     for need in task.needs:
         if not any(need in p.title or need in p.body for p in relevant):
             problems.append(f"need {need!r} is in no relevant corpus page")

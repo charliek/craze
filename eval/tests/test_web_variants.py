@@ -79,6 +79,16 @@ def test_the_lint_catches_a_docs_address_a_variant_leaves_in():
                for p in web_lint(replace(var, prompt=var.prompt + " community.harborware.example")))
 
 
+def test_the_lint_catches_a_docs_address_in_a_file_name(monkeypatch):
+    import crazeeval.validate as v
+
+    var = load_tasks()["T-WS1"]
+    real = v._start_files
+    monkeypatch.setattr(v, "_start_files", lambda t: real(t) + [("files/docs.quayside.example.txt", "")])
+    assert any("'docs.quayside.example' is in the fixture's file name files/docs.quayside.example.txt" in p
+               for p in web_lint(var))
+
+
 def _variant(tmp_path: Path, body: str, base: str = "T-W1") -> Path:
     root = tmp_path / "tasks"
     src = load_tasks()[base].dir
