@@ -28,8 +28,13 @@ Short and concrete; each item points at the section that explains it.
 - Compare against the previous campaign using `eval/results/2026-09-plan029/summary.json`
   and its README. Plan 029's raw runs were deleted on 2026-09-28, so its full record is
   the archive in the private `charliek/craze-evals` repo at `campaigns/2026-09-plan029/`,
-  not local batches.
-- Re-check the open items plan 029 left:
+  not local batches. The start-model campaign of November 2026
+  (`eval/results/2026-11-start-models/`) ran craze alone, with no reference harness and
+  no judge: use it for objective passes, cost and tool use per model, not for win rates.
+- Re-check the open items the earlier campaigns left:
+  - Kimi K3.1 Pro, the Fireworks start model, finished 3 of 17 tasks in November 2026
+    before the budget guard stopped the batch; its two T-E1 runs had each cost three to
+    four times a whole Kimi K3 run by then. It is not yet shown to be as good as K3.
   - L7 (the verification-evidence prompt bullet) was kept provisionally and needs
     confirming on the fresh held-out set.
   - The deepseek plan-mode runaway: see §7.
@@ -544,6 +549,25 @@ held-out numbers as informational only, precisely because those tasks had alread
 - **Budget reservations that never settle** (a disconnected request whose usage never
   arrives) keep their conservative reservation against the cap forever — `crazeeval ledger`
   shows this as committed-but-unreconciled spend; it's expected, not a bug to chase.
+- **One refused request stops the whole batch.** The ledger admits a request only when
+  the committed spend plus every open reservation fits under the cap, and a refusal ends
+  the batch for every model in it, not only the one refused. A model with no output limit
+  in craze's catalog reserves a worst-case response per request (about $2.92 for
+  `fireworks/kimi-k3p1-pro`), and `--cap-other` such requests can be open at once. The
+  November 2026 campaign stopped with $2.82 of its $20 unspent, 26 Kimi K3.1 Pro runs and
+  every GLM 5.3 Flash run not started. Run a lane per provider, give an expensive model
+  its own lane with `--cap-other 1`, and leave headroom of at least three of its
+  reservations.
+- **A projection made from the smoke runs is far too low.** Once a model has completed
+  runs in the ledger, `run` projects from their median, and after only the smoke split
+  that median is of two tiny tasks. The November 2026 main batch was projected at $4.24
+  and had spent $16.93 when the budget guard stopped it. Budget from the previous
+  campaign's per-run medians (§3), and allow for a plan or explain task costing up to
+  twelve times a model's median run (Kimi K3's T-P1 against its median, same campaign).
+- **A run that makes very many tool calls can be voided.** A run may hold at most four
+  open reservations (`MAX_OPEN_RESERVATIONS_PER_RUN`); a request past that is refused and
+  the run is scored `budget-capped` even if its answer finishes and passes its checks
+  (Muse Spark contributor, T-E1, November 2026: 101 tool calls).
 - **A batch directory is exclusive.** `run` refuses to reuse an existing `--out` unless you
   pass `--resume`, and `--resume` only proceeds if the batch's identity fingerprint still
   matches (task definitions, testdata, fixtures, the config snapshot, model settings and
