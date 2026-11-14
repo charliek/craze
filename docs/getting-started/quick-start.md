@@ -214,6 +214,15 @@ them connected:
     OpenRouter's models are its `~<family>-latest` routers, so an alias there
     may resolve to a newer model after OpenRouter updates the router.
 
+**Web search:** a native session can search the web and fetch pages, through
+Exa, with no key to set up. The first time the model wants to, craze asks
+(**Allow via Exa** or **Disable web search**) and remembers the answer; a
+headless turn (`craze prompt`, `craze new --wait`) never asks and gets no web
+tools unless you allowed them before. `websearch = false` in `config.toml`
+turns it off, and a `[websearch]` table with `provider = "exa"` turns it on
+without asking. Details, and what is sent to Exa: [Native web
+search](../reference/configuration.md#native-web-search).
+
 `craze auth logout fireworks` removes a stored key. Keys, and the two files you
 can use to change or add models, are in [Native models and
 providers](../reference/configuration.md#native-models-and-providers); the

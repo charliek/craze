@@ -1,0 +1,3 @@
+event: message
+data: {"result":{"content":[{"type":"text","text":"web_search_exa error (401): Invalid API key. Provide a valid key using 'Authorization: Bearer <key>' or 'x-api-key: <key>'. Create a key at https://dashboard.exa.ai/api-keys\nTimestamp: 2026-11-12T04:52:24.833Z"}],"isError":true},"jsonrpc":"2.0","id":1}
+

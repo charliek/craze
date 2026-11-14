@@ -14,7 +14,7 @@ from pathlib import Path
 
 from crazeeval import keys as keymod
 from crazeeval import paths
-from crazeeval.config import EvalModel, Snapshot
+from crazeeval.config import DEFAULT_HARNESSES, EvalModel, Snapshot
 from crazeeval.homes import HOMES
 from crazeeval.sandbox import Relay, SandboxSpec, Toolchains, run_sandboxed
 from crazeeval.workspace import craze_template
@@ -77,9 +77,11 @@ def probe_env(home: Path, em: EvalModel, snap: Snapshot) -> dict[str, str]:
     on a placeholder route shaped like a real one: loopback http, ending in the API's
     ``/v1`` (an Anthropic route must, for craze's override: homes.anthropic_api)."""
     env: dict[str, str] = {}
-    for h, fn in HOMES.items():
+    # The default harnesses only: craze-web shares craze's home directory, and would
+    # add its config.toml and web route to the probe's craze.
+    for h in DEFAULT_HARNESSES:
         if em.supports(h):
-            env.update(fn(home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}/v1"))
+            env.update(HOMES[h](home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}/v1"))
     return env
 
 

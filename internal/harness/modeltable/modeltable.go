@@ -116,6 +116,15 @@ const (
 	// so (plan 031 §3.2).
 	MinKeyLen = 8
 
+	// ExaKeyEnv is the variable the native harness's web search reads an Exa
+	// key from (plan 051 §B; internal/harness/websearch, which may not import
+	// this package, names it too). It funds no model, but it holds a
+	// credential: every table, whatever its kind — merged over the catalog,
+	// loaded alone (`catalog = false`) or built in memory — lists it among
+	// CredentialEnvNames and reads it in Keys (webCredentialEnv), whether or
+	// not web search is on.
+	ExaKeyEnv = "EXA_API_KEY"
+
 	// MaxAliasLen is the longest model alias a table holds, in bytes (plan
 	// 034 C4r3, r14 #a): the bound a native session's published catalog
 	// holds a model's id to, since an id cut short would be one no
@@ -240,6 +249,19 @@ type Table struct {
 	// endpoint (plan 050 review) — for Keys to redact; nil for a table
 	// loaded without a catalog or built in memory.
 	credentialKeys []Secret
+	// webKeys are the usable keys the directory's credentials.toml stores
+	// for the web search (plan 051 §F.5), by credential id, trimmed, as
+	// LoadWith read them — for every kind of table it loads: what
+	// WebSearchKey sends when the variable holds none, and what Keys hands
+	// the redactor. nil for a table built in memory, or a directory with no
+	// such file. A snapshot: a key stored after the load is not here
+	// (a running session learns it for redaction alone, at a turn's start).
+	webKeys map[string]Secret
+	// credsErr and credsProblems are what LoadWith's reading of
+	// credentials.toml said of it among Warnings (CredentialsReport): the
+	// file's own problem, and each entry of the wrong shape.
+	credsErr      error
+	credsProblems []string
 	// catalogModels are the aliases whose model is the catalog's own
 	// (Resolved.CatalogModel), stamped by the merge; nil for a table loaded
 	// without a catalog or built in memory.
@@ -1345,10 +1367,23 @@ func keyProblem(k string) error {
 // the marker nor uses its words ("redacted", "credential"): a key that
 // overlaps the marker may be one of them.
 func keyReason(err error) string {
-	if errors.Is(err, ErrKeyTooShort) {
+	switch {
+	case errors.Is(err, ErrKeyTooShort):
 		return fmt.Sprintf("shorter than %d bytes: too short to be a real key, or to redact from tool output", MinKeyLen)
+	case errors.Is(err, ErrKeyNotUTF8):
+		return "not valid UTF-8, which the file cannot hold"
 	}
 	return "overlaps craze's redaction marker, which would print the key back in its own place"
+}
+
+// KeyRule is KeyProblem's error (ErrKeyTooShort, ErrKeyOverlapsMarker) as a
+// predicate for a sentence about the key — "is shorter than 8 bytes" or
+// "overlaps craze's redaction marker" — naming the rule, never the value.
+func KeyRule(err error) string {
+	if errors.Is(err, ErrKeyTooShort) {
+		return fmt.Sprintf("is shorter than %d bytes", MinKeyLen)
+	}
+	return "overlaps craze's redaction marker"
 }
 
 // aliasProblem is what is wrong with alias as a model's, "" when nothing is:
@@ -1698,13 +1733,77 @@ func envKeyNames(providers map[string]Provider) []string {
 // runs is started without (tool.ChildEnviron), and the set Keys reads values
 // from for the redactor.
 //
+// It also holds webCredentialEnv, the web search's key variable, for every
+// table (plan 051 §B): a table loaded with `catalog = false` has no catalog
+// names, and its commands must still be started without that key.
+//
 // Funding is never decided here: Resolve, Choices, StartModel, Providers and
 // EnvWarnings read the providers' own env_keys, and nothing else. The caller
 // owns the slice.
 func (t *Table) CredentialEnvNames() []string {
 	names := append(envKeyNames(t.Providers), t.credentialEnv...)
+	names = append(names, webCredentialEnv...)
 	slices.Sort(names)
 	return slices.Compact(names)
+}
+
+// webCredentialEnv are the variables that hold a key for something other than
+// a model — the web search's provider (plan 051 §B) — which every table lists
+// among its credentials, independent of its providers and of how it was
+// loaded: each registry credential's Env (webCredentials, plan 051 §F.5).
+var webCredentialEnv = func() []string {
+	env := make([]string, len(webCredentials))
+	for i, c := range webCredentials {
+		env[i] = c.Env
+	}
+	return env
+}()
+
+// WebSearchKey is the key the web search sends (plan 051 §B, §F.5, R3), in
+// resolveKey's order for a model provider: ExaKeyEnv's value as t reads the
+// environment — a variable WithholdFrozen marked reads as unset (envOf) —
+// trimmed, when it can be a key; else the key credentials.toml stored when
+// t was loaded, when it can be one; else "", the keyless endpoint. A value
+// keyProblem refuses (too short, or overlapping the redaction marker) is
+// skipped wherever it is, so a value Keys would not hand the redactor is
+// never sent. Read once, at Open, from the table and the getenv the
+// session's redactor is built from — one snapshot of the credentials, so the
+// key sent is always one the redactor holds, and a key stored or rotated
+// after the load is not sent until a session loads the table again. A nil
+// getenv is os.Getenv.
+func (t *Table) WebSearchKey(getenv func(string) string) Secret {
+	if k, err := envKey(t.envOf(getenv), ExaKeyEnv); err == nil && k != "" {
+		return k
+	}
+	return t.webKeys["exa"]
+}
+
+// CredentialsReport is what the reading of credentials.toml that loaded t
+// said of the file among t's Warnings (plan 051 §F.5): problems, the
+// value-free line for each credential entry of the wrong shape — as
+// StoredCredentialsAndProblems says them — and err, the file's own problem as
+// StoredCredentials returns it (nil for a file read, or none). A running
+// session's look seeds what it has already said from this, the reading that
+// was said, never a second reading (review C5 item 6). Nothing for a table
+// built in memory.
+func (t *Table) CredentialsReport() (problems []string, err error) {
+	return slices.Clone(t.credsProblems), t.credsErr
+}
+
+// StoredWebKeys are the usable keys credentials.toml stored for the web
+// search when t was loaded (webKeys, plan 051 §F.5), trimmed, in registry
+// order — each one Keys returns too — and nil when there are none. The
+// harness records them as known from Open (review C5 item 1): a key the
+// session opened with is inherited by every sub-agent it opens later, even
+// once a reloaded table no longer holds it.
+func (t *Table) StoredWebKeys() []Secret {
+	var out []Secret
+	for _, c := range webCredentials {
+		if k := t.webKeys[c.ID]; k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Keys returns every key the table knows of, for the redactor that keeps
@@ -1712,12 +1811,14 @@ func (t *Table) CredentialEnvNames() []string {
 // the value of each of its env_keys variables that getenv reports set to a
 // usable key — all of them, not only the first, which is the one Resolve
 // picks — and its inline api_key; then the value of every other variable
-// CredentialEnvNames lists (C2r2), which funds nothing but is a credential
-// all the same; then every inline api_key providers.toml writes that no
+// CredentialEnvNames lists (C2r2) — the web search's key variable among
+// them, for every table (webCredentialEnv) — which funds nothing but is a
+// credential all the same; then every inline api_key providers.toml writes that no
 // provider holds (credentialKeys: an entry the merge dropped, or an old
-// import's key it would not send to craze's endpoint); each with surrounding
-// whitespace trimmed. A nil getenv is
-// os.Getenv.
+// import's key it would not send to craze's endpoint); then every usable key
+// credentials.toml stored for the web search when the table was loaded
+// (webKeys, plan 051 §F.5); each with surrounding whitespace trimmed. A nil
+// getenv is os.Getenv.
 //
 // An env value that cannot be a key — under MinKeyLen bytes, or overlapping
 // the redaction marker — is skipped, exactly as Resolve skips it, so "funded"
@@ -1749,7 +1850,7 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 		}
 	}
 	funding := envKeyNames(t.Providers)
-	for _, name := range t.credentialEnv {
+	for _, name := range t.CredentialEnvNames() {
 		if _, read := slices.BinarySearch(funding, name); read {
 			continue
 		}
@@ -1762,29 +1863,43 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 			keys = append(keys, k)
 		}
 	}
+	for _, c := range webCredentials {
+		if k := t.webKeys[c.ID]; k != "" && !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
 	return keys, nil
 }
 
 // EnvWarnings is one line for each variable a provider takes its key from
 // that getenv reports set to a value that cannot be a key (plan 031 §3.2):
 // Resolve and Keys skip it, and the session says so, naming the variable and
-// the rule, never the value. Each variable is named once, in sorted order. A
-// nil getenv is os.Getenv.
+// the rule, never the value — and the same for the web search's key variable
+// (webCredentialEnv, plan 051 §F.5), which WebSearchKey skips for the stored
+// key or the keyless endpoint. Each variable is named once, in sorted order.
+// A nil getenv is os.Getenv.
 func (t *Table) EnvWarnings(getenv func(string) string) []string {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
 	var out []string
-	for _, name := range envKeyNames(t.Providers) {
-		_, err := envKey(getenv, name)
-		switch {
-		case errors.Is(err, ErrKeyTooShort):
-			out = append(out, fmt.Sprintf("modeltable: %s is set to a value shorter than %d bytes, which cannot be an API key; it is ignored", name, MinKeyLen))
-		case err != nil:
-			out = append(out, fmt.Sprintf("modeltable: %s is set to a value that overlaps craze's redaction marker, which would print the key back in its own place; it is ignored", name))
+	names := append(envKeyNames(t.Providers), webCredentialEnv...)
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		if _, err := envKey(getenv, name); err != nil {
+			out = append(out, envWarning(name, err))
 		}
 	}
 	return out
+}
+
+// envWarning is EnvWarnings' line for variable name, set to a value
+// keyProblem refused with err: the name and the rule, never the value.
+func envWarning(name string, err error) string {
+	if errors.Is(err, ErrKeyTooShort) {
+		return fmt.Sprintf("modeltable: %s is set to a value shorter than %d bytes, which cannot be an API key; it is ignored", name, MinKeyLen)
+	}
+	return fmt.Sprintf("modeltable: %s is set to a value that overlaps craze's redaction marker, which would print the key back in its own place; it is ignored", name)
 }
 
 // Aliases returns every model alias, sorted.

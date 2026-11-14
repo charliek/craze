@@ -18,9 +18,19 @@
         "capabilities": {"$ref": "#/$defs/sessionCapabilities"},
         "retryHorizon": {"$ref": "#/$defs/retryHorizon"},
         "permissionMode": {"$ref": "#/$defs/permissionMode"},
-        "startedAt": {"$ref": "event.json#/$defs/time", "description": "When the host started serving the session, in UTC: what a client counts elapsed time from. Absent when the host does not say (an older host)."}
+        "startedAt": {"$ref": "event.json#/$defs/time", "description": "When the host started serving the session, in UTC: what a client counts elapsed time from. Absent when the host does not say (an older host)."},
+        "webSearch": {"$ref": "#/$defs/webSearchInfo"}
       },
       "required": ["sessionId", "providerSessionId", "incarnation", "hostId", "workspace", "provider", "catalogs", "capabilities", "retryHorizon"]
+    },
+    "webSearchInfo": {
+      "description": "Whether the session offered the web tools (plan 051): offered, always written, says websearch and webfetch were in this incarnation's tool list at Open (on, or undecided with a person to ask), and stays true when a consent card answers Disable since. Present only once the session is ready, and only for a session that may offer them (native); absent for an ACP session, one not ready yet, and an older host.",
+      "type": "object",
+      "properties": {
+        "offered": {"type": "boolean"}
+      },
+      "required": ["offered"],
+      "additionalProperties": false
     },
     "sessionInfo": {
       "description": "The session info document: the session's static facts, final once the session is up (the attach reply's session, a ready notification's). Its catalogs are empty until then.",
@@ -127,7 +137,7 @@
       "additionalProperties": false
     },
     "connectionCapabilities": {
-      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true; createOptions is absent. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create; createOptions true where it serves sessions.createOptions, and absent otherwise; createTitle true where its session.create takes a title, and absent otherwise; reopen true where it serves sessions.saved and session.reopen both, and absent otherwise.",
+      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true; createOptions is absent. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create; createOptions true where it serves sessions.createOptions, and absent otherwise; createTitle true where its session.create takes a title, and absent otherwise; reopen true where it serves sessions.saved and session.reopen both, and absent otherwise; reopenWebSearch true, beside reopen, where the hosts it starts apply a session's recorded web search choice on a load, and absent otherwise.",
       "type": "object",
       "properties": {
         "rosterSubscribe": {"type": "boolean"},
@@ -138,7 +148,8 @@
         "attachWhenNow": {"type": "boolean"},
         "createOptions": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.createOptions. Absent — false — on a host, on a hub from before it existed, and on one given no answer to it: a client makes no call."},
         "createTitle": {"type": "boolean", "description": "The hub's, omitted when false: its session.create takes a title. Absent — false — on a host and on a hub from before it existed, which refuses a create naming one unknown_field: a client that has a title to set checks it first."},
-        "reopen": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.saved and session.reopen both, a client's resume of a saved session. Absent — false — on a host, on a hub from before it existed and on one given no answer to either: a client hides its resume entry."}
+        "reopen": {"type": "boolean", "description": "The hub's, omitted when false: the hub serves sessions.saved and session.reopen both, a client's resume of a saved session. Absent — false — on a host, on a hub from before it existed and on one given no answer to either: a client hides its resume entry."},
+        "reopenWebSearch": {"type": "boolean", "description": "The hub's, omitted when false, and said only beside reopen: the hosts it starts for session.reopen apply the web search choice a session's row records (webSearch). Absent — false — on a host, on a hub without reopen and on a hub from before the record, whose own craze serve --load would open the session without it: a client reopening a session that records one checks it first, and reports such a hub rather than reopening through it."}
       },
       "required": ["rosterSubscribe", "sessionCreate", "multiplex", "connect", "snapshot", "attachWhenNow"],
       "additionalProperties": false

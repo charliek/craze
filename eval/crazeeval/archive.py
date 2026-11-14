@@ -15,7 +15,9 @@ twice reads it once, and it writes:
   paths), run key and id, harness with its version and executable hash, the craze build
   for a craze run, the model, wire model and served models, the task, split, category,
   mode, plan mode, rep, status, objective pass and each check's result, answer words,
-  tool calls, main requests, wall time, cost, list cost and tokens;
+  tool calls, main requests, wall time, cost, list cost and tokens -- and, for a
+  craze-web run, its web route's counters (``web``: searches, fetches, misses, bytes
+  served, malformed, refused);
 - ``verdicts.jsonl``: one line per final verdict: the task, model, split, the two run
   ids and harnesses, the judge model and mode, the winner, confidence and scores, each
   judged order's rubric grades and reasons, and the judge hashes. The report's own set
@@ -63,6 +65,7 @@ from crazeeval import judging
 from crazeeval import keys as keymod
 from crazeeval import paths
 from crazeeval import report as rp
+from crazeeval.config import harness_executable
 from crazeeval.judge import judge_hash, task_judge_hashes
 from crazeeval.tasks import Task
 
@@ -237,7 +240,9 @@ def calibration_summary(batch: Path, global_now: str) -> dict | None:
 def run_row(r: dict, info: dict) -> dict:
     m = r.get("metrics") or {}
     h = r.get("harness")
-    ex = (info.get("executables") or {}).get(h) or {}
+    # An arm (craze-web) keeps its own name and reports the executable it ran (craze's).
+    exe = harness_executable(h) if isinstance(h, str) else h
+    ex = (info.get("executables") or {}).get(exe) or {}
     row = {
         "campaign": info.get("campaign"),
         "batch": info.get("name"),
@@ -266,8 +271,13 @@ def run_row(r: dict, info: dict) -> dict:
         "list_cost": m.get("list_cost"),
         "tokens": m.get("tokens"),
     }
-    if h == rp.NATIVE:
+    if exe == rp.NATIVE:
         row["craze_build"] = info.get("craze_build")
+    # A craze-web run's web route counters (ints; never a query or URL): only a run that
+    # has them gets the key, so every other row is what it was.
+    web = rp.web_counters(r)
+    if web is not None:
+        row["web"] = web
     return row
 
 

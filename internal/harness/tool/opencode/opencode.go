@@ -28,17 +28,51 @@ const Name = "opencode"
 // pins the two together.
 const CredentialsFile = "providers.toml"
 
+// WebSearchStateFile is the name of the web search's remembered choice
+// under Env.Home (plan 051 §C.2), which the file tools refuse as they refuse
+// the key file, so a model cannot turn its own web search on. It is
+// websearch.StateFile, which this package may not import; a test there pins
+// the two together. bash is not a file tool and can still write it.
+const WebSearchStateFile = "websearch.json"
+
+// WebCredentialsFile is the name of the stored web search keys' file under
+// Env.Home (plan 051 §F.5), which the file tools refuse as they refuse the
+// key file. It is modeltable.CredentialsFile, which this package may not
+// import; a test there pins the two together.
+const WebCredentialsFile = "credentials.toml"
+
+// protectedFiles are the files under Env.Home the file tools refuse by name,
+// place and identity (isCredentials).
+var protectedFiles = []string{CredentialsFile, WebSearchStateFile, WebCredentialsFile}
+
 // AuthDir is the name of the harness's sign-in directory under Env.Home, the
 // ChatGPT plan's tokens and registration (plan 033 §3.12), which the file
 // tools refuse whole. It is modeltable.ChatGPTAuthDir (and chatgptauth's), a
 // test in internal/agent pins the three together.
 const AuthDir = "auth"
 
+// Option changes what Profile builds.
+type Option func(*options)
+
+type options struct{ web bool }
+
+// WithWeb adds the web tools, websearch and webfetch, at their places in the
+// order (plan 051 §A). Without it Profile is the thirteen tools every session
+// was offered before them, byte for byte; the harness registers the profile
+// with them and withholds them from a session whose web state does not offer
+// them, before anything is built from the list, so such a session offers
+// exactly what Profile() returns.
+func WithWeb() Option { return func(o *options) { o.web = true } }
+
 // Profile returns the opencode profile with a fresh set of its tools. A
 // session builds its own, so grep and glob share one ripgrep, and look for
 // rg on PATH once per session. Its System func is the system prompt written
-// for these tools (System).
-func Profile() (tool.Profile, error) {
+// for these tools (System); the web tools do not change it.
+func Profile(opts ...Option) (tool.Profile, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	system, err := systemFunc()
 	if err != nil {
 		return tool.Profile{}, fmt.Errorf("opencode: %w", err)
@@ -60,6 +94,18 @@ func Profile() (tool.Profile, error) {
 	// difference: opencode offers its question tool first of all, and here it
 	// follows the six, so that a session's requests still open with the tools
 	// every earlier session's did.
+	//
+	// The web tools (plan 051 §A, WithWeb) are at opencode's places for them:
+	// webfetch after the agent tools, as opencode's webfetch follows its task
+	// tool, and websearch after todo_write. A session that is not offered
+	// them has them removed from this list, which leaves it the list it had
+	// before they existed.
+	web := func(build func() (tool.Tool, error)) func() (tool.Tool, error) {
+		if !o.web {
+			return nil
+		}
+		return build
+	}
 	builders := []func() (tool.Tool, error){
 		newBash,
 		newBashOutput,
@@ -71,12 +117,17 @@ func Profile() (tool.Profile, error) {
 		newWrite,
 		newAgent,
 		newAgentOutput,
+		web(newWebFetch),
 		newTodoWrite,
+		web(newWebSearch),
 		newAskUserQuestion,
 		newExitPlanMode,
 	}
 	p := tool.Profile{Name: Name, System: system}
 	for _, build := range builders {
+		if build == nil {
+			continue
+		}
 		t, err := build()
 		if err != nil {
 			return tool.Profile{}, fmt.Errorf("opencode: %w", err)

@@ -1,0 +1,4 @@
+# T-W1 (web-api-reference): a client for a fictional harbour API whose endpoint, header
+# and paging names are only in the task's corpus.
+initial_message = "quayside: a small client for the Quayside harbour API"
+initial_date = "2026-10-05T09:00:00+00:00"

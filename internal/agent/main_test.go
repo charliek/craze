@@ -7,6 +7,7 @@ import (
 
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/websearch"
 )
 
 // TestMain unsets every variable the shipped model catalog takes a key from
@@ -31,5 +32,11 @@ func TestMain(m *testing.M) {
 	// this) gets a refused connection on this machine instead of reaching
 	// Anthropic.
 	_ = os.Setenv(messagesapi.TestAPIEnv, "http://127.0.0.1:9")
+	// The web search (plan 051 §B): its key is not a catalog name, so it is
+	// unset by name, and its endpoint is aimed at the same dead port, so a
+	// session offered the web tools whose test reads the process environment
+	// gets a refused connection instead of reaching Exa.
+	_ = os.Unsetenv(modeltable.ExaKeyEnv)
+	_ = os.Setenv(websearch.TestEndpointEnv, "http://127.0.0.1:9/mcp")
 	os.Exit(m.Run())
 }

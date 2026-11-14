@@ -12,7 +12,7 @@ EVERY message you receive is forwarded to craze: the first one and every follow-
 
 ## Input
 
-Your prompt is the task. It may start with one line that is exactly `mode=plan` or exactly `mode=ask`. If it does, that line is the mode and is NOT part of the task; the task is everything after it. Any other first line is part of the task.
+Your prompt is the task. It may start with one line that is exactly `mode=plan` or exactly `mode=ask`. If it does, that line is the mode and is NOT part of the task; the task is everything after it. Any other first line is part of the task, with one exception: a first line made only of `key=value` words that includes a `web=` word is not accepted here (web search is for the native provider). Reply with exactly `grok: web= applies to the native provider; use craze:sol, craze:astra, craze:muse, craze:wonder or craze:delegate` and stop. Make no tool call.
 
 Flags for this agent: `--provider grok --model grok-4.7 --effort high`
 

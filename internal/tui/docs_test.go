@@ -79,7 +79,10 @@ func TestTUIReferenceNamesEveryBuiltinSlashCommand(t *testing.T) {
 //   - a string-literal key passed to configSwitch, or as saveSetting's key
 //     argument, is a top-level key;
 //   - ConfigCompatClaude's list of {"key", &c.NoX} pairs is the
-//     [compat.claude] table's keys, and AgentBinKeys is [agents]'s.
+//     [compat.claude] table's keys, and AgentBinKeys is [agents]'s;
+//   - in ConfigWebSearch, a string-literal index of any map but the config
+//     map is a [websearch] key: `websearch` is a bool or a table
+//     (boolOrTable), read once from the config map and then as a table.
 //
 // Any other string-keyed index in the file is not a config key and is
 // ignored. A key the scrape cannot read as a literal (a non-literal index of
@@ -147,6 +150,7 @@ func configKeys(t *testing.T) (top []string, tables map[string][]string) {
 				continue
 			}
 			inCompat := d.Name.Name == "ConfigCompatClaude"
+			inWeb := d.Name.Name == "ConfigWebSearch"
 			// The config map variables of this function.
 			cfgVars := map[string]bool{}
 			ast.Inspect(d.Body, func(n ast.Node) bool {
@@ -163,6 +167,17 @@ func configKeys(t *testing.T) (top []string, tables map[string][]string) {
 				switch x := n.(type) {
 				case *ast.IndexExpr:
 					id, ok := x.X.(*ast.Ident)
+					if ok && !cfgVars[id.Name] && inWeb {
+						// The [websearch] table's own keys.
+						if s, ok := str(x.Index); ok {
+							if !slices.Contains(tables["websearch"], s) {
+								tables["websearch"] = append(tables["websearch"], s)
+							}
+						} else {
+							unseen(x.Pos(), "non-literal [websearch] key")
+						}
+						return true
+					}
 					if !ok || !cfgVars[id.Name] {
 						return true // not the config map: not a config key
 					}
@@ -211,7 +226,8 @@ func configKeys(t *testing.T) (top []string, tables map[string][]string) {
 			t.Fatalf("config.go scrape lost the key %q (found %v): update configKeys", want, top)
 		}
 	}
-	if len(tables["compat.claude"]) < 6 || len(tables["agents"]) < 3 {
+	if len(tables["compat.claude"]) < 6 || len(tables["agents"]) < 3 ||
+		!slices.Equal(tables["websearch"], []string{"provider"}) || !slices.Contains(top, "websearch") {
 		t.Fatalf("config.go scrape lost a table's keys: %v", tables)
 	}
 	return top, tables
@@ -276,6 +292,11 @@ func mentionsKey(text, key string) bool {
 	return strings.Contains(text, "`"+key+"`") || regexp.MustCompile(`(?m)^\s*`+regexp.QuoteMeta(key)+` *=`).MatchString(text)
 }
 
+// boolOrTable are the keys that are either a bool or a table (`websearch =
+// false`, or [websearch]), so the reference documents both: the key itself,
+// and the table in its own section.
+var boolOrTable = map[string]bool{"websearch": true}
+
 // TestConfigurationReferenceNamesEveryConfigKey keeps
 // docs/reference/configuration.md current: every config.toml key the decoder
 // reads is documented, and every key of the [agents] and [compat.claude]
@@ -284,7 +305,7 @@ func TestConfigurationReferenceNamesEveryConfigKey(t *testing.T) {
 	doc := readDoc(t, "docs", "reference", "configuration.md")
 	top, tables := configKeys(t)
 	for _, k := range top {
-		if _, isTable := tables[k]; isTable || k == "compat" {
+		if _, isTable := tables[k]; (isTable && !boolOrTable[k]) || k == "compat" {
 			continue // a table: checked below, by its own section
 		}
 		if !mentionsKey(doc, k) {

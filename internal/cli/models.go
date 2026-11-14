@@ -125,6 +125,15 @@ type modelsDoc struct {
 	Models       []modelRow      `json:"models"`
 	Retired      []retiredRow    `json:"retired"`
 	Providers    []modelProvider `json:"providers"`
+	// Capabilities is what this craze can do for a caller choosing among its
+	// models (plan 051 S6): the same in both forms, set unconditionally.
+	Capabilities modelsCapabilities `json:"capabilities"`
+}
+
+// modelsCapabilities is the models document's capabilities: webSearch, that
+// this craze has `--web-search` and the native web tools (always true).
+type modelsCapabilities struct {
+	WebSearch bool `json:"webSearch"`
 }
 
 // modelRow is one model. Every key is always present but replacedBy (a
@@ -278,7 +287,8 @@ func unverifiable(t *modeltable.Table, raw string) bool {
 // state out (the shipped form).
 func modelsDocument(t *modeltable.Table, getenv func(string) string, crazeVersion string) modelsDoc {
 	doc := modelsDoc{Schema: modelsSchema, CrazeVersion: crazeVersion,
-		Models: []modelRow{}, Retired: []retiredRow{}, Providers: []modelProvider{}}
+		Models: []modelRow{}, Retired: []retiredRow{}, Providers: []modelProvider{},
+		Capabilities: modelsCapabilities{WebSearch: true}}
 	var offered map[string]bool
 	if getenv != nil {
 		offered = t.Offered(getenv)

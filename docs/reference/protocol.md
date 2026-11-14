@@ -205,7 +205,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false,"createOptions":true,"createTitle":true,"reopen":true,"reopenWebSearch":true},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -252,6 +252,21 @@ same way: absent on a host, on a hub from before the two methods, and on one
 given no answer to either. A client hides its resume entry without it, and
 `craze new --load` reports such a hub as one that "cannot reopen a saved
 session".
+
+`reopenWebSearch` says the hosts the hub starts for a
+[`session.reopen`](#sessionreopen) apply the web search choice a session's row
+records (`webSearch`, [the session index](configuration.md#session-index)):
+the hub's own `craze serve --load` opens the session with it. It is said only
+beside `reopen`, and omitted when `false` in the same way: absent on a host,
+on a hub without `reopen`, and on a hub from before the record — which, since
+a hub starts its hosts from its own executable, may be an older craze that
+outlived an upgrade and would open the session without the choice. A client
+reopening a session that records one checks it first: `craze new --load`
+reports such a hub as one that "cannot reopen a session created with
+--web-search or --no-web-search" and reopens nothing (the hub exits once no
+session runs and no client is connected, and the next `craze new --load`
+starts a current one); a session that records none is reopened through it as
+before.
 
 ### Client ids and resume
 
@@ -1348,8 +1363,13 @@ disconnects does not cancel it.
      a person's session with the plain defaults, a sub-agent's (unattended)
      session with its recorded mode, permission mode, model and effort, and
      `--unattended`. Never `--provider`, `--workspace` or `--title`: the row
-     decides where and as what the session runs. The host's ready line
-     decides what follows:
+     decides where and as what the session runs. Nor `--web-search` or
+     `--no-web-search`: the host applies the web search choice the row
+     records (`webSearch`, [the session index](configuration.md#session-index)),
+     as every load does, and refuses a recorded `on` that `config.toml` has
+     since turned off when the session is a sub-agent's (unattended) — a
+     refusal of the session, below — while a person's session opens without
+     web tools. The host's ready line decides what follows:
      - `ok`: the session's own host. Its start is waited for (below), and a
        start that fails or runs past the budget stops it, as a create stops
        its own; so does its row naming another session, and the hub looks
@@ -1731,6 +1751,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
 | `startedAt` | when the host started serving the session, UTC — what a client counts the session's elapsed time from. Absent when the host does not say |
+| `webSearch` | `{offered}` — whether the session offered the web tools: `offered`, always written, `true` when `websearch` and `webfetch` were in this incarnation's tool list at Open (web search on, or undecided with a person to ask), and still `true` after a consent card answered *Disable*. Present only once the session is ready, beside the catalogs, and only for a native session; absent for an ACP session, one not ready yet, the fake host by default, and an older host. It rides on the ready notification and on a `sessions.list` row too, which share these fields. See [Web search counts](#web-search-counts) |
 
 `permissionMode` and `startedAt` are absent from the example above, as they
 are from every host that does not set them — an older one, or the fake host
@@ -1860,6 +1881,13 @@ older client's decoder skips, so it folds every other section exactly as
 before and the codecs stay at version 1; and the catalog's values are open
 — a client hides a row with a `source`, `requires` or `run` value it does not
 know — so a later host can add one without a version of its own.
+
+[Web search counts](#web-search-counts) are announced by the info document's
+`webSearch`, absent on every older host and every ACP session: a client that
+finds none says nothing of web search. The state delta's `webSearch` section
+and the snapshot's `turn.webSearch` are keys an older client's decoder skips,
+so it folds every other section exactly as before, and the codecs stay at
+version 1.
 
 Side questions are announced the same way: where `capabilities.aside` is
 absent — cursor, every older host — a client makes no `session.aside` call.
@@ -2123,6 +2151,84 @@ before the replay's `end`), never in a delta of its own inside the bracket. A
 usage-only delta prints no `craze prompt --json` line, but it takes a `seq`
 like every event. The section is additive, like `compaction`: no codec
 version bump and no capability.
+
+## Web search counts
+
+A native session counts the calls its web service handles — `websearch` and
+`webfetch`, its sub-agents' included — by turn, and says so as the **web search
+section**, `state.webSearch` on a `meta` event:
+
+```json
+{"type":"meta","state":{"webSearch":{"searches":2,"fetches":1,"failed":1,"urls":["https://go.dev/doc/devel/release","https://go.dev/blog/go1.27"]}},"at":"..."}
+```
+
+- `searches` and `fetches` are the calls the service handled, whatever their
+  outcome; `failed` those that returned an error (a provider error, a rate
+  limit, a declined, disabled or cancelled consent, a cancellation in flight).
+  A call refused before it reached the service is not counted.
+- `urls` are the URLs of successful results — a search's result URLs in order,
+  a fetch's requested URL when its page had text — with the provider key
+  scrubbed, and each section redacts from the URL as returned every key the
+  session's redactor has held at any count or section so far — its own and its
+  sub-agents', a sub-agent's staying covered after the sub-agent ends: once
+  covered, always covered for the session. A section covers the keys learned
+  before it began; one learned while a section is being made is covered from
+  the next one on. Each URL is then cut to at most 500 bytes at a UTF-8
+  boundary (a URL already held to its first 4 KiB loses any trailing start of
+  a known key), listed once, first seen first, at most 100 (distinct by that
+  form as it was when counted);
+  `urlsTruncated` is `true` when a URL was cut or left out, or two were folded
+  into one that a later key could tell apart.
+- Each member is absent when zero, empty or `false`. No ACP session sends the
+  section.
+
+**Cumulative, and it replaces.** Each section carries the whole tally of the
+turn so far, and a client **replaces** what it holds with it — it never adds —
+so a snapshot and the replay after it never count twice.
+
+**It names no turn: a client stamps it.** A section belongs to the turn running
+in the log as it arrives: the running [foreign turn](#the-foreign-turn)'s
+bracket id first (a native wake's `wake-N`), else the engine turn's `turn-N`. A
+section with neither running is ignored (a native session sends none). The
+session sends it only inside a turn's window — after the turn's `started` (or
+its opening bracket) and before its `ended` (or its ending bracket) — once per
+call that reaches it while the window is open, and once more as the turn's last
+delta when the turn made any call (for a turn of the engine's, whose window
+closes before the host settles it, the host restates that tally again just
+ahead of the turn's `ended`), so a client that joined mid-turn by a cursor
+holds the whole count at the turn's end — with one accepted exception, a
+window one event wide: snapshots are cut per committed event, so a client whose
+snapshot was cut exactly at the turn's last restating delta, and which then
+stopped reading before the very next event, can hold a cursor just past it; a
+client that resumes from that cursor and reads the turn's ending (or the
+closing ending) before it next takes a snapshot has no tally for the turn. The
+same holds for a prompt's turn, a wake's bracket and a close. A call that
+returns while no turn runs (a background sub-agent's) is carried to the next
+turn the session runs, never put on the ended one. A session's close is the cutoff: before the closing ending
+of the turn it cuts short, the host restates that turn's tally, and counts
+nothing after.
+
+**In a snapshot**, the tally is the turn's `webSearch`, with the `turnId` it
+was stamped with: `turn.webSearch` is
+`{turnId, searches?, fetches?, failed?, urls?, urlsTruncated?}`. It is reset
+when a turn or a running bracket starts and kept once the turn has ended, until
+the next starts — `retries`' lifetime. A tally is the turn's whose `turnId` it
+carries, in the incarnation of the stream or snapshot it came from: the counts
+are **incarnation-local**, as turn ids are, and a reload starts from zero.
+
+**Whether the session offered the tools at all** is the [info
+document](#the-session-info-document)'s `webSearch.offered`, not a section: it
+is fixed at Open.
+
+These are **completion-window statistics, for activity accounting** — the calls
+whose report reached the session while the turn ran — and not the provenance of
+an answer: a background sub-agent's search counts in the turn it completed in,
+whichever turn started it and whichever turn delivers its result.
+
+The section and the snapshot member are additive: no codec or snapshot version
+moves, and an older client skips a key it does not know ([Tolerant inbound,
+strict outbound](#tolerant-inbound-strict-outbound)), so to it a delta carrying
+only `webSearch` is a meta with an empty state, which it folds as no change.
 
 ## Live models
 

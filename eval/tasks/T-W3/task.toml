@@ -1,0 +1,60 @@
+# T-W3 web-changelog-migration (craze plan 051 E4, a changelog's breaking change): a client
+# for a fictional library-circulation API, still written against version 1, moved to
+# version 2. What version 2 renamed and re-shaped (the resource and its paths, the branch's
+# header, the copy's field, the due timestamp, the renewal refusal's status and code) is
+# only in the corpus (testdata/corpus/, served to craze-web by the proxy's web route); the
+# hidden tests' fake server answers only version 2. Scored by the hidden tests alone; the
+# judge is not used for this split.
+id = "T-W3"
+name = "web-changelog-migration"
+category = "feature"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`bindlewick.py` is the client our library's self-service kiosks use for the Bindlewick Circulation API. It is still written against version 1 of the API, which Bindlewick is switching off; move it to version 2. Callers must not have to change: keep the module's public interface as it is (`Client` and its constructor, `checkout`, `checkouts` and `renew`, the `Checkout` fields and what they mean, `BindlewickError`, and `RenewalRefused`, raised only when the patron has used up their renewals). Use only the standard library, as the module does now. Bindlewick's documentation, including what changed between versions, is published at https://docs.bindlewick.example; follow it exactly, since the kiosks will be pointed at the real API. Run the tests when you are done.
+"""
+rubric = [
+    "Calls version 2's endpoints for lending, listing and renewing, with the request bodies version 2 expects.",
+    "Sends the branch the way version 2 requires, on every request, and the key as before.",
+    "Maps version 2's loan objects to Checkout, keeping the due day as the site's calendar day.",
+    "Raises RenewalRefused only for version 2's renewal-limit refusal, and BindlewickError for other errors.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["changelog.md", "v2-loans.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["Bindlewick-Site", "/loans", "/renewals", "copy_ref", "due_at", "loans.renewal_cap"]
+
+[repo]
+kind = "fixture"
+name = "bindlewick"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_bindlewick.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_circulation_v2.py::test_checkout_lends_the_copy",
+    "tests/test_hidden_circulation_v2.py::test_checkouts_lists_every_loan_in_order",
+    "tests/test_hidden_circulation_v2.py::test_renew_moves_the_due_day",
+    "tests/test_hidden_circulation_v2.py::test_a_renewal_over_the_limit_is_refused",
+    "tests/test_hidden_circulation_v2.py::test_other_renewal_conflicts_are_not_refusals",
+    "tests/test_hidden_circulation_v2.py::test_every_request_names_the_site_and_the_key",
+    "tests/test_hidden_circulation_v2.py::test_errors_are_api_errors",
+    "tests/test_bindlewick.py::test_checkout_is_a_value",
+    "tests/test_bindlewick.py::test_a_refused_renewal_is_an_api_error",
+    "tests/test_bindlewick.py::test_client_keeps_its_settings",
+]
+
+[checks.add]
+"tests/test_hidden_circulation_v2.py" = "testdata/hidden/test_hidden_circulation_v2.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

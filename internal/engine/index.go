@@ -196,6 +196,14 @@ type IndexOptions struct {
 	// writes none. The index keeps it set-only and hands it on by craze id
 	// (sessions.Store.Upsert), so nil never clears a row's record.
 	Unattended *sessions.Unattended
+	// WebSearch is the web search choice every row this session writes
+	// carries (plan 051 F.3): "on" or "off", the session's effective one —
+	// a new session's --web-search or --no-web-search (craze serve), attended
+	// or not, or a load's recorded choice (craze serve --load, the in-process
+	// TUI's --continue and resume picker), so a row the index's cap evicted is
+	// recreated with it; "" — a session with neither — writes none. The index
+	// keeps it set-only and hands it on by craze id, as Unattended.
+	WebSearch string
 	// Title is the title the session was created with (plan 043 D8: craze
 	// serve --title, a session.create's), already normalized
 	// (NormalizeTitle) and pinned in the session itself (agent.Options'
@@ -1014,6 +1022,7 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		CWD:        w.opts.CWD,
 		CrazeID:    w.craze,
 		Unattended: w.opts.Unattended,
+		WebSearch:  w.opts.WebSearch,
 		Title:      w.titleLine(title),
 		TitleKind:  kind,
 	}

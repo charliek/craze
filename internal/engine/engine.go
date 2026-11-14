@@ -936,6 +936,15 @@ func (e *Engine) Close() error {
 		// Up for good: nothing is admitted again, and a session that could start a
 		// turn of its own must not start one under a closing engine either.
 		e.raiseFenceLocked()
+		// The web tally's close cutoff (plan 051 F.4.2), before the ending
+		// batch is built: a session that keeps one publishes the tally a
+		// waiter on the current turn must hold — through the log's outbox,
+		// ahead of the closing ending in the same FIFO — and then counts
+		// nothing more. Whether a turn is current is read here, in this
+		// section. e.mu → the session's lock is the one cross order allowed.
+		if f, ok := e.sess.(agent.WebTallyFreezer); ok {
+			f.FreezeWebTally(e.cur != nil)
+		}
 		var batch []agent.Event
 		if t := e.cur; t != nil {
 			// The turn that was running has ended, and this is the only place
@@ -2062,6 +2071,14 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		t.retry = true
 		e.wake()
 		return nil
+	}
+	// The web tally's settlement restatement (plan 051 F.4.2), the close's
+	// freeze's twin: a session that keeps one restates the released prompt's
+	// tally through the log's outbox, so it is committed ahead of this batch's
+	// ended for a waiter whose cursor fell in the gap since the release. Here,
+	// before the successor's claim below, whose Begin forgets that tally.
+	if f, ok := e.sess.(agent.WebTallyFreezer); ok {
+		f.RestateWebTally()
 	}
 	var batch []agent.Event
 	// The steers the turn accepted and could not answer go back first: ahead of

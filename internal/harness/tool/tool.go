@@ -47,11 +47,14 @@ const (
 	// adapter draws a task-kind call as the TUI's existing task row
 	// (ToolEvent.Task); discovery's 05 guessed "think" before the design.
 	KindTask Kind = "task"
+	// KindFetch is a call that reads a page off the web: webfetch (plan 051
+	// §A). The TUI already draws a fetch-kind row as it draws a search.
+	KindFetch Kind = "fetch"
 )
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk, KindTask:
+	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk, KindTask, KindFetch:
 		return true
 	}
 	return false
@@ -343,6 +346,13 @@ type Env struct {
 	// none of them (JobsAware, X101): a run_in_background its model sends
 	// anyway runs in the foreground, and the timeout kills.
 	Jobs Jobs
+	// Web is the session's web search service (web.go, plan 051 §B): what
+	// websearch and webfetch reach the web through, behind the same kind of
+	// narrow seam as Todos and Subagents. nil when the session has none —
+	// the tools then answer with a tool_error result. Whoever builds an Env
+	// assigns it only when the service is not nil, so an absent service is a
+	// nil interface, never a typed nil.
+	Web Web
 	// Streams keeps a running command's output stream widened to every key
 	// its session learns while it runs (StreamTracker; plan 033 C14r, r12
 	// #6a): in every session — a headless one and a sub-agent's included,

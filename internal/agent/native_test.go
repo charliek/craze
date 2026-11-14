@@ -20,6 +20,7 @@ import (
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
+	"github.com/charliek/craze/internal/harness/websearch"
 )
 
 // The native adapter's tests. The model is scripted (harness.Options.NewModel
@@ -95,9 +96,13 @@ func newNativeFixture(t *testing.T) *nativeFixture {
 		t.Fatalf("saving the test model table: %v", err)
 	}
 	f := &nativeFixture{
-		t:      t,
-		dir:    dir,
-		env:    map[string]string{"NATIVE_TEST_KEY": nativeCanary, "NATIVE_OTHER_KEY": nativeCanaryOther},
+		t:   t,
+		dir: dir,
+		// The web search's endpoint is aimed at a port nothing serves (as
+		// TestMain aims the process's): an interactive session is offered
+		// the web tools, and a call that reached the network would go to Exa.
+		env: map[string]string{"NATIVE_TEST_KEY": nativeCanary, "NATIVE_OTHER_KEY": nativeCanaryOther,
+			websearch.TestEndpointEnv: "http://127.0.0.1:9/mcp"},
 		models: map[string]*scriptedModel{},
 	}
 	for alias, m := range table.Models {

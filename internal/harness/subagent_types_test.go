@@ -199,12 +199,15 @@ func TestPersonaToolMapping(t *testing.T) {
 		{"native ids verbatim", []string{"bash", "read", "glob", "grep", "edit", "write"}, childTools, nil},
 		{"the drop list", []string{
 			"Agent", "Agent(claude-security:explore)", "Agent(a, b)", "Task", "TaskCreate", "TaskOutput", "TodoWrite",
-			"AskUserQuestion", "ExitPlanMode", "WebFetch", "WebFetch(domain:example.com)", "WebSearch", "NotebookEdit",
+			"AskUserQuestion", "ExitPlanMode", "NotebookEdit",
 			"NotebookRead", "KillShell", "BashOutput", "Workflow", "Skill", "mcp__github__create_issue", "MCP__x",
 			"agent", "todo_write", "ask_user_question", "exit_plan_mode",
 		}, nil, nil},
 		{"a real plugin's list", []string{"Glob", "Grep", "LS", "Read", "NotebookRead", "WebFetch", "TodoWrite", "WebSearch", "KillShell", "BashOutput"},
-			[]string{"glob", "grep", "read"}, nil},
+			[]string{"glob", "grep", "read", "webfetch", "websearch"}, nil},
+		{"bare web names map (plan 051 §D)", []string{"WebSearch", "webfetch", "websearch", "WebFetch"}, []string{"websearch", "webfetch"}, nil},
+		{"a restricted web name is refused, not mapped", []string{"WebFetch(domain:example.com)", "Read"},
+			[]string{"read"}, []string{"WebFetch(domain:example.com)"}},
 		{"unknown names, and restrictions craze cannot honour", []string{"Read", "Frobnicate", "Bash(git status:*)", "Read(./src/**)", "Frobnicate", "", "  "},
 			[]string{"read"}, []string{"Frobnicate", "Bash(git status:*)", "Read(./src/**)"}},
 		{"nothing", nil, nil, nil},
@@ -236,6 +239,34 @@ func TestPersonaToolMapping(t *testing.T) {
 		}
 	}
 
+	// With the web tools offered, the same holds for the fifteen-tool profile:
+	// websearch and webfetch map to themselves and none is reported unknown.
+	pw, err := opencode.Profile(opencode.WithWeb())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawWeb := 0
+	for _, tl := range pw.Tools {
+		id := tl.Spec().ID
+		ids, unknown := tool.MapClaudeTools([]string{id})
+		var want []string
+		if every.keeps(id) {
+			want = []string{id}
+		}
+		if id == "websearch" || id == "webfetch" {
+			sawWeb++
+			if !every.keeps(id) {
+				t.Errorf("a child with every tool does not keep %s", id)
+			}
+		}
+		if !slices.Equal(ids, want) || unknown != nil {
+			t.Errorf("the with-web profile's %s maps to %q, %q; want %q and nothing unknown", id, ids, unknown, want)
+		}
+	}
+	if sawWeb != 2 {
+		t.Errorf("the with-web profile holds %d web tools, want 2", sawWeb)
+	}
+
 	// A persona's two lists, mapped by the adapter, then resolved here.
 	mapped := func(names ...string) []string { ids, _ := tool.MapClaudeTools(names); return ids }
 	for _, tc := range []struct {
@@ -250,7 +281,7 @@ func TestPersonaToolMapping(t *testing.T) {
 		{"a list, less the disallowed, in the profile's order",
 			tool.Persona{Tools: mapped("Grep", "Read", "Bash", "Write"), DisallowedTools: mapped("bash", "WebFetch")},
 			false, []string{"read", "grep", "write"}},
-		{"a list that maps to nothing: text-only", tool.Persona{Tools: mapped("WebFetch", "TodoWrite", "Agent(x)")}, false, nil},
+		{"a list that maps to nothing: text-only", tool.Persona{Tools: mapped("NotebookEdit", "TodoWrite", "Agent(x)")}, false, nil},
 		{"everything listed is disallowed: text-only", tool.Persona{Tools: mapped("Read"), DisallowedTools: mapped("LS")}, false, nil},
 	} {
 		all, ids := childToolSet(tc.p, childTools)
@@ -258,4 +289,35 @@ func TestPersonaToolMapping(t *testing.T) {
 			t.Errorf("%s: childToolSet = (%v, %q), want (%v, %q)", tc.name, all, ids, tc.all, tc.ids)
 		}
 	}
+
+	// The web names resolve against what the parent offers (plan 051 §D): with
+	// the web tools offered a bare name is granted, a restricted allow entry
+	// grants nothing, a restricted deny entry takes the tool away; with them
+	// withheld every one of these resolves to nothing, as the names were
+	// dropped before.
+	withWeb := append(slices.Clone(childTools), "websearch", "webfetch")
+	for _, tc := range []struct {
+		name          string
+		p             tool.Persona
+		on, withheld  []string
+		onAll, offAll bool
+	}{
+		{"bare names", tool.Persona{Tools: mapped("Read", "WebSearch", "WebFetch")}, []string{"read", "websearch", "webfetch"}, []string{"read"}, false, false},
+		{"only web names", tool.Persona{Tools: mapped("WebFetch")}, []string{"webfetch"}, nil, false, false},
+		{"a restricted allow entry grants nothing", tool.Persona{Tools: mapped("Read", "WebFetch(domain:example.com)")}, []string{"read"}, []string{"read"}, false, false},
+		{"a restricted deny entry removes the tool", tool.Persona{AllTools: true, DisallowedTools: mDeny("WebFetch(domain:example.com)")},
+			[]string{"bash", "read", "glob", "grep", "edit", "write", "websearch"}, []string{"bash", "read", "glob", "grep", "edit", "write"}, false, false},
+		{"every tool, nothing disallowed", tool.Persona{AllTools: true}, nil, nil, true, true},
+	} {
+		all, ids := childToolSet(tc.p, withWeb)
+		if all != tc.onAll || !slices.Equal(ids, tc.on) {
+			t.Errorf("%s, web offered: childToolSet = (%v, %q), want (%v, %q)", tc.name, all, ids, tc.onAll, tc.on)
+		}
+		all, ids = childToolSet(tc.p, childTools)
+		if all != tc.offAll || !slices.Equal(ids, tc.withheld) {
+			t.Errorf("%s, web withheld: childToolSet = (%v, %q), want (%v, %q)", tc.name, all, ids, tc.offAll, tc.withheld)
+		}
+	}
 }
+
+func mDeny(names ...string) []string { ids, _ := tool.MapClaudeDisallowed(names); return ids }

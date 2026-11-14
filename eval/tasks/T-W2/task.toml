@@ -1,0 +1,60 @@
+# T-W2 web-api-reference-telemetry (craze plan 051 E4, reference docs): an upload method
+# for a fictional weather-station telemetry API. The endpoint's path and body members, its
+# seal header and the message the seal covers, the measurement members and their integer
+# units (one changed since the beta), and which conflict code means "already stored" are
+# only in the corpus (testdata/corpus/, served to craze-web by the proxy's web route). The
+# hidden tests' fake ingest host stores only tranches that use them, and its error cases
+# also check that the request was otherwise the documented one, so a client that merely
+# raises on errors passes none of them. Scored by the hidden tests alone; the judge is not
+# used for this split.
+id = "T-W2"
+name = "web-api-reference-telemetry"
+category = "feature"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`skerrywind.py` uploads weather-station readings to the Skerrywind telemetry API (version 4), but `Client.upload(readings, batch_id)` is still a stub. Implement it: upload the readings for the client's station in a single request, authenticated with the station's signing secret the way the API requires, with every measurement in the members and units the API expects (the gateway logs Celsius, hectopascals and metres per second), and return the receipt the API issues. Gateways resend an upload with the same id after a timeout, so a resent upload that the API already holds must not fail; any other error response raises `SkerrywindError`. Use only the standard library, as the rest of the module does. Skerrywind's API documentation is published at https://docs.skerrywind.example; get the endpoint, the request body, the authentication, the units and the retry behaviour exactly right, since the client will be pointed at the real API. Run the tests when you are done.
+"""
+rubric = [
+    "POSTs the upload to the version 4 tranches endpoint for the client's station, with the documented body and a seal over the station id and the exact body.",
+    "Sends each reading in the documented integer members and units.",
+    "Treats only the documented already-stored conflict code as success with the first acknowledgement's id, and raises SkerrywindError for any other error.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["v4-signing.md", "v4-tranches.md", "v4-units.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["/tranches", "tranche_ref", "Skw-Tranche-Seal", "air_temp_dk", "station_pres_dapa", "wind_speed_cms",
+         "tranche.replayed"]
+
+[repo]
+kind = "fixture"
+name = "skerrywind"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_skerrywind.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_tranches.py::test_a_tranche_is_stored_in_the_documented_fields_and_units",
+    "tests/test_hidden_tranches.py::test_a_trailing_slash_and_a_single_reading",
+    "tests/test_hidden_tranches.py::test_a_retried_tranche_returns_the_first_receipt",
+    "tests/test_hidden_tranches.py::test_a_reused_reference_is_an_error",
+    "tests/test_hidden_tranches.py::test_a_wrong_secret_is_an_error",
+    "tests/test_hidden_tranches.py::test_an_unknown_station_is_an_error",
+    "tests/test_skerrywind.py::test_reading_from_log_line",
+    "tests/test_skerrywind.py::test_client_keeps_its_settings",
+]
+
+[checks.add]
+"tests/test_hidden_tranches.py" = "testdata/hidden/test_hidden_tranches.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

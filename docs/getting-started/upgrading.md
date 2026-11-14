@@ -697,6 +697,87 @@ older binary should not write it.
 - **New:** `openrouter/muse-spark-1.3` and `openrouter/muse-wonder`, Meta's
   models on OpenRouter, offered when you have OpenRouter and no Meta key.
 
+### `EXA_API_KEY` is kept out of native commands
+
+Nothing needs migrating. A native session now treats an exported
+`EXA_API_KEY` as a key, as it treats every provider's variable
+([Keys](../reference/configuration.md#keys)), in every configuration — a
+`models.toml` with `catalog = false` included: the commands it runs (`bash`, a
+background command, a sub-agent's) are started without the variable, and its
+value is redacted from what the tools return. **A script of yours that reads
+`EXA_API_KEY` no longer finds it when a native session's shell runs it**; run
+it outside craze. The variable funds no model.
+
+### Native web search
+
+Nothing needs migrating. A native session gains two tools, `websearch` and
+`webfetch`, which search the web and fetch pages through Exa
+([Native web search](../reference/configuration.md#native-web-search)). What
+changes for you:
+
+- **In the TUI**, a native session is offered them, and the first time its
+  model calls one, a question card asks you: **Allow via Exa** or **Disable
+  web search**. The answer is remembered in a new file,
+  `~/.craze/native/websearch.json` (`0600`), and later sessions do not ask;
+  `Esc` declines for that session only. The model's search queries and the
+  URLs it fetches go to Exa once you allow it.
+- **Headless runs do not change.** `craze prompt`, `craze new --wait` and an
+  unattended host answer their own questions, so they never ask and are
+  offered no web tools — their model requests carry exactly the tools they
+  did — unless you allowed web search before or turned it on in
+  `config.toml`.
+- **A caller can decide per run**: `--web-search` and `--no-web-search` on
+  `craze new --wait`, `craze prompt` and `craze serve`
+  ([Web search flags](../reference/cli.md#web-search-flags)).
+  `--no-web-search` guarantees no web tools, whatever the home says;
+  `--web-search` offers them without asking, and is refused (exit 1, kind
+  `config`, `detail.reason` `web_search_not_offered` under `craze new --wait
+  --json`) by `websearch = false` in `config.toml` or on a provider other than
+  native. The choice is recorded on the session's index row (`webSearch`) and
+  every later load keeps it, `craze send`'s reload included. An older craze
+  rejects either flag as an unknown flag (exit 2), and keeps a row's
+  `webSearch` key as it found it. A hub still running from before the
+  upgrade does not reopen a session that records a choice: `craze new
+  --load` says `this hub (craze <v>) cannot reopen a session created with
+  --web-search or --no-web-search; …`, exit 1, until that hub exits or is
+  stopped ([`reopenWebSearch`](../reference/protocol.md#the-hubs-result)).
+- **`detail.reason` has a fifth value**, `web_search_not_offered`, and it comes
+  with no `detail.model`: the model is there on the four model reasons only. A
+  program that took `model` to be present with every `reason` must allow for
+  its absence.
+- **To turn it off** everywhere, whatever was remembered:
+  `websearch = false` in `~/.craze/config.toml`. To turn it on without being
+  asked: a `[websearch]` table with `provider = "exa"`. Any other value under
+  `websearch` is read as off, with a line saying so.
+- **`EXA_API_KEY`**, when exported, is sent to Exa to raise its rate limit
+  (see [above](#exa_api_key-is-kept-out-of-native-commands) for what else
+  craze does with it).
+- **A stored Exa key.** `craze auth login websearch/exa` (or `exa`, when no
+  model provider of yours is called that) stores one in a new file,
+  `~/.craze/native/credentials.toml` (`0600`); `craze auth logout
+  websearch/exa` removes it. `EXA_API_KEY` still comes first, then the stored
+  key, then Exa's keyless endpoint
+  ([The stored web search key](../reference/configuration.md#the-stored-web-search-key)).
+  An older craze sharing the directory never reads the file, and
+  `providers.toml` is not touched.
+- **`craze auth list` gains a section**: after the providers, a blank line,
+  `Web search`, and one row, `Exa  websearch/exa  <how it is keyed>`. A script
+  that parses the list's rows stops at the blank line. The numbered list `craze
+  auth login` shows on a terminal gains the web search after the providers
+  (`Provider [1-8]`), and the usage errors that list provider ids end with
+  `websearch/exa`. If a provider of yours is called `exa`, bare `exa` stays
+  that provider.
+- The file tools refuse `websearch.json` and `credentials.toml` as they refuse
+  `providers.toml`.
+- **Sub-agent personas.** A bare `WebSearch` or `WebFetch` in a persona's
+  `tools` used to be dropped; it now names `websearch` or `webfetch`, which
+  the sub-agent has when its parent's session opened with web search on (not
+  while the parent is still waiting on the consent card). A persona that listed
+  only those names, and so ran with no tools, now has them in such a session.
+  A restricted entry (`WebFetch(domain:example.com)`) in `tools` is reported
+  as a name craze cannot map and grants nothing; in `disallowedTools` it
+  removes `webfetch`.
+
 ## Since v0.1.1
 
 Nothing needs migrating.

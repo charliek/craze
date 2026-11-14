@@ -13,14 +13,18 @@ import (
 
 // TestToolProfilesArePinnedToTheProfiles: the catalog keeps its own copy of
 // the tool profile names, so loading models.toml links no tool code; this
-// test is what keeps the copy honest. It also pins the file tools' name for
-// the key file to this package's. When a profile is added, both lists move.
+// test is what keeps the copy honest. It also pins the file tools' names for
+// the key file and the web search's key file (plan 051 §F.5) to this
+// package's. When a profile is added, both lists move.
 func TestToolProfilesArePinnedToTheProfiles(t *testing.T) {
 	if got := ToolProfiles(); !slices.Equal(got, []string{opencode.Name}) {
 		t.Fatalf("ToolProfiles = %q, want the registered profiles, the default first: %q", got, []string{opencode.Name})
 	}
 	if opencode.CredentialsFile != ProvidersFile {
 		t.Fatalf("the file tools refuse %q, but the keys live in %q", opencode.CredentialsFile, ProvidersFile)
+	}
+	if opencode.WebCredentialsFile != CredentialsFile {
+		t.Fatalf("the file tools refuse %q, but the web search keys live in %q", opencode.WebCredentialsFile, CredentialsFile)
 	}
 	ToolProfiles()[0] = "changed"
 	if toolProfiles[0] != opencode.Name {

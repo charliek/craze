@@ -190,6 +190,7 @@ type ConnectionCapabilities struct {
 	CreateOptions   bool `json:"createOptions,omitempty"`
 	CreateTitle     bool `json:"createTitle,omitempty"`
 	Reopen          bool `json:"reopen,omitempty"`
+	ReopenWebSearch bool `json:"reopenWebSearch,omitempty"`
 }
 
 // HostCapabilities is a session host's connection capabilities in protocol
@@ -214,7 +215,12 @@ func HostCapabilities() ConnectionCapabilities {
 // take a title (Creates.Title; plan 043 D8) — every craze hub's, and no test
 // hub's that does not say so, so no hello from before it moves. So is Reopen:
 // the hub sets it only when it is given the answers to both sessions.saved and
-// session.reopen (Creates.Saved and Creates.Reopen; plan 046 B1).
+// session.reopen (Creates.Saved and Creates.Reopen; plan 046 B1). So is
+// ReopenWebSearch: the hub sets it only beside Reopen, when the hosts it
+// spawns apply the web search choice a session's row records on a load
+// (Creates.WebSearch; plan 051 F.3, C6 review F1) — a client reopening a
+// session with one needs it, since a hub from before the record would reopen
+// it through its own craze serve, which ignores it.
 func HubCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
@@ -285,6 +291,20 @@ type SessionInfo struct {
 	// the host's clock: what a client counts the session's elapsed time
 	// from. Absent when the host does not say.
 	StartedAt time.Time `json:"startedAt,omitzero"`
+	// WebSearch is whether the session offered the web tools (plan 051
+	// F.4.3): present only once the session is ready, for a session that may
+	// offer them (native); absent for an ACP session, the fake host's by
+	// default, one not ready yet, and an older host.
+	WebSearch *WebSearchInfo `json:"webSearch,omitempty"`
+}
+
+// WebSearchInfo is the info document's webSearch: Offered says websearch and
+// webfetch were in this incarnation's tool list at Open — on, or undecided
+// with a person to ask — and stays true when a consent card answers "Disable"
+// since (the tools stay listed and answer disabled). It is always written,
+// true or false.
+type WebSearchInfo struct {
+	Offered bool `json:"offered"`
 }
 
 // PermissionMode is how a session's agent handles permission requests (plan

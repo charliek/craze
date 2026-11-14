@@ -36,6 +36,9 @@ import (
 // `logout` signs out, and `list` shows the sign-in — auth_chatgpt.go. Its
 // login branches off before any key is read or asked for (X134).
 //
+// The web search's key is the other exception (plan 051 §F.5): no provider's,
+// it is kept in credentials.toml and addressed as websearch/exa — auth_web.go.
+//
 // A key is read from stdin when stdin is not a terminal — its first line, at
 // most maxKeyLine bytes, trimmed — and otherwise from a prompt that does not
 // echo (echoOff). No key, and no part of one, is ever printed, logged or put
@@ -69,15 +72,19 @@ type authRun struct {
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Manage model provider API keys and the ChatGPT sign-in",
-		Long: `Manage the API keys of the native provider's model providers, and the
-ChatGPT plan's sign-in.
+		Short: "Manage model provider API keys, the web search key and the ChatGPT sign-in",
+		Long: `Manage the API keys of the native provider's model providers, the native
+web search's key, and the ChatGPT plan's sign-in.
 
 A key is stored in the craze directory's native/providers.toml (0600), which
 craze rewrites whole: comments there are not kept. A provider's environment
 variable (FIREWORKS_API_KEY, say) is used before its stored key. No key is
 checked with its provider when it is stored: a wrong one shows on first use.
 Storing an Anthropic key also fetches the account's model list.
+
+The web search's Exa key is websearch/exa (or exa, when no model provider
+has that name). It is stored in native/credentials.toml (0600); EXA_API_KEY
+is used before it, and with neither the search uses Exa's keyless endpoint.
 
 The ChatGPT plan takes no key: "craze auth login chatgpt" signs in with
 ChatGPT in a browser, "craze auth logout chatgpt" signs out, and
@@ -124,10 +131,13 @@ func authFlagError(cmd *cobra.Command, _ error) error {
 func newAuthLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login [provider]",
-		Short: "Store a provider's API key, or sign in to the ChatGPT plan",
-		Long: `Store a provider's API key, or sign in to the ChatGPT plan.
+		Short: "Store a provider's API key or the web search key, or sign in to the ChatGPT plan",
+		Long: `Store a provider's API key or the web search key, or sign in to the ChatGPT
+plan.
 
-The provider is its id or its display name, in any case. With none given on a
+The provider is its id or its display name, in any case. websearch/exa is the
+web search's Exa key, stored in native/credentials.toml; exa alone means the
+same unless a model provider has that id or name. With none given on a
 terminal, craze shows a numbered list to pick from. The key is read without
 echo on a terminal, and otherwise from the first line of stdin.
 
@@ -146,7 +156,7 @@ machine the browser is not on.`,
 func newAuthLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout <provider>",
-		Short: "Remove a provider's stored API key",
+		Short: "Remove a provider's stored API key, or the stored web search key (websearch/exa)",
 		// None is refused in RunE, whose message lists the providers; the
 		// check here runs before the root's PersistentPreRunE.
 		Args: authArgs(1, "takes one argument, the provider"),
@@ -157,7 +167,7 @@ func newAuthLogoutCmd() *cobra.Command {
 func newAuthListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List the providers and how each is connected",
+		Short: "List the providers and the web search, and how each is connected",
 		Args:  authArgs(0, "takes no arguments"),
 		RunE:  authRunE(func(a *authRun, _ string) error { return a.list() }),
 	}
@@ -202,9 +212,13 @@ func newAuthRun(cmd *cobra.Command) (*authRun, error) {
 	return a, nil
 }
 
-// login is craze auth login [provider].
+// login is craze auth login [provider]. A web search credential's full name
+// is dispatched before providers.toml is read (auth_web.go).
 func (a *authRun) login(arg string) error {
-	infos, err := a.providers()
+	if c, ok := webByFullName(arg); ok {
+		return a.loginWeb(c)
+	}
+	infos, err := a.providers(arg)
 	if err != nil {
 		return err
 	}
@@ -212,6 +226,9 @@ func (a *authRun) login(arg string) error {
 	named := strings.TrimSpace(arg) != ""
 	switch {
 	case named:
+		if c, ok := webTarget(infos, arg); ok {
+			return a.loginWeb(c)
+		}
 		if p, err = a.match(infos, arg); err != nil {
 			return err
 		}
@@ -221,13 +238,18 @@ func (a *authRun) login(arg string) error {
 			return a.signIn()
 		}
 	case a.tty == nil:
-		return usagef("%s: name a provider (%s); craze shows a list to pick from only on a terminal", a.name, keyProviderIDs(infos))
+		return usagef("%s: name a provider (%s); craze shows a list to pick from only on a terminal", a.name, targetIDs(infos))
 	}
 	var key string
 	if a.tty == nil {
 		key, err = a.readKeyLine()
 	} else {
-		p, key, err = a.ask(infos, p, named)
+		var ch authChoice
+		ch, key, err = a.ask(infos, authChoice{p: p}, named)
+		if err == nil && ch.web != nil {
+			return a.storeWeb(*ch.web, key)
+		}
+		p = ch.p
 	}
 	if err != nil {
 		return err
@@ -303,14 +325,21 @@ func (a *authRun) anthropicList() {
 	fmt.Fprintf(a.out, "Fetched %d Anthropic %s.\n", n, noun)
 }
 
-// logout is craze auth logout <provider>.
+// logout is craze auth logout <provider>. A web search credential's full
+// name is dispatched before providers.toml is read (auth_web.go).
 func (a *authRun) logout(arg string) error {
-	infos, err := a.providers()
+	if c, ok := webByFullName(arg); ok {
+		return a.logoutWeb(c)
+	}
+	infos, err := a.providers(arg)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(arg) == "" {
-		return usagef("%s: name the provider whose stored key to remove (%s)", a.name, keyProviderIDs(infos))
+		return usagef("%s: name the provider whose stored key to remove (%s)", a.name, targetIDs(infos))
+	}
+	if c, ok := webTarget(infos, arg); ok {
+		return a.logoutWeb(c)
 	}
 	p, err := a.match(infos, arg)
 	if err != nil {
@@ -337,40 +366,61 @@ func (a *authRun) logout(arg string) error {
 }
 
 // list is craze auth list: one row per provider — its display name, its id
-// and how it is funded — then notes: stored keys that cannot be used, and
-// what loading the model table says. The table is loaded only for its notes
-// (the redundant overrides of plan 031 §3.3, its warnings and the unusable
-// variables); one that does not load — a broken models.toml, say — is itself
-// a note, since the rows need only providers.toml and the catalog.
+// and how it is funded — then the "Web search" section (listWeb: the search
+// credentials by full name, after the providers, printed even when the
+// providers cannot be listed, plan 051 R4), then notes: stored keys that
+// cannot be used, the web search's, and what loading the model table says.
+// The table is loaded only for its notes (the redundant overrides of plan
+// 031 §3.3, its warnings and the unusable variables); one that does not load
+// — a broken models.toml, say — is itself a note, since the rows need only
+// providers.toml and the catalog. A note is said once, though the web
+// section and the table may both have it.
 func (a *authRun) list() error {
-	infos, err := a.providers()
+	infos, perr := a.providers("")
+	if perr == nil {
+		tw := tabwriter.NewWriter(a.out, 0, 0, 2, ' ', 0)
+		for _, p := range infos {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", sanitizeLine(p.Name), sanitizeLine(p.ID), a.connectedBy(p))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	webLines, err := a.listWeb(perr == nil)
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(a.out, 0, 0, 2, ' ', 0)
-	for _, p := range infos {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", sanitizeLine(p.Name), sanitizeLine(p.ID), a.connectedBy(p))
-	}
-	if err := tw.Flush(); err != nil {
-		return err
+	said := map[string]bool{}
+	note := func(line string) {
+		line = strings.TrimPrefix(line, "modeltable: ")
+		if !said[line] {
+			said[line] = true
+			a.note(line)
+		}
 	}
 	for _, p := range infos {
 		if p.StoredProblem != nil {
-			a.note(brokenKeyNote(p))
+			note(brokenKeyNote(p))
 		}
+	}
+	for _, line := range webLines {
+		note(line)
+	}
+	if perr != nil {
+		return perr
 	}
 	table, err := modeltable.Load(a.dir)
 	if err != nil {
-		a.note("native sessions cannot start until this is fixed: " + strings.TrimPrefix(err.Error(), "modeltable: "))
+		note("native sessions cannot start until this is fixed: " + strings.TrimPrefix(err.Error(), "modeltable: "))
 		return nil
 	}
 	for _, line := range slices.Concat(table.RedundantOverrides(), table.Warnings, table.EnvWarnings(a.getenv)) {
-		a.note(strings.TrimPrefix(line, "modeltable: "))
+		note(line)
 	}
 	// Which source each maker's models come from, where the source order
 	// hides another's (plan 050 C5).
 	for _, line := range sourceNotes(table, a.getenv) {
-		a.note(line)
+		note(line)
 	}
 	return nil
 }
@@ -402,27 +452,33 @@ func (a *authRun) fail(err error) error {
 }
 
 // providers is modeltable.Providers over a's directory and environment, its
-// error an exit.
-func (a *authRun) providers() ([]modeltable.ProviderInfo, error) {
+// error an exit. When arg is a web search credential's bare name, the error
+// also names the credential's full name, which reaches it whatever
+// providers.toml holds (plan 051 R4).
+func (a *authRun) providers(arg string) ([]modeltable.ProviderInfo, error) {
 	infos, err := modeltable.Providers(a.dir, a.getenv)
-	if err != nil {
-		return nil, a.fail(err)
+	if err == nil {
+		return infos, nil
 	}
-	return infos, nil
+	if c, ok := webByBareName(arg); ok {
+		err = fmt.Errorf("%w; for the %s web search key, whatever that file holds, name it %s", err, c.Name, c.FullName())
+	}
+	return nil, a.fail(err)
 }
 
 // match is the provider arg names: an id, else a display name, either in any
 // case. No match, or a name two providers share, is a usage error that lists
-// the ids and does not quote arg.
+// the ids — and the web search credentials' full names — and does not quote
+// arg.
 func (a *authRun) match(infos []modeltable.ProviderInfo, arg string) (modeltable.ProviderInfo, error) {
 	p, n := matchProvider(infos, arg)
 	switch {
 	case n == 1:
 		return p, nil
 	case n > 1:
-		return p, usagef("%s: more than one provider has that name; name it by id (%s)", a.name, keyProviderIDs(infos))
+		return p, usagef("%s: more than one provider has that name; name it by id (%s)", a.name, targetIDs(infos))
 	}
-	return p, usagef("%s: no such provider; craze has %s", a.name, keyProviderIDs(infos))
+	return p, usagef("%s: no such provider; craze has %s", a.name, targetIDs(infos))
 }
 
 // matchProvider is the one provider arg names and 1, or how many match: an
@@ -444,41 +500,58 @@ func matchProvider(infos []modeltable.ProviderInfo, arg string) (modeltable.Prov
 	return found, n
 }
 
-// keyProviderIDs is every provider's id, in list order, for a message.
-func keyProviderIDs(infos []modeltable.ProviderInfo) string {
-	if len(infos) == 0 {
-		return "none"
+// targetIDs is every provider's id, in list order, and then every web search
+// credential's full name (plan 051 §F.5): everything login and logout take,
+// for a message.
+func targetIDs(infos []modeltable.ProviderInfo) string {
+	ids := make([]string, 0, len(infos)+1)
+	for _, p := range infos {
+		ids = append(ids, p.ID)
 	}
-	ids := make([]string, len(infos))
-	for i, p := range infos {
-		ids[i] = p.ID
+	for _, c := range modeltable.WebCredentials() {
+		ids = append(ids, c.FullName())
 	}
 	return sanitizeLine(strings.Join(ids, ", "))
+}
+
+// authChoice is what login stores a key for: a model provider, or — web set
+// — a web search credential (plan 051 §F.5).
+type authChoice struct {
+	p   modeltable.ProviderInfo
+	web *modeltable.WebCredential
+}
+
+// name is the choice's display name, for its key prompt.
+func (c authChoice) name() string {
+	if c.web != nil {
+		return c.web.Name
+	}
+	return c.p.Name
 }
 
 // ask is login's conversation on the terminal: the menu when no provider was
 // named, then the key's prompt — the terminal's echo off from before the
 // first prompt is drawn until the key is read (echoOff), so nothing typed at
 // either shows as it is typed, however soon after its prompt it comes.
-func (a *authRun) ask(infos []modeltable.ProviderInfo, p modeltable.ProviderInfo, named bool) (modeltable.ProviderInfo, string, error) {
+func (a *authRun) ask(infos []modeltable.ProviderInfo, ch authChoice, named bool) (authChoice, string, error) {
 	q, err := quiet(a.tty)
 	if err != nil {
-		return p, "", exitf(1, "%s: turning the terminal's echo off: %v; nothing was saved", a.name, err)
+		return ch, "", exitf(1, "%s: turning the terminal's echo off: %v; nothing was saved", a.name, err)
 	}
 	defer q.restore()
 	if !named {
-		if p, err = a.choose(infos); err != nil {
-			return p, "", err
+		if ch, err = a.choose(infos); err != nil {
+			return ch, "", err
 		}
-		if p.SignIn {
+		if ch.web == nil && ch.p.SignIn {
 			// The ChatGPT plan takes no key: login signs in instead, once
 			// the deferred restore has put the echo back and taken this
 			// handler away (the sign-in has its own: signIn).
-			return p, "", nil
+			return ch, "", nil
 		}
 	}
-	key, err := a.promptKey(sanitizeLine(p.Name))
-	return p, key, err
+	key, err := a.promptKey(sanitizeLine(ch.name()))
+	return ch, key, err
 }
 
 // maxMenuLine is the longest menu answer choose keeps; the rest of a longer
@@ -486,35 +559,41 @@ func (a *authRun) ask(infos []modeltable.ProviderInfo, p modeltable.ProviderInfo
 const maxMenuLine = 256
 
 // choose shows the numbered menu on the terminal and reads the choice, the
-// echo off (ask): a number, or an id or display name as login's argument
-// takes. Connected providers are marked. Only a number on the list is written
-// back after the prompt, to look as if it was echoed; any other answer never
-// is — nor quoted in an error — since a key pasted at the wrong prompt is the
-// mistake this guards.
-func (a *authRun) choose(infos []modeltable.ProviderInfo) (modeltable.ProviderInfo, error) {
-	if len(infos) == 0 {
-		return modeltable.ProviderInfo{}, exitf(1, "%s: there is no provider to connect", a.name)
+// echo off (ask): a number, or a name as login's argument takes. The model
+// providers come first, then — under "Web search:" — the web search
+// credentials (plan 051 §F.5), numbered on; connected entries are marked.
+// Only a number on the list is written back after the prompt, to look as if
+// it was echoed; any other answer never is — nor quoted in an error — since a
+// key pasted at the wrong prompt is the mistake this guards.
+func (a *authRun) choose(infos []modeltable.ProviderInfo) (authChoice, error) {
+	webs, _ := modeltable.WebKeys(a.dir, a.getenv)
+	mark := func(connected bool) string {
+		if connected {
+			return " (connected)"
+		}
+		return ""
 	}
 	fmt.Fprintln(a.errw, "Connect a model provider:")
 	for i, p := range infos {
-		mark := ""
-		if p.Connected() {
-			mark = " (connected)"
-		}
-		fmt.Fprintf(a.errw, "  %d. %s%s\n", i+1, sanitizeLine(p.Name), mark)
+		fmt.Fprintf(a.errw, "  %d. %s%s\n", i+1, sanitizeLine(p.Name), mark(p.Connected()))
 	}
-	fmt.Fprintf(a.errw, "Provider [1-%d]: ", len(infos))
+	fmt.Fprintln(a.errw, "Web search:")
+	for i, w := range webs {
+		fmt.Fprintf(a.errw, "  %d. %s (%s)%s\n", len(infos)+i+1, sanitizeLine(w.Name), w.FullName(), mark(w.Connected()))
+	}
+	n := len(infos) + len(webs)
+	fmt.Fprintf(a.errw, "Provider [1-%d]: ", n)
 	line, long, err := readTTYLine(a.tty, maxMenuLine)
-	if n, ok := menuNumber(line, len(infos)); ok && !long {
-		fmt.Fprintf(a.errw, "%d\n", n)
+	if i, ok := menuNumber(line, n); ok && !long {
+		fmt.Fprintf(a.errw, "%d\n", i)
 	} else {
 		fmt.Fprintln(a.errw) // the Enter that ended the answer was not echoed
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
-		return modeltable.ProviderInfo{}, exitf(1, "%s: reading the choice: %v", a.name, err)
+		return authChoice{}, exitf(1, "%s: reading the choice: %v", a.name, err)
 	}
 	if long {
-		return modeltable.ProviderInfo{}, errNotOnTheList(a.name)
+		return authChoice{}, errNotOnTheList(a.name)
 	}
 	return a.pick(infos, line)
 }
@@ -530,19 +609,34 @@ func errNotOnTheList(name string) error {
 	return usagef("%s: that is not a provider on the list; nothing was saved", name)
 }
 
-// pick is the provider a menu answer names; see choose.
-func (a *authRun) pick(infos []modeltable.ProviderInfo, answer string) (modeltable.ProviderInfo, error) {
+// pick is the entry a menu answer names — a number on the list, a web search
+// credential's full name (before any provider, as login's argument is
+// dispatched: a provider whose display name is websearch/exa never captures
+// it, review C5 item 4), a provider's id or name, or a web search
+// credential's bare name as login's argument takes it (webTarget); see
+// choose.
+func (a *authRun) pick(infos []modeltable.ProviderInfo, answer string) (authChoice, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
-		return modeltable.ProviderInfo{}, exitf(1, "%s: no provider chosen; nothing was saved", a.name)
+		return authChoice{}, exitf(1, "%s: no provider chosen; nothing was saved", a.name)
 	}
-	if n, ok := menuNumber(answer, len(infos)); ok {
-		return infos[n-1], nil
+	webs := modeltable.WebCredentials()
+	if n, ok := menuNumber(answer, len(infos)+len(webs)); ok {
+		if n <= len(infos) {
+			return authChoice{p: infos[n-1]}, nil
+		}
+		return authChoice{web: &webs[n-len(infos)-1]}, nil
+	}
+	if c, ok := webByFullName(answer); ok {
+		return authChoice{web: &c}, nil
 	}
 	if p, n := matchProvider(infos, answer); n == 1 {
-		return p, nil
+		return authChoice{p: p}, nil
 	}
-	return modeltable.ProviderInfo{}, errNotOnTheList(a.name)
+	if c, ok := webTarget(infos, answer); ok {
+		return authChoice{web: &c}, nil
+	}
+	return authChoice{}, errNotOnTheList(a.name)
 }
 
 // readKeyLine is the key from stdin, not a terminal: its first line, at
@@ -642,13 +736,9 @@ func (a *authRun) brokenKeyNotes(except string) {
 // brokenKeyNote says p's stored key cannot be used, by the rule — never the
 // value — and how to replace or remove it.
 func brokenKeyNote(p modeltable.ProviderInfo) string {
-	why := "it overlaps craze's redaction marker"
-	if errors.Is(p.StoredProblem, modeltable.ErrKeyTooShort) {
-		why = fmt.Sprintf("it is shorter than %d bytes", modeltable.MinKeyLen)
-	}
 	id := sanitizeLine(p.ID)
 	return fmt.Sprintf(`the stored %s key cannot be used: %s; replace it with "craze auth login %s" or remove it with "craze auth logout %s"`,
-		sanitizeLine(p.Name), why, id, id)
+		sanitizeLine(p.Name), keyRule(p.StoredProblem), id, id)
 }
 
 // note is one line of a's notes, on stderr.

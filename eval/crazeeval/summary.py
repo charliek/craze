@@ -9,7 +9,7 @@ deterministic JSON document for the main repository (``eval/results/<campaign>/`
 Each group, in ``--report`` order, holds:
 
 - ``report``: the report directory's name; ``models``: the models it covers (those with
-  craze runs, or with a best open harness fixed); ``other_models``: the rest of the
+  craze or craze-web runs, or with a best open harness fixed); ``other_models``: the rest of the
   report's models (runs reused from a shared batch, no bar) -- named, their rows left
   out;
 - ``bar``: per covered model the best open harness and why (its baseline batch by
@@ -21,6 +21,9 @@ Each group, in ``--report`` order, holds:
   (rate, CI, W/T/L, n);
 - ``metrics``: metric medians per ``model/harness``; ``task_tables``: craze's W/L/T per
   task and harness;
+- ``web`` (only for a report with web-split runs, craze plan 051 E5): the web tasks,
+  the pass per ``model/harness`` on them (craze and craze-web), the web route's
+  counters (totals and per-run medians) and the web runs' metric medians;
 - ``provenance``: the whole report's -- batch names (never paths), the baseline batch,
   the judge hash(es) and per-task hashes, the plan modes, the verdict counts (over every
   model), and ``sealed``.
@@ -50,6 +53,7 @@ from pathlib import Path, PurePosixPath
 
 from crazeeval import archive as arch
 from crazeeval import report as rp
+from crazeeval.config import harness_executable
 
 SCHEMA = 1
 REPORT_FILE = "report.json"
@@ -143,10 +147,12 @@ def _bar(sb: dict, names: set[str]) -> dict:
 
 
 def covered_models(rep: dict) -> list[str]:
-    """The models a report covers: those with craze runs, or whose best open harness
-    was fixed. A model with neither only has runs reused from a batch shared across
-    providers (the gx plan-task re-run) and has no bar."""
-    native = {m for m, h in map(_split_key, rep.get("objective") or {}) if h == rp.NATIVE}
+    """The models a report covers: those with craze runs -- on any arm that runs craze,
+    craze-web too, so a model a web campaign ran on craze-web alone keeps its ``web``
+    rows -- or whose best open harness was fixed. A model with neither only has runs
+    reused from a batch shared across providers (the gx plan-task re-run) and has no
+    bar."""
+    native = {m for m, h in map(_split_key, rep.get("objective") or {}) if harness_executable(h) == rp.NATIVE}
     out = set(native)
     for m, sb in (rep.get("success_bar") or {}).items():
         best = sb.get("best_open_harness") if isinstance(sb, dict) else None
@@ -195,6 +201,27 @@ def _win_rates(rep: dict, covered: set[str]) -> dict:
     return out
 
 
+def _ints(d) -> dict[str, int]:
+    return {str(k): int(v) for k, v in (d or {}).items() if isinstance(v, (int, float))}
+
+
+def _web(w: dict, covered: set[str]) -> dict:
+    """The report's ``web`` section, slim (craze plan 051 E5): the web tasks' ids, the
+    covered models' pass per ``model/harness`` (its runs, passes, rate, 90% CI, each
+    task's mean pass), the web route's counters (totals as ints and per-run medians) and
+    the web runs' metric medians. The per-run rows stay in the report and the archive."""
+    keep = ("runs", "unscored", "passed", "rate", "ci90", "tasks")
+    return {
+        "tasks": sorted(t for t in w.get("tasks") or [] if isinstance(t, str)),
+        "pass": {k: {f: p.get(f) for f in keep} for k, p in _rows(w.get("pass"), covered).items()
+                 if isinstance(p, dict)},
+        "counters": {k: {"runs": int(c.get("runs") or 0), "totals": _ints(c.get("totals")),
+                         "medians": {n: v for n, v in (c.get("medians") or {}).items() if isinstance(v, (int, float))}}
+                     for k, c in _rows(w.get("counters"), covered).items() if isinstance(c, dict)},
+        "metrics": _rows(w.get("metrics"), covered),
+    }
+
+
 def group(name: str, rep: dict) -> dict:
     """One report's slim group: everything but ``provenance`` is the covered models'
     alone (see the module doc)."""
@@ -227,6 +254,9 @@ def group(name: str, rep: dict) -> dict:
             "sealed": bool(rep.get("sealed")),
         },
     }
+    # Additive (no schema change), only for a report with web runs (craze plan 051 E5).
+    if isinstance(rep.get("web"), dict):
+        out["web"] = _web(rep["web"], cov)
     return out
 
 

@@ -103,6 +103,21 @@ type Row struct {
 	// rewrite like any other it does not know.
 	Unattended *Unattended `json:"unattended,omitempty"`
 
+	// WebSearch is the web search choice the session was created with (plan
+	// 051 F.3): "on" for --web-search, "off" for --no-web-search, "" when
+	// neither was given. Every load of the session applies it again, whoever
+	// opens it. It is a field of its own, not a member of Unattended, whose
+	// presence marks a session unattended: an attended craze serve
+	// --web-search records it too. Set-only, by applyCrazeID's rule, and
+	// inherited by a new row of a craze id that has one (a load under a new
+	// provider session id), as Unattended is: a follow-up cannot change the
+	// choice.
+	//
+	// Additive, as CrazeID is: written only when set. A value other than
+	// "on" or "off" — a newer craze's — is read as none and written back as
+	// it came.
+	WebSearch string `json:"webSearch,omitempty"`
+
 	// TitleKind is only meaningful as input to Upsert; see the type's doc.
 	// It is never read from or written to the file.
 	TitleKind TitleKind `json:"-"`
@@ -178,7 +193,8 @@ type Store struct {
 // never replaced, an empty one is filled, and an empty incoming id changes
 // nothing. in.Unattended follows applyUnattended, the same rule; a row created
 // here inherits the record of a marked row of its craze id first (plan 041
-// P10).
+// P10). in.WebSearch follows applyWebSearch, the same rule, and is inherited
+// the same way (plan 051 F.3).
 //
 // CreatedAt is set once, when the row is first created. The whole operation
 // -- read, merge by key, rewrite -- runs under atomicfile.Lock; unlike
@@ -223,6 +239,7 @@ func (s *Store) Upsert(in Row) error {
 		applyTitle(&records[i].Row, in)
 		applyCrazeID(&records[i].Row, in)
 		applyUnattended(&records[i].Row, in.Unattended)
+		applyWebSearch(&records[i].Row, in.WebSearch)
 		found = true
 		break
 	}
@@ -243,6 +260,9 @@ func (s *Store) Upsert(in Row) error {
 		// fallback for a craze id nothing marked yet.
 		applyUnattended(&rec.Row, inheritedUnattended(records, in.CrazeID))
 		applyUnattended(&rec.Row, in.Unattended)
+		// The web search choice the same way: the thread's, then the writer's.
+		applyWebSearch(&rec.Row, inheritedWebSearch(records, in.CrazeID))
+		applyWebSearch(&rec.Row, in.WebSearch)
 		records = append(records, rec)
 	}
 
@@ -377,18 +397,48 @@ func applyUnattended(row *Row, u *Unattended) {
 	row.Unattended = &c
 }
 
+// applyWebSearch folds a web search choice into row (plan 051 F.3): set-only,
+// by applyUnattended's rule — "" changes nothing, a row with none takes it,
+// and a row with one keeps the choice the session was created with.
+func applyWebSearch(row *Row, w string) {
+	if w == "" || row.WebSearch != "" {
+		return
+	}
+	row.WebSearch = w
+}
+
+// inheritedWebSearch is the choice a new row of craze id inherits: the newest
+// row's of that id that has one, in Recent's order, "" when none has (or
+// there is no id to inherit by), as inheritedUnattended.
+func inheritedWebSearch(records []record, crazeID string) string {
+	if r := newestOfCrazeID(records, crazeID, func(r Row) bool { return r.WebSearch != "" }); r != nil {
+		return r.WebSearch
+	}
+	return ""
+}
+
 // inheritedUnattended is the record a new row of craze id inherits (plan 041
 // P10): the newest marked row's of that id, in Recent's order, nil when none
 // is marked — or when there is no id to inherit by (a legacy row, or one
 // written before its session knew its id).
 func inheritedUnattended(records []record, crazeID string) *Unattended {
+	if r := newestOfCrazeID(records, crazeID, func(r Row) bool { return r.Unattended != nil }); r != nil {
+		return r.Unattended
+	}
+	return nil
+}
+
+// newestOfCrazeID is the newest row of craze id for which has holds, in
+// Recent's order (UpdatedAt, ties to the later file position), nil when none
+// does or crazeID is "".
+func newestOfCrazeID(records []record, crazeID string, has func(Row) bool) *Row {
 	if crazeID == "" {
 		return nil
 	}
 	var newest *record
 	for i := range records {
 		r := &records[i]
-		if r.Row.CrazeID != crazeID || r.Row.Unattended == nil {
+		if r.Row.CrazeID != crazeID || !has(r.Row) {
 			continue
 		}
 		if newest == nil || r.Row.UpdatedAt.After(newest.Row.UpdatedAt) ||
@@ -399,7 +449,7 @@ func inheritedUnattended(records []record, crazeID string) *Unattended {
 	if newest == nil {
 		return nil
 	}
-	return newest.Row.Unattended
+	return &newest.Row
 }
 
 // evictOverflow drops rows once records exceeds maxRows, otherwise it
@@ -821,6 +871,14 @@ func decodeLine(line string) (record, error) {
 	// string is read as none rather than failing a whole file over a key that
 	// is not part of the read contract.
 	crazeID, _ := raw["crazeId"].(string)
+	// webSearch (plan 051 F.3) likewise: "on" or "off" is the choice, and
+	// anything else is none — left in extra, so a newer craze's value is
+	// written back as it came.
+	webSearch, _ := raw["webSearch"].(string)
+	known := webSearch == "on" || webSearch == "off"
+	if !known {
+		webSearch = ""
+	}
 
 	extra := make(map[string]any, len(raw))
 	for k, v := range raw {
@@ -828,6 +886,9 @@ func decodeLine(line string) (record, error) {
 	}
 	for _, k := range []string{"sessionId", "provider", "cwd", "title", "pinned", "crazeId", "createdAt", "updatedAt"} {
 		delete(extra, k)
+	}
+	if known {
+		delete(extra, "webSearch")
 	}
 
 	return record{
@@ -839,6 +900,7 @@ func decodeLine(line string) (record, error) {
 			Pinned:     pinned,
 			CrazeID:    crazeID,
 			Unattended: decodeUnattended(raw["unattended"]),
+			WebSearch:  webSearch,
 			CreatedAt:  createdAt,
 			UpdatedAt:  updatedAt,
 		},
@@ -867,7 +929,7 @@ func decodeUnattended(v any) *Unattended {
 // encodeLine is decodeLine's inverse: known fields plus whatever unknown
 // ones travelled in on extra.
 func encodeLine(rec record) ([]byte, error) {
-	out := make(map[string]any, len(rec.extra)+7)
+	out := make(map[string]any, len(rec.extra)+8)
 	for k, v := range rec.extra {
 		out[k] = v
 	}
@@ -894,6 +956,10 @@ func encodeLine(rec record) ([]byte, error) {
 		}
 		obj["mode"], obj["permissionMode"], obj["model"], obj["effort"] = u.Mode, u.PermissionMode, u.Model, u.Effort
 		out["unattended"] = obj
+	}
+	if rec.Row.WebSearch != "" {
+		// Written only when there is one, as crazeId (plan 051 F.3).
+		out["webSearch"] = rec.Row.WebSearch
 	}
 	out["createdAt"] = rec.Row.CreatedAt.UTC().Format(time.RFC3339Nano)
 	out["updatedAt"] = rec.Row.UpdatedAt.UTC().Format(time.RFC3339Nano)

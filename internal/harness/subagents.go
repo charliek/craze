@@ -1220,6 +1220,7 @@ func (s *Session) childOpenOptions(v tableView, alias, effort string, c *ChildOp
 		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Snapshot: s.base.snapshot, Child: c,
 		NewModel: s.newModel, Getenv: s.getenv, Now: s.base.now, Version: s.base.version,
 		MatchModel: v.match, Warn: s.warn, ProviderRetries: &s.providerRetries,
+		Web:   s.base.web.forChild(),
 		tools: s.base.seams,
 	}
 }
@@ -1236,6 +1237,10 @@ type childBase struct {
 	snapshot SessionStart
 	top      startModel
 	seams    toolSeams
+	// web is Options.Web as the session opened (plan 051 §C.3): a child gets
+	// it only when it is on (WebState.forChild). A session allowed web search
+	// mid-session gives its children the tools from its next session.
+	web WebState
 }
 
 // clone is p with slices of its own; their elements are strings.

@@ -1,0 +1,54 @@
+# T-W1 web-api-reference (craze plan 051 E4, reference docs): a client method for a
+# fictional HTTP API. The endpoint's path, its authentication header and its paging
+# parameter and field are only in the corpus (testdata/corpus/, served to craze-web by
+# the proxy's web route); the hidden tests' fake server answers only requests that use
+# them. Scored by the hidden tests alone; the judge is not used for this split.
+id = "T-W1"
+name = "web-api-reference"
+category = "feature"
+split = "web"
+mode = "build"
+timeout_s = 900
+prompt = """
+`quayside.py` is a client for the Quayside harbour-operations API (version 3), but `Client.berth_schedule(harbor, day)` is still a stub. Implement it: it must return every berth slot booked at that harbour on that day as `Slot` objects, in the order the API lists them, following the API's paging until there are no more pages, and raise `QuaysideError` for any error response. Use only the standard library, as the rest of the module does. Quayside's API documentation is published at https://docs.quayside.example; get the endpoint, the authentication and the paging exactly right, since the client will be pointed at the real API. Run the tests when you are done.
+"""
+rubric = [
+    "Calls the version 3 berth-slots endpoint for the harbour with the service date, authenticated as the API documents.",
+    "Follows the documented paging to the last page and returns every slot in order.",
+    "Raises QuaysideError for an error response.",
+]
+false_claims = []
+harnesses = ["craze", "craze-web"]
+corpus = "testdata/corpus"
+# The corpus files holding the decisive facts; every other page is a distractor.
+relevant = ["v3-authentication.md", "v3-berth-slots.md"]
+# Strings a solution must contain (validate.web_lint: in a relevant page and the
+# reference patch, in neither the prompt nor the fixture).
+needs = ["X-Quayside-Key", "/berth-slots", "service_date", "page_mark", "next_page_mark"]
+
+[repo]
+kind = "fixture"
+name = "quayside"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_quayside.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_berth_slots.py::test_every_slot_across_pages",
+    "tests/test_hidden_berth_slots.py::test_a_single_page",
+    "tests/test_hidden_berth_slots.py::test_every_request_carries_the_key",
+    "tests/test_hidden_berth_slots.py::test_a_rejected_key_is_an_error",
+    "tests/test_hidden_berth_slots.py::test_an_unknown_harbor_is_an_error",
+    "tests/test_quayside.py::test_slot_from_json",
+    "tests/test_quayside.py::test_client_keeps_its_settings",
+]
+
+[checks.add]
+"tests/test_hidden_berth_slots.py" = "testdata/hidden/test_hidden_berth_slots.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

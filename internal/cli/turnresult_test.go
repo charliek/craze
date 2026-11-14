@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -349,6 +350,95 @@ func TestResultJSONKeys(t *testing.T) {
 		"model": "string", "attach": "string", "row": "string", "handle": "string", "partial": "bool"}
 	if !maps.Equal(got, want) {
 		t.Errorf("a running result's keys: %v, want %v", got, want)
+	}
+	if _, ok := jsonKeys(t, done)["webSearch"]; ok {
+		t.Errorf("a grok result has webSearch: %v", jsonKeys(t, done))
+	}
+
+	// A native host's results (plan 051 F.4.5): webSearch on every status, its
+	// offered always written, true or false, and every other member only when
+	// it is not zero.
+	native := func(offered bool) resultSession {
+		return resultSession{id: s.id, provider: "native", model: "acme/sonic", web: &protocol.WebSearchInfo{Offered: offered}}
+	}
+	used := newTurnAccumulator()
+	used.takeWeb(&agent.WebSearchState{Searches: 2, Fetches: 1, Failed: 1, URLs: []string{"https://a.example/"}, URLsTruncated: true}, 5)
+	for _, tc := range []struct {
+		name   string
+		res    *turnResult
+		acc    *turnAccumulator
+		object map[string]string
+	}{
+		{"offered false", newResult(native(false), statusCompleted), newTurnAccumulator(), map[string]string{"offered": "bool"}},
+		{"offered with every member", newResult(native(true), statusCompleted), used,
+			map[string]string{"offered": "bool", "searches": "number", "fetches": "number", "failed": "number", "urls": "array", "urlsTruncated": "bool"}},
+		{"running", newResult(native(true), statusRunning), used,
+			map[string]string{"offered": "bool", "searches": "number", "fetches": "number", "failed": "number", "urls": "array", "urlsTruncated": "bool"}},
+		{"idle", newResult(native(true), statusIdle), nil, map[string]string{"offered": "bool"}},
+	} {
+		if tc.acc != nil {
+			tc.res.fill(tc.acc)
+		}
+		if got := jsonKeys(t, tc.res)["webSearch"]; got != "object" {
+			t.Errorf("%s: webSearch is %q, want an object", tc.name, got)
+			continue
+		}
+		if got := jsonKeys(t, tc.res.WebSearch); !maps.Equal(got, tc.object) {
+			t.Errorf("%s: webSearch's keys %v, want %v", tc.name, got, tc.object)
+		}
+	}
+	b, _ := json.Marshal(newResult(native(false), statusIdle))
+	if !strings.Contains(string(b), `"webSearch":{"offered":false},"attach"`) {
+		t.Errorf("offered false is not written, or not before attach: %s", b)
+	}
+}
+
+// TestTheFooterSaysTheWebCalls (plan 051 F.4.5): one line when the turn made a
+// search or a fetch — `web: <n> search(es), <n> fetch(es)`, ` (<n> failed)`
+// when any failed — after the files and plan-file lines and before the
+// automatic answers; none without a call, and no URL.
+func TestTheFooterSaysTheWebCalls(t *testing.T) {
+	line := func(w *resultWebSearch) (string, []string) {
+		res := newResult(resultSession{id: "0199c0de-1111-7000-8000-00000000a001", provider: "native"}, statusCompleted)
+		res.WebSearch = w
+		res.fill(newTurnAccumulator())
+		files := []string{"a.go"}
+		res.Files, res.PlanFile = &files, "/plan.md"
+		res.AutoAnswered = []autoAnswer{{Kind: "question", Summary: "Pick", Choice: "A"}}
+		lines := strings.Split(res.footer(), "\n")
+		for _, l := range lines {
+			if strings.HasPrefix(l, "web: ") {
+				return l, lines
+			}
+		}
+		return "", lines
+	}
+	for _, tc := range []struct {
+		w    resultWebSearch
+		want string
+	}{
+		{resultWebSearch{Offered: true, WireWebSearch: agent.WireWebSearch{Searches: 1, Fetches: 1}}, "web: 1 search, 1 fetch"},
+		{resultWebSearch{Offered: true, WireWebSearch: agent.WireWebSearch{Searches: 2, Fetches: 2}}, "web: 2 searches, 2 fetches"},
+		{resultWebSearch{Offered: true, WireWebSearch: agent.WireWebSearch{Searches: 2, Fetches: 0, Failed: 1}}, "web: 2 searches, 0 fetches (1 failed)"},
+		{resultWebSearch{Offered: true, WireWebSearch: agent.WireWebSearch{Fetches: 1, Failed: 1, URLs: []string{"https://a.example/"}}}, "web: 0 searches, 1 fetch (1 failed)"},
+	} {
+		w := tc.w
+		got, lines := line(&w)
+		if got != tc.want {
+			t.Errorf("%+v: the line %q, want %q", tc.w, got, tc.want)
+		}
+		i := slices.Index(lines, got)
+		if i < 1 || lines[i-1] != "plan file: /plan.md" || !strings.HasPrefix(lines[i+1], "auto-answered:") {
+			t.Errorf("the line's place:\n%s", strings.Join(lines, "\n"))
+		}
+		if strings.Contains(strings.Join(lines, "\n"), "https://") {
+			t.Errorf("a URL is printed:\n%s", strings.Join(lines, "\n"))
+		}
+	}
+	for _, w := range []*resultWebSearch{nil, {Offered: true}, {Offered: false}} {
+		if got, lines := line(w); got != "" {
+			t.Errorf("%+v: a line with no call: %q\n%s", w, got, strings.Join(lines, "\n"))
+		}
 	}
 }
 

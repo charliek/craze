@@ -1,0 +1,3 @@
+event: message
+data: {"result":{"content":[{"type":"text","text":"# Häfen – Überblick\nURL: https://docs.example.org/de/haefen\n\nDie Liegeplätze im Hafen werden täglich vergeben. Gezeiten: siehe Tabelle.","_meta":{"searchTime":0}}]},"jsonrpc":"2.0","id":2}
+

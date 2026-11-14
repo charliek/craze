@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
+	"github.com/charliek/craze/internal/harness/websearch"
 	"github.com/charliek/craze/internal/paths"
 )
 
@@ -311,6 +312,54 @@ func ConfigProviderRetries() (int, string) {
 		return def, fmt.Sprintf("config.toml provider_retries %d is not between 0 and %d", n, most)
 	}
 	return int(n), ""
+}
+
+// ConfigWebSearch reads `websearch` (plan 051 §C.1): whether a native
+// session is offered the web tools, websearch and webfetch. Two forms are
+// valid: `websearch = false`, off, and a [websearch] table whose only key is
+// `provider`, naming a provider craze has ("exa"), on. No key is absent,
+// which defers to the remembered choice (websearch.json). Anything else —
+// `websearch = true`, a string, an empty table, a table with another key, a
+// provider that is not a string or that craze does not have — and a
+// config.toml that cannot be read or parsed are invalid: off, never absent,
+// so a remembered allow cannot outvote an off the user mistyped, with a line
+// naming the two valid forms. It is a privacy switch, so it fails closed, as
+// ConfigJournal does. The line never quotes the file.
+func ConfigWebSearch() agent.WebConfig {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return invalidWebSearch("config.toml could not be parsed")
+	case err != nil:
+		return invalidWebSearch("config.toml could not be read")
+	}
+	v, ok := cfg["websearch"]
+	if !ok {
+		return agent.WebConfig{}
+	}
+	switch x := v.(type) {
+	case bool:
+		if !x {
+			return agent.WebConfig{Setting: agent.WebSettingOff}
+		}
+	case map[string]any:
+		if p, ok := x["provider"].(string); ok && len(x) == 1 && slices.Contains(websearch.Providers(), p) {
+			return agent.WebConfig{Setting: agent.WebSettingOn, Provider: p}
+		}
+	}
+	return invalidWebSearch("config.toml websearch is not one of its two forms")
+}
+
+// invalidWebSearch is an invalid `websearch` reading, the line saying why,
+// the two valid forms and that web search is off.
+func invalidWebSearch(why string) agent.WebConfig {
+	var quoted []string
+	for _, p := range websearch.Providers() {
+		quoted = append(quoted, fmt.Sprintf("%q", p))
+	}
+	return agent.WebConfig{Setting: agent.WebSettingInvalid, Why: fmt.Sprintf(
+		"%s, so web search is off (websearch takes one of two forms: `websearch = false`, or a [websearch] table with provider = %s)",
+		why, strings.Join(quoted, " or "))}
 }
 
 // ConfigCompatClaude is the [compat.claude] table — which classes of Claude's

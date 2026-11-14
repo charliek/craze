@@ -1,0 +1,74 @@
+diff --git a/bindlewick.py b/bindlewick.py
+--- a/bindlewick.py
++++ b/bindlewick.py
+@@ -13,7 +13,7 @@
+ import urllib.request
+ from dataclasses import dataclass
+ 
+-API_VERSION = "v1"
++API_VERSION = "v2"
+ 
+ 
+ class BindlewickError(Exception):
+@@ -36,7 +36,9 @@
+ 
+     @classmethod
+     def from_json(cls, obj: dict) -> "Checkout":
+-        return cls(id=obj["checkout_id"], barcode=obj["barcode"], title=obj["title"], due=obj["due_date"])
++        """A version 2 loan: the copy's label is copy_ref, and due_at is a timestamp in
++        the site's local time whose date part, as written, is the due day."""
++        return cls(id=obj["id"], barcode=obj["copy_ref"], title=obj["title"], due=obj["due_at"][:10])
+ 
+ 
+ class Client:
+@@ -48,10 +50,11 @@
+ 
+     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+         """``method`` ``path`` (under the API version) with an optional JSON ``body``,
+-        for this client's branch; the decoded JSON answer."""
+-        query = urllib.parse.urlencode({"branch": self.branch})
+-        url = f"{self.base_url}/{API_VERSION}{path}?{query}"
+-        headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
++        for this client's branch (a site, named in the Bindlewick-Site header); the
++        decoded JSON answer."""
++        url = f"{self.base_url}/{API_VERSION}{path}"
++        headers = {"Authorization": f"Bearer {self.api_key}", "Bindlewick-Site": self.branch,
++                   "Accept": "application/json"}
+         data = None
+         if body is not None:
+             data = json.dumps(body).encode()
+@@ -62,7 +65,8 @@
+                 raw = resp.read()
+         except urllib.error.HTTPError as e:
+             code = _error_code(e.read())
+-            if e.code == 403 and code == "renew_limit":
++            # Other 409s (a returned loan, a waiting hold) are not the renewal limit.
++            if e.code == 409 and code == "loans.renewal_cap":
+                 raise RenewalRefused(f"{path}: renewal limit reached") from None
+             raise BindlewickError(f"HTTP {e.code} for {path} ({code or 'no code'})") from None
+         except urllib.error.URLError as e:
+@@ -74,18 +78,18 @@
+ 
+     def checkout(self, patron_id: str, barcode: str) -> Checkout:
+         """Lend the copy with ``barcode`` to the patron ``patron_id``."""
+-        obj = self._request("POST", "/checkouts", {"patron_id": patron_id, "barcode": barcode})
+-        return Checkout.from_json(obj)
++        obj = self._request("POST", "/loans", {"patron_id": patron_id, "copy_ref": barcode})
++        return Checkout.from_json(obj["loan"])
+ 
+     def checkouts(self, patron_id: str) -> list[Checkout]:
+         """Everything the patron ``patron_id`` has out, in the order the API lists it."""
+-        obj = self._request("GET", f"/patrons/{urllib.parse.quote(patron_id, safe='')}/checkouts")
+-        return [Checkout.from_json(o) for o in obj["checkouts"]]
++        obj = self._request("GET", f"/patrons/{urllib.parse.quote(patron_id, safe='')}/loans")
++        return [Checkout.from_json(o) for o in obj["loans"]]
+ 
+     def renew(self, checkout_id: str) -> Checkout:
+         """Renew the checkout ``checkout_id``; the checkout with its new due day."""
+-        obj = self._request("POST", f"/checkouts/{urllib.parse.quote(checkout_id, safe='')}/renew")
+-        return Checkout.from_json(obj)
++        obj = self._request("POST", f"/loans/{urllib.parse.quote(checkout_id, safe='')}/renewals", {})
++        return Checkout.from_json(obj["loan"])
+ 
+ 
+ def _error_code(raw: bytes) -> str | None:

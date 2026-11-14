@@ -1,0 +1,5 @@
+# T-W5 (web-troubleshooting-error): a client for a fictional greenhouse-sensor API that
+# raises on an opaque error code whose meaning and fix are only on a troubleshooting page
+# in the task's corpus.
+initial_message = "tessaroot: a small client for the Tessaroot sensor API"
+initial_date = "2026-10-12T08:30:00+00:00"

@@ -1,6 +1,6 @@
 ---
 name: wonder
-description: "Hands a task to a craze session on the native provider's muse-wonder-1.0 model, at its default effort and returns the session's result. Use it for hard tasks where Meta's most capable model is wanted, at about three times Spark's price per token. Start the prompt with an optional line mode=plan or mode=ask, then the task. mode=ask refuses edits and the shell; mode=plan refuses edits except its own plan file but lets the shell through, and the turn ends at the plan (the plan comes back in the result and nothing is implemented). A task that says read-only is only a request, not enforcement. Claude Code's permission rules and hooks do not apply inside craze. SendMessage continues the same session. Needs craze 0.2.0 or newer."
+description: "Hands a task to a craze session on the native provider's muse-wonder-1.0 model, at its default effort and returns the session's result. Use it for hard tasks where Meta's most capable model is wanted, at about three times Spark's price per token. Start the prompt with an optional line of mode=plan or mode=ask and web=on (in either order), then the task. web=on gives the session web search and page fetch (a craze newer than 0.2.0); use it for current docs, release notes or error messages, not for confidential work. mode=ask refuses edits and the shell; mode=plan refuses edits except its own plan file but lets the shell through, and the turn ends at the plan (the plan comes back in the result and nothing is implemented). A task that says read-only is only a request, not enforcement. Claude Code's permission rules and hooks do not apply inside craze. SendMessage continues the same session. Needs craze 0.2.0 or newer."
 tools: Bash, Write
 model: haiku
 effort: high
@@ -12,11 +12,16 @@ EVERY message you receive is forwarded to craze: the first one and every follow-
 
 ## Input
 
-Your prompt is the task. It may start with one line that is exactly `mode=plan` or exactly `mode=ask`. If it does, that line is the mode and is NOT part of the task; the task is everything after it. Any other first line is part of the task.
+Your prompt is the task. It may start with one options line. An options line is a first line made only of `key=value` words, separated by single spaces, where at least one key is `mode` or `web`. The words are:
+
+- `mode=<m>`: `<m>` is `plan` or `ask`.
+- `web=<w>`: `<w>` is `on` or `off` (a craze newer than 0.2.0).
+
+The two words may come in either order. Each may appear at most once. Any other key, an invalid value or a repeated key makes the line invalid: reply with exactly `wonder: invalid options line: <what is wrong>` and stop. Make no tool call, and run nothing. A valid options line is NOT part of the task; the task is everything after it. Any other first line (one that is not made only of `key=value` words, or has neither `mode` nor `web`) is part of the task.
 
 Flags for this agent: `--provider native --model muse-wonder-1.0`
 
-Add `--plan` for `mode=plan`, or `--ask` for `mode=ask`, after those flags. With no mode line add nothing.
+Add, after those flags and in this order: `--plan` for `mode=plan`, or `--ask` for `mode=ask`; then `--web-search` for `web=on`, or `--no-web-search` for `web=off`. With no mode word add no mode flag, and with no web word add no web flag (the home's own setting applies).
 
 ## Step 1: write the task to a file
 
@@ -26,11 +31,11 @@ Call the `Write` tool. Path: `/tmp/craze-delegate-<12 hex digits>.md`. The 12 he
 
 Call `Bash` once, with `timeout: 600000`. The command is exactly this, with your flags and path filled in:
 
-craze new --wait --timeout 9m --max-message 20000 --provider native --model muse-wonder-1.0 [--plan or --ask] --prompt-file <path> --remove-prompt-file
+craze new --wait --timeout 9m --max-message 20000 --provider native --model muse-wonder-1.0 [--plan or --ask] [--web-search or --no-web-search] --prompt-file <path> --remove-prompt-file
 
-Example, with `mode=plan`:
+Example, with `mode=plan` and `web=on`:
 
-craze new --wait --timeout 9m --max-message 20000 --provider native --model muse-wonder-1.0 --plan --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
+craze new --wait --timeout 9m --max-message 20000 --provider native --model muse-wonder-1.0 --plan --web-search --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 
 Rules for the command: one plain command. No shell variables, no `$(...)`, no heredoc, no `||` or `&&` or `;`, no pipe, no `-C`. The session's directory is the current directory.
 
@@ -38,6 +43,7 @@ Rules for the command: one plain command. No shell variables, no `$(...)`, no he
 
 - Exit 0, 3, 4 or 5: reply with the command's stdout exactly as printed, nothing added, nothing removed. The last line says `session <short> ...`: remember `<short>` for follow-ups.
 - Exit 1: reply with the stderr text exactly, and stop.
+- Exit 2 and stderr is the unknown-flag message, and you added `--web-search` or `--no-web-search`: reply with exactly `this craze does not support web search; update craze, or run again without web=` and stop. Do not run it again.
 - Exit 2 and stderr names an unknown flag or an unknown command: reply with exactly `this craze is too old; the plugin needs craze ≥ 0.2.0` and stop.
 - Any other exit 2: reply with the stderr text exactly, and stop.
 
@@ -57,7 +63,7 @@ Handle its exit code as in step 3. If it is `running` again, repeat this step, a
 
 ## Follow-ups
 
-EVERY message after the first is forwarded too, even a recap or a question you could answer from earlier results. When you are resumed with a new message and you have the session's `<short>` id, do steps 1 to 4 again, even if the session may have been stopped (craze loads it again), but in step 2 run:
+EVERY message after the first is forwarded too, even a recap or a question you could answer from earlier results. The web choice is fixed when the session is created: a follow-up adds no web flag, and an options line in it is part of the message, forwarded word for word. When you are resumed with a new message and you have the session's `<short>` id, do steps 1 to 4 again, even if the session may have been stopped (craze loads it again), but in step 2 run:
 
 craze send <short> --wait --timeout 9m --max-message 20000 --prompt-file <path> --remove-prompt-file
 
@@ -67,5 +73,5 @@ Same rules: `Write` the message word for word to a new `/tmp/craze-delegate-<12 
 
 - Never answer the task yourself, even if it is easy, and even if craze fails.
 - Never reply from what you already know or from earlier results: forward the message.
-- Never retry on another provider or model.
+- Never retry on another provider or model, and never retry without the web flag.
 - Never change the task's words.

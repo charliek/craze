@@ -186,6 +186,11 @@ var claudeToolIDs = map[string]string{
 	"bash":      "bash",
 	"glob":      "glob",
 	"grep":      "grep",
+	// The web tools (plan 051 §D): a bare name maps; whether the child is
+	// offered them is the session's web state (the offered list lacks them
+	// when web is withheld, so they resolve to nothing).
+	"websearch": "websearch",
+	"webfetch":  "webfetch",
 }
 
 // droppedTools are the names, lowercased, a persona's list may hold that are
@@ -198,7 +203,7 @@ var claudeToolIDs = map[string]string{
 // ("mcp__…") is dropped as well (droppedTool).
 var droppedTools = []string{
 	AgentTool, "todowrite", "askuserquestion", "exitplanmode",
-	"webfetch", "websearch", "notebookedit", "notebookread",
+	"notebookedit", "notebookread",
 	"killshell", "bashoutput", "workflow", "skill",
 	"todo_write", "ask_user_question", ExitPlanModeTool, AgentOutputTool,
 	BashOutputTool, BashStopTool,
@@ -216,10 +221,11 @@ func droppedTool(base string) bool {
 // can report what it could not map, and hands the harness only native ids.
 //
 // Names match case-insensitively. Read and LS are read, Write is write, Edit
-// and MultiEdit are edit, and Bash, Glob and Grep are themselves; a native id
+// and MultiEdit are edit, WebSearch is websearch, WebFetch is webfetch, and
+// Bash, Glob and Grep are themselves; a native id
 // is taken verbatim. Dropped silently: Agent, Agent(…), Task and every name
-// that starts with it, TodoWrite, AskUserQuestion, ExitPlanMode, WebFetch,
-// WebSearch, NotebookEdit, NotebookRead, KillShell, BashOutput, Workflow,
+// that starts with it, TodoWrite, AskUserQuestion, ExitPlanMode,
+// NotebookEdit, NotebookRead, KillShell, BashOutput, Workflow,
 // Skill, every MCP name, and the native ids of the tools a child never gets,
 // bash_output and bash_stop among them. Every other name is returned in
 // unknown, for the caller's one diagnostic, and not mapped — a name with a
@@ -251,8 +257,10 @@ func MapClaudeTools(names []string) (ids, unknown []string) {
 // disallowedTools: Bash(rm:*) would keep an unrestricted bash its author meant
 // to fence. Taking the whole tool away gives the child less than the author
 // wrote, which is the side craze errs on. A restricted name that is dropped
-// silently (Agent(…), WebFetch(domain:…)) stays dropped: those are tools no
-// child has anyway, so there is nothing to take away.
+// silently (Agent(…)) stays dropped: those are tools no child has anyway, so
+// there is nothing to take away. WebFetch(domain:…) is a restricted known name:
+// craze has no domain restriction, so on a deny list it takes webfetch away
+// whole, and on an allow list it is reported unknown and grants nothing.
 func MapClaudeDisallowed(names []string) (ids, unknown []string) {
 	return mapClaudeNames(names, true)
 }

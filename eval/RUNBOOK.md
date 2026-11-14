@@ -38,6 +38,9 @@ Short and concrete; each item points at the section that explains it.
 - At the end: summarize and publish (§5f), and keep only the current and previous
   campaign's raw runs.
 
+A web-split campaign (craze-web against craze on the `web` tasks; craze plan 051) is
+smaller and has its own checklist: §9.
+
 ## 1. What a campaign is
 
 A campaign is one directory holding a series of batches, their budget and their config:
@@ -211,8 +214,10 @@ not after.
 A task is `eval/tasks/<id>/task.toml` plus `eval/testdata/<id>/`. Nothing under `tasks/`
 is reachable from inside the sandbox — `task.toml` fields: `id`, `category` (explain,
 answer, investigate, bugfix, feature, refactor, multi-step, verify, plan), `split` (dev,
-heldout, smoke), `mode` (build or plan), `prompt`, `timeout_s`, `rubric`, `[repo]`,
-`[[checks]]`, `[validate]`.
+heldout, smoke, web), `mode` (build or plan), `prompt`, `timeout_s`, `rubric`, `[repo]`,
+`[[checks]]`, `[validate]`. A web task also declares `harnesses`, `corpus`, `relevant` and
+`needs`, is scored by its hidden tests alone, and adds the web lint to its controls: see
+`eval/README.md`'s *The web split*.
 
 **Choosing checks by category** (see `eval/README.md`'s *Tasks* section for each check
 type's exact semantics):
@@ -337,13 +342,16 @@ uv run crazeeval report --batch <baseline-batch> --baseline <baseline-batch> --l
 **d. The lever loop**, one change at a time. Build the candidate from a **commit**, never
 a dirty tree (so the build is reproducible and its provenance is a real sha), to exactly
 the path the run command below names (`../bin/craze-L1`, relative to `eval/`), creating
-its directory first:
+its directory first. Extract into a fresh, empty directory each time: an old extraction
+reused would keep a file the commit has since removed or renamed, and build it:
 
 ```shell
 REPO_ROOT=$(git rev-parse --show-toplevel)
 mkdir -p "$REPO_ROOT/bin"
-git archive --format=tar HEAD | (mkdir -p /tmp/build-L1 && tar -x -C /tmp/build-L1)
-(cd /tmp/build-L1 && go build -trimpath -o "$REPO_ROOT/bin/craze-L1" ./cmd/craze)
+BUILD=$(mktemp -d)
+git archive --format=tar HEAD | tar -x -C "$BUILD"
+(cd "$BUILD" && go build -trimpath -o "$REPO_ROOT/bin/craze-L1" ./cmd/craze)
+rm -rf "$BUILD"
 ```
 
 Run the dev tasks, 2 reps, on the tuning models (plan 029 used the free/cheap ones: the
@@ -513,3 +521,106 @@ full archive is in the private `craze-evals` repository at
 `campaigns/2026-09-plan029/`. It's a concrete instance of every step above, with the actual
 numbers, keep/reject decisions and spend — read it for what a full campaign's shape looks
 like end to end.
+
+## 9. A web-split campaign (checklist)
+
+The `web` split (craze plan 051 E4; `eval/README.md`'s *The web split*) asks one question:
+does craze with web search (`craze-web`) solve tasks plain `craze` cannot, and at what
+cost? Six tasks (T-W1–T-W6), two arms, two cheap models, three reps: 72 runs, scored by
+the hidden tests alone. No baseline against the open harnesses, no lever loop, no judge, no
+held-out set. Each item points at the section that explains the command.
+
+- Pick a campaign name `YYYY-MM-web` and `export CRAZEEVAL_CAMPAIGN_DIR=~/.craze-eval/<name>`
+  (§1). A fresh campaign has its own ledger, so its cap is this campaign's alone. Every
+  `run` below passes `--budget-cap 10 --run-cap 0.50` (the defaults are $95 and $3): $10
+  is the hard cap on committed plus reserved spend, and the run cap stops a runaway run
+  once it has settled $0.50.
+- Build the binary from a **commit** that has craze's web tools (plan 051), never a dirty
+  tree, extracted into a fresh, empty directory (§5d):
+
+  ```shell
+  REPO_ROOT=$(git rev-parse --show-toplevel)
+  mkdir -p "$REPO_ROOT/bin"
+  BUILD=$(mktemp -d)
+  git archive --format=tar HEAD | tar -x -C "$BUILD"
+  (cd "$BUILD" && go build -trimpath -o "$REPO_ROOT/bin/craze-web" ./cmd/craze)
+  rm -rf "$BUILD"
+  ```
+
+- Pick two cheap models already in `models.toml` and `prices.toml` (§3), for example
+  `muse-spark-1.3-contributor` and `fireworks/deepseek-v4p1-flash` (about $0.015 per craze
+  run in plan 029). Any provider works: the web tools are craze's own and the proxy answers
+  them from the task's corpus, not the provider.
+- Snapshot the config, validate the split and probe the sandbox (§2). Each of the six tasks
+  must pass all three controls (the web lint, the untouched fixture fails, the reference
+  patch passes):
+
+  ```shell
+  uv run crazeeval snapshot-config
+  uv run crazeeval validate --tasks split:web
+  uv run crazeeval probe --craze-bin ../bin/craze-web
+  ```
+
+- Smoke one task, one rep, both arms and both models, then read the capture report's
+  fidelity block: `web_tools_on_web_arm` must be true (craze-web was offered `websearch`
+  and `webfetch` and no other web tool) and `web_tools_absent` true (plain craze was
+  offered none). A craze-web run's `result.json` carries the web route's counters under
+  `proxy.web`. The smoke also gives each model a median cost per run in this campaign's
+  ledger, which the batch's projection uses from then on instead of `prices.toml`'s
+  `prior_run_cost` (deepseek's $0.35 prior over 36 runs alone would pass $10, so without
+  the smoke the batch is refused before it starts):
+
+  ```shell
+  uv run crazeeval run --harness craze,craze-web --model muse-spark-1.3-contributor,fireworks/deepseek-v4p1-flash \
+    --tasks T-W1 --reps 1 --craze-bin ../bin/craze-web --budget-cap 10 --run-cap 0.50 --label web-smoke
+  uv run crazeeval captures --run <web-smoke-batch>
+  ```
+
+- Run the campaign: both arms must be named (`craze-web` is never a default harness, and
+  `split:web` is never in the default selection or in `split:all`). `--resume` reopens it
+  after a crash; pass the same caps, since they are part of the batch's identity (§7):
+
+  ```shell
+  uv run crazeeval run --harness craze,craze-web --model muse-spark-1.3-contributor,fireworks/deepseek-v4p1-flash \
+    --tasks split:web --reps 3 --craze-bin ../bin/craze-web --budget-cap 10 --run-cap 0.50 --label web
+  uv run crazeeval ledger
+  ```
+
+- Report and check fidelity. Scoring is the hidden tests alone: no `calibrate`, no
+  `judge-batch`. The report's *Web tasks* section has the pass per model and arm on each
+  task and the web route's counters (searches, fetches, misses, bytes served); its success
+  bar does not apply to this split:
+
+  ```shell
+  uv run crazeeval report --batch <web-batch> --out <web-batch>/report
+  uv run crazeeval captures --run <web-batch>
+  ```
+
+- Summarize into this repo (§5f step 1). The report is sealed, which here hides nothing (a
+  web batch has no held-out runs and no verdicts), so `summarize` needs `--allow-sealed`;
+  the result is the summary's `web` object. Then write `results/<name>/README.md` by hand:
+  the pass per arm and model, the calls and tokens craze-web spent, the spend, and what
+  the campaign cannot show (below):
+
+  ```shell
+  uv run crazeeval summarize --report <web-batch>/report --campaign-name <name> \
+    --out results/<name>/summary.json --allow-sealed
+  ```
+
+- Archive both batches into the private `craze-evals` clone (§5f step 2), commit and push
+  `campaigns/<name>/` there and add a row to its README's campaign table; raw runs stay
+  local (§5f step 3):
+
+  ```shell
+  uv run crazeeval archive --batch <web-smoke-batch> --batch <web-batch> --all-runs --unseal \
+    --out ../../craze-evals/campaigns/<name>
+  ```
+
+**What it can show, and what it cannot.** It shows whether a model uses the web tools to
+solve tasks it cannot solve without them (craze-web's pass rate against plain craze's on the
+same tasks and models), and at what cost in calls and tokens. The tools search and fetch a
+frozen corpus ranked by BM25, not Exa's index, so it measures tool use and nothing about
+Exa's real ranking or results. It measures no harm either: the web tools are offered only
+on web tasks, so whether having them makes a model worse on tasks that need no web is not
+measured (future work). Plain craze failing a web task is the expected result, not a
+regression; a task plain craze passes says its facts leaked or can be guessed.

@@ -220,6 +220,9 @@ func (s *nativeSession) openWake(id, reason, text string) {
 	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
 		ID: id, Text: text, Reason: reason, Running: true,
 	}})
+	// The wake's web window opens after its bracket, in the same section
+	// (native_webtally.go): the calls left idle become its tally.
+	s.openWebLocked()
 	s.mu.Unlock()
 	_ = s.log.Flush(context.Background(), s.done)
 }
@@ -287,6 +290,10 @@ func (s *nativeSession) endWake(hs *harness.Session, id, reason string, tok Turn
 		s.released = nil
 	}
 	close(rel)
+	// The wake's web window closes ahead of its ending bracket, its tally
+	// restated as its last delta (native_webtally.go). A wake keeps no
+	// webLast: its ending is enqueued right here, so it has no gap.
+	s.closeWebLocked(false)
 	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
 		ID: id, Reason: reason,
 	}})

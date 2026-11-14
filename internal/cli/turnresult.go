@@ -15,6 +15,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/transcript"
 )
@@ -108,6 +109,40 @@ type turnAccumulator struct {
 	// the approval policy answered during this turn: what a returned plan leaves
 	// behind when its event cannot be read back (turnWaiter.returnedCancel).
 	planAnsweredInTurn bool
+	// web is the turn's web tally (plan 051 F.4.4), the newest by seq of every
+	// source — a webSearch section folded at its event's seq, a snapshot's
+	// turn.webSearch naming the target at the snapshot's seq — and webSeq the
+	// seq it was taken at. A tally replaces the held one only when its seq is
+	// strictly greater: a delta and a snapshot at the same seq carry the same
+	// tally, and a look ahead of the stream is not lowered by the older deltas
+	// the stream then replays. A seq of 0 (an event that never passed through
+	// a log) always applies.
+	web    *agent.WebSearchState
+	webSeq uint64
+}
+
+// takeWeb is the seq rule (web): w, at seq, replaces the held tally when it
+// is newer. w is the accumulator's own copy from here on.
+func (a *turnAccumulator) takeWeb(w *agent.WebSearchState, seq uint64) {
+	if w == nil || (seq != 0 && a.web != nil && seq <= a.webSeq) {
+		return
+	}
+	a.web = w.Clone()
+	if seq != 0 {
+		a.webSeq = seq
+	}
+}
+
+// dropWeb forgets the held tally: what it held was another turn's
+// (turnWaiter.foreignUnseen).
+func (a *turnAccumulator) dropWeb() { a.web, a.webSeq = nil, 0 }
+
+// seedWeb takes a snapshot's turn.webSearch, at its seq, only when it names
+// target: a tally of another turn is never borrowed.
+func (a *turnAccumulator) seedWeb(snap *transcript.Snapshot, target string) {
+	if tw := snap.Turn.WebSearch; tw != nil && target != "" && tw.TurnID == target {
+		a.takeWeb(&tw.WebSearchState, snap.Seq)
+	}
 }
 
 // accTool is one tool call's merged state: whether it reached completed or
@@ -253,6 +288,10 @@ func (a *turnAccumulator) fold(ev agent.Event) {
 				u := *st.Usage
 				a.usage = &u
 			}
+			// The turn's web tally, at the event's seq (takeWeb): the waiter
+			// hands over only the target's own sections (turnWaiter.ownWeb).
+			// Not a step report: noteStep reads only the usage section.
+			a.takeWeb(st.WebSearch, ev.Seq)
 			if st.Detail != "" || st.IndexErr != "" {
 				// Each draws an error row.
 				a.split()
@@ -581,7 +620,9 @@ func terminalStatus(status string) bool {
 // keys): status, session, short, provider and attach always; model once it was
 // resolved; turn and/or row with a target; message, toolCalls, durationMs, files
 // (`[]` when none) and stopReason on a terminal status; the rest when present. A
-// key that is absent is never written as null or false.
+// key that is absent is never written as null or false — but for webSearch's
+// offered, the one member written as false: it is always written, true or
+// false, whenever webSearch is present (usageComplete is written only as false).
 type turnResult struct {
 	Status      string       `json:"status"`
 	Session     string       `json:"session"`
@@ -621,7 +662,12 @@ type turnResult struct {
 	// Warnings are the result's model notices (plan 050 C2, resultOutput.notice):
 	// absent when there are none.
 	Warnings []resultWarning `json:"warnings,omitempty"`
-	Attach   string          `json:"attach"`
+	// WebSearch is whether the session offered the web tools and the target
+	// turn's web tally (plan 051 F.4.5): present on every result whose waiter
+	// adopted an info document carrying webSearch — a native host of this
+	// version — and absent otherwise, and on every exit-1 envelope.
+	WebSearch *resultWebSearch `json:"webSearch,omitempty"`
+	Attach    string           `json:"attach"`
 
 	// usage is Usage decoded, for the plain footer.
 	usage *agent.UsageState
@@ -634,6 +680,15 @@ type turnResult struct {
 	// turn-1 with every incarnation — a reload's first turn is another
 	// turn-1 of the same session (plan 041 C8, 1).
 	inc string
+}
+
+// resultWebSearch is a result's webSearch (plan 051 F.4.5): offered, always
+// written, and the target turn's web tally — completion-window activity
+// accounting, not provenance of an answer — each member omitted when zero,
+// empty or false — the members of the wire's own webSearch section.
+type resultWebSearch struct {
+	Offered bool `json:"offered"`
+	agent.WireWebSearch
 }
 
 // resultError is `error` wherever the waiting commands print one — a result's
@@ -649,17 +704,18 @@ type resultError struct {
 // errorDetail is resultError's detail: names and numbers only, each cleaned
 // again here whatever host sent it, so no text from outside craze — a key, a
 // path, a piece of a request — can ride in it. Cause is what began the stop, on
-// kind stopped. Reason, Model and ReplacedBy are a model-shaped config
-// failure's (plan 050 C2, modelRefusal): what failed, of a closed set, the
-// model's alias, and a retired one's replacement; the waiter's own, never a
-// host's.
+// kind stopped. Reason, Model and ReplacedBy are a start check's config
+// failure's, the waiter's own, never a host's: what failed, of a closed set;
+// on a model refusal (plan 050 C2, modelRefusal) the model's alias and a
+// retired one's replacement; on web_search_not_offered (plan 051 S1,
+// configRefusal) the reason alone.
 type errorDetail struct {
 	Status       int    `json:"status,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
 	Cause        string `json:"cause,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	// Model is set exactly when Reason is, so the key is there on those
-	// failures alone, "" included.
+	// Model is set on a model refusal, so the key is there on those failures
+	// alone, "" included; it is absent for web_search_not_offered.
 	Model      *string `json:"model,omitempty"`
 	ReplacedBy string  `json:"replaced_by,omitempty"`
 }
@@ -708,19 +764,25 @@ type resultAsk struct {
 }
 
 // resultSession is who a result is about: the session's full id, its
-// provider and its model.
+// provider and its model; and web, the info document's webSearch the waiter
+// last adopted (nil for none: a non-native provider, an older host).
 type resultSession struct {
 	id, provider, model string
+	web                 *protocol.WebSearchInfo
 }
 
 // newResult is a result about s with status, its always-present keys set —
 // "" for a session the command never learnt (craze new --wait cancelled while
-// its host was still starting), which has no attach command either.
+// its host was still starting), which has no attach command either — and
+// webSearch's offered when s has an info document's webSearch.
 func newResult(s resultSession, status string) *turnResult {
 	short := psShort(s.id)
 	res := &turnResult{Status: status, Session: s.id, Short: short, Provider: s.provider, Model: s.model}
 	if short != "" {
 		res.Attach = "craze attach --session " + short
+	}
+	if s.web != nil {
+		res.WebSearch = &resultWebSearch{Offered: s.web.Offered}
 	}
 	return res
 }
@@ -744,6 +806,11 @@ func (r *turnResult) fill(a *turnAccumulator) {
 	r.Plan = a.plan
 	r.AutoAnswered = a.auto
 	r.setUsage(a.usage)
+	// The turn's web tally, beside offered: only on a result that has
+	// webSearch at all (newResult), whatever the status.
+	if w, t := r.WebSearch, a.web; w != nil && t != nil {
+		w.WireWebSearch = *agent.ToWireWebSearch(t)
+	}
 }
 
 // defaultStopReason is a terminal status's stopReason when the engine sent none:
@@ -842,6 +909,9 @@ func (r *turnResult) footer() string {
 	if r.PlanFile != "" {
 		lines = append(lines, "plan file: "+psLine(r.PlanFile))
 	}
+	if l := r.webLine(); l != "" {
+		lines = append(lines, l)
+	}
 	for _, a := range r.AutoAnswered {
 		lines = append(lines, fmt.Sprintf("auto-answered: %s %q → %s", a.Kind, a.Summary, a.Choice))
 	}
@@ -868,6 +938,21 @@ func (r *turnResult) footer() string {
 			r.Attach, r.Short, r.Short, waitCommand(r.Short, r.Handle)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// webLine is the footer's web line (plan 051 F.4.5): `web: 1 search, 2
+// fetches`, ` (1 failed)` after it when any failed, and "" when the turn made
+// no web call. URLs are not printed.
+func (r *turnResult) webLine() string {
+	w := r.WebSearch
+	if w == nil || w.Searches+w.Fetches == 0 {
+		return ""
+	}
+	line := "web: " + pluralAs(w.Searches, "search", "searches") + ", " + pluralAs(w.Fetches, "fetch", "fetches")
+	if w.Failed > 0 {
+		line += fmt.Sprintf(" (%d failed)", w.Failed)
+	}
+	return line
 }
 
 // plain is the whole plain output: the body, `---`, the footer.
@@ -912,12 +997,15 @@ func waitCommand(short, handle string) string {
 	return "craze wait " + short + " --from " + handle
 }
 
-// plural is n and noun, plural unless n is 1.
-func plural(n int, noun string) string {
+// plural is n and noun, plural (an s added) unless n is 1.
+func plural(n int, noun string) string { return pluralAs(n, noun, noun+"s") }
+
+// pluralAs is n and one, or many unless n is 1.
+func pluralAs(n int, one, many string) string {
 	if n == 1 {
-		return "1 " + noun
+		return "1 " + one
 	}
-	return fmt.Sprintf("%d %ss", n, noun)
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // halfCent is half a cent in picodollars (10⁻¹² $): a cent is 10¹⁰.

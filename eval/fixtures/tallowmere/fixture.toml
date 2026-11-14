@@ -1,0 +1,5 @@
+# T-W4 (web-changelog-breaking-auth): a client for a fictional parcel-locker API, written
+# against the retired version 2; what changed in the current version is only in the task's
+# corpus.
+initial_message = "tallowmere: a small client for the Tallowmere parcel-locker API"
+initial_date = "2026-05-18T10:30:00+00:00"

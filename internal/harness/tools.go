@@ -87,9 +87,14 @@ type toolset struct {
 	// offered are the profile's tools a child may be given, in the profile's
 	// order: what a type's tools resolve out of (childToolSet), both in the
 	// description and for the child the runner opens, so the tools a type is
-	// listed with are the tools its child gets. nil for a sub-agent. Fixed at
-	// Open.
+	// listed with are the tools its child gets. The web tools are among them
+	// only when the session opened on, the one state its children inherit
+	// (WebState.forChild). nil for a sub-agent. Fixed at Open.
 	offered []string
+	// web is the session's web state (Options.Web, plan 051 §C.3): whether
+	// its profile's web tools are offered, which check holds a switch's
+	// profile to as openTools held the session's. Fixed at Open.
+	web WebState
 	// parents are the models the agent tool's menu lists as the session's
 	// own (openTools' parents: on a resume, every alias it may continue on),
 	// which a call naming one is held to as the menu was (resolveChildModel,
@@ -140,8 +145,10 @@ type toolset struct {
 	// learned is every stored key learn has accepted, in the order it first
 	// did, each once — the ones the session already knew included, since a
 	// key it knew from the environment is not one a sub-agent opened later
-	// would find there again. A child the runner opens from here on starts
-	// with them (ChildOptions.learned, r2-1); nothing else reads them.
+	// would find there again — and the web search keys the table stored when
+	// the session opened (openTools, review C5 item 1). A child the runner
+	// opens from here on starts with them (ChildOptions.learned, r2-1);
+	// nothing else reads them.
 	learned []string
 	// refusing is the refusal state learn puts the session in (r2-2,
 	// ErrStoredKeyFrozen): set, under mu, in the one section that found a
@@ -245,7 +252,17 @@ type toolset struct {
 // (subagentChoices, plan 050 C1): the model a new session opens on, or every
 // alias a resume may continue on (resumeParents), since the menu is fixed
 // here, before a resume has settled its model.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, parents []string, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
+//
+// web is the session's web state (Options.Web, plan 051 §C.3). A session it
+// does not offer the web tools to has them removed from its profile's list
+// before anything is built from that list — the agent types' tools
+// (toolset.offered), the agent tool's text, the specs, the tools array the
+// header hashes and the dispatcher — so it is offered, byte for byte, what it
+// was before they existed. Only a session that opened on lists them among
+// the tools a child may be given, since a child's own state is on only then
+// (WebState.forChild). Env.Web is the state's service when the tools are
+// offered and there is one, and otherwise a nil interface.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, parents []string, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, web WebState, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -268,9 +285,20 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 			}
 		}
 	}
-	ts := &toolset{keys: vals, closing: make(chan struct{})}
+	ts := &toolset{keys: vals, closing: make(chan struct{}), web: web}
 	if child == nil {
 		ts.todos = newSessionTodos()
+	}
+	// The web search keys credentials.toml stored when the table was loaded
+	// (plan 051 §F.5, review C5 item 1) are recorded as learned from Open: a
+	// rotation the turn-start look learns, and a reload whose table holds
+	// only the new key, would otherwise leave a sub-agent opened later —
+	// which starts from the current table and the learned keys — without the
+	// key this session has known since it opened.
+	for _, k := range table.StoredWebKeys() {
+		if v := k.Reveal(); slices.Contains(vals, v) && !slices.Contains(ts.learned, v) {
+			ts.learned = append(ts.learned, v)
+		}
 	}
 	slices.Sort(ts.keys)
 	ts.installed = slices.Clone(ts.keys)
@@ -296,7 +324,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if ts.registry, err = build(); err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
-	p, err := ts.registry.ProfileFor(ref)
+	p, err := ts.profileFor(ref)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
@@ -309,8 +337,9 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		ts.types = agentTypes(personas)
 		ts.parents = slices.Clone(parents)
 		every := &ChildOptions{AllTools: true}
+		toChild := web.forChild().Offered()
 		for _, t := range p.Tools {
-			if id := t.Spec().ID; every.keeps(id) {
+			if id := t.Spec().ID; every.keeps(id) && (toChild || !tool.IsWebTool(id)) {
 				ts.offered = append(ts.offered, id)
 			}
 		}
@@ -489,6 +518,12 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// model sends though its bash does not offer it runs in the foreground.
 	if runsJobs {
 		env.Jobs = jobs{r: subs}
+	}
+	// And for the web service: only a session offered the web tools gets one
+	// (plan 051 §C.3); with none Env.Web is a nil interface, which the tools
+	// answer with a tool_error.
+	if web.Offered() && web.Service != nil {
+		env.Web = web.Service
 	}
 	ts.environ, ts.envNames = env.Environ, keyNames
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
@@ -997,9 +1032,11 @@ func redactErrWith(red *redact.Replacer, err error) error {
 
 // defaultProfiles is the registry a session gets: the opencode profile,
 // built fresh — its tools are the session's own, so grep and glob share one
-// ripgrep lookup per session — and so the default for every model.
+// ripgrep lookup per session — and so the default for every model. It has
+// the web tools (opencode.WithWeb), which openTools removes from a session
+// whose web state does not offer them.
 func defaultProfiles() (*tool.Registry, error) {
-	p, err := opencode.Profile()
+	p, err := opencode.Profile(opencode.WithWeb())
 	if err != nil {
 		return nil, err
 	}
@@ -1027,10 +1064,24 @@ func startModelOf(r modeltable.Resolved) startModel {
 // registry's default, as a model with no tool_profile gets.
 func profileRef(name string) tool.ModelRef { return tool.ModelRef{Profile: name} }
 
+// profileFor is the profile ref gets, with the web tools removed when the
+// session's web state does not offer them (withWeb): the one list openTools
+// builds the session from, and the one check compares a switch's model
+// against.
+func (ts *toolset) profileFor(ref tool.ModelRef) (tool.Profile, error) {
+	p, err := ts.registry.ProfileFor(ref)
+	if err != nil {
+		return tool.Profile{}, err
+	}
+	p.Tools = withWeb(p.Tools, ts.web)
+	return p, nil
+}
+
 // check refuses a switch to r unless r's model gets the session's profile:
-// the tools and the system prompt are the session's, fixed at Open.
+// the tools and the system prompt are the session's, fixed at Open, with the
+// web tools withheld as they were then (profileFor).
 func (ts *toolset) check(r modeltable.Resolved) error {
-	p, err := ts.registry.ProfileFor(modelRef(r))
+	p, err := ts.profileFor(modelRef(r))
 	switch {
 	case err != nil:
 		return fmt.Errorf("harness: model %q: %w", r.Alias, err)

@@ -202,6 +202,15 @@ type Options struct {
 	// the built-ins alone. A sub-agent has no agent tool, and this is not read
 	// for one.
 	Personas []Persona
+	// Web is whether the session offers the web tools, websearch and
+	// webfetch, and the service they reach the web through (WebState, plan
+	// 051 §C.3), decided by the adapter once, at Open. The zero value
+	// withholds them: the session is offered exactly what it was before they
+	// existed. A state that offers them with no Service gets one built at
+	// Open when WebEndpoint is set (WebState.withService). A child's is its
+	// parent's when the parent opened on and withheld otherwise
+	// (WebState.forChild), whatever is set here.
+	Web WebState
 	// ProviderRetries is how many times a step's model request may be sent again
 	// after failing, before output or (for a transport or server failure) after
 	// it: `provider_retries`. nil is DefaultProviderRetries; 0 is none; anything
@@ -247,6 +256,25 @@ type Options struct {
 	// sub-agent's, and the summarizer's, side question's and wake's requests
 	// on the session's model, go where the session's own do.
 	AnthropicAPIBase func() (string, error)
+	// WebEndpoint answers the endpoint the web service a session builds at
+	// Open calls (WebState.withService, plan 051 §B): in production the
+	// adapter's reading of websearch.Override — "" for the provider's own,
+	// or a test's loopback override — read once, when the service is built.
+	// An error refuses Open; the adapter has already turned an invalid
+	// override into withheld web tools, so it never hands one in. nil builds
+	// no service: a state that offers the tools with none then answers each
+	// call with a tool_error, which is what keeps a harness test that sets
+	// only a mode from reaching the network.
+	WebEndpoint func() (string, error)
+	// OnWebCall is told of every call the web service built at Open handled,
+	// once each, after its outcome is known (WebCall, plan 051 F.4.1):
+	// the session's own calls and its children's alike, since a child shares
+	// its parent's service (WebState.forChild). It is called from the calling
+	// goroutine — a turn's tool, a child's runner, a background worker — with
+	// no lock of the harness's or the service's held, possibly concurrently,
+	// and must not block. nil reports nothing. Not read for a sub-agent, and
+	// not for a service a caller hands in (WebState.Service).
+	OnWebCall func(WebCall)
 	// Getenv looks up the environment variables that hold API keys; nil is
 	// os.Getenv. The ACP child's environment (agent.Options.Env) is not the
 	// harness's, and tests never read the real one (plan 018 §3.5).
@@ -657,6 +685,21 @@ func Open(opts Options) (*Session, error) {
 		s.now = time.Now
 	}
 	s.sleep = defaultSleep
+	// A child is offered the web tools only when its parent opened on, with
+	// the parent's service (plan 051 §C.3): the runner passes it so
+	// (childOpenOptions), and a child opened any other way is held to the
+	// same rule. Otherwise the web service is built once, before anything is
+	// kept of opts.Web: the session's tools, its children (childBase) and a
+	// resumed session's tools all reach the web through the one service, and
+	// so share one consent.
+	if child != nil {
+		opts.Web = opts.Web.forChild()
+	}
+	built, err := opts.Web.withService(&opts, s.getenv)
+	if err != nil {
+		return nil, err
+	}
+	opts.Web = built
 	// A session that is not a sub-agent can start them: its runner exists
 	// before its tools, which hand it to the agent tool (Env.Subagents), and
 	// reads the rest of the session only when a call arrives, by which time
@@ -666,7 +709,7 @@ func Open(opts Options) (*Session, error) {
 		s.subs.background, s.subs.sink, s.subs.onPending = opts.Background, opts.Sink, opts.OnPending
 		s.base = childBase{
 			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
-			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools,
+			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools, web: opts.Web,
 		}
 	}
 	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
@@ -726,7 +769,7 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		s.base.top = start.top
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.Web, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -1376,6 +1419,13 @@ func (s *Session) AddSecrets(values ...string) {
 // rows, plan 026 §3.9, review r8). It cannot cover a key learned after it was
 // taken: Redact's own limit, for one call.
 func (s *Session) Redactor() func(string) string { return s.redactor().String }
+
+// Replacer is Redactor's Replacer itself, for a caller that keeps a redactor
+// of its own which only ever widens (redact.Replacer.Union) — so a key a
+// sub-agent knew stays covered after the sub-agent's turn has detached — or
+// that redacts the start of a longer text (redact.Replacer.Head). Redactor's
+// limit is its own: it cannot cover a key learned after it was taken.
+func (s *Session) Replacer() *redact.Replacer { return s.redactor() }
 
 // redactor is the replacer Redact applies: the widest one while no sub-agent
 // knows a key the session does not, and otherwise one over both sessions'

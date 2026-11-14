@@ -37,6 +37,8 @@ class Runner:
     # Download caches in the home, deleted after scoring (never evidence, often large).
     prune_paths: list[str] = []
     supports_plan: bool = True
+    # Whether the run's proxy route carries the task's web corpus (craze-web).
+    web: bool = False
 
     def supports(self, em: EvalModel, task: Task) -> bool:
         if task.is_plan and not self.supports_plan:

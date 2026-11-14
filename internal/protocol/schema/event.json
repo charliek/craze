@@ -342,9 +342,22 @@
         "sendNow": {"$ref": "#/$defs/sendNow"},
         "usage": {"$ref": "#/$defs/usage"},
         "catalog": {"$ref": "#/$defs/catalog"},
+        "webSearch": {"$ref": "#/$defs/webSearch"},
         "reason": {"type": "string"},
         "detail": {"type": "string"},
         "indexErr": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "webSearch": {
+      "description": "The web search section (WebSearchState; native only, absent for every ACP session and never null): the open turn's web tally, cumulative — each delta carries the whole tally so far and replaces what a client holds, never adds to it. It names no turn: a client stamps it with the turn running in the log as it arrives (a running foreign bracket's id first, else the engine turn's), and a native session sends it only inside a turn's window. searches and fetches are the calls the web service handled, whatever their outcome; failed those that returned an error; urls the URLs of successful results (a search's result URLs in order, a fetch's requested URL when its page had text), key scrubbed and redacted, each at most 500 bytes, distinct, first seen first, at most 100; urlsTruncated, a URL cut or a distinct one dropped. Each member is omitted when zero, empty or false. Completion-window activity accounting, not provenance of an answer; the counters are incarnation-local.",
+      "type": "object",
+      "properties": {
+        "searches": {"type": "integer", "minimum": 0},
+        "fetches": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "urls": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500}},
+        "urlsTruncated": {"type": "boolean"}
       },
       "additionalProperties": false
     },

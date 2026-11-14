@@ -76,7 +76,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// the gate; the session's own is set below, before it is handed out.
 	ws := filepath.Clean(opts.Workspace)
 	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.Asker, opts.Table, s.getenv,
-		profileRef(profile), resumeParents(opts, path), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
+		profileRef(profile), resumeParents(opts, path), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.Web, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

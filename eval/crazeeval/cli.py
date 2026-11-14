@@ -42,23 +42,26 @@ def _ledger_path(a) -> Path:
 def cmd_run(a) -> int:
     from crazeeval import keys as keymod
     from crazeeval.batch import BatchConfig, run_batch
-    from crazeeval.config import HARNESSES, load_models, load_snapshot
+    from crazeeval.config import DEFAULT_HARNESSES, SUPPORTED_HARNESSES, load_models, load_snapshot
     from crazeeval.pricing import load_prices
+    from crazeeval.runners import RUNNERS
     from crazeeval.sandbox import Toolchains, bwrap_available
     from crazeeval.tasks import load_tasks, select_tasks
 
     if a.first_rep < 1:
         print(f"--first-rep must be >= 1, got {a.first_rep}", file=sys.stderr)
         return 2
-    harnesses = _csv(a.harness) or list(HARNESSES)
+    harnesses = _csv(a.harness) or list(DEFAULT_HARNESSES)
     for h in harnesses:
-        if h not in HARNESSES:
+        if h not in SUPPORTED_HARNESSES:
             print(f"unknown harness {h!r}", file=sys.stderr)
             return 2
     craze_bin = None
-    if "craze" in harnesses:
+    # Every harness whose sandbox binds the craze binary (craze and craze-web).
+    if any("craze" in RUNNERS[h].tools for h in harnesses):
         if not a.craze_bin:
-            print("--craze-bin is required when craze is among the harnesses (never /usr/local/bin/craze)", file=sys.stderr)
+            print("--craze-bin is required when a harness that runs craze is among the harnesses "
+                  "(never /usr/local/bin/craze)", file=sys.stderr)
             return 2
         craze_bin = Path(a.craze_bin).resolve()
         if str(craze_bin).startswith("/usr/local/bin"):
@@ -164,7 +167,9 @@ def cmd_validate(a) -> int:
     from crazeeval.tasks import load_tasks, select_tasks
     from crazeeval.validate import validate_task
 
-    tasks = select_tasks(load_tasks(), a.tasks or "split:all")
+    # Every task by default, the web split's (which split:all leaves out) included.
+    all_tasks = load_tasks()
+    tasks = select_tasks(all_tasks, a.tasks) if a.tasks else list(all_tasks.values())
     tc = Toolchains.resolve() if bwrap_available() else None
     ok_all = True
     report = []
@@ -661,13 +666,15 @@ def main(argv: list[str] | None = None) -> int:
         return sub.add_parser(name, parents=[common], **kw)
 
     r = command("run", help="run a batch of sandboxed harness runs through the proxy")
-    r.add_argument("--harness", help="comma list of craze,gx,opencode,codex (default: all)")
+    r.add_argument("--harness", help="comma list of craze,gx,opencode,codex (default: those four) and craze-web "
+                   "(craze with web search, on web tasks only; never a default)")
     r.add_argument("--model", help="comma list of eval model keys (default: all)")
-    r.add_argument("--tasks", help="comma list of task ids and/or split:<dev|heldout|smoke|all>")
+    r.add_argument("--tasks", help="comma list of task ids and/or split:<dev|heldout|smoke|web|all> "
+                   "(all: every split but web)")
     r.add_argument("--reps", type=int, default=1)
     r.add_argument("--first-rep", type=int, default=1,
                     help="number reps from N (a later batch adding rep N to an earlier one)")
-    r.add_argument("--craze-bin", help="the craze binary under test (required for craze)")
+    r.add_argument("--craze-bin", help="the craze binary under test (required for craze and craze-web)")
     r.add_argument("--label", default="batch")
     r.add_argument("--parallel", type=int, default=4)
     r.add_argument("--cap-zai", type=int, default=None, help="concurrent runs on Z.AI (default 2)")
@@ -684,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(fn=cmd_run)
 
     v = command("validate", help="run every task's category controls")
-    v.add_argument("--tasks", help="comma list of task ids and/or split:<name> (default: all)")
+    v.add_argument("--tasks", help="comma list of task ids and/or split:<name> (default: every task, web included)")
     v.add_argument("--keep", help="keep the validation workspaces under this directory")
     v.add_argument("--json", help="also write the report here")
     v.set_defaults(fn=cmd_validate)

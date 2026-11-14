@@ -1,0 +1,39 @@
+diff --git a/orvelline.py b/orvelline.py
+--- a/orvelline.py
++++ b/orvelline.py
+@@ -7,8 +7,10 @@
+ from __future__ import annotations
+ 
+ import json
++import time
+ import urllib.error
+ import urllib.request
++import uuid
+ from dataclasses import dataclass, field
+ 
+ 
+@@ -77,8 +79,22 @@
+         """Book pass ``pass_code`` for ``traveller_id``, valid from ``starts_on``
+         (YYYY-MM-DD), and return the booking."""
+         body = {"traveller_id": traveller_id, "pass_code": pass_code, "starts_on": starts_on}
+-        out = self._request("POST", "/v2/pass-bookings", body)
+-        return Booking.from_json(out["booking"])
++        # One Orvelline-Dedup-Key per booking, so a held booking can be finished: on 409
++        # booking.hold_pending, wait details.settle_cs (centiseconds) and promptly resend the
++        # same body with the same key plus Orvelline-Resume-Hold: <details.quota_claim>, for
++        # as long as that is the answer (the claim ends in a booking or another error).
++        headers = {"Orvelline-Dedup-Key": str(uuid.uuid4())}
++        while True:
++            try:
++                out = self._request("POST", "/v2/pass-bookings", body, headers)
++            except OrvellineError as e:
++                claim, wait_cs = e.details.get("quota_claim"), e.details.get("settle_cs")
++                if e.status != 409 or e.code != "booking.hold_pending" or not claim or wait_cs is None:
++                    raise
++                time.sleep(wait_cs / 100)
++                headers = {**headers, "Orvelline-Resume-Hold": claim}
++                continue
++            return Booking.from_json(out["booking"])
+
+ 
+ def _api_error(status: int, raw: bytes) -> OrvellineError:

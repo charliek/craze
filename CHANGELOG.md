@@ -36,6 +36,9 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 - A native host killed outright has its shell commands ended (`SIGTERM`, then
   `SIGKILL`) by the waiter that sees it go or by the next craze command; every
   native command has `CRAZE_HOST_ID` in its environment.
+- A native session treats an exported `EXA_API_KEY` as a key in every
+  configuration, `catalog = false` included: the commands it runs are started
+  without it, and its value is redacted from tool output.
 
 ### Sessions and scripting
 
@@ -88,6 +91,58 @@ v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
 
 ### The native provider
 
+- Web search: `websearch` and `webfetch` search the web and fetch pages through
+  Exa's hosted endpoint, with no key needed (`EXA_API_KEY` raises its rate
+  limit). Decided when a session opens: `websearch = false` in `config.toml`
+  turns it off and a `[websearch]` table with `provider = "exa"` on; otherwise
+  the answer remembered in `native/websearch.json`; otherwise a session whose
+  questions reach a person asks once, on the first call (**Allow via Exa**,
+  **Disable web search**, both remembered; a skip declines for the session).
+  A session that answers its own questions (`craze prompt`, `craze new
+  --wait`, an unattended host) never asks and is offered no web tools until
+  someone has decided, so its requests are unchanged. A sub-agent gets them
+  only when its parent opened on. The file tools refuse `websearch.json`.
+- `--web-search` and `--no-web-search` on `craze new --wait`, `craze prompt`
+  and `craze serve` decide web search for one session: `--no-web-search`
+  withholds the tools whatever the home says (never refused, a no-op off
+  native); `--web-search` offers them over a remembered Disable with no
+  question and nothing remembered, and is refused — exit 1, kind `config` —
+  by an explicit off in `config.toml` or a provider other than native. Under
+  `craze new --wait` the refusal comes before the prompt is read, with
+  `detail.reason` `web_search_not_offered` (no `detail.model`), and wins over
+  a model refusal; `craze prompt` reports it as its startup `error` event.
+  Both together, or either on plain `craze new` or with `--load`, are usage
+  errors. The choice is recorded on the session's index row (`webSearch`,
+  outside `unattended`) and applied on every load: a `craze send` reload, a
+  hub reopen (through a hub whose `hello` says `reopenWebSearch`: an older
+  hub still running is reported, not reopened through), `--continue`, the
+  resume picker and the session list. A
+  recorded `--web-search` that `config.toml` has since turned off refuses a
+  reload nobody attends, and opens a person's resume without web tools, with
+  a line saying why.
+- A stored Exa key: `craze auth login websearch/exa` (bare `exa` too, unless a
+  model provider has that name) keeps one in `native/credentials.toml`
+  (`0600`, its own lock, unknown tables and keys kept, read leniently with
+  value-free diagnostics); `craze auth logout websearch/exa` removes it, and
+  `craze auth list` shows it under a new "Web search" section, even when
+  `providers.toml` cannot be read. The search sends `EXA_API_KEY`, else the
+  stored key, else none (the keyless endpoint), resolved once when a session
+  opens; every native session redacts the stored key, learns one stored while
+  it runs at its next turn, and the file tools refuse `credentials.toml`.
+- Web search counts: a native session's waiting-command result carries
+  `webSearch` — `offered` (always written, `true` or `false`) and the target
+  turn's `searches`, `fetches`, `failed`, `urls` (successful results' URLs,
+  key scrubbed and redacted, at most 100 of at most 500 bytes) and
+  `urlsTruncated` — on every status, never on an exit-1 envelope, and the plain
+  footer gains `web: 1 search, 2 fetches (1 failed)`. The counts are activity
+  accounting for the turn's window, not a statement of which sources an answer
+  used: a background sub-agent's calls count in the turn they finished in, and a
+  close is the cutoff. On the wire, a `webSearch` state section (cumulative, a
+  replacement, stamped by the client with the running turn), the snapshot's
+  `turn.webSearch` with its `turnId`, and the info document's
+  `webSearch.offered` (once ready, native only); no codec version moves.
+  `craze models --json` and `--shipped --json` gain `capabilities:
+  {"webSearch": true}`.
 - A shipped model can be deprecated (`deprecated` and `replaced_by` in the
   catalog): it runs when named, is never offered or chosen for you, and each
   `models.toml` reference to it warns. A `[[retired]]` row can name its

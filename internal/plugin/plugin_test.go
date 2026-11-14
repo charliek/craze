@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -126,6 +128,93 @@ func checkAgent(text string) []string {
 	return bad
 }
 
+// webNote is the phrase every place that states a minimum for web= spells;
+// RELEASING.md's release step replaces it with the version that ships the
+// feature.
+const webNote = "a craze newer than 0.2.0"
+
+// nativeAgents accept web=; delegate does too, with its own grammar.
+var nativeAgents = []string{"astra", "muse", "sol", "wonder"}
+
+// checkWebAgent returns what is wrong with an agent that accepts web=. It is
+// separate from checkAgent, which a body without web= still passes.
+func checkWebAgent(name, text string) []string {
+	fm, body, err := frontmatter(text)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var bad []string
+	if !strings.Contains(fm["description"], "web=on") {
+		bad = append(bad, "description does not say it accepts web=on")
+	}
+	if !strings.Contains(fm["description"], webNote) {
+		bad = append(bad, "description does not say "+webNote)
+	}
+	for _, want := range []string{"`--web-search` for `web=on`, or `--no-web-search` for `web=off`", webNote,
+		"this craze does not support web search; update craze, or run again without web=",
+		"fixed when the session is created"} {
+		if !strings.Contains(body, want) {
+			bad = append(bad, "body does not contain "+want)
+		}
+	}
+	// An example labelled with web=on or web=off runs the command it says:
+	// the first craze line after the label carries the matching flag.
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "Example") {
+			continue
+		}
+		flag := ""
+		switch {
+		case strings.Contains(line, "`web=on`"):
+			flag = "--web-search"
+		case strings.Contains(line, "`web=off`"):
+			flag = "--no-web-search"
+		default:
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			if strings.HasPrefix(next, "craze ") {
+				if !slices.Contains(strings.Fields(next), flag) {
+					bad = append(bad, "the example after "+strconv.Quote(line)+" does not pass "+flag)
+				}
+				break
+			}
+		}
+	}
+	// The web exit-2 rule comes before the general one.
+	web := strings.Index(body, "update craze, or run again without web=")
+	general := strings.Index(body, "this craze is too old")
+	if web < 0 || general < 0 || web > general {
+		bad = append(bad, "the web exit-2 rule does not come before the general one")
+	}
+	if name == "delegate" {
+		if !strings.Contains(body, "delegate: invalid target line: web= applies to the native provider") {
+			bad = append(bad, "body does not refuse web= on another provider")
+		}
+	} else {
+		for _, want := range []string{"mode=", "either order", name + ": invalid options line: <what is wrong>", "at most once"} {
+			if !strings.Contains(body, want) {
+				bad = append(bad, "body does not contain "+want)
+			}
+		}
+	}
+	return bad
+}
+
+// checkNoWebAgent returns what is wrong with an agent that must not accept
+// web= (grok, cursor): no web flag, and an error for a web= line.
+func checkNoWebAgent(name, text string) []string {
+	var bad []string
+	if strings.Contains(text, "--web-search") || strings.Contains(text, "--no-web-search") {
+		bad = append(bad, "mentions a web flag")
+	}
+	if !strings.Contains(text, name+": web= applies to the native provider") {
+		bad = append(bad, "does not refuse a web= first line")
+	}
+	return bad
+}
+
 // checkSkill returns what is wrong with one skill file, or nil.
 func checkSkill(text string) []string {
 	fm, _, err := frontmatter(text)
@@ -205,6 +294,32 @@ func TestAgents(t *testing.T) {
 	sort.Strings(got)
 	if strings.Join(got, ",") != strings.Join(wantAgents, ",") {
 		t.Errorf("agents = %v, want %v", got, wantAgents)
+	}
+}
+
+func TestWebAgents(t *testing.T) {
+	root := repoRoot(t)
+	for _, name := range append([]string{"delegate"}, nativeAgents...) {
+		for _, bad := range checkWebAgent(name, readFile(t, root, "agents/"+name+".md")) {
+			t.Errorf("agents/%s.md: %s", name, bad)
+		}
+	}
+	for _, name := range []string{"grok", "cursor"} {
+		for _, bad := range checkNoWebAgent(name, readFile(t, root, "agents/"+name+".md")) {
+			t.Errorf("agents/%s.md: %s", name, bad)
+		}
+	}
+	for rel, wants := range map[string][]string{
+		"skills/craze/SKILL.md":               {webNote, "web=off", "webSearch"},
+		"skills/craze/references/commands.md": {webNote, "webSearch"},
+		"docs/getting-started/claude-code.md": {"web=on", "cli.md#web-search-flags"},
+	} {
+		text := readFile(t, root, rel)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %s", rel, want)
+			}
+		}
 	}
 }
 
@@ -290,5 +405,15 @@ func TestCheckersRefuse(t *testing.T) {
 	}
 	if len(checkSkill("---\nname: x\n---\nbody")) == 0 {
 		t.Error("checkSkill accepted a skill with no description")
+	}
+	// The minimal body stays a good agent, and is not a web agent.
+	if len(checkWebAgent("sol", good)) == 0 {
+		t.Error("checkWebAgent accepted a body with no web= support")
+	}
+	if len(checkNoWebAgent("grok", "x --web-search")) != 2 {
+		t.Error("checkNoWebAgent accepted a web flag and no refusal")
+	}
+	if len(checkNoWebAgent("grok", "grok: web= applies to the native provider")) != 0 {
+		t.Error("checkNoWebAgent refused a good agent")
 	}
 }

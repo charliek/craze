@@ -16,6 +16,7 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 |---|---|
 | `--provider <id>` | `native`, `cursor`, `grok` (or `gx`). Without it `provider` in `config.toml`; none configured is exit 1 |
 | `--model`, `--effort`, `--fast` / `--no-fast` | The start settings. On `native`, an unknown or retired `--model`, an `--effort` the model does not list (with `--model`) and `--fast` (no native model has one) fail before the session starts: exit 1, kind `config`, `error.detail.reason`. `craze models <alias> --json` shows a native model's efforts. ACP providers ignore a setting the model does not offer |
+| `--web-search` / `--no-web-search` | Native only; needs a craze newer than 0.2.0. Offer the session the web tools (`websearch`, `webfetch`; queries and fetched URLs go to Exa), or none, whatever the home says. Without either the home's own setting applies (off for an unattended run unless the owner turned it on). Use `--web-search` for information newer than a model's training or not in the repository (current docs, release notes, an error message, comparing tools), not for edits or reviews of local code or work the user called confidential. Fixed when the session is created. `--json` results carry a `webSearch` object of what was searched and fetched. Both together fail (exit 2). `--web-search` with a provider that is not native, or over a `websearch = false` in `config.toml`, fails (exit 1, kind `config`, `error.detail.reason` `web_search_not_offered`); `--no-web-search` on another provider does nothing |
 | `--plan` / `--ask` | Mode. `--ask` refuses edits and the shell. `--plan` refuses edits except its own plan file, lets the shell through, and **ends the turn at the plan** (`completed` with a `plan:` section, nothing implemented) |
 | `--prompt-file <path>` | The prompt: a file, or `-` for stdin. Else the words after the command, else stdin. Two sources, none, an empty prompt or one over 512 KiB (32 KiB on craze 0.2.0) is exit 2 |
 | `--remove-prompt-file` | Delete the prompt file once read |
@@ -34,7 +35,7 @@ craze send 175bfe79 --wait --timeout 9m --max-message 20000 --prompt-file /tmp/c
 craze send 175bfe79 "and the docs"
 ```
 
-Sends the prompt to the session `<short>` (the id in the result's last line), queued behind any turn. Without `--wait` it prints `started turn-3` or `queued q-2 (position 1)` and a `next:` line, and exits 0. With `--wait` it follows **that** prompt's turn and prints its result like `craze new --wait`. A session that has ended (its host idled out or was stopped) is loaded again first, with its recorded mode, model and effort, and keeps its context. `--max-message` needs `--wait`.
+Sends the prompt to the session `<short>` (the id in the result's last line), queued behind any turn. Without `--wait` it prints `started turn-3` or `queued q-2 (position 1)` and a `next:` line, and exits 0. With `--wait` it follows **that** prompt's turn and prints its result like `craze new --wait`. A session that has ended (its host idled out or was stopped) is loaded again first, with its recorded mode, model, effort and web search choice, and keeps its context. `--max-message` needs `--wait`.
 
 ## Follow a turn: `craze wait`
 
@@ -72,7 +73,7 @@ The message is the turn's last assistant message (`(no final message)` if none).
 |---|---|---|
 | 0 | `completed`, `idle` | The turn ended normally; `idle`: the session has had no turn |
 | 1 | none | craze failed (no such session, session ended, unreachable, lost connection, a session that could not start, `--timeout` before the prompt was sent, a prompt that may not have arrived, a `send` over 32 KiB to a busy session). The message is on stderr; with `--json`, `error.kind` says which: `stopped` (the session ended), `connection_lost`, `host_exited`, `unobserved`, `start_failed`, `prompt` (the busy-session refusal) and others |
-| 2 | none | Usage error. An unknown flag or command means the craze is too old (needs 0.2.0 or newer) |
+| 2 | none | Usage error. An unknown flag or command means the craze is too old (needs 0.2.0 or newer); when the command included `--web-search` or `--no-web-search`, it means this craze does not support web search (a craze newer than 0.2.0): run again without it |
 | 3 | `failed`, `cancelled`, `dropped` | The turn ended without completing, or the queued prompt was removed |
 | 4 | `needs_input` | An ask is open that nothing here answers; answer it in `craze attach`, or `craze cancel` / `craze stop` |
 | 5 | `running` | `--timeout` passed; the turn goes on. Run the `next:` command |

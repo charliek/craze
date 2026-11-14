@@ -323,6 +323,7 @@ func serveSpec(f *tuiFlags, load, hostID, logPath string) hostspawn.Spec {
 		Model:        f.model,
 		Effort:       strings.TrimSpace(f.effort),
 		Fast:         f.fastSetting(),
+		WebSearch:    f.webSearchSetting().String(),
 		AgentBin:     f.agentBin,
 		PluginDirs:   f.pluginDirs,
 		NoForce:      !f.force || f.noForce,

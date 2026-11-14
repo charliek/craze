@@ -177,7 +177,7 @@ func TestAWaiterSeededFromASnapshotAgrees(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := newTurnAccumulator()
-		seedFromSnapshot(a, dec)
+		seedFromSnapshot(a, dec, "")
 		for _, ev := range all[cut:] {
 			a.fold(ev)
 		}
@@ -207,7 +207,7 @@ func TestAWaiterSeededFromASnapshotMidAttemptUncovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := newTurnAccumulator()
-	seedFromSnapshot(a, snap)
+	seedFromSnapshot(a, snap, "")
 	if msg, _ := a.message(); msg != "abandoned text" {
 		t.Fatalf("the seed's message = %q", msg)
 	}
@@ -357,7 +357,7 @@ func TestNineBurstsRollBackToThePreviousAnswer(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := newTurnAccumulator()
-		seedFromSnapshot(a, snap)
+		seedFromSnapshot(a, snap, "")
 		for _, ev := range all[cut:] {
 			a.fold(ev)
 		}

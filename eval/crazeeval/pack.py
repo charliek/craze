@@ -14,8 +14,8 @@ kept on the owner's disk, without the harness homes and caches (plan
   ``result.pre-rescore.json``;
 - per attempt (``.../rep<N>/attempt-<n>/``): ``result.json`` (and its pre-rescore
   original), ``stdout.jsonl``, ``stderr.txt``, ``diff.patch``, ``start-manifest.json``,
-  ``final-manifest.json``, ``capture.jsonl.gz`` (or a plain ``capture.jsonl``), the
-  files of ``gitpost/``, and the scoring results: ``scoring/<label>.stdout`` and
+  ``final-manifest.json``, ``capture.jsonl.gz`` (or a plain ``capture.jsonl``), a
+  craze-web run's ``web.jsonl`` (its web route's journal), the files of ``gitpost/``, and the scoring results: ``scoring/<label>.stdout`` and
   ``.stderr`` (``go test -json`` is the stdout) and any ``scoring/<label>.out/`` report
   file (JUnit) -- never a scoring workspace copy;
 - held-out only with ``unseal``: ``heldout/results.jsonl``, ``heldout/rescore.jsonl``,
@@ -70,7 +70,7 @@ HELDOUT_FILES = frozenset({"results.jsonl", "rescore.jsonl"})
 REP_FILES = frozenset({"result.json", "result.pre-rescore.json"})
 ATTEMPT_FILES = frozenset({
     "result.json", "result.pre-rescore.json", "stdout.jsonl", "stderr.txt", "diff.patch", "start-manifest.json",
-    "final-manifest.json", "capture.jsonl.gz", "capture.jsonl",
+    "final-manifest.json", "capture.jsonl.gz", "capture.jsonl", "web.jsonl",
 })
 REP_RE = re.compile(r"^rep\d+$")
 ATTEMPT_RE = re.compile(r"^attempt-\d+$")

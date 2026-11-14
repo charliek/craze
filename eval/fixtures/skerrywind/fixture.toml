@@ -1,0 +1,5 @@
+# T-W2 (web-api-reference-telemetry): a client for a fictional weather-station telemetry
+# API whose upload endpoint and body, signing header and signed message, measurement
+# fields and units, and the meaning of a conflict code are only in the task's corpus.
+initial_message = "skerrywind: a small uploader for the Skerrywind station telemetry API"
+initial_date = "2026-10-12T08:30:00+00:00"

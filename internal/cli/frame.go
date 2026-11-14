@@ -235,6 +235,9 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 		// The same carry as runTUI's --continue: the row's durable craze id
 		// belongs to the session built from it (session control SD-22).
 		cfg.CrazeSessionID = row.CrazeID
+		// And its recorded web search choice, which every row the engine
+		// writes carries (plan 051 F.3, C6 review F2).
+		cfg.WebSearch = row.WebSearch
 	case o.resume:
 		rows, err := index.Picker(cwd, "", resumeRowLimit)
 		if err != nil {

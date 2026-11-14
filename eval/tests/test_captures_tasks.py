@@ -223,6 +223,43 @@ def test_fidelity_checks_served_models_too():
     assert web["web_tools_absent"] is False  # a failing run outweighs a missing one
 
 
+def test_fidelity_web_tools_by_arm():
+    """craze plan 051 E2: web tools are expected on craze-web and absent on every other
+    harness; one model per run is checked across both arms."""
+    both = ("webfetch", "websearch")
+    f = captures.fidelity("m", [_row("craze", [_run()]), _row("craze-web", [_run(web=both), _run(web=both)])],
+                          "high", "w")
+    assert f["web_tools_absent"] is True and f["web_tools_on_web_arm"] is True and f["one_model_per_run"] is True
+    assert f["main_request_coverage"] == {"craze": True, "craze-web": True} and f["effort_parity"] is True
+    # Offered neither, one only, or another web tool besides: false.
+    for web in ((), ("websearch",), both + ("web_search",)):
+        f = captures.fidelity("m", [_row("craze-web", [_run(web=both), _run(web=web)])], "high", "w")
+        assert f["web_tools_on_web_arm"] is False, web
+    # No main request on a web-arm run: no evidence; a failing run still outweighs it.
+    assert captures.fidelity("m", [_row("craze-web", [_run(web=both), _run(main=0)])], "high", "w")[
+        "web_tools_on_web_arm"] == captures.NO_EVIDENCE
+    assert captures.fidelity("m", [_row("craze-web", [_run(), _run(main=0)])], "high", "w")[
+        "web_tools_on_web_arm"] is False
+    # A model run on the web arm alone: web_tools_absent has nothing to read (not applicable).
+    alone = captures.fidelity("m", [_row("craze-web", [_run(web=both)])], "high", "w")
+    assert alone["web_tools_absent"] is None and alone["web_tools_on_web_arm"] is True
+    # The plain arm offered a web tool: still false, whatever craze-web did.
+    leak = captures.fidelity("m", [_row("craze", [_run(web=("websearch",))]), _row("craze-web", [_run(web=both)])],
+                             "high", "w")
+    assert leak["web_tools_absent"] is False and leak["web_tools_on_web_arm"] is True
+    # One model per run reads the web arm's runs too.
+    other = captures.fidelity("m", [_row("craze", [_run()]), _row("craze-web", [_run(web=both, served=("x",))])],
+                              "high", "w")
+    assert other["one_model_per_run"] is False and other["one_model_failures"] == ["craze-web: r"]
+    # A model without web-arm runs gets exactly the keys it always did.
+    assert "web_tools_on_web_arm" not in captures.fidelity("m", [_row("craze", [_run()])], "high", "w")
+    md = captures.render_markdown({"batch": "b", "sealed": True, "models": {
+        "m": {"harnesses": [_row("craze-web", [_run(web=both)])], "fidelity": alone},
+        "n": {"harnesses": [_row("craze", [_run()])], "fidelity": captures.fidelity("n", [_row("craze", [_run()])],
+                                                                                    "high", "w")}}})
+    assert md.count("web arm (craze-web) offered webfetch and websearch alone: True") == 1
+
+
 def test_glm_thinking_flag_needs_evidence():
     oc = _row("opencode", [_run(main=0, req=(), served=())])
     assert captures.fidelity("glm-5.3", [oc], "max", "glm-5.3")["opencode_glm_thinking_flag"] == captures.NO_EVIDENCE

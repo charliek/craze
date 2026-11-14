@@ -12,12 +12,15 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from crazeeval import paths
+from crazeeval import paths, webcorpus
 
 IMPLEMENTATION = {"bugfix", "feature", "refactor", "multi-step"}
 ANSWER_LIKE = {"explain", "answer", "plan"}
 CATEGORIES = IMPLEMENTATION | ANSWER_LIKE | {"investigate", "verify"}
-SPLITS = {"dev", "heldout", "smoke"}
+# web (craze plan 051 E4): tasks whose decisive facts are only in their corpus, run on
+# craze and craze-web; never in the default selection, nor in split:all.
+WEB_SPLIT = "web"
+SPLITS = {"dev", "heldout", "smoke", WEB_SPLIT}
 MODES = {"build", "plan"}
 CHECK_TYPES = {
     "facts",
@@ -66,6 +69,13 @@ class Task:
     # A craze-repo task's commit: ``[repo] commit`` when the task pins one, else
     # paths.CRAZE_TEMPLATE_COMMIT (resolved at load). None for a fixture task.
     commit: str | None = None
+    # A web task's corpus (its directory under testdata/ and its pages, parsed at load),
+    # the corpus files holding its decisive facts, and the strings a solution must
+    # contain (validate.web_lint). None and empty for every other task.
+    corpus: Path | None = None
+    web_corpus: webcorpus.Corpus | None = None
+    relevant: list[str] = field(default_factory=list)
+    needs: list[str] = field(default_factory=list)
 
     @property
     def repo_name(self) -> str:
@@ -159,7 +169,7 @@ def load_task(d: Path) -> Task:
             raise TaskError(f"{tid}: {c['name']}: shared_helper needs callers and markers")
         if c["type"] == "tests":
             expect = c.get("expect")
-            if not isinstance(expect, list) or not expect or not all(isinstance(x, str) and x for x in expect):
+            if not _nonempty_strings(expect):
                 raise TaskError(f"{tid}: {c['name']}: expect must name the test ids that must run and pass")
     prompt = (doc.get("prompt") or "").strip()
     if not prompt:
@@ -189,7 +199,40 @@ def load_task(d: Path) -> Task:
         t.setup_patch = t.testdata(setup)
         if not t.setup_patch.exists():
             raise TaskError(f"{tid}: setup patch {setup!r} missing")
+    _load_web(t, doc)
     return t
+
+
+def _nonempty_strings(v) -> bool:
+    return isinstance(v, list) and bool(v) and all(isinstance(x, str) and x for x in v)
+
+
+def _load_web(t: Task, doc: dict) -> None:
+    """A web task's ``corpus``, ``relevant`` and ``needs`` (craze plan 051 E4): all three
+    required on the web split, none allowed elsewhere."""
+    keys = [k for k in ("corpus", "relevant", "needs") if k in doc]
+    if t.split != WEB_SPLIT:
+        if keys:
+            raise TaskError(f"{t.id}: {', '.join(keys)} belong(s) to a web-split task only")
+        return
+    if t.repo_kind != "fixture":
+        raise TaskError(f"{t.id}: a web task runs on a fixture")
+    if not isinstance(doc.get("corpus"), str) or not doc["corpus"]:
+        raise TaskError(f"{t.id}: a web task names its corpus directory")
+    if not _nonempty_strings(doc.get("relevant")) or not _nonempty_strings(doc.get("needs")):
+        raise TaskError(f"{t.id}: a web task lists its relevant corpus files and its needs")
+    if not t.harnesses or "craze-web" not in t.harnesses:
+        raise TaskError(f"{t.id}: a web task's harnesses include craze-web")
+    t.corpus = t.testdata(doc["corpus"])
+    try:
+        t.web_corpus = webcorpus.load_corpus(t.corpus)
+    except (webcorpus.CorpusError, OSError, UnicodeDecodeError) as e:
+        raise TaskError(f"{t.id}: corpus: {e}") from None
+    files = {p.file for p in t.web_corpus.pages}
+    if missing := [f for f in doc["relevant"] if f not in files]:
+        raise TaskError(f"{t.id}: relevant files not in the corpus: {missing}")
+    t.relevant = list(doc["relevant"])
+    t.needs = list(doc["needs"])
 
 
 def load_tasks(root: Path | None = None) -> dict[str, Task]:
@@ -203,14 +246,16 @@ def load_tasks(root: Path | None = None) -> dict[str, Task]:
 
 
 def select_tasks(all_tasks: dict[str, Task], spec: str | None) -> list[Task]:
-    """``spec``: comma-separated ids and/or ``split:<name>`` terms; default = dev+heldout."""
+    """``spec``: comma-separated ids and/or ``split:<name>`` terms; default = dev+heldout.
+    ``split:all`` is every split but web: a web task runs only when named, by its id or
+    ``split:web``, so no existing campaign's selection gains one."""
     if not spec:
         return [t for t in all_tasks.values() if t.split in ("dev", "heldout")]
     out: list[Task] = []
     for term in [s.strip() for s in spec.split(",") if s.strip()]:
         if term.startswith("split:"):
             name = term.split(":", 1)[1]
-            out += [t for t in all_tasks.values() if t.split == name or name == "all"]
+            out += [t for t in all_tasks.values() if t.split == name or (name == "all" and t.split != WEB_SPLIT)]
         elif term in all_tasks:
             out.append(all_tasks[term])
         else:

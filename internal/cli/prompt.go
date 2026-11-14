@@ -16,6 +16,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/tui"
 )
 
 const (
@@ -46,10 +47,14 @@ type promptOpts struct {
 	effort    string
 	fast      bool
 	noFast    bool
-	agentBin  string
-	provider  string
-	followUps []string
-	decisions []string
+	// webSearch and noWebSearch are --web-search and --no-web-search (plan
+	// 051 F.1): this run's web tools, whatever the home says.
+	webSearch   bool
+	noWebSearch bool
+	agentBin    string
+	provider    string
+	followUps   []string
+	decisions   []string
 	// pluginDirs are extra plugin roots, cursor-agent's --plugin-dir spelled
 	// the same way. They are craze's own: the child agent is never told.
 	pluginDirs []string
@@ -138,6 +143,7 @@ func newPromptCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an ACP model id (session/set_model after session/new), or a native model alias")
 	registerStartSettingFlags(cmd, &o.effort, &o.fast, &o.noFast)
+	registerWebSearchFlags(cmd, &o.webSearch, &o.noWebSearch, "")
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
@@ -195,6 +201,11 @@ func (o *promptOpts) agentOptions(ws string, approval *agent.ApprovalPolicy, pro
 		Provider:        prov,
 		Compat:          compatClaude(o.stderr),
 		ProviderRetries: providerRetries(o.stderr),
+		WebSearch:       tui.ConfigWebSearch(),
+		// Given now, for an unattended run (Interactive is false): the
+		// native session decides with it at Open, as the check in run did.
+		WebFlag:       webFlag(o.webSearch, o.noWebSearch),
+		WebFlagOrigin: agent.WebFlagGiven,
 		// Headless craze has one stream for its own notes, stderr, as it
 		// does for discoverPlugins' (Options.Diag falls back to it).
 		JournalDir: journalDir(o.stderr),
@@ -207,6 +218,9 @@ func (o *promptOpts) run() (retErr error) {
 	}
 	if o.fast && o.noFast {
 		return usagef("craze: --fast and --no-fast are mutually exclusive")
+	}
+	if o.webSearch && o.noWebSearch {
+		return webFlagsExclusive("craze")
 	}
 	for _, d := range o.decisions {
 		if _, err := decisionKind(d); err != nil {
@@ -230,6 +244,16 @@ func (o *promptOpts) run() (retErr error) {
 		return err
 	}
 	if err := refuseInProcess("craze", resolved.Provider, o.agentBin, o.mode()); err != nil {
+		return err
+	}
+	// A --web-search that cannot be honoured (plan 051 F.2, S4): exit 1
+	// before any session is built or provider called — the run is unattended
+	// — said on stderr and, under --json, as the startup error event, which
+	// carries no kind or detail.
+	if err := webStartCheck("craze prompt", webFlag(o.webSearch, o.noWebSearch), agent.WebFlagGiven, false, resolved.Provider); err != nil {
+		if o.json {
+			writeErrorEvent(o.stdout, err)
+		}
 		return err
 	}
 	// The one line a start that may sit unanswered says before it starts

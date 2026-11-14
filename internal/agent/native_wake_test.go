@@ -62,6 +62,8 @@ type wakeSeams struct {
 	log     *logHooks
 	observe func(Event)
 	reload  func(stage string)
+	// env is set in the fixture's environment before the session starts.
+	env map[string]string
 }
 
 // newWakeRig starts the session; seam, when set, is the worker's wakeSeam.
@@ -74,6 +76,9 @@ func newWakeRig(t *testing.T, opts Options, seam func()) *wakeRig {
 func newWakeRigWith(t *testing.T, opts Options, seams wakeSeams) *wakeRig {
 	t.Helper()
 	f, r := routedNative(t)
+	for k, v := range seams.env {
+		f.env[k] = v
+	}
 	opts.Interactive = true
 	rig := &wakeRig{t: t, f: f, a: r["test/a"], decided: make(chan bool, 64), pending: make(chan struct{}, 64)}
 	models := f.edit

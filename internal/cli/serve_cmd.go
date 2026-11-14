@@ -227,6 +227,9 @@ func newServeCmd() *cobra.Command {
 // (registerSessionFlags), then serve's own.
 func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	registerSessionFlags(cmd, &f.tuiFlags)
+	// serve's alone of the session's (plan 051 F.1): a new session's web
+	// search choice, which the root never takes — a person's session asks.
+	registerWebSearchFlags(cmd, &f.webSearch, &f.noWebSearch, "")
 	cmd.Flags().StringVar(&f.load, "load", "",
 		"load this session: its craze session id, or <provider>:<session id> for one craze has given none")
 	cmd.Flags().StringVar(&f.log, "log", "",
@@ -312,6 +315,12 @@ func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Si
 	}
 	if f.cont && load != nil {
 		return usagef("craze serve: --continue and --load are mutually exclusive")
+	}
+	if w := f.webSearchSetting(); w != agent.WebFlagAbsent && (f.cont || load != nil) {
+		// The choice is the session's, made when it was created and recorded
+		// on its row (plan 051 F.3): a load applies the row's, and a command
+		// line cannot change it.
+		return usagef("craze serve: --%s is a new session's: a loaded session keeps the web search choice it was created with", webFlagName(w))
 	}
 	hostID, err := f.hostIdentity()
 	if err != nil {
@@ -552,6 +561,16 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	if f.unattended {
 		unattendedPolicy(&opts)
 	}
+	// The web search decision's refusals (plan 051 F.2, S3), now that the
+	// unattended policy has said whether anybody attends the session: a
+	// new session's flag, asked already before its id was minted (refuse),
+	// and a load's recorded one (sessionOptions, from the row claimLoad
+	// took) — refused for a reload nobody attends, and let through for a
+	// person's resume, which opens without web tools and says why. A refusal
+	// is the session asked for refused, so the ready line carries it.
+	if err := webStartCheck("craze serve", opts.WebFlag, opts.WebFlagOrigin, opts.Interactive, p); err != nil {
+		return refusedChoice(err)
+	}
 	// A start that fails leaves the session listable and attachable until
 	// the host stops (plan 030 C5): its log stays open, so a client attached
 	// while it started is sent the failure (the ready notification's failed
@@ -587,6 +606,16 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		engOpts.Index.Unattended = f.unattendedRecord()
 		engOpts.AsksDoNotPin = true
 	}
+	// The session's web search choice goes on every row it writes (plan 051
+	// F.3), attended or not — so not in the unattended record above, whose
+	// presence marks a session unattended — and every load applies it
+	// (sessionOptions). It is the effective one sessionOptions settled: a new
+	// session's flag, or a load's recorded choice, which no command line
+	// carries again (serveBody refuses the flags). A load's host writes it
+	// too, so a row the index's cap evicted while the session ran, or before
+	// its first write, is recreated with it rather than without (C6 review
+	// F2).
+	engOpts.Index.WebSearch = opts.WebFlag.String()
 	// The index writes the same title as the user's once the session has its
 	// id (plan 043 P10): the row is pinned to it, as after a /rename.
 	engOpts.Index.Title = title

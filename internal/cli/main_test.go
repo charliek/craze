@@ -12,6 +12,7 @@ import (
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/websearch"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/rundir"
 )
@@ -86,6 +87,12 @@ func TestMain(m *testing.M) {
 	// whenever a key funds the provider, and a test that funds it without a
 	// fake of its own (t.Setenv over this) gets a refused connection here.
 	_ = os.Setenv(messagesapi.TestAPIEnv, chatgptFence)
+	// The web search (plan 051 §B) the same way: its key is not a catalog
+	// name, so it is unset by name, and its endpoint is aimed at the fence,
+	// so a session offered the web tools without a fake of its own gets a
+	// refused connection instead of reaching Exa.
+	_ = os.Unsetenv(modeltable.ExaKeyEnv)
+	_ = os.Setenv(websearch.TestEndpointEnv, chatgptFence+"/mcp")
 	// The macOS login session is pinned to the GUI's for the package and
 	// every test child it starts (plan 036): the provider availability check
 	// marks cursor unavailable outside it, so on a Mac runner whose session

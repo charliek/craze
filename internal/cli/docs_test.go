@@ -178,7 +178,7 @@ func TestCLIReferenceDocumentsEveryCommandAndFlag(t *testing.T) {
 }
 
 // structJSONKeys is every JSON key of t's fields, and of the structs they hold
-// (through pointers and slices), each once.
+// (through pointers and slices) or embed untagged, each once.
 func structJSONKeys(t reflect.Type, into map[string]bool) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
 		t = t.Elem()
@@ -189,6 +189,11 @@ func structJSONKeys(t reflect.Type, into map[string]bool) {
 	for i := range t.NumField() {
 		f := t.Field(i)
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if f.Anonymous && name == "" {
+			// Its members are the struct's own on the wire.
+			structJSONKeys(f.Type, into)
+			continue
+		}
 		if name == "" || name == "-" {
 			continue
 		}
@@ -207,11 +212,11 @@ func TestCLIReferenceNamesEveryModelsKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := map[string]bool{}
-	for _, v := range []any{modelsDoc{}, modelsMiss{}, failureBody{}, errorDetail{}} {
+	for _, v := range []any{modelsDoc{}, modelsMiss{}, failureBody{}, errorDetail{}, resultWebSearch{}} {
 		structJSONKeys(reflect.TypeOf(v), keys)
 	}
 	for _, k := range []string{warningModelDeprecated, reasonModelUnknown, reasonModelRetired, reasonEffortNotOffered, reasonFastNotOffered,
-		modelActive, modelDeprecated, sourceCatalog, sourceAccount, sourceUser, authByKey, authBySignIn} {
+		modelActive, modelDeprecated, sourceCatalog, sourceAccount, sourceUser, authByKey, authBySignIn, "webSearch"} {
 		keys[k] = true
 	}
 	for k := range keys {
@@ -219,7 +224,7 @@ func TestCLIReferenceNamesEveryModelsKey(t *testing.T) {
 			t.Errorf("docs/reference/cli.md does not name %q", k)
 		}
 	}
-	if !keys["warnings"] || !keys["replaced_by"] || !keys["unverifiable"] || !keys["accountModels"] {
+	if !keys["warnings"] || !keys["replaced_by"] || !keys["unverifiable"] || !keys["accountModels"] || !keys["urlsTruncated"] || !keys["capabilities"] {
 		t.Fatalf("premise: the walk missed keys: %v", keys)
 	}
 }

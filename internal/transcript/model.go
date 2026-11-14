@@ -187,11 +187,36 @@ type Turn struct {
 	// (agent.StepRetryInfo.Total), kept once the turn has ended, until the next
 	// starts. A waiter that attaches after a retry reads it here.
 	Retries int
+	// WebSearch is the web tally of the turn it names (plan 051 F.4.3): the
+	// last webSearch section a delta carried, stamped with the id of the turn
+	// running in the log as it arrived — a running foreign bracket's, else
+	// the engine turn's — and replacing whatever was held. Reset at each
+	// turn's start (a started, a running bracket) and kept once the turn has
+	// ended, until the next starts: Retries' lifetime. nil when none. The
+	// model's own copy; every projection hands out a deep copy (Mirror, the
+	// snapshot's cut, Restore).
+	WebSearch *TurnWebSearch
 	// Truncated reports that the snapshot this model was restored from
 	// carried only the head of Text, over ItemCap (plan 024 §3.5), so a
 	// client can say so. A model folded from the event stream never sets it;
 	// the next turn started replaces Text whole.
 	Truncated bool
+}
+
+// TurnWebSearch is a turn's web tally as the fold stamped it: the turn it is
+// (a turn's or a foreign bracket's id, of the stream's incarnation) and the
+// tally.
+type TurnWebSearch struct {
+	TurnID string
+	agent.WebSearchState
+}
+
+// clone is a copy of w that shares nothing with it, nil for nil.
+func (w *TurnWebSearch) clone() *TurnWebSearch {
+	if w == nil {
+		return nil
+	}
+	return &TurnWebSearch{TurnID: w.TurnID, WebSearchState: *w.Clone()}
 }
 
 // Settings is every StateDelta section as the last delta that carried it left
@@ -737,6 +762,9 @@ func (m *Model) cutLocked() cut {
 	}
 	// The catalog likewise, its list included (plan 034 §3.4).
 	c.settings.Catalog = cloneCatalog(m.settings.Catalog)
+	// And the turn's web tally, its URL list included (plan 051 F.4.3): the
+	// turn is copied by value, which would share the pointer.
+	c.turn.WebSearch = m.turn.WebSearch.clone()
 	// And the slash catalog (plan 043 P6): State and Snapshot each hand out
 	// rows of their own, and the snapshot's caps (capSlash) drop rows from
 	// the cut's copy, never the model's.

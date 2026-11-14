@@ -406,6 +406,15 @@ type StateDelta struct {
 	// reloaded has sent none (its list is the one it started with, revision
 	// 0).
 	Catalog *CatalogState
+	// WebSearch is the open turn's web tally (plan 051 F.4.3): the native
+	// session's count of the web service's calls whose reports reached it
+	// while the turn's window was open, cumulative — each delta carries the
+	// whole tally so far, and REPLACES what a fold holds; it never adds. It
+	// names no turn: a fold stamps it with the turn running in the log as it
+	// arrives (a running foreign bracket's id first, else the engine turn's).
+	// Only a native session sends one, and only inside a turn's window; no
+	// ACP session ever does. The delta's own copy, never written after.
+	WebSearch *WebSearchState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it
 	// may stand alone, with every section nil: that is a delta whose news is the
@@ -503,6 +512,37 @@ type UsageState struct {
 	ContextWindow int64
 	Turn          Spend
 	Session       Spend
+}
+
+// WebSearchState is a turn's web tally (plan 051 F.4.1): completion-window
+// activity accounting, not provenance of an answer. Searches and Fetches are
+// the calls the web service handled whatever their outcome, and Failed those
+// that returned an error. URLs are the URLs of successful results, with the
+// provider key scrubbed and, as this value was published, every key the
+// session's redactor had held at any report or publication of the session
+// so far redacted (native_webtally.go) — each cut to at
+// most 500 bytes at a UTF-8 boundary, listed once each, first seen first, at
+// most 100; URLsTruncated says a URL was cut or left out, or two were folded
+// into one that a later key could tell apart.
+type WebSearchState struct {
+	Searches, Fetches, Failed int
+	URLs                      []string
+	URLsTruncated             bool
+}
+
+// Empty says the tally counts nothing.
+func (w WebSearchState) Empty() bool {
+	return w.Searches == 0 && w.Fetches == 0 && w.Failed == 0 && len(w.URLs) == 0 && !w.URLsTruncated
+}
+
+// Clone is a copy of w that shares nothing with it: its own URL list.
+func (w *WebSearchState) Clone() *WebSearchState {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	c.URLs = slices.Clone(w.URLs)
+	return &c
 }
 
 // Spend is a sum of token usage and what it cost: the token counts, as the
@@ -1174,6 +1214,24 @@ type Options struct {
 	// (harness.Options.ProviderRetries): nil is the harness's default. Only a
 	// native session reads it; an ACP agent keeps its own retries.
 	ProviderRetries *int
+	// WebSearch is config.toml's `websearch` (plan 051 §C.1), which the CLI
+	// reads (tui.ConfigWebSearch): half of whether a native session is
+	// offered the web tools (DecideWeb). The zero value is no key, which
+	// defers to the remembered choice. Only a native session reads it, and
+	// says the reading's line (an invalid or unreadable value) when it opens:
+	// the CLI says nothing about it.
+	WebSearch WebConfig
+	// WebFlag is --web-search (on) or --no-web-search (off), or neither
+	// (plan 051 F.1), and WebFlagOrigin where it came from (F.3): given on the
+	// command line that starts this session, or recorded on the row of the
+	// session it loads (sessions.Row.WebSearch). A native session decides
+	// its web tools from them at Open (DecideWeb), with Interactive as the
+	// final word on whether a person is opening it: a flag that cannot be
+	// honoured fails the start, except a recorded on that a person resumes,
+	// which opens without web tools and says why. Every other provider
+	// ignores them; the CLI refuses --web-search for one before it starts.
+	WebFlag       WebFlag
+	WebFlagOrigin WebFlagOrigin
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for
@@ -1568,6 +1626,40 @@ type SlashCataloger interface {
 // the assertion trusted alone.
 type EffortFactser interface {
 	PublishesEffortFacts() bool
+}
+
+// WebSearcher is a session that may offer the web tools (plan 051 F.4.3):
+// the native session. WebSearch answers whether websearch and webfetch were
+// in this incarnation's tool list at Open — offered, whatever a consent card
+// answered since — and known, false until Open has decided. Like
+// EffortFactser it is optional and found by a type assertion: an ACP session
+// does not implement it, and its info document carries no webSearch.
+type WebSearcher interface {
+	WebSearch() (offered, known bool)
+}
+
+// WebTallyFreezer is a session that keeps a turn's web tally (plan 051
+// F.4.2): the native session. The engine's Close calls FreezeWebTally once,
+// under its own lock, after it raised the admission fence and before it
+// enqueues the synthetic closing ending of the turn it finds running —
+// turnCurrent says it found one. The session publishes the tally a waiter on
+// that turn must hold (the open window's, or the released prompt's while
+// turnCurrent) through the log's outbox, ahead of the ending in the same
+// FIFO, then counts nothing more: the close's cutoff.
+//
+// The engine's settlement calls RestateWebTally the same way, under its own
+// lock and before it enqueues the turn's ended: the session publishes the
+// released prompt window's tally once more, through the same outbox, so a
+// waiter whose cursor fell after the release's restatement — in the gap
+// before the settlement — still meets the count ahead of the ending. It
+// freezes nothing.
+//
+// Both take only the session's own lock and the outbox's leaf, and never
+// block or flush. Optional, found by a type assertion as ModelsRefresher is:
+// a session without it is settled and closed as before.
+type WebTallyFreezer interface {
+	FreezeWebTally(turnCurrent bool)
+	RestateWebTally()
 }
 
 // ErrAsideUnsupported is a side question to a session that has none: one

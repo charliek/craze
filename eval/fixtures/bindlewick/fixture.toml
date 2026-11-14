@@ -1,0 +1,4 @@
+# T-W3 (web-changelog-migration): a client for a fictional library-circulation API, still
+# written against the API's version 1; what version 2 changed is only in the task's corpus.
+initial_message = "bindlewick: a small client for the Bindlewick Circulation API"
+initial_date = "2026-05-18T10:30:00+00:00"

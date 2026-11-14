@@ -377,6 +377,7 @@ with the same refusals in the same words, and:
 |------|-------------|
 | `--load` | Load a session by id instead of starting one: a craze session id, or `<provider>:<session id>` for an index row that has no craze id yet. It runs in the row's own workspace: an explicit `--workspace` naming another directory is exit 2, a row whose directory is gone is exit 1, and no such row is exit 1. `--provider` filters as it does for `-c` |
 | `--log` | Write the host's diagnostics, its crash output and the agent's stderr to this file, rotated once at 4 MiB (default: stderr) |
+| `--web-search`, `--no-web-search` | A new session's [web search](#web-search-flags): offer a native session the web tools, or offer none, whatever the home says. The TUI does not take them. Both together exit 2; either with `--load` or `--continue` exit 2 (a loaded session keeps the choice it was created with). `--web-search` that cannot be honoured is exit 1, kind `config`, before anything is claimed. The choice is recorded on the session's row, attended or not |
 
 `--host-id` and `--no-host-status` also exist, hidden: the spawner passes them
 (the id it minted for the host, and the launching TUI's host-status choice).
@@ -409,6 +410,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--effort` | Effort to start at, where the model offers an effort setting: a level's id or name, matched as the TUI's `--effort` is (see [Flags](#flags)). Set after `--model` and before the first prompt; applies to this run only |
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one; neither leaves it as the model has it. Both together exit 2 |
+| `--web-search`, `--no-web-search` | Offer this run's native session the web tools, or offer none, whatever the home says ([web search](#web-search-flags)). Both together exit 2. `--web-search` that cannot be honoured (an explicit off in `config.toml`, a provider other than native) is exit 1 before any provider is called: the message on stderr and, with `--json`, the `error` event; `--no-web-search` is never refused |
 | `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
@@ -1018,8 +1020,9 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--load <id>` | Reopen a saved session through the hub instead of starting one ([below](#craze-new-load)): an id [`craze ps --saved`](#saved-sessions) prints, or a whole one |
 
 `--timeout`, `--max-message`, `--prompt-file`, `--remove-prompt-file`,
-`--plan` and `--ask` are `--wait`'s alone: without it each is a usage error
-(`craze new: --plan needs --wait`, exit 2).
+`--plan`, `--ask`, `--web-search` and `--no-web-search` are `--wait`'s alone:
+without it each is a usage error (`craze new: --plan needs --wait`, exit 2). A
+session plain `craze new` starts is a person's, whose web search asks.
 
 The session's host finds its agent binary as a session the list starts for
 another provider does — `[agents]` in `config.toml`, then `PATH`: a hub never
@@ -1182,9 +1185,11 @@ result — `{"session": <roster row>, "joined": …}` — on one line. Like plai
 `craze new`, it never reads stdin. A prompt, and `--prompt-file`,
 `--provider`, `--model`, `--effort`, `--fast`, `--no-fast`, `--no-force`,
 `--title`, `-C`/`--dir`, `--wait`, `--plan`, `--ask`,
-`--timeout` and `--max-message`, are usage errors, exit 2 (`craze new: --load
+`--timeout`, `--max-message`, `--web-search` and `--no-web-search`, are usage
+errors, exit 2 (`craze new: --load
 does not take --provider: a reopened session keeps its own`): a reopened
-session keeps its own directory, provider and settings.
+session keeps its own directory, provider and settings (its web search
+choice included).
 
 It waits up to **4 minutes** for the hub's answer (the hub's own bound is
 180 s). A refusal is the hub's words on one line, exit 1: a session whose
@@ -1203,6 +1208,16 @@ reopen a saved session; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, exit 1: nothing
 is sent to it. A `spawn_failed` from a hub of another craze version gets the
 same upgrade remedy as plain `craze new`'s.
+
+A session whose row records a [web search choice](#web-search-flags) needs a
+hub whose hosts apply it (its `hello` says
+[`reopenWebSearch`](protocol.md#the-hubs-result)): a hub starts its hosts from
+its own executable, so one still running from before the record — an older
+craze that outlived an upgrade — would open the session without the choice.
+Such a hub is `this hub (craze <v>) cannot reopen a session created with
+--web-search or --no-web-search; it exits once no session runs and no client
+is connected, or stop it now with kill <pid> (no session ends)`, exit 1, and
+nothing is sent to it; it still reopens a session that records none.
 
 ### craze new --wait
 
@@ -1259,6 +1274,7 @@ the settings it started with.
 | `--provider <id>` | The session's provider; without it `provider` in `config.toml`, and with none configured exit 1 (`no default provider yet; pass --provider …`) |
 | `--model`, `--effort`, `--fast` / `--no-fast`, `--no-force` | As plain `craze new`'s, but on the native provider `--model`, an explicit `--effort` and `--fast` are [checked before the host starts](#model-checks): a model that is not there, an effort the model does not list, and `--fast` are refused, exit 1 |
 | `--title <title>` | As plain `craze new`'s: the session's name from its start, pinned, normalized the same way (one that comes to nothing is a usage error). No hub is asked, so no hub's `createTitle` is needed: the host this starts is named directly |
+| `--web-search`, `--no-web-search` | Offer the native session the web tools (`websearch`, `webfetch`), or offer none, whatever the home says ([below](#web-search-flags)); recorded for every later load. Both together exit 2. `--web-search` that cannot be honoured is [refused](#model-checks) before the prompt is read and before any host starts, exit 1 |
 | `--plan`, `--ask` | Start in plan or ask mode — for a native session, `--ask` refuses edits and the shell, and `--plan` refuses edits but the agent's own plan file and lets the shell through; a task that says "read-only" is a request, not a rule. **The turn ends at the plan, on every provider**: the result is `completed` with the plan (`plan`), the session still in plan mode. A native session accepts its own plan and stops; on cursor and grok craze accepts nothing — it answers the plan cancelled and ends the turn (its stop reason `cancelled`, the plan auto-answered `returned`) — since an ACP agent told its plan is accepted goes on to carry it out. A plain `craze wait` afterwards reports such a turn the same way while its host still holds the turn's events, and `cancelled` once it does not; `craze wait --from <handle>` — the handle `craze send` prints — recognises it whenever its replay is honoured |
 | `--prompt-file <path>` | Read the prompt from this file, `-` for stdin ([The prompt](#the-prompt)) |
 | `--remove-prompt-file` | Delete `--prompt-file`'s file once it has been read |
@@ -1297,15 +1313,17 @@ session`.
 
 #### Model checks
 
-On the native provider (`--provider native`, or `provider = "native"` in
-`config.toml`), the command checks what it was asked for against the native model
-table it loads itself — the one [`craze models`](#craze-models) reads — **before
-any host is spawned**, so a refusal starts no session and sends no request to a
-model provider. Each refusal is exit 1, kind `config`, with a `detail` a program
-reads instead of the message:
+The command checks what it was asked for **before any host is spawned**, so a
+refusal starts no session and sends no request to a model provider: a
+`--web-search` that cannot be honoured, on any provider, and on the native
+provider (`--provider native`, or `provider = "native"` in `config.toml`) the
+model, against the native model table it loads itself — the one [`craze
+models`](#craze-models) reads. Each refusal is exit 1, kind `config`, with a
+`detail` a program reads instead of the message:
 
 | `detail.reason` | When | Message |
 |-----------------|------|---------|
+| `web_search_not_offered` | `--web-search` cannot be honoured: the provider is not native, `config.toml` turns web search off (`websearch = false`, an invalid `websearch` value, or a `config.toml` craze cannot read), or `CRAZE_TEST_EXA_MCP` is not a loopback URL. Checked first — before the prompt is read, so `--prompt-file` (and `--remove-prompt-file`'s file) is left as it was — and it wins over a model refusal. `--no-web-search` is never refused | `--web-search cannot be honoured: config.toml turns web search off (websearch = false)`, or `… web search is a native provider feature` |
 | `model_unknown` | `--model` names no model (matched exactly as the session would match it, `<provider id>/<alias>` included) | `native: unknown model "<model>"; craze models lists the models` (a session's own start error, which a person reads, lists them) |
 | `model_retired` | `--model` names an alias the catalog retired; `detail.replaced_by` names the replacement when the catalog has one | `native: <alias> was retired; use <replacement>` — the replacement before anything else |
 | `effort_not_offered` | With `--model`, an `--effort` the model does not list (its levels in any case) | `--effort minimal: openai/gpt-6.1-sol offers low, medium, high, xhigh, max`, or `… has no effort control` |
@@ -1315,7 +1333,15 @@ reads instead of the message:
 {"error":{"message":"native: openrouter/gpt-6.1-sol was retired; use openrouter/gpt-sol-latest","kind":"config","retryable":false,"detail":{"reason":"model_retired","model":"openrouter/gpt-6.1-sol","replaced_by":"openrouter/gpt-sol-latest"}}}
 ```
 
-`detail.model` is always there on these four reasons: the model's alias as it
+`web_search_not_offered` carries the reason alone: no `detail.model`. If the
+host itself refuses `--web-search` (the config changed between the check and
+its start), the failure has the same message and no `detail`.
+
+```json
+{"error":{"message":"--web-search cannot be honoured: config.toml turns web search off (websearch = false)","kind":"config","retryable":false,"detail":{"reason":"web_search_not_offered"}}}
+```
+
+`detail.model` is always there on the four model reasons: the model's alias as it
 resolved, or as given when nothing did (only an alias's characters, at most 256
 bytes), and `""` when nothing was named (`--fast` with no `--model`) or the name
 held none of an alias's characters. `detail.replaced_by` is there only with
@@ -1335,6 +1361,35 @@ nothing, and the host then refuses the start as it always has (its own message,
 which lists the models for one that names nothing, with no `detail`). A stored session whose recorded `--model` has since been
 retired fails its reload on `craze send` with kind `config`, the replacement
 named; start a new session on it.
+
+#### Web search flags
+
+A native session's [web tools](configuration.md#native-web-search) —
+`websearch` and `webfetch`, through Exa — are decided when it opens. A session
+that answers its own questions, as this one does, is offered them only when
+someone has decided: `config.toml`, a remembered Allow from the TUI, or one of
+these flags, which `craze prompt` and `craze serve` take too:
+
+- **`--no-web-search`** guarantees no web tools. It beats any setting in the
+  home — `[websearch]` in `config.toml` and a remembered Allow — and is never
+  refused; on a provider other than native it changes nothing.
+- **`--web-search`** offers the tools, over a remembered Disable, with no
+  consent question and nothing remembered. **An explicit off in
+  `config.toml` beats it**: `websearch = false` (or an invalid `websearch`
+  value, or a `config.toml` that cannot be read) refuses it, exit 1,
+  [`web_search_not_offered`](#model-checks) — the command fails rather than run
+  without what it asked for. So does a provider other than native.
+- **Neither**: the home decides — on with `[websearch]` in `config.toml` or a
+  remembered Allow, off otherwise (never asked: nobody would answer).
+
+Both together are a usage error, exit 2. The choice is the session's: its
+index row records it ([`webSearch`](configuration.md#session-index)), every
+later load applies it — [`craze send`](#craze-send)'s reload, `craze new
+--load`, `--continue`, `--resume`, the session list — and `craze send` has no
+flag to change it. A recorded `--web-search` that `config.toml` has since
+turned off fails `craze send`'s reload, exit 1, kind `config`, until the
+config changes; a person resuming the session in the TUI gets it without web
+tools and one line saying why.
 
 ### Ending with the turn
 
@@ -1621,6 +1676,13 @@ any session's host, until its [idle exit](configuration.md#host-idle-exit)
 (an interactive one's `host_idle_exit`, an unattended one's
 `host_idle_exit_unattended`) or `craze stop`.
 
+A reloaded session keeps the [web search choice](#web-search-flags) it was
+created with (its row's `webSearch`): `craze send` has no flag to change it. A
+recorded `--web-search` that `config.toml` has since turned off fails the
+reload of a session `craze new --wait` started, exit 1, kind `config`, the
+host's words (`this session was created with --web-search, which cannot be
+honoured: …`), until the config changes.
+
 | Flag | Description |
 |------|-------------|
 | `--wait` | Wait for the prompt's turn to end and print its result |
@@ -1753,7 +1815,9 @@ of it had a price; `+` when some did not) and how full the context is. Then,
 each when there is one: `usage:` (a step's spend [left out](#a-turn-cut-short)),
 `error:` (a failed turn, a stopped one, or one interrupted before its prompt was
 sent), [`files:`](#what-files-lists) (with `outside the workspace:` and `plan file:`
-when there are any), one
+when there are any), `web:` — the turn's [web calls](#web-search-counts), as
+`web: 1 search, 2 fetches`, with ` (1 failed)` after it when any failed, and only
+when the turn made one; its URLs are not printed — one
 `auto-answered:` line per question or plan craze's approval policy answered,
 `ask:` and `blocked by:` (`needs_input`), the session, and `next:` — the exact
 command to run next for a `running` or `needs_input` result; `session stopping`
@@ -1802,12 +1866,81 @@ model was resolved; and with a turn or a queued prompt, `turn` and/or `row`.
 | `messageCut` | `true` when the message was longer than 1 MiB: its end is kept |
 | `messageFile` | `--max-message`'s file, holding the whole result, when it cut or left out the message or the plan; `message` and `plan` are then what was kept |
 | `warnings` | [Model notices](#model-notices): `[{kind, model, replacedBy, message}]`, at most 8; absent when there are none |
+| `webSearch` | A native session's [web search](#web-search-counts): `{"offered": <bool>, "searches": n, "fetches": n, "failed": n, "urls": [...], "urlsTruncated": true}` — `offered` always, the turn's counts when it made web calls. Absent for a non-native session, a host older than this craze, and every exit-1 envelope |
 
-A key that does not apply is absent, never `null` or `false`:
+A key that does not apply is absent, never `null` or `false` — but for
+`webSearch`'s `offered`, which is always written, `true` or `false`, whenever
+`webSearch` is there (`usageComplete` is written only as `false`):
 
 ```json
-{"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"attach":"craze attach --session 175bfe79"}
+{"status":"completed","session":"0199c0de-1111-7000-8000-397e175bfe79","short":"175bfe79","provider":"native","model":"chatgpt/gpt-6.1-sol","turn":"turn-2","message":"The flaky test raced …","stopReason":"end_turn","toolCalls":5,"durationMs":27100,"files":["stats/core.py"],"usage":{"contextTokens":16590,"contextWindow":272000,"turn":{…},"session":{…}},"webSearch":{"offered":false},"attach":"craze attach --session 175bfe79"}
 ```
+
+### Web search counts
+
+A native session's result carries `webSearch` — on every status, from every
+command that waits (`craze wait`, `craze new --wait`, `craze send --wait`) — once
+the waiter has read a host of this craze. `offered` says the session's tool list
+held `websearch` and `webfetch` when it opened (web search on, or undecided with a
+person to ask); a consent card answered *Disable* since leaves it `true`. The
+rest is the target turn's tally, each member absent when zero or empty:
+
+| Member | |
+|--------|---|
+| `searches`, `fetches` | The web calls the session's web service handled, whatever their outcome — a call cancelled in flight and one that waited on the consent card included. A call refused before it reached the service (a bad or non-public URL) is an ordinary failed tool call and not counted; a retried step adds nothing |
+| `failed` | Those of them that returned an error: a provider error, a rate limit, a declined, disabled or cancelled consent, a cancellation in flight |
+| `urls` | The URLs of successful results: a search's result URLs in result order, and a fetch's requested URL when the page had text (never one parsed from the page). The provider key is scrubbed, and each publication of the count redacts from the URL as returned every key the session has held at any count or publication so far — a sub-agent's included, which stays covered after it ends (a key learned while a count is being published is covered from the next one); each is then cut to at most 500 bytes at a character's boundary, listed once, first seen first, at most 100 |
+| `urlsTruncated` | `true` when a URL was cut or left out, or two were folded into one that a later key could tell apart |
+
+**What the numbers mean.** They are activity accounting for the turn's window —
+the calls whose report reached the session while the turn ran, its sub-agents'
+included — and **not a statement of which sources an answer used**. Zero counts
+prove nothing about sources: a background sub-agent can search during one turn
+and deliver its result in a later one, which then reports none; a count does not
+mean the result reached the model (the call may be a child's whose result comes
+later, or never); and a background child's search counts in the turn it
+completed in, whichever turn started the child. Calls that finish while no turn
+runs are counted in the session's next turn — the wake that delivers a background
+result, or the next prompt.
+
+Where the counts are complete, and where they are not:
+
+| Result | `webSearch` |
+|--------|-------------|
+| `completed`, `failed`, `cancelled` (a close's `stopped` included) of a turn or a wake | `offered` and the turn's counts, complete up to the turn's cutoff: its end, or, for a turn a session's close cut short, the close (one exception, a window one event wide: *the one-event window*, below) |
+| `cancelled`, `stopped`, `partial`, no ending seen (the host's stop record names the turn, or no record and the host marked stopping) | `offered` and whatever was seen: no completeness promise |
+| `running` (`--timeout`) or `needs_input` of a turn | `offered` and the counts so far (a call waiting on the consent card is not counted yet) |
+| `running`, `needs_input` (`blockedBy`) or `dropped` of a queued prompt | `offered` alone: never the counts of the turn ahead of it |
+| `idle` with no last turn | `offered` alone |
+| `idle` with a last turn | that turn's, as above |
+
+A wait that attaches late is complete for a turn still running, or for the last
+one while no other has started; one whose turn's ending was missed and another
+turn has started is [`unobserved`](#failures-and-kinds) (exit 1) and carries no
+`webSearch`. A partial result settled from where the session stands may be
+short, never another turn's. A close is the cutoff: a call that finishes after it
+is in no result. The counts belong to the session's incarnation, as turn ids do:
+a reloaded session starts again from zero, and nothing is kept across a reload.
+
+**The one-event window.** A `running` result's handle can fall after the last
+event that carries the turn's counts: the session restates them just before the
+turn's ending (or the close's), but a snapshot is cut at a committed event, so a
+wait whose snapshot was cut exactly at that restating event and which timed out
+before the very next event gets a handle past it. A `craze wait --from` that
+handle, if the turn's ending is the first thing it reads (before it has caught
+up with the session and looked at it), returns the ending without the counts:
+`webSearch` is `offered` alone. The window is that one event wide, and the same
+for a prompt's turn, a wake and a close; a `--from` that catches up first, or
+any other timing, has the whole count.
+
+A wake that runs while a turn waits to be claimed (`craze prompt`'s turn held
+behind the agent's own, or any turn started while a wake held the session) is
+its own turn: its calls are never in that turn's result, whether the turn
+completes after it or the wait times out or the session closes while it runs.
+One exception: a `craze wait --from` whose handle lies inside such a wake, which
+times out or sees the session close before it has caught up with the session and
+before the wake's ending arrives, cannot tell the wake is running and can report
+the wake's counts as the turn's.
 
 ### Model notices
 
@@ -2127,12 +2260,13 @@ it is one object:
 `message` is for people, on one line. `kind` and `retryable` are for a program.
 `detail` is present only when there is more to say, and holds `status` (the
 provider's HTTP status), `provider_code` (its own short name for the failure),
-`cause` ([what began a stop](#what-began-a-stop)), and, on a model-shaped `config`
-failure of [`craze new --wait`'s checks](#model-checks) or [`craze
-models`](#craze-models), `reason` (`model_unknown`, `model_retired`,
-`effort_not_offered` or `fast_not_offered`, a closed set no other failure
-carries), `model` and `replaced_by`: names and numbers, never text, a key or a
-piece of a request. Consumers must ignore keys they do not know: a later craze may
+`cause` ([what began a stop](#what-began-a-stop)), and, on a `config` failure of
+[`craze new --wait`'s checks](#model-checks) or [`craze models`](#craze-models),
+`reason` (`model_unknown`, `model_retired`, `effort_not_offered`,
+`fast_not_offered` or `web_search_not_offered`, a closed set no other failure
+carries), with `model` and `replaced_by` on the four model reasons (never on
+`web_search_not_offered`): names and numbers, never text, a key or a piece of a
+request. Consumers must ignore keys they do not know: a later craze may
 add one. An ACP agent's JSON-RPC code is not an HTTP status, and is not reported
 as one.
 
@@ -2183,7 +2317,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | Kind | When | Retryable |
 |------|------|-----------|
 | `usage` | A flag or argument error (exit 2). At exit 1 too: an id several sessions match | false |
-| `config` | An unknown provider or model (on the native provider under `--wait`, a retired one, an `--effort` the model does not list or `--fast` too, each with a [`detail.reason`](#model-checks)), bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
+| `config` | An unknown provider or model (on the native provider under `--wait`, a retired one, an `--effort` the model does not list or `--fast` too, each with a [`detail.reason`](#model-checks)), a `--web-search` that cannot be honoured (under `--wait` with `detail.reason` `web_search_not_offered`; and a reload of a session whose recorded `--web-search` `config.toml` has since turned off), bad configuration (a native model table that will not load, or one a configured key clashes with), an id no session has, a `--session-file` that cannot be written | false |
 | `workspace` | `-C` is missing or not a directory | false |
 | `prompt` | The prompt is unreadable, empty or over 512 KiB (exit 2); or, exit 1, a prompt over 32 KiB that `craze send` gave a busy session, which the session refused ([The prompt](#the-prompt)) | false |
 | `start_failed` | The agent or host did not start | true |
@@ -2302,7 +2436,8 @@ craze auth list
 ```
 
 Manages the API keys of the [native provider](configuration.md#native-models-and-providers)'s
-model providers, and the [ChatGPT plan](configuration.md#the-chatgpt-plan)'s
+model providers, the native web search's key (`websearch/exa`, below), and the
+[ChatGPT plan](configuration.md#the-chatgpt-plan)'s
 sign-in. A key is stored as its provider's `api_key` in
 `native/providers.toml` in the craze directory (`~/.craze`, or `$CRAZE_HOME`),
 written at `0600`; a provider's environment variable, when it holds a usable
@@ -2318,12 +2453,29 @@ ChatGPT, so for it `login` [signs in](#signing-in-to-the-chatgpt-plan), `logout`
 signs out, and `list` shows the sign-in. Those talk to OpenAI's sign-in
 service, and nothing else does.
 
+The native [web search](configuration.md#native-web-search)'s Exa key is not a model
+provider's: it is named **`websearch/exa`**, and stored as `api_key` in the
+`[exa]` table of `native/credentials.toml` (`0600`), a file of its own beside
+`providers.toml` ([The stored web search key](configuration.md#the-stored-web-search-key)).
+`EXA_API_KEY`, when it holds a usable key, is used before it; with neither,
+the search uses Exa's keyless endpoint. `websearch/exa`, in any case, is always
+the search key — `login` and `logout` take it before `providers.toml` is even
+read, so a `providers.toml` craze cannot read never stops it being stored or
+removed. Bare `exa` (or `Exa`) means the same **unless a model provider has
+that id or display name**: then bare `exa` is that provider, exactly as any
+provider name is, and the search key is reached as `websearch/exa`. Which name
+reaches it changes nothing else: a search key stored before a provider named
+`exa` appeared keeps working, and stays removable as `websearch/exa`. Bare
+`exa` with a `providers.toml` craze cannot read fails as any provider name
+does (exit 1), and the error says to name it `websearch/exa`.
+
 A provider is named by its id or its display name, in any case: `fireworks`,
 `Fireworks`, `"z.ai coding plan"`. The providers are the
 [catalog's](configuration.md#the-shipped-catalog) and any of your own in
 `providers.toml` (a directory whose `models.toml` says
 [`catalog = false`](configuration.md#isolated-setups-catalog-false) has only
-its own). All three exit 1 when there is no craze directory (neither `HOME`
+its own). The usage errors that list what can be named end with
+`websearch/exa`. All three exit 1 when there is no craze directory (neither `HOME`
 nor `CRAZE_HOME` is set). An argument too many, or a flag a command does not
 take, is exit 2, and what was typed is not repeated back: it may be a key.
 
@@ -2380,6 +2532,38 @@ without a terminal, or a name that matches none, is exit 2; the name is not
 repeated back, in case what was typed there was the key. Another provider's
 stored key that cannot be used is kept as it is and named in a note on
 stderr, so it can be replaced or removed next.
+
+`craze auth login websearch/exa` (or `exa`, unshadowed) stores the web
+search's Exa key, read the same way — stdin's first line, or the no-echo
+prompt `Exa API key: `. On a terminal with nothing named, the numbered list
+has the web search after the providers, numbered on, under its own heading
+(`Web search:` / `8. Exa (websearch/exa)`); typing `websearch/exa` there picks
+the web search even when a model provider's display name is `websearch/exa`.
+The key is held to the same rules (empty, shorter than 8 bytes, or overlapping
+the redaction marker) and must be valid UTF-8 — otherwise exit 1, nothing
+saved, `the key for websearch/exa was not saved: …` — and only `api_key` in
+`[exa]` changes: every other table and key in the file — yours, or a later
+craze's — is written back, and the file is rewritten whole, at `0600`, under
+its own lock (`credentials.toml.lock`). A `credentials.toml` craze cannot read
+— not valid TOML, a symlink, not a regular file, larger than 1 MiB — or whose
+`exa` is not a table is refused (exit 1, nothing written), the error naming
+the file and the line or key, never a value.
+
+```bash
+printf '%s\n' "$EXA_KEY" | craze auth login websearch/exa
+```
+
+```text
+Saved the Exa web search key in /home/you/.craze/native/credentials.toml.
+EXA_API_KEY is set in this environment; craze uses it before the stored key.
+```
+
+The second line only when `EXA_API_KEY` holds a usable key; when it is set to
+one that cannot be a key, it says so instead (`EXA_API_KEY is set in this
+environment to a value that cannot be a key (it is shorter than 8 bytes);
+craze skips it and uses the stored key.`). A session already running keeps the
+search key it opened with: a key stored now is sent from the next session (the
+running one only learns it, to [redact](configuration.md#the-stored-web-search-key) it).
 
 #### Signing in to the ChatGPT plan
 
@@ -2558,6 +2742,15 @@ settings, under Apps. Not signed in, it prints `Not signed in to ChatGPT.`
 A key someone wrote for the plan in `providers.toml`, which it never uses, is
 removed as well.
 
+`craze auth logout websearch/exa` (or `exa`, unshadowed) removes the stored
+web search key, and only `api_key`: anything else in `[exa]`, and every other
+table, stays (an `[exa]` left empty is dropped). `Removed the stored Exa web
+search key.`, or `No stored Exa web search key.` — with no `credentials.toml`,
+nothing is written, not even the directory — then `Exa web search is still
+connected through EXA_API_KEY.` while that variable holds a usable key. A file
+craze cannot read, or whose `exa` is not a table, is refused as `login`
+refuses it.
+
 ### craze auth list
 
 One row per provider, by display name: its name, its id, and how it is
@@ -2576,7 +2769,20 @@ Meta              meta             stored key
 OpenAI            openai           env OPENAI_API_KEY
 OpenRouter        openrouter       not connected
 Z.AI Coding Plan  zai-coding-plan  not connected
+
+Web search
+Exa  websearch/exa  stored key
 ```
+
+After the providers, a blank line and a **Web search** section: one row per
+web search credential, by its full name — `env EXA_API_KEY`, `stored key`, or
+`no key (keyless endpoint)`, in the order the search takes them. A variable set
+to a value that cannot be a key is skipped, and shown: `stored key;
+EXA_API_KEY is set but unusable` (or `no key (keyless endpoint); EXA_API_KEY
+is set but unusable`), with a note naming the rule. The section needs only
+`credentials.toml` and the environment, so it is printed even when
+`providers.toml` cannot be read — then it is all of stdout, and the command
+still exits 1 with that file's error.
 
 `openai` is OpenAI's API on a key, billed per token
 ([OpenAI](configuration.md#openai)); `chatgpt` is the ChatGPT subscription. An
@@ -2584,8 +2790,10 @@ exported `OPENAI_API_KEY` connects `openai` as any provider's variable does,
 and its models run by name; but with no key stored as well, craze never
 chooses one of them for a new session on its own (`craze providers` says so).
 
-Then notes, on stderr, each starting `note: `: a stored key that cannot be
-used, an entry of yours that [repeats what craze
+Then notes, on stderr, each starting `note: ` and each said once: a stored key that cannot be
+used, a `credentials.toml` craze cannot read (or an entry in it of the wrong
+shape, or a stored web search key that cannot be one) — naming the file and
+the line or key, never a value — an entry of yours that [repeats what craze
 ships](configuration.md#how-the-files-merge) (delete it to follow craze's
 updates), the warnings a native session prints when it starts, one line for
 each maker whose models the [source
@@ -2792,7 +3000,7 @@ does not load (kind `config`), 2 for a usage error.
 ### The models document
 
 ```json
-{"schema":1,"crazeVersion":"0.2.0","models":[{"alias":"fireworks/kimi-k3","provider":"fireworks","maker":"","name":"Kimi K3 (Fireworks)","status":"deprecated","replacedBy":"fireworks/kimi-k3p1-pro","source":"catalog","efforts":["low","medium","high","xhigh","max"],"defaultEffort":"high","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":0,"state":{"funded":true,"offered":false}}],"retired":[{"alias":"openrouter/gpt-6.1-sol","replacedBy":"openrouter/gpt-sol-latest"}],"providers":[{"id":"chatgpt","name":"ChatGPT plan","auth":"sign-in","accountModels":"only"},{"id":"openai","name":"OpenAI","auth":"key","accountModels":"none"}]}
+{"schema":1,"crazeVersion":"0.2.0","models":[{"alias":"fireworks/kimi-k3","provider":"fireworks","maker":"","name":"Kimi K3 (Fireworks)","status":"deprecated","replacedBy":"fireworks/kimi-k3p1-pro","source":"catalog","efforts":["low","medium","high","xhigh","max"],"defaultEffort":"high","fast":false,"vision":true,"contextWindow":1048576,"defaultContext":0,"state":{"funded":true,"offered":false}}],"retired":[{"alias":"openrouter/gpt-6.1-sol","replacedBy":"openrouter/gpt-sol-latest"}],"providers":[{"id":"chatgpt","name":"ChatGPT plan","auth":"sign-in","accountModels":"only"},{"id":"openai","name":"OpenAI","auth":"key","accountModels":"none"}],"capabilities":{"webSearch":true}}
 ```
 
 | Key | |
@@ -2802,6 +3010,7 @@ does not load (kind `config`), 2 for a usage error.
 | `models` | One row a model, sorted by alias |
 | `retired` | The aliases the catalog retired, sorted: `alias`, and `replacedBy` when the catalog names a replacement. A retired alias is in no row, and `--model` refuses it — but for one exception the catalog has always had: a complete entry of your own in `models.toml` under a retired alias, pointing at a live provider and wire model, is your model ([retired models](configuration.md#retired-models)): it is a row, `source` `user`, and runs |
 | `providers` | The **model** providers, sorted by `id` — what [`craze auth list`](#craze-auth-list) lists, not the agent providers [`craze providers`](#craze-providers) lists |
+| `capabilities` | What this craze can do for a caller choosing among its models: `{"webSearch": true}` — it takes [`--web-search`](#web-search-flags) and reports a native turn's [web search counts](#web-search-counts) in a waiting command's result. The same in every form of the document (`--json` and `--shipped --json`; not `craze models <alias> --json`), and always `true` on a craze that has the key: a craze older than this one has no `capabilities` at all |
 
 Each row carries every key below, always, but `replacedBy` (a deprecated row's
 alone) and `state` (the local forms' alone):
@@ -2842,7 +3051,9 @@ retired: openrouter/gpt-6.1-sol (use openrouter/gpt-sol-latest)
 
 Each release publishes `craze models --shipped --json` as `models.json`, listed in
 its `checksums.txt`, with `crazeVersion` the release's own version: what a
-machine that pins a release can read before installing it.
+machine that pins a release can read before installing it — its `capabilities`
+included, so a caller can tell before installing whether that release reports web
+search.
 
 ## craze version
 

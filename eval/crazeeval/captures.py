@@ -10,9 +10,12 @@ licenses lever L4.
 
 It also runs the config-fidelity checks of AC-A8 before judging: reasoning-effort
 parity across harnesses (or the recorded difference), opencode's GLM ``thinking``
-flag, no web tool offered by any harness, one model per run (requested *and* served),
-and no contamination hit in an accepted run. A check with no main request to read is
-``no-evidence``, never true (review r1-c2 §9).
+flag, the web tools by arm (craze plan 051 E2: none offered by any harness but a web
+arm, ``web_tools_absent``; on a web arm -- craze-web -- craze's two web tools and no
+other, ``web_tools_on_web_arm``, a key present only when the model has web-arm runs),
+one model per run (requested *and* served), and no contamination hit in an accepted
+run. A check with no main request to read is ``no-evidence``, never true (review r1-c2
+§9).
 
 Held-out runs are read only with ``--unseal`` (their captures hold their answers).
 """
@@ -31,6 +34,7 @@ from crazeeval.capture import content_text
 from crazeeval.config import load_models
 from crazeeval.packet import attempt_dir
 from crazeeval.report import iter_results
+from crazeeval.runners import RUNNERS
 
 # What a request sends as its conversation, tools and system prompt, never a parameter:
 # ``system`` is the Messages API's top-level system prompt.
@@ -292,11 +296,35 @@ def _run_one_model(run: dict, wire_model: str | None) -> bool | str:
     return not wire_model or run["served_models"] == [wire_model]
 
 
+# The arms whose runs are offered web search (craze plan 051 E2: craze-web), and the web
+# tools such a run must be offered: craze's own two (internal/harness/tool/web.go), as
+# capture.web_tools names them.
+WEB_ARMS = frozenset(h for h, r in RUNNERS.items() if r.web)
+WEB_ARM_TOOLS = ["webfetch", "websearch"]
+
+
+def _run_web_tools_absent(run: dict) -> bool | str:
+    return False if run["web_tools_offered"] else (True if run["main_requests"] else NO_EVIDENCE)
+
+
+def _run_web_tools_on_web_arm(run: dict) -> bool | str:
+    """A web-arm run was offered craze's two web tools and no other web tool."""
+    if not run["main_requests"]:
+        return NO_EVIDENCE
+    return sorted(run["web_tools_offered"]) == WEB_ARM_TOOLS
+
+
 def fidelity(model_key: str, rows: list[dict], pinned_effort: str | None, wire_model: str | None) -> dict:
     """AC-A8 for one model. Every check needs main-request evidence from every run of
     every harness: a run with no main request makes a check ``no-evidence`` (review
-    r1-c2 §9), and a failing run makes it false."""
+    r1-c2 §9), and a failing run makes it false.
+
+    The web check is arm-aware (craze plan 051 E2): ``web_tools_absent`` reads every
+    harness's runs but a web arm's (None when the model ran on web arms alone), and
+    ``web_tools_on_web_arm``, present only when the model has web-arm runs, reads theirs."""
     runs = [(r["harness"], run) for r in rows for run in r.get("per_run") or []]
+    plain = [run for h, run in runs if h not in WEB_ARMS]
+    web_arm = [run for h, run in runs if h in WEB_ARMS]
     covered = {r["harness"]: bool(r.get("per_run")) and all(x["main_requests"] for x in r["per_run"]) for r in rows}
     eff = {r["harness"]: (r.get("effective_efforts") if covered[r["harness"]] else NO_EVIDENCE) for r in rows}
     if not rows or not all(covered.values()):
@@ -308,18 +336,22 @@ def fidelity(model_key: str, rows: list[dict], pinned_effort: str | None, wire_m
     if "glm" in model_key and oc is not None:
         tf = oc.get("thinking_flag") or {"requests": 0, "with_flag": 0}
         thinking = NO_EVIDENCE if not tf["requests"] or not covered["opencode"] else tf["with_flag"] == tf["requests"]
-    web = [False if run["web_tools_offered"] else (True if run["main_requests"] else NO_EVIDENCE) for _, run in runs]
-    return {
+    absent = None if web_arm and not plain else _combine([_run_web_tools_absent(run) for run in plain])
+    out = {
         "pinned_effort": pinned_effort,
         "main_request_coverage": {h: ok for h, ok in covered.items()},
         "effort_by_harness": eff,
         "effort_parity": parity,
         "opencode_glm_thinking_flag": thinking,
-        "web_tools_absent": _combine(web),
+        "web_tools_absent": absent,
         "one_model_per_run": _combine([_run_one_model(run, wire_model) for _, run in runs]),
         "one_model_failures": [f"{h}: {run['run']}" for h, run in runs if _run_one_model(run, wire_model) is False][:10],
         "no_contamination_in_accepted_runs": all(not r.get("contaminated_accepted_runs") for r in rows),
     }
+    if web_arm:
+        # Additive: a model with no web-arm run reports exactly the keys it always did.
+        out["web_tools_on_web_arm"] = _combine([_run_web_tools_on_web_arm(run) for run in web_arm])
+    return out
 
 
 def build(batch: Path, out_dir: Path, unseal: bool = False) -> dict:
@@ -348,6 +380,9 @@ def render_markdown(rep: dict) -> str:
               f"{', '.join(f'{h}: {v}' for h, v in f['effort_by_harness'].items())})",
               f"- web tools absent: {f['web_tools_absent']}; one model per run: {f['one_model_per_run']}; "
               f"no contamination in accepted runs: {f['no_contamination_in_accepted_runs']}"]
+        if "web_tools_on_web_arm" in f:
+            L.append(f"- web arm ({', '.join(sorted(WEB_ARMS))}) offered {' and '.join(WEB_ARM_TOOLS)} alone: "
+                     f"{f['web_tools_on_web_arm']} (web tools absent above reads every other harness)")
         if f["opencode_glm_thinking_flag"] is not None:
             L.append(f"- opencode's GLM thinking flag on every request: {f['opencode_glm_thinking_flag']}")
         L += ["", "| harness | prompt bytes | sha256 | env (ws/date/git/os/shell) | tools | desc bytes | "

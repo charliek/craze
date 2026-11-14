@@ -1199,3 +1199,63 @@ func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
 		t.Fatalf("a new session took an old identity: %q", fresh)
 	}
 }
+
+// TestTheRecordedWebSearchTravelsEveryLoadPath: the in-process TUI's engine
+// writes a loaded session's recorded web search choice (sessions.Row.WebSearch,
+// plan 051 F.3) on every row it writes, as craze serve --load's does —
+// --continue's through Config.WebSearch, the resume picker's from the row it
+// chose — so a row the index's cap evicted while the session ran is recreated
+// with it, not without (C6 review F2). A new session, which the in-process TUI
+// starts with no web flag, writes none.
+func TestTheRecordedWebSearchTravelsEveryLoadPath(t *testing.T) {
+	isolateSkillsHome(t)
+	// titled is the row s's engine writes once its agent titles it.
+	titled := func(t *testing.T, idx *fakeIndex, s *Stub) sessions.Row {
+		t.Helper()
+		n := idx.count()
+		s.Emit(agent.Event{Type: agent.EventMeta, Text: "a title after the eviction"})
+		waitRows(t, idx, n+1)
+		return idx.last()
+	}
+	for _, rec := range []string{"off", "on"} {
+		t.Run(rec, func(t *testing.T) {
+			idx := &fakeIndex{}
+			continued, loaded, fresh := NewStub(), NewStub(), NewStub()
+			for _, s := range []*Stub{continued, loaded, fresh} {
+				t.Cleanup(func() { _ = s.Close() })
+			}
+			m := New(Config{
+				Session:        continued,
+				CrazeSessionID: "018f-the-continued-thread",
+				WebSearch:      rec,
+				Loading:        true,
+				Theme:          "tokyo-night",
+				Workspace:      t.TempDir(),
+				Yolo:           true,
+				Provider:       agent.CursorProvider(),
+				SessionIndex:   idx,
+				NewSession:     func(agent.Provider) agent.Session { return fresh },
+				LoadSession:    func(agent.Provider, sessions.Row) agent.Session { return loaded },
+			})
+			if got := titled(t, idx, continued); got.CrazeID != "018f-the-continued-thread" || got.WebSearch != rec {
+				t.Fatalf("--continue's row: crazeId %q webSearch %q, want %q", got.CrazeID, got.WebSearch, rec)
+			}
+
+			row := resumeRow("s-1", "cursor", "yesterday", time.Hour)
+			row.CrazeID = "018f-the-web-thread"
+			row.WebSearch = rec
+			tm, _ := m.confirmResume(row)
+			m = tm.(Model)
+			if got := titled(t, idx, loaded); got.CrazeID != "018f-the-web-thread" || got.WebSearch != rec {
+				t.Fatalf("the resume picker's row: crazeId %q webSearch %q, want %q", got.CrazeID, got.WebSearch, rec)
+			}
+
+			tm, _ = m.confirmProvider(agent.CursorProvider(), true)
+			m = tm.(Model)
+			t.Cleanup(func() { _ = m.eng.Close() })
+			if got := titled(t, idx, fresh); got.WebSearch != "" {
+				t.Fatalf("a new session's row carries webSearch %q", got.WebSearch)
+			}
+		})
+	}
+}

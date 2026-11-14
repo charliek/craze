@@ -363,10 +363,15 @@ func (r *rig) committed() []agent.Event {
 	if err := r.e.Sync(ctx); err != nil && !errors.Is(err, agent.ErrLogClosing) && !errors.Is(err, agent.ErrClosed) {
 		r.t.Fatalf("sync: %v", err)
 	}
+	return drainEngine(r.e)
+}
+
+// drainEngine is every event the engine's primary holds now.
+func drainEngine(e *Engine) []agent.Event {
 	var evs []agent.Event
 	for {
 		select {
-		case ev := <-r.e.Events():
+		case ev := <-e.Events():
 			evs = append(evs, ev)
 		default:
 			return evs

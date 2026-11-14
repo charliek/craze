@@ -66,6 +66,14 @@ The maintainer runs step 1; everything else is automated.
   `release.yml`'s `version-check` compares it with the tag too. The plugin
   states the minimum craze version it needs (0.2.0) in its agents, its skill
   and the README; raise it there when a plugin change needs a newer craze.
+  An optional feature may have its own minimum: the `web=` option's text
+  (the agents, the skill, `references/commands.md`) says "a craze newer than
+  0.2.0" in place of a version. The release step: replace that phrase in
+  those files with the version that ships the feature (`grep -rn "newer than
+  0.2.0" agents skills docs`), and the same phrase in `webNote` in
+  `internal/plugin/plugin_test.go`, which checks that every one of those
+  places says it, in the release commit. The plugin's general minimum is
+  unchanged.
 
 NOT bumped:
 

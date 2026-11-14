@@ -225,7 +225,9 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 		// row's freshly minted one included; without one, a row written before
 		// crazeId existed carries none, and the engine mints one that the next
 		// write puts in the file.
-		m.setSession(m.loadSession(p, row), row.CrazeID)
+		// Its recorded web search choice too (plan 051 F.3), which the
+		// session built from the row applies and every row it writes carries.
+		m.setLoadedSession(m.loadSession(p, row), row.CrazeID, row.WebSearch)
 	}
 	// The row's session is this process's own, its agent spawned here, and
 	// its provider was chosen with no provider picker: the start's check is

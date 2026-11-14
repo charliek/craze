@@ -8,6 +8,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
+	"github.com/charliek/craze/internal/tui"
 )
 
 // The session flags (plan 030 §3.3): the command line of a session, which two
@@ -60,6 +61,59 @@ func registerStartSettingFlags(cmd *cobra.Command, effort *string, fast, noFast 
 	cmd.Flags().BoolVar(noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
 }
 
+// registerWebSearchFlags declares --web-search and --no-web-search on cmd
+// (plan 051 F.1): a new native session's web tools, offered or withheld
+// whatever the home's own setting says. Three commands take them — craze new
+// (with --wait), craze prompt and craze serve — and this is the one place
+// their wording is spelled. Never through registerSessionFlags, which would
+// put them on the root command, whose sessions ask. prefix is what the usage
+// starts with ("with --wait: " on craze new).
+func registerWebSearchFlags(cmd *cobra.Command, on, off *bool, prefix string) {
+	cmd.Flags().BoolVar(on, "web-search", false, prefix+"offer a native session the web tools (websearch, webfetch); refused when config.toml turns web search off or the provider is not native")
+	cmd.Flags().BoolVar(off, "no-web-search", false, prefix+"offer a native session no web tools, whatever config.toml or a remembered choice says")
+}
+
+// webFlag is --web-search/--no-web-search as a session takes them (plan 051
+// F.1): on, off, or absent for neither. The caller has refused both. Its
+// String is how the spawn's argv and the session's row spell it.
+func webFlag(on, off bool) agent.WebFlag {
+	switch {
+	case on:
+		return agent.WebFlagOn
+	case off:
+		return agent.WebFlagOff
+	}
+	return agent.WebFlagAbsent
+}
+
+// webFlagName is the flag that says w: web-search for on, no-web-search for
+// off.
+func webFlagName(w agent.WebFlag) string {
+	if w == agent.WebFlagOff {
+		return "no-web-search"
+	}
+	return "web-search"
+}
+
+// webFlagsExclusive is the usage error both web flags together are, in
+// command what's words.
+func webFlagsExclusive(what string) error {
+	return usagef("%s: --web-search and --no-web-search are mutually exclusive", what)
+}
+
+// webStartCheck is DecideWeb's refusal half for a session about to start on
+// provider p (agent.CheckWebFlag, plan 051 F.2): flag, from origin, attended
+// or not, against config.toml and this process's CRAZE_TEST_EXA_MCP. nil, or
+// the refusal as command what's exit 1, kind config, reason
+// web_search_not_offered (webRefusal). Only --web-search is refused, and only
+// it reads the config.
+func webStartCheck(what string, flag agent.WebFlag, origin agent.WebFlagOrigin, attended bool, p agent.Provider) error {
+	if err := agent.CheckWebFlag(flag, origin, attended, p.Name() == agent.NativeProvider().Name(), tui.ConfigWebSearch, nil); err != nil {
+		return webRefusal(what, err)
+	}
+	return nil
+}
+
 // fastFlags is --fast/--no-fast as the session takes them: true, false, or
 // nil for neither. The caller has refused both.
 func fastFlags(fast, noFast bool) *bool {
@@ -85,6 +139,11 @@ func (f *tuiFlags) settle() error {
 	if f.fast && f.noFast {
 		return usagef("craze: --fast and --no-fast are mutually exclusive")
 	}
+	if f.webSearch && f.noWebSearch {
+		// Only craze serve registers them (registerServeFlags): on the root
+		// both stay false.
+		return webFlagsExclusive("craze")
+	}
 	if f.noForce {
 		f.force = false
 	}
@@ -96,6 +155,13 @@ func (f *tuiFlags) settle() error {
 // default. settle has refused both.
 func (f *tuiFlags) fastSetting() *bool {
 	return fastFlags(f.fast, f.noFast)
+}
+
+// webSearchSetting is --web-search/--no-web-search as the session takes it
+// (agent.Options.WebFlag, hostspawn.Spec.WebSearch, sessions.Row.WebSearch):
+// on, off, or absent for neither. settle has refused both.
+func (f *tuiFlags) webSearchSetting() agent.WebFlag {
+	return webFlag(f.webSearch, f.noWebSearch)
 }
 
 // setFast is fastSetting's inverse: the command line that asks for v.

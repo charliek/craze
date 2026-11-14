@@ -5,6 +5,10 @@ harnesses on the same models and the same tasks: gx (the grok-build fork), openc
 codex. It records what each one sends on the wire and scores the results. It is not part
 of CI or the per-commit gate. It costs money, and its runs are not deterministic.
 
+A fifth arm, `craze-web` (craze plan 051), is craze with web search on, its searches and
+fetches answered by the proxy from a web task's frozen corpus; it runs only when named,
+and only on the `web` split (see *The web split*).
+
 See `eval/RUNBOOK.md` for the procedure -- a campaign end to end, and how to add a model or
 a task.
 
@@ -237,6 +241,47 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - **Reading a capture** decodes each binary line on its own: a record cut anywhere by a
   killed proxy (even inside a UTF-8 character) is skipped and every earlier one kept.
 
+### The web route (craze-web)
+
+One route forwards nothing (craze plan 051 E3; `proxy.py`, `webcorpus.py`):
+`POST /r/<token>/web/mcp` answers craze's web tools from the run's own **frozen corpus**.
+craze-web's home points craze's web search provider at it (`CRAZE_TEST_EXA_MCP`, through
+the same loopback relay as the model route), so the sandbox stays closed: no egress
+allow-list, nothing fetched, nothing leaves the host.
+
+- **Corpus binding:** `register_run` binds a corpus to a route once, immutably, and only
+  for a craze-web run (its task's corpus). A route registered without one -- every other
+  arm's -- is refused there (`web-not-available`, logged to `proxy-refusals.jsonl`, never
+  the capture). A token reaches its own run's corpus and no other; the relay does not
+  authenticate connections, and this does not change that.
+- **The wire:** it takes the two `tools/call` shapes craze sends Exa's MCP endpoint
+  (`web_search_exa`, `web_fetch_exa`) and answers in Exa's event-stream envelope and text
+  layouts, so craze's real parser reads them. Anything but `POST …/web/mcp` is refused
+  (`web-not-allowed`); a body over 64 KiB is refused while it is read; a loaded key in the
+  path, query, headers or body -- raw or JSON-escaped -- is a key exposure, flagged as on
+  the model route; a body that is not a valid call is a JSON-RPC error, counted as
+  malformed.
+- **Search** is BM25 (`k1 = 1.2`, `b = 0.75`) over each page's title and body; tokens are
+  lowercased runs of letters and digits, no stemming, no stop words; the top 8 by score,
+  ties by URL ascending; each result's content is the page's first 1,500 characters. A
+  query that shares no token with any page gets an empty content list, which craze reads
+  as no results.
+- **Fetch** is an exact match on the URL with its fragment and trailing slashes trimmed;
+  anything else gets one empty text block (craze reads an empty page) and counts as a
+  miss. Neither reply invents words: craze writes its own "no results" and "no content"
+  lines.
+- **The journal:** `web.jsonl` beside the capture in the attempt directory, one line per
+  call (`kind: "call"`: op `search` with the query and the result URLs, or `fetch` with
+  the URL and whether it hit; `malformed` with why; the status and the bytes served) or
+  refusal (`kind: "refused"`), and a closing `kind: "summary"` line with the counters:
+  `searches`, `fetches`, `misses`, `bytes_served`, `malformed`, `refused`. The same
+  counters are the route summary's `web` (`result.json`'s `proxy.web`, a craze-web run
+  only). A web call never touches the capture, the request counters, the ledger, usage,
+  pricing or the one-model-per-run check.
+- **Goldens:** the route's replies for a fixed mini-corpus are committed as
+  `internal/harness/websearch/testdata/eval-corpus-*.body`; a Go test parses them with
+  craze's parser and `tests/test_web_route.py` regenerates them byte for byte.
+
 ### Budget
 
 - **Ledger:** `ledger.jsonl` in the campaign directory (`--ledger` to move it) is append-only,
@@ -320,6 +365,7 @@ The generated homes, per harness:
 | harness | home | notes |
 |---|---|---|
 | craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort. `models.toml` says `catalog = false` (craze plan 031 P10): craze ships a model catalog and merges it under the user's files, which would add every shipped model — funded by the proxy provider's dummy key — to the run and to the agent tool's description, changing the frozen prompt; with it off the two files are the whole table. `crazeeval proxy --craze-home` writes it too. **The driver** is the snapshot's: the owner's own, or for an old gx import's entry (`source = "gx"`, whose driver and `base_url` craze ignores for a provider it ships while its catalog is on) the one craze's shipped catalog (`internal/harness/modeltable/catalog.toml`) gave the provider at snapshot time, as craze itself runs it: Meta's `openai-responses` (craze plan 047 D14). An entry that names none runs on the catalog's. Such a gx entry's proxy route goes to craze's shipped endpoint too, and its key is chosen as craze chooses it (the catalog's variables, then the entry's own names, then its `api_key`). With the owner's `models.toml` at `catalog = false`, craze keeps every entry whole, so the snapshot and the route do too. An OpenRouter target is refused before its home is written: craze's `openrouter` driver has a fixed endpoint and cannot point at the proxy. **Anthropic:** craze's endpoint is fixed, so the provider entry is `driver = "anthropic"` and the dummy key, no `base_url` (craze refuses one; a `catalog = false` table must name the driver), and the run's environment carries `CRAZE_TEST_ANTHROPIC_API`, the route without its `/v1`: craze keeps the override's path and adds `/v1/messages` itself, and takes only an `http` URL on a loopback IP literal. `crazeeval proxy --craze-home` prints it as `craze_env`. |
+| craze-web | craze's home, byte for byte, plus `.craze/config.toml` (0600) | `[websearch] provider = "exa"` turns web search on (the config decides: no state file, no key), and the run's environment adds `CRAZE_TEST_EXA_MCP`: the run's web route, `http://127.0.0.1:<port>/r/<token>/web/mcp`, derived from its base URL (craze takes only an `http` URL on a loopback IP literal). The same binary, command and output reading as craze. `crazeeval probe` builds only the default harnesses' homes. |
 | gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. **Anthropic:** gx's `messages` backend, with `anthropic-version` as an extra header (gx sends it no other way); the proxy drops gx's own credential header and sets `x-api-key`. |
 | opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan`, `fireworks-ai` and `anthropic` (Messages) providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
 | codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |
@@ -352,13 +398,19 @@ campaign comes from the environment or is `~/.craze-eval/default`.
 # Once per campaign, and again whenever the owner's model tables change:
 uv run crazeeval snapshot-config
 
-# Validators: every task's category controls must pass before the task may run.
+# Validators: every task's category controls must pass before the task may run
+# (default: every task, the web split's included; a web task's lint is one control).
 uv run crazeeval validate [--tasks <ids|split:...>]
 
-# A batch. --craze-bin is required for craze; never /usr/local/bin/craze.
+# A batch. --craze-bin is required for craze and craze-web; never /usr/local/bin/craze.
+# --harness defaults to craze,gx,opencode,codex; craze-web runs only when named.
+# --tasks defaults to the dev and held-out splits; split:all is every split but web.
 uv run crazeeval run --harness craze,gx,opencode,codex --model muse-spark-1.3-contributor,glm-5.3-flash \
     --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke [--parallel 4] \
     [--cap-zai 2] [--cap-other 3] [--out DIR] [--timeout S] [--first-rep N]
+# A web batch (see "The web split"): the web tasks on craze and craze-web.
+uv run crazeeval run --harness craze,craze-web --model <models> --tasks split:web --reps 3 \
+    --craze-bin ../bin/craze --label web
 # --first-rep numbers reps from N instead of 1 -- a later batch adding a second rep
 # where budget allows, without re-running (and so replacing) rep1.
 # The batch directory is created exclusively and locked; an existing one is refused.
@@ -410,14 +462,17 @@ uv run crazeeval archive --batch DIR [--batch LATER ...] --out DIR [--unseal] [-
 
 # A campaign's compact summary.json for this repository (see "Where results go"), from
 # one or more `report` output directories (their report.json): one group per report, in
-# the order given. Per group: the models it covers (craze runs, or a best open harness
+# the order given. Per group: the models it covers (craze or craze-web runs, or a best open harness
 # fixed; the report's other models are named in other_models and their rows left out);
 # per model the best open harness and why, the bar's outcome and each condition
 # (all_tasks, heldout, dev: objective counts, win rate, 90% CI, W/T/L, n) and coverage
 # gaps; objective pass counts and statuses per model/harness; the win-rate matrix per
 # split, per model and pooled; metric medians; the task tables; and the report's
 # provenance -- batch names (never paths), the judge hash(es), plan modes, verdict
-# counts, sealed. Everything but the provenance is the covered models' alone: pooled is
+# counts, sealed. A report with web-split runs adds `web` (see "The report"): the web
+# tasks, the pass per model/harness on them, the web route's counters (integer totals and
+# per-run medians) and the web runs' metric medians -- never a per-run row; absent
+# otherwise, and the schema stays 1. Everything but the provenance is the covered models' alone: pooled is
 # recomputed from their cells (never the report's pooled, which counts every model),
 # and the report-wide aggregates report.json cannot split by model are left out (the
 # length-bias digest, a --compare block). Left out too: verdict and loss lists,
@@ -435,7 +490,7 @@ uv run crazeeval summarize --report DIR [--report DIR ...] --out FILE [--campaig
 # validation.json, rescore.jsonl, best-open-harness.json; everything under judging/,
 # calibration/ and captures/ but the .lock files; per rep result.json (and
 # result.pre-rescore.json); per attempt result.json, stdout.jsonl, stderr.txt,
-# diff.patch, start-/final-manifest.json, capture.jsonl.gz (or capture.jsonl), gitpost/
+# diff.patch, start-/final-manifest.json, capture.jsonl.gz (or capture.jsonl), web.jsonl, gitpost/
 # and the scoring logs (scoring/*.stdout, *.stderr, *.out/ reports -- no scoring copy).
 # Held-out (heldout/ and judging/heldout/) only with --unseal. Never home/ (harness
 # state, binaries, caches: regenerable), ws/, Go caches or anything else. Only the
@@ -454,7 +509,8 @@ uv run crazeeval pack --batch DIR [--batch DIR ...] --out FILE.tar.gz [--unseal]
 
 # Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
 # from each rep's final attempt's manifests with today's ignores (X15); every other
-# check stands, objective_pass is recomputed. Held-out runs only with --unseal; --dry-run
+# check stands, objective_pass is recomputed (a craze-web run by craze's rules, its web
+# counters kept). Held-out runs only with --unseal; --dry-run
 # prints the summary and writes nothing. Reads manifests, batch.json and result.json, plus
 # the current task definitions (hashed to check each run's task fingerprint against the
 # batch); never answers, captures or anything key-bearing.
@@ -467,8 +523,11 @@ A task is `tasks/<id>/task.toml` plus `testdata/`. Nothing under `tasks/` is rea
 inside a sandbox. The `task.toml` fields:
 
 - `id`, `category` (explain, answer, investigate, bugfix, feature, refactor, multi-step,
-  verify, plan), `split` (dev, heldout, smoke), `mode` (build or plan), `prompt`,
+  verify, plan), `split` (dev, heldout, smoke, web), `mode` (build or plan), `prompt`,
   `timeout_s` and `rubric`;
+- `harnesses` (optional): the only harnesses the task runs on (a web task:
+  `["craze", "craze-web"]`); `corpus`, `relevant` and `needs`: a web task's, and only a
+  web task's (see *The web split*);
 - `[repo]`: `kind = "craze"` (optional `setup_patch`, optional `commit`) or
   `kind = "fixture"` plus `name`;
 - `[repo] commit` (craze tasks only): the craze commit the task materialises, a full
@@ -540,6 +599,7 @@ The validators, per category, are run by `crazeeval validate` (§3.1.5):
 | investigate | pass on a reference answer and fail on a decoy |
 | verify | pass on a synthetic capture whose code-running call exercised the case and was answered (`synthetic_command`, `synthetic_result`); fail with none, with an irrelevant answered call (`python --version`), and with the right call never answered |
 | explain, answer, plan | pass on the reference answer and fail on the decoy; `no_writes` must also fail when an edit is planted |
+| a web task (any category) | its own category's controls, plus the web lint (below) |
 
 C1 ships two smoke tasks on the `smoke-py` fixture: `smoke-explain` and `smoke-fix`. C2 adds
 the fifteen tasks of §3.1.5 (`name` is the task's slug; `false_claims` lists claims the
@@ -574,8 +634,55 @@ untouched and with the reference (its structural checks carry the control), and 
 
 Scoring time: each Go scoring invocation compiles with a cold, private Go cache and takes
 about 2 s (T-B2, T-F2, T-M1 on a fixture; T-B3's `go test ./internal/harness/redact/` in the
-craze tree); a pytest invocation about 0.1–0.2 s. `crazeeval validate` of all seventeen
-tasks takes about 25 s.
+craze tree); a pytest invocation about 0.1–0.2 s. `crazeeval validate` of the seventeen
+tasks above takes about 25 s.
+
+### The web split
+
+`split = "web"` (craze plan 051 E4) holds tasks whose decisive facts exist only in a
+frozen corpus: a client or caller for a **fictional HTTP API** whose paths, parameter
+names, headers, error meanings or changed fields are documented only there. The fake
+server lives in the hidden tests, so nothing the model can read in the workspace holds
+the facts; no fictional library is vendored (its source would leak them).
+
+- **Selection:** never in the default selection, nor in `split:all`; a web task runs only
+  when named, by its id or `--tasks split:web`. It declares
+  `harnesses = ["craze", "craze-web"]`, and `craze-web` is never a default harness, so
+  name both: `--harness craze,craze-web --tasks split:web` (with `--craze-bin`). The
+  default harnesses on a web task run craze alone; craze-web runs no task without a
+  corpus. `crazeeval validate` with no `--tasks` validates every task, web included.
+- **Layout:** `tasks/<id>/task.toml` adds `corpus` (a directory under the task, usually
+  `testdata/corpus`, of `*.md` pages only, each starting with a `URL:` line and a
+  `Title:` line, URLs unique), `relevant` (the corpus files holding the decisive facts;
+  every other page is a distractor) and `needs` (strings a solution must contain). The
+  corpus is under the task, so no sandbox ever sees it except through the web route. The
+  fixture is an ordinary one under `fixtures/`; the hidden tests and `reference.patch`
+  are under `testdata/` as for any task.
+- **The lint** (`validate.web_lint`, a control of `crazeeval validate`): at least three
+  distractor pages per relevant page, and every need in a relevant page's title or body
+  and in the reference patch's added lines -- and, ignoring case, in neither the prompt
+  nor any fixture file, by content or by name. With the usual controls (the untouched
+  fixture fails, the reference passes), it proves a task scoreable and its facts
+  corpus-only.
+- **Scoring** is the hidden tests alone; the judge is not used for this split.
+
+| id | name | category | split | repo | objective checks |
+|---|---|---|---|---|---|
+| T-W1 | web-api-reference | feature | web | `quayside` | 5 hidden + 2 trusted tests: the v3 berth-slots endpoint, its auth header, its paging; corpus of 11 pages (2 relevant) |
+| T-W2 | web-api-reference-telemetry | feature | web | `skerrywind` | 6 hidden + 2 trusted tests: the v4 tranche upload's path and body, its seal header and what it covers, the measurement fields' integer units, the already-stored conflict code; corpus of 13 pages (3 relevant) |
+| T-W3 | web-changelog-migration | feature | web | `bindlewick` | 7 hidden + 3 trusted tests: a v1 client moved to v2 per the changelog (the renamed resource and paths, the branch header, the copy field, the due timestamp, the renewal-limit code); corpus of 10 pages (2 relevant) |
+| T-W4 | web-changelog-breaking-auth | feature | web | `tallowmere` | 7 hidden + 3 trusted tests: a retired v2 client moved to v3 (the key's header, the renamed resource, a newly required field in minutes, renamed response fields, an empty 204 on cancel); corpus of 14 pages (3 relevant) |
+| T-W5 | web-troubleshooting-error | bugfix | web | `tessaroot` | 6 hidden + 3 trusted tests: error TSR-7719 handled by the troubleshooting page's single follow-up (its query parameter and header, the error body's reference) and the readings it flags as provisional; corpus of 10 pages (1 relevant) |
+| T-W6 | web-troubleshooting-retry | bugfix | web | `orvelline` | 8 hidden + 4 trusted tests: 409 booking.hold_pending finished as the troubleshooting guide says (a de-duplication header on every booking, the resend's claim header, each answer's wait in centiseconds, resending for as long as the hold is pending); corpus of 11 pages (2 relevant) |
+
+**What a web campaign measures**, and what it cannot. It shows whether a model uses
+the web tools to solve tasks it otherwise cannot -- craze-web's pass rate against plain
+craze's on the same tasks and models -- and at what cost in calls and tokens (the web
+route's counters, the runs' main requests, tool calls and tokens). It cannot show the
+real provider's ranking: the corpus's BM25 stands in for Exa's search, so it measures
+tool use, not Exa's results. Nor does it measure harm: web search is offered only on web
+tasks, so whether having the tools makes a model worse on tasks that need no web is not
+measured (future work).
 
 **Contamination.** Tool calls that touch `eval/`, `reference.patch`, `eval-runs`,
 `.claude/plans`, the owner's `/home/*/.craze/native`, a GitHub URL of the craze
@@ -633,6 +740,7 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
 - `attempt-<n>/`:
   - `stdout.jsonl`, `stderr.txt`
   - `capture.jsonl.gz`
+  - `web.jsonl` (a craze-web run only: its web route's journal; see *The web route*)
   - `start-manifest.json`, `final-manifest.json`, `diff.patch`, `gitpost/`
   - `ws/` (the final workspace; removed for craze-repo tasks) and `home/` (the harness's
     state). The run's Go cache and the caches above are deleted after the key scan (never
@@ -657,7 +765,9 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   - served models;
   - offered tools and the web tools among them;
   - the main requests' effective reasoning controls;
-- `proxy`: the route summary, including the refusal counters;
+- `proxy`: the route summary, including the refusal counters, and for a craze-web run
+  `web`: its web route's counters (`searches`, `fetches`, `misses`, `bytes_served`,
+  `malformed`, `refused`);
 - `sandbox`: quiescence and environ samples;
 - `key_scan`.
 
@@ -805,7 +915,19 @@ sol, one order: a schema-valid verdict in 11 s.
   either side), the task, model, split, the craze run key and the other run, the scores,
   and per judged order the rubric items craze did not meet against the other side's
   (each item only craze missed is quoted from the rubric) and the judge's reasons -- the
-  tuning signal behind a lever such as L7. Sealed, it covers the dev tasks only.
+  tuning signal behind a lever such as L7. Sealed, it covers the dev tasks only;
+- **web tasks** (craze plan 051 E5), only when the runs include web-split tasks (a run of
+  a web task by the split its `result.json` recorded -- the task's current split only when
+  it recorded none -- or one whose route had a corpus) -- `report.json`'s `web`, and a "Web tasks"
+  section: per model and arm (craze, craze-web) the objective pass over the scored runs
+  with its Wilson 90% interval, the unscored count and each task's mean pass; the web
+  route's counters over the scored runs (`searches`, `fetches`, `misses`,
+  `bytes_served`, `malformed`, `refused`), their totals and per-run medians; the metric
+  medians of the web runs alone; and per run its counters with its task, rep, status and
+  pass. Web tasks sit outside dev and held-out, so they count in no objective total, no
+  win rate and no success bar (whose outcome reads inconclusive for a model with craze
+  runs only). A report of runs without web tasks has no `web` key and no section: it is
+  byte for byte what it was.
 
 **Sealed:** without `--unseal` nothing under a batch's `heldout/` -- runs or verdicts -- is
 read; the success bar uses the dev tasks alone and reports `provisional-meets` or
@@ -833,7 +955,9 @@ once either way.
   craze run (binary basename, sha256 prefix, version, the source commit it was built
   from), the model, wire model and served models, the task, split, category, mode, plan
   mode, rep, status, objective pass and each check's result, answer words, tool calls,
-  main requests, wall time, cost, list cost and tokens;
+  main requests, wall time, cost, list cost and tokens. A craze-web run's row names its
+  own harness, craze's version, hash and build (the binary it ran), and adds `web`: its
+  web route's counters (integers, never a query or URL); every other row is as it was;
 - `verdicts.jsonl`: one line per final verdict -- task, model, split, the two run ids and
   harnesses, judge model and mode, winner, confidence, scores, each judged order's rubric
   grades and reasons, a success-bar escalation's first result, `judge_hash` and
@@ -896,8 +1020,12 @@ and how many of them carry their reasoning (counted per turn, over the requests 
 run's first and for the last request; chat messages and Responses items alike), the last
 request's role sequence, and the served and requested model ids. Its fidelity block is
 AC-A8: effort parity across harnesses (each harness's effective reasoning control from its
-main requests), opencode's GLM `thinking` flag on every request, no web tool offered, one
+main requests), opencode's GLM `thinking` flag on every request, the web tools by arm, one
 model per run -- every run requested only the target and was served only the target -- and
-no contamination hit in an accepted run. Every check needs main-request evidence from
+no contamination hit in an accepted run. The web check is arm-aware (craze plan 051 E2):
+`web_tools_absent` reads every harness but craze-web (no web tool offered; `null` for a
+model run on craze-web alone), and `web_tools_on_web_arm`, present only for a model with
+craze-web runs, requires each of them to be offered craze's `websearch` and `webfetch`
+and no other web tool. Every check needs main-request evidence from
 every run: a run with no main request makes it `no-evidence`, never true, and one failing
 run makes it false. Held-out runs are read only with `--unseal`.

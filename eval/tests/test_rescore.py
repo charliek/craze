@@ -299,6 +299,26 @@ def test_a_changed_task_or_a_result_without_an_attempt_is_skipped(batch):
         final_attempt_dir(batch.dir, {"attempt": 2, "attempts": [{"attempt": 1, "dir": "attempt-1"}]})
 
 
+def test_a_craze_web_run_rescores_as_a_craze_run_does(batch):
+    """craze plan 051: a craze-web run is rescored by craze's rules (its runner's
+    workspace state) and keeps its web route's counters; the old runs are as before."""
+    web = {"searches": 2, "fetches": 1, "misses": 0, "bytes_served": 4000, "malformed": 0, "refused": 0}
+    rep = _write_run(batch.dir, batch.tasks["T-XB"], "craze-web", "glm",
+                     {**START, f"{PKG}/redact.go": "f:0644:fixed", **BUILD_OUTPUTS})
+    for p in (rep / "result.json", rep / "attempt-1" / "result.json"):
+        r = _load(p)
+        r["proxy"] = {"requests": 3, "flags": [], "web": web}
+        p.write_text(json.dumps(r, indent=2, sort_keys=True) + "\n")
+    s = rescore(batch.dir, tasks=batch.tasks)
+    assert (s["examined"], s["changed"], s["skipped"]) == (9, 7, 1)  # one more examined and changed
+    changed = {c["run_key"]: c for c in s["changed_runs"]}
+    assert changed["craze-web/glm/T-XB/rep1"] == {**changed["craze/glm/T-XB/rep1"], "run_key": "craze-web/glm/T-XB/rep1"}
+    for p in (rep / "result.json", rep / "attempt-1" / "result.json"):
+        r = _load(p)
+        assert _check(r, "scope")["passed"] and r["objective_pass"] and r["proxy"]["web"] == web
+        assert r["harness"] == "craze-web"
+
+
 def test_cli_rescore_prints_the_summary_and_no_answer(batch, monkeypatch, capsys):
     monkeypatch.setattr(rescoremod, "load_tasks", lambda: batch.tasks)
     before = _snapshot(batch.dir)

@@ -71,8 +71,23 @@
         "at": {"$ref": "event.json#/$defs/time"},
         "foreign": {"$ref": "event.json#/$defs/foreignTurn"},
         "retries": {"type": "integer", "minimum": 0, "description": "How many times the turn's steps have been sent again so far, kept until the next turn starts (a step_retry event's total); absent for none."},
+        "webSearch": {"$ref": "#/$defs/turnWebSearch"},
         "truncated": {"type": "boolean"}
       },
+      "additionalProperties": false
+    },
+    "turnWebSearch": {
+      "description": "The web tally of the turn turnId names (a turn's or a foreign bracket's id, of the snapshot's incarnation): the last webSearch state section folded, stamped with the turn running as it arrived (a running foreign bracket first, else the engine turn), reset when a turn or a running bracket starts and kept once the turn has ended until the next starts, as retries is; absent when none. Its other members are the event codec's webSearch section's.",
+      "type": "object",
+      "properties": {
+        "turnId": {"type": "string"},
+        "searches": {"type": "integer", "minimum": 0},
+        "fetches": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "urls": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500}},
+        "urlsTruncated": {"type": "boolean"}
+      },
+      "required": ["turnId"],
       "additionalProperties": false
     },
     "settings": {

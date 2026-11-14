@@ -52,3 +52,19 @@ class CrazeRunner(Runner):
 
     def plan_mode(self, task):
         return "--plan" if task.is_plan else None
+
+
+class CrazeWebRunner(CrazeRunner):
+    """craze with web search on, its searches and fetches answered from the task's
+    corpus by the proxy's web route (craze plan 051 E2): the same binary, command and
+    reading as craze, a home that differs only by homes.craze_web_home. It runs only a
+    task that has a corpus (a ``web`` task)."""
+
+    name = "craze-web"
+    web = True
+
+    def supports(self, em, task):
+        return task.web_corpus is not None and super().supports(em, task)
+
+    def home(self, home, em, snap, base_url):
+        return homes.craze_web_home(home, em, snap, base_url)

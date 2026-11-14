@@ -52,6 +52,8 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return usagef("craze new: --fast and --no-fast are mutually exclusive")
 	case f.plan && f.ask:
 		return usagef("craze new: --plan and --ask are mutually exclusive")
+	case f.webSearch && f.noWebSearch:
+		return webFlagsExclusive("craze new")
 	case f.timeout < 0:
 		return usagef("craze new: --timeout must not be negative")
 	case f.maxMessage < 0:
@@ -84,6 +86,13 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	ignoreSIGPIPE()
 	r := newPromptJob(cmd, newWhat, "", true, started, f.timeout, f.json, f.maxMessage, sigs)
 	defer r.close()
+	// A --web-search that cannot be honoured (plan 051 F.2, S2) is refused
+	// before the prompt is read, so --prompt-file and --remove-prompt-file's
+	// file are left as they were, and ahead of the model check below, which
+	// it wins over (no model notice is said).
+	if err := newWaitWebCheck(f, provider); err != nil {
+		return failJSON(stdout, r.out, err)
+	}
 	// Under --timeout and the signals, as the rest of the command (C3 review
 	// r1, 6), and before anything is spawned.
 	text, err := f.prompt.read(r.ctx, cmd, newWhat, args, r.signalled)
@@ -135,7 +144,8 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		}
 	}
 	flags := tuiFlags{workspace: abs, provider: provider, model: strings.TrimSpace(f.model), effort: strings.TrimSpace(f.effort),
-		fast: f.fast, noFast: f.noFast, force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
+		fast: f.fast, noFast: f.noFast, webSearch: f.webSearch, noWebSearch: f.noWebSearch,
+		force: !f.noForce, noForce: f.noForce, ask: f.ask, plan: f.plan, noHostStatus: true}
 	// No model: --model is only what was asked for, which the agent may yet
 	// refuse, and a result says the model once the session has said it.
 	r.session = resultSession{provider: provider}
@@ -156,6 +166,28 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	// take (runWait's rule).
 	defer conn.close(r.relayed)
 	return r.waitFor(conn)
+}
+
+// newWaitWebCheck is craze new --wait's web search refusal (plan 051 S2): with
+// --web-search, the provider the session would start on — explicit, already
+// checked, else config.toml's, as the default below resolves it — and the
+// refusal half of the web decision (webStartCheck), given now and unattended.
+// A missing or unknown default provider is left to its own error, later.
+func newWaitWebCheck(f *newFlags, provider string) error {
+	if !f.webSearch {
+		return nil
+	}
+	if provider == "" {
+		provider = tui.ConfigProvider()
+	}
+	if provider == "" {
+		return nil
+	}
+	p, err := agent.ProviderByName(provider)
+	if err != nil {
+		return nil
+	}
+	return webStartCheck(newWhat, agent.WebFlagOn, agent.WebFlagGiven, false, p)
 }
 
 // newWaitHostKnown sees the host known and --session-file written, nothing dialled:
