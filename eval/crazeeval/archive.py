@@ -15,7 +15,9 @@ twice reads it once, and it writes:
   paths), run key and id, harness with its version and executable hash, the craze build
   for a craze run, the model, wire model and served models, the task, split, category,
   mode, plan mode, rep, status, objective pass and each check's result, answer words,
-  tool calls, main requests, wall time, cost, list cost and tokens;
+  tool calls, main requests, wall time, cost, list cost and tokens -- and, for a
+  craze-web run, its web route's counters (``web``: searches, fetches, misses, bytes
+  served, malformed, refused);
 - ``verdicts.jsonl``: one line per final verdict: the task, model, split, the two run
   ids and harnesses, the judge model and mode, the winner, confidence and scores, each
   judged order's rubric grades and reasons, and the judge hashes. The report's own set
@@ -271,6 +273,11 @@ def run_row(r: dict, info: dict) -> dict:
     }
     if exe == rp.NATIVE:
         row["craze_build"] = info.get("craze_build")
+    # A craze-web run's web route counters (ints; never a query or URL): only a run that
+    # has them gets the key, so every other row is what it was.
+    web = rp.web_counters(r)
+    if web is not None:
+        row["web"] = web
     return row
 
 

@@ -14,7 +14,12 @@ verdict files, and writes a Markdown report and its JSON:
 - ``--compare``: a craze build against an earlier one (a lever's before/after,
   pooled and per model);
 - ``--losses``: "Where craze lost" -- every final verdict a craze run lost, with the
-  rubric items it did not meet against the other side's and the judge's reasons.
+  rubric items it did not meet against the other side's and the judge's reasons;
+- web tasks (craze plan 051 E5), only when the runs include web-split tasks: the
+  objective pass rate per model and arm (craze, craze-web) with its Wilson interval and
+  per-task means, the web route's counters (searches, fetches, misses, bytes served;
+  malformed and refused) per run and their totals and per-run medians per model and
+  arm, and the metric medians of the web runs alone (``web``; absent otherwise).
 
 **Only verdicts that still stand count** (``current_verdicts``, plan 029 W2): a record's
 ``task_judge_hash`` must equal its task's current one -- or, for a record from before
@@ -45,7 +50,7 @@ from pathlib import Path
 from typing import Iterator
 
 from crazeeval.judge import judge_hash, task_judge_hashes, verdict_current
-from crazeeval.tasks import Task
+from crazeeval.tasks import WEB_SPLIT, Task
 
 Z90 = 1.6448536269514722
 OPEN_HARNESSES = ("gx", "opencode")
@@ -723,6 +728,80 @@ def compare(new_runs: list[dict], old_runs: list[dict], verdicts: list[dict], sp
             "keep_rule": {"conditional_keep": decide(0.55), "requested_keep": decide(0.45)}}
 
 
+# -- web tasks (craze plan 051 E5) ------------------------------------------------------------------------------
+
+# The web route's counters, as a craze-web run's proxy summary carries them (proxy.py
+# RouteState.web; the same counts close its web.jsonl). Only a run whose route had a
+# corpus has them.
+WEB_COUNTERS = ("searches", "fetches", "misses", "bytes_served", "malformed", "refused")
+
+
+def web_counters(r: dict) -> dict[str, int] | None:
+    """A run's web route counters, ints only (None: its route had no corpus -- every run
+    but a craze-web one, and every run from before the web route)."""
+    proxy = r.get("proxy")
+    w = proxy.get("web") if isinstance(proxy, dict) else None
+    if not isinstance(w, dict):
+        return None
+    return {k: int(w[k]) if isinstance(w.get(k), (int, float)) else 0 for k in WEB_COUNTERS}
+
+
+def is_web_run(r: dict, tasks: dict[str, Task]) -> bool:
+    """A run of a web-split task -- by the split its result recorded, and by the task as
+    it is now only when it recorded none (a task moved between splits since never
+    reclassifies a run; review C10) -- or a run whose route had a corpus."""
+    split = r.get("split")
+    if split is None and (t := tasks.get(r.get("task"))) is not None:
+        split = t.split
+    return split == WEB_SPLIT or web_counters(r) is not None
+
+
+def _median(values: list[int]) -> int | float:
+    """The median of ints: an int unless the two middle values straddle a half."""
+    m = statistics.median(values)
+    return int(m) if m == int(m) else m
+
+
+def web_section(runs: list[dict], tasks: dict[str, Task]) -> dict | None:
+    """E5 for the runs of web tasks, None when there are none (so a report without web
+    runs is what it always was). Per ``model/harness``: ``pass`` -- the objective pass
+    over its scored runs, the rate with its Wilson 90% interval, each task's mean pass;
+    ``counters`` (craze-web) -- the web route's counters over its scored runs, totals
+    and per-run medians; ``metrics`` -- the metric medians of the web runs alone. And
+    ``runs``: every web run's counters with its task, rep, status and pass."""
+    web_runs = [r for r in runs if is_web_run(r, tasks)]
+    if not web_runs:
+        return None
+    by: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in web_runs:
+        by[(r.get("model"), r.get("harness"))].append(r)
+    per_task = pass_by_task(web_runs)
+    passes, counters = {}, {}
+    for (m, h), rs in sorted(by.items(), key=lambda kv: tuple(map(str, kv[0]))):
+        sc = [r for r in rs if scored(r)]
+        k = sum(1 for r in sc if r.get("objective_pass"))
+        lo, hi = wilson(k, len(sc))
+        passes[f"{m}/{h}"] = {"runs": len(sc), "unscored": len(rs) - len(sc), "passed": k,
+                              "rate": round(k / len(sc), 4) if sc else None, "ci90": [round(lo, 4), round(hi, 4)],
+                              "tasks": {t: round(v, 4) for t, v in sorted(per_task.get((m, h), {}).items())}}
+        cs = [c for c in map(web_counters, sc) if c is not None]
+        if cs:
+            counters[f"{m}/{h}"] = {"runs": len(cs), "totals": {n: sum(c[n] for c in cs) for n in WEB_COUNTERS},
+                                    "medians": {n: _median([c[n] for c in cs]) for n in WEB_COUNTERS}}
+    rows = []
+    for r in sorted(web_runs, key=lambda r: (str(r.get("task")), str(r.get("model")), str(r.get("harness")),
+                                             str(r.get("rep")))):
+        c = web_counters(r)
+        if c is not None:
+            rows.append({"task": r.get("task"), "model": r.get("model"), "harness": r.get("harness"),
+                         "rep": r.get("rep"), "status": r.get("status"), "objective_pass": bool(r.get("objective_pass")),
+                         **c})
+    return {"tasks": sorted({str(r.get("task")) for r in web_runs}), "pass": passes, "counters": counters,
+            "metrics": {f"{m}/{h}": v for (m, h), v in sorted(metric_medians(web_runs).items(),
+                                                              key=lambda kv: tuple(map(str, kv[0])))},
+            "runs": rows}
+
+
 # -- the report ---------------------------------------------------------------------------------------------------
 
 
@@ -792,6 +871,10 @@ def build(inp: ReportInput) -> dict:
         # The rubric text of the tasks with a loss, to name the items craze missed.
         out["rubrics"] = {t: list(inp.tasks[t].rubric) for t in sorted({x["task"] for x in out["losses"]})
                           if t in inp.tasks}
+    # Additive and only with web runs: every other report is byte for byte what it was.
+    web = web_section(inp.runs, inp.tasks)
+    if web is not None:
+        out["web"] = web
     return out
 
 
@@ -889,7 +972,44 @@ def render_markdown(rep: dict) -> str:
                      + (" — **objective drop**" if p["objective_drop"] else ""))
     if "losses" in rep:
         L += [""] + render_losses(rep["losses"], rep.get("rubrics") or {})
+    if "web" in rep:
+        L += [""] + render_web(rep["web"])
     return "\n".join(L) + "\n"
+
+
+def render_web(w: dict) -> list[str]:
+    """The web tasks section (craze plan 051 E5)."""
+    L = ["## Web tasks (craze plan 051 E5)", "",
+         f"Tasks: {', '.join(w['tasks'])}. Scored by their hidden tests alone; the web route answers craze-web's "
+         "searches and fetches from each task's frozen corpus.", "",
+         "Objective pass per model and arm (scored runs; Wilson 90%):", "",
+         "| model | harness | passed | rate [90% CI] | unscored | per task |", "|---|---|---|---|---|---|"]
+    for k, p in w["pass"].items():
+        m, h = k.rsplit("/", 1)
+        rate = "–" if p["rate"] is None else f"{p['rate']:.0%} [{p['ci90'][0]:.0%}–{p['ci90'][1]:.0%}]"
+        tasks = ", ".join(f"{t} {v:g}" for t, v in p["tasks"].items()) or "–"
+        L.append(f"| {m} | {h} | {p['passed']} of {p['runs']} | {rate} | {p['unscored']} | {tasks} |")
+    names = [n.replace("_", " ") for n in WEB_COUNTERS]
+    L += ["", "The web route's counters (scored runs): total (per-run median):", "",
+          "| model | harness | runs | " + " | ".join(names) + " |", "|---" * (len(names) + 3) + "|"]
+    for k, c in w["counters"].items():
+        m, h = k.rsplit("/", 1)
+        L.append(f"| {m} | {h} | {c['runs']} | "
+                 + " | ".join(f"{c['totals'][n]} ({_fmt(c['medians'][n])})" for n in WEB_COUNTERS) + " |")
+    if not w["counters"]:
+        L.append("| – | – | 0 |" + " – |" * len(names))
+    L += ["", "Metric medians of the web runs:", "", "| model/harness | " + " | ".join(METRICS) + " |",
+          "|---" * (len(METRICS) + 1) + "|"]
+    for k, v in w["metrics"].items():
+        L.append(f"| {k} | " + " | ".join(_fmt(v.get(n)) for n in METRICS) + " |")
+    if w["runs"]:
+        L += ["", "Per run:", "", "| task | model | harness | rep | status | pass | " + " | ".join(names) + " |",
+              "|---" * (len(names) + 6) + "|"]
+        for r in w["runs"]:
+            L.append(f"| {r['task']} | {r['model']} | {r['harness']} | {r['rep']} | {r['status']} | "
+                     f"{'yes' if r['objective_pass'] else 'no'} | " + " | ".join(str(r[n]) for n in WEB_COUNTERS) + " |")
+    L.append("")
+    return L
 
 
 def _task_hash_line(th: dict[str, list[str]]) -> str:
