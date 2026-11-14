@@ -32,9 +32,9 @@ Short and concrete; each item points at the section that explains it.
   (`eval/results/2026-11-start-models/`) ran craze alone, with no reference harness and
   no judge: use it for objective passes, cost and tool use per model, not for win rates.
 - Re-check the open items the earlier campaigns left:
-  - Kimi K3.1 Pro, the Fireworks start model, finished 3 of 17 tasks in November 2026
-    before the budget guard stopped the batch; its two T-E1 runs had each cost three to
-    four times a whole Kimi K3 run by then. It is not yet shown to be as good as K3.
+  - Kimi K3.1 Pro, the Fireworks start model, passed 15 of 17 tasks in November 2026
+    against Kimi K3's 16.5, at about two and a half times K3's cost: on T-E1 and T-P1 it
+    reached the $3 run limit without an answer. It ran one rep, at `high` effort only.
   - L7 (the verification-evidence prompt bullet) was kept provisionally and needs
     confirming on the fresh held-out set.
   - The deepseek plan-mode runaway: see §7.

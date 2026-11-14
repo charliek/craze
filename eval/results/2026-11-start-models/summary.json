@@ -113,13 +113,13 @@
           "wall s": 47.1795
         },
         "fireworks/kimi-k3p1-pro/craze": {
-          "answer words": 63.5,
-          "cost $": 0.0841,
-          "input tokens": 98281.5,
-          "main requests": 10.5,
-          "output tokens": 1840.5,
-          "tool calls": 14.0,
-          "wall s": 47.4715
+          "answer words": 75.0,
+          "cost $": 0.1203,
+          "input tokens": 106009.0,
+          "main requests": 11.5,
+          "output tokens": 3151.0,
+          "tool calls": 18.5,
+          "wall s": 74.1555
         },
         "glm-5.3-flash/craze": {
           "answer words": 277.0,
@@ -232,13 +232,27 @@
           }
         },
         "fireworks/kimi-k3p1-pro/craze": {
-          "all": 3.0,
-          "dev": 3.0,
-          "heldout": 0.0,
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
           "tasks": {
             "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
             "T-D1": 1.0,
-            "T-D2": 1.0
+            "T-D2": 1.0,
+            "T-E1": 0.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 0.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0
           }
         },
         "glm-5.3-flash/craze": {
@@ -321,7 +335,8 @@
           "main-20261113-224427",
           "glm-flash-20261114-002047",
           "glm-rest-20261114-011601",
-          "glm-rest2-20261114-013744"
+          "glm-rest2-20261114-013744",
+          "k31-rest-20261114-021556"
         ],
         "judge_hash_now": "8464a18c94bfc594ea028db8b9dd4d92b1ebb28617629bb10f9d7beb7614376c",
         "judge_hashes": [],
@@ -350,8 +365,9 @@
           "ok": 34
         },
         "fireworks/kimi-k3p1-pro/craze": {
-          "budget-stop": 2,
-          "ok": 6
+          "budget-capped": 2,
+          "budget-stop": 1,
+          "ok": 18
         },
         "glm-5.3-flash/craze": {
           "ok": 34

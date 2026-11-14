@@ -5,9 +5,13 @@ good as `fireworks/kimi-k3` as the model a Fireworks-only machine starts on? It 
 the other providers' start models on the same tasks as a regression check after plans 050
 and 051.
 
-**It does not answer the Fireworks question.** The budget guard stopped the main batch
-when Kimi K3.1 Pro had finished 3 of the 17 tasks. Every other model ran all 17 tasks
-twice. Read *What the campaign cannot say* before quoting a number from here.
+**Kimi K3.1 Pro is not shown to be as good as Kimi K3 on this suite, and it cost about
+two and a half times as much.** It passed 15 of the 17 tasks. On the other two (T-E1 and
+T-P1, both questions about the craze repository) it reached the $3 spending limit for a
+run without giving an answer, where K3 answered both, twice, for a fraction of that.
+K3.1 Pro has one scored run on 14 of the tasks and two on the other three, so this is
+thinner evidence than the other models' two reps. Read *What the campaign cannot say*
+before quoting a number from here.
 
 ## Setup
 
@@ -35,10 +39,15 @@ Models, each at the effort craze's catalog starts it on:
 | `glm-5.3` | Z.AI coding plan | max |
 | `glm-5.3-flash` | Z.AI coding plan | high |
 
-Batches: `main-20261113-224427` (all seven models, stopped by the budget guard),
-then three zero-cost Z.AI batches for the GLM runs the stop cut off
-(`glm-flash-20261114-002047`, `glm-rest-20261114-011601`, `glm-rest2-20261114-013744`).
-A 14-run smoke batch came first and passed 14 of 14.
+Batches, in order:
+
+- A 14-run smoke batch, which passed 14 of 14.
+- `main-20261113-224427`: all seven models, two reps. The budget guard stopped it when
+  Kimi K3.1 Pro had finished three tasks and GLM 5.3 Flash had not started (see *Budget*).
+- `glm-flash-20261114-002047`, `glm-rest-20261114-011601`, `glm-rest2-20261114-013744`:
+  the GLM runs the stop cut off, at no cost.
+- `k31-rest-20261114-021556`: one rep of Kimi K3.1 Pro on its 14 remaining tasks, one run
+  at a time with a $3 limit per run, after the owner raised the cap to $35.
 
 ## Results
 
@@ -53,13 +62,17 @@ point. Cost is the provider's list price. Medians are over finished runs.
 | `fireworks/kimi-k3` | 34 of 34 | 9 | 7.5 | 16.5 | $0.088 | $5.55 | 47 s | 10 | 238 |
 | `muse-spark-1.3-contributor` | 33 of 34 | 8.5 | 8 | 16.5 | $0.014 | $1.00 | 47 s | 12 | 173 |
 | `glm-5.3` | 33 of 34 | 8.5 | 7.5 | 16 | $0 (plan) | $0 (plan) | 193 s | 13 | 240 |
-| `fireworks/kimi-k3p1-pro` | 6 of 34 | 3 of 3 run | not run | 3 of 3 run | $0.056 | $3.30 | 47 s | 14 | 64 |
+| `fireworks/kimi-k3p1-pro` | 18 of 22 started | 7 | 8 | 15 | $0.078 | $10.21 | 65 s | 18 | 83 |
+
+Kimi K3.1 Pro's row is one rep on 14 tasks and two on three (T-B1, T-D1, T-D2); its 13
+other second reps were never run, so its score is over the reps it has. Its total
+includes the four runs that were stopped or reached the run limit.
 
 The two GLM models are on the Z.AI coding plan, a flat subscription, so their runs cost
 nothing against the budget. At Fireworks' list price for GLM 5.3 the same tokens would be
 $6.83 (`glm-5.3`) and $4.82 (`glm-5.3-flash`).
 
-The four runs that did not pass:
+The runs that did not pass:
 
 - **`fireworks/kimi-k3`, T-F2 rep 2** and **`glm-5.3`, T-F2 rep 2**: the model's `Bytes`
   crashed the hidden test for the most negative size (`TestHiddenBytesNegative`). This is
@@ -70,6 +83,7 @@ The four runs that did not pass:
   checks, but the evaluator voided the run (`budget-capped`). The model made 101 tool
   calls, and one request was refused because the run already held four open budget
   reservations. This is a limit of the evaluator, not a wrong answer.
+- **`fireworks/kimi-k3p1-pro`, T-E1 and T-P1**: see the next section.
 
 `fireworks/deepseek-v4p1-flash-1017` showed no runaway generation on the plan tasks, the
 failure the runbook asks each campaign to look for: 4 of 4 plan runs passed, and its
@@ -77,40 +91,48 @@ largest single response was 14,950 output tokens (T-P1). Four runs is a small sa
 
 ## Kimi K3.1 Pro against Kimi K3
 
-On the three tasks both finished (T-B1, T-D1, T-D2; two reps each):
+One pass over the 17 tasks, K3's two reps beside K3.1 Pro's one scored run per task (rep 1
+where it has two):
 
-| | objective | cost, 6 runs | tool calls, 6 runs | input tokens, 6 runs | median answer words |
+| | tasks passed | cost | tool calls | input tokens | median cost / run | median answer words |
+|---|---|---|---|---|---|---|
+| `fireworks/kimi-k3` rep 1 | 17 | $2.90 | 196 | 3.4M | $0.082 | 232 |
+| `fireworks/kimi-k3` rep 2 | 16 | $2.65 | 195 | 2.8M | $0.094 | 246 |
+| `fireworks/kimi-k3p1-pro` | 15 | $7.10 | 765 | 14.3M | $0.081 | 88 |
+
+On a typical task the two cost the same: K3.1 Pro is cheaper per token and uses more
+tokens. It makes about twice the tool calls (median 19 against 10) and writes answers
+about a third as long.
+
+The difference is in the tasks that ask about the craze repository itself. K3's two reps
+beside K3.1 Pro's run:
+
+| task | K3 cost | K3 tool calls | K3.1 Pro cost | K3.1 Pro tool calls | K3.1 Pro result |
 |---|---|---|---|---|---|
-| `fireworks/kimi-k3` | 6 of 6 | $0.33 | 46 | 319k | 139 |
-| `fireworks/kimi-k3p1-pro` | 6 of 6 | $0.37 | 69 | 452k | 64 |
+| T-E1 explain the prompt prefix | $0.38, $0.48 | 17, 19 | $2.11 | 156 | no answer at the run limit |
+| T-E2 explain a bad tool call | $0.36, $0.40 | 13, 16 | $1.34 | 117 | passed |
+| T-E3 answer a cost question | $0.13, $0.26 | 12, 19 | $0.45 | 66 | passed |
+| T-P1 plan a craze feature | $1.07, $0.58 | 32, 27 | $2.16 | 209 | no answer at the run limit |
 
-K3.1 Pro passed the same checks with half again as many tool calls and answers under half
-as long. Its lower price per token roughly cancelled its higher token use.
+On these K3.1 Pro reads far more of the repository than K3, several files per request,
+and resends a growing context each time: 4.2M and 4.5M input tokens on T-E1 and T-P1. Its
+reads were all different, so this is breadth, not a loop. Both runs were cut off by the
+run's $3 ledger limit ($2 at list price). The most any other model's run spent was $1.61
+on the ledger (K3, T-P1). Whether they would have passed with more money is unknown.
 
-On T-E1 (explain how craze builds its prompt prefix) the two models diverged. Both K3.1
-Pro runs were still going when the batch stopped, two and four minutes in:
-
-| | status | tool calls | file reads | input tokens | cost |
-|---|---|---|---|---|---|
-| `fireworks/kimi-k3` rep 1 | passed | 17 | 11 | 358k | $0.38 |
-| `fireworks/kimi-k3` rep 2 | passed | 19 | 14 | 494k | $0.48 |
-| `fireworks/kimi-k3p1-pro` rep 1 | stopped, unscored | 112 | 79 | 1.81M | $1.39 |
-| `fireworks/kimi-k3p1-pro` rep 2 | stopped, unscored | 132 | 95 | 2.93M | $1.54 |
-
-The reads were all different (no loop), so K3.1 Pro was reading far more of the
-repository than K3 did, and resending a growing context each time. Each stopped run had
-already cost three to four times one whole K3 run. Whether either would have passed is
-unknown. The other models' T-E1 runs took 22 to 67 tool calls, apart from the Muse run of
-101 calls that the evaluator voided.
+T-E1 has now failed to finish three times out of three. In the main batch its two runs
+were stopped by the batch's budget guard after 112 and 132 tool calls, at $1.39 and $1.54.
 
 ## What the campaign cannot say
 
-- **Whether K3.1 Pro is at least as good as K3.** It ran 3 of 17 tasks. The condition
-  issue #118 sets for keeping it as the Fireworks start is not shown either way.
+- **Whether K3.1 Pro's answers are better where it does answer.** It may be reading more
+  because it is more thorough. Nothing here measures that.
+- **How K3.1 Pro behaves at another effort.** It ran at `high`, the catalog's start for
+  it. A lower effort might read less; that was not tried.
 - **Which model writes the better answer.** With no judge, a passing run by one model and
   a passing run by another count the same. Plan 029 found the objective checks sit near
-  the ceiling for every harness, and that is true here: all six finished models scored
-  16 or more of 17.
+  the ceiling for every harness, and that is true here: the six models with two full reps
+  scored 16 or more of 17, and K3.1 Pro 15.
 - **Anything blind about the held-out tasks.** These eight were already read in plan
   029's final. Nothing in craze was changed from this campaign's results, but the set is
   still due the rotation `eval/RUNBOOK.md` §6 describes before the next tuning loop.
@@ -120,8 +142,9 @@ unknown. The other models' T-E1 runs took 22 to 67 tool calls, apart from the Mu
 - **The other start models hold up after plans 050 and 051.** Haiku 5.5, Muse Spark
   contributor, GLM 5.3 and GLM 5.3 Flash passed every task at least once, and the misses
   are one rep each.
-- **K3.1 Pro can be far more expensive than K3 on a repository question**, despite its
-  lower price per token. Two runs on one task is thin evidence, but it is the kind of task
+- **K3.1 Pro does not meet the condition issue #118 set.** It passed fewer tasks than K3
+  (15 against 16 and 17) and one pass cost $7.10 against K3's $2.65 to $2.90. Both misses
+  and most of the extra cost are on questions about a large repository, the kind of task
   a new session often starts with.
 - **`fireworks/deepseek-v4p1-flash-1017` is the cheap Fireworks candidate that finished.**
   It passed 34 of 34 for $1.49, against K3's 33 of 34 for $5.55. It uses more tool calls
@@ -130,11 +153,12 @@ unknown. The other models' T-E1 runs took 22 to 67 tool calls, apart from the Mu
 
 ## Budget
 
-Approved cap: $20, counted by the evaluator's ledger, which charges Fireworks models at
-1.5 times list (the US serverless rate). The ledger ended at $17.18 committed. At list
-price the campaign cost about $12.
+The cap is counted by the evaluator's ledger, which charges Fireworks models at 1.5 times
+list (the US serverless rate). The owner approved $20, then $35 to finish Kimi K3.1 Pro.
+The ledger ended at $27.54 committed: $17.18 when the main batch stopped, and $10.36 for
+the K3.1 Pro batch. At list price the campaign cost about $19.
 
-Two things went wrong with the budget, both in the evaluator:
+Two things went wrong with the first $20, both in the evaluator:
 
 1. **One refused request stops the whole batch.** The ledger admits a request only if
    everything committed plus every open reservation fits under the cap. K3.1 Pro has no
@@ -153,10 +177,11 @@ of at least three of its reservations.
 
 ## Open
 
-Finishing K3.1 Pro needs more budget than was approved. One more rep of its 14 unrun
-tasks plus T-E1, one run at a time, fits under a cap raised to about $35. Until then the
-Fireworks start model in `catalog.toml` rests on the maker's guidance and the partial
-evidence above.
+- The Fireworks `start` in `catalog.toml` is still Kimi K3.1 Pro. Issue #118 says to
+  change it if K3.1 Pro is not at least as good as K3 on the suite; that is the owner's
+  decision. The candidates this campaign ran are `fireworks/kimi-k3` (deprecated in the
+  catalog) and `fireworks/deepseek-v4p1-flash-1017`.
+- Not run: K3.1 Pro's second rep on 13 tasks, and K3.1 Pro at a lower effort.
 
 ## How this record was made
 
@@ -167,13 +192,15 @@ uv run crazeeval report --unseal --out $CRAZEEVAL_CAMPAIGN_DIR/report \
   --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/main-20261113-224427 \
   --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/glm-flash-20261114-002047 \
   --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/glm-rest-20261114-011601 \
-  --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/glm-rest2-20261114-013744
+  --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/glm-rest2-20261114-013744 \
+  --batch $CRAZEEVAL_CAMPAIGN_DIR/eval-runs/k31-rest-20261114-021556
 uv run crazeeval summarize --report $CRAZEEVAL_CAMPAIGN_DIR/report \
   --campaign-name 2026-11-start-models --out results/2026-11-start-models/summary.json
 ```
 
 `summary.json` holds the report's own numbers: its `cost $` medians are the ledger's
 (1.5 times list for the Fireworks models), where the tables above use list price, and its
-`statuses` omit the runs a stopped batch never started. The per-run figures in the Kimi
-tables come from each run's `result.json`. The full archive has not been published to
+`statuses` omit the runs a stopped batch never started. Its medians for Kimi K3.1 Pro
+include the two runs that hit the run limit, where the results table counts finished runs
+only. The per-run figures in the Kimi tables come from each run's `result.json`. The full archive has not been published to
 `charliek/craze-evals` yet; the raw runs are local.
