@@ -10,9 +10,11 @@ An Anthropic model (craze plan 047 D11) is the exception to "the files point at 
 route": craze's Anthropic endpoint is fixed, so its route reaches craze as
 ``CRAZE_TEST_ANTHROPIC_API`` in the run's environment instead (anthropic_api).
 
-craze-web's home (craze plan 051 E2) is craze's plus the one ``config.toml`` any home
-here writes for craze, turning web search on; its provider's endpoint reaches craze as
-``CRAZE_TEST_EXA_MCP``, the proxy's web route on the run's token (web_mcp_url).
+craze-web's home (craze plan 051 E2) is craze's plus a ``config.toml`` turning web search
+on; its provider's endpoint reaches craze as ``CRAZE_TEST_EXA_MCP``, the proxy's web route
+on the run's token (web_mcp_url). Plain craze's home on a web task (and only there) is
+craze's plus a ``config.toml`` turning web search off (craze_web_off), which craze's
+``--web-search`` cannot override.
 """
 
 from __future__ import annotations
@@ -162,6 +164,21 @@ def craze_web_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> 
     env = craze_home(home, em, snap, base_url)
     _write(home / ".craze" / "config.toml", WEB_CONFIG, mode=0o600)
     return {**env, EXA_MCP_ENV: web_url}
+
+
+# The config.toml plain craze gets on a web task (plan 051 follow-up): web search off.
+# craze refuses ``--web-search`` against it (web_search_not_offered), so a nested
+# ``craze prompt --web-search`` a model runs through bash on the plain arm fails at once,
+# instead of a nested session offering web tools to a request through the proxy (C12's
+# plain-arm escape attempts). The run's own session is offered no web tools either way.
+WEB_OFF_CONFIG = "websearch = false\n"
+
+
+def craze_web_off(home: Path) -> None:
+    """Plain craze's home on a web task: craze_home's files plus a ``config.toml`` that
+    turns web search off. Every other task's craze home is craze_home's alone, byte for
+    byte."""
+    _write(home / ".craze" / "config.toml", WEB_OFF_CONFIG, mode=0o600)
 
 
 def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_urls: dict[str, str]) -> dict[str, str]:

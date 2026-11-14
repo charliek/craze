@@ -1,0 +1,12 @@
+# T-WS6 web-troubleshooting-retry-search (craze plan 051 follow-up): T-W6, its docs site
+# unnamed. The prompt names only the product, and the setup patch takes the docs site's
+# address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W6's
+# (variant_of).
+id = "T-WS6"
+name = "web-troubleshooting-retry-search"
+variant_of = "T-W6"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`orvelline.py` is our travel desk's client for the Orvelline Passes API (version 2). Since the busy season began, some calls to `Client.book_pass` fail with `OrvellineError: 409 booking.hold_pending` and the traveller ends up with no pass. Fix `book_pass` so that a booking that gets this answer is completed the way Orvelline says it must be, without ever risking booking (and charging for) the same pass twice; every other error must still be raised as `OrvellineError` straight away. Use only the standard library, as the rest of the module does. Orvelline's API documentation, including its troubleshooting guides, is published on the web; follow it exactly, since the client will be pointed at the real API. Run the tests when you are done.
+"""

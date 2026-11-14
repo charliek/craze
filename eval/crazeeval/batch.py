@@ -167,8 +167,12 @@ def task_fingerprint(task: Task) -> str:
     """A task's identity: its directory's tree hash (definition, testdata, patches) --
     and, for a craze-repo task on a commit other than FINGERPRINT_BASE_COMMIT, that
     commit, so a defaulted commit that moves changes the batch identity too (an explicit
-    ``[repo] commit`` is in task.toml, so in the tree hash, already)."""
+    ``[repo] commit`` is in task.toml, so in the tree hash, already). A variant's
+    (``variant_of``) folds in its base's tree hash, whose testdata it runs on; every
+    other task's is unchanged."""
     th = tree_hash(task.dir)
+    if task.base_dir is not None:
+        th = hashlib.sha256(f"{th}\0variant-of={tree_hash(task.base_dir)}".encode()).hexdigest()
     commit = task.craze_commit
     if commit is None or commit == FINGERPRINT_BASE_COMMIT:
         return th
@@ -395,6 +399,7 @@ class Batch:
         try:
             base_url = self.proxy.base_url(route, em.provider)
             env = runner.home(home, em, cfg.snap, base_url)
+            runner.task_home(home, task)
             cmd = runner.command(em, task, ws_inside, cfg.snap)
             sspec = SandboxSpec(
                 workspace=ws,

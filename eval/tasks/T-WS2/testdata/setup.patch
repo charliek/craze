@@ -1,0 +1,12 @@
+diff --git a/README.md b/README.md
+index 3405a88..bf8d03d 100644
+--- a/README.md
++++ b/README.md
+@@ -17,6 +17,6 @@ print(receipt)
+ ```
+ 
+ The gateway logs readings in the units its sensors report: degrees Celsius, hectopascals
+-and metres per second. The API's documentation is at https://docs.skerrywind.example.
++and metres per second.
+ 
+ Run the tests with `python -m pytest`.

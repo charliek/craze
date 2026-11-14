@@ -400,7 +400,11 @@ def fixture_hash(name: str) -> str:
     return h.hexdigest()
 
 
-def materialise_fixture(name: str, dest: Path) -> None:
+def materialise_fixture(name: str, dest: Path, setup_patch: Path | None = None) -> None:
+    """The fixture's files as a fresh repository: its initial commit, then its history.
+    ``setup_patch`` (a fixture task's ``[repo] setup_patch``, or a variant's own) is
+    applied to the files before the initial commit, so the start commit carries it and
+    nothing in the history shows it was ever otherwise."""
     src = fixture_dir(name)
     meta = {}
     if (src / "fixture.toml").exists():
@@ -411,6 +415,8 @@ def materialise_fixture(name: str, dest: Path) -> None:
         raise WorkspaceError(f"fixture {name}: no files/ directory")
     shutil.copytree(files, dest, symlinks=True, dirs_exist_ok=False)
     git(dest, "init", "-q", "-b", "main")
+    if setup_patch is not None:
+        git(dest, "apply", "--whitespace=nowarn", "-", input=Path(setup_patch).read_bytes())
     git(dest, "add", "-A")
     git(dest, "commit", "-q", "-m", meta.get("initial_message", "Initial commit"), date=meta.get("initial_date", FIXTURE_DATE))
     for step in meta.get("history") or []:
@@ -456,7 +462,7 @@ def materialise(task: Task, dest: Path, cache: Path | None = None) -> Start:
         if not isolation["ok"]:
             raise WorkspaceError(f"{task.id}: workspace failed its isolation checks")
     else:
-        materialise_fixture(task.fixture, dest)
+        materialise_fixture(task.fixture, dest, task.setup_patch)
     commit = git(dest, "rev-parse", "HEAD").strip()
     return Start(commit=commit, manifest=build_manifest(dest), isolation=isolation)
 

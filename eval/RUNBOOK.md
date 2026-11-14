@@ -593,9 +593,19 @@ like end to end.
 
 The `web` split (craze plan 051 E4; `eval/README.md`'s *The web split*) asks one question:
 does craze with web search (`craze-web`) solve tasks plain `craze` cannot, and at what
-cost? Six tasks (T-W1–T-W6), two arms, two cheap models, three reps: 72 runs, scored by
-the hidden tests alone. No baseline against the open harnesses, no lever loop, no judge, no
-held-out set. Each item points at the section that explains the command.
+cost? Twelve tasks: T-W1–T-W6 name their docs site (so a run fetches it directly) and
+T-WS1–T-WS6 are the same tasks with the site unnamed (so a run has to search first). Two
+arms, two cheap models, three reps, scored by the hidden tests alone. No baseline against
+the open harnesses, no lever loop, no judge, no held-out set. Each item points at the
+section that explains the command.
+
+`--tasks split:web` is all twelve: 144 runs, about $12 at 2026-11-web's per-run costs (its
+72 T-W1–T-W6 runs settled about $5.83, most of it plain Muse's long runs), more than the
+$10 cap below leaves room for. Run one half per campaign, by id:
+`--tasks T-WS1,T-WS2,T-WS3,T-WS4,T-WS5,T-WS6` measures search (72 runs), or raise
+`--budget-cap` for both. Plain craze's home on a web
+task turns web search off (`config.toml`: `websearch = false`), so a nested
+`craze prompt --web-search` on the plain arm is refused rather than reaching the proxy.
 
 - Pick a campaign name `YYYY-MM-web` and `export CRAZEEVAL_CAMPAIGN_DIR=~/.craze-eval/<name>`
   (§1). A fresh campaign has its own ledger, so its cap is this campaign's alone. Every
@@ -644,7 +654,9 @@ held-out set. Each item points at the section that explains the command.
   ```
 
 - Run the campaign: both arms must be named (`craze-web` is never a default harness, and
-  `split:web` is never in the default selection or in `split:all`). `--resume` reopens it
+  `split:web` is never in the default selection or in `split:all`). For the search half,
+  replace `split:web` below with `T-WS1,T-WS2,T-WS3,T-WS4,T-WS5,T-WS6` (and the smoke's
+  `T-W1` with `T-WS1`). `--resume` reopens it
   after a crash; pass the same caps, since they are part of the batch's identity (§7):
 
   ```shell
@@ -685,7 +697,8 @@ held-out set. Each item points at the section that explains the command.
 
 **What it can show, and what it cannot.** It shows whether a model uses the web tools to
 solve tasks it cannot solve without them (craze-web's pass rate against plain craze's on the
-same tasks and models), and at what cost in calls and tokens. The tools search and fetch a
+same tasks and models), and at what cost in calls and tokens; on T-WS1–T-WS6, whether it
+searches to find documentation it was not pointed at (the web route's `searches` counter). The tools search and fetch a
 frozen corpus ranked by BM25, not Exa's index, so it measures tool use and nothing about
 Exa's real ranking or results. It measures no harm either: the web tools are offered only
 on web tasks, so whether having them makes a model worse on tasks that need no web is not

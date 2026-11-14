@@ -1,0 +1,11 @@
+diff --git a/README.md b/README.md
+index 7de2298..d31ac5e 100644
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,4 @@ print(r.locker, r.compartment, r.code, r.expires_at)
+ client.cancel(r.id)
+ ```
+ 
+-Tallowmere's API documentation is at https://docs.tallowmere.example.
+-
+ Run the tests with `python -m pytest`.

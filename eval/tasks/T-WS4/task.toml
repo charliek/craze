@@ -1,0 +1,12 @@
+# T-WS4 web-changelog-breaking-auth-search (craze plan 051 follow-up): T-W4, its docs
+# site unnamed. The prompt names only the product, and the setup patch takes the docs
+# site's address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W4's
+# (variant_of).
+id = "T-WS4"
+name = "web-changelog-breaking-auth-search"
+variant_of = "T-W4"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`tallowmere.py` is our client for the Tallowmere parcel-locker API. It was written against version 2 of the API, which Tallowmere has since retired, and the live API now refuses every request the client sends. Move the client to the current API version so that `Client.reserve` and `Client.cancel` work against it, following Tallowmere's changelog and API reference exactly: the authentication, the endpoints, and the request and response bodies. Keep the module's public interface as it is: the `Reservation` dataclass and its fields, the signatures of `Client.reserve` and `Client.cancel`, and `TallowmereError` raised for any error response. Use only the standard library, as the rest of the module does. Tallowmere's API documentation is published on the web. Run the tests when you are done.
+"""

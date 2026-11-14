@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from crazeeval import paths, webcorpus
@@ -76,6 +76,10 @@ class Task:
     web_corpus: webcorpus.Corpus | None = None
     relevant: list[str] = field(default_factory=list)
     needs: list[str] = field(default_factory=list)
+    # A variant's base task directory (``variant_of``): where every testdata path but the
+    # variant's own setup patch resolves -- its corpus, hidden tests and reference patch
+    # are the base's. None for every other task.
+    base_dir: Path | None = None
 
     @property
     def repo_name(self) -> str:
@@ -93,10 +97,18 @@ class Task:
         return self.mode == "plan"
 
     def testdata(self, rel: str) -> Path:
-        p = (self.dir / rel).resolve()
-        if not str(p).startswith(str(self.dir.resolve()) + "/"):
-            raise TaskError(f"{self.id}: {rel!r} escapes the task directory")
-        return p
+        return _inside(self.id, self.base_dir or self.dir, rel)
+
+
+def _inside(tid: str, root: Path, rel: str) -> Path:
+    p = (root / rel).resolve()
+    if not str(p).startswith(str(root.resolve()) + "/"):
+        raise TaskError(f"{tid}: {rel!r} escapes the task directory")
+    return p
+
+
+# What a variant's task.toml may say (``variant_of``): everything else is its base's.
+VARIANT_KEYS = {"id", "name", "variant_of", "prompt", "setup_patch"}
 
 
 def load_task(d: Path) -> Task:
@@ -106,6 +118,8 @@ def load_task(d: Path) -> Task:
     tid = doc.get("id") or d.name
     if tid != d.name:
         raise TaskError(f"task id {tid!r} does not match its directory {d.name!r}")
+    if "variant_of" in doc:
+        return _load_variant(d, tid, doc)
     cat = doc.get("category")
     if cat not in CATEGORIES:
         raise TaskError(f"{tid}: unknown category {cat!r}")
@@ -201,6 +215,40 @@ def load_task(d: Path) -> Task:
             raise TaskError(f"{tid}: setup patch {setup!r} missing")
     _load_web(t, doc)
     return t
+
+
+def _load_variant(d: Path, tid: str, doc: dict) -> Task:
+    """A web task's variant (``variant_of``, plan 051 follow-up): the base web task with
+    its own id, name and prompt, and optionally a ``setup_patch`` of its own (in its own
+    directory) applied to the fixture before its initial commit -- so the variant can
+    take out what the base's workspace says that its prompt must not, the docs site's
+    address, with no trace in the history. Everything else -- the fixture, checks,
+    corpus, needs, hidden tests and reference patch -- is the base's, read from the
+    base's directory. The base is a web task that is not itself a variant."""
+    if extra := sorted(set(doc) - VARIANT_KEYS):
+        raise TaskError(f"{tid}: a variant sets only {sorted(VARIANT_KEYS)}, not {extra}")
+    base_id = doc["variant_of"]
+    if not isinstance(base_id, str) or not base_id or "/" in base_id or base_id in (".", ".."):
+        raise TaskError(f"{tid}: variant_of must name a task directory")
+    base_dir = d.parent / base_id
+    if not (base_dir / "task.toml").exists():
+        raise TaskError(f"{tid}: variant_of {base_id!r}: no such task")
+    with open(base_dir / "task.toml", "rb") as f:
+        if "variant_of" in tomllib.load(f):
+            raise TaskError(f"{tid}: variant_of {base_id!r} is itself a variant")
+    base = load_task(base_dir)
+    if base.split != WEB_SPLIT:
+        raise TaskError(f"{tid}: variant_of {base_id!r}: only a web task has variants")
+    prompt = (doc.get("prompt") or "").strip()
+    if not prompt:
+        raise TaskError(f"{tid}: empty prompt")
+    setup = None
+    if "setup_patch" in doc:
+        setup = _inside(tid, d, doc["setup_patch"])
+        if not setup.exists():
+            raise TaskError(f"{tid}: setup patch {doc['setup_patch']!r} missing")
+    return replace(base, id=tid, dir=d, base_dir=base_dir, name=str(doc.get("name") or ""), prompt=prompt,
+                   setup_patch=setup)
 
 
 def _nonempty_strings(v) -> bool:

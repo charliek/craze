@@ -31,7 +31,8 @@ def test_default_harnesses_and_task_selection_unchanged():
     # selection is what it was.
     assert select_tasks(tasks, None) == [t for t in tasks.values() if t.split in ("dev", "heldout")]
     assert [t.id for t in select_tasks(tasks, "split:all")] == [t.id for t in tasks.values() if t.split != "web"]
-    assert [t.id for t in select_tasks(tasks, "split:web")] == ["T-W1", "T-W2", "T-W3", "T-W4", "T-W5", "T-W6"]
+    assert [t.id for t in select_tasks(tasks, "split:web")] == ["T-W1", "T-W2", "T-W3", "T-W4", "T-W5", "T-W6",
+                                                                "T-WS1", "T-WS2", "T-WS3", "T-WS4", "T-WS5", "T-WS6"]
     assert [t.id for t in select_tasks(tasks, "T-W1")] == ["T-W1"]
 
 

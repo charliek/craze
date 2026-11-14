@@ -1,0 +1,11 @@
+diff --git a/README.md b/README.md
+index 9d002ce..2306bd7 100644
+--- a/README.md
++++ b/README.md
+@@ -15,6 +15,4 @@ for r in client.readings("propagation-1", "rh-04", "2026-03-14T00:00:00Z", "2026
+ Every error the API answers is raised as `TessarootError`, carrying the HTTP status and
+ Tessaroot's error code (`TSR-` and four digits).
+ 
+-The API's documentation is at https://docs.tessaroot.example.
+-
+ Run the tests with `python -m pytest`.

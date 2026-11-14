@@ -30,6 +30,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from crazeeval import paths
 from crazeeval.checks import (
@@ -45,7 +46,7 @@ from crazeeval.checks import (
 )
 from crazeeval.sandbox import Toolchains
 from crazeeval.tasks import ANSWER_LIKE, IMPLEMENTATION, WEB_SPLIT, Task
-from crazeeval.workspace import fixture_dir, git, ignores_for, materialise
+from crazeeval.workspace import fixture_dir, git, ignores_for, materialise, materialise_fixture
 
 
 @dataclass
@@ -157,8 +158,10 @@ def web_lint(task: Task) -> list[str]:
     DISTRACTORS_PER_RELEVANT distractor pages per relevant one, and every need in a
     relevant page and in the reference patch's added lines -- and, ignoring case, in
     neither the prompt nor any file of the fixture (its files and fixture.toml, whose
-    message is the start commit's), by content or by name, so the decisive facts reach
-    a run only through the corpus."""
+    message is the start commit's, with a setup patch applied), by content or by name, so
+    the decisive facts reach a run only through the corpus. A variant (``variant_of``)
+    is the search-only form of its base: the host of no corpus page is in its prompt or
+    its start files either, so a run finds the docs by searching for them."""
     corpus = task.web_corpus
     if corpus is None:
         return ["not a web task"]
@@ -172,10 +175,13 @@ def web_lint(task: Task) -> list[str]:
     added = _added_lines(task.testdata(ref).read_text()) if ref else ""
     if not ref:
         problems.append("no validate.reference_patch")
-    fdir = fixture_dir(task.fixture or "")
-    fixture = [(str(p.relative_to(fdir)), p.read_text(errors="replace").casefold())
-               for p in sorted(fdir.rglob("*")) if p.is_file()]
+    fixture = _start_files(task)
     prompt = task.prompt.casefold()
+    if task.base_dir is not None:
+        for host in sorted({urlsplit(p.url).hostname or "" for p in corpus.pages} - {""}):
+            if host in prompt:
+                problems.append(f"corpus host {host!r} is in the prompt")
+            problems += [f"corpus host {host!r} is in the fixture's {name}" for name, text in fixture if host in text]
     for need in task.needs:
         if not any(need in p.title or need in p.body for p in relevant):
             problems.append(f"need {need!r} is in no relevant corpus page")
@@ -188,6 +194,23 @@ def web_lint(task: Task) -> list[str]:
         problems += [f"need {need!r} is in the fixture's file name {name}" for name, _ in fixture
                      if need.casefold() in name.casefold()]
     return problems
+
+
+def _start_files(task: Task) -> list[tuple[str, str]]:
+    """The fixture's files as a run starts with them, by their name under the fixture
+    directory, casefolded: its files and fixture.toml, and with the task's setup patch
+    applied to its files (materialised to a scratch directory) when it has one."""
+    fdir = fixture_dir(task.fixture or "")
+    out = [(str(p.relative_to(fdir)), p.read_text(errors="replace").casefold())
+           for p in sorted(fdir.rglob("*")) if p.is_file()]
+    if task.setup_patch is None:
+        return out
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "start"
+        materialise_fixture(task.fixture or "", dest, task.setup_patch)
+        files = [(str(Path("files") / p.relative_to(dest)), p.read_text(errors="replace").casefold())
+                 for p in sorted(dest.rglob("*")) if p.is_file() and ".git" not in p.relative_to(dest).parts]
+    return [(n, t) for n, t in out if not n.startswith("files/")] + files
 
 
 async def _validate(task: Task, v: Validation, work: Path, tc, cache) -> None:

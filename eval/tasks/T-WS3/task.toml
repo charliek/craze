@@ -1,0 +1,12 @@
+# T-WS3 web-changelog-migration-search (craze plan 051 follow-up): T-W3, its docs site
+# unnamed. The prompt names only the product, and the setup patch takes the docs site's
+# address out of the fixture's README, so a craze-web run must search to find the
+# documentation; the fixture, corpus, needs, hidden tests and reference patch are T-W3's
+# (variant_of).
+id = "T-WS3"
+name = "web-changelog-migration-search"
+variant_of = "T-W3"
+setup_patch = "testdata/setup.patch"
+prompt = """
+`bindlewick.py` is the client our library's self-service kiosks use for the Bindlewick Circulation API. It is still written against version 1 of the API, which Bindlewick is switching off; move it to version 2. Callers must not have to change: keep the module's public interface as it is (`Client` and its constructor, `checkout`, `checkouts` and `renew`, the `Checkout` fields and what they mean, `BindlewickError`, and `RenewalRefused`, raised only when the patron has used up their renewals). Use only the standard library, as the module does now. Bindlewick's documentation, including what changed between versions, is published on the web; follow it exactly, since the kiosks will be pointed at the real API. Run the tests when you are done.
+"""

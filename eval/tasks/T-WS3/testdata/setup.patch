@@ -1,0 +1,13 @@
+diff --git a/README.md b/README.md
+index eff69c9..cb06195 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,6 @@ for item in client.checkouts("p-1042"):
+         print(item.title, "cannot be renewed again")
+ ```
+ 
+-`branch` is the code of the branch the kiosk stands in. The API's documentation is at
+-https://docs.bindlewick.example.
++`branch` is the code of the branch the kiosk stands in.
+ 
+ Run the tests with `python -m pytest`.
