@@ -644,8 +644,9 @@ if command -v tmux >/dev/null; then
 	run env CRAZE_SMOKE_SOCK="$SOCK-gone" "$SMOKE" stop sg
 	if [[ $RC == 0 ]] && has "$OUTF" '^stopped sg$'; then ok "smoke.sh stop: an absent server counts as stopped (0)"; else bad "smoke.sh stop (absent)" "exit $RC"; fi
 fi
-# --host mac without the mac-mini runbook's scripts (a scratch HOME: no ssh).
-run env HOME="$S/nohome" "$SMOKE" --host mac start st cat
+# --host mac without the mac-mini runbook's scripts (a missing scratch dir: no ssh; smoke.sh reads the
+# owner's real home, so a scratch HOME no longer hides a runbook that exists).
+run env CRAZE_SMOKE_MAC_DIR="$S/nomac" "$SMOKE" --host mac start st cat
 if [[ $RC == 3 ]] && has "$OUTF" 'see the mac-mini runbook'; then ok "smoke.sh --host mac without the runbook: 3"; else bad "smoke.sh --host mac" "exit $RC"; fi
 
 echo "SELFTEST passed=$pass failed=$fail"
