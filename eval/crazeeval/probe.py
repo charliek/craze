@@ -79,7 +79,12 @@ def probe_env(home: Path, em: EvalModel, snap: Snapshot) -> dict[str, str]:
     env: dict[str, str] = {}
     # The default harnesses only: craze-web shares craze's home directory, and would
     # add its config.toml and web route to the probe's craze.
+    # gx has no home on a model the snapshot has no gx entry for: no run builds one
+    # either (config.gx_problems refuses it).
+    no_gx = snap.model(em.key).get("gx") is None
     for h in DEFAULT_HARNESSES:
+        if h == "gx" and no_gx:
+            continue
         if em.supports(h):
             env.update(HOMES[h](home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}/v1"))
     return env

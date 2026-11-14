@@ -29,6 +29,8 @@ def harness_executable(harness: str) -> str:
 # modeltable legacySource): such an entry for a provider craze ships yields to the
 # catalog, lending only its key, so its driver and base_url are not craze's.
 LEGACY_SOURCE = "gx"
+# craze's Anthropic provider id (keys.ANTHROPIC; keys imports this module).
+ANTHROPIC_PROVIDER = "anthropic"
 
 
 def shipped_providers(path: Path | None = None) -> dict[str, dict]:
@@ -47,6 +49,101 @@ def catalog_on(craze_dir: Path) -> bool:
         return True
     with open(p, "rb") as f:
         return tomllib.load(f).get("catalog") is not False
+
+
+def craze_models(craze_dir: Path, catalog_path: Path | None = None) -> dict[str, dict]:
+    """craze's model table as craze builds it from ``craze_dir`` (the owner's native
+    directory), each entry by alias.
+
+    With the catalog off (``catalog_on`` is False: the owner's ``models.toml`` says
+    ``catalog = false``), the owner's ``[models]`` alone. With it on, craze's shipped
+    catalog's ``[models]`` (``paths.CRAZE_CATALOG``, or ``catalog_path``) with the owner's
+    ``models.toml`` -- optional; absent means no entries -- laid over it by craze's rule
+    (internal/harness/modeltable/overlay.go: ``merger.model`` and ``overlayModel``):
+
+    - an entry marked ``source = "gx"`` (an old gx import's copy) for an alias the
+      catalog ships is ignored: the catalog's entry stands;
+    - any other entry for a shipped alias overrides it key by key, only the keys it
+      writes. One that writes ``efforts`` keeps the shipped ``default_effort`` only if the
+      new list has it, unless it writes its own; an empty ``efforts`` list means none;
+    - an entry for an alias the catalog does not ship is taken whole.
+
+    A ``default_effort`` the resulting model does not offer is ignored, as craze ignores
+    it. The shipped entries are read as craze reads them (``_shipped_models``).
+
+    Not mirrored: craze also drops an entry that points at a retired wire id (or an old
+    gx import's copy of a retired alias), falls back to the shipped entry when an
+    override fails any other of its validation rules (a bad ``cost`` table, an unknown
+    provider, a ``default_context`` over the window), merges a ``cost`` table key by key
+    (here it is replaced whole; no snapshot keeps it) and forgets the shipped
+    ``deprecated`` / ``replaced_by`` / ``maker`` when an entry repoints the alias. So an
+    override craze rejects is still taken here: ``snapshot-config`` names every override
+    it used (``owner_overrides``) for the owner to compare with ``craze models <alias>``."""
+    p = Path(craze_dir) / "models.toml"
+    own: dict = {}
+    if p.exists():
+        with open(p, "rb") as f:
+            own = dict(tomllib.load(f).get("models") or {})
+    if not catalog_on(craze_dir):
+        return {alias: dict(e) for alias, e in own.items()}
+    shipped = _shipped_models(catalog_path)
+    out = {alias: dict(e) for alias, e in shipped.items()}
+    for alias, o in own.items():
+        base = shipped.get(alias)
+        if base is None:
+            out[alias] = dict(o)
+        elif o.get("source") != LEGACY_SOURCE:
+            out[alias] = _overlay_model(base, o)
+    return out
+
+
+def _shipped_models(catalog_path: Path | None = None) -> dict[str, dict]:
+    """The shipped catalog's ``[models]`` as craze reads them before any user file:
+    ``[anthropic_defaults] default_effort`` is the default effort of each Anthropic model
+    that offers it and has none of its own (craze's withAnthropicList)."""
+    with open(catalog_path or paths.CRAZE_CATALOG, "rb") as f:
+        doc = tomllib.load(f)
+    shipped = {alias: dict(e) for alias, e in (doc.get("models") or {}).items()}
+    effort = (doc.get("anthropic_defaults") or {}).get("default_effort")
+    for e in shipped.values():
+        if e.get("provider") == ANTHROPIC_PROVIDER and not e.get("default_effort") and effort in (e.get("efforts") or []):
+            e["default_effort"] = effort
+    return shipped
+
+
+def owner_overrides(craze_dir: Path, catalog_path: Path | None = None) -> dict[str, list[str]]:
+    """The shipped aliases the owner's ``models.toml`` overrides, each with the keys it
+    writes: the entries ``craze_models`` lays over the catalog. Empty with the catalog
+    off (the owner's file is then the whole table) or with no file."""
+    p = Path(craze_dir) / "models.toml"
+    if not p.exists() or not catalog_on(craze_dir):
+        return {}
+    with open(p, "rb") as f:
+        own = tomllib.load(f).get("models") or {}
+    shipped = _shipped_models(catalog_path)
+    return {alias: sorted(k for k in o if k != "source") for alias, o in own.items()
+            if alias in shipped and o.get("source") != LEGACY_SOURCE}
+
+
+def _overlay_model(base: dict, o: dict) -> dict:
+    """``base`` (a shipped entry) with the keys ``o`` writes (craze's overlayModel)."""
+    m = dict(base)
+    m.update({k: v for k, v in o.items() if k not in ("efforts", "default_effort")})
+    if "efforts" in o:
+        if o["efforts"]:
+            m["efforts"] = list(o["efforts"])
+        else:
+            m.pop("efforts", None)  # craze: an empty list is no effort control
+        if m.get("default_effort") not in (m.get("efforts") or []):
+            m.pop("default_effort", None)
+    if "default_effort" in o:
+        if not o["default_effort"]:
+            m.pop("default_effort", None)
+        elif o["default_effort"] in (m.get("efforts") or []):
+            m["default_effort"] = o["default_effort"]
+        # else craze ignores the key: the shipped default stands if the model still
+        # offers it (kept or dropped above), else none.
+    return m
 
 
 def yields_to_catalog(provider: str, entry: dict, shipped: dict, catalog: bool) -> bool:
@@ -125,8 +222,8 @@ class Snapshot:
 
     def max_output(self, models) -> dict[str, int]:
         """Each eval model's maximum output tokens by wire model: the **largest** of every
-        limit that applies to it -- the owner's craze ``max_output_tokens``, gx
-        ``max_completion_tokens`` and the snapshot's models.dev ``limit.output``
+        limit that applies to it -- the snapshot's craze ``max_output_tokens``, gx
+        ``max_completion_tokens`` (none without a gx entry) and models.dev ``limit.output``
         (deepseek-v4p1-flash lists 384000) -- else pricing.MODEL_MAX_OUTPUT_DEFAULT. What
         the proxy reserves for a request that names no output limit: whichever harness
         sent it, the provider may generate up to the largest (review r2-c1 item 10,
@@ -157,6 +254,17 @@ class Snapshot:
             return self.config["models"][key]
         except KeyError:
             raise KeyError(f"model {key!r} is not in config snapshot {self.dir.name}") from None
+
+
+def gx_problems(models, snap: Snapshot, harnesses) -> list[str]:
+    """Why a run cannot start the gx harness: one line per model whose config snapshot has
+    no gx entry (the owner's gx tables did not name its alias at snapshot time). Only the
+    harness named ``gx`` needs one; none for a run without it."""
+    if "gx" not in harnesses:
+        return []
+    return [f"{em.key}: the config snapshot has no gx entry (the owner's gx tables do not name {em.gx}); "
+            "drop gx from --harness, or add it there and re-run snapshot-config"
+            for em in models if snap.model(em.key).get("gx") is None]
 
 
 def catalog_max_output(catalog: dict, opencode_id: str) -> int | None:

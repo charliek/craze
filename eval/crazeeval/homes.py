@@ -185,6 +185,11 @@ def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_
 
 def gx_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict[str, str]:
     m = snap.model(em.key)
+    if m.get("gx") is None:
+        # snapshot-config found no gx entry for the alias (config.gx_problems refuses a
+        # run before it gets here).
+        raise ValueError(f"{em.key}: the config snapshot has no gx entry (the owner's gx tables do not name "
+                         f"{em.gx}); gx cannot run on this model until it is added there and snapshot-config re-run")
     model = dict(m["gx"])
     model["reasoning_effort"] = em.effort
     pid = m["gx_provider_id"]
