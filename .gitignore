@@ -24,8 +24,9 @@ __pycache__/
 # Docs build output
 site-build/
 
-# tmux smoke captures
-/smoke-captures/
+# tmux smoke captures (tmux_smoke.py's default out dir, at any depth: a
+# scratch copy of tests/cli writes beside its own root)
+smoke-captures/
 
 # Zensical differential-build cache (root only)
 /.cache/
