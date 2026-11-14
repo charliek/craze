@@ -1,0 +1,331 @@
+{
+  "campaign": "2026-11-web",
+  "groups": [
+    {
+      "bar": {
+        "anthropic/claude-haiku-5-5": {
+          "best_open_harness": {
+            "baseline_batch": "web-20261114-004248",
+            "counts": null,
+            "harness": null,
+            "reason": "no open-harness runs",
+            "source": "provisional (dev tasks of the baseline; held-out sealed)"
+          },
+          "outcome": "inconclusive",
+          "reason": "no native or no open-harness runs"
+        },
+        "muse-spark-1.3-contributor": {
+          "best_open_harness": {
+            "baseline_batch": "web-20261114-004248",
+            "counts": null,
+            "harness": null,
+            "reason": "no open-harness runs",
+            "source": "provisional (dev tasks of the baseline; held-out sealed)"
+          },
+          "outcome": "inconclusive",
+          "reason": "no native or no open-harness runs"
+        }
+      },
+      "harnesses": [
+        "craze",
+        "craze-web"
+      ],
+      "metrics": {
+        "anthropic/claude-haiku-5-5/craze": {
+          "answer words": 301.0,
+          "cost $": 0.0032,
+          "input tokens": 84574.0,
+          "main requests": 6.0,
+          "output tokens": 2243.5,
+          "tool calls": 5.0,
+          "wall s": 31.288
+        },
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "answer words": 327.0,
+          "cost $": 0.0075,
+          "input tokens": 144597.5,
+          "main requests": 8.0,
+          "output tokens": 8009.5,
+          "tool calls": 13.5,
+          "wall s": 37.7895
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "answer words": 250.0,
+          "cost $": 0.3175,
+          "input tokens": 3096724.5,
+          "main requests": 53.5,
+          "output tokens": 29729.5,
+          "tool calls": 57.0,
+          "wall s": 376.282
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "answer words": 191.5,
+          "cost $": 0.0241,
+          "input tokens": 226996.5,
+          "main requests": 16.0,
+          "output tokens": 6962.5,
+          "tool calls": 22.0,
+          "wall s": 64.768
+        }
+      },
+      "models": [
+        "anthropic/claude-haiku-5-5",
+        "muse-spark-1.3-contributor"
+      ],
+      "objective": {
+        "anthropic/claude-haiku-5-5/craze": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-W1": 0.0,
+            "T-W2": 0.0,
+            "T-W3": 0.0,
+            "T-W4": 0.0,
+            "T-W5": 0.0,
+            "T-W6": 0.0
+          }
+        },
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-W1": 1.0,
+            "T-W2": 1.0,
+            "T-W3": 1.0,
+            "T-W4": 1.0,
+            "T-W5": 1.0,
+            "T-W6": 0.0
+          }
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-W1": 0.0,
+            "T-W2": 0.0,
+            "T-W3": 0.0,
+            "T-W4": 0.0,
+            "T-W5": 0.0,
+            "T-W6": 0.0
+          }
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-W1": 1.0,
+            "T-W2": 1.0,
+            "T-W3": 1.0,
+            "T-W4": 1.0,
+            "T-W5": 1.0,
+            "T-W6": 1.0
+          }
+        }
+      },
+      "other_models": [],
+      "provenance": {
+        "baseline_batch": "web-20261114-004248",
+        "batches": [
+          "web-20261114-004248"
+        ],
+        "judge_hash_now": "8464a18c94bfc594ea028db8b9dd4d92b1ebb28617629bb10f9d7beb7614376c",
+        "judge_hashes": [],
+        "plan_modes": [],
+        "sealed": true,
+        "task_judge_hashes": {},
+        "verdicts": {
+          "bound_to_scored_runs": 0,
+          "final": 0,
+          "loaded": 0,
+          "stale": 0,
+          "unbound": 0
+        }
+      },
+      "report": "report",
+      "statuses": {
+        "anthropic/claude-haiku-5-5/craze": {
+          "ok": 18
+        },
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "ok": 18
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "budget-capped": 4,
+          "ok": 14
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "ok": 18
+        }
+      },
+      "task_tables": {},
+      "web": {
+        "counters": {
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "medians": {
+              "bytes_served": 7867.5,
+              "fetches": 4.5,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 0
+            },
+            "runs": 18,
+            "totals": {
+              "bytes_served": 151578,
+              "fetches": 90,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 0
+            }
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "medians": {
+              "bytes_served": 10104,
+              "fetches": 6.5,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 0
+            },
+            "runs": 18,
+            "totals": {
+              "bytes_served": 182518,
+              "fetches": 123,
+              "malformed": 0,
+              "misses": 3,
+              "refused": 0,
+              "searches": 0
+            }
+          }
+        },
+        "metrics": {
+          "anthropic/claude-haiku-5-5/craze": {
+            "answer words": 301.0,
+            "cost $": 0.0032,
+            "input tokens": 84574.0,
+            "main requests": 6.0,
+            "output tokens": 2243.5,
+            "tool calls": 5.0,
+            "wall s": 31.288
+          },
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "answer words": 327.0,
+            "cost $": 0.0075,
+            "input tokens": 144597.5,
+            "main requests": 8.0,
+            "output tokens": 8009.5,
+            "tool calls": 13.5,
+            "wall s": 37.7895
+          },
+          "muse-spark-1.3-contributor/craze": {
+            "answer words": 250.0,
+            "cost $": 0.3175,
+            "input tokens": 3096724.5,
+            "main requests": 53.5,
+            "output tokens": 29729.5,
+            "tool calls": 57.0,
+            "wall s": 376.282
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "answer words": 191.5,
+            "cost $": 0.0241,
+            "input tokens": 226996.5,
+            "main requests": 16.0,
+            "output tokens": 6962.5,
+            "tool calls": 22.0,
+            "wall s": 64.768
+          }
+        },
+        "pass": {
+          "anthropic/claude-haiku-5-5/craze": {
+            "ci90": [
+              0.0,
+              0.1307
+            ],
+            "passed": 0,
+            "rate": 0.0,
+            "runs": 18,
+            "tasks": {
+              "T-W1": 0.0,
+              "T-W2": 0.0,
+              "T-W3": 0.0,
+              "T-W4": 0.0,
+              "T-W5": 0.0,
+              "T-W6": 0.0
+            },
+            "unscored": 0
+          },
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "ci90": [
+              0.6482,
+              0.9314
+            ],
+            "passed": 15,
+            "rate": 0.8333,
+            "runs": 18,
+            "tasks": {
+              "T-W1": 1.0,
+              "T-W2": 1.0,
+              "T-W3": 1.0,
+              "T-W4": 1.0,
+              "T-W5": 1.0,
+              "T-W6": 0.0
+            },
+            "unscored": 0
+          },
+          "muse-spark-1.3-contributor/craze": {
+            "ci90": [
+              0.0,
+              0.1307
+            ],
+            "passed": 0,
+            "rate": 0.0,
+            "runs": 18,
+            "tasks": {
+              "T-W1": 0.0,
+              "T-W2": 0.0,
+              "T-W3": 0.0,
+              "T-W4": 0.0,
+              "T-W5": 0.0,
+              "T-W6": 0.0
+            },
+            "unscored": 0
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "ci90": [
+              0.8693,
+              1.0
+            ],
+            "passed": 18,
+            "rate": 1.0,
+            "runs": 18,
+            "tasks": {
+              "T-W1": 1.0,
+              "T-W2": 1.0,
+              "T-W3": 1.0,
+              "T-W4": 1.0,
+              "T-W5": 1.0,
+              "T-W6": 1.0
+            },
+            "unscored": 0
+          }
+        },
+        "tasks": [
+          "T-W1",
+          "T-W2",
+          "T-W3",
+          "T-W4",
+          "T-W5",
+          "T-W6"
+        ]
+      },
+      "win_rates": {}
+    }
+  ],
+  "schema": 1
+}
