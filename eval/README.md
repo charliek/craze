@@ -334,10 +334,11 @@ allow-list, nothing fetched, nothing leaves the host.
   kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
   so a renamed or retired alias has to be changed in both places. codex runs only where the provider
   serves `/responses` (Meta, Fireworks; not Z.AI or Anthropic). The Fireworks models are
-  Kimi K3.1 Pro (`fireworks/kimi-k3p1-pro`, craze's Fireworks start; GitHub issue #118)
-  with Kimi K3 (`fireworks/kimi-k3`) as its baseline, both `last = true` so they run in
-  the same place in a batch, and DeepSeek V4.1 Flash in both snapshots
-  (`fireworks/deepseek-v4p1-flash-1017` and the older `fireworks/deepseek-v4p1-flash`).
+  Kimi K3.1 Pro (`fireworks/kimi-k3p1-pro`) with Kimi K3 (`fireworks/kimi-k3`) as its
+  baseline, both `last = true` so they run in the same place in a batch, and DeepSeek
+  V4.1 Flash in both snapshots (`fireworks/deepseek-v4p1-flash-1017`, craze's Fireworks
+  start since the campaign for GitHub issue #118, and the older
+  `fireworks/deepseek-v4p1-flash`).
   K3 and the older DeepSeek are deprecated in craze's catalog but still run by name.
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**

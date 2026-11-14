@@ -406,7 +406,7 @@ func TestNativeAvailability(t *testing.T) {
 				return ""
 			},
 			want: availEntry{"native", "needs_setup", "signed in to ChatGPT, but its models are not available",
-				"craze auth login chatgpt, or start with --model fireworks/kimi-k3p1-pro"},
+				"craze auth login chatgpt, or start with --model fireworks/deepseek-v4p1-flash-1017"},
 		},
 		{
 			name:  "a broken providers.toml",

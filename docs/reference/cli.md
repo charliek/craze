@@ -2864,7 +2864,7 @@ How each is judged:
   order or on a provider left out of it, it is `signed in to
   ChatGPT, but its models are not available`, fix `craze auth login chatgpt,
   or start with --model openai/gpt-6.1-sol` (with only a Fireworks key, the
-  fix names `fireworks/kimi-k3p1-pro`). When the only funded models are
+  fix names `fireworks/deepseek-v4p1-flash-1017`). When the only funded models are
   `openai`'s, by an `OPENAI_API_KEY` in the environment with no key stored,
   it is `OPENAI_API_KEY is set in the environment, but no key is stored for
   OpenAI`, fix `craze auth login openai, or start with --model

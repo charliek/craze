@@ -683,15 +683,17 @@ func TestNativeStartFallsBackFromAnUnfundedDefault(t *testing.T) {
 
 // TestNativeStartNotesOnlyTheLastResort (plan 038 §2.3): over the shipped
 // catalog with only a Fireworks key, a new session with nothing remembered
-// starts on Fireworks' start model, fireworks/kimi-k3p1-pro, and says nothing — the
-// provider order chose it; with a provider_order of the user's that leaves
-// Fireworks out, it falls back to the first funded alias by name, and that
-// last resort, with no pin to name, is noted. (The fallback is the first
-// funded, offered alias: Fireworks' deprecated models are not one, plan 050.)
+// starts on Fireworks' start model, fireworks/deepseek-v4p1-flash-1017, and says
+// nothing — the provider order chose it; with a provider_order of the user's
+// that leaves Fireworks out, it falls back to the first funded alias by name,
+// and that last resort, with no pin to name, is noted. (The fallback is the
+// first funded, offered alias: Fireworks' deprecated models are not one, plan
+// 050. It is the same model as the start, so the note alone tells the two
+// cases apart.)
 func TestNativeStartNotesOnlyTheLastResort(t *testing.T) {
 	const fallback = "fireworks/deepseek-v4p1-flash-1017"
 	for _, tc := range []struct{ name, models, want, note string }{
-		{"the provider order's start", "", "fireworks/kimi-k3p1-pro", ""},
+		{"the provider order's start", "", "fireworks/deepseek-v4p1-flash-1017", ""},
 		{"the last resort", "version = 1\nprovider_order = [\"meta\"]\n", fallback,
 			`no start model in the provider order is available; starting on "` + fallback + `"`},
 	} {

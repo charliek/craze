@@ -475,11 +475,21 @@ later.
 A replacement has its own price (Kimi K3.1 Pro is two thirds of Kimi K3's, M3.1
 Flash half of M3's), so craze never switches you to it.
 
-- **Fireworks starts on `fireworks/kimi-k3p1-pro`** (it was
+- **Fireworks starts on `fireworks/deepseek-v4p1-flash-1017`** (it was
   `fireworks/ember-1`) for a new session that remembers nothing and has no
-  `default_model`. It is the owner's choice, not an evaluation's result. Write
-  `default_model = "fireworks/ember-1"` in `models.toml` to keep the old start;
-  a remembered model still wins, as before.
+  `default_model`, so a machine whose only key is a Fireworks key starts its
+  new sessions on DeepSeek V4.1 Flash 1017. The owner chose it on 2026-11-14
+  from the November 2026 start-model evaluation (issue #118), where it passed
+  34 of 34 runs for $1.49 at list price; answer quality was not judged. Write
+  `default_model = "fireworks/ember-1"` in `models.toml` to keep the old start,
+  or `default_model = "fireworks/kimi-k3p1-pro"` to start on Kimi K3.1 Pro
+  (the start of unreleased builds from `main` from 2026-11-13); a
+  remembered model still wins, as before. DeepSeek's models are also on
+  OpenRouter. If your own `source_order` puts `openrouter` before `fireworks`
+  and you have an OpenRouter key, this start model is hidden, and a new
+  session goes on through the start rules as if Fireworks had no start model:
+  with the shipped provider order, to OpenRouter's start model ([One source
+  per maker](#one-source-per-maker)).
 - **A deprecated model is no fallback.** When craze must pick a funded model
   by alias because no start model resolves, it no longer takes
   `fireworks/deepseek-v4p1-flash`; it takes `fireworks/deepseek-v4p1-flash-1017`.
@@ -670,9 +680,9 @@ older binary should not write it.
   OpenRouter, Meta or Anthropic key), nothing remembered and no pin, a new
   session no longer starts on that provider's start model; it refuses (kind
   `config`): `native: signed in to ChatGPT, but its models are not available,
-  and craze does not start a new session on fireworks/kimi-k3p1-pro
+  and craze does not start a new session on fireworks/deepseek-v4p1-flash-1017
   (Fireworks) on its own; run craze auth login chatgpt, or start with --model
-  fireworks/kimi-k3p1-pro`. Signing in again fixes it; so do `--model`, a
+  fireworks/deepseek-v4p1-flash-1017`. Signing in again fixes it; so do `--model`, a
   `default_model` pin, a model you picked with `/model` (the model memory),
   or a `provider_order` that lists that provider before `chatgpt`. A Z.AI key,
   before the plan in the order, still starts on `glm-5.3`, and a model on a

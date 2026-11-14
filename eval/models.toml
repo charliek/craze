@@ -74,9 +74,10 @@ codex_provider = "fireworks"
 # Dominates cost (plan 029 §9): one rep, last in each batch.
 last = true
 
-# Kimi K3.1 Pro, Moonshot's successor to K3 and Fireworks' start model in craze's catalog
-# (GitHub issue #118: evaluate it as that start). K3 above, deprecated in craze's catalog
-# but still run by name, is its comparison baseline. Its opencode id is in the models.dev
+# Kimi K3.1 Pro, Moonshot's successor to K3. It was Fireworks' start model in craze's
+# catalog until the campaign for GitHub issue #118 (eval/results/2026-11-start-models),
+# which moved the start to DeepSeek V4.1 Flash 1017. K3 above, deprecated in craze's
+# catalog but still run by name, is its comparison baseline. Its opencode id is in the models.dev
 # catalog (checked 2026-11-14).
 [models."fireworks/kimi-k3p1-pro"]
 provider = "fireworks"

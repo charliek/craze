@@ -32,9 +32,11 @@ Short and concrete; each item points at the section that explains it.
   (`eval/results/2026-11-start-models/`) ran craze alone, with no reference harness and
   no judge: use it for objective passes, cost and tool use per model, not for win rates.
 - Re-check the open items the earlier campaigns left:
-  - Kimi K3.1 Pro, the Fireworks start model, passed 15 of 17 tasks in November 2026
-    against Kimi K3's 16.5, at about two and a half times K3's cost: on T-E1 and T-P1 it
-    reached the $3 run limit without an answer. It ran one rep, at `high` effort only.
+  - Kimi K3.1 Pro passed 15 of 17 tasks in November 2026 against Kimi K3's 16.5, at
+    about two and a half times K3's cost: on T-E1 and T-P1 it reached the $3 run limit
+    without an answer. It ran one rep, at `high` effort only. The Fireworks start model
+    moved to `fireworks/deepseek-v4p1-flash-1017` on that result, without a judged
+    comparison of its answers against Kimi's.
   - L7 (the verification-evidence prompt bullet) was kept provisionally and needs
     confirming on the fresh held-out set.
   - The deepseek plan-mode runaway: see §7.
@@ -216,9 +218,10 @@ Per-harness support limits to know about before adding a model:
 - **Muse Wonder** (`muse-wonder-1.0`, Meta's preview flagship) is set like Spark, at
   `high`. It costs 40× contributor's input and 100× its output, so smoke it on one task and
   budget from that run, not from contributor's.
-- **Kimi K3.1 Pro** (`fireworks/kimi-k3p1-pro`) is craze's Fireworks start model and
-  Moonshot's successor to Kimi K3; GitHub issue #118 asks for it to be evaluated as that
-  start. `fireworks/kimi-k3` stays in `models.toml` as its baseline (craze's catalog marks
+- **Kimi K3.1 Pro** (`fireworks/kimi-k3p1-pro`) is Moonshot's successor to Kimi K3. It
+  was craze's Fireworks start model until the campaign GitHub issue #118 asked for
+  (`eval/results/2026-11-start-models/`), after which the start moved to
+  `fireworks/deepseek-v4p1-flash-1017`. `fireworks/kimi-k3` stays in `models.toml` as its baseline (craze's catalog marks
   it deprecated, but Fireworks still serves it and craze still runs it by name). Both
   have `last = true`, so they run after the other models in a batch, in the same
   position. K3.1 Pro's prices are two thirds of K3's (`prior_run_cost` 2.00).
