@@ -49,6 +49,7 @@ In `caller.answer` (`mcp.go:325-369`), an `isError` text matching `Error fetchin
 |---|---|
 | `CRAWL_NOT_FOUND` | `The page was not found (HTTP 404 or no longer there): <url>. Search for its current address.` |
 | `CRAWL_UNKNOWN_ERROR` | `Exa could not fetch <url> (the site may be unreachable or block crawlers).` |
+| `CRAWL_EMPTY_CONTENT` | `Exa fetched <url> but found no readable text (the page may need JavaScript). Try a search; its excerpts may carry the page's text.` |
 | Any other `CRAWL_*` | `Exa could not fetch <url>: <CODE>` |
 
 A keyless HTTP 403 gets a hint like the 429's: the keyless endpoint refuses IPv6 and proxied connections, and a key avoids that. Text changes move goldens; run `scripts/verify/v8.sh`.

@@ -70,6 +70,7 @@ python3 probe/exa_probe.py --keyed call web_fetch_exa '{"urls":["https://no-such
 |---|---|
 | A real 404 (`curl -sSL -o /dev/null -w '%{http_code}'` gives `404`) | HTTP 200, `isError`, `Error fetching URL(s): <url>: CRAWL_NOT_FOUND` |
 | A host with no DNS | HTTP 200, `isError`, `Error fetching URL(s): <url>: CRAWL_UNKNOWN_ERROR` |
+| A page rendered by JavaScript (`https://publish.obsidian.md/tasks/Editing/Create+or+edit+Task`; `curl -sSL` returns a 2.5 KB shell with none of its text) | HTTP 200, `isError`, `Error fetching URL(s): <url>: CRAWL_EMPTY_CONTENT`. A sibling page on the same site (`…/Getting+Started/Dates`) fetched fine (9.7 KB), presumably from Exa's cache, so results there vary by page. A local fetch would get the same empty shell. |
 | Two URLs, one bad (not something craze sends) | HTTP 200, no `isError`: the good page alone; the bad URL is silently dropped |
 
 Not reproduced: Exa's documented keyless 403 over IPv6 or a proxied path (https://docs.exa.ai/reference/exa-mcp, Troubleshooting).
