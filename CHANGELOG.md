@@ -2,15 +2,20 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
-## Unreleased
+## v0.3.0 — 2026-11-15
 
-The waiting commands become a contract a program can drive unattended: typed
-failures it can branch on and retry, a session that ends with its turn, a session
-file that names the session before the result, `stop` and `cancel` safe to send
-twice, and prompts up to 512 KiB. A program that reads `craze new --wait --json`,
-`craze send --wait --json` or `craze wait --json` needs changes: [Upgrading, since
-v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one. Nothing in
-`~/.craze` needs migrating; restart a running hub after upgrading.
+Native sessions can search the web and fetch pages (`websearch`, `webfetch`,
+through Exa, asked once before first use), OpenAI API keys join the native
+providers, each model maker's models come from one source you can order, and
+Fireworks starts on DeepSeek V4.1 Flash 1017. The waiting commands become a
+contract a program can drive unattended: typed failures it can branch on and
+retry, a session that ends with its turn, a session file that names the session
+before the result, `stop` and `cancel` safe to send twice, and prompts up to 512
+KiB. A program that reads `craze new --wait --json`, `craze send --wait --json`
+or `craze wait --json` needs changes: [Upgrading, since
+v0.2.0](docs/getting-started/upgrading.md#since-v020) lists each one, with the
+other behaviour changes. Nothing in `~/.craze` needs migrating; restart a running
+hub after upgrading.
 
 ### Behaviour changes
 
