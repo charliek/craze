@@ -3,7 +3,7 @@
 When a task does not say where its documentation is, does craze's native harness with web
 search (`craze-web`) search for it, find the right pages and solve the task? The
 [2026-11-web campaign](../2026-11-web/README.md) (C12) could not tell: its prompts named the
-docs site, and no run searched. Run per `eval/RUNBOOK.md` §9.
+docs site, and no craze-web run searched. Run per `eval/RUNBOOK.md` §9.
 
 ## Setup
 
@@ -13,16 +13,17 @@ docs site, and no run searched. Run per `eval/RUNBOOK.md` §9.
   web", and a setup patch takes the docs site's address out of the fixture's README; the lint
   checks that no corpus host is in the prompt or the start files. Scored by hidden tests alone.
 - **Arm:** `craze-web` alone in the campaign (`websearch` and `webfetch`, answered by the proxy
-  from the task's corpus; BM25 for search). Plain `craze` ran only in the smoke: on these tasks
-  it is C12's 0 of 36 again (the prompts differ by one clause), and its home now turns web search
-  off (`websearch = false`), which the smoke checked.
+  from the task's corpus; BM25 for search). Plain `craze` ran only in the smoke (0 of 2 on
+  T-WS1), to check that its home now turns web search off (`websearch = false`). The campaign
+  measured no plain baseline on these tasks; C12's plain 0 of 36 on T-W1–T-W6, whose prompts
+  differ by one clause, is context, not a repeat.
 - **Models:** `muse-spark-1.3-contributor` (effort high) and `anthropic/claude-haiku-5-5`
   (effort medium), as in C12. Three reps: 36 runs, plus a 4-run smoke on T-WS1 with both arms.
 - **Binary:** craze built from `d9ea9fe` (main with #128).
 - **Caps:** `--run-cap 0.50`; `--budget-cap 5` for the smoke and `10` for the campaign. The
   campaign at $5 was refused before it started: the projection takes each model's median smoke
-  run, and Muse's two were $0.03 (craze-web) and $0.49 (plain), so it projected $5.00 for 36
-  runs that settled $0.65. The smoke ran two runs at a time, the campaign three.
+  run as the ledger charged it, and Muse's two were $0.03 (craze-web) and $0.52 (plain), so it
+  projected $5.00 for 36 runs that settled $0.65. The smoke ran two runs at a time, the campaign three.
 
 ## Result
 
@@ -36,9 +37,10 @@ Both models solved the search-only tasks as often as the ones that named the doc
 three failures are again all on the retry task (T-WS6), for a different reason (below).
 
 **Every run searched**: 1 or 2 searches per run, 56 in all, where C12 had none. In 34 of the 36
-runs the first web call was a search. In the other two (Haiku, T-WS2 rep 3 and T-WS4 rep 3) it
-was a fetch of the API's own base URL from the fixture's code, which missed, and then a search.
-None guessed the docs site's address.
+runs the web route recorded a search first. In the other two (Haiku, T-WS2 rep 3 and T-WS4 rep 3)
+the model sent a search and a fetch of the API's own base URL (from the fixture's code) in the same
+turn, and the route recorded the fetch, which missed, first. None tried the docs site's address
+before a search had shown it.
 
 ## Cost and behaviour (medians per run; half-token medians rounded up)
 
@@ -81,23 +83,26 @@ contaminated or retried: 36 attempts for 36 runs.
 
 In the smoke, plain `craze` was offered no web tools (`web tools absent: True` for both models).
 The plain Muse run looked for a way out, as four did in C12: it read the home's `config.toml`
-(`websearch = false`) and `craze --help`, and sent its own requests through the proxy with a
-hosted `web_search` tool and for another model. The proxy refused both (`unbounded-input`,
-`model-not-allowed`). No nested `--web-search` session started, and the run failed its hidden
+(`websearch = false`) and `craze --help`, and sent its own requests through the proxy: two with a
+hosted `web_search` tool, refused `unbounded-input`, and a malformed probe (`{"query":"test"}`,
+no model named), refused `model-not-allowed`. No nested `--web-search` session started, and the run failed its hidden
 tests. Its hand-written requests carried no effort control, so the smoke's capture report says
 `effort parity: no` for Muse, as C12's did.
 
 ## Spend
 
-$1.20 committed over the campaign: the smoke's $0.56 (the plain Muse run alone $0.49) and the
-36 runs' $0.65. No open reservations.
+$1.20 committed over the campaign: the smoke's $0.56 and the 36 runs' $0.65. The plain Muse smoke
+run alone was $0.52 committed ($0.49 of reported usage, plus $0.03 a usage-less HTTP 400 left
+reserved). No open reservations.
 
 ## What it shows, and what it does not
 
 It shows that both models search for documentation they were not pointed at, find the relevant
 pages among the distractors, and solve the tasks as often as when given the site, for little extra
-cost. It also shows that a search snippet can stand in for a page, which hurt Haiku on T-WS6. It
-does not measure:
+cost. Its traces also suggest that a search snippet can stand in for a page, and did for Haiku on
+T-WS6: the fact it missed is past the snippet in every rep, though no ablation here proves that
+was the cause. The cost and wall-time comparisons are model charges over the local corpus route;
+a real search provider adds its own charges and latency. It does not measure:
 
 - **Exa.** Search is BM25 over a frozen corpus, not Exa's index; a real index has far more
   distractors and other ranking.
