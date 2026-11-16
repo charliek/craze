@@ -67,25 +67,38 @@ func backoff(retryAfter time.Duration, attempt int) time.Duration {
 	if retryAfter <= 0 {
 		retryAfter = defaultRetryAfter
 	}
-	return time.Duration(float64(retryAfter) * (1 + rand.Float64()) * float64(attempt))
+	w := float64(retryAfter) * (1 + rand.Float64()) * float64(attempt)
+	if w >= float64(maxRetryAfter) {
+		return maxRetryAfter
+	}
+	return time.Duration(w)
 }
 
+// maxRetryAfter is the longest wait retryAfterOf and backoff give: longer
+// than any call's deadline, so a wait this long is never taken, and short
+// enough that no arithmetic on it overflows a Duration.
+const maxRetryAfter = time.Hour
+
 // retryAfterOf is a Retry-After header's wait: delta-seconds or an HTTP date,
-// 0 for none or one that cannot be read or is in the past.
+// 0 for none or one that cannot be read or is in the past, and at most
+// maxRetryAfter however large the header (a value past int64 included).
 func retryAfterOf(v string) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0
 	}
-	if n, err := strconv.Atoi(v); err == nil {
-		if n <= 0 {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		switch {
+		case n <= 0:
 			return 0
+		case n >= int64(maxRetryAfter/time.Second):
+			return maxRetryAfter
 		}
 		return time.Duration(n) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		if d := time.Until(t); d > 0 {
-			return d
+			return min(d, maxRetryAfter)
 		}
 	}
 	return 0
@@ -208,6 +221,11 @@ func (c *caller) call(ctx context.Context, tool string, args map[string]any) (st
 			return "", &failure{kind: failAborted}
 		case <-cctx.Done():
 			t.Stop()
+			// Both may be done: the caller's own end is a cancel, never
+			// the call's deadline.
+			if ctx.Err() != nil {
+				return "", &failure{kind: failAborted}
+			}
 			return "", &failure{kind: failTimeout}
 		case <-t.C:
 		}

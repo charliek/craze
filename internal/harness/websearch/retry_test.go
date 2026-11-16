@@ -147,6 +147,33 @@ func TestAWaitPastTheDeadlineIsNotTaken(t *testing.T) {
 	}
 }
 
+// TestAHugeRetryAfterIsNotRetried: a Retry-After too large for a Duration
+// is not wrapped into a short wait: the 429 comes back at once (review
+// finding, PR 1).
+func TestAHugeRetryAfterIsNotRetried(t *testing.T) {
+	f := newFake(t, http429("18446744074"))
+	s := withConfig(t, f, Config{backoff: backoff})
+	_, err := search(s, "q")
+	wantErr(t, err, tool.ClassToolError, limitedKeyless)
+	if n := len(f.calls()); n != 1 {
+		t.Fatalf("%d requests, want 1", n)
+	}
+}
+
+// TestCancelBeforeTheWaitIsAnAbort: a cancel that lands as the wait begins,
+// with the call's deadline over too, is the caller's cancel, never a
+// timeout (review finding, PR 1).
+func TestCancelBeforeTheWaitIsAnAbort(t *testing.T) {
+	f := newFake(t, http429(""))
+	ctx, cancel := context.WithCancel(context.Background())
+	s := withConfig(t, f, Config{timeout: 3 * time.Second, backoff: func(time.Duration, int) time.Duration {
+		cancel()
+		return 0
+	}})
+	_, err := s.Search(ctx, "q")
+	wantErr(t, err, tool.ClassAborted, tool.AbortedText)
+}
+
 // TestCancelDuringAWait: a cancel while waiting to try again is an abort,
 // promptly.
 func TestCancelDuringAWait(t *testing.T) {
@@ -259,6 +286,10 @@ func TestRetryAfterOf(t *testing.T) {
 		{"-3", 0, 0},
 		{"soon", 0, 0},
 		{"Wed, 21 Oct 2015 07:28:00 GMT", 0, 0},
+		{"18446744074", time.Hour, time.Hour},
+		{"99999999999999999999999", time.Hour, time.Hour},
+		{"7200", time.Hour, time.Hour},
+		{time.Now().Add(72 * time.Hour).UTC().Format(http.TimeFormat), time.Hour, time.Hour},
 		{future, 80 * time.Second, 90 * time.Second},
 	} {
 		if got := retryAfterOf(tc.v); got < tc.min || got > tc.max {
@@ -276,6 +307,9 @@ func TestBackoff(t *testing.T) {
 		}
 		if d := backoff(3*time.Second, 2); d < 6*time.Second || d >= 12*time.Second {
 			t.Fatalf("backoff(3s, 2) = %s", d)
+		}
+		if d := backoff(maxRetryAfter, 3); d != maxRetryAfter {
+			t.Fatalf("backoff(max, 3) = %s, want it capped", d)
 		}
 	}
 }
