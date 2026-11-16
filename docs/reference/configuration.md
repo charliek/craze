@@ -2470,8 +2470,16 @@ started with. With one profile today, the key changes nothing yet.
 A native session can search the web and read pages with two tools,
 `websearch` (a query, answered with each result's title, link, date and an
 excerpt) and `webfetch` (an `http` or `https` URL, answered with the page's
-text). Both go through [Exa](https://exa.ai)'s hosted endpoint,
-`https://mcp.exa.ai/mcp`, which works without a key; an exported
+text). `websearch` takes two optional settings the model can use: `domains`,
+up to 10 sites (bare hosts such as `docs.python.org`) whose pages alone, and
+their subdomains', are results; and `num_results`, 1 to 10 results instead of
+the default 8. Its description, and a line after every search's results
+(*These results are excerpts, often only the start of each page. Before
+relying on a detail from one, read the page with webfetch.*), tell the model
+that results are excerpts and to fetch a page before relying on a detail from
+it. Both go through
+[Exa](https://exa.ai)'s hosted endpoint, `https://mcp.exa.ai/mcp` (a search
+with `domains` uses its `web_search_advanced_exa` tool), which works without a key; an exported
 [`EXA_API_KEY`](#keys), or a key [stored](#the-stored-web-search-key) with
 `craze auth login websearch/exa`, raises its rate limit. Both are read-only, so a session
 in [ask or plan mode](tui.md#modes) may use them too. `webfetch` refuses a URL

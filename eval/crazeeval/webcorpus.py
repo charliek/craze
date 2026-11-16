@@ -2,7 +2,7 @@
 
 A ``web`` task's pages (``*.md`` files, each starting with a ``URL:`` line and a
 ``Title:`` line) answer the native harness's web tools for the ``craze-web`` arm: the
-proxy's ``/r/<token>/web/mcp`` route takes the two ``tools/call`` shapes craze sends to
+proxy's ``/r/<token>/web/mcp`` route takes the ``tools/call`` shapes craze sends to
 Exa's MCP endpoint (internal/harness/websearch/exa.go) and answers each in Exa's
 event-stream envelope and text layouts, so craze's own parser reads them. The layouts
 are Exa's (exa-mcp-server's web_search_exa and web_fetch_exa, as captured in
@@ -14,7 +14,10 @@ Search is BM25 (k1 1.2, b 0.75) over each page's title and body; tokens are lowe
 runs of letters and digits, with no stemming and no stop words; the top eight by score,
 ties by URL ascending; each result's content is the page's first 1,500 characters. A
 query that shares no token with any page gets a result with an empty content list,
-which craze reads as no results. Fetch is an exact match on the URL with its fragment
+which craze reads as no results. A search's numResults (1 to 10) is honoured.
+web_search_advanced_exa (a search craze sends with a domain filter) ranks the same way,
+keeps the pages whose host is one of its includeDomains or below one, and answers in
+Exa's JSON (advanced_text). Fetch is an exact match on the URL with its fragment
 and trailing slashes trimmed; anything else gets one empty text block, which craze
 reads as an empty page, and is counted as a miss. Neither invents words of Exa's:
 craze writes its own "no results" and "no content" lines. Pure Python: nothing is
@@ -38,7 +41,11 @@ WEB_PATH = "mcp"
 
 SEARCH_TOOL = "web_search_exa"
 FETCH_TOOL = "web_fetch_exa"
+# Exa's opt-in search with domain filters (craze issue #140): its reply is JSON, not
+# web_search_exa's blocks of text (discovery/web-search E8).
+ADVANCED_TOOL = "web_search_advanced_exa"
 RESULTS = 8
+MAX_RESULTS = 10
 CONTENT_CHARS = 1500
 K1 = 1.2
 B = 0.75
@@ -57,6 +64,23 @@ class CorpusError(ValueError):
 def tokens(text: str) -> list[str]:
     """Lowercased runs of letters and digits (Unicode ones included)."""
     return TOKEN_RE.findall(text.lower())
+
+
+def in_domains(url: str, domains: list[str]) -> bool:
+    """Whether ``url``'s host is one of ``domains`` or a subdomain of one, as Exa's
+    includeDomains matches (a bare host; case does not matter)."""
+    host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    for d in domains:
+        d = d.strip().lower().removeprefix("https://").removeprefix("http://").split("/", 1)[0]
+        if d and (host == d or host.endswith("." + d)):
+            return True
+    return False
+
+
+def result_count(v) -> int:
+    """A numResults argument as the route honours it: an int from 1 to MAX_RESULTS,
+    else RESULTS."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= MAX_RESULTS else RESULTS
 
 
 def normal_url(url: str) -> str:
@@ -96,10 +120,14 @@ class Corpus:
         set_(self, "_avgdl", (sum(lens) / len(lens)) if lens else 0.0)
         set_(self, "_by_url", MappingProxyType({p.url: p for p in self.pages}))
 
-    def search(self, query: str) -> list[Page]:
-        """The top RESULTS pages for ``query`` by BM25, ties by URL ascending; pages
-        that share no token with it are never results."""
-        return [p for _, p in self.ranked(query)[:RESULTS]]
+    def search(self, query: str, n: int = RESULTS, domains: list[str] | None = None) -> list[Page]:
+        """The top ``n`` pages for ``query`` by BM25, ties by URL ascending; pages that
+        share no token with it are never results. With ``domains``, only pages whose
+        host is one of them or below one of them."""
+        ranked = [p for _, p in self.ranked(query)]
+        if domains:
+            ranked = [p for p in ranked if in_domains(p.url, domains)]
+        return ranked[:n]
 
     def ranked(self, query: str) -> list[tuple[float, Page]]:
         """Every page sharing a token with ``query``, with its BM25 score, best first and
@@ -177,6 +205,18 @@ def search_text(pages: list[Page]) -> str:
     return SEPARATOR.join(
         f"Title: {p.title}\nURL: {p.url}\nPublished: N/A\nAuthor: N/A\nHighlights:\n{p.body[:CONTENT_CHARS]}"
         for p in pages)
+
+
+def advanced_text(pages: list[Page]) -> str:
+    """web_search_advanced_exa's text: a JSON object whose ``results`` hold each page's
+    url, title and one highlight (its first CONTENT_CHARS characters); no ``results``
+    member at all when nothing was found, as Exa answers."""
+    reply: dict[str, Any] = {"requestId": "eval", "resolvedSearchType": ""}
+    if pages:
+        reply["results"] = [{"id": p.url, "url": p.url, "title": p.title, "highlights": [p.body[:CONTENT_CHARS]]}
+                            for p in pages]
+    reply["costDollars"] = {"total": 0}
+    return json.dumps(reply, separators=(",", ":"), ensure_ascii=False)
 
 
 def fetch_text(page: Page, max_chars: int | None = None) -> str:
@@ -268,17 +308,25 @@ def respond(corpus: Corpus, req: dict) -> Reply:
     params = req.get("params")
     name = params.get("name") if isinstance(params, dict) else None
     args = params.get("arguments") if isinstance(params, dict) else None
-    if name not in (SEARCH_TOOL, FETCH_TOOL):
+    if name not in (SEARCH_TOOL, FETCH_TOOL, ADVANCED_TOOL):
         return err(-32602, f"Tool {str(name)[:80]} not found", "unknown tool")
     if not isinstance(args, dict):
         return err(-32602, f"Invalid arguments for tool {name}", "arguments not an object")
-    if name == SEARCH_TOOL:
+    if name in (SEARCH_TOOL, ADVANCED_TOOL):
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
             return err(-32602, f"Invalid arguments for tool {name}: query", "no query")
-        pages = corpus.search(query)
-        return Reply(200, SSE, result_event(rid, search_text(pages) if pages else None),
-                     {"op": "search", "query": query, "results": [p.url for p in pages]})
+        n = result_count(args.get("numResults"))
+        if name == SEARCH_TOOL:
+            pages = corpus.search(query, n)
+            return Reply(200, SSE, result_event(rid, search_text(pages) if pages else None),
+                         {"op": "search", "query": query, "results": [p.url for p in pages]})
+        domains = args.get("includeDomains")
+        if not (isinstance(domains, list) and domains and all(isinstance(d, str) for d in domains)):
+            return err(-32602, f"Invalid arguments for tool {name}: includeDomains", "no includeDomains")
+        pages = corpus.search(query, n, domains)
+        return Reply(200, SSE, result_event(rid, advanced_text(pages)),
+                     {"op": "search", "query": query, "domains": domains[:10], "results": [p.url for p in pages]})
     urls = args.get("urls")
     if isinstance(urls, str):
         urls = [urls]

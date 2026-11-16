@@ -2,7 +2,10 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -31,12 +34,17 @@ func newWebSearch() (tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	// opencode's Input (websearch.ts:24-26).
+	// opencode's Input (websearch.ts:24-26), and craze's own two options
+	// (issue #140): the sites to search, and how many results.
 	return &webSearchTool{spec: tool.Spec{
 		ID:          tool.WebSearchTool,
 		Description: desc,
 		Parameters: map[string]any{
 			"query": map[string]any{"type": "string", "description": "Websearch query"},
+			"domains": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+				"description": "Only return results from these sites and their subdomains, as bare hosts, at most 10 (e.g. [\"docs.python.org\"]). Optional"},
+			"num_results": map[string]any{"type": "integer", "minimum": 1, "maximum": tool.MaxWebResults,
+				"description": "How many results to return, 1 to 10 (default 8). Optional"},
 		},
 		Required: []string{"query"},
 		Kind:     tool.KindSearch,
@@ -60,12 +68,71 @@ func (w *webSearchTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) 
 	if query = strings.TrimSpace(query); query == "" {
 		return nil, errors.New("query must not be empty")
 	}
-	return &webSearchCall{query: query}, nil
+	q := tool.WebQuery{Query: query}
+	items, _, err := a.array("domains", false)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > tool.MaxWebDomains {
+		return nil, fmt.Errorf("domains takes at most %d sites, not %d", tool.MaxWebDomains, len(items))
+	}
+	for _, raw := range items {
+		var d string
+		if json.Unmarshal(raw, &d) != nil {
+			return nil, errors.New("domains must be an array of strings")
+		}
+		host, ok := siteHost(d)
+		if !ok {
+			return nil, fmt.Errorf("domains: %q is not a site's host name, such as docs.python.org", d)
+		}
+		if !slices.Contains(q.Domains, host) {
+			q.Domains = append(q.Domains, host)
+		}
+	}
+	n, ok, err := a.integer("num_results", 1)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		if n > tool.MaxWebResults {
+			return nil, fmt.Errorf("num_results must be at most %d, not %d", tool.MaxWebResults, n)
+		}
+		q.Results = int(n)
+	}
+	return &webSearchCall{q: q}, nil
 }
 
-type webSearchCall struct{ query string }
+// siteHost is d as a bare host name — a scheme, a path and a port dropped,
+// lowercased — and whether it is one: at least one dot, and only letters,
+// digits, hyphens and dots, as a domain filter takes.
+func siteHost(d string) (string, bool) {
+	d = strings.ToLower(strings.TrimSpace(d))
+	if i := strings.Index(d, "://"); i >= 0 {
+		d = d[i+3:]
+	}
+	if i := strings.IndexAny(d, "/?#"); i >= 0 {
+		d = d[:i]
+	}
+	if i := strings.LastIndexByte(d, ':'); i >= 0 {
+		d = d[:i]
+	}
+	d = strings.Trim(d, ".")
+	if !strings.Contains(d, ".") || len(d) > 253 {
+		return "", false
+	}
+	for _, r := range d {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+		default:
+			return "", false
+		}
+	}
+	return d, true
+}
 
-func (c *webSearchCall) Request() tool.Request { return tool.Request{Title: c.query} }
+type webSearchCall struct{ q tool.WebQuery }
+
+func (c *webSearchCall) Request() tool.Request { return tool.Request{Title: c.q.Query} }
 
 func (c *webSearchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
@@ -74,14 +141,21 @@ func (c *webSearchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Web == nil {
 		return tool.Result{Text: noWebText, IsError: true, Class: tool.ClassToolError}
 	}
-	results, err := env.Web.Search(ctx, c.query)
+	var results []tool.WebResult
+	var err error
+	if wq, ok := env.Web.(tool.WebQuerier); ok {
+		results, err = wq.SearchQuery(ctx, c.q)
+	} else {
+		results, err = env.Web.Search(ctx, c.q.Query)
+	}
 	if err != nil {
-		return webErrorResult(ctx, err, "Unable to search the web for "+c.query)
+		return webErrorResult(ctx, err, "Unable to search the web for "+c.q.Query)
 	}
 	return tool.Result{Text: cutFirstLine(searchText(results), env)}
 }
 
-// searchText is opencode's layout of the results (websearch.ts:151-161): per
+// searchText is opencode's layout of the results (websearch.ts:151-161), and
+// craze's excerptFooter after them: per
 // result a "## [title](url)" heading, the URL standing for a missing title,
 // then "Published: <date>" when there is one, then a blank line and the
 // content when there is any; the results joined by a blank line. No results
@@ -106,8 +180,14 @@ func searchText(results []tool.WebResult) string {
 		}
 		parts = append(parts, s)
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n") + "\n\n" + excerptFooter
 }
+
+// excerptFooter ends every search with results (issue #131): a model that
+// writes from an excerpt misses what is further down the page, and a line at
+// the point it reads the results moves it where the description alone did
+// not (eval T-WS6).
+const excerptFooter = "These results are excerpts, often only the start of each page. Before relying on a detail from one, read the page with webfetch."
 
 // webErrorResult is a failed search's or fetch's result: a *tool.WebError's
 // class and text as they are (its text is already fit for the model), a
