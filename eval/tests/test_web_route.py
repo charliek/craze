@@ -505,6 +505,9 @@ def test_advanced_search_filters_by_domain_and_answers_json():
     assert webcorpus.in_domains("https://docs.example.org/x", ["example.org"])
     assert webcorpus.in_domains("https://docs.example.org/x", ["https://docs.example.org/guide"])
     assert not webcorpus.in_domains("https://notexample.org/x", ["example.org"])
+    # A query or a port with no path is not part of the host.
+    assert webcorpus.in_domains("https://docs.example.org?topic=harbor", ["docs.example.org"])
+    assert webcorpus.in_domains("https://docs.example.org:8443#x", ["docs.example.org"])
 
 
 def test_advanced_search_with_nothing_found_has_no_results_member():

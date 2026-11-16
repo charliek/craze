@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 # The route: /r/<token>/<WEB_HOST>/<WEB_PATH>.
 WEB_HOST = "web"
@@ -69,10 +70,11 @@ def tokens(text: str) -> list[str]:
 def in_domains(url: str, domains: list[str]) -> bool:
     """Whether ``url``'s host is one of ``domains`` or a subdomain of one, as Exa's
     includeDomains matches (a bare host; case does not matter)."""
-    host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    host = (urlsplit(url).hostname or "").lower()
     for d in domains:
-        d = d.strip().lower().removeprefix("https://").removeprefix("http://").split("/", 1)[0]
-        if d and (host == d or host.endswith("." + d)):
+        d = d.strip().lower()
+        d = (urlsplit(d).hostname or "") if "://" in d else d.split("/", 1)[0].split("?", 1)[0].split(":", 1)[0]
+        if d and host and (host == d or host.endswith("." + d)):
             return True
     return False
 

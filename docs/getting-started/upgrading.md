@@ -93,9 +93,10 @@ end `it exits when idle`.
 - **Two optional settings on `websearch`**: `domains`, up to 10 sites to
   search only, and `num_results`, 1 to 10 results (8 when unset). A search
   with `domains` goes to Exa's `web_search_advanced_exa`. The tool's
-  description, and a new last line of every search's results, tell the model
-  that results are excerpts and to fetch a page before relying on a detail
-  from it. Tool definitions change, so a
+  description, and a new line with every search that returns results (after
+  them, or before them when they are long enough to be cut; none when there
+  are no results), tell the model that results are excerpts and to fetch a
+  page before relying on a detail from it. Tool definitions change, so a
   native session's cached prompt prefix starts fresh once
   ([Native web search](../reference/configuration.md#native-web-search)).
 
