@@ -79,11 +79,24 @@ func (m Model) runWebSearch(args string) (tea.Model, tea.Cmd) {
 		m.addError("/websearch: " + websearch.StateFile + " could not be written; nothing changed")
 		return m, nil
 	}
-	m.addNote(said + " (this session keeps what it opened with)")
+	m.addNote(said + " (" + webSearchScope(m.remote, path) + ")")
 	if over := configOverride(cfg); over != "" {
 		m.addNote("web search: " + over + ", which wins over this")
 	}
 	return m, nil
+}
+
+// webSearchScope is what /websearch on, off or ask changed, for its note: a
+// session that has decided keeps its choice and one still undecided adopts
+// the new one at its next web call; and, viewing a session served elsewhere,
+// that only this machine's file changed — a host on another machine reads its
+// own.
+func webSearchScope(remote bool, path string) string {
+	scope := "a session that has decided keeps its choice; one still undecided adopts this at its next web call"
+	if remote {
+		scope = "this machine's " + path + " only: a session host elsewhere reads its own; " + scope
+	}
+	return scope
 }
 
 // webStatus is the session's last web status section, nil before one.

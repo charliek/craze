@@ -3,6 +3,7 @@ package websearch
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -218,5 +219,23 @@ func TestScrubberWith(t *testing.T) {
 	var none *scrubber
 	if got := none.with(b).text(b); strings.Contains(got, b) {
 		t.Fatalf("nil.with: %q", got)
+	}
+}
+
+// TestScrubberOverlappingKeys: keys of which one starts with, or overlaps,
+// the other are both taken out whole, whichever was added first (CodeRabbit
+// on #145): every pattern is matched against the text as it is.
+func TestScrubberOverlappingKeys(t *testing.T) {
+	short, long := "exa-1234-5678", "exa-1234-5678-90abcdef"
+	for name, s := range map[string]*scrubber{
+		"short first": newScrubber(short).with(long),
+		"long first":  newScrubber(long).with(short),
+	} {
+		for _, in := range []string{"k=" + long + ".", "k=" + short + " and " + long, url.QueryEscape("k=" + long)} {
+			got := s.text(in)
+			if strings.Contains(got, "90abcdef") || strings.Contains(got, "5678") {
+				t.Errorf("%s: %q scrubbed to %q", name, in, got)
+			}
+		}
 	}
 }

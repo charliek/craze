@@ -2359,6 +2359,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// redacted or sent, as it always was.
 	if learned != hs {
 		s.learnStoredKeys(hs)
+		// A stored web search key the late look took up is the web status's
+		// news too: openWebLocked published before it.
+		s.mu.Lock()
+		s.publishWebStatusLocked()
+		s.mu.Unlock()
 	}
 	// Then the models funded since the last turn (plan 034 §3.4, Q14 a):
 	// after the keys, so a table that names a key just stored is read by a
