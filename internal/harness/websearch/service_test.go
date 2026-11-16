@@ -36,20 +36,22 @@ func TestTheKeyIsSentOnlyWhenUsable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFake(t, limited)
 			_, err := search(keyed(t, f, tc.key, 0), "q")
-			want := "Web search rate limited (HTTP 429)"
+			want := limitedKeyed
 			if tc.sent == "" {
-				want += ". Setting EXA_API_KEY raises the limit"
+				want = limitedKeyless
 			}
 			wantErr(t, err, tool.ClassToolError, want)
 			got := f.calls()
-			if len(got) != 1 {
-				t.Fatalf("%d requests", len(got))
+			if len(got) != maxAttempts {
+				t.Fatalf("%d requests, want %d (every attempt)", len(got), maxAttempts)
 			}
-			if v, ok := got[0].Header["X-Api-Key"]; tc.sent == "" && ok {
-				t.Fatalf("an unusable key was sent: x-api-key present (%d values)", len(v))
-			}
-			if v := got[0].Header.Get("X-Api-Key"); v != tc.sent {
-				t.Fatalf("x-api-key = %q, want %q", v, tc.sent)
+			for _, rec := range got {
+				if v, ok := rec.Header["X-Api-Key"]; tc.sent == "" && ok {
+					t.Fatalf("an unusable key was sent: x-api-key present (%d values)", len(v))
+				}
+				if v := rec.Header.Get("X-Api-Key"); v != tc.sent {
+					t.Fatalf("x-api-key = %q, want %q", v, tc.sent)
+				}
 			}
 		})
 	}

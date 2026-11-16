@@ -20,6 +20,16 @@ import (
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
+// TestMain makes a rate limit's wait short for every test of the package
+// (retryWait), keeping its shape — Retry-After, jitter, the attempt — at a
+// thousandth of the time. A test of the waits sets Config.backoff.
+func TestMain(m *testing.M) {
+	retryWait = func(retryAfter time.Duration, attempt int) time.Duration {
+		return backoff(retryAfter, attempt) / 1000
+	}
+	os.Exit(m.Run())
+}
+
 // received is one request the fake MCP server took.
 type received struct {
 	Method, Path, RawQuery string
@@ -254,3 +264,11 @@ func isWebError(err error) bool {
 	_, ok := errors.AsType[*tool.WebError](err)
 	return ok
 }
+
+// The words a rate limit and a keyless refusal read as (issue #137, #139).
+const (
+	keyHintText    = "store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session."
+	limitedKeyed   = "Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once."
+	limitedKeyless = "Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a few seconds before searching again. A free Exa key raises the limit: " + keyHintText
+	refusedKeyless = "Web search refused (HTTP 403) by Exa's keyless endpoint, which refuses IPv6 and proxied connections. A free Exa key avoids this: " + keyHintText
+)

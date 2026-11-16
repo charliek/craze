@@ -21,18 +21,21 @@ type Provider interface {
 const DefaultProvider = "exa"
 
 // entry is a provider in the table: where it is reached, the variable its
-// key is read from (named in the hint a rate limit gives when no key was
-// sent), and how it is built over a caller of that endpoint.
+// key is read from and the credential `craze auth login` stores it under
+// (both named in the hint a rate limit gives when no key was sent), its name
+// as the model reads it, and how it is built over a caller of that endpoint.
 type entry struct {
 	endpoint string
 	keyEnv   string
+	login    string
+	name     string
 	build    func(*caller) Provider
 }
 
 // providers are the providers by id (plan 051 §B). One for now; a second
 // brings failover with it.
 var providers = map[string]entry{
-	"exa": {endpoint: ExaEndpoint, keyEnv: ExaKeyEnv, build: newExa},
+	"exa": {endpoint: ExaEndpoint, keyEnv: ExaKeyEnv, login: "websearch/exa", name: "Exa", build: newExa},
 }
 
 // Providers is every provider's id, sorted.

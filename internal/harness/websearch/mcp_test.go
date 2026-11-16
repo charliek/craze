@@ -211,7 +211,8 @@ func TestBlocks(t *testing.T) {
 
 // TestProviderErrors: an error result names its status in its text, as Exa's
 // do, and is read as that status — the captured 401, a 429 with and without
-// a key (the hint names EXA_API_KEY only when no key was sent), any other —
+// a key (the hint names how to get a key only when no key was sent), a 403
+// with and without one, any other —
 // and one that names none is unable, with the provider's first line. An HTTP
 // status other than 200 is read the same, and a rate limit is never "no
 // results".
@@ -230,8 +231,8 @@ func TestProviderErrors(t *testing.T) {
 		}
 	}
 	const (
-		limited     = "Web search rate limited (HTTP 429)"
-		limitedHint = limited + ". Setting EXA_API_KEY raises the limit"
+		limited     = limitedKeyed
+		limitedHint = limitedKeyless
 		auth        = "Web search authentication failed (HTTP 401)"
 	)
 	for _, tc := range []struct {
@@ -248,6 +249,8 @@ func TestProviderErrors(t *testing.T) {
 		{"HTTP 429, no key", status(http.StatusTooManyRequests), "", limitedHint},
 		{"HTTP 429, a key", status(http.StatusTooManyRequests), key, limited},
 		{"HTTP 401", status(http.StatusUnauthorized), key, auth},
+		{"HTTP 403, no key", status(http.StatusForbidden), "", refusedKeyless},
+		{"HTTP 403, a key", status(http.StatusForbidden), key, "Web search request failed (HTTP 403)"},
 		{"HTTP 503", status(http.StatusServiceUnavailable), "", "Web search request failed (HTTP 503)"},
 		{"HTTP 202", status(http.StatusAccepted), "", "Web search request failed (HTTP 202)"},
 	} {

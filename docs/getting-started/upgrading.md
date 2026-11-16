@@ -1,7 +1,7 @@
 # Upgrading
 
-Four sections: [since v0.2.0](#since-v020), the changes after the fourth
-release; [since v0.1.1](#since-v011), the third release's; [since
+Five sections: [since v0.3.0](#since-v030), the changes after the fifth
+release; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
 v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
 first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
@@ -38,6 +38,33 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.3.0
+
+### Web search retries a rate limit, and says what went wrong
+
+- **A rate-limited search or fetch is tried again** before the model sees it:
+  up to three attempts, waiting as long as Exa's `Retry-After` asks (a second
+  when it does not say), with jitter, inside the call's 25 seconds. A batch of
+  parallel searches on Exa's keyless endpoint, which used to lose most of its
+  calls to the limit, now completes. A keyed account's limit (10 requests a
+  second) is retried the same way.
+- **At most four web calls are at Exa at once** per session, its sub-agents
+  included; more wait their turn, and time spent waiting does not count against
+  a call's 25 seconds.
+- **The texts the model reads change.** A rate limit that outlasts the retries
+  reads `Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a
+  few seconds before searching again. A free Exa key raises the limit: store
+  one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored
+  now is used from the next session.` (it was `… (HTTP 429). Setting
+  EXA_API_KEY raises the limit`); keyed, `Web search rate limited (HTTP 429).
+  Wait a few seconds before searching again, and send fewer searches at once.`
+  A keyless HTTP 403 says the keyless endpoint refuses IPv6 and proxied
+  connections. A fetch Exa could not make reads in plain words: `The page was
+  not found (HTTP 404, or it no longer exists): <url>. Search for its current
+  address.` for `CRAWL_NOT_FOUND`, and likewise for `CRAWL_UNKNOWN_ERROR` and
+  `CRAWL_EMPTY_CONTENT` ([Rate limits and
+  failures](../reference/configuration.md#rate-limits-and-failures)).
 
 ## Since v0.2.0
 
