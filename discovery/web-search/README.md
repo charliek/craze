@@ -18,9 +18,10 @@ open questions `WQ-n`, follow-ups `WF-nn`.
 | date | event |
 |---|---|
 | 2026-11-15 | Discovery. In a real research session (a Wren design question), web search lost 5 of 22 searches to Exa's keyless rate limit, and a key stored mid-session was not used. The endpoint was then probed directly with the stored key ([02](02-experiments.md)). Issues #137–#141 were filed with measurements, #131 was annotated, and this folder was written. Nothing is decided yet. |
+| 2026-11-15 | W1–W3 built, as three stacked PRs: retries and the in-flight cap, plain failure words (W1); a key stored mid-session used from the next turn, the three-way consent card, `/websearch` and the `webStatus` section (W2); `domains`, `num_results` and the excerpt line and footer (W3). Decisions WD-01–WD-06. Exit results in [04](04-roadmap.md). |
 
-**Current phase: none started.** [04](04-roadmap.md) proposes W1–W3; the owner
-has not reviewed them.
+**Current phase: W1–W3 done.** What is left is [07](07-follow-ups.md)'s
+WF-8 (#136) and the follow-ups W1–W3 found.
 
 ## Reading order
 
