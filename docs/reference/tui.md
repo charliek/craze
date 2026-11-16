@@ -1757,10 +1757,8 @@ Web search · Exa (exa.ai)
 choice: allowed through Exa without asking, no web tools, or nothing
 remembered so the next session asks. A session that has decided keeps its
 choice and the tools it opened with; one still undecided adopts the new choice
-at its next web call, without the consent card. They change this machine's
-`websearch.json`: viewing a session whose host runs on another machine, that
-host's new sessions read its own file, and the note says so. A `websearch`
-setting in `config.toml` still wins, and the note says so too.
+at its next web call, without the consent card. A `websearch` setting in
+`config.toml` still wins, and the note says so.
 
 `Esc` means two different things on purpose. On a question it is *skipped*: the
 agent is told you declined to answer and the turn carries on. On a plan or a
