@@ -259,6 +259,16 @@ type Settings struct {
 	// and all, replaced whole by the next and never written through, and each
 	// projection carries a copy of its own (cloneCatalog).
 	Catalog *agent.CatalogState
+	// WebStatus is the session's web status section (issues #137, #141): its
+	// web search provider, key source, consent and call totals, nil until a
+	// delta carries one — which only a native session that offered the web
+	// tools sends; always nil for an ACP session. Session-wide, never a
+	// turn's (the turn's tally is TurnState.WebSearch), and incarnation-local:
+	// a reload's session starts its totals from zero. Like Usage it is the
+	// delta's copy, replaced whole by the next and never written through, and
+	// each projection carries a copy of its own. Its strings are a few bytes
+	// each, so no truncation mark.
+	WebStatus *agent.WebStatusState
 	// Truncated names the sections the snapshot this model was restored from
 	// carried only the head of some string of (over ItemCap, plan 024 §3.5),
 	// so a client can say so. A model folded from the event stream never sets
@@ -762,6 +772,11 @@ func (m *Model) cutLocked() cut {
 	}
 	// The catalog likewise, its list included (plan 034 §3.4).
 	c.settings.Catalog = cloneCatalog(m.settings.Catalog)
+	// And the web status, a value type like Usage (issues #137, #141).
+	if w := m.settings.WebStatus; w != nil {
+		cw := *w
+		c.settings.WebStatus = &cw
+	}
 	// And the turn's web tally, its URL list included (plan 051 F.4.3): the
 	// turn is copied by value, which would share the pointer.
 	c.turn.WebSearch = m.turn.WebSearch.clone()

@@ -218,6 +218,12 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 			return protocol.StateResult{}, err
 		}
 	}
+	// The web status section (issues #137, #141), absent when the session has
+	// none (every ACP session; a native one that has not published one).
+	webStatus, err := agent.EncodeWebStatusState(st.WebStatus)
+	if err != nil {
+		return protocol.StateResult{}, err
+	}
 	r := protocol.StateResult{
 		Activity:    protocol.Activity(st.Activity),
 		ForeignTurn: st.ForeignTurn,
@@ -230,7 +236,7 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 		StartFailed: st.StartFailed,
 		Prompted:    st.Prompted,
 		Cancelled:   st.Cancelled,
-		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config, Usage: usage, Catalog: catalog},
+		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config, Usage: usage, Catalog: catalog, WebStatus: webStatus},
 	}
 	if a := st.SendNow; a != nil {
 		r.SendNow = &protocol.ArmedSend{Text: a.Text, FromRow: a.FromRow, Turn: a.Turn, Cause: a.Cause}

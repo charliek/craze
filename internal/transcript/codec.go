@@ -192,6 +192,11 @@ type wireSettings struct {
 	// bounds (agent's boundCatalog, plan 034 C5r), far under ItemCap and the
 	// budget.
 	Catalog json.RawMessage `json:"catalog,omitempty"`
+	// WebStatus is the web status section in the event codec's own shape
+	// (issues #137, #141), absent until a delta has carried one: never null
+	// or {}. Its strings are not capped (capSettings): a provider id, a key's
+	// source and a consent word, a few bytes each, far under ItemCap.
+	WebStatus json.RawMessage `json:"webStatus,omitempty"`
 	// Truncated is Settings.Truncated, absent when no section is marked.
 	Truncated *wireSettingsTruncated `json:"truncated,omitempty"`
 }
@@ -437,12 +442,15 @@ func encodeSettings(s *Settings) (*wireSettings, error) {
 	if w.Catalog, err = agent.EncodeCatalogState(s.Catalog); err != nil {
 		return nil, err
 	}
+	if w.WebStatus, err = agent.EncodeWebStatusState(s.WebStatus); err != nil {
+		return nil, err
+	}
 	if t := s.Truncated; t != (SettingsTruncated{}) {
 		w.Truncated = &wireSettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
 			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, Slash: t.Slash, SendNow: t.SendNow}
 	}
 	if w.Title == "" && w.Mode == "" && w.Model == "" && w.Config == nil && w.Commands == nil &&
-		w.Plugins == nil && w.Slash == nil && w.SendNow == nil && w.Usage == nil && w.Catalog == nil && w.Truncated == nil {
+		w.Plugins == nil && w.Slash == nil && w.SendNow == nil && w.Usage == nil && w.Catalog == nil && w.WebStatus == nil && w.Truncated == nil {
 		return nil, nil
 	}
 	return w, nil
@@ -866,6 +874,9 @@ func decodeSettings(w *wireSettings) (Settings, error) {
 		return s, err
 	}
 	if s.Catalog, err = agent.DecodeCatalogState(w.Catalog); err != nil {
+		return s, err
+	}
+	if s.WebStatus, err = agent.DecodeWebStatusState(w.WebStatus); err != nil {
 		return s, err
 	}
 	return s, nil

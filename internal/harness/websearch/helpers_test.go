@@ -267,7 +267,7 @@ func isWebError(err error) bool {
 
 // The words a rate limit and a keyless refusal read as (issue #137, #139).
 const (
-	keyHintText    = "store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session."
+	keyHintText    = "store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next turn."
 	limitedKeyed   = "Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once."
 	limitedKeyless = "Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a few seconds before searching again. A free Exa key raises the limit: " + keyHintText
 	refusedKeyless = "Web search refused (HTTP 403) by Exa's keyless endpoint, which refuses IPv6 and proxied connections. A free Exa key avoids this: " + keyHintText

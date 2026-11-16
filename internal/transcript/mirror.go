@@ -71,6 +71,11 @@ func (m *Model) Mirror() Mirror {
 		mr.Settings.Usage = &cu
 	}
 	mr.Settings.Catalog = cloneCatalog(m.settings.Catalog)
+	if w := m.settings.WebStatus; w != nil {
+		// A value type, as Usage is: one copy owns it whole.
+		cw := *w
+		mr.Settings.WebStatus = &cw
+	}
 	if f := m.turn.Foreign; f != nil {
 		cf := *f
 		mr.Turn.Foreign = &cf

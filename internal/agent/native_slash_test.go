@@ -38,7 +38,7 @@ func TestNativeInstallsCarryTheSlashCatalog(t *testing.T) {
 	if st := install.State; st.Slash == nil || !slices.Equal(st.Slash.Items, want.Items) || !slices.Equal(snap.Slash, want.Items) {
 		t.Fatalf("the install delta's catalog %+v, the snapshot's %+v, want %+v", install.State.Slash, snap.Slash, want.Items)
 	}
-	if got := strings.Join(slashNames(want), ","); got != "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort,compact,ship" {
+	if got := strings.Join(slashNames(want), ","); got != "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort,websearch,compact,ship" {
 		t.Fatalf("native's catalog is %s", got)
 	}
 	snap.Slash[0].Description = "changed"

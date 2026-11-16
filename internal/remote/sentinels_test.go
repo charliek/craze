@@ -644,6 +644,9 @@ var tuiSites = []tuiSite{
 	// clipboard's image, read, processed and stored in this process — never
 	// a Backend call's answer.
 	{"composer_image.go", "attachErrReason", "Is", "fs.ErrNotExist", 1, proofLocal},
+	// /websearch ask (issue #141): the remembered choice's file removed in
+	// this process, never a Backend call's answer.
+	{"websearch_cmd.go", "runWebSearch", "Is", "fs.ErrNotExist", 1, proofLocal},
 	{"composer_image.go", "attachErrReason", "Error", "err", 1, proofLocal},
 	{"clipboard_image.go", "readImageFrom", "Is", "attach.ErrSourceTooLarge", 1, proofLocal},
 	// The clipboard's text read (plan 033 C3r): no tool could list the

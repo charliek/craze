@@ -123,7 +123,7 @@ func TestOneReportPerHandledCall(t *testing.T) {
 
 	t.Run("disabled consent", func(t *testing.T) {
 		f := newFake(t, replyText(oneResult))
-		s, r := reported(t, f, Config{Undecided: true, CanAsk: true, Asker: &fakeAsker{answer: picks([]int{1})}})
+		s, r := reported(t, f, Config{Undecided: true, CanAsk: true, Asker: &fakeAsker{answer: picks([]int{2})}})
 		_, err := search(s, "q")
 		wantErr(t, err, tool.ClassToolError, DisabledText)
 		if c := r.one(t, "the disabling call"); !c.Failed {

@@ -3864,6 +3864,12 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if ok && name == connectBuiltin.Name && m.connectOffered() {
 		return m.runBuiltin(name, args)
 	}
+	// /websearch is a builtin of native sessions alone too (issue #141):
+	// anywhere else it goes to the agent as text. It needs no agent, so it
+	// runs mid-turn and never queues.
+	if ok && name == websearchBuiltin.Name && m.connectOffered() {
+		return m.runBuiltin(name, args)
+	}
 	// /btw is a builtin of the sessions that answer side questions alone
 	// (plan 040 §3.6, btw.go): anywhere else it goes to the agent below as
 	// the text it is. It runs whatever the session is doing — mid-turn, and
@@ -3905,7 +3911,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 // with an error row (busyRefusalText).
 func runsWhileWorking(name string) bool {
 	switch name {
-	case "exit", "help", "theme", "tasks", "clear", "rename":
+	case "exit", "help", "theme", "tasks", "clear", "rename", "websearch":
 		return true
 	}
 	return false

@@ -592,6 +592,13 @@ func emitSiteEvents() []emitSiteEvent {
 			Usage: &UsageState{ContextTokens: 12_300, Turn: Spend{Input: 10, Output: 5, Unpriced: true},
 				Session: Spend{Input: 30, Output: 15, Unpriced: true}},
 		}, At: at}},
+		{"a native session's web status, after a rate-limited search", Event{Type: EventMeta, State: &StateDelta{WebStatus: &WebStatusState{
+			Provider: "exa", Key: "stored", Consent: "allowed for this session",
+			Searches: 3, Fetches: 1, Failed: 1, RateLimited: 1, Retries: 2,
+		}}, At: at}},
+		{"a native session's first web status, nothing called yet", Event{Type: EventMeta, State: &StateDelta{WebStatus: &WebStatusState{
+			Provider: "exa", Key: "keyless", Consent: "undecided",
+		}}, At: at}},
 		{"a native session's reload, offering a model it was just funded for", Event{Type: EventMeta, State: &StateDelta{
 			Catalog: &CatalogState{Revision: 2, Models: []ModelInfo{
 				{ID: "chatgpt/gpt-6.1-sol", Name: "GPT-6.1 Sol (ChatGPT)", Recent: 1},
@@ -807,6 +814,17 @@ func pinnedWireShapes() []pinnedWireShape {
 				`{"id":"test/b","name":""}],"revision":3}}}`},
 		{Event{Type: EventMeta, State: &StateDelta{Catalog: &CatalogState{}}},
 			`{"type":"meta","state":{"catalog":{"revision":0}}}`},
+		// The web status section (issues #137, #141): every key always, as
+		// the usage section's, an empty string and a zero included; the
+		// section absent when nil, as every delta above shows.
+		{Event{Type: EventMeta, State: &StateDelta{WebStatus: &WebStatusState{
+			Provider: "exa", Key: "env", Consent: "allowed", Searches: 4, Fetches: 2, Failed: 1, RateLimited: 1, Retries: 3,
+		}}},
+			`{"type":"meta","state":{"webStatus":{"provider":"exa","key":"env","consent":"allowed",` +
+				`"searches":4,"fetches":2,"failed":1,"rateLimited":1,"retries":3}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{WebStatus: &WebStatusState{}}},
+			`{"type":"meta","state":{"webStatus":{"provider":"","key":"","consent":"",` +
+				`"searches":0,"fetches":0,"failed":0,"rateLimited":0,"retries":0}}}`},
 		// The slash section (plan 043 §3.2): the rows under a key of their
 		// own, each with its name always and every other key omitted at its
 		// zero value — an absent arg is none, an absent whileWorking false —
@@ -908,6 +926,39 @@ func TestCatalogIsAbsentOnTheWireWhenNil(t *testing.T) {
 		if c, err := DecodeCatalogState(json.RawMessage(raw)); c != nil || err != nil {
 			t.Fatalf("DecodeCatalogState(%q) = %+v, %v; want nil", raw, c, err)
 		}
+	}
+}
+
+// TestWebStatusIsAbsentOnTheWireWhenNil (issues #137, #141): a delta with no
+// web status section carries no "webStatus" key at all — never null and never
+// {} — which is every delta an ACP session publishes; the leaf wrappers agree,
+// and a decoded section is a copy of its own.
+func TestWebStatusIsAbsentOnTheWireWhenNil(t *testing.T) {
+	body, err := EncodeEvent(Event{Type: EventMeta, State: &StateDelta{Model: ptr("grok")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, `"webStatus"`) {
+		t.Fatalf("a delta with no web status section writes one: %s", body)
+	}
+	if raw, err := EncodeWebStatusState(nil); raw != nil || err != nil {
+		t.Fatalf("EncodeWebStatusState(nil) = %q, %v; want no bytes at all", raw, err)
+	}
+	for _, raw := range []string{"", "null"} {
+		if w, err := DecodeWebStatusState(json.RawMessage(raw)); w != nil || err != nil {
+			t.Fatalf("DecodeWebStatusState(%q) = %+v, %v; want nil", raw, w, err)
+		}
+	}
+	want := WebStatusState{Provider: "exa", Key: "stored", Consent: "allowed", Searches: 2, RateLimited: 1, Retries: 1}
+	in := want
+	raw, err := EncodeWebStatusState(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Searches = 99 // the encoder's input, written after the encode
+	got, err := DecodeWebStatusState(raw)
+	if err != nil || got == nil || *got != want {
+		t.Fatalf("DecodeWebStatusState(%s) = %+v, %v; want %+v", raw, got, err, want)
 	}
 }
 

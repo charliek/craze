@@ -1708,14 +1708,55 @@ search](configuration.md#native-web-search) asks once, with an ordinary
 question card, the first time its model calls `websearch` or `webfetch`. Its
 head reads `question 1/1` followed by the question, as every question card's
 does: *Allow craze to search the web and fetch pages for up-to-date
-information?*, with **Allow via Exa** (described *Queries and URLs are sent to
-Exa (exa.ai).*) and **Disable web search**. Both answers are remembered for
-later sessions. `Esc` skips it as any question: web search is declined for
+information?*, with three options: **Always allow** (described *Queries and
+URLs are sent to Exa (exa.ai). Later sessions don't ask.*), **Allow for this
+session** (*Asks again in the next session.*) and **Disable web search**
+(*Later sessions have no web tools; /websearch on turns it back on.*). Always
+allow and Disable are remembered for later sessions; Allow for this session is
+not. A session that opened before another one was answered looks at the
+remembered answer again before it asks, so sessions started side by side ask
+once between them. `Esc` skips it as any question: web search is declined for
 this session only, and the card is not shown again until the next one. The
 row an answer leaves names the question (`? Allow craze to search the web … →
-Allow via Exa`); the row a skip leaves names the request by its header, **Web
+Always allow`); the row a skip leaves names the request by its header, **Web
 search** (`? Web search → skipped`). A session that answers its questions
 itself never shows this card.
+
+### Web search status
+
+`/websearch` in a native session adds a few note rows about its [web
+search](configuration.md#native-web-search):
+
+```text
+Web search · Exa (exa.ai)
+  This session   on
+  Key            stored key (craze auth login websearch/exa)
+  Calls          14 searches, 3 fetches
+  Failed         2, 1 rate limited
+  Retried        4 rate-limited attempts sent again
+  New sessions   on (websearch.json) · /websearch off or ask to change
+```
+
+- **This session**: `on`, `on, for this session`, `asks on its first web
+  call`, `off: disabled from the consent card` or `off: the consent card was
+  skipped`. Before the session's first turn it says no status has been sent
+  yet.
+- **Key**: the key the session sends now — `stored key`, `EXA_API_KEY`, or
+  `keyless` (Exa's free limit). A key stored with `craze auth login
+  websearch/exa` while the session runs is used from its next turn.
+- **Calls**, **Failed** and **Retried**: the session's totals since it opened
+  (or was reloaded), its sub-agents' calls included. **Failed** says how many
+  were still rate limited after craze's retries; **Retried** how many attempts
+  were sent again after a rate limit. Rows with nothing to count are left out.
+- **New sessions**: what a session started now does — `config.toml`'s
+  `websearch` setting when there is one, else the remembered choice
+  (`websearch.json`), else ask.
+
+`/websearch on`, `/websearch off` and `/websearch ask` change the remembered
+choice: allowed through Exa without asking, no web tools, or nothing
+remembered so the next session asks. They change new sessions only; the
+running one keeps the tools it opened with. A `websearch` setting in
+`config.toml` still wins, and the note says so.
 
 `Esc` means two different things on purpose. On a question it is *skipped*: the
 agent is told you declined to answer and the turn carries on. On a plan or a
@@ -1776,6 +1817,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
 | `/effort` | Change the current model's [effort](#effort): a picker, or `/effort <level>` — only where the current model has an effort control |
+| `/websearch` | This session's [web search](#web-search-status): its key, consent and call counts; `/websearch on`, `off` or `ask` set what new sessions do — native sessions only; runs mid-turn |
 
 `/plan`, `/ask` and `/agent` are in the menu only when the session advertises
 modes, and on a session that does not offer the one typed, `Enter` says `mode

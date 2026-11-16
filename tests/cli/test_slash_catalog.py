@@ -76,6 +76,10 @@ _EXIT = {"name": "exit", "description": "End this session", "source": "builtin",
 # effort is the client's own reading of the snapshot (an effort option).
 _EFFORT = {"name": "effort", "description": "Change the current model's effort", "source": "builtin",
            "requires": "effort", "run": {"kind": "picker", "arg": "optional", "argHint": "<level>", "picker": "effort"}}
+# /websearch (craze issue #141): a native session's, last, after /effort.
+_WEBSEARCH = {"name": "websearch", "description": "Web search status, or /websearch on|off|ask for new sessions",
+              "source": "builtin", "whileWorking": True,
+              "run": {"kind": "local", "arg": "optional", "argHint": "on|off|ask", "local": "websearch"}}
 
 
 def _mode_row(name: str, value: str) -> dict:
@@ -350,6 +354,7 @@ def test_attach_snapshot_carries_the_native_catalog(
         _BTW,
         _EXIT,
         _EFFORT,
+        _WEBSEARCH,
         # native's own command: it advertises /compact itself, as an agent row.
         {"name": "compact", "description": "Summarize the conversation so far to free context; /compact <what to keep>",
          "source": "agent", "run": {"kind": "prompt", "arg": "optional"}},

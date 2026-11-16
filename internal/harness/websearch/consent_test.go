@@ -111,8 +111,9 @@ func TestConsentQuestion(t *testing.T) {
 		Header:   "Web search",
 		Question: "Allow craze to search the web and fetch pages for up-to-date information?",
 		Options: []tool.QuestionOption{
-			{Label: "Allow via Exa", Description: "Queries and URLs are sent to Exa (exa.ai)."},
-			{Label: "Disable web search"},
+			{Label: "Always allow", Description: "Queries and URLs are sent to Exa (exa.ai). Later sessions don't ask."},
+			{Label: "Allow for this session", Description: "Asks again in the next session."},
+			{Label: "Disable web search", Description: "Later sessions have no web tools; /websearch on turns it back on."},
 		},
 	}}
 	if !reflect.DeepEqual(q, want) {
@@ -143,11 +144,11 @@ func TestConsentAllow(t *testing.T) {
 	}
 }
 
-// TestConsentDisable: exactly the second option disables: this call and
+// TestConsentDisable: exactly the third option disables: this call and
 // every later one answer that web search is disabled, the provider is never
 // called, false is remembered, and nobody is asked again.
 func TestConsentDisable(t *testing.T) {
-	a := &fakeAsker{answer: picks([]int{1})}
+	a := &fakeAsker{answer: picks([]int{2})}
 	f := newFake(t, replyText(oneResult))
 	path := statePath(t)
 	s := consented(t, f, a, true, path, nil)
@@ -161,7 +162,68 @@ func TestConsentDisable(t *testing.T) {
 	}
 }
 
-// TestConsentDecline: anything but exactly one of the two options — nobody
+// TestConsentForSession: exactly the second option allows this session
+// only: the call and every later one go to the provider, nobody is asked
+// again, and nothing is remembered, so the next session asks.
+func TestConsentForSession(t *testing.T) {
+	a := &fakeAsker{answer: picks([]int{1})}
+	f := newFake(t, replyText(oneResult))
+	path := statePath(t)
+	s := consented(t, f, a, true, path, nil)
+	if r, err := search(s, "q"); err != nil || len(r) != 1 {
+		t.Fatalf("Search = %+v, %v", r, err)
+	}
+	if _, err := s.Fetch(context.Background(), "https://a.example/"); err != nil {
+		t.Fatal(err)
+	}
+	stateIs(t, path, "")
+	if a.count() != 1 || len(f.calls()) != 2 {
+		t.Fatalf("asked %d times, %d provider calls; want 1 and 2", a.count(), len(f.calls()))
+	}
+	next := &fakeAsker{answer: picks([]int{1})}
+	if _, err := search(consented(t, f, next, true, path, nil), "q"); err != nil || next.count() != 1 {
+		t.Fatalf("the next session: %v, asked %d times; want it asked", err, next.count())
+	}
+}
+
+// TestConsentAnsweredElsewhere: a session that opened undecided looks at the
+// remembered choice again before it asks: an allow written since — by a
+// session opened beside it and answered first — lets the call through
+// without asking, a disable disables it, and an allow through a provider
+// this session does not use is no answer.
+func TestConsentAnsweredElsewhere(t *testing.T) {
+	for name, tc := range map[string]struct {
+		written, text string
+		asked         int
+	}{
+		"allow":          {`{"version":1,"provider":"exa"}`, "", 0},
+		"disable":        {`{"version":1,"provider":false}`, "Web search is disabled", 0},
+		"not valid JSON": {`{`, "", 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &fakeAsker{answer: picks([]int{1})}
+			f := newFake(t, replyText(oneResult))
+			path := statePath(t)
+			s := consented(t, f, a, true, path, nil)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, tc.written)
+			_, err := search(s, "q")
+			if tc.text == "" && err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if tc.text != "" {
+				wantErr(t, err, tool.ClassToolError, tc.text)
+			}
+			if a.count() != tc.asked {
+				t.Fatalf("asked %d times, want %d", a.count(), tc.asked)
+			}
+		})
+	}
+}
+
+// TestConsentDecline: anything but exactly one of the three options — nobody
 // answering, a skip (unanswered), an empty or out-of-range pick, two picks,
 // an answer to two questions, an asker's own error — declines for this
 // session: the call answers that web search was not approved, nothing is
@@ -172,7 +234,7 @@ func TestConsentDecline(t *testing.T) {
 		"unanswered":    func(context.Context) (tool.Answers, error) { return tool.Answers{}, nil },
 		"no picks":      picks(),
 		"empty pick":    picks([]int{}),
-		"out of range":  picks([]int{2}),
+		"out of range":  picks([]int{3}),
 		"negative":      picks([]int{-1}),
 		"both":          picks([]int{0, 1}),
 		"two questions": picks([]int{0}, []int{0}),
@@ -296,7 +358,7 @@ func TestConsentCancel(t *testing.T) {
 // answer: the asking call and every waiter are aborted, nothing is remembered,
 // the provider is not called, and the next call asks again.
 func TestConsentLateAnswer(t *testing.T) {
-	for name, pick := range map[string][]int{"allow": {0}, "disable": {1}} {
+	for name, pick := range map[string][]int{"allow": {0}, "session": {1}, "disable": {2}} {
 		t.Run(name, func(t *testing.T) {
 			// The answer comes after the asking ctx ends; a call that cannot be
 			// cancelled (the next one) is answered at once.
@@ -370,7 +432,8 @@ func TestConsentConcurrentCalls(t *testing.T) {
 		text   string
 	}{
 		"allow":   {picks([]int{0}), ""},
-		"disable": {picks([]int{1}), "Web search is disabled"},
+		"session": {picks([]int{1}), ""},
+		"disable": {picks([]int{2}), "Web search is disabled"},
 		"decline": {picks(), "Web search was not approved in this session"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -428,7 +491,7 @@ func TestConsentWriteFails(t *testing.T) {
 		text string
 	}{
 		"allow":   {[]int{0}, ""},
-		"disable": {[]int{1}, "Web search is disabled"},
+		"disable": {[]int{2}, "Web search is disabled"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			blocker := filepath.Join(t.TempDir(), "native")

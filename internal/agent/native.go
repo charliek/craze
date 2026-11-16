@@ -472,6 +472,10 @@ type nativeSession struct {
 	// at Open, and webKnown whether Open has decided it (WebSearch). Under
 	// s.mu.
 	webOffered, webKnown bool
+	// webStatusSent is the last web status section published
+	// (publishWebStatusLocked), so an unchanged one is not sent again. Under
+	// s.mu.
+	webStatusSent *WebStatusState
 	// webReportSeam runs in webReport before s.mu is taken to count the
 	// call: the attribution point's window. **A test seam: nil in production**, set only by a test
 	// in this package before the first report.
@@ -907,6 +911,10 @@ func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 	if u := s.snap.Usage; u != nil {
 		c := *u
 		st.Usage = &c
+	}
+	if w := s.snap.WebStatus; w != nil {
+		c := *w
+		st.WebStatus = &c
 	}
 	return st
 }
@@ -3589,6 +3597,10 @@ func (s *nativeSession) Snapshot() Snapshot {
 	if u := s.snap.Usage; u != nil {
 		c := *u
 		out.Usage = &c
+	}
+	if w := s.snap.WebStatus; w != nil {
+		c := *w
+		out.WebStatus = &c
 	}
 	return out
 }

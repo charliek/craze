@@ -373,10 +373,22 @@ func (m Model) inFlightCounts() string {
 	out := make([]string, 0, len(statusKindOrder))
 	for _, name := range statusKindOrder {
 		if n := counts[name]; n > 0 {
-			out = append(out, fmt.Sprintf("%d %s%s", n, name, plural(n)))
+			out = append(out, fmt.Sprintf("%d %s%s", n, name, kindPlural(name, n)))
 		}
 	}
 	return strings.Join(out, ", ")
+}
+
+// kindPlural is the ending a count of n of kind takes: none for one, "es"
+// for the kinds that end in "ch" (search, fetch), "s" for the rest.
+func kindPlural(kind string, n int) string {
+	switch {
+	case n == 1:
+		return ""
+	case strings.HasSuffix(kind, "ch"):
+		return "es"
+	}
+	return "s"
 }
 
 // agentCount is the `← n agents` marker pointing at the rows below. With a

@@ -100,6 +100,29 @@ func (s *scrubber) text(v string) string {
 	return v
 }
 
+// with is a scrubber that takes out every key s does and key too: s itself
+// when key is not usable or s holds it already, and newScrubber(key) when s
+// is nil. s is never changed.
+func (s *scrubber) with(key string) *scrubber {
+	add := newScrubber(key)
+	switch {
+	case add == nil:
+		return s
+	case s == nil:
+		return add
+	}
+	if slices.ContainsFunc(s.patterns, func(re *regexp.Regexp) bool { return re.String() == add.patterns[0].String() }) {
+		return s
+	}
+	out := &scrubber{patterns: append(slices.Clone(s.patterns), add.patterns...), forms: slices.Clone(s.forms)}
+	for _, f := range add.forms {
+		if !slices.Contains(out.forms, f) {
+			out.forms = append(out.forms, f)
+		}
+	}
+	return out
+}
+
 // valid is v as text a scrub sees whole: invalid UTF-8 dropped, and so is
 // U+FFFD, which a JSON decoder puts in an invalid byte's place. Either, left
 // inside a key, would hide it from the scrub, and dropped after it would join

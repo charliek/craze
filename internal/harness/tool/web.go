@@ -57,6 +57,9 @@ type WebPage struct {
 type WebError struct {
 	Class ErrorClass
 	Text  string
+	// RateLimited says the provider rate limited the call, still after the
+	// service's retries.
+	RateLimited bool
 }
 
 func (e *WebError) Error() string { return e.Text }
@@ -67,12 +70,15 @@ func (e *WebError) Error() string { return e.Text }
 // cancelled consent, a cancellation in flight), and the URLs it contributes —
 // a successful search's result URLs in result order, a successful fetch's
 // requested URL when the page's text was not empty, and none for a failed
-// call — each with the provider key already scrubbed out. A call refused
+// call — each with the provider key already scrubbed out. RateLimited says a
+// failed call was the provider's rate limit, still after the service's
+// retries. A call refused
 // before it reached the service (a bad or non-public URL) is never reported.
 // The service knows nothing of turns: who counts a report, and in which turn,
 // is the session's.
 type WebCall struct {
-	Fetch  bool
-	Failed bool
-	URLs   []string
+	Fetch       bool
+	Failed      bool
+	RateLimited bool
+	URLs        []string
 }

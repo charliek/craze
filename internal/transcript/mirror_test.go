@@ -89,6 +89,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 	title, mode, model := "a title", "plan", "grok"
 	usage, sendNow := filled[agent.UsageState](t), filled[agent.SendNowState](t)
 	catalog := filled[agent.CatalogState](t)
+	webStatus := filled[agent.WebStatusState](t)
 	slash := agent.SlashCatalog{Items: filled[[]agent.SlashItem](t)}
 	row := filled[agent.QueuedPrompt](t)
 	row.ID = "q1"
@@ -100,13 +101,14 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 	return sequenced([]agent.Event{
 		{Type: agent.EventMeta, State: &agent.StateDelta{
 			Title: &title, Mode: &mode, Model: &model,
-			Config:   &agent.ConfigState{Options: filled[[]agent.ConfigOption](t)},
-			Commands: &agent.CommandsState{Commands: filled[[]agent.CommandInfo](t)},
-			Plugins:  &agent.PluginsState{Plugins: filled[[]agent.PluginCommand](t)},
-			Slash:    &slash,
-			SendNow:  &sendNow,
-			Usage:    &usage,
-			Catalog:  &catalog,
+			Config:    &agent.ConfigState{Options: filled[[]agent.ConfigOption](t)},
+			Commands:  &agent.CommandsState{Commands: filled[[]agent.CommandInfo](t)},
+			Plugins:   &agent.PluginsState{Plugins: filled[[]agent.PluginCommand](t)},
+			Slash:     &slash,
+			SendNow:   &sendNow,
+			Usage:     &usage,
+			Catalog:   &catalog,
+			WebStatus: &webStatus,
 		}},
 		{Type: agent.EventQueue, QueueChange: agent.QueueQueued, Queue: &row},
 		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &child},

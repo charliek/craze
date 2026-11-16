@@ -52,3 +52,43 @@ func TestSessionStateCarriesUsageOnlyWhenTheSessionHasOne(t *testing.T) {
 		t.Fatalf("the settings' usage: %s → %+v, %v; want %+v", st.Settings.Usage, got, err, want)
 	}
 }
+
+// webStatusSession is the host's Stub with a web status section in its
+// snapshot: what a native session's is once it has published one (issues
+// #137, #141).
+type webStatusSession struct {
+	*tui.Stub
+	web *agent.WebStatusState
+}
+
+func (s *webStatusSession) Snapshot() agent.Snapshot {
+	snap := s.Stub.Snapshot()
+	w := *s.web
+	snap.WebStatus = &w
+	return snap
+}
+
+// TestSessionStateCarriesWebStatusOnlyWhenTheSessionHasOne (issues #137,
+// #141): session.state's settings carry the web status section through the
+// event codec's leaf wrapper when the session has one, and no "webStatus" key
+// at all when it has none — every ACP session, the Stub here. Every reply is
+// held to session.state.json by the test client (wiretest).
+func TestSessionStateCarriesWebStatusOnlyWhenTheSessionHasOne(t *testing.T) {
+	h := newHost(t)
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)})
+	if bytes.Contains(r.Result, []byte(`"webStatus"`)) {
+		t.Fatalf("a session with no web status answers with the key: %s", r.Result)
+	}
+
+	want := agent.WebStatusState{Provider: "exa", Key: "stored", Consent: "allowed", Searches: 3, Fetches: 1, RateLimited: 1, Retries: 2}
+	h = newHost(t, withSession(func(s *tui.Stub) agent.Session { return &webStatusSession{Stub: s, web: &want} }))
+	a = h.dial()
+	a.sayHello(nil)
+	st := ok[protocol.StateResult](t, a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)}))
+	got, err := agent.DecodeWebStatusState(st.Settings.WebStatus)
+	if err != nil || got == nil || *got != want {
+		t.Fatalf("the settings' web status: %s → %+v, %v; want %+v", st.Settings.WebStatus, got, err, want)
+	}
+}

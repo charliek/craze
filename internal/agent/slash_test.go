@@ -98,6 +98,7 @@ func TestSlashBuiltinTableIsNormative(t *testing.T) {
 		{Name: "btw", Description: "Ask a side question (not saved): /btw <question>", Requires: SlashRequiresAside, Run: SlashRun{Kind: SlashRunAside, Param: "question", Arg: SlashArgRequired, ArgHint: "<question>"}, WhileWorking: true},
 		{Name: "exit", Description: "End this session", Requires: SlashRequiresStop, Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodStop}, WhileWorking: true},
 		{Name: "effort", Description: "Change the current model's effort", Requires: SlashRequiresEffort, Run: SlashRun{Kind: SlashRunPicker, Picker: "effort", Arg: SlashArgOptional, ArgHint: "<level>"}},
+		{Name: "websearch", Description: "Web search status, or /websearch on|off|ask for new sessions", Run: SlashRun{Kind: SlashRunLocal, Local: "websearch", Arg: SlashArgOptional, ArgHint: "on|off|ask"}, WhileWorking: true},
 	}
 	for i := range want {
 		want[i].Source = SlashSourceBuiltin
@@ -159,7 +160,7 @@ func TestSlashCatalogBuiltinGates(t *testing.T) {
 		want string
 	}{
 		{"cursor", cursorInputs(), "help,model,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort"},
-		{"native adds connect after model", native, "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort"},
+		{"native adds connect after model, and websearch last", native, "help,model,connect,clear,tasks,theme,rename,plan,ask,agent,btw,exit,effort,websearch"},
 		{"no modes advertised", noModes, "help,model,clear,tasks,theme,rename,btw,exit,effort"},
 		{"modes not shown by the provider", modesOff, "help,model,clear,tasks,theme,rename,btw,exit,effort"},
 		{"no tasks panel", noTodos, "help,model,clear,theme,rename,plan,ask,agent,btw,exit,effort"},

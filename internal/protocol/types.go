@@ -1240,6 +1240,11 @@ type Settings struct {
 	Config  json.RawMessage `json:"config"`
 	Usage   json.RawMessage `json:"usage,omitempty"`
 	Catalog json.RawMessage `json:"catalog,omitempty"`
+	// WebStatus is the session's web search as the event codec's webStatus
+	// section (event.json#/$defs/webStatus; issues #137, #141): present once a
+	// native session that offered the web tools has published one, absent
+	// otherwise — never null or {}.
+	WebStatus json.RawMessage `json:"webStatus,omitempty"`
 }
 
 // SnapshotParams is session.snapshot's params, which ask for one bounded

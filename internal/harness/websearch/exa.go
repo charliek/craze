@@ -57,7 +57,7 @@ func (e *exa) Fetch(ctx context.Context, url string) (tool.WebPage, error) {
 	if err != nil {
 		return tool.WebPage{}, err
 	}
-	return tool.WebPage{URL: e.c.scrub.text(url), Text: text}, nil
+	return tool.WebPage{URL: e.c.scrubber().text(url), Text: text}, nil
 }
 
 // parseExa reads web_search_exa's text: blocks separated by a "---" line,

@@ -91,7 +91,7 @@
       "additionalProperties": false
     },
     "settings": {
-      "description": "The settings, each list section in the event codec's own section shape, absent when empty; usage, the last usage section a delta carried (native only), absent when none has; catalog, likewise the last catalog section a delta carried (a native session that reloaded its model table), absent when none has; slash, the last slash section a delta carried (a session whose capabilities.slashCatalog is true), absent when none has or it was empty, held to the snapshot's bounds: a row with an action field over 262144 bytes dropped, never cut, a description, argHint or reason cut to its head, at most 512 rows, truncated.slash set when any of that happened — and left out whole, truncated.slash set, when the snapshot's mandatory state would not fit its budget with it: the catalog repeats the commands and plugins, so it never makes a snapshot fail.",
+      "description": "The settings, each list section in the event codec's own section shape, absent when empty; usage, the last usage section a delta carried (native only), absent when none has; catalog, likewise the last catalog section a delta carried (a native session that reloaded its model table), absent when none has; webStatus, likewise the last webStatus section a delta carried (a native session that offered the web tools), absent when none has; slash, the last slash section a delta carried (a session whose capabilities.slashCatalog is true), absent when none has or it was empty, held to the snapshot's bounds: a row with an action field over 262144 bytes dropped, never cut, a description, argHint or reason cut to its head, at most 512 rows, truncated.slash set when any of that happened — and left out whole, truncated.slash set, when the snapshot's mandatory state would not fit its budget with it: the catalog repeats the commands and plugins, so it never makes a snapshot fail.",
       "type": "object",
       "properties": {
         "title": {"type": "string"},
@@ -104,6 +104,7 @@
         "sendNow": {"$ref": "event.json#/$defs/sendNow"},
         "usage": {"$ref": "event.json#/$defs/usage"},
         "catalog": {"$ref": "event.json#/$defs/catalog"},
+        "webStatus": {"$ref": "event.json#/$defs/webStatus"},
         "truncated": {"$ref": "#/$defs/settingsTruncated"}
       },
       "additionalProperties": false
