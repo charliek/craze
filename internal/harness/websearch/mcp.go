@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"mime"
 	"net"
 	"net/http"
@@ -41,6 +42,55 @@ const userAgent = "craze"
 // for the model (failure.detail).
 const maxDetail = 200
 
+// Rate-limit retries (issue #138). A call the provider rate limits — an HTTP
+// 429, or an error result that names status 429, which is how Exa answers a
+// keyed account over its per-second limit — is tried again, up to
+// maxAttempts in all, after a wait (backoff): the provider's Retry-After when
+// it sent one, else defaultRetryAfter, grown with jitter and the attempt. A
+// wait that would leave less than retryMargin of the call's deadline is not
+// taken: the 429 is returned at once rather than run into the timeout.
+const (
+	maxAttempts       = 3
+	defaultRetryAfter = time.Second
+	retryMargin       = 2 * time.Second
+)
+
+// retryWait is the backoff every new caller starts with: backoff, which the
+// package's tests replace with a short one so a rate limit does not cost them
+// seconds.
+var retryWait = backoff
+
+// backoff is the wait before the attempt after attempt (1-based), given the
+// provider's Retry-After (0 when it sent none): the base, defaultRetryAfter
+// when it sent none, times (1 + jitter in [0, 1)) times attempt.
+func backoff(retryAfter time.Duration, attempt int) time.Duration {
+	if retryAfter <= 0 {
+		retryAfter = defaultRetryAfter
+	}
+	return time.Duration(float64(retryAfter) * (1 + rand.Float64()) * float64(attempt))
+}
+
+// retryAfterOf is a Retry-After header's wait: delta-seconds or an HTTP date,
+// 0 for none or one that cannot be read or is in the past.
+func retryAfterOf(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n <= 0 {
+			return 0
+		}
+		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // failKind is what went wrong with a call, for the service's words for it.
 type failKind int
 
@@ -64,6 +114,19 @@ type failure struct {
 	kind   failKind
 	status int
 	detail string
+	// retryAfter is the wait a rate-limited reply's Retry-After header
+	// asked for, 0 for none.
+	retryAfter time.Duration
+	// crawl is the code a failed fetch's error text ends with
+	// (CRAWL_NOT_FOUND …, crawlRE), "" for none. detail holds the text as
+	// well, for anything that is not a fetch.
+	crawl string
+}
+
+// rateLimited says f is a rate limit: an HTTP 429, or an error result naming
+// one.
+func (f *failure) rateLimited() bool {
+	return f.kind == failStatus && f.status == http.StatusTooManyRequests
 }
 
 func (f *failure) Error() string {
@@ -93,6 +156,12 @@ type caller struct {
 	http    *http.Client
 	timeout time.Duration
 	ids     atomic.Int64
+	// backoff is the wait before a rate-limited call's next attempt
+	// (backoff, the package function, unless a test sets its own).
+	backoff func(retryAfter time.Duration, attempt int) time.Duration
+	// retries counts the attempts made after a rate limit, over the
+	// caller's life.
+	retries atomic.Int64
 }
 
 // newCaller builds a caller of endpoint whose calls each last at most
@@ -105,16 +174,50 @@ func newCaller(endpoint, key string, scrub *scrubber, hc *http.Client, timeout t
 		c = &cp
 	}
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &caller{endpoint: endpoint, key: key, scrub: scrub, http: c, timeout: timeout}
+	return &caller{endpoint: endpoint, key: key, scrub: scrub, http: c, timeout: timeout, backoff: retryWait}
 }
 
 // call calls tool with args and returns the text of its result: its text
 // content blocks joined in order (any other block ignored), with the key
-// scrubbed out. Every failure is a *failure.
+// scrubbed out. Every failure is a *failure. A rate-limited attempt is tried
+// again (maxAttempts, backoff) within the one deadline, timeout, that bounds
+// the whole call, its waits included; each attempt is a fresh request with a
+// fresh id.
 func (c *caller) call(ctx context.Context, tool string, args map[string]any) (string, error) {
 	if ctx.Err() != nil {
 		return "", &failure{kind: failAborted}
 	}
+	cctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	for attempt := 1; ; attempt++ {
+		text, f := c.attempt(ctx, cctx, tool, args)
+		if f == nil {
+			return text, nil
+		}
+		if !f.rateLimited() || attempt >= maxAttempts {
+			return "", f
+		}
+		wait := c.backoff(f.retryAfter, attempt)
+		if dl, ok := cctx.Deadline(); ok && time.Until(dl)-wait < retryMargin {
+			return "", f
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return "", &failure{kind: failAborted}
+		case <-cctx.Done():
+			t.Stop()
+			return "", &failure{kind: failTimeout}
+		case <-t.C:
+		}
+		c.retries.Add(1)
+	}
+}
+
+// attempt is one request of a call: ctx the caller's own, cctx the call's
+// with its deadline.
+func (c *caller) attempt(ctx, cctx context.Context, tool string, args map[string]any) (string, *failure) {
 	id := c.ids.Add(1)
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -125,8 +228,6 @@ func (c *caller) call(ctx context.Context, tool string, args map[string]any) (st
 	if err != nil {
 		return "", &failure{kind: failOther}
 	}
-	cctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
 	text, f := c.post(cctx, id, body)
 	// The context decides, whatever the transport or the reader made of it,
 	// a reply read whole included: the caller's own context ending is a
@@ -160,7 +261,11 @@ func (c *caller) post(ctx context.Context, id int64, body []byte) (string, *fail
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", &failure{kind: failStatus, status: resp.StatusCode}
+		f := &failure{kind: failStatus, status: resp.StatusCode}
+		if f.rateLimited() {
+			f.retryAfter = retryAfterOf(resp.Header.Get("Retry-After"))
+		}
+		return "", f
 	}
 	r := &capped{r: resp.Body, left: MaxReply}
 	media, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
@@ -363,6 +468,9 @@ func (c *caller) answer(env *envelope) (string, *failure) {
 		if status, ok := statusOf(text); ok {
 			return "", &failure{kind: failStatus, status: status}
 		}
+		if code := crawlOf(text); code != "" {
+			return "", &failure{kind: failOther, crawl: code, detail: detail(text)}
+		}
 		return "", &failure{kind: failOther, detail: detail(text)}
 	}
 	return text, nil
@@ -384,6 +492,18 @@ func statusOf(text string) (int, bool) {
 	}
 	n, err := strconv.Atoi(m[1])
 	return n, err == nil
+}
+
+// crawlRE finds the code a failed fetch's text ends with, as Exa's do:
+// "Error fetching URL(s): https://a.example/x: CRAWL_NOT_FOUND".
+var crawlRE = regexp.MustCompile(`^Error fetching URL\(s\): .*: (CRAWL_[A-Z0-9_]+)$`)
+
+// crawlOf is the crawl code text's first line ends with, "" for none.
+func crawlOf(text string) string {
+	if m := crawlRE.FindStringSubmatch(firstLine(text)); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // firstLine is v up to its first line ending, trimmed.

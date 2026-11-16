@@ -2654,6 +2654,37 @@ the file whole, atomically, at `0600` — comments are not kept, and the header
 they write says so. The file tools refuse `credentials.toml` as they refuse
 `providers.toml` and `websearch.json`, and `grep` and `glob` never show it.
 
+### Rate limits and failures
+
+Exa limits how fast it answers: its keyless endpoint a few calls at a time, a
+keyed account 10 requests a second. Models send searches in parallel batches,
+so the web search paces them:
+
+- **At most four calls at once.** A session's searches and fetches, its
+  sub-agents' included, share four places at Exa; a call past them waits for
+  one. Time spent waiting does not count against the call's 25 seconds.
+- **A rate limit is tried again.** A call Exa rate limits — an HTTP 429, or a
+  keyed account's error result that names 429 — is sent again, up to three
+  attempts in all, after a wait: Exa's `Retry-After` (a second when it sends
+  none), times one to two (jitter), times the attempt. All of it fits in the
+  call's 25 seconds; a wait that would not is skipped and the rate limit
+  returned at once. A cancel while waiting stops the call.
+
+What the model reads when a call fails anyway:
+
+| Failure | Text |
+|---|---|
+| A rate limit, keyless | `Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a few seconds before searching again. A free Exa key raises the limit: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session.` |
+| A rate limit, keyed | `Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once.` |
+| A keyless HTTP 403 (Exa's keyless endpoint refuses IPv6 and proxied connections) | `Web search refused (HTTP 403) by Exa's keyless endpoint, which refuses IPv6 and proxied connections. A free Exa key avoids this: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session.` |
+| A bad key | `Web search authentication failed (HTTP 401)` |
+| Any other status | `Web search request failed (HTTP <status>)` |
+| A fetch of a missing page (`CRAWL_NOT_FOUND`) | `The page was not found (HTTP 404, or it no longer exists): <url>. Search for its current address.` |
+| A site Exa could not reach (`CRAWL_UNKNOWN_ERROR`) | `Exa could not fetch <url>: the site may be unreachable or block crawlers. Try another source for the same information.` |
+| A page with no text without JavaScript (`CRAWL_EMPTY_CONTENT`) | `Exa fetched <url> but found no readable text (the page may need JavaScript to render). Try a search: its excerpts may carry the page's text.` |
+| Another crawl code | `Exa could not fetch <url> (<code>)` |
+| A timeout | `Web search timed out after 25s` |
+
 ### What leaves your machine
 
 To Exa: each search's query, each URL fetched, and, when there is one, your

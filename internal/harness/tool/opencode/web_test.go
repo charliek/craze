@@ -314,7 +314,7 @@ func TestWebFetchResults(t *testing.T) {
 // tool_error; any other error is opencode's generic sentence, a tool_error;
 // a call whose context is done is aborted. Nothing here is truncated.
 func TestWebErrors(t *testing.T) {
-	limited := &tool.WebError{Class: tool.ClassToolError, Text: "Web search rate limited (HTTP 429). Setting EXA_API_KEY raises the limit"}
+	limited := &tool.WebError{Class: tool.ClassToolError, Text: "Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once."}
 	timeout := &tool.WebError{Class: tool.ClassTimeout, Text: "Web search timed out after 25s"}
 	for _, tc := range []struct {
 		name  string
