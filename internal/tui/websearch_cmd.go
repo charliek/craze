@@ -79,7 +79,11 @@ func (m Model) runWebSearch(args string) (tea.Model, tea.Cmd) {
 		m.addError("/websearch: " + websearch.StateFile + " could not be written; nothing changed")
 		return m, nil
 	}
-	m.addNote(said + " (" + webSearchScope + ")")
+	scope := webSearchScope
+	if choice == (websearch.Choice{}) {
+		scope = "a session that has decided keeps its choice; one still undecided asks at its next web call"
+	}
+	m.addNote(said + " (" + scope + ")")
 	if over := configOverride(cfg); over != "" {
 		m.addNote("web search: " + over + ", which wins over this")
 	}
