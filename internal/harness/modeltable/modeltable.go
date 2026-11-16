@@ -1778,6 +1778,14 @@ func (t *Table) WebSearchKey(getenv func(string) string) Secret {
 	return t.webKeys["exa"]
 }
 
+// WebSearchKeyFromEnv says the key WebSearchKey returns with getenv is the
+// variable's (ExaKeyEnv), not the stored one: what a session's web search
+// status names as its key's source.
+func (t *Table) WebSearchKeyFromEnv(getenv func(string) string) bool {
+	k, err := envKey(t.envOf(getenv), ExaKeyEnv)
+	return err == nil && k != ""
+}
+
 // CredentialsReport is what the reading of credentials.toml that loaded t
 // said of the file among t's Warnings (plan 051 §F.5): problems, the
 // value-free line for each credential entry of the wrong shape — as

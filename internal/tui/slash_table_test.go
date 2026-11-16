@@ -32,6 +32,8 @@ import (
 //   - /effort does not either (plan 047 D4): handleEnter dispatches it as a
 //     builtin where the session has an effort option, under the same busy
 //     refusal as /model.
+//   - /websearch runs mid-turn (issue #141): handleEnter dispatches it on a
+//     native session, as /connect, but it needs no agent.
 //   - /sessions is this client's own row and is not in the table (P13).
 func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 	run := map[string]agent.SlashRun{
@@ -48,6 +50,8 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 		"btw":     {Kind: agent.SlashRunAside, Param: "question"}, // openBtw
 		"exit":    {Kind: agent.SlashRunMethod, Method: agent.SlashMethodStop},
 		"effort":  {Kind: agent.SlashRunPicker, Picker: "effort"}, // runEffort: openEffortPicker, or /effort <level>
+		// runWebSearch: the panel, or /websearch on|off|ask
+		"websearch": {Kind: agent.SlashRunLocal, Local: "websearch"},
 	}
 	var names []string
 	for _, b := range agent.SlashBuiltins() {
@@ -58,7 +62,7 @@ func TestSlashTableMatchesTheTUIsDispatch(t *testing.T) {
 		}
 		var want bool
 		switch it.Name {
-		case btwBuiltin.Name:
+		case btwBuiltin.Name, websearchBuiltin.Name:
 			want = true
 		case connectBuiltin.Name, effortBuiltin.Name:
 			want = false
@@ -119,6 +123,9 @@ func todaysSlashCatalog(m Model) []slashItem {
 		}
 		if it.Name == "exit" && m.effortOffered() {
 			items = append(items, effortBuiltin)
+		}
+		if it.Name == "exit" && m.connectOffered() {
+			items = append(items, websearchBuiltin)
 		}
 	}
 	seen := map[string]struct{}{}

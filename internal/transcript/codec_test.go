@@ -574,6 +574,12 @@ func pinnedSnapshots() []pinnedSnapshot {
 			`{"version":1,"settings":{"model":"test/a","usage":{"contextTokens":34000,"contextWindow":100000,` +
 				`"turn":{"input":10,"output":5,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":20000000,"unpriced":false},` +
 				`"session":{"input":30,"output":15,"reasoning":0,"cacheRead":1000,"cacheCreation":0,"costPicoUsd":60000000,"unpriced":true}}},"main":{}}`},
+		// The web status section (issues #137, #141): the event codec's own
+		// shape, every key written, a zero included.
+		{"the settings' web status section", Snapshot{Settings: Settings{Model: "test/a", WebStatus: &agent.WebStatusState{
+			Provider: "exa", Key: "keyless", Consent: "allowed", Searches: 2, Failed: 1, RateLimited: 1, Retries: 2}}},
+			`{"version":1,"settings":{"model":"test/a","webStatus":{"provider":"exa","key":"keyless","consent":"allowed",` +
+				`"searches":2,"fetches":0,"failed":1,"rateLimited":1,"retries":2}},"main":{}}`},
 		{"the settings' truncation marks", Snapshot{Settings: Settings{Truncated: SettingsTruncated{
 			Title: true, Mode: true, Model: true, Config: true, Commands: true, Plugins: true, Slash: true, SendNow: true}}},
 			`{"version":1,"settings":{"truncated":{"title":true,"mode":true,"model":true,"config":true,"commands":true,"plugins":true,"slash":true,"sendNow":true}},"main":{}}`},

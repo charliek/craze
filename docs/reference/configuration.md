@@ -1258,8 +1258,11 @@ with one line naming the provider, never the value; a file that no longer
 parses is one line too, and nothing in it is learned until it is fixed. The
 same look reads the [stored web search key](#the-stored-web-search-key)'s
 `credentials.toml`, whether or not the model table loads, and learns its key
-the same way — to redact it and to check it against the frozen prompt; the web
-search itself keeps the key it opened with.
+the same way — to redact it and to check it against the frozen prompt — and,
+once the redactor holds it, hands an Exa key to the session's web search, which
+sends it from then on (a session that opened with `EXA_API_KEY` keeps that:
+the variable comes first). Removing the stored key does not take it back from a
+running session.
 
 If a newly stored key turns out to be inside what the session sends with every
 request — its system prompt (which names the working directory), its tool
@@ -2561,9 +2564,17 @@ many calls arrive together:
 
 | Option | What it does |
 |---|---|
-| **Allow via Exa** (its description: *Queries and URLs are sent to Exa (exa.ai).*) | The call goes ahead, and so does every later one. Remembered: later sessions are offered the tools and never ask. |
-| **Disable web search** | This call and every later one in the session answer `Web search is disabled`. Remembered: later sessions are offered no web tools. |
+| **Always allow** (its description: *Queries and URLs are sent to Exa (exa.ai). Later sessions don't ask.*) | The call goes ahead, and so does every later one. Remembered: later sessions are offered the tools and never ask. |
+| **Allow for this session** (*Asks again in the next session.*) | The call goes ahead, and so does every later one in this session. Nothing is remembered. |
+| **Disable web search** (*Later sessions have no web tools; /websearch on turns it back on.*) | This call and every later one in the session answer `Web search is disabled`. Remembered: later sessions are offered no web tools. |
 | `Esc` (skip), or no answer | Declined for this session only: the calls answer `Web search was not approved in this session`, the card is not shown again in this session, and nothing is remembered, so the next session asks again. |
+
+Before it asks, a session reads the remembered choice again: an answer given
+in another session since this one opened — Always allow or Disable — decides
+without a card. So once one session's card is answered, sessions opened
+before it no longer ask; two whose first web calls both come before either
+card is answered each show one. [`/websearch`](tui.md#web-search-status) shows a session's web
+search and sets the remembered choice (`on`, `off`, `ask`).
 
 A turn cancelled while the card is up takes no answer, even one picked just as
 it was cancelled: the asking call and every call waiting on the card end as
@@ -2626,8 +2637,9 @@ session opens, and that one reading is both what the session redacts and what
 its web search sends, so the search never sends a key the session would not
 redact. A key stored while a session runs is learned at its next turn to be
 redacted ([Keys stored while a session runs](#keys-stored-while-a-session-runs)),
-and sent from the next session on: the running session's search keeps the key
-it opened with.
+and from then on sent by that session's search too, unless it opened with
+`EXA_API_KEY`'s. The redactor learns the key first, so the search still never
+sends a key the session would not redact.
 
 craze reads the file leniently: tables and keys it does not know are ignored,
 so a later craze can add to it. A file it cannot read — not valid TOML, a
@@ -2674,9 +2686,9 @@ What the model reads when a call fails anyway:
 
 | Failure | Text |
 |---|---|
-| A rate limit, keyless | `Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a few seconds before searching again. A free Exa key raises the limit: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session.` |
+| A rate limit, keyless | `Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a few seconds before searching again. A free Exa key raises the limit: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next turn.` |
 | A rate limit, keyed | `Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once.` |
-| A keyless HTTP 403 (Exa's keyless endpoint refuses IPv6 and proxied connections) | `Web search refused (HTTP 403) by Exa's keyless endpoint, which refuses IPv6 and proxied connections. A free Exa key avoids this: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next session.` |
+| A keyless HTTP 403 (Exa's keyless endpoint refuses IPv6 and proxied connections) | `Web search refused (HTTP 403) by Exa's keyless endpoint, which refuses IPv6 and proxied connections. A free Exa key avoids this: store one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored now is used from the next turn.` |
 | A bad key | `Web search authentication failed (HTTP 401)` |
 | Any other status | `Web search request failed (HTTP <status>)` |
 | A fetch of a missing page (`CRAWL_NOT_FOUND`) | `The page was not found (HTTP 404, or it no longer exists): <url>. Search for its current address.` |

@@ -96,6 +96,9 @@ func (m *Model) recompute() {
 		// The session's usage (plan 028 §3.14): the status row reads it from
 		// the fold like every other settings section.
 		Usage: f.Settings.Usage,
+		// The session's web status (issues #137, #141), session-wide like
+		// Usage: /websearch reads it from the fold the same way.
+		WebStatus: f.Settings.WebStatus,
 	}
 	queue := f.Queue
 	// The fold ends the arm on the started that fires it (SF-55), and carries

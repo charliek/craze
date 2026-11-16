@@ -106,6 +106,7 @@ var protocolRaw = map[string]string{
 	"Settings.config":            "event.json#/$defs/config",
 	"Settings.usage":             "event.json#/$defs/usage",
 	"Settings.catalog":           "event.json#/$defs/catalog",
+	"Settings.webStatus":         "event.json#/$defs/webStatus",
 	"SnapshotResult.snapshot":    "snapshot.json#",
 	"PromptResult.queued":        "event.json#/$defs/queued",
 	"QueueAddResult.row":         "event.json#/$defs/queued",

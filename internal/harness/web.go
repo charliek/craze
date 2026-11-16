@@ -88,8 +88,13 @@ func (w WebState) withService(o *Options, getenv func(string) string) (WebState,
 	if err != nil {
 		return w, fmt.Errorf("harness: web search: %w", err)
 	}
+	source := websearch.KeyStored
+	if o.Table.WebSearchKeyFromEnv(getenv) {
+		source = websearch.KeyEnv
+	}
 	svc, err := newWebService(websearch.Config{
 		Provider:  w.Provider,
+		KeySource: source,
 		Key:       o.Table.WebSearchKey(getenv).Reveal(),
 		Endpoint:  endpoint,
 		Undecided: w.Mode == WebAsking,
@@ -105,6 +110,11 @@ func (w WebState) withService(o *Options, getenv func(string) string) (WebState,
 	w.Service = svc
 	return w, nil
 }
+
+// WebService is the web service the session's tools reach the web through
+// (its children share it), nil when the session offers no web tools or was
+// built without one.
+func (s *Session) WebService() tool.Web { return s.base.web.Service }
 
 // newWebService builds the service withService hands the session: a seam for
 // the tests that read the configuration a session built it from (the key it

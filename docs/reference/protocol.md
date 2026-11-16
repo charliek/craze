@@ -50,7 +50,8 @@ by construction:
   when it cut one;
 - `session.state`'s queue rows are capped at 32 KiB each, and its settings
   carry only the provider's own (bounded) config catalog and, for a native
-  session, the fixed-size [usage section](#usage);
+  session, the fixed-size [usage section](#usage) and the small
+  [web status section](#web-search-status);
 - an [`aside`](#aside) notification carries at most 4 KiB of text.
 
 A host tolerates a final line at end-of-file with no trailing `\n` (a lone
@@ -1884,10 +1885,11 @@ know — so a later host can add one without a version of its own.
 
 [Web search counts](#web-search-counts) are announced by the info document's
 `webSearch`, absent on every older host and every ACP session: a client that
-finds none says nothing of web search. The state delta's `webSearch` section
-and the snapshot's `turn.webSearch` are keys an older client's decoder skips,
-so it folds every other section exactly as before, and the codecs stay at
-version 1.
+finds none says nothing of web search. The state delta's `webSearch` and
+`webStatus` sections, the snapshot's `turn.webSearch` and
+`settings.webStatus`, and `session.state`'s `settings.webStatus` are keys an
+older client's decoder skips, so it folds every other section exactly as
+before, and the codecs stay at version 1.
 
 Side questions are announced the same way: where `capabilities.aside` is
 absent — cursor, every older host — a client makes no `session.aside` call.
@@ -2229,6 +2231,49 @@ The section and the snapshot member are additive: no codec or snapshot version
 moves, and an older client skips a key it does not know ([Tolerant inbound,
 strict outbound](#tolerant-inbound-strict-outbound)), so to it a delta carrying
 only `webSearch` is a meta with an empty state, which it folds as no change.
+
+### Web search status
+
+Beside the turn's tally, a native session that offered the web tools reports
+its web search as it stands: the **web status section**, `state.webStatus` on
+a `meta` event, `{provider, key, consent, searches, fetches, failed,
+rateLimited, retries}` — what the TUI's `/websearch` shows.
+
+```json
+{"type":"meta","state":{"webStatus":{"provider":"exa","key":"keyless","consent":"allowed",
+  "searches":3,"fetches":1,"failed":1,"rateLimited":1,"retries":2}},"at":"..."}
+```
+
+- `provider` is the provider's id (`"exa"`).
+- `key` is where the key the session sends now came from: `"keyless"`,
+  `"env"` (`EXA_API_KEY`) or `"stored"` (`craze auth login websearch/exa`).
+- `consent` is where the session's consent stands: `"allowed"`, `"allowed for
+  this session"`, `"disabled"`, `"declined"` or `"undecided"`.
+- `searches` and `fetches` are the calls its web service handled, its
+  sub-agents' included; `failed` those that returned an error; `rateLimited`
+  those of them that were a rate limit after every retry; `retries` the
+  attempts made again after a rate limit.
+- Every key is always present, a `0` and an `""` included, as the usage
+  section's are.
+
+**Session-wide, and it replaces.** Unlike `webSearch`, the section names no
+turn and a client stamps it with none: it is the session's, like
+[`usage`](#usage). Each carries the whole of it, and a client **replaces** what
+it holds. The session sends one after every call its web service handled,
+when a key stored mid-session is taken up, and at its first turn — never two
+alike in a row. The totals are **incarnation-local**: a reload's session
+starts them from zero.
+
+It stands in the two reads of where things are, as usage does:
+`session.state`'s `settings.webStatus` and a snapshot's `settings.webStatus`
+(the last section a delta carried). Like usage it is reported state, never a
+`session.set` kind. No ACP session sends one, and a native session that did
+not offer the web tools sends none: for those the key is **absent** — never
+`null` and never `{}`.
+
+The section is additive: no codec or snapshot version moves, and an older
+client skips the key, so to it a delta carrying only `webStatus` is a meta with
+an empty state, which it folds as no change.
 
 ## Live models
 

@@ -610,6 +610,9 @@ type wireState struct {
 	// know (the slash section's precedent), which leaves every other section
 	// folded the same.
 	WebSearch *WireWebSearch `json:"webSearch,omitempty"`
+	// WebStatus is the session's web search as it stands (issues #137,
+	// #141), absent when nil: additive in the same way.
+	WebStatus *wireWebStatus `json:"webStatus,omitempty"`
 	Reason    string         `json:"reason,omitempty"`
 	Detail    string         `json:"detail,omitempty"`
 	IndexErr  string         `json:"indexErr,omitempty"`
@@ -819,6 +822,42 @@ type wireUsage struct {
 	Session       wireSpend `json:"session"`
 }
 
+// wireWebStatus is a WebStatusState (issues #137, #141), field for field in
+// the same order, so it converts by a plain pointer cast. It is session-wide
+// and replaced whole, as wireUsage is, and like wireUsage it always writes
+// every key: a 0 count and an empty consent are values, not absences. The
+// section itself is absent when nil (wireState's omitempty), never null or
+// {}: no ACP session's delta ever carries one.
+type wireWebStatus struct {
+	Provider    string `json:"provider"`
+	Key         string `json:"key"`
+	Consent     string `json:"consent"`
+	Searches    int    `json:"searches"`
+	Fetches     int    `json:"fetches"`
+	Failed      int    `json:"failed"`
+	RateLimited int    `json:"rateLimited"`
+	Retries     int    `json:"retries"`
+}
+
+// toWireWebStatus is w on the wire, nil for nil: its own copy, so the delta's
+// value is never shared with the encoded one.
+func toWireWebStatus(w *WebStatusState) *wireWebStatus {
+	if w == nil {
+		return nil
+	}
+	c := wireWebStatus(*w)
+	return &c
+}
+
+// webStatus is a wireWebStatus back as a WebStatusState, nil for nil.
+func (w *wireWebStatus) webStatus() *WebStatusState {
+	if w == nil {
+		return nil
+	}
+	c := WebStatusState(*w)
+	return &c
+}
+
 // WireWebSearch is a WebSearchState on the wire (plan 051 F.4.3): the state
 // section `webSearch`, and the members a snapshot's turn.webSearch carries
 // beside its turnId (internal/transcript). Each member is omitted when zero,
@@ -998,6 +1037,7 @@ func toWireEvent(ev Event) wireEvent {
 		w.State.Slash = toWireSlash(s.Slash)
 		w.State.Catalog = toWireCatalog(s.Catalog)
 		w.State.WebSearch = ToWireWebSearch(s.WebSearch)
+		w.State.WebStatus = toWireWebStatus(s.WebStatus)
 	}
 	w.Err = toWireError(ev.Err)
 	return w
@@ -1353,6 +1393,7 @@ func (w *wireEvent) event() Event {
 		ev.State.Slash = s.Slash.slash()
 		ev.State.Catalog = s.Catalog.catalog()
 		ev.State.WebSearch = s.WebSearch.State()
+		ev.State.WebStatus = s.WebStatus.webStatus()
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code, Info: e.Info}
@@ -1759,6 +1800,22 @@ func EncodeUsageState(u *UsageState) (json.RawMessage, error) {
 func DecodeUsageState(raw json.RawMessage) (*UsageState, error) {
 	w, err := decodeLeaf[wireUsage]("usage", raw)
 	return w.usage(), err
+}
+
+// EncodeWebStatusState is w as the event codec writes a StateDelta's
+// WebStatus section (issues #137, #141), nil for nil: what a transcript
+// snapshot's settings and session.state's settings carry.
+func EncodeWebStatusState(w *WebStatusState) (json.RawMessage, error) {
+	if w == nil {
+		return nil, nil
+	}
+	return encodeLeaf("web status", toWireWebStatus(w))
+}
+
+// DecodeWebStatusState is EncodeWebStatusState's inverse.
+func DecodeWebStatusState(raw json.RawMessage) (*WebStatusState, error) {
+	w, err := decodeLeaf[wireWebStatus]("web status", raw)
+	return w.webStatus(), err
 }
 
 // EncodeCatalogState is c as the event codec writes a StateDelta's Catalog

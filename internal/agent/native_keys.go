@@ -13,6 +13,7 @@ import (
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/websearch"
 )
 
 // A running native session learns the keys stored in its providers.toml after
@@ -64,9 +65,11 @@ import (
 // the model table's state, every value handed to LearnKeys — so a key stored
 // or rotated by `craze auth login websearch/exa` while a session runs is
 // redacted from the next turn on, in the session and its live children, and
-// refuses every turn if it is in the frozen prompt. Only that: the session's
-// web service sends the key it resolved at Open until the session opens again
-// (R3), and the model table's reload does not watch the file.
+// refuses every turn if it is in the frozen prompt. Once the redactor holds
+// it, and only then, a stored Exa key is handed to the session's web service
+// (issue #137), which sends it from its next call on — unless the session
+// opened with EXA_API_KEY's, which comes first. The model table's reload does
+// not watch the file.
 
 // storedKeys is the session's look at its providers.toml. mu serializes the
 // looks — a turn's and a wake's are already one at a time behind the claim,
@@ -291,9 +294,9 @@ func (k *storedKeys) openedWithCredentials(table *modeltable.Table) {
 // credentials.toml (plan 051 §F.5): stamp-gated like the other two, whether
 // or not the model table loads, and every key the file stores
 // (modeltable.StoredCredentials, a lenient reading) handed to LearnKeys —
-// for redaction and the frozen-prompt check only: the session's web service
-// keeps the key it opened with (R3), and a key stored now is sent from the
-// next session. A file that cannot be read — not valid TOML, a symlink, not a
+// for redaction and the frozen-prompt check — and then, a key LearnKeys took
+// and none of them in the frozen prompt, the web search's own handed to the
+// session's web service (issue #137): sent from the service's next call. A file that cannot be read — not valid TOML, a symlink, not a
 // regular file — is one diagnostic, said once, naming the file and never a
 // value, and nothing is learned from it until it can be read; an entry of the
 // wrong shape in a file read is one value-free line, said once while it
@@ -333,5 +336,18 @@ func (s *nativeSession) lookAtCredentials(hs *harness.Session, note func(string)
 		note(fmt.Sprintf(
 			"a web search key stored in %s since this session started appears in its frozen prompt; every turn from now on is refused — start a new session",
 			path))
+		return
+	}
+	svc, ok := hs.WebService().(*websearch.Service)
+	if !ok {
+		return
+	}
+	for i, sc := range stored {
+		if sc.ID != websearch.DefaultProvider || (i < len(skipped) && skipped[i] != nil) {
+			continue
+		}
+		if svc.SetKey(sc.Key.Reveal(), websearch.KeyStored) {
+			note("web search: the Exa key stored since this session started is used from now on")
+		}
 	}
 }

@@ -338,14 +338,14 @@ func (m Model) stopOffered() bool { return m.eng != nil && m.info().Stop }
 // craze's own rather than sending it to the agent: the fixed set (builtinNamed),
 // /btw and /effort — whose rows require aside and effort, and handleEnter's
 // gates are the same facts (btwOffered, effortClaimed; plan 047 D4) — and
-// /connect on a native session. A builtin row of any other name is one a
+// /connect and /websearch on a native session. A builtin row of any other name is one a
 // later host added, and Enter would send it as text, so the menu does not
 // offer it.
 func (m Model) dispatchesBuiltin(name string) bool {
 	switch name = strings.ToLower(name); name {
 	case btwBuiltin.Name, effortBuiltin.Name:
 		return true
-	case connectBuiltin.Name:
+	case connectBuiltin.Name, websearchBuiltin.Name:
 		return m.connectOffered()
 	}
 	return builtinNamed(name)
@@ -373,7 +373,7 @@ func slashRunKnown(r agent.SlashRun) bool {
 		return r.Picker == "model" || r.Picker == "effort"
 	case agent.SlashRunLocal:
 		switch r.Local {
-		case "help", "clear", "tasks", "theme", "connect":
+		case "help", "clear", "tasks", "theme", "connect", "websearch":
 			return true
 		}
 	}
@@ -671,6 +671,8 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "tasks":
 		m.input.SetValue("")
 		return m.cycleTasks()
+	case "websearch":
+		return m.runWebSearch(args)
 	case "theme":
 		m.input.SetValue("")
 		if args == "" {

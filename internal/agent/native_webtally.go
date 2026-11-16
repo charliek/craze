@@ -7,6 +7,7 @@ import (
 
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/websearch"
 )
 
 // The web tally (plan 051 F.4): the native session counts the web service's
@@ -232,12 +233,42 @@ func (s *nativeSession) webReport(call tool.WebCall) {
 		return
 	}
 	red := s.webRedactorLocked()
+	defer s.publishWebStatusLocked()
 	if !s.webOpen {
 		s.webIdle.add(call, red)
 		return
 	}
 	s.web.add(call, red)
 	s.enqueueWebLocked(&s.web)
+}
+
+// publishWebStatusLocked publishes the session's web status (the WebStatus
+// section, issues #137 and #141) when it differs from the last one
+// published: after every call the web service handled (webReport) and at
+// every turn's start (openWebLocked), which is where a key stored since the
+// last turn has just been taken up. Nothing for a session with no web
+// service, or once the tally is frozen. s.mu is held; the service's status
+// takes only its own leaf locks.
+func (s *nativeSession) publishWebStatusLocked() {
+	if s.webFrozen || s.hs == nil {
+		return
+	}
+	svc, ok := s.hs.WebService().(*websearch.Service)
+	if !ok || svc == nil {
+		return
+	}
+	st := svc.Status()
+	ws := &WebStatusState{
+		Provider: st.Provider, Key: string(st.Key), Consent: st.Consent,
+		Searches: st.Searches, Fetches: st.Fetches, Failed: st.Failed, RateLimited: st.RateLimited, Retries: st.Retries,
+	}
+	if s.webStatusSent != nil && *s.webStatusSent == *ws {
+		return
+	}
+	sent, held := *ws, *ws
+	s.webStatusSent = &sent
+	s.snap.WebStatus = &held
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{WebStatus: ws})
 }
 
 // enqueueWebLocked enqueues t as a web section: its published value, made
@@ -255,6 +286,7 @@ func (s *nativeSession) openWebLocked() {
 	if !s.webFrozen && !s.web.empty() {
 		s.enqueueWebLocked(&s.web)
 	}
+	s.publishWebStatusLocked()
 }
 
 // closeWebLocked closes the open window, if one is: its tally restated as its

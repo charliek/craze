@@ -174,16 +174,16 @@ type slashBuiltinRow struct {
 // moves (P20). It moved here from the TUI (plan 043 D1) so a host can describe
 // the menu to a client that is not the TUI.
 //
-// /effort (plan 047 D4) is last, after /exit, so `/e` still selects /exit
-// and `/ef` /effort. It is not reserved: where the session has no effort
+// /effort (plan 047 D4) is after /exit, so `/e` still selects /exit
+// and `/ef` /effort. /websearch (issue #141), native only, is last. It is not reserved: where the session has no effort
 // option the row is hidden, and an agent's or a plugin's /effort shows.
 //
 // /sessions is not here (P13): whether a client has a hub list is the
 // client's fact, and the TUI adds that row itself.
 //
 // WhileWorking is real dispatch (P16; internal/tui's handleEnter and
-// runsWhileWorking): true for exit, help, theme, tasks, clear, rename and
-// btw, false for model, the modes, connect and effort — which the TUI
+// runsWhileWorking): true for exit, help, theme, tasks, clear, rename, btw
+// and websearch, false for model, the modes, connect and effort — which the TUI
 // refuses busy. TestSlashTableMatchesTheTUIsDispatch holds it to the TUI.
 var slashBuiltinTable = []slashBuiltinRow{
 	{item: SlashItem{Name: "help", Description: "Keybindings and commands",
@@ -209,6 +209,8 @@ var slashBuiltinTable = []slashBuiltinRow{
 		Run: SlashRun{Kind: SlashRunMethod, Method: SlashMethodStop}, WhileWorking: true}, reserved: true},
 	{item: SlashItem{Name: "effort", Description: "Change the current model's effort", Requires: SlashRequiresEffort,
 		Run: SlashRun{Kind: SlashRunPicker, Picker: "effort", Arg: SlashArgOptional, ArgHint: "<level>"}}},
+	{item: SlashItem{Name: "websearch", Description: "Web search status, or /websearch on|off|ask for new sessions",
+		Run: SlashRun{Kind: SlashRunLocal, Local: "websearch", Arg: SlashArgOptional, ArgHint: "on|off|ask"}, WhileWorking: true}, gate: slashNative},
 }
 
 func init() {

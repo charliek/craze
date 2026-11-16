@@ -56,7 +56,7 @@ end `it exits when idle`.
   reads `Web search rate limited (HTTP 429) on Exa's keyless endpoint. Wait a
   few seconds before searching again. A free Exa key raises the limit: store
   one with 'craze auth login websearch/exa' (or set EXA_API_KEY); a key stored
-  now is used from the next session.` (it was `… (HTTP 429). Setting
+  now is used from the next turn.` (it was `… (HTTP 429). Setting
   EXA_API_KEY raises the limit`); keyed, `Web search rate limited (HTTP 429).
   Wait a few seconds before searching again, and send fewer searches at once.`
   A keyless HTTP 403 says the keyless endpoint refuses IPv6 and proxied
@@ -65,6 +65,28 @@ end `it exits when idle`.
   address.` for `CRAWL_NOT_FOUND`, and likewise for `CRAWL_UNKNOWN_ERROR` and
   `CRAWL_EMPTY_CONTENT` ([Rate limits and
   failures](../reference/configuration.md#rate-limits-and-failures)).
+
+### Web search: a key stored mid-session, a three-way card, and `/websearch`
+
+- **A key stored while a session runs is used from its next turn.**
+  `craze auth login websearch/exa` during a keyless session used to change
+  nothing until the next session; now the session's next turn learns the key,
+  redacts it and sends it. A session that opened with `EXA_API_KEY` keeps that
+  key.
+- **The consent card has three options**: **Always allow** (remembered; it
+  was **Allow via Exa**), **Allow for this session** (new, not remembered) and
+  **Disable web search**, now the third option. A program that answers the card
+  by its index must move a disable from the second option to the third.
+- **An answer in one session counts in the others.** A session reads the
+  remembered choice again before it asks, so once one session's card is
+  answered (Always allow or Disable), sessions that opened before it no longer
+  ask. Two whose first web calls both come before either card is answered each
+  show one.
+- **`/websearch`** is a new slash command in native sessions: the session's
+  key, consent and call totals, and `/websearch on|off|ask` for new sessions
+  ([Web search status](../reference/tui.md#web-search-status)).
+- **A new state section, `webStatus`**, carries a native session's web search
+  status ([protocol](../reference/protocol.md)); older clients skip it.
 
 ## Since v0.2.0
 

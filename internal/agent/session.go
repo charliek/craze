@@ -415,6 +415,15 @@ type StateDelta struct {
 	// Only a native session sends one, and only inside a turn's window; no
 	// ACP session ever does. The delta's own copy, never written after.
 	WebSearch *WebSearchState
+	// WebStatus is the session's web search as it stands now (issues #137,
+	// #141): the provider, where the key it sends came from, where its
+	// consent stands, and its call totals over the incarnation, sub-agents'
+	// included. Session-wide, like Usage, never a turn's: a native session
+	// that offered the web tools sends one after every call its web service
+	// handled, when a key stored mid-session is taken up, and at its first
+	// turn; each is the whole of it and REPLACES what a fold holds. No ACP
+	// session ever sends one. The delta's own copy, never written after.
+	WebStatus *WebStatusState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it
 	// may stand alone, with every section nil: that is a delta whose news is the
@@ -512,6 +521,30 @@ type UsageState struct {
 	ContextWindow int64
 	Turn          Spend
 	Session       Spend
+}
+
+// WebStatusState is a native session's web search, session-wide (issues
+// #137, #141; StateDelta.WebStatus): what the TUI's /websearch shows.
+//
+//   - Provider is the provider's id ("exa").
+//   - Key is where the key the session sends now came from: "keyless",
+//     "env" (EXA_API_KEY) or "stored" (craze auth login websearch/exa).
+//   - Consent is "allowed", "allowed for this session", "disabled",
+//     "declined" or "undecided".
+//   - Searches and Fetches are the calls its web service handled, Failed
+//     those that returned an error, RateLimited those of them that were a
+//     rate limit after every retry, and Retries the attempts made again
+//     after a rate limit — totals over the incarnation, incarnation-local as
+//     the turn tally is: a reload starts from zero.
+type WebStatusState struct {
+	Provider    string
+	Key         string
+	Consent     string
+	Searches    int
+	Fetches     int
+	Failed      int
+	RateLimited int
+	Retries     int
 }
 
 // WebSearchState is a turn's web tally (plan 051 F.4.1): completion-window
@@ -715,6 +748,11 @@ type Snapshot struct {
 	// reports one, and always nil for an ACP session. Its own copy, cloned by
 	// Snapshot.
 	Usage *UsageState
+	// WebStatus is the session's web search as the last StateDelta.WebStatus
+	// left it (issues #137, #141): nil until a native session that offered
+	// the web tools publishes one, and always nil for an ACP session. Its own
+	// copy, cloned by Snapshot.
+	WebStatus *WebStatusState
 	// CatalogRevision is the revision of Models (plan 034 §3.4, Q17): 0 for
 	// the list a session started with, and the Revision of the last
 	// StateDelta.Catalog after it, read with Models in one locked section, so

@@ -772,6 +772,17 @@ var deltaFields = []deltaField{
 			m.settings.Catalog = cloneCatalog(c)
 		}
 	}},
+	// WebStatus (issues #137, #141): the session's web search as it stands —
+	// provider, key source, consent and call totals — session-wide like
+	// Usage, never stamped with a turn, and a whole replacement: a copy, so
+	// the model holds nothing the event it came from does. It has no
+	// truncation mark to clear.
+	{name: "WebStatus", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
+		if st.WebStatus != nil {
+			w := *st.WebStatus
+			m.settings.WebStatus = &w
+		}
+	}},
 	// WebSearch (plan 051 F.4.3): the open turn's web tally, cumulative, so a
 	// replacement — never an addition, which is what keeps a snapshot and the
 	// replay after it from counting twice. The section names no turn: it is

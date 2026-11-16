@@ -343,6 +343,7 @@
         "usage": {"$ref": "#/$defs/usage"},
         "catalog": {"$ref": "#/$defs/catalog"},
         "webSearch": {"$ref": "#/$defs/webSearch"},
+        "webStatus": {"$ref": "#/$defs/webStatus"},
         "reason": {"type": "string"},
         "detail": {"type": "string"},
         "indexErr": {"type": "string"}
@@ -359,6 +360,22 @@
         "urls": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500}},
         "urlsTruncated": {"type": "boolean"}
       },
+      "additionalProperties": false
+    },
+    "webStatus": {
+      "description": "The web status section (WebStatusState; native only, absent for every ACP session and never null or {}): the session's web search as it stands now — provider, the provider's id (\"exa\"); key, where the key the session sends came from (\"keyless\", \"env\" or \"stored\"); consent, where its consent stands (\"allowed\", \"allowed for this session\", \"disabled\", \"declined\" or \"undecided\"); and its call totals: searches and fetches the calls its web service handled, failed those that returned an error, rateLimited those of them that were a rate limit after every retry, retries the attempts made again after a rate limit, sub-agents' calls included. Session-wide, never stamped with a turn: each delta carries the whole of it and replaces what a client holds. A native session that offered the web tools sends one after every call its web service handled, when a key stored mid-session is taken up, and at its first turn. The totals are incarnation-local: a reload's session starts them from zero. Always every key.",
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string"},
+        "key": {"type": "string"},
+        "consent": {"type": "string"},
+        "searches": {"type": "integer", "minimum": 0},
+        "fetches": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "rateLimited": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0}
+      },
+      "required": ["provider", "key", "consent", "searches", "fetches", "failed", "rateLimited", "retries"],
       "additionalProperties": false
     },
     "usage": {

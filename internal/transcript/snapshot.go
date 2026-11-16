@@ -1009,6 +1009,11 @@ func Restore(s *Snapshot, o Options) *Model {
 		m.settings.Usage = &c
 	}
 	m.settings.Catalog = cloneCatalog(s.Settings.Catalog)
+	if w := s.Settings.WebStatus; w != nil {
+		// The model's own copy, as a delta's is (fold.go's WebStatus row).
+		c := *w
+		m.settings.WebStatus = &c
+	}
 	// The slash catalog likewise (plan 043 P6): the restored model's own rows,
 	// so a snapshot its holder goes on writing reaches none of the model's.
 	m.settings.Slash = nilIfEmpty(slices.Clone(s.Settings.Slash))

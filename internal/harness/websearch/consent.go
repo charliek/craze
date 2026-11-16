@@ -9,7 +9,9 @@ import (
 )
 
 // Consent (plan 051 §C.4): a session that opened undecided asks the person
-// on its first web call, once, and remembers the answer.
+// on its first web call, once, and remembers the answer unless it was for
+// this session only. Before it asks it looks at the remembered choice again:
+// another session may have been answered since this one opened.
 const (
 	// consentHeader is the consent card's title.
 	consentHeader = "Web search"
@@ -17,12 +19,17 @@ const (
 	ConsentQuestion = "Allow craze to search the web and fetch pages for up-to-date information?"
 	// consentDetail says where the queries go: the allowing option's
 	// description, drawn under it on the card.
-	consentDetail = "Queries and URLs are sent to Exa (exa.ai)."
-	// consentAllow and consentDisable are the options, in this order: the
-	// first allows (and is remembered), the second disables (and is
-	// remembered).
-	consentAllow   = "Allow via Exa"
+	consentDetail = "Queries and URLs are sent to Exa (exa.ai). Later sessions don't ask."
+	// consentAllow, consentSession and consentDisable are the options, in
+	// this order: the first allows and is remembered, the second allows for
+	// this session only, the third disables and is remembered.
+	consentAllow   = "Always allow"
+	consentSession = "Allow for this session"
 	consentDisable = "Disable web search"
+	// consentSessionDetail and consentDisableDetail are the other two
+	// options' descriptions.
+	consentSessionDetail = "Asks again in the next session."
+	consentDisableDetail = "Later sessions have no web tools; /websearch on turns it back on."
 
 	// DisabledText answers a call in a session whose person disabled web
 	// search from the card: this call, and every later one.
@@ -42,7 +49,8 @@ var consentQuestion = []tool.Question{{
 	Question: ConsentQuestion,
 	Options: []tool.QuestionOption{
 		{Label: consentAllow, Description: consentDetail},
-		{Label: consentDisable},
+		{Label: consentSession, Description: consentSessionDetail},
+		{Label: consentDisable, Description: consentDisableDetail},
 	},
 }}
 
@@ -52,8 +60,9 @@ type verdict int
 const (
 	undecided verdict = iota
 	allowed
-	disabled // from the card: remembered
-	declined // for this session only: nothing remembered
+	allowedSession // from the card, for this session only: nothing remembered
+	disabled       // from the card: remembered
+	declined       // for this session only: nothing remembered
 )
 
 // consent is a service's gate: every call passes it before the provider is
@@ -92,23 +101,30 @@ func newConsent(cfg Config, provider string) *consent {
 // pass says whether a call may go on: nil when it may, and otherwise the
 // error the call answers with.
 //
-//   - Allowed passes; disabled and declined answer DisabledText and
-//     DeclinedText.
+//   - Allowed (remembered or for the session) passes; disabled and
+//     declined answer DisabledText and DeclinedText.
 //   - Undecided with no way to ask (canAsk false, or no asker) answers
 //     DeclinedText, asking nobody and writing nothing: an answer a policy
 //     gives on nobody's behalf is not consent. The verdict stays undecided.
 //   - Undecided with a question in flight waits for it and shares its
 //     outcome; a waiter whose own ctx ends first is aborted alone.
-//   - Undecided otherwise asks. Exactly the first option allows and the
-//     second disables, each remembered; anything else declines for the
-//     session, remembering nothing. If ctx has ended by the time the asker
+//   - Undecided otherwise first reads the remembered choice again: one an
+//     answer in another session wrote since this session opened decides
+//     without asking (an allow through this service's provider allows, a
+//     disable disables), so an answer saved in another session counts here.
+//     Two sessions whose first calls both come before either card is
+//     answered each ask: the question in flight is per service. With
+//     nothing remembered it asks. Exactly the
+//     first option allows and is remembered, the second allows for this
+//     session only, the third disables and is remembered; anything else
+//     declines for the session, remembering nothing. If ctx has ended by the time the asker
 //     returns — even with an answer — this call and every waiter are
 //     aborted, nothing is decided, and the next call asks again.
 func (c *consent) pass(ctx context.Context) *tool.WebError {
 	c.mu.Lock()
 	for {
 		switch c.verdict {
-		case allowed:
+		case allowed, allowedSession:
 			c.mu.Unlock()
 			return nil
 		case disabled:
@@ -135,6 +151,10 @@ func (c *consent) pass(ctx context.Context) *tool.WebError {
 			c.mu.Lock()
 			continue
 		}
+		if v := c.rememberedNow(); v != undecided {
+			c.verdict = v
+			continue
+		}
 		p := &pendingAsk{done: make(chan struct{})}
 		c.asking = p
 		c.mu.Unlock()
@@ -157,8 +177,26 @@ func (c *consent) pass(ctx context.Context) *tool.WebError {
 	}
 }
 
+// rememberedNow is the remembered choice as the file says now: allowed
+// through this provider, disabled, or undecided for anything else — nothing
+// remembered, another provider, a file that cannot be used, or no file to
+// read. c.mu is held; the file is small and read once.
+func (c *consent) rememberedNow() verdict {
+	if c.path == "" {
+		return undecided
+	}
+	switch ch, _ := ReadChoice(c.path); {
+	case ch.Disabled:
+		return disabled
+	case ch.Provider != "" && ch.Provider == c.provider:
+		return allowed
+	}
+	return undecided
+}
+
 // ask puts the question and reads the answer: allowed for exactly [[0]],
-// disabled for exactly [[1]], declined for anything else — unless ctx has
+// allowed for the session for exactly [[1]], disabled for exactly [[2]],
+// declined for anything else — unless ctx has
 // ended by the time the asker returns, which is no answer at all (ok false)
 // whatever the asker brought back: an answer that lands as the asking call
 // is cancelled is neither acted on nor remembered.
@@ -172,6 +210,8 @@ func (c *consent) ask(ctx context.Context) (v verdict, ok bool) {
 		case slices.Equal(ans.Picked[0], []int{0}):
 			return allowed, true
 		case slices.Equal(ans.Picked[0], []int{1}):
+			return allowedSession, true
+		case slices.Equal(ans.Picked[0], []int{2}):
 			return disabled, true
 		}
 	}
@@ -201,4 +241,21 @@ func (c *consent) remember(v verdict) {
 
 func aborted() *tool.WebError {
 	return &tool.WebError{Class: tool.ClassAborted, Text: tool.AbortedText}
+}
+
+// state is where the session's consent stands, in Status's words.
+func (c *consent) state() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch c.verdict {
+	case allowed:
+		return "allowed"
+	case allowedSession:
+		return "allowed for this session"
+	case disabled:
+		return "disabled"
+	case declined:
+		return "declined"
+	}
+	return "undecided"
 }

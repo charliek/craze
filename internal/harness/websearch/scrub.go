@@ -91,13 +91,66 @@ func (s *scrubber) text(v string) string {
 	if s == nil {
 		return v
 	}
+	// Every pattern and form is matched against the text as it is, and the
+	// union of what they match is replaced: one replaced before another is
+	// matched could leave part of a longer, overlapping key behind (a key
+	// that starts with an earlier one, once SetKey has added it).
+	var spans [][2]int
 	for _, re := range s.patterns {
-		v = re.ReplaceAllLiteralString(v, redact.Marker)
+		for _, m := range re.FindAllStringIndex(v, -1) {
+			spans = append(spans, [2]int{m[0], m[1]})
+		}
 	}
 	for _, f := range s.forms {
-		v = strings.ReplaceAll(v, f, redact.Marker)
+		for i := 0; ; {
+			j := strings.Index(v[i:], f)
+			if j < 0 {
+				break
+			}
+			spans = append(spans, [2]int{i + j, i + j + len(f)})
+			i += j + 1
+		}
 	}
-	return v
+	if len(spans) == 0 {
+		return v
+	}
+	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
+	var b strings.Builder
+	at := 0
+	for i := 0; i < len(spans); {
+		start, end := spans[i][0], spans[i][1]
+		for i++; i < len(spans) && spans[i][0] < end; i++ {
+			end = max(end, spans[i][1])
+		}
+		b.WriteString(v[at:start])
+		b.WriteString(redact.Marker)
+		at = end
+	}
+	b.WriteString(v[at:])
+	return b.String()
+}
+
+// with is a scrubber that takes out every key s does and key too: s itself
+// when key is not usable or s holds it already, and newScrubber(key) when s
+// is nil. s is never changed.
+func (s *scrubber) with(key string) *scrubber {
+	add := newScrubber(key)
+	switch {
+	case add == nil:
+		return s
+	case s == nil:
+		return add
+	}
+	if slices.ContainsFunc(s.patterns, func(re *regexp.Regexp) bool { return re.String() == add.patterns[0].String() }) {
+		return s
+	}
+	out := &scrubber{patterns: append(slices.Clone(s.patterns), add.patterns...), forms: slices.Clone(s.forms)}
+	for _, f := range add.forms {
+		if !slices.Contains(out.forms, f) {
+			out.forms = append(out.forms, f)
+		}
+	}
+	return out
 }
 
 // valid is v as text a scrub sees whole: invalid UTF-8 dropped, and so is

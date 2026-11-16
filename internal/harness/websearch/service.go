@@ -28,6 +28,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/harness/tool"
@@ -81,6 +83,9 @@ type Config struct {
 	// Provider is the provider's id in the table (Providers); "" is
 	// DefaultProvider.
 	Provider string
+	// KeySource is where Key came from, for Status: KeyEnv or KeyStored;
+	// anything else, or no usable key, reads as KeyNone.
+	KeySource KeySource
 	// Key is the provider key, optional: sent in the x-api-key header, only
 	// to the provider's own endpoint, and only when usable — at least the
 	// shortest key craze accepts and clear of the redaction marker, so one
@@ -140,16 +145,23 @@ const MaxInFlight = 4
 // concurrent use.
 type Service struct {
 	p     Provider
+	id    string
 	entry entry
-	keyed bool // a key goes with every call
+	// overridden is a service at the test override, which sends no key
+	// whatever it is given.
+	overridden bool
 	// slots holds one token per call at the provider (MaxInFlight).
 	slots chan struct{}
-	// c is the provider's caller, for its retry count.
+	// c is the provider's caller: the key it sends now and the scrubber for
+	// the words of a failure, which carry the query or the page's URL as the
+	// caller gave it, and its retry count.
 	c       *caller
 	timeout time.Duration
-	// scrub is the caller's scrubber, for the words of a failure, which
-	// carry the query or the page's URL as the caller gave it.
-	scrub *scrubber
+	// mu guards source and serializes SetKey.
+	mu     sync.Mutex
+	source KeySource
+	// The session's totals (Status), over the service's life.
+	searches, fetches, failed, rateLimited atomic.Int64
 	// consent is what every call passes before the provider is called.
 	consent *consent
 	// report is Config.Report, nil for none.
@@ -191,10 +203,116 @@ func New(cfg Config) (*Service, error) {
 	if cfg.backoff != nil {
 		c.backoff = cfg.backoff
 	}
+	source := KeyNone
+	if key != "" && (cfg.KeySource == KeyEnv || cfg.KeySource == KeyStored) {
+		source = cfg.KeySource
+	} else if key != "" {
+		source = KeyStored
+	}
 	return &Service{
-		p: e.build(c), entry: e, keyed: key != "", slots: make(chan struct{}, MaxInFlight), c: c,
-		timeout: timeout, scrub: scrub, consent: newConsent(cfg, id), report: cfg.Report,
+		p: e.build(c), id: id, entry: e, overridden: cfg.Endpoint != "", slots: make(chan struct{}, MaxInFlight), c: c,
+		timeout: timeout, source: source, consent: newConsent(cfg, id), report: cfg.Report,
 	}, nil
+}
+
+// KeySource is where the key a service sends came from.
+type KeySource string
+
+const (
+	// KeyNone is no key: the provider's keyless endpoint.
+	KeyNone KeySource = "keyless"
+	// KeyEnv is the provider's variable (EXA_API_KEY).
+	KeyEnv KeySource = "env"
+	// KeyStored is the key `craze auth login` stored in credentials.toml.
+	KeyStored KeySource = "stored"
+)
+
+// Status is a service as /websearch shows it: the provider, where the key it
+// sends now came from, where the session's consent stands, and the session's
+// totals over the service's life, its children's calls included.
+type Status struct {
+	// Provider is the provider's id ("exa"); Name its name ("Exa").
+	Provider, Name string
+	// Key is where the key sent now came from; KeyEnvName is the variable
+	// the provider's key is read from.
+	Key        KeySource
+	KeyEnvName string
+	// Consent is "allowed", "allowed for this session", "disabled",
+	// "declined" or "undecided".
+	Consent string
+	// Searches and Fetches are the calls the service handled; Failed those
+	// that returned an error, RateLimited those of them that were a rate
+	// limit after every retry, and Retries the attempts made again after a
+	// rate limit.
+	Searches, Fetches, Failed, RateLimited, Retries int
+}
+
+// Status is the service now.
+func (s *Service) Status() Status {
+	s.mu.Lock()
+	source := s.source
+	s.mu.Unlock()
+	return Status{
+		Provider: s.id, Name: s.entry.name, Key: source, KeyEnvName: s.entry.keyEnv,
+		Consent:  s.consent.state(),
+		Searches: int(s.searches.Load()), Fetches: int(s.fetches.Load()), Failed: int(s.failed.Load()),
+		RateLimited: int(s.rateLimited.Load()), Retries: s.Retries(),
+	}
+}
+
+// SetKey makes key, from source, the key the service sends from its next
+// call on (issue #137): a key stored while the session runs, handed over by
+// the session once its redactor holds it — never before, so the key sent is
+// always one the redactor holds. The scrubber keeps every key it held, the
+// one before included. Calls already at the provider finish with the key
+// they were sent with. It reports whether the key now sent changed; a key
+// that is not usable, one under the test override, the one already sent, or
+// a stored key while the variable's is sent (the variable comes first, as at
+// Open) changes nothing (but a source).
+func (s *Service) SetKey(key string, source KeySource) bool {
+	key = strings.TrimSpace(key)
+	if s.overridden || !usable(key) || (source != KeyEnv && source != KeyStored) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.source == KeyEnv && source == KeyStored {
+		return false
+	}
+	ks := s.c.keys()
+	s.source = source
+	if ks.key == key {
+		return false
+	}
+	s.c.setKey(key, ks.scrub.with(key))
+	return true
+}
+
+// keyed says a key goes with the service's calls now.
+func (s *Service) keyed() bool { return s.c != nil && s.c.keys().key != "" }
+
+// scrub is the scrubber the service's words are scrubbed with now.
+func (s *Service) scrub() *scrubber {
+	if s.c == nil {
+		return nil
+	}
+	return s.c.scrubber()
+}
+
+// count adds a handled call to the session's totals.
+func (s *Service) count(fetch bool, err error) {
+	if fetch {
+		s.fetches.Add(1)
+	} else {
+		s.searches.Add(1)
+	}
+	if err == nil {
+		return
+	}
+	s.failed.Add(1)
+	if we, ok := errors.AsType[*tool.WebError](err); ok && we.RateLimited {
+		s.rateLimited.Add(1)
+	}
 }
 
 // slot waits for a slot at the provider (MaxInFlight) and returns its
@@ -217,7 +335,7 @@ func (s *Service) Retries() int { return int(s.c.retries.Load()) }
 // returns (reportCall).
 func (s *Service) Search(ctx context.Context, query string) (results []tool.WebResult, err error) {
 	call := tool.WebCall{}
-	defer func() { s.reportCall(call, err) }()
+	defer func() { s.count(false, err); s.reportCall(call, err) }()
 	if werr := s.consent.pass(ctx); werr != nil {
 		return nil, werr
 	}
@@ -240,7 +358,7 @@ func (s *Service) Search(ctx context.Context, query string) (results []tool.WebR
 			// The provider's text was scrubbed before it was parsed (R1); a
 			// second pass over the URL alone is idempotent, and the URL is
 			// the one value of the reply the session keeps beyond the call.
-			if u := s.scrub.text(r.URL); u != "" {
+			if u := s.scrub().text(r.URL); u != "" {
 				call.URLs = append(call.URLs, u)
 			}
 		}
@@ -253,7 +371,7 @@ func (s *Service) Search(ctx context.Context, query string) (results []tool.WebR
 // once, however it returns (reportCall).
 func (s *Service) Fetch(ctx context.Context, pageURL string) (page tool.WebPage, err error) {
 	call := tool.WebCall{Fetch: true}
-	defer func() { s.reportCall(call, err) }()
+	defer func() { s.count(true, err); s.reportCall(call, err) }()
 	if werr := s.consent.pass(ctx); werr != nil {
 		return tool.WebPage{}, werr
 	}
@@ -267,7 +385,7 @@ func (s *Service) Fetch(ctx context.Context, pageURL string) (page tool.WebPage,
 	}()
 	if err != nil {
 		if f, ok := errors.AsType[*failure](err); ok && f.crawl != "" {
-			return tool.WebPage{}, &tool.WebError{Class: tool.ClassToolError, Text: s.scrub.text(s.crawlText(f.crawl, pageURL))}
+			return tool.WebPage{}, &tool.WebError{Class: tool.ClassToolError, Text: s.scrub().text(s.crawlText(f.crawl, pageURL))}
 		}
 		return tool.WebPage{}, s.webError(err, "Unable to fetch "+pageURL)
 	}
@@ -275,7 +393,7 @@ func (s *Service) Fetch(ctx context.Context, pageURL string) (page tool.WebPage,
 	// out (F.4.1), never one parsed from the provider's text; a page whose
 	// text was empty is a fetch that contributes none.
 	if s.report != nil && strings.TrimSpace(page.Text) != "" {
-		if u := s.scrub.text(pageURL); u != "" {
+		if u := s.scrub().text(pageURL); u != "" {
 			call.URLs = []string{u}
 		}
 	}
@@ -292,6 +410,9 @@ func (s *Service) reportCall(call tool.WebCall, err error) {
 	}
 	if err != nil {
 		call.Failed, call.URLs = true, nil
+		if we, ok := errors.AsType[*tool.WebError](err); ok && we.RateLimited {
+			call.RateLimited = true
+		}
 	}
 	s.report(call)
 }
@@ -320,14 +441,14 @@ func (s *Service) webError(err error, unable string) *tool.WebError {
 		switch f.status {
 		case http.StatusTooManyRequests:
 			text := "Web search rate limited (HTTP 429). Wait a few seconds before searching again, and send fewer searches at once."
-			if !s.keyed {
+			if !s.keyed() {
 				text = "Web search rate limited (HTTP 429) on " + s.entry.name + "'s keyless endpoint. Wait a few seconds before searching again. " + s.keyHint("raises the limit") + "."
 			}
-			return &tool.WebError{Class: tool.ClassToolError, Text: text}
+			return &tool.WebError{Class: tool.ClassToolError, Text: text, RateLimited: true}
 		case http.StatusUnauthorized:
 			return &tool.WebError{Class: tool.ClassToolError, Text: "Web search authentication failed (HTTP 401)"}
 		case http.StatusForbidden:
-			if !s.keyed {
+			if !s.keyed() {
 				return &tool.WebError{Class: tool.ClassToolError, Text: "Web search refused (HTTP 403) by " + s.entry.name +
 					"'s keyless endpoint, which refuses IPv6 and proxied connections. " + s.keyHint("avoids this") + "."}
 			}
@@ -337,7 +458,7 @@ func (s *Service) webError(err error, unable string) *tool.WebError {
 	if f.detail != "" {
 		unable += ": " + f.detail
 	}
-	return &tool.WebError{Class: tool.ClassToolError, Text: s.scrub.text(unable)}
+	return &tool.WebError{Class: tool.ClassToolError, Text: s.scrub().text(unable)}
 }
 
 // keyHint is how a keyless session's user gets a key to the provider, for a
@@ -345,7 +466,7 @@ func (s *Service) webError(err error, unable string) *tool.WebError {
 // effect — storing one, or the variable, and when a key stored now is sent.
 func (s *Service) keyHint(effect string) string {
 	return "A free " + s.entry.name + " key " + effect + ": store one with 'craze auth login " + s.entry.login +
-		"' (or set " + s.entry.keyEnv + "); a key stored now is used from the next session"
+		"' (or set " + s.entry.keyEnv + "); a key stored now is used from the next turn"
 }
 
 // crawlText is a failed fetch of pageURL in plain words (issue #139), by the

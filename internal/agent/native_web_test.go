@@ -419,8 +419,9 @@ func TestNativeWebConsentAllow(t *testing.T) {
 		t.Fatalf("the card: %+v", q)
 	}
 	opts := q.Questions[0].Options
-	if q.Questions[0].Prompt != websearch.ConsentQuestion || len(opts) != 2 || opts[0].Label != "Allow via Exa" ||
-		opts[0].Description != "Queries and URLs are sent to Exa (exa.ai)." || opts[1].Label != "Disable web search" {
+	if q.Questions[0].Prompt != websearch.ConsentQuestion || len(opts) != 3 || opts[0].Label != "Always allow" ||
+		opts[0].Description != "Queries and URLs are sent to Exa (exa.ai). Later sessions don't ask." ||
+		opts[1].Label != "Allow for this session" || opts[2].Label != "Disable web search" {
 		t.Fatalf("the card's question: %+v", q.Questions[0])
 	}
 	if len(exa.calls()) != 0 {
@@ -464,7 +465,7 @@ func TestNativeWebConsentDisable(t *testing.T) {
 	m.push(nativeCallStep("c1", "websearch", searchArgs(t, "golang")),
 		nativeCallStep("c2", "websearch", searchArgs(t, "again")), answer("done"))
 	out := startPrompt(s, "look it up")
-	answerQuestion(t, s, w.waitType(EventQuestion).Question, 1)
+	answerQuestion(t, s, w.waitType(EventQuestion).Question, 2)
 	if got := await(t, out, "the prompt"); got.err != nil {
 		t.Fatal(got.err)
 	}

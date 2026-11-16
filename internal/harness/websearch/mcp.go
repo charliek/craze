@@ -159,16 +159,23 @@ func (f *failure) Error() string {
 	return "websearch: call failed"
 }
 
+// keyState is the key a caller sends and the scrubber its replies are read
+// with, swapped together (caller.setKey) so a key is never sent before the
+// scrubber holds it.
+type keyState struct {
+	// key is sent in x-api-key when not "": the service has already judged
+	// it usable and the endpoint the provider's own.
+	key   string
+	scrub *scrubber
+}
+
 // caller calls tools on one MCP endpoint. It is safe for concurrent use.
 type caller struct {
 	endpoint string
-	// key is sent in x-api-key when not "": the service has already judged
-	// it usable and the endpoint the provider's own.
-	key     string
-	scrub   *scrubber
-	http    *http.Client
-	timeout time.Duration
-	ids     atomic.Int64
+	ks       atomic.Pointer[keyState]
+	http     *http.Client
+	timeout  time.Duration
+	ids      atomic.Int64
 	// backoff is the wait before a rate-limited call's next attempt
 	// (backoff, the package function, unless a test sets its own).
 	backoff func(retryAfter time.Duration, attempt int) time.Duration
@@ -187,8 +194,22 @@ func newCaller(endpoint, key string, scrub *scrubber, hc *http.Client, timeout t
 		c = &cp
 	}
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &caller{endpoint: endpoint, key: key, scrub: scrub, http: c, timeout: timeout, backoff: retryWait}
+	cl := &caller{endpoint: endpoint, http: c, timeout: timeout, backoff: retryWait}
+	cl.ks.Store(&keyState{key: key, scrub: scrub})
+	return cl
 }
+
+// keys is the key the caller sends now and its scrubber.
+func (c *caller) keys() *keyState { return c.ks.Load() }
+
+// scrubber is the scrubber the caller reads replies with now: one that holds
+// every key the caller has held.
+func (c *caller) scrubber() *scrubber { return c.ks.Load().scrub }
+
+// setKey makes key the one sent from the next request on, with scrub — which
+// holds it and every key before it — the scrubber from the same moment. A
+// request already sent finishes with the key it was sent with.
+func (c *caller) setKey(key string, scrub *scrubber) { c.ks.Store(&keyState{key: key, scrub: scrub}) }
 
 // call calls tool with args and returns the text of its result: its text
 // content blocks joined in order (any other block ignored), with the key
@@ -270,8 +291,8 @@ func (c *caller) post(ctx context.Context, id int64, body []byte) (string, *fail
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", userAgent)
-	if c.key != "" {
-		req.Header.Set("X-Api-Key", c.key)
+	if k := c.keys().key; k != "" {
+		req.Header.Set("X-Api-Key", k)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -451,7 +472,7 @@ func (c *caller) answer(env *envelope) (string, *failure) {
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(env.Error, &e)
-		return "", &failure{kind: failOther, detail: detail(c.scrub.text(e.Message))}
+		return "", &failure{kind: failOther, detail: detail(c.scrubber().text(e.Message))}
 	}
 	if env.Result == nil || string(env.Result) == "null" {
 		return "", &failure{kind: failOther}
@@ -481,7 +502,7 @@ func (c *caller) answer(env *envelope) (string, *failure) {
 	}
 	// The key out of the whole text before anything reads it: a key split
 	// across two blocks is whole here, and nothing has parsed or cut it yet.
-	text := c.scrub.text(b.String())
+	text := c.scrubber().text(b.String())
 	if res.IsError {
 		if status, ok := statusOf(text); ok {
 			return "", &failure{kind: failStatus, status: status}
