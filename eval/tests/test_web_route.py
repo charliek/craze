@@ -478,3 +478,60 @@ def test_task_corpus_answers_the_task_question():
     top = t.web_corpus.search("quayside api berth slots paging")
     assert top[0].file == "v3-berth-slots.md"
     assert t.web_corpus.search("quayside authentication api key header")[0].file == "v3-authentication.md"
+
+
+# -- the advanced search (craze issue #140) --------------------------------------------------
+
+
+def advanced_call(query: str, domains, n=None, rid: int = 1) -> dict:
+    args = {"query": query, "includeDomains": domains, "enableHighlights": True}
+    if n is not None:
+        args["numResults"] = n
+    return {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+            "params": {"name": "web_search_advanced_exa", "arguments": args}}
+
+
+def test_advanced_search_filters_by_domain_and_answers_json():
+    c = load_corpus(MINI)
+    reply = webcorpus.answer(c, json.dumps(advanced_call("harbor tide", ["docs.example.org"])).encode())
+    got = json.loads(text_of(reply.body))
+    urls = [r["url"] for r in got["results"]]
+    assert urls and all(u.startswith("https://docs.example.org/") for u in urls)
+    assert "https://mirror.example.org/tides" in [p.url for p in c.search("harbor tide")]
+    first = got["results"][0]
+    assert first["id"] == first["url"] and first["title"] and len(first["highlights"]) == 1
+    assert reply.entry == {"op": "search", "query": "harbor tide", "domains": ["docs.example.org"], "results": urls}
+    # A subdomain matches its parent; a scheme or path on a domain is ignored.
+    assert webcorpus.in_domains("https://docs.example.org/x", ["example.org"])
+    assert webcorpus.in_domains("https://docs.example.org/x", ["https://docs.example.org/guide"])
+    assert not webcorpus.in_domains("https://notexample.org/x", ["example.org"])
+    # A query or a port with no path is not part of the host.
+    assert webcorpus.in_domains("https://docs.example.org?topic=harbor", ["docs.example.org"])
+    assert webcorpus.in_domains("https://docs.example.org:8443#x", ["docs.example.org"])
+
+
+def test_advanced_search_with_nothing_found_has_no_results_member():
+    c = load_corpus(MINI)
+    reply = webcorpus.answer(c, json.dumps(advanced_call("harbor tide", ["nowhere.example"])).encode())
+    got = json.loads(text_of(reply.body))
+    assert "results" not in got and got["requestId"] == "eval"
+    assert reply.entry["results"] == []
+
+
+def test_advanced_search_needs_its_domains():
+    c = load_corpus(MINI)
+    for domains in (None, [], "docs.example.org", [3]):
+        reply = webcorpus.answer(c, json.dumps(advanced_call("harbor", domains)).encode())
+        assert event_data(reply.body)["error"]["code"] == -32602 and reply.entry["op"] == "malformed"
+
+
+def test_num_results_is_honoured_within_range():
+    c = load_corpus(MINI)
+    for n, want in ((1, 1), (2, 2), (0, None), (11, None), (True, None), ("2", None)):
+        call = search_call("harbor tide")
+        call["params"]["arguments"]["numResults"] = n
+        reply = webcorpus.answer(c, json.dumps(call).encode())
+        full = len(c.search("harbor tide"))
+        assert len(reply.entry["results"]) == (want if want is not None else full), n
+    reply = webcorpus.answer(c, json.dumps(advanced_call("harbor tide", ["docs.example.org"], n=1)).encode())
+    assert len(json.loads(text_of(reply.body))["results"]) == 1

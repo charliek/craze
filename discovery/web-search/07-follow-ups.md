@@ -4,11 +4,7 @@
 
 | ID | Priority | Issue | What | Phase | Effort |
 |---|---|---|---|---|---|
-| WF-1 | 1 | #138 | Retry rate-limited calls (both shapes) and cap concurrent calls per session. Keyless batches of 8 lose 5 of 8 today; retry recovered all 8 within 4.6 s (E3, E4). | W1 | small–medium |
-| WF-2 | 2 | #137 (B1) | The unkeyed 429 hint names `craze auth login websearch/exa` and the next-session rule. | W1 | small |
-| WF-3 | 3 | #139 | Plain words for `CRAWL_NOT_FOUND`, `CRAWL_UNKNOWN_ERROR` and the keyless 403 (E7). | W1 | small |
-| WF-4 | 4 | #141 | In-session key source, plus call and failure counts. | W2 | small |
-| WF-5 | 5 | #137 (B2) | A key stored mid-session is used from the next turn, after the redactor holds it. | W2 | medium |
-| WF-6 | 6 | #131 | Models trust excerpts instead of fetching: try a line in the tool description; re-run T-WS6. | W3 | small–medium |
-| WF-7 | 7 | #140 | Optional `domains` and `num_results` through `web_search_advanced_exa`; needs a JSON reply parser (E2, E8). | W3 | medium |
 | WF-8 | later | #136 | A second provider, hosted search on the Responses driver, a local `webfetch`, moving `KeyPattern`. | later | large |
+| WF-9 | 1 | — | Run W1's live checks (E3, E5, E7) on the mac-mini. | — | small |
+| WF-10 | 2 | — | A stored key removed (`craze auth logout websearch/exa`) mid-session is still sent by that session until it reopens. | — | small |
+| WF-11 | 3 | — | Measure `domains` on research sessions, where the site is known: tokens per search with and without it (E8 halved bytes). | — | small |

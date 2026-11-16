@@ -1,0 +1,225 @@
+{
+  "campaign": "2026-11-websearch-w3",
+  "groups": [
+    {
+      "bar": {
+        "anthropic/claude-haiku-5-5": {
+          "best_open_harness": {
+            "baseline_batch": "w3-footer-20261115-222626",
+            "counts": null,
+            "harness": null,
+            "reason": "no open-harness runs",
+            "source": "provisional (dev tasks of the baseline; held-out sealed)"
+          },
+          "outcome": "inconclusive",
+          "reason": "no native or no open-harness runs"
+        },
+        "muse-spark-1.3-contributor": {
+          "best_open_harness": {
+            "baseline_batch": "w3-footer-20261115-222626",
+            "counts": null,
+            "harness": null,
+            "reason": "no open-harness runs",
+            "source": "provisional (dev tasks of the baseline; held-out sealed)"
+          },
+          "outcome": "inconclusive",
+          "reason": "no native or no open-harness runs"
+        }
+      },
+      "harnesses": [
+        "craze-web"
+      ],
+      "metrics": {
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "answer words": 369.0,
+          "cost $": 0.0091,
+          "input tokens": 198735.5,
+          "main requests": 9.5,
+          "output tokens": 8735.5,
+          "tool calls": 13.0,
+          "wall s": 42.3495
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "answer words": 186.0,
+          "cost $": 0.0229,
+          "input tokens": 216099.5,
+          "main requests": 14.0,
+          "output tokens": 5970.5,
+          "tool calls": 18.0,
+          "wall s": 52.6745
+        }
+      },
+      "models": [
+        "anthropic/claude-haiku-5-5",
+        "muse-spark-1.3-contributor"
+      ],
+      "objective": {
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-WS1": 1.0,
+            "T-WS2": 1.0,
+            "T-WS3": 1.0,
+            "T-WS4": 1.0,
+            "T-WS5": 1.0,
+            "T-WS6": 0.0
+          }
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "all": null,
+          "dev": 0.0,
+          "heldout": null,
+          "tasks": {
+            "T-WS1": 1.0,
+            "T-WS2": 1.0,
+            "T-WS3": 1.0,
+            "T-WS4": 1.0,
+            "T-WS5": 1.0,
+            "T-WS6": 1.0
+          }
+        }
+      },
+      "other_models": [],
+      "provenance": {
+        "baseline_batch": "w3-footer-20261115-222626",
+        "batches": [
+          "w3-footer-20261115-222626"
+        ],
+        "judge_hash_now": "72ed0de1374a1bc54bbabc23aa266f5cbf7e63f91927adf7f44c31fc2fe0a3da",
+        "judge_hashes": [],
+        "plan_modes": [],
+        "sealed": true,
+        "task_judge_hashes": {},
+        "verdicts": {
+          "bound_to_scored_runs": 0,
+          "final": 0,
+          "loaded": 0,
+          "stale": 0,
+          "unbound": 0
+        }
+      },
+      "report": "report",
+      "statuses": {
+        "anthropic/claude-haiku-5-5/craze-web": {
+          "ok": 18
+        },
+        "muse-spark-1.3-contributor/craze-web": {
+          "ok": 18
+        }
+      },
+      "task_tables": {},
+      "web": {
+        "counters": {
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "medians": {
+              "bytes_served": 21354,
+              "fetches": 3,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 2
+            },
+            "runs": 18,
+            "totals": {
+              "bytes_served": 382446,
+              "fetches": 52,
+              "malformed": 0,
+              "misses": 3,
+              "refused": 0,
+              "searches": 30
+            }
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "medians": {
+              "bytes_served": 20639.5,
+              "fetches": 3,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 1
+            },
+            "runs": 18,
+            "totals": {
+              "bytes_served": 388018,
+              "fetches": 62,
+              "malformed": 0,
+              "misses": 0,
+              "refused": 0,
+              "searches": 24
+            }
+          }
+        },
+        "metrics": {
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "answer words": 369.0,
+            "cost $": 0.0091,
+            "input tokens": 198735.5,
+            "main requests": 9.5,
+            "output tokens": 8735.5,
+            "tool calls": 13.0,
+            "wall s": 42.3495
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "answer words": 186.0,
+            "cost $": 0.0229,
+            "input tokens": 216099.5,
+            "main requests": 14.0,
+            "output tokens": 5970.5,
+            "tool calls": 18.0,
+            "wall s": 52.6745
+          }
+        },
+        "pass": {
+          "anthropic/claude-haiku-5-5/craze-web": {
+            "ci90": [
+              0.6482,
+              0.9314
+            ],
+            "passed": 15,
+            "rate": 0.8333,
+            "runs": 18,
+            "tasks": {
+              "T-WS1": 1.0,
+              "T-WS2": 1.0,
+              "T-WS3": 1.0,
+              "T-WS4": 1.0,
+              "T-WS5": 1.0,
+              "T-WS6": 0.0
+            },
+            "unscored": 0
+          },
+          "muse-spark-1.3-contributor/craze-web": {
+            "ci90": [
+              0.8693,
+              1.0
+            ],
+            "passed": 18,
+            "rate": 1.0,
+            "runs": 18,
+            "tasks": {
+              "T-WS1": 1.0,
+              "T-WS2": 1.0,
+              "T-WS3": 1.0,
+              "T-WS4": 1.0,
+              "T-WS5": 1.0,
+              "T-WS6": 1.0
+            },
+            "unscored": 0
+          }
+        },
+        "tasks": [
+          "T-WS1",
+          "T-WS2",
+          "T-WS3",
+          "T-WS4",
+          "T-WS5",
+          "T-WS6"
+        ]
+      },
+      "win_rates": {}
+    }
+  ],
+  "schema": 1
+}

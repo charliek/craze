@@ -151,7 +151,7 @@ func TestNewRefuses(t *testing.T) {
 			t.Errorf("New(%q) = %v, %v", id, s, err)
 		}
 	}
-	if !slices.Equal(Providers(), []string{"exa"}) || DefaultProvider != "exa" || ExaEndpoint != "https://mcp.exa.ai/mcp" {
+	if !slices.Equal(Providers(), []string{"exa"}) || DefaultProvider != "exa" || ExaEndpoint != "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa,web_search_advanced_exa" {
 		t.Errorf("the table: %q, default %q, Exa at %q", Providers(), DefaultProvider, ExaEndpoint)
 	}
 	if MaxReply != 256<<10 || CallTimeout.Seconds() != 25 {

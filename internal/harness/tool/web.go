@@ -32,6 +32,29 @@ type Web interface {
 	Fetch(ctx context.Context, url string) (WebPage, error)
 }
 
+// WebQuery is a search with its options (issue #140): Domains, when set,
+// keeps the results to those sites and their subdomains (bare hosts, at most
+// MaxWebDomains); Results, when above zero, is how many to ask for (at most
+// MaxWebResults). The zero options are the provider's default search.
+type WebQuery struct {
+	Query   string
+	Domains []string
+	Results int
+}
+
+// The bounds of a WebQuery's options.
+const (
+	MaxWebDomains = 10
+	MaxWebResults = 10
+)
+
+// WebQuerier is a Web that takes a search's options too, found by a type
+// assertion: the web service is one. A Web that is not is asked the query
+// alone, its options dropped.
+type WebQuerier interface {
+	SearchQuery(ctx context.Context, q WebQuery) ([]WebResult, error)
+}
+
 // WebResult is one search result. URL is never empty; Title and Published
 // may be ("" when the provider gave none), and Published is the provider's
 // date as written (an ISO 8601 date or date-time).

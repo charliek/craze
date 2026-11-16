@@ -2,6 +2,7 @@ package websearch
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/charliek/craze/internal/harness/tool"
@@ -12,13 +13,21 @@ import (
 // when there is one, raises Exa's limits.
 const (
 	// ExaEndpoint is Exa's hosted MCP endpoint, the one place its key goes.
-	ExaEndpoint = "https://mcp.exa.ai/mcp"
+	// Its tools parameter names every tool craze calls: naming one replaces
+	// Exa's default list, and web_search_advanced_exa — a search with a
+	// domain filter — is not in that list (discovery/web-search E2).
+	ExaEndpoint = "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa,web_search_advanced_exa"
 	// ExaKeyEnv is the variable an Exa key is read from. The model table
 	// registers the same name as a credential (modeltable.ExaKeyEnv), so its
 	// value is redacted and kept from commands whether or not search is on.
 	ExaKeyEnv = "EXA_API_KEY"
-	// exaResults is how many results a search asks for: opencode's number.
+	// exaResults is how many results a search asks for when the model names
+	// no number: opencode's.
 	exaResults = 8
+	// exaHighlightMax is the most of a domain-filtered search's result craze
+	// keeps, in bytes: web_search_advanced_exa's highlightsMaxCharacters is
+	// asked for too, but Exa does not hold to it (discovery E8).
+	exaHighlightMax = 3000
 	// exaMaxCharacters is the most of a page a fetch asks for; the
 	// dispatcher cuts what the model reads after it.
 	exaMaxCharacters = 50000
@@ -34,10 +43,31 @@ type exa struct{ c *caller }
 
 func newExa(c *caller) Provider { return &exa{c: c} }
 
-// Search asks web_search_exa for query, which is also the search's objective
-// (a field Exa requires), and parses the blocks of its reply (parseExa).
-func (e *exa) Search(ctx context.Context, query string) ([]tool.WebResult, error) {
-	text, err := e.c.call(ctx, "web_search_exa", map[string]any{"query": query, "objective": query, "numResults": exaResults})
+// Search asks web_search_exa for q's query, which is also the search's
+// objective (a field Exa requires), with q's number of results (exaResults
+// when it names none), and parses the blocks of its reply (parseExa). A q
+// with domains goes to web_search_advanced_exa instead, as includeDomains,
+// with highlights, and its JSON reply is parsed (parseExaAdvanced).
+func (e *exa) Search(ctx context.Context, q tool.WebQuery) ([]tool.WebResult, error) {
+	n := q.Results
+	if n <= 0 {
+		n = exaResults
+	}
+	if len(q.Domains) > 0 {
+		text, err := e.c.call(ctx, "web_search_advanced_exa", map[string]any{
+			"query": q.Query, "numResults": n, "includeDomains": q.Domains,
+			"enableHighlights": true, "highlightsMaxCharacters": exaHighlightMax,
+		})
+		if err != nil {
+			return nil, err
+		}
+		results, ok := parseExaAdvanced(text, e.c.scrubber())
+		if !ok {
+			return nil, &failure{kind: failOther}
+		}
+		return results, nil
+	}
+	text, err := e.c.call(ctx, "web_search_exa", map[string]any{"query": q.Query, "objective": q.Query, "numResults": n})
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +76,56 @@ func (e *exa) Search(ctx context.Context, query string) ([]tool.WebResult, error
 		return nil, &failure{kind: failOther}
 	}
 	return results, nil
+}
+
+// exaAdvancedReply is web_search_advanced_exa's reply: JSON, unlike
+// web_search_exa's blocks of text (discovery E8). Only what a result needs is
+// read; requestId, costDollars, image and the rest are ignored.
+type exaAdvancedReply struct {
+	Results *[]struct {
+		URL           string   `json:"url"`
+		Title         string   `json:"title"`
+		PublishedDate string   `json:"publishedDate"`
+		Highlights    []string `json:"highlights"`
+		Text          string   `json:"text"`
+	} `json:"results"`
+}
+
+// parseExaAdvanced reads web_search_advanced_exa's JSON: each result with a
+// URL, its highlights joined by a blank line (its text when it has none) and
+// cut to exaHighlightMax bytes. Every field is scrubbed of the key again once
+// decoded (scrub): the reply's text was scrubbed whole, but a JSON escape
+// (\u200b inside a key) only becomes the character the scrubber's gaps
+// recognise when it is decoded. A JSON object with no results member, or an
+// empty one, is no results (Exa's answer to a search that found nothing);
+// anything else — not JSON, not an object (null included), or results none
+// of which has a URL — is a failure.
+func parseExaAdvanced(text string, scrub *scrubber) (results []tool.WebResult, ok bool) {
+	if t := strings.TrimSpace(text); !strings.HasPrefix(t, "{") {
+		return nil, false
+	}
+	var r exaAdvancedReply
+	if err := json.Unmarshal([]byte(text), &r); err != nil {
+		return nil, false
+	}
+	if r.Results == nil || len(*r.Results) == 0 {
+		return nil, true
+	}
+	for _, x := range *r.Results {
+		u := strings.TrimSpace(scrub.text(x.URL))
+		if u == "" {
+			continue
+		}
+		content := strings.TrimSpace(strings.Join(x.Highlights, "\n\n"))
+		if content == "" {
+			content = strings.TrimSpace(x.Text)
+		}
+		results = append(results, tool.WebResult{
+			Title: strings.TrimSpace(scrub.text(x.Title)), URL: u,
+			Published: strings.TrimSpace(scrub.text(x.PublishedDate)), Content: cut(scrub.text(content), exaHighlightMax),
+		})
+	}
+	return results, len(results) > 0
 }
 
 // Fetch asks web_fetch_exa for url, and returns its text as it is: a "# "

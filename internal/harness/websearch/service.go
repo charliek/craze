@@ -330,10 +330,18 @@ func (s *Service) slot(ctx context.Context) (func(), *tool.WebError) {
 // limit, over its life.
 func (s *Service) Retries() int { return int(s.c.retries.Load()) }
 
-// Search runs query on the provider, once the session's consent lets it.
+// Search runs query on the provider with no options (SearchQuery).
+func (s *Service) Search(ctx context.Context, query string) ([]tool.WebResult, error) {
+	return s.SearchQuery(ctx, tool.WebQuery{Query: query})
+}
+
+var _ tool.WebQuerier = (*Service)(nil)
+
+// SearchQuery runs q on the provider, once the session's consent lets it.
 // Every error is a *tool.WebError. The call is reported once, however it
 // returns (reportCall).
-func (s *Service) Search(ctx context.Context, query string) (results []tool.WebResult, err error) {
+func (s *Service) SearchQuery(ctx context.Context, q tool.WebQuery) (results []tool.WebResult, err error) {
+	query := q.Query
 	call := tool.WebCall{}
 	defer func() { s.count(false, err); s.reportCall(call, err) }()
 	if werr := s.consent.pass(ctx); werr != nil {
@@ -345,7 +353,7 @@ func (s *Service) Search(ctx context.Context, query string) (results []tool.WebR
 	}
 	results, err = func() ([]tool.WebResult, error) {
 		defer release()
-		return s.p.Search(ctx, query)
+		return s.p.Search(ctx, q)
 	}()
 	if err != nil {
 		return nil, s.webError(err, "Unable to search the web for "+query)

@@ -12,7 +12,7 @@ import (
 // fetch. Its errors are the caller's failures (*failure), which the service
 // puts in words; a provider never returns text of its own to the model.
 type Provider interface {
-	Search(ctx context.Context, query string) ([]tool.WebResult, error)
+	Search(ctx context.Context, q tool.WebQuery) ([]tool.WebResult, error)
 	Fetch(ctx context.Context, url string) (tool.WebPage, error)
 }
 

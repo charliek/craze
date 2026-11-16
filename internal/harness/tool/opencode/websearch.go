@@ -2,7 +2,10 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -31,12 +34,17 @@ func newWebSearch() (tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	// opencode's Input (websearch.ts:24-26).
+	// opencode's Input (websearch.ts:24-26), and craze's own two options
+	// (issue #140): the sites to search, and how many results.
 	return &webSearchTool{spec: tool.Spec{
 		ID:          tool.WebSearchTool,
 		Description: desc,
 		Parameters: map[string]any{
 			"query": map[string]any{"type": "string", "description": "Websearch query"},
+			"domains": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+				"description": "Only return results from these sites and their subdomains, as bare hosts, at most 10 (e.g. [\"docs.python.org\"]). Optional"},
+			"num_results": map[string]any{"type": "integer", "minimum": 1, "maximum": tool.MaxWebResults,
+				"description": "How many results to return, 1 to 10 (default 8). Optional"},
 		},
 		Required: []string{"query"},
 		Kind:     tool.KindSearch,
@@ -60,12 +68,81 @@ func (w *webSearchTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) 
 	if query = strings.TrimSpace(query); query == "" {
 		return nil, errors.New("query must not be empty")
 	}
-	return &webSearchCall{query: query}, nil
+	q := tool.WebQuery{Query: query}
+	items, _, err := a.array("domains", false)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > tool.MaxWebDomains {
+		return nil, fmt.Errorf("domains takes at most %d sites, not %d", tool.MaxWebDomains, len(items))
+	}
+	for _, raw := range items {
+		var d string
+		if json.Unmarshal(raw, &d) != nil {
+			return nil, errors.New("domains must be an array of strings")
+		}
+		host, ok := siteHost(d)
+		if !ok {
+			return nil, fmt.Errorf("domains: %q is not a site's host name, such as docs.python.org", d)
+		}
+		if !slices.Contains(q.Domains, host) {
+			q.Domains = append(q.Domains, host)
+		}
+	}
+	n, ok, err := a.integer("num_results", 1)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		if n > tool.MaxWebResults {
+			return nil, fmt.Errorf("num_results must be at most %d, not %d", tool.MaxWebResults, n)
+		}
+		q.Results = int(n)
+	}
+	return &webSearchCall{q: q}, nil
 }
 
-type webSearchCall struct{ query string }
+// siteHost is d as a bare host name — a scheme, a path and a port dropped,
+// lowercased — and whether it is one: no user name or password, at least two
+// labels, each 1 to 63 letters, digits or hyphens not starting or ending with
+// a hyphen, 253 bytes in all, as a domain filter takes.
+func siteHost(d string) (string, bool) {
+	d = strings.ToLower(strings.TrimSpace(d))
+	if i := strings.Index(d, "://"); i >= 0 {
+		d = d[i+3:]
+	}
+	if i := strings.IndexAny(d, "/?#"); i >= 0 {
+		d = d[:i]
+	}
+	if strings.Contains(d, "@") {
+		return "", false
+	}
+	if i := strings.LastIndexByte(d, ':'); i >= 0 {
+		d = d[:i]
+	}
+	d = strings.TrimSuffix(d, ".")
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 || len(d) > 253 {
+		return "", false
+	}
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return "", false
+		}
+		for _, r := range l {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			default:
+				return "", false
+			}
+		}
+	}
+	return d, true
+}
 
-func (c *webSearchCall) Request() tool.Request { return tool.Request{Title: c.query} }
+type webSearchCall struct{ q tool.WebQuery }
+
+func (c *webSearchCall) Request() tool.Request { return tool.Request{Title: c.q.Query} }
 
 func (c *webSearchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
@@ -74,11 +151,17 @@ func (c *webSearchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Web == nil {
 		return tool.Result{Text: noWebText, IsError: true, Class: tool.ClassToolError}
 	}
-	results, err := env.Web.Search(ctx, c.query)
-	if err != nil {
-		return webErrorResult(ctx, err, "Unable to search the web for "+c.query)
+	var results []tool.WebResult
+	var err error
+	if wq, ok := env.Web.(tool.WebQuerier); ok {
+		results, err = wq.SearchQuery(ctx, c.q)
+	} else {
+		results, err = env.Web.Search(ctx, c.q.Query)
 	}
-	return tool.Result{Text: cutFirstLine(searchText(results), env)}
+	if err != nil {
+		return webErrorResult(ctx, err, "Unable to search the web for "+c.q.Query)
+	}
+	return tool.Result{Text: withFooter(cutFirstLineAt(searchText(results), env, tool.MaxBytes-len(excerptFooter)-2), len(results))}
 }
 
 // searchText is opencode's layout of the results (websearch.ts:151-161): per
@@ -108,6 +191,26 @@ func searchText(results []tool.WebResult) string {
 	}
 	return strings.Join(parts, "\n\n")
 }
+
+// withFooter is a search's text with excerptFooter: last, where the model
+// reads it after the results, unless the dispatcher's head would cut it off
+// there (tool.MaxBytes, tool.MaxLines) — then first, so a long search still
+// says it. text is already as cutFirstLine left it; no results, no footer.
+func withFooter(text string, results int) string {
+	if results == 0 {
+		return text
+	}
+	if len(text)+len(excerptFooter)+2 > tool.MaxBytes || strings.Count(text, "\n")+3 > tool.MaxLines {
+		return excerptFooter + "\n\n" + text
+	}
+	return text + "\n\n" + excerptFooter
+}
+
+// excerptFooter ends every search with results (issue #131): a model that
+// writes from an excerpt misses what is further down the page, and a line at
+// the point it reads the results moves it where the description alone did
+// not (eval T-WS6).
+const excerptFooter = "These results are excerpts, often only the start of each page. Before relying on a detail from one, read the page with webfetch."
 
 // webErrorResult is a failed search's or fetch's result: a *tool.WebError's
 // class and text as they are (its text is already fit for the model), a
@@ -149,13 +252,18 @@ func webAborted() tool.Result {
 // A redacted line does not grow again when the dispatcher redacts it (a
 // second pass changes nothing). Text whose first line fits once redacted is
 // returned redacted, as the dispatcher would make it.
-func cutFirstLine(text string, env tool.Env) string {
+func cutFirstLine(text string, env tool.Env) string { return cutFirstLineAt(text, env, tool.MaxBytes) }
+
+// cutFirstLineAt is cutFirstLine breaking at limit bytes rather than
+// tool.MaxBytes: a search's, which may put excerptFooter in front of it
+// (withFooter), keeps that much room for it.
+func cutFirstLineAt(text string, env tool.Env, limit int) string {
 	text = env.CurrentRedactor().String(text)
 	first, _, _ := strings.Cut(text, "\n")
-	if len(first) <= tool.MaxBytes {
+	if len(first) <= limit {
 		return text
 	}
-	cut := tool.MaxBytes
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
