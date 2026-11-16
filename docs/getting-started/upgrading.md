@@ -77,8 +77,11 @@ end `it exits when idle`.
   was **Allow via Exa**), **Allow for this session** (new, not remembered) and
   **Disable web search**, now the third option. A program that answers the card
   by its index must move a disable from the second option to the third.
-- **Sessions started side by side ask once.** A session reads the remembered
-  choice again before it asks, so an answer in one counts in the others.
+- **An answer in one session counts in the others.** A session reads the
+  remembered choice again before it asks, so once one session's card is
+  answered (Always allow or Disable), sessions that opened before it no longer
+  ask. Two whose first web calls both come before either card is answered each
+  show one.
 - **`/websearch`** is a new slash command in native sessions: the session's
   key, consent and call totals, and `/websearch on|off|ask` for new sessions
   ([Web search status](../reference/tui.md#web-search-status)).

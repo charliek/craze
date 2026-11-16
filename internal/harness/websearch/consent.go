@@ -111,8 +111,10 @@ func newConsent(cfg Config, provider string) *consent {
 //   - Undecided otherwise first reads the remembered choice again: one an
 //     answer in another session wrote since this session opened decides
 //     without asking (an allow through this service's provider allows, a
-//     disable disables), so sessions opened side by side ask once between
-//     them, not once each. With nothing remembered it asks. Exactly the
+//     disable disables), so an answer saved in another session counts here.
+//     Two sessions whose first calls both come before either card is
+//     answered each ask: the question in flight is per service. With
+//     nothing remembered it asks. Exactly the
 //     first option allows and is remembered, the second allows for this
 //     session only, the third disables and is remembered; anything else
 //     declines for the session, remembering nothing. If ctx has ended by the time the asker

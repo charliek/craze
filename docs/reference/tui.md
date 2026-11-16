@@ -1714,8 +1714,9 @@ session** (*Asks again in the next session.*) and **Disable web search**
 (*Later sessions have no web tools; /websearch on turns it back on.*). Always
 allow and Disable are remembered for later sessions; Allow for this session is
 not. A session that opened before another one was answered looks at the
-remembered answer again before it asks, so sessions started side by side ask
-once between them. `Esc` skips it as any question: web search is declined for
+remembered answer again before it asks, so an answer saved there counts here;
+two sessions whose first web calls both come before either card is answered
+each show one. `Esc` skips it as any question: web search is declined for
 this session only, and the card is not shown again until the next one. The
 row an answer leaves names the question (`? Allow craze to search the web … →
 Always allow`); the row a skip leaves names the request by its header, **Web

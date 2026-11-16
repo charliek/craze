@@ -2571,8 +2571,9 @@ many calls arrive together:
 
 Before it asks, a session reads the remembered choice again: an answer given
 in another session since this one opened — Always allow or Disable — decides
-without a card, so sessions started side by side ask once between them, not
-once each. [`/websearch`](tui.md#web-search-status) shows a session's web
+without a card. So once one session's card is answered, sessions opened
+before it no longer ask; two whose first web calls both come before either
+card is answered each show one. [`/websearch`](tui.md#web-search-status) shows a session's web
 search and sets the remembered choice (`on`, `off`, `ask`).
 
 A turn cancelled while the card is up takes no answer, even one picked just as
