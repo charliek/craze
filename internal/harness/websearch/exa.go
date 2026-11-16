@@ -61,7 +61,7 @@ func (e *exa) Search(ctx context.Context, q tool.WebQuery) ([]tool.WebResult, er
 		if err != nil {
 			return nil, err
 		}
-		results, ok := parseExaAdvanced(text)
+		results, ok := parseExaAdvanced(text, e.c.scrubber())
 		if !ok {
 			return nil, &failure{kind: failOther}
 		}
@@ -93,10 +93,17 @@ type exaAdvancedReply struct {
 
 // parseExaAdvanced reads web_search_advanced_exa's JSON: each result with a
 // URL, its highlights joined by a blank line (its text when it has none) and
-// cut to exaHighlightMax bytes. A reply with no results member, or an empty
-// one, is no results (Exa's answer to a search that found nothing); one that
-// is not JSON, or whose results hold none with a URL, is a failure.
-func parseExaAdvanced(text string) (results []tool.WebResult, ok bool) {
+// cut to exaHighlightMax bytes. Every field is scrubbed of the key again once
+// decoded (scrub): the reply's text was scrubbed whole, but a JSON escape
+// (\u200b inside a key) only becomes the character the scrubber's gaps
+// recognise when it is decoded. A JSON object with no results member, or an
+// empty one, is no results (Exa's answer to a search that found nothing);
+// anything else — not JSON, not an object (null included), or results none
+// of which has a URL — is a failure.
+func parseExaAdvanced(text string, scrub *scrubber) (results []tool.WebResult, ok bool) {
+	if t := strings.TrimSpace(text); !strings.HasPrefix(t, "{") {
+		return nil, false
+	}
 	var r exaAdvancedReply
 	if err := json.Unmarshal([]byte(text), &r); err != nil {
 		return nil, false
@@ -105,7 +112,8 @@ func parseExaAdvanced(text string) (results []tool.WebResult, ok bool) {
 		return nil, true
 	}
 	for _, x := range *r.Results {
-		if strings.TrimSpace(x.URL) == "" {
+		u := strings.TrimSpace(scrub.text(x.URL))
+		if u == "" {
 			continue
 		}
 		content := strings.TrimSpace(strings.Join(x.Highlights, "\n\n"))
@@ -113,8 +121,8 @@ func parseExaAdvanced(text string) (results []tool.WebResult, ok bool) {
 			content = strings.TrimSpace(x.Text)
 		}
 		results = append(results, tool.WebResult{
-			Title: strings.TrimSpace(x.Title), URL: strings.TrimSpace(x.URL),
-			Published: strings.TrimSpace(x.PublishedDate), Content: cut(content, exaHighlightMax),
+			Title: strings.TrimSpace(scrub.text(x.Title)), URL: u,
+			Published: strings.TrimSpace(scrub.text(x.PublishedDate)), Content: cut(scrub.text(content), exaHighlightMax),
 		})
 	}
 	return results, len(results) > 0

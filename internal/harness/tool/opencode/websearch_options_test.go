@@ -94,3 +94,54 @@ func TestWebSearchOptionsWithAPlainWeb(t *testing.T) {
 		t.Fatalf("queries %q", web.queries)
 	}
 }
+
+// TestSiteHost: a domain is a bare host of DNS labels; a user name, an
+// empty, over-long or hyphen-edged label, one label alone, or any other
+// character is refused (review finding, PR 3).
+func TestSiteHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"docs.python.org":                           "docs.python.org",
+		"HTTPS://Docs.Python.org:443/3/library":     "docs.python.org",
+		"docs.python.org.":                          "docs.python.org",
+		"a-b.example":                               "a-b.example",
+		"xn--bcher-kva.example":                     "xn--bcher-kva.example",
+		"https://alice.example:pw@docs.python.org/": "",
+		"user@docs.python.org":                      "",
+		"a..example":                                "",
+		"-a.example":                                "",
+		"a-.example":                                "",
+		strings.Repeat("a", 64) + ".example":        "",
+		"localhost":                                 "",
+		"bücher.example":                            "",
+		"docs python.org":                           "",
+		"":                                          "",
+	} {
+		got, ok := siteHost(in)
+		if got != want || ok != (want != "") {
+			t.Errorf("siteHost(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+// TestTheFooterSurvivesALongSearch: a search whose results run past the
+// dispatcher's limits keeps the excerpt footer in what the model reads — in
+// front of the results — and an ordinary one has it last (review finding,
+// PR 3).
+func TestTheFooterSurvivesALongSearch(t *testing.T) {
+	big := make([]tool.WebResult, 10)
+	for i := range big {
+		big[i] = tool.WebResult{Title: "t", URL: "https://a.example/", Content: strings.Repeat("word ", 1300)}
+	}
+	many := []tool.WebResult{{Title: "t", URL: "https://a.example/", Content: strings.Repeat("l\n", tool.MaxLines)}}
+	for name, results := range map[string][]tool.WebResult{"bytes": big, "lines": many} {
+		f := newWebFixture(t, &fakeWeb{results: results}, nil)
+		_, res := f.call(t, "websearch", map[string]any{"query": "q"})
+		if got := ok(t, res); !strings.HasPrefix(got, excerptFooter+"\n\n") {
+			t.Errorf("%s: the read text does not start with the footer: %.80q", name, got)
+		}
+	}
+	f := newWebFixture(t, &fakeWeb{results: []tool.WebResult{{URL: "https://a.example/", Content: "x"}}}, nil)
+	if _, res := f.call(t, "websearch", map[string]any{"query": "q"}); !strings.HasSuffix(ok(t, res), "\n\n"+excerptFooter) {
+		t.Errorf("an ordinary search does not end with the footer")
+	}
+}

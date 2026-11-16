@@ -2473,7 +2473,8 @@ excerpt) and `webfetch` (an `http` or `https` URL, answered with the page's
 text). `websearch` takes two optional settings the model can use: `domains`,
 up to 10 sites (bare hosts such as `docs.python.org`) whose pages alone, and
 their subdomains', are results; and `num_results`, 1 to 10 results instead of
-the default 8. Its description, and a line after every search's results
+the default 8. Its description, and a line with every search's results —
+after them, or before them when they are long enough to be cut —
 (*These results are excerpts, often only the start of each page. Before
 relying on a detail from one, read the page with webfetch.*), tell the model
 that results are excerpts and to fetch a page before relying on a detail from

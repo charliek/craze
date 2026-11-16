@@ -152,8 +152,9 @@ Deliberate differences in behaviour:
 
 - A search with results ends with craze's own line (issue #131): "These
   results are excerpts, often only the start of each page. Before relying on
-  a detail from one, read the page with webfetch." opencode's results end
-  with the last result.
+  a detail from one, read the page with webfetch." — or starts with it, when
+  the results are long enough for the dispatcher's head to cut it off.
+  opencode's results end with the last result.
 - websearch takes two optional parameters opencode's does not (issue #140):
   domains, the sites to search (bare hosts, at most 10), sent to Exa's
   web_search_advanced_exa as includeDomains; and num_results, 1 to 10

@@ -90,3 +90,36 @@ func TestNumResultsWithoutDomains(t *testing.T) {
 		t.Fatalf("calls %+v / %+v", got[0].Call.Params, got[1].Call.Params)
 	}
 }
+
+// TestAdvancedFieldsAreScrubbedOnceDecoded: a key split by an escaped
+// zero-width space survives the scrub of the reply's text, which sees
+// `\u200b`, and is a key again once decoded: every decoded field is scrubbed
+// (review finding, PR 3).
+func TestAdvancedFieldsAreScrubbedOnceDecoded(t *testing.T) {
+	const key = "exa-key-0123456789abcdef"
+	split := key[:12] + "\\u200b" + key[12:] // a JSON escape, six ASCII bytes
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, rec received) {
+		body := `{"results":[{"url":"https://a.example/?k=` + split + `","title":"` + split + `","highlights":["has ` + split + `"]}]}`
+		sendSSE(w, event(resultJSON(rec.Call.ID, false, body)))
+	})
+	results, err := overridden(t, f, key).SearchQuery(context.Background(), tool.WebQuery{Query: "q", Domains: []string{"a.example"}})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%+v, %v", results, err)
+	}
+	r := results[0]
+	for _, v := range []string{r.URL, r.Title, r.Content} {
+		if s := shown(v); strings.Contains(s, key) {
+			t.Fatalf("a decoded field shows the key: %q", v)
+		}
+	}
+}
+
+// TestAdvancedNullIsAFailure: a reply of JSON null, or any value but an
+// object, is a failure, never no results (review finding, PR 3).
+func TestAdvancedNullIsAFailure(t *testing.T) {
+	for _, body := range []string{`null`, `[]`, `"x"`, `  null  `} {
+		f := newFake(t, replyText(body))
+		_, err := overridden(t, f, "").SearchQuery(context.Background(), tool.WebQuery{Query: "q", Domains: []string{"go.dev"}})
+		wantErr(t, err, tool.ClassToolError, "Unable to search the web for q")
+	}
+}

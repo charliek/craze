@@ -516,7 +516,7 @@ func TestWebLongLine(t *testing.T) {
 		if !found || head == "" || len(head) > tool.MaxBytes || !strings.Contains(notice, "bytes truncated...") {
 			t.Fatalf("%s: a one-line page read %d bytes of head and notice %q; want a non-empty head within the limit", name, len(head), notice)
 		}
-		if !strings.HasPrefix(long, strings.TrimPrefix(head, "## [")) {
+		if !strings.HasPrefix(long, strings.TrimPrefix(searchHead(name, head), "## [")) {
 			t.Fatalf("%s: the head is not the page's start", name)
 		}
 		if res.Trunc.Spill == "" {
@@ -527,7 +527,7 @@ func TestWebLongLine(t *testing.T) {
 		if name == "websearch" {
 			whole = searchText(web.results)
 		}
-		if spilled := load(t, res.Trunc.Spill); strings.Replace(spilled, "\n", "", 1) != whole || len(spilled) != len(whole)+1 {
+		if spilled := searchHead(name, load(t, res.Trunc.Spill)); strings.Replace(spilled, "\n", "", 1) != whole || len(spilled) != len(whole)+1 {
 			t.Fatalf("%s: the spill file is not the whole result broken once", name)
 		}
 	}
@@ -632,6 +632,24 @@ func (w *blockingWeb) Fetch(context.Context, string) (tool.WebPage, error) {
 	return w.page, nil
 }
 
+// searchHead is a search's head with the excerpt footer a long search puts
+// in front of it (withFooter) taken off; anything else as it is.
+func searchHead(name, head string) string {
+	if name == "websearch" {
+		return strings.TrimPrefix(head, excerptFooter+"\n\n")
+	}
+	return head
+}
+
+// webBreakAt is where a long first line of name's result is broken: a
+// search keeps room for its footer in front (cutFirstLineAt).
+func webBreakAt(name string) int {
+	if name == "websearch" {
+		return tool.MaxBytes - len(excerptFooter) - 2
+	}
+	return tool.MaxBytes
+}
+
 // TestWebCutRedactsWithTheKeysOfTheCut (C2 review, item 5): a key the session
 // learns while the call waits on the web (Session.AddSecrets, which sets the
 // dispatcher's redactor) and that the result holds across tool.MaxBytes is
@@ -642,8 +660,8 @@ func (w *blockingWeb) Fetch(context.Context, string) (tool.WebPage, error) {
 func TestWebCutRedactsWithTheKeysOfTheCut(t *testing.T) {
 	const token = "zq-web-token-cut-0051"
 	tail := strings.Repeat("b", 100)
-	lead := strings.Repeat("a", tool.MaxBytes-10) // the break falls after token[:10]
 	for name, in := range map[string]string{"webfetch": `{"url":"https://example.com/"}`, "websearch": `{"query":"q"}`} {
+		lead := strings.Repeat("a", webBreakAt(name)-10) // the break falls after token[:10]
 		t.Run(name, func(t *testing.T) {
 			web := &blockingWeb{
 				started: make(chan struct{}), release: make(chan struct{}),
@@ -699,6 +717,7 @@ func TestWebLineGrownByRedaction(t *testing.T) {
 		_, res := f.call(t, name, in)
 		got := ok(t, res)
 		head, _, _ := strings.Cut(got, "\n\n...")
+		head = searchHead(name, head)
 		if head == "" || !strings.HasPrefix(strings.TrimPrefix(head, "## ["), "aaaa") || strings.Contains(got, keyA) {
 			t.Errorf("%s: a line the redaction grew past the limit kept %d bytes (want some, and no key): %.60q", name, len(head), got)
 		}

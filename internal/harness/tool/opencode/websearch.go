@@ -103,8 +103,9 @@ func (w *webSearchTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) 
 }
 
 // siteHost is d as a bare host name — a scheme, a path and a port dropped,
-// lowercased — and whether it is one: at least one dot, and only letters,
-// digits, hyphens and dots, as a domain filter takes.
+// lowercased — and whether it is one: no user name or password, at least two
+// labels, each 1 to 63 letters, digits or hyphens not starting or ending with
+// a hyphen, 253 bytes in all, as a domain filter takes.
 func siteHost(d string) (string, bool) {
 	d = strings.ToLower(strings.TrimSpace(d))
 	if i := strings.Index(d, "://"); i >= 0 {
@@ -113,18 +114,27 @@ func siteHost(d string) (string, bool) {
 	if i := strings.IndexAny(d, "/?#"); i >= 0 {
 		d = d[:i]
 	}
+	if strings.Contains(d, "@") {
+		return "", false
+	}
 	if i := strings.LastIndexByte(d, ':'); i >= 0 {
 		d = d[:i]
 	}
-	d = strings.Trim(d, ".")
-	if !strings.Contains(d, ".") || len(d) > 253 {
+	d = strings.TrimSuffix(d, ".")
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 || len(d) > 253 {
 		return "", false
 	}
-	for _, r := range d {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
-		default:
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
 			return "", false
+		}
+		for _, r := range l {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			default:
+				return "", false
+			}
 		}
 	}
 	return d, true
@@ -151,11 +161,10 @@ func (c *webSearchCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if err != nil {
 		return webErrorResult(ctx, err, "Unable to search the web for "+c.q.Query)
 	}
-	return tool.Result{Text: cutFirstLine(searchText(results), env)}
+	return tool.Result{Text: withFooter(cutFirstLineAt(searchText(results), env, tool.MaxBytes-len(excerptFooter)-2), len(results))}
 }
 
-// searchText is opencode's layout of the results (websearch.ts:151-161), and
-// craze's excerptFooter after them: per
+// searchText is opencode's layout of the results (websearch.ts:151-161): per
 // result a "## [title](url)" heading, the URL standing for a missing title,
 // then "Published: <date>" when there is one, then a blank line and the
 // content when there is any; the results joined by a blank line. No results
@@ -180,7 +189,21 @@ func searchText(results []tool.WebResult) string {
 		}
 		parts = append(parts, s)
 	}
-	return strings.Join(parts, "\n\n") + "\n\n" + excerptFooter
+	return strings.Join(parts, "\n\n")
+}
+
+// withFooter is a search's text with excerptFooter: last, where the model
+// reads it after the results, unless the dispatcher's head would cut it off
+// there (tool.MaxBytes, tool.MaxLines) — then first, so a long search still
+// says it. text is already as cutFirstLine left it; no results, no footer.
+func withFooter(text string, results int) string {
+	if results == 0 {
+		return text
+	}
+	if len(text)+len(excerptFooter)+2 > tool.MaxBytes || strings.Count(text, "\n")+3 > tool.MaxLines {
+		return excerptFooter + "\n\n" + text
+	}
+	return text + "\n\n" + excerptFooter
 }
 
 // excerptFooter ends every search with results (issue #131): a model that
@@ -229,13 +252,18 @@ func webAborted() tool.Result {
 // A redacted line does not grow again when the dispatcher redacts it (a
 // second pass changes nothing). Text whose first line fits once redacted is
 // returned redacted, as the dispatcher would make it.
-func cutFirstLine(text string, env tool.Env) string {
+func cutFirstLine(text string, env tool.Env) string { return cutFirstLineAt(text, env, tool.MaxBytes) }
+
+// cutFirstLineAt is cutFirstLine breaking at limit bytes rather than
+// tool.MaxBytes: a search's, which may put excerptFooter in front of it
+// (withFooter), keeps that much room for it.
+func cutFirstLineAt(text string, env tool.Env, limit int) string {
 	text = env.CurrentRedactor().String(text)
 	first, _, _ := strings.Cut(text, "\n")
-	if len(first) <= tool.MaxBytes {
+	if len(first) <= limit {
 		return text
 	}
-	cut := tool.MaxBytes
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
