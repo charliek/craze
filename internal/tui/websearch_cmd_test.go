@@ -115,7 +115,11 @@ func TestWebSearchOnOffAsk(t *testing.T) {
 			t.Fatalf("%s: remembered %+v, want %+v", tc.cmd, got, tc.want)
 		}
 		notes := texts(m, entryNote)
-		if len(notes) == 0 || !strings.HasSuffix(notes[len(notes)-1], "(a session that has decided keeps its choice; one still undecided adopts this at its next web call)") {
+		want := "(a session that has decided keeps its choice; one still undecided adopts this at its next web call)"
+		if tc.want == (websearch.Choice{}) {
+			want = "(a session that has decided keeps its choice; one still undecided asks at its next web call)"
+		}
+		if len(notes) == 0 || !strings.HasSuffix(notes[len(notes)-1], want) {
 			t.Fatalf("%s: notes %q", tc.cmd, notes)
 		}
 	}

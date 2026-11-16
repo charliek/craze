@@ -79,7 +79,11 @@ func (m Model) runWebSearch(args string) (tea.Model, tea.Cmd) {
 		m.addError("/websearch: " + websearch.StateFile + " could not be written; nothing changed")
 		return m, nil
 	}
-	m.addNote(said + " (" + webSearchScope(m.remote, path) + ")")
+	scope := webSearchScope
+	if choice == (websearch.Choice{}) {
+		scope = "a session that has decided keeps its choice; one still undecided asks at its next web call"
+	}
+	m.addNote(said + " (" + scope + ")")
 	if over := configOverride(cfg); over != "" {
 		m.addNote("web search: " + over + ", which wins over this")
 	}
@@ -87,17 +91,11 @@ func (m Model) runWebSearch(args string) (tea.Model, tea.Cmd) {
 }
 
 // webSearchScope is what /websearch on, off or ask changed, for its note: a
-// session that has decided keeps its choice and one still undecided adopts
-// the new one at its next web call; and, viewing a session served elsewhere,
-// that only this machine's file changed — a host on another machine reads its
-// own.
-func webSearchScope(remote bool, path string) string {
-	scope := "a session that has decided keeps its choice; one still undecided adopts this at its next web call"
-	if remote {
-		scope = "this machine's " + path + " only: a session host elsewhere reads its own; " + scope
-	}
-	return scope
-}
+// session that has decided keeps its choice, and one still undecided adopts
+// the new one at its next web call. Every session this TUI shows is hosted on
+// this machine, from the same native directory, so the file is the hosts'
+// too.
+const webSearchScope = "a session that has decided keeps its choice; one still undecided adopts this at its next web call"
 
 // webStatus is the session's last web status section, nil before one.
 func (m Model) webStatus() *agent.WebStatusState { return m.snap.WebStatus }
