@@ -1005,36 +1005,45 @@ func TestClaudeRememberedExitsAreBounded(t *testing.T) {
 	})
 }
 
-// TestClaudeWithdrawalEndsTheCallAtOnce (review C3c 4): the request is marked
-// withdrawn and its context ended in one section, so by the time anything
-// else can look — the registry taking an answer — the call is already over,
-// with the withdrawal as its cause.
+// TestClaudeWithdrawalEndsTheCallAtOnce (reviews C3c 4, C3d 1): the window
+// between ending a withdrawn request's context and marking it withdrawn is
+// parked. Inside it the call must already be over, with the withdrawal as its
+// cause — which is what makes a first answer racing into that window an
+// already_resolved one at the registry — and the request must not yet be
+// answerable by anyone: nothing is written to the agent, then or after.
 func TestClaudeWithdrawalEndsTheCallAtOnce(t *testing.T) {
 	p := newRawPipeDialect(t, DialectClaude)
 	req := AskQuestionRequest{Questions: []AskQuestion{{ID: "question_0", Options: []AskOption{{ID: "a"}}}}}
 	in := p.client.register(&Message{JSONRPC: jsonrpcVersion, ID: json.RawMessage(`5`), Method: MethodElicitationCreate}, RequestParams{Ask: &req})
 	seen := make(chan error, 1)
-	prev := testAfterWithdraw
-	testAfterWithdraw = func(got *pendingReq) {
-		if got == in {
-			p.client.incomingMu.Lock()
-			replied := got.replied
-			p.client.incomingMu.Unlock()
-			if !replied {
-				seen <- errors.New("not marked withdrawn")
-				return
-			}
-			seen <- context.Cause(got.ctx)
+	prev := testWithdrawWindow
+	testWithdrawWindow = func(got *pendingReq) {
+		if got != in {
+			return
 		}
+		// In the window, as a racing answer sees it: the context is the
+		// registry's only view of the request.
+		seen <- context.Cause(got.ctx)
 	}
-	t.Cleanup(func() { testAfterWithdraw = prev })
+	t.Cleanup(func() { testWithdrawWindow = prev })
 	p.send(t, nil, MethodCancelRequest, `{"requestId":5}`)
 	select {
 	case cause := <-seen:
 		if !errors.Is(cause, ErrRequestWithdrawn) {
-			t.Fatalf("on leaving the section the call's cause was %v", cause)
+			t.Fatalf("in the window the call's cause was %v: a first answer could still be taken", cause)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the withdrawal never ran")
 	}
+	// Marked withdrawn once the window closes, and answered by nobody: a
+	// late handler reply is lost, not written.
+	waitUntil(t, func() bool {
+		p.client.incomingMu.Lock()
+		defer p.client.incomingMu.Unlock()
+		return in.replied && in.repliedBy == ReplyLostWithdrawn
+	})
+	if d := p.client.replyIncoming(in, elicitationResult("accept", nil)); d.Delivered || d.Lost != ReplyLostWithdrawn {
+		t.Fatalf("a reply after the withdrawal %+v", d)
+	}
+	p.noReply(t)
 }

@@ -950,18 +950,14 @@ func (c *Client) handleCancelRequest(msg *Message) {
 		c.incomingMu.Unlock()
 		return
 	}
-	in.replied = true
-	in.repliedBy = ReplyLostWithdrawn
-	if in.decide != nil {
-		select {
-		case in.decide <- cancelDecision(in.method):
-		default:
-		}
-	}
-	// The context ends in the same section that marks the request withdrawn
-	// (review C3c 4): the registry refuses an answer for an ask whose call has
-	// ended withdrawn, so no answer can be taken once delivery is impossible.
-	// Ending a context is a leaf operation, as replyIncomingBy's is.
+	// The context ends first, before the request is marked withdrawn (review
+	// C3d 1): the registry takes no lock of the client's, and refuses an
+	// answer for an ask whose call has ended withdrawn (AskRegistry.Answer), so
+	// from this instant no first answer can be accepted, whatever the marking
+	// below still owes. incomingMu is held throughout, so no reply — the
+	// handler's included — can be written between the two steps: the request
+	// is still answered exactly once, by nobody. Ending a context is a leaf
+	// operation, as replyIncomingBy's is.
 	//
 	// What remains, and is accepted (orchestrator's disposition, C3d): the
 	// user's answer and Claude's withdrawal crossing on the wire — the answer
@@ -972,12 +968,21 @@ func (c *Client) handleCancelRequest(msg *Message) {
 	if in.withdraw != nil {
 		in.withdraw()
 	}
-	c.incomingMu.Unlock()
-	if testAfterWithdraw != nil {
-		testAfterWithdraw(in)
+	if testWithdrawWindow != nil {
+		testWithdrawWindow(in)
 	}
+	in.replied = true
+	in.repliedBy = ReplyLostWithdrawn
+	if in.decide != nil {
+		select {
+		case in.decide <- cancelDecision(in.method):
+		default:
+		}
+	}
+	c.incomingMu.Unlock()
 }
 
-// testAfterWithdraw runs, when a test sets it, once handleCancelRequest has
-// left its locked section.
-var testAfterWithdraw func(*pendingReq)
+// testWithdrawWindow runs, when a test sets it, in handleCancelRequest
+// between ending the request's context and marking it withdrawn, with
+// incomingMu held.
+var testWithdrawWindow func(*pendingReq)
