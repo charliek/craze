@@ -2143,3 +2143,37 @@ func TestAModelChangeRewritesAClaudeRow(t *testing.T) {
 		t.Fatalf("the model change wrote %+v, want a touch", got)
 	}
 }
+
+// TestIndexRecordsClaudesEffort (plan 052 L5 F1): a claude session's row
+// carries its effort beside its model, and an options change alone rewrites
+// it.
+func TestIndexRecordsClaudesEffort(t *testing.T) {
+	effort := []agent.ConfigOption{{ID: "effort", Type: "select", Current: "low", SelectValues: []agent.SelectValue{{Value: "low"}, {Value: "high"}}}}
+	for _, tc := range []struct{ provider, want string }{{"claude", "low"}, {"cursor", ""}} {
+		idx := newFakeIndex()
+		w := newIndexWriter(IndexOptions{Store: idx, CWD: "/w", Provider: tc.provider}, "018f-the-thread",
+			func() agent.Snapshot {
+				return agent.Snapshot{SessionID: "fake-1", CurrentModel: "haiku", Config: effort}
+			},
+			func(string, string) {})
+		t.Cleanup(w.stop)
+		if !w.write("", "", sessions.TitleKindNone) {
+			t.Fatal("no write")
+		}
+		idx.mu.Lock()
+		got := idx.rows[len(idx.rows)-1].Effort
+		idx.mu.Unlock()
+		if got != tc.want {
+			t.Fatalf("%s: effort %q, want %q", tc.provider, got, tc.want)
+		}
+	}
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: &agent.ConfigState{Options: effort}}})
+	idx.waitRows(t, 3)
+}

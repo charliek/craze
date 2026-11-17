@@ -37,6 +37,9 @@ import (
 //     directory on macOS, none elsewhere. It must be a real directory (not a
 //     symlink), owned by this user, and is made 0700.
 
+// overageWriteFile replaces a record: atomically and durably.
+var overageWriteFile = atomicfile.WriteSync
+
 // The record's I/O bounds, vars for tests.
 var (
 	overageReadBound  = 2 * time.Second
@@ -199,18 +202,32 @@ func writeOverageRecordAt(path string, rec overageRecord) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(path, append(b, '\n'), 0o600)
+	// Durable (review C5c item 7): the file synced before the rename and the
+	// directory after it, so a hold reported written survives a crash.
+	return overageWriteFile(path, append(b, '\n'), 0o600)
 }
 
-// writeOverageRecord writes rec as the machine's trip record. The craze
+// overagePaths are where a session's trip record is: the craze directory's
+// and its fallback, each "" for none — resolved once, as the session starts
+// (review C5c item 3), so a trip never resolves a path (filepath.Abs reads the
+// working directory, which can stall on a dead network mount).
+type overagePaths struct{ primary, fallback string }
+
+// resolveOveragePaths is the record's paths as the seams give them now.
+func resolveOveragePaths() overagePaths {
+	path, fallback, _ := overageSeams()
+	return overagePaths{primary: path, fallback: fallback}
+}
+
+// writeOverageRecord writes rec as the machine's trip record at at. The craze
 // directory's record is tried twice (its directory made if missing); when it
 // will not take it, the fallback is written instead (review C5 item 3), which
 // every check reads too. It answers where the record went, and the craze
 // directory's failure when the fallback had to take it; err is set only when
 // neither took it — the session that tripped still stops, but the hold is not
 // recorded.
-func writeOverageRecord(rec overageRecord) (where string, primaryErr, err error) {
-	path, fallback, _ := overageSeams()
+func writeOverageRecord(at overagePaths, rec overageRecord) (where string, primaryErr, err error) {
+	path, fallback := at.primary, at.fallback
 	if path != "" {
 		primaryErr = os.MkdirAll(filepath.Dir(path), 0o700)
 		if primaryErr == nil {
@@ -237,17 +254,19 @@ func writeOverageRecord(rec overageRecord) (where string, primaryErr, err error)
 	return fallback, primaryErr, nil
 }
 
-// readBounded is readOverageRecord bounded by overageReadBound: a read that
-// does not answer in time is an error (its goroutine is left to the
-// filesystem).
-func readBounded(path string) (*overageRecord, error) {
+// errNoFallback is a fallback whose directory does not exist: no fallback.
+var errNoFallback = errors.New("no fallback")
+
+// readBounded is read bounded by overageReadBound: a read that does not answer
+// in time is an error (its goroutine is left to the filesystem).
+func readBounded(read func() (*overageRecord, error)) (*overageRecord, error) {
 	type answer struct {
 		rec *overageRecord
 		err error
 	}
 	ch := make(chan answer, 1)
 	go func() {
-		rec, err := readOverageRecord(path)
+		rec, err := read()
 		ch <- answer{rec, err}
 	}()
 	t := time.NewTimer(overageReadBound)
@@ -260,25 +279,49 @@ func readBounded(path string) (*overageRecord, error) {
 	}
 }
 
-// overageRefusal is the trip record's word before a claude start, prompt or
+// readFallback is the fallback's record: its directory checked first, in the
+// same bounded read (review C5c item 3). A directory that does not exist is
+// no fallback (errNoFallback); any other failure of the check — not this
+// user's, a symlink, an I/O error — is the check's error, and refuses.
+func readFallback(path string) (*overageRecord, error) {
+	overageIO("checkdir", path)
+	if err := checkFallbackDir(filepath.Dir(path), false); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, errNoFallback
+		}
+		return nil, err
+	}
+	return readOverageRecord(path)
+}
+
+// overageRefusal is the trip record's word for the record's paths as the
+// seams give them now (tests; a session reads its own resolved paths).
+func overageRefusal() error { return overageRefusalAt(resolveOveragePaths()) }
+
+// overageRefusalAt is the trip record's word before a claude start, prompt or
 // wake (§ D3): the quota refusal while it — the craze directory's, or its
 // fallback (review C5 item 3), whichever holds longer — holds, nil once both
 // have expired or when there are none. A record that is there and cannot be
 // read, that is not a regular file, or whose read does not answer in time
 // refuses too, and says which file: the guard fails closed (review C5b item
-// 1). A fallback whose directory is not the user's own is not read at all.
-func overageRefusal() error {
-	path, fallback, now := overageSeams()
-	if fallback != "" && checkFallbackDir(filepath.Dir(fallback), false) != nil {
-		fallback = ""
-	}
+// 1). So does a fallback whose directory cannot be checked, or fails the
+// check, for any reason but not existing (review C5c item 3).
+func overageRefusalAt(at overagePaths) error {
+	now := overageClock()
 	var held *overageRecord
 	heldAt := ""
-	for _, p := range []string{path, fallback} {
+	for i, p := range []string{at.primary, at.fallback} {
 		if p == "" {
 			continue
 		}
-		rec, err := readBounded(p)
+		read := func() (*overageRecord, error) { return readOverageRecord(p) }
+		if i == 1 {
+			read = func() (*overageRecord, error) { return readFallback(p) }
+		}
+		rec, err := readBounded(read)
+		if errors.Is(err, errNoFallback) {
+			continue
+		}
 		if err != nil {
 			return claudeErr(errkind.Quota, "craze cannot read its Claude overage record %s (%v); it refuses Claude sessions until the file is fixed or removed", p, err)
 		}

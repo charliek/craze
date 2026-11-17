@@ -46,6 +46,9 @@ import (
 //	                             a trailing report landing in the next turn
 //	                   HOLD      work until cancelled
 //	                   STDERR    a line on stderr, then the trip
+//	                   CONFIG-TRIP  a config and a commands update, then the
+//	                             trip
+//	                   FLOOD-TRIP  600 text chunks, then the trip
 //	                   TWO-TRIPS a trip with no reset time, then one a week
 //	                             away inside the stop's grace
 //	                   ESCAPE    two real children, one in the adapter's
@@ -199,6 +202,21 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 			trip()
 		}()
 	case strings.Contains(text, "HOLD"):
+		s.hang(id)
+	case strings.Contains(text, "FLOOD-TRIP"):
+		// More text than a reader that is not reading has room for, then
+		// the trip behind it.
+		for i := range 600 {
+			s.claudeSay(sid, fmt.Sprintf("chunk %d ", i))
+		}
+		trip()
+		s.hang(id)
+	case strings.Contains(text, "CONFIG-TRIP"):
+		// A config update and a commands update the read loop publishes,
+		// then the trip behind them.
+		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.claude.catalog()})
+		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateAvailableCommands, "availableCommands": []any{}})
+		trip()
 		s.hang(id)
 	case strings.Contains(text, "STDERR"):
 		// A diagnostic on the adapter's stderr, then the trip.

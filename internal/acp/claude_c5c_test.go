@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -260,3 +261,76 @@ func TestClaudeDrainDeliversWhatCameBeforeEOF(t *testing.T) {
 		t.Fatalf("the drain dropped what came before the EOF: %s", got)
 	}
 }
+
+// TestKillTreeSendsNoGroupSignalAfterTheReap (review C5c item 4): once the
+// agent has been reaped its group's id may be anyone's: no raw group signal
+// goes, only the snapshot's checked members.
+func TestKillTreeSendsNoGroupSignalAfterTheReap(t *testing.T) {
+	var sent []int
+	prev := groupKill
+	groupKill = func(pid int, sig syscall.Signal) error {
+		sent = append(sent, pid)
+		return nil
+	}
+	t.Cleanup(func() { groupKill = prev })
+	c := spawnShell(t, `exit 0`, nil)
+	waitClosed(t, c.child.reapedCh, 5*time.Second, "the reap")
+	c.child.KillTree(nil)
+	if len(sent) != 0 {
+		t.Fatalf("raw group signals %v after the agent was reaped", sent)
+	}
+	// While the agent is unreaped, the group is signalled.
+	r := spawnShell(t, `sleep 60`, nil)
+	r.child.KillTree(nil)
+	if len(sent) != 1 || sent[0] != -r.child.pgid {
+		t.Fatalf("group signals %v for an unreaped agent; want one to -%d", sent, r.child.pgid)
+	}
+}
+
+// TestClaudeSeverWhileTellingAnEviction (review C5c item 9): a stop that
+// severs while the session is being told of an evicted child keeps the new
+// child's announce from it.
+func TestClaudeSeverWhileTellingAnEviction(t *testing.T) {
+	r := newClaudeRig(t)
+	var newSeen atomic.Bool
+	r.client.SetSubagentHandler(func(n SubagentNotification) {
+		if n.Evicted {
+			r.client.conn.sever()
+		}
+		if n.ChildSessionID == "newcomer" {
+			newSeen.Store(true)
+		}
+	})
+	r.ready(t)
+	for i := range ChildRouteCap {
+		r.pushOn(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"idle`+strconv.Itoa(i)+`","state":{"state":"idle","stopReason":"end_turn"}}`)
+	}
+	r.pushUpdate(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"newcomer","state":{"state":"running"}}`)
+	time.Sleep(150 * time.Millisecond)
+	if newSeen.Load() {
+		t.Fatal("the new child's announce reached the session after the sever")
+	}
+}
+
+// TestStderrCopyRetiresBehindABlockedSink (review C5c item 11): a sink that
+// never returns leaves the copy from the agent's pipe retired within the cap.
+func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
+	prev := stderrWaitBound
+	stderrWaitBound = 300 * time.Millisecond
+	t.Cleanup(func() { stderrWaitBound = prev })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	sink := writerFunc(func(p []byte) (int, error) { <-release; return len(p), nil })
+	c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", `echo one >&2; echo two >&2; exit 0`}, Stderr: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The agent has written and exited on its own: the copy holds its words.
+	waitClosed(t, c.child.exitedCh, 5*time.Second, "the agent's exit")
+	_ = c.Close()
+	waitClosed(t, c.child.stderrDone, 3*time.Second, "the stderr copy's retirement")
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

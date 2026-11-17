@@ -160,8 +160,9 @@ reach it. What changes for everyone else:
 - **A tool still running when a turn fails is shown failed.** A turn that
   fails — the agent's error, or the agent exiting — closes the tool rows it
   left running, on every provider, where they used to spin on.
-- **A claude session's index row records its model** (`model` in
-  `sessions.jsonl`), which an older craze keeps as an unknown key.
+- **A claude session's index row records its model and its effort**
+  (`model` and `effort` in `sessions.jsonl`), which an older craze keeps as
+  unknown keys; a resume asks for both again.
 - **The protocol gains a question's free text**, additive and optional: a
   question item's `allowText`, `asks.answer`'s `answer.text` and an ask
   ending's `text` ([A question's free

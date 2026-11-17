@@ -98,12 +98,13 @@ func (ch *Child) SnapshotTree() TreeSnapshot {
 }
 
 // KillTree is the overage guard's kill (plan 052 § D3): every descendant of
-// the agent that earlier or now reads in its tree, each checked to still be
-// that process, then the group with no grace (Kill) — and the group again,
-// directly, whatever the reaper had already done (an agent that exited first,
-// review C5b item 4): a group outlives its leader while a member lives, and
-// its id is not handed out again while it does. It waits until the agent has
-// been reaped.
+// the agent that earlier or now reads in its tree — the agent's group members
+// among them — each checked to still be that process (killVerified), then the
+// group with no grace (Kill). A raw signal to the group's id goes only while
+// the agent is unreaped, its pid pinning the id (review C5c item 4): an agent
+// that exited first and was reaped may leave an empty group whose id is
+// someone else's by now, so its members are reached one by one, through the
+// snapshots. It waits until the agent has been reaped.
 func (ch *Child) KillTree(earlier TreeSnapshot) {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
@@ -116,8 +117,14 @@ func (ch *Child) KillTree(earlier TreeSnapshot) {
 		seen[e] = true
 		killVerified(e)
 	}
+	ch.reapMu.Lock()
+	if !ch.reaped && !isClosed(ch.reapedCh) {
+		// The agent is unreaped (the reap waits on reapMu): its group's id
+		// cannot be anyone else's.
+		_ = groupKill(-ch.pgid, syscall.SIGKILL)
+	}
+	ch.reapMu.Unlock()
 	ch.Kill()
-	_ = groupKill(-ch.pgid, syscall.SIGKILL)
 }
 
 // groupKill is kill(2) to a group, a variable for tests.

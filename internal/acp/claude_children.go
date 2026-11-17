@@ -187,6 +187,20 @@ func (c *Client) watchHold(ctx context.Context) {
 	}()
 }
 
+// HoldSettled is closed once a claude load's post-reply hold is settled —
+// drained by ReplayDone, failed by its bounds, or ended by the client's close
+// — and at once when there is none (review C5c item 6).
+func (c *Client) HoldSettled() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cf.holdCtx == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return c.cf.holdCtx.Done()
+}
+
 // LoadContext is the session's context for its own work between a claude
 // load's reply and ReplayDone (review C4c item 1): it ends when the hold fails
 // — its bounds, its time, its load's context — or the client closes, with that
@@ -296,6 +310,9 @@ func (c *Client) ReplayDone() error {
 		return err
 	}
 	if !c.holdingLocked() {
+		// Nothing held (a trip closed the machine during the hold, or no
+		// load): the hold, if any, is settled.
+		c.endHoldContextLocked(nil)
 		c.mu.Unlock()
 		c.dispatchMu.Unlock()
 		return nil
@@ -529,10 +546,18 @@ func (c *Client) claudeSubagentLocked(n SessionNotification, root string) {
 			return
 		}
 		for _, id := range ids {
+			if c.conn.severed.Load() {
+				return
+			}
 			h(SubagentNotification{SessionID: root, Kind: SubagentUpdate, SubagentID: id, ChildSessionID: id, State: ChildUnknown, Evicted: true})
 		}
 	}
 	tellGone(evicted)
+	if c.conn.severed.Load() {
+		// Severed while a removal was being told — the overage guard's stop
+		// (review C5c item 9): nothing more reaches the session.
+		return
+	}
 	if h != nil {
 		h(sub)
 	}

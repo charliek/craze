@@ -74,6 +74,11 @@ func (s *session) sessionParams(loading bool) acp.SessionParams {
 	if loading && s.opts.Model == "" && strings.TrimSpace(s.opts.LoadModel) != "" {
 		sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: "model", Value: strings.TrimSpace(s.opts.LoadModel)})
 	}
+	if loading && s.opts.Effort == "" && strings.TrimSpace(s.opts.LoadEffort) != "" {
+		// The effort the row recorded (plan 052 L5 F1), after the model it
+		// belongs to.
+		sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: claudeEffortID, Value: strings.TrimSpace(s.opts.LoadEffort)})
+	}
 	sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: "fast", Value: "off"})
 	if s.opts.Unattended {
 		sp.Meta = map[string]any{"claudeCode": map[string]any{"options": map[string]any{
@@ -294,6 +299,9 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 	if loading && s.opts.Model == "" {
 		s.noteRecordedModel(read())
 	}
+	if loading && s.opts.Effort == "" {
+		s.noteRecordedEffort(read())
+	}
 	return nil
 }
 
@@ -331,6 +339,30 @@ func (s *session) noteRecordedModel(cur Snapshot) {
 	s.log.Note(journal.DiagNote{Kind: "recorded_model_refused", Fields: map[string]any{"recorded": want, "model": got}})
 	if w := diagWriter(s.opts); w != nil {
 		fmt.Fprintf(w, "craze: the session's recorded model %s was not applied; it runs on %s\n", sanitizeLine(want), sanitizeLine(got))
+	}
+}
+
+// claudeEffortID is the adapter's effort option's id.
+const claudeEffortID = "effort"
+
+// noteRecordedEffort is the load's effort check (plan 052 L5 F1), as
+// noteRecordedModel is the model's: an effort the adapter refused, or no
+// longer offers, keeps the adapter's, and the session says which two.
+func (s *session) noteRecordedEffort(cur Snapshot) {
+	want := strings.TrimSpace(s.opts.LoadEffort)
+	if want == "" {
+		return
+	}
+	got := ""
+	if opt := EffortOption(cur); opt != nil {
+		got = opt.Current
+	}
+	if got == want {
+		return
+	}
+	s.log.Note(journal.DiagNote{Kind: "recorded_effort_refused", Fields: map[string]any{"recorded": want, "effort": got}})
+	if w := diagWriter(s.opts); w != nil {
+		fmt.Fprintf(w, "craze: the session's recorded effort %s was not applied; it runs at %s\n", sanitizeLine(want), sanitizeLine(got))
 	}
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -71,7 +72,10 @@ func (s *session) publishUsageLocked() {
 	u := s.usage.state()
 	s.snap.Usage = &u
 	d := u
-	s.enqueueDeltaLocked("", Event{}, &StateDelta{Usage: &d})
+	// The latest usage stands for every one before it still waiting (review
+	// C5c item 8): a stalled reader holds one, not one per report.
+	ev := Event{Type: EventMeta, State: &StateDelta{Usage: &d}, At: time.Now(), Replayed: s.replaying.Load()}
+	s.log.EnqueueLatest("usage", ev)
 }
 
 // noteRateLimit keeps the adapter's latest rate limit and publishes it (§ D2).

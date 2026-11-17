@@ -377,11 +377,6 @@ func (p Provider) preflight(ctx context.Context, adapter, companion string, env 
 	if !p.isClaude() {
 		return PreflightInfo{}, nil
 	}
-	// The overage guard's trip record first (plan 052 § D3): while it holds,
-	// no claude session starts on this machine.
-	if err := overageRefusal(); err != nil {
-		return PreflightInfo{}, err
-	}
 	total := durationOr(&preflightTotalWait, defaultPreflightTotalWait)
 	ctx, cancel := context.WithTimeout(ctx, total)
 	defer cancel()

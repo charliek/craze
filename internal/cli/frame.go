@@ -210,6 +210,7 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 			Compat:        agent.ClaudeCompat{},
 			LoadSessionID: row.SessionID,
 			LoadModel:     row.Model,
+			LoadEffort:    row.Effort,
 			Title:         row.Title,
 			TitlePinned:   row.Pinned,
 		})

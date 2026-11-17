@@ -167,7 +167,9 @@ func TestClaudeOverageRecordFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	overageMu.Lock()
-	overageFallback = func(string) string { return filepath.Join(notADir, "fallback.json") }
+	// A fallback whose directory cannot be made (its parent is missing):
+	// nowhere to write, and nothing there to read.
+	overageFallback = func(string) string { return filepath.Join(t.TempDir(), "missing", "craze", "fallback.json") }
 	overageMu.Unlock()
 	_, stopped2 := overageRig2(t)
 	r2, _ := startClaude(t, "claude-overage", Options{Interactive: true})

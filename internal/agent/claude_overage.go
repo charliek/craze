@@ -91,6 +91,15 @@ func overageSeams() (path, fallback string, now time.Time) {
 	return path, overageFallback(path), overageNow()
 }
 
+// overageClock is the guard's now alone: no path is resolved (review C5c
+// item 3), so a trip never waits on the working directory.
+func overageClock() time.Time {
+	overageMu.Lock()
+	now := overageNow
+	overageMu.Unlock()
+	return now()
+}
+
 // epochTime is an epoch-seconds field of the adapter's as a time, the zero
 // time for none.
 func epochTime(sec float64) time.Time {
@@ -153,7 +162,7 @@ func stopGrace() time.Duration { return durationOr(&overageStopGrace, defaultSto
 // carries extends the hold (review C5 item 4). It answers the error the
 // running turn ends with: the first trip's.
 func (s *session) tripOverage(rl acp.RateLimit) error {
-	_, _, now := overageSeams()
+	now := overageClock()
 	rec := newOverageRecord(rl, now)
 	s.mu.Lock()
 	if hasReset(rl, now) {
@@ -174,8 +183,14 @@ func (s *session) tripOverage(rl acp.RateLimit) error {
 		primaryErr, err error
 	}
 	done := make(chan written, 1)
+	at := s.recordPaths()
+	// The session's close waits for this write, bounded (review C5c item 1):
+	// a host that stops right after the trip does not take a pending hold
+	// with it.
+	s.recordWrites.Add(1)
 	go func() {
-		where, primaryErr, err := writeOverageRecord(rec)
+		defer s.recordWrites.Done()
+		where, primaryErr, err := writeOverageRecord(at, rec)
 		done <- written{where, primaryErr, err}
 	}()
 	var w *written
@@ -282,8 +297,15 @@ func (s *session) containOverage(err error) error {
 		// A foreign turn still open when the client closes ends with it too.
 		client.FailForeign(err)
 		grace := stopGrace()
+		s.mu.Lock()
+		killed := make(chan struct{})
+		s.overageKilled = killed
+		s.mu.Unlock()
 		go func() {
 			client.StopWithin(grace)
+			// The kill is done — descendants, group, agent: the session's
+			// close, which waits for this (review C5c item 2), may go on.
+			close(killed)
 			s.afterOverageStop(err, idle)
 		}()
 	}
@@ -332,7 +354,7 @@ func (s *session) guardForeignStart(f acp.ForeignTurn) {
 	if !f.Running || !s.provider().isClaude() || s.replaying.Load() {
 		return
 	}
-	refusal := overageRefusal()
+	refusal := overageRefusalAt(s.recordPaths())
 	if refusal == nil {
 		return
 	}
@@ -354,7 +376,7 @@ func (s *session) promptGate(ctx context.Context) error {
 	if !s.provider().isClaude() {
 		return nil
 	}
-	return overageRefusal()
+	return overageRefusalAt(s.recordPaths())
 }
 
 // claudePromptTrip is the guard's read of a claude prompt's error (§ D3, §
@@ -388,4 +410,53 @@ func (s *session) StoppedErr() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.overage
+}
+
+// recordPaths is where this session's trip record is, resolved once (review
+// C5c item 3): at the start, before anything else of the guard's runs.
+func (s *session) recordPaths() overagePaths {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.recordResolved {
+		s.recordAt, s.recordResolved = resolveOveragePaths(), true
+	}
+	return s.recordAt
+}
+
+// The bounds of the close's waits for the guard's work in flight (review C5c
+// items 1, 2), vars for tests.
+var (
+	recordWriteDrain = 10 * time.Second
+	overageKillJoin  = 5 * time.Second
+)
+
+// joinOverage is the close's wait for the guard's work still in flight: the
+// stop's kill, at most overageKillJoin — a `craze prompt` that exits right
+// after its turn must not abandon the descendant sweep — and the trip
+// record's write, at most recordWriteDrain, after which the host's log says
+// which record may not hold.
+func (s *session) joinOverage() {
+	s.mu.Lock()
+	killed := s.overageKilled
+	at := s.recordAt
+	s.mu.Unlock()
+	if killed != nil {
+		t := time.NewTimer(overageKillJoin)
+		select {
+		case <-killed:
+		case <-t.C:
+		}
+		t.Stop()
+	}
+	written := make(chan struct{})
+	go func() { s.recordWrites.Wait(); close(written) }()
+	t := time.NewTimer(recordWriteDrain)
+	defer t.Stop()
+	select {
+	case <-written:
+	case <-t.C:
+		if w := diagWriter(s.opts); w != nil {
+			fmt.Fprintf(w, "craze: the Claude overage record %s was still being written when the session closed; it may not hold\n", sanitizeLine(at.primary))
+		}
+	}
 }

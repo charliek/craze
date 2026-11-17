@@ -127,6 +127,12 @@ type Row struct {
 	// Additive, as CrazeID is: written only when set.
 	Model string `json:"model,omitempty"`
 
+	// Effort is the session's effort as its provider last reported it, for
+	// the same providers as Model (claude, plan 052 L5 F1): a load sends it
+	// back unless --effort names another. An empty one in an upsert leaves
+	// the row's as it was. Additive: written only when set.
+	Effort string `json:"effort,omitempty"`
+
 	// TitleKind is only meaningful as input to Upsert; see the type's doc.
 	// It is never read from or written to the file.
 	TitleKind TitleKind `json:"-"`
@@ -250,6 +256,7 @@ func (s *Store) Upsert(in Row) error {
 		applyUnattended(&records[i].Row, in.Unattended)
 		applyWebSearch(&records[i].Row, in.WebSearch)
 		applyModel(&records[i].Row, in.Model)
+		applyEffort(&records[i].Row, in.Effort)
 		found = true
 		break
 	}
@@ -274,6 +281,7 @@ func (s *Store) Upsert(in Row) error {
 		applyWebSearch(&rec.Row, inheritedWebSearch(records, in.CrazeID))
 		applyWebSearch(&rec.Row, in.WebSearch)
 		applyModel(&rec.Row, in.Model)
+		applyEffort(&rec.Row, in.Effort)
 		records = append(records, rec)
 	}
 
@@ -287,6 +295,14 @@ func (s *Store) Upsert(in Row) error {
 func applyModel(row *Row, model string) {
 	if m := strings.TrimSpace(model); m != "" {
 		row.Model = m
+	}
+}
+
+// applyEffort records the effort an upsert carries; an empty one says
+// nothing and leaves the row's.
+func applyEffort(row *Row, effort string) {
+	if e := strings.TrimSpace(effort); e != "" {
+		row.Effort = e
 	}
 }
 
@@ -902,6 +918,7 @@ func decodeLine(line string) (record, error) {
 	// model (plan 052 § C4) likewise: a string is the model, anything else
 	// none, left in extra to be written back as it came.
 	model, modelKnown := raw["model"].(string)
+	effort, effortKnown := raw["effort"].(string)
 
 	extra := make(map[string]any, len(raw))
 	for k, v := range raw {
@@ -909,6 +926,9 @@ func decodeLine(line string) (record, error) {
 	}
 	if modelKnown {
 		delete(extra, "model")
+	}
+	if effortKnown {
+		delete(extra, "effort")
 	}
 	for _, k := range []string{"sessionId", "provider", "cwd", "title", "pinned", "crazeId", "createdAt", "updatedAt"} {
 		delete(extra, k)
@@ -928,6 +948,7 @@ func decodeLine(line string) (record, error) {
 			Unattended: decodeUnattended(raw["unattended"]),
 			WebSearch:  webSearch,
 			Model:      model,
+			Effort:     effort,
 			CreatedAt:  createdAt,
 			UpdatedAt:  updatedAt,
 		},
@@ -991,6 +1012,10 @@ func encodeLine(rec record) ([]byte, error) {
 	if rec.Row.Model != "" {
 		// Written only when there is one, as crazeId (plan 052 § C4).
 		out["model"] = rec.Row.Model
+	}
+	if rec.Row.Effort != "" {
+		// Likewise (plan 052 L5 F1).
+		out["effort"] = rec.Row.Effort
 	}
 	out["createdAt"] = rec.Row.CreatedAt.UTC().Format(time.RFC3339Nano)
 	out["updatedAt"] = rec.Row.UpdatedAt.UTC().Format(time.RFC3339Nano)

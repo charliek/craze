@@ -192,7 +192,7 @@ func TestClaudeOverageWakeUnderBackpressure(t *testing.T) {
 		for range r.s.Events() {
 		}
 	}()
-	if _, _, err := writeOverageRecord(overageRecord{Until: time.Now().Add(time.Hour), Window: "seven_day", At: time.Now()}); err != nil {
+	if _, _, err := writeOverageRecord(resolveOveragePaths(), overageRecord{Until: time.Now().Add(time.Hour), Window: "seven_day", At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	stall.Store(true)

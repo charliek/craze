@@ -363,6 +363,8 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		// The model the row recorded, which claude's load sends back unless
 		// --model names one (plan 052 § C4); other providers ignore it.
 		LoadModel: row.Model,
+		// And its effort (plan 052 L5 F1).
+		LoadEffort: row.Effort,
 	}
 	opts.WebFlag, opts.WebFlagOrigin = f.webSearchSetting(), agent.WebFlagGiven
 	if opts.WebFlag == agent.WebFlagAbsent {

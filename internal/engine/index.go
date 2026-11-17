@@ -1030,6 +1030,10 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		// The model the session is on, every write (plan 052 § C4): a load
 		// of the row sends it back.
 		row.Model = snap.CurrentModel
+		// And its effort (plan 052 L5 F1), which a load sends back too.
+		if opt := agent.EffortOption(snap); opt != nil {
+			row.Effort = opt.Current
+		}
 	}
 	if err := w.opts.Store.Upsert(row); err != nil {
 		if report {

@@ -183,6 +183,14 @@ type session struct {
 	// line about the record's whereabouts is being written (fallbackLine).
 	tripUntil      time.Time
 	recordLineBusy atomic.Bool
+	// recordAt is where the session's trip record is, resolved once
+	// (recordPaths); recordWrites counts the record writes in flight and
+	// overageKilled closes once the overage stop's kill is done — the close
+	// waits for both, bounded (joinOverage).
+	recordAt       overagePaths
+	recordResolved bool
+	recordWrites   sync.WaitGroup
+	overageKilled  chan struct{}
 	// compacting is the claude compaction open now ("-" for one with no id),
 	// "" for none; compactedLast the id of the last that ended (claude_notes.go).
 	compacting, compactedLast string
@@ -691,6 +699,15 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	env := p.spawnEnv(s.opts.Env, companion, cwd)
 	// claude's preflight (§ A4), at the very paths the spawn uses, under the
 	// environment it spawns with, before anything is spawned.
+	if p.isClaude() {
+		// The overage guard's trip record first (plan 052 § D3), at the paths
+		// the session resolves once, here (review C5c item 3): while it holds,
+		// no claude session starts on this machine.
+		if err := overageRefusalAt(s.recordPaths()); err != nil {
+			s.unstart()
+			return false, err
+		}
+	}
 	info, err := p.preflight(ctx, binary, companion, env, cwd)
 	if err != nil {
 		s.unstart()
@@ -2672,6 +2689,12 @@ func (s *session) Close() error {
 func (s *session) teardown() {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
+		if s.provider().isClaude() {
+			// The overage guard's kill and record write in flight finish
+			// first, bounded (review C5c items 1, 2): a close that ends the
+			// process must not abandon either.
+			s.joinOverage()
+		}
 		s.mu.Lock()
 		s.closed = true
 		close(s.done)
@@ -3413,7 +3436,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			close(s.commandsApplied)
 		}
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 		// A new catalog is a trigger for the skills too (plan 043 P5): grok
 		// advertises the skills it has loaded, and one created since the last
 		// scan is as likely to be on disk. Asked for with s.mu released, and
@@ -3432,7 +3455,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			s.enqueueDeltaLocked("", Event{Mode: mode}, &StateDelta{Mode: &mode})
 			s.inUseCheckLocked()
 			s.mu.Unlock()
-			s.flushDelta()
+			s.flushReadLoopDelta()
 		}
 	case acp.UpdateSessionInfo:
 		// session_info_update reuses the tool title field on the wire.
@@ -3459,7 +3482,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// folds state.
 		s.enqueueDeltaLocked("", Event{Text: title}, &StateDelta{Title: &title})
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
@@ -3483,7 +3506,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// under (L3 F1).
 		s.inUseCheckLocked()
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 	case acp.UpdatePlan:
 		if !s.provider().planUpdatesAreTodos {
 			return
@@ -3821,6 +3844,17 @@ func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 // which is why every caller hands emit a payload of its own (cloneTool,
 // cloneSubagent, a copied slice): nothing may change it while it is read.
 // No caller holds s.mu here; the log's boundary is never taken under it.
+// flushReadLoopDelta is flushDelta for a delta the read loop enqueued: on
+// claude it is not waited for (review C5c item 5) — the dispatch is held, and a
+// stalled reader must never keep the read loop from a tripping usage behind it;
+// the queue keeps the delta's order (emitCtx).
+func (s *session) flushReadLoopDelta() {
+	if s.provider().isClaude() {
+		return
+	}
+	s.flushDelta()
+}
+
 func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
@@ -3833,6 +3867,21 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 		s.log.Abandoned()
 		return false
 	default:
+	}
+	if s.provider().isClaude() {
+		// claude's publication never waits for a reader (review C5c items 5,
+		// 10): the read loop that emits must always reach a tripping usage
+		// behind what it emits, so every event is queued — in the one order,
+		// beside the state deltas queued the same way. An event that carries
+		// an error, which the queue does not keep, is published directly,
+		// once the queue ahead of it is through.
+		if ev.Err == nil {
+			s.log.Enqueue(ev)
+			return true
+		}
+		if s.log.Pending() {
+			_ = s.log.Flush(ctx, s.done)
+		}
 	}
 	return s.log.Publish(ctx, s.done, ev)
 }

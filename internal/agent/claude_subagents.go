@@ -388,6 +388,15 @@ func (s *session) retireChildrenAtEnd(client *acp.Client) {
 	if testRetireJoining != nil {
 		testRetireJoining()
 	}
+	// And after a load's hold, when one is pending (review C5c item 6): what
+	// the agent sent behind the load's reply was read before the end, and is
+	// delivered by the drain — once it has drained, or the hold has failed by
+	// its own bounds — before any row is retired.
+	select {
+	case <-client.HoldSettled():
+	case <-s.done:
+		return
+	}
 	// And after the claude dispatch outside the read loop — ReplayDone's
 	// drain — has handed on and published what it was routing (review C4c
 	// item 4): a running row it publishes never follows the retirement.

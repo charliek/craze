@@ -1071,9 +1071,10 @@ func (e *Engine) observe(ev agent.Event) {
 	}
 	e.observeRowTimes(ev)
 	e.observeCatalog(ev)
-	if ev.State != nil && ev.State.Model != nil && e.idx.recordsModel() {
-		// The model moved, and this provider's rows carry it (plan 052 §
-		// C4): the row is rewritten with it. A touch, so a session with no
+	if ev.State != nil && (ev.State.Model != nil || ev.State.Config != nil) && e.idx.recordsModel() {
+		// The model or the options moved, and this provider's rows carry
+		// the model and the effort (plan 052 § C4, L5 F1): the row is
+		// rewritten with them. A touch, so a session with no
 		// row yet conjures none — its first write carries the model anyway.
 		e.idx.post(indexWork{touch: true})
 	}

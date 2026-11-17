@@ -390,11 +390,19 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	if stderrDst == nil {
 		stderrDst = io.Discard
 	}
-	// Every byte still reaches the sink; the recorder keeps the last of
-	// them for a failed start's words (Client.StderrTail).
-	child.stderrTail = newStderrTail(stderrDst)
+	// Every byte still reaches the sink — through a queue of its own, so a
+	// sink that blocks never holds the copy (review C5c item 11) — and the
+	// recorder keeps the last of them for a failed start's words
+	// (Client.StderrTail).
+	sink := newAsyncSink(stderrDst)
+	child.stderrTail = newStderrTail(sink)
 	go func() {
 		_, _ = io.Copy(child.stderrTail, stderr)
+		// The copy has reached the pipe's end: the queue is handed to the
+		// sink for at most the cap, and the copy is over either way. Past
+		// it, only the sink's own writer is left, in the write that has not
+		// returned; it ends when that does.
+		sink.closeWithin(stderrWaitBound)
 		close(child.stderrDone)
 	}()
 

@@ -506,16 +506,19 @@ type EventLog struct {
 	// outboxMaxEvents and outboxMaxBytes are the soft bound — a test lowers them
 	// directly, before anything enqueues, because the bound is the log's business
 	// and no caller has a reason to choose it.
-	outboxMu        sync.Mutex
-	outbox          []outboxBatch
-	outboxEvents    int
-	outboxBytes     int
-	outboxMaxEvents int
-	outboxMaxBytes  int
-	enqueued        uint64
-	drained         uint64
-	waiters         []*flushWaiter
-	drainerStarted  bool
+	outboxMu sync.Mutex
+	outbox   []outboxBatch
+	// outboxSuperseded counts events EnqueueLatest dropped for a later one of
+	// the same key.
+	outboxSuperseded atomic.Int64
+	outboxEvents     int
+	outboxBytes      int
+	outboxMaxEvents  int
+	outboxMaxBytes   int
+	enqueued         uint64
+	drained          uint64
+	waiters          []*flushWaiter
+	drainerStarted   bool
 	// outboxWake tells the idle drainer there is a batch (capacity 1: a
 	// collapsed pair of wake-ups is a drainer that finds both batches).
 	outboxWake chan struct{}
@@ -970,6 +973,9 @@ type outboxBatch struct {
 	// Enqueue: the drainer writes the batch's first sequence number into it
 	// once the whole batch is committed.
 	ticket *Ticket
+	// key, when set, names what the batch states (EnqueueLatest): a later
+	// batch of the same key replaces it while it waits.
+	key string
 }
 
 // Ticket is the receipt of one EnqueueTicket: once the batch has been
@@ -1097,7 +1103,27 @@ func (l *EventLog) EnqueueTicket(evs ...Event) *Ticket {
 	return t
 }
 
-func (l *EventLog) enqueue(t *Ticket, evs []Event) {
+// Pending reports whether the outbox holds events not yet committed: a
+// session that publishes an event directly while it does would put it ahead of
+// them (review C5c item 10), and enqueues it behind them instead.
+func (l *EventLog) Pending() bool {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	return l.enqueued > l.drained
+}
+
+// EnqueueLatest is Enqueue of one event that states the whole of something —
+// a usage section — under key: a batch of the same key still waiting in the
+// outbox is dropped for it, so a stalled reader holds at most one per key
+// (review C5c item 8). The new one goes at the end, behind everything enqueued
+// since, so the order the session said things in is kept.
+func (l *EventLog) EnqueueLatest(key string, ev Event) {
+	l.enqueueKeyed(nil, []Event{ev}, key)
+}
+
+func (l *EventLog) enqueue(t *Ticket, evs []Event) { l.enqueueKeyed(t, evs, "") }
+
+func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string) {
 	if len(evs) == 0 {
 		return
 	}
@@ -1109,7 +1135,7 @@ func (l *EventLog) enqueue(t *Ticket, evs []Event) {
 		l.droppedAtClose.Add(int64(len(evs)))
 		return
 	}
-	b := outboxBatch{evs: make([]pendingEvent, len(evs)), ticket: t}
+	b := outboxBatch{evs: make([]pendingEvent, len(evs)), ticket: t, key: key}
 	for i, ev := range evs {
 		if ev.Err != nil {
 			// Never read: not Error(), not Unwrap, not Is or As. ev is this
@@ -1126,6 +1152,21 @@ func (l *EventLog) enqueue(t *Ticket, evs []Event) {
 	if l.outboxIsCut() {
 		l.droppedAtClose.Add(int64(len(evs)))
 		return
+	}
+	if key != "" {
+		for i, old := range l.outbox {
+			if old.key != key || old.ticket != nil {
+				continue
+			}
+			// Superseded while it waited: it was never committed, so the
+			// running totals forget it as if it had never been enqueued.
+			l.outbox = slices.Delete(l.outbox, i, i+1)
+			l.outboxEvents -= len(old.evs)
+			l.outboxBytes -= old.bytes
+			l.enqueued -= uint64(len(old.evs))
+			l.outboxSuperseded.Add(int64(len(old.evs)))
+			break
+		}
 	}
 	l.outbox = append(l.outbox, b)
 	l.outboxEvents += len(b.evs)

@@ -119,3 +119,60 @@ func (c *Client) StderrTail(wait time.Duration) []byte {
 	}
 	return c.child.stderrTail.tail()
 }
+
+// asyncSinkQueue bounds what an asyncSink holds for a sink that is behind: past
+// it, chunks are dropped and counted.
+const asyncSinkQueue = 256
+
+// asyncSink is the agent's stderr sink behind a queue of its own (review C5c
+// item 11): the copy from the agent's pipe never waits on the sink, so a sink
+// that blocks for good leaves one goroutine — its writer, in the write that
+// has not returned, and at most asyncSinkQueue chunks behind it — not the copy,
+// its pipe and the child it belongs to. A sink that keeps up gets every byte,
+// in order.
+type asyncSink struct {
+	dst     io.Writer
+	ch      chan []byte
+	done    chan struct{}
+	once    sync.Once
+	dropped int64
+	mu      sync.Mutex
+}
+
+func newAsyncSink(dst io.Writer) *asyncSink {
+	a := &asyncSink{dst: dst, ch: make(chan []byte, asyncSinkQueue), done: make(chan struct{})}
+	go func() {
+		defer close(a.done)
+		for b := range a.ch {
+			_, _ = a.dst.Write(b)
+		}
+	}()
+	return a
+}
+
+// Write queues a copy of p for the sink, or drops it when the queue is full.
+func (a *asyncSink) Write(p []byte) (int, error) {
+	b := append([]byte(nil), p...)
+	select {
+	case a.ch <- b:
+	default:
+		a.mu.Lock()
+		a.dropped++
+		a.mu.Unlock()
+	}
+	return len(p), nil
+}
+
+// closeWithin ends the queue and waits, at most d, for the sink to have
+// taken what it held; it answers whether it did.
+func (a *asyncSink) closeWithin(d time.Duration) bool {
+	a.once.Do(func() { close(a.ch) })
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-a.done:
+		return true
+	case <-t.C:
+		return false
+	}
+}

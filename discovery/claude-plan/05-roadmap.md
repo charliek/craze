@@ -134,8 +134,9 @@ own id, reuse of a row by a follow-up, and unattended `craze new --wait --plan` 
 `_session/steering` and injected mid-turn (L2). On the mac-mini (L5, 8 of 8 checks): read and write cards, resume,
 question and "Other", plan approve and reject, a sub-agent row, an image prompt, `/compact` and two concurrent
 sessions all passed. Known and left: no "Working" line during a foreign turn, finished child rows show no model,
-`--wait` counts no tool calls for the Agent call (L4), `craze -c` restores a claude session's model but not its
-effort (L5 F1), and a new session without `--model` starts on Claude Code's default (L5 O1).
+`--wait` counts no tool calls for the Agent call (L4), and a new session without `--model` starts on Claude Code's
+default (L5 O1). `craze -c` restoring the model but not the effort (L5 F1) is fixed: the index row records the
+effort too, and a resume asks for it again (C5d).
 
 On macOS an old tmux server can lose login-keychain access (`claude auth status` reads signed out in its panes); a
 fresh server started from the ssh login works.

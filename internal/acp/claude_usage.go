@@ -253,6 +253,14 @@ func (c *Client) StopWithin(grace time.Duration) {
 // right after the connection is severed, before the kill.
 var testAfterSever func()
 
+// SetAfterSeverForTest sets testAfterSever for a test in another package and
+// returns the restore. Never called outside tests.
+func SetAfterSeverForTest(f func()) (restore func()) {
+	prev := testAfterSever
+	testAfterSever = f
+	return func() { testAfterSever = prev }
+}
+
 // PromptQuota is a claude prompt result's `_meta.quota.token_count`: the
 // turn's own tokens as the adapter counts them, and whether it carried them.
 type PromptQuota struct {

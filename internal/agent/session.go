@@ -1300,6 +1300,9 @@ type Options struct {
 	// § C4) sends back in its session/load unless Model names one. Other
 	// providers ignore it.
 	LoadModel string
+	// LoadEffort is the effort the row recorded (sessions.Row.Effort), sent
+	// back the same way unless Effort names one (plan 052 L5 F1).
+	LoadEffort string
 	// Unattended marks a session nobody attends (craze new --wait's host,
 	// cli's unattendedPolicy): claude's is started without the tools that
 	// schedule work for after its host has exited (plan 052 § E3).

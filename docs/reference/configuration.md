@@ -266,6 +266,10 @@ One JSON object per line:
   every other provider's rows have no key. A resume of the row asks the
   adapter for it again unless `--model` names one. A value that is not a
   string is read as none and kept.
+- `effort` is the effort a claude session was last at, written and read the
+  same way as `model`: changed as `/effort` (or the model picker) changes it,
+  asked for again by a resume unless `--effort` names one, absent from every
+  other provider's rows.
 
 **A `--continue` or `--resume` never changes the persisted default
 provider.** Loading yesterday's grok thread is not a decision about
@@ -923,10 +927,11 @@ skills and MCP servers — applies as it does in Claude Code, but for these:
 - **An unattended session** (`craze new --wait`) is started without
   `ScheduleWakeup`, `Monitor` and `CronCreate`, which schedule work for after
   the host has exited.
-- **The model is remembered.** A claude session's [index](#session-index) row
-  records its model (`model`), and a resume asks for it again, unless
-  `--model` names one; a model the adapter no longer takes leaves a note and
-  the session runs on the adapter's.
+- **The model and the effort are remembered.** A claude session's
+  [index](#session-index) row records its model (`model`) and its effort
+  (`effort`), and a resume asks for each again, unless `--model` or
+  `--effort` names one; a model or an effort the adapter no longer takes
+  leaves a note and the session runs on the adapter's.
 - **`--force`** answers a permission with the option that allows that one
   call, never the one that saves a permanent rule into your Claude settings;
   a request with no such option shows its card.

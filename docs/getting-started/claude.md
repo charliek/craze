@@ -69,7 +69,7 @@ and the `npm i -g` above bring them up to date.
 - Your Claude Code setup applies — settings, hooks, permission rules,
   `CLAUDE.md`, skills, MCP servers — except that craze starts each session in
   Manual (or `plan` under `--plan`), keeps fast mode off, and owns the
-  session's model. [What craze sets](../reference/configuration.md#what-craze-sets)
+  session's model and effort. [What craze sets](../reference/configuration.md#what-craze-sets)
   lists each.
 
 ## Plan only
@@ -123,7 +123,10 @@ running, and on a prompt's rate-limit failure. When one arrives craze:
    (`~/.craze/claude-overage.json`, or under `$CRAZE_HOME`), holding until the
    limit resets (an hour on when Claude gives no reset time). A later sign
    with a later reset extends it, and two craze processes writing at once
-   keep the later of the two;
+   keep the later of the two. The write is durable — synced to the disk
+   before it counts as written — and a session that closes, or a `craze`
+   that exits, while it is still being written waits for it up to 10
+   seconds, then says in its log which record may not hold;
 2. **ends the running turn** — yours, or one Claude started on its own — with
    a `quota` error: *Claude would bill this as extra usage: your plan's 7-day
    limit is reached (resets …). craze stopped this session; the request in
@@ -132,7 +135,10 @@ running, and on a prompt's rate-limit failure. When one arrives craze:
    Claude 2 seconds, then kills the adapter's process group outright — Claude
    Code and every sub-agent and background command in it — and, first, every
    process the adapter started that left that group (a command that made a
-   session of its own). Nothing Claude sends after that is shown. A session
+   session of its own). A session closed while this stop is still killing
+   waits for the kill, up to 5 seconds, so a `craze prompt` that exits
+   right after its turn does not leave it half done. Nothing Claude sends
+   after that is shown. A session
    that was idle says why in the transcript, and the session's host stops: it
    is no one's until you resume it. `craze -c` (or `craze send`) resumes it,
    in a fresh adapter, once the limit has reset.
@@ -146,7 +152,10 @@ If craze's directory will not take the record (it is read-only, the disk is
 full), craze writes it to a fallback only you can write into —
 `$XDG_RUNTIME_DIR/craze/` on Linux, your per-user temporary directory on macOS
 — named in the session's journal, and every check reads both. A fallback
-directory that is a symlink or not yours is never used. With no fallback, or
+directory that is a symlink or not yours is never written to, and while it is
+there every claude session is refused, naming it, as is one that cannot be
+checked (an I/O error, or no answer within two seconds); only a fallback
+directory that does not exist means no fallback. With no fallback, or
 neither file writable, the session that tripped still stops, and its error says
 the hold could not be recorded: other claude sessions on the machine are not
 refused then. A trip never waits on a slow disk for more than a second before
@@ -156,6 +165,12 @@ A record that is there and cannot be read — not a regular file, a symlink, or
 on a disk that does not answer within two seconds — refuses every claude
 session until it is fixed or removed.
 
+Where the record is — craze's directory and the fallback — is settled once, as
+the session starts, so a trip never looks it up. A `CRAZE_HOME` given as a
+relative path on a network filesystem that has stopped answering can hold a
+claude start while craze finds its directory; that delays a start, never a
+stop.
+
 **What craze cannot do.** It is containment, not prevention:
 
 - the request that carries the sign has already been billed, and so may the
@@ -163,11 +178,14 @@ session until it is fixed or removed.
 - a session that starts while the account is already in extra usage gets no
   sign until its first usage report, so that first request is billed;
 - work Claude does that craze never hears about cannot be stopped by it;
-- the kill reaches the adapter's process group and every process in the
-  adapter's process tree when the stop begins or when it kills — each checked
-  to still be that process before it is signalled (on macOS a best effort) —
-  even if the adapter exited first; a process that left that tree before
-  either look (forked twice and handed to the system) is out of reach.
+- the kill reaches the adapter's process group while the adapter is still
+  there, and every process in the adapter's process tree when the stop
+  begins or when it kills — each checked to still be that process before it
+  is signalled (on macOS a best effort) — even if the adapter exited first;
+  once the adapter is gone its group is no longer signalled as a whole (the
+  number may be another program's by then), only the processes found in it.
+  A process that left that tree before either look (forked twice and handed
+  to the system) is out of reach.
 
 **Turn off extra usage on your Claude account** (claude.ai, under your plan's
 usage settings): that is the only hard guarantee, and craze recommends it for
