@@ -6,11 +6,11 @@
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
                        ╭────────────────────────────────────────────────────╮                       
                        │provider                                            │                       
                        │> cursor                                     default│                       
                        │  grok                                              │                       
+                       │  claude                                            │                       
                        │  native                                            │                       
                        │↑↓ · tab · enter starts · esc uses default          │                       
                        ╰────────────────────────────────────────────────────╯                       

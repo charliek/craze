@@ -100,13 +100,32 @@ end `it exits when idle`.
   native session's cached prompt prefix starts fresh once
   ([Native web search](../reference/configuration.md#native-web-search)).
 
-### A Claude provider, reached with `--provider claude`
+### A Claude provider
 
 craze can now drive **your own Claude Code on your Claude Pro or Max plan**
 through the `claude-agent-acp` adapter ([Claude on your
-plan](claude.md)). It is a preview: `--provider claude`, `provider =
-"claude"` and `CRAZE_PROVIDER=claude` reach it, and no listing shows it yet.
-What changes for everyone else:
+plan](claude.md)). It is listed after grok — by `craze providers`, the
+startup picker, `/provider`, `--help` and the hub's `sessions.createOptions` —
+and `--provider claude`, `provider = "claude"` and `CRAZE_PROVIDER=claude`
+reach it. What changes for everyone else:
+
+- **Every provider listing has a fourth row**, `claude`, between grok and
+  native: unavailable on a machine without the adapter or Claude Code, named
+  with its install command. A script that reads `craze providers --json` or
+  `sessions.createOptions` by position, or counts three providers, sees four.
+  The unknown-provider and no-default errors name `claude` too
+  (`want cursor, grok, claude, or native`).
+- **The usage section is no longer native-only**: a claude session reports
+  one too, with optional `plan`, `window`, `windowUtilization`, `resetsAt` and
+  `model` keys after the four it always has ([Usage](../reference/protocol.md#usage)).
+  A client that does not know them is unaffected.
+- **A `notice` event** carries one of Claude Code's notices, and a claude
+  session sends `compaction` events too, with no sizes; `craze prompt --json`
+  prints a `notice` line ([JSON events](../reference/cli.md#json-events)).
+  Only claude sends either.
+- **The claude overage guard keeps a record**, `claude-overage.json` in
+  craze's directory, which refuses claude starts and prompts on the machine
+  until the limit it names resets ([Extra usage](claude.md#extra-usage-the-overage-guard)).
 
 - **`claude` is a provider id now.** It used to be an unknown one: `--provider
   claude` exited 2, and `provider = "claude"` warned and started cursor. Both

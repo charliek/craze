@@ -7,14 +7,21 @@ hosts as its other providers, with Claude Code doing the work. craze runs the
 adapter, the Agent Client Protocol project's bridge to Claude Code, and the
 adapter runs your signed-in `claude`.
 
-!!! note "A preview"
-    The provider is reached with `--provider claude` and is not yet listed by
-    `craze providers`, the picker or `--help`. Its question and plan cards,
-    modes (`Shift+Tab` cycles Manual, accept edits and plan) and interjections
-    work ([Cards](../reference/tui.md#cards)): as in Claude Code, `Esc` on a
-    question cancels it, aborting the tool that asked. Sub-agents and
-    background work work too ([below](#background-work-and-sub-agents)); plan
-    usage arrives in a later release, and it is listed then.
+claude is listed after grok — in `craze providers`, the startup picker,
+`/provider` and `--help` — and reached with `--provider claude` too. Its
+question and plan cards, modes (`Shift+Tab` cycles Manual, accept edits and
+plan) and interjections work ([Cards](../reference/tui.md#cards)): as in
+Claude Code, `Esc` on a question cancels it, aborting the tool that asked.
+Sub-agents and background work work too
+([below](#background-work-and-sub-agents)), and the status row shows your
+plan's usage ([below](#usage-and-your-plans-limits)).
+
+!!! warning "Turn off extra usage on your Claude account"
+    craze stops a session that Claude says is billing extra usage, but that
+    is **containment, not prevention**: the request that tells craze has
+    already been billed. The only hard guarantee is extra usage turned off
+    on your Claude account. [Extra usage](#extra-usage-the-overage-guard)
+    says what craze does and what it cannot do.
 
 ## Set it up
 
@@ -30,12 +37,15 @@ adapter runs your signed-in `claude`.
     npm i -g @agentclientprotocol/claude-agent-acp
     ```
 
-3. **Start a session:**
+3. **Start a session:** pick `claude` in the startup picker, or name it:
 
     ```shell
     craze --provider claude
     craze prompt --provider claude "explain this repository"
     ```
+
+    `craze providers` says whether both binaries were found, and names the
+    one missing.
 
 craze finds the adapter on `PATH` (or `[agents].claude` in `config.toml`, or
 `--agent-bin`), and `claude` on `PATH`. A `claude` that is not on `PATH` is
@@ -81,6 +91,61 @@ is why the adapter's own report is checked too.
 
 Fast mode bills as extra usage on a Claude plan, so craze refuses `--fast`
 with claude and turns fast mode off whenever it finds it on.
+
+## Usage and your plan's limits
+
+The status row's usage part, on a claude session, reads like
+`3% ctx · 59.6k / 122k tok · max · 7d 45%`: how full the context is, the last
+turn's tokens and the session's (as Claude counts them; **never dollars** — the
+adapter's cost figure is what the API would charge, not what your plan pays),
+your plan, and how much of its current limit window is used: `5h` for the
+five-hour window, `7d` for a seven-day one. Claude reports the window only when
+it changes, so the figure is the last one it sent
+([the usage part](../reference/tui.md#usage-and-cost)).
+
+**Plan mode runs on Sonnet,** whatever model you picked: Claude Code switches
+to it for planning, and it spends your plan accordingly. When Claude's usage
+reports name another model family than the one picked, the status row says
+the one in use first: `sonnet (in use; picked Haiku 5.5 · low)`.
+
+## Extra usage: the overage guard
+
+A Claude plan can be set to keep going past its limit as **extra usage**,
+billed on top of the plan. craze runs claude on the plan alone, so it watches
+for the signs that a request was, or would be, billed that way — Claude's own
+report that extra usage is in use, a limit window that is the extra-usage one,
+or the plan's limit reached while extra usage is allowed — on every usage
+report, whether you prompted, Claude is working on its own, or nothing is
+running, and on a prompt's rate-limit failure. When one arrives craze:
+
+1. **writes a trip record**, `claude-overage.json` in craze's directory
+   (`~/.craze/claude-overage.json`, or under `$CRAZE_HOME`), holding until the
+   limit resets (an hour on when Claude gives no reset time);
+2. **ends the running turn** — yours, or one Claude started on its own — with
+   a `quota` error: *Claude would bill this as extra usage: your plan's 7-day
+   limit is reached (resets …). craze stopped this session; the request in
+   flight may already have been billed.*;
+3. **stops the session:** it cancels the turn, gives Claude 2 seconds, then
+   kills the adapter's process group — Claude Code and every sub-agent and
+   background command with it. Nothing Claude sends after that is shown. The
+   session is still yours: `craze -c` resumes it once the limit has reset.
+
+**The record is machine-wide.** Until it expires, every claude session start
+and every claude prompt on this machine — another project's too — is refused
+with `quota`, naming the reset time. It expires on its own; if you turned
+extra usage off, or your limit reset early, delete the file to go on at once.
+
+**What craze cannot do.** It is containment, not prevention:
+
+- the request that carries the sign has already been billed, and so may the
+  one in flight when craze stops the session;
+- a session that starts while the account is already in extra usage gets no
+  sign until its first usage report, so that first request is billed;
+- work Claude does that craze never hears about cannot be stopped by it.
+
+**Turn off extra usage on your Claude account** (claude.ai, under your plan's
+usage settings): that is the only hard guarantee, and craze recommends it for
+every account it drives.
 
 ## Background work and sub-agents
 
@@ -128,4 +193,6 @@ words and its kind. The common ones:
   sign in to a Pro or Max plan;
 - `claude-agent-acp … is older than craze needs`: run the `npm i -g` above;
 - `agent binary not found: claude-agent-acp is not on PATH`: install the
-  adapter, or set `[agents].claude`.
+  adapter, or set `[agents].claude`;
+- `Claude would bill this as extra usage: …`: the overage guard's trip record
+  holds ([above](#extra-usage-the-overage-guard)).

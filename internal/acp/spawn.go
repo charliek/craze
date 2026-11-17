@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -202,7 +203,11 @@ type Child struct {
 	// request.
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
-	stderrDone   chan struct{}
+	// killNow, set before the shutdown request (Kill), makes the reaper send
+	// SIGKILL where it would send SIGTERM first: the overage guard's stop
+	// (plan 052 § D3), which gives the agent no grace to make one more call.
+	killNow    atomic.Bool
+	stderrDone chan struct{}
 	// stderrTail keeps the end of what the agent wrote to its stderr, on its
 	// way to the sink (Client.StderrTail); nil for a child Spawn did not
 	// start.
@@ -312,6 +317,26 @@ func (ch *Child) Shutdown() {
 	}
 	ch.shutdownOnce.Do(func() { close(ch.shutdownCh) })
 	<-ch.reapedCh
+}
+
+// Kill is Shutdown with no grace: the reaper's signals are SIGKILL from the
+// first, to the agent's group as to what it leaves in it. It waits until the
+// agent has been reaped.
+func (ch *Child) Kill() {
+	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
+		return
+	}
+	ch.killNow.Store(true)
+	ch.Shutdown()
+}
+
+// termSignal is the first signal a shutdown sends: SIGTERM, or SIGKILL after
+// Kill.
+func (ch *Child) termSignal() syscall.Signal {
+	if ch.killNow.Load() {
+		return syscall.SIGKILL
+	}
+	return syscall.SIGTERM
 }
 
 func Spawn(opts SpawnOptions) (*Client, error) {

@@ -129,7 +129,7 @@ func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 
 // escalate is step 2: the agent still runs and has been asked to stop.
 func (ch *Child) escalate(observed <-chan observation) observation {
-	ch.signal(syscall.SIGTERM)
+	ch.signal(ch.termSignal())
 	grace := time.NewTimer(shutdownGrace)
 	defer grace.Stop()
 	select {
@@ -147,7 +147,7 @@ func (ch *Child) cleanGroup() {
 	if !ch.groupLive() {
 		return
 	}
-	ch.signal(syscall.SIGTERM)
+	ch.signal(ch.termSignal())
 	if ch.groupDrained(shutdownGrace) {
 		return
 	}
@@ -261,7 +261,7 @@ func (ch *Child) reapPolling() {
 		// the agent, or its zombie.
 		switch {
 		case termed.IsZero() && isClosed(ch.shutdownCh):
-			_ = sendSignal(ch.pid, syscall.SIGTERM)
+			_ = sendSignal(ch.pid, ch.termSignal())
 			termed, request = time.Now(), nil
 		case !termed.IsZero() && !killed && time.Since(termed) >= shutdownGrace:
 			_ = sendSignal(ch.pid, syscall.SIGKILL)

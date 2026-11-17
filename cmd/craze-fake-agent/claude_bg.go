@@ -163,11 +163,15 @@ func (s *server) claudeSetupTraffic(sid string, post bool) {
 		if !post {
 			return
 		}
-		s.update(sid, map[string]any{"sessionUpdate": "notice", "notice": map[string]any{"level": "info", "text": "a notice"}})
+		s.update(sid, map[string]any{"sessionUpdate": "notice", "severity": "info", "title": "a notice"})
 		s.update(sid, map[string]any{"sessionUpdate": "plan", "entries": []any{}})
 		s.usage(sid, true)
 		s.update(sid, map[string]any{"sessionUpdate": "compaction_summary_chunk", "content": map[string]string{"type": "text", "text": "summary"}})
 		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateAvailableCommands, "availableCommands": []any{}})
+	case "claude-overage":
+		if post {
+			s.claudeOverageSetup(sid)
+		}
 	case "claude-compaction-idle":
 		if !post {
 			return

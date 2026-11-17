@@ -196,6 +196,9 @@ Flags:
                       background work and children (claude_bg.go): wakes
                       with no prompt in flight, idle traffic, sub-agents
                       announced with subagent_update, and the held prompt
+          claude-usage, claude-overage, claude-errors
+                      usage and plan limits, the overage guard's trips and
+                      the prompt errors (claude_usage.go)
 
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
@@ -336,7 +339,8 @@ func main() {
 		"claude-replay-load", "claude-notice-idle", "claude-compaction-idle",
 		"claude-subagent", "claude-subagent-nested", "claude-subagent-early-child",
 		"claude-subagent-reuse", "claude-subagent-unknown", "claude-child-ask",
-		"claude-held-bg-subagent", "claude-unattended-bg":
+		"claude-held-bg-subagent", "claude-unattended-bg",
+		"claude-usage", "claude-overage", "claude-errors":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

@@ -96,6 +96,7 @@ var kinds = map[agent.EventType]kindRow{
 	agent.EventTurn:        {class: classState | classStream, main: foldTurn, childIgnored: true},
 	agent.EventCompaction:  {class: classMarker | classStream, main: foldCompaction, child: childCompaction},
 	agent.EventStepRetry:   {class: classMarker | classStream, main: foldStepRetry, child: childStepRetry},
+	agent.EventNotice:      {class: classStream, main: foldNotice, childIgnored: true},
 }
 
 // ------------------------------------------------------------ stream kinds
@@ -554,6 +555,15 @@ func childCompaction(t *Transcript, ev agent.Event) {
 	case agent.CompactionEnded:
 		t.endCompaction(c, t.model.stamp(ev.At))
 	}
+}
+
+// foldNotice is the agent's notice (claude's, plan 052 § B2): a note, in
+// place, that ends the run above it.
+func foldNotice(m *Model, ev agent.Event) {
+	if ev.Notice == nil {
+		return
+	}
+	m.Main.addNote(capNote(noticeNote(ev.Notice)), m.stamp(ev.At))
 }
 
 // ------------------------------------------------------------------- queue

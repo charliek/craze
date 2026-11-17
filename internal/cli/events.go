@@ -148,6 +148,24 @@ func compactionJSON(ev agent.Event) jsonCompaction {
 	return j
 }
 
+// jsonNotice is one of the agent's notices (claude's, plan 052 § B2): its
+// severity, title and description, each left out when empty.
+type jsonNotice struct {
+	Type        string `json:"type"`
+	Seq         uint64 `json:"seq,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func noticeJSON(ev agent.Event) jsonNotice {
+	j := jsonNotice{Type: "notice", Seq: ev.Seq}
+	if n := ev.Notice; n != nil {
+		j.Severity, j.Title, j.Description = n.Severity, n.Title, n.Description
+	}
+	return j
+}
+
 // jsonStepRetry says a step's model request failed and is being sent again, the
 // one line a consumer must act on for what it already read: when discarded is
 // set, the text, thought and tool lines of the same agent from seq from on are
@@ -291,6 +309,8 @@ func eventJSON(ev agent.Event) (any, bool) {
 		return compactionJSON(ev), ev.Compaction != nil
 	case agent.EventStepRetry:
 		return stepRetryJSON(ev), ev.StepRetry != nil
+	case agent.EventNotice:
+		return noticeJSON(ev), ev.Notice != nil
 	case agent.EventSubagent:
 		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:

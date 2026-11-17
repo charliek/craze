@@ -62,6 +62,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
+| `claude-overage.json` | The claude overage guard's trip record, `{until, window, at}`: written when a claude session is stopped for billing extra usage, and refusing every claude start and prompt until `until` — see [Extra usage](../getting-started/claude.md#extra-usage-the-overage-guard). Absent until then; delete it to go on at once |
 | `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `websearch.json` (the remembered [web search](#native-web-search) choice), `credentials.toml` (the [stored web search key](#the-stored-web-search-key)), `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
@@ -736,9 +737,8 @@ terminal is reset, the same as the tab title.
 
 ## Provider precedence
 
-Ids are `cursor`, `grok`, and `native`, and `claude`, which every one of
-these accepts though no listing shows it yet ([The claude
-provider](#the-claude-provider)). An empty string (`--provider ""`,
+Ids are `cursor`, `grok`, `claude` ([The claude
+provider](#the-claude-provider)) and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
 Every id is always offered in the startup picker, so the picker can never be
@@ -818,10 +818,13 @@ file.
 [`claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp),
 the ACP project's bridge to Claude Code. craze spawns the adapter, and the
 adapter runs your signed-in `claude`. craze holds no credential, never logs
-you in, and reads nothing under `~/.claude`. It is reached with `--provider
-claude` (or `provider = "claude"`, `CRAZE_PROVIDER=claude`) and is not yet
-listed by `craze providers`, the picker or `--help`. The
-[getting-started page](../getting-started/claude.md) walks through the setup.
+you in, and reads nothing under `~/.claude`. It is listed after grok by
+`craze providers`, the picker and `--help`, and reached with `--provider
+claude` (or `provider = "claude"`, `CRAZE_PROVIDER=claude`). The
+[getting-started page](../getting-started/claude.md) walks through the setup,
+and its [overage guard](../getting-started/claude.md#extra-usage-the-overage-guard)
+keeps a trip record, `claude-overage.json`, in craze's directory (`~/.craze`, or
+`$CRAZE_HOME`).
 
 ### What it needs
 
@@ -2868,7 +2871,7 @@ same turn is waited on again, and craze does not read them back.
 |----------|---------|
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | The launch's own provider's agent binary when `--agent-bin` is unset; never a session of another provider's ([Agent binaries](#agent-binaries)) |
-| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `native`; `claude` is accepted too, [not yet listed](#the-claude-provider)) |
+| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `claude` or `native`) |
 | `CRAZE_SESSION_PROVIDER` | Set by craze, never read by it yet: every ACP agent a session spawns gets the session's provider id here (`cursor`, `grok`, `claude`), replacing any it inherited, so a program the agent runs can tell which craze session it is inside. [The hub](cli.md#the-hub) removes it from its hosts' environment |
 | `CLAUDE_CODE_EXECUTABLE` | The `claude` a [claude session](#the-claude-provider) runs, when it is not the one on `PATH`. craze sets it in the adapter's environment to the path it resolved |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |

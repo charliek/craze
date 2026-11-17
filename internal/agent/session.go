@@ -156,8 +156,9 @@ const (
 	// after a request the model's window refused. Event.Compaction carries
 	// it, and Event.Agent names the sub-agent whose context it was, "" for
 	// the session's own. Every started is followed by its ended; a load's
-	// replay has only the ended of each stored compaction. No ACP provider
-	// emits it.
+	// replay has only the ended of each stored compaction. Of the ACP
+	// providers only claude emits it (plan 052 § B2), from its
+	// compaction_update: reason auto, and no sizes.
 	EventCompaction EventType = "compaction"
 	// EventStepRetry says a step's model request failed and will be sent again
 	// from the same input (StepRetryInfo): what its failed attempt streamed is
@@ -165,7 +166,22 @@ const (
 	// sub-agent whose step it was, "" for the session's own. No ACP provider
 	// emits it.
 	EventStepRetry EventType = "step_retry"
+	// EventNotice is a notice the agent sent the user (plan 052 § B2):
+	// Event.Notice carries it — a severity, a title and a description — and a
+	// client draws it as a note. Only claude sends one, from Claude Code's
+	// notices (a hook's message, a background task stopped, a model
+	// fallback).
+	EventNotice EventType = "notice"
 )
+
+// NoticeInfo is Event.Notice: one of the agent's notices. Severity is the
+// agent's word for it ("info", "warning", "error"), an open string; Title its
+// headline and Description the rest, either possibly empty but not both.
+type NoticeInfo struct {
+	Severity    string
+	Title       string
+	Description string
+}
 
 // A native step's retry budget, `provider_retries`: the harness's own.
 const (
@@ -391,9 +407,11 @@ type StateDelta struct {
 	// Usage is what the session has spent and how full its context is, as
 	// Snapshot.Usage now stands (plan 028 §3.14): a native session's, authored
 	// under its lock from the harness's report after every step, every
-	// compaction and a load's replay. It is never cleared — a session that
-	// has spent something has spent it — so a non-nil Usage is always the
-	// whole of it, and no ACP session ever sends one.
+	// compaction and a load's replay; and a claude session's (plan 052 § D1),
+	// from the adapter's usage reports, its prompt results and its plan's
+	// limit. It is never cleared — a session that has spent something has
+	// spent it — so a non-nil Usage is always the whole of it. No cursor or
+	// grok session ever sends one.
 	Usage *UsageState
 	// Catalog is the models the session offers, as Snapshot.Models now
 	// stands, and the list's revision (plan 034 §3.4, Q17): a native session's
@@ -506,7 +524,8 @@ type SendNowState struct {
 // UsageState is a session's usage section (plan 028 §3.14), on
 // StateDelta.Usage and Snapshot.Usage alike: the context the next request
 // sends and the window it goes to, and what the session has spent — in its
-// current turn and in all.
+// current turn and in all. A native session reports it, and so does claude
+// (plan 052 § D1, § D2): its tokens unpriced, and its plan's limit.
 //
 // ContextTokens is the estimated size, in tokens, of what the session's next
 // request sends; ContextWindow is the context the model it goes to works
@@ -516,11 +535,24 @@ type SendNowState struct {
 // followed — after a load, the last turn the stored session recorded — and
 // Session the whole session's: its own requests, its compactions' and the
 // sub-agents its turns ran (a child's own transcript is never added in).
+//
+// Plan, Window, WindowUtilization and ResetsAt are a plan's limit (claude's
+// alone, plan 052 § D2; empty, 0 and the zero time for every other session):
+// the subscription ("max"), the window the latest limit report named
+// ("five_hour", "seven_day", ...), its use from 0 to 1 — 0 when the report
+// carried none — and when it resets. Model is the model the agent's last usage
+// report said it ran (claude's `_claude/model`), "" when none did: plan mode
+// runs on Sonnet whatever model is picked.
 type UsageState struct {
-	ContextTokens int64
-	ContextWindow int64
-	Turn          Spend
-	Session       Spend
+	ContextTokens     int64
+	ContextWindow     int64
+	Turn              Spend
+	Session           Spend
+	Plan              string
+	Window            string
+	WindowUtilization float64
+	ResetsAt          time.Time
+	Model             string
 }
 
 // WebStatusState is a native session's web search, session-wide (issues
@@ -745,8 +777,8 @@ type Snapshot struct {
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, as the last StateDelta.Usage left
 	// it. nil until a native session's first step — or its load's replay —
-	// reports one, and always nil for an ACP session. Its own copy, cloned by
-	// Snapshot.
+	// or a claude session's first report (plan 052 § D1) sets one, and always
+	// nil for a cursor or grok session. Its own copy, cloned by Snapshot.
 	Usage *UsageState
 	// WebStatus is the session's web search as the last StateDelta.WebStatus
 	// left it (issues #137, #141): nil until a native session that offered
@@ -849,6 +881,8 @@ type Event struct {
 	// rather than produced now. It is stamped on every event emitted between
 	// the two EventReplay phases.
 	Replayed bool
+	// Notice is set on EventNotice: the agent's notice.
+	Notice *NoticeInfo
 	// Compaction is set on EventCompaction: one end of one compaction.
 	Compaction *CompactionInfo
 	// Turn is set on EventTurn: one phase of one engine-driven turn.

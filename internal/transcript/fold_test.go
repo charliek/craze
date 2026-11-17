@@ -1204,3 +1204,23 @@ func TestClaudeForeignEndingDrawsItsFailure(t *testing.T) {
 		t.Fatalf("a cancelled foreign turn drew %q", got)
 	}
 }
+
+// TestClaudeNoticeAndCompactionNotes (plan 052 § B2): a notice is a note of
+// its title and description, a warning leading with its severity; a claude
+// compaction, which reports no sizes, notes that it ran and nothing more, and
+// one cancelled notes why.
+func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Severity: "info", Title: "Task stopped by user", Description: "build."}, At: at(1)},
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Severity: "warning", Title: "Stop hook says"}, At: at(2)},
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Description: "only words"}, At: at(3)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionAuto}, At: at(4)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionAuto}, At: at(5)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionAuto, Err: "cancelled"}, At: at(6)},
+	)
+	want := []string{"Task stopped by user: build.", "warning: Stop hook says", "only words", NoteCompacted, NoteCompactionFailed + ": cancelled"}
+	if got := factTexts(m.Main, "note"); !slices.Equal(got, want) {
+		t.Fatalf("notes %q\nwant %q", got, want)
+	}
+}

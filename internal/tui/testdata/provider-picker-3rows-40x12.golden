@@ -1,7 +1,7 @@
   ╭──────────────────────────────────╮  
   │provider                          │  
-  │  cursor                          │  
   │  grok                            │  
+  │  claude                          │  
   │> native                   default│  
   │↑↓ · tab · enter starts · esc use…│  
   ╰──────────────────────────────────╯  

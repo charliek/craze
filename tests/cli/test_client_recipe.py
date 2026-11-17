@@ -462,6 +462,13 @@ def test_a_client_against_a_real_hub(
             },
             {"id": "grok", "label": "grok", "state": "ready"},
             {
+                "id": "claude",
+                "label": "claude",
+                "state": "unavailable",
+                "reason": "claude-agent-acp not found on PATH",
+                "fix": f"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in {config}",
+            },
+            {
                 "id": "native",
                 "label": "native",
                 "state": "needs_setup",

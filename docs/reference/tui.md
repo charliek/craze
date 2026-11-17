@@ -7,8 +7,8 @@
 
 The TUI is the default command. It refuses to start on a non-tty.
 
-Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`
-and `native` (see [Configuration](configuration.md#provider-precedence)) —
+Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
+`claude` and `native` (see [Configuration](configuration.md#provider-precedence)) —
 before the session is constructed. The preselected row is the resolved default
 (see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
@@ -27,7 +27,8 @@ box starts the default.
 
 As the dialog opens, craze checks each provider the way
 [`craze providers`](cli.md#craze-providers) does — whether its binary
-resolves, whether native has a model provider with a key, and on a Mac
+resolves (claude's two: the adapter and Claude Code's `claude`, the missing
+one named), whether native has a model provider with a key, and on a Mac
 whether this craze runs in the login session cursor needs — and marks every
 row that cannot start:
 
@@ -36,6 +37,7 @@ row that cannot start:
 │provider                                            │
 │> cursor                       unavailable · default│
 │  grok                                              │
+│  claude                                 unavailable│
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
 │install cursor-agent, or set [agents].cursor in     │
@@ -123,9 +125,12 @@ Top to bottom:
 
 Row 1 reads `workspace · branch · provider · model · usage · elapsed`. The
 model carries what the agent lets craze set beside it, `Name (high · fast)`:
-the effort when the model offers one, and `fast` only when it is on. The usage
-part is the native provider's alone (see [Usage and cost](#usage-and-cost)),
-and the elapsed time is the session's age. When the terminal is too narrow the
+the effort when the model offers one, and `fast` only when it is on. On a
+claude session whose usage reports name another model family than the one
+picked — plan mode runs on Sonnet — the model reads the one in use first,
+`sonnet (in use; picked Haiku 5.5 · low)`. The usage part is the native and
+claude providers' (see [Usage and cost](#usage-and-cost)), and the elapsed
+time is the session's age. When the terminal is too narrow the
 parts go in this order: elapsed, branch, usage, provider, then the model;
 only the workspace always stays.
 
@@ -1684,6 +1689,17 @@ transcript:
 Token counts are plain under 1,000, else `k` or `M` to three significant
 figures (`890k`, `1.21M`).
 
+A **claude** session shows Claude Code's compactions the same way — the
+spinner's `compacting context…` while one runs, and a note when it ends — but
+Claude reports no sizes, so the note is `context compacted`, or `compaction
+failed: <why>` (`cancelled` for one a cancel cut short). One Claude runs while
+nothing else does is a turn of its own ([Claude working on its
+own](#claude-working-on-its-own)).
+
+Claude Code's **notices** — a hook's message, a background task it stopped, a
+model it fell back from — are notes too, in place: `<title>: <description>`,
+led by `warning:` or `error:` when Claude marks them so.
+
 ### `/compact`
 
 Native advertises one [slash command](#slash-commands), `/compact [focus]` —
@@ -1741,7 +1757,8 @@ spent, the turn's amount then the session's:
 | some usage had no price | `34% ctx · $0.04 / $1.20+` |
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
-| no usage yet (ACP, or before native's first step) | no part at all |
+| a claude session | `3% ctx · 59.6k / 122k tok · max · 7d 45%` |
+| no usage yet (cursor, grok, or before native's first step or claude's first report) | no part at all |
 
 `NN% ctx` is the context's share of the context the model works within: its
 [context default](configuration.md#native-context-default) when it has one,
@@ -1759,6 +1776,19 @@ spent, including its compactions' usage and its sub-agents', each priced by
 its own model. Row 1 drops its parts in a pinned order as the terminal
 narrows — elapsed first, then the branch, then this usage part, then the
 provider, and the model last of all.
+
+A **claude** session has a usage part too, from Claude's own reports. It is
+never in dollars: the cost the adapter reports is what the API would have
+charged, not what your plan pays, so the turn's and the session's amounts are
+tokens — the last turn's, and every turn's of this session added up, as
+Claude counts them. After them come your plan (`max`, as `claude auth status`
+says it) and the use of its latest limit window: `5h` for the five-hour
+window, `7d` for a seven-day one (`7d 45%`). Claude sends the window only when
+it changes, so the figure is the last one it sent, and the part shows the plan
+alone until the first. The context's share is of the window Claude reports for
+the model. See [Claude on your
+plan](../getting-started/claude.md#usage-and-your-plans-limits) for the
+overage guard that watches the same reports.
 
 ## Cards
 

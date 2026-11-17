@@ -62,6 +62,19 @@ type Conn struct {
 
 	wCloser io.Closer
 	rCloser io.Closer
+
+	// severed, once set (sever), makes the reader drop every frame it reads
+	// from then on, unread by anyone: the overage guard's stop (plan 052 §
+	// D3), after which nothing the agent or a child of it sends reaches the
+	// session.
+	severed atomic.Bool
+}
+
+// sever drops every frame read from here on, and answers every call still
+// pending with ErrClosed: nothing the agent sends after it is seen.
+func (c *Conn) sever() {
+	c.severed.Store(true)
+	c.failAll(ErrClosed)
 }
 
 func NewConn(in io.Reader, out io.Writer) *Conn {
@@ -312,6 +325,11 @@ func (c *Conn) readLoop() {
 			}
 			c.failAll(err)
 			return
+		}
+		if c.severed.Load() {
+			// Severed: read to the end so the agent is never held on its
+			// stdout, and handed to no one.
+			continue
 		}
 		switch {
 		case msg.IsResponse():

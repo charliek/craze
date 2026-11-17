@@ -99,6 +99,10 @@ func (f *snapFiller) fill(path string, v reflect.Value) {
 		if !f.zero {
 			v.SetUint(uint64(f.next()))
 		}
+	case reflect.Float64:
+		if !f.zero {
+			v.SetFloat(float64(f.next()) + 0.25)
+		}
 	case reflect.Bool:
 		if !f.zero {
 			n := f.next()

@@ -37,6 +37,7 @@ var ignoredForAChild = []agent.EventType{
 	agent.EventForeignTurn,
 	agent.EventReplay,
 	agent.EventTurn,
+	agent.EventNotice,
 }
 
 // routedWhateverAgentSays is the one kind the fold routes to the main model

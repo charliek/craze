@@ -51,9 +51,10 @@ and want one fast, scriptable front end for several of them.
   [failure kinds](docs/reference/cli.md#failure-kinds),
   [what a dead host leaves running](docs/reference/cli.md#what-a-dead-host-leaves-running),
   [a waiter run detached](docs/reference/cli.md#a-waiter-run-detached)
-- **Claude on your plan** (preview): your own Claude Code, on your Claude Pro
-  or Max plan, through the `claude-agent-acp` adapter, with `--provider claude`.
-  [Claude on your plan](docs/getting-started/claude.md)
+- **Claude on your plan**: your own Claude Code, on your Claude Pro or Max
+  plan, through the `claude-agent-acp` adapter — listed as `claude`, with its
+  plan usage on the status row and a guard that stops a session Claude says is
+  billing extra usage. [Claude on your plan](docs/getting-started/claude.md)
 - **Claude Code sub-agents**: a plugin that hands a task to a craze session.
   [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - **`/btw` side questions**: ask without adding to the session.
@@ -96,7 +97,7 @@ Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
 ```shell
 craze                       # pick a provider, then the TUI in the current directory
-craze --provider grok       # skip the picker (cursor, grok or native)
+craze --provider grok       # skip the picker (cursor, grok, claude or native)
 craze auth login fireworks  # connect a native provider; `craze auth login chatgpt` signs in with a ChatGPT plan
 craze --provider native     # start a native session
 craze -c                    # continue the newest session in this workspace

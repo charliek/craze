@@ -66,7 +66,7 @@ func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	const want = `craze: unknown provider "codex" (want cursor, grok, or native)`
+	const want = `craze: unknown provider "codex" (want cursor, grok, claude, or native)`
 	if ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
@@ -270,7 +270,7 @@ func providerNames(list []agent.Provider) []string {
 }
 
 // TestPickerProviders pins the picker's row list: every listed provider —
-// cursor, grok and native — whatever is installed, so the picker is never empty
+// cursor, grok, claude and native — whatever is installed, so the picker is never empty
 // and a provider whose binary is missing is a row with a state
 // (pickerAvailability), not a row left out. Native is in-process, so it is
 // unaffected by PATH or --agent-bin (plan 028 §3.16).
@@ -281,7 +281,7 @@ func providerNames(list []agent.Provider) []string {
 func TestPickerProviders(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
 	cursor, grok := agent.CursorProvider(), agent.GrokProvider()
-	want := []string{"cursor", "grok", "native"}
+	want := []string{"cursor", "grok", "claude", "native"}
 	for _, tc := range []struct {
 		name   string
 		launch agent.Provider
@@ -346,7 +346,7 @@ func TestGxIsNoLongerAProvider(t *testing.T) {
 		cmd.SetArgs([]string{"prompt", "--provider", "gx", "hi"})
 		err := cmd.Execute()
 		var ee *exitError
-		if !errors.As(err, &ee) || ee.code != 2 || ee.msg != `craze: unknown provider "gx" (want cursor, grok, or native)` {
+		if !errors.As(err, &ee) || ee.code != 2 || ee.msg != `craze: unknown provider "gx" (want cursor, grok, claude, or native)` {
 			t.Fatalf("%v", err)
 		}
 	})
@@ -412,7 +412,7 @@ func TestPromptPersistsGrokProviderKeepingOtherKeys(t *testing.T) {
 // (persistProvider/SaveProvider), which through H7 a hidden provider never
 // did (TestPersistProviderSkipsAHiddenProvider, above).
 func TestNativeIsListedAndPersistable(t *testing.T) {
-	if got, want := agent.ProviderNames(), []string{"cursor", "grok", "native"}; !reflect.DeepEqual(got, want) {
+	if got, want := agent.ProviderNames(), []string{"cursor", "grok", "claude", "native"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ProviderNames %q, want %q", got, want)
 	}
 	native, err := agent.ProviderByName("native")
@@ -444,7 +444,7 @@ func TestNativeIsListedAndPersistable(t *testing.T) {
 // one — it runs inside craze. Every command that takes the flag says which are
 // the ACP agents craze spawns and which runs inside craze.
 func TestProviderFlagUsageSaysWhatRunsWhere(t *testing.T) {
-	const want = "provider: cursor, grok (ACP agents) or native (runs inside craze)"
+	const want = "provider: cursor, grok, claude (ACP agents) or native (runs inside craze)"
 	root := NewRootCmd()
 	for _, path := range [][]string{nil, {"prompt"}, {"frame"}} {
 		cmd, _, err := root.Find(path)

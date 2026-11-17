@@ -117,6 +117,10 @@ func requestSession(params json.RawMessage) string {
 //     opens is announced ahead of the update.
 func (c *Client) routeClaude(n SessionNotification) {
 	kind := sessionUpdateKind(n.Update)
+	// The overage guard reads every usage_update first, whoever it is for and
+	// whenever it comes (plan 052 § D3): a trip ends the running turn before
+	// the update can settle it.
+	c.noteRateLimit(kind, n)
 	c.mu.Lock()
 	if c.sessionID == "" {
 		c.pendingUpdates = append(c.pendingUpdates, n)

@@ -40,6 +40,7 @@ func optionsMachine(t *testing.T) (crazeDir, pathDir string) {
 	pathDir = availPath(t)
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv(envAgentBin, "")
+	t.Setenv(agent.ClaudeExecutableEnv, "")
 	return crazeDir, pathDir
 }
 
@@ -87,6 +88,8 @@ func hubOptions(t *testing.T) (protocol.CreateOptionsResult, optionsLog) {
 func TestHubCreateOptionsReadsTheProcessCrazeHome(t *testing.T) {
 	crazeDir, pathDir := optionsMachine(t)
 	writeExecutable(t, pathDir, "cursor-agent")
+	writeExecutable(t, pathDir, "claude-agent-acp")
+	writeExecutable(t, pathDir, "claude")
 	grok := writeExecutable(t, t.TempDir(), "my-grok")
 	writeFileT(t, filepath.Join(crazeDir, "config.toml"), fmt.Sprintf("provider = \"grok\"\n\n[agents]\ngrok = %q\n", grok))
 	work := t.TempDir()
@@ -99,6 +102,7 @@ func TestHubCreateOptionsReadsTheProcessCrazeHome(t *testing.T) {
 		Providers: []protocol.ProviderOption{
 			{ID: "cursor", Label: "cursor", State: protocol.ProviderReady},
 			{ID: "grok", Label: "grok", State: protocol.ProviderReady},
+			{ID: "claude", Label: "claude", State: protocol.ProviderReady},
 			{ID: "native", Label: "native", State: protocol.ProviderNeedsSetup, Reason: nativeNoKeyReason, Fix: nativeNoKeyFix},
 		},
 		DefaultProvider: "grok",
@@ -268,7 +272,7 @@ func TestHubRecentDirsOfAnUnreadableIndex(t *testing.T) {
 	writeFileT(t, filepath.Join(crazeDir, "config.toml"), "provider = \"grok\"\n")
 	writeFileT(t, filepath.Join(crazeDir, "sessions.jsonl"), indexRow("s-1", t.TempDir(), "2026-10-03T12:00:00Z")+"{not json\n")
 	got, log := hubOptions(t)
-	if got.RecentDirs == nil || len(got.RecentDirs) != 0 || got.DefaultProvider != "grok" || len(got.Providers) != 3 {
+	if got.RecentDirs == nil || len(got.RecentDirs) != 0 || got.DefaultProvider != "grok" || len(got.Providers) != 4 {
 		t.Fatalf("the answer over a malformed index: %+v", got)
 	}
 	if len(log) != 1 || !strings.Contains(log[0], "the session index cannot be read") || !strings.Contains(log[0], "sessions.jsonl:2") {

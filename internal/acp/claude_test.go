@@ -282,7 +282,7 @@ func TestInitializeAndSessionParamsBytes(t *testing.T) {
 		msg := p.readWithin(t, 3*time.Second, "initialize")
 		want := wantInit
 		if d == DialectClaude {
-			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}},"subagents":{}}}`
+			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}},"subagents":{},"session":{"notices":{},"compaction":{}}}}`
 		}
 		if string(msg.Params) != want {
 			t.Fatalf("%s initialize\n got %s\nwant %s", d, msg.Params, want)

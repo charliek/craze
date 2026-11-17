@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const contentLengthPrefix = "content-length:"
@@ -90,7 +91,22 @@ func truncateForError(b []byte) string {
 type Encoder struct {
 	mu sync.Mutex
 	w  io.Writer
+	// fenced, once set (fence), refuses every frame but a session/cancel
+	// notification: the overage guard's stop (plan 052 § D3), which must
+	// still cancel what runs while nothing else reaches the agent. It is read
+	// under mu, after the frame's turn to write has come, so a frame queued
+	// behind a write in progress when the fence went up is refused too.
+	fenced atomic.Bool
 }
+
+// ErrFenced is a frame refused because the connection is fenced: the session
+// stopped for the overage guard (plan 052 § D3), and nothing but a
+// session/cancel goes to the agent any more.
+var ErrFenced = errors.New("acp: the session is stopping; nothing more is sent")
+
+// fence makes the encoder refuse every frame but a session/cancel
+// notification from here on.
+func (e *Encoder) fence() { e.fenced.Store(true) }
 
 func NewEncoder(w io.Writer) *Encoder {
 	return &Encoder{w: w}
@@ -106,6 +122,9 @@ func (e *Encoder) WriteMessage(msg *Message) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.fenced.Load() && (msg.Method != MethodSessionCancel || len(msg.ID) != 0) {
+		return ErrFenced
+	}
 	if _, err := e.w.Write(append(b, '\n')); err != nil {
 		return err
 	}

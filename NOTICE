@@ -22,7 +22,10 @@ Ported or adapted into craze's Claude provider and ACP client:
   (packages/provider-acp-registry/src/server/claudeAcp.ts;
   internal/agent/claude_subagents.go);
 - the ten-minute limit on a turn that sends nothing with a tool call open
-  (packages/provider-core/src/server/failure.ts; internal/acp/foreign.go).
+  (packages/provider-core/src/server/failure.ts; internal/acp/foreign.go);
+- the reading of a Claude rate limit's extra usage as allowed or in use
+  (apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts;
+  internal/acp/claude_usage.go).
 
 MIT License
 

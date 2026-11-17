@@ -718,21 +718,23 @@ func claudeModes() []string {
 	return []string{"default", "acceptEdits", "plan", "auto", "bypassPermissions"}
 }
 
-func TestClaudeProviderIsHiddenAndResolvable(t *testing.T) {
+// TestClaudeProviderIsListedAndResolvable (AC1): from C5 claude is listed,
+// after grok, and resolves by its id.
+func TestClaudeProviderIsListedAndResolvable(t *testing.T) {
 	p, err := ProviderByName("claude")
-	if err != nil || !p.Hidden() || !p.Resumable() || p.Dialect() != acp.DialectClaude || !slices.Equal(p.Bins(), []string{"claude-agent-acp"}) {
+	if err != nil || p.Hidden() || !p.Resumable() || p.Dialect() != acp.DialectClaude || !slices.Equal(p.Bins(), []string{"claude-agent-acp"}) {
 		t.Fatalf("%+v %v", p, err)
 	}
-	if slices.Contains(ProviderNames(), "claude") {
-		t.Fatal("claude is listed before C5")
+	if !slices.Equal(ProviderNames(), []string{"cursor", "grok", "claude", "native"}) {
+		t.Fatalf("listed %q; want claude after grok", ProviderNames())
 	}
-	// C4's capabilities, and nothing of a later milestone's: sub-agent rows,
-	// transcripts and the per-child stop (§ E3), but no background sub-agent
-	// presentation and no fast toggle (craze keeps fast off, § D3).
+	// The capabilities: sub-agent rows, transcripts and the per-child stop (§
+	// E3), but no background sub-agent presentation and no fast toggle
+	// (craze keeps fast off, § D3).
 	want := Capabilities{Effort: true, Modes: true, Todos: true, AskCards: true, PlanCards: true, ParameterizedPicker: true, Interject: true,
 		SubagentRows: true, SubagentTranscript: true, SubagentCancel: true}
 	if p.Capabilities() != want {
-		t.Fatalf("claude declares %+v, want C4's %+v", p.Capabilities(), want)
+		t.Fatalf("claude declares %+v, want %+v", p.Capabilities(), want)
 	}
 	if !p.isSubagentTool("Agent") || !p.isSubagentTool("Task") || p.isSubagentTool("task") {
 		t.Fatal("claude's sub-agent tool names")

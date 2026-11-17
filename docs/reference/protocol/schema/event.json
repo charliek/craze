@@ -8,7 +8,7 @@
     "type": {
       "description": "The event's kind. A client ignores a kind it does not know.",
       "type": "string",
-      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction", "step_retry"]
+      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction", "step_retry", "notice"]
     },
     "text": {"type": "string", "description": "A text, thought or user chunk; a title (meta)."},
     "mode": {"type": "string", "description": "The mode an agent-initiated meta reports."},
@@ -33,6 +33,7 @@
     "replayed": {"type": "boolean", "description": "The event came from a session/load replay."},
     "compaction": {"$ref": "#/$defs/compaction"},
     "stepRetry": {"$ref": "#/$defs/stepRetry"},
+    "notice": {"$ref": "#/$defs/notice"},
     "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
     "err": {"$ref": "#/$defs/error"},
     "stopReason": {"type": "string"},
@@ -400,13 +401,18 @@
       "additionalProperties": false
     },
     "usage": {
-      "description": "The usage section (UsageState; native only, absent for every ACP session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context the model it goes to works within (contextWindow: its default_context when that is below its context window, else the window; 0 when the window is unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key.",
+      "description": "The usage section (UsageState; native and claude, absent for every cursor and grok session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context the model it goes to works within (contextWindow: its default_context when that is below its context window, else the window; 0 when the window is unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key but the plan's, which are claude's alone and optional: plan, the subscription (\"max\"); window, the window of the plan's latest limit report (five_hour, seven_day, seven_day_opus, seven_day_sonnet, seven_day_overage_included or overage; an open string); windowUtilization, that window's use from 0 to 1, written exactly when window is (0 when the report carried none); resetsAt, when it resets; and model, the model the agent's last usage report said it ran. A claude session's spend is tokens only: costPicoUsd 0 and unpriced true.",
       "type": "object",
       "properties": {
         "contextTokens": {"type": "integer"},
         "contextWindow": {"type": "integer"},
         "turn": {"$ref": "#/$defs/spend"},
-        "session": {"$ref": "#/$defs/spend"}
+        "session": {"$ref": "#/$defs/spend"},
+        "plan": {"type": "string"},
+        "window": {"type": "string"},
+        "windowUtilization": {"type": "number", "minimum": 0},
+        "resetsAt": {"$ref": "#/$defs/time"},
+        "model": {"type": "string"}
       },
       "required": ["contextTokens", "contextWindow", "turn", "session"],
       "additionalProperties": false
@@ -575,7 +581,7 @@
       "additionalProperties": false
     },
     "compaction": {
-      "description": "One end of a compaction of a session's context (CompactionInfo; native only): phase started, then ended. reason is auto, manual or overflow, an open string. An ended one carries tokensBefore, the context's estimated size before it, and either tokensAfter, its estimated size after, or err, why no summary was written. A replay carries only the ended one of each stored compaction. The event's agent names the sub-agent whose context it was.",
+      "description": "One end of a compaction of a session's context (CompactionInfo; native, and claude's compaction_update): phase started, then ended. reason is auto, manual or overflow, an open string. A native ended one carries tokensBefore, the context's estimated size before it, and either tokensAfter, its estimated size after, or err, why no summary was written; a claude one carries no sizes, only err for one that failed or was cancelled. A native replay carries only the ended one of each stored compaction. The event's agent names the sub-agent whose context it was.",
       "type": "object",
       "properties": {
         "phase": {"type": "string"},
@@ -583,6 +589,16 @@
         "tokensBefore": {"type": "integer", "minimum": 0},
         "tokensAfter": {"type": "integer", "minimum": 0},
         "err": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "notice": {
+      "description": "A notice the agent sent the user (NoticeInfo; claude only, from Claude Code's notices): severity, the agent's word for it (info, warning, error; an open string), title its headline and description the rest. Either of title and description may be absent, never both. A client draws it as a note.",
+      "type": "object",
+      "properties": {
+        "severity": {"type": "string"},
+        "title": {"type": "string"},
+        "description": {"type": "string"}
       },
       "additionalProperties": false
     },

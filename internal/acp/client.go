@@ -102,7 +102,10 @@ type Client struct {
 	settingsHandler func(SettingsReply) error
 	subagentHandler func(SubagentNotification)
 	authHandler     func(AuthStatus)
-	promptGate      func(ctx context.Context) error
+	// rateLimitHandler is claude's (claude_usage.go): every live
+	// `_claude/rateLimit`, and the overage guard's trip.
+	rateLimitHandler func(RateLimit) error
+	promptGate       func(ctx context.Context) error
 	// refusedHandler is told of a claude request craze answered itself
 	// (claude_cards.go). claudeTools is the tool name the adapter stamped on
 	// each recent tool call, by id, in arrival order (claudeToolOrder), so a
@@ -356,6 +359,9 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 		// stream on their own ids, and Agent's own call is replaced by the
 		// child's first session_message.
 		params.ClientCapabilities.Subagents = &struct{}{}
+		// Notices and compaction as their own updates (§ B2, C5): the
+		// session draws each as a transcript note.
+		params.ClientCapabilities.Session = &SessionCapabilities{}
 	}
 	var result InitializeResult
 	if err := c.conn.Call(ctx, MethodInitialize, params, &result); err != nil {

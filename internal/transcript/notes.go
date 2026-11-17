@@ -81,7 +81,30 @@ func compactionNote(c *agent.CompactionInfo) string {
 	case agent.CompactionOverflow:
 		head = NoteCompactedOverflow
 	}
+	if c.TokensBefore == 0 && c.TokensAfter == 0 {
+		// No sizes reported (claude's compaction_update, plan 052 § B2).
+		return head
+	}
 	return head + " · " + tokenCount(c.TokensBefore) + " → " + tokenCount(c.TokensAfter) + " tokens"
+}
+
+// noticeNote is the note an agent's notice draws (plan 052 § B2): its title
+// and its description, joined by a colon, on one line; a warning or an error
+// leads with its severity.
+func noticeNote(n *agent.NoticeInfo) string {
+	title, desc := sanitizeLine(n.Title), sanitizeLine(n.Description)
+	text := title
+	switch {
+	case title == "":
+		text = desc
+	case desc != "":
+		text = title + ": " + desc
+	}
+	switch n.Severity {
+	case "warning", "error":
+		text = n.Severity + ": " + text
+	}
+	return text
 }
 
 // TokenCount is a token count as craze says one anywhere it is drawn — the

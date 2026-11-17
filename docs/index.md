@@ -1,9 +1,10 @@
 # craze
 
 A Linux and macOS terminal UI for coding agents. It talks ACP to
-[Cursor CLI](https://cursor.com/cli) (`cursor-agent acp`) or
-[Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`). You own the chrome; the provider still
-runs the agent. Its **native** provider runs the agent inside craze instead,
+[Cursor CLI](https://cursor.com/cli) (`cursor-agent acp`),
+[Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`) or your own
+Claude Code on your Claude plan ([Claude on your plan](getting-started/claude.md)).
+You own the chrome; the provider still runs the agent. Its **native** provider runs the agent inside craze instead,
 against a model provider's API or a ChatGPT plan, and needs no other CLI (see
 [Native provider](getting-started/quick-start.md#native-provider)).
 
@@ -27,9 +28,13 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
 
 ## What it does
 
-- **A TUI over three providers.** `cursor`, `grok` and the built-in
+- **A TUI over four providers.** `cursor`, `grok`, `claude` and the built-in
   `native` agent share one set of keys, cards and slash commands
   ([TUI reference](reference/tui.md)).
+- **Claude on your plan.** Your own Claude Code on your Claude Pro or Max
+  plan, with its plan usage on the status row and a guard that stops a
+  session Claude says is billing extra usage
+  ([Claude on your plan](getting-started/claude.md)).
 - **Sessions that outlive the terminal.** A detached host keeps the agent
   running; `craze ps`, `craze attach` and `craze -c` rejoin it
   ([CLI reference](reference/cli.md#sessions-outlive-their-terminal)).
@@ -87,7 +92,9 @@ To run craze you need:
     - one of: the [Cursor CLI](https://cursor.com/cli), with a working login
       (`cursor-agent login`, the same binary is also installed as `agent`); or
       the [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`),
-      with `grok login` or `XAI_API_KEY` set
+      with `grok login` or `XAI_API_KEY` set; or Claude Code signed in to a
+      Claude Pro or Max plan, with the `claude-agent-acp` adapter
+      ([Claude on your plan](getting-started/claude.md))
 
 Go 1.27.3+ (this repo pins 1.27.3 via `.mise.toml`) is needed only to build from
 source. Brew, apt and the release archives need no Go.

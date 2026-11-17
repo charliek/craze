@@ -389,18 +389,19 @@ func NativeProvider() Provider {
 // listing — the picker, --help, the unknown-provider error, and any written
 // later — leaves it out without having to remember a filter (plan 018
 // §3.4). Native was one of those until H7's smoke passed on both platforms;
-// D-65 lists it here, after grok (plan 028 §3.16).
+// D-65 lists it here, after grok (plan 028 §3.16). claude was one until its
+// overage guard landed (plan 052 C5): it is listed after grok.
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), NativeProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
 // and nothing lists. Listing them in Providers and filtering at each listing
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
-// hidden entry can never shadow a listed id. Production code registers one:
-// claude, until its cards work (plan 052 § A1; native was the entry before
-// D-65). RegisterHiddenProviderForTest plants more.
+// hidden entry can never shadow a listed id. Production code registers none
+// today (native was the entry before D-65, claude before plan 052 C5);
+// RegisterHiddenProviderForTest plants them.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -408,7 +409,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders = []Provider{ClaudeProvider()}
+	hiddenProviders []Provider
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are

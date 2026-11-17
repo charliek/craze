@@ -167,6 +167,14 @@ type session struct {
 	// fixFast): non-nil while a reset runs, closed when it has ended — fast
 	// confirmed off, or the session stopped.
 	gate claudeGate
+	// usage is claude's usage section and its plan limits (claude_usage.go),
+	// under s.mu; overage is the overage guard's stop once it has begun
+	// (claude_overage.go): the error the session stopped with, nil until then.
+	usage   claudeUsage
+	overage error
+	// compacting is the claude compaction open now ("-" for one with no id),
+	// "" for none; compactedLast the id of the last that ended (claude_notes.go).
+	compacting, compactedLast string
 	// fastTimer is the deadline of the fast reset in flight, if any (fixFast):
 	// teardown stops it, under s.mu.
 	fastTimer *time.Timer
@@ -672,9 +680,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	env := p.spawnEnv(s.opts.Env, companion, cwd)
 	// claude's preflight (§ A4), at the very paths the spawn uses, under the
 	// environment it spawns with, before anything is spawned.
-	if _, err := p.preflight(ctx, binary, companion, env, cwd); err != nil {
+	info, err := p.preflight(ctx, binary, companion, env, cwd)
+	if err != nil {
 		s.unstart()
 		return false, err
+	}
+	if p.isClaude() {
+		// The plan the status row names (§ D2).
+		s.mu.Lock()
+		s.usage.plan = sanitizeLine(info.SubscriptionType)
+		s.mu.Unlock()
 	}
 	client, err := acp.Spawn(acp.SpawnOptions{
 		Binary: binary,
@@ -739,10 +754,15 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		}
 	}
 	client.SetAuthStatusHandler(s.onAuthStatus)
+	if p.isClaude() {
+		// The plan's limit and the overage guard (plan 052 § D2, § D3).
+		client.SetRateLimitHandler(s.onClaudeRateLimit)
+	}
 	// The last check before a prompt's bytes go out (review C2b 2): held
 	// while claude's fast mode is being reset, refused once the session has
-	// stopped. Cursor and grok never have either.
-	client.SetPromptGate(s.awaitFastFix)
+	// stopped or while the overage guard's trip record holds. Cursor and grok
+	// never have any of these.
+	client.SetPromptGate(s.promptGate)
 	if p.isClaude() {
 		// A child whose agent is gone never reports again: its row ends
 		// with the transport (review C4 item 3).
@@ -1849,9 +1869,18 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.mu.Lock()
 	s.doneEmitted = true
 	s.mu.Unlock()
+	if err != nil {
+		// A claude prompt error is classified by its errorKind (§ D4), and
+		// its rate limit read by the overage guard (§ D3), whose trip stops
+		// the session and is what the turn ends with.
+		err = s.classifyPromptErr(err)
+	} else {
+		s.claudeTurnUsage(res)
+	}
 	if f := s.fatalErr(); f != nil {
-		// The login gate stopped the session under this turn (live_claude.go):
-		// the turn ends with why, whatever the closed connection said.
+		// The login gate, or the overage guard, stopped the session under
+		// this turn (live_claude.go, claude_overage.go): the turn ends with
+		// why, whatever the closed connection said.
 		err = f
 	}
 	if err == nil {
@@ -2328,6 +2357,11 @@ func (s *session) Snapshot() Snapshot {
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
 	out.Subagents = snapshotSubagents(s.subagentOrder, s.subagents)
 	out.ForeignTurn = s.foreign
+	if s.snap.Usage != nil {
+		// claude's usage section (plan 052 § D1): its own copy.
+		c := *s.snap.Usage
+		out.Usage = &c
+	}
 	return out
 }
 
@@ -3266,6 +3300,15 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 	case updateSessionMessage:
 		// claude: the root's copy of a prompt it sent a child (§ E3).
 		s.claudeSessionMessage(n.Update)
+	case updateUsageKind:
+		// claude: the context meter and the model in use (§ D1).
+		s.onClaudeUsage(n.Update)
+	case updateCompactionKind:
+		// claude: a compaction, as a transcript note (§ B2).
+		s.onClaudeCompaction(n.Update)
+	case updateNoticeKind:
+		// claude: one of Claude Code's notices, as a transcript note (§ B2).
+		s.onClaudeNotice(n.Update)
 	case acp.UpdateAgentMessage:
 		s.emit(Event{Type: EventText, Text: s.rootText(u)})
 	case acp.UpdateAgentThought:

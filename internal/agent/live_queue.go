@@ -107,6 +107,9 @@ func (s *session) onACPForeignTurn(f acp.ForeignTurn) {
 		s.noteForeignSilence(f)
 	}
 	s.onForeignTurn(info)
+	// A turn claude opened on its own while the overage guard's record holds
+	// ends with the refusal, and the session stops (§ D3).
+	s.guardForeignStart(f)
 }
 
 // noteForeignSilence is the transcript note a foreign turn the silence rule

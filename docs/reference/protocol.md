@@ -1101,7 +1101,7 @@ create sheet offers; `craze providers --hub` prints it.
 `unknown_field`.
 
 **`providers`** is every agent provider this machine lists, in craze's own
-order — `cursor`, `grok`, `native` — at most 16, each listed whether or not
+order — `cursor`, `grok`, `claude`, `native` — at most 16, each listed whether or not
 its binary is found. Each has its `id`
 (what `session.create`'s `provider` takes), its `label` (what a client shows)
 and its `state`:
@@ -2052,9 +2052,11 @@ A native session compacts its context: it summarizes the conversation so far
 and continues from the summary — on its own when the context nears the
 model's window, when a request is refused as too large, or on request, when
 the user sends `/compact [focus]` (the one command a native session
-advertises, and an ordinary prompt on the wire: no method, no capability). No
-ACP provider compacts through craze, so none of these events ever comes from
-one.
+advertises, and an ordinary prompt on the wire: no method, no capability).
+Of the ACP providers only **claude** reports one: Claude Code compacting its
+context, on its own or for `/compact`, which craze turns into the same events
+— `reason` always `auto`, and no sizes ([below](#a-claude-compaction)). Cursor
+and grok never send them.
 
 On the event stream a compaction is two `compaction` events, `started` then
 `ended`, `{phase, reason, tokensBefore?, tokensAfter?, err?}`, with the
@@ -2085,6 +2087,22 @@ note in the transcript, `context compacted · 890k → 21k tokens` (`on request`
 for `manual`, `context was too large — compacted` for `overflow`), or
 `compaction failed: <err>`.
 
+### A claude compaction
+
+claude's compaction (`compaction_update`, declared with the client capability
+`session.compaction`) is the same pair of events on the session's own stream:
+`started` when Claude says it is in progress, `ended` when it says it
+completed, failed or was cancelled. Claude reports no sizes, so neither count
+is ever set and the note is `context compacted`; a failed one carries its
+`err`, and a cancelled one `"err":"cancelled"`. A compaction Claude runs while
+nothing else runs is a turn of its own, bracketed by a `foreign_turn` with
+`reason` `compaction` ([The foreign turn](#the-foreign-turn)).
+
+```json
+{"type":"compaction","compaction":{"phase":"started","reason":"auto"},"at":"..."}
+{"type":"compaction","compaction":{"phase":"ended","reason":"auto"},"at":"..."}
+```
+
 A snapshot carries an open compaction on the transcript it belongs to — the
 main one or a child's — as `compacting {since, reason}`, absent when none is
 open, so a client that attaches mid-compaction draws the same "compacting
@@ -2092,6 +2110,27 @@ context…" until the `ended` it folds next. Both fields are additive: a client
 that does not know them ignores the kind and the member (see [Tolerant
 inbound, strict outbound](#tolerant-inbound-strict-outbound)), and neither
 bumps a codec version.
+
+## Notices
+
+A claude session passes on Claude Code's **notices** — a hook's message, a
+background task it stopped, a model it fell back from — as `notice` events
+(claude declares the client capability `session.notices`, so the adapter sends
+them as notices rather than as text in the reply):
+
+```json
+{"type":"notice","notice":{"severity":"warning","title":"Stop hook says","description":"remember the tests"},"at":"..."}
+```
+
+`severity` is Claude's word for it (`info`, `warning`, `error`; an **open
+string**), `title` its headline and `description` the rest; each is absent when
+empty, and never both of `title` and `description`. A client draws it as a note
+in the transcript, `<title>: <description>`, led by the severity for a warning
+or an error. A notice is the session's own, never a sub-agent's, and stamped
+`replayed` inside a replay like any event. Cursor, grok and native never send
+one, and a client that does not know the kind ignores it (see [Tolerant
+inbound, strict outbound](#tolerant-inbound-strict-outbound)); no codec version
+bump and no capability.
 
 ## A step's retry
 
@@ -2160,10 +2199,12 @@ A native session reports what it has spent and how full its context is: the
 **usage section**, `{contextTokens, contextWindow, turn, session}`. It is a
 state delta section like the model or the config — `state.usage` on a `meta`
 event — and it stands in the two reads of where things are: `session.state`'s
-`settings.usage` and a snapshot's `settings.usage`. No ACP provider reports
-usage through craze, so for every ACP session the key is **absent** — never
-`null` and never `{}` — as it is for a native session before its first step.
-A client reads the key's presence as "this session reports usage".
+`settings.usage` and a snapshot's `settings.usage`. A **claude** session
+reports one too ([below](#a-claude-sessions-usage)). Cursor and grok report no
+usage through craze, so for their sessions the key is **absent** — never
+`null` and never `{}` — as it is for a native session before its first step
+and a claude one before Claude's first report. A client reads the key's
+presence as "this session reports usage".
 
 `settings.usage` is **reported state, not a setting**: it sits in `settings`
 because that is where a session's state sections are read, but no client
@@ -2204,6 +2245,37 @@ before the replay's `end`), never in a delta of its own inside the bracket. A
 usage-only delta prints no `craze prompt --json` line, but it takes a `seq`
 like every event. The section is additive, like `compaction`: no codec
 version bump and no capability.
+
+### A claude session's usage
+
+A claude session's usage section comes from Claude's own reports: each usage
+report sets `contextTokens` and `contextWindow` (the context in use and the
+window Claude gives for the model), and each prompted turn's result sets
+`turn` — its tokens as Claude counts them — and adds them into `session`. It
+is **never priced**: Claude's cost figure is what the API would charge, not
+what a plan pays, so `costPicoUsd` is always `0` and `unpriced` always `true`,
+and a client shows tokens. A turn Claude runs on its own adds nothing to
+`turn` or `session`. After the four keys come the plan's, all optional and
+claude's alone:
+
+```json
+{"type":"meta","state":{"usage":{"contextTokens":30938,"contextWindow":1000000,
+  "turn":{"input":4,"output":164,"reasoning":0,"cacheRead":28511,"cacheCreation":30907,"costPicoUsd":0,"unpriced":true},
+  "session":{"input":8,"output":442,"reasoning":0,"cacheRead":90427,"cacheCreation":31234,"costPicoUsd":0,"unpriced":true},
+  "plan":"max","window":"seven_day","windowUtilization":0.45,"resetsAt":"2026-11-20T09:00:00Z","model":"claude-sonnet-5-5"}},"at":"..."}
+```
+
+| Key | Meaning |
+|---|---|
+| `plan` | The subscription Claude Code's saved login is on (`max`, `pro`) |
+| `window` | The window of the plan's latest limit report: `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` or `overage` — an open string |
+| `windowUtilization` | That window's use, `0` to `1`; present exactly when `window` is (`0` when Claude's report carried none) |
+| `resetsAt` | When that window resets |
+| `model` | The model Claude's last usage report said it ran, which can differ from the session's model: plan mode runs on Sonnet |
+
+Claude sends its limit report only when it changes, so `window` and the rest
+are the last one sent, kept until the next. Each is absent when empty; a
+client that does not know them ignores them.
 
 ## Web search counts
 

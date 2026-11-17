@@ -229,7 +229,7 @@ func TestProviderPickerDrawsTheStates(t *testing.T) {
 
 	// Every row ready: the box is exactly what it is with no availability.
 	ready := availPicker(t, availPickerConfig(t, agent.CursorProvider(), func() []ProviderAvail {
-		return []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "native", State: AvailReady}}
+		return []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "claude", State: AvailReady}, {ID: "native", State: AvailReady}}
 	}, nil, log.build), 80, 24)
 	plainPicker := goldenPicker(t, agent.CursorProvider(), nil, 80, 24)
 	if got, want := plainView(ready), plainView(plainPicker); got != want {
@@ -873,7 +873,7 @@ func TestSessProviderAsksOffTheUpdate(t *testing.T) {
 	if as.callCount() != 0 {
 		t.Fatalf("Update called the source %d times", as.callCount())
 	}
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) || cmdItem(t, m, "cursor").Refusal != "" {
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "native"}) || cmdItem(t, m, "cursor").Refusal != "" {
 		t.Fatalf("before any answer /provider offers %v (cursor %+v)", got, cmdItem(t, m, "cursor"))
 	}
 	for _, c := range []tea.Cmd{mustCmd(t, open, "readSessAvail"), mustCmd(t, load, "startLoad")} {

@@ -26,7 +26,7 @@ import (
 
 // providersMachine is the scratch machine the cases run on: grok on PATH and
 // nothing else, an empty craze directory (no native key), and its
-// config.toml's path, which cursor's fix names.
+// config.toml's path, which cursor's and claude's fixes name.
 func providersMachine(t *testing.T) (config string) {
 	t.Helper()
 	availPath(t, "grok")
@@ -34,7 +34,13 @@ func providersMachine(t *testing.T) (config string) {
 	home := crazeHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv(envAgentBin, "")
+	t.Setenv(agent.ClaudeExecutableEnv, "")
 	return filepath.Join(home, "config.toml")
+}
+
+// claudeAdapterFix is craze providers' fix for claude's adapter missing.
+func claudeAdapterFix(config string) string {
+	return "install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in " + config
 }
 
 // TestProvidersTable (A2): the human table — a header, then one row per
@@ -48,11 +54,12 @@ func TestProvidersTable(t *testing.T) {
 		t.Fatalf("craze providers: exit %d %q", code, stderr)
 	}
 	row := func(cells ...string) string {
-		return fmt.Sprintf("%-10s%-13s%-32s%s\n", cells[0], cells[1], cells[2], cells[3])
+		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
 		row("cursor", "unavailable", "cursor-agent not found on PATH", "install cursor-agent, or set [agents].cursor in "+config) +
 		row("grok", "ready", "-", "-") +
+		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix)
 	if stdout != want {
 		t.Fatalf("craze providers:\n%s\nwant:\n%s", stdout, want)
@@ -82,6 +89,8 @@ func TestProvidersJSON(t *testing.T) {
 		`{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":` +
 		q("install cursor-agent, or set [agents].cursor in "+config) + `},` +
 		`{"id":"grok","label":"grok","state":"ready"},` +
+		`{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":` +
+		q(claudeAdapterFix(config)) + `},` +
 		`{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":` +
 		q(nativeNoKeyFix) + `}]}` + "\n"
 	if stdout != want {
@@ -101,7 +110,7 @@ func TestProvidersJSONIsTheWiresProviderOption(t *testing.T) {
 	var doc struct {
 		Providers []json.RawMessage `json:"providers"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 3 {
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 4 {
 		t.Fatalf("craze providers --json printed %q (%v)", stdout, err)
 	}
 	for _, p := range doc.Providers {
@@ -203,11 +212,12 @@ func TestProvidersHub(t *testing.T) {
 		t.Fatalf("craze providers --hub: exit %d %q", code, stderr)
 	}
 	row := func(cells ...string) string {
-		return fmt.Sprintf("%-10s%-13s%-32s%s\n", cells[0], cells[1], cells[2], cells[3])
+		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
 		row("cursor", "unavailable", "cursor-agent not found on PATH", "install cursor-agent, or set [agents].cursor in "+config) +
 		row("grok", "ready", "-", "-") +
+		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix) +
 		"default: grok\n" +
 		"recent: " + work + "\n" +
@@ -224,7 +234,7 @@ func TestProvidersHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	var res protocol.CreateOptionsResult
-	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 3 ||
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 4 ||
 		len(res.RecentDirs) != 2 || res.RecentDirs[0].Dir != work {
 		t.Fatalf("craze providers --hub --json printed %q (%v)", stdout, err)
 	}

@@ -144,6 +144,17 @@ type ClientCapabilities struct {
 	// session. With it the adapter announces each child with subagent_update
 	// on its immediate parent and streams the child on its own session id.
 	Subagents *struct{} `json:"subagents,omitempty"`
+	// Session is the RFD session capabilities (plan 052 § B2): claude's
+	// alone, `session:{notices:{}, compaction:{}}`. With them the adapter
+	// sends its notices as `notice` updates instead of bold transcript text,
+	// and a compaction as `compaction_update` instead of a tool call.
+	Session *SessionCapabilities `json:"session,omitempty"`
+}
+
+// SessionCapabilities is clientCapabilities.session: two empty objects.
+type SessionCapabilities struct {
+	Notices    struct{} `json:"notices"`
+	Compaction struct{} `json:"compaction"`
 }
 
 // ElicitationCapabilities is clientCapabilities.elicitation: form only, an

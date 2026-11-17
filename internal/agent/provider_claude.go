@@ -80,14 +80,12 @@ var claudeCycleModes = []string{"default", "acceptEdits", "plan"}
 // in: Manual, or plan under --plan (§ C2).
 var claudeStartModes = []string{"default", "plan"}
 
-// ClaudeProvider is Claude Code through claude-agent-acp (plan 052 § A1). It
-// is hidden until its background work and overage guard land (C4, C5):
-// resolvable by --provider claude, CRAZE_PROVIDER and config.toml, listed by
-// nothing. It is not optional: once listed, a missing binary shows it
-// unavailable. Its capabilities arrive in the milestone that handles each
-// one: C3's cards (the question card from elicitation/create, the plan card
-// from a plan exit), modes, effort, todos, the parameterized picker and the
-// interjection (_session/steering).
+// ClaudeProvider is Claude Code through claude-agent-acp (plan 052 § A1),
+// listed after grok since its overage guard landed (C5). It is not optional:
+// a missing binary — the adapter or `claude` — shows it unavailable. Its
+// capabilities: C3's cards (the question card from elicitation/create, the
+// plan card from a plan exit), modes, effort, todos, the parameterized picker
+// and the interjection (_session/steering); C4's sub-agent rows.
 func ClaudeProvider() Provider {
 	return Provider{
 		name:        claudeName,
@@ -99,7 +97,6 @@ func ClaudeProvider() Provider {
 		defaultBins:     []string{claudeAdapterBin},
 		loginHint:       claudeLoginHint,
 		resumable:       true,
-		hidden:          true,
 		capabilities: Capabilities{
 			Effort:              true,
 			Modes:               true,
@@ -377,6 +374,11 @@ type preflightRun struct {
 func (p Provider) preflight(ctx context.Context, adapter, companion string, env []string, cwd string) (PreflightInfo, error) {
 	if !p.isClaude() {
 		return PreflightInfo{}, nil
+	}
+	// The overage guard's trip record first (plan 052 § D3): while it holds,
+	// no claude session starts on this machine.
+	if err := overageRefusal(); err != nil {
+		return PreflightInfo{}, err
 	}
 	total := durationOr(&preflightTotalWait, defaultPreflightTotalWait)
 	ctx, cancel := context.WithTimeout(ctx, total)

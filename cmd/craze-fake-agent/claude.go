@@ -31,6 +31,9 @@ import (
 //	claude-unattended-bg, claude-replay-load, claude-notice-idle,
 //	claude-compaction-idle
 //	              background work and children (claude_bg.go)
+//	claude-usage, claude-overage, claude-errors
+//	              usage, plan limits, the overage guard's trips and the prompt
+//	              errors (claude_usage.go)
 //
 // Environment (each read when the frame it shapes is sent):
 //
@@ -409,6 +412,8 @@ func (s *server) claudePrompt(msg *acp.Message) {
 			os.Exit(3)
 		}
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: "Internal error", Data: json.RawMessage(`{"errorKind":"server_error"}`)})
+	case s.claudeUsageTurn(msg.ID, sid, text):
+		// A usage, overage or error script's own turn (claude_usage.go).
 	case s.claudeBGTurn(msg.ID, sid, text):
 		// A background or children script's own turn (claude_bg.go).
 	case s.claudeCardTurn(msg.ID, sid, text):
