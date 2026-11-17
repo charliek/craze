@@ -109,7 +109,10 @@ accepted as a provider id. Nothing that mentions it breaks:
 - **`provider = "gx"` in `config.toml`, or `CRAZE_PROVIDER=gx`,** warns `craze:
   unknown provider "gx", using cursor` and starts cursor, as any unknown id
   does. Pick a provider again (`/provider`, or `provider = "grok"`) to replace
-  it.
+  it. Two paths do not fall back, as for any unknown default: `craze new
+  --wait` with no `--provider` exits 1, and a hub `session.create` that names
+  no provider is `bad_request` (`sessions.createOptions` omits the stale
+  default). Name a provider, or fix `config.toml`.
 - **`--provider gx` is refused**, exit 2: `craze: unknown provider "gx" (want
   cursor, grok, or native)`. The same refusal answers `craze new --provider gx`
   and a `session.create` that names `gx`.

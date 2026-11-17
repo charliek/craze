@@ -141,7 +141,7 @@ def exit_status(text: str) -> str | None:
 content_text = cap.content_text
 tool_results = cap.tool_results
 # Calls that are harness housekeeping, not work on the task: left out of the evidence
-# (gx's session_title is gx's alone and would name the harness).
+# (a harness's own session_title would name the harness).
 EVIDENCE_SKIP_KINDS = {"title"}
 
 

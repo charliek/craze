@@ -22,7 +22,7 @@ from test_homes_env import fake_snapshot
 
 
 def test_default_harnesses_and_task_selection_unchanged():
-    assert DEFAULT_HARNESSES == HARNESSES == ("craze", "gx", "opencode", "codex")
+    assert DEFAULT_HARNESSES == HARNESSES == ("craze", "opencode", "codex")
     assert SUPPORTED_HARNESSES == DEFAULT_HARNESSES + ("craze-web",)
     assert set(RUNNERS) == set(HOMES) == set(SUPPORTED_HARNESSES)
     tasks = load_tasks()
@@ -44,7 +44,7 @@ def test_craze_web_runs_only_web_tasks_and_only_when_named():
     web, dev = tasks["T-W1"], tasks["T-F1"]
     assert RUNNERS["craze-web"].supports(em, web) and not RUNNERS["craze-web"].supports(em, dev)
     assert RUNNERS["craze"].supports(em, web)
-    assert not RUNNERS["gx"].supports(em, web) and not RUNNERS["opencode"].supports(em, web)
+    assert not RUNNERS["opencode"].supports(em, web)
     assert RUNNERS["craze-web"].web and not any(RUNNERS[h].web for h in DEFAULT_HARNESSES)
 
     def runs(harnesses, chosen):
@@ -62,7 +62,7 @@ def test_a_craze_web_run_requires_craze_bin(capsys):
 
     assert main(["run", "--harness", "craze-web", "--tasks", "split:web"]) == 2
     assert "--craze-bin is required" in capsys.readouterr().err
-    assert main(["run", "--harness", "gx,craze-web"]) == 2
+    assert main(["run", "--harness", "opencode,craze-web"]) == 2
     assert "--craze-bin is required" in capsys.readouterr().err
     assert main(["run", "--harness", "craze-webb", "--craze-bin", "/bin/true"]) == 2
     assert "unknown harness 'craze-webb'" in capsys.readouterr().err

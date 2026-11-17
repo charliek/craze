@@ -590,7 +590,7 @@ def test_a_fresh_campaign_plans_runs_then_archives(tmp_path, monkeypatch, capsys
     try:
         paths.set_campaign("fresh")
         ms = load_models()
-        cfg = BatchConfig(harnesses=["craze", "gx"], models=[ms["glm-5.3-flash"]],
+        cfg = BatchConfig(harnesses=["craze", "opencode"], models=[ms["glm-5.3-flash"]],
                           tasks=select_tasks(load_tasks(), "smoke-explain,smoke-fix"), reps=1,
                           out=paths.runs_dir() / "smoke-1", label="smoke", snap=Snapshot(dir=tmp_path, config={},
                                                                                         hash="x"))

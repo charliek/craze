@@ -5,8 +5,8 @@ verdict files, and writes a Markdown report and its JSON:
 
 - objective pass counts per model x harness (dev, held-out, all fifteen);
 - the pairwise win-rate matrix with Wilson 90% intervals (ties count half);
-- the success bar per model: craze native against the best open harness (gx or
-  opencode), fixed from the baseline batch and recorded there -- meets, misses (with
+- the success bar per model: craze native against the best open harness (opencode,
+  since gx was retired), fixed from the baseline batch and recorded there -- meets, misses (with
   the gap) or inconclusive (incomplete coverage);
 - metric medians (requests, tool calls, tokens, cost, wall time, answer words);
 - verdicts against the log length ratio of the two answers (length bias);
@@ -53,7 +53,7 @@ from crazeeval.judge import judge_hash, task_judge_hashes, verdict_current
 from crazeeval.tasks import WEB_SPLIT, Task
 
 Z90 = 1.6448536269514722
-OPEN_HARNESSES = ("gx", "opencode")
+OPEN_HARNESSES = ("opencode",)
 NATIVE = "craze"
 # Runs that are not scored: infrastructure failures, and runs invalidated by a
 # contamination hit or a key exposure (§3.1.5). Timeouts, crashes and budget-capped runs
@@ -401,23 +401,15 @@ def win_matrix(verdicts: list[dict], splits: dict[str, str], split: str | None =
 
 
 def best_open_harness(counts: dict, verdicts: list[dict], model: str, key: str = "all") -> dict:
-    """The open harness with the higher objective count on ``key`` (§3.1.8); tiebreak:
-    its win rate in gx-vs-opencode pairs (then its name)."""
+    """The open harness with the higher objective count on ``key`` (§3.1.8). opencode is
+    the only open harness since gx was retired, so it is the only one with runs; a
+    retired arm in an archive is never chosen (archives are read by summary.py, not
+    recomputed here)."""
     have = {h: counts[(model, h)][key] for h in OPEN_HARNESSES if (model, h) in counts}
     if not have:
         return {"harness": None, "reason": "no open-harness runs"}
-    if len(have) == 1:
-        h = next(iter(have))
-        return {"harness": h, "reason": "the only open harness with runs", "counts": have}
-    a, b = OPEN_HARNESSES
-    if have[a] != have[b]:
-        h = a if have[a] > have[b] else b
-        return {"harness": h, "reason": "higher objective pass count", "counts": have}
-    wr = win_matrix(verdicts, {}, model=model).get((a, b))
-    if wr is not None and wr.rate is not None and wr.rate != 0.5:
-        h = a if wr.rate > 0.5 else b
-        return {"harness": h, "reason": f"tied counts; {a} vs {b} win rate {wr.rate:.2f}", "counts": have}
-    return {"harness": a, "reason": "tied counts and no deciding gx-vs-opencode verdicts; by name", "counts": have}
+    h = max(have, key=lambda n: (have[n], n))
+    return {"harness": h, "reason": "the only open harness with runs", "counts": have}
 
 
 def fixed_best_open_harness(baseline_batch: Path | None, baseline_runs: list[dict], verdicts: list[dict],

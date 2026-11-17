@@ -197,64 +197,6 @@ def craze_home_multi(crazedir: Path, ems: list[EvalModel], snap: Snapshot, base_
     return env
 
 
-# -- gx ---------------------------------------------------------------------------
-
-
-def gx_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict[str, str]:
-    m = snap.model(em.key)
-    if m.get("gx") is None:
-        # snapshot-config found no gx entry for the alias (config.gx_problems refuses a
-        # run before it gets here).
-        raise ValueError(f"{em.key}: the config snapshot has no gx entry (the owner's gx tables do not name "
-                         f"{em.gx}); gx cannot run on this model until it is added there and snapshot-config re-run")
-    model = dict(m["gx"])
-    model["reasoning_effort"] = em.effort
-    pid = m["gx_provider_id"]
-    provider = {
-        "base_url": base_url,
-        "api_key": paths.DUMMY_KEY,
-        "api_backend": m["gx_provider"].get("api_backend", "chat_completions"),
-    }
-    if em.provider == ANTHROPIC:
-        # gx speaks the Messages API as its "messages" backend (its user guide, custom
-        # models), and sends Anthropic's version header only as an extra header. The
-        # proxy drops gx's own credential header and sets x-api-key.
-        provider["api_backend"] = "messages"
-        provider["extra_headers"] = {"anthropic-version": ANTHROPIC_VERSION}
-    doc = {
-        # Web tools off (plan 029 §3.1.4): web_search and web_fetch, and the hosted
-        # search lane; image/video tools would call api.x.ai.
-        "disable_web_search": True,
-        "cli": {"auto_update": False},
-        "models": {
-            "default": em.gx,
-            # Title and image-description calls default to grok-4.6; pin them to the target.
-            "session_summary": em.gx,
-            "image_description": em.gx,
-        },
-        "features": {
-            "web_fetch": False,
-            "backend_tools": False,
-            "image_gen": False,
-            "video_gen": False,
-            "telemetry": False,
-            "remote_fetch": False,
-            # Per-turn summary and title refresh replay the whole conversation to the
-            # model and never reach the answer: off, to spend the budget on answers.
-            "turn_summary": False,
-            "title_refresh": False,
-        },
-        # Pre-set so gx does not rewrite the generated file on first run.
-        "marketplace": {"official_marketplace_auto_installed": True, "default_skills_installs_purged": True},
-        "model_providers": {pid: provider},
-        "model": {em.gx: model},
-    }
-    grok = home / ".grok"
-    grok.mkdir(parents=True, exist_ok=True)
-    _write(grok / "config.toml", tomli_w.dumps(doc), mode=0o600)
-    return {"GROK_HOME": f"{H}/.grok", "GROK_IMAGE_EDIT": "0"}
-
-
 # -- opencode ---------------------------------------------------------------------
 
 OPENCODE_MODELS_INSIDE = f"{paths.SANDBOX_CONFIG}/opencode-models.json"
@@ -342,7 +284,7 @@ def codex_home(home: Path, em: EvalModel, snap: Snapshot, base_url: str) -> dict
     return {"CODEX_HOME": f"{H}/.codex", paths.DUMMY_KEY_VAR: paths.DUMMY_KEY}
 
 
-HOMES = {"craze": craze_home, "gx": gx_home, "opencode": opencode_home, "codex": codex_home,
+HOMES = {"craze": craze_home, "opencode": opencode_home, "codex": codex_home,
          "craze-web": craze_web_home}
 
 

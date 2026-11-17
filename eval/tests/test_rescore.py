@@ -158,8 +158,8 @@ def batch(tmp_path):
         # Only the build outputs are out of scope (the final of two attempts): flips to a pass.
         "only-build": _write_run(b, xb, "craze", "glm", {**START, **edit, **BUILD_OUTPUTS}, attempts=2),
         # A genuine out-of-scope edit besides them stays failed.
-        "outside": _write_run(b, xb, "gx", "glm", {**START, **edit, "internal/harness/system.go": "f:0644:x",
-                                                   **BUILD_OUTPUTS}),
+        "outside": _write_run(b, xb, "opencode", "glm-flash", {**START, **edit, "internal/harness/system.go": "f:0644:x",
+                                                               **BUILD_OUTPUTS}),
         # A denied edit (the package's test file) stays failed.
         "denied": _write_run(b, xb, "opencode", "glm", {**START, **edit, f"{PKG}/redact_test.go": "f:0644:x",
                                                         **BUILD_OUTPUTS}),
@@ -171,7 +171,7 @@ def batch(tmp_path):
         # A fixture task has no repository ignores: nothing changes.
         "fixture": _write_run(b, xn, "craze", "glm", {**START, **BUILD_OUTPUTS}),
         # No manifests: skipped and counted.
-        "no-manifests": _write_run(b, xe, "gx", "glm", None),
+        "no-manifests": _write_run(b, xe, "opencode", "glm", None),
         # Held-out: sealed unless unsealed.
         "heldout": _write_run(b, xh, "craze", "glm", {**START, **edit, **BUILD_OUTPUTS}),
     }
@@ -194,7 +194,7 @@ def test_rescore_flips_only_what_the_build_outputs_failed(batch):
     s = rescore(batch.dir, tasks=batch.tasks)
     assert (s["examined"], s["changed"], s["skipped"]) == (8, 6, 1)
     changed = {c["run_key"]: c for c in s["changed_runs"]}
-    assert set(changed) == {"craze/glm/T-XB/rep1", "gx/glm/T-XB/rep1", "opencode/glm/T-XB/rep1",
+    assert set(changed) == {"craze/glm/T-XB/rep1", "opencode/glm-flash/T-XB/rep1", "opencode/glm/T-XB/rep1",
                             "codex/glm/T-XB/rep1", "craze/glm-flash/T-XB/rep1", "craze/glm/T-XE/rep1"}
 
     # Only the build outputs: diff_scope and objective_pass flip, in both result files.
@@ -224,7 +224,7 @@ def test_rescore_flips_only_what_the_build_outputs_failed(batch):
     den = _load(reps["denied"] / "result.json")
     assert not _check(den, "scope")["passed"] and not den["objective_pass"]
     assert _check(den, "scope")["details"]["denied"] == [f"{PKG}/redact_test.go"]
-    assert changed["gx/glm/T-XB/rep1"]["checks"] == [] and changed["opencode/glm/T-XB/rep1"]["checks"] == []
+    assert changed["opencode/glm-flash/T-XB/rep1"]["checks"] == [] and changed["opencode/glm/T-XB/rep1"]["checks"] == []
 
     # A non-ok status stays objective-fail although its scope check now passes.
     for k in ("crashed", "key"):

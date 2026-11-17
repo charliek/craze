@@ -1,7 +1,7 @@
 """Per-harness answer extraction on recorded output samples (plan 029 AC-A1).
 
 The samples under tests/samples/ are real stdout from the C1 smoke (smoke-fix on
-glm-5.3-flash for craze, gx and opencode; on deepseek-v4p1-flash for codex), key-scanned
+glm-5.3-flash for craze and opencode; on deepseek-v4p1-flash for codex), key-scanned
 before they were copied here.
 """
 
@@ -13,7 +13,6 @@ from pathlib import Path
 from crazeeval.runners.base import read_ndjson
 from crazeeval.runners.codex import extract_codex
 from crazeeval.runners.craze import extract_craze
-from crazeeval.runners.gx import extract_gx
 from crazeeval.runners.opencode import extract_opencode
 
 S = Path(__file__).parent / "samples"
@@ -42,23 +41,6 @@ def test_craze_ignores_sub_agent_text_and_leads_with_a_plan():
     ]
     assert extract_craze(ev).answer == "Final answer."
     assert extract_craze(ev, plan_text="# Plan\n1. do it").answer == "# Plan\n1. do it\n\nFinal answer."
-
-
-def test_gx_terminal_result_line():
-    ev = read_ndjson(S / "gx-smoke-fix.jsonl")
-    result = [e for e in ev if e.get("type") == "result"][-1]
-    ex = extract_gx(ev)
-    assert ex.answer == result["result"].strip() and ex.answer
-    assert "`7`" in ex.answer
-    assert ex.extra["subtype"] == "success" and ex.extra["permissionMode"] == "bypassPermissions"
-    assert "run_terminal_command" in ex.extra["tools"]
-
-
-def test_gx_error_result_has_no_answer():
-    ev = [{"type": "result", "subtype": "error_during_execution", "is_error": True, "errors": ["boom"]}]
-    ex = extract_gx(ev)
-    assert ex.answer == "" and any("boom" in n for n in ex.notes)
-    assert extract_gx([]).notes == ["no result line"]
 
 
 def test_opencode_text_of_the_last_finished_step():
@@ -96,7 +78,6 @@ def test_samples_hold_no_credentials():
 def test_recorded_samples_report_explicit_completion():
     """Review r1-c1 finding 17: each real sample ended in an explicit success."""
     assert extract_craze(read_ndjson(S / "craze-smoke-fix.jsonl")).completed
-    assert extract_gx(read_ndjson(S / "gx-smoke-fix.jsonl")).completed
     assert extract_opencode(read_ndjson(S / "opencode-smoke-fix.jsonl")).completed
     assert extract_codex(read_ndjson(S / "codex-smoke-fix.jsonl"), "x").completed
 

@@ -394,7 +394,7 @@ never touches your real clipboard.
 
 ## Evaluation harness (`eval/`)
 
-`eval/` is a separate evaluation harness for the native provider: sandboxed runs of native, gx,
+`eval/` is a separate evaluation harness for the native provider: sandboxed runs of native,
 opencode and codex against the same tasks and models, scored objectively and judged blind by
 `codex exec`. It is not part of CI or the per-commit gate, and it spends real API money — do not
 run it as part of an ordinary change.

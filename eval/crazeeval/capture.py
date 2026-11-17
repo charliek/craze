@@ -627,7 +627,7 @@ def tool_results(records: list[dict]) -> dict[str, str]:
 # -- tool kinds ---------------------------------------------------------------------------
 
 # Every tool name the four harnesses offer (read from the C1/C2 captures: craze's opencode
-# profile, gx, opencode, codex) and a few they may call, by kind. The judge's packet shows
+# profile, opencode, codex; gx was a fourth until it was retired) and a few they may call, by kind. The judge's packet shows
 # the kind, never the name: the names alone would tell it which harness a side is
 # (review r1-c2 §5). An unknown name is "other".
 TOOL_KINDS: dict[str, tuple[str, ...]] = {

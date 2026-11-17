@@ -39,8 +39,7 @@ type editCall struct {
 // _meta.updateParams says Other for every tool. search_replace and write are
 // what its own session records show changing files (tool_definitions.json and
 // updates.jsonl under ~/.grok/sessions; a real turn's are in
-// internal/agent/testdata/grok-edits.jsonl), and gx reports the same names
-// (eval/tests/samples/gx-smoke-fix.jsonl). A tool not named here does not count,
+// internal/agent/testdata/grok-edits.jsonl). A tool not named here does not count,
 // whatever kind it reports. A provider with no rule has no edits.
 var editCalls = map[string]editCall{
 	nativeName: {kinds: []string{string(tool.KindEdit)}},

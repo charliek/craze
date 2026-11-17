@@ -455,8 +455,8 @@ class Proxy:
         parts = request.path.split("/", 4)
         if len(parts) < 5 or parts[1] != "r" or not parts[2] or not parts[3]:
             if request.method in ("GET", "HEAD") and request.path == "/":
-                # gx pre-warms its HTTP client with an unauthenticated GET of the
-                # base URL's origin; nothing is forwarded, nothing counted.
+                # A harness may pre-warm its HTTP client with an unauthenticated GET of
+                # the base URL's origin; nothing is forwarded, nothing counted.
                 return self._error(404, "not-found", "nothing here")
             self._log_unrouted({"ts": time.time(), "method": request.method, "reason": "bad-path"})
             return self._error(404, "bad-path", "not a /r/<token>/<host>/... route")

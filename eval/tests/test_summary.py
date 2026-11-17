@@ -301,7 +301,7 @@ def test_a_report_the_report_builder_writes_summarizes(tmp_path):
 
     covered_runs = [run(h, t) for h in ("craze", "gx", "opencode") for t in splits]
     stray_runs = [run(h, t, STRAY) for h in ("gx", "opencode") for t in splits]
-    verdicts = [verdict(t, "craze", "gx", "x") for t in splits] + [
+    verdicts = [verdict(t, "craze", "opencode", "x") for t in splits] + [
         verdict("D1", "gx", "opencode", "x"),  # the covered model's
         verdict("D1", "gx", "opencode", "y", STRAY), verdict("H1", "gx", "opencode", "tie", STRAY)]
     rep = rp.build(rp.ReportInput(runs=covered_runs + stray_runs, verdicts=verdicts, tasks=tasks, unseal=True,
@@ -314,13 +314,13 @@ def test_a_report_the_report_builder_writes_summarizes(tmp_path):
     sm.summarize([tmp_path / "report-live"], out, "camp-y")
     g = json.loads(out.read_text())["groups"][0]
     assert g["models"] == [M] and g["other_models"] == [STRAY]
-    assert g["bar"][M]["best_open_harness"]["harness"] == "gx"
+    assert g["bar"][M]["best_open_harness"]["harness"] == "opencode"
     assert g["bar"][M]["best_open_harness"]["source"] == "fixed now and recorded in base-y/best-open-harness.json"
     assert g["bar"][M]["conditions"]["heldout"]["win_rate"]["wtl"] == [1, 0, 0]
     pooled = g["win_rates"]["dev"]["pooled"]
     assert pooled["gx vs opencode"] == _pooled(1, 0, 0) and pooled["opencode vs gx"] == _pooled(0, 0, 1)
     for split in ("dev", "heldout"):  # the stray judged no craze pair: those cells are the report's own
-        for pair in ("craze vs gx", "gx vs craze"):
+        for pair in ("craze vs opencode", "opencode vs craze"):
             assert g["win_rates"][split]["pooled"][pair] == sm.cell(rep["win_rates"][f"{split}|pooled"][pair])
     assert "gx vs opencode" not in g["win_rates"]["heldout"]["pooled"]  # only the stray's there
     assert g["provenance"]["batches"] == ["base-y"] and sm.path_hits(g) == []
@@ -342,3 +342,21 @@ def test_the_cli_prints_the_size_and_defaults_the_campaign_name(reports, tmp_pat
     assert main(["summarize", "--report", str(sealed), "--out", str(tmp_path / "t.json")]) == 2
     assert "--allow-sealed" in capsys.readouterr().err and not (tmp_path / "t.json").exists()
     assert main(["summarize", "--report", str(sealed), "--out", str(tmp_path / "t.json"), "--allow-sealed"]) == 0
+
+
+ARCHIVED = Path(__file__).resolve().parents[1] / "results" / "2026-09-plan029" / "summary.json"
+
+
+def test_the_archived_plan029_summary_still_renders_with_its_retired_gx_arm():
+    """gx was retired after plan 029, but eval/results/ is history: its summary must still
+    load and render byte for byte, the gx arm in it as recorded (a harness with no runner)."""
+    from crazeeval.runners import RUNNERS
+
+    text = ARCHIVED.read_text(encoding="utf-8")
+    doc = json.loads(text)
+    assert sm.render(doc) == text
+    assert "gx" not in RUNNERS
+    groups = doc["groups"]
+    assert any("gx" in g["harnesses"] for g in groups)
+    assert any(g["bar"][m]["best_open_harness"]["harness"] == "gx" for g in groups for m in g["bar"])
+    assert sm.scan(doc, text) == []

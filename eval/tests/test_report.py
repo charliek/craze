@@ -68,7 +68,8 @@ def test_wilson_interval():
 def test_success_bar_meets():
     runs, vs = world({}, {"D1": False}, {"D1": False, "D2": False}, {})
     sb = success_bar(runs, vs, SPLITS, M, unsealed=True)
-    assert sb["best_open_harness"]["harness"] == "gx"  # more objective passes than opencode
+    # opencode is the only open harness (gx is retired, so its arm in the data is never chosen).
+    assert sb["best_open_harness"]["harness"] == "opencode"
     assert sb["outcome"] == "meets", sb
     assert sb["all_tasks"]["win_rate"]["rate"] == 1.0 and sb["heldout"]["objective_ok"]
 
@@ -106,13 +107,12 @@ def test_success_bar_sealed_is_provisional_and_dev_only():
     assert sb["outcome"] == "provisional-meets" and "heldout" not in sb and sb["sealed"]
 
 
-def test_best_open_harness_tiebreak_by_their_head_to_head():
-    runs, vs = world({}, {"D1": False}, {"D2": False}, {})
+def test_best_open_harness_is_opencode_and_a_retired_gx_arm_is_never_chosen():
+    runs, vs = world({}, {}, {"D1": False}, {})  # gx passes everything, opencode misses D1
     counts = rp.objective_counts(runs, SPLITS)
-    vs.append(verdict("D3", "gx", "opencode", "y"))
-    assert rp.best_open_harness(counts, vs, M)["harness"] == "opencode"
-    vs[-1] = verdict("D3", "gx", "opencode", "x")
-    assert rp.best_open_harness(counts, vs, M)["harness"] == "gx"
+    best = rp.best_open_harness(counts, vs, M)
+    assert best["harness"] == "opencode" and set(best["counts"]) == {"opencode"}
+    assert rp.best_open_harness({}, vs, M)["harness"] is None
 
 
 def test_two_reps_count_as_halves():
@@ -130,9 +130,10 @@ def test_verdicts_bind_to_the_exact_scored_runs():
     bound, dropped = rp.bind_verdicts(vs + [stale], runs)
     assert dropped == 2 and stale not in bound
     assert all(not (v["hy"] == "opencode" and v["task"] == "D3") for v in bound)
-    # Only the stale verdict for D2's gx pair: coverage is incomplete, never met by it.
+    # Only the stale verdict for D2's opencode pair: coverage is incomplete, never met by it.
     runs2, vs2 = world({}, {}, {}, {})
-    vs2 = [v for v in vs2 if not (v["task"] == "D2" and v["hy"] == "gx")] + [verdict("D2", "craze", "gx", "x", xb="OLD")]
+    vs2 = [v for v in vs2 if not (v["task"] == "D2" and v["hy"] == "opencode")] + [
+        verdict("D2", "craze", "opencode", "x", xb="OLD")]
     bound2, _ = rp.bind_verdicts(vs2, runs2)
     sb = success_bar(runs2, rp.final_verdicts(bound2), SPLITS, M, unsealed=True)
     assert sb["outcome"] == "inconclusive" and sb["coverage"]["missing"]["verdict"] == ["D2"]
@@ -157,12 +158,11 @@ def test_one_final_verdict_per_pair():
 
 
 def test_best_open_harness_is_fixed_from_the_baseline_and_recorded(tmp_path):
-    base_runs, base_vs = world({}, {}, {"D1": False}, {})  # baseline: gx 5, opencode 4
+    base_runs, base_vs = world({}, {}, {"D1": False}, {})  # baseline: opencode 4 (gx's arm is retired)
     base = _write_batch(tmp_path / "base", base_runs, base_vs)
-    # The final batch re-runs the open harnesses on two tasks (a drift check): merged,
-    # opencode would now lead gx 5 to 4 -- but the baseline's choice must stand.
-    final_runs = [run("opencode", "D1", True, batch="F"), run("gx", "D2", False, batch="F"),
-                  run("craze", "D1", True, batch="F")]
+    # The final batch re-runs the open harness on a task (a drift check); the baseline's
+    # choice must stand.
+    final_runs = [run("opencode", "D1", True, batch="F"), run("craze", "D1", True, batch="F")]
     final = _write_batch(tmp_path / "final", final_runs, [])
     tasks = _tasks()
     merged = rp.load_runs([base, final], unseal=True)
@@ -171,13 +171,13 @@ def test_best_open_harness_is_fixed_from_the_baseline_and_recorded(tmp_path):
     rep = rp.build(rp.ReportInput(runs=merged, verdicts=vs, tasks=tasks, unseal=True, batches=[str(base), str(final)],
                                   baseline_batch=base, baseline_runs=rp.load_runs([base], unseal=True)))
     sb = rep["success_bar"][M]
-    assert sb["best_open_harness"]["harness"] == "gx" and "recorded" in sb["best_open_harness"]["source"]
+    assert sb["best_open_harness"]["harness"] == "opencode" and "recorded" in sb["best_open_harness"]["source"]
     record = json.loads((base / rp.BEST_OPEN_FILE).read_text())
-    assert record["models"][M]["harness"] == "gx" and record["baseline_batch"] == str(base)
+    assert record["models"][M]["harness"] == "opencode" and record["baseline_batch"] == str(base)
     # A later change to the baseline's own results cannot move it: the record stands.
-    flipped = [dict(r, objective_pass=(r["harness"] != "gx")) for r in rp.load_runs([base], unseal=True)]
+    flipped = [dict(r, objective_pass=(r["harness"] != "opencode")) for r in rp.load_runs([base], unseal=True)]
     again = rp.fixed_best_open_harness(base, flipped, [], SPLITS, [M], unsealed=True)
-    assert again[M]["harness"] == "gx" and again[M]["source"].startswith("recorded in")
+    assert again[M]["harness"] == "opencode" and again[M]["source"].startswith("recorded in")
     # Sealed, the choice is provisional (dev tasks of the baseline) and not recorded.
     other = tmp_path / "other"
     other.mkdir()
