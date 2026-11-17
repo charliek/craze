@@ -159,6 +159,9 @@ type session struct {
 	// fixFast): non-nil while a reset runs, closed when it has ended — fast
 	// confirmed off, or the session stopped.
 	gate claudeGate
+	// fastTimer is the deadline of the fast reset in flight, if any (fixFast):
+	// teardown stops it, under s.mu.
+	fastTimer *time.Timer
 	// planKept is the turn whose claude plan exit was answered keep planning,
 	// under s.mu (notePlanKept); the zero token when none.
 	planKept     TurnToken
@@ -2551,6 +2554,10 @@ func (s *session) teardown() {
 		s.mu.Lock()
 		s.closed = true
 		close(s.done)
+		if s.fastTimer != nil {
+			// A fast reset's deadline outlives nothing (review C2c 3).
+			s.fastTimer.Stop()
+		}
 		client := s.client
 		s.mu.Unlock()
 		// The skill scan in flight is cancelled and every later request

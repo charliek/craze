@@ -121,14 +121,23 @@ func (s *session) stopFor(err error) {
 		s.mu.Unlock()
 		return
 	}
-	s.gate.fatal = err
 	client := s.client
+	if client != nil {
+		// Writing stops first, in the same locked section that records the
+		// error and before it (review C2c 1): a prompt past its gate, and a
+		// write held behind another, fail rather than reach the agent, so no
+		// prompt is ever written once the stop is visible. Halt only closes
+		// the agent's stdin, so it is safe under s.mu and on the read loop.
+		client.Halt()
+	}
+	s.gate.fatal = err
+	if testStopForRecorded != nil {
+		testStopForRecorded()
+	}
 	s.mu.Unlock()
 	if client != nil {
-		// Writing stops now, synchronously: a prompt past every check, and a
-		// write held behind another, fail rather than reach the agent (review
-		// C2b 2, 3). The rest of the close runs off this goroutine.
-		client.Halt()
+		// The rest of the close runs off this goroutine: Close waits for the
+		// read loop, which may be the caller.
 		go func() { _ = client.Close() }()
 	}
 }
@@ -240,10 +249,13 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 			_, err := s.SetConfig(setCtx, "", fast.ID, off, "")
 			cancel()
 			if err = startSetFailure(setCtx, err, "fast off"); err != nil && !errors.Is(err, ErrOptionGone) {
-				if !refusedByAgent(err) {
+				if ctx.Err() != nil {
+					// The caller gave up: its own reason.
 					return err
 				}
-				return claudeErr(errkind.Config, "Claude Code refused to turn fast mode off (%s), and %s", sanitizeLine(err.Error()), FastBillsExtra)
+				// Refused, unanswered or failed: fast off is not confirmed,
+				// and that is config's to say (review C2c 4).
+				return claudeErr(errkind.Config, "craze could not confirm Claude Code's fast mode off (%s), and %s", sanitizeLine(err.Error()), FastBillsExtra)
 			}
 			if FastOn(read()) {
 				return claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
@@ -344,9 +356,10 @@ func (s *session) fixFast(done chan struct{}) {
 	// The reset's own deadline, whatever its sets do (review C2b 3): past it
 	// the session stops, which also fails a set held in its write.
 	limit := durationOr(&fastFixDeadline, defaultFastFixDeadline)
-	timer := time.AfterFunc(limit, func() {
-		s.stopFor(claudeErr(errkind.Config, "Claude Code did not confirm fast mode off within %s, and %s", limit, FastBillsExtra))
-	})
+	timer := time.AfterFunc(limit, func() { s.fastDeadline(done, limit) })
+	s.mu.Lock()
+	s.fastTimer = timer
+	s.mu.Unlock()
 	defer timer.Stop()
 	var fail error
 	for attempt := 0; ; attempt++ {
@@ -380,8 +393,35 @@ func (s *session) fixFast(done chan struct{}) {
 	close(done)
 }
 
+// fastDeadline is the deadline of the reset done names firing (fixFast). It
+// stops the session only if that reset is still the one in flight and the
+// session is open (review C2c 3): a timer's callback can start after its reset
+// confirmed fast off and stopped it — Stop cannot take back a callback already
+// running — and a later reset, or Close, may have followed.
+func (s *session) fastDeadline(done chan struct{}, limit time.Duration) {
+	s.mu.Lock()
+	current := s.fastFix == done && !s.closed
+	s.mu.Unlock()
+	if !current {
+		return
+	}
+	s.stopFor(claudeErr(errkind.Config, "Claude Code did not confirm fast mode off within %s, and %s", limit, FastBillsExtra))
+}
+
+// testStopForRecorded runs, when a test sets it, in stopFor right after the
+// fatal error is recorded, under s.mu.
+var testStopForRecorded func()
+
 // awaitFastFix waits for a reset of claude's fast mode in flight, and answers
-// the session's fatal error: the reset's, when it stopped the session.
+// the session's fatal error: the reset's, when it stopped the session. It is
+// the ACP client's prompt gate (SetPromptGate), run immediately before a
+// prompt's or a steer's bytes go out.
+//
+// What it cannot close, and is accepted (plan 052 C2c, orchestrator's
+// disposition): a fast:on the agent sends after this check and before the
+// bytes are written. That is the agent turning fast on a moment after the
+// write, which no client can prevent; the reset that update starts, and the
+// overage guard (C5), contain it.
 //
 // It waits until no reset is in flight, not for the one it saw: a reset that
 // ends can be followed at once by another (review C2b 2).

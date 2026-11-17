@@ -759,6 +759,15 @@ func elicitationOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage
 // tells the interjection handler — on the read loop, ahead of whatever the
 // steered turn sends next — so the transcript shows the text where it went in.
 func (c *Client) steer(ctx context.Context, sid, text, id string) error {
+	// The same last word a prompt gets (SetPromptGate): a steer is model work.
+	c.mu.Lock()
+	gate := c.promptGate
+	c.mu.Unlock()
+	if gate != nil {
+		if err := gate(ctx); err != nil {
+			return err
+		}
+	}
 	params := map[string]any{
 		"sessionId": sid,
 		"prompt":    []ContentBlock{{Type: "text", Text: text}},

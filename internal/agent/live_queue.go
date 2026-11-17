@@ -36,6 +36,12 @@ func (s *session) interject(ctx context.Context, text string) error {
 	if !s.provider().Capabilities().Interject {
 		return ErrUnsupported
 	}
+	// A steer is model work like a prompt (review C2c 2): it waits for a
+	// claude fast reset in flight, and a stopped session refuses it with its
+	// own error. The client's prompt gate checks again just before the write.
+	if err := s.awaitFastFix(ctx); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	client := s.client
 	live := s.inPrompt && !s.doneEmitted && !s.cancelling
@@ -67,6 +73,13 @@ func (s *session) interject(ctx context.Context, text string) error {
 		// failure; its frames arrive with no prompt in flight.
 		s.log.Note(journal.DiagNote{Kind: "claude_steer_started_turn"})
 		return nil
+	}
+	if err != nil {
+		if f := s.fatalErr(); f != nil {
+			// The session stopped under the steer: that is why, whatever the
+			// closed connection said, as for a prompt.
+			return f
+		}
 	}
 	return err
 }

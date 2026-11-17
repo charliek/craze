@@ -1049,3 +1049,115 @@ func TestClaudeFastResetHasAHardDeadline(t *testing.T) {
 	_, err := r.s.Prompt(t.Context(), "hello")
 	wantKind(t, err, errkind.Config, FastBillsExtra)
 }
+
+// TestClaudeNoPromptWrittenOnceTheStopIsRecorded (review C2c 1): a prompt past
+// its gate when the session is stopped is never written once the stop is on
+// record — the agent's stdin is closed before the fatal error is visible.
+func TestClaudeNoPromptWrittenOnceTheStopIsRecorded(t *testing.T) {
+	r := newClaudeRig(t, "claude-basic", Options{})
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	passed, release := make(chan struct{}), make(chan struct{})
+	r.s.clientRef().SetPromptGate(func(ctx context.Context) error {
+		err := r.s.awaitFastFix(ctx)
+		if err == nil {
+			close(passed)
+			<-release
+		}
+		return err
+	})
+	written := make(chan struct{})
+	prev := testStopForRecorded
+	testStopForRecorded = func() {
+		// The prompt, past its gate, goes for the wire now, in the window
+		// between the stop's record and anything after it.
+		close(release)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(r.read(t, "calls"), "session/prompt") {
+				close(written)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	t.Cleanup(func() { testStopForRecorded = prev })
+	done := make(chan error, 1)
+	go func() { _, err := r.s.Prompt(context.Background(), "hello"); done <- err }()
+	<-passed
+	r.s.stopFor(claudeErr(errkind.Config, "stopped for the test"))
+	<-done
+	select {
+	case <-written:
+		t.Fatalf("the prompt reached the agent after the stop was recorded: %s", r.read(t, "calls"))
+	default:
+	}
+}
+
+// TestClaudeSteeringGoesThroughTheGate (review C2c 2): a mid-turn steer waits
+// for a fast reset in flight like a prompt, and a stopped session refuses it
+// with its own error.
+func TestClaudeSteeringGoesThroughTheGate(t *testing.T) {
+	gate, release := holdSets(t)
+	r := newClaudeRig(t, "claude-basic", Options{}, gate)
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	turn := make(chan error, 1)
+	go func() { _, err := r.s.Prompt(context.Background(), "HANG"); turn <- err }()
+	waitFor(t, "the turn", func() bool { return strings.Contains(r.read(t, "calls"), "session/prompt") })
+	r.s.onUpdate(claudeFastOnUpdate())
+	waitFor(t, "the reset's set", func() bool { return strings.Contains(r.read(t, "calls"), "fast=off") })
+	steered := make(chan error, 1)
+	go func() { steered <- r.s.Interject(context.Background(), "and also this") }()
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(r.read(t, "calls"), acp.MethodClaudeSteering) {
+		t.Fatalf("the steer was written while fast was being reset: %s", r.read(t, "calls"))
+	}
+	release()
+	<-steered
+	// Stopped: a steer is refused with the session's own error.
+	r.s.stopFor(claudeErr(errkind.Config, "stopped for the test"))
+	err := r.s.Interject(context.Background(), "more")
+	wantKind(t, err, errkind.Config, "stopped for the test")
+	<-turn
+}
+
+// TestClaudeAnObsoleteFastDeadlineDoesNothing (review C2c 3): a reset's
+// deadline that fires once that reset has ended — another in flight, or the
+// session closed — stops nothing.
+func TestClaudeAnObsoleteFastDeadlineDoesNothing(t *testing.T) {
+	r := newClaudeRig(t, "claude-basic", Options{})
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	a, b := make(chan struct{}), make(chan struct{})
+	r.s.mu.Lock()
+	r.s.fastFix = b // reset A confirmed off and ended; B is in flight
+	r.s.mu.Unlock()
+	r.s.fastDeadline(a, time.Second)
+	if err := r.s.fatalErr(); err != nil {
+		t.Fatalf("A's deadline stopped the session while B ran: %v", err)
+	}
+	r.s.mu.Lock()
+	r.s.fastFix = nil
+	r.s.mu.Unlock()
+	_ = r.s.Close()
+	r.s.fastDeadline(b, time.Second)
+	if err := r.s.fatalErr(); err != nil {
+		t.Fatalf("a deadline after Close stopped the session: %v", err)
+	}
+}
+
+// TestClaudeLoadFastResetTimeoutIsConfig (review C2c 4): the fast reset a load
+// owes, unanswered, fails the start with config.
+func TestClaudeLoadFastResetTimeoutIsConfig(t *testing.T) {
+	gate, _ := holdSets(t)
+	prev := startSettingWait
+	startSettingWait = 300 * time.Millisecond
+	t.Cleanup(func() { startSettingWait = prev })
+	r := newClaudeRig(t, "claude-load", Options{LoadSessionID: "s-old"}, gate)
+	collect(t, r.s)
+	wantKind(t, r.s.Start(t.Context()), errkind.Config, FastBillsExtra)
+}
