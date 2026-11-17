@@ -115,11 +115,20 @@ func (s *session) onAuthStatus(st acp.AuthStatus) {
 // gate stops a session so with auth, and fast mode that will not go off with
 // config. The close runs off the caller's goroutine, which may be the read
 // loop: Close waits for that to end.
-func (s *session) stopFor(err error) {
+func (s *session) stopFor(err error) { s.stopForIf(err, nil) }
+
+// stopForIf is stopFor, done only if still holds — checked in the same locked
+// section that halts the agent and records the error, so nothing can change
+// between the check and the stop (review C2d 1). still runs under s.mu; nil
+// always holds.
+func (s *session) stopForIf(err error, still func() bool) {
 	s.mu.Lock()
-	if s.gate.fatal != nil {
+	if s.gate.fatal != nil || (still != nil && !still()) {
 		s.mu.Unlock()
 		return
+	}
+	if testFastDeadlineValidated != nil && still != nil {
+		testFastDeadlineValidated()
 	}
 	client := s.client
 	if client != nil {
@@ -247,10 +256,20 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 			// whatever the reply said, and read back.
 			setCtx, cancel := context.WithTimeoutCause(ctx, startSettingWait, errStartSettingWait)
 			_, err := s.SetConfig(setCtx, "", fast.ID, off, "")
+			// Why the request's own context ended, if it did, read before
+			// cancel records one of its own: the caller's ending, or this
+			// request's timeout (errStartSettingWait).
+			cause := context.Cause(setCtx)
+			if testAfterLoadFastSet != nil {
+				testAfterLoadFastSet()
+			}
 			cancel()
 			if err = startSetFailure(setCtx, err, "fast off"); err != nil && !errors.Is(err, ErrOptionGone) {
-				if ctx.Err() != nil {
-					// The caller gave up: its own reason.
+				if callerEnded(err, cause) {
+					// The caller gave up, and that is what ended the set:
+					// its own reason (review C2d 2). Not the parent's state
+					// read now — a cancel after the set had failed for its
+					// own reasons changes nothing.
 					return err
 				}
 				// Refused, unanswered or failed: fast off is not confirmed,
@@ -398,15 +417,35 @@ func (s *session) fixFast(done chan struct{}) {
 // session is open (review C2c 3): a timer's callback can start after its reset
 // confirmed fast off and stopped it — Stop cannot take back a callback already
 // running — and a later reset, or Close, may have followed.
+//
+// The check and the stop are one locked section (stopForIf): a check that
+// passed cannot be acted on after the reset completed or the session closed.
 func (s *session) fastDeadline(done chan struct{}, limit time.Duration) {
-	s.mu.Lock()
-	current := s.fastFix == done && !s.closed
-	s.mu.Unlock()
-	if !current {
-		return
-	}
-	s.stopFor(claudeErr(errkind.Config, "Claude Code did not confirm fast mode off within %s, and %s", limit, FastBillsExtra))
+	s.stopForIf(
+		claudeErr(errkind.Config, "Claude Code did not confirm fast mode off within %s, and %s", limit, FastBillsExtra),
+		func() bool { return s.fastFix == done && !s.closed },
+	)
 }
+
+// callerEnded reports whether a set failed because its caller's context ended:
+// err is a context error and the set's own context ended for a cause that is
+// not its own timeout (cause is context.Cause of it, taken when the set
+// returned). An agent's refusal, or the set's own timeout, is not.
+func callerEnded(err, cause error) bool {
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return cause != nil && !errors.Is(cause, errStartSettingWait)
+}
+
+// testFastDeadlineValidated runs, when a test sets it, in a conditional stop
+// (stopForIf: a fast reset's deadline) once its condition has held, before the
+// stop — under s.mu, as the check is.
+var testFastDeadlineValidated func()
+
+// testAfterLoadFastSet runs, when a test sets it, right after a load's
+// mandatory fast-off set has returned, before its failure is classified.
+var testAfterLoadFastSet func()
 
 // testStopForRecorded runs, when a test sets it, in stopFor right after the
 // fatal error is recorded, under s.mu.

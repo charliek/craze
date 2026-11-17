@@ -1161,3 +1161,83 @@ func TestClaudeLoadFastResetTimeoutIsConfig(t *testing.T) {
 	collect(t, r.s)
 	wantKind(t, r.s.Start(t.Context()), errkind.Config, FastBillsExtra)
 }
+
+// TestClaudeAFastDeadlineParkedAfterItsCheck (review C2d 1): a deadline that
+// found its reset current and is then held — while that reset completes and
+// another starts, or the session closes — stops nothing it did not check: the
+// check and the stop are one step.
+func TestClaudeAFastDeadlineParkedAfterItsCheck(t *testing.T) {
+	for _, gap := range []string{"A completes, B starts", "Close"} {
+		t.Run(gap, func(t *testing.T) {
+			r := newClaudeRig(t, "claude-basic", Options{})
+			if err := r.s.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			a, b := make(chan struct{}), make(chan struct{})
+			r.s.mu.Lock()
+			r.s.fastFix = a
+			r.s.mu.Unlock()
+			var inGap atomic.Bool
+			prev := testFastDeadlineValidated
+			testFastDeadlineValidated = func() {
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					if gap == "Close" {
+						_ = r.s.Close()
+						return
+					}
+					r.s.mu.Lock()
+					r.s.fastFix = b
+					r.s.mu.Unlock()
+				}()
+				select {
+				case <-done:
+					inGap.Store(true)
+				case <-time.After(300 * time.Millisecond):
+				}
+			}
+			t.Cleanup(func() { testFastDeadlineValidated = prev })
+			r.s.fastDeadline(a, time.Second)
+			if inGap.Load() && r.s.fatalErr() != nil {
+				t.Fatalf("A's deadline stopped the session after %s, past its own check", gap)
+			}
+		})
+	}
+}
+
+// TestClaudeLoadFastSetTimeoutStaysConfigUnderALateCancel (review C2d 2): the
+// load's fast-off set that ran out its own time is config, even when the
+// caller's context is cancelled a moment later.
+func TestClaudeLoadFastSetTimeoutStaysConfigUnderALateCancel(t *testing.T) {
+	gate, _ := holdSets(t)
+	prevWait := startSettingWait
+	startSettingWait = 300 * time.Millisecond
+	t.Cleanup(func() { startSettingWait = prevWait })
+	r := newClaudeRig(t, "claude-load", Options{LoadSessionID: "s-old"}, gate)
+	collect(t, r.s)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	prev := testAfterLoadFastSet
+	testAfterLoadFastSet = func() { cancel() }
+	t.Cleanup(func() { testAfterLoadFastSet = prev })
+	wantKind(t, r.s.Start(ctx), errkind.Config, FastBillsExtra)
+}
+
+func TestCallerEnded(t *testing.T) {
+	refusal := &acp.RPCError{Code: -32602, Message: "nope"}
+	for _, tc := range []struct {
+		err, cause error
+		want       bool
+	}{
+		{context.Canceled, context.Canceled, true},                 // the caller cancelled first
+		{context.DeadlineExceeded, context.DeadlineExceeded, true}, // the caller's own deadline
+		{context.DeadlineExceeded, errStartSettingWait, false},     // the set's own timeout
+		{refusal, nil, false},                                      // the agent refused
+		{refusal, context.Canceled, false},                         // refused, then the caller left
+	} {
+		if got := callerEnded(tc.err, tc.cause); got != tc.want {
+			t.Errorf("callerEnded(%v, %v) = %v", tc.err, tc.cause, got)
+		}
+	}
+}
