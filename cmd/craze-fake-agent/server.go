@@ -83,6 +83,9 @@ type server struct {
 	// pm is the permodel scripts' per-model catalog state (permodel.go), and
 	// nil for every other script.
 	pm *permodelState
+	// claude is the claude scripts' session state (claude.go), nil for every
+	// other script.
+	claude *claudeState
 	// order is every session/set_mode and session/prompt in arrival order, with
 	// the mode each set_mode asked for. It is what lets the planmode scripts
 	// prove craze chained the two rather than racing them; recording it anywhere
@@ -261,6 +264,10 @@ func newServer(conn *acp.Conn, script string) *server {
 	if permodelScript(script) {
 		s.pm = newPermodelState(script)
 		conn.SetRequestHandler(withCalls(s.onPermodelRequest))
+	}
+	if claudeScript(script) {
+		s.claude = newClaudeState()
+		conn.SetRequestHandler(withCalls(s.onClaudeRequest))
 	}
 	conn.SetNotifyHandler(withCalls(s.onNotify))
 	return s

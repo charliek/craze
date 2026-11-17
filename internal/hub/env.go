@@ -32,7 +32,9 @@ import (
 //     named here too so that no environment handed in can carry it), one launch's
 //     choices (CRAZE_PROVIDER, CRAZE_DETACH,
 //     CRAZE_CONTROL_SOCKET, CRAZE_AGENT_BIN: P7 scopes an agent binary to the
-//     launch that named it), and the terminal the first spawner ran in:
+//     launch that named it), the caller marker an agent's environment carries
+//     (CRAZE_SESSION_PROVIDER, plan 052 § J1: each agent is given its own at
+//     its spawn), and the terminal the first spawner ran in:
 //     every HERDR_* and ROOST_* variable, TMUX, TMUX_PANE and STY.
 //   - Everything else is kept: PATH, HOME, XDG_*, CRAZE_RUNTIME_DIR (the
 //     socket base, and the tests' process marker), CRAZE_JOURNAL, CRAZE_FAKE_*,
@@ -57,6 +59,10 @@ const crazeHomeEnv = "CRAZE_HOME"
 var removedEnv = []string{
 	hostspawn.ReadyFDEnv, hostspawn.HostChildEnv, HubChildEnv, hostspawn.CommandMarkName,
 	"CRAZE_PROVIDER", "CRAZE_DETACH", "CRAZE_CONTROL_SOCKET", "CRAZE_AGENT_BIN",
+	// The caller marker an agent's environment carries (plan 052 § J1): a
+	// hub started from inside an agent's session must not hand it on to its
+	// hosts. Each agent gets its own, set fresh at its spawn.
+	"CRAZE_SESSION_PROVIDER",
 	"TMUX", "TMUX_PANE", "STY",
 }
 

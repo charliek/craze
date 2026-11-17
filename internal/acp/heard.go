@@ -83,7 +83,10 @@ func turnActivity(msg *Message) bool {
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped,
 		MethodGrokQueueChanged, MethodGrokQueueChangedWrapped,
 		MethodGrokModelsUpdate, MethodGrokModelsUpdateWrapped,
-		MethodGrokSessionsChanged, MethodGrokSessionsChangedWrapped:
+		MethodGrokSessionsChanged, MethodGrokSessionsChangedWrapped,
+		MethodClaudeAuthStatus, MethodAuthStatusUpdate:
+		// claude-agent-acp re-reads the login at the start of every prompt
+		// and pushes it when it changed: about the session, not the prompt.
 		return false
 	case MethodSessionUpdate:
 		return !sessionLevelUpdate(updateKind(msg.Params))

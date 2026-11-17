@@ -226,6 +226,17 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 	return nil
 }
 
+// refuseFast is the usage error for --fast on a provider that refuses it
+// (plan 052 § D3): claude's fast mode bills as extra usage on a Claude plan.
+// cmd is the command's name as its other usage errors spell it. --no-fast
+// and neither flag pass.
+func refuseFast(cmd string, p agent.Provider, fast *bool) error {
+	if fast == nil || !*fast || !p.RefusesFast() {
+		return nil
+	}
+	return usagef("%s: --fast cannot be used with provider %s: %s", cmd, p.Name(), agent.FastBillsExtra)
+}
+
 // knownProvider is the session index's view of the registry: a row whose
 // provider id this build does not know is kept in the file but never offered
 // (§3.2), because craze has no way to start it. A provider that is not

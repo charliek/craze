@@ -209,6 +209,7 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 			// The default, for the reason the session above spells it out.
 			Compat:        agent.ClaudeCompat{},
 			LoadSessionID: row.SessionID,
+			LoadModel:     row.Model,
 			Title:         row.Title,
 			TitlePinned:   row.Pinned,
 		})

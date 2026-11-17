@@ -300,21 +300,36 @@ func parseSelectValues(raw json.RawMessage) []SelectValue {
 	return out
 }
 
+// NextModeID is the mode Shift+Tab moves to: the advertised mode after the
+// current one, wrapping. A provider with a cycle of its own (claude's
+// Manual → accept edits → plan, plan 052 § C1) moves only through the
+// advertised modes in it, in the agent's order, so a mode outside it is
+// reachable by name and never by the key; from such a mode the key goes to
+// the cycle's first.
 func NextModeID(snap Snapshot) string {
-	if len(snap.Modes) == 0 {
+	modes := snap.Modes
+	if cycle := snap.Provider.provider().CycleModes(); cycle != nil {
+		modes = make([]ModeInfo, 0, len(snap.Modes))
+		for _, m := range snap.Modes {
+			if slices.Contains(cycle, m.ID) {
+				modes = append(modes, m)
+			}
+		}
+	}
+	if len(modes) == 0 {
 		return ""
 	}
 	idx := -1
-	for i, m := range snap.Modes {
+	for i, m := range modes {
 		if m.ID == snap.CurrentMode {
 			idx = i
 			break
 		}
 	}
 	if idx < 0 {
-		return snap.Modes[0].ID
+		return modes[0].ID
 	}
-	return snap.Modes[(idx+1)%len(snap.Modes)].ID
+	return modes[(idx+1)%len(modes)].ID
 }
 
 // errUnknownModel is MatchModel's refusal of a name no advertised model has,

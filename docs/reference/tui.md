@@ -1470,7 +1470,10 @@ mode the agent advertised it as: accent for an implement-like mode, purple for
 plan, teal for a read-only mode like ask. Clicking the chip cycles the mode the
 same way `Shift+Tab` does — see [Mouse](#mouse). Every change writes a
 `mode → <id>` note, followed by the agent's own description of the mode when
-it gave one.
+it gave one. On a `claude` session (whose modes the TUI shows from a later
+release) the cycle is `default` (Manual) →
+`acceptEdits` → `plan` only: `auto` and `bypassPermissions` are reached by
+name, never by the key, and from either the key goes to `default`.
 
 When a turn in a plan-kind mode ends with an assistant reply, the composer's
 placeholder offers to act on it once craze is idle:
@@ -2304,7 +2307,10 @@ cursor's Claude models — gets a tab too, labelled with the agent's own name,
 lowercased, showing its raw values. A tab is shown whenever the catalog
 advertises the option; there is no capability-bit gate on a tab (the
 provider's effort/fast bits gate only the status-row chips, never a control
-the model itself advertises).
+the model itself advertises). The one exception is a `claude` session's
+`fast`, which is never offered: Claude's fast mode bills as extra usage on a
+Claude plan, and craze keeps it off ([The claude
+provider](configuration.md#what-craze-sets)).
 Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
 `context` and `thinking`; grok shows `effort` alone, never `fast`.
 

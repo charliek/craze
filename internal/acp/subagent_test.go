@@ -241,7 +241,7 @@ func TestPendingUpdatesFlushAfterSessionNew(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.client.NewSession(t.Context(), t.TempDir())
+		_, err := p.client.NewSession(t.Context(), t.TempDir(), SessionParams{})
 		done <- err
 	}()
 	req := p.readWithin(t, 3*time.Second, "session/new")
@@ -281,7 +281,7 @@ func TestNewSessionClearsChildAllowlist(t *testing.T) {
 	cap.waitFor(t, 0, 1)
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.client.NewSession(t.Context(), t.TempDir())
+		_, err := p.client.NewSession(t.Context(), t.TempDir(), SessionParams{})
 		done <- err
 	}()
 	req := p.readWithin(t, 3*time.Second, "session/new")
@@ -914,7 +914,7 @@ func TestGrokSubagentScriptsEndToEnd(t *testing.T) {
 				t.Fatal(err)
 			}
 			cwd := t.TempDir()
-			res, err := c.NewSession(ctx, cwd)
+			res, err := c.NewSession(ctx, cwd, SessionParams{})
 			if err != nil {
 				t.Fatal(err)
 			}

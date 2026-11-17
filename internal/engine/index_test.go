@@ -2100,3 +2100,46 @@ func TestFallbackTitleIsTheFirstLine(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexRecordsClaudesModel (plan 052 § C4): a claude session's row carries
+// the model it is on, every write; another provider's carries none.
+func TestIndexRecordsClaudesModel(t *testing.T) {
+	for _, tc := range []struct{ provider, want string }{{"claude", "haiku"}, {"cursor", ""}} {
+		idx := newFakeIndex()
+		w := newIndexWriter(IndexOptions{Store: idx, CWD: "/w", Provider: tc.provider}, "018f-the-thread",
+			func() agent.Snapshot { return agent.Snapshot{SessionID: "fake-1", CurrentModel: "haiku"} },
+			func(string, string) {})
+		t.Cleanup(w.stop)
+		if !w.write("", "", sessions.TitleKindNone) {
+			t.Fatal("no write")
+		}
+		idx.mu.Lock()
+		got := idx.rows[len(idx.rows)-1].Model
+		idx.mu.Unlock()
+		if got != tc.want {
+			t.Fatalf("%s: model %q, want %q", tc.provider, got, tc.want)
+		}
+		if w.recordsModel() != (tc.provider == "claude") {
+			t.Fatalf("%s: recordsModel", tc.provider)
+		}
+	}
+}
+
+// TestAModelChangeRewritesAClaudeRow (plan 052 § C4): a delta that moves the
+// model is, on its own, a write of the row for a provider whose rows carry the
+// model (cursor's never do: TestIndexRecordsClaudesModel).
+func TestAModelChangeRewritesAClaudeRow(t *testing.T) {
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	model := "haiku"
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Model: &model}})
+	idx.waitRows(t, 3)
+	if got := idx.last(); got.TitleKind != sessions.TitleKindNone {
+		t.Fatalf("the model change wrote %+v, want a touch", got)
+	}
+}

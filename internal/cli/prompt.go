@@ -246,6 +246,9 @@ func (o *promptOpts) run() (retErr error) {
 	if err := refuseInProcess("craze", resolved.Provider, o.agentBin, o.mode()); err != nil {
 		return err
 	}
+	if err := refuseFast("craze", resolved.Provider, fastFlags(o.fast, o.noFast)); err != nil {
+		return err
+	}
 	// A --web-search that cannot be honoured (plan 051 F.2, S4): exit 1
 	// before any session is built or provider called — the run is unattended
 	// — said on stderr and, under --json, as the startup error event, which

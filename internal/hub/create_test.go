@@ -147,7 +147,7 @@ func TestCreateRefusesBadParams(t *testing.T) {
 		{"a cwd of a number", map[string]any{"cwd": 7, "provider": "cursor"}, protocol.ReasonBadRequest},
 		{"an empty prompt", map[string]any{"cwd": work, "provider": "cursor", "prompt": ""}, protocol.ReasonBadRequest},
 		{"a blank prompt", map[string]any{"cwd": work, "provider": "cursor", "prompt": " \n"}, protocol.ReasonBadRequest},
-		{"an unknown provider", map[string]any{"cwd": work, "provider": "claude"}, protocol.ReasonBadRequest},
+		{"an unknown provider", map[string]any{"cwd": work, "provider": "gx"}, protocol.ReasonBadRequest},
 		{"no provider and no default", map[string]any{"cwd": work}, protocol.ReasonBadRequest},
 		{"a null model", map[string]any{"cwd": work, "provider": "cursor", "model": nil}, protocol.ReasonBadRequest},
 		{"a model with a NUL", map[string]any{"cwd": work, "provider": "cursor", "model": "a\x00b"}, protocol.ReasonBadRequest},

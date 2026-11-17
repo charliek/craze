@@ -184,8 +184,21 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// hub chooses: its configured default.
 	provider := strings.TrimSpace(f.provider)
 	if provider != "" {
-		if _, err := agent.ProviderByName(provider); err != nil {
+		p, err := agent.ProviderByName(provider)
+		if err != nil {
 			return unknownProviderError(provider)
+		}
+		if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+			return err
+		}
+	} else if f.fast {
+		// No --provider: the create starts the hub's own default, so --fast is
+		// held to that provider (review F3; plan 052 § J2's rule for the
+		// target): exit 2 on claude, as an explicit --provider claude is.
+		if p, err := agent.ProviderByName(newDefaultTarget()); err == nil {
+			if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+				return err
+			}
 		}
 	}
 	out := cmd.OutOrStdout()
@@ -407,4 +420,23 @@ func newRequestID() (string, error) {
 		return "", err
 	}
 	return "new-" + hex.EncodeToString(b[:]), nil
+}
+
+// newDefaultTarget is the provider a plain craze new's create would start: the
+// running hub's own default (sessions.createOptions.defaultProvider), or —
+// with no hub running, or one that cannot say — the config file's, which the
+// hub this create starts will read (hubCreates' tui.ConfigProvider). "" for
+// none; the create's own refusal says so.
+func newDefaultTarget() string {
+	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
+	defer cancel()
+	if sock, err := hub.Find(ctx, rundir.ProcessEnv(), protocol.ConnectionCapabilities{CreateOptions: true}); err == nil {
+		if raw, err := hub.CreateOptions(ctx, sock, newClient); err == nil {
+			var res protocol.CreateOptionsResult
+			if json.Unmarshal(raw, &res) == nil {
+				return strings.TrimSpace(res.DefaultProvider)
+			}
+		}
+	}
+	return tui.ConfigProvider()
 }

@@ -76,8 +76,12 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	// (plan 037 LC-4).
 	provider := strings.TrimSpace(f.provider)
 	if provider != "" {
-		if _, err := agent.ProviderByName(provider); err != nil {
+		p, err := agent.ProviderByName(provider)
+		if err != nil {
 			return unknownProviderError(provider)
+		}
+		if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+			return err
 		}
 	}
 	stdout := cmd.OutOrStdout()
@@ -128,8 +132,12 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		if provider == "" {
 			return fail(errkind.Config, "no default provider yet; pass --provider %s", newProviderChoices)
 		}
-		if _, err := agent.ProviderByName(provider); err != nil {
+		p, err := agent.ProviderByName(provider)
+		if err != nil {
 			return fail(errkind.Config, "config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
+		}
+		if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+			return err
 		}
 	}
 	if provider == agent.NativeProvider().Name() {

@@ -35,17 +35,17 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not, [deprecated](configuration.md#deprecated-models) or not — and a model whose provider has no key refuses to start, saying how to give it one. An alias may also be written `<provider id>/<alias>`, the provider id being the one `craze auth login` takes (`zai-coding-plan/glm-5.3` is `glm-5.3`), when the name alone matches no model. An alias craze has [retired](configuration.md#retired-models) is refused (kind `config`) with its replacement first (`native: <alias> was retired; use <replacement>`, and nothing after it); a stored session whose recorded `--model` was retired since is refused the same way when it reloads, and is never moved to the replacement: start a new session. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line in the session's diagnostics (below). Applies to this start only — a `--continue` or `--resume` load included — and is never remembered. `craze new --wait` on the native provider is strict instead: with `--model`, a level the model does not list is [refused](#model-checks) |
-| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below). No native model has one: `craze new --wait` on the native provider [refuses `--fast`](#model-checks) |
+| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below). No native model has one: `craze new --wait` on the native provider [refuses `--fast`](#model-checks). On `claude` `--fast` is refused, exit 2 (`--fast cannot be used with provider claude: fast mode bills extra usage on a Claude plan`), by every command that takes it; `--no-fast` is accepted |
 | `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
-| `--provider` | Provider: `cursor`, `grok` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
+| `--provider` | Provider: `cursor`, `grok` (ACP agents) or `native` (runs inside craze); `claude`, Claude Code on your Claude plan, is accepted but not yet listed ([Claude sessions](#claude-sessions)). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--no-background` | Keep the terminal's own background and text colours instead of the theme's. Same as `background = false` |
 | `--no-host-status` | Report nothing to the herdr pane or roost tab craze runs in, and leave the agent's environment whole. Same as `host_status = false`. See [Host status](configuration.md#host-status) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
-| `--ask` | Set session mode to ask after `session/new` |
-| `--plan` | Set session mode to plan after `session/new` |
+| `--ask` | Set session mode to ask after `session/new`. `claude` has no ask mode: its start fails, `mode ask is not advertised` |
+| `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
 | `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one, skipping sub-agent sessions. No matching session exits 1 |
 | `--version`, `-v` | Print the craze version and exit, as `craze version` does. Answered before any argument is checked |
@@ -279,6 +279,38 @@ a newer craze build — one this version does not recognize — is never
 trimmed, and the load is refused instead, so nothing unrecognized is thrown
 away.
 
+### Claude sessions
+
+`--provider claude` starts **your own Claude Code on your Claude plan**
+through the `claude-agent-acp` adapter; [Claude on your
+plan](../getting-started/claude.md) sets it up, and [The claude
+provider](configuration.md#the-claude-provider) is the reference. It is not yet
+listed by `craze providers`, the picker or `--help`. Before anything reaches the
+model, a claude start can fail in these ways, each with its [kind](#failure-kinds):
+
+| Failure | Kind | Words |
+|---------|------|-------|
+| The adapter is not found | `start_failed` | `agent binary not found: claude-agent-acp is not on PATH; install it, or set [agents].claude in …` |
+| `claude` is not found | `start_failed` | `claude not found on PATH; install Claude Code (claude), or set CLAUDE_CODE_EXECUTABLE` |
+| Claude Code is not signed in | `auth` | ``Claude Code is not signed in (run `claude auth login`)`` |
+| The saved login is not a Pro or Max plan (an API key, an OAuth token, a cloud, an enterprise seat) | `auth` | `craze runs claude on a Claude Pro or Max plan only, and this login is …` |
+| The adapter reports another login pays (an `apiKeyHelper`, a gateway, an enterprise seat) | `auth` | `an API key pays for this session, not your Claude plan: …`, or `this Claude login is …` |
+| The adapter never says which login pays | `start_failed` | `craze could not confirm which Claude login pays for this session` |
+| The adapter or Claude Code is older than craze needs | `config` | ``claude-agent-acp 0.106.0 is older than craze needs (0.107.0): run `npm i -g @agentclientprotocol/claude-agent-acp` ``, or ``… run `claude update` `` |
+| A check does not answer in five seconds, or prints nothing craze can read | `start_failed` | ``` `claude auth status --json` did not answer in time ``` |
+| `--ask` | `config` | `mode ask is not advertised` |
+| The start mode, or fast mode off, does not take | `config` | `Claude Code kept this session in mode … where craze starts it in default`, `Claude Code kept fast mode on, …` |
+| `--fast` | `usage`, exit 2 | `--fast cannot be used with provider claude: fast mode bills extra usage on a Claude plan` |
+
+A login check that fails later, while the session runs, ends the turn running
+with `auth` and stops the session: every later prompt is refused the same way.
+Fast mode that Claude Code turns on is turned off again before the next prompt
+goes out; if it will not go off (the reset fails, or its reply still has it
+on), the session stops the same way with `config`. `craze new --fast` with no
+`--provider` is refused, exit 2, when the default it would start is claude.
+A turn that stops with `refusal`, `max_tokens` or `max_turn_requests` ends as an
+`agent` error naming the reason.
+
 ### Sessions outlive their terminal
 
 The ordinary `craze` no longer runs the session inside the terminal's
@@ -417,8 +449,8 @@ echo "hello" | ./bin/craze prompt --json
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
-| `--ask` | Set session mode to ask after `session/new` |
-| `--plan` | Set session mode to plan after `session/new` |
+| `--ask` | Set session mode to ask after `session/new`. `claude` has no ask mode: its start fails, `mode ask is not advertised` |
+| `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
 | `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
 | `--json` | Write only JSON events to stdout |
 
@@ -2323,7 +2355,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | `start_failed` | The agent or host did not start | true |
 | `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
 | `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error or overload (`server_is_overloaded`, `service_unavailable_error`) it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400) | per class |
-| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send | false |
+| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send; on `claude`, a login that is not a Claude Pro or Max plan ([Claude sessions](#claude-sessions)) | false |
 | `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so). On the `openai-responses` driver a 429 or an in-stream error whose code or type is `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` or `organization_usage_limit_exceeded` ends the turn after one request, never retried in it | false |
 | `context_too_large` | The request does not fit the model's context window | false |
 | `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found` | false |
@@ -2846,6 +2878,13 @@ How each is judged:
   `[agents].cursor /opt/x/cursor-agent not found` (the fix then says to point
   that override at an existing binary). A provider whose binary is not found
   is still listed, as unavailable.
+- **claude** is not listed yet ([Claude sessions](#claude-sessions)). Its
+  state is judged the same way as cursor's and grok's, for its two binaries:
+  the adapter `claude-agent-acp` (found as cursor's and grok's binaries are)
+  and Claude Code's `claude` (`$CLAUDE_CODE_EXECUTABLE`, else `PATH`). Either
+  missing is unavailable, named with its install: `install the adapter: npm i
+  -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude
+  in …`, and `install Claude Code (claude), or set CLAUDE_CODE_EXECUTABLE`.
 - **cursor, on macOS,** is also unavailable when this craze runs outside the
   Mac's login session — started over `ssh` — where cursor may not reach the
   login keychain (`this craze runs outside the macOS login session (over

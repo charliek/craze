@@ -101,6 +101,7 @@ type Client struct {
 	onUpdate        func(SessionNotification)
 	settingsHandler func(SettingsReply) error
 	subagentHandler func(SubagentNotification)
+	authHandler     func(AuthStatus)
 	pendingUpdates  []SessionNotification
 	// children is the routed-child allowlist, in registration order. A
 	// subagent_spawned registers its child_session_id; subagent_finished
@@ -369,12 +370,12 @@ func (c *Client) Authenticate(ctx context.Context, methodID string, meta map[str
 	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: methodID, Meta: meta}, nil)
 }
 
-func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult, error) {
+func (c *Client) NewSession(ctx context.Context, cwd string, sp SessionParams) (*NewSessionResult, error) {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		return nil, err
 	}
-	params := NewSessionParams{CWD: abs, MCPServers: []any{}}
+	params := NewSessionParams{CWD: abs, MCPServers: sp.mcpServers(), ConfigOptions: sp.ConfigOptions, Meta: sp.Meta}
 	var result NewSessionResult
 	if err := c.conn.Call(ctx, MethodSessionNew, params, &result); err != nil {
 		return nil, err
@@ -429,7 +430,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 // agent is still streaming lands in pendingUpdates again. That is only safe
 // because Start closes the client immediately on this error — the buffer, and
 // any child a replayed subagent_spawned registered, go with it.
-func (c *Client) LoadSession(ctx context.Context, id, cwd string) (*NewSessionResult, error) {
+func (c *Client) LoadSession(ctx context.Context, id, cwd string, sp SessionParams) (*NewSessionResult, error) {
 	if id == "" {
 		return nil, errors.New("acp: load session has no id")
 	}
@@ -451,7 +452,7 @@ func (c *Client) LoadSession(ctx context.Context, id, cwd string) (*NewSessionRe
 
 	ctx, cancel := context.WithTimeout(ctx, loadSessionDeadline())
 	defer cancel()
-	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: []any{}}
+	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: sp.mcpServers(), ConfigOptions: sp.ConfigOptions, Meta: sp.Meta}
 	var result NewSessionResult
 	if err := c.conn.Call(ctx, MethodSessionLoad, params, &result); err != nil {
 		c.mu.Lock()
@@ -1027,7 +1028,13 @@ func (c *Client) Exited() <-chan struct{} {
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
 	c.noteHeard()
-	d := c.Dialect()
+	// dialect is written once, before the read loop starts: read off c.mu.
+	if dialectHandles(c.dialect, msg.Method) != decisionHandle {
+		// A method this dialect has no business sending (dialectHandles): the
+		// answer an unknown method gets.
+		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+		return
+	}
 	switch msg.Method {
 	case MethodRequestPermission:
 		var req PermissionRequest
@@ -1037,10 +1044,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Permission: &req}, func(in *pendingReq) { c.handlePermission(in, req) })
 	case MethodCursorAskQuestion:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		var req AskQuestionRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/ask_question params")
@@ -1048,10 +1051,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodCursorCreatePlan:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		var req CreatePlanRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/create_plan params")
@@ -1059,10 +1058,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
-		if d != DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		req, err := parseGrokAsk(msg.Params)
 		if err != nil {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/ask_user_question params")
@@ -1070,10 +1065,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
-		if d != DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		req, err := parseGrokPlan(msg.Params)
 		if err != nil {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/exit_plan_mode params")
@@ -1081,16 +1072,8 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodCursorUpdateTodos:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		c.handleUpdateTodos(msg.ID, msg.Params)
 	case MethodCursorTask:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		c.handleTask(msg.ID, msg.Params)
 	default:
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -1230,23 +1213,19 @@ func (c *Client) TurnActive(turn int) bool {
 
 func (c *Client) onNotify(msg *Message) {
 	c.noteActivity(msg)
+	if dialectHandles(c.dialect, msg.Method) != decisionHandle {
+		return
+	}
 	switch msg.Method {
 	case MethodSessionUpdate:
 		c.handleSessionUpdate(msg)
 	case MethodCursorUpdateTodos:
-		if c.Dialect() != DialectGrok {
-			c.handleUpdateTodos(nil, msg.Params)
-		}
+		c.handleUpdateTodos(nil, msg.Params)
 	case MethodCursorTask:
-		if c.Dialect() != DialectGrok {
-			c.handleTask(nil, msg.Params)
-		}
+		c.handleTask(nil, msg.Params)
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped:
 		c.handlePromptComplete(msg)
 	case MethodGrokSessionNotification, MethodGrokSessionNotificationWrapped:
-		if c.Dialect() != DialectGrok {
-			return
-		}
 		// turn_completed rides the same notification as the sub-agent
 		// lifecycle and is not one: it ends the foreign turn it names and is
 		// not a lifecycle event, so it never reaches the subagent router.
@@ -1256,13 +1235,11 @@ func (c *Client) onNotify(msg *Message) {
 		}
 		c.handleSubagentNotification(msg)
 	case MethodGrokInterjection, MethodGrokInterjectionWrapped:
-		if c.Dialect() == DialectGrok {
-			c.handleInterjection(msg)
-		}
+		c.handleInterjection(msg)
 	case MethodGrokQueueChanged, MethodGrokQueueChangedWrapped:
-		if c.Dialect() == DialectGrok {
-			c.handleQueueChanged(msg)
-		}
+		c.handleQueueChanged(msg)
+	case MethodClaudeAuthStatus:
+		c.handleAuthStatus(msg)
 	}
 }
 
@@ -1349,8 +1326,11 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 	}
 	// dialect is written once, before the read loop starts, so the dialect
 	// check and grokToolName's own json.Unmarshal stay off c.mu.
-	if c.dialect == DialectGrok {
+	switch c.dialect {
+	case DialectGrok:
 		n.ToolName = grokToolName(n.Update)
+	case DialectClaude:
+		n.ToolName = claudeToolName(n.Update)
 	}
 	c.mu.Lock()
 	if c.sessionID == "" {

@@ -1026,6 +1026,11 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		Title:      w.titleLine(title),
 		TitleKind:  kind,
 	}
+	if recordsModel(provider) {
+		// The model the session is on, every write (plan 052 § C4): a load
+		// of the row sends it back.
+		row.Model = snap.CurrentModel
+	}
 	if err := w.opts.Store.Upsert(row); err != nil {
 		if report {
 			w.report(cause, err.Error())
@@ -1048,6 +1053,19 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 	w.mu.Unlock()
 	return nil
 }
+
+// recordsModel reports whether rows of provider carry the session's model
+// (agent.Provider.RecordsModel).
+func recordsModel(provider string) bool {
+	p, err := agent.ProviderByName(provider)
+	return err == nil && p.RecordsModel()
+}
+
+// recordsModel reports whether this writer's session is one whose rows carry
+// its model, by the provider it was started as (IndexOptions.Provider). It is
+// the observer's to call, so it reads no snapshot: no lock, no I/O, nothing
+// of the session's.
+func (w *indexWriter) recordsModel() bool { return recordsModel(w.opts.Provider) }
 
 // retiresFallback reports whether a title of this kind, once written, leaves
 // the row wanting no first-prompt fallback: its own (which IS the fallback),

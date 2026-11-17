@@ -153,7 +153,13 @@ type session struct {
 	planHold  chan struct{}
 	releasing bool
 	// foreign mirrors the client's foreign-turn state for Snapshot.
-	foreign      bool
+	foreign bool
+	// gate is claude's effective-login gate (live_claude.go), under s.mu;
+	// fastFix is claude's fast mode being set back off (keepFastOffLocked,
+	// fixFast): non-nil while a reset runs, closed when it has ended — fast
+	// confirmed off, or the session stopped.
+	gate         claudeGate
+	fastFix      chan struct{}
 	interjectSeq int
 	// plugins are the on-disk plugin entries discovered once, in Start,
 	// before session/new; they never change again. commandsSeen records that
@@ -383,6 +389,7 @@ func newSession(opts Options) *session {
 		commandsApplied: make(chan struct{}),
 		taskReceipts:    make(map[string]TaskInfo),
 		subagents:       make(map[string]*subagentRec),
+		gate:            claudeGate{first: make(chan struct{})},
 	}
 	// The marks of r27 finding 1 are for the session/new install alone. A LOAD
 	// records none: its replayed updates arrive BEFORE the load's reply by
@@ -534,6 +541,15 @@ var (
 // returned say the same.
 func (s *session) Start(ctx context.Context) error {
 	teardown, err := s.start(ctx)
+	if f := s.fatalErr(); f != nil {
+		// A login the gate refused while the start ran (a push after the
+		// first) stops the session: the start fails with it, whatever call it
+		// cut short, and tears down what a successful start built.
+		if err == nil {
+			teardown = true
+		}
+		err = f
+	}
 	if err == nil {
 		return nil
 	}
@@ -565,7 +581,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.started = true
 	s.mu.Unlock()
 
-	args := s.provider().Args(s.opts.ExtraArgs, s.opts.Force)
+	p := s.provider()
+	args := p.Args(s.opts.ExtraArgs, s.opts.Force)
+	if p.isClaude() {
+		// What claude refuses outright — a mode it has none of, --fast — is
+		// refused before anything is spawned.
+		if err := s.claudeStartRefusal(); err != nil {
+			s.unstart()
+			return false, err
+		}
+	}
 
 	cwd := s.opts.Workspace
 	if cwd == "" {
@@ -614,13 +639,31 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	if testAfterBinaryResolved != nil {
 		testAfterBinaryResolved()
 	}
+	// The companion binary (claude's `claude`, plan 052 § A2), resolved from
+	// the environment the agent will see, and that environment itself
+	// (spawnEnv, § A3): on every spawn path — the TUI's, a host's, the hub's,
+	// craze prompt's — since every one of them starts here.
+	companion, err := p.ResolveCompanion(s.childEnv())
+	if err != nil {
+		s.unstart()
+		return false, fmt.Errorf("agent: %w", err)
+	}
+	env := p.spawnEnv(s.opts.Env, companion, cwd)
+	// claude's preflight (§ A4), at the very paths the spawn uses, under the
+	// environment it spawns with, before anything is spawned.
+	if _, err := p.preflight(ctx, binary, companion, env, cwd); err != nil {
+		s.unstart()
+		return false, err
+	}
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary:  binary,
-		Args:    args,
+		Binary: binary,
+		Args:   args,
+		// The session's own directory: the adapter's auth probe reads that
+		// project's settings (§ A4, R2-1), as every agent reads its project.
 		Dir:     cwd,
-		Env:     s.opts.Env,
+		Env:     env,
 		Stderr:  s.stderrSink(),
-		Dialect: s.provider().Dialect(),
+		Dialect: p.Dialect(),
 	})
 	if err != nil {
 		s.unstart()
@@ -668,10 +711,18 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetForeignTurnHandler(func(f acp.ForeignTurn) {
 		s.onForeignTurn(ForeignTurnInfo{ID: f.ID, Text: f.Text, Running: f.Running})
 	})
+	client.SetAuthStatusHandler(s.onAuthStatus)
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
 		return true, err
+	}
+	if p.isClaude() {
+		// The effective-login gate (§ A4): the adapter's own word on which
+		// login pays, before anything that could spend it.
+		if err := s.awaitLogin(ctx); err != nil {
+			return true, err
+		}
 	}
 	if methodID, meta, ok := s.authMethod(initRes); ok {
 		if err := client.Authenticate(ctx, methodID, meta); err != nil {
@@ -719,7 +770,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 	} else {
-		sess, err := client.NewSession(ctx, cwd)
+		sess, err := client.NewSession(ctx, cwd, s.sessionParams(false))
 		if err != nil {
 			return true, err
 		}
@@ -737,11 +788,17 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// a load that means after the restored snapshot has been installed and the
 	// replay bracket closed, so it writes through s.mu instead of into a
 	// snapshot that has not been published yet.
-	modes := snap.Modes
-	if loading {
-		modes = s.Snapshot().Modes
-	}
-	if s.opts.Mode != "" {
+	if p.isClaude() {
+		// The start mode, fast off and a load's recorded model went in the
+		// setup request; what the adapter applied is read back (§ B3).
+		if err := s.claudeSettle(ctx, client, loading, &snap); err != nil {
+			return true, err
+		}
+	} else if s.opts.Mode != "" {
+		modes := snap.Modes
+		if loading {
+			modes = s.Snapshot().Modes
+		}
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(modes))
 		if !ok {
 			return true, fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
@@ -749,20 +806,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		if err := client.SetMode(ctx, modeID); err != nil {
 			return true, err
 		}
-		if loading {
-			// On a load the snapshot has already been published, so this writes
-			// through s.mu — and says so, in the same section, or a client that
-			// folds the stream would keep the mode the replay left while
-			// Snapshot answers this one, for ever (r23 finding 2). Event.Mode
-			// stays empty: it is an *agent*-initiated update's field, and this
-			// is craze's own --mode.
-			s.mu.Lock()
-			s.snap.CurrentMode = modeID
-			s.enqueueDeltaLocked("", Event{}, s.owedModelLocked(&StateDelta{Mode: &modeID}))
-			s.mu.Unlock()
-		} else {
-			snap.CurrentMode = modeID
-		}
+		s.settleMode(loading, &snap, modeID)
 	}
 	if s.opts.Model != "" {
 		// --model is a model change like SetModel's, by the same path (plan 025
@@ -825,6 +869,11 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		return true, err
 	}
 	if loading {
+		// Fast mode on in the published catalog is set off before the start
+		// returns, or the start fails (review F1).
+		if err := s.ensureFastOff(ctx); err != nil {
+			return true, err
+		}
 		// The load's install has published the catalog (loadSession), and the
 		// end bracket is out: scans may run from here.
 		s.scanner.arm()
@@ -913,6 +962,13 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// nothing.
 	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// An update of the agent's own that turned fast mode on while the install
+	// was pending was kept by it and checked by nothing (keepFastOffLocked
+	// waits for the install): it is set off here, before the start returns,
+	// or the start fails (review F1).
+	if err := s.ensureFastOff(ctx); err != nil {
+		return true, err
+	}
 	// The catalog is published, so a scan's result has something to be
 	// compared against: requests run from here, and one made during Start —
 	// an attach to a host whose session was still starting — runs now.
@@ -1199,7 +1255,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
 	s.replaying.Store(true)
-	res, err := client.LoadSession(ctx, s.opts.LoadSessionID, cwd)
+	res, err := client.LoadSession(ctx, s.opts.LoadSessionID, cwd, s.sessionParams(true))
 	if err != nil {
 		// No end bracket: the load failed, so Start returns and closes the
 		// client. Clearing the flag keeps a late notification from being
@@ -1538,6 +1594,10 @@ func (s *session) claim(text string) func(context.Context) (Result, error) {
 	if s.claimed || s.inPrompt {
 		return func(context.Context) (Result, error) { return Result{}, acp.ErrPromptInFlight }
 	}
+	if f := s.gate.fatal; f != nil {
+		// The login gate stopped this session: no prompt goes anywhere.
+		return func(context.Context) (Result, error) { return Result{}, f }
+	}
 	s.claimed = true
 	s.cancelling = false
 	wire := &turnWire{done: make(chan struct{})}
@@ -1592,6 +1652,12 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// so a caller that gives up here gives up only its claim. Its refusal comes
 	// back the same way: the slot was already another prompt's, and returning
 	// here spends no turn number and rolls nothing back.
+	// A reset of claude's fast mode still in flight is waited for, and a
+	// session it stopped refuses the prompt (review F1): no turn goes out
+	// while fast mode may be on.
+	if err := s.awaitFastFix(ctx); err != nil {
+		return Result{}, err
+	}
 	abort, err := s.awaitCatalog(ctx, text)
 	if err != nil {
 		return Result{}, err
@@ -1741,12 +1807,31 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.mu.Lock()
 	s.doneEmitted = true
 	s.mu.Unlock()
+	if f := s.fatalErr(); f != nil {
+		// The login gate stopped the session under this turn (live_claude.go):
+		// the turn ends with why, whatever the closed connection said.
+		err = f
+	}
+	if err == nil {
+		// A claude turn that stopped short of its end is an agent error
+		// naming why (plan 052 § B8).
+		if stop := refusedStopReason(s.provider(), res.StopReason); stop != nil {
+			err = stop
+		}
+	}
 	// Before the terminal event, whichever it is: every ask this turn still
 	// holds ends now, and the outbox is drained, so a late opening and every
 	// turn_ended ending are in the record ahead of the ending that says the turn
 	// is over (plan 021 §3.6).
 	s.endAskTurn(token)
 	if err != nil {
+		// A tool the failed turn left running ends with it (plan 052 § B9):
+		// no agent sends a terminal update for a call its own failure — or
+		// its exit — cut short, and a row left in progress would spin for
+		// ever. Every dialect alike. Ported from t3code's 47f90ee2e9 and
+		// 623047ccfd, which close open tool calls when the prompt fails or
+		// the process dies.
+		s.closeInFlightTools(toolFailed)
 		// The error goes out first, so a consumer already in its error state
 		// by the time the engine's chain policy clears its own queue at
 		// settlement (plan 021 §3.5) — this session has none of its own any
@@ -2041,6 +2126,16 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 		return SetOutcome{}, ErrStaleModel
 	}
 	isModel := isModelOptionID(id, s.snap.Config)
+	if s.provider().RefusesFast() {
+		// Claude's fast mode bills as extra usage (plan 052 § D3): no client
+		// turns it on.
+		if fast := FastOption(Snapshot{Provider: s.provider().Info(), Config: s.snap.Config}); fast != nil && fast.ID == id {
+			if _, on, ok := FastOnOff(fast); ok && value == on {
+				s.mu.Unlock()
+				return SetOutcome{}, claudeErr(errkind.Config, "%s", FastBillsExtra)
+			}
+		}
+	}
 	s.mu.Unlock()
 	var err error
 	if isModel {
@@ -2497,13 +2592,18 @@ func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.Per
 		// the cancel today's PickYoloAllow miss produced, now with a record
 		// saying policy did it (§2.3's "none at all" row).
 		ans := AskAnswer{Cancel: true}
-		if id, ok := acp.PickYoloAllow(req.Options); ok {
+		id, ok := s.provider().ForceOption(req.Options)
+		if ok {
 			ans = AskAnswer{OptionID: id}
 		}
-		rec := s.automaticAsk(token, ask, ans)
-		dec := permissionDecision(rec)
-		dec.Replied = s.reportedBy(rec.ID)
-		return dec
+		if ok || !s.provider().forceMissShowsCard() {
+			rec := s.automaticAsk(token, ask, ans)
+			dec := permissionDecision(rec)
+			dec.Replied = s.reportedBy(rec.ID)
+			return dec
+		}
+		// Claude with no allow_once: force answers nothing, and the card
+		// shows (plan 052 § B6).
 	}
 	if !live {
 		return permissionDecision(s.staleAsk(ask))
@@ -3190,6 +3290,8 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// or the model revision move (r23 finding 3).
 		moved := s.applyConfigLocked(cfg)
 		s.markAgentWroteLocked(&s.agentWrote.config)
+		// Claude's fast mode turned on is turned off again (plan 052 § D3).
+		s.keepFastOffLocked(cfg)
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
 		if moved {
 			model := s.snap.CurrentModel

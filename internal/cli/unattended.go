@@ -54,6 +54,7 @@ import (
 // asks, which an unset Approval would have derived otherwise.
 func unattendedPolicy(opts *agent.Options) {
 	opts.Interactive = false
+	opts.Unattended = true
 	opts.Approval = headlessApproval(opts.Force)
 	if p := opts.Provider; p == nil || !p.InProcess() {
 		// An ACP agent told its plan is accepted goes on to carry it out in

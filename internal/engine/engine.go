@@ -1037,6 +1037,12 @@ func (e *Engine) observe(ev agent.Event) {
 	}
 	e.observeRowTimes(ev)
 	e.observeCatalog(ev)
+	if ev.State != nil && ev.State.Model != nil && e.idx.recordsModel() {
+		// The model moved, and this provider's rows carry it (plan 052 §
+		// C4): the row is rewritten with it. A touch, so a session with no
+		// row yet conjures none — its first write carries the model anyway.
+		e.idx.post(indexWork{touch: true})
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {

@@ -111,6 +111,11 @@ type availInputs struct {
 	hubPID int
 	// configPath is config.toml's path, for the fixes that name [agents].
 	configPath string
+	// getenv is the environment a companion binary resolves in
+	// (agent.Provider.ResolveCompanion: claude's CLAUDE_CODE_EXECUTABLE): this
+	// process's, which a host it spawns — and the hub's, which its hosts —
+	// inherit. nil is os.Getenv.
+	getenv func(string) string
 }
 
 // availability is one entry per row, in rows' order (agent.Providers()'s),
@@ -147,6 +152,20 @@ func providerAvailability(in availInputs, p agent.Provider) providerAvail {
 		a.State = availUnavailable
 		a.Reason, a.Fix = missingBinary(p, r, in.configPath)
 		return a
+	}
+	if len(p.CompanionBins()) > 0 {
+		// The binary the agent runs beside it (plan 052 § A2): claude's
+		// `claude`, from CLAUDE_CODE_EXECUTABLE or PATH. Either missing is
+		// unavailable, each naming itself.
+		getenv := in.getenv
+		if getenv == nil {
+			getenv = os.Getenv
+		}
+		if _, err := p.ResolveCompanion(getenv); err != nil {
+			a.State = availUnavailable
+			a.Reason, a.Fix = missingCompanion(p, getenv)
+			return a
+		}
 	}
 	if p.Name() == agent.CursorProvider().Name() {
 		if _, gui, known := in.gui(); known && !gui {
@@ -221,7 +240,23 @@ func missingBinary(p agent.Provider, r binResolution, configPath string) (reason
 	if bins := p.Bins(); len(bins) > 0 {
 		bin = bins[0]
 	}
-	return bin + " not found on PATH", "install " + bin + ", or set [agents]." + p.Name() + " in " + configPath
+	install := "install " + bin
+	if cmd := p.AdapterInstall(); cmd != "" {
+		// claude's adapter is an npm package, and says how it installs.
+		install = "install the adapter: " + cmd + " (Node ≥22)"
+	}
+	return bin + " not found on PATH", install + ", or set [agents]." + p.Name() + " in " + configPath
+}
+
+// missingCompanion is the reason and fix for p's companion binary not
+// resolving (plan 052 § A2): the CLAUDE_CODE_EXECUTABLE it was pointed at,
+// or the PATH miss.
+func missingCompanion(p agent.Provider, getenv func(string) string) (reason, fix string) {
+	bin := p.CompanionBins()[0]
+	if v := strings.TrimSpace(getenv(agent.ClaudeExecutableEnv)); v != "" {
+		return agent.ClaudeExecutableEnv + " " + v + " not found", "point " + agent.ClaudeExecutableEnv + " at Claude Code's claude, or unset it"
+	}
+	return bin + " not found on PATH", "install Claude Code (" + bin + "), or set " + agent.ClaudeExecutableEnv
 }
 
 // Native's reasons and fixes (plan 036 §3.1, decision 9). A model table that

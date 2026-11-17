@@ -93,7 +93,7 @@ func (s *session) classifyTask(t ToolEvent) bool {
 		return false
 	}
 	p := s.provider()
-	if p.subagentToolName != "" && t.ToolName == p.subagentToolName {
+	if p.isSubagentTool(t.ToolName) {
 		return true
 	}
 	if t.ToolName == "" && p.titleTaskFallback && t.Title != "" {
@@ -684,12 +684,12 @@ func (s *session) joinByDescriptionLocked(id string) []Event {
 	if tools == nil || order == nil {
 		return nil
 	}
-	spawnName := s.provider().subagentToolName
+	prov := s.provider()
 	found := ""
 	for i := len(*order) - 1; i >= 0; i-- {
 		tid := (*order)[i]
 		t := tools[tid]
-		if t.ToolName != spawnName {
+		if !prov.isSubagentTool(t.ToolName) {
 			continue
 		}
 		if s.toolCallJoinedLocked(tid, owner) {
@@ -714,7 +714,7 @@ func (s *session) joinByDescriptionLocked(id string) []Event {
 }
 
 func (s *session) joinFromOutputLocked(owner string, tool ToolEvent, raw, content json.RawMessage) []Event {
-	if tool.ToolName != s.provider().subagentToolName {
+	if !s.provider().isSubagentTool(tool.ToolName) {
 		return nil
 	}
 	id := subagentIDFromSpawn(raw, content)
@@ -911,7 +911,7 @@ func (s *session) eachToolStoreLocked(fn func(owner string, tools map[string]Too
 }
 
 func (s *session) syncCursorLocked(tool ToolEvent) []Event {
-	if s.provider().subagentToolName != "task" || tool.Task == nil {
+	if s.provider().dialect != acp.DialectCursor || tool.Task == nil {
 		return nil
 	}
 	rec, ok := s.subagents[tool.ID]

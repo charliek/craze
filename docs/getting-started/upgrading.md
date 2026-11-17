@@ -100,6 +100,31 @@ end `it exits when idle`.
   native session's cached prompt prefix starts fresh once
   ([Native web search](../reference/configuration.md#native-web-search)).
 
+### A Claude provider, reached with `--provider claude`
+
+craze can now drive **your own Claude Code on your Claude Pro or Max plan**
+through the `claude-agent-acp` adapter ([Claude on your
+plan](claude.md)). It is a preview: `--provider claude`, `provider =
+"claude"` and `CRAZE_PROVIDER=claude` reach it, and no listing shows it yet.
+What changes for everyone else:
+
+- **`claude` is a provider id now.** It used to be an unknown one: `--provider
+  claude` exited 2, and `provider = "claude"` warned and started cursor. Both
+  now start a claude session, which checks your Claude login and refuses
+  anything but a Pro or Max plan ([Claude
+  sessions](../reference/cli.md#claude-sessions)).
+- **`[agents].claude`** in `config.toml` is read: the adapter's path, as the
+  other `[agents]` keys are.
+- **Every ACP agent's environment gains `CRAZE_SESSION_PROVIDER`**, set to the
+  session's provider (`cursor`, `grok`, `claude`), replacing any it inherited;
+  [the hub](../reference/cli.md#the-hub) removes it from its hosts'.
+  Nothing else in a cursor or grok agent's environment changes.
+- **A tool still running when a turn fails is shown failed.** A turn that
+  fails — the agent's error, or the agent exiting — closes the tool rows it
+  left running, on every provider, where they used to spin on.
+- **A claude session's index row records its model** (`model` in
+  `sessions.jsonl`), which an older craze keeps as an unknown key.
+
 ### The gx provider is gone
 
 craze no longer has a `gx` provider (the third-party fork of the Grok CLI): it

@@ -134,6 +134,7 @@ var sessProviderDetail = map[string]string{
 	agent.CursorProvider().Name(): "cursor-agent over ACP",
 	agent.GrokProvider().Name():   "grok over ACP",
 	agent.NativeProvider().Name(): "craze's own harness",
+	agent.ClaudeProvider().Name(): "your Claude Code, on your Claude plan",
 }
 
 // sessPick is what /provider and /model — and /effort and /fast (plan 032

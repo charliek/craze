@@ -43,7 +43,11 @@ const (
 //
 // It is an immutable value with methods rather than a set of callbacks, so a
 // Snapshot can carry a copy of it and the UI can read it without holding a
-// session. A new provider adds a constructor here and changes nothing else.
+// session. A new provider adds a constructor and a registry line. Behaviour
+// that differs per provider beyond these fields — the spawn environment, the
+// companion binary, the preflight and the force pick (provider_claude.go) — is
+// a method that switches on the provider, never a function field, so the value
+// stays plain data a Snapshot can carry a copy of (plan 052 § A1).
 type Provider struct {
 	name            string
 	modeKinds       map[string]ModeKind
@@ -86,10 +90,11 @@ type Provider struct {
 	// still caught either way: a -32602 before the agent did anything is sent
 	// again with path text (live_images.go).
 	imagesDespiteCapability bool
-	// subagentToolName is the wire tool name that is a sub-agent spawn:
-	// grok spawn_subagent, cursor task. Title-regex fallback only runs
-	// when this is unknown and titleTaskFallback is set (cursor).
-	subagentToolName  string
+	// subagentToolNames are the wire tool names that are a sub-agent spawn:
+	// grok spawn_subagent, cursor task, claude Agent and Task (the older
+	// name). Title-regex fallback only runs when the tool has no name and
+	// titleTaskFallback is set (cursor).
+	subagentToolNames []string
 	titleTaskFallback bool
 	// hidden keeps a provider out of Providers() altogether: it lives in the
 	// hidden list, which only ProviderByName reads, so it resolves by id but
@@ -244,7 +249,7 @@ func CursorProvider() Provider {
 			ParameterizedPicker: true,
 		},
 		dialect:           acp.DialectCursor,
-		subagentToolName:  "task",
+		subagentToolNames: []string{"task"},
 		titleTaskFallback: true,
 		skillScan: SkillScan{
 			RelRoots: []string{
@@ -296,9 +301,9 @@ func GrokProvider() Provider {
 			Interject:           true,
 		},
 		// x.ai/btw (plan 040 §3.5).
-		aside:            true,
-		dialect:          acp.DialectGrok,
-		subagentToolName: "spawn_subagent",
+		aside:             true,
+		dialect:           acp.DialectGrok,
+		subagentToolNames: []string{"spawn_subagent"},
 		// Grok advertises its whole catalog, plugin skills included, over
 		// ACP; the walk only adds SKILL.md trees the daemon has not loaded.
 		// grok-build always scans both .grok and .agents (.claude/.cursor sit
@@ -393,9 +398,9 @@ func Providers() []Provider {
 // and nothing lists. Listing them in Providers and filtering at each listing
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
-// hidden entry can never shadow a listed id. Nothing production code
-// registers is hidden any more (native was the one entry, until D-65); only
-// RegisterHiddenProviderForTest plants one now.
+// hidden entry can never shadow a listed id. Production code registers one:
+// claude, until its cards work (plan 052 § A1; native was the entry before
+// D-65). RegisterHiddenProviderForTest plants more.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -403,7 +408,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders []Provider
+	hiddenProviders = []Provider{ClaudeProvider()}
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are
@@ -595,6 +600,29 @@ func (p Provider) authFor(initRes *acp.InitializeResult, getenv func(string) str
 
 // FallbackModes are the modes craze assumes when session/new advertises none.
 func (p Provider) FallbackModes() []ModeInfo { return append([]ModeInfo(nil), p.fallbackModes...) }
+
+// isSubagentTool reports whether a tool's wire name is one of p's sub-agent
+// spawns.
+func (p Provider) isSubagentTool(name string) bool {
+	return name != "" && slices.Contains(p.subagentToolNames, name)
+}
+
+// ForceOption is the option force answers a permission request with (plan
+// 052 § B6). Cursor and grok take allow_always, then allow_once
+// (acp.PickYoloAllow). Claude takes allow_once only: its allow_always is
+// allow-with-updates, which writes a permanent rule into the user's Claude
+// settings. ok is false when there is nothing p's force may pick: on claude
+// the card then shows, on the others the request is cancelled.
+func (p Provider) ForceOption(opts []acp.PermissionOption) (string, bool) {
+	if p.isClaude() {
+		return acp.PickKind(opts, acp.KindAllowOnce)
+	}
+	return acp.PickYoloAllow(opts)
+}
+
+// forceMissShowsCard reports whether a forced permission request with no
+// option ForceOption may pick is shown to the user rather than cancelled.
+func (p Provider) forceMissShowsCard() bool { return p.isClaude() }
 
 // LoginHint is the command the auth error tells the user to run.
 func (p Provider) LoginHint() string { return p.loginHint }

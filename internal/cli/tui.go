@@ -92,6 +92,9 @@ func (f *tuiFlags) refuse(p agent.Provider) error {
 	if err := refuseInProcess("craze", p, f.agentBin, f.mode()); err != nil {
 		return err
 	}
+	if err := refuseFast("craze", p, f.fastSetting()); err != nil {
+		return err
+	}
 	return webStartCheck("craze", f.webSearchSetting(), agent.WebFlagGiven, false, p)
 }
 
@@ -357,6 +360,9 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		LoadSessionID: row.SessionID,
 		Title:         row.Title,
 		TitlePinned:   row.Pinned,
+		// The model the row recorded, which claude's load sends back unless
+		// --model names one (plan 052 § C4); other providers ignore it.
+		LoadModel: row.Model,
 	}
 	opts.WebFlag, opts.WebFlagOrigin = f.webSearchSetting(), agent.WebFlagGiven
 	if opts.WebFlag == agent.WebFlagAbsent {

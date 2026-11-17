@@ -97,6 +97,12 @@ const (
 
 	StopEndTurn   = "end_turn"
 	StopCancelled = "cancelled"
+	// The stop reasons a turn can end with short of its end (plan 052 B8):
+	// the model declined, ran out of output tokens, or hit the agent's cap on
+	// model requests in one turn.
+	StopRefusal         = "refusal"
+	StopMaxTokens       = "max_tokens"
+	StopMaxTurnRequests = "max_turn_requests"
 )
 
 // DialectID selects the provider-shaped branch of the ACP client. The client
@@ -107,6 +113,11 @@ type DialectID string
 const (
 	DialectCursor DialectID = "cursor"
 	DialectGrok   DialectID = "grok"
+	// DialectClaude is claude-agent-acp, the ACP bridge to Claude Code (plan
+	// 052 § B): plain session/prompt, the tool name in
+	// _meta.claudeCode.toolName, and the adapter's auth-status pushes read
+	// (claude.go).
+	DialectClaude DialectID = "claude"
 )
 
 type Implementation struct {
@@ -238,9 +249,43 @@ type AuthenticateParams struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 }
 
+// SessionParams is what a session/new or session/load carries beside its cwd
+// (plan 052 § B3). Every field is empty for cursor and grok, whose bytes on
+// the wire are unchanged: mcpServers is always [], and the other two are left
+// out when empty.
+//
+// MCPServers is always empty today: a limited preparation for a craze MCP
+// server a later plan injects (plan 052 § G2). ConfigOptions are the initial
+// values of the session's config options, which claude-agent-acp applies in
+// order on new, load and resume, and skips silently when it refuses one — so a
+// caller validates the effective values from the response. Meta is the
+// request's _meta (claude: _meta.claudeCode.options).
+type SessionParams struct {
+	MCPServers    []any
+	ConfigOptions []ConfigOptionValue
+	Meta          map[string]any
+}
+
+// ConfigOptionValue is one entry of a setup request's configOptions: the
+// select option configId set to value, as session/set_config_option sets it.
+type ConfigOptionValue struct {
+	ConfigID string `json:"configId"`
+	Value    string `json:"value"`
+}
+
+// mcpServers is p's MCPServers as the wire takes them: never null.
+func (p SessionParams) mcpServers() []any {
+	if p.MCPServers == nil {
+		return []any{}
+	}
+	return p.MCPServers
+}
+
 type NewSessionParams struct {
-	CWD        string `json:"cwd"`
-	MCPServers []any  `json:"mcpServers"`
+	CWD           string              `json:"cwd"`
+	MCPServers    []any               `json:"mcpServers"`
+	ConfigOptions []ConfigOptionValue `json:"configOptions,omitempty"`
+	Meta          map[string]any      `json:"_meta,omitempty"`
 }
 
 type NewSessionResult struct {
@@ -256,9 +301,11 @@ type NewSessionResult struct {
 // answers {modes, models}, grok answers with models alone), with
 // sessionId filled in by the client because the wire does not echo it.
 type LoadSessionParams struct {
-	SessionID  string `json:"sessionId"`
-	CWD        string `json:"cwd"`
-	MCPServers []any  `json:"mcpServers"`
+	SessionID     string              `json:"sessionId"`
+	CWD           string              `json:"cwd"`
+	MCPServers    []any               `json:"mcpServers"`
+	ConfigOptions []ConfigOptionValue `json:"configOptions,omitempty"`
+	Meta          map[string]any      `json:"_meta,omitempty"`
 }
 
 // loadSessionTimeout is the session/load deadline. All three probed agents

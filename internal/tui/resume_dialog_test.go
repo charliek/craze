@@ -255,7 +255,7 @@ func TestResumePickerCapsTheList(t *testing.T) {
 // again) but is never offered — there is nothing Enter could start.
 func TestResumePickerDropsAnUnknownProvider(t *testing.T) {
 	m, _ := newResumePicker(t, []sessions.Row{
-		resumeRow("s-1", "claude", "from another build", time.Minute),
+		resumeRow("s-1", "gx", "from another build", time.Minute),
 		resumeRow("s-2", "grok", "a session craze can start", 2*time.Minute),
 	}, 100, 30)
 	if len(m.resume) != 1 || m.resume[0].SessionID != "s-2" {

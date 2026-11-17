@@ -4300,6 +4300,11 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 	if m.snap.Provider.Kind(m.snap.CurrentMode) != agent.ModePlan {
 		return false
 	}
+	// A provider with no implement prompt approves its plan on its own card
+	// (claude, plan 052 § B5), so a plan-mode turn of its offers nothing.
+	if m.snap.Provider.ImplementPrompt() == "" {
+		return false
+	}
 	return m.implementModeID() != ""
 }
 
