@@ -102,6 +102,7 @@ type Client struct {
 	settingsHandler func(SettingsReply) error
 	subagentHandler func(SubagentNotification)
 	authHandler     func(AuthStatus)
+	promptGate      func(ctx context.Context) error
 	// refusedHandler is told of a claude request craze answered itself
 	// (claude_cards.go). claudeTools is the tool name the adapter stamped on
 	// each recent tool call, by id, in arrival order (claudeToolOrder), so a
@@ -597,6 +598,7 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	}
 	sid := c.sessionID
 	dialect := c.dialect
+	gate := c.promptGate
 	wait := make(chan promptResult, 1)
 	c.promptWait = wait
 	c.mu.Unlock()
@@ -627,6 +629,14 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// one step before the bytes go out.
 	if accepted != nil {
 		accepted()
+	}
+	// The caller's last word, at the last moment before the bytes go out
+	// (SetPromptGate): it may hold the prompt, or refuse it, in which case
+	// nothing is written.
+	if gate != nil {
+		if err := gate(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	params := PromptParams{

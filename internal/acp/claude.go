@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 )
@@ -89,6 +90,28 @@ func (c *Client) handleAuthStatus(msg *Message) {
 	if h != nil {
 		h(st)
 	}
+}
+
+// SetPromptGate installs the caller's last check of a prompt (plan 052 review
+// C2b 2): it runs in PromptBlocks and ResendBlocks once the prompt is admitted
+// and its accepted hook has run, immediately before the bytes are written, on
+// the prompting goroutine with no client lock held. It may wait; an error it
+// returns is the call's, and the prompt is never written. The claude session
+// holds a prompt there while its fast mode is being reset, and refuses one
+// once the session has stopped.
+func (c *Client) SetPromptGate(g func(ctx context.Context) error) {
+	c.mu.Lock()
+	c.promptGate = g
+	c.mu.Unlock()
+}
+
+// Halt stops the client writing, at once and from any goroutine, the read
+// loop included: the agent's stdin is closed, so a write in flight or any
+// later one fails, while what the agent has already written is still read.
+// It is what a session stopping for a reason of its own does before it closes
+// the client, which is the rest of the shutdown.
+func (c *Client) Halt() {
+	c.conn.closeWriter()
 }
 
 // claudeToolName is the tool's own name the adapter stamps on every tool_call

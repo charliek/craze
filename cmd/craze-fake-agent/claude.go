@@ -46,7 +46,11 @@ import (
 //	CRAZE_FAKE_CLAUDE_REFUSE_MODEL a model value refused: skipped as an
 //	                              initial option, -32602 to a set
 //	CRAZE_FAKE_SET_REFUSE         a config id whose session/set_config_option
-//	                              is refused -32602, as for the other scripts
+//	                              is refused -32602, and CRAZE_FAKE_SET_GATE,
+//	                              as for the other scripts
+//	CRAZE_FAKE_CLAUDE_LOAD_FAST_HIDDEN  1: a load turns fast mode on and pushes
+//	                              it during the replay, and its reply — built
+//	                              before — still says off
 //	CRAZE_FAKE_DUMP_SETUP         every session/new and session/load params
 //	                              object is appended to this file, one line
 //	                              each
@@ -264,7 +268,15 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 		// A load restores the transcript's last mode before its options.
 		s.claude.set("mode", envOr("CRAZE_FAKE_CLAUDE_MODE", "bypassPermissions"))
 		s.claude.applyInitial(msg.Params)
-		s.reply(msg.ID, s.claude.setupResult(p.SessionID))
+		res := s.claude.setupResult(p.SessionID)
+		if os.Getenv("CRAZE_FAKE_CLAUDE_LOAD_FAST_HIDDEN") == "1" {
+			// The adapter turns fast mode on and says so while the replay is
+			// still running, and its load reply, built a moment earlier, still
+			// says off: the session is on, and the reply hides it.
+			s.claude.force("fast", "on")
+			s.update(p.SessionID, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.claude.catalog()})
+		}
+		s.reply(msg.ID, res)
 	case acp.MethodSessionPrompt:
 		dumpPrompt(msg.Params)
 		s.cancelled.Store(false)
@@ -272,22 +284,26 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 	case acp.MethodClaudeSteering:
 		s.onClaudeSteer(msg)
 	case acp.MethodSessionSetConfig:
-		var p acp.SetConfigParams
-		_ = json.Unmarshal(msg.Params, &p)
-		if refuse := os.Getenv("CRAZE_FAKE_SET_REFUSE"); refuse != "" && refuse == p.ConfigID {
-			_ = s.conn.ReplyErr(msg.ID, pmInvalidParams("Refused config option: "+p.ConfigID))
-			return
-		}
-		if _, refused := s.claude.set(p.ConfigID, p.Value); refused {
-			_ = s.conn.ReplyErr(msg.ID, pmInvalidParams("Invalid value for config option "+p.ConfigID+": "+p.Value))
-			return
-		}
-		s.reply(msg.ID, map[string]any{"configOptions": s.claude.catalog()})
-		if p.ConfigID == "mode" {
-			s.update(s.claude.sid, acp.SessionUpdate{SessionUpdate: acp.UpdateCurrentMode, CurrentModeID: s.claude.current("mode")})
-		}
+		// CRAZE_FAKE_SET_GATE and CRAZE_FAKE_SET_REFUSE as for every script
+		// (setGated).
+		s.setGated(msg, s.claudeSetConfig)
 	default:
 		_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+	}
+}
+
+// claudeSetConfig is session/set_config_option: the value applied the
+// adapter's way, answered with the whole catalog.
+func (s *server) claudeSetConfig(msg *acp.Message) {
+	var p acp.SetConfigParams
+	_ = json.Unmarshal(msg.Params, &p)
+	if _, refused := s.claude.set(p.ConfigID, p.Value); refused {
+		_ = s.conn.ReplyErr(msg.ID, pmInvalidParams("Invalid value for config option "+p.ConfigID+": "+p.Value))
+		return
+	}
+	s.reply(msg.ID, map[string]any{"configOptions": s.claude.catalog()})
+	if p.ConfigID == "mode" {
+		s.update(s.claude.sid, acp.SessionUpdate{SessionUpdate: acp.UpdateCurrentMode, CurrentModeID: s.claude.current("mode")})
 	}
 }
 

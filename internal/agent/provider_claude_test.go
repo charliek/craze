@@ -936,3 +936,116 @@ func TestClaudeFastThatWillNotGoOffStopsTheSession(t *testing.T) {
 		wantKind(t, err, errkind.Config, FastBillsExtra)
 	}
 }
+
+// TestClaudeLoadSetsFastOffWhateverTheReplySays (review C2b 1): after a load
+// craze cannot know the adapter's fast mode — a push during the replay is
+// overruled by the load's reply — so it sets it off once, whatever the reply
+// said.
+func TestClaudeLoadSetsFastOffWhateverTheReplySays(t *testing.T) {
+	r := newClaudeRig(t, "claude-load", Options{LoadSessionID: "s-old"}, "CRAZE_FAKE_CLAUDE_LOAD_FAST_HIDDEN=1")
+	collect(t, r.s)
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	calls := r.read(t, "calls")
+	load := strings.Index(calls, "session/load")
+	if load < 0 || !strings.Contains(calls[load:], "session/set_config_option fast=off") {
+		t.Fatalf("no fast reset after the load: %s", calls)
+	}
+}
+
+// holdSets makes CRAZE_FAKE_SET_GATE a FIFO nothing writes until release
+// is called: every session/set_config_option is answered only then.
+func holdSets(t *testing.T) (env string, release func()) {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "set-gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "CRAZE_FAKE_SET_GATE=" + fifo, func() {
+		f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = f.Write([]byte{1})
+		_ = f.Close()
+	}
+}
+
+// TestClaudePromptWaitsForAResetThatStartsBeforeItsWrite (review C2b 2): a
+// fast reset that begins after the prompt's own check, just before its write,
+// still holds the prompt back until fast is off.
+func TestClaudePromptWaitsForAResetThatStartsBeforeItsWrite(t *testing.T) {
+	gate, release := holdSets(t)
+	r := newClaudeRig(t, "claude-basic", Options{}, gate)
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var fired atomic.Bool
+	prev := testBeforeWire
+	testBeforeWire = func(s *session) {
+		if s == r.s && fired.CompareAndSwap(false, true) {
+			s.onUpdate(claudeFastOnUpdate())
+		}
+	}
+	t.Cleanup(func() { testBeforeWire = prev })
+	done := make(chan error, 1)
+	go func() { _, err := r.s.Prompt(context.Background(), "hello"); done <- err }()
+	waitFor(t, "the reset's set", func() bool { return strings.Contains(r.read(t, "calls"), "fast=off") })
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(r.read(t, "calls"), "session/prompt") {
+		t.Fatalf("the prompt was written while fast was being reset: %s", r.read(t, "calls"))
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClaudePromptNotWrittenAfterTheSessionStopped (review C2b 2): a prompt
+// past its checks when the session is stopped is never written.
+func TestClaudePromptNotWrittenAfterTheSessionStopped(t *testing.T) {
+	r := newClaudeRig(t, "claude-basic", Options{})
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	stop := claudeErr(errkind.Config, "stopped for the test")
+	prev := testBeforeWire
+	testBeforeWire = func(s *session) {
+		if s == r.s {
+			s.stopFor(stop)
+		}
+	}
+	t.Cleanup(func() { testBeforeWire = prev })
+	_, err := r.s.Prompt(t.Context(), "hello")
+	wantKind(t, err, errkind.Config, "stopped for the test")
+	time.Sleep(100 * time.Millisecond)
+	if strings.Contains(r.read(t, "calls"), "session/prompt") {
+		t.Fatalf("the prompt reached the agent: %s", r.read(t, "calls"))
+	}
+}
+
+// TestClaudeFastResetHasAHardDeadline (review C2b 3): a reset whose set never
+// comes back stops the session at its own deadline, whatever the set does.
+func TestClaudeFastResetHasAHardDeadline(t *testing.T) {
+	gate, _ := holdSets(t)
+	r := newClaudeRig(t, "claude-basic", Options{}, gate)
+	prev := fastFixDeadline.Swap(int64(300 * time.Millisecond))
+	t.Cleanup(func() { fastFixDeadline.Store(prev) })
+	if err := r.s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.Prompt(t.Context(), "FAST-ON"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for r.s.fatalErr() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the reset outlived its deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_, err := r.s.Prompt(t.Context(), "hello")
+	wantKind(t, err, errkind.Config, FastBillsExtra)
+}

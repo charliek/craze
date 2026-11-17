@@ -181,3 +181,27 @@ func TestNewFastRefusedOnAClaudeDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestNewFastBindsTheCheckedDefault (review C2b 4): the provider --fast was
+// checked against is the one the create names, so the hub cannot start
+// another it reads afresh; with no --fast nothing is bound and the hub's
+// default stands, as ever.
+func TestNewFastBindsTheCheckedDefault(t *testing.T) {
+	cursor := func() string { return "cursor" }
+	got, err := newProvider(&newFlags{fast: true}, cursor)
+	if err != nil || got != "cursor" {
+		t.Fatalf("--fast: %q %v, want the checked default bound", got, err)
+	}
+	if got, err := newProvider(&newFlags{}, cursor); err != nil || got != "" {
+		t.Fatalf("no --fast: %q %v, want the hub's default left to it", got, err)
+	}
+	if got, err := newProvider(&newFlags{noFast: true}, cursor); err != nil || got != "" {
+		t.Fatalf("--no-fast: %q %v", got, err)
+	}
+	if _, err := newProvider(&newFlags{fast: true}, func() string { return "claude" }); err == nil {
+		t.Fatal("--fast on a claude default passed")
+	}
+	if got, err := newProvider(&newFlags{fast: true}, func() string { return "" }); err != nil || got != "" {
+		t.Fatalf("no default: %q %v, want the create's own refusal", got, err)
+	}
+}

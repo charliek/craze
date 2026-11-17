@@ -182,24 +182,9 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// config, no default — and a wrong one is the usage error every other
 	// command gives, exit 2, kind config under --json. Omitted or empty, the
 	// hub chooses: its configured default.
-	provider := strings.TrimSpace(f.provider)
-	if provider != "" {
-		p, err := agent.ProviderByName(provider)
-		if err != nil {
-			return unknownProviderError(provider)
-		}
-		if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
-			return err
-		}
-	} else if f.fast {
-		// No --provider: the create starts the hub's own default, so --fast is
-		// held to that provider (review F3; plan 052 § J2's rule for the
-		// target): exit 2 on claude, as an explicit --provider claude is.
-		if p, err := agent.ProviderByName(newDefaultTarget()); err == nil {
-			if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
-				return err
-			}
-		}
+	provider, err := newProvider(f, newDefaultTarget)
+	if err != nil {
+		return err
 	}
 	out := cmd.OutOrStdout()
 	// A stdout whose reader has gone fails its write with EPIPE rather than
@@ -439,4 +424,36 @@ func newDefaultTarget() string {
 		}
 	}
 	return tui.ConfigProvider()
+}
+
+// newProvider is the provider craze new's create names: --provider, checked
+// by its id alone (plan 037 LC-4) and held to --fast (refuseFast); or, with
+// none, "" — the hub's own default — unless --fast was given. Then --fast is
+// held to the provider the create would start (target: newDefaultTarget;
+// plan 052 § J2's rule for the target, review F3), exit 2 on claude, and that
+// provider is the one named.
+func newProvider(f *newFlags, target func() string) (string, error) {
+	provider := strings.TrimSpace(f.provider)
+	if provider != "" {
+		p, err := agent.ProviderByName(provider)
+		if err != nil {
+			return "", unknownProviderError(provider)
+		}
+		return provider, refuseFast("craze new", p, fastFlags(f.fast, f.noFast))
+	}
+	if f.fast {
+		if id := target(); id != "" {
+			if p, err := agent.ProviderByName(id); err == nil {
+				if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+					return "", err
+				}
+				// Bound into the create (review C2b 4): the hub reads its
+				// default again when it creates, and one changed in between
+				// would start a provider this check never saw. Only when the
+				// check ran: with no --fast the hub's own default stands.
+				return id, nil
+			}
+		}
+	}
+	return "", nil
 }

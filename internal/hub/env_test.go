@@ -125,3 +125,23 @@ func TestChildEnvRemovesACommandsMark(t *testing.T) {
 		t.Fatalf("handed on: %q", got)
 	}
 }
+
+// TestChildEnvMakesTheClaudeExecutableAbsolute (plan 052 review C2b 4/F4): a
+// relative CLAUDE_CODE_EXECUTABLE is made absolute against the spawner's
+// directory before it crosses into a hub or host that runs elsewhere; a bare
+// name — a PATH lookup — and an absolute path are kept as they are.
+func TestChildEnvMakesTheClaudeExecutableAbsolute(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"CLAUDE_CODE_EXECUTABLE=./tools/claude", "CLAUDE_CODE_EXECUTABLE=/launch/tools/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=tools/claude", "CLAUDE_CODE_EXECUTABLE=/launch/tools/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=../bin/claude", "CLAUDE_CODE_EXECUTABLE=/bin/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=claude", "CLAUDE_CODE_EXECUTABLE=claude"},
+		{"CLAUDE_CODE_EXECUTABLE=/opt/claude", "CLAUDE_CODE_EXECUTABLE=/opt/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=", "CLAUDE_CODE_EXECUTABLE="},
+	} {
+		got := ChildEnv([]string{tc.in}, "/launch")
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

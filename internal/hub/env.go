@@ -18,8 +18,10 @@ import (
 // marks of a ready pipe that is not the child's, the multiplexer of the pane
 // the first spawner ran in.
 //
-//   - CRAZE_HOME and the removed config-file variable are made absolute
-//     against the spawner's working directory when relative, the way the
+//   - CRAZE_HOME and the removed config-file variable — and a
+//     CLAUDE_CODE_EXECUTABLE that is a path rather than a bare name — are
+//     made absolute against the spawner's working directory when relative,
+//     the way the
 //     spawner itself resolves them (paths.CrazeDir: a leading "~" or "~/" is
 //     the home directory, whitespace around the value is not part of it); a
 //     value craze takes for unset (empty, or blank) is left as it is, and so
@@ -51,6 +53,11 @@ import (
 // it out of its own environment as it starts (TakeReadyPipe), and the
 // contract removes it from whatever it hands on.
 const HubChildEnv = "CRAZE_HUB_CHILD"
+
+// claudeExecutableEnv is the `claude` a claude session runs
+// (agent.ClaudeExecutableEnv), named here because the hub does not import the
+// agent package: a relative path in it is made absolute (ChildEnv).
+const claudeExecutableEnv = "CLAUDE_CODE_EXECUTABLE"
 
 // crazeHomeEnv is the craze directory's variable (paths.CrazeDir).
 const crazeHomeEnv = "CRAZE_HOME"
@@ -89,6 +96,12 @@ func ChildEnv(environ []string, cwd string) []string {
 		case k == crazeHomeEnv:
 			kv = k + "=" + absCrazeHome(v, cwd, home)
 		case k == paths.RemovedConfigEnv:
+			kv = k + "=" + absValue(v, cwd)
+		case k == claudeExecutableEnv && strings.ContainsRune(v, '/'):
+			// A path, not a PATH lookup: made absolute here, against the
+			// spawner's directory, as the spawner would have read it — the
+			// host it reaches runs in the session's directory (plan 052
+			// review C2b 4).
 			kv = k + "=" + absValue(v, cwd)
 		}
 		out = append(out, kv)

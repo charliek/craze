@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -124,6 +125,10 @@ func (s *session) stopFor(err error) {
 	client := s.client
 	s.mu.Unlock()
 	if client != nil {
+		// Writing stops now, synchronously: a prompt past every check, and a
+		// write held behind another, fail rather than reach the agent (review
+		// C2b 2, 3). The rest of the close runs off this goroutine.
+		client.Halt()
 		go func() { _ = client.Close() }()
 	}
 }
@@ -225,7 +230,25 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 	cur = read()
 	if fast := FastOption(cur); fast != nil {
 		off, on, ok := FastOnOff(fast)
-		if ok && fast.Current == on {
+		switch {
+		case loading && ok && off != "":
+			// After a load the adapter's fast mode is not known: a push of it
+			// during the replay is overruled by the load's reply, which may
+			// have been built before it (review C2b 1). So it is set off once,
+			// whatever the reply said, and read back.
+			setCtx, cancel := context.WithTimeoutCause(ctx, startSettingWait, errStartSettingWait)
+			_, err := s.SetConfig(setCtx, "", fast.ID, off, "")
+			cancel()
+			if err = startSetFailure(setCtx, err, "fast off"); err != nil && !errors.Is(err, ErrOptionGone) {
+				if !refusedByAgent(err) {
+					return err
+				}
+				return claudeErr(errkind.Config, "Claude Code refused to turn fast mode off (%s), and %s", sanitizeLine(err.Error()), FastBillsExtra)
+			}
+			if FastOn(read()) {
+				return claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
+			}
+		case ok && fast.Current == on:
 			if err := s.startSet(ctx, client, loading, snap, fast, off, "fast off"); err != nil && !refusedByAgent(err) {
 				return err
 			}
@@ -281,6 +304,14 @@ func (s *session) noteRecordedModel(cur Snapshot) {
 // agent that answers each with fast still on is not asked for ever.
 const fastFixAttempts = 3
 
+// fastFixDeadline bounds one reset of claude's fast mode as a whole, whatever
+// its sets do (review C2b 3): a set whose write is held behind another — a
+// prompt the agent has stopped reading — never sees its own context. Atomic
+// for the tests that shorten it.
+var fastFixDeadline atomic.Int64
+
+const defaultFastFixDeadline = 20 * time.Second
+
 // claudeFastOn reports whether cfg has claude's fast mode on.
 func (s *session) claudeFastOn(cfg []ConfigOption) bool {
 	return s.provider().RefusesFast() && FastOn(Snapshot{Provider: s.provider().Info(), Config: cfg})
@@ -310,6 +341,13 @@ func (s *session) keepFastOffLocked(cfg []ConfigOption) {
 // and no turn may run with it on. done is closed last, so a prompt waiting
 // on it (awaitFastFix) finds the session stopped.
 func (s *session) fixFast(done chan struct{}) {
+	// The reset's own deadline, whatever its sets do (review C2b 3): past it
+	// the session stops, which also fails a set held in its write.
+	limit := durationOr(&fastFixDeadline, defaultFastFixDeadline)
+	timer := time.AfterFunc(limit, func() {
+		s.stopFor(claudeErr(errkind.Config, "Claude Code did not confirm fast mode off within %s, and %s", limit, FastBillsExtra))
+	})
+	defer timer.Stop()
 	var fail error
 	for attempt := 0; ; attempt++ {
 		s.mu.Lock()
@@ -344,11 +382,20 @@ func (s *session) fixFast(done chan struct{}) {
 
 // awaitFastFix waits for a reset of claude's fast mode in flight, and answers
 // the session's fatal error: the reset's, when it stopped the session.
+//
+// It waits until no reset is in flight, not for the one it saw: a reset that
+// ends can be followed at once by another (review C2b 2).
 func (s *session) awaitFastFix(ctx context.Context) error {
-	s.mu.Lock()
-	done := s.fastFix
-	s.mu.Unlock()
-	if done != nil {
+	for {
+		s.mu.Lock()
+		done, fatal := s.fastFix, s.gate.fatal
+		s.mu.Unlock()
+		if fatal != nil {
+			return fatal
+		}
+		if done == nil {
+			return nil
+		}
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -357,7 +404,6 @@ func (s *session) awaitFastFix(ctx context.Context) error {
 			return fmt.Errorf("agent: session closed")
 		}
 	}
-	return s.fatalErr()
 }
 
 // ensureFastOff is the start's last check of claude's fast mode (review F1):

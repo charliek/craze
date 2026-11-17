@@ -713,6 +713,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		s.onForeignTurn(ForeignTurnInfo{ID: f.ID, Text: f.Text, Running: f.Running})
 	})
 	client.SetAuthStatusHandler(s.onAuthStatus)
+	// The last check before a prompt's bytes go out (review C2b 2): held
+	// while claude's fast mode is being reset, refused once the session has
+	// stopped. Cursor and grok never have either.
+	client.SetPromptGate(s.awaitFastFix)
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {

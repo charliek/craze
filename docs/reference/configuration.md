@@ -832,7 +832,9 @@ listed by `craze providers`, the picker or `--help`. The
 - **Claude Code**, `claude`, signed in with `claude auth login`. craze runs the
   one `$CLAUDE_CODE_EXECUTABLE` names when that is set — the way to point at a
   `claude` that is not on `PATH` — else `claude` on `PATH`, and always hands
-  the adapter that same path in `CLAUDE_CODE_EXECUTABLE`. `--agent-bin`,
+  the adapter that same path, made absolute, in `CLAUDE_CODE_EXECUTABLE`. A
+  relative path is read from the directory the craze command ran in, also
+  for a session [the hub](cli.md#the-hub) starts elsewhere. `--agent-bin`,
   `$CRAZE_AGENT_BIN` and `[agents].claude` never pick it.
 - **Versions.** craze refuses an adapter older than **0.107.0** or a Claude
   Code older than **2.1.322** (kind `config`, with the update command). The
@@ -911,7 +913,8 @@ skills and MCP servers — applies as it does in Claude Code, but for these:
   is refused (exit 2) — on `craze new` with no `--provider` too, when the
   default it would start is claude — the model picker offers no fast tab, and
   craze turns it off again whenever it finds it on, holding the next prompt
-  until it is off. A session where it will not go off fails to start
+  until it is off; a resumed session has it set off once whatever the load
+  said. A reset not confirmed within 20 seconds stops the session. A session where it will not go off fails to start
   (`config`); a running one where it will not stops, the turn running ending
   with `config` and every later prompt refused the same way.
 - **An unattended session** (`craze new --wait`) is started without
