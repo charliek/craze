@@ -991,6 +991,10 @@ func (m *Model) otherRows(t *agent.ToolEvent, width int) []string {
 	if label == "" {
 		label = "tool"
 	}
+	if t.ToolName == "AskUserQuestion" && t.Kind == "other" {
+		// Claude Code's question tool, which claude-agent-acp kinds `other`.
+		label = "question"
+	}
 	target := sanitizeLine(t.Title)
 	if (t.Kind == "search" || t.Kind == "fetch") && t.RawInput != "" {
 		if q := queryNotInTitle(t.RawInput, target); q != "" {

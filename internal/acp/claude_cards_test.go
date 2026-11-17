@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -216,6 +218,27 @@ func TestClaudeElicitationUnanswerable(t *testing.T) {
 		{"array of oneOf", q(`"question_0":{"type":"array","items":{"oneOf":[{"const":"a"}]}}`), `{"action":"cancel"}`, RefusedElicitationForm},
 		{"empty form", q(``), `{"action":"cancel"}`, RefusedElicitationForm},
 		{"refusal fallback", q(`"choice":{"type":"string","oneOf":[{"const":"retry_fallback","title":"Retry"},{"const":"cancelled","title":"Keep"}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		// A malformed envelope is cancelled, never declined (review C3 item
+		// 3): a decline would let the tool run on empty answers.
+		{"message not a string", `{"mode":"form","message":[],"requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"mode not a string", `{"mode":7,"message":"m"}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"mode empty", `{"mode":"","message":"m"}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"url mode malformed", `{"mode":"url","message":{"x":1},"url":"https://example.com"}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"toolCallId not a string", `{"mode":"form","toolCallId":3,"message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"not an object", `[1,2]`, `{"action":"cancel"}`, RefusedElicitationForm},
+		// Constraints the card cannot enforce (review C3 item 4).
+		{"custom enum", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","enum":["No"]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"custom pattern", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","pattern":"^x$"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"custom maxLength", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","maxLength":3}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"custom format", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","format":"email"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"array minItems", q(`"question_0":{"type":"array","minItems":1,"items":{"anyOf":[{"const":"a"}]}}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"array maxItems", q(`"question_0":{"type":"array","maxItems":1,"items":{"anyOf":[{"const":"a"},{"const":"b"}]}}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"items keyword", q(`"question_0":{"type":"array","items":{"type":"string","anyOf":[{"const":"a"}]}}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"single default", q(`"question_0":{"type":"string","default":"a","oneOf":[{"const":"a"}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"option keyword", q(`"question_0":{"type":"string","oneOf":[{"const":"a","default":true}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"schema keyword", `{"mode":"form","message":"m","requestedSchema":{"type":"object","additionalProperties":false,"properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"required free text", `{"mode":"form","message":"m","requestedSchema":{"type":"object","required":["question_0_custom"],"properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string"}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"required unknown", `{"mode":"form","message":"m","requestedSchema":{"type":"object","required":["question_1"],"properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newRawPipeDialect(t, DialectClaude)
@@ -339,7 +362,10 @@ func claudePlanOdd() []struct {
 		{"kind edit", "", func() planRequest { x := r; x.kind = "edit"; return x }(), "reject"},
 		{"no plan", "", func() planRequest { x := r; x.plan, x.content = "", ""; return x }(), "reject"},
 		{"no reject option", "", withOptions(r, realExitOptions()[:4]...), ""},
-		{"reject of kind allow", "", withOptions(r, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}, PermissionOption{OptionID: "reject", Kind: KindAllowAlways}, PermissionOption{OptionID: "deny", Kind: KindRejectOnce}), "deny"},
+		// The id is what the adapter acts on: reject, whatever its kind; and
+		// never another reject-kind id, which the adapter throws on.
+		{"reject of kind allow", "", withOptions(r, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}, PermissionOption{OptionID: "reject", Kind: KindAllowAlways}, PermissionOption{OptionID: "deny", Kind: KindRejectOnce}), "reject"},
+		{"deny alone", "", withOptions(r, PermissionOption{OptionID: "exit-plan-auto", Kind: KindAllowAlways}, PermissionOption{OptionID: "deny", Kind: KindRejectOnce}), ""},
 		{"options only", "", planRequest{title: "Run tool?", kind: "execute", options: []PermissionOption{{OptionID: "exit-plan-bypass", Kind: KindAllowAlways}, {OptionID: "allow-once", Kind: KindAllowOnce}}}, ""},
 		{"titled only", "", planRequest{title: "Approve Plan", options: []PermissionOption{{OptionID: "allow-once", Kind: KindAllowOnce}, {OptionID: "allow-with-updates", Kind: KindAllowAlways}, {OptionID: "reject", Kind: KindRejectOnce}}}, "reject"},
 	}
@@ -400,7 +426,8 @@ func assertNoPlanBypass(t *testing.T, opts []PermissionOption, result json.RawMe
 	}
 	_ = json.Unmarshal(result, &r)
 	id := r.Outcome.OptionID
-	if id == "" {
+	if id == "" || id == ClaudeExitPlanReject {
+		// reject is the adapter's keep planning, whatever kind it carries.
 		return
 	}
 	if strings.HasPrefix(id, "exit-plan-") && id != ClaudeExitPlanDefault {
@@ -631,4 +658,146 @@ func TestClaudeSteering(t *testing.T) {
 		}
 		p.noReply(t)
 	})
+}
+
+// TestClaudeToolNamesAreTheSessionsOwn is review C3 item 1's sequence: a
+// foreign session's tool call named EnterPlanMode (its update dropped) cannot
+// lend that name to the active session's call of the same id, which the
+// adapter named ExitPlanMode. A malformed exit about it — kind switch_mode, no
+// name or title of its own, allow-once in place of exit-plan-default — is a
+// suspect, and rejected; force never sees it.
+func TestClaudeToolNamesAreTheSessionsOwn(t *testing.T) {
+	malformed := planRequest{kind: "switch_mode", plan: "# Plan", options: []PermissionOption{
+		{OptionID: "allow-once", Kind: KindAllowOnce}, {OptionID: "reject", Kind: KindRejectOnce},
+	}}
+	stamp := func(p *rawPipe, sid, name string) {
+		p.send(t, nil, MethodSessionUpdate, `{"sessionId":"`+sid+`","update":{"_meta":{"claudeCode":{"toolName":"`+name+`"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","kind":"switch_mode"}}`)
+	}
+	ownEnter := malformed
+	ownEnter.name = "EnterPlanMode"
+	for _, tc := range []struct {
+		name  string
+		stamp func(p *rawPipe)
+		req   planRequest
+	}{
+		{"the review's sequence", func(p *rawPipe) { stamp(p, "foreign", "EnterPlanMode"); stamp(p, "s-1", "ExitPlanMode") }, malformed},
+		// A remembered EnterPlanMode alone never makes a request ordinary:
+		// the request does not say so itself.
+		{"a remembered EnterPlanMode alone", func(p *rawPipe) { stamp(p, "s-1", "EnterPlanMode") }, malformed},
+		// A call the adapter named twice is a suspect, though its latest name
+		// and the request's own both say EnterPlanMode.
+		{"renamed", func(p *rawPipe) { stamp(p, "s-1", "ExitPlanMode"); stamp(p, "s-1", "EnterPlanMode") }, ownEnter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+				t.Error("the malformed exit reached the permission handler (force)")
+				return PermissionDecision{OptionID: "allow-once"}
+			})
+			tc.stamp(p)
+			p.send(t, 4, MethodRequestPermission, tc.req.params())
+			if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != `{"outcome":{"outcome":"selected","optionId":"reject"}}` {
+				t.Fatalf("answer %s", got)
+			}
+		})
+	}
+}
+
+// TestClaudeToolNamesForgottenOnANewSession: a tool call remembered from the
+// session before a session/new names nothing in the new one.
+func TestClaudeToolNamesForgottenOnANewSession(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	// A dropped session's tool call is never remembered.
+	p.send(t, nil, MethodSessionUpdate, `{"sessionId":"foreign","update":{"_meta":{"claudeCode":{"toolName":"EnterPlanMode"}},"toolCallId":"t1","sessionUpdate":"tool_call"}}`)
+	p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"ExitPlanMode"}},"toolCallId":"t1","sessionUpdate":"tool_call"}}`)
+	waitUntil(t, func() bool { return p.client.claudeTool("s-1", "t1").name == "ExitPlanMode" })
+	if got := p.client.claudeTool("foreign", "t1"); got.name != "" || p.client.claudeTool("s-1", "t1").conflicts {
+		t.Fatalf("a dropped update was remembered: %+v", got)
+	}
+	go func() { _, _ = p.client.NewSession(t.Context(), t.TempDir(), SessionParams{}) }()
+	req := p.readWithin(t, 3*time.Second, "session/new")
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Result: json.RawMessage(`{"sessionId":"s-1"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return p.client.claudeTool("s-1", "t1").name == "" })
+}
+
+// TestClaudeElicitationRequired (review C3 item 4): a form's `required` is the
+// one constraint beyond the adapter's own form that the card takes, and it is
+// carried to the question, which must then be answered.
+func TestClaudeElicitationRequired(t *testing.T) {
+	_, req, why := parseElicitation(json.RawMessage(`{"mode":"form","message":"m","requestedSchema":{"type":"object","required":["question_1"],"properties":{` +
+		`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_1":{"type":"array","items":{"anyOf":[{"const":"b"}]}}}}}`))
+	if why != "" || len(req.Questions) != 2 || req.Questions[0].Required || !req.Questions[1].Required {
+		t.Fatalf("%q %+v", why, req)
+	}
+}
+
+// TestClaudeCancelRequestWithdraws (review C3 item 6): the adapter's
+// $/cancel_request withdraws the open request it names. The handler's context
+// ends with ErrRequestWithdrawn, nothing is written to the agent afterwards —
+// the decision that races the withdrawal included, which is reported lost as
+// withdrawn — and a request nobody holds is ignored.
+func TestClaudeCancelRequestWithdraws(t *testing.T) {
+	for _, method := range []string{MethodElicitationCreate, MethodRequestPermission} {
+		t.Run(method, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			parked := make(chan Arrival, 1)
+			disp := make(chan ReplyDisposition, 1)
+			p.client.SetAskHandler(func(a Arrival, _ AskQuestionRequest) AskDecision {
+				parked <- a
+				<-a.Call.Done()
+				return AskDecision{Answers: map[string][]string{"question_0": {"a"}}, Replied: func(d ReplyDisposition) { disp <- d }}
+			})
+			p.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+				parked <- a
+				<-a.Call.Done()
+				return PermissionDecision{OptionID: "allow-once", Replied: func(d ReplyDisposition) { disp <- d }}
+			})
+			params := `{"mode":"form","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`
+			if method == MethodRequestPermission {
+				params = `{"sessionId":"s-1","toolCall":{"toolCallId":"t1","name":"Write","kind":"edit","title":"Write x"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]}`
+			}
+			p.send(t, 7, method, params)
+			a := <-parked
+			p.send(t, nil, MethodCancelRequest, `{"requestId":99}`)
+			p.send(t, nil, MethodCancelRequest, `{"requestId":7}`)
+			select {
+			case <-a.Call.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("the withdrawal did not end the request's context")
+			}
+			if !errors.Is(context.Cause(a.Call), ErrRequestWithdrawn) {
+				t.Fatalf("cause %v", context.Cause(a.Call))
+			}
+			if d := <-disp; d.Delivered || d.Lost != ReplyLostWithdrawn {
+				t.Fatalf("the racing decision %+v, want lost as withdrawn", d)
+			}
+			p.noReply(t)
+		})
+	}
+}
+
+// TestClaudeCancelRequestBeforeTheHandler: a request withdrawn before its
+// handler ran never runs it; the early answer says withdrawn, and nothing is
+// written.
+func TestClaudeCancelRequestBeforeTheHandler(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	early := watchEarly(p.client)
+	req := AskQuestionRequest{Questions: []AskQuestion{{ID: "question_0", Options: []AskOption{{ID: "a"}}}}}
+	in := p.client.register(&Message{JSONRPC: jsonrpcVersion, ID: json.RawMessage(`5`), Method: MethodElicitationCreate}, RequestParams{Ask: &req})
+	p.send(t, nil, MethodCancelRequest, `{"requestId":5}`)
+	waitUntil(t, func() bool { return in.ctx.Err() != nil })
+	ran := false
+	p.client.runIncoming(in, func(*pendingReq) { ran = true })
+	if ran {
+		t.Fatal("the handler ran for a withdrawn request")
+	}
+	if ea := oneEarlyAnswer(t, early); ea.Reason != EarlyWithdrawn || ea.Params.Ask == nil {
+		t.Fatalf("early answer %+v", ea)
+	}
+	p.noReply(t)
 }

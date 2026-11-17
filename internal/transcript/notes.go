@@ -278,6 +278,11 @@ func questionTitle(q *agent.QuestionEvent) string {
 }
 
 // planNote is what an answered plan draws.
+// noteWithdrawn is what a question's or a plan's row says when the agent took
+// the request back (agent.AskByWithdrawn): only claude does, with
+// $/cancel_request.
+const noteWithdrawn = "withdrawn by Claude"
+
 func planNote(p *agent.PlanEvent, accepted bool) string {
 	verb := "rejected"
 	if accepted {

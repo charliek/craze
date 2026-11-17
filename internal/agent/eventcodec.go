@@ -381,6 +381,7 @@ type wireEvent struct {
 	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
+	KeptPlanning   bool             `json:"keptPlanning,omitempty"`
 	At             time.Time        `json:"at,omitzero"`
 }
 
@@ -475,6 +476,7 @@ type wireQuestion struct {
 	Options       []wireOption `json:"options,omitempty"`
 	AllowMultiple bool         `json:"allowMultiple,omitempty"`
 	AllowText     bool         `json:"allowText,omitempty"`
+	Required      bool         `json:"required,omitempty"`
 }
 
 type wireOption struct {
@@ -571,17 +573,18 @@ type wireTurn struct {
 // event already has on the wire, so an ending that carries its body and the
 // opening it stands in for read the same.
 type wireAsk struct {
-	ID       string              `json:"id,omitempty"`
-	Kind     AskKind             `json:"kind,omitempty"`
-	Outcome  AskOutcome          `json:"outcome,omitempty"`
-	By       string              `json:"by,omitempty"`
-	OptionID string              `json:"optionId,omitempty"`
-	Answers  map[string][]string `json:"answers,omitempty"`
-	Text     map[string]string   `json:"text,omitempty"`
-	Skip     bool                `json:"skip,omitempty"`
-	Accepted bool                `json:"accepted,omitempty"`
-	Label    string              `json:"label,omitempty"`
-	Body     *wireAskBody        `json:"body,omitempty"`
+	ID        string              `json:"id,omitempty"`
+	Kind      AskKind             `json:"kind,omitempty"`
+	Outcome   AskOutcome          `json:"outcome,omitempty"`
+	By        string              `json:"by,omitempty"`
+	OptionID  string              `json:"optionId,omitempty"`
+	Answers   map[string][]string `json:"answers,omitempty"`
+	Text      map[string]string   `json:"text,omitempty"`
+	Cancelled bool                `json:"cancelled,omitempty"`
+	Skip      bool                `json:"skip,omitempty"`
+	Accepted  bool                `json:"accepted,omitempty"`
+	Label     string              `json:"label,omitempty"`
+	Body      *wireAskBody        `json:"body,omitempty"`
 }
 
 // wireAskBody is an AskBody: exactly one of the three is set on an ask craze
@@ -992,6 +995,7 @@ func toWireEvent(ev Event) wireEvent {
 		StepRetry:      (*wireStepRetry)(ev.StepRetry),
 		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
+		KeptPlanning:   ev.KeptPlanning,
 		At:             ev.At.UTC(),
 	}
 	if ev.Tool != nil {
@@ -1002,16 +1006,17 @@ func toWireEvent(ev Event) wireEvent {
 	w.Plan = toWirePlan(ev.Plan)
 	if a := ev.Ask; a != nil {
 		w.Ask = &wireAsk{
-			ID:       a.ID,
-			Kind:     a.Kind,
-			Outcome:  a.Outcome,
-			By:       a.By,
-			OptionID: a.OptionID,
-			Answers:  a.Answers,
-			Text:     a.Text,
-			Skip:     a.Skip,
-			Accepted: a.Accepted,
-			Label:    a.Label,
+			ID:        a.ID,
+			Kind:      a.Kind,
+			Outcome:   a.Outcome,
+			By:        a.By,
+			OptionID:  a.OptionID,
+			Answers:   a.Answers,
+			Text:      a.Text,
+			Cancelled: a.Cancelled,
+			Skip:      a.Skip,
+			Accepted:  a.Accepted,
+			Label:     a.Label,
 		}
 		if b := a.Body; b != nil {
 			w.Ask.Body = &wireAskBody{
@@ -1296,6 +1301,7 @@ func toWireQuestionEv(q *QuestionEvent) *wireQuestionEv {
 				Options:       convertSlice(qq.Options, func(o Option) wireOption { return wireOption(o) }),
 				AllowMultiple: qq.AllowMultiple,
 				AllowText:     qq.AllowText,
+				Required:      qq.Required,
 			}
 		}),
 		Auto:    q.Auto,
@@ -1348,6 +1354,7 @@ func (w *wireEvent) event() Event {
 		StepRetry:      (*StepRetryInfo)(w.StepRetry),
 		Cause:          w.Cause,
 		StopReason:     w.StopReason,
+		KeptPlanning:   w.KeptPlanning,
 		At:             w.At.UTC(),
 	}
 	if w.Tool != nil {
@@ -1358,14 +1365,15 @@ func (w *wireEvent) event() Event {
 	ev.Plan = w.Plan.plan()
 	if a := w.Ask; a != nil {
 		ev.Ask = &AskUpdate{
-			ID:       a.ID,
-			Kind:     a.Kind,
-			Outcome:  a.Outcome,
-			By:       a.By,
-			OptionID: a.OptionID,
-			Skip:     a.Skip,
-			Accepted: a.Accepted,
-			Label:    a.Label,
+			ID:        a.ID,
+			Kind:      a.Kind,
+			Outcome:   a.Outcome,
+			By:        a.By,
+			OptionID:  a.OptionID,
+			Cancelled: a.Cancelled,
+			Skip:      a.Skip,
+			Accepted:  a.Accepted,
+			Label:     a.Label,
 		}
 		if len(a.Answers) > 0 {
 			ev.Ask.Answers = a.Answers
@@ -1516,6 +1524,7 @@ func (w *wireQuestionEv) question() *QuestionEvent {
 				Options:       convertSlice(wq.Options, func(o wireOption) Option { return Option(o) }),
 				AllowMultiple: wq.AllowMultiple,
 				AllowText:     wq.AllowText,
+				Required:      wq.Required,
 			}
 		}),
 		Auto: w.Auto,

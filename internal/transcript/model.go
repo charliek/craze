@@ -124,16 +124,9 @@ type Model struct {
 	// asks are the open asks and ended the last-ended list, each keyed by
 	// id in the order they opened or ended (keyedList): no scan under the
 	// boundary, however many asks are open.
-	asks  keyedList[Ask]
-	ended keyedList[AskEnding]
-	turn  Turn
-	// planKept says the last thing the main session did was have a plan
-	// rejected — kept planning — so a cancelled ending that follows at once is
-	// that rejection's (claude ends its turn cancelled on one, plan 052 §
-	// B5), not a cancel, and leaves no cancelled note: the plan's own
-	// `→ rejected` row says what happened. Anything else the session does
-	// clears it.
-	planKept  bool
+	asks      keyedList[Ask]
+	ended     keyedList[AskEnding]
+	turn      Turn
 	replaying bool
 	settings  Settings
 	queue     []agent.QueuedPrompt

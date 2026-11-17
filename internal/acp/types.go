@@ -601,6 +601,10 @@ type AskQuestion struct {
 	// (plan 052 § B4). Only the claude dialect sets it; it is never read
 	// off cursor's wire.
 	AllowText bool `json:"-"`
+	// Required says the question must be answered — a pick or free text —
+	// when the request is answered at all: a claude form's `required`.
+	// Never read off cursor's wire.
+	Required bool `json:"-"`
 }
 
 type AskOption struct {
@@ -697,6 +701,10 @@ const (
 	// failed. The error itself is dropped, exactly as it always has been; only
 	// the fact is reported.
 	ReplyLostWriteFailed = "write_failed"
+	// ReplyLostWithdrawn: the agent took the request back ($/cancel_request)
+	// before the decision was written, so nothing was: it would answer a
+	// request the agent no longer waits on.
+	ReplyLostWithdrawn = "withdrawn"
 	// ReplyLostInvalidOption: the decision named an option the request never
 	// offered, so the client replaced it with the cancelled outcome. The reply
 	// reached the agent; the decision did not.
@@ -795,6 +803,9 @@ const (
 	// cancelled itself rather than let a card be raised for a turn that has
 	// ended.
 	EarlyStaleTurn EarlyAnswerReason = "stale_turn"
+	// EarlyWithdrawn: the agent took the request back ($/cancel_request)
+	// before any handler ran; nothing was written to it.
+	EarlyWithdrawn EarlyAnswerReason = "withdrawn"
 )
 
 // EarlyAnswer is one blocking request the client answered by itself, before any

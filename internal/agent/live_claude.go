@@ -462,9 +462,34 @@ func (s *session) claudeReturnPlan(token TurnToken, live bool, ask AskRequest) a
 		return acp.PlanDecision{Cancelled: true}
 	}
 	rec := s.automaticAsk(token, ask, AskAnswer{Reject: true})
+	s.notePlanKept(token)
 	dec := planDecision(rec)
 	dec.Replied = s.reportedBy(rec.ID)
 	return dec
+}
+
+// notePlanKept records that turn token's plan exit was answered reject (keep
+// planning), which ends a claude turn cancelled (plan 052 § B5). Only claude's,
+// and only for a turn of craze's own; a cancel asked for afterwards clears it
+// (Cancel), and so does the turn's end (keptPlanning).
+func (s *session) notePlanKept(token TurnToken) {
+	if !s.provider().isClaude() || token.NoTurn() {
+		return
+	}
+	s.mu.Lock()
+	s.planKept = token
+	s.mu.Unlock()
+}
+
+// keptPlanning reports, once, whether turn token's cancelled ending is its
+// plan's rejection (notePlanKept) with no cancel asked for since: the fact an
+// EventDone carries (Event.KeptPlanning).
+func (s *session) keptPlanning(token TurnToken) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := !token.NoTurn() && s.planKept == token
+	s.planKept = TurnToken{}
+	return kept
 }
 
 // onRefusedRequest is the client's word that it answered a claude request

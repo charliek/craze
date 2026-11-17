@@ -66,6 +66,8 @@ func TestClaudeAskCard(t *testing.T) {
 		{"text alone", &AskAnswer{Answers: map[string][]string{"question_0": {}}, Text: map[string]string{"question_0": "green"}},
 			`ask answer: {"action":"accept","content":{"question_0_custom":"green"}}`},
 		{"skip", &AskAnswer{Skip: true}, `ask answer: {"action":"decline"}`},
+		// The card dismissed (Esc on claude): cancel, which aborts the tool.
+		{"dismissed", &AskAnswer{Cancel: true}, `ask answer: {"action":"cancel"}`},
 		{"cancelled turn", nil, `ask answer: {"action":"cancel"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +200,11 @@ func TestClaudePlanCard(t *testing.T) {
 			got := <-done
 			if got.err != nil || got.r.StopReason != tc.stop {
 				t.Fatalf("result %+v %v, want stop %s", got.r, got.err, tc.stop)
+			}
+			// Keep planning's cancelled ending says it was the plan's
+			// (review C3 item 9); an approval's end_turn says nothing.
+			if d := log.waitType(t, EventDone); d.KeptPlanning != !tc.accept {
+				t.Fatalf("done %+v", d)
 			}
 			for _, a := range r.s.asks.Asks() {
 				if a.Kind == AskPermission {
@@ -342,7 +349,7 @@ func TestClaudeInterjectIdle(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := run(context.Background()); done <- err }()
 	waitFor(t, "the turn", func() bool { return r.s.promptInFlight() })
-	if err := r.s.Interject(t.Context(), "x"); !errors.Is(err, ErrNotInTurn) {
+	if err := r.s.Interject(t.Context(), "x"); !errors.Is(err, ErrPromptRequired) || !errors.Is(err, ErrNotInTurn) {
 		t.Fatalf("promptRequired: %v", err)
 	}
 	if _, err := r.s.Cancel(t.Context()); err != nil {
@@ -384,5 +391,128 @@ func TestFreeTextSurvivesTheCodec(t *testing.T) {
 	body, _ := EncodeEvent(Event{Type: EventQuestion, Question: q})
 	if strings.Contains(body, "allowText") {
 		t.Fatalf("an unset allowText is written: %s", body)
+	}
+}
+
+// TestQuestionAnswerShapes covers review C3 items 4, 5 and 7 at the registry:
+// a single-select takes one pick, on every provider; a required question must
+// get a pick or text and its ask cannot be skipped; and a question can be
+// cancelled — claude's Esc — but a cancel carries no answers.
+func TestQuestionAnswerShapes(t *testing.T) {
+	body := AskBody{Question: &QuestionEvent{Questions: []Question{
+		{ID: "one", Options: []Option{{ID: "a"}, {ID: "b"}}},
+		{ID: "many", AllowMultiple: true, Options: []Option{{ID: "x"}, {ID: "y"}}},
+	}}}
+	required := AskBody{Question: &QuestionEvent{Questions: []Question{
+		{ID: "r", Required: true, AllowText: true, AllowMultiple: true, Options: []Option{{ID: "x"}}},
+	}}}
+	for _, tc := range []struct {
+		name string
+		body AskBody
+		a    AskAnswer
+		ok   bool
+	}{
+		{"two picks on a single-select", body, AskAnswer{Answers: map[string][]string{"one": {"a", "b"}}}, false},
+		{"one pick each", body, AskAnswer{Answers: map[string][]string{"one": {"a"}, "many": {"x", "y"}}}, true},
+		{"required left empty", required, AskAnswer{Answers: map[string][]string{"r": {}}}, false},
+		{"required skipped", required, AskAnswer{Skip: true}, false},
+		{"required picked", required, AskAnswer{Answers: map[string][]string{"r": {"x"}}}, true},
+		{"required typed", required, AskAnswer{Text: map[string]string{"r": "own"}}, true},
+		{"required cancelled", required, AskAnswer{Cancel: true}, true},
+		{"cancel with answers", body, AskAnswer{Cancel: true, Answers: map[string][]string{"one": {"a"}}}, false},
+		{"cancel with skip", body, AskAnswer{Cancel: true, Skip: true}, false},
+	} {
+		got, _, err := validateAnswer(AskQuestion, tc.body, tc.a)
+		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrBadAnswer)) {
+			t.Fatalf("%s: %+v %v", tc.name, got, err)
+		}
+	}
+	if d := askDecision(AskRecord{Outcome: AskAnswered, Answer: AskAnswer{Cancel: true}}); !d.Cancelled {
+		t.Fatalf("a cancelled question's decision %+v", d)
+	}
+}
+
+// TestAWithdrawnRequestEndsAsWithdrawn (review C3 item 6): a request the agent
+// withdrew ($/cancel_request, the Arrival's Call ended with
+// acp.ErrRequestWithdrawn) ends its parked card as withdrawn — whether it
+// lands while the card is up or before it was raised — and an early answer
+// the client reports as withdrawn says so too.
+func TestAWithdrawnRequestEndsAsWithdrawn(t *testing.T) {
+	req := acp.AskQuestionRequest{Questions: []acp.AskQuestion{{ID: "question_0", Prompt: "p", Options: []acp.AskOption{{ID: "a", Label: "a"}}}}}
+	withdrawn := func() (context.Context, context.CancelCauseFunc) {
+		return context.WithCancelCause(context.Background())
+	}
+	t.Run("while the card is up", func(t *testing.T) {
+		s := newAskSession(t, Options{Interactive: true})
+		ctx, cancel := withdrawn()
+		done := make(chan acp.AskDecision, 1)
+		go func() { done <- s.onAskQuestion(acp.Arrival{Call: ctx}, req) }()
+		waitFor(t, "the card", func() bool { return len(s.asks.Asks()) == 1 })
+		cancel(acp.ErrRequestWithdrawn)
+		if d := <-done; !d.Cancelled {
+			t.Fatalf("decision %+v", d)
+		}
+		if r := s.asks.Resolved(); len(r) != 1 || r[0].Outcome != AskCancelled || r[0].By != AskByWithdrawn {
+			t.Fatalf("resolved %+v", r)
+		}
+	})
+	t.Run("before it was raised", func(t *testing.T) {
+		s := newAskSession(t, Options{Interactive: true})
+		ctx, cancel := withdrawn()
+		cancel(acp.ErrRequestWithdrawn)
+		s.onAskQuestion(acp.Arrival{Call: ctx}, req)
+		if r := s.asks.Resolved(); len(r) != 1 || r[0].By != AskByWithdrawn {
+			t.Fatalf("resolved %+v", r)
+		}
+	})
+	t.Run("early", func(t *testing.T) {
+		s := newAskSession(t, Options{Interactive: true})
+		s.onEarlyAnswer(acp.EarlyAnswer{Reason: acp.EarlyWithdrawn, Params: acp.RequestParams{Ask: &req}})
+		if r := s.asks.Resolved(); len(r) != 1 || r[0].Outcome != AskCancelled || r[0].By != AskByWithdrawn {
+			t.Fatalf("resolved %+v", r)
+		}
+	})
+	t.Run("a cancel is still the call's", func(t *testing.T) {
+		s := newAskSession(t, Options{Interactive: true})
+		ctx, cancel := withdrawn()
+		cancel(nil)
+		s.onAskQuestion(acp.Arrival{Call: ctx}, req)
+		if r := s.asks.Resolved(); len(r) != 1 || r[0].By != AskByCall {
+			t.Fatalf("resolved %+v", r)
+		}
+	})
+}
+
+// TestKeptPlanningIsClaudesAndYieldsToACancel (review C3 item 9): the mark is
+// set for claude's turn alone, is that turn's, and a cancel asked for after the
+// rejection takes it away — the ending is then the user's cancel.
+func TestKeptPlanningIsClaudesAndYieldsToACancel(t *testing.T) {
+	p := ClaudeProvider()
+	s := newAskSession(t, Options{Provider: &p})
+	turn := s.asks.BeginTurn()
+	s.notePlanKept(turn)
+	if !s.keptPlanning(turn) {
+		t.Fatal("the rejected turn's ending is not marked")
+	}
+	if s.keptPlanning(turn) {
+		t.Fatal("the mark outlived the ending it was for")
+	}
+	s.notePlanKept(turn)
+	if s.keptPlanning(s.asks.BeginTurn()) {
+		t.Fatal("another turn's ending was marked")
+	}
+	s.notePlanKept(turn)
+	if _, err := s.Cancel(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if s.keptPlanning(turn) {
+		t.Fatal("a cancel after the rejection still reads as kept planning")
+	}
+	g := GrokProvider()
+	gs := newAskSession(t, Options{Provider: &g})
+	gt := gs.asks.BeginTurn()
+	gs.notePlanKept(gt)
+	if gs.keptPlanning(gt) {
+		t.Fatal("grok's rejection marked its ending")
 	}
 }

@@ -1735,7 +1735,7 @@ func TestFrameGoldenClaudeAsk(t *testing.T) {
 		name, keys string
 		want       []string
 	}{
-		{"claude-ask", "<wait:idle>go<enter><wait:card>", []string{"question 1/1  Do you prefer red or blue?", "> 1 Red", "Choose red", "  3 Other…", "esc skip"}},
+		{"claude-ask", "<wait:idle>go<enter><wait:card>", []string{"question 1/1  Do you prefer red or blue?", "> 1 Red", "Choose red", "  3 Other…", "esc cancel", "◌ question  Asking for your input"}},
 		{"claude-ask-other", "<wait:idle>go<enter><wait:card>3teal<wait:text:Other: teal>", []string{"> 3 Other: teal▏", "type your answer · enter send · esc back"}},
 	} {
 		for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {

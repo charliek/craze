@@ -36,6 +36,7 @@
     "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
     "err": {"$ref": "#/$defs/error"},
     "stopReason": {"type": "string"},
+    "keptPlanning": {"type": "boolean", "description": "On a done whose stop reason is cancelled: the turn ended because its plan was answered keep planning (claude), not because anyone cancelled it, so no cancelled note is drawn."},
     "at": {"$ref": "#/$defs/time"}
   },
   "required": ["type"],
@@ -171,7 +172,8 @@
         "prompt": {"type": "string"},
         "options": {"type": "array", "items": {"$ref": "#/$defs/option"}},
         "allowMultiple": {"type": "boolean"},
-        "allowText": {"type": "boolean", "description": "The question also takes a free-text answer of the user's own (answer text): claude's \"Other\" box. No other provider sets it."}
+        "allowText": {"type": "boolean", "description": "The question also takes a free-text answer of the user's own (answer text): claude's \"Other\" box. No other provider sets it."},
+        "required": {"type": "boolean", "description": "The question must be answered (a pick or text) whenever the ask is answered, and the ask cannot be skipped: a claude form's required. No other provider sets it."}
       },
       "additionalProperties": false
     },
@@ -308,7 +310,7 @@
       "additionalProperties": false
     },
     "ask": {
-      "description": "One ask's ending (AskUpdate): kind is permission, question or plan; outcome answered, cancelled, turn_ended, closing or automatic; by whose doing (client, call, cancel, turn, close, policy, provider, unavailable). body is set only when no opening was ever published.",
+      "description": "One ask's ending (AskUpdate): kind is permission, question or plan; outcome answered, cancelled, turn_ended, closing or automatic; by whose doing (client, call, cancel, turn, close, policy, provider, withdrawn — the agent took its request back, claude's $/cancel_request — unavailable). body is set only when no opening was ever published.",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
@@ -318,6 +320,7 @@
         "optionId": {"type": "string"},
         "answers": {"$ref": "#/$defs/answers"},
         "text": {"$ref": "#/$defs/answerText"},
+        "cancelled": {"type": "boolean", "description": "A question cancelled rather than answered (answer cancel): claude's Esc, which aborts the tool that asked."},
         "skip": {"type": "boolean"},
         "accepted": {"type": "boolean"},
         "label": {"type": "string"},

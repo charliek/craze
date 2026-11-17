@@ -4885,7 +4885,7 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
-		if ev.StopReason == stopCancelled {
+		if ev.StopReason == stopCancelled && !ev.KeptPlanning {
 			// Esc leaves nothing else behind: the spinner going away, and the
 			// note, are the only signs the cancel landed, and the first is
 			// indistinguishable from the turn having finished on its own.

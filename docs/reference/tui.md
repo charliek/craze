@@ -541,8 +541,10 @@ text that it folds into the turn at its next safe point (after a tool result),
 native steers it into the turn's next step, and claude's `_session/steering`
 injects it into the running turn (a tool running then is moved to the
 background, as in Claude Code). The transcript shows each as a `↳` entry. When
-claude finds its turn already over, the message is not taken: the note says
-`nothing to interject into` and the draft stays in the composer for `Enter`.
+claude finds its turn already over, it does not take the message, and craze
+sends it as the next prompt instead: the draft clears and the message is
+queued (or goes at once, if nothing is running), so a turn that ends just
+before the interjection loses nothing.
 Cursor has none — a second prompt there silently cancels the first — so craze
 never sends one and offers send now instead, always with
 
@@ -1704,7 +1706,7 @@ reported again only when you come back to it.
 | Card | Keys |
 |---|---|
 | permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a`, `y` or `1` allow once, **`A` allow always**, `n`, `r` or `2` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
-| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. On a question that takes an answer of your own, the last row is `Other…` (below). |
+| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request — on a `claude` session it **cancels** it instead (hint `esc cancel`; below). On a question that takes an answer of your own, the last row is `Other…` (below). |
 | plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a`, `y` or `1` accept, `r`, `n` or `2` reject. `Esc` cancels the turn. |
 
 A question card's option may carry a description, drawn dimmed on its own
@@ -1722,22 +1724,35 @@ answer on its own; on a multiple-choice one it joins the options toggled, and
 note on it. A text answer is at most 4096 bytes. Cursor and grok questions take
 no free text and have no such row.
 
-**claude's cards.** A claude question that skips (`Esc`) tells Claude the user
-declined to answer; cancelling the turn while it is up withdraws it, which
-aborts the tool. A question craze cannot show — a form of another shape than
-AskUserQuestion's, or one that is not a form — raises no card: it is withdrawn
-(the tool aborts) and the diag lane says so.
+**claude's cards.** `Esc` on a claude question card cancels the question, as
+`Esc` does in Claude Code: the tool that asked is aborted (a skip would let it
+run on empty answers). The row reads `? <question> → cancelled`. Cancelling the
+turn while it is up does the same. Its tool row is labelled `question`. A
+single-choice question takes one pick, on every provider; a claude question
+the form marks `required` must get a pick or text — `Enter` on a
+multiple-choice one with nothing toggled and nothing typed does nothing — and
+its card cannot be skipped. When Claude takes a question or a permission back
+(its `$/cancel_request`, when the tool that asked is aborted), the card goes
+away with nothing sent, and a question's or plan's row reads `→ withdrawn by
+Claude`; an answer that crosses the withdrawal is not delivered. A question
+craze cannot show — a form of another shape than AskUserQuestion's, one whose
+fields carry a constraint the card cannot enforce (an `enum` or `pattern` on
+the free text, a `minItems` on a choice), one that is not a form, or a request
+that does not read as one — raises no card: it is withdrawn (the tool aborts)
+and the diag lane says so. Only a well-formed request of another mode is
+declined.
 
 When Claude leaves plan mode (ExitPlanMode) it asks for approval, and that is
 the plan card, with the plan in the transcript: accept sends Claude Code's
 "Yes, manually approve edits", so Claude goes on in `default` (Manual) and asks
 for each edit, which [force](cli.md) then answers; reject sends "No, keep
-planning", which ends the turn, and the card shows it rejected with no cancel
-banner. craze never picks Claude's options that switch to `auto`, bypass
+planning", which ends the turn, and the card shows it rejected with no
+`cancelled` note — unless you cancelled the turn yourself after rejecting it. craze never picks Claude's options that switch to `auto`, bypass
 permissions, accept edits or clear the context, and force never approves a
 plan. A plan approval of any shape other than the one craze knows raises no
-card: it is answered "keep planning" (or cancelled, when it offers no such
-option) and the diag lane says the approval had an unexpected shape.
+card: it is answered "keep planning" — Claude's own `reject` option, and never
+another — or cancelled, when it offers no such option, and the diag lane says
+the approval had an unexpected shape.
 
 A native session that has not decided about [web
 search](configuration.md#native-web-search) asks once, with an ordinary

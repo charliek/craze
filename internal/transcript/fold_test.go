@@ -1099,41 +1099,76 @@ func TestRangeIsWhatAFoldAppended(t *testing.T) {
 	}
 }
 
-// TestARejectedPlansCancelLeavesNoCancelledNote (plan 052 § B5): claude ends
-// its turn cancelled when its plan is rejected ("keep planning"). The plan's
-// own `→ rejected` row says what happened, so that ending draws no cancelled
-// note — its ExitPlanMode call settling between the two included. Anything new
-// in between (words here) makes the cancel a cancel again, and so does a plan
-// that was accepted.
+// TestARejectedPlansCancelLeavesNoCancelledNote (plan 052 § B5, review C3
+// item 9): claude ends its turn cancelled when its plan is answered keep
+// planning, and its session marks that ending (Event.KeptPlanning): no
+// cancelled note. The fact rides on the event, so a client restored from a
+// snapshot taken between the rejection and the ending folds the same suffix
+// the same way. A cancelled ending that does not carry it — a cancel the user
+// asked for after the rejection, which clears it, and every cursor or grok
+// turn, which never set it — draws its note as ever.
 func TestARejectedPlansCancelLeavesNoCancelledNote(t *testing.T) {
 	plan := &agent.PlanEvent{ID: "plan-1", Name: "the plan", Plan: "## Steps"}
-	ending := func(accepted bool) agent.Event {
-		return agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient, Accepted: accepted}}
+	rejected := agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient}}
+	before := []agent.Event{
+		{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: "plan"}},
+		{Type: agent.EventPlan, Plan: plan},
+		rejected,
+		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "toolu_plan", Status: "failed"}},
 	}
-	settled := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "toolu_plan", Status: "failed"}}
-	done := agent.Event{Type: agent.EventDone, StopReason: "cancelled"}
+	cancelledNote := func(m *Model) bool {
+		for _, f := range facts(m.Main) {
+			if f.Kind == "note" && f.Text == NoteCancelled {
+				return true
+			}
+		}
+		return false
+	}
 	for _, tc := range []struct {
-		name   string
-		evs    []agent.Event
-		banner bool
+		name string
+		done agent.Event
+		note bool
 	}{
-		{"rejected", []agent.Event{ending(false), settled, done}, false},
-		{"rejected, then words", []agent.Event{ending(false), {Type: agent.EventText, Text: "ok"}, done}, true},
-		{"accepted", []agent.Event{ending(true), done}, true},
+		{"kept planning (claude)", agent.Event{Type: agent.EventDone, StopReason: "cancelled", KeptPlanning: true}, false},
+		{"cancelled after the rejection, or any cursor/grok turn", agent.Event{Type: agent.EventDone, StopReason: "cancelled"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New(Options{})
-			m.Fold(agent.Event{Type: agent.EventPlan, Plan: plan})
-			for _, ev := range tc.evs {
+			for _, ev := range before {
 				m.Fold(ev)
 			}
-			got := false
-			for _, f := range facts(m.Main) {
-				got = got || (f.Kind == "note" && f.Text == NoteCancelled)
+			snap, err := m.Snapshot(1 << 20)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got != tc.banner {
-				t.Fatalf("cancelled note drawn = %v, want %v: %v", got, tc.banner, facts(m.Main))
+			restored := Restore(snap, Options{})
+			for _, mm := range []*Model{m, restored} {
+				mm.Fold(tc.done)
+				if got := cancelledNote(mm); got != tc.note {
+					t.Fatalf("cancelled note drawn = %v, want %v: %v", got, tc.note, facts(mm.Main))
+				}
 			}
 		})
+	}
+}
+
+// TestAWithdrawnAskSaysSo (review C3 item 6): a question or a plan the agent
+// withdrew ends with its row saying so; a cancel's ending still draws none.
+func TestAWithdrawnAskSaysSo(t *testing.T) {
+	m := New(Options{})
+	m.Fold(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{ID: "q", Prompt: "Pick one"}}}})
+	m.Fold(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "the plan"}})
+	m.Fold(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-2", Questions: []agent.Question{{ID: "q", Prompt: "Other"}}}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskCancelled, By: agent.AskByWithdrawn}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskCancelled, By: agent.AskByWithdrawn}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-2", Kind: agent.AskQuestion, Outcome: agent.AskCancelled, By: agent.AskByCancel}})
+	var notes []string
+	for _, f := range facts(m.Main) {
+		if f.Kind == "note" {
+			notes = append(notes, f.Text)
+		}
+	}
+	if want := []string{"? Pick one → withdrawn by Claude", "plan the plan → withdrawn by Claude"}; !reflect.DeepEqual(notes, want) {
+		t.Fatalf("notes %q, want %q", notes, want)
 	}
 }

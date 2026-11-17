@@ -873,7 +873,13 @@ type Event struct {
 	Cause      string
 	Err        error
 	StopReason string
-	At         time.Time
+	// KeptPlanning marks an EventDone whose cancelled stop is a plan's
+	// rejection, not a cancel: claude ends its turn cancelled when its plan is
+	// answered "keep planning" (plan 052 § B5), and nobody cancelled it since.
+	// The plan's own `→ rejected` row says what happened, so a client draws no
+	// cancelled note for it. Only claude sets it.
+	KeptPlanning bool
+	At           time.Time
 	// Seq is assigned by the session's event log; 0 on an event that never
 	// passed through one. It is the log's record envelope's, not the event's
 	// own: the codec does not carry it (eventcodec.go), and Record.Event
@@ -1035,6 +1041,10 @@ type Question struct {
 	// user's own (AskAnswer.Text): claude's per-question "Other" box (plan
 	// 052 § B4). No other provider sets it.
 	AllowText bool
+	// Required says the question must be answered — a pick or free text —
+	// whenever the ask is answered: a claude form's `required`. Such an ask
+	// cannot be skipped (it can be cancelled).
+	Required bool
 }
 
 // QuestionEvent carries a cursor/ask_question request. Auto is set when craze

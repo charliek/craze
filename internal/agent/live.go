@@ -158,7 +158,10 @@ type session struct {
 	// fastFix is claude's fast mode being set back off (keepFastOffLocked,
 	// fixFast): non-nil while a reset runs, closed when it has ended — fast
 	// confirmed off, or the session stopped.
-	gate         claudeGate
+	gate claudeGate
+	// planKept is the turn whose claude plan exit was answered keep planning,
+	// under s.mu (notePlanKept); the zero token when none.
+	planKept     TurnToken
 	fastFix      chan struct{}
 	interjectSeq int
 	// plugins are the on-disk plugin entries discovered once, in Start,
@@ -1847,10 +1850,12 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.scanner.request()
 		return Result{}, err
 	}
+	kept := false
 	if res.StopReason == acp.StopCancelled {
 		s.closeInFlightTools(acp.StopCancelled)
+		kept = s.keptPlanning(token)
 	}
-	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
+	s.emit(Event{Type: EventDone, StopReason: res.StopReason, KeptPlanning: kept})
 	// Every turn of craze's own that ran — done or cancelled here, failed
 	// above — is a trigger for the disk skills (plan 043 P5): a turn is what
 	// writes a SKILL.md. After the terminal event, and asking only: the walk
@@ -2312,6 +2317,11 @@ func (s *session) ForeignTurn() bool {
 // finished the wait — only what it already knew before giving up, which is
 // exactly what is reported alongside the error.
 func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
+	// A cancel asked for after a plan was kept planning is a cancel: the turn's
+	// cancelled ending is no longer the plan's alone (keptPlanning).
+	s.mu.Lock()
+	s.planKept = TurnToken{}
+	s.mu.Unlock()
 	client := s.clientRef()
 	if client == nil {
 		return CancelOutcome{Settled: true}, nil
@@ -2658,6 +2668,7 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 			Options:       opts,
 			AllowMultiple: q.AllowMultiple,
 			AllowText:     q.AllowText,
+			Required:      q.Required,
 		})
 	}
 	return out
@@ -2687,6 +2698,9 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 		return planDecision(s.staleAsk(ask))
 	}
 	rec, replied := s.decideAsk(a, token, ask)
+	if rec.Outcome == AskAnswered && rec.Answer.Reject {
+		s.notePlanKept(token)
+	}
 	dec := planDecision(rec)
 	dec.Replied = replied
 	return dec
@@ -2829,18 +2843,20 @@ func (s *session) onEarlyAnswer(e acp.EarlyAnswer) {
 	if !ok {
 		return
 	}
-	outcome := AskCancelled
+	outcome, by := AskCancelled, AskByProvider
 	switch e.Reason {
 	case acp.EarlyStaleTurn:
 		outcome = AskTurnEnded
 	case acp.EarlyClosed:
 		outcome = AskClosing
+	case acp.EarlyWithdrawn:
+		by = AskByWithdrawn
 	}
 	// The token is only the record's: the ask is resolved as it is minted, so
 	// no turn's lifecycle can reach it. A request that belonged to no turn of
 	// craze's own says so.
 	token, _ := s.askToken(e.Arrival())
-	s.asks.AnsweredEarly(token, req, outcome, AskByProvider)
+	s.asks.AnsweredEarly(token, req, outcome, by)
 }
 
 // earlyAskRequest is one early-answered request as the registry takes it. The
@@ -2931,7 +2947,7 @@ func (s *session) askToken(a acp.Arrival) (TurnToken, bool) {
 func (s *session) decideAsk(a acp.Arrival, token TurnToken, req AskRequest) (AskRecord, func(acp.ReplyDisposition)) {
 	ctx := s.askCall(a)
 	if ctx.Err() != nil {
-		rec := s.asks.AnsweredEarly(token, req, AskCancelled, AskByCall)
+		rec := s.asks.AnsweredEarly(token, req, AskCancelled, callEndedBy(ctx))
 		s.flushAsks()
 		return rec, s.reportedBy(rec.ID)
 	}
@@ -3063,7 +3079,10 @@ func permissionDecision(rec AskRecord) acp.PermissionDecision {
 func askDecision(rec AskRecord) acp.AskDecision {
 	switch rec.Outcome {
 	case AskAnswered, AskAutomatic:
-		if rec.Answer.Skip {
+		switch {
+		case rec.Answer.Cancel:
+			return acp.AskDecision{Cancelled: true}
+		case rec.Answer.Skip:
 			return acp.AskDecision{Skip: true}
 		}
 		return acp.AskDecision{Answers: rec.Answer.Answers, Text: rec.Answer.Text}

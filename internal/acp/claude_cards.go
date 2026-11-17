@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,37 +108,63 @@ func claudeToolCall(update json.RawMessage) (id, name string) {
 	return w.ToolCallID, w.Meta.ClaudeCode.ToolName
 }
 
-// noteClaudeTool remembers the tool name the adapter stamped on a tool call,
-// so the permission request that follows can be checked against it (§ B5).
-// The first name a call is given is kept: a later update cannot rename it.
-func (c *Client) noteClaudeTool(update json.RawMessage) {
+// toolKey is one tool call of one session: a toolCallId is the adapter's,
+// unique within the session that announced it and nothing more.
+type toolKey struct{ session, call string }
+
+// toolSeen is what the adapter has stamped on one tool call: the latest name,
+// and whether it ever gave the call two different names — which makes any
+// request about the call a suspect (§ B5, review C3 item 1).
+type toolSeen struct {
+	name      string
+	conflicts bool
+}
+
+// noteClaudeTool remembers the tool name the adapter stamped on a tool call of
+// sid, so the permission request that follows can be checked against it
+// (§ B5). It is called only for an update the session filter routed — the
+// active session's or a registered child's — never for one it dropped. The
+// latest name wins, and a second, different name marks the call.
+func (c *Client) noteClaudeTool(sid string, update json.RawMessage) {
 	id, name := claudeToolCall(update)
 	if id == "" || name == "" {
 		return
 	}
+	k := toolKey{sid, id}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.claudeTools[id]; ok {
+	if seen, ok := c.claudeTools[k]; ok {
+		seen.conflicts = seen.conflicts || seen.name != name
+		seen.name = name
+		c.claudeTools[k] = seen
 		return
 	}
 	if c.claudeTools == nil {
-		c.claudeTools = make(map[string]string)
+		c.claudeTools = make(map[toolKey]toolSeen)
 	}
 	if len(c.claudeToolOrder) >= claudeToolsCap {
 		delete(c.claudeTools, c.claudeToolOrder[0])
 		c.claudeToolOrder = c.claudeToolOrder[1:]
 	}
-	c.claudeTools[id] = name
-	c.claudeToolOrder = append(c.claudeToolOrder, id)
+	c.claudeTools[k] = toolSeen{name: name}
+	c.claudeToolOrder = append(c.claudeToolOrder, k)
 }
 
-func (c *Client) claudeToolName(id string) string {
+// claudeTool is what the session sid's tool call id was stamped with.
+func (c *Client) claudeTool(sid, id string) toolSeen {
 	if id == "" {
-		return ""
+		return toolSeen{}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.claudeTools[id]
+	return c.claudeTools[toolKey{sid, id}]
+}
+
+// resetClaudeToolsLocked forgets every tool call: a new or loaded session's
+// ids are its own. c.mu is held.
+func (c *Client) resetClaudeToolsLocked() {
+	c.claudeTools = nil
+	c.claudeToolOrder = nil
 }
 
 // ------------------------------------------------------------ plan exits
@@ -164,10 +191,17 @@ type planExit struct {
 // request's _meta.claudeCode.toolName, its tool call's, the tool call's own
 // name, or the one the preceding tool_call was stamped with — is ExitPlanMode.
 //
+// The preceding tool_call's name is looked up by the request's own session
+// and tool call id (noteClaudeTool); a call the adapter named twice over is a
+// suspect whatever its names are.
+//
 // One request is not a suspect though its kind is switch_mode: EnterPlanMode's,
-// which the adapter marks switch_mode too (tool-calls/reporters/interaction.js),
-// when every tool name it carries says EnterPlanMode and nothing else about it
-// says exit. Entering plan mode allows nothing; it is an ordinary permission.
+// which the adapter marks switch_mode too (tool-calls/reporters/interaction.js)
+// — but only when the request ITSELF says EnterPlanMode (its tool call's name,
+// either _meta tool name, or its title), no option id starts with exit-plan-,
+// it has no plan title, and no source at all, the remembered tool_call
+// included, names anything else. A remembered name alone never makes a request
+// ordinary. Entering plan mode allows nothing; it is an ordinary permission.
 func (c *Client) classifyPlanExit(params json.RawMessage, req PermissionRequest) planExit {
 	var w struct {
 		Title    string     `json:"title"`
@@ -187,14 +221,20 @@ func (c *Client) classifyPlanExit(params json.RawMessage, req PermissionRequest)
 		// read cannot follow is suspected and unsafe, never allowed.
 		return planExit{suspected: true, why: "the request did not decode", rejectID: rejectOption(req.Options)}
 	}
-	var names []string
-	for _, n := range []string{
-		w.Meta.ClaudeCode.ToolName, w.ToolCall.Meta.ClaudeCode.ToolName, w.ToolCall.Name,
-		c.claudeToolName(w.ToolCall.ToolCallID),
-	} {
+	var own []string
+	for _, n := range []string{w.Meta.ClaudeCode.ToolName, w.ToolCall.Meta.ClaudeCode.ToolName, w.ToolCall.Name} {
 		if n != "" {
-			names = append(names, n)
+			own = append(own, n)
 		}
+	}
+	seen := c.claudeTool(req.SessionID, w.ToolCall.ToolCallID)
+	names := own
+	if seen.name != "" {
+		names = append(append([]string(nil), own...), seen.name)
+	}
+	ownEnter := w.ToolCall.Title == claudeEnterPlanTool
+	for _, n := range own {
+		ownEnter = ownEnter || n == claudeEnterPlanTool
 	}
 	exitOption := false
 	for _, o := range req.Options {
@@ -210,7 +250,7 @@ func (c *Client) classifyPlanExit(params json.RawMessage, req PermissionRequest)
 	}
 	switchMode := w.ToolCall.Kind != nil && *w.ToolCall.Kind == claudeSwitchModeKind
 	exitNamed := false
-	enterOnly := len(names) > 0
+	enterOnly := true
 	for _, n := range names {
 		if n == claudeExitPlanTool {
 			exitNamed = true
@@ -219,15 +259,18 @@ func (c *Client) classifyPlanExit(params json.RawMessage, req PermissionRequest)
 			enterOnly = false
 		}
 	}
-	if !switchMode && !titled && !exitOption && !exitNamed {
+	if !switchMode && !titled && !exitOption && !exitNamed && !seen.conflicts {
 		return planExit{}
 	}
-	if enterOnly && !titled && !exitOption {
+	if ownEnter && enterOnly && !titled && !exitOption && !seen.conflicts {
 		return planExit{}
 	}
 	pe := planExit{suspected: true, rejectID: rejectOption(req.Options)}
 	pe.plan = planExitText(w.ToolCall.RawInput, w.ToolCall.Content)
 	pe.why = planExitUnsafe(req.Options, w.ToolCall.Kind, names, pe.plan)
+	if pe.why == "" && seen.conflicts {
+		pe.why = "its tool call was given two names"
+	}
 	pe.safe = pe.why == ""
 	return pe
 }
@@ -314,28 +357,15 @@ func planExitText(rawInput, content json.RawMessage) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// rejectOption is the option an unsafe plan exit is answered with: the one
-// named reject when it is of a reject kind, else the first option of kind
-// reject_once (then reject_always) whose id says nothing of allowing or of
-// exiting plan mode. "" when there is none: the request is answered
-// cancelled.
+// rejectOption is the option an unsafe plan exit is answered with: exactly the
+// option named reject, whatever kind it is given — the id is what the adapter
+// acts on, and reject is its "keep planning" — or "" when there is none: the
+// request is then answered cancelled (review C3 item 2). No other id is ever
+// chosen: the adapter throws on one it does not know.
 func rejectOption(opts []PermissionOption) string {
-	rejecting := func(o PermissionOption) bool {
-		return (o.Kind == KindRejectOnce || o.Kind == KindRejectAlways) &&
-			o.OptionID != "" &&
-			!strings.HasPrefix(o.OptionID, claudeExitPlanPrefix) &&
-			!strings.HasPrefix(strings.ToLower(o.OptionID), "allow")
-	}
 	for _, o := range opts {
-		if o.OptionID == ClaudeExitPlanReject && rejecting(o) {
+		if o.OptionID == ClaudeExitPlanReject {
 			return o.OptionID
-		}
-	}
-	for _, kind := range []string{KindRejectOnce, KindRejectAlways} {
-		for _, o := range opts {
-			if o.Kind == kind && rejecting(o) {
-				return o.OptionID
-			}
 		}
 	}
 	return ""
@@ -418,36 +448,89 @@ func elicitationResult(action string, content map[string]any) json.RawMessage {
 
 var questionKey = regexp.MustCompile(`^question_(0|[1-9][0-9]{0,3})(_custom)?$`)
 
+// The keywords a form may carry, each at its level: exactly what the
+// adapter's own AskUserQuestion form uses (elicitation.js
+// askUserQuestionsToCreateRequest), plus the schema's `required`, which craze
+// enforces (AskQuestion.Required). Any other keyword is a constraint the card
+// cannot enforce — an `enum` on the free text, a `minItems` on a
+// multi-select — and the form is refused (review C3 item 4).
+var (
+	formSchemaKeys   = []string{"type", "properties", "required", "title", "description"}
+	formSingleKeys   = []string{"type", "title", "description", "oneOf"}
+	formMultiKeys    = []string{"type", "title", "description", "items"}
+	formItemsKeys    = []string{"anyOf"}
+	formOptionKeys   = []string{"const", "title", "description", "_meta"}
+	formCustomKeys   = []string{"type", "title", "description", "_meta"}
+	errFormMalformed = "the request is not a well-formed elicitation"
+)
+
+// strictObject decodes raw as a JSON object and names its first key not in
+// allowed ("" when none is).
+func strictObject(raw json.RawMessage, allowed []string) (map[string]json.RawMessage, string, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return nil, "", false
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !slices.Contains(allowed, k) {
+			return m, k, true
+		}
+	}
+	return m, "", true
+}
+
 // parseElicitation reads a claude elicitation/create (§ B4). mode is the
-// request's mode; for a form, req is the questions it asks, and why says what
-// made a form unanswerable ("" when it is not). A form is answerable only
-// when every property is a question_<i> — a string with a oneOf of
-// {const,title} options, or an array whose items are an anyOf of them — or a
-// question_<i>_custom string beside its question_<i>.
+// request's mode — set only when the envelope is well formed: a request whose
+// mode, message, toolCallId or schema is of the wrong type is malformed, and
+// cancelled, never declined (review C3 item 3). For a form, req is the
+// questions it asks, and why says what made it unanswerable ("" when it is
+// not). A form is answerable only when every property is a question_<i> — a
+// string with a oneOf of {const,title} options, or an array whose items are an
+// anyOf of them — or a question_<i>_custom string beside its question_<i>,
+// each carrying no keyword but those (formSchemaKeys and the rest); its
+// `required` may name questions, which must then be answered.
 func parseElicitation(params json.RawMessage) (mode string, req AskQuestionRequest, why string) {
 	var w struct {
-		Mode            string          `json:"mode"`
+		Mode            *string         `json:"mode"`
 		ToolCallID      string          `json:"toolCallId"`
 		Message         string          `json:"message"`
 		RequestedSchema json.RawMessage `json:"requestedSchema"`
 	}
 	if err := json.Unmarshal(params, &w); err != nil {
-		return "", AskQuestionRequest{}, "the request did not decode"
+		return "", AskQuestionRequest{}, errFormMalformed
 	}
-	mode = w.Mode
-	if mode == "" {
-		// ACP's form mode is the default when a request names none.
-		mode = "form"
+	mode = "form"
+	if w.Mode != nil {
+		if *w.Mode == "" {
+			return "", AskQuestionRequest{}, errFormMalformed
+		}
+		mode = *w.Mode
 	}
 	if mode != "form" {
 		return mode, AskQuestionRequest{}, ""
 	}
+	top, extra, ok := strictObject(w.RequestedSchema, formSchemaKeys)
+	if !ok {
+		return mode, AskQuestionRequest{}, "the form's schema is not an object"
+	}
+	if extra != "" {
+		return mode, AskQuestionRequest{}, fmt.Sprintf("the form's schema carries %q, which the card cannot enforce", extra)
+	}
 	var schema struct {
 		Type       string                     `json:"type"`
 		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
 	}
 	if err := json.Unmarshal(w.RequestedSchema, &schema); err != nil || schema.Type != "object" {
 		return mode, AskQuestionRequest{}, "the form's schema is not an object"
+	}
+	if _, has := top["required"]; has && schema.Required == nil {
+		return mode, AskQuestionRequest{}, "the form's required is not a list"
 	}
 	if len(schema.Properties) == 0 {
 		return mode, AskQuestionRequest{}, "the form asks nothing"
@@ -461,8 +544,12 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 		}
 		i, _ := strconv.Atoi(m[1])
 		if m[2] != "" {
-			if !isStringProperty(raw) {
+			_, extra, ok := strictObject(raw, formCustomKeys)
+			switch {
+			case !ok || !isStringProperty(raw):
 				return mode, AskQuestionRequest{}, fmt.Sprintf("property %q is not a text field", key)
+			case extra != "":
+				return mode, AskQuestionRequest{}, fmt.Sprintf("property %q carries %q, which the card cannot enforce", key, extra)
 			}
 			customs[i] = true
 			continue
@@ -479,6 +566,18 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 			return mode, AskQuestionRequest{}, fmt.Sprintf("question_%d_custom has no question", i)
 		}
 		questions[i].AllowText = true
+	}
+	for _, key := range schema.Required {
+		m := questionKey.FindStringSubmatch(key)
+		if m == nil || m[2] != "" {
+			// A required free text the card would have to insist on.
+			return mode, AskQuestionRequest{}, fmt.Sprintf("the form requires %q, which the card cannot enforce", key)
+		}
+		i, _ := strconv.Atoi(m[1])
+		if questions[i] == nil {
+			return mode, AskQuestionRequest{}, fmt.Sprintf("the form requires %q, which it does not ask", key)
+		}
+		questions[i].Required = true
 	}
 	order := make([]int, 0, len(questions))
 	for i := range questions {
@@ -532,40 +631,56 @@ type enumOption struct {
 // parseQuestionProperty reads one question_<i>, or says what is wrong with it.
 func parseQuestionProperty(raw json.RawMessage) (formQuestion, string) {
 	var p struct {
-		Type        string       `json:"type"`
-		Title       string       `json:"title"`
-		Description string       `json:"description"`
-		OneOf       []enumOption `json:"oneOf"`
-		Items       *struct {
-			AnyOf []enumOption `json:"anyOf"`
-		} `json:"items"`
+		Type        string          `json:"type"`
+		Title       string          `json:"title"`
+		Description string          `json:"description"`
+		OneOf       json.RawMessage `json:"oneOf"`
+		Items       json.RawMessage `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return formQuestion{}, "did not decode"
 	}
-	var opts []enumOption
 	q := formQuestion{header: p.Title}
 	q.Prompt = p.Description
+	var list json.RawMessage
+	allowed := formSingleKeys
 	switch p.Type {
 	case "string":
-		if p.Items != nil {
-			return formQuestion{}, "is a string with items"
-		}
-		opts = p.OneOf
+		list = p.OneOf
 	case "array":
-		if p.Items == nil || len(p.OneOf) > 0 {
+		allowed = formMultiKeys
+		items, extra, ok := strictObject(p.Items, formItemsKeys)
+		if !ok {
 			return formQuestion{}, "is an array with no anyOf items"
 		}
-		opts = p.Items.AnyOf
+		if extra != "" {
+			return formQuestion{}, fmt.Sprintf("has items carrying %q, which the card cannot enforce", extra)
+		}
+		list = items["anyOf"]
 		q.AllowMultiple = true
 	default:
 		return formQuestion{}, fmt.Sprintf("is of type %q", p.Type)
 	}
-	if len(opts) == 0 {
+	if _, extra, _ := strictObject(raw, allowed); extra != "" {
+		return formQuestion{}, fmt.Sprintf("carries %q, which the card cannot enforce", extra)
+	}
+	var raws []json.RawMessage
+	if json.Unmarshal(list, &raws) != nil || len(raws) == 0 {
 		return formQuestion{}, "offers no options"
 	}
 	seen := map[string]bool{}
-	for _, o := range opts {
+	for _, r := range raws {
+		_, extra, ok := strictObject(r, formOptionKeys)
+		if !ok {
+			return formQuestion{}, "has an option that is not an object"
+		}
+		if extra != "" {
+			return formQuestion{}, fmt.Sprintf("has an option carrying %q, which the card cannot enforce", extra)
+		}
+		var o enumOption
+		if json.Unmarshal(r, &o) != nil {
+			return formQuestion{}, "has an option that did not decode"
+		}
 		var id string
 		if json.Unmarshal(o.Const, &id) != nil || id == "" {
 			return formQuestion{}, "has an option with no string const"
@@ -590,6 +705,11 @@ func parseQuestionProperty(raw json.RawMessage) (formQuestion, string) {
 func (c *Client) routeElicitation(msg *Message) {
 	mode, req, why := parseElicitation(msg.Params)
 	switch {
+	case why == errFormMalformed:
+		// Not a request craze can read at all: withdrawn, as an unrenderable
+		// form is — a decline would let the tool run on empty answers.
+		_ = c.conn.Reply(msg.ID, elicitationResult("cancel", nil))
+		c.reportRefused(RefusedRequest{Method: msg.Method, Kind: RefusedElicitationForm, Answer: "cancel", Detail: why})
 	case mode != "form":
 		_ = c.conn.Reply(msg.ID, elicitationResult("decline", nil))
 		c.reportRefused(RefusedRequest{Method: msg.Method, Kind: RefusedElicitationMode, Answer: "decline", Detail: fmt.Sprintf("mode %q", mode)})
@@ -675,5 +795,53 @@ func (c *Client) steer(ctx context.Context, sid, text, id string) error {
 		return ErrSteerStartedTurn
 	default:
 		return fmt.Errorf("acp: steer answered %q", outcome)
+	}
+}
+
+// ------------------------------------------------------------ withdrawal
+
+// MethodCancelRequest is ACP's $/cancel_request: the agent no longer waits on
+// a request it made of the client. claude-agent-acp sends it when the callback
+// behind an elicitation or a permission request is aborted (v1/acp-agent.js
+// elicitFromClient).
+const MethodCancelRequest = "$/cancel_request"
+
+// ErrRequestWithdrawn is the cause a withdrawn request's Arrival.Call ends
+// with (context.Cause): its ask closes as withdrawn by the agent, not as
+// cancelled by anything of craze's.
+var ErrRequestWithdrawn = errors.New("acp: the agent withdrew the request")
+
+// handleCancelRequest is $/cancel_request (review C3 item 6): the matching
+// blocking request is answered — by nobody: no reply is written, the agent
+// having stopped waiting — and its context ends with ErrRequestWithdrawn, so
+// a card parked on it closes as withdrawn. A decision that races it is
+// dropped, its Replied told ReplyLostWithdrawn. A request whose handler has
+// already claimed its answer, or that was answered, is left alone.
+func (c *Client) handleCancelRequest(msg *Message) {
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if decodeObject(msg.Params, &p) != nil || len(bytes.TrimSpace(p.RequestID)) == 0 {
+		c.countDropped()
+		return
+	}
+	c.incomingMu.Lock()
+	in, ok := c.incoming[idKey(bytes.TrimSpace(p.RequestID))]
+	if !ok || in.replied || in.claimed {
+		c.incomingMu.Unlock()
+		return
+	}
+	in.replied = true
+	in.repliedBy = ReplyLostWithdrawn
+	if in.decide != nil {
+		select {
+		case in.decide <- cancelDecision(in.method):
+		default:
+		}
+	}
+	withdraw := in.withdraw
+	c.incomingMu.Unlock()
+	if withdraw != nil {
+		withdraw()
 	}
 }

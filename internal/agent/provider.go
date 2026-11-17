@@ -683,6 +683,13 @@ type ProviderInfo struct {
 	implementPrompt string
 }
 
+// QuestionDismissCancels reports whether a question card's dismissal (Esc)
+// cancels the question rather than skipping it: claude's, where Esc aborts the
+// tool that asked as it does in Claude Code, while a skip would let the tool
+// run on empty answers (plan 052 § B4 as amended, 2026-11-17). cursor, grok
+// and native skip.
+func (p ProviderInfo) QuestionDismissCancels() bool { return p.Name == claudeName }
+
 // provider rebuilds the value with methods. The name alone decides which
 // constructor runs, so a snapshot keeps its provider's capabilities, dialect
 // and skill scan. A zero ProviderInfo — a stub session, a snapshot taken

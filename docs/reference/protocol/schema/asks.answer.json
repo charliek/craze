@@ -16,7 +16,7 @@
       "additionalProperties": false
     },
     "answer": {
-      "description": "An answer, each kind reading its own members and refusing any other kind's. permission: optionId, the exact id of an offered option (never a kind), or cancel. question: answers (each question's id to the option ids chosen) and, for a question with allowText, text (its id to a free-text answer, at most 4096 bytes, beside its picks or alone), or skip; a question that asks nothing takes {}. plan: exactly one of accept and reject.",
+      "description": "An answer, each kind reading its own members and refusing any other kind's. permission: optionId, the exact id of an offered option (never a kind), or cancel. question: answers (each question's id to the option ids chosen) and, for a question with allowText, text (its id to a free-text answer, at most 4096 bytes, beside its picks or alone), or skip, or cancel (the question withdrawn, which a claude question's tool takes as aborted); a question with required set cannot be skipped and must have a pick or text; a single-choice question takes at most one option id; a question that asks nothing takes {}. plan: exactly one of accept and reject.",
       "type": "object",
       "properties": {
         "optionId": {"type": "string"},

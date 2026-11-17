@@ -11,7 +11,8 @@ adapter runs your signed-in `claude`.
     The provider is reached with `--provider claude` and is not yet listed by
     `craze providers`, the picker or `--help`. Its question and plan cards,
     modes (`Shift+Tab` cycles Manual, accept edits and plan) and interjections
-    work ([Cards](../reference/tui.md#cards)); sub-agents and plan usage arrive
+    work ([Cards](../reference/tui.md#cards)): as in Claude Code, `Esc` on a
+    question cancels it, aborting the tool that asked; sub-agents and plan usage arrive
     in later releases, and it is listed then.
 
 ## Set it up

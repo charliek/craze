@@ -573,6 +573,12 @@ func appendDraft(draft, in string) string {
 // "Other…" row picks nothing: its typed text is its answer.
 func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	q := c.question()
+	if q.Required && q.AllowMultiple && len(c.selectedIDs()) == 0 && c.text[q.ID] == "" {
+		// A question that must be answered takes no empty confirm: the card
+		// stays on it (agent.Question.Required).
+		m.setHead(c)
+		return m, nil
+	}
 	answers := make(map[string][]string, len(c.answers)+1)
 	for k, v := range c.answers {
 		answers[k] = v
@@ -601,11 +607,16 @@ func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers, Text: c.text})
 }
 
-// skipQuestion is Esc: the whole request is skipped, not just this question.
+// skipQuestion is Esc: the whole request is skipped, not just this question —
+// or, on claude, cancelled, as Esc cancels Claude Code's own question and the
+// tool that asked it (agent.ProviderInfo.QuestionDismissCancels).
 func (m Model) skipQuestion() (tea.Model, tea.Cmd) {
 	c, ok := m.popCard()
 	if !ok || c.ask == nil {
 		return m, nil
+	}
+	if m.snap.Provider.QuestionDismissCancels() {
+		return m.answerCard(c, c.ask.ID, agent.AskAnswer{Cancel: true})
 	}
 	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Skip: true})
 }
@@ -750,9 +761,13 @@ func (m Model) questionCardBody(c card) string {
 	if q.AllowText {
 		rows = append(rows, m.otherRow(c, inner))
 	}
-	hint := "1-9 pick · ↑↓ move · enter select · esc skip"
+	esc := "esc skip"
+	if m.snap.Provider.QuestionDismissCancels() {
+		esc = "esc cancel"
+	}
+	hint := "1-9 pick · ↑↓ move · enter select · " + esc
 	if q.AllowMultiple {
-		hint = "1-9 or space toggle · ↑↓ move · enter confirm · esc skip"
+		hint = "1-9 or space toggle · ↑↓ move · enter confirm · " + esc
 	}
 	if c.typing {
 		hint = "type your answer · enter send · esc back"

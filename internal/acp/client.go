@@ -108,8 +108,8 @@ type Client struct {
 	// each recent tool call, by id, in arrival order (claudeToolOrder), so a
 	// permission request can be checked against the call it names (§ B5).
 	refusedHandler  func(RefusedRequest)
-	claudeTools     map[string]string
-	claudeToolOrder []string
+	claudeTools     map[toolKey]toolSeen
+	claudeToolOrder []toolKey
 	// steering is initialize's _meta.steering.supported, for claude: it alone
 	// lets Interject send _session/steering (§ B7). Written once, by
 	// Initialize, before any interjection can be made.
@@ -161,6 +161,10 @@ type pendingReq struct {
 	// it.
 	ctx  context.Context
 	gone context.CancelFunc
+	// withdraw ends ctx as gone does, with ErrRequestWithdrawn as its cause:
+	// the agent took the request back ($/cancel_request), which a handler's
+	// parked ask reads off the context (context.Cause).
+	withdraw func()
 }
 
 // Who answered a blocking request, on pendingReq.repliedBy. The first three
@@ -412,6 +416,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string, sp SessionParams) (
 	// foreign turn nor the interjection ids survive it.
 	c.children = nil
 	c.childOrder = nil
+	c.resetClaudeToolsLocked()
 	c.foreignID = ""
 	c.foreignText = ""
 	c.foreignSeen = false
@@ -466,6 +471,7 @@ func (c *Client) LoadSession(ctx context.Context, id, cwd string, sp SessionPara
 	c.pendingUpdates = nil
 	c.children = nil
 	c.childOrder = nil
+	c.resetClaudeToolsLocked()
 	c.foreignID = ""
 	c.foreignText = ""
 	c.foreignSeen = false
@@ -1146,7 +1152,10 @@ func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 	turn, inTurn := c.turn, c.inPrompt
 	c.mu.Unlock()
 	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, params: params, decide: make(chan any, 1)}
-	in.ctx, in.gone = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
+	in.ctx = ctx
+	in.gone = func() { cancel(nil) }
+	in.withdraw = func() { cancel(ErrRequestWithdrawn) }
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
@@ -1200,6 +1209,8 @@ func (c *Client) reportEarlyAnswer(in *pendingReq, disp ReplyDisposition) {
 		reason = EarlyCancelled
 	case ReplyLostClosed:
 		reason = EarlyClosed
+	case ReplyLostWithdrawn:
+		reason = EarlyWithdrawn
 	}
 	h(EarlyAnswer{Reason: reason, Turn: in.turn, InTurn: in.inTurn, Params: in.params})
 }
@@ -1279,6 +1290,8 @@ func (c *Client) onNotify(msg *Message) {
 		c.handleQueueChanged(msg)
 	case MethodClaudeAuthStatus:
 		c.handleAuthStatus(msg)
+	case MethodCancelRequest:
+		c.handleCancelRequest(msg)
 	}
 }
 
@@ -1370,9 +1383,6 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		n.ToolName = grokToolName(n.Update)
 	case DialectClaude:
 		n.ToolName = claudeToolName(n.Update)
-		if n.ToolName != "" {
-			c.noteClaudeTool(n.Update)
-		}
 	}
 	c.mu.Lock()
 	if c.sessionID == "" {
@@ -1390,6 +1400,11 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		c.dropped++
 		c.mu.Unlock()
 		return
+	}
+	if n.ToolName != "" && c.dialect == DialectClaude {
+		// Only now, past the session filter: a dropped session's tool call
+		// must never name one of the active session's (§ B5).
+		c.noteClaudeTool(n.SessionID, n.Update)
 	}
 	if n.SessionID != active {
 		n.Child = n.SessionID

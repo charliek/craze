@@ -153,6 +153,9 @@ func TestDialectDecisionsPinned(t *testing.T) {
 		{DialectClaude, MethodElicitationCreate, decisionHandle},
 		{DialectCursor, MethodElicitationCreate, decisionRefuse},
 		{DialectGrok, MethodElicitationCreate, decisionRefuse},
+		{DialectClaude, MethodCancelRequest, decisionHandle},
+		{DialectCursor, MethodCancelRequest, decisionIgnore},
+		{DialectGrok, MethodCancelRequest, decisionIgnore},
 		{DialectClaude, MethodRequestPermission, decisionHandle},
 	} {
 		if got := dialectHandles(tc.d, tc.method); got != tc.want {

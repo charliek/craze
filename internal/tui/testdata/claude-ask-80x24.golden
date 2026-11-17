@@ -1,5 +1,5 @@
 ❯ go                                                                            
-◌ other  Asking for your input                                                  
+◌ question  Asking for your input                                               
                                                                                 
                                                                                 
                                                                                 
@@ -18,7 +18,7 @@
 │  2 Blue                                                                      │
 │    Choose blue                                                               │
 │  3 Other…                                                                    │
-│1-9 pick · ↑↓ move · enter select · esc skip                                  │
+│1-9 pick · ↑↓ move · enter select · esc cancel                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ws │ claude │ opus (high) │ 0m                                                  
 ◆ default · shift+tab · ▸▸ bypass permissions on                                

@@ -175,7 +175,7 @@ var inboundMethods = []string{
 	MethodGrokQueueChanged, MethodGrokQueueChangedWrapped,
 	MethodGrokModelsUpdate, MethodGrokModelsUpdateWrapped,
 	MethodGrokSessionsChanged, MethodGrokSessionsChangedWrapped,
-	MethodClaudeAuthStatus, MethodAuthStatusUpdate, MethodElicitationCreate,
+	MethodClaudeAuthStatus, MethodAuthStatusUpdate, MethodElicitationCreate, MethodCancelRequest,
 	updateMethod(UpdateAgentMessage), updateMethod(UpdateAgentThought),
 	updateMethod(UpdateToolCall), updateMethod(UpdateToolCallUpd),
 	updateMethod(UpdateAvailableCommands), updateMethod(UpdateCurrentMode),
@@ -233,6 +233,13 @@ func dialectHandles(d DialectID, method string) decision {
 			return decisionHandle
 		}
 		return decisionRefuse
+	case MethodCancelRequest:
+		// A notification: claude withdraws a request with it; nobody else
+		// sends one, and it is dropped there.
+		if d == DialectClaude {
+			return decisionHandle
+		}
+		return decisionIgnore
 	}
 	return decisionNone
 }

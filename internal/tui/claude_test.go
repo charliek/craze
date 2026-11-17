@@ -257,3 +257,72 @@ func TestQuestionCardWithoutTextHasNoOtherRow(t *testing.T) {
 		t.Fatalf("3 did something on a two-option question:\n%s", plainView(m))
 	}
 }
+
+// TestClaudeQuestionEscCancels (plan 052 § B4 as amended, 2026-11-17): Esc on
+// a claude question card cancels it — Claude Code's Esc, which aborts the
+// tool — rather than skipping it, which would let the tool run on empty
+// answers. The hint says so, and the row reads cancelled. Cursor's card still
+// skips (TestQuestionCardEscSkipsTheWholeRequest).
+func TestClaudeQuestionEscCancels(t *testing.T) {
+	m, stub := sizedCards(t)
+	stub.SetProvider(agent.ClaudeProvider())
+	m.snap.Provider = agent.ClaudeProvider().Info()
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: claudeQuestion()})
+	if !strings.Contains(plainView(m), "enter select · esc cancel") {
+		t.Fatalf("the hint:\n%s", plainView(m))
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	calls := stub.Calls()
+	if len(calls) != 1 || calls[0].Skip || !calls[0].Cancelled {
+		t.Fatalf("esc sent %+v", calls)
+	}
+	if rec, ok := stub.Asks().Record("ask-1"); !ok || !rec.Answer.Cancel {
+		t.Fatalf("the record %+v", rec)
+	}
+	m = endingDelivered(t, m, stub)
+	if !strings.Contains(plainView(m), "? Do you prefer red or blue? → cancelled") {
+		t.Fatalf("missing the cancelled row:\n%s", plainView(m))
+	}
+}
+
+// TestRequiredMultiSelectTakesNoEmptyConfirm: a question that must be answered
+// does not take Enter with nothing toggled and nothing typed.
+func TestRequiredMultiSelectTakesNoEmptyConfirm(t *testing.T) {
+	m, stub := sizedCards(t)
+	q := claudeQuestion()
+	q.Questions = q.Questions[1:]
+	q.Questions[0].Required = true
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: q})
+	m, _ = press(m, enter())
+	if !m.cardOpen() || len(stub.Calls()) != 0 {
+		t.Fatalf("an empty confirm answered a required question: %+v", stub.Calls())
+	}
+	m, _ = press(m, runeKey('1'))
+	m, _ = press(m, enter())
+	if m.cardOpen() || len(stub.Calls()) != 1 {
+		t.Fatalf("a pick did not answer it: %+v", stub.Calls())
+	}
+}
+
+// TestClaudeSteerPromptRequiredQueuesTheText (plan 052 § B7, review C3 item
+// 8): the turn ends just before claude takes a steer, and claude answers
+// promptRequired. The text is not lost: the engine queues it as the next
+// prompt, and the draft is cleared, the message shown queued.
+func TestClaudeSteerPromptRequiredQueuesTheText(t *testing.T) {
+	m, sess := scriptedModel(t)
+	sess.SetProvider(agent.ClaudeProvider())
+	m = deliver(t, m, refreshSnapMsg{})
+	sc := scriptHeld()
+	m = startScripted(t, m, sess, "go", sc)
+	sess.FailNextInterject(agent.ErrPromptRequired)
+	m.input.SetValue("BANANA")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpUntil(t, m, func(m Model) bool { return m.input.Value() == "" && len(m.queue) == 1 })
+	if m.queue[0].Text != "BANANA" {
+		t.Fatalf("the queued text %+v\n%s", m.queue, plainView(m))
+	}
+	if strings.Contains(plainView(m), "nothing to interject into") {
+		t.Fatalf("a queued steer says it was refused:\n%s", plainView(m))
+	}
+	sc.Release()
+}

@@ -129,6 +129,13 @@ What changes for everyone else:
   ending's `text` ([A question's free
   text](../reference/protocol.md#a-questions-free-text)). Only claude sets
   them; a client that does not know them is unaffected.
+- **A single-choice question takes one pick**, on every provider: an
+  `asks.answer` naming two option ids for a question without
+  `allowMultiple` is now `bad_request`, reason `bad_answer` (it used to be
+  accepted and only the first id sent). craze's own TUI never sent one.
+- **A question can be answered `cancel`**, and its ending carries
+  `cancelled`; claude's adds `by: withdrawn`, a `required` question item and a
+  `done`'s `keptPlanning` — all additive.
 
 ### The gx provider is gone
 

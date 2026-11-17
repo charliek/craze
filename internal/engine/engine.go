@@ -871,7 +871,15 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 		if err != nil {
 			return err
 		}
-		return e.sess.Interject(ctx, admitted)
+		err = e.sess.Interject(ctx, admitted)
+		if errors.Is(err, agent.ErrPromptRequired) {
+			// The agent's turn ended while the text was on its way and the
+			// agent did not take it (claude's steering promptRequired, plan
+			// 052 § B7): it goes as the next prompt — at once when nothing
+			// runs, else queued — so the turn ending first loses nothing.
+			_, err = e.submit(c, admitted, SubmitQueue, "", false)
+		}
+		return err
 	})
 }
 

@@ -59,9 +59,8 @@ func (s *session) interject(ctx context.Context, text string) error {
 	switch {
 	case errors.Is(err, acp.ErrSteerIdle):
 		// claude found no running turn (plan 052 § B7): the text was not
-		// taken, and is the caller's to send as a prompt, as any
-		// interjection that finds no turn is.
-		return ErrNotInTurn
+		// taken, and is to go as the next prompt, which the engine sees to.
+		return ErrPromptRequired
 	case errors.Is(err, acp.ErrSteerStartedTurn):
 		// idleBehavior promptRequired should rule this out: the adapter
 		// took the text as a turn of its own. It was taken, so it is no

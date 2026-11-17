@@ -40,6 +40,9 @@ func classifyTable() []classifyCase {
 		{"ErrIndexWrite", fmt.Errorf("%w: %w", ErrIndexWrite, boom), "index_write", "index_write", false},
 		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", "not_accepting", true},
 		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", "not_in_turn", true},
+		// Engine.Interject queues the text on it and never returns it; it is an
+		// ErrNotInTurn should one ever escape.
+		{"agent.ErrPromptRequired", agent.ErrPromptRequired, "not_accepting", "not_in_turn", true},
 		{"ErrExitFenced", ErrExitFenced, "not_accepting", "exit_fenced", true},
 		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", "in_progress", true},
 		// A DUPLICATE of a blocking command whose own wait timed out against an
@@ -299,6 +302,7 @@ func agentSentinels() map[string]error {
 		"ErrQueueFull":        agent.ErrQueueFull,
 		"ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
 		"ErrNotInTurn":        agent.ErrNotInTurn,
+		"ErrPromptRequired":   agent.ErrPromptRequired,
 		"ErrPromptInFlight":   agent.ErrPromptInFlight,
 		"ErrUnsupported":      agent.ErrUnsupported,
 		"ErrForeignTurn":      agent.ErrForeignTurn,
