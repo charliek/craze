@@ -27,6 +27,7 @@ import shutil
 import signal
 import subprocess
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import IO, Any, TypeVar
@@ -54,6 +55,31 @@ POLL_FIRST_ID = 100
 FAKE_HOST_ID = "0a0a0a0a0a0a"
 FAKE_SESSION_ID = "recipe-fake"
 HELLO = {"protocols": [1], "client": {"kind": "test", "name": "recipe"}}
+# ROW_TEXT_CELLS is a row fact's cap (engine.RowTextCells): a provider's
+# reason and fix are cut to it, "…" last.
+ROW_TEXT_CELLS = 200
+
+
+def row_line(text: str) -> str:
+    """text cut as a row fact is (engine.RowLine's capCells): to at most
+    ROW_TEXT_CELLS terminal cells, "…" (one cell) ending a cut one. A fix names
+    config.toml, whose path under a long temp directory (macOS's) runs past the
+    cap. Every character here is one cell or two (a wide one); a zero-width
+    one would need grapheme clusters, and fails the test rather than guess."""
+
+    def cells(ch: str) -> int:
+        assert not unicodedata.combining(ch) and unicodedata.category(ch) not in ("Mn", "Me", "Cf"), repr(ch)
+        return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+    if sum(cells(ch) for ch in text) <= ROW_TEXT_CELLS:
+        return text
+    out, width = [], 0
+    for ch in text:
+        if width + cells(ch) > ROW_TEXT_CELLS - 1:
+            break
+        out.append(ch)
+        width += cells(ch)
+    return "".join(out) + "…"
 
 
 def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> Path:
@@ -458,7 +484,7 @@ def test_a_client_against_a_real_hub(
                 "label": "cursor",
                 "state": "unavailable",
                 "reason": "cursor-agent not found on PATH",
-                "fix": f"install cursor-agent, or set [agents].cursor in {config}",
+                "fix": row_line(f"install cursor-agent, or set [agents].cursor in {config}"),
             },
             {"id": "grok", "label": "grok", "state": "ready"},
             {
@@ -466,7 +492,9 @@ def test_a_client_against_a_real_hub(
                 "label": "claude",
                 "state": "unavailable",
                 "reason": "claude-agent-acp not found on PATH",
-                "fix": f"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in {config}",
+                "fix": row_line(
+                    f"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in {config}"
+                ),
             },
             {
                 "id": "native",

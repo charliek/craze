@@ -18,6 +18,7 @@ import (
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/tool"
 )
 
 // okStatus is a saved claude.ai Max login, `claude auth status --json`'s
@@ -755,8 +756,18 @@ func TestClaudeForceOption(t *testing.T) {
 	}
 }
 
+// TestClaudePlanFileIsNoEdit: a write under the Claude config directory's
+// plans/ is the plan file, not an edit outside the workspace. The config
+// directory is reached through a symlink, as macOS's /var is /private/var:
+// the check takes a resolved path (editScope.edited resolves each one first),
+// so every direct ask resolves its path as edited does, and the plan file is
+// found whichever spelling the agent wrote — the link's or the real one.
 func TestClaudePlanFileIsNoEdit(t *testing.T) {
-	cfg := t.TempDir()
+	real := t.TempDir()
+	cfg := filepath.Join(t.TempDir(), "cfg")
+	if err := os.Symlink(real, cfg); err != nil {
+		t.Fatal(err)
+	}
 	get := func(k string) string {
 		if k == "CLAUDE_CONFIG_DIR" {
 			return cfg
@@ -764,16 +775,26 @@ func TestClaudePlanFileIsNoEdit(t *testing.T) {
 		return ""
 	}
 	isPlan := claudePlanCheck(claudeConfigDir(get))
-	if !isPlan(filepath.Join(cfg, "plans", "fuzzy-plan.md")) {
+	resolved := func(p string) string {
+		t.Helper()
+		r, err := tool.RealPath(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if !isPlan(resolved(filepath.Join(cfg, "plans", "fuzzy-plan.md"))) {
 		t.Fatal("the plan file")
 	}
-	if isPlan(filepath.Join(cfg, "settings.json")) || isPlan(filepath.Join(cfg, "plans")) {
+	if isPlan(resolved(filepath.Join(cfg, "settings.json"))) || isPlan(resolved(filepath.Join(cfg, "plans"))) {
 		t.Fatal("not a plan file")
 	}
 	sc := editScope{workspace: t.TempDir(), isPlan: isPlan}
-	got := sc.edited([]string{filepath.Join(cfg, "plans", "p.md")})
-	if got == nil || got.PlanFile == "" || len(got.OutsideFiles) != 0 {
-		t.Fatalf("%+v", got)
+	for _, dir := range []string{cfg, real} {
+		got := sc.edited([]string{filepath.Join(dir, "plans", "p.md")})
+		if got == nil || got.PlanFile != resolved(filepath.Join(real, "plans", "p.md")) || len(got.OutsideFiles) != 0 {
+			t.Fatalf("a plan written under %s: %+v", dir, got)
+		}
 	}
 }
 

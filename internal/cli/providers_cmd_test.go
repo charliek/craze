@@ -7,16 +7,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control/wiretest"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/transcript"
 	"github.com/charliek/craze/internal/version"
+	"github.com/rivo/uniseg"
 )
 
 // craze providers (plan 036 §3.2, A2). Every case runs over a scratch PATH,
@@ -38,9 +41,17 @@ func providersMachine(t *testing.T) (config string) {
 	return filepath.Join(home, "config.toml")
 }
 
-// claudeAdapterFix is craze providers' fix for claude's adapter missing.
+// claudeAdapterFix is craze providers' fix for claude's adapter missing, cut
+// to a row fact's cells as every fix is (engine.RowLine): a long temp
+// directory — macOS's — runs config's path past the cap.
 func claudeAdapterFix(config string) string {
-	return "install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in " + config
+	return engine.RowLine("install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in " + config)
+}
+
+// cursorMissingFix is craze providers' fix for cursor-agent missing, cut as
+// claudeAdapterFix's is.
+func cursorMissingFix(config string) string {
+	return engine.RowLine("install cursor-agent, or set [agents].cursor in " + config)
 }
 
 // TestProvidersTable (A2): the human table — a header, then one row per
@@ -57,7 +68,7 @@ func TestProvidersTable(t *testing.T) {
 		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
-		row("cursor", "unavailable", "cursor-agent not found on PATH", "install cursor-agent, or set [agents].cursor in "+config) +
+		row("cursor", "unavailable", "cursor-agent not found on PATH", cursorMissingFix(config)) +
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix)
@@ -87,7 +98,7 @@ func TestProvidersJSON(t *testing.T) {
 	}
 	want := `{"providers":[` +
 		`{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":` +
-		q("install cursor-agent, or set [agents].cursor in "+config) + `},` +
+		q(cursorMissingFix(config)) + `},` +
 		`{"id":"grok","label":"grok","state":"ready"},` +
 		`{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":` +
 		q(claudeAdapterFix(config)) + `},` +
@@ -95,6 +106,44 @@ func TestProvidersJSON(t *testing.T) {
 		q(nativeNoKeyFix) + `}]}` + "\n"
 	if stdout != want {
 		t.Fatalf("craze providers --json:\n%s\nwant:\n%s", stdout, want)
+	}
+}
+
+// TestProvidersJSONCutsALongConfigPath: a craze directory deep enough —
+// macOS's per-user temp directory is — runs claude's fix, which names
+// config.toml, past a row fact's 200 cells. The fix is cut as every row fact
+// is, "…" last, and the expectations above, built with the same cut, hold on
+// any machine.
+func TestProvidersJSONCutsALongConfigPath(t *testing.T) {
+	providersMachine(t)
+	home := filepath.Join(t.TempDir(), strings.Repeat("d", 60), strings.Repeat("e", 60), "craze-home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_HOME", home)
+	config := filepath.Join(home, "config.toml")
+	stdout, stderr, code := executeErr([]string{"providers", "--json"})
+	if code != 0 {
+		t.Fatalf("craze providers --json: exit %d %q", code, stderr)
+	}
+	var doc struct {
+		Providers []protocol.ProviderOption `json:"providers"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var fix string
+	for _, p := range doc.Providers {
+		if p.ID == "claude" {
+			fix = p.Fix
+		}
+	}
+	full := "install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in " + config
+	if uniseg.StringWidth(full) <= engine.RowTextCells {
+		t.Fatalf("the premise: a fix of %d cells is not past the cap", uniseg.StringWidth(full))
+	}
+	if fix != claudeAdapterFix(config) || !strings.HasSuffix(fix, "…") || uniseg.StringWidth(fix) != engine.RowTextCells {
+		t.Fatalf("claude's fix %q (%d cells); want it cut to %d", fix, uniseg.StringWidth(fix), engine.RowTextCells)
 	}
 }
 
@@ -215,7 +264,7 @@ func TestProvidersHub(t *testing.T) {
 		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
-		row("cursor", "unavailable", "cursor-agent not found on PATH", "install cursor-agent, or set [agents].cursor in "+config) +
+		row("cursor", "unavailable", "cursor-agent not found on PATH", cursorMissingFix(config)) +
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix) +

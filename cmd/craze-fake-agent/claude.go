@@ -383,7 +383,7 @@ func dumpSetup(params json.RawMessage) {
 //	AUTH-LATER     an api_key _auth/status_update, then hold until cancelled
 //	TOOL-FAIL      a tool call left open, then the prompt answered -32603
 //	TOOL-EXIT      a tool call left open, then the process exits
-//	STEER-RACE     hold until a _session/steering, which ends this turn and
+//	STEER-RACE     say "held for the steer" and hold until a _session/steering, which ends this turn and
 //	               is answered startedNewTurn (claude_bg.go)
 //	HANG           hold until cancelled
 //
@@ -407,10 +407,13 @@ func (s *server) claudePrompt(msg *acp.Message) {
 		say("fast on")
 		s.reply(msg.ID, map[string]any{"stopReason": acp.StopEndTurn})
 	case strings.Contains(text, "STEER-RACE"):
-		// Held for the steer that answers it (claudeStartedTurn).
+		// Held for the steer that answers it (claudeStartedTurn), and says
+		// so once it is: a steer sent after that line finds the turn held,
+		// however late this goroutine ran.
 		s.mu.Lock()
 		s.claude.race = msg.ID
 		s.mu.Unlock()
+		say(steerRaceHeld)
 	case strings.Contains(text, "HANG"):
 		s.hang(msg.ID)
 	case strings.Contains(text, "AUTH-LATER"):
@@ -436,6 +439,9 @@ func (s *server) claudePrompt(msg *acp.Message) {
 		s.reply(msg.ID, map[string]any{"stopReason": acp.StopEndTurn})
 	}
 }
+
+// steerRaceHeld is STEER-RACE's line once its turn is held for the steer.
+const steerRaceHeld = "held for the steer"
 
 // claudeWrite is a Write call as the adapter streams it (probe2's write
 // step): the tool_call, the update naming the file, the permission request,

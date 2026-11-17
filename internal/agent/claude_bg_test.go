@@ -231,7 +231,13 @@ func TestClaudeForeignSessionStartedNewTurn(t *testing.T) {
 	r, log := startClaude(t, "claude-basic", Options{Interactive: true})
 	done := make(chan error, 1)
 	go func() { _, err := r.s.Prompt(context.Background(), "STEER-RACE"); done <- err }()
-	waitFor(t, "the turn", func() bool { return r.s.promptInFlight() })
+	// The steer goes once the fake holds the turn for it — not once the
+	// session has a prompt in flight, which is before the prompt reaches the
+	// fake (and the fake takes it on a goroutine of its own): steered before,
+	// it finds no turn, and the session says the turn had ended.
+	waitFor(t, "the turn held for the steer", func() bool {
+		return firstIndex(log.snapshot(), isText("held for the steer")) >= 0
+	})
 	if err := r.s.Interject(t.Context(), "keep going"); err != nil {
 		t.Fatalf("the steer: %v", err)
 	}
