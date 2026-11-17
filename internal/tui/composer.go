@@ -38,6 +38,9 @@ const (
 	// running turn, cursor can only cancel it and start again.
 	queueInterjectHint = "enter queues  ·  ctrl+l interjects"
 	queueSendNowHint   = "enter queues  ·  ctrl+l sends now"
+	// queueForeignHint is the hint while the agent runs a turn of its own
+	// that shows as work (foreignWorking): a message waits for it to end.
+	queueForeignHint = "enter queues"
 )
 
 func newComposer(th Theme) textarea.Model {
@@ -293,7 +296,13 @@ func (m Model) composerHint() string {
 		return clampWidth(unstartedHint, m.composerInner())
 	}
 	// A card owns the keyboard, so neither verb is available under one.
-	if m.status != statusWorking || m.cardOpen() || m.input.Value() != "" {
+	if m.cardOpen() || m.input.Value() != "" {
+		return ""
+	}
+	if m.status != statusWorking {
+		if m.foreignWorking() {
+			return clampWidth(queueForeignHint, m.composerInner())
+		}
 		return ""
 	}
 	hint := queueSendNowHint

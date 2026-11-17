@@ -188,6 +188,10 @@ type claudeForeign struct {
 	open       map[string]struct{}
 	// failErr is FailForeign's: what a turn still open at Close ends with.
 	failErr error
+	// loaded: a load's reply has been read while replaying; held is what the
+	// adapter sent since, routed at ReplayDone.
+	loaded bool
+	held   []SessionNotification
 	// seen is every root tool call id lately seen, in seenOrder.
 	seen      map[string]struct{}
 	seenOrder []string
@@ -325,9 +329,13 @@ func (c *Client) foreignRootLocked(kind string, update json.RawMessage) *Foreign
 		// The candidate waited for this close.
 		c.armGraceLocked()
 	}
-	// Any root update is a frame: the silence rule starts again, with the
-	// limit the open tools now call for.
-	c.armSilenceLocked()
+	// The silence rule is "no root content" (§ E1 (b), review C4 item 10): it
+	// starts again on content, and once more when the last open tool call
+	// closes, from the long limit to the short one — a close needs an open,
+	// which is content, so nothing else the agent sends can hold a turn up.
+	if content || (closed && len(f.open) == 0) {
+		c.armSilenceLocked()
+	}
 	return start
 }
 
@@ -458,16 +466,26 @@ func (c *Client) promptOverLocked(turn int) {
 	}
 }
 
-// foreignCancelLocked is a user cancel while the agent runs a turn of its own:
-// the turn is to end cancelled, after the grace (the file's comment, way 3).
-func (c *Client) foreignCancelLocked() {
+// foreignCancelLocked is a user cancel of the foreign turn id, once its
+// session/cancel has been written (CancelHeld, review C4 item 1): the turn is
+// to end cancelled, after the grace (the file's comment, way 3). A turn that
+// has ended since, or a cancel that never reached the agent, changes nothing.
+func (c *Client) foreignCancelLocked(id string) {
 	f := &c.cf
-	if f.phase != phaseForeign {
+	if f.phase != phaseForeign || id == "" || f.id != id {
 		return
 	}
 	f.cancelled = true
 	f.candidate = true
 	c.armGraceLocked()
+}
+
+// foreignIDLocked is the open foreign turn's id, "" for none.
+func (c *Client) foreignIDLocked() string {
+	if c.cf.phase != phaseForeign {
+		return ""
+	}
+	return c.cf.id
 }
 
 // FailForeign records what a claude foreign turn still open when the client
@@ -488,25 +506,8 @@ func (c *Client) closeForeign() {
 	if c.dialect != DialectClaude {
 		return
 	}
-	c.mu.Lock()
-	if c.cf.phase != phaseForeign {
-		// Nothing to announce: closed from here, so nothing opens. A read
-		// loop deciding after this sees closed.
-		c.closeMachineLocked()
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-	if !c.lockDispatchWithin(closeCancelWait) {
-		// The read loop is held by a handler that cannot deliver (a consumer
-		// that stopped reading): the ending is dropped rather than the close
-		// held — the session is going either way.
-		c.mu.Lock()
-		c.closeMachineLocked()
-		c.mu.Unlock()
-		return
-	}
-	defer c.dispatchMu.Unlock()
+	// The ending is decided now, under c.mu, and the machine closed in the
+	// same section: nothing opens or ends again after it.
 	c.mu.Lock()
 	var end *ForeignTurn
 	if c.cf.phase == phaseForeign {
@@ -519,8 +520,54 @@ func (c *Client) closeForeign() {
 	c.closeMachineLocked()
 	h := c.foreignHandler
 	c.mu.Unlock()
-	fireForeign(h, nil, end)
+	if end == nil || h == nil {
+		return
+	}
+	// It is always delivered (review C4 item 2): in order with the read loop's
+	// own announcements when dispatchMu can be had within the close's bound,
+	// and without it otherwise — the read loop is then held by a handler that
+	// cannot deliver, and the session must still learn the turn is over. The
+	// delivery runs on its own goroutine, so a handler that blocks never holds
+	// the close past the bound either; the session drops a start that would
+	// come after its own ending (onForeignTurn).
+	delivered := make(chan struct{})
+	go func() {
+		defer close(delivered)
+		locked := c.lockDispatchWithin(closeWait())
+		defer func() {
+			if locked {
+				c.dispatchMu.Unlock()
+			}
+		}()
+		if testCloseForeignDeliver != nil {
+			testCloseForeignDeliver(locked)
+		}
+		h(*end)
+	}()
+	select {
+	case <-delivered:
+	case <-time.After(2 * closeWait()):
+	}
 }
+
+// testCloseForeignDeliver is a test seam, nil in production: it runs in
+// closeForeign's delivery, after the lock was or was not had, just before the
+// ending is handed on.
+var testCloseForeignDeliver func(locked bool)
+
+// testCloseWait, when set, replaces closeCancelWait for closeForeign's bound.
+var testCloseWait time.Duration
+
+func closeWait() time.Duration {
+	if testCloseWait > 0 {
+		return testCloseWait
+	}
+	return closeCancelWait
+}
+
+// testAfterPrompted is a test seam, nil in production: it runs in a claude
+// PromptBlocks once the machine is prompted, just before the bytes go out.
+var testAfterPrompted func()
 
 // closeMachineLocked retires the timers and closes the machine: nothing opens
 // again.

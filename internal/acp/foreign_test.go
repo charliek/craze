@@ -444,7 +444,12 @@ func TestClaudeForeignNothingDuringAReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.roundTrip(t)
+	// Live, but held until the session's replay is over (review C4 item 5).
+	r.want(t, "user_message_chunk", "agent_message_chunk")
+	r.client.ReplayDone()
 	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk")
+	r.push(t, chunk("after"))
+	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk", "agent_message_chunk")
 }
 
 // TestClaudeForeignPromptRefusedAndPromptedAbsorbs: a prompt cannot start
@@ -482,10 +487,14 @@ func TestClaudeForeignCancel(t *testing.T) {
 	r := newClaudeRig(t)
 	r.ready(t)
 	r.push(t, chunk("wake"), toolCall("t1", "in_progress"))
-	go func() { _ = r.client.Cancel(context.Background()) }()
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- r.client.Cancel(context.Background()) }()
 	msg := r.readWithin(t, 3*time.Second, "session/cancel")
 	if msg.Method != MethodSessionCancel || !strings.Contains(string(msg.Params), `"sessionId":"root"`) {
 		t.Fatalf("the cancel wrote %s %s", msg.Method, msg.Params)
+	}
+	if err := <-cancelled; err != nil {
+		t.Fatal(err)
 	}
 	r.clk.Advance(grace / 2)
 	r.push(t, chunk("trailing"), usageCost)
@@ -654,4 +663,128 @@ func fixtureFrames(t *testing.T, dir string) []claudeFrame {
 		out = append(out, f)
 	}
 	return out
+}
+
+// TestClaudeForeignAnUnwrittenCancelEndsNothing (review C4 item 1): a cancel
+// whose session/cancel never left — its context was over before the write —
+// does not end the turn: content and an open tool call still hold it.
+func TestClaudeForeignAnUnwrittenCancelEndsNothing(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"), toolCall("t1", "in_progress"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.client.Cancel(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancel on an ended context = %v", err)
+	}
+	r.clk.Advance(10 * grace)
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("a cancel that was never written ended the turn: %s", got)
+	}
+	r.push(t, toolUpd("t1", "completed"), usageCost)
+	r.clk.Advance(grace)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "tool_call", "tool_call_update", "usage_update", "end claude-1 background")
+}
+
+// TestClaudeForeignTheCloseAlwaysDeliversTheEnding (review C4 item 2): with
+// the read loop held inside a handler that cannot deliver, the close still
+// hands the session the failed ending — without the dispatch lock, past its
+// bound — and the read loop, released, announces nothing after it.
+func TestClaudeForeignTheCloseAlwaysDeliversTheEnding(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"))
+	parked, release := make(chan struct{}), make(chan struct{})
+	ends := make(chan ForeignTurn, 2)
+	r.client.SetForeignTurnHandler(func(f ForeignTurn) {
+		if !f.Running {
+			ends <- f
+		}
+	})
+	r.client.SetUpdateHandler(func(n SessionNotification) {
+		close(parked)
+		<-release
+	})
+	var locked []bool
+	testCloseWait = 20 * time.Millisecond
+	testCloseForeignDeliver = func(l bool) { locked = append(locked, l) }
+	t.Cleanup(func() { testCloseWait, testCloseForeignDeliver = 0, nil })
+	r.pushUpdate(t, rigRoot, chunk("stuck"))
+	<-parked
+	stop := errors.New("the login changed")
+	r.client.FailForeign(stop)
+	closed := make(chan struct{})
+	go func() { _ = r.client.Close(); close(closed) }()
+	var end ForeignTurn
+	select {
+	case end = <-ends:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the close never delivered the foreign turn's ending")
+	}
+	if !errors.Is(end.Err, stop) || end.ID != "claude-1" || len(locked) != 1 || locked[0] {
+		t.Fatalf("the ending %+v (locked %v); want claude-1 failed, delivered without the lock", end, locked)
+	}
+	close(release)
+	<-closed
+	select {
+	case f := <-ends:
+		t.Fatalf("a second ending %+v", f)
+	default:
+	}
+}
+
+// TestClaudeForeignPromptedOnlyPastTheGate (review C4 item 4): a wake that
+// arrives while the prompt gate holds a prompt opens a foreign turn of its
+// own, and the prompt is refused when the gate lets go, nothing written; a
+// gate that refuses leaves the machine as it was.
+func TestClaudeForeignPromptedOnlyPastTheGate(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("prompted before the gate passed: %s", got)
+	}
+	r.push(t, chunk("a wake"))
+	release <- nil
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the held prompt = %v; want ErrForeignTurn", err)
+	}
+	r.want(t, "start claude-1 background", "agent_message_chunk")
+	r.push(t, usageCost)
+	r.clk.Advance(grace)
+	r.client.SetPromptGate(func(context.Context) error { return errors.New("refused") })
+	if _, err := r.client.Prompt(context.Background(), "y"); err == nil || r.client.ForeignPhase() != "idle" {
+		t.Fatalf("a refused gate: %v, phase %s", err, r.client.ForeignPhase())
+	}
+	r.push(t, chunk("another wake"))
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("after a refused gate a wake did not open: %s", got)
+	}
+}
+
+// TestClaudeForeignSilenceIsNoContent (review C4 item 10): traffic that is
+// not content — a session-level update, a kind this build does not know —
+// does not restart the silence rule.
+func TestClaudeForeignSilenceIsNoContent(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"))
+	for range 3 {
+		r.clk.Advance(DefaultForeignTiming.Silence / 3)
+		if r.client.ForeignPhase() != "foreign" {
+			break
+		}
+		r.push(t, `{"sessionUpdate":"something_new"}`, usageNoCost)
+	}
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("non-content traffic held the turn past the silence limit: %s", got)
+	}
 }

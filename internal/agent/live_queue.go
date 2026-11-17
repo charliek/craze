@@ -131,7 +131,18 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 		return
 	}
 	s.mu.Lock()
+	if info.Running && info.ID != "" && info.ID == s.foreignEnded {
+		// Its ending is out already: a start delivered after it is no
+		// turn running (review C4 item 2).
+		s.mu.Unlock()
+		return
+	}
 	s.foreign = info.Running
+	if !info.Running {
+		s.foreignEnded = info.ID
+	}
+	// Either bracket ends the open text run (review C4 item 11).
+	s.textRun = ""
 	s.mu.Unlock()
 	cp := info
 	s.emit(Event{Type: EventForeignTurn, ForeignTurn: &cp})

@@ -293,6 +293,10 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 			s.update(p.SessionID, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.claude.catalog()})
 		}
 		s.reply(msg.ID, res)
+		if os.Getenv("CRAZE_FAKE_CLAUDE_WAKE_AFTER_LOAD") == "1" {
+			// Live, right behind the reply (claude_bg.go).
+			s.wake(p.SessionID, "a live wake")
+		}
 	case acp.MethodSessionPrompt:
 		dumpPrompt(msg.Params)
 		s.cancelled.Store(false)

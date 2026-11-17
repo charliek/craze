@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -126,6 +127,12 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 			status, msg := claudeStatus(n, rec.stopAsked)
 			return append(evs, s.finishClaudeChildLocked(rec, status, msg, "")...)
 		}
+		if status, msg := claudeStatus(n, rec.stopAsked); rec.info.Status == SubagentFailed && status == SubagentFailed && n.Error != "" {
+			// The adapter reports a failure again once the SDK supplies the
+			// error text its first report lacked (native-subagents.js
+			// supplyError, review C4 item 8): the row takes it.
+			rec.info.Error = truncateUTF8(sanitizeText(msg), subagentErrorCap)
+		}
 	}
 	switch {
 	case spawned:
@@ -187,11 +194,14 @@ func (s *session) claudeChildGoneLocked(rec *subagentRec) []Event {
 // claudeSessionMessage is a session_message: a prompt one session sent
 // another (§ E3). The one a child receives is its opening user block — drawn
 // once, whichever of its two copies (on the sender, on the recipient) comes
-// first — and the launching call it replaces is the row's tool call. A child's
-// report back to its parent is the parent's tool result, not drawn.
+// first — and the launching call it replaces is the row's tool call. A reply
+// (`<launch>:reply`) is the sender's report back to its parent — the
+// parent's tool result — and never the parent's prompt (review C4 item 9): it
+// is the sender's row's output.
 func (s *session) claudeSessionMessage(raw json.RawMessage) {
 	var w struct {
 		MessageID string          `json:"messageId"`
+		Sender    string          `json:"senderSessionId"`
 		Recipient string          `json:"recipientSessionId"`
 		Content   json.RawMessage `json:"content"`
 	}
@@ -199,6 +209,10 @@ func (s *session) claudeSessionMessage(raw json.RawMessage) {
 		return
 	}
 	text := sessionMessageText(w.Content)
+	if strings.HasSuffix(w.MessageID, replySuffix) {
+		s.claudeChildReply(w.Sender, text)
+		return
+	}
 	s.mu.Lock()
 	rec := s.subagents[w.Recipient]
 	if rec == nil || w.MessageID == "" || rec.promptIDs[w.MessageID] {
@@ -212,7 +226,7 @@ func (s *session) claudeSessionMessage(raw json.RawMessage) {
 	prev := cloneSubagent(rec.info)
 	rec.info.Prompt = truncateUTF8(text, taskPromptCap)
 	rec.userChunks++
-	if rec.info.ToolCallID == "" && !strings.HasSuffix(w.MessageID, ":reply") {
+	if rec.info.ToolCallID == "" {
 		rec.info.ToolCallID = w.MessageID
 	}
 	capSubagent(&rec.info)
@@ -226,6 +240,31 @@ func (s *session) claudeSessionMessage(raw json.RawMessage) {
 	if routed && text != "" {
 		s.emit(Event{Type: EventUser, Agent: w.Recipient, Text: text})
 	}
+}
+
+// replySuffix ends the messageId of a child's report back to its parent
+// (native-subagents.js launchReply).
+const replySuffix = ":reply"
+
+// claudeChildReply is a child's report back to its parent: the child's row's
+// output. A report from no row the session holds is the root's own tool
+// result, and draws nothing.
+func (s *session) claudeChildReply(sender, text string) {
+	s.mu.Lock()
+	rec := s.subagents[sender]
+	if rec == nil || text == "" {
+		s.mu.Unlock()
+		return
+	}
+	prev := cloneSubagent(rec.info)
+	rec.info.Output = text
+	capSubagent(&rec.info)
+	var evs []Event
+	if !sameSubagentFull(prev, rec.info) {
+		evs = append(evs, subagentRowEvent(rec, SubagentChangeProgress))
+	}
+	s.mu.Unlock()
+	s.emitAll(evs)
 }
 
 // sessionMessageText is a session_message's content: its text blocks joined.
@@ -267,10 +306,90 @@ func (s *session) CancelSubagent(id string) error {
 		s.mu.Unlock()
 		return nil
 	}
+	if !client.ChildRouted(id) {
+		// The registry no longer holds it (refused at the cap, forgotten):
+		// there is no session to cancel, and the caller is told so rather
+		// than left with a stop that never went (review C4 item 6).
+		s.mu.Unlock()
+		// Both: the session's cause, and the protocol's unknown_subagent.
+		return fmt.Errorf("agent: sub-agent %s cannot be stopped: %w: %w", id, ErrNoSuchSubagent, acp.ErrNoSession)
+	}
 	rec.stopAsked = true
 	s.mu.Unlock()
-	go func() { _ = client.CancelSession(context.Background(), id) }()
+	go func() {
+		if err := client.CancelSession(context.Background(), id); err != nil {
+			// It never went: the next stop may try again.
+			s.mu.Lock()
+			rec.stopAsked = false
+			s.mu.Unlock()
+		}
+	}()
 	return nil
+}
+
+// finishedCapLocked is how many finished rows the session keeps. A claude
+// child the ACP registry still holds may report again — late updates, a reuse
+// — so claude keeps as many as the registry routes (review C4 item 7).
+func (s *session) finishedCapLocked() int {
+	if s.provider().isClaude() {
+		return max(subagentFinishedCap, acp.ChildRouteCap)
+	}
+	return subagentFinishedCap
+}
+
+// retireChildrenAtEnd waits for the agent's transport to end and then ends
+// every claude child row still running, failed: its agent is gone, so it will
+// never report again, and a row left running would hold the session busy for
+// ever (review C4 item 3). A session that closes first has nothing to retire.
+func (s *session) retireChildrenAtEnd(client *acp.Client) {
+	select {
+	case <-client.Conn().Done():
+	case <-s.done:
+		return
+	}
+	s.mu.Lock()
+	var evs []Event
+	for _, id := range append([]string(nil), s.subagentOrder...) {
+		if rec := s.subagents[id]; rec != nil && rec.info.Status == SubagentRunning {
+			rec.info.NoCancel = true
+			evs = append(evs, s.finishClaudeChildLocked(rec, SubagentFailed, agentStopped, "")...)
+		}
+	}
+	s.mu.Unlock()
+	s.emitAll(evs)
+}
+
+// agentStopped is the error of a claude child whose agent stopped under it.
+const agentStopped = "the agent stopped"
+
+// rootText is a claude root text chunk as the transcript is to draw it: a
+// chunk of another message than the open run's starts a paragraph of its own
+// (review C4 item 11), so a held turn's launch text and its hand-back do not
+// run together. Every other provider's text goes as it came.
+func (s *session) rootText(u sessionUpdateWire) string {
+	text := messageText(u.Content)
+	if !s.provider().isClaude() {
+		return text
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if text == "" {
+		return text
+	}
+	if s.textRun != "" && u.MessageID != "" && u.MessageID != s.textRun {
+		text = "\n\n" + text
+	}
+	if u.MessageID != "" {
+		s.textRun = u.MessageID
+	}
+	return text
+}
+
+// endTextRun is anything that ends the transcript's open text run.
+func (s *session) endTextRun() {
+	s.mu.Lock()
+	s.textRun = ""
+	s.mu.Unlock()
 }
 
 var _ SubagentCanceller = (*session)(nil)

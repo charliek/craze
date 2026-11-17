@@ -474,6 +474,9 @@ func (m Model) spinnerElapsed() string {
 	if m.status == statusWorking {
 		return m.turnElapsed()
 	}
+	if m.foreignWorking() && !m.foreignStart.IsZero() && !m.frozen {
+		return formatElapsed(m.now().Sub(m.foreignStart))
+	}
 	for i := range m.snap.Subagents {
 		if subagentBusy(m.snap.Subagents[i]) {
 			return m.subElapsed(m.snap.Subagents[i])

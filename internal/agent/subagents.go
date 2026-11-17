@@ -556,7 +556,8 @@ func (s *session) evictFinishedLocked(keep string) {
 			finished = append(finished, id)
 		}
 	}
-	if len(finished) <= subagentFinishedCap {
+	limit := s.finishedCapLocked()
+	if len(finished) <= limit {
 		return
 	}
 	sort.SliceStable(finished, func(i, j int) bool {
@@ -566,7 +567,7 @@ func (s *session) evictFinishedLocked(keep string) {
 		}
 		return a.finishSeq < b.finishSeq
 	})
-	for len(finished) > subagentFinishedCap {
+	for len(finished) > limit {
 		drop := -1
 		for i, id := range finished {
 			if id != keep {

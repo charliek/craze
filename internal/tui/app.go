@@ -1025,12 +1025,15 @@ type Model struct {
 	// any other command is somebody else's Disarm and is worded for the user.
 	disarmed string
 
-	tickGen     int
-	tickLive    bool
-	tickFast    bool
-	spinFrame   int
-	turnStart   time.Time
-	lastThought bool
+	tickGen   int
+	tickLive  bool
+	tickFast  bool
+	spinFrame int
+	turnStart time.Time
+	// foreignStart is when the agent's own turn now running began
+	// (foreignWorking's working line).
+	foreignStart time.Time
+	lastThought  bool
 
 	ctrlCDeadline time.Time
 	clock         func() time.Time
@@ -4808,6 +4811,7 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// And it is a turn begun, as beginTurn counts craze's own
 			// (lastturn.go).
 			m.turnStarts++
+			m.foreignStart = m.now()
 		}
 		return nil
 	case agent.EventText:

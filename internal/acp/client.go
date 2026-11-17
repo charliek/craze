@@ -595,9 +595,6 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// and every request of the turn before it is now stale.
 	c.turn++
 	turn := c.turn
-	if c.dialect == DialectClaude {
-		c.enterPromptedLocked(turn)
-	}
 	// The new turn's identity is not known yet: queue/changed teaches it, and
 	// until then nothing the last turn learned may speak for this one.
 	c.promptID = ""
@@ -663,6 +660,22 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	if gate != nil {
 		if err := gate(ctx); err != nil {
 			return nil, err
+		}
+	}
+	if dialect == DialectClaude {
+		// Prompted only now, the gate passed and the bytes next (review C4
+		// item 4): a wake that arrived while the gate held the prompt opened
+		// a foreign turn of its own, and the prompt goes back to the caller as
+		// refused, nothing written; a gate that refused changed nothing.
+		c.mu.Lock()
+		if c.foreignRunningLocked() {
+			c.mu.Unlock()
+			return nil, ErrForeignTurn
+		}
+		c.enterPromptedLocked(turn)
+		c.mu.Unlock()
+		if testAfterPrompted != nil {
+			testAfterPrompted()
 		}
 	}
 
@@ -957,18 +970,29 @@ func (c *Client) Held() HeldRequests {
 func (c *Client) CancelHeld(ctx context.Context, held HeldRequests) error {
 	c.completeCancelled(held.reqs, repliedByCancel)
 	c.mu.Lock()
+	foreign := ""
 	if c.dialect == DialectClaude && c.sessionID != "" {
 		// A cancel ends the turn's plan exits too (review C3c 2).
 		c.settleClaudeToolsLocked(c.sessionID)
-		// And a turn the agent runs on its own ends cancelled (§ E1 (c)).
-		c.foreignCancelLocked()
+		foreign = c.foreignIDLocked()
 	}
 	c.mu.Unlock()
 	sid := c.SessionID()
 	if sid == "" {
 		return nil
 	}
-	return c.conn.Notify(ctx, MethodSessionCancel, CancelParams{SessionID: sid})
+	if err := c.conn.Notify(ctx, MethodSessionCancel, CancelParams{SessionID: sid}); err != nil {
+		return err
+	}
+	if foreign != "" {
+		// A turn the agent runs on its own ends cancelled (§ E1 (c)) — once
+		// the cancel is on the wire, and only the turn it was made in (review
+		// C4 item 1): a cancel that never left keeps the turn's own rules.
+		c.mu.Lock()
+		c.foreignCancelLocked(foreign)
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 func (c *Client) AnswerPermission(id string, dec PermissionDecision) {

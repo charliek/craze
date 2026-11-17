@@ -281,3 +281,29 @@ func TestClaudeChildNestedAsksAndCancels(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeChildALabelKeepsTheIdleBit (review C4 item 6): a subagent_update
+// with no state — a cwd, a label — does not mark an idle child working, so it
+// stays the one the cap evicts; one first named that way is idle.
+func TestClaudeChildALabelKeepsTheIdleBit(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.pushUpdate(t, rigRoot, subUpd("c0", running))
+	r.pushUpdate(t, rigRoot, subUpd("c0", idleEndTurn))
+	r.pushUpdate(t, rigRoot, subUpd("c0", `,"cwd":"/elsewhere"`))
+	r.pushUpdate(t, rigRoot, subUpd("restored", `,"title":"An ancestor"`))
+	for i := 1; i < childRouteCap-1; i++ {
+		r.pushUpdate(t, rigRoot, subUpd(fmt.Sprintf("c%d", i), running))
+	}
+	r.pushOn(t, rigRoot, subUpd("new1", running))
+	r.pushOn(t, rigRoot, subUpd("new2", running))
+	if got := r.client.DroppedUpdates(); got != 0 {
+		t.Fatalf("dropped %d: an idle child relabelled was not evictable", got)
+	}
+	r.client.mu.Lock()
+	c0, restored := r.client.kids.has("c0"), r.client.kids.has("restored")
+	r.client.mu.Unlock()
+	if c0 || restored {
+		t.Fatalf("c0 %v, restored %v still registered; want both evicted as idle", c0, restored)
+	}
+}

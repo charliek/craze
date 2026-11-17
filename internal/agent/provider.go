@@ -690,6 +690,13 @@ type ProviderInfo struct {
 // and native skip.
 func (p ProviderInfo) QuestionDismissCancels() bool { return p.Name == claudeName }
 
+// ForeignTurnShowsWorking reports whether a turn the agent runs on its own
+// shows as work in progress — the working line and the queue's hint, as a
+// prompted turn does: claude's background turns (plan 052 L4 O1), which can
+// run for minutes. Grok's interjection fallback and native's wake keep their
+// own presentation.
+func (p ProviderInfo) ForeignTurnShowsWorking() bool { return p.Name == claudeName }
+
 // provider rebuilds the value with methods. The name alone decides which
 // constructor runs, so a snapshot keeps its provider's capabilities, dialect
 // and skill scan. A zero ProviderInfo — a stub session, a snapshot taken

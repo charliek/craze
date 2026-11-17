@@ -153,7 +153,15 @@ type session struct {
 	planHold  chan struct{}
 	releasing bool
 	// foreign mirrors the client's foreign-turn state for Snapshot.
-	foreign bool
+	// foreignEnded is the id of the last foreign turn that ended: a start
+	// for it delivered late — a close that could not wait for the read loop
+	// (acp closeForeign) — is not a turn running (review C4 item 2).
+	foreign      bool
+	foreignEnded string
+	// textRun is the messageId of the claude root text the transcript's open
+	// run holds, "" when none is open: a chunk of another message starts a
+	// paragraph of its own (review C4 item 11).
+	textRun string
 	// gate is claude's effective-login gate (live_claude.go), under s.mu;
 	// fastFix is claude's fast mode being set back off (keepFastOffLocked,
 	// fixFast): non-nil while a reset runs, closed when it has ended — fast
@@ -735,6 +743,11 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// while claude's fast mode is being reset, refused once the session has
 	// stopped. Cursor and grok never have either.
 	client.SetPromptGate(s.awaitFastFix)
+	if p.isClaude() {
+		// A child whose agent is gone never reports again: its row ends
+		// with the transport (review C4 item 3).
+		go s.retireChildrenAtEnd(client)
+	}
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
@@ -1344,6 +1357,10 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
+	// The one boundary (review C4 item 5): what claude sent after the load's
+	// reply was held until here, and is routed now as live, foreign turns
+	// and all, behind the end bracket.
+	client.ReplayDone()
 	return nil
 }
 
@@ -1731,6 +1748,8 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
+	// A turn of craze's own starts a run of its own (review C4 item 11).
+	s.textRun = ""
 	s.token = token
 	// A new turn: it has not ended, so an interjection is live again. No
 	// cancel has been asked for it either — the withdraw above says so.
@@ -3213,7 +3232,9 @@ type sessionUpdateWire struct {
 	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string                 `json:"currentModeId,omitempty"`
 	ConfigOptions     json.RawMessage        `json:"configOptions,omitempty"`
-	Entries           json.RawMessage        `json:"entries,omitempty"`
+	// MessageID is claude's message id on a text or thought chunk.
+	MessageID string          `json:"messageId,omitempty"`
+	Entries   json.RawMessage `json:"entries,omitempty"`
 }
 
 func (s *session) onUpdate(n acp.SessionNotification) {
@@ -3246,14 +3267,16 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// claude: the root's copy of a prompt it sent a child (§ E3).
 		s.claudeSessionMessage(n.Update)
 	case acp.UpdateAgentMessage:
-		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
+		s.emit(Event{Type: EventText, Text: s.rootText(u)})
 	case acp.UpdateAgentThought:
+		s.endTextRun()
 		s.emit(Event{Type: EventThought, Text: messageText(u.Content)})
 	case acp.UpdateToolCall, acp.UpdateToolCallUpd:
 		delta, ok := toolDeltaFromWire(u)
 		if !ok {
 			return
 		}
+		s.endTextRun()
 		delta.wireName = n.ToolName
 		s.publishToolDelta(delta)
 	case acp.UpdateAvailableCommands:

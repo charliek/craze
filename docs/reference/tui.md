@@ -215,7 +215,10 @@ asked for on its own.
   (`SendMessage`), the same row runs again as a new attempt.
 - A child Claude can no longer observe ends cancelled with the activity `no
   longer observable`, and so do the children it started; the other rows are
-  untouched.
+  untouched. A child still running when the session stops, or when the
+  adapter exits, fails with `the agent stopped`: it will never report again.
+- A child's report back to the child that launched it is the reporting
+  child's output on its row, not part of its parent's transcript.
 - `Delete`/`Backspace` stops a running child that lets itself be stopped (every
   child Claude announces does): Claude stops that child alone, your turn goes
   on, and its row ends cancelled, `stopped by the user`.
@@ -240,16 +243,26 @@ work)`, or `the agent is compacting its context on its own` for compaction:
   session is set up.
 - It ends 2 seconds after the result's usage report, unless more content comes
   first (then it goes on) or a tool call is still open (then it waits for the
-  call to finish). With no report at all it ends after a minute of silence —
-  ten with a tool call open — and the diagnostics say so (`claude went quiet
-  during a turn of its own`).
+  call to finish). With no report at all it ends after a minute in which
+  Claude says or does nothing — ten with a tool call open; other traffic does
+  not count — and the diagnostics say so (`claude went quiet during a turn of
+  its own`).
 - Because the end is inferred, a follow-up that comes more than 2 seconds after
   a report opens a second turn of its own, or, if a message of yours was sent
   in between, is part of your turn.
-- A prompt typed while it runs is queued, and sent once it ends. `Esc` stops it:
-  craze sends Claude the cancel, and the turn ends `cancelled` 2 seconds later.
+- While it runs the working line shows, as for your own turn (`Working · …
+  · esc to interrupt`), and the empty composer says `enter queues`: a prompt
+  typed meanwhile is queued, and sent once it ends. `Esc` stops it: craze
+  sends Claude the cancel, and once the cancel is written the turn ends
+  `cancelled` 2 seconds later (a cancel that could not be written changes
+  nothing).
 - When the session stops for a reason of its own (the login changed) while
   such a turn runs, the turn ends failed, with the reason.
+- Claude's text is drawn per message: when Claude starts a new message in the
+  same run — its reply after a background child reported, say — it starts a
+  new paragraph instead of running on from the last word.
+- What Claude sends right after a resumed session's replay is live: a turn of
+  its own it starts there opens after the `restored` note.
 
 Background commands themselves are not tracked: they have no row, and they do
 not hold your turn or the host. A host that exits ends Claude Code and the

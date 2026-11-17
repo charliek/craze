@@ -43,7 +43,9 @@ import (
 //	                              (compaction_update in_progress, its usage,
 //	                              completed)
 //	claude-subagent               AGENT: a child that reads and reports back;
-//	                              AGENT-HOLD: one that works until cancelled
+//	                              AGENT-HOLD: one that works until cancelled;
+//	                              AGENT-EXIT: one still working when the
+//	                              adapter exits
 //	                              (its own session/cancel)
 //	claude-subagent-nested        AGENT: root → child → grandchild, each asking
 //	                              nothing, each idle in turn
@@ -61,6 +63,9 @@ import (
 //	                              done, as the adapter holds it
 //	claude-unattended-bg          any prompt: a background shell; the reply
 //	                              goes at once, and the shell's wake later
+//
+// CRAZE_FAKE_CLAUDE_WAKE_AFTER_LOAD=1 makes a load's reply followed at once by
+// a wake (claude-replay-load), live content right behind the replay.
 //
 // Environment: CRAZE_FAKE_CLAUDE_WAKE_DELAY (default 100ms), CRAZE_FAKE_CLAUDE_GAP
 // (default 50ms), CRAZE_FAKE_CLAUDE_CHILD_RUN (default 200ms), and
@@ -271,6 +276,13 @@ func (s *server) childTurn(id json.RawMessage, sid, text string) {
 	end := func(say string) { s.endTurnSaying(id, sid, say) }
 	switch s.script {
 	case "claude-subagent":
+		if strings.Contains(text, "AGENT-EXIT") {
+			s.announce(sid, fakeChild, "Doomed", "work until the end", "toolu_launch_1")
+			s.claudeSay(fakeChild, "working")
+			// The adapter dies with its child running: nothing more of it.
+			time.Sleep(50 * time.Millisecond)
+			os.Exit(3)
+		}
 		if strings.Contains(text, "AGENT-HOLD") {
 			ch := fakeKids.chanFor(fakeChild)
 			s.announce(sid, fakeChild, "Hold on", "work until stopped", "toolu_launch_1")

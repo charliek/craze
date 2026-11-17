@@ -49,16 +49,44 @@ func (c *Client) claudeSetup(sid string) {
 }
 
 // claudeLoaded is a claude session/load's reply hook, on the read loop: the
-// replay is over, and from the next update the rules apply.
+// replay is over on the wire. What the adapter sends from here is live, but it
+// is held (routeClaude) until the session has closed its own replay bracket
+// (ReplayDone), so the one boundary between replayed and live is the
+// session's: nothing live reaches it stamped replayed, and a foreign turn
+// opened by it is one the session sees (review C4 item 5).
 func (c *Client) claudeLoaded() {
+	c.mu.Lock()
+	if c.cf.phase == phaseReplaying {
+		c.cf.loaded = true
+	}
+	c.mu.Unlock()
+}
+
+// ReplayDone is the session's word that its replay is over — its replay flag
+// cleared and its end bracket out — on claude: the machine is idle and ready
+// from here, and every update held since the load's reply is routed now, in
+// order, under the rules, before anything the read loop reads next. Every
+// other dialect, and a claude client that is not loading, does nothing.
+func (c *Client) ReplayDone() {
+	if c.dialect != DialectClaude {
+		return
+	}
 	c.dispatchMu.Lock()
 	defer c.dispatchMu.Unlock()
 	c.mu.Lock()
-	if c.cf.phase == phaseReplaying {
-		c.cf.phase = phaseIdle
-		c.cf.ready = true
+	if c.cf.phase != phaseReplaying || !c.cf.loaded {
+		c.mu.Unlock()
+		return
 	}
+	held := c.cf.held
+	c.cf.held = nil
+	c.cf.loaded = false
+	c.cf.phase = phaseIdle
+	c.cf.ready = true
 	c.mu.Unlock()
+	for _, n := range held {
+		c.routeClaude(n)
+	}
 }
 
 // requestSession is a request's params.sessionId, "" for none.
@@ -92,6 +120,13 @@ func (c *Client) routeClaude(n SessionNotification) {
 	c.mu.Lock()
 	if c.sessionID == "" {
 		c.pendingUpdates = append(c.pendingUpdates, n)
+		c.mu.Unlock()
+		return
+	}
+	if c.cf.phase == phaseReplaying && c.cf.loaded {
+		// Live, after the load's reply, and held until the session's replay
+		// is over (ReplayDone).
+		c.cf.held = append(c.cf.held, n)
 		c.mu.Unlock()
 		return
 	}
@@ -156,15 +191,26 @@ func (c *Client) claudeSubagentLocked(n SessionNotification, root string) {
 	var evicted []string
 	var replay []SessionNotification
 	if sub.State != ChildUnknown {
+		known := c.kids.has(child)
 		registered, out := c.kids.childStarted(childPolicyClaude, n.SessionID, child)
 		evicted = out
-		if !registered {
+		switch {
+		case !registered:
 			// Refused at the cap with no idle child to make room: the row
 			// still shows; the child's stream stays in the early buffer and
 			// expires there.
 			c.dropped++
-		} else {
+		case sub.State == "":
+			// A label or a cwd alone says nothing of the child's work
+			// (review C4 item 6): a known child keeps its idle bit, and one
+			// first named this way — a restored ancestor — is not working.
+			if !known {
+				c.kids.childIdle(child, true)
+			}
+		default:
 			c.kids.childIdle(child, sub.State == ChildIdle)
+		}
+		if registered {
 			replay = c.kids.takeEarly(child)
 		}
 	}
@@ -194,6 +240,14 @@ func (c *Client) claudeSubagentLocked(n SessionNotification, root string) {
 	for _, r := range replay {
 		c.routeClaude(r)
 	}
+}
+
+// ChildRouted reports whether id is a claude child this client routes — the
+// one CancelSession can cancel.
+func (c *Client) ChildRouted(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dialect == DialectClaude && id != "" && id != c.sessionID && c.kids.has(id)
 }
 
 // CancelSession is session/cancel for one claude child session (plan 052 §

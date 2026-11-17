@@ -356,3 +356,27 @@ func TestRequiredSingleChoiceNeedsAPick(t *testing.T) {
 		t.Fatalf("calls %+v", calls)
 	}
 }
+
+// TestClaudeForeignTurnShowsWorking (plan 052 L4 O1): while claude runs a turn
+// of its own the working line shows, with its Esc, and the empty composer says
+// Enter queues; grok's interjection fallback keeps its own presentation.
+func TestClaudeForeignTurnShowsWorking(t *testing.T) {
+	for _, tc := range []struct {
+		p       agent.Provider
+		working bool
+	}{
+		{agent.ClaudeProvider(), true},
+		{agent.GrokProvider(), false},
+	} {
+		m, _ := claudeScripted(t, tc.p, "default", claudeModeIDs...)
+		if m.status == statusWorking || m.spinnerVisible() {
+			t.Fatalf("%s: working before the turn", tc.p.Name())
+		}
+		m.snap.ForeignTurn = true
+		m.foreignStart = m.now()
+		line, hint := m.spinnerView(), m.composerHint()
+		if tc.working != strings.Contains(line, "esc to interrupt") || tc.working != (hint == queueForeignHint) || tc.working != m.wantFastTick() {
+			t.Fatalf("%s during its own turn: line %q, hint %q, fast tick %v", tc.p.Name(), line, hint, m.wantFastTick())
+		}
+	}
+}

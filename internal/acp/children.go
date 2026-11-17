@@ -28,6 +28,10 @@ import (
 // provider has its own transport and joins at the agent-level roster, not
 // here. Everything in it is under c.mu.
 
+// ChildRouteCap is childRouteCap, for the claude session's finished-row
+// retention (review C4 item 7): a child the registry still holds keeps its row.
+const ChildRouteCap = childRouteCap
+
 // childRouteCap bounds concurrently routed children. On grok a 65th
 // registration is refused (dropped and counted); no registered child is ever
 // evicted. On claude the oldest idle child makes room first.
@@ -77,8 +81,9 @@ func (r *childRegistry) has(id string) bool {
 // grok; on claude the oldest idle child is evicted to make room, and evicted
 // answers it and its descendants, every one of them deregistered.
 func (r *childRegistry) childStarted(p childPolicy, parent, id string) (ok bool, evicted []string) {
-	if e, known := r.entries[id]; known {
-		e.idle = false
+	if _, known := r.entries[id]; known {
+		// A known id keeps its slot and its idle bit: the caller says what
+		// the update means for the child's work (childIdle).
 		return true, nil
 	}
 	if len(r.order) >= childRouteCap {
