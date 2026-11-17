@@ -1511,7 +1511,12 @@ func (s *session) childEnv() func(string) string {
 	if s.opts.Env == nil {
 		return os.Getenv
 	}
-	env := s.opts.Env
+	return envLookup(s.opts.Env)
+}
+
+// envLookup is a lookup over env, KEY=value entries, the last entry of a key
+// winning.
+func envLookup(env []string) func(string) string {
 	return func(key string) string {
 		prefix := key + "="
 		for i := len(env) - 1; i >= 0; i-- {
@@ -3366,16 +3371,16 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.flushReplayUser()
 	}
 	switch u.SessionUpdate {
-	case updateSessionMessage:
+	case acp.UpdateSessionMessage:
 		// claude: the root's copy of a prompt it sent a child (§ E3).
 		s.claudeSessionMessage(n.Update)
-	case updateUsageKind:
+	case acp.UpdateUsage:
 		// claude: the context meter and the model in use (§ D1).
 		s.onClaudeUsage(n.Update)
-	case updateCompactionKind:
+	case acp.UpdateCompaction:
 		// claude: a compaction, as a transcript note (§ B2).
 		s.onClaudeCompaction(n.Update)
-	case updateNoticeKind:
+	case acp.UpdateNotice:
 		// claude: one of Claude Code's notices, as a transcript note (§ B2).
 		s.onClaudeNotice(n.Update)
 	case acp.UpdateAgentMessage:

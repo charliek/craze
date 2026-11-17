@@ -229,7 +229,7 @@ func TestClaudeDrainDeliversWhatCameBeforeEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pushUpdate(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"kid","title":"t","state":{"state":"running"}}`)
-	r.pushUpdate(t, "kid", agentText("the last words"))
+	r.pushUpdate(t, "kid", chunk("the last words"))
 	r.pushUpdate(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"kid","state":{"state":"idle","stopReason":"end_turn"}}`)
 	r.roundTrip(t)
 	parked := make(chan struct{})
@@ -302,7 +302,7 @@ func TestClaudeSeverWhileTellingAnEviction(t *testing.T) {
 		}
 	})
 	r.ready(t)
-	for i := range ChildRouteCap {
+	for i := range childRouteCap {
 		r.pushOn(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"idle`+strconv.Itoa(i)+`","state":{"state":"idle","stopReason":"end_turn"}}`)
 	}
 	r.pushUpdate(t, rigRoot, `{"sessionUpdate":"subagent_update","sessionId":"newcomer","state":{"state":"running"}}`)

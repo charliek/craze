@@ -93,8 +93,8 @@ func TestClaudeTripEndsTheForeignTurnBeforeItsResult(t *testing.T) {
 		}
 	})
 	r.ready(t)
-	r.push(t, usageWith(probe2RateLimit, false), agentText("waking"),
-		usageWith(`{"status":"allowed","isUsingOverage":true,"resetsAt":1795399200}`, true), agentText("more"))
+	r.push(t, usageWith(probe2RateLimit, false), chunk("waking"),
+		usageWith(`{"status":"allowed","isUsingOverage":true,"resetsAt":1795399200}`, true), chunk("more"))
 	want := []string{"ratelimit", "usage_update", "start claude-1 background", "agent_message_chunk",
 		"ratelimit", "end claude-1 background err", "usage_update", "agent_message_chunk"}
 	if got := r.log.get(); !slices.Equal(got, want) {
@@ -111,10 +111,6 @@ func TestClaudeTripEndsTheForeignTurnBeforeItsResult(t *testing.T) {
 	if got := r.log.get(); len(got) != len(want) {
 		t.Fatalf("after the trip: %q", got[len(want):])
 	}
-}
-
-func agentText(s string) string {
-	return `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + s + `"}}`
 }
 
 // TestClaudeFenceLetsOnlyTheCancelThrough (§ D3): once fenced, a prompt, a
@@ -170,7 +166,7 @@ func TestClaudeStopWithinSevers(t *testing.T) {
 		at = r.log.get()
 		// The agent goes on talking after the sever.
 		for i := 0; i < 5; i++ {
-			params := `{"sessionId":"` + rigRoot + `","update":` + agentText("after") + `}`
+			params := `{"sessionId":"` + rigRoot + `","update":` + chunk("after") + `}`
 			_ = r.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, Method: MethodSessionUpdate, Params: json.RawMessage(params)})
 		}
 		time.Sleep(100 * time.Millisecond)

@@ -121,7 +121,7 @@ func (c *Client) StderrTail(wait time.Duration) []byte {
 }
 
 // asyncSinkQueue bounds what an asyncSink holds for a sink that is behind: past
-// it, chunks are dropped and counted.
+// it, chunks are dropped.
 const asyncSinkQueue = 256
 
 // asyncSink is the agent's stderr sink behind a queue of its own (review C5c
@@ -131,12 +131,10 @@ const asyncSinkQueue = 256
 // its pipe and the child it belongs to. A sink that keeps up gets every byte,
 // in order.
 type asyncSink struct {
-	dst     io.Writer
-	ch      chan []byte
-	done    chan struct{}
-	once    sync.Once
-	dropped int64
-	mu      sync.Mutex
+	dst  io.Writer
+	ch   chan []byte
+	done chan struct{}
+	once sync.Once
 }
 
 func newAsyncSink(dst io.Writer) *asyncSink {
@@ -156,23 +154,18 @@ func (a *asyncSink) Write(p []byte) (int, error) {
 	select {
 	case a.ch <- b:
 	default:
-		a.mu.Lock()
-		a.dropped++
-		a.mu.Unlock()
 	}
 	return len(p), nil
 }
 
 // closeWithin ends the queue and waits, at most d, for the sink to have
-// taken what it held; it answers whether it did.
-func (a *asyncSink) closeWithin(d time.Duration) bool {
+// taken what it held.
+func (a *asyncSink) closeWithin(d time.Duration) {
 	a.once.Do(func() { close(a.ch) })
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-a.done:
-		return true
 	case <-t.C:
-		return false
 	}
 }

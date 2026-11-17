@@ -159,17 +159,17 @@ const (
 
 func updateClassOf(kind string) updateClass {
 	switch kind {
-	case UpdateAvailableCommands, UpdateCurrentMode, UpdateConfigOption, UpdateSessionInfo, updateUsage:
+	case UpdateAvailableCommands, UpdateCurrentMode, UpdateConfigOption, UpdateSessionInfo, UpdateUsage:
 		return classSession
 	case updateUserMessageChunk:
 		return classEcho
 	case UpdateAgentMessage, UpdateAgentThought, UpdateToolCall:
 		return classContent
-	case updateCompaction:
+	case UpdateCompaction:
 		return classCompaction
 	case UpdateToolCallUpd, UpdatePlan:
 		return classTrailing
-	case updateNotice, updateCompactionSum, updateSubagent, updateSessionMsg:
+	case UpdateNotice, updateCompactionSum, SubagentUpdate, UpdateSessionMessage:
 		return classAside
 	}
 	return classUnknown
@@ -191,7 +191,7 @@ func grokSessionLevel(kind string) bool {
 
 // The update kinds above that craze reads nowhere else.
 const (
-	updateUsage                 = "usage_update"
+	UpdateUsage                 = "usage_update"
 	updateUserMessageChunk      = "user_message_chunk"
 	grokLastTurnSummary         = "last_turn_summary"
 	grokSessionSummaryGenerated = "session_summary_generated"

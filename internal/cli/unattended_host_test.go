@@ -111,24 +111,12 @@ func TestAnUnattendedACPHostReturnsItsPlan(t *testing.T) {
 // cancelled, and no session/cancel is written at all, so none precedes the
 // answer; the result is completed, with the plan, auto-answered `returned`.
 func TestAnUnattendedClaudeHostReturnsItsPlan(t *testing.T) {
-	_, ws := serveHome(t)
-	fake := fakeAgentPath(t)
-	writeCrazeConfig(t, "host_idle_exit = \"30s\"\n\n[agents]\nclaude = \""+fake+"\"\n")
-	env := rundir.ProcessEnv()
+	env, ws, _ := claudeHostHome(t, "claude-plan")
 	spawnAsChild(t, nil)
 	spawnBounds(t, serveStep, serveStep, serveStep)
 	t.Cleanup(func() { stopEveryHost(t, env) })
 	calls := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("CRAZE_FAKE_DUMP_CALLS", calls)
-	t.Setenv("CRAZE_FAKE_SCRIPT", "claude-plan")
-	claude := filepath.Join(t.TempDir(), "claude")
-	stub := "#!/bin/sh\ncase \"$*\" in\n" +
-		"  *'auth status'*) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}' ;;\n" +
-		"  *--version*) echo '2.1.326 (Claude Code)' ;;\nesac\n"
-	if err := os.WriteFile(claude, []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(agent.ClaudeExecutableEnv, claude)
 	stdout, stderr, code := executeErr([]string{"new", "--wait", "--json", "--provider", "claude", "-C", ws, "--plan", "plan the change"})
 	m := decodeResult(t, stdout)
 	auto, _ := json.Marshal(m["autoAnswered"])

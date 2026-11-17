@@ -443,16 +443,12 @@ func newDefaultTarget() string {
 func newProvider(f *newFlags, target func() string) (string, error) {
 	provider := strings.TrimSpace(f.provider)
 	if provider != "" {
-		p, err := agent.ProviderByName(provider)
-		if err != nil {
-			return "", unknownProviderError(provider)
-		}
-		return provider, refuseFast("craze new", p, fastFlags(f.fast, f.noFast))
+		return provider, f.checkNamedProvider(provider)
 	}
 	if f.fast {
 		if id := target(); id != "" {
 			if p, err := agent.ProviderByName(id); err == nil {
-				if err := refuseFast("craze new", p, fastFlags(f.fast, f.noFast)); err != nil {
+				if err := f.refuseFast(p); err != nil {
 					return "", err
 				}
 				// Bound into the create (review C2b 4): the hub reads its
@@ -464,6 +460,21 @@ func newProvider(f *newFlags, target func() string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// checkNamedProvider checks an explicit --provider by its id alone (plan 037
+// LC-4) and holds it to --fast (refuseFast).
+func (f *newFlags) checkNamedProvider(id string) error {
+	p, err := agent.ProviderByName(id)
+	if err != nil {
+		return unknownProviderError(id)
+	}
+	return f.refuseFast(p)
+}
+
+// refuseFast is refuseFast for craze new's --fast and --no-fast on p.
+func (f *newFlags) refuseFast(p agent.Provider) error {
+	return refuseFast("craze new", p, fastFlags(f.fast, f.noFast))
 }
 
 // newGuard is plain craze new's self-delegation guard (plan 052 § J2, R2-6),

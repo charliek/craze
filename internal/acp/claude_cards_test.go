@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -14,27 +12,13 @@ import (
 	"time"
 )
 
-// cardFrame is one line of testdata/claude-cards/frames.jsonl: a real
-// claude-agent-acp 0.107.3 frame of L0's ask, plan and steer steps, redacted
+// cardFrames is testdata/claude-cards/frames.jsonl's frames of one step: real
+// claude-agent-acp 0.107.3 frames of L0's ask, plan and steer steps, redacted
 // (the session id, the tool call ids, the paths).
-type cardFrame struct {
-	Step string  `json:"step"`
-	Dir  string  `json:"dir"`
-	Msg  Message `json:"msg"`
-}
-
-func cardFrames(t *testing.T, step string) []cardFrame {
+func cardFrames(t *testing.T, step string) []claudeFrame {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "claude-cards", "frames.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []cardFrame
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		var f cardFrame
-		if err := json.Unmarshal([]byte(line), &f); err != nil {
-			t.Fatal(err)
-		}
+	var out []claudeFrame
+	for _, f := range fixtureFrames(t, "claude-cards") {
 		if f.Step == step {
 			out = append(out, f)
 		}
@@ -47,7 +31,7 @@ func cardFrames(t *testing.T, step string) []cardFrame {
 
 // replayIn sends every incoming frame of a step but its replies, in order,
 // and answers with the request (the one frame with both an id and a method).
-func replayIn(t *testing.T, p *rawPipe, frames []cardFrame) *Message {
+func replayIn(t *testing.T, p *rawPipe, frames []claudeFrame) *Message {
 	t.Helper()
 	var req *Message
 	for _, f := range frames {
@@ -67,7 +51,7 @@ func replayIn(t *testing.T, p *rawPipe, frames []cardFrame) *Message {
 	return req
 }
 
-func outResult(t *testing.T, frames []cardFrame) string {
+func outResult(t *testing.T, frames []claudeFrame) string {
 	t.Helper()
 	for _, f := range frames {
 		if f.Dir == "out" && f.Msg.Method == "" {

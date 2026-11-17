@@ -107,7 +107,7 @@ func TestClaudeSeverChecksAgainUnderTheDispatch(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { testClaudeDispatch = prev })
-	r.pushUpdate(t, rigRoot, agentText("late"))
+	r.pushUpdate(t, rigRoot, chunk("late"))
 	<-waiting
 	r.client.conn.sever()
 	close(release)
@@ -186,7 +186,7 @@ func TestClaudeSeverDropsWhatTheLoadHeld(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	r.pushUpdate(t, rigRoot, agentText("held"))
+	r.pushUpdate(t, rigRoot, chunk("held"))
 	r.roundTrip(t)
 	r.client.conn.sever()
 	if err := r.client.ReplayDone(); err != nil {

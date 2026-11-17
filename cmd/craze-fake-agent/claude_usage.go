@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -257,14 +258,9 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 // whatever it is told.
 func (s *server) tickForever(sid, what string) {
 	for n := 1; ; n++ {
-		s.claudeSay(sid, what+" "+itoa(n))
+		s.claudeSay(sid, what+" "+strconv.Itoa(n))
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-func itoa(n int) string {
-	b, _ := json.Marshal(n)
-	return string(b)
 }
 
 // claudeOverageSetup is claude-overage's traffic after session/new's reply:
@@ -344,7 +340,7 @@ func (s *server) spawnChildren() {
 		if err := cmd.Start(); err != nil {
 			continue
 		}
-		lines = append(lines, c.name+" "+itoa(cmd.Process.Pid))
+		lines = append(lines, c.name+" "+strconv.Itoa(cmd.Process.Pid))
 		go func() { _ = cmd.Wait() }()
 	}
 	if p := os.Getenv("CRAZE_FAKE_CHILD_PIDS"); p != "" {

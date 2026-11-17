@@ -63,19 +63,6 @@ func shortClaudeWaits(t *testing.T, cmd, total, login time.Duration) {
 	})
 }
 
-// envLookup is a lookup over env, the last entry of a key winning.
-func envLookup(env []string) func(string) string {
-	return func(key string) string {
-		prefix := key + "="
-		for i := len(env) - 1; i >= 0; i-- {
-			if strings.HasPrefix(env[i], prefix) {
-				return env[i][len(prefix):]
-			}
-		}
-		return ""
-	}
-}
-
 func TestSpawnEnvCursorAndGrokGainOnlyTheMarker(t *testing.T) {
 	base := []string{"A=1", "ANTHROPIC_API_KEY=k", "A=2", "CLAUDECODE=1", "CRAZE_SESSION_PROVIDER=old", "B=3", "NOEQUALS"}
 	for _, p := range []Provider{CursorProvider(), GrokProvider()} {
@@ -776,14 +763,14 @@ func TestClaudePlanFileIsNoEdit(t *testing.T) {
 		}
 		return ""
 	}
-	dir := claudeConfigDir(get)
-	if !isClaudePlanFile(filepath.Join(cfg, "plans", "fuzzy-plan.md"), dir) {
+	isPlan := claudePlanCheck(claudeConfigDir(get))
+	if !isPlan(filepath.Join(cfg, "plans", "fuzzy-plan.md")) {
 		t.Fatal("the plan file")
 	}
-	if isClaudePlanFile(filepath.Join(cfg, "settings.json"), dir) || isClaudePlanFile(filepath.Join(cfg, "plans"), dir) {
+	if isPlan(filepath.Join(cfg, "settings.json")) || isPlan(filepath.Join(cfg, "plans")) {
 		t.Fatal("not a plan file")
 	}
-	sc := editScope{workspace: t.TempDir(), isPlan: func(p string) bool { return isClaudePlanFile(p, dir) }}
+	sc := editScope{workspace: t.TempDir(), isPlan: isPlan}
 	got := sc.edited([]string{filepath.Join(cfg, "plans", "p.md")})
 	if got == nil || got.PlanFile == "" || len(got.OutsideFiles) != 0 {
 		t.Fatalf("%+v", got)

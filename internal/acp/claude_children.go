@@ -445,8 +445,11 @@ func (c *Client) routeClaude(n SessionNotification) {
 		return
 	}
 	// Live, after the load's reply, and held until the session's replay is
-	// over (ReplayDone), within the hold's bounds.
-	if taken, failed := c.holdLocked(heldFrame{update: &n}, len(n.Update)); taken {
+	// over (ReplayDone), within the hold's bounds. The copy is taken only
+	// then, so an update routed live is not moved to the heap.
+	if c.holdingLocked() {
+		held := n
+		_, failed := c.holdLocked(heldFrame{update: &held}, len(n.Update))
 		c.mu.Unlock()
 		if failed {
 			go func() { _ = c.Close() }()
@@ -461,7 +464,7 @@ func (c *Client) routeClaude(n SessionNotification) {
 		c.mu.Unlock()
 		return
 	}
-	if kind == updateSubagent {
+	if kind == SubagentUpdate {
 		c.claudeSubagentLocked(n, active)
 		return
 	}
@@ -579,6 +582,11 @@ func (c *Client) claudeSubagentLocked(n SessionNotification, root string) {
 func (c *Client) ChildRouted(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.childRoutedLocked(id)
+}
+
+// childRoutedLocked is ChildRouted under c.mu.
+func (c *Client) childRoutedLocked(id string) bool {
 	return c.dialect == DialectClaude && id != "" && id != c.sessionID && c.kids.has(id)
 }
 
@@ -588,7 +596,7 @@ func (c *Client) ChildRouted(id string) bool {
 // cancelled this way; the root's cancel is Cancel.
 func (c *Client) CancelSession(ctx context.Context, id string) error {
 	c.mu.Lock()
-	ok := c.dialect == DialectClaude && id != "" && id != c.sessionID && c.kids.has(id)
+	ok := c.childRoutedLocked(id)
 	c.mu.Unlock()
 	if !ok {
 		return ErrNoSession

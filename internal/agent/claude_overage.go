@@ -83,12 +83,12 @@ func SetClaudeOverageForTest(path string, now func() time.Time, grace time.Durat
 	}
 }
 
-// overageSeams is the record's path, its fallback's and now.
-func overageSeams() (path, fallback string, now time.Time) {
+// overageSeams is the record's path and its fallback's.
+func overageSeams() (path, fallback string) {
 	overageMu.Lock()
 	defer overageMu.Unlock()
 	path = overagePath()
-	return path, overageFallback(path), overageNow()
+	return path, overageFallback(path)
 }
 
 // overageClock is the guard's now alone: no path is resolved (review C5c

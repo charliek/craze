@@ -65,6 +65,7 @@ func claudeStatus(n acp.SubagentNotification, asked bool) (SubagentStatus, strin
 	return SubagentCompleted, ""
 }
 
+// subagentTerminal reports whether a row's status says it has ended.
 func subagentTerminal(st SubagentStatus) bool {
 	return st != SubagentRunning && st != ""
 }

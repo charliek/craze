@@ -1451,7 +1451,8 @@ func (c *Client) onNotify(msg *Message) {
 	case MethodClaudeAuthStatus:
 		c.handleAuthStatus(msg)
 	case MethodCancelRequest:
-		if c.dialect == DialectClaude && c.holdClaude(heldFrame{cancel: msg}, len(msg.Params)) {
+		// Only claude's dispatch reaches here (dialectHandles).
+		if c.holdClaude(heldFrame{cancel: msg}, len(msg.Params)) {
 			// A withdrawal stays behind the request it withdraws.
 			return
 		}

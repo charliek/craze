@@ -34,7 +34,7 @@ type editCall struct {
 	// directory (isGrokPlanFile). Native's plan file is the harness's own.
 	grokPlan bool
 	// claudePlan says the provider writes its plan file under the Claude
-	// config directory's plans/ (isClaudePlanFile): ExitPlanMode's plan.
+	// config directory's plans/ (claudePlanCheck): ExitPlanMode's plan.
 	claudePlan bool
 }
 
@@ -298,19 +298,22 @@ func claudeConfigDir(getenv func(string) string) string {
 	return homeDotDir(getenv, ".claude")
 }
 
-// isClaudePlanFile reports whether resolved is under the Claude config
-// directory's plans/, where plan mode writes the plan ExitPlanMode presents
-// (plan 052 § A5): told by where it is, as grok's plan file is.
-func isClaudePlanFile(resolved, dir string) bool {
+// claudePlanCheck reports whether a resolved path is under the Claude config
+// directory dir's plans/, where plan mode writes the plan ExitPlanMode presents
+// (plan 052 § A5): told by where it is, as grok's plan file is. plans/ is
+// resolved once, for every path the check is asked about.
+func claudePlanCheck(dir string) func(resolved string) bool {
 	if dir == "" {
-		return false
+		return func(string) bool { return false }
 	}
 	root := filepath.Join(dir, "plans")
 	if real, err := tool.RealPath(root); err == nil {
 		root = real
 	}
-	_, inside := relativeTo(root, resolved)
-	return inside && resolved != root
+	return func(resolved string) bool {
+		_, inside := relativeTo(root, resolved)
+		return inside && resolved != root
+	}
 }
 
 // same reports whether e and o stamp the same thing.
@@ -378,8 +381,7 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 		scope.isPlan = func(resolved string) bool { return isGrokPlanFile(resolved, home, sid) }
 	}
 	if rule.claudePlan {
-		dir := claudeConfigDir(s.childEnv())
-		scope.isPlan = func(resolved string) bool { return isClaudePlanFile(resolved, dir) }
+		scope.isPlan = claudePlanCheck(claudeConfigDir(s.childEnv()))
 	}
 	edited := scope.edited(paths)
 	if edited.same(t.Edited) {

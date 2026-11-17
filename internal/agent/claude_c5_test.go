@@ -23,16 +23,24 @@ import (
 func overageRig(t *testing.T, grace time.Duration) (record string, stopped <-chan time.Time) {
 	t.Helper()
 	record = filepath.Join(t.TempDir(), "claude-overage.json")
-	restore := SetClaudeOverageForTest(record, nil, grace)
+	t.Cleanup(SetClaudeOverageForTest(record, nil, grace))
+	return record, overageStops(t)
+}
+
+// overageStops is a channel told each time an overage stop has closed its
+// client; it replaces any earlier one until the test ends.
+func overageStops(t *testing.T) <-chan time.Time {
+	t.Helper()
 	ch := make(chan time.Time, 8)
 	prev := testOverageStopped
 	testOverageStopped = func() { ch <- time.Now() }
-	t.Cleanup(func() {
-		testOverageStopped = prev
-		restore()
-	})
-	return record, ch
+	t.Cleanup(func() { testOverageStopped = prev })
+	return ch
 }
+
+// overageRefusal is the trip record's word for the record's paths as the
+// seams give them now (a session reads its own resolved paths).
+func overageRefusal() error { return overageRefusalAt(resolveOveragePaths()) }
 
 // readRecord is the trip record at path, failing the test if there is none.
 func readRecord(t *testing.T, path string) overageRecord {
@@ -428,7 +436,7 @@ func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
 // TestRecordIsNeverTheUsersInTests: every test of this package reads and
 // writes a record of its own (TestMain).
 func TestRecordIsNeverTheUsersInTests(t *testing.T) {
-	path, fallback, _ := overageSeams()
+	path, fallback := overageSeams()
 	for _, p := range []string{path, fallback} {
 		if dir := filepath.Dir(p); !strings.Contains(dir, os.TempDir()) {
 			t.Fatalf("the package's record is %s; want a temporary one", p)

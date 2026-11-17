@@ -171,23 +171,13 @@ func TestClaudeOverageRecordFallsBack(t *testing.T) {
 	// nowhere to write, and nothing there to read.
 	overageFallback = func(string) string { return filepath.Join(t.TempDir(), "missing", "craze", "fallback.json") }
 	overageMu.Unlock()
-	_, stopped2 := overageRig2(t)
+	stopped2 := overageStops(t)
 	r2, _ := startClaude(t, "claude-overage", Options{Interactive: true})
 	_, err := r2.s.Prompt(t.Context(), "MID")
 	if !isQuota(err) || !strings.Contains(err.Error(), "could not record the hold") {
 		t.Fatalf("a trip with nowhere to record it: %v", err)
 	}
 	waitStopped(t, r2, stopped2, 5*time.Second)
-}
-
-// overageRig2 is a second stop channel for a test that has one rig already.
-func overageRig2(t *testing.T) (string, <-chan time.Time) {
-	t.Helper()
-	ch := make(chan time.Time, 8)
-	prev := testOverageStopped
-	testOverageStopped = func() { ch <- time.Now() }
-	t.Cleanup(func() { testOverageStopped = prev })
-	return "", ch
 }
 
 // TestClaudeOverageLaterTripExtendsTheHold (review C5 item 4): a trip with no

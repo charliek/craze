@@ -989,18 +989,11 @@ func hasSubagentChange(log *eventLog, change, id string) bool {
 
 func lastSubagent(t *testing.T, evs []Event, id string) SubagentInfo {
 	t.Helper()
-	var got SubagentInfo
-	found := false
-	for _, ev := range evs {
-		if ev.Type == EventSubagent && ev.Subagent != nil && ev.Subagent.ID == id {
-			got = *ev.Subagent
-			found = true
-		}
-	}
-	if !found {
+	got := lastRow(evs, id)
+	if got == nil {
 		t.Fatalf("no subagent %s", id)
 	}
-	return got
+	return *got
 }
 
 func assertSpawnedThenStream(t *testing.T, evs []Event, id string) {

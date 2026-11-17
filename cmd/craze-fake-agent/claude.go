@@ -358,12 +358,7 @@ func dumpSetup(params json.RawMessage) {
 	if p == "" {
 		return
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(append(append([]byte(nil), params...), '\n'))
+	appendLine(p, params)
 }
 
 // claudePrompt answers one prompt. Directives, anywhere in its text:

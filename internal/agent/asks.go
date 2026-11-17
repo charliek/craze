@@ -1643,15 +1643,9 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 		if err != nil {
 			return AskAnswer{}, "", err
 		}
-		if len(a.Answers) == 0 && len(text) > 0 {
-			// Free text alone answers the questions it is for (plan 052 §
-			// B4): the user typed their own answer instead of picking one.
-			if err := checkRequired(body.Question, a.Answers, text); err != nil {
-				return AskAnswer{}, "", err
-			}
-			return AskAnswer{Answers: cloneAnswers(a.Answers), Text: text}, "", nil
-		}
-		if len(a.Answers) == 0 {
+		// Free text alone answers the questions it is for (plan 052 § B4): the
+		// user typed their own answer instead of picking one.
+		if len(a.Answers) == 0 && len(text) == 0 {
 			// A question that asks nothing — cursor really does send
 			// ask_question with no questions — is answered with no answers, by
 			// craze's policy and by a client alike: it is the only thing either
@@ -1666,7 +1660,7 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 		if err := checkQuestionAnswers(body.Question, a.Answers); err != nil {
 			return AskAnswer{}, "", err
 		}
-		if err := checkRequired(body.Question, a.Answers, text); err != nil {
+		if err := checkRequired(body.Question, a.Answers); err != nil {
 			return AskAnswer{}, "", err
 		}
 		return AskAnswer{Answers: cloneAnswers(a.Answers), Text: text}, "", nil
@@ -1726,7 +1720,7 @@ func checkQuestionAnswers(q *QuestionEvent, answers map[string][]string) error {
 // checkRequired refuses an answer that leaves a question that must be
 // answered (Question.Required, a claude form's `required`) without an option
 // pick; free text alone does not do.
-func checkRequired(q *QuestionEvent, answers map[string][]string, text map[string]string) error {
+func checkRequired(q *QuestionEvent, answers map[string][]string) error {
 	for _, one := range questionsOffered(q) {
 		if one.Required && len(answers[one.ID]) == 0 {
 			// An option pick: free text rides in the question's own _custom

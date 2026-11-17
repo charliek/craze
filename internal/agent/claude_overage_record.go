@@ -215,7 +215,7 @@ type overagePaths struct{ primary, fallback string }
 
 // resolveOveragePaths is the record's paths as the seams give them now.
 func resolveOveragePaths() overagePaths {
-	path, fallback, _ := overageSeams()
+	path, fallback := overageSeams()
 	return overagePaths{primary: path, fallback: fallback}
 }
 
@@ -293,10 +293,6 @@ func readFallback(path string) (*overageRecord, error) {
 	}
 	return readOverageRecord(path)
 }
-
-// overageRefusal is the trip record's word for the record's paths as the
-// seams give them now (tests; a session reads its own resolved paths).
-func overageRefusal() error { return overageRefusalAt(resolveOveragePaths()) }
 
 // overageRefusalAt is the trip record's word before a claude start, prompt or
 // wake (§ D3): the quota refusal while it — the craze directory's, or its

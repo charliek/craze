@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	updateSessionMessage = "session_message"
 	updateUserMessage    = "user_message_chunk"
 	subagentDescCap      = 256
 	subagentTypeCap      = 64
@@ -292,7 +291,7 @@ const (
 // are unrouted rows.
 func (s *session) runningSubagentsLocked() (total, unrouted int) {
 	for _, rec := range s.subagents {
-		if rec.info.Status != SubagentRunning && rec.info.Status != "" {
+		if subagentTerminal(rec.info.Status) {
 			continue
 		}
 		total++
@@ -384,8 +383,7 @@ func (s *session) handleProgressLocked(n acp.SubagentNotification) []Event {
 	if sameSubagentFull(prev, rec.info) {
 		return nil
 	}
-	info := cloneSubagent(rec.info)
-	return []Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeProgress}}
+	return []Event{subagentRowEvent(rec, SubagentChangeProgress)}
 }
 
 func (s *session) applyProgressFieldsLocked(info *SubagentInfo, n acp.SubagentNotification) {
@@ -443,8 +441,7 @@ func (s *session) handleFinishedLocked(n acp.SubagentNotification) []Event {
 		if sameSubagentFull(prev, rec.info) {
 			return nil
 		}
-		info := cloneSubagent(rec.info)
-		return []Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeProgress}}
+		return []Event{subagentRowEvent(rec, SubagentChangeProgress)}
 	}
 
 	return s.closeAttemptLocked(rec)
@@ -575,7 +572,7 @@ func (s *session) evictFinishedLocked(keep string) (dropped []*subagentRec) {
 	var finished []string
 	for _, id := range s.subagentOrder {
 		rec := s.subagents[id]
-		if rec != nil && rec.info.Status != SubagentRunning && rec.info.Status != "" {
+		if rec != nil && subagentTerminal(rec.info.Status) {
 			if claude && !rec.gone {
 				// A claude child the ACP registry still routes keeps its row:
 				// its retention is the registry's, which says when it goes
@@ -630,7 +627,7 @@ func (s *session) removeSubagentOrderLocked(id string) {
 // (session_message).
 func (s *session) onChildUpdate(id, wireName string, u sessionUpdateWire, raw json.RawMessage) {
 	switch u.SessionUpdate {
-	case updateSessionMessage:
+	case acp.UpdateSessionMessage:
 		// claude: a prompt this child received — its opening user block —
 		// or one it sent a grandchild of its own.
 		s.claudeSessionMessage(raw)
@@ -995,12 +992,10 @@ func (s *session) syncCursorLocked(tool ToolEvent) []Event {
 		s.subagents[tool.ID] = rec
 		s.subagentOrder = append(s.subagentOrder, tool.ID)
 		s.writeCursorTaskLocked(tool.ID, rec)
-		info := cloneSubagent(rec.info)
-		evs := []Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}
+		evs := []Event{subagentRowEvent(rec, SubagentChangeSpawned)}
 		if terminalToolStatus(tool.Status) {
 			s.applyCursorTerminalLocked(rec, tool)
-			fin := cloneSubagent(rec.info)
-			evs = append(evs, Event{Type: EventSubagent, Subagent: &fin, SubagentChange: SubagentChangeFinished})
+			evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
 		}
 		return evs
 	}
@@ -1008,19 +1003,17 @@ func (s *session) syncCursorLocked(tool ToolEvent) []Event {
 	s.fillCursorLocked(rec, tool)
 	if terminalToolStatus(tool.Status) && prev.Status == SubagentRunning {
 		s.applyCursorTerminalLocked(rec, tool)
-		info := cloneSubagent(rec.info)
-		return []Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeFinished}}
+		return []Event{subagentRowEvent(rec, SubagentChangeFinished)}
 	}
 	s.writeCursorTaskLocked(tool.ID, rec)
 	if sameSubagentFull(prev, rec.info) {
 		return nil
 	}
-	info := cloneSubagent(rec.info)
 	change := SubagentChangeProgress
 	if rec.info.Status != SubagentRunning && prev.Status != rec.info.Status {
 		change = SubagentChangeFinished
 	}
-	return []Event{{Type: EventSubagent, Subagent: &info, SubagentChange: change}}
+	return []Event{subagentRowEvent(rec, change)}
 }
 
 func (s *session) writeCursorTaskLocked(toolID string, rec *subagentRec) {

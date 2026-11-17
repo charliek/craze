@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"time"
@@ -76,26 +75,18 @@ func UsageRateLimit(update json.RawMessage) (RateLimit, bool) {
 // ErrorRateLimit is a prompt error's `data.rateLimit`, and whether it carried
 // one that reads as an object.
 func ErrorRateLimit(data json.RawMessage) (RateLimit, bool) {
-	raw := bytes.TrimSpace(data)
-	if len(raw) == 0 || raw[0] != '{' {
-		return RateLimit{}, false
-	}
 	var w struct {
 		RateLimit json.RawMessage `json:"rateLimit"`
 	}
-	if json.Unmarshal(raw, &w) != nil {
+	if decodeObject(data, &w) != nil {
 		return RateLimit{}, false
 	}
 	return decodeRateLimit(w.RateLimit)
 }
 
 func decodeRateLimit(raw json.RawMessage) (RateLimit, bool) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || raw[0] != '{' {
-		return RateLimit{}, false
-	}
 	var r RateLimit
-	if json.Unmarshal(raw, &r) != nil {
+	if decodeObject(raw, &r) != nil {
 		return RateLimit{}, false
 	}
 	return r, true
@@ -119,7 +110,7 @@ func (c *Client) SetRateLimitHandler(h func(RateLimit) error) {
 // rate limit is handed to the handler, and a trip it answers ends the foreign
 // turn now. The caller holds dispatchMu and not c.mu.
 func (c *Client) noteRateLimit(kind string, n SessionNotification) {
-	if kind != updateUsage {
+	if kind != UpdateUsage {
 		return
 	}
 	rl, ok := UsageRateLimit(n.Update)
@@ -269,16 +260,12 @@ type PromptQuota struct {
 
 // Quota is r's `_meta.quota.token_count` (claude), and whether there was one.
 func (r PromptResult) Quota() (PromptQuota, bool) {
-	raw := bytes.TrimSpace(r.Meta)
-	if len(raw) == 0 || raw[0] != '{' {
-		return PromptQuota{}, false
-	}
 	var w struct {
 		Quota struct {
 			TokenCount *PromptQuota `json:"token_count"`
 		} `json:"quota"`
 	}
-	if json.Unmarshal(raw, &w) != nil || w.Quota.TokenCount == nil {
+	if decodeObject(r.Meta, &w) != nil || w.Quota.TokenCount == nil {
 		return PromptQuota{}, false
 	}
 	return *w.Quota.TokenCount, true

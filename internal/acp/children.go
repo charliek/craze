@@ -28,10 +28,6 @@ import (
 // provider has its own transport and joins at the agent-level roster, not
 // here. Everything in it is under c.mu.
 
-// ChildRouteCap is childRouteCap, for the claude session's finished-row
-// retention (review C4 item 7): a child the registry still holds keeps its row.
-const ChildRouteCap = childRouteCap
-
 // childRouteCap bounds concurrently routed children. On grok a 65th
 // registration is refused (dropped and counted); no registered child is ever
 // evicted. On claude the oldest idle child makes room first.

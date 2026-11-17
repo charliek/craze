@@ -150,14 +150,13 @@ const (
 func updateMethod(kind string) string { return MethodSessionUpdate + "#" + kind }
 
 // The session/update kinds craze knows of besides those it names elsewhere:
-// claude-agent-acp's own (evidence 05), which a session drops until a later
-// milestone reads them, and usage and the user's echo (heard.go).
+// claude-agent-acp's own (evidence 05) — its subagent_update is SubagentUpdate
+// (types.go) — and usage and the user's echo (heard.go).
 const (
-	updateSubagent      = "subagent_update"
-	updateSessionMsg    = "session_message"
-	updateNotice        = "notice"
-	updateCompaction    = "compaction_update"
-	updateCompactionSum = "compaction_summary_chunk"
+	UpdateSessionMessage = "session_message"
+	UpdateNotice         = "notice"
+	UpdateCompaction     = "compaction_update"
+	updateCompactionSum  = "compaction_summary_chunk"
 )
 
 // inboundMethods is every method and session/update kind an agent may send
@@ -180,9 +179,9 @@ var inboundMethods = []string{
 	updateMethod(UpdateToolCall), updateMethod(UpdateToolCallUpd),
 	updateMethod(UpdateAvailableCommands), updateMethod(UpdateCurrentMode),
 	updateMethod(UpdateConfigOption), updateMethod(UpdateSessionInfo), updateMethod(UpdatePlan),
-	updateMethod(updateUsage), updateMethod(updateUserMessageChunk),
-	updateMethod(updateSubagent), updateMethod(updateSessionMsg), updateMethod(updateNotice),
-	updateMethod(updateCompaction), updateMethod(updateCompactionSum),
+	updateMethod(UpdateUsage), updateMethod(updateUserMessageChunk),
+	updateMethod(SubagentUpdate), updateMethod(UpdateSessionMessage), updateMethod(UpdateNotice),
+	updateMethod(UpdateCompaction), updateMethod(updateCompactionSum),
 }
 
 // dialectHandles is the one table of what each dialect does with each method
@@ -251,9 +250,9 @@ func updateDecision(kind string) decision {
 	switch kind {
 	case UpdateAgentMessage, UpdateAgentThought, UpdateToolCall, UpdateToolCallUpd,
 		UpdateAvailableCommands, UpdateCurrentMode, UpdateConfigOption, UpdateSessionInfo, UpdatePlan,
-		updateUsage, updateUserMessageChunk:
+		UpdateUsage, updateUserMessageChunk:
 		return decisionHandle
-	case updateSubagent, updateSessionMsg, updateNotice, updateCompaction, updateCompactionSum:
+	case SubagentUpdate, UpdateSessionMessage, UpdateNotice, UpdateCompaction, updateCompactionSum:
 		// claude-agent-acp's own: handed to the session, which drops them
 		// until later milestones read them. No other dialect sends them.
 		return decisionHandle

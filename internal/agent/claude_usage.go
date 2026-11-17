@@ -15,9 +15,6 @@ import (
 // plan's limit from the latest `_claude/rateLimit`, which the adapter sends
 // only when it changes, so it is kept until the next.
 
-// updateUsageKind is the session/update kind of a usage report.
-const updateUsageKind = "usage_update"
-
 // claudeUsage is a claude session's usage, under s.mu.
 type claudeUsage struct {
 	// reported: something has been reported, so the section is published.

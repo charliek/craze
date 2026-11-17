@@ -332,7 +332,7 @@ func (c *Client) foreignRootLocked(kind string, update json.RawMessage) *Foreign
 		// The turn goes on: only a new cost usage makes a new candidate.
 		f.candidate = false
 		c.stopGraceLocked()
-	case kind == updateUsage && hasCost(update):
+	case kind == UpdateUsage && hasCost(update):
 		f.candidate = true
 		if len(f.open) == 0 || f.cancelled {
 			c.armGraceLocked()

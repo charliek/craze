@@ -11,12 +11,6 @@ import (
 // compaction of the context as `compaction_update` (context-compaction.js)
 // instead of transcript text and a tool call; the session draws each as a note.
 
-// The update kinds read here.
-const (
-	updateNoticeKind     = "notice"
-	updateCompactionKind = "compaction_update"
-)
-
 // noticeTextCap bounds a notice's title and description, each.
 const noticeTextCap = 2048
 

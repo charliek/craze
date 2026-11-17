@@ -285,14 +285,14 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 				return claudeErr(errkind.Config, "craze could not confirm Claude Code's fast mode off (%s), and %s", sanitizeLine(err.Error()), FastBillsExtra)
 			}
 			if FastOn(read()) {
-				return claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
+				return errFastKeptOn()
 			}
 		case ok && fast.Current == on:
 			if err := s.startSet(ctx, client, loading, snap, fast, off, "fast off"); err != nil && !refusedByAgent(err) {
 				return err
 			}
 			if FastOn(read()) {
-				return claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
+				return errFastKeptOn()
 			}
 		}
 	}
@@ -336,10 +336,7 @@ func (s *session) noteRecordedModel(cur Snapshot) {
 	if want == "" || got == want {
 		return
 	}
-	s.log.Note(journal.DiagNote{Kind: "recorded_model_refused", Fields: map[string]any{"recorded": want, "model": got}})
-	if w := diagWriter(s.opts); w != nil {
-		fmt.Fprintf(w, "craze: the session's recorded model %s was not applied; it runs on %s\n", sanitizeLine(want), sanitizeLine(got))
-	}
+	s.noteRecordedRefused("model", "on", want, got)
 }
 
 // claudeEffortID is the adapter's effort option's id.
@@ -360,10 +357,22 @@ func (s *session) noteRecordedEffort(cur Snapshot) {
 	if got == want {
 		return
 	}
-	s.log.Note(journal.DiagNote{Kind: "recorded_effort_refused", Fields: map[string]any{"recorded": want, "effort": got}})
+	s.noteRecordedRefused("effort", "at", want, got)
+}
+
+// noteRecordedRefused journals and says that the load's recorded setting
+// (model or effort) want was not applied and the session runs prep got.
+func (s *session) noteRecordedRefused(setting, prep, want, got string) {
+	s.log.Note(journal.DiagNote{Kind: "recorded_" + setting + "_refused", Fields: map[string]any{"recorded": want, setting: got}})
 	if w := diagWriter(s.opts); w != nil {
-		fmt.Fprintf(w, "craze: the session's recorded effort %s was not applied; it runs at %s\n", sanitizeLine(want), sanitizeLine(got))
+		fmt.Fprintf(w, "craze: the session's recorded %s %s was not applied; it runs %s %s\n", setting, sanitizeLine(want), prep, sanitizeLine(got))
 	}
+}
+
+// errFastKeptOn is the start's and the reset's config error when Claude Code
+// answered with fast mode still on.
+func errFastKeptOn() error {
+	return claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
 }
 
 // fastFixAttempts bounds the sets of one reset of claude's fast mode: an
@@ -428,7 +437,7 @@ func (s *session) fixFast(done chan struct{}) {
 		s.mu.Unlock()
 		off, _, _ := FastOnOff(fast)
 		if attempt == fastFixAttempts || off == "" {
-			fail = claudeErr(errkind.Config, "Claude Code kept fast mode on, and %s", FastBillsExtra)
+			fail = errFastKeptOn()
 			break
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), startSettingWait)
