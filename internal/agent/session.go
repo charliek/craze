@@ -1602,6 +1602,17 @@ type Clocked interface {
 	Now() time.Time
 }
 
+// StopErrer is a session that can stop itself for good — a claude session's
+// overage guard (plan 052 § D3) — and says with what: the engine's close
+// ends the turn it finds running with that failure rather than with its
+// synthetic closing ending, so a waiter reads the quota failure D3 requires
+// (review C5b item 7).
+type StopErrer interface {
+	// StoppedErr is the error the session stopped itself with, nil while it
+	// has not.
+	StoppedErr() error
+}
+
 // SeedAnnouncer is a session built with state its stream has to say before
 // anything else happens (plan 043 D8, branch review B9): a new session created
 // with a title (Options.Title, seedNewTitle), whose snapshot — so every state

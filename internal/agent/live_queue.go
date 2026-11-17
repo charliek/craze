@@ -103,13 +103,14 @@ func (s *session) onACPForeignTurn(f acp.ForeignTurn) {
 	if f.Err != nil {
 		info.Err = &TurnError{Kind: ErrorInfo(f.Err).Kind, Message: f.Err.Error()}
 	}
+	// A turn claude opened on its own while the overage guard's record holds
+	// ends with the refusal, and the session stops (§ D3) — decided before
+	// anything here can wait on a reader (review C5b item 5).
+	s.guardForeignStart(f)
 	if f.Silent {
 		s.noteForeignSilence(f)
 	}
 	s.onForeignTurn(info)
-	// A turn claude opened on its own while the overage guard's record holds
-	// ends with the refusal, and the session stops (§ D3).
-	s.guardForeignStart(f)
 }
 
 // noteForeignSilence is the transcript note a foreign turn the silence rule

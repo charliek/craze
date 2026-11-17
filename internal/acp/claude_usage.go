@@ -219,6 +219,13 @@ var fenceWait = 100 * time.Millisecond
 // ignores the cancel cannot outlast it. It blocks until the client is closed;
 // callers run it on a goroutine of their own.
 func (c *Client) StopWithin(grace time.Duration) {
+	// The agent's tree as the stop begins, while it is most likely whole: a
+	// child the agent leaves behind by exiting first is still found
+	// (review C5b item 4).
+	var tree TreeSnapshot
+	if c.child != nil {
+		tree = c.child.SnapshotTree()
+	}
 	if sid := c.SessionID(); sid != "" {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), grace)
@@ -237,7 +244,7 @@ func (c *Client) StopWithin(grace time.Duration) {
 		testAfterSever()
 	}
 	if c.child != nil {
-		c.child.KillTree()
+		c.child.KillTree(tree)
 	}
 	_ = c.Close()
 }

@@ -178,6 +178,11 @@ type session struct {
 	// (claude_overage.go): the error the session stopped with, nil until then.
 	usage   claudeUsage
 	overage error
+	// tripUntil is the hold a reset-less trip of this session computed, so
+	// one handled again keeps it (review C5b item 11); recordLineBusy says a
+	// line about the record's whereabouts is being written (fallbackLine).
+	tripUntil      time.Time
+	recordLineBusy atomic.Bool
 	// compacting is the claude compaction open now ("-" for one with no id),
 	// "" for none; compactedLast the id of the last that ended (claude_notes.go).
 	compacting, compactedLast string
@@ -922,6 +927,9 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			snap.Config = cloneConfig(s.snap.Config)
 			snap.CurrentModel = s.snap.CurrentModel
 		}
+		// claude's model in use belongs to the options it was reported under
+		// (L3 F1), and --model just changed them (review C5b item 9).
+		s.inUseCheckLocked()
 		s.mu.Unlock()
 	}
 	// The --effort/--fast tail (plan 032 §3.11, P6): after --model, so against

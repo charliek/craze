@@ -150,7 +150,22 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 	}
 	switch {
 	case spawned:
-		return []Event{subagentRowEvent(rec, SubagentChangeSpawned)}
+		evs := []Event{subagentRowEvent(rec, SubagentChangeSpawned)}
+		if rec.gone && subagentTerminal(rec.info.Status) {
+			// Born finished and unrouted — a stateless ancestor the
+			// registry's cap refused (review C4d finding 3): bounded by the
+			// finished-row cap as a finish is, the oldest such rows going.
+			if rec.info.EndedAt.IsZero() {
+				rec.info.EndedAt = time.Now()
+			}
+			s.stampFinishLocked(rec)
+			for _, d := range s.evictFinishedLocked(rec.info.ID) {
+				if d.info.Retained {
+					evs = append(evs, subagentRowEvent(d, SubagentChangeRemoved))
+				}
+			}
+		}
+		return evs
 	case !sameSubagentFull(prev, rec.info):
 		return []Event{subagentRowEvent(rec, SubagentChangeProgress)}
 	}

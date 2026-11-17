@@ -206,7 +206,10 @@ type Child struct {
 	// killNow, set before the shutdown request (Kill), makes the reaper send
 	// SIGKILL where it would send SIGTERM first: the overage guard's stop
 	// (plan 052 § D3), which gives the agent no grace to make one more call.
-	killNow    atomic.Bool
+	killNow atomic.Bool
+	// reapGate holds the reap while the overage guard reads the agent's
+	// process tree (SnapshotTree, review C5b item 3).
+	reapGate
 	stderrDone chan struct{}
 	// stderrTail keeps the end of what the agent wrote to its stderr, on its
 	// way to the sink (Client.StderrTail); nil for a child Spawn did not
@@ -290,16 +293,27 @@ func (ch *Child) PID() int {
 }
 
 // Wait waits for the agent to have been reaped and its stderr copied to the
-// end.
+// end — the copy at most stderrWaitBound.
 func (ch *Child) Wait() {
 	if ch == nil {
 		return
 	}
 	<-ch.reapedCh
 	if ch.stderrDone != nil {
-		<-ch.stderrDone
+		// Bounded (review C5b item 6): a stderr sink that blocks holds its
+		// copy, and a kill cannot unblock a write into the sink; the copy
+		// goes on alone, and nobody waits for it past the bound.
+		t := time.NewTimer(stderrWaitBound)
+		defer t.Stop()
+		select {
+		case <-ch.stderrDone:
+		case <-t.C:
+		}
 	}
 }
+
+// stderrWaitBound bounds Wait's wait for the stderr copy, a var for tests.
+var stderrWaitBound = 2 * time.Second
 
 // Shutdown asks the reaper to end the agent and waits until it has been
 // reaped. It sends no signal itself: the reaper sends every one (reaper.go),

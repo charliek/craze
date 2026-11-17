@@ -208,6 +208,36 @@ func (c *Client) endHoldContextLocked(cause error) {
 	}
 }
 
+// lockDispatchUntil takes dispatchMu, or gives up when ctx ends (nil: never),
+// answering whether it holds it. A lock taken after the give-up is released at
+// once by the goroutine that took it.
+func (c *Client) lockDispatchUntil(ctx context.Context) bool {
+	if c.dispatchMu.TryLock() {
+		return true
+	}
+	if ctx == nil {
+		c.dispatchMu.Lock()
+		return true
+	}
+	got := make(chan struct{})
+	gaveUp := make(chan struct{})
+	go func() {
+		c.dispatchMu.Lock()
+		select {
+		case got <- struct{}{}:
+		case <-gaveUp:
+			c.dispatchMu.Unlock()
+		}
+	}()
+	select {
+	case <-got:
+		return true
+	case <-ctx.Done():
+		close(gaveUp)
+		return false
+	}
+}
+
 // JoinDispatch waits until no claude dispatch is running — the read loop's
 // or ReplayDone's drain — or stop closes, answering whether it got there:
 // whatever was dispatched before it has been handed on and published (review
@@ -244,7 +274,21 @@ func (c *Client) ReplayDone() error {
 	if c.dialect != DialectClaude {
 		return nil
 	}
-	c.dispatchMu.Lock()
+	// The dispatch is taken as the load's context allows (review C4d finding
+	// 1): a read-loop handler that holds it can stall, and a hold that fails
+	// meanwhile must still end this call.
+	c.mu.Lock()
+	hold := c.cf.holdCtx
+	c.mu.Unlock()
+	if !c.lockDispatchUntil(hold) {
+		c.mu.Lock()
+		err := c.cf.holdErr
+		c.mu.Unlock()
+		if err == nil {
+			err = fmt.Errorf("%w: %w", ErrReplayHold, context.Cause(hold))
+		}
+		return err
+	}
 	c.mu.Lock()
 	if err := c.cf.holdErr; err != nil {
 		c.mu.Unlock()
@@ -283,19 +327,13 @@ func (c *Client) ReplayDone() error {
 			c.mu.Lock()
 			failed := c.cf.holdErr != nil
 			c.mu.Unlock()
-			ended := false
-			select {
-			case <-c.conn.ReadDone():
-				// The agent's output has ended: the session retires its
-				// children once this drain is over (JoinDispatch), and
-				// nothing routed after that may contradict it.
-				ended = true
-			default:
-			}
-			if failed || ended || c.conn.severed.Load() {
-				// The hold failed, the transport ended, or the overage
-				// guard's stop (review C5 item 7): nothing more reaches the
-				// session.
+			if failed || c.conn.severed.Load() {
+				// The hold failed (its bounds, its time, its context), or the
+				// overage guard's stop (review C5 item 7): nothing more
+				// reaches the session. The transport ending is not one of
+				// these (review C4d finding 2): every frame held was read
+				// before it, and is delivered — the session retires its
+				// children only once this drain is over (JoinDispatch).
 				break
 			}
 			switch {
@@ -377,6 +415,12 @@ func (c *Client) routeClaude(n SessionNotification) {
 	// whenever it comes (plan 052 § D3): a trip ends the running turn before
 	// the update can settle it.
 	c.noteRateLimit(kind, n)
+	if c.conn.severed.Load() {
+		// Severed while the rate limit was being handled — the overage
+		// guard's own stop, run from it (review C5b item 8): the update is
+		// handed to no one after the kill.
+		return
+	}
 	c.mu.Lock()
 	if c.sessionID == "" {
 		c.pendingUpdates = append(c.pendingUpdates, n)
@@ -419,7 +463,7 @@ func (c *Client) routeClaude(n SessionNotification) {
 	if !root {
 		n.Child = n.SessionID
 	}
-	if h != nil {
+	if h != nil && !c.conn.severed.Load() {
 		h(n)
 	}
 }

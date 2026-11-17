@@ -172,6 +172,11 @@ func (s *server) claudeSetupTraffic(sid string, post bool) {
 		if post {
 			s.claudeOverageSetup(sid)
 		}
+	case "claude-usage":
+		if !post && os.Getenv("CRAZE_FAKE_CLAUDE_SETUP_USAGE") != "" {
+			// A usage report before the reply, on Sonnet.
+			s.usageReport(sid, 1000, "claude-sonnet-5-5", nil, false)
+		}
 	case "claude-compaction-idle":
 		if !post {
 			return

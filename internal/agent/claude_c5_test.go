@@ -397,6 +397,15 @@ func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
 	if _, err := r.s.Prompt(t.Context(), "NOTICE COMPACT"); err != nil {
 		t.Fatal(err)
 	}
+	// The events are read off the session's stream by the collector: waited
+	// for, not assumed there the moment the prompt returns.
+	waitFor(t, "the notice and the compaction's ending", func() bool {
+		evs := log.snapshot()
+		return firstIndex(evs, func(ev Event) bool { return ev.Type == EventNotice }) >= 0 &&
+			firstIndex(evs, func(ev Event) bool {
+				return ev.Type == EventCompaction && ev.Compaction != nil && ev.Compaction.Phase == CompactionEnded
+			}) >= 0
+	})
 	evs := log.snapshot()
 	n := firstIndex(evs, func(ev Event) bool { return ev.Type == EventNotice })
 	if n < 0 || *evs[n].Notice != (NoticeInfo{Severity: "warning", Title: "Stop hook says", Description: "remember the tests"}) {

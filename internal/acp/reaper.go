@@ -121,7 +121,11 @@ func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 	ch.cleanGroup()
 	ch.signal(syscall.SIGKILL)
 	ch.drainStderr()
+	// The reap waits for a tree read in progress (SnapshotTree).
+	ch.reapMu.Lock()
 	ch.waitErr = ch.cmd.Wait()
+	ch.reaped = true
+	ch.reapMu.Unlock()
 	if !obs.known {
 		ch.setStatus(reapedExit(ch.cmd.ProcessState, ch.waitErr))
 	}
@@ -245,7 +249,13 @@ func (ch *Child) reapPolling() {
 		request = ch.shutdownCh
 	)
 	for {
+		// Each poll may reap: it waits for a tree read in progress.
+		ch.reapMu.Lock()
 		st, reaped, err := pollReap(ch.pid)
+		if reaped || err != nil {
+			ch.reaped = true
+		}
+		ch.reapMu.Unlock()
 		if err != nil {
 			ch.waitErr = ch.cmd.Wait()
 			ch.endedByShutdown = isClosed(ch.shutdownCh)

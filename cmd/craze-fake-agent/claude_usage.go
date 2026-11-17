@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,6 +28,8 @@ import (
 //	                 whatever model is picked (plan mode, L2). NOTICE: a
 //	                 notice. COMPACT: a compaction, in_progress then completed
 //	                 with a summary chunk between.
+//	                 CRAZE_FAKE_CLAUDE_SETUP_USAGE (set): a usage report on
+//	                 Sonnet before session/new's reply.
 //	claude-overage   a prompt names where the trip lands; the signal is
 //	                 CRAZE_FAKE_CLAUDE_OVERAGE (below). Directives:
 //	                   MID       text, the tripping usage, then work until
@@ -42,6 +45,7 @@ import (
 //	                             CRAZE_FAKE_CLAUDE_GAP, the tripping usage —
 //	                             a trailing report landing in the next turn
 //	                   HOLD      work until cancelled
+//	                   STDERR    a line on stderr, then the trip
 //	                   TWO-TRIPS a trip with no reset time, then one a week
 //	                             away inside the stop's grace
 //	                   ESCAPE    two real children, one in the adapter's
@@ -56,6 +60,8 @@ import (
 //	                 session/new, the tripping usage with nothing running.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_WAKE (a duration): that long after
 //	                 session/new, a wake that does not trip.
+//	                 CRAZE_FAKE_CLAUDE_IDLE_LIMIT (a duration): that long after
+//	                 session/new, a changed plan limit that does not trip.
 //	                 CRAZE_FAKE_CLAUDE_SETUP_TRIP (set): the trip before
 //	                 session/new's reply, and the reply an error. A load
 //	                 (loadSession true) replays a turn and answers.
@@ -194,6 +200,11 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 		}()
 	case strings.Contains(text, "HOLD"):
 		s.hang(id)
+	case strings.Contains(text, "STDERR"):
+		// A diagnostic on the adapter's stderr, then the trip.
+		fmt.Fprintln(os.Stderr, "claude-agent-acp: something to say")
+		trip()
+		s.hang(id)
 	case strings.Contains(text, "TWO-TRIPS"):
 		// A first trip with no reset time, then, inside the stop's grace, a
 		// second whose reset is a week away.
@@ -247,6 +258,13 @@ func (s *server) claudeOverageSetup(sid string) {
 		go func() {
 			time.Sleep(d)
 			s.usageReport(sid, 30000, claudeModel, tripRateLimit(), false)
+		}()
+	}
+	if d := envDuration("CRAZE_FAKE_CLAUDE_IDLE_LIMIT", 0); d > 0 {
+		// A changed plan limit with nothing running.
+		go func() {
+			time.Sleep(d)
+			s.usageReport(sid, 30000, claudeModel, planRateLimit(), false)
 		}()
 	}
 	if d := envDuration("CRAZE_FAKE_CLAUDE_IDLE_WAKE", 0); d > 0 {

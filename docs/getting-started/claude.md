@@ -142,14 +142,19 @@ and every claude prompt on this machine — another project's too — is refused
 with `quota`, naming the reset time. It expires on its own; if you turned
 extra usage off, or your limit reset early, delete the file to go on at once.
 
-If craze's directory will not take the record (it is read-only, or the disk is
-full), craze writes it to a fallback in the system's temporary directory
-(`$TMPDIR/craze-<uid>/claude-overage-<id>.json`, named in the error and the
-session's journal), and every check reads both. If neither can be written, the
-session that tripped still stops, and its error says the hold could not be
-recorded: other claude sessions on the machine are not refused then. A record
-that is there and cannot be read refuses every claude session until it is
-fixed or removed.
+If craze's directory will not take the record (it is read-only, the disk is
+full), craze writes it to a fallback only you can write into —
+`$XDG_RUNTIME_DIR/craze/` on Linux, your per-user temporary directory on macOS
+— named in the session's journal, and every check reads both. A fallback
+directory that is a symlink or not yours is never used. With no fallback, or
+neither file writable, the session that tripped still stops, and its error says
+the hold could not be recorded: other claude sessions on the machine are not
+refused then. A trip never waits on a slow disk for more than a second before
+it stops the session; the record is written as soon as the disk allows.
+
+A record that is there and cannot be read — not a regular file, a symlink, or
+on a disk that does not answer within two seconds — refuses every claude
+session until it is fixed or removed.
 
 **What craze cannot do.** It is containment, not prevention:
 
@@ -158,9 +163,11 @@ fixed or removed.
 - a session that starts while the account is already in extra usage gets no
   sign until its first usage report, so that first request is billed;
 - work Claude does that craze never hears about cannot be stopped by it;
-- the kill reaches the adapter's process group and every process still in the
-  adapter's process tree when craze looks; a process that has already left
-  that tree (forked twice and handed to the system) is out of reach.
+- the kill reaches the adapter's process group and every process in the
+  adapter's process tree when the stop begins or when it kills — each checked
+  to still be that process before it is signalled (on macOS a best effort) —
+  even if the adapter exited first; a process that left that tree before
+  either look (forked twice and handed to the system) is out of reach.
 
 **Turn off extra usage on your Claude account** (claude.ai, under your plan's
 usage settings): that is the only hard guarantee, and craze recommends it for

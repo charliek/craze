@@ -92,7 +92,9 @@ func (s *session) noteRateLimit(rl acp.RateLimit) {
 	s.usage.rl = &cp
 	s.publishUsageLocked()
 	s.mu.Unlock()
-	s.flushDelta()
+	// Enqueued, not flushed (review C4d finding 1): this runs on the read
+	// loop, under the dispatch, and a flush would hold the dispatch for as
+	// long as a reader stalls; the outbox keeps the delta's order.
 }
 
 func sameRateLimit(a, b acp.RateLimit) bool {
@@ -141,7 +143,7 @@ func (s *session) onClaudeUsage(raw json.RawMessage) {
 	}
 	s.publishUsageLocked()
 	s.mu.Unlock()
-	s.flushDelta()
+	// Enqueued, not flushed: the read loop's, as noteRateLimit's.
 }
 
 // claudeTurnUsage is a prompted turn's tokens, from its result's

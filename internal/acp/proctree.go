@@ -1,25 +1,48 @@
 package acp
 
-import "syscall"
+import (
+	"sync"
+	"syscall"
+)
 
-// The overage guard's descendant sweep (plan 052 § D3, review C5 item 6). A
-// kill of the agent's process group reaches everything that stayed in it; a
-// descendant that made a group or a session of its own (setsid, setpgid) does
-// not. So before the group kill, the agent's process tree is read — every
-// process whose parent chain leads to the agent — and each one outside the
-// group is killed outright. It is best effort, and says so in the docs:
-// a process that has already left the tree (double-forked and reparented to
-// init) cannot be found this way, and a pid read in the table and reused by
-// the time the signal goes would be a stranger's — the window is the time
-// between one read of the process table and the signals that follow it.
+// The overage guard's descendant kill (plan 052 § D3, reviews C5 item 6 and
+// C5b items 3–4). A kill of the agent's process group reaches everything
+// that stayed in it; a descendant that made a group or a session of its own
+// (setsid, setpgid) does not, and one the polling reaper's agent left behind
+// at an exit of its own is not cleaned up either. So the agent's process tree
+// — every process whose parent chain leads to the agent, with its start time
+// — is read when the stop begins, and again at the kill while the agent is
+// unreaped (the reaper waits for the read: Child.reapMu); every process of
+// either reading is killed, each one only once it has been checked to still
+// be that process (pidfd and start time on Linux, start time on macOS), and
+// the group last, whatever became of the agent.
+//
+// What it cannot reach, and the docs say so: a process that left the tree
+// before either reading (forked twice and handed to init). On macOS the
+// identity check and the signal are two calls, so a pid reused between them
+// is a residual, best-effort window; Linux signals through the pidfd that was
+// checked.
 
-// treeEntry is one process of the process table: its pid, its parent's and
-// its process group.
-type treeEntry struct{ pid, ppid, pgid int }
+// treeEntry is one process of the process table: its pid, its parent's, its
+// process group, and its start time as the platform spells it (Linux: stat's
+// field 22, in clock ticks since boot; macOS: ps's lstart), the identity a
+// reused pid does not share.
+type treeEntry struct {
+	pid, ppid, pgid int
+	start           string
+}
+
+// TreeSnapshot is the agent's descendants at one moment.
+type TreeSnapshot []treeEntry
 
 // procTable is the platform's process table (proctree_linux.go,
 // proctree_darwin.go): a variable so a test can see it.
 var procTable = readProcTable
+
+// killVerified is the platform's checked kill of one snapshot entry: false
+// when the process is gone or the pid is no longer that process. A variable
+// so a test can see it.
+var killVerified = platformKillVerified
 
 // descendants is every process of table whose parent chain reaches root,
 // root excluded.
@@ -48,40 +71,62 @@ func descendants(table []treeEntry, root int) []treeEntry {
 	return out
 }
 
-// killEscaped SIGKILLs every descendant of the agent that is outside its
-// process group, and answers how many it signalled. It is called only while
-// the agent is unreaped (its pid still pins the tree's root), before the
-// group kill.
-func (ch *Child) killEscaped() int {
+// testDuringSnapshot is a test seam, nil in production: it runs inside
+// SnapshotTree while the reaper is held off.
+var testDuringSnapshot func()
+
+// SnapshotTree reads the agent's descendants, holding the reaper off for the
+// read (reapMu), so the agent's pid — the tree's root — cannot be reaped and
+// reused while it is read. An agent already reaped has no tree to read: nil.
+func (ch *Child) SnapshotTree() TreeSnapshot {
+	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
+		return nil
+	}
+	ch.reapMu.Lock()
+	defer ch.reapMu.Unlock()
+	if testDuringSnapshot != nil {
+		testDuringSnapshot()
+	}
+	if isClosed(ch.reapedCh) || ch.reaped {
+		return nil
+	}
 	table, err := procTable()
 	if err != nil {
-		return 0
+		return nil
 	}
-	n := 0
-	for _, e := range descendants(table, ch.pid) {
-		if e.pgid == ch.pgid || e.pid <= 1 {
-			continue
-		}
-		if sweepSignal(e.pid, syscall.SIGKILL) == nil {
-			n++
-		}
-	}
-	return n
+	return descendants(table, ch.pid)
 }
 
-// sweepSignal is kill(2) for the sweep, a variable for tests.
-var sweepSignal = func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
-
-// KillTree is the overage guard's kill (plan 052 § D3): the agent's
-// descendants outside its process group first, while its tree can still be
-// read, then the group itself with no grace (Kill). It waits until the agent
-// has been reaped.
-func (ch *Child) KillTree() {
+// KillTree is the overage guard's kill (plan 052 § D3): every descendant of
+// the agent that earlier or now reads in its tree, each checked to still be
+// that process, then the group with no grace (Kill) — and the group again,
+// directly, whatever the reaper had already done (an agent that exited first,
+// review C5b item 4): a group outlives its leader while a member lives, and
+// its id is not handed out again while it does. It waits until the agent has
+// been reaped.
+func (ch *Child) KillTree(earlier TreeSnapshot) {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
 	}
-	if !isClosed(ch.exitedCh) {
-		ch.killEscaped()
+	seen := map[treeEntry]bool{}
+	for _, e := range append(append(TreeSnapshot(nil), earlier...), ch.SnapshotTree()...) {
+		if e.pid <= 1 || seen[e] {
+			continue
+		}
+		seen[e] = true
+		killVerified(e)
 	}
 	ch.Kill()
+	_ = groupKill(-ch.pgid, syscall.SIGKILL)
+}
+
+// groupKill is kill(2) to a group, a variable for tests.
+var groupKill = func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
+
+// reapGate is the reaper's side of reapMu: the reap — cmd.Wait, or the
+// fallback's wait4 — waits for a tree read in progress.
+type reapGate struct {
+	reapMu sync.Mutex
+	// reaped is set, under reapMu, once the reap has been made.
+	reaped bool
 }

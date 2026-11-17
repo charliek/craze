@@ -973,10 +973,22 @@ func (e *Engine) Close() error {
 			// left that can say so (the doc comment above). It carries the
 			// turn's own cause, as every other ending does.
 			e.cur = nil
-			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+			info := &agent.TurnInfo{
 				ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
 				StopReason: stopClosing, Pending: e.queue.Len(), Cause: e.closeCause,
-			}}, t.cause))
+			}
+			if se, ok := e.sess.(agent.StopErrer); ok {
+				if err := se.StoppedErr(); err != nil {
+					// The session stopped itself (a claude overage trip, plan
+					// 052 § D3): the turn failed with that, not merely closed
+					// (review C5b item 7).
+					info.StopReason = ""
+					info.Err = err.Error()
+					info.ErrClass = agent.ClassifyEventErr(err)
+					info.Info = agent.ErrorInfo(err)
+				}
+			}
+			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: info}, t.cause))
 		}
 		// An armed send will never fire now, and the record says so before the
 		// log stops taking work: a mandatory completion, like every other
