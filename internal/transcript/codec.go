@@ -126,12 +126,13 @@ type wireAskEnding struct {
 }
 
 type wireTurn struct {
-	ID      string          `json:"id,omitempty"`
-	Text    string          `json:"text,omitempty"`
-	Origin  string          `json:"origin,omitempty"`
-	At      time.Time       `json:"at,omitzero"`
-	Foreign json.RawMessage `json:"foreign,omitempty"`
-	Retries int             `json:"retries,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Origin    string          `json:"origin,omitempty"`
+	At        time.Time       `json:"at,omitzero"`
+	Foreign   json.RawMessage `json:"foreign,omitempty"`
+	ForeignAt time.Time       `json:"foreignAt,omitzero"`
+	Retries   int             `json:"retries,omitempty"`
 	// WebSearch is Turn.WebSearch (plan 051 F.4.3): the web tally of the turn
 	// its turnId names, absent when the model holds none. Each URL is at most
 	// 500 bytes, far under ItemCap, so nothing of it is capped.
@@ -384,7 +385,7 @@ func encodeHeader(jw *jsonWriter, s *Snapshot) ([]byte, error) {
 		h.Ended = append(h.Ended, wireAskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
 	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Retries != 0 || t.WebSearch != nil || t.Truncated {
-		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated,
+		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), ForeignAt: t.ForeignAt.UTC(), Retries: t.Retries, Truncated: t.Truncated,
 			WebSearch: toWireTurnWebSearch(t.WebSearch)}
 		if h.Turn.Foreign, err = agent.EncodeForeignTurnInfo(t.Foreign); err != nil {
 			return nil, fail("turn", err)
@@ -794,7 +795,7 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 		s.Ended = append(s.Ended, AskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
 	if t := w.Turn; t != nil {
-		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Retries: t.Retries, Truncated: t.Truncated,
+		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), ForeignAt: t.ForeignAt.UTC(), Retries: t.Retries, Truncated: t.Truncated,
 			WebSearch: t.WebSearch.turnWebSearch()}
 		var err error
 		if s.Turn.Foreign, err = agent.DecodeForeignTurnInfo(t.Foreign); err != nil {

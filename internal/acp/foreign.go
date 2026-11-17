@@ -191,7 +191,13 @@ type claudeForeign struct {
 	// loaded: a load's reply has been read while replaying; held is what the
 	// adapter sent since, routed at ReplayDone.
 	loaded bool
-	held   []SessionNotification
+	held   []heldFrame
+	// heldBytes is held's size; holdErr is why the hold failed (a bound or the
+	// load's context), and holdGen the generation its time bound was armed in.
+	heldBytes int
+	holdErr   error
+	holdTimer Timer
+	holdGen   uint64
 	// seen is every root tool call id lately seen, in seenOrder.
 	seen      map[string]struct{}
 	seenOrder []string

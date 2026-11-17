@@ -1224,3 +1224,35 @@ func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
 		t.Fatalf("notes %q\nwant %q", got, want)
 	}
 }
+
+// TestAForeignTurnsClockSurvivesTheSnapshot (plan 052 review C4b item 8): a
+// running foreign bracket's time travels in the snapshot — through its codec —
+// and a restored model, and its mirror, carry it; an ending clears it.
+func TestAForeignTurnsClockSurvivesTheSnapshot(t *testing.T) {
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}, At: at(7)},
+	)
+	snap, err := m.Snapshot(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := EncodeSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodeSnapshot(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Turn.ForeignAt; !got.Equal(at(7)) {
+		t.Fatalf("the snapshot's foreign clock %v; want %v", got, at(7))
+	}
+	if got := Restore(back, Options{}).Mirror().Turn.ForeignAt; !got.Equal(at(7)) {
+		t.Fatalf("the restored mirror's foreign clock %v", got)
+	}
+	foldAll(t, m, true, agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground}, At: at(8)})
+	if got := m.Mirror().Turn.ForeignAt; !got.IsZero() {
+		t.Fatalf("an ended turn keeps a clock: %v", got)
+	}
+}

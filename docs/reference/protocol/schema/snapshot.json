@@ -70,6 +70,7 @@
         "origin": {"type": "string"},
         "at": {"$ref": "event.json#/$defs/time"},
         "foreign": {"$ref": "event.json#/$defs/foreignTurn"},
+        "foreignAt": {"$ref": "event.json#/$defs/time", "description": "When the running foreign bracket came: the agent's own turn's start, for a client attaching mid-turn; absent when no foreign turn is running, and from a host that predates it."},
         "retries": {"type": "integer", "minimum": 0, "description": "How many times the turn's steps have been sent again so far, kept until the next turn starts (a step_retry event's total); absent for none."},
         "webSearch": {"$ref": "#/$defs/turnWebSearch"},
         "truncated": {"type": "boolean"}

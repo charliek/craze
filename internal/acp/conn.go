@@ -42,6 +42,9 @@ type Conn struct {
 	err     error
 	done    chan struct{}
 	closed  bool
+	// readDone is closed once the read loop has returned: every frame the
+	// agent wrote has been dispatched, its handlers run (ReadDone).
+	readDone chan struct{}
 
 	onRequest func(*Message)
 	onNotify  func(*Message)
@@ -79,10 +82,11 @@ func (c *Conn) sever() {
 
 func NewConn(in io.Reader, out io.Writer) *Conn {
 	c := &Conn{
-		dec:     NewDecoder(in),
-		enc:     NewEncoder(out),
-		pending: make(map[string]*pendingCall),
-		done:    make(chan struct{}),
+		dec:      NewDecoder(in),
+		enc:      NewEncoder(out),
+		pending:  make(map[string]*pendingCall),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 	if closer, ok := out.(io.Closer); ok {
 		c.wCloser = closer
@@ -312,7 +316,14 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// ReadDone is closed once the read loop has returned — after the last frame it
+// read has been dispatched and its handler has returned. Done says calls can no
+// longer be answered, which can come first: a process exit fails the calls while
+// the agent's last output is still being read (review C4b item 2).
+func (c *Conn) ReadDone() <-chan struct{} { return c.readDone }
+
 func (c *Conn) readLoop() {
+	defer close(c.readDone)
 	defer c.failAll(io.EOF)
 	for {
 		msg, err := c.dec.ReadMessage()

@@ -55,6 +55,9 @@ type subagentRec struct {
 	// drawn as its opening prompt.
 	attempts  int
 	stopAsked bool
+	// gone: the ACP registry no longer routes the child (unknown, evicted,
+	// the agent gone), so its row is the session's own to keep or drop.
+	gone      bool
 	promptIDs map[string]bool
 }
 
@@ -549,14 +552,21 @@ func (s *session) stampFinishLocked(rec *subagentRec) {
 // describe a row no snapshot ever held. keep is the record that just
 // finished; it is never the one evicted.
 func (s *session) evictFinishedLocked(keep string) {
+	claude := s.provider().isClaude()
 	var finished []string
 	for _, id := range s.subagentOrder {
 		rec := s.subagents[id]
 		if rec != nil && rec.info.Status != SubagentRunning && rec.info.Status != "" {
+			if claude && !rec.gone {
+				// A claude child the ACP registry still routes keeps its row:
+				// its retention is the registry's, which says when it goes
+				// (claudeChildGoneLocked; review C4b item 7).
+				continue
+			}
 			finished = append(finished, id)
 		}
 	}
-	limit := s.finishedCapLocked()
+	limit := subagentFinishedCap
 	if len(finished) <= limit {
 		return
 	}

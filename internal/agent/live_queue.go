@@ -133,6 +133,12 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 	if s.replaying.Load() {
 		return
 	}
+	// The state change and the event are one step with respect to any other
+	// bracket (review C4b item 1): an ending cannot be published between a
+	// start's state change and its event, so the stream never shows a start
+	// after its own ending, and a start that comes after it is dropped below.
+	s.foreignMu.Lock()
+	defer s.foreignMu.Unlock()
 	s.mu.Lock()
 	if info.Running && info.ID != "" && info.ID == s.foreignEnded {
 		// Its ending is out already: a start delivered after it is no
@@ -147,6 +153,13 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 	// Either bracket ends the open text run (review C4 item 11).
 	s.textRun = ""
 	s.mu.Unlock()
+	if info.Running && testForeignStartPublish != nil {
+		testForeignStartPublish()
+	}
 	cp := info
 	s.emit(Event{Type: EventForeignTurn, ForeignTurn: &cp})
 }
+
+// testForeignStartPublish is a test seam, nil in production: it runs between a
+// foreign start's state change and its event.
+var testForeignStartPublish func()

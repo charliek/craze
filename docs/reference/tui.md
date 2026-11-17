@@ -257,7 +257,8 @@ work)`, or `the agent is compacting its context on its own` for compaction:
   in between, is part of your turn.
 - While it runs the working line shows, as for your own turn (`Working · …
   · esc to interrupt`), and the empty composer says `enter queues`: a prompt
-  typed meanwhile is queued, and sent once it ends. `Esc` stops it: craze
+  typed meanwhile is queued, and sent once it ends — one sent the moment such a
+  turn opened, before craze could see it, waits at the head of the queue too. `Esc` stops it: craze
   sends Claude the cancel, and once the cancel is written the turn ends
   `cancelled` 2 seconds later (a cancel that could not be written changes
   nothing).

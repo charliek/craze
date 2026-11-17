@@ -2023,7 +2023,11 @@ something to say, and each is absent at its zero value:
 | `cancelled` | `true`: a user cancel ended it (`session.cancel`, `Esc`). [`lastTurn`](#the-last-turn) reads `outcome: cancelled` |
 | `err` | `{kind, message}`: it failed — `kind` one of the [failure kinds](cli.md#failure-kinds), `message` the reason (a claude session that stopped for a reason of its own while the turn ran). `lastTurn` reads `outcome: failed` with that `err` and `kind`, and a `craze wait` on the turn reports it failed |
 
-An end with neither ran to its end (`done`). The end bracket (`foreignTurn` with no `running`) always precedes the
+An end with neither ran to its end (`done`).
+
+A snapshot's `turn` carries, beside the `foreign` bracket it holds, `foreignAt`: when that bracket's
+start came, while the agent's own turn runs — the clock a client that attaches mid-turn counts it
+from. It is absent when none runs, and from a host that predates it. The end bracket (`foreignTurn` with no `running`) always precedes the
 next turn's own output on the stream — an agent's own next turn (a queued
 follow-up draining, say) never races ahead of the foreign turn's ending.
 

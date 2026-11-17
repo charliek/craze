@@ -446,7 +446,9 @@ func TestClaudeForeignNothingDuringAReplay(t *testing.T) {
 	r.roundTrip(t)
 	// Live, but held until the session's replay is over (review C4 item 5).
 	r.want(t, "user_message_chunk", "agent_message_chunk")
-	r.client.ReplayDone()
+	if err := r.client.ReplayDone(); err != nil {
+		t.Fatal(err)
+	}
 	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk")
 	r.push(t, chunk("after"))
 	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk", "agent_message_chunk")
@@ -786,5 +788,136 @@ func TestClaudeForeignSilenceIsNoContent(t *testing.T) {
 	}
 	if got := r.client.ForeignPhase(); got != "idle" {
 		t.Fatalf("non-content traffic held the turn past the silence limit: %s", got)
+	}
+}
+
+// loaded runs session/load to its reply, with ctx the load's own: the client
+// is then holding the agent's live traffic until ReplayDone.
+func (r *claudeRig) loaded(t *testing.T, ctx context.Context) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.client.LoadSession(ctx, rigRoot, t.TempDir(), SessionParams{})
+		done <- err
+	}()
+	req := r.readWithin(t, 3*time.Second, "session/load")
+	r.answerWith(t, req, `{}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClaudeForeignAGatedPromptHasNoTurn (review C4b item 4): while a prompt
+// waits at its gate no turn of craze's is open, so a request the agent's own
+// turn makes meanwhile arrives with no turn, and the refused prompt cannot
+// take it with it.
+func TestClaudeForeignAGatedPromptHasNoTurn(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "reject"}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	r.push(t, chunk("a wake"))
+	r.send(t, 41, MethodRequestPermission, `{"sessionId":"root","toolCall":{"toolCallId":"t1","title":"Read"},"options":[{"optionId":"reject","name":"No","kind":"reject_once"}]}`)
+	a := <-arrivals
+	if a.InTurn {
+		t.Fatalf("the wake's request arrived %+v; want no turn of craze's", a)
+	}
+	r.readWithin(t, 3*time.Second, "the wake's permission reply")
+	if _, err := r.client.Prompt(context.Background(), "y"); !errors.Is(err, ErrPromptInFlight) {
+		t.Fatalf("a second prompt while the first waits at its gate = %v", err)
+	}
+	release <- nil
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the gated prompt = %v; want ErrForeignTurn", err)
+	}
+}
+
+// TestClaudeChildRequestHeldBehindItsAnnounce (review C4b item 5): after a
+// load's reply a child's announce and the permission request that follows it
+// are held together, and released in that order: the request finds its child
+// registered instead of being refused.
+func TestClaudeChildRequestHeldBehindItsAnnounce(t *testing.T) {
+	r := newClaudeRig(t)
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	r.loaded(t, context.Background())
+	r.pushUpdate(t, rigRoot, subUpd("c1", running))
+	r.pushUpdate(t, rigRoot, subUpd("c1", requiresInput))
+	replies := make(chan *Message, 1)
+	go func() {
+		if msg, err := r.dec.ReadMessage(); err == nil {
+			replies <- msg
+		}
+	}()
+	r.send(t, 42, MethodRequestPermission, `{"sessionId":"c1","toolCall":{"toolCallId":"ct","title":"Write"},"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"}]}`)
+	// The barrier is an auth push, which is never held and writes nothing:
+	// everything before it has been dispatched once its handler has run.
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	if err := r.client.ReplayDone(); err != nil {
+		t.Fatal(err)
+	}
+	var msg *Message
+	select {
+	case msg = <-replies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child's request was never answered")
+	}
+	if !strings.Contains(string(msg.Result), "allow-once") {
+		t.Fatalf("the child's request was answered %s; want it held behind its announce and allowed", msg.Result)
+	}
+	if a := <-arrivals; a.Child != "c1" {
+		t.Fatalf("the held request arrived %+v; want child c1", a)
+	}
+}
+
+// TestClaudeLoadHoldIsBounded (review C4b item 6): the hold behind a load's
+// reply fails — ReplayDone answers ErrReplayHold and the client closes — past
+// its frame bound, past its time bound, and when the load's context ends.
+func TestClaudeLoadHoldIsBounded(t *testing.T) {
+	prev := holdFrameCap
+	holdFrameCap = 3
+	t.Cleanup(func() { holdFrameCap = prev })
+	for _, tc := range []string{"frames", "time", "context"} {
+		t.Run(tc, func(t *testing.T) {
+			r := newClaudeRig(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r.loaded(t, ctx)
+			switch tc {
+			case "frames":
+				for _, c := range []string{"1", "2", "3", "4"} {
+					r.pushUpdate(t, rigRoot, chunk(c))
+				}
+			case "time":
+				r.clk.Advance(replayHoldWait)
+			case "context":
+				cancel()
+			}
+			select {
+			case <-r.client.Conn().Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("the client did not close when its hold failed")
+			}
+			if err := r.client.ReplayDone(); !errors.Is(err, ErrReplayHold) {
+				t.Fatalf("ReplayDone = %v; want ErrReplayHold", err)
+			}
+		})
 	}
 }

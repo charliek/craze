@@ -77,7 +77,12 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 	}
 	rec := s.subagents[id]
 	if n.State == acp.ChildUnknown {
-		return s.claudeChildGoneLocked(rec)
+		return s.claudeChildGoneLocked(rec, n.Evicted)
+	}
+	if s.transportEnded {
+		// The agent is gone and its children retired: nothing creates or
+		// restarts a running row from here (review C4b item 2).
+		return nil
 	}
 	spawned := false
 	if rec == nil {
@@ -183,8 +188,21 @@ func (s *session) finishClaudeChildLocked(rec *subagentRec, status SubagentStatu
 // child — or the registry dropping it (its parent's unknown or eviction): a
 // running row ends cancelled, no longer observable. A row already ended keeps
 // its outcome.
-func (s *session) claudeChildGoneLocked(rec *subagentRec) []Event {
-	if rec == nil || rec.info.Status != SubagentRunning {
+//
+// The registry no longer routes it, so its row's retention is the session's
+// own from here (gone; evictFinishedLocked). One the registry evicted that had
+// already ended is dropped at once: the registry let it go, and the session
+// follows its order rather than its own (review C4b item 7).
+func (s *session) claudeChildGoneLocked(rec *subagentRec, evicted bool) []Event {
+	if rec == nil {
+		return nil
+	}
+	rec.gone = true
+	if rec.info.Status != SubagentRunning {
+		if evicted {
+			delete(s.subagents, rec.info.ID)
+			s.removeSubagentOrderLocked(rec.info.ID)
+		}
 		return nil
 	}
 	rec.info.NoCancel = true
@@ -327,27 +345,25 @@ func (s *session) CancelSubagent(id string) error {
 	return nil
 }
 
-// finishedCapLocked is how many finished rows the session keeps. A claude
-// child the ACP registry still holds may report again — late updates, a reuse
-// — so claude keeps as many as the registry routes (review C4 item 7).
-func (s *session) finishedCapLocked() int {
-	if s.provider().isClaude() {
-		return max(subagentFinishedCap, acp.ChildRouteCap)
-	}
-	return subagentFinishedCap
-}
-
 // retireChildrenAtEnd waits for the agent's transport to end and then ends
 // every claude child row still running, failed: its agent is gone, so it will
 // never report again, and a row left running would hold the session busy for
 // ever (review C4 item 3). A session that closes first has nothing to retire.
 func (s *session) retireChildrenAtEnd(client *acp.Client) {
+	// The read loop's end, not the calls' (review C4b item 2): a process exit
+	// fails the calls while the agent's last frames are still being read, and
+	// a child's last update must be applied — and published — before its row
+	// is retired, never after.
 	select {
-	case <-client.Conn().Done():
+	case <-client.Conn().ReadDone():
 	case <-s.done:
 		return
 	}
 	s.mu.Lock()
+	s.transportEnded = true
+	for _, rec := range s.subagents {
+		rec.gone = true
+	}
 	var evs []Event
 	for _, id := range append([]string(nil), s.subagentOrder...) {
 		if rec := s.subagents[id]; rec != nil && rec.info.Status == SubagentRunning {

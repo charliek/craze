@@ -4,10 +4,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // claudeCatalog is claude-agent-acp's catalog, as its session/new answers it
@@ -378,5 +380,37 @@ func TestClaudeForeignTurnShowsWorking(t *testing.T) {
 		if tc.working != strings.Contains(line, "esc to interrupt") || tc.working != (hint == queueForeignHint) || tc.working != m.wantFastTick() {
 			t.Fatalf("%s during its own turn: line %q, hint %q, fast tick %v", tc.p.Name(), line, hint, m.wantFastTick())
 		}
+	}
+}
+
+// TestClaudeForeignClockAfterARestore (plan 052 review C4b item 8): a client
+// that attaches while claude runs a turn of its own counts the working line
+// from that turn's start, not from a prompted turn's or zero; one restored with
+// no such turn running holds no stale clock.
+func TestClaudeForeignClockAfterARestore(t *testing.T) {
+	m, _ := claudeScripted(t, agent.ClaudeProvider(), "default", claudeModeIDs...)
+	start := time.Unix(1_800_000_000, 0).UTC()
+	tm := transcript.New(transcript.Options{})
+	tm.Fold(agent.Event{Seq: 1, Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}, At: start})
+	snap, err := tm.Snapshot(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Incarnation = m.incarnation()
+	m.foreignStart = start.Add(-time.Hour)
+	if !m.applyRestore(restoreMsg{snap: snap}) {
+		t.Fatal("the restore was not applied")
+	}
+	if !m.foreignStart.Equal(start) {
+		t.Fatalf("the restored foreign clock %v; want the turn's start %v", m.foreignStart, start)
+	}
+	tm.Fold(agent.Event{Seq: 2, Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground}, At: start.Add(time.Minute)})
+	if snap, err = tm.Snapshot(0); err != nil {
+		t.Fatal(err)
+	}
+	snap.Incarnation = m.incarnation()
+	m.applyRestore(restoreMsg{snap: snap})
+	if !m.foreignStart.IsZero() {
+		t.Fatalf("a restore with no foreign turn running kept the clock %v", m.foreignStart)
 	}
 }

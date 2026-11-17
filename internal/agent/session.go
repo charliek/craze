@@ -46,6 +46,15 @@ var ErrNoSuchSubagent = errors.New("agent: no such sub-agent")
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
 
+// ErrForeignTurnRequeue is ErrForeignTurn from a session whose refused text
+// is to wait in the queue whatever its source (review C4b item 3): claude's,
+// whose turns of its own open without warning — between the engine's look and
+// the prompt's gate — so a message typed straight into an idle session must
+// not be lost to one. The engine puts text the client held itself at the head
+// of the queue, as it puts back a refused row. It is ErrForeignTurn to
+// errors.Is.
+var ErrForeignTurnRequeue = fmt.Errorf("%w; the message waits for it in the queue", ErrForeignTurn)
+
 // ErrAgentExited is session.Close's answer when the agent's own exit had
 // been reaped before craze's first Close on it sampled the child's wait
 // channel — not that Close failed. Match it with errors.Is; internal/tui

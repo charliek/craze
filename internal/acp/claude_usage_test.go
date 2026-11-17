@@ -215,7 +215,9 @@ func TestClaudeReplayedRateLimitIsHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.roundTrip(t)
-	r.client.ReplayDone()
+	if err := r.client.ReplayDone(); err != nil {
+		t.Fatal(err)
+	}
 	r.roundTrip(t)
 	if !slices.Equal(trips, []bool{false}) {
 		t.Fatalf("the handler saw %v; want the live report alone", trips)

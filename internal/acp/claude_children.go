@@ -3,6 +3,9 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
 )
 
 // The claude dialect's routing of session/update (plan 052 § E1, § E3): the
@@ -58,8 +61,120 @@ func (c *Client) claudeLoaded() {
 	c.mu.Lock()
 	if c.cf.phase == phaseReplaying {
 		c.cf.loaded = true
+		// The hold has a time bound (review C4b item 6): a session that never
+		// gets to ReplayDone does not hold the agent's traffic for ever.
+		gen := c.cf.holdGen
+		c.cf.holdTimer = c.clockLocked().AfterFunc(replayHoldWait, func() {
+			c.failHold(gen, fmt.Errorf("%w: the session did not take the agent's traffic within %v of the load", ErrReplayHold, replayHoldWait))
+		})
 	}
 	c.mu.Unlock()
+}
+
+// ErrReplayHold is a load whose post-reply hold failed (review C4b item 6):
+// past its bounds, past its time, or its load's context ended first. The
+// client closes itself, and ReplayDone answers with it.
+var ErrReplayHold = errors.New("acp: the load's live traffic could not be held")
+
+// The post-load hold's bounds (review C4b item 6), vars for tests.
+var (
+	holdFrameCap   = 4096
+	holdByteCap    = 16 << 20
+	replayHoldWait = 30 * time.Second
+)
+
+// holdClaude holds f if the client is holding, closing the client when the
+// hold fails; it answers whether f was taken.
+func (c *Client) holdClaude(f heldFrame, size int) bool {
+	c.mu.Lock()
+	taken, failed := c.holdLocked(f, size)
+	c.mu.Unlock()
+	if failed {
+		go func() { _ = c.Close() }()
+	}
+	return taken
+}
+
+// heldFrame is one frame held between a load's reply and ReplayDone, in
+// arrival order: an update, a request, or a request's withdrawal.
+type heldFrame struct {
+	update *SessionNotification
+	req    *Message
+	cancel *Message
+}
+
+// holdingLocked reports whether the client holds what the agent sends: a
+// load's reply has been read and the session's replay is not over.
+func (c *Client) holdingLocked() bool {
+	return c.cf.phase == phaseReplaying && c.cf.loaded
+}
+
+// holdLocked holds one frame of size bytes, or, past a bound, fails the hold.
+// It answers whether the frame was taken (held or dropped): false only when
+// the client is not holding.
+func (c *Client) holdLocked(f heldFrame, size int) (taken, failed bool) {
+	if !c.holdingLocked() {
+		return false, false
+	}
+	if c.cf.holdErr != nil {
+		c.dropped++
+		return true, false
+	}
+	if len(c.cf.held) >= holdFrameCap || c.cf.heldBytes+size > holdByteCap {
+		c.failHoldLocked(fmt.Errorf("%w: more than %d frames or %d bytes", ErrReplayHold, holdFrameCap, holdByteCap))
+		return true, true
+	}
+	c.cf.held = append(c.cf.held, f)
+	c.cf.heldBytes += size
+	return true, false
+}
+
+// failHoldLocked fails the hold: what was held is dropped and counted, nothing
+// more is taken, and the caller closes the client (off the read loop).
+func (c *Client) failHoldLocked(err error) {
+	if c.cf.holdErr != nil {
+		return
+	}
+	c.cf.holdErr = err
+	c.dropped += int64(len(c.cf.held))
+	c.cf.held, c.cf.heldBytes = nil, 0
+	if c.cf.holdTimer != nil {
+		c.cf.holdTimer.Stop()
+		c.cf.holdTimer = nil
+	}
+	c.cf.holdGen++
+}
+
+// failHold is failHoldLocked for a hold still at gen (its time bound, or its
+// load's context ending), and the client's close.
+func (c *Client) failHold(gen uint64, err error) {
+	c.mu.Lock()
+	failed := c.holdingLocked() && c.cf.holdGen == gen && c.cf.holdErr == nil
+	if failed {
+		c.failHoldLocked(err)
+	}
+	c.mu.Unlock()
+	if failed {
+		go func() { _ = c.Close() }()
+	}
+}
+
+// watchHold fails the hold if the load's own context ends while it lasts.
+func (c *Client) watchHold(ctx context.Context) {
+	c.mu.Lock()
+	gen := c.cf.holdGen
+	holding := c.holdingLocked()
+	c.mu.Unlock()
+	if !holding {
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.failHold(gen, fmt.Errorf("%w: %w", ErrReplayHold, ctx.Err()))
+		case <-c.conn.Done():
+		}
+	}()
 }
 
 // ReplayDone is the session's word that its replay is over — its replay flag
@@ -67,26 +182,49 @@ func (c *Client) claudeLoaded() {
 // from here, and every update held since the load's reply is routed now, in
 // order, under the rules, before anything the read loop reads next. Every
 // other dialect, and a claude client that is not loading, does nothing.
-func (c *Client) ReplayDone() {
+//
+// It answers the hold's failure, when it failed (ErrReplayHold): the client
+// has closed itself, and the load is to fail.
+func (c *Client) ReplayDone() error {
 	if c.dialect != DialectClaude {
-		return
+		return nil
 	}
 	c.dispatchMu.Lock()
 	defer c.dispatchMu.Unlock()
 	c.mu.Lock()
-	if c.cf.phase != phaseReplaying || !c.cf.loaded {
+	if err := c.cf.holdErr; err != nil {
 		c.mu.Unlock()
-		return
+		return err
+	}
+	if !c.holdingLocked() {
+		c.mu.Unlock()
+		return nil
 	}
 	held := c.cf.held
-	c.cf.held = nil
+	c.cf.held, c.cf.heldBytes = nil, 0
 	c.cf.loaded = false
 	c.cf.phase = phaseIdle
 	c.cf.ready = true
-	c.mu.Unlock()
-	for _, n := range held {
-		c.routeClaude(n)
+	if c.cf.holdTimer != nil {
+		c.cf.holdTimer.Stop()
+		c.cf.holdTimer = nil
 	}
+	c.cf.holdGen++
+	c.mu.Unlock()
+	// In arrival order, requests and withdrawals with the updates (review
+	// C4b item 5): a child's request comes after the announce that registers
+	// it, as it came on the wire.
+	for _, f := range held {
+		switch {
+		case f.update != nil:
+			c.routeClaude(*f.update)
+		case f.req != nil:
+			c.onRequest(f.req)
+		case f.cancel != nil:
+			c.handleCancelRequest(f.cancel)
+		}
+	}
+	return nil
 }
 
 // requestSession is a request's params.sessionId, "" for none.
@@ -127,11 +265,13 @@ func (c *Client) routeClaude(n SessionNotification) {
 		c.mu.Unlock()
 		return
 	}
-	if c.cf.phase == phaseReplaying && c.cf.loaded {
-		// Live, after the load's reply, and held until the session's replay
-		// is over (ReplayDone).
-		c.cf.held = append(c.cf.held, n)
+	// Live, after the load's reply, and held until the session's replay is
+	// over (ReplayDone), within the hold's bounds.
+	if taken, failed := c.holdLocked(heldFrame{update: &n}, len(n.Update)); taken {
 		c.mu.Unlock()
+		if failed {
+			go func() { _ = c.Close() }()
+		}
 		return
 	}
 	now := c.clockLocked().Now()

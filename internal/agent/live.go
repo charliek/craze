@@ -158,6 +158,12 @@ type session struct {
 	// (acp closeForeign) — is not a turn running (review C4 item 2).
 	foreign      bool
 	foreignEnded string
+	// foreignMu makes a foreign bracket's state change and its event one
+	// step (onForeignTurn). Taken before s.mu, never under it.
+	foreignMu sync.Mutex
+	// transportEnded: the claude agent's read loop has ended and its running
+	// children were retired (retireChildrenAtEnd), under s.mu.
+	transportEnded bool
 	// textRun is the messageId of the claude root text the transcript's open
 	// run holds, "" when none is open: a chunk of another message starts a
 	// paragraph of its own (review C4 item 11).
@@ -1379,9 +1385,9 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
 	// The one boundary (review C4 item 5): what claude sent after the load's
 	// reply was held until here, and is routed now as live, foreign turns
-	// and all, behind the end bracket.
-	client.ReplayDone()
-	return nil
+	// and all, behind the end bracket. A hold that failed — past its bounds,
+	// or its load's context over — fails the load (review C4b item 6).
+	return client.ReplayDone()
 }
 
 // flushReplayUser emits the coalesced replayed prompt as exactly one EventUser.
@@ -1849,6 +1855,10 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.token = TurnToken{}
 		s.doneEmitted = prevDone
 		s.mu.Unlock()
+		if s.provider().isClaude() && errors.Is(err, acp.ErrForeignTurn) {
+			// The text waits for the agent's turn, wherever it came from.
+			return Result{}, ErrForeignTurnRequeue
+		}
 		return Result{}, err
 	}
 	// An agent that refused the image blocks (-32602) before doing anything

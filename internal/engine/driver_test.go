@@ -1426,3 +1426,25 @@ func TestForeignTurnAEndsAsBBegins(t *testing.T) {
 	r.until(lastEnding)
 	r.wantPrompts("queued behind A")
 }
+
+// TestADirectSubmitRequeuedByAForeignTurnWaitsInTheQueue (plan 052 review C4b
+// item 3): text a client held itself, refused because claude's own turn
+// opened under it (agent.ErrForeignTurnRequeue), is not lost to a failure: it
+// goes to the head of the queue and runs once the agent's turn lets it. A
+// plain ErrForeignTurn — grok's — keeps today's ending (the test above).
+func TestADirectSubmitRequeuedByAForeignTurnWaitsInTheQueue(t *testing.T) {
+	r := newRig(t, Options{})
+	r.queue("three")
+	r.s.script(&script{refuse: agent.ErrForeignTurnRequeue})
+	if res := r.submit("two"); res.Turn != "turn-1" {
+		t.Fatalf("the submit answered %+v, want the turn it started", res)
+	}
+	r.until(ended("turn-1"))
+	st := r.e.State()
+	if st.Activity == ActivityError || len(st.Queue) != 2 || st.Queue[0].Text != "two" || st.Queue[1].Text != "three" {
+		t.Fatalf("state after the requeue: activity %s, queue %+v", st.Activity, st.Queue)
+	}
+	r.until(lastEnding)
+	// The refused attempt, then the row it became, then the queue behind it.
+	r.wantPrompts("two", "two", "three")
+}

@@ -26,7 +26,11 @@ type Client struct {
 	mu        sync.Mutex
 	sessionID string
 	inPrompt  bool
-	dialect   DialectID
+	// gating is a claude prompt admitted and waiting at its gate: no turn
+	// yet (inPrompt and the turn counter move only once the gate has passed,
+	// review C4b item 4), but no second prompt either.
+	gating  bool
+	dialect DialectID
 	// promptWait is the grok prompt_complete racer. First of the RPC reply
 	// or a matching notify wins; the other is abandoned.
 	promptWait chan promptResult
@@ -481,6 +485,7 @@ func (c *Client) LoadSession(ctx context.Context, id, cwd string, sp SessionPara
 	}
 	c.mu.Unlock()
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, loadSessionDeadline())
 	defer cancel()
 	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: sp.mcpServers(), ConfigOptions: sp.ConfigOptions, Meta: sp.Meta}
@@ -502,6 +507,11 @@ func (c *Client) LoadSession(ctx context.Context, id, cwd string, sp SessionPara
 		c.sessionID = ""
 		c.mu.Unlock()
 		return nil, err
+	}
+	if claude {
+		// The hold behind the reply ends with the load's own context too
+		// (review C4b item 6).
+		c.watchHold(parent)
 	}
 	// The wire does not echo the id (grok returns models alone); the caller
 	// asked for this one and got it.
@@ -578,7 +588,7 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// another.
 	blocks = append([]ContentBlock(nil), blocks...)
 	c.mu.Lock()
-	if c.inPrompt {
+	if c.inPrompt || c.gating {
 		c.mu.Unlock()
 		return nil, ErrPromptInFlight
 	}
@@ -596,11 +606,19 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.mu.Unlock()
 		return nil, ErrHeardSinceRefusal
 	}
-	c.inPrompt = true
-	// A new turn: every blocking request registered from here on belongs to it,
-	// and every request of the turn before it is now stale.
-	c.turn++
-	turn := c.turn
+	claude := c.dialect == DialectClaude
+	turn := 0
+	if claude {
+		// The turn opens once the gate has passed (below): a request that
+		// arrives while it waits is no turn's of craze's.
+		c.gating = true
+	} else {
+		c.inPrompt = true
+		// A new turn: every blocking request registered from here on belongs
+		// to it, and every request of the turn before it is now stale.
+		c.turn++
+		turn = c.turn
+	}
 	// The new turn's identity is not known yet: queue/changed teaches it, and
 	// until then nothing the last turn learned may speak for this one.
 	c.promptID = ""
@@ -627,6 +645,7 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	defer func() {
 		c.mu.Lock()
 		c.inPrompt = false
+		c.gating = false
 		c.promptWait = nil
 		if resend {
 			// Every id grok named since the refused attempt opened is the
@@ -674,10 +693,16 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		// a foreign turn of its own, and the prompt goes back to the caller as
 		// refused, nothing written; a gate that refused changed nothing.
 		c.mu.Lock()
+		c.gating = false
 		if c.foreignRunningLocked() {
 			c.mu.Unlock()
 			return nil, ErrForeignTurn
 		}
+		// The turn opens here, with the machine prompted, in one section
+		// (review C4b item 4).
+		c.inPrompt = true
+		c.turn++
+		turn = c.turn
 		c.enterPromptedLocked(turn)
 		c.mu.Unlock()
 		if testAfterPrompted != nil {
@@ -1144,6 +1169,10 @@ func (c *Client) onRequest(msg *Message) {
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
 		return
 	}
+	if c.dialect == DialectClaude && c.holdClaude(heldFrame{req: msg}, len(msg.Params)) {
+		// Held with the updates after a load's reply (review C4b item 5).
+		return
+	}
 	switch msg.Method {
 	case MethodRequestPermission:
 		var req PermissionRequest
@@ -1383,6 +1412,10 @@ func (c *Client) onNotify(msg *Message) {
 	case MethodClaudeAuthStatus:
 		c.handleAuthStatus(msg)
 	case MethodCancelRequest:
+		if c.dialect == DialectClaude && c.holdClaude(heldFrame{cancel: msg}, len(msg.Params)) {
+			// A withdrawal stays behind the request it withdraws.
+			return
+		}
 		c.handleCancelRequest(msg)
 	}
 }

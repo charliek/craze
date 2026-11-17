@@ -441,7 +441,9 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	m.turn.Foreign = ev.ForeignTurn
 	m.fc.state = true
 	m.Main.closeStream(at)
+	m.turn.ForeignAt = time.Time{}
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
+		m.turn.ForeignAt = at
 		m.turn.Retries = 0
 		m.turn.WebSearch = nil
 		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)

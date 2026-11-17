@@ -2267,7 +2267,14 @@ func (e *Engine) settleLocked(t *turn) []launch {
 // And never for a turn a cancel was validated against: the user asked for that
 // turn to stop, and a stop wins over a restore (cancelledRefusalLocked).
 func (e *Engine) restoresLocked(t *turn) bool {
-	return e.rowRefusedLocked(t) && !t.cancelAsked && !e.stopped
+	return (e.rowRefusedLocked(t) || e.textRequeuedLocked(t)) && !t.cancelAsked && !e.stopped
+}
+
+// textRequeuedLocked says t's text, which the client held itself, is to wait
+// in the queue: its session refused it as agent.ErrForeignTurnRequeue (claude,
+// review C4b item 3), under the TUI's policy.
+func (e *Engine) textRequeuedLocked(t *turn) bool {
+	return t.row == nil && errors.Is(t.err, agent.ErrForeignTurnRequeue) && !e.opts.Chain.RetryForeignTurn
 }
 
 // cancelledRefusalLocked says t's ending is the cancel-before-open one although
@@ -2320,7 +2327,13 @@ func (e *Engine) rowRefusedLocked(t *turn) bool {
 // ran. Then nothing else would ever drain the row. The tick's pass drains it if a
 // turn may start; if the agent's turn is still running, that turn's end does.
 func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
-	batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+	if t.row != nil {
+		batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+	} else {
+		// Text the client held itself becomes a row at the head, as a
+		// steer the turn left unanswered does (textRequeuedLocked).
+		batch = append(batch, e.stamp(e.queue.PushFront(t.text, e.now()).Event(), t.cause))
+	}
 	if f := e.exitFence; f != nil && f.turn == t.id {
 		// Back in the queue, and not over: the fence waits for its row again.
 		f.turn = ""
