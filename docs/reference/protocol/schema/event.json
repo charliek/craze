@@ -235,7 +235,8 @@
         "tokensUsed": {"type": "integer"},
         "toolsUsed": {"type": "array", "items": {"type": "string"}},
         "transcript": {"type": "boolean"},
-        "background": {"type": "boolean"}
+        "background": {"type": "boolean"},
+        "noCancel": {"type": "boolean", "description": "This child cannot be stopped on its own (a claude child whose capabilities grant no cancel): its row offers no stop, though the session has session.subagent.cancel. Absent is false."}
       },
       "additionalProperties": false
     },
@@ -274,16 +275,26 @@
       "additionalProperties": false
     },
     "foreignTurn": {
-      "description": "One end of a turn the agent ran on its own: running on its start, absent on its end. reason is on both ends when the agent gave one.",
+      "description": "One end of a turn the agent ran on its own: running on its start, absent on its end. reason is on both ends when the agent gave one. An end may say how the turn ended: cancelled, or err for a failed turn.",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
         "text": {"type": "string"},
         "reason": {
           "type": "string",
-          "description": "Why the agent started the turn: an open string, not an enum. Absent (\"\") is grok's interjection fallback; subagent_wake is the native session delivering a background sub-agent's result. A client reads a value it does not know as absent."
+          "description": "Why the agent started the turn: an open string, not an enum. Absent (\"\") is grok's interjection fallback; subagent_wake is the native session delivering a background sub-agent's result, job_wake one delivering background commands' results; background is claude running a cycle of its own (a background command's or a sub-agent's wake, or a steer that started a turn); compaction is claude compacting its context while idle. A client reads a value it does not know as absent."
         },
-        "running": {"type": "boolean"}
+        "running": {"type": "boolean"},
+        "cancelled": {"type": "boolean", "description": "On an end: a user cancel ended the turn. Absent is false."},
+        "err": {
+          "description": "On an end: the turn failed, and why — kind (one of the kinds in the CLI reference) and message. A failed foreign turn settles as a failed turn. Absent when it did not fail.",
+          "type": "object",
+          "properties": {
+            "kind": {"type": "string"},
+            "message": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

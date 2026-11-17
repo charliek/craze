@@ -108,6 +108,12 @@ func ClaudeProvider() Provider {
 			PlanCards:           true,
 			ParameterizedPicker: true,
 			Interject:           true,
+			// C4 (plan 052 § E3): a row per child from subagent_update, its
+			// own transcript, and its own stop where the child grants cancel.
+			// Background sub-agents stay native's presentation.
+			SubagentRows:       true,
+			SubagentTranscript: true,
+			SubagentCancel:     true,
 		},
 		dialect:             acp.DialectClaude,
 		planUpdatesAreTodos: true,

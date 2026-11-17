@@ -12,8 +12,9 @@ adapter runs your signed-in `claude`.
     `craze providers`, the picker or `--help`. Its question and plan cards,
     modes (`Shift+Tab` cycles Manual, accept edits and plan) and interjections
     work ([Cards](../reference/tui.md#cards)): as in Claude Code, `Esc` on a
-    question cancels it, aborting the tool that asked; sub-agents and plan usage arrive
-    in later releases, and it is listed then.
+    question cancels it, aborting the tool that asked. Sub-agents and
+    background work work too ([below](#background-work-and-sub-agents)); plan
+    usage arrives in a later release, and it is listed then.
 
 ## Set it up
 
@@ -80,6 +81,42 @@ is why the adapter's own report is checked too.
 
 Fast mode bills as extra usage on a Claude plan, so craze refuses `--fast`
 with claude and turns fast mode off whenever it finds it on.
+
+## Background work and sub-agents
+
+Claude Code's sub-agents (`Agent`) show as rows of their own under the status
+rows, nested when one starts another, each with its own transcript
+([Claude's sub-agents](../reference/tui.md#claude-sub-agents)). A child that
+asks for permission or a question raises its own card, labelled with the
+child; your turn ending does not close it. `Delete` on a running row stops
+that child alone.
+
+**Held turns.** When a task starts a background sub-agent, Claude keeps your
+turn open until the sub-agent and Claude's reply about it are done. So
+`craze new --wait`, and `craze send --wait --exit-after-turn`, return the
+whole job, the sub-agent's report included, not just the moment it was
+launched.
+
+**Background commands** (`run_in_background`) are different: Claude's turn
+ends as soon as the command starts, and craze does not track the command.
+It does not keep your turn, a `--wait`, or the host open. When it finishes
+while the session is still running, Claude reports on it in a turn of its
+own, which craze shows as `the agent continued on its own (background
+work)`. A host that exits — `--exit-after-turn`, an idle exit, `craze stop` —
+ends the adapter, Claude Code and any commands still running; an unattended
+session (`craze new --wait`) also turns off Claude Code's `ScheduleWakeup`,
+`Monitor` and `CronCreate`, which would never fire after the host goes.
+
+**Turns of Claude's own.** ACP v1 marks no start or end for these, so craze
+infers them ([the rules](../reference/tui.md#claude-working-on-its-own)): such
+a turn ends 2 seconds after Claude's usage report for it, or after a minute
+with no word from Claude. A message you type meanwhile is queued and sent once
+it ends.
+
+**Cancel.** `Esc` (or `craze cancel`) stops your turn, or a turn Claude is
+running on its own. It does not stop background commands, or sub-agents
+working in the background: Claude keeps them running, as Claude Code does.
+Stop a sub-agent with `Delete` on its row.
 
 ## When a start fails
 

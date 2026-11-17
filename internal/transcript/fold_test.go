@@ -1172,3 +1172,35 @@ func TestAWithdrawnAskSaysSo(t *testing.T) {
 		t.Fatalf("notes %q, want %q", notes, want)
 	}
 }
+
+// TestClaudeForeignEndingDrawsItsFailure (plan 052 § E2): claude's reasons
+// pick their notes, and a foreign turn that ended failed draws its failure as a
+// turn's error row; a cancelled one draws nothing of the fold's own (the client
+// that cancelled notes it).
+func TestClaudeForeignEndingDrawsItsFailure(t *testing.T) {
+	for _, c := range []struct{ reason, want string }{
+		{agent.ReasonBackground, NoteBackgroundTurn},
+		{agent.ReasonCompaction, NoteCompactionTurn},
+	} {
+		m := New(Options{})
+		foldAll(t, m, true,
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: c.reason, Running: true}, At: at(1)},
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: c.reason,
+				Err: &agent.TurnError{Kind: "auth", Message: "the login changed"}}, At: at(2)},
+		)
+		if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{c.want}) {
+			t.Fatalf("reason %q: notes %q", c.reason, got)
+		}
+		if got := factTexts(m.Main, "error"); !slices.Equal(got, []string{"the login changed"}) {
+			t.Fatalf("reason %q: errors %q; want the failure", c.reason, got)
+		}
+	}
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}, At: at(1)},
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Cancelled: true}, At: at(2)},
+	)
+	if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{NoteBackgroundTurn}) || len(factTexts(m.Main, "error")) != 0 {
+		t.Fatalf("a cancelled foreign turn drew %q", got)
+	}
+}

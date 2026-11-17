@@ -145,6 +145,9 @@ func (s *session) stopForIf(err error, still func() bool) {
 	}
 	s.mu.Unlock()
 	if client != nil {
+		// A turn the agent is running on its own ends with the session, as a
+		// failed turn that says why (plan 052 § E2).
+		client.FailForeign(err)
 		// The rest of the close runs off this goroutine: Close waits for the
 		// read loop, which may be the caller.
 		go func() { _ = client.Close() }()
@@ -506,18 +509,25 @@ func refusedStopReason(p Provider, stop string) error {
 	if !p.isClaude() {
 		return nil
 	}
-	var why string
-	switch stop {
-	case acp.StopRefusal:
-		why = "the model refused to continue"
-	case acp.StopMaxTokens:
-		why = "the model reached its output token limit"
-	case acp.StopMaxTurnRequests:
-		why = "the turn reached its limit of model requests"
-	default:
+	why := stoppedShortWhy(stop)
+	if why == "" {
 		return nil
 	}
 	return &stopReasonError{reason: stop, why: why}
+}
+
+// stoppedShortWhy says why a claude stop reason stopped short of its end, ""
+// for one that did not.
+func stoppedShortWhy(stop string) string {
+	switch stop {
+	case acp.StopRefusal:
+		return "the model refused to continue"
+	case acp.StopMaxTokens:
+		return "the model reached its output token limit"
+	case acp.StopMaxTurnRequests:
+		return "the turn reached its limit of model requests"
+	}
+	return ""
 }
 
 // stopReasonError is a turn that stopped short of its end (§ B8).
@@ -611,4 +621,22 @@ func (s *session) onRefusedRequest(r acp.RefusedRequest) {
 	default:
 		fmt.Fprintf(w, "craze: claude asked a question craze cannot show (%s); cancelled\n", sanitizeLine(r.Detail))
 	}
+}
+
+// claudeForeignTiming, when set, replaces the foreign-turn state machine's
+// limits for every claude session started after: tests shorten the grace and
+// the silence rule so a fake's wake ends within a test's patience.
+var claudeForeignTiming *acp.ForeignTiming
+
+// ForeignTiming is the claude foreign-turn state machine's limits
+// (acp.ForeignTiming), named here for a caller above the agent seam.
+type ForeignTiming = acp.ForeignTiming
+
+// SetClaudeForeignTimingForTest sets the foreign-turn limits every claude
+// session started from now on uses, for a test in another package, and
+// returns the restore. Never called outside tests.
+func SetClaudeForeignTimingForTest(t ForeignTiming) (restore func()) {
+	prev := claudeForeignTiming
+	claudeForeignTiming = &t
+	return func() { claudeForeignTiming = prev }
 }

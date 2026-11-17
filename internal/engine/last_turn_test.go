@@ -226,3 +226,28 @@ func TestAFailedEndingCarriesWhatTheFailureSaid(t *testing.T) {
 	}
 	r.wantLastTurn(&LastTurn{Outcome: TurnFailed, Err: "wrapped: said", Info: want, EndedAt: fakeClock, TurnID: res.Turn})
 }
+
+// TestClaudeForeignEndingsSettleByTheirBracket (plan 052 § E2): a foreign
+// turn's ending that carries an error settles failed, with the kind it said;
+// one a user cancel ended settles cancelled; one that says neither is done.
+func TestClaudeForeignEndingsSettleByTheirBracket(t *testing.T) {
+	end := func(f agent.ForeignTurnInfo) agent.Event {
+		return agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &f, At: fakeClock}
+	}
+	for _, tc := range []struct {
+		name string
+		f    agent.ForeignTurnInfo
+		want LastTurn
+	}{
+		{"done", agent.ForeignTurnInfo{ID: "claude-1"}, LastTurn{Outcome: TurnDone, TurnID: "claude-1"}},
+		{"cancelled", agent.ForeignTurnInfo{ID: "claude-2", Cancelled: true}, LastTurn{Outcome: TurnCancelled, TurnID: "claude-2"}},
+		{"failed", agent.ForeignTurnInfo{ID: "claude-3", Err: &agent.TurnError{Kind: errkind.Auth, Message: "the login changed"}},
+			LastTurn{Outcome: TurnFailed, TurnID: "claude-3", Err: "the login changed", Info: errkind.New(errkind.Auth)}},
+	} {
+		starts, got := turnEnding(end(tc.f))
+		tc.want.EndedAt = fakeClock
+		if starts || got == nil || *got != tc.want {
+			t.Fatalf("%s: %+v; want %+v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -89,7 +89,7 @@ func (c *Client) requestSessionUnknown(params json.RawMessage) string {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.sessionID == "" || (sid != c.sessionID && !c.isChildLocked(sid)) {
+	if c.sessionID == "" || (sid != c.sessionID && !c.kids.has(sid)) {
 		return "the request is about a session craze does not route"
 	}
 	return ""
@@ -887,6 +887,11 @@ func (c *Client) steer(ctx context.Context, sid, text, id string) error {
 			return fmt.Errorf("%s: %w", MethodClaudeSteering, err)
 		}
 		outcome = r.Outcome
+		if outcome == steerStartedNewTurn {
+			// The adapter runs the text as a turn of its own: a foreign
+			// turn from here, before anything of it is read (§ E1).
+			c.steerStartedTurn()
+		}
 		if outcome == steerInjected || outcome == steerStartedNewTurn {
 			c.mu.Lock()
 			h := c.interjectHandler

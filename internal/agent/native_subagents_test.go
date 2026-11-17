@@ -1377,14 +1377,13 @@ func TestNativeCancelSubagent(t *testing.T) {
 	}
 }
 
-// TestSubagentCancelIsNativeOnly (§3.10): the per-child stop is the native
-// session's alone. The ACP session does not implement SubagentCanceller — the
-// engine answers ErrUnsupported for it — and neither grok nor cursor
-// advertises SubagentCancel, so the TUI never offers the key there.
+// TestSubagentCancelIsNativeOnly (§3.10, plan 052 § E3): the per-child stop is
+// native's and claude's. The ACP session implements SubagentCanceller for
+// claude, whose children grant cancel; grok and cursor neither advertise
+// SubagentCancel nor stop a child — the session answers ErrUnsupported for
+// them, the answer the engine gives a session without the verb — so the TUI
+// never offers the key there.
 func TestSubagentCancelIsNativeOnly(t *testing.T) {
-	if _, ok := any((*session)(nil)).(SubagentCanceller); ok {
-		t.Fatal("the ACP session implements SubagentCanceller; no ACP agent has a per-child stop")
-	}
 	if _, ok := any((*nativeSession)(nil)).(SubagentCanceller); !ok {
 		t.Fatal("the native session does not implement SubagentCanceller")
 	}
@@ -1392,8 +1391,16 @@ func TestSubagentCancelIsNativeOnly(t *testing.T) {
 		if p.Capabilities().SubagentCancel {
 			t.Fatalf("%s advertises SubagentCancel", p.Name())
 		}
+		s := newSession(Options{Provider: &p})
+		s.subagents = map[string]*subagentRec{"sub-1": {info: SubagentInfo{ID: "sub-1", Status: SubagentRunning}}}
+		if err := s.CancelSubagent("sub-1"); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("%s's session stopped a child: %v; want ErrUnsupported", p.Name(), err)
+		}
 	}
-	if !NativeProvider().Capabilities().SubagentCancel {
-		t.Fatal("native does not advertise SubagentCancel")
+	if !NativeProvider().Capabilities().SubagentCancel || !ClaudeProvider().Capabilities().SubagentCancel {
+		t.Fatal("native or claude does not advertise SubagentCancel")
+	}
+	if ClaudeProvider().Capabilities().SubagentBackground {
+		t.Fatal("claude advertises SubagentBackground; background sub-agents stay native's presentation")
 	}
 }

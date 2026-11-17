@@ -374,7 +374,7 @@ own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
 
 | field | |
 |---|---|
-| `outcome` | `done` (ran to its end — and every foreign turn, whose closing bracket carries no outcome), `failed` (its ending carried an error), or `cancelled` (a cancel, a prompt withdrawn before it was sent, or the session's close) |
+| `outcome` | `done` (ran to its end — and every foreign turn whose closing bracket says neither `cancelled` nor `err`), `failed` (its ending carried an error, a foreign turn's `err` included), or `cancelled` (a cancel — a foreign turn's `cancelled` included —, a prompt withdrawn before it was sent, or the session's close) |
 | `err` | a failed turn's error text; absent otherwise |
 | `stopReason` | the ending's own stop reason; absent for a foreign turn, a failure that has none, and an older host |
 | `cause` | on a stop reason of `closing`, [what began the close](#what-began-a-close); absent otherwise |
@@ -597,7 +597,7 @@ endpoint-level reads.
 | `session.queue.clear` | ✓ | — | `removed[]` | every row removed, in queue order |
 | `session.set` | ✓ | `setting{kind, id?, value, forModel?}` | `value`, `rev` | `rev` is the seq of the state delta that carried the change, `0` if it could not be learned |
 | `session.setTitle` | ✓ | `title` | `{}` | the delta, not the reply, is how a client learns the title took |
-| `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
+| `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event. A row whose `noCancel` is `true` (a claude child that grants no cancel) answers `unsupported` |
 | `session.stop` | ✓ | `cause?` | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
 | `session.models.refresh` | | `nativeDir?` | `status`, `revision`, `sameDir?` | served where the session capability `modelsRefresh` is `true` (a native session): the session takes up the models funded since it opened — see [`session.models.refresh`](#sessionmodelsrefresh); idempotent, so not mutating; a session whose `modelsRefresh` is absent (an ACP session) is refused `unsupported`, reason `models_refresh_unsupported` |
 | `session.aside` | | `asideId`, `question`, `prior?[]` | `text`, `model?`, `usage?` | served where the session capability `aside` is `true` (a native or grok session): a side question answered from the session's context, its answer streamed as [`aside`](#aside) notifications to this connection and whole in the reply, nothing of it journaled or in the session's history — see [`session.aside`](#sessionaside); not mutating; a session whose `aside` is absent (cursor) is refused `unsupported`, reason `aside_unsupported` |
@@ -1805,7 +1805,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | wire name | meaning |
 |---|---|
 | `interject` | the provider can fold text into a running turn without cancelling it |
-| `subagentCancel` | `session.subagent.cancel` is served |
+| `subagentCancel` | `session.subagent.cancel` is served — for every running row but one whose `noCancel` is `true` (a claude child that grants no cancel; the `subagent` row's other members are in the [event schema](protocol/schema/event.json)) |
 | `subagentBackground` | the provider can run a sub-agent's turn in the background (a native "wake") |
 | `modes` | the provider has switchable modes |
 | `effort` | the provider has an effort/thinking-level setting |
@@ -1990,28 +1990,40 @@ arrives next.
 
 `foreignTurn` (on `sessions.list` rows, `session.state`, and inside a
 snapshot) says the agent is running a turn of its own that craze did not
-start: grok's interjection fallback, or a native wake (a background
-sub-agent's or shell job's result). While one runs, the engine's own `activity` reads `idle` — a foreign
+start: grok's interjection fallback, a native wake (a background
+sub-agent's or shell job's result), or claude working on its own (a
+background command's or child's wake, idle compaction — inferred, since ACP v1
+marks none of them; [tui.md](tui.md#claude-working-on-its-own) has the rules). While one runs, the engine's own `activity` reads `idle` — a foreign
 turn is not itself an activity, it overlays whichever one is current.
 
 On the event stream, a foreign turn is bracketed by two `foreign_turn` events
-whose `foreignTurn` member is `{id, text?, reason?, running?}` — `running: true`
-on the start, absent on the end:
+whose `foreignTurn` member is `{id, text?, reason?, running?, cancelled?, err?}` —
+`running: true` on the start, absent on the end:
 
 ```json
 {"type":"foreign_turn","foreignTurn":{"id":"wake-1","text":"sub-agent result","reason":"subagent_wake","running":true},"at":"..."}
 {"type":"foreign_turn","foreignTurn":{"id":"wake-1","reason":"subagent_wake"},"at":"..."}
 ```
 
-`reason` is an **open string** — not a closed enum — with three values known
-today: `""` (grok's fallback), `subagent_wake` (a native child's wake) and
-`job_wake` (a native wake delivering background shell jobs' results). An
-unknown value renders with the default wording; a client must not fail on
-one it has never seen.
+`reason` is an **open string** — not a closed enum — with five values known
+today: `""` (grok's fallback), `subagent_wake` (a native child's wake),
+`job_wake` (a native wake delivering background shell jobs' results),
+`background` (claude running a model call of its own: a background command's
+or a child's wake, or a steer Claude took as a turn of its own) and
+`compaction` (claude compacting its context while idle). An unknown value
+renders with the default wording; a client must not fail on one it has never
+seen.
 
-A foreign turn has **no `EventDone` and no `EventError`**: nothing about how
-it ended is on the wire beyond the end bracket (no `running`). A client learns only that it
-is over, never its outcome. The end bracket (`foreignTurn` with no `running`) always precedes the
+A foreign turn has **no `EventDone` and no `EventError`**: how it ended is on
+the end bracket alone. Its two optional members say it when there is
+something to say, and each is absent at its zero value:
+
+| member | |
+|---|---|
+| `cancelled` | `true`: a user cancel ended it (`session.cancel`, `Esc`). [`lastTurn`](#the-last-turn) reads `outcome: cancelled` |
+| `err` | `{kind, message}`: it failed — `kind` one of the [failure kinds](cli.md#failure-kinds), `message` the reason (a claude session that stopped for a reason of its own while the turn ran). `lastTurn` reads `outcome: failed` with that `err` and `kind`, and a `craze wait` on the turn reports it failed |
+
+An end with neither ran to its end (`done`). The end bracket (`foreignTurn` with no `running`) always precedes the
 next turn's own output on the stream — an agent's own next turn (a queued
 follow-up draining, say) never races ahead of the foreign turn's ending.
 

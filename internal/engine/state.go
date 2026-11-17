@@ -147,7 +147,8 @@ type TurnOutcome string
 
 const (
 	// TurnDone is a turn that ran to its end with no error and no cancel —
-	// and every foreign turn: its closing bracket carries no outcome.
+	// and every foreign turn whose closing bracket says neither (a claude
+	// foreign turn's may: ForeignTurnInfo.Err, ForeignTurnInfo.Cancelled).
 	TurnDone TurnOutcome = "done"
 	// TurnFailed is a turn whose ending carried an error (TurnInfo.Err): the
 	// agent's failure, a refusal the engine turned into the ending, and the
@@ -204,7 +205,16 @@ func turnEnding(ev agent.Event) (starts bool, ended *LastTurn) {
 		if ft.Running {
 			return true, nil
 		}
-		return false, &LastTurn{Outcome: TurnDone, EndedAt: at, TurnID: ft.ID}
+		lt := &LastTurn{Outcome: TurnDone, EndedAt: at, TurnID: ft.ID}
+		switch {
+		case ft.Err != nil:
+			// A foreign turn that failed (plan 052 § E2): a failed turn,
+			// with the kind it said of itself.
+			lt.Outcome, lt.Err, lt.Info = TurnFailed, ft.Err.Error(), ft.Err.ErrorInfo()
+		case ft.Cancelled:
+			lt.Outcome = TurnCancelled
+		}
+		return false, lt
 	}
 	return false, nil
 }

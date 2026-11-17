@@ -26,6 +26,10 @@ type rpcResp struct {
 type pendingCall struct {
 	ch      chan rpcResp
 	onReply func(json.RawMessage) error
+	// onAnswer, when set, runs on the read goroutine for whatever reply
+	// arrives — a result or an error — before onReply and before the answer is
+	// sent (callAnswered). It never runs for a request failAll answers.
+	onAnswer func()
 }
 
 type Conn struct {
@@ -110,10 +114,12 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 // not block: a hook that blocked would hold this call's reply wait with it.
 // It publishes, and that is all.
 func (c *Conn) callSent(ctx context.Context, method string, params, result any, sent func()) error {
-	raw, err := c.callRaw(ctx, method, params, sent, nil)
-	if err != nil {
-		return err
-	}
+	return c.callAnswered(ctx, method, params, result, sent, nil)
+}
+
+// decodeResult decodes a reply's result into result; an absent or null
+// result, or a nil result to decode into, leaves it as it is.
+func decodeResult(raw json.RawMessage, result any) error {
 	if result == nil || len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
@@ -137,10 +143,26 @@ func (c *Conn) callSent(ctx context.Context, method string, params, result any, 
 // context's error and never with the connection's close — because what the
 // hook did is then a fact its caller has to be told about (callRaw's wait).
 func (c *Conn) callReply(ctx context.Context, method string, params any, onReply func(json.RawMessage) error) (json.RawMessage, error) {
-	return c.callRaw(ctx, method, params, nil, onReply)
+	return c.callRaw(ctx, method, params, nil, onReply, nil)
 }
 
-func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func(), onReply func(json.RawMessage) error) (json.RawMessage, error) {
+// callAnswered is callSent with a hook for the reply itself, whichever it is:
+// onAnswer runs on the read goroutine, inside deliver, for a result and for an
+// error reply alike, before the answer is handed to this caller — so what it
+// changes is ordered against every notification by where the reply sits on the
+// wire (plan 052 § E1: a claude prompt's turn ends when its reply is read, not
+// when the caller is next scheduled). It does not run for a request the
+// connection's close answers, nor for one this call gave up on before the reply
+// came; it must not block and must do no I/O on this connection.
+func (c *Conn) callAnswered(ctx context.Context, method string, params, result any, sent, onAnswer func()) error {
+	raw, err := c.callRaw(ctx, method, params, sent, nil, onAnswer)
+	if err != nil {
+		return err
+	}
+	return decodeResult(raw, result)
+}
+
+func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func(), onReply func(json.RawMessage) error, onAnswer func()) (json.RawMessage, error) {
 	paramRaw, err := marshalRaw(params)
 	if err != nil {
 		return nil, err
@@ -157,7 +179,7 @@ func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func
 		c.mu.Unlock()
 		return nil, ErrClosed
 	}
-	c.pending[key] = &pendingCall{ch: ch, onReply: onReply}
+	c.pending[key] = &pendingCall{ch: ch, onReply: onReply, onAnswer: onAnswer}
 	c.mu.Unlock()
 
 	msg := &Message{JSONRPC: jsonrpcVersion, ID: id, Method: method, Params: paramRaw}
@@ -324,6 +346,9 @@ func (c *Conn) deliver(msg *Message) {
 	c.mu.Unlock()
 	if !ok {
 		return
+	}
+	if p.onAnswer != nil {
+		p.onAnswer()
 	}
 	if msg.Error != nil {
 		p.ch <- rpcResp{err: msg.Error}

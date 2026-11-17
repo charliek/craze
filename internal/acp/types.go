@@ -139,6 +139,11 @@ type ClientCapabilities struct {
 	// elicitation/create form only once the client says it renders one. nil
 	// for cursor and grok, whose initialize bytes stay as they were.
 	Elicitation *ElicitationCapabilities `json:"elicitation,omitempty"`
+	// Subagents is the RFD sub-agent capability (plan 052 § B2, § E3): an
+	// empty object, declared by the claude dialect alone, for every claude
+	// session. With it the adapter announces each child with subagent_update
+	// on its immediate parent and streams the child on its own session id.
+	Subagents *struct{} `json:"subagents,omitempty"`
 }
 
 // ElicitationCapabilities is clientCapabilities.elicitation: form only, an
@@ -524,6 +529,18 @@ const (
 	SubagentSpawned  = "subagent_spawned"
 	SubagentProgress = "subagent_progress"
 	SubagentFinished = "subagent_finished"
+	// SubagentUpdate is claude's RFD subagent_update (plan 052 § E3), carried
+	// on session/update and read into the same notification: its State,
+	// StopReason, Title and Cancel say what the grok kinds say by kind.
+	SubagentUpdate = "subagent_update"
+)
+
+// The claude child states (subagent_update.state.state).
+const (
+	ChildRunning        = "running"
+	ChildRequiresAction = "requires_action"
+	ChildIdle           = "idle"
+	ChildUnknown        = "unknown"
 )
 
 // SubagentNotification is one parsed subagent lifecycle event. SessionID is
@@ -551,6 +568,21 @@ type SubagentNotification struct {
 	TokensUsed      int
 	ToolsUsed       []string
 	WillWake        bool
+
+	// claude's subagent_update (Kind SubagentUpdate) alone. State is
+	// state.state ("" when the update carries none: a label, or a cwd);
+	// StopReason is an idle state's stopReason, and Error its error.message.
+	// Title is the parent's label for the child. Cancel is the child's
+	// capabilities as the update states them: nil when it says nothing, else
+	// whether capabilities.cancel is granted (null, for an unknown child, is
+	// false). Evicted marks a notification the client made itself: the child
+	// was dropped from the registry (its parent's unknown or eviction, or the
+	// cap), so nothing more of it will be routed.
+	State      string
+	StopReason string
+	Title      string
+	Cancel     *bool
+	Evicted    bool
 }
 
 type AvailableCommand struct {
@@ -743,6 +775,10 @@ type Arrival struct {
 	// registered, so the request belongs to that turn. False means it arrived
 	// between craze's turns, or during a turn the agent started itself.
 	InTurn bool
+	// Child is the claude child session the request is about, "" for the
+	// root's. Such a request has InTurn false: it belongs to no turn of the
+	// root's, so a root turn's end never takes its card away (plan 052 § E3).
+	Child string
 	// Call is this request's own lifetime, as a context: it ends the moment
 	// something other than this handler answers the request — a Cancel, a
 	// CancelHeld, a Close, the stale-turn reply — and again when the handler
@@ -927,6 +963,17 @@ type ForeignTurn struct {
 	ID      string
 	Text    string
 	Running bool
+	// Reason is why the agent started it: "" for grok's interjection
+	// fallback; ForeignReasonBackground or ForeignReasonCompaction for a claude
+	// turn the state machine opened (foreign.go). Both brackets carry it.
+	Reason string
+	// The ending's, claude's alone. Cancelled says a user cancel ended it.
+	// Silent says the silence rule ended it, the agent having said nothing for
+	// the limit. Err is what failed it: the session stopping for a reason of
+	// its own while the turn ran (Client.FailForeign).
+	Cancelled bool
+	Silent    bool
+	Err       error
 }
 
 // IsInterjectFallback reports whether a promptId is one grok minted for a

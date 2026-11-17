@@ -784,6 +784,10 @@ type SubagentInfo struct {
 	ToolsUsed    []string
 	Transcript   bool
 	Background   bool
+	// NoCancel says this child cannot be stopped on its own even though the
+	// session has the verb (Capabilities.SubagentCancel): a claude child whose
+	// capabilities grant no cancel (plan 052 § E3), so its row offers no stop.
+	NoCancel bool
 }
 
 // Todo is one entry of the cursor todo list. Status is normalised to
@@ -915,7 +919,50 @@ type ForeignTurnInfo struct {
 	Text    string
 	Reason  string
 	Running bool
+	// The ending's (Running false), each absent at its zero value. Cancelled
+	// says a user cancel ended it. Err says it failed (plan 052 § E2): the
+	// engine settles it as a failed turn, and a waiter reports the failure.
+	Cancelled bool
+	Err       *TurnError
 }
+
+// Clone is f with its own copy of Err, so a holder of one can change nothing
+// of another's.
+func (f ForeignTurnInfo) Clone() *ForeignTurnInfo {
+	if f.Err != nil {
+		e := *f.Err
+		f.Err = &e
+	}
+	return &f
+}
+
+// TurnError is a failure a turn's bracket carries as plain data: what kind of
+// failure it was, in the CLI reference's words (errkind), and its message. It
+// travels in the event codec as {kind, message}.
+type TurnError struct {
+	Kind    errkind.Kind `json:"kind,omitempty"`
+	Message string       `json:"message,omitempty"`
+}
+
+// Error is the failure's message, or a plain one when it carries none.
+func (e *TurnError) Error() string {
+	if e.Message == "" {
+		return "the agent's turn failed"
+	}
+	return e.Message
+}
+
+// ErrorInfo is its kind, with the kind's default retryable.
+func (e *TurnError) ErrorInfo() errkind.Info { return errkind.New(e.Kind) }
+
+// ReasonBackground is ForeignTurnInfo.Reason for a claude turn the agent ran
+// on its own: a background command's or a sub-agent's wake, or a steer that
+// started a turn (plan 052 § E1). ReasonCompaction is idle compaction, a model
+// call the agent makes while nothing runs.
+const (
+	ReasonBackground = acp.ForeignReasonBackground
+	ReasonCompaction = acp.ForeignReasonCompaction
+)
 
 // ReasonSubagentWake is ForeignTurnInfo.Reason for the native session's wake:
 // a turn of its own, bracketed as foreign, that delivers a finished background

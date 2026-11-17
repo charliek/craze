@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -314,11 +315,20 @@ func (s *server) onClaudeSteer(msg *acp.Message) {
 	s.mu.Lock()
 	steer := s.claude.steer
 	s.claude.steer = nil
+	race := s.claude.race
+	s.claude.race = nil
 	s.mu.Unlock()
 	switch {
+	case race != nil:
+		// The turn ends just ahead of the steer, which the adapter then runs
+		// as a turn of its own (the stray startedNewTurn of plan 052 § B7).
+		s.reply(race, map[string]any{"stopReason": acp.StopEndTurn})
+		s.claudeStartedTurn(msg, text)
 	case steer != nil:
 		s.reply(msg.ID, map[string]any{"outcome": "injected"})
 		steer <- text
+	case os.Getenv("CRAZE_FAKE_CLAUDE_STEER_STARTS") == "1":
+		s.claudeStartedTurn(msg, text)
 	case p.Meta.Steering.IdleBehavior == "promptRequired":
 		s.reply(msg.ID, map[string]any{"outcome": "promptRequired", "reason": "noRunningTurn"})
 	default:

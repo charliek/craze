@@ -722,9 +722,14 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetInterjectionHandler(func(n acp.InterjectionNotification) {
 		s.onInterjection(interjectionText{Text: n.Text})
 	})
-	client.SetForeignTurnHandler(func(f acp.ForeignTurn) {
-		s.onForeignTurn(ForeignTurnInfo{ID: f.ID, Text: f.Text, Running: f.Running})
-	})
+	client.SetForeignTurnHandler(s.onACPForeignTurn)
+	if p.isClaude() {
+		// The foreign-turn state machine's limits (plan 052 § E1): the
+		// defaults, unless a test shortened them.
+		if claudeForeignTiming != nil {
+			client.SetForeignTiming(*claudeForeignTiming)
+		}
+	}
 	client.SetAuthStatusHandler(s.onAuthStatus)
 	// The last check before a prompt's bytes go out (review C2b 2): held
 	// while claude's fast mode is being reset, refused once the session has
@@ -2625,6 +2630,9 @@ func (s *session) teardown() {
 // is an ordering nicety lost, never a reason to change the decision.
 func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.PermissionDecision {
 	ask := AskRequest{Kind: AskPermission, Body: AskBody{Permission: permissionBody(req)}}
+	if label := s.childLabel(a); label != "" {
+		ask.Body.Permission.Tool = strings.TrimSpace(ask.Body.Permission.Tool + " · " + label)
+	}
 	token, live := s.askToken(a)
 	if EffectiveApproval(s.opts).Permission == ApprovalAllow {
 		// Force. An option that allows it, or — when the request offers none —
@@ -2657,6 +2665,9 @@ func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.Per
 // with each question's first option and reports what it sent.
 func (s *session) onAskQuestion(a acp.Arrival, req acp.AskQuestionRequest) acp.AskDecision {
 	ask := AskRequest{Kind: AskQuestion, Body: AskBody{Question: questionBody(req)}}
+	if label := s.childLabel(a); label != "" {
+		ask.Body.Question.Title = strings.TrimSpace(label + " · " + ask.Body.Question.Title)
+	}
 	token, live := s.askToken(a)
 	if EffectiveApproval(s.opts).Question == ApprovalFirstOption {
 		rec := s.automaticAsk(token, ask, AskAnswer{Answers: acp.AskAutoAnswers(req)})
@@ -3211,7 +3222,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		return
 	}
 	if n.Child != "" {
-		s.onChildUpdate(n.Child, n.ToolName, u)
+		s.onChildUpdate(n.Child, n.ToolName, u, n.Update)
 		return
 	}
 	if s.replaying.Load() {
@@ -3231,6 +3242,9 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.flushReplayUser()
 	}
 	switch u.SessionUpdate {
+	case updateSessionMessage:
+		// claude: the root's copy of a prompt it sent a child (§ E3).
+		s.claudeSessionMessage(n.Update)
 	case acp.UpdateAgentMessage:
 		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
 	case acp.UpdateAgentThought:

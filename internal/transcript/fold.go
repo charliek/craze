@@ -449,6 +449,12 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	// A foreign turn has no EventDone of its own: its end is its turn's end,
 	// and a compaction a native wake ran cannot outlive it (P34).
 	m.Main.clearCompaction()
+	// An ending that failed draws its failure as a turn's does (plan 052 §
+	// E2). A cancelled one draws nothing here: the client whose Esc stopped it
+	// notes it itself, as for a native wake (the TUI's applyForeignCancelled).
+	if f := ev.ForeignTurn; f != nil && f.Err != nil {
+		m.Main.addError(f.Err.Error(), at)
+	}
 }
 
 // foldReplay is a session/load replay bracket. Its end closes the last

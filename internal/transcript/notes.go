@@ -28,6 +28,13 @@ const (
 	// NoteJobWake heads the stream of a native wake that delivers background
 	// bash jobs' results alone (plan 033 §3.8, agent.ReasonJobWake).
 	NoteJobWake = "background command finished — the agent continues"
+	// NoteBackgroundTurn heads the stream of a turn claude ran on its own: a
+	// background command's or a sub-agent's wake, or a steer that started a
+	// turn (agent.ReasonBackground, plan 052 § E1).
+	NoteBackgroundTurn = "the agent continued on its own (background work)"
+	// NoteCompactionTurn heads the stream of claude compacting its context
+	// while idle (agent.ReasonCompaction).
+	NoteCompactionTurn = "the agent is compacting its context on its own"
 	// NoteRestored closes a session/load replay: everything above it is
 	// history the agent handed back, everything below is this session.
 	NoteRestored = "restored"
@@ -130,8 +137,22 @@ func noteForForeignTurn(reason string) string {
 		return NoteSubagentWake
 	case agent.ReasonJobWake:
 		return NoteJobWake
+	case agent.ReasonBackground:
+		return NoteBackgroundTurn
+	case agent.ReasonCompaction:
+		return NoteCompactionTurn
 	}
 	return NoteForeignTurn
+}
+
+// IsForeignTurnNote says text is a note a foreign turn's start draws
+// (noteForForeignTurn), whatever its reason.
+func IsForeignTurnNote(text string) bool {
+	switch text {
+	case NoteForeignTurn, NoteSubagentWake, NoteJobWake, NoteBackgroundTurn, NoteCompactionTurn:
+		return true
+	}
+	return false
 }
 
 // The outcome notes an answered ask's ending draws (foldAsk, plan 032 §3.2

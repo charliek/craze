@@ -517,6 +517,7 @@ type wireSubagent struct {
 	ToolsUsed    []string  `json:"toolsUsed,omitempty"`
 	Transcript   bool      `json:"transcript,omitempty"`
 	Background   bool      `json:"background,omitempty"`
+	NoCancel     bool      `json:"noCancel,omitempty"`
 }
 
 type wireQueued struct {
@@ -545,10 +546,12 @@ type wirePluginCommand struct {
 }
 
 type wireForeignTurn struct {
-	ID      string `json:"id,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	Running bool   `json:"running,omitempty"`
+	ID        string     `json:"id,omitempty"`
+	Text      string     `json:"text,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
+	Running   bool       `json:"running,omitempty"`
+	Cancelled bool       `json:"cancelled,omitempty"`
+	Err       *TurnError `json:"err,omitempty"`
 }
 
 // wireTurn is TurnInfo, field for field in the same order, so it converts by
@@ -1332,6 +1335,7 @@ func toWireSubagent(a *SubagentInfo) *wireSubagent {
 		ToolsUsed:    a.ToolsUsed,
 		Transcript:   a.Transcript,
 		Background:   a.Background,
+		NoCancel:     a.NoCancel,
 	}
 }
 
@@ -1558,6 +1562,7 @@ func (w *wireSubagent) subagent() *SubagentInfo {
 		ToolsUsed:    nilIfEmpty(w.ToolsUsed),
 		Transcript:   w.Transcript,
 		Background:   w.Background,
+		NoCancel:     w.NoCancel,
 	}
 }
 

@@ -95,6 +95,30 @@ func (s *session) onInterjection(n interjectionText) {
 // is the only file that names the acp type.
 type interjectionText struct{ Text string }
 
+// onACPForeignTurn is the client's foreign-turn bracket, as the session
+// records it: claude's reason, a cancelled ending, and a failed one with its
+// kind (plan 052 § E1, § E2). A turn the silence rule ended leaves a note.
+func (s *session) onACPForeignTurn(f acp.ForeignTurn) {
+	info := ForeignTurnInfo{ID: f.ID, Text: f.Text, Reason: f.Reason, Running: f.Running, Cancelled: f.Cancelled}
+	if f.Err != nil {
+		info.Err = &TurnError{Kind: ErrorInfo(f.Err).Kind, Message: f.Err.Error()}
+	}
+	if f.Silent {
+		s.noteForeignSilence(f)
+	}
+	s.onForeignTurn(info)
+}
+
+// noteForeignSilence is the transcript note a foreign turn the silence rule
+// ended leaves (§ E1 (b)): the journal's diagnostic and the diagnostic lane's
+// line, as C2's and C3's notes are.
+func (s *session) noteForeignSilence(f acp.ForeignTurn) {
+	s.log.Note(journal.DiagNote{Kind: "claude_foreign_silence", Fields: map[string]any{"turn": f.ID, "reason": f.Reason}})
+	if w := diagWriter(s.opts); w != nil {
+		fmt.Fprintf(w, "craze: claude went quiet during a turn of its own (%s); treating it as over\n", sanitizeLine(f.ID))
+	}
+}
+
 // onForeignTurn records a turn the agent started on its own and tells the
 // callers, so the drain that was about to run waits and re-runs at its end.
 func (s *session) onForeignTurn(info ForeignTurnInfo) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -41,14 +40,7 @@ func (r *rowRecorder) last() (sessions.Row, bool) {
 // session/new answered with (opus) on its index row.
 func TestClaudeRowRecordsTheModelAfterAStartRetry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	dir := t.TempDir()
-	claude := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\ncase \"$*\" in\n" +
-		"  *'auth status'*) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}' ;;\n" +
-		"  *--version*) echo '2.1.326 (Claude Code)' ;;\nesac\n"
-	if err := os.WriteFile(claude, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	claude := fakeClaudeCLI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
 	defer cancel()
 	p := agent.ClaudeProvider()

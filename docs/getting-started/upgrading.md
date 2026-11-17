@@ -136,6 +136,12 @@ What changes for everyone else:
 - **A question can be answered `cancel`**, and its ending carries
   `cancelled`; claude's adds `by: withdrawn`, a `required` question item and a
   `done`'s `keptPlanning` — all additive.
+- **A foreign turn's end can say how it ended**: `foreignTurn.cancelled` and
+  `foreignTurn.err` (`{kind, message}`), with two new `reason` values,
+  `background` and `compaction` ([The foreign
+  turn](../reference/protocol.md#the-foreign-turn)); a sub-agent row can carry
+  `noCancel`. All additive, and only claude sets them: a grok or native
+  foreign turn's brackets, and `lastTurn` for them, are unchanged.
 
 ### The gx provider is gone
 

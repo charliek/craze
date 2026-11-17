@@ -362,7 +362,7 @@ func (m Model) subagentBanner() string {
 		if len(m.visibleAgents()) > 1 {
 			tail = " · tab next agent"
 		}
-		tail += m.stopBannerHint()
+		tail += m.stopBannerHint(info)
 	} else {
 		// A finished sub-agent gets the Warn banner on both providers; the
 		// receipt note stays so the cursor view still says what it holds.

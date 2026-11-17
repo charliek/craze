@@ -16,7 +16,13 @@ Ported or adapted into craze's Claude provider and ACP client:
   (apps/server/src/provider/Drivers/ClaudeHome.ts;
   internal/agent/provider_claude.go);
 - closing the tool calls a turn left open when its prompt fails or its agent
-  exits (commits 47f90ee2e9 and 623047ccfd; internal/agent/live.go).
+  exits (commits 47f90ee2e9 and 623047ccfd; internal/agent/live.go);
+- the mapping of a Claude sub-agent's subagent_update states to a row's
+  status, and session_message's id as the launching call's
+  (packages/provider-acp-registry/src/server/claudeAcp.ts;
+  internal/agent/claude_subagents.go);
+- the ten-minute limit on a turn that sends nothing with a tool call open
+  (packages/provider-core/src/server/failure.ts; internal/acp/foreign.go).
 
 MIT License
 

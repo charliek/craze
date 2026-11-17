@@ -664,6 +664,11 @@ func (s *server) onNotify(msg *acp.Message) {
 	if msg.Method != acp.MethodSessionCancel {
 		return
 	}
+	if s.claudeCancelChild(msg.Params) {
+		// A claude child's own cancel stops that child and nothing else.
+		s.noteOrder(orderCancel, "")
+		return
+	}
 	// Still on the read loop, alongside session/prompt, so the record is the
 	// order craze put the two on the wire and not the order two handler
 	// goroutines happened to wake in.

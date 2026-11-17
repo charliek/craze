@@ -282,7 +282,7 @@ func TestInitializeAndSessionParamsBytes(t *testing.T) {
 		msg := p.readWithin(t, 3*time.Second, "initialize")
 		want := wantInit
 		if d == DialectClaude {
-			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}}}}`
+			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}},"subagents":{}}}`
 		}
 		if string(msg.Params) != want {
 			t.Fatalf("%s initialize\n got %s\nwant %s", d, msg.Params, want)
@@ -318,25 +318,14 @@ func TestInitializeAndSessionParamsBytes(t *testing.T) {
 // claude-agent-acp 0.107.3 frame (L0's capture, redacted: the session id, the
 // paths, the account's email and organisation), in or out of the client.
 type claudeFrame struct {
-	Dir string  `json:"dir"`
-	Msg Message `json:"msg"`
+	Step string  `json:"step"`
+	Dir  string  `json:"dir"`
+	Msg  Message `json:"msg"`
 }
 
 func claudeFrames(t *testing.T) []claudeFrame {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "claude-basic", "frames.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []claudeFrame
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		var f claudeFrame
-		if err := json.Unmarshal([]byte(line), &f); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, f)
-	}
-	return out
+	return fixtureFrames(t, "claude-basic")
 }
 
 // TestClaudeBasicFrames drives the claude dialect through a real session's

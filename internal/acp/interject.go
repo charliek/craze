@@ -33,7 +33,14 @@ func (c *Client) SetForeignTurnHandler(h func(ForeignTurn)) {
 func (c *Client) ForeignTurnRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.foreignID != ""
+	return c.foreignRunningLocked()
+}
+
+// foreignRunningLocked is whether the agent is in a turn of its own: grok's
+// broadcast one, or claude's inferred one (only claude's machine ever goes
+// foreign).
+func (c *Client) foreignRunningLocked() bool {
+	return c.foreignID != "" || c.cf.phase == phaseForeign
 }
 
 // PromptID is the promptId the agent gave the prompt in flight, or "" when it

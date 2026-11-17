@@ -1207,8 +1207,7 @@ func TestLoadSessionResetsSessionState(t *testing.T) {
 
 	client.mu.Lock()
 	client.sessionID = "s-old"
-	client.children = map[string]struct{}{"child-1": {}}
-	client.childOrder = []string{"child-1"}
+	client.kids.childStarted(childPolicyGrok, "s-old", "child-1")
 	client.foreignID = "prompt-9"
 	client.foreignText = "a turn of the agent's own"
 	client.foreignSeen = true
@@ -1229,8 +1228,8 @@ func TestLoadSessionResetsSessionState(t *testing.T) {
 	if client.sessionID != "s-load" {
 		t.Fatalf("sessionID %q", client.sessionID)
 	}
-	if len(client.children) != 0 || len(client.childOrder) != 0 {
-		t.Fatalf("child allowlist survived the load: %v %v", client.children, client.childOrder)
+	if len(client.kids.entries) != 0 || len(client.kids.order) != 0 {
+		t.Fatalf("child allowlist survived the load: %v %v", client.kids.entries, client.kids.order)
 	}
 	if client.foreignID != "" || client.foreignText != "" || client.foreignSeen {
 		t.Fatalf("foreign-turn state survived the load: %q %q %v", client.foreignID, client.foreignText, client.foreignSeen)

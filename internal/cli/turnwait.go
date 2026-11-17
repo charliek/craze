@@ -1500,10 +1500,7 @@ func turnBoundary(e transcript.Entry) bool {
 	case transcript.KindUser:
 		return !e.Interject
 	case transcript.KindNote:
-		switch e.Text {
-		case transcript.NoteForeignTurn, transcript.NoteSubagentWake, transcript.NoteJobWake:
-			return true
-		}
+		return transcript.IsForeignTurnNote(e.Text)
 	}
 	return false
 }
@@ -1604,10 +1601,10 @@ func (w *turnWaiter) runningEvent(ctx context.Context, ev agent.Event) {
 				w.turnStarted(ev)
 				return
 			}
-			// A foreign turn's ending is always done: its bracket carries no
-			// outcome (protocol.TurnDone).
+			// A foreign turn's ending is done unless its bracket says it
+			// failed or was cancelled (plan 052 § E2).
 			w.acc.end(ev.At)
-			w.finish(w.newResult(statusCompleted))
+			w.foreignEnded(ft)
 			return
 		}
 	} else if tu := ev.Turn; ev.Type == agent.EventTurn && tu != nil && tu.ID == w.target.id {
@@ -2431,4 +2428,22 @@ func (w *turnWaiter) hostChanged() {
 // reload hint when the session index has the session's row (§3.1, §3.4).
 func endedLine(id string) string {
 	return "the session ended" + reloadHint(matchCrazeID(indexCrazeIDs(), id))
+}
+
+// foreignEnded is a foreign target's ending: completed, unless its bracket
+// says it failed — the failure, with its kind — or that a user cancel ended it
+// (plan 052 § E2).
+func (w *turnWaiter) foreignEnded(ft *agent.ForeignTurnInfo) {
+	switch {
+	case ft.Err != nil:
+		res := w.newResult(statusFailed)
+		res.Error = newResultError(ft.Err.Error(), ft.Err.ErrorInfo())
+		w.finish(res)
+	case ft.Cancelled:
+		res := w.newResult(statusCancelled)
+		res.StopReason = stopCancelled
+		w.finish(res)
+	default:
+		w.finish(w.newResult(statusCompleted))
+	}
 }

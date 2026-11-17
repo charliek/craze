@@ -27,6 +27,10 @@ import (
 //	claude-load   the above; loadSession true, and session/new refused
 //	claude-ask, claude-ask-odd, claude-plan, claude-plan-odd, claude-steer
 //	              claude-basic with a card turn of their own (claude_cards.go)
+//	claude-wake*, claude-subagent*, claude-child-ask, claude-held-bg-subagent,
+//	claude-unattended-bg, claude-replay-load, claude-notice-idle,
+//	claude-compaction-idle
+//	              background work and children (claude_bg.go)
 //
 // Environment (each read when the frame it shapes is sent):
 //
@@ -74,6 +78,9 @@ type claudeState struct {
 	// steer is the turn claude-steer holds open for a _session/steering,
 	// under the server's mu; nil when none is (claude_cards.go).
 	steer chan string
+	// race is the prompt STEER-RACE holds, under the server's mu: the next
+	// steer answers it first, then startedNewTurn (claude_bg.go).
+	race json.RawMessage
 }
 
 func claudeSelect(id, name, category, current string, values ...string) map[string]any {
@@ -227,7 +234,7 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 			"agentInfo":       map[string]string{"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": envOr("CRAZE_FAKE_ADAPTER_VERSION", fakeAdapterVersion)},
 			"authMethods":     []any{},
 			"agentCapabilities": map[string]any{
-				"loadSession":        s.script == "claude-load",
+				"loadSession":        s.script == "claude-load" || s.script == "claude-replay-load",
 				"promptCapabilities": map[string]any{"image": true, "embeddedContext": true},
 			},
 			"_meta": map[string]any{"steering": map[string]any{"supported": true}},
@@ -236,23 +243,25 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 		if spec == "silent" {
 			return
 		}
-		if d, err := time.ParseDuration(os.Getenv("CRAZE_FAKE_CLAUDE_AUTH_DELAY")); err == nil && d > 0 {
+		if d := envDuration("CRAZE_FAKE_CLAUDE_AUTH_DELAY", 0); d > 0 {
 			go func() { time.Sleep(d); s.sendAuthStatus(spec) }()
 			return
 		}
 		s.sendAuthStatus(spec)
 	case acp.MethodSessionNew:
 		dumpSetup(msg.Params)
-		if s.script == "claude-load" {
+		if s.script == "claude-load" || s.script == "claude-replay-load" {
 			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "session/new must not be called"})
 			return
 		}
 		s.claude.applyInitial(msg.Params)
+		s.claudeSetupTraffic(fakeSessionID, false)
 		s.reply(msg.ID, s.claude.setupResult(fakeSessionID))
 		s.advertiseCommands()
+		s.claudeSetupTraffic(fakeSessionID, true)
 	case acp.MethodSessionLoad:
 		dumpSetup(msg.Params)
-		if s.script != "claude-load" {
+		if s.script != "claude-load" && s.script != "claude-replay-load" {
 			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
 			return
 		}
@@ -265,6 +274,13 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 		// The replay: the user's prompt and the reply, as the adapter replays.
 		s.update(p.SessionID, map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": "hello"}})
 		s.update(p.SessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": "hi there"}})
+		if s.script == "claude-replay-load" {
+			// A whole cycle in the replay: a tool call, its close, and the
+			// result's usage — none of it a turn of today's.
+			s.toolOn(p.SessionID, "toolu_replayed", acp.UpdateToolCall, "in_progress")
+			s.toolOn(p.SessionID, "toolu_replayed", acp.UpdateToolCallUpd, "completed")
+			s.usage(p.SessionID, true)
+		}
 		// A load restores the transcript's last mode before its options.
 		s.claude.set("mode", envOr("CRAZE_FAKE_CLAUDE_MODE", "bypassPermissions"))
 		s.claude.applyInitial(msg.Params)
@@ -347,6 +363,8 @@ func dumpSetup(params json.RawMessage) {
 //	AUTH-LATER     an api_key _auth/status_update, then hold until cancelled
 //	TOOL-FAIL      a tool call left open, then the prompt answered -32603
 //	TOOL-EXIT      a tool call left open, then the process exits
+//	STEER-RACE     hold until a _session/steering, which ends this turn and
+//	               is answered startedNewTurn (claude_bg.go)
 //	HANG           hold until cancelled
 //
 // Anything else is echoed.
@@ -368,6 +386,11 @@ func (s *server) claudePrompt(msg *acp.Message) {
 		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.claude.catalog()})
 		say("fast on")
 		s.reply(msg.ID, map[string]any{"stopReason": acp.StopEndTurn})
+	case strings.Contains(text, "STEER-RACE"):
+		// Held for the steer that answers it (claudeStartedTurn).
+		s.mu.Lock()
+		s.claude.race = msg.ID
+		s.mu.Unlock()
 	case strings.Contains(text, "HANG"):
 		s.hang(msg.ID)
 	case strings.Contains(text, "AUTH-LATER"):
@@ -382,6 +405,8 @@ func (s *server) claudePrompt(msg *acp.Message) {
 			os.Exit(3)
 		}
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: "Internal error", Data: json.RawMessage(`{"errorKind":"server_error"}`)})
+	case s.claudeBGTurn(msg.ID, sid, text):
+		// A background or children script's own turn (claude_bg.go).
 	case s.claudeCardTurn(msg.ID, sid, text):
 		// A card script's own turn (claude_cards.go).
 	default:

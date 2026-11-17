@@ -186,6 +186,16 @@ Flags:
                       questions), forms craze cannot show, ExitPlanMode, every
                       odd plan exit, and a turn held for _session/steering;
                       each says the answer it got
+          claude-wake, claude-wake-early, claude-wake-placeholder,
+          claude-wake-placeholder-late, claude-wake-opentool,
+          claude-wake-nousage, claude-wake-trailing, claude-replay-load,
+          claude-notice-idle, claude-compaction-idle, claude-subagent,
+          claude-subagent-nested, claude-subagent-early-child,
+          claude-subagent-reuse, claude-subagent-unknown, claude-child-ask,
+          claude-held-bg-subagent, claude-unattended-bg
+                      background work and children (claude_bg.go): wakes
+                      with no prompt in flight, idle traffic, sub-agents
+                      announced with subagent_update, and the held prompt
 
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
@@ -320,7 +330,13 @@ func main() {
 		"grok-btw", "grok-btw-missing", "grok-btw-escape",
 		"exit-two-lines",
 		"claude-basic", "claude-load",
-		"claude-ask", "claude-ask-odd", "claude-plan", "claude-plan-odd", "claude-steer":
+		"claude-ask", "claude-ask-odd", "claude-plan", "claude-plan-odd", "claude-steer",
+		"claude-wake", "claude-wake-early", "claude-wake-placeholder", "claude-wake-placeholder-late",
+		"claude-wake-opentool", "claude-wake-nousage", "claude-wake-trailing",
+		"claude-replay-load", "claude-notice-idle", "claude-compaction-idle",
+		"claude-subagent", "claude-subagent-nested", "claude-subagent-early-child",
+		"claude-subagent-reuse", "claude-subagent-unknown", "claude-child-ask",
+		"claude-held-bg-subagent", "claude-unattended-bg":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

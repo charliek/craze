@@ -185,12 +185,75 @@ the host says again, and is the first thing on the row to go when the
 terminal is too narrow. A host from before craze counted its clients sends no
 count, and the chip never shows.
 
-On a provider that can stop one child (native today), `Delete` or
+On a provider that can stop one child (native and claude), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn
 goes on and the parent reads that the user stopped it. On any other row —
-grok, cursor, or a finished row — the key goes to the composer as before.
-This works the same on a background sub-agent's row (below).
+grok, cursor, a finished row, or a claude child that does not let itself be
+stopped — the key goes to the composer as before. This works the same on a
+background sub-agent's row (below).
+
+### Claude sub-agents
+
+A `claude` session declares sub-agents, so Claude Code's `Agent` (and `Task`)
+children show in the band as rows of their own, one per child: the label is
+the child's role (`general-purpose`), the description its title (`Read
+note.txt contents`), and the call that launched it never makes a second row.
+Each child streams its own session, so its [view](#sub-agent-view) is its own
+prompt, tool calls and replies. A child Claude starts inside another child is
+nested under it: its row carries its parent, and it is stopped, viewed and
+asked for on its own.
+
+- A child waiting on you — a permission or question card it raised — stays
+  running, with the activity `waiting for you`. Its card is labelled with it
+  (`· sub-agent <title>`) and outlives your turn: your turn ending, Claude's
+  answer included, never takes a child's card away. It closes when you answer
+  it, when Claude takes it back, when you cancel, or with the session.
+- A child that finishes goes idle: completed (`✓`), cancelled (`–`), or failed
+  (`✗`, with Claude's error; a child that hit its output or request limit, or
+  refused, fails too). An idle child is kept: when Claude sends it more work
+  (`SendMessage`), the same row runs again as a new attempt.
+- A child Claude can no longer observe ends cancelled with the activity `no
+  longer observable`, and so do the children it started; the other rows are
+  untouched.
+- `Delete`/`Backspace` stops a running child that lets itself be stopped (every
+  child Claude announces does): Claude stops that child alone, your turn goes
+  on, and its row ends cancelled, `stopped by the user`.
+- Claude keeps your turn open while background children it started are still
+  working: the turn — and `craze new --wait`, `craze send --wait` — ends after
+  the children and the reply that reports on them. A child that runs on after
+  your turn (an idle child reused later) still keeps the session busy while it
+  runs.
+
+### Claude working on its own
+
+Claude Code runs model calls of its own with nothing of yours running: a
+background command finishing (`run_in_background`), a background child
+reporting, idle compaction. ACP v1 marks none of them, so craze infers each as
+a turn of the agent's own — the same bracket as grok's fallback and native's
+wake — headed in the transcript by `the agent continued on its own (background
+work)`, or `the agent is compacting its context on its own` for compaction:
+
+- It opens only on what Claude says or does — text, thinking, a new tool call
+  — never on a usage report, a notice, a plan, a trailing tool update, a
+  child's traffic, a load's replay, or anything that arrives before the
+  session is set up.
+- It ends 2 seconds after the result's usage report, unless more content comes
+  first (then it goes on) or a tool call is still open (then it waits for the
+  call to finish). With no report at all it ends after a minute of silence —
+  ten with a tool call open — and the diagnostics say so (`claude went quiet
+  during a turn of its own`).
+- Because the end is inferred, a follow-up that comes more than 2 seconds after
+  a report opens a second turn of its own, or, if a message of yours was sent
+  in between, is part of your turn.
+- A prompt typed while it runs is queued, and sent once it ends. `Esc` stops it:
+  craze sends Claude the cancel, and the turn ends `cancelled` 2 seconds later.
+- When the session stops for a reason of its own (the login changed) while
+  such a turn runs, the turn ends failed, with the reason.
+
+Background commands themselves are not tracked: they have no row, and they do
+not hold your turn or the host. A host that exits ends Claude Code and the
+commands it started.
 
 ### Background sub-agents
 
@@ -456,7 +519,7 @@ off.
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, claude and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | newline; `Shift+Enter` only in a terminal that sends it as one of the two sequences below, as Ghostty and Roost do (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents), or [claude working on its own](#claude-working-on-its-own)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
 | `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
@@ -466,7 +529,7 @@ off.
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it; in `/connect`'s ChatGPT sign-in, copy its address |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu or the [`@` file popup](#file-mentions) open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
-| `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native only); on any other row or provider the key falls through as if unhandled |
+| `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native and claude); on any other row or provider the key falls through as if unhandled |
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
@@ -956,16 +1019,17 @@ rendered by the same machinery as the main one. Cursor streams no sub-agent
 transcript, so the view is what its `cursor/task` receipt carried: a note
 saying so, the prompt, a `model · duration · agent id` line once the receipt
 landed, and the output when there is one. There is no composer here — you
-cannot prompt or message a sub-agent from craze. On native,
+cannot prompt or message a sub-agent from craze. On native and claude,
 `Delete`/`Backspace` in a running child's view stops it (see the banner
-below); a grok or cursor sub-agent cannot be stopped from craze.
+below); a grok or cursor sub-agent cannot be stopped from craze. Claude
+streams each child's own session too.
 
 The composer's top rule carries the chip `(model) description` —
 `(grok-4.6) List directory files` — and the input line is replaced by the
 banner:
 
 - running: `○ @explore · read-only · esc to return`, with `· tab next agent`
-  when more than one row is visible, and, on native, a further
+  when more than one row is visible, and, on native and claude (a claude child that can be stopped), a further
   ` · del to stop` at the tail's end — the full banner then reads exactly
   `○ @general-purpose · read-only · esc to return · tab next agent · del to
   stop`
