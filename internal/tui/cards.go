@@ -573,9 +573,15 @@ func appendDraft(draft, in string) string {
 // "Other…" row picks nothing: its typed text is its answer.
 func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	q := c.question()
-	if q.Required && q.AllowMultiple && len(c.selectedIDs()) == 0 {
-		// A question that must be answered takes no empty confirm: the card
-		// stays on it (agent.Question.Required).
+	picked := c.optSel >= 0 && c.optSel < len(q.Options)
+	if q.AllowMultiple {
+		picked = len(c.selectedIDs()) > 0
+	}
+	if q.Required && !picked {
+		// A question that must be answered takes an option, as the registry
+		// insists (agent.Question.Required): an empty confirm, or text in
+		// Other… alone, leaves the card on it, the text kept for a pick to
+		// carry as its note (review C3c 3).
 		m.setHead(c)
 		return m, nil
 	}

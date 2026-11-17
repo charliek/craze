@@ -276,17 +276,21 @@ func TestClaudeElicitationUnanswerable(t *testing.T) {
 // cancelled is answered cancel (§ B4's CancelHeld row).
 func TestClaudeElicitationCancelHeld(t *testing.T) {
 	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
 	asked := make(chan Arrival, 1)
 	p.client.SetAskHandler(func(a Arrival, _ AskQuestionRequest) AskDecision {
 		asked <- a
 		<-a.Call.Done()
 		return AskDecision{Answers: map[string][]string{"question_0": {"a"}}}
 	})
-	p.send(t, 7, MethodElicitationCreate, `{"mode":"form","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]}}}}`)
+	p.send(t, 7, MethodElicitationCreate, `{"mode":"form","sessionId":"s-1","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]}}}}`)
 	<-asked
 	go func() { _ = p.client.Cancel(t.Context()) }()
 	if got := string(p.readWithin(t, 3*time.Second, "the cancel's answer").Result); got != `{"action":"cancel"}` {
 		t.Fatalf("answer %s", got)
+	}
+	if m := p.readWithin(t, 3*time.Second, "the session/cancel"); m.Method != MethodSessionCancel {
+		t.Fatalf("after the answer: %+v", m)
 	}
 	requestsDone(t, p)
 	p.noReply(t)
@@ -806,7 +810,7 @@ func TestClaudeCancelRequestWithdraws(t *testing.T) {
 				<-a.Call.Done()
 				return PermissionDecision{OptionID: "allow-once", Replied: func(d ReplyDisposition) { disp <- d }}
 			})
-			params := `{"mode":"form","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`
+			params := `{"mode":"form","sessionId":"s-1","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`
 			if method == MethodRequestPermission {
 				params = `{"sessionId":"s-1","toolCall":{"toolCallId":"t1","name":"Write","kind":"edit","title":"Write x"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]}`
 			}
@@ -849,4 +853,188 @@ func TestClaudeCancelRequestBeforeTheHandler(t *testing.T) {
 		t.Fatalf("early answer %+v", ea)
 	}
 	p.noReply(t)
+}
+
+// TestClaudeRequestsNeedTheirSession (review C3c 1): a claude permission or
+// elicitation whose sessionId is missing, null, not a string, or names no
+// session craze routes is malformed. The review's sequence — t remembered as
+// ExitPlanMode in s-1, then a permission about t that calls itself
+// EnterPlanMode and offers allow-once, with no session — never reaches force:
+// with no session to look t up in, it reads as an EnterPlanMode and is
+// cancelled, as anything else is; a suspected exit would get reject. Each gets
+// a note.
+func TestClaudeRequestsNeedTheirSession(t *testing.T) {
+	exitish := `"toolCall":{"toolCallId":"t","name":"EnterPlanMode","kind":"switch_mode","title":"EnterPlanMode"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]`
+	write := `"toolCall":{"toolCallId":"w","name":"Write","kind":"edit","title":"Write x"},"options":[{"optionId":"allow-once","kind":"allow_once"}]`
+	form := `"mode":"form","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}`
+	for _, tc := range []struct {
+		name, method, params, want string
+	}{
+		{"exit, no session", MethodRequestPermission, `{` + exitish + `}`, cancelledReply},
+		{"exit, null session", MethodRequestPermission, `{"sessionId":null,` + exitish + `}`, cancelledReply},
+		{"exit, empty session", MethodRequestPermission, `{"sessionId":"",` + exitish + `}`, cancelledReply},
+		{"exit, unrouted session", MethodRequestPermission, `{"sessionId":"foreign",` + exitish + `}`, cancelledReply},
+		{"write, no session", MethodRequestPermission, `{` + write + `}`, cancelledReply},
+		{"write, unrouted session", MethodRequestPermission, `{"sessionId":"foreign",` + write + `}`, cancelledReply},
+		{"form, unrouted session", MethodElicitationCreate, `{"sessionId":"foreign",` + form + `}`, `{"action":"cancel"}`},
+		{"form, no session", MethodElicitationCreate, `{` + form + `}`, `{"action":"cancel"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+				t.Error("a request with no session of craze's reached the permission handler (force)")
+				return PermissionDecision{OptionID: "allow-once"}
+			})
+			p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
+				t.Error("a request with no session of craze's raised a card")
+				return AskDecision{}
+			})
+			refused := make(chan RefusedRequest, 1)
+			p.client.SetRefusedRequestHandler(func(r RefusedRequest) { refused <- r })
+			p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"ExitPlanMode"}},"toolCallId":"t","sessionUpdate":"tool_call","status":"pending"}}`)
+			p.send(t, 4, tc.method, tc.params)
+			if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != tc.want {
+				t.Fatalf("answer %s, want %s", got, tc.want)
+			}
+			select {
+			case r := <-refused:
+				if r.Kind != RefusedRequestSession {
+					t.Fatalf("refusal %+v", r)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no note")
+			}
+		})
+	}
+}
+
+// TestClaudeRequestWithANonStringSessionIsRefused: a sessionId that is not a
+// string does not decode as a permission request at all: an invalid-params
+// error, which reaches no handler.
+func TestClaudeRequestWithANonStringSessionIsRefused(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+		t.Error("reached the permission handler")
+		return PermissionDecision{}
+	})
+	p.send(t, 4, MethodRequestPermission, `{"sessionId":7,"toolCall":{"toolCallId":"w","name":"Write","kind":"edit"},"options":[{"optionId":"allow-once","kind":"allow_once"}]}`)
+	if m := p.readWithin(t, 3*time.Second, "the answer"); m.Error == nil || m.Error.Code != CodeInvalidParams {
+		t.Fatalf("answer %+v", m)
+	}
+}
+
+// TestClaudeSuspectedExitWithNoSessionIsRejected: a request that is a
+// suspected exit on its own (exit-plan-* options) and names no session gets
+// the unsafe exit's answer, reject.
+func TestClaudeSuspectedExitWithNoSessionIsRejected(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	r := realExit()
+	params := strings.Replace(r.params(), `"sessionId":"s-1",`, ``, 1)
+	if strings.Contains(params, "sessionId") {
+		t.Fatalf("setup: %s", params)
+	}
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
+		t.Error("a sessionless exit raised the plan card")
+		return PlanDecision{Accept: true}
+	})
+	p.send(t, 4, MethodRequestPermission, params)
+	if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != `{"outcome":{"outcome":"selected","optionId":"reject"}}` {
+		t.Fatalf("answer %s", got)
+	}
+}
+
+func toolCount(c *Client) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.claudeToolOrder)
+}
+
+// TestClaudeRememberedExitsAreBounded (review C3c 2): open plan exits are kept
+// past the cap only while they can still be asked about. A prompted turn's end
+// and a cancel settle every exit of that session, and a terminal update that
+// names no tool settles its call; once settled, the next announcement brings
+// the memory back to the cap, not one call lower.
+func TestClaudeRememberedExitsAreBounded(t *testing.T) {
+	announce := func(p *rawPipe, prefix string, n int, name string) {
+		for i := range n {
+			p.send(t, nil, MethodSessionUpdate, fmt.Sprintf(`{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":%q}},"toolCallId":"%s-%d","sessionUpdate":"tool_call","status":"pending"}}`, name, prefix, i))
+		}
+		waitUntil(t, func() bool { return p.client.claudeTool("s-1", fmt.Sprintf("%s-%d", prefix, n-1)).name != "" })
+	}
+	t.Run("a prompted turn's end", func(t *testing.T) {
+		p := newRawPipeDialect(t, DialectClaude)
+		p.setSession("s-1")
+		done := make(chan error, 1)
+		go func() { _, err := p.client.Prompt(t.Context(), "plan"); done <- err }()
+		prompt := p.readWithin(t, 3*time.Second, "session/prompt")
+		announce(p, "exit", 2*claudeToolsCap, "ExitPlanMode")
+		if n := toolCount(p.client); n != 2*claudeToolsCap {
+			t.Fatalf("open exits kept %d, want all %d", n, 2*claudeToolsCap)
+		}
+		if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: prompt.ID, Result: json.RawMessage(`{"stopReason":"end_turn"}`)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		announce(p, "read", 1, "Read")
+		if n := toolCount(p.client); n > claudeToolsCap {
+			t.Fatalf("after the turn %d calls kept, want at most %d", n, claudeToolsCap)
+		}
+	})
+	t.Run("a cancel", func(t *testing.T) {
+		p := newRawPipeDialect(t, DialectClaude)
+		p.setSession("s-1")
+		announce(p, "exit", claudeToolsCap+10, "ExitPlanMode")
+		go func() { _ = p.client.Cancel(t.Context()) }()
+		p.readWithin(t, 3*time.Second, "session/cancel")
+		announce(p, "read", 1, "Read")
+		if n := toolCount(p.client); n > claudeToolsCap {
+			t.Fatalf("after the cancel %d calls kept, want at most %d", n, claudeToolsCap)
+		}
+	})
+	t.Run("a nameless terminal update", func(t *testing.T) {
+		p := newRawPipeDialect(t, DialectClaude)
+		p.setSession("s-1")
+		announce(p, "exit", 1, "ExitPlanMode")
+		p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"toolCallId":"exit-0","sessionUpdate":"tool_call_update","status":"failed"}}`)
+		waitUntil(t, func() bool { return p.client.claudeTool("s-1", "exit-0").settled })
+	})
+}
+
+// TestClaudeWithdrawalEndsTheCallAtOnce (review C3c 4): the request is marked
+// withdrawn and its context ended in one section, so by the time anything
+// else can look — the registry taking an answer — the call is already over,
+// with the withdrawal as its cause.
+func TestClaudeWithdrawalEndsTheCallAtOnce(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	req := AskQuestionRequest{Questions: []AskQuestion{{ID: "question_0", Options: []AskOption{{ID: "a"}}}}}
+	in := p.client.register(&Message{JSONRPC: jsonrpcVersion, ID: json.RawMessage(`5`), Method: MethodElicitationCreate}, RequestParams{Ask: &req})
+	seen := make(chan error, 1)
+	prev := testAfterWithdraw
+	testAfterWithdraw = func(got *pendingReq) {
+		if got == in {
+			p.client.incomingMu.Lock()
+			replied := got.replied
+			p.client.incomingMu.Unlock()
+			if !replied {
+				seen <- errors.New("not marked withdrawn")
+				return
+			}
+			seen <- context.Cause(got.ctx)
+		}
+	}
+	t.Cleanup(func() { testAfterWithdraw = prev })
+	p.send(t, nil, MethodCancelRequest, `{"requestId":5}`)
+	select {
+	case cause := <-seen:
+		if !errors.Is(cause, ErrRequestWithdrawn) {
+			t.Fatalf("on leaving the section the call's cause was %v", cause)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the withdrawal never ran")
+	}
 }

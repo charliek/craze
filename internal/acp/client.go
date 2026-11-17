@@ -624,6 +624,11 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		// refusal, the caller giving up — a completion naming it from here on
 		// is late and ends nothing.
 		c.retireLocked(c.promptID)
+		if dialect == DialectClaude {
+			// The prompted turn is over: its plan exits are no longer
+			// awaiting a request (review C3c 2).
+			c.settleClaudeToolsLocked(sid)
+		}
 		c.promptID = ""
 		c.promptText = ""
 		c.promptJoined = ""
@@ -926,6 +931,12 @@ func (c *Client) Held() HeldRequests {
 // block.
 func (c *Client) CancelHeld(ctx context.Context, held HeldRequests) error {
 	c.completeCancelled(held.reqs, repliedByCancel)
+	c.mu.Lock()
+	if c.dialect == DialectClaude && c.sessionID != "" {
+		// A cancel ends the turn's plan exits too (review C3c 2).
+		c.settleClaudeToolsLocked(c.sessionID)
+	}
+	c.mu.Unlock()
 	sid := c.SessionID()
 	if sid == "" {
 		return nil
@@ -1401,7 +1412,7 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		c.mu.Unlock()
 		return
 	}
-	if n.ToolName != "" && c.dialect == DialectClaude {
+	if c.dialect == DialectClaude {
 		// Only now, past the session filter: a dropped session's tool call
 		// must never name one of the active session's (§ B5).
 		c.noteClaudeTool(n.SessionID, n.Update)

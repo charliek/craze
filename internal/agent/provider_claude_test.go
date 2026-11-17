@@ -1177,30 +1177,48 @@ func TestClaudeAFastDeadlineParkedAfterItsCheck(t *testing.T) {
 			r.s.mu.Lock()
 			r.s.fastFix = a
 			r.s.mu.Unlock()
-			var inGap atomic.Bool
+			// The competitor changes the state the check read — B replaces A,
+			// or the session closes — and records whether the stop had already
+			// been recorded when it got there. It needs s.mu, so it can only
+			// run where the deadline's check has let go of it.
+			competitor := func() bool {
+				if gap == "Close" {
+					r.s.mu.Lock()
+					stopped := r.s.gate.fatal != nil
+					r.s.mu.Unlock()
+					_ = r.s.Close()
+					return stopped
+				}
+				r.s.mu.Lock()
+				defer r.s.mu.Unlock()
+				r.s.fastFix = b
+				return r.s.gate.fatal != nil
+			}
+			var ran, lockHeld bool
+			done := make(chan bool, 1)
 			prev := testFastDeadlineValidated
 			testFastDeadlineValidated = func() {
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					if gap == "Close" {
-						_ = r.s.Close()
-						return
-					}
-					r.s.mu.Lock()
-					r.s.fastFix = b
+				ran = true
+				// Parked just after the check passed. If the check let go of
+				// s.mu, the competitor runs to its end here, between the check
+				// and the stop — the very gap the atomic check closes; if it
+				// still holds it, the competitor can only follow the stop.
+				if r.s.mu.TryLock() {
 					r.s.mu.Unlock()
-				}()
-				select {
-				case <-done:
-					inGap.Store(true)
-				case <-time.After(300 * time.Millisecond):
+					done <- competitor()
+					return
 				}
+				lockHeld = true
+				go func() { done <- competitor() }()
 			}
 			t.Cleanup(func() { testFastDeadlineValidated = prev })
 			r.s.fastDeadline(a, time.Second)
-			if inGap.Load() && r.s.fatalErr() != nil {
-				t.Fatalf("A's deadline stopped the session after %s, past its own check", gap)
+			stoppedFirst := <-done // the competitor, joined
+			if !ran {
+				t.Fatal("the deadline's check never passed: the parked callback did not run")
+			}
+			if !lockHeld || !stoppedFirst {
+				t.Fatalf("after %s the state changed between A's check and its stop (lock held %v, stop recorded first %v)", gap, lockHeld, stoppedFirst)
 			}
 		})
 	}

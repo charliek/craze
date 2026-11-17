@@ -326,3 +326,33 @@ func TestClaudeSteerPromptRequiredQueuesTheText(t *testing.T) {
 	}
 	sc.Release()
 }
+
+// TestRequiredSingleChoiceNeedsAPick (review C3c 3): on a two-question card
+// whose first question is required and single-choice, text in Other… alone
+// does not advance it — the registry would refuse the whole answer, and the
+// card has no way back to the first question. Picking an option then
+// advances, the text riding along.
+func TestRequiredSingleChoiceNeedsAPick(t *testing.T) {
+	m, stub := sizedCards(t)
+	q := claudeQuestion()
+	q.Questions[0].Required = true
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: q})
+	m, _ = press(m, runeKey('3'))
+	for _, r := range "teal" {
+		m, _ = press(m, runeKey(r))
+	}
+	m, _ = press(m, enter())
+	if !strings.Contains(plainView(m), "question 1/2") {
+		t.Fatalf("Other text alone advanced a required question:\n%s", plainView(m))
+	}
+	m, _ = press(m, runeKey('2'))
+	if !strings.Contains(plainView(m), "question 2/2") {
+		t.Fatalf("a pick did not advance it:\n%s", plainView(m))
+	}
+	m, _ = press(m, runeKey('1'))
+	_, _ = press(m, enter())
+	calls := stub.Calls()
+	if len(calls) != 1 || calls[0].Cancelled || !slices.Equal(calls[0].Answers["question_0"], []string{"Blue"}) || calls[0].Text["question_0"] != "teal" {
+		t.Fatalf("calls %+v", calls)
+	}
+}

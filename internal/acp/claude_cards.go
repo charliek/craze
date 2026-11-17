@@ -69,7 +69,31 @@ const (
 	RefusedElicitationMode = "elicitation_mode"
 	RefusedElicitationForm = "elicitation_form"
 	RefusedPlanExitShape   = "plan_exit_shape"
+	RefusedRequestSession  = "request_session"
 )
+
+// requestSessionUnknown says why a claude request's sessionId names no session
+// craze routes — missing, null, not a string, or neither the active session
+// nor a registered child — or "" when it names one (review C3c 1). Such a
+// request is malformed: no lookup is ever made under "".
+func (c *Client) requestSessionUnknown(params json.RawMessage) string {
+	var w struct {
+		SessionID *json.RawMessage `json:"sessionId"`
+	}
+	if json.Unmarshal(params, &w) != nil || w.SessionID == nil {
+		return "the request names no session"
+	}
+	var sid string
+	if json.Unmarshal(*w.SessionID, &sid) != nil || sid == "" {
+		return "the request's session is not an id"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sessionID == "" || (sid != c.sessionID && !c.isChildLocked(sid)) {
+		return "the request is about a session craze does not route"
+	}
+	return ""
+}
 
 // SetRefusedRequestHandler installs the handler told of every RefusedRequest.
 // It runs on its own goroutine, after the reply was written.
@@ -132,13 +156,22 @@ type toolSeen struct {
 // latest name wins, and a second, different name marks the call.
 func (c *Client) noteClaudeTool(sid string, update json.RawMessage) {
 	id, name, status := claudeToolCall(update)
-	if id == "" || name == "" {
+	if id == "" || sid == "" {
 		return
 	}
 	k := toolKey{sid, id}
 	settled := status == "completed" || status == "failed"
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if name == "" {
+		// A terminal update that names no tool still settles the call it
+		// is about (review C3c 2); it teaches no name.
+		if seen, ok := c.claudeTools[k]; ok && settled {
+			seen.settled = true
+			c.claudeTools[k] = seen
+		}
+		return
+	}
 	if seen, ok := c.claudeTools[k]; ok {
 		seen.conflicts = seen.conflicts || seen.name != name
 		seen.name = name
@@ -150,32 +183,48 @@ func (c *Client) noteClaudeTool(sid string, update json.RawMessage) {
 	if c.claudeTools == nil {
 		c.claudeTools = make(map[toolKey]toolSeen)
 	}
-	if len(c.claudeToolOrder) >= claudeToolsCap {
-		c.evictClaudeToolLocked()
+	for len(c.claudeToolOrder) >= claudeToolsCap && c.evictClaudeToolLocked() {
+		// Back to the cap: settled calls past it go now, not one per call
+		// (review C3c 2).
 	}
 	c.claudeTools[k] = toolSeen{name: name, exit: name == claudeExitPlanTool, settled: settled}
 	c.claudeToolOrder = append(c.claudeToolOrder, k)
 }
 
-// evictClaudeToolLocked forgets the oldest call it may: never one named
+// evictClaudeToolLocked forgets the oldest call it may, and reports whether
+// it found one: never one named
 // ExitPlanMode that is still open, whose forgetting would let a request about
 // it pass for an ordinary one (review C3b 2). With every remembered call such
 // a one, nothing is forgotten and the memory grows past its cap — bounded by
 // the plan exits the adapter leaves open at once. c.mu is held.
-func (c *Client) evictClaudeToolLocked() {
+func (c *Client) evictClaudeToolLocked() bool {
 	for i, k := range c.claudeToolOrder {
 		if seen := c.claudeTools[k]; seen.exit && !seen.settled {
 			continue
 		}
 		delete(c.claudeTools, k)
 		c.claudeToolOrder = append(c.claudeToolOrder[:i:i], c.claudeToolOrder[i+1:]...)
-		return
+		return true
+	}
+	return false
+}
+
+// settleClaudeToolsLocked settles every remembered call of session sid: its
+// prompted turn is over, or cancelled, so no request about one of them is
+// still to come (review C3c 2) — the exits among them become forgettable.
+// c.mu is held.
+func (c *Client) settleClaudeToolsLocked(sid string) {
+	for k, seen := range c.claudeTools {
+		if k.session == sid && !seen.settled {
+			seen.settled = true
+			c.claudeTools[k] = seen
+		}
 	}
 }
 
 // claudeTool is what the session sid's tool call id was stamped with.
 func (c *Client) claudeTool(sid, id string) toolSeen {
-	if id == "" {
+	if id == "" || sid == "" {
 		return toolSeen{}
 	}
 	c.mu.Lock()
@@ -403,6 +452,19 @@ func rejectOption(opts []PermissionOption) string {
 // reports whether it took the request.
 func (c *Client) routeClaudePermission(msg *Message, req PermissionRequest) bool {
 	pe := c.classifyPlanExit(msg.Params, req)
+	if why := c.requestSessionUnknown(msg.Params); why != "" {
+		// A request about no session craze knows (review C3c 1): its tool
+		// call cannot be checked against the one it names, so it never
+		// reaches a handler — or force. A suspected exit gets the unsafe
+		// exit's answer; anything else is cancelled.
+		answer, sent := cancelledOutcome(), "cancelled"
+		if pe.suspected && pe.rejectID != "" {
+			answer, sent = selectedOutcome(pe.rejectID), pe.rejectID
+		}
+		_ = c.conn.Reply(msg.ID, answer)
+		c.reportRefused(RefusedRequest{Method: msg.Method, Kind: RefusedRequestSession, Answer: sent, Detail: why})
+		return true
+	}
 	if !pe.suspected {
 		return false
 	}
@@ -740,6 +802,13 @@ func parseQuestionProperty(raw json.RawMessage) (formQuestion, string) {
 // an answerable form raised as a question.
 func (c *Client) routeElicitation(msg *Message) {
 	mode, req, why := parseElicitation(msg.Params)
+	if why == "" {
+		if bad := c.requestSessionUnknown(msg.Params); bad != "" {
+			_ = c.conn.Reply(msg.ID, elicitationResult("cancel", nil))
+			c.reportRefused(RefusedRequest{Method: msg.Method, Kind: RefusedRequestSession, Answer: "cancel", Detail: bad})
+			return
+		}
+	}
 	switch {
 	case why == errFormMalformed:
 		// Not a request craze can read at all: withdrawn, as an unrenderable
@@ -884,9 +953,26 @@ func (c *Client) handleCancelRequest(msg *Message) {
 		default:
 		}
 	}
-	withdraw := in.withdraw
+	// The context ends in the same section that marks the request withdrawn
+	// (review C3c 4): the registry refuses an answer for an ask whose call has
+	// ended withdrawn, so no answer can be taken once delivery is impossible.
+	// Ending a context is a leaf operation, as replyIncomingBy's is.
+	//
+	// What remains, and is accepted (orchestrator's disposition, C3d): the
+	// user's answer and Claude's withdrawal crossing on the wire — the answer
+	// taken by the registry before this runs, its reply then lost to the
+	// withdrawal. The ask's ending stays the answer; the lost delivery is
+	// recorded by the journal's diagnostic (AskRegistry.Report). No protocol
+	// change carries it.
+	if in.withdraw != nil {
+		in.withdraw()
+	}
 	c.incomingMu.Unlock()
-	if withdraw != nil {
-		withdraw()
+	if testAfterWithdraw != nil {
+		testAfterWithdraw(in)
 	}
 }
+
+// testAfterWithdraw runs, when a test sets it, once handleCancelRequest has
+// left its locked section.
+var testAfterWithdraw func(*pendingReq)

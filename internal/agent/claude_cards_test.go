@@ -493,18 +493,18 @@ func TestKeptPlanningIsClaudesAndYieldsToACancel(t *testing.T) {
 	p := ClaudeProvider()
 	s := newAskSession(t, Options{Provider: &p})
 	turn := s.asks.BeginTurn()
-	s.notePlanKept(turn, s.cancelGen())
+	notePlanKeptNow(s, turn)
 	if !s.keptPlanning(turn) {
 		t.Fatal("the rejected turn's ending is not marked")
 	}
 	if s.keptPlanning(turn) {
 		t.Fatal("the mark outlived the ending it was for")
 	}
-	s.notePlanKept(turn, s.cancelGen())
+	notePlanKeptNow(s, turn)
 	if s.keptPlanning(s.asks.BeginTurn()) {
 		t.Fatal("another turn's ending was marked")
 	}
-	s.notePlanKept(turn, s.cancelGen())
+	notePlanKeptNow(s, turn)
 	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestKeptPlanningIsClaudesAndYieldsToACancel(t *testing.T) {
 	g := GrokProvider()
 	gs := newAskSession(t, Options{Provider: &g})
 	gt := gs.asks.BeginTurn()
-	gs.notePlanKept(gt, gs.cancelGen())
+	notePlanKeptNow(gs, gt)
 	if gs.keptPlanning(gt) {
 		t.Fatal("grok's rejection marked its ending")
 	}
@@ -581,12 +581,50 @@ func TestKeptPlanningLosesToACancelBetween(t *testing.T) {
 	p := ClaudeProvider()
 	s := newAskSession(t, Options{Provider: &p})
 	turn := s.asks.BeginTurn()
-	gen := s.cancelGen() // the plan card raised
+	gen, _ := s.cancelGen() // the plan card raised
 	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	s.notePlanKept(turn, gen) // the delayed rejection handler resumes
 	if s.keptPlanning(turn) {
 		t.Fatal("a cancel between the rejection and its note still reads as kept planning")
+	}
+}
+
+// notePlanKeptNow is the plan handler's path with no cancel between its
+// snapshot and its note.
+func notePlanKeptNow(s *session, token TurnToken) {
+	if gen, calm := s.cancelGen(); calm {
+		s.notePlanKept(token, gen)
+	}
+}
+
+// TestKeptPlanningLosesToACancelInProgress is review C3c 6's interleaving: a
+// Cancel has cleared the mark and counted itself, and is still running, when
+// a plan handler snapshots; the rejection then comes back after the cancel
+// has finished. The snapshot was taken mid-cancel, so nothing is noted, and
+// the turn's ending is the cancel's. A note attempted while a cancel is
+// running is refused too.
+func TestKeptPlanningLosesToACancelInProgress(t *testing.T) {
+	p := ClaudeProvider()
+	s := newAskSession(t, Options{Provider: &p})
+	turn := s.asks.BeginTurn()
+	s.mu.Lock() // Cancel's first section, then paused
+	s.cancels++
+	s.cancelsActive++
+	s.mu.Unlock()
+	gen, calm := s.cancelGen() // the plan handler's snapshot
+	s.notePlanKept(turn, gen)  // a note while the cancel still runs
+	if s.keptPlanning(turn) {
+		t.Fatal("a note made while a cancel ran was kept")
+	}
+	s.mu.Lock() // the cancel finishes
+	s.cancelsActive--
+	s.mu.Unlock()
+	if calm {
+		s.notePlanKept(turn, gen) // the delayed handler resumes
+	}
+	if calm || s.keptPlanning(turn) {
+		t.Fatalf("a snapshot taken mid-cancel noted keep planning (calm %v)", calm)
 	}
 }

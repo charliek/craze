@@ -168,9 +168,11 @@ type session struct {
 	// cancels counts the Cancels asked of this session, under s.mu: a plan's
 	// keep planning noted after a cancel it did not see is not noted
 	// (notePlanKept).
-	cancels      uint64
-	fastFix      chan struct{}
-	interjectSeq int
+	cancels uint64
+	// cancelsActive counts the Cancels still running, under s.mu.
+	cancelsActive int
+	fastFix       chan struct{}
+	interjectSeq  int
 	// plugins are the on-disk plugin entries discovered once, in Start,
 	// before session/new; they never change again. commandsSeen records that
 	// the agent's first available_commands_update has been applied, which is
@@ -2330,7 +2332,16 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	s.mu.Lock()
 	s.planKept = TurnToken{}
 	s.cancels++
+	// In progress from here until it returns, before anything else can look
+	// (review C3c 6): a plan handler that snapshots meanwhile cannot note
+	// keep planning (notePlanKept).
+	s.cancelsActive++
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.cancelsActive--
+		s.mu.Unlock()
+	}()
 	client := s.clientRef()
 	if client == nil {
 		return CancelOutcome{Settled: true}, nil
@@ -2710,9 +2721,9 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 	if !live {
 		return planDecision(s.staleAsk(ask))
 	}
-	gen := s.cancelGen()
+	gen, calm := s.cancelGen()
 	rec, replied := s.decideAsk(a, token, ask)
-	if rec.Outcome == AskAnswered && rec.Answer.Reject {
+	if rec.Outcome == AskAnswered && rec.Answer.Reject && calm {
 		s.notePlanKept(token, gen)
 	}
 	dec := planDecision(rec)

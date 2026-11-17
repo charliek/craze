@@ -540,9 +540,11 @@ func (s *session) claudeReturnPlan(token TurnToken, live bool, ask AskRequest) a
 		s.staleAsk(ask)
 		return acp.PlanDecision{Cancelled: true}
 	}
-	gen := s.cancelGen()
+	gen, calm := s.cancelGen()
 	rec := s.automaticAsk(token, ask, AskAnswer{Reject: true})
-	s.notePlanKept(token, gen)
+	if calm {
+		s.notePlanKept(token, gen)
+	}
 	dec := planDecision(rec)
 	dec.Replied = s.reportedBy(rec.ID)
 	return dec
@@ -560,17 +562,20 @@ func (s *session) notePlanKept(token TurnToken, gen uint64) {
 		return
 	}
 	s.mu.Lock()
-	if s.cancels == gen {
+	if s.cancels == gen && s.cancelsActive == 0 {
 		s.planKept = token
 	}
 	s.mu.Unlock()
 }
 
-// cancelGen is how many Cancels have been asked of the session so far.
-func (s *session) cancelGen() uint64 {
+// cancelGen is how many Cancels have been asked of the session so far, and
+// whether none is running now: a snapshot taken while a cancel is in progress
+// can note nothing (review C3c 6), since that cancel's clearing may already
+// have happened.
+func (s *session) cancelGen() (gen uint64, calm bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cancels
+	return s.cancels, s.cancelsActive == 0
 }
 
 // keptPlanning reports, once, whether turn token's cancelled ending is its
