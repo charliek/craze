@@ -566,7 +566,8 @@ calls and replies arrive as tagged `user`, `thought`, `tool` and `text` lines.
 provider streams one), which is always present — `true` or `false`. Grok's
 lines come from its own lifecycle notifications; cursor
 sends none, so craze synthesizes the same lines from the `cursor/task`
-receipt. `tool.task` carries `description`, `model`, `agentId`, `durationMs`
+receipt. A claude session also writes `"event":"removed"` for a finished
+sub-agent row it no longer keeps (a reader drops it too). `tool.task` carries `description`, `model`, `agentId`, `durationMs`
 and `status` (`running`, `completed`, `failed`, `cancelled`).
 
 `command` is one plugin command or skill craze found on disk and expanded

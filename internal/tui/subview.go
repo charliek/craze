@@ -152,6 +152,13 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	}
 	info := *ev.Subagent
 	id := info.ID
+	if ev.SubagentChange == agent.SubagentChangeRemoved {
+		// The fold dropped the row (plan 052 review C4c item 5): so do its
+		// stamps; a view open on it keeps its tombstone.
+		delete(m.agentStart, id)
+		delete(m.agentDone, id)
+		return
+	}
 	// The mirror already holds the roster this event folded (reduceEvent), so
 	// the tombstone, the stamps and the receipt pane below read it as it now
 	// stands.

@@ -693,11 +693,16 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		// a foreign turn of its own, and the prompt goes back to the caller as
 		// refused, nothing written; a gate that refused changed nothing.
 		c.mu.Lock()
-		c.gating = false
 		if c.foreignRunningLocked() {
+			// The claim stays this call's until its own cleanup releases
+			// it (review C4c item 9): no second prompt slips in between.
 			c.mu.Unlock()
+			if testGateRefused != nil {
+				testGateRefused()
+			}
 			return nil, ErrForeignTurn
 		}
+		c.gating = false
 		// The turn opens here, with the machine prompted, in one section
 		// (review C4b item 4).
 		c.inPrompt = true
@@ -1073,6 +1078,11 @@ func (c *Client) Close() error {
 			default:
 			}
 		}
+		// A session still waiting on a claude load's hold is told the
+		// client is gone (LoadContext, review C4c item 1).
+		c.mu.Lock()
+		c.endHoldContextLocked(ErrClosed)
+		c.mu.Unlock()
 		// A claude turn of the agent's own ends with the client, failed with
 		// what FailForeign recorded, before the connection goes.
 		c.closeForeign()
@@ -1174,10 +1184,29 @@ func (c *Client) onRequest(msg *Message) {
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
 		return
 	}
-	if c.dialect == DialectClaude && c.holdClaude(heldFrame{req: msg}, len(msg.Params)) {
-		// Held with the updates after a load's reply (review C4b item 5).
-		return
+	if c.dialect == DialectClaude {
+		// A request takes the dispatch ordering a notification does (review
+		// C4c item 3): it never overtakes an update still being routed — by
+		// the read loop, or by ReplayDone's drain.
+		c.dispatchMu.Lock()
+		defer c.dispatchMu.Unlock()
+		if c.conn.severed.Load() {
+			// Severed while this waited for the dispatch lock.
+			return
+		}
+		if c.holdClaude(heldFrame{req: msg}, len(msg.Params)) {
+			// Held with the updates after a load's reply (review C4b
+			// item 5).
+			return
+		}
 	}
+	c.dispatchRequest(msg)
+}
+
+// dispatchRequest is onRequest past its dialect check and its claude hold:
+// ReplayDone's drain dispatches a held request through it, under the
+// dispatchMu it already holds.
+func (c *Client) dispatchRequest(msg *Message) {
 	switch msg.Method {
 	case MethodRequestPermission:
 		var req PermissionRequest

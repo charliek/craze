@@ -519,6 +519,7 @@ type wireSubagent struct {
 	Transcript   bool      `json:"transcript,omitempty"`
 	Background   bool      `json:"background,omitempty"`
 	NoCancel     bool      `json:"noCancel,omitempty"`
+	Retained     bool      `json:"retained,omitempty"`
 }
 
 type wireQueued struct {
@@ -1371,6 +1372,7 @@ func toWireSubagent(a *SubagentInfo) *wireSubagent {
 		Transcript:   a.Transcript,
 		Background:   a.Background,
 		NoCancel:     a.NoCancel,
+		Retained:     a.Retained,
 	}
 }
 
@@ -1599,6 +1601,7 @@ func (w *wireSubagent) subagent() *SubagentInfo {
 		Transcript:   w.Transcript,
 		Background:   w.Background,
 		NoCancel:     w.NoCancel,
+		Retained:     w.Retained,
 	}
 }
 

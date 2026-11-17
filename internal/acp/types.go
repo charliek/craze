@@ -594,6 +594,10 @@ type SubagentNotification struct {
 	Title      string
 	Cancel     *bool
 	Evicted    bool
+	// Unrouted marks an update for a child the registry would not register
+	// (the cap, every child working): its row shows, but nothing of it is
+	// routed (review C4c item 7).
+	Unrouted bool
 }
 
 type AvailableCommand struct {

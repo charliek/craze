@@ -1256,3 +1256,48 @@ func TestAForeignTurnsClockSurvivesTheSnapshot(t *testing.T) {
 		t.Fatalf("an ended turn keeps a clock: %v", got)
 	}
 }
+
+// TestRetainedRowsFollowTheSession (plan 052 review C4c item 5): rows the
+// session retains — claude's — are not evicted by the model's own 32-row
+// finished cap: the A/B sequence (A spawned before B, B finished first, then
+// 32 more) keeps B, and a removed event drops A and its child transcript.
+func TestRetainedRowsFollowTheSession(t *testing.T) {
+	m := New(Options{})
+	row := func(id string, st agent.SubagentStatus, end int) *agent.SubagentInfo {
+		r := &agent.SubagentInfo{ID: id, Status: st, Retained: true}
+		if end > 0 {
+			r.EndedAt = at(end)
+		}
+		return r
+	}
+	ev := func(info *agent.SubagentInfo, change string, n int) agent.Event {
+		return agent.Event{Type: agent.EventSubagent, Subagent: info, SubagentChange: change, At: at(n)}
+	}
+	evs := []agent.Event{
+		ev(row("A", agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 1),
+		ev(row("B", agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 2),
+		{Type: agent.EventText, Agent: "A", Text: "a's work", At: at(3)},
+		ev(row("B", agent.SubagentCompleted, 4), agent.SubagentChangeFinished, 4),
+		ev(row("A", agent.SubagentCompleted, 5), agent.SubagentChangeFinished, 5),
+	}
+	for i := range 32 {
+		id := fmt.Sprintf("c%d", i)
+		evs = append(evs, ev(row(id, agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 10+2*i),
+			ev(row(id, agent.SubagentCompleted, 11+2*i), agent.SubagentChangeFinished, 11+2*i))
+	}
+	foldAll(t, m, true, evs...)
+	held := func() map[string]bool {
+		out := map[string]bool{}
+		for _, a := range m.Mirror().Agents {
+			out[a.ID] = true
+		}
+		return out
+	}
+	if h := held(); !h["A"] || !h["B"] || len(h) != 34 {
+		t.Fatalf("the model holds %d rows (A %v, B %v); want all 34 the session retains", len(h), h["A"], h["B"])
+	}
+	foldAll(t, m, true, ev(row("A", agent.SubagentCompleted, 5), agent.SubagentChangeRemoved, 100))
+	if h := held(); h["A"] || !h["B"] || len(h) != 33 {
+		t.Fatalf("after A's removal the model holds %d rows (A %v, B %v)", len(h), h["A"], h["B"])
+	}
+}

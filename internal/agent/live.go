@@ -1325,9 +1325,18 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 		s.replaying.Store(false)
 		return err
 	}
+	// Everything from here to ReplayDone waits on hctx, not on the
+	// background or s.done alone: on claude it ends when the hold behind the
+	// load's reply fails or the client closes (review C4c item 1), so a
+	// stalled replay completion fails the load instead of hanging Start.
+	hctx := client.LoadContext()
+	if testLoadStall != nil {
+		// A test's stalled replay completion: a wait that ends only with hctx.
+		testLoadStall(hctx)
+	}
 	// The last chunks of a replayed prompt have no update behind them to push
 	// them out, so replay end is their flush.
-	s.flushReplayUser()
+	s.flushReplayUserCtx(hctx)
 	restored := snapshotFromNewProvider(res, s.provider(), initRes)
 	s.mu.Lock()
 	s.sessionID = res.SessionID
@@ -1377,12 +1386,15 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// restored snapshot is installed", so the delta that says what was
 	// installed has to be committed ahead of it (§3.8's ordering rule for a
 	// flush behind a boundary).
-	s.flushDelta()
+	_ = s.log.Flush(hctx, s.done)
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
-	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
+	s.emitCtx(hctx, Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
+	if hctx.Err() != nil {
+		return context.Cause(hctx)
+	}
 	// The one boundary (review C4 item 5): what claude sent after the load's
 	// reply was held until here, and is routed now as live, foreign turns
 	// and all, behind the end bracket. A hold that failed — past its bounds,
@@ -1393,7 +1405,14 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 // flushReplayUser emits the coalesced replayed prompt as exactly one EventUser.
 // The builder is drained under the lock, so the read loop and Start racing to
 // flush it cannot emit the same text twice.
-func (s *session) flushReplayUser() {
+func (s *session) flushReplayUser() { s.flushReplayUserCtx(context.Background()) }
+
+// testLoadStall is a test seam, nil in production: it runs in a claude load
+// right after the reply, with the context the load's own waits use.
+var testLoadStall func(context.Context)
+
+// flushReplayUserCtx is flushReplayUser whose publication gives up with ctx.
+func (s *session) flushReplayUserCtx(ctx context.Context) {
 	s.mu.Lock()
 	text := s.replayUser.String()
 	s.replayUser.Reset()
@@ -1401,7 +1420,7 @@ func (s *session) flushReplayUser() {
 	if text == "" {
 		return
 	}
-	s.emit(Event{Type: EventUser, Text: text})
+	s.emitCtx(ctx, Event{Type: EventUser, Text: text})
 }
 
 // discoverPlugins runs the provider's plugin scan for this workspace. It never

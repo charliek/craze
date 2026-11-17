@@ -1448,3 +1448,32 @@ func TestADirectSubmitRequeuedByAForeignTurnWaitsInTheQueue(t *testing.T) {
 	// The refused attempt, then the row it became, then the queue behind it.
 	r.wantPrompts("two", "two", "three")
 }
+
+// TestACancelledDirectRequeueIsCancelled (plan 052 review C4c item 8): claude's
+// direct text refused as agent.ErrForeignTurnRequeue, with a cancel validated
+// against its turn while the claim was out, ends cancelled — synthetic, not an
+// error — is not put back, and the follow-up queued behind it drains.
+func TestACancelledDirectRequeueIsCancelled(t *testing.T) {
+	r, _, returned, _ := restoreRig(t)
+	refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurnRequeue))
+	if res := r.submit("direct"); res.Turn != "turn-1" {
+		t.Fatalf("the submit answered %+v", res)
+	}
+	r.queue("follow-up")
+	await(t, refusal.refusing, "the direct claim to reach its refusal")
+	if _, err := r.e.Cancel(context.Background(), Command{}, "turn-1"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	close(refusal.gate)
+	awaitTurn(t, returned, "turn-1")
+	got := r.until(ended("turn-1"))
+	end := got[len(got)-1].Turn
+	if !end.Synthetic || end.StopReason != stopCancelled || end.Err != "" {
+		t.Fatalf("the cancelled direct refusal's ending: %+v", end)
+	}
+	r.until(lastEnding)
+	if st := r.e.State(); st.Activity == ActivityError || len(st.Queue) != 0 {
+		t.Fatalf("state: %+v", st)
+	}
+	r.wantPrompts("direct", "follow-up")
+}

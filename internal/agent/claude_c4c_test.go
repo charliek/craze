@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,5 +223,205 @@ func TestClaudeForeignRefusalWaitsInTheQueue(t *testing.T) {
 	waitFor(t, "the session to say foreign", r.s.ForeignTurn)
 	if _, err := r.s.Prompt(t.Context(), "next"); !errors.Is(err, ErrForeignTurnRequeue) || !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("a prompt during claude's own turn = %v; want ErrForeignTurnRequeue", err)
+	}
+}
+
+// ----------------------------------------------------------------- C4d
+
+// TestClaudeAStalledLoadCompletionFails (review C4c item 1): after a load's
+// reply, the session's own waits end with the load: its context ending fails
+// the hold, the stalled completion gives up, and Start returns ErrReplayHold
+// instead of hanging.
+func TestClaudeAStalledLoadCompletionFails(t *testing.T) {
+	r := newClaudeRig(t, "claude-replay-load", Options{Interactive: true, LoadSessionID: "s-loaded"})
+	collect(t, r.s)
+	stalled := make(chan struct{})
+	testLoadStall = func(ctx context.Context) {
+		close(stalled)
+		<-ctx.Done()
+	}
+	t.Cleanup(func() { testLoadStall = nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan error, 1)
+	go func() { started <- r.s.Start(ctx) }()
+	<-stalled
+	cancel()
+	select {
+	case err := <-started:
+		if !errors.Is(err, acp.ErrReplayHold) {
+			t.Fatalf("Start = %v; want ErrReplayHold", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled load completion held Start after its context ended")
+	}
+}
+
+// TestClaudeChildRetiredAfterTheDrain (review C4c item 4): with ReplayDone's
+// drain parked between a child's running change and its publication, the
+// agent's output ends: the retirement waits for the drain, so the running row
+// is published before its retirement failure, never after it.
+func TestClaudeChildRetiredAfterTheDrain(t *testing.T) {
+	p := ClaudeProvider()
+	s := newSession(Options{Provider: &p})
+	t.Cleanup(func() { _ = s.Close() })
+	log := collect(t, s)
+	cr, sw := io.Pipe()
+	sr, cw := io.Pipe()
+	t.Cleanup(func() { _ = cr.Close(); _ = cw.Close(); _ = sr.Close(); _ = sw.Close() })
+	client := acp.DialWithDialect(cr, cw, acp.DialectClaude)
+	t.Cleanup(func() { _ = client.Close() })
+	s.mu.Lock()
+	s.client = client
+	s.sessionID = "root"
+	s.mu.Unlock()
+	client.SetUpdateHandler(s.onUpdate)
+	client.SetSubagentHandler(s.onSubagent)
+	barrier := make(chan struct{}, 1)
+	client.SetAuthStatusHandler(func(acp.AuthStatus) { barrier <- struct{}{} })
+	enc, dec := acp.NewEncoder(sw), acp.NewDecoder(sr)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := client.LoadSession(context.Background(), "root", t.TempDir(), acp.SessionParams{})
+		loaded <- err
+	}()
+	req, err := dec.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.WriteMessage(&acp.Message{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-loaded; err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			if _, err := dec.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	raw, _ := json.Marshal(map[string]any{"sessionId": "root", "update": announce("c1", "running")})
+	_ = enc.WriteMessage(&acp.Message{JSONRPC: "2.0", Method: acp.MethodSessionUpdate, Params: raw})
+	_ = enc.WriteMessage(&acp.Message{JSONRPC: "2.0", Method: acp.MethodClaudeAuthStatus, Params: json.RawMessage(`{"authStatus":{"kind":"account"}}`)})
+	<-barrier
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	testSubagentPublish = func(n acp.SubagentNotification) {
+		if n.ChildSessionID == "c1" && n.State == acp.ChildRunning {
+			close(parked)
+			<-release
+		}
+	}
+	joining := make(chan struct{})
+	testRetireJoining = func() { close(joining) }
+	t.Cleanup(func() { testSubagentPublish, testRetireJoining = nil, nil })
+	go s.retireChildrenAtEnd(client)
+	drained := make(chan error, 1)
+	go func() { drained <- client.ReplayDone() }()
+	<-parked
+	_ = sw.Close() // the agent's output ends
+	<-client.Conn().ReadDone()
+	<-joining
+	retired := func() bool {
+		for _, ev := range log.snapshot() {
+			if ev.Type == EventSubagent && ev.Subagent != nil && ev.Subagent.ID == "c1" && ev.Subagent.Status == SubagentFailed {
+				return true
+			}
+		}
+		return false
+	}
+	// The one bounded look at non-progress: a retirement that did not wait
+	// for the drain publishes its failure here, while the drain is parked.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) && !retired() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if retired() {
+		t.Fatal("the retirement published while the drain still held the child's running row")
+	}
+	close(release)
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the retirement", retired)
+	var order []SubagentStatus
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventSubagent && ev.Subagent != nil && ev.Subagent.ID == "c1" {
+			order = append(order, ev.Subagent.Status)
+		}
+	}
+	if len(order) < 2 || order[len(order)-1] != SubagentFailed || order[0] != SubagentRunning {
+		t.Fatalf("the child's rows were published %v; want running, then failed last", order)
+	}
+}
+
+// TestClaudeSessionSaysWhichRowsItRemoves (review C4c item 5, the session's
+// half; the transcript's is transcript.TestRetainedRowsFollowTheSession): in the
+// A/B sequence every claude row is Retained, and the one row the session drops
+// — A, which the registry evicted — is said to be removed; nothing else is.
+func TestClaudeSessionSaysWhichRowsItRemoves(t *testing.T) {
+	pc := newPipeClaude(t, nil)
+	pc.push(t, "root", announce("A", "running"))
+	pc.push(t, "root", announce("B", "running"))
+	pc.push(t, "root", idleUpdate("B"))
+	pc.push(t, "root", idleUpdate("A"))
+	for i := range 62 {
+		id := fmt.Sprintf("c%d", i)
+		pc.push(t, "root", announce(id, "running"))
+		pc.push(t, "root", idleUpdate(id))
+	}
+	pc.push(t, "root", announce("D", "running"))
+	pc.push(t, "root", idleUpdate("D"))
+	pc.barrier(t)
+	var removed []string
+	for _, ev := range pc.log.snapshot() {
+		if ev.Type != EventSubagent || ev.Subagent == nil {
+			continue
+		}
+		if !ev.Subagent.Retained {
+			t.Fatalf("a claude row not retained: %+v", ev.Subagent)
+		}
+		if ev.SubagentChange == SubagentChangeRemoved {
+			removed = append(removed, ev.Subagent.ID)
+		}
+	}
+	if len(removed) != 1 || removed[0] != "A" {
+		t.Fatalf("removed %v; want A alone", removed)
+	}
+}
+
+// TestClaudeChildRetentionFollowsRouting (review C4c items 6, 7): a child the
+// registry routes again after it was gone is the registry's to keep once more,
+// and children the registry's cap refused — never routed — are capped like
+// any gone row.
+func TestClaudeChildRetentionFollowsRouting(t *testing.T) {
+	s, _ := claudeUnit(t)
+	upd := func(id, state string, unrouted, evicted bool) acp.SubagentNotification {
+		n := claudeChildUpdate(id, state, map[string]any{"stop": acp.StopEndTurn})
+		n.Unrouted, n.Evicted = unrouted, evicted
+		return n
+	}
+	s.onSubagent(upd("G", acp.ChildRunning, false, false))
+	s.onSubagent(upd("G", acp.ChildUnknown, false, true))
+	s.onSubagent(upd("G", acp.ChildRunning, false, false))
+	s.onSubagent(upd("G", acp.ChildIdle, false, false))
+	for i := range 40 {
+		id := fmt.Sprintf("refused%d", i)
+		s.onSubagent(upd(id, acp.ChildRunning, true, false))
+		s.onSubagent(upd(id, acp.ChildIdle, true, false))
+	}
+	if _, ok := claudeRowOf(s, "G"); !ok {
+		t.Fatal("G, routed again, was evicted as a gone row")
+	}
+	refused := 0
+	for _, r := range s.Snapshot().Subagents {
+		if strings.HasPrefix(r.ID, "refused") {
+			refused++
+		}
+	}
+	if refused > subagentFinishedCap {
+		t.Fatalf("%d refused rows kept; want at most %d", refused, subagentFinishedCap)
 	}
 }

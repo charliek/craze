@@ -669,6 +669,9 @@ const (
 	SubagentChangeSpawned  = "spawned"
 	SubagentChangeProgress = "progress"
 	SubagentChangeFinished = "finished"
+	// SubagentChangeRemoved is a Retained row the session has dropped: a
+	// client drops it, and its child transcript, too.
+	SubagentChangeRemoved = "removed"
 )
 
 type SubagentStatus string
@@ -833,6 +836,11 @@ type SubagentInfo struct {
 	// session has the verb (Capabilities.SubagentCancel): a claude child whose
 	// capabilities grant no cancel (plan 052 § E3), so its row offers no stop.
 	NoCancel bool
+	// Retained says the session alone decides when this row goes, and says so
+	// with a SubagentChangeRemoved event: a client keeps it until then rather
+	// than evicting it by its own finished-row cap. claude's rows, whose
+	// retention follows the ACP registry (plan 052 review C4c item 5).
+	Retained bool
 }
 
 // Todo is one entry of the cursor todo list. Status is normalised to

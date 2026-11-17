@@ -164,7 +164,7 @@ func sameSubagentFull(a, b SubagentInfo) bool {
 		a.Error != b.Error || a.Prompt != b.Prompt || a.Output != b.Output ||
 		a.Activity != b.Activity || a.DurationMs != b.DurationMs || a.ToolCalls != b.ToolCalls ||
 		a.Turns != b.Turns || a.TokensUsed != b.TokensUsed || a.Transcript != b.Transcript ||
-		a.Background != b.Background || a.NoCancel != b.NoCancel || !a.StartedAt.Equal(b.StartedAt) || !a.EndedAt.Equal(b.EndedAt) {
+		a.Background != b.Background || a.NoCancel != b.NoCancel || a.Retained != b.Retained || !a.StartedAt.Equal(b.StartedAt) || !a.EndedAt.Equal(b.EndedAt) {
 		return false
 	}
 	if len(a.ToolsUsed) != len(b.ToolsUsed) {
@@ -192,8 +192,19 @@ func (s *session) onSubagent(n acp.SubagentNotification) {
 		evs = s.handleClaudeSubagentLocked(n)
 	}
 	s.mu.Unlock()
+	if testSubagentPublish != nil && len(evs) > 0 {
+		testSubagentPublish(n)
+	}
 	s.emitAll(evs)
 }
+
+// Test seams, nil in production: testSubagentPublish runs between a roster
+// change and its events' publication; testRetireJoining in the retirement
+// once the read loop has ended, before it joins the claude dispatch.
+var (
+	testSubagentPublish func(acp.SubagentNotification)
+	testRetireJoining   func()
+)
 
 // subagentRecOf finds a record by ChildSessionID first (the routing key) and
 // falls back to SubagentID for shapes that only carry it.
@@ -464,8 +475,16 @@ func (s *session) closeAttemptLocked(rec *subagentRec) []Event {
 	evs := s.settleChildToolsLocked(rec)
 	evs = append(evs, s.remergeJoinedTaskLocked(rec)...)
 	s.stampFinishLocked(rec)
-	s.evictFinishedLocked(rec.info.ID)
-	return append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+	dropped := s.evictFinishedLocked(rec.info.ID)
+	evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+	// A retained row the session drops is said to be gone (review C4c item
+	// 5): a client follows the session's order, not a cap of its own.
+	for _, d := range dropped {
+		if d.info.Retained {
+			evs = append(evs, subagentRowEvent(d, SubagentChangeRemoved))
+		}
+	}
+	return evs
 }
 
 func finishStatus(s string) SubagentStatus {
@@ -551,7 +570,7 @@ func (s *session) stampFinishLocked(rec *subagentRec) {
 // would delete the record its own finished event is about, so the event would
 // describe a row no snapshot ever held. keep is the record that just
 // finished; it is never the one evicted.
-func (s *session) evictFinishedLocked(keep string) {
+func (s *session) evictFinishedLocked(keep string) (dropped []*subagentRec) {
 	claude := s.provider().isClaude()
 	var finished []string
 	for _, id := range s.subagentOrder {
@@ -590,9 +609,11 @@ func (s *session) evictFinishedLocked(keep string) {
 		}
 		id := finished[drop]
 		finished = append(finished[:drop], finished[drop+1:]...)
+		dropped = append(dropped, s.subagents[id])
 		delete(s.subagents, id)
 		s.removeSubagentOrderLocked(id)
 	}
+	return dropped
 }
 
 func (s *session) removeSubagentOrderLocked(id string) {

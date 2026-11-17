@@ -66,6 +66,7 @@ func (c *Client) claudeLoaded() {
 	c.mu.Lock()
 	if c.cf.phase == phaseReplaying {
 		c.cf.loaded = true
+		c.cf.holdCtx, c.cf.holdCancel = context.WithCancelCause(context.Background())
 		// The hold has a time bound (review C4b item 6): a session that never
 		// gets to ReplayDone does not hold the agent's traffic for ever.
 		gen := c.cf.holdGen
@@ -141,6 +142,9 @@ func (c *Client) failHoldLocked(err error) {
 		return
 	}
 	c.cf.holdErr = err
+	if c.cf.holdCancel != nil {
+		c.cf.holdCancel(err)
+	}
 	c.dropped += int64(len(c.cf.held))
 	c.cf.held, c.cf.heldBytes = nil, 0
 	if c.cf.holdTimer != nil {
@@ -154,7 +158,7 @@ func (c *Client) failHoldLocked(err error) {
 // load's context ending), and the client's close.
 func (c *Client) failHold(gen uint64, err error) {
 	c.mu.Lock()
-	failed := c.holdingLocked() && c.cf.holdGen == gen && c.cf.holdErr == nil
+	failed := (c.holdingLocked() || c.cf.draining) && c.cf.holdGen == gen && c.cf.holdErr == nil
 	if failed {
 		c.failHoldLocked(err)
 	}
@@ -169,17 +173,63 @@ func (c *Client) watchHold(ctx context.Context) {
 	c.mu.Lock()
 	gen := c.cf.holdGen
 	holding := c.holdingLocked()
+	hctx := c.cf.holdCtx
 	c.mu.Unlock()
-	if !holding {
+	if !holding || hctx == nil {
 		return
 	}
 	go func() {
 		select {
 		case <-ctx.Done():
 			c.failHold(gen, fmt.Errorf("%w: %w", ErrReplayHold, ctx.Err()))
-		case <-c.conn.Done():
+		case <-hctx.Done():
 		}
 	}()
+}
+
+// LoadContext is the session's context for its own work between a claude
+// load's reply and ReplayDone (review C4c item 1): it ends when the hold fails
+// — its bounds, its time, its load's context — or the client closes, with that
+// as its cause, so a stalled replay completion gives up and the load fails
+// rather than waiting for ever. context.Background for every other client.
+func (c *Client) LoadContext() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cf.holdCtx == nil {
+		return context.Background()
+	}
+	return c.cf.holdCtx
+}
+
+// endHoldContextLocked ends the hold's context with cause, if there is one.
+func (c *Client) endHoldContextLocked(cause error) {
+	if c.cf.holdCancel != nil {
+		c.cf.holdCancel(cause)
+	}
+}
+
+// JoinDispatch waits until no claude dispatch is running — the read loop's
+// or ReplayDone's drain — or stop closes, answering whether it got there:
+// whatever was dispatched before it has been handed on and published (review
+// C4c item 4).
+func (c *Client) JoinDispatch(stop <-chan struct{}) bool {
+	got := make(chan struct{})
+	gaveUp := make(chan struct{})
+	go func() {
+		c.dispatchMu.Lock()
+		select {
+		case got <- struct{}{}:
+		case <-gaveUp:
+		}
+		c.dispatchMu.Unlock()
+	}()
+	select {
+	case <-got:
+		return true
+	case <-stop:
+		close(gaveUp)
+		return false
+	}
 }
 
 // ReplayDone is the session's word that its replay is over — its replay flag
@@ -195,14 +245,15 @@ func (c *Client) ReplayDone() error {
 		return nil
 	}
 	c.dispatchMu.Lock()
-	defer c.dispatchMu.Unlock()
 	c.mu.Lock()
 	if err := c.cf.holdErr; err != nil {
 		c.mu.Unlock()
+		c.dispatchMu.Unlock()
 		return err
 	}
 	if !c.holdingLocked() {
 		c.mu.Unlock()
+		c.dispatchMu.Unlock()
 		return nil
 	}
 	held := c.cf.held
@@ -210,32 +261,84 @@ func (c *Client) ReplayDone() error {
 	c.cf.loaded = false
 	c.cf.phase = phaseIdle
 	c.cf.ready = true
-	if c.cf.holdTimer != nil {
-		c.cf.holdTimer.Stop()
-		c.cf.holdTimer = nil
-	}
-	c.cf.holdGen++
+	// The time bound and the context watch stay armed through the drain
+	// (review C4c item 1): a handler that blocks in it is bounded too.
+	c.cf.draining = true
+	hctx := c.cf.holdCtx
 	c.mu.Unlock()
-	// In arrival order, requests and withdrawals with the updates (review
-	// C4b item 5): a child's request comes after the announce that registers
-	// it, as it came on the wire.
-	for _, f := range held {
-		if c.conn.severed.Load() {
-			// The overage guard's stop (review C5 item 7): nothing held
-			// reaches the session after it.
-			break
+	// The drain runs on its own goroutine, holding dispatchMu until it is
+	// done, so the read loop waits behind it; this call waits for it or for
+	// the hold to fail, whichever is first.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		defer c.dispatchMu.Unlock()
+		// In arrival order, requests and withdrawals with the updates
+		// (review C4b item 5): a child's request comes after the announce
+		// that registers it, as it came on the wire.
+		for _, f := range held {
+			if testDrainFrame != nil {
+				testDrainFrame()
+			}
+			c.mu.Lock()
+			failed := c.cf.holdErr != nil
+			c.mu.Unlock()
+			ended := false
+			select {
+			case <-c.conn.ReadDone():
+				// The agent's output has ended: the session retires its
+				// children once this drain is over (JoinDispatch), and
+				// nothing routed after that may contradict it.
+				ended = true
+			default:
+			}
+			if failed || ended || c.conn.severed.Load() {
+				// The hold failed, the transport ended, or the overage
+				// guard's stop (review C5 item 7): nothing more reaches the
+				// session.
+				break
+			}
+			switch {
+			case f.update != nil:
+				c.routeClaude(*f.update)
+			case f.req != nil:
+				c.dispatchRequest(f.req)
+			case f.cancel != nil:
+				c.handleCancelRequest(f.cancel)
+			}
 		}
-		switch {
-		case f.update != nil:
-			c.routeClaude(*f.update)
-		case f.req != nil:
-			c.onRequest(f.req)
-		case f.cancel != nil:
-			c.handleCancelRequest(f.cancel)
+		c.mu.Lock()
+		c.cf.draining = false
+		if c.cf.holdErr == nil {
+			if c.cf.holdTimer != nil {
+				c.cf.holdTimer.Stop()
+				c.cf.holdTimer = nil
+			}
+			c.cf.holdGen++
 		}
+		c.mu.Unlock()
+	}()
+	var done <-chan struct{}
+	if hctx != nil {
+		done = hctx.Done()
 	}
-	return nil
+	select {
+	case <-drained:
+	case <-done:
+	}
+	c.mu.Lock()
+	err := c.cf.holdErr
+	if err == nil {
+		// Done with: the session's waits are over.
+		c.endHoldContextLocked(nil)
+	}
+	c.mu.Unlock()
+	return err
 }
+
+// testDrainFrame is a test seam, nil in production: it runs in ReplayDone's
+// drain before each held frame is routed.
+var testDrainFrame func()
 
 // requestSession is a request's params.sessionId, "" for none.
 func requestSession(params json.RawMessage) string {
@@ -359,6 +462,7 @@ func (c *Client) claudeSubagentLocked(n SessionNotification, root string) {
 			// still shows; the child's stream stays in the early buffer and
 			// expires there.
 			c.dropped++
+			sub.Unrouted = true
 		case sub.State == "":
 			// A label or a cwd alone says nothing of the child's work
 			// (review C4 item 6): a known child keeps its idle bit, and one

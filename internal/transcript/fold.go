@@ -614,6 +614,20 @@ func foldSubagent(m *Model, ev agent.Event) {
 		return
 	}
 	id := info.ID
+	if ev.SubagentChange == agent.SubagentChangeRemoved {
+		// The session dropped a row it retains (plan 052 review C4c item 5):
+		// the model drops it, and its child transcript, in the session's
+		// order rather than by its own cap.
+		if _, ok := m.agents[id]; ok {
+			delete(m.agents, id)
+			if i := slices.Index(m.agentOrder, id); i >= 0 {
+				m.agentOrder = slices.Delete(m.agentOrder, i, i+1)
+			}
+			m.dropSub(id)
+			m.fc.state = true
+		}
+		return
+	}
 	// The TUI's applySubagentEvent ensures the child's transcript first.
 	t := m.ensureSub(id)
 	row, ok := m.agents[id]
@@ -676,7 +690,8 @@ func (m *Model) setActivity(id, a string) {
 func (m *Model) evictFinished(keep string) {
 	var finished []string
 	for _, id := range m.agentOrder {
-		if s := m.agents[id].info.Status; s != agent.SubagentRunning && s != "" {
+		// A retained row goes only when the session says so (removed).
+		if r := m.agents[id].info; r.Status != agent.SubagentRunning && r.Status != "" && !r.Retained {
 			finished = append(finished, id)
 		}
 	}

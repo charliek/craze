@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"time"
@@ -198,6 +199,13 @@ type claudeForeign struct {
 	holdErr   error
 	holdTimer Timer
 	holdGen   uint64
+	// holdCtx ends when the hold fails or the client closes (cause
+	// ErrReplayHold or ErrClosed): the session's own post-reply waits use it
+	// (LoadContext). draining: ReplayDone is routing what was held, its time
+	// bound and context watch still armed (review C4c item 1).
+	holdCtx    context.Context
+	holdCancel context.CancelCauseFunc
+	draining   bool
 	// seen is every root tool call id lately seen, in seenOrder.
 	seen      map[string]struct{}
 	seenOrder []string
@@ -574,6 +582,10 @@ func closeWait() time.Duration {
 // testAfterPrompted is a test seam, nil in production: it runs in a claude
 // PromptBlocks once the machine is prompted, just before the bytes go out.
 var testAfterPrompted func()
+
+// testGateRefused is a test seam, nil in production: it runs in a claude
+// PromptBlocks refused after its gate, before its cleanup.
+var testGateRefused func()
 
 // closeMachineLocked retires the timers and closes the machine: nothing opens
 // again.

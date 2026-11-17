@@ -921,3 +921,141 @@ func TestClaudeLoadHoldIsBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestClaudeGateClaimHeldUntilItsCleanup (review C4c item 9): a prompt refused
+// after its gate keeps its claim until its own cleanup has run: with the
+// agent's turn over by then, a second prompt in that gap is refused as in
+// flight rather than admitted beside the first's cleanup.
+func TestClaudeGateClaimHeldUntilItsCleanup(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	parked, resume := make(chan struct{}), make(chan struct{})
+	testGateRefused = func() { close(parked); <-resume }
+	t.Cleanup(func() { testGateRefused = nil })
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	r.push(t, chunk("a wake"), usageCost)
+	release <- nil
+	<-parked
+	// The agent's turn ends while the refused prompt has yet to clean up.
+	r.clk.Advance(grace)
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("phase %s", got)
+	}
+	r.client.SetPromptGate(nil)
+	second := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "y"); second <- err }()
+	select {
+	case err := <-second:
+		if !errors.Is(err, ErrPromptInFlight) {
+			t.Fatalf("a prompt while the refused one held its claim = %v; want ErrPromptInFlight", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second prompt was admitted while the refused one still held its claim")
+	}
+	close(resume)
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the gated prompt = %v", err)
+	}
+}
+
+// TestClaudeADrainThatBlocksIsBounded (review C4c item 1): the hold's time
+// bound stays armed through ReplayDone's drain: a handler that blocks there
+// fails the hold — ReplayDone answers ErrReplayHold, LoadContext ends with it
+// — instead of holding Start for ever.
+func TestClaudeADrainThatBlocksIsBounded(t *testing.T) {
+	r := newClaudeRig(t)
+	r.loaded(t, context.Background())
+	hctx := r.client.LoadContext()
+	parked, release := make(chan struct{}), make(chan struct{})
+	r.client.SetUpdateHandler(func(SessionNotification) { close(parked); <-release })
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	r.pushUpdate(t, rigRoot, chunk("held"))
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	done := make(chan error, 1)
+	go func() { done <- r.client.ReplayDone() }()
+	<-parked
+	r.clk.Advance(replayHoldWait)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrReplayHold) {
+			t.Fatalf("ReplayDone = %v; want ErrReplayHold", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a drain blocked in a handler held ReplayDone past the hold's bound")
+	}
+	if !errors.Is(context.Cause(hctx), ErrReplayHold) {
+		t.Fatalf("the load's context ended with %v", context.Cause(hctx))
+	}
+}
+
+// TestClaudeARequestWaitsBehindTheDrain (review C4c item 3): a child's request
+// read while ReplayDone is still routing the held announce of that child
+// waits behind it, and finds the child registered.
+func TestClaudeARequestWaitsBehindTheDrain(t *testing.T) {
+	r := newClaudeRig(t)
+	r.loaded(t, context.Background())
+	parked, release := make(chan struct{}), make(chan struct{})
+	first := true
+	testDrainFrame = func() {
+		if first {
+			first = false
+			close(parked)
+			<-release
+		}
+	}
+	t.Cleanup(func() { testDrainFrame = nil })
+	r.pushUpdate(t, rigRoot, chunk("root text"))
+	r.pushUpdate(t, rigRoot, subUpd("c1", running))
+	r.pushUpdate(t, rigRoot, subUpd("c1", requiresInput))
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	replies := make(chan *Message, 1)
+	go func() {
+		if msg, err := r.dec.ReadMessage(); err == nil {
+			replies <- msg
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- r.client.ReplayDone() }()
+	<-parked
+	r.send(t, 43, MethodRequestPermission, `{"sessionId":"c1","toolCall":{"toolCallId":"ct","title":"Write"},"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"}]}`)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var msg *Message
+	select {
+	case msg = <-replies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child's request was never answered")
+	}
+	if !strings.Contains(string(msg.Result), "allow-once") {
+		t.Fatalf("the request overtook the drain: answered %s", msg.Result)
+	}
+	if a := <-arrivals; a.Child != "c1" {
+		t.Fatalf("arrival %+v", a)
+	}
+}

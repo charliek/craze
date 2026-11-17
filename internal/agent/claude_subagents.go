@@ -79,6 +79,12 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 	if n.State == acp.ChildUnknown {
 		return s.claudeChildGoneLocked(rec, n.Evicted)
 	}
+	if rec != nil && !s.transportEnded {
+		// Routed again, or refused by the registry's cap: the row's
+		// retention follows (review C4c items 6, 7). A child the cap refused
+		// is never routed, so its finished row is capped as a gone one.
+		rec.gone = n.Unrouted
+	}
 	if s.transportEnded {
 		// The agent is gone and its children retired: nothing creates or
 		// restarts a running row from here (review C4b item 2).
@@ -94,6 +100,9 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 			return nil
 		}
 		rec.attempts = 1
+		rec.gone = n.Unrouted
+		// The session says when it goes (SubagentChangeRemoved).
+		rec.info.Retained = true
 		// No cancel unless the update grants it (applyClaudeLabelsLocked).
 		rec.info.NoCancel = true
 		if n.State == "" {
@@ -202,6 +211,8 @@ func (s *session) claudeChildGoneLocked(rec *subagentRec, evicted bool) []Event 
 		if evicted {
 			delete(s.subagents, rec.info.ID)
 			s.removeSubagentOrderLocked(rec.info.ID)
+			// A client drops it too (review C4c item 5).
+			return []Event{subagentRowEvent(rec, SubagentChangeRemoved)}
 		}
 		return nil
 	}
@@ -357,6 +368,15 @@ func (s *session) retireChildrenAtEnd(client *acp.Client) {
 	select {
 	case <-client.Conn().ReadDone():
 	case <-s.done:
+		return
+	}
+	if testRetireJoining != nil {
+		testRetireJoining()
+	}
+	// And after the claude dispatch outside the read loop — ReplayDone's
+	// drain — has handed on and published what it was routing (review C4c
+	// item 4): a running row it publishes never follows the retirement.
+	if !client.JoinDispatch(s.done) {
 		return
 	}
 	s.mu.Lock()

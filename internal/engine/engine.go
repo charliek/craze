@@ -2291,7 +2291,9 @@ func (e *Engine) textRequeuedLocked(t *turn) bool {
 // even after a cancel: a residual, recorded with R1. So does a turn under
 // ChainPolicy.RetryForeignTurn, whose client reads a foreign-turn refusal as one.
 func (e *Engine) cancelledRefusalLocked(t *turn) bool {
-	return e.rowRefusedLocked(t) && t.cancelAsked
+	// claude's direct text (textRequeuedLocked) too (review C4c item 8): a
+	// cancel validated against it ends it cancelled, not failed.
+	return (e.rowRefusedLocked(t) || e.textRequeuedLocked(t)) && t.cancelAsked
 }
 
 // rowRefusedLocked is what both of the above start from: a turn whose text came

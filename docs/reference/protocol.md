@@ -2026,6 +2026,11 @@ something to say, and each is absent at its zero value:
 
 An end with neither ran to its end (`done`).
 
+A sub-agent row may carry `retained`: the session alone decides when it goes, and says so with a
+`subagent` event whose `subagentChange` is `removed`; a client then drops the row and its child
+transcript, and never evicts a retained row by a finished-row cap of its own (claude's rows, whose
+retention follows the agent's own registry of its children).
+
 A snapshot's `turn` carries, beside the `foreign` bracket it holds, `foreignAt`: when that bracket's
 start came, while the agent's own turn runs — the clock a client that attaches mid-turn counts it
 from. It is absent when none runs, and from a host that predates it. The end bracket (`foreignTurn` with no `running`) always precedes the
