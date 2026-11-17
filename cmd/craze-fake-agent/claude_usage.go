@@ -47,9 +47,13 @@ import (
 //	                             a trailing report landing in the next turn
 //	                   HOLD      work until cancelled
 //	                   STDERR    a line on stderr, then the trip
+//	                   STDERR-FLOOD  600 lines on stderr, then work until
+//	                             cancelled
 //	                   CONFIG-TRIP  a config and a commands update, then the
 //	                             trip
 //	                   FLOOD-TRIP  600 text chunks, then the trip
+//	                   FLOOD-ONLY  2000 text chunks, then work until
+//	                             cancelled
 //	                   TWO-TRIPS a trip with no reset time, then one a week
 //	                             away inside the stop's grace
 //	                   ESCAPE    two real children, one in the adapter's
@@ -204,6 +208,13 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 		}()
 	case strings.Contains(text, "HOLD"):
 		s.hang(id)
+	case strings.Contains(text, "FLOOD-ONLY"):
+		// More text than a reader that is not reading has room for, and no
+		// trip: work until cancelled.
+		for i := range 2000 {
+			s.claudeSay(sid, fmt.Sprintf("chunk %d ", i))
+		}
+		s.hang(id)
 	case strings.Contains(text, "FLOOD-TRIP"):
 		// More text than a reader that is not reading has room for, then
 		// the trip behind it.
@@ -218,6 +229,14 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.claude.catalog()})
 		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateAvailableCommands, "availableCommands": []any{}})
 		trip()
+		s.hang(id)
+	case strings.Contains(text, "STDERR-FLOOD"):
+		// 600 lines on stderr, a millisecond apart, then work until
+		// cancelled.
+		for i := range 600 {
+			fmt.Fprintf(os.Stderr, "claude-agent-acp: line %d\n", i)
+			time.Sleep(time.Millisecond)
+		}
 		s.hang(id)
 	case strings.Contains(text, "STDERR"):
 		// A diagnostic on the adapter's stderr, then the trip.

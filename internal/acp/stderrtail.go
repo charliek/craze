@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -99,6 +100,16 @@ func StderrWait(d time.Duration) time.Duration {
 	return d
 }
 
+// StderrDropped is how many chunks of the agent's stderr claude's queued
+// sink dropped because its sink was behind (review C5d item 8): 0 for every
+// other dialect, whose copy waits for its sink and drops nothing.
+func (c *Client) StderrDropped() int64 {
+	if c.child == nil || c.child.stderrSink == nil {
+		return 0
+	}
+	return c.child.stderrSink.dropped.Load()
+}
+
 // StderrTail is the last 2 KiB of what the agent wrote to its stderr, raw:
 // what a start that failed because its agent exited can say in the agent's
 // own words (plan 035 C7). It waits up to wait for the copy of the agent's
@@ -131,10 +142,11 @@ const asyncSinkQueue = 256
 // its pipe and the child it belongs to. A sink that keeps up gets every byte,
 // in order.
 type asyncSink struct {
-	dst  io.Writer
-	ch   chan []byte
-	done chan struct{}
-	once sync.Once
+	dst     io.Writer
+	ch      chan []byte
+	done    chan struct{}
+	once    sync.Once
+	dropped atomic.Int64
 }
 
 func newAsyncSink(dst io.Writer) *asyncSink {
@@ -154,6 +166,7 @@ func (a *asyncSink) Write(p []byte) (int, error) {
 	select {
 	case a.ch <- b:
 	default:
+		a.dropped.Add(1)
 	}
 	return len(p), nil
 }

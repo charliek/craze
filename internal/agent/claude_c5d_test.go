@@ -113,6 +113,13 @@ func TestClaudeCloseJoinsTheKill(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("the close never ended")
 	}
+	waitChildrenGone(t, pids)
+}
+
+// waitChildrenGone fails unless every child the fake wrote to pids has ended
+// within a few seconds.
+func waitChildrenGone(t *testing.T, pids string) {
+	t.Helper()
 	raw, _ := os.ReadFile(pids)
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		f := strings.Fields(line)

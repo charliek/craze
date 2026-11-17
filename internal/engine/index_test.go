@@ -2177,3 +2177,40 @@ func TestIndexRecordsClaudesEffort(t *testing.T) {
 	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: &agent.ConfigState{Options: effort}}})
 	idx.waitRows(t, 3)
 }
+
+// TestASettingsChangeSurvivesTheClose (review C5d item 4): a model or effort
+// change still owed to a claude row when the engine closes is written, not
+// dropped as a plain touch: the next resume asks for what the row says.
+func TestASettingsChangeSurvivesTheClose(t *testing.T) {
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	entered, release := idx.parkAt(3)
+	t.Cleanup(release)
+	r.e.idx.closeWait = watchdog
+	finishing := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(finishing) }
+	effort := func(v string) *agent.ConfigState {
+		return &agent.ConfigState{Options: []agent.ConfigOption{{ID: "effort", Type: "select", Current: v, SelectValues: []agent.SelectValue{{Value: "low"}, {Value: "high"}}}}}
+	}
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: effort("high")}})
+	await(t, entered, "the first change's write to park")
+	// The second change is owed while that write is held: the close finds it.
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: effort("low")}})
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	await(t, finishing, "the worker's exit to begin")
+	release()
+	select {
+	case <-closed:
+	case <-time.After(watchdog):
+		t.Fatal("Close never returned")
+	}
+	if n := idx.tries(); n != 4 {
+		t.Fatalf("%d writes; want the seed's two, the parked change's and the owed one's", n)
+	}
+}

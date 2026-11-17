@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -312,8 +314,9 @@ func TestClaudeSeverWhileTellingAnEviction(t *testing.T) {
 	}
 }
 
-// TestStderrCopyRetiresBehindABlockedSink (review C5c item 11): a sink that
-// never returns leaves the copy from the agent's pipe retired within the cap.
+// TestStderrCopyRetiresBehindABlockedSink (review C5c item 11): on claude, a
+// sink that never returns leaves the copy from the agent's pipe retired
+// within the cap.
 func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
 	prev := stderrWaitBound
 	stderrWaitBound = 300 * time.Millisecond
@@ -321,7 +324,7 @@ func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	sink := writerFunc(func(p []byte) (int, error) { <-release; return len(p), nil })
-	c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", `echo one >&2; echo two >&2; exit 0`}, Stderr: sink})
+	c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", `echo one >&2; echo two >&2; exit 0`}, Stderr: sink, Dialect: DialectClaude})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,3 +337,109 @@ func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// TestKillTreeReachesWhatACapturedMemberStartedAfterTheExit (review C5d item
+// 7): on the polling reaper, a group member the stop's first snapshot caught
+// starts another process during the grace and exits, and then the agent
+// exits and is reaped: the late process, left in the group, is found in the
+// process table and killed too.
+func TestKillTreeReachesWhatACapturedMemberStartedAfterTheExit(t *testing.T) {
+	stubObserve(t, 0, syscall.ENOSYS, nil)
+	var stderr syncBuffer
+	// The member forks the late process and exits: it is nobody's
+	// descendant, only the group's.
+	c := spawnShell(t, `sh -c 'sleep 0.4; sleep 600 & echo "b $!" >&2; exit 0' &
+echo ready >&2; sleep 0.8; exit 0`, &stderr)
+	stderr.waitFor(t, "ready")
+	done := make(chan struct{})
+	go func() { c.StopWithin(3 * time.Second); close(done) }()
+	stderr.waitFor(t, "b ")
+	var late int
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "b" {
+			late, _ = strconv.Atoi(f[1])
+		}
+	}
+	if late == 0 {
+		t.Fatalf("no late pid in %q", stderr.String())
+	}
+	t.Cleanup(func() { _ = syscall.Kill(late, syscall.SIGKILL) })
+	waitClosed(t, done, 10*time.Second, "the stop")
+	waitPidGone(t, "the process a captured member started after the snapshot", late)
+}
+
+// TestKillTreeReachesWhatAnEscapedMemberStartedAfterTheExit (review C5d item
+// 7): a captured process in a session of its own starts another during the
+// grace, and then the agent exits and is reaped: the late process, a
+// descendant of a captured one, is killed too.
+func TestKillTreeReachesWhatAnEscapedMemberStartedAfterTheExit(t *testing.T) {
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("perl is not installed")
+	}
+	stubObserve(t, 0, syscall.ENOSYS, nil)
+	inner := filepath.Join(t.TempDir(), "inner.sh")
+	if err := os.WriteFile(inner, []byte("sleep 0.4; sleep 600 & echo \"d $!\" >&2; wait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stderr syncBuffer
+	c := spawnShell(t, `perl -e 'use POSIX qw(setsid); setsid(); exec "sh", "`+inner+`"' &
+echo ready >&2; sleep 0.8; exit 0`, &stderr)
+	stderr.waitFor(t, "ready")
+	done := make(chan struct{})
+	go func() { c.StopWithin(3 * time.Second); close(done) }()
+	stderr.waitFor(t, "d ")
+	var late int
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "d" {
+			late, _ = strconv.Atoi(f[1])
+		}
+	}
+	if late == 0 {
+		t.Fatalf("no late pid in %q", stderr.String())
+	}
+	t.Cleanup(func() { _ = syscall.Kill(late, syscall.SIGKILL) })
+	waitClosed(t, done, 10*time.Second, "the stop")
+	waitPidGone(t, "the process an escaped member started after the snapshot", late)
+}
+
+// TestStderrSinkQueueIsClaudesAlone (review C5d item 8): every other dialect's
+// copy waits for a sink that is behind and loses nothing; claude's queue drops
+// what it cannot hold, and counts it.
+func TestStderrSinkQueueIsClaudesAlone(t *testing.T) {
+	script := `i=0; while [ $i -lt 600 ]; do echo "line $i" >&2; sleep 0.001; i=$((i+1)); done; exit 0`
+	for _, d := range []DialectID{"", DialectClaude} {
+		t.Run("dialect="+string(d), func(t *testing.T) {
+			release := make(chan struct{})
+			var got syncBuffer
+			var once atomic.Bool
+			sink := writerFunc(func(p []byte) (int, error) {
+				if once.CompareAndSwap(false, true) {
+					<-release // behind for a while, from the first write
+				}
+				return got.Write(p)
+			})
+			c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", script}, Stderr: sink, Dialect: d})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d == DialectClaude {
+				// The agent writes everything while the sink is behind.
+				waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+				close(release)
+			} else {
+				// Held back by the sink: let go once it has been for a while.
+				time.Sleep(500 * time.Millisecond)
+				close(release)
+				waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+			}
+			_ = c.Close()
+			lines := strings.Count(got.String(), "\n")
+			switch {
+			case d != DialectClaude && (lines != 600 || c.StderrDropped() != 0):
+				t.Fatalf("%d lines reached the sink, %d chunks dropped; want all 600 and none", lines, c.StderrDropped())
+			case d == DialectClaude && (c.StderrDropped() == 0 || lines >= 600):
+				t.Fatalf("%d lines reached the sink, %d chunks dropped; want the queue's overflow dropped and counted", lines, c.StderrDropped())
+			}
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,12 +84,16 @@ func SetClaudeOverageForTest(path string, now func() time.Time, grace time.Durat
 	}
 }
 
-// overageSeams is the record's path and its fallback's.
+// overageSeams is the record's path and its fallback's. The resolvers are
+// called outside overageMu (review C5d item 5): one that stalls — a relative
+// CRAZE_HOME on a dead mount — holds only its caller, never another session's
+// clock.
 func overageSeams() (path, fallback string) {
 	overageMu.Lock()
-	defer overageMu.Unlock()
-	path = overagePath()
-	return path, overageFallback(path)
+	pathOf, fallbackOf := overagePath, overageFallback
+	overageMu.Unlock()
+	path = pathOf()
+	return path, fallbackOf(path)
 }
 
 // overageClock is the guard's now alone: no path is resolved (review C5c
@@ -186,10 +191,11 @@ func (s *session) tripOverage(rl acp.RateLimit) error {
 	at := s.recordPaths()
 	// The session's close waits for this write, bounded (review C5c item 1):
 	// a host that stops right after the trip does not take a pending hold
-	// with it.
-	s.recordWrites.Add(1)
+	// with it. Registered before it starts, so a close under way finds it
+	// (joinOverage looks again after each wait, review C5d item 2).
+	wrote := s.recordStarted()
 	go func() {
-		defer s.recordWrites.Done()
+		defer s.recordEnded(wrote)
 		where, primaryErr, err := writeOverageRecord(at, rec)
 		done <- written{where, primaryErr, err}
 	}()
@@ -416,47 +422,121 @@ func (s *session) StoppedErr() error {
 // C5c item 3): at the start, before anything else of the guard's runs.
 func (s *session) recordPaths() overagePaths {
 	s.mu.Lock()
+	if s.recordResolved {
+		at := s.recordAt
+		s.mu.Unlock()
+		return at
+	}
+	s.mu.Unlock()
+	// Resolved with no lock held (review C5d item 5): a resolution that
+	// stalls holds the start that asked, never the session's close.
+	at := resolveOveragePaths()
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.recordResolved {
-		s.recordAt, s.recordResolved = resolveOveragePaths(), true
+		s.recordAt, s.recordResolved = at, true
 	}
 	return s.recordAt
 }
 
+// recordStarted registers a record write about to start, for the close to
+// wait for (joinOverage), and answers the channel recordEnded closes.
+func (s *session) recordStarted() chan struct{} {
+	ch := make(chan struct{})
+	s.mu.Lock()
+	s.recordPending = append(s.recordPending, ch)
+	s.mu.Unlock()
+	return ch
+}
+
+// recordEnded is a registered record write's end.
+func (s *session) recordEnded(ch chan struct{}) {
+	s.mu.Lock()
+	s.recordPending = slices.DeleteFunc(s.recordPending, func(c chan struct{}) bool { return c == ch })
+	s.mu.Unlock()
+	close(ch)
+}
+
 // The bounds of the close's waits for the guard's work in flight (review C5c
-// items 1, 2), vars for tests.
+// items 1, 2), vars for tests. recordWriteDrain stays below the launcher's
+// SIGTERM grace, hostspawn.TermGrace (5 s), which a host's whole stop has to
+// fit in before its group is killed (review C5d item 1): a host stopped by its
+// launcher gets to its warning, not killed mid-wait.
+// TestRecordJoinFitsTheLauncherGrace holds the two together.
 var (
-	recordWriteDrain = 10 * time.Second
+	recordWriteDrain = 3 * time.Second
 	overageKillJoin  = 5 * time.Second
 )
 
+// overageJoinState is the close's deadlines for the guard's work, set once as
+// it begins, and whether it has given up on each — only the close's own
+// goroutine reads or writes it after that.
+type overageJoinState struct {
+	recordBy, killBy         time.Time
+	recordGaveUp, killGaveUp bool
+}
+
 // joinOverage is the close's wait for the guard's work still in flight: the
-// stop's kill, at most overageKillJoin — a `craze prompt` that exits right
-// after its turn must not abandon the descendant sweep — and the trip
-// record's write, at most recordWriteDrain, after which the host's log says
-// which record may not hold.
+// stop's kill, until overageKillJoin after the close began — a `craze
+// prompt` that exits right after its turn must not abandon the descendant
+// sweep — and the trip record's writes, until recordWriteDrain after it, past
+// which the host's log says which record may not hold. It looks again after
+// each wait (review C5d item 2): a stop or a write that began while it waited
+// is waited for too, within the same deadlines. The close calls it twice —
+// before the client's close and after it — under one set of deadlines.
 func (s *session) joinOverage() {
 	s.mu.Lock()
-	killed := s.overageKilled
-	at := s.recordAt
-	s.mu.Unlock()
-	if killed != nil {
-		t := time.NewTimer(overageKillJoin)
-		select {
-		case <-killed:
-		case <-t.C:
-		}
-		t.Stop()
+	if s.overageJoin == nil {
+		now := time.Now()
+		s.overageJoin = &overageJoinState{recordBy: now.Add(recordWriteDrain), killBy: now.Add(overageKillJoin)}
 	}
-	written := make(chan struct{})
-	go func() { s.recordWrites.Wait(); close(written) }()
-	t := time.NewTimer(recordWriteDrain)
+	j := s.overageJoin
+	s.mu.Unlock()
+	for {
+		s.mu.Lock()
+		killed := s.overageKilled
+		var pending chan struct{}
+		if len(s.recordPending) > 0 {
+			pending = s.recordPending[0]
+		}
+		at := s.recordAt
+		s.mu.Unlock()
+		switch {
+		case killed != nil && !j.killGaveUp && !isDone(killed):
+			if !waitBy(killed, j.killBy) {
+				j.killGaveUp = true
+			}
+		case pending != nil && !j.recordGaveUp:
+			if !waitBy(pending, j.recordBy) {
+				j.recordGaveUp = true
+				// Off the close's goroutine (review C5d item 6): a sink that
+				// blocks never holds the close.
+				s.diagLine(fmt.Sprintf("craze: the Claude overage record %s was still being written when the session closed; it may not hold", sanitizeLine(at.primary)))
+			}
+		default:
+			return
+		}
+	}
+}
+
+// waitBy waits for ch until deadline; it answers whether ch closed.
+func waitBy(ch <-chan struct{}, deadline time.Time) bool {
+	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
 	select {
-	case <-written:
+	case <-ch:
+		return true
 	case <-t.C:
-		if w := diagWriter(s.opts); w != nil {
-			fmt.Fprintf(w, "craze: the Claude overage record %s was still being written when the session closed; it may not hold\n", sanitizeLine(at.primary))
-		}
+		return isDone(ch)
+	}
+}
+
+// isDone reports whether ch is closed.
+func isDone(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }

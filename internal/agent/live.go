@@ -184,13 +184,18 @@ type session struct {
 	tripUntil      time.Time
 	recordLineBusy atomic.Bool
 	// recordAt is where the session's trip record is, resolved once
-	// (recordPaths); recordWrites counts the record writes in flight and
-	// overageKilled closes once the overage stop's kill is done — the close
-	// waits for both, bounded (joinOverage).
+	// (recordPaths); recordPending holds a channel per record write in
+	// flight, closed as it ends, and overageKilled closes once the overage
+	// stop's kill is done — the close waits for both, bounded, by the
+	// deadlines in overageJoin, set once as it begins (joinOverage).
 	recordAt       overagePaths
 	recordResolved bool
-	recordWrites   sync.WaitGroup
+	recordPending  []chan struct{}
 	overageKilled  chan struct{}
+	overageJoin    *overageJoinState
+	// stalledReader is set once the outbox's hard bound has stopped the
+	// session (readerStalled).
+	stalledReader atomic.Bool
 	// compacting is the claude compaction open now ("-" for one with no id),
 	// "" for none; compactedLast the id of the last that ended (claude_notes.go).
 	compacting, compactedLast string
@@ -2389,7 +2394,32 @@ func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *
 	if st != nil && st.Model != nil && *st.Model == s.snap.CurrentModel {
 		s.modelUnannounced = false
 	}
-	return s.log.EnqueueTicket(base)
+	t := s.log.EnqueueTicket(base)
+	if s.provider().isClaude() && s.log.OutboxPastHardBound() {
+		// A state delta is kept — it is the session's state — but the
+		// outbox past its hard bound stops the session all the same.
+		s.readerStalled()
+	}
+	return t
+}
+
+// readerStalled stops a claude session whose events nobody has read for the
+// outbox's hard bound (review C5d item 3): through stopFor — the agent is
+// halted and closed, the turn running ends with the error — once, and off the
+// caller's goroutine, which may hold s.mu or be the read loop.
+func (s *session) readerStalled() {
+	if !s.stalledReader.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		s.log.Note(journal.DiagNote{Kind: "event_reader_stalled", Fields: map[string]any{"refused": s.log.outboxRefused.Load()}})
+		s.stopFor(errReaderStalled())
+	}()
+}
+
+// errReaderStalled is the error of a session stopped by readerStalled.
+func errReaderStalled() error {
+	return claudeErr(errkind.Internal, "craze's event reader stalled; the session was stopped")
 }
 
 // owedModelLocked is st with the Model section added, at CurrentModel, when a
@@ -2727,6 +2757,19 @@ func (s *session) teardown() {
 		s.askStop()
 		if client != nil {
 			s.closeErr = client.Close()
+			if n := client.StderrDropped(); n > 0 {
+				// claude's stderr sink was behind, and its queue dropped
+				// what it could not hold (review C5d item 8): said once.
+				s.log.Note(journal.DiagNote{Kind: "stderr_dropped", Fields: map[string]any{"chunks": n}})
+				s.diagLine(fmt.Sprintf("craze: %d chunks of the agent's stderr were dropped: its sink was behind", n))
+			}
+		}
+		if s.provider().isClaude() {
+			// Again, within what is left of the same bounds (review C5d item
+			// 2): a trip the read loop handled while the close was under way
+			// — its write, its stop — is joined too. The client is closed: no
+			// trip comes after this.
+			s.joinOverage()
 		}
 		// The child's stderr copy has finished by now (Client.Close waits for
 		// it), so this is where its last unterminated line can be noted — and
@@ -3881,7 +3924,13 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 		// an error, which the queue does not keep, is published directly,
 		// once the queue ahead of it is through.
 		if ev.Err == nil {
-			s.log.Enqueue(ev)
+			if !s.log.EnqueueBounded(ev) {
+				// Past the hard bound: nobody has read for that long, and
+				// the session is stopped rather than hold more (review C5d
+				// item 3).
+				s.readerStalled()
+				return false
+			}
 			return true
 		}
 		if s.log.Pending() {

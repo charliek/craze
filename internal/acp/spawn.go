@@ -215,6 +215,9 @@ type Child struct {
 	// way to the sink (Client.StderrTail); nil for a child Spawn did not
 	// start.
 	stderrTail *stderrTail
+	// stderrSink is claude's queued sink (nil for every other dialect): what
+	// it dropped is counted there.
+	stderrSink *asyncSink
 }
 
 // newChild starts watching cmd, just started, and its reaper. Whether the
@@ -390,21 +393,34 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	if stderrDst == nil {
 		stderrDst = io.Discard
 	}
-	// Every byte still reaches the sink — through a queue of its own, so a
-	// sink that blocks never holds the copy (review C5c item 11) — and the
-	// recorder keeps the last of them for a failed start's words
+	// The recorder keeps the last of the bytes for a failed start's words
 	// (Client.StderrTail).
-	sink := newAsyncSink(stderrDst)
-	child.stderrTail = newStderrTail(sink)
-	go func() {
-		_, _ = io.Copy(child.stderrTail, stderr)
-		// The copy has reached the pipe's end: the queue is handed to the
-		// sink for at most the cap, and the copy is over either way. Past
-		// it, only the sink's own writer is left, in the write that has not
-		// returned; it ends when that does.
-		sink.closeWithin(stderrWaitBound)
-		close(child.stderrDone)
-	}()
+	if opts.Dialect != DialectClaude {
+		// Every byte reaches the sink, the copy waiting for it: a sink that
+		// is behind holds the agent's writes back, and nothing is lost.
+		child.stderrTail = newStderrTail(stderrDst)
+		go func() {
+			_, _ = io.Copy(child.stderrTail, stderr)
+			close(child.stderrDone)
+		}()
+	} else {
+		// claude's sink sits behind a queue of its own, so a sink that blocks
+		// never holds the copy (review C5c item 11) — the overage stop's
+		// close must not wait on it — at the price of what a full queue
+		// drops, counted (Client.StderrDropped, review C5d item 8).
+		sink := newAsyncSink(stderrDst)
+		child.stderrSink = sink
+		child.stderrTail = newStderrTail(sink)
+		go func() {
+			_, _ = io.Copy(child.stderrTail, stderr)
+			// The copy has reached the pipe's end: the queue is handed to
+			// the sink for at most the cap, and the copy is over either way.
+			// Past it, only the sink's own writer is left, in the write that
+			// has not returned; it ends when that does.
+			sink.closeWithin(stderrWaitBound)
+			close(child.stderrDone)
+		}()
+	}
 
 	conn := NewConn(stdout, stdin)
 	conn.ended = child.endedWith

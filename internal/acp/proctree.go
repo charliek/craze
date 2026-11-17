@@ -15,7 +15,10 @@ import (
 // unreaped (the reaper waits for the read: Child.reapMu); every process of
 // either reading is killed, each one only once it has been checked to still
 // be that process (pidfd and start time on Linux, start time on macOS), and
-// the group last, whatever became of the agent.
+// the group last while the agent is unreaped. Once it has been reaped, the
+// group's remaining members and what the captured processes started since are
+// read from the process table and killed the same checked way (review C5d
+// item 7).
 //
 // What it cannot reach, and the docs say so: a process that left the tree
 // before either reading (forked twice and handed to init). On macOS the
@@ -109,22 +112,82 @@ func (ch *Child) KillTree(earlier TreeSnapshot) {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
 	}
-	seen := map[treeEntry]bool{}
-	for _, e := range append(append(TreeSnapshot(nil), earlier...), ch.SnapshotTree()...) {
-		if e.pid <= 1 || seen[e] {
-			continue
-		}
-		seen[e] = true
-		killVerified(e)
+	entries := append(append(TreeSnapshot(nil), earlier...), ch.SnapshotTree()...)
+	swept := false
+	if ch.reapedNow() {
+		// The agent exited first and has been reaped — on the polling reaper
+		// nothing cleaned its group at that exit (review C5d item 7) — so
+		// what is left is found in the process table, before anything is
+		// killed (a captured process's children are its descendants only
+		// while it lives): its group's members, and whatever a captured
+		// process has started since.
+		entries = append(entries, leftBehind(ch.pgid, entries)...)
+		swept = true
 	}
+	seen := map[treeEntry]bool{}
+	kill := func(es []treeEntry) {
+		for _, e := range es {
+			if e.pid <= 1 || seen[e] {
+				continue
+			}
+			seen[e] = true
+			killVerified(e)
+		}
+	}
+	kill(entries)
 	ch.reapMu.Lock()
-	if !ch.reaped && !isClosed(ch.reapedCh) {
+	reaped := ch.reaped || isClosed(ch.reapedCh)
+	if !reaped {
 		// The agent is unreaped (the reap waits on reapMu): its group's id
 		// cannot be anyone else's.
 		_ = groupKill(-ch.pgid, syscall.SIGKILL)
 	}
 	ch.reapMu.Unlock()
+	if reaped && !swept {
+		// Reaped while the kills ran: the group's members are read now.
+		kill(leftBehind(ch.pgid, entries))
+	}
 	ch.Kill()
+}
+
+// reapedNow reports whether the agent has been reaped.
+func (ch *Child) reapedNow() bool {
+	ch.reapMu.Lock()
+	defer ch.reapMu.Unlock()
+	return ch.reaped || isClosed(ch.reapedCh)
+}
+
+// leftBehind is what a reaped agent left, from the process table read now:
+// every member of its process group pgid, and every descendant of a captured
+// process that is still that process (its start time unchanged).
+//
+// The group's id is safe to match while any member is left: a pid that is a
+// live group's id is not handed to a new process. Once the group is empty the
+// id is free, and a new process may hold it, with a group of its own of that
+// id; so when some process's pid is pgid, the group is not read at all.
+func leftBehind(pgid int, captured []treeEntry) []treeEntry {
+	table, err := procTable()
+	if err != nil {
+		return nil
+	}
+	byPid := make(map[int]treeEntry, len(table))
+	for _, e := range table {
+		byPid[e.pid] = e
+	}
+	var out []treeEntry
+	if _, reused := byPid[pgid]; !reused && pgid > 1 {
+		for _, e := range table {
+			if e.pgid == pgid {
+				out = append(out, e)
+			}
+		}
+	}
+	for _, c := range captured {
+		if now, ok := byPid[c.pid]; ok && now.start == c.start {
+			out = append(out, descendants(table, c.pid)...)
+		}
+	}
+	return out
 }
 
 // groupKill is kill(2) to a group, a variable for tests.

@@ -1075,8 +1075,9 @@ func (e *Engine) observe(ev agent.Event) {
 		// The model or the options moved, and this provider's rows carry
 		// the model and the effort (plan 052 § C4, L5 F1): the row is
 		// rewritten with them. A touch, so a session with no
-		// row yet conjures none — its first write carries the model anyway.
-		e.idx.post(indexWork{touch: true})
+		// row yet conjures none — its first write carries the model anyway —
+		// but one a close still writes (review C5d item 4).
+		e.idx.post(indexWork{settings: true})
 	}
 	switch ev.Type {
 	case agent.EventReplay:

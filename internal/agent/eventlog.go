@@ -511,14 +511,17 @@ type EventLog struct {
 	// outboxSuperseded counts events EnqueueLatest dropped for a later one of
 	// the same key.
 	outboxSuperseded atomic.Int64
-	outboxEvents     int
-	outboxBytes      int
-	outboxMaxEvents  int
-	outboxMaxBytes   int
-	enqueued         uint64
-	drained          uint64
-	waiters          []*flushWaiter
-	drainerStarted   bool
+	// outboxRefused counts events EnqueueBounded refused past the hard
+	// bound.
+	outboxRefused   atomic.Int64
+	outboxEvents    int
+	outboxBytes     int
+	outboxMaxEvents int
+	outboxMaxBytes  int
+	enqueued        uint64
+	drained         uint64
+	waiters         []*flushWaiter
+	drainerStarted  bool
 	// outboxWake tells the idle drainer there is a batch (capacity 1: a
 	// collapsed pair of wake-ups is a drainer that finds both batches).
 	outboxWake chan struct{}
@@ -1118,14 +1121,44 @@ func (l *EventLog) Pending() bool {
 // (review C5c item 8). The new one goes at the end, behind everything enqueued
 // since, so the order the session said things in is kept.
 func (l *EventLog) EnqueueLatest(key string, ev Event) {
-	l.enqueueKeyed(nil, []Event{ev}, key)
+	l.enqueueKeyed(nil, []Event{ev}, key, false)
 }
 
-func (l *EventLog) enqueue(t *Ticket, evs []Event) { l.enqueueKeyed(t, evs, "") }
+// outboxHardFactor is the outbox's hard bound, as a multiple of its soft one
+// (review C5d item 3): what EnqueueBounded will not go past.
+const outboxHardFactor = 4
 
-func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string) {
+// EnqueueBounded is Enqueue of one event that a producer with no reader to
+// wait for — claude's read loop — may be refused: past outboxHardFactor times
+// the soft bound, in events or bytes, the event is not taken and it answers
+// false, and the caller stops what is producing (review C5d item 3). Memory
+// stays bounded and the producer never blocks.
+func (l *EventLog) EnqueueBounded(ev Event) bool {
+	return l.enqueueKeyed(nil, []Event{ev}, "", true)
+}
+
+// OutboxPastHardBound reports whether the outbox holds more than its hard
+// bound.
+func (l *EventLog) OutboxPastHardBound() bool {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	return l.pastHardLocked(0, 0)
+}
+
+// pastHardLocked reports whether the outbox, with events and bytes more, is
+// past its hard bound.
+func (l *EventLog) pastHardLocked(events, bytes int) bool {
+	return l.outboxEvents+events > outboxHardFactor*l.outboxMaxEvents || l.outboxBytes+bytes > outboxHardFactor*l.outboxMaxBytes
+}
+
+func (l *EventLog) enqueue(t *Ticket, evs []Event) { l.enqueueKeyed(t, evs, "", false) }
+
+// enqueueKeyed is every enqueue: under key, when one is given
+// (EnqueueLatest), and refused past the hard bound when bounded
+// (EnqueueBounded). It answers whether the events were taken.
+func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string, bounded bool) bool {
 	if len(evs) == 0 {
-		return
+		return true
 	}
 	if l.outboxIsCut() {
 		// Refused before anything is encoded, so a drop after Close reads nothing
@@ -1133,7 +1166,7 @@ func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string) {
 		// whole point of checking here and not only under the mutex. The locked
 		// recheck below still covers a cut that lands during the encoding.
 		l.droppedAtClose.Add(int64(len(evs)))
-		return
+		return false
 	}
 	b := outboxBatch{evs: make([]pendingEvent, len(evs)), ticket: t, key: key}
 	for i, ev := range evs {
@@ -1151,7 +1184,11 @@ func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string) {
 	defer l.outboxMu.Unlock()
 	if l.outboxIsCut() {
 		l.droppedAtClose.Add(int64(len(evs)))
-		return
+		return false
+	}
+	if bounded && l.pastHardLocked(len(b.evs), b.bytes) {
+		l.outboxRefused.Add(int64(len(evs)))
+		return false
 	}
 	if key != "" {
 		for i, old := range l.outbox {
@@ -1184,6 +1221,7 @@ func (l *EventLog) enqueueKeyed(t *Ticket, evs []Event, key string) {
 	case l.outboxWake <- struct{}{}:
 	default:
 	}
+	return true
 }
 
 // OutboxRoom reports whether the outbox is under its soft bound (4096 events or

@@ -125,8 +125,9 @@ running, and on a prompt's rate-limit failure. When one arrives craze:
    with a later reset extends it, and two craze processes writing at once
    keep the later of the two. The write is durable — synced to the disk
    before it counts as written — and a session that closes, or a `craze`
-   that exits, while it is still being written waits for it up to 10
-   seconds, then says in its log which record may not hold;
+   that exits, while it is still being written waits for it up to 3
+   seconds (inside the 5 seconds a launcher gives a host it stops), then
+   says in its log which record may not hold;
 2. **ends the running turn** — yours, or one Claude started on its own — with
    a `quota` error: *Claude would bill this as extra usage: your plan's 7-day
    limit is reached (resets …). craze stopped this session; the request in
@@ -136,8 +137,9 @@ running, and on a prompt's rate-limit failure. When one arrives craze:
    Code and every sub-agent and background command in it — and, first, every
    process the adapter started that left that group (a command that made a
    session of its own). A session closed while this stop is still killing
-   waits for the kill, up to 5 seconds, so a `craze prompt` that exits
-   right after its turn does not leave it half done. Nothing Claude sends
+   — or before it has begun, while the record is being written — waits for
+   the kill, up to 5 seconds, so a `craze prompt` that exits right after its
+   turn does not leave it half done. Nothing Claude sends
    after that is shown. A session
    that was idle says why in the transcript, and the session's host stops: it
    is no one's until you resume it. `craze -c` (or `craze send`) resumes it,
@@ -168,8 +170,16 @@ session until it is fixed or removed.
 Where the record is — craze's directory and the fallback — is settled once, as
 the session starts, so a trip never looks it up. A `CRAZE_HOME` given as a
 relative path on a network filesystem that has stopped answering can hold a
-claude start while craze finds its directory; that delays a start, never a
-stop.
+claude start while craze finds its directory; that delays that start, never
+a stop, another session, or the stalled session's own close.
+
+A claude session never waits for whoever reads its events, so that a sign
+behind a burst of output is always reached. If nothing has read them for
+long enough that 16,384 events or 32 MiB are waiting, craze stops the
+session, as it does for extra usage, with *craze's event reader stalled; the
+session was stopped*. If the sink for Claude's stderr falls behind, lines
+that do not fit in its queue are dropped, and the session's log says how
+many as it closes.
 
 **What craze cannot do.** It is containment, not prevention:
 
@@ -183,9 +193,11 @@ stop.
   begins or when it kills — each checked to still be that process before it
   is signalled (on macOS a best effort) — even if the adapter exited first;
   once the adapter is gone its group is no longer signalled as a whole (the
-  number may be another program's by then), only the processes found in it.
-  A process that left that tree before either look (forked twice and handed
-  to the system) is out of reach.
+  number may be another program's by then): what is left in it, and what the
+  processes found earlier have started since, are found in the process table
+  and killed one by one, each checked the same way. A process that left the
+  tree and the group before any look (forked twice and handed to the system,
+  in a group of its own) is out of reach.
 
 **Turn off extra usage on your Claude account** (claude.ai, under your plan's
 usage settings): that is the only hard guarantee, and craze recommends it for
