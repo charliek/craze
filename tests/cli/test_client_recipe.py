@@ -27,6 +27,7 @@ import shutil
 import signal
 import subprocess
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import IO, Any, TypeVar
@@ -54,6 +55,31 @@ POLL_FIRST_ID = 100
 FAKE_HOST_ID = "0a0a0a0a0a0a"
 FAKE_SESSION_ID = "recipe-fake"
 HELLO = {"protocols": [1], "client": {"kind": "test", "name": "recipe"}}
+# ROW_TEXT_CELLS is a row fact's cap (engine.RowTextCells): a provider's
+# reason and fix are cut to it, "…" last.
+ROW_TEXT_CELLS = 200
+
+
+def row_line(text: str) -> str:
+    """text cut as a row fact is (engine.RowLine's capCells): to at most
+    ROW_TEXT_CELLS terminal cells, "…" (one cell) ending a cut one. A fix names
+    config.toml, whose path under a long temp directory (macOS's) runs past the
+    cap. Every character here is one cell or two (a wide one); a zero-width
+    one would need grapheme clusters, and fails the test rather than guess."""
+
+    def cells(ch: str) -> int:
+        assert not unicodedata.combining(ch) and unicodedata.category(ch) not in ("Mn", "Me", "Cf"), repr(ch)
+        return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+    if sum(cells(ch) for ch in text) <= ROW_TEXT_CELLS:
+        return text
+    out, width = [], 0
+    for ch in text:
+        if width + cells(ch) > ROW_TEXT_CELLS - 1:
+            break
+        out.append(ch)
+        width += cells(ch)
+    return "".join(out) + "…"
 
 
 def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> Path:
@@ -65,7 +91,7 @@ def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> 
     (os.Executable()) as the hub and as each host. The one agent a host
     starts here, grok's, is config.toml's [agents].grok, an absolute path.
     Neither fake starts anything. So the list is craze and craze-fake-host.
-    Then cursor's candidates (cursor-agent, then agent), grok and gx are
+    Then cursor's candidates (cursor-agent, then agent) and grok are
     found nowhere, on every machine, wherever the binaries under test live:
     no system directory, and no directory a CRAZE_BIN override sits in, is
     ever searched.
@@ -102,10 +128,10 @@ def recipe_env(path_dir: Path) -> dict[str, str]:
       CRAZE_RUNTIME_DIR the socket base, kept short under /tmp because a
       socket's path is capped at 100 bytes. The last is also the marker that
       conftest.host_cleanup finds this test's processes by.
-    - PATH is private_path's directory alone. cursor-agent, agent, grok and
-      gx are then not found, so cursor is `unavailable`, "not found", on both
+    - PATH is private_path's directory alone. cursor-agent, agent and grok
+      are then not found, so cursor is `unavailable`, "not found", on both
       OSes, because a missing binary is reported ahead of the macOS
-      login-session rule. gx is not listed. grok reaches the fake agent only
+      login-session rule. grok reaches the fake agent only
       through config.toml's [agents], the one route a hub's host takes, since
       the hub strips CRAZE_AGENT_BIN and CRAZE_PROVIDER.
     - CRAZE_FAKE_SCRIPT=grok-echo has the fake agent speak grok's dialect and
@@ -458,9 +484,18 @@ def test_a_client_against_a_real_hub(
                 "label": "cursor",
                 "state": "unavailable",
                 "reason": "cursor-agent not found on PATH",
-                "fix": f"install cursor-agent, or set [agents].cursor in {config}",
+                "fix": row_line(f"install cursor-agent, or set [agents].cursor in {config}"),
             },
             {"id": "grok", "label": "grok", "state": "ready"},
+            {
+                "id": "claude",
+                "label": "claude",
+                "state": "unavailable",
+                "reason": "claude-agent-acp not found on PATH",
+                "fix": row_line(
+                    f"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in {config}"
+                ),
+            },
             {
                 "id": "native",
                 "label": "native",

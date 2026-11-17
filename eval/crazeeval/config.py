@@ -13,7 +13,7 @@ from crazeeval import paths
 # What a run selects when it names no harness, and every harness it may name: craze-web
 # (craze with web search answered from a web task's corpus, craze plan 051 E2) runs only
 # when named.
-DEFAULT_HARNESSES = ("craze", "gx", "opencode", "codex")
+DEFAULT_HARNESSES = ("craze", "opencode", "codex")
 SUPPORTED_HARNESSES = DEFAULT_HARNESSES + ("craze-web",)
 HARNESSES = DEFAULT_HARNESSES
 # An arm that runs another harness's executable, by the name batch identity and the
@@ -171,7 +171,6 @@ class EvalModel:
     wire_model: str
     effort: str
     craze: str
-    gx: str
     opencode: str
     codex: str | None = None
     codex_provider: str | None = None
@@ -199,7 +198,6 @@ def load_models(path: Path | None = None) -> dict[str, EvalModel]:
             wire_model=e["wire_model"],
             effort=e["effort"],
             craze=e["craze"],
-            gx=e["gx"],
             opencode=e["opencode"],
             codex=e.get("codex"),
             codex_provider=e.get("codex_provider"),
@@ -222,8 +220,8 @@ class Snapshot:
 
     def max_output(self, models) -> dict[str, int]:
         """Each eval model's maximum output tokens by wire model: the **largest** of every
-        limit that applies to it -- the snapshot's craze ``max_output_tokens``, gx
-        ``max_completion_tokens`` (none without a gx entry) and models.dev ``limit.output``
+        limit that applies to it -- the snapshot's craze ``max_output_tokens`` and
+        models.dev ``limit.output``
         (deepseek-v4p1-flash lists 384000) -- else pricing.MODEL_MAX_OUTPUT_DEFAULT. What
         the proxy reserves for a request that names no output limit: whichever harness
         sent it, the provider may generate up to the largest (review r2-c1 item 10,
@@ -237,7 +235,7 @@ class Snapshot:
                 m = self.model(em.key)
             except KeyError:
                 m = {}
-            limits = [(m.get("craze") or {}).get("max_output_tokens"), (m.get("gx") or {}).get("max_completion_tokens"),
+            limits = [(m.get("craze") or {}).get("max_output_tokens"),
                       catalog_max_output(catalog, em.opencode)]
             found = [v for v in limits if isinstance(v, int) and v > 0]
             out[em.wire_model] = max(found) if found else MODEL_MAX_OUTPUT_DEFAULT
@@ -254,17 +252,6 @@ class Snapshot:
             return self.config["models"][key]
         except KeyError:
             raise KeyError(f"model {key!r} is not in config snapshot {self.dir.name}") from None
-
-
-def gx_problems(models, snap: Snapshot, harnesses) -> list[str]:
-    """Why a run cannot start the gx harness: one line per model whose config snapshot has
-    no gx entry (the owner's gx tables did not name its alias at snapshot time). Only the
-    harness named ``gx`` needs one; none for a run without it."""
-    if "gx" not in harnesses:
-        return []
-    return [f"{em.key}: the config snapshot has no gx entry (the owner's gx tables do not name {em.gx}); "
-            "drop gx from --harness, or add it there and re-run snapshot-config"
-            for em in models if snap.model(em.key).get("gx") is None]
 
 
 def catalog_max_output(catalog: dict, opencode_id: str) -> int | None:

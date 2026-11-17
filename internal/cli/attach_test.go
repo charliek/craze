@@ -349,7 +349,7 @@ func TestAttachDialsTheEntry(t *testing.T) {
 	}
 	crazeID := eng.State().CrazeSessionID
 	entry := waitEntry(t, entryPath(env, hostID), func(e rundir.Entry) bool { return e.Ready })
-	entry.Provider = "gx" // what the fallback reads, told apart from the host's grok
+	entry.Provider = "cursor" // what the fallback reads, told apart from the host's grok
 	cfg, err := attachConfig(attachTarget{entry: entry, sessionID: entry.CrazeSessionID},
 		attachView{theme: "dracula", noMouse: true, noBackground: true})
 	if err != nil {
@@ -363,7 +363,7 @@ func TestAttachDialsTheEntry(t *testing.T) {
 		cfg.PersistProvider || cfg.ClaimSession != nil {
 		t.Fatalf("the attach TUI was handed something of a host's: %+v", cfg)
 	}
-	if info := cfg.Backend.Info(); info.Provider != "gx" || info.Workspace != entry.Workspace || info.CrazeSessionID != crazeID {
+	if info := cfg.Backend.Info(); info.Provider != "cursor" || info.Workspace != entry.Workspace || info.CrazeSessionID != crazeID {
 		t.Fatalf("Info before the attach: %+v", info)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

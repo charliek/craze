@@ -35,7 +35,7 @@ const (
 // the index (a newer craze may know it again), but craze cannot start it, so
 // there is nothing Enter could do with it. A provider craze knows whose binary
 // does not resolve *is* offered: the spawn error is the right message, which
-// is what plan 012 settled for `--provider gx` on a machine without gx.
+// is what plan 012 settled for `--provider grok` on a machine without grok.
 //
 // A row whose provider is not resumable is dropped the same way, although the
 // registry resolves the id: craze cannot load its sessions (plan 028 §3.5).
@@ -189,7 +189,7 @@ func (m Model) resumeClaimed(msg resumeClaimMsg) (tea.Model, tea.Cmd) {
 // The row's provider is locked, whatever --provider or the config file
 // resolved to: the index says which agent wrote this session, and only that
 // agent can be trusted to load it (a grok row is started by grok even though
-// gx would load it — §3.1). persistProvider is left alone: internal/cli has
+// another provider would load it — §3.1). persistProvider is left alone: internal/cli has
 // already decided whether this run may write a default, and a load never does
 // unless --provider was explicit.
 func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {

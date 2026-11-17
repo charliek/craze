@@ -65,11 +65,11 @@ func registerProviderFlag(cmd *cobra.Command, dst *string) {
 
 // providerUsage is --provider's help: every listed provider, with the ACP
 // agents craze spawns told apart from the one that runs inside it — "cursor,
-// grok, gx (ACP agents) or native (runs inside craze)". Computed from the
+// grok (ACP agents) or native (runs inside craze)". Computed from the
 // registry, as providerIDs is, so a new provider cannot be named in one and
 // missing from the other. "Runs inside craze" is the refusal's own wording
 // (refuseInProcess) and not "harness", an implementation word the root --help
-// must not carry (TestImportGxHelpNeverMentionsTheHarness).
+// must not carry (TestRootHelpNamesNativeOnceAndNeverTheHarness).
 func providerUsage(ps []agent.Provider) string {
 	var acp, own []string
 	for _, p := range ps {
@@ -224,6 +224,17 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 		return usagef("%s: --%s cannot be used with provider %s, which has no modes", cmd, mode, p.Name())
 	}
 	return nil
+}
+
+// refuseFast is the usage error for --fast on a provider that refuses it
+// (plan 052 § D3): claude's fast mode bills as extra usage on a Claude plan.
+// cmd is the command's name as its other usage errors spell it. --no-fast
+// and neither flag pass.
+func refuseFast(cmd string, p agent.Provider, fast *bool) error {
+	if fast == nil || !*fast || !p.RefusesFast() {
+		return nil
+	}
+	return usagef("%s: --fast cannot be used with provider %s: %s", cmd, p.Name(), agent.FastBillsExtra)
 }
 
 // knownProvider is the session index's view of the registry: a row whose

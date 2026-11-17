@@ -54,7 +54,7 @@ type Options struct {
 	//
 	// The zero value hides nothing, and it is what a construction site with
 	// no capabilities to hand assumes — a probe, a unit test's model — since
-	// every shipped provider (cursor, grok, gx, native) shows both cards.
+	// every shipped provider (cursor, grok, native) shows both cards.
 	Hidden HiddenAsks
 }
 
@@ -181,8 +181,11 @@ type Turn struct {
 	ID, Text, Origin string
 	At               time.Time
 	// Foreign is the last foreign-turn bracket: Running while the agent runs
-	// a turn of its own.
-	Foreign *agent.ForeignTurnInfo
+	// a turn of its own. ForeignAt is when that running bracket came, zero
+	// once it has ended: the working line's clock for a client that attaches
+	// mid-turn (review C4b item 8).
+	Foreign   *agent.ForeignTurnInfo
+	ForeignAt time.Time
 	// Retries is how many times the turn's steps have been sent again so far
 	// (agent.StepRetryInfo.Total), kept once the turn has ended, until the next
 	// starts. A waiter that attaches after a retry reads it here.

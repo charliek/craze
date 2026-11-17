@@ -56,7 +56,8 @@ import (
 // Where the exit cannot be observed without reaping — the observation
 // refused (a waitid refused under a seccomp filter or an emulator, ENOSYS),
 // no kqueue, or a macOS exit watch whose zombie queries keep failing — the
-// reaper is reapPolling, which reaps with wait4 and never signals the group.
+// reaper is reapPolling, which reaps with wait4 and signals the group only
+// while the agent is unreaped.
 // newChild settles which before the reaper runs, so before any signal. An
 // observation that fails later hands over to it too; any signal sent before
 // that went while the agent was unreaped.
@@ -120,7 +121,11 @@ func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 	ch.cleanGroup()
 	ch.signal(syscall.SIGKILL)
 	ch.drainStderr()
+	// The reap waits for a tree read in progress (SnapshotTree).
+	ch.reapMu.Lock()
 	ch.waitErr = ch.cmd.Wait()
+	ch.reaped = true
+	ch.reapMu.Unlock()
 	if !obs.known {
 		ch.setStatus(reapedExit(ch.cmd.ProcessState, ch.waitErr))
 	}
@@ -129,7 +134,7 @@ func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 
 // escalate is step 2: the agent still runs and has been asked to stop.
 func (ch *Child) escalate(observed <-chan observation) observation {
-	ch.signal(syscall.SIGTERM)
+	ch.signal(ch.termSignal())
 	grace := time.NewTimer(shutdownGrace)
 	defer grace.Stop()
 	select {
@@ -147,7 +152,7 @@ func (ch *Child) cleanGroup() {
 	if !ch.groupLive() {
 		return
 	}
-	ch.signal(syscall.SIGTERM)
+	ch.signal(ch.termSignal())
 	if ch.groupDrained(shutdownGrace) {
 		return
 	}
@@ -219,10 +224,12 @@ const reapPoll = 50 * time.Millisecond
 // it polls wait4(pid, WNOHANG) itself — the exit, its status and the reap in
 // one call — and sends a shutdown's signals only between its own polls,
 // right after one found the agent unreaped, so no signal can follow the
-// reap: SIGTERM, and SIGKILL past the grace, to the agent alone. The group
-// is never signalled here — nothing holds its id once the poll that finds
-// the exit has reaped it — so what the agent left running in it is not
-// cleaned up, the cost of this fallback. Once reaped, the stderr copy is
+// reap: SIGTERM, and SIGKILL past the grace, to the agent's group — the
+// agent is unreaped when each goes, so its pid pins the group's id (review C5
+// item 6). The group is never signalled after the poll that finds the exit —
+// nothing holds its id once that poll has reaped it — so what the agent left
+// running in it after an exit of its own is not cleaned up, the cost of this
+// fallback. Once reaped, the stderr copy is
 // drained, cmd.Process released — so no wait on the pid follows the reap —
 // and cmd.Wait called for what it still owns, the pipes and their
 // goroutines; its error, the released Process's, is expected.
@@ -242,7 +249,13 @@ func (ch *Child) reapPolling() {
 		request = ch.shutdownCh
 	)
 	for {
+		// Each poll may reap: it waits for a tree read in progress.
+		ch.reapMu.Lock()
 		st, reaped, err := pollReap(ch.pid)
+		if reaped || err != nil {
+			ch.reaped = true
+		}
+		ch.reapMu.Unlock()
 		if err != nil {
 			ch.waitErr = ch.cmd.Wait()
 			ch.endedByShutdown = isClosed(ch.shutdownCh)
@@ -259,12 +272,16 @@ func (ch *Child) reapPolling() {
 		}
 		// Unreaped, and only this goroutine reaps it: a signal now reaches
 		// the agent, or its zombie.
+		// The group, not the agent alone (review C5 item 6): the agent is
+		// unreaped — running, or a zombie only this goroutine's next wait4
+		// can reap — so its pid still pins the group's id, and a signal to
+		// -pgid reaches the agent's own children, Claude Code's among them.
 		switch {
 		case termed.IsZero() && isClosed(ch.shutdownCh):
-			_ = sendSignal(ch.pid, syscall.SIGTERM)
+			ch.signal(ch.termSignal())
 			termed, request = time.Now(), nil
 		case !termed.IsZero() && !killed && time.Since(termed) >= shutdownGrace:
-			_ = sendSignal(ch.pid, syscall.SIGKILL)
+			ch.signal(syscall.SIGKILL)
 			killed = true
 		}
 		poll := time.NewTimer(reapPoll)

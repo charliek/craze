@@ -393,7 +393,7 @@ def test_the_override_is_what_craze_accepts_and_keeps_its_path(tmp_path):
     run(go())
 
 
-def test_the_opencode_and_gx_homes_for_anthropic(tmp_path):
+def test_the_opencode_home_for_anthropic(tmp_path):
     snap = fake_snapshot(tmp_path)
     em = load_models()["anthropic/claude-sonnet-5-5"]
     base = "http://127.0.0.1:4242/r/t/api.anthropic.com/v1"
@@ -401,17 +401,12 @@ def test_the_opencode_and_gx_homes_for_anthropic(tmp_path):
     o = json.loads((tmp_path / "oc/opencode.json").read_text())
     assert o["model"] == o["small_model"] == "anthropic/claude-sonnet-5-5" and o["enabled_providers"] == ["anthropic"]
     assert o["provider"] == {"anthropic": {"options": {"baseURL": base, "apiKey": paths.DUMMY_KEY}}}
-    HOMES["gx"](tmp_path / "gx", em, snap, base)
-    g = tomllib.loads((tmp_path / "gx/.grok/config.toml").read_text())
-    assert g["model_providers"]["anthropic"] == {"base_url": base, "api_key": paths.DUMMY_KEY, "api_backend": "messages",
-                                                 "extra_headers": {"anthropic-version": "2023-06-01"}}
-    assert g["model"]["anthropic/claude-sonnet-5-5"]["reasoning_effort"] == "medium"
     with pytest.raises(ValueError):
         HOMES["codex"](tmp_path / "cx", em, snap, base)  # no Responses API at Anthropic
 
 
 def test_the_anthropic_provider_is_read_as_craze_reads_it(tmp_path):
-    craze, _ = owner_tree(tmp_path)
+    craze = owner_tree(tmp_path)
     table, ring = load_providers(craze / "providers.toml", env={})
     a = table["anthropic"]
     assert (a.driver, a.base_url, a.host, a.prefix, a.messages) == ("anthropic", ANTHROPIC_BASE, "api.anthropic.com",
@@ -446,8 +441,8 @@ def test_a_batch_manifest_samples_an_anthropic_models_configs(tmp_path):
     snap = fake_snapshot(tmp_path)
     ms = load_models()
     models = [ms["anthropic/claude-haiku-5-5"], ms["glm-5.3-flash"]]
-    out = sample_configs(models, ["craze", "craze-web", "opencode", "gx"], snap)
-    assert set(out) == {f"{h}/{em.key}" for em in models for h in ("craze", "craze-web", "opencode", "gx")}
+    out = sample_configs(models, ["craze", "craze-web", "opencode"], snap)
+    assert set(out) == {f"{h}/{em.key}" for em in models for h in ("craze", "craze-web", "opencode")}
     haiku = out["craze/anthropic/claude-haiku-5-5"][".craze/native/providers.toml"]
     assert 'driver = "anthropic"' in haiku and "base_url" not in haiku
     # Another provider's placeholder is as it was: the upstream's name, no /v1 added.
@@ -457,16 +452,15 @@ def test_a_batch_manifest_samples_an_anthropic_models_configs(tmp_path):
 def test_the_snapshot_needs_no_entry_for_the_locked_provider(tmp_path):
     from crazeeval.snapshot import build_snapshot
 
-    craze, grok = owner_tree(tmp_path)
+    craze = owner_tree(tmp_path)
     text = (craze / "providers.toml").read_text()
     (craze / "providers.toml").write_text(text[: text.index("[providers.anthropic]")])  # an env-only key
-    snap = build_snapshot(load_models(), craze_dir=craze, grok_dir=grok)
+    snap = build_snapshot(load_models(), craze_dir=craze)
     assert snap["models"]["anthropic/claude-opus-5-5"]["craze_provider"] == {}
-    assert snap["models"]["anthropic/claude-opus-5-5"]["gx_provider"]["api_backend"] == "messages"
     assert FAKE["anthropic"] not in json.dumps(snap)
     with pytest.raises(KeyError):  # an unlocked provider still needs its entry
         (craze / "providers.toml").write_text(text.replace("[providers.meta]", "[providers.notmeta]"))
-        build_snapshot(load_models(), craze_dir=craze, grok_dir=grok)
+        build_snapshot(load_models(), craze_dir=craze)
 
 
 def test_a_price_without_a_cache_write_rate_defaults_to_zero(tmp_path):
@@ -626,9 +620,8 @@ def test_the_probe_generates_an_anthropic_home(tmp_path):
     snap = fake_snapshot(tmp_path)
     env = probe_env(tmp_path / "home", load_models()["anthropic/claude-haiku-5-5"], snap)
     assert env[ANTHROPIC_API_ENV] == "http://127.0.0.1:1/r/probe/anthropic"
-    assert {"CRAZE_HOME", "GROK_HOME", "OPENCODE_CONFIG"} <= set(env) and paths.DUMMY_KEY_VAR not in env  # no codex
-    g = tomllib.loads((tmp_path / "home/.grok/config.toml").read_text())
-    assert g["model_providers"]["anthropic"]["base_url"] == "http://127.0.0.1:1/r/probe/anthropic/v1"
+    assert {"CRAZE_HOME", "OPENCODE_CONFIG"} <= set(env) and paths.DUMMY_KEY_VAR not in env  # no codex
+    assert "GROK_HOME" not in env and not (tmp_path / "home/.grok").exists()
     # Every other model's home still generates on the same placeholder.
     for em in load_models().values():
         probe_env(tmp_path / "all" / em.slug, em, snap)

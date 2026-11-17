@@ -8,10 +8,7 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-`gx` and `native` — `gx` shown when a binary for it resolves, or when it is
-the resolved default (the default is always listed, so `Esc` never starts a
-row the picker did not show), since gx is a third-party fork nobody can assume
-is installed (see [Configuration](configuration.md#provider-precedence)) —
+`claude` and `native` (see [Configuration](configuration.md#provider-precedence)) —
 before the session is constructed. The preselected row is the resolved default
 (see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
@@ -30,7 +27,8 @@ box starts the default.
 
 As the dialog opens, craze checks each provider the way
 [`craze providers`](cli.md#craze-providers) does — whether its binary
-resolves, whether native has a model provider with a key, and on a Mac
+resolves (claude's two: the adapter and Claude Code's `claude`, the missing
+one named), whether native has a model provider with a key, and on a Mac
 whether this craze runs in the login session cursor needs — and marks every
 row that cannot start:
 
@@ -39,6 +37,7 @@ row that cannot start:
 │provider                                            │
 │> cursor                       unavailable · default│
 │  grok                                              │
+│  claude                                 unavailable│
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
 │install cursor-agent, or set [agents].cursor in     │
@@ -85,9 +84,8 @@ row that cannot start:
 - The check reads only files, never the network, and runs as the dialog
   opens. Until it answers every row is ready and a choice is taken as it
   always was. Each answer also decides the rows, as `/provider`'s does: a
-  `gx` installed since the dialog opened is listed, and one removed is
-  dropped — unless it is the default, which always stays, marked
-  `unavailable`.
+  provider the answer names is listed and one it leaves out is dropped —
+  unless it is the default, which always stays, marked `unavailable`.
 
 The states are advice for the dialogs alone: `--provider <id>` and
 `--resume` start exactly as they always have, whatever the check says, so a
@@ -127,9 +125,15 @@ Top to bottom:
 
 Row 1 reads `workspace · branch · provider · model · usage · elapsed`. The
 model carries what the agent lets craze set beside it, `Name (high · fast)`:
-the effort when the model offers one, and `fast` only when it is on. The usage
-part is the native provider's alone (see [Usage and cost](#usage-and-cost)),
-and the elapsed time is the session's age. When the terminal is too narrow the
+the effort when the model offers one, and `fast` only when it is on. On a
+claude session whose last turn ran on another model family than the model
+option it ran under — `/model haiku` in plan mode, which runs on Sonnet — the
+model reads the one in use first and the one picked as the model dialog names
+it, `sonnet (in use; picked Haiku 5.5 · low)`. Entering or leaving plan mode,
+which moves the model option itself, or any change of the mode or model,
+clears the note until the next turn reports. The usage part is the native and
+claude providers' (see [Usage and cost](#usage-and-cost)), and the elapsed
+time is the session's age. When the terminal is too narrow the
 parts go in this order: elapsed, branch, usage, provider, then the model;
 only the workspace always stays.
 
@@ -189,12 +193,89 @@ the host says again, and is the first thing on the row to go when the
 terminal is too narrow. A host from before craze counted its clients sends no
 count, and the chip never shows.
 
-On a provider that can stop one child (native today), `Delete` or
+On a provider that can stop one child (native and claude), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn
 goes on and the parent reads that the user stopped it. On any other row —
-grok, cursor, or a finished row — the key goes to the composer as before.
-This works the same on a background sub-agent's row (below).
+grok, cursor, a finished row, or a claude child that does not let itself be
+stopped — the key goes to the composer as before. This works the same on a
+background sub-agent's row (below).
+
+### Claude sub-agents
+
+A `claude` session declares sub-agents, so Claude Code's `Agent` (and `Task`)
+children show in the band as rows of their own, one per child: the label is
+the child's role (`general-purpose`), the description its title (`Read
+note.txt contents`), and the call that launched it never makes a second row.
+Each child streams its own session, so its [view](#sub-agent-view) is its own
+prompt, tool calls and replies. A child Claude starts inside another child is
+nested under it: its row carries its parent, and it is stopped, viewed and
+asked for on its own.
+
+- A child waiting on you — a permission or question card it raised — stays
+  running, with the activity `waiting for you`. Its card is labelled with it
+  (`· sub-agent <title>`) and outlives your turn: your turn ending, Claude's
+  answer included, never takes a child's card away. It closes when you answer
+  it, when Claude takes it back, when you cancel, or with the session.
+- A child that finishes goes idle: completed (`✓`), cancelled (`–`), or failed
+  (`✗`, with Claude's error; a child that hit its output or request limit, or
+  refused, fails too). An idle child is kept: when Claude sends it more work
+  (`SendMessage`), the same row runs again as a new attempt.
+- A child Claude can no longer observe ends cancelled with the activity `no
+  longer observable`, and so do the children it started; the other rows are
+  untouched. A child still running when the session stops, or when the
+  adapter exits, fails with `the agent stopped`: it will never report again.
+- A child's report back to the child that launched it is the reporting
+  child's output on its row, not part of its parent's transcript.
+- `Delete`/`Backspace` stops a running child that lets itself be stopped (every
+  child Claude announces does): Claude stops that child alone, your turn goes
+  on, and its row ends cancelled, `stopped by the user`.
+- Claude keeps your turn open while background children it started are still
+  working: the turn — and `craze new --wait`, `craze send --wait` — ends after
+  the children and the reply that reports on them. A child that runs on after
+  your turn (an idle child reused later) still keeps the session busy while it
+  runs.
+
+### Claude working on its own
+
+Claude Code runs model calls of its own with nothing of yours running: a
+background command finishing (`run_in_background`), a background child
+reporting, idle compaction. ACP v1 marks none of them, so craze infers each as
+a turn of the agent's own — the same bracket as grok's fallback and native's
+wake — headed in the transcript by `the agent continued on its own (background
+work)`, or `the agent is compacting its context on its own` for compaction:
+
+- It opens only on what Claude says or does — text, thinking, a new tool call
+  — never on a usage report, a notice, a plan, a trailing tool update, a
+  child's traffic, a load's replay, or anything that arrives before the
+  session is set up.
+- It ends 2 seconds after the result's usage report, unless more content comes
+  first (then it goes on) or a tool call is still open (then it waits for the
+  call to finish). With no report at all it ends after a minute in which
+  Claude says or does nothing — ten with a tool call open; other traffic does
+  not count — and the diagnostics say so (`claude went quiet during a turn of
+  its own`).
+- Because the end is inferred, a follow-up that comes more than 2 seconds after
+  a report opens a second turn of its own, or, if a message of yours was sent
+  in between, is part of your turn.
+- While it runs the working line shows, as for your own turn (`Working · …
+  · esc to interrupt`), and the empty composer says `enter queues`: a prompt
+  typed meanwhile is queued, and sent once it ends — one sent the moment such a
+  turn opened, before craze could see it, waits at the head of the queue too. `Esc` stops it: craze
+  sends Claude the cancel, and once the cancel is written the turn ends
+  `cancelled` 2 seconds later (a cancel that could not be written changes
+  nothing).
+- When the session stops for a reason of its own (the login changed) while
+  such a turn runs, the turn ends failed, with the reason.
+- Claude's text is drawn per message: when Claude starts a new message in the
+  same run — its reply after a background child reported, say — it starts a
+  new paragraph instead of running on from the last word.
+- What Claude sends right after a resumed session's replay is live: a turn of
+  its own it starts there opens after the `restored` note.
+
+Background commands themselves are not tracked: they have no row, and they do
+not hold your turn or the host. A host that exits ends Claude Code and the
+commands it started.
 
 ### Background sub-agents
 
@@ -318,7 +399,7 @@ A restored session does not reconstruct everything:
 - **Sub-agent transcripts** are not reconstructed. A finished sub-agent's
   row comes back from the replayed spawn/finish lifecycle, but there is no
   transcript behind it to open.
-- **Grok and gx** show no tabs in the [model dialog](#model-dialog) right
+- **Grok** shows no tabs in the [model dialog](#model-dialog) right
   after a resume — their `session/load` result carries no catalog, unlike a
   fresh `session/new`. A later live turn may supply one again.
 - A rename is craze's own and is never sent to the agent: `agent ls` and
@@ -402,7 +483,7 @@ another craze since counts; else X's default. A remembered level X no longer
 offers is its default. Asking for the model you are already on keeps its
 effort. `/model X <effort>` still sets a level directly, as two steps: the
 switch, then the effort. A model with no effort control has none either way.
-ACP providers (cursor, grok, gx) are unchanged: their effort is whatever the
+ACP providers (cursor, grok) are unchanged: their effort is whatever the
 agent's option says after the switch.
 
 #### What the model is told
@@ -458,9 +539,9 @@ off.
 | Key | Action |
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
-| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
+| `Ctrl+L` | the strong send: on Grok, claude and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | newline; `Shift+Enter` only in a terminal that sends it as one of the two sequences below, as Ghostty and Roost do (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents), or [claude working on its own](#claude-working-on-its-own)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
 | `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
@@ -470,7 +551,7 @@ off.
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it; in `/connect`'s ChatGPT sign-in, copy its address |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu or the [`@` file popup](#file-mentions) open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
-| `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native only); on any other row or provider the key falls through as if unhandled |
+| `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native and claude); on any other row or provider the key falls through as if unhandled |
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
@@ -478,7 +559,7 @@ off.
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
-| `Enter` on `/btw <question>` | where the session answers side questions (native, Grok, gx): open the [side view](#side-questions-btw) and ask it, even mid-turn; inside the view, `Enter` asks a follow-up |
+| `Enter` on `/btw <question>` | where the session answers side questions (native, Grok): open the [side view](#side-questions-btw) and ask it, even mid-turn; inside the view, `Enter` asks a follow-up |
 | `Esc` or `Ctrl+C` inside the side view | close it: the question in flight is cancelled and the side thread discarded; the main turn runs on, and `Ctrl+C` arms no quit (with a card up, `Ctrl+C` is what it always is) |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -534,16 +615,23 @@ queue), and `Backspace` cancels it.
 
 ### The three verbs
 
-| Verb | Cursor | Grok, gx, native | Cancels the turn? | Asks first? |
+| Verb | Cursor | Grok, claude, native | Cancels the turn? | Asks first? |
 |---|---|---|---|---|
 | queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
 | send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
-| interject (`Ctrl+L` on a draft under Grok, gx or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+| interject (`Ctrl+L` on a draft under Grok, claude or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
 
-Grok (and gx) and native have a mid-turn path: grok's `x.ai/interject` hands it
+Grok and native have a mid-turn path: grok's `x.ai/interject` hands it
 text that it folds into the turn at its next safe point (after a tool result),
-and native steers it into the turn's next step. The transcript shows either as
-a `↳` entry.
+native steers it into the turn's next step, and claude's `_session/steering`
+injects it into the running turn (a tool running then is moved to the
+background, as in Claude Code). The transcript shows each as a `↳` entry. When
+claude finds its turn already over, it does not take the message, and craze
+sends it as the next prompt instead: the draft clears and the message is
+queued (or goes at once, if nothing is running), so a turn that ends just
+before the interjection loses nothing — unless the turn was cancelled or the
+queue cleared meanwhile, when the message is not sent: the note says `nothing
+to interject into` and the draft stays in the composer.
 Cursor has none — a second prompt there silently cancels the first — so craze
 never sends one and offers send now instead, always with
 
@@ -803,7 +891,7 @@ Two other notes can appear when you paste:
 
 | Agent | Receives |
 |---|---|
-| Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in place of each image block instead (the chip stays in the message text) (Grok and gx are sent images regardless, since they take them without saying so) |
+| Cursor, Grok | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in place of each image block instead (the chip stays in the message text) (Grok is sent images regardless, since it takes them without saying so) |
 | An agent that rejects the images | when it answers the prompt with an invalid-params error without having done anything with it, craze sends the message once more with each image as `[Image #N: <path>]` text. Updates about the session itself (its command list, mode, settings or title) do not count as doing something. After the agent has done anything for the turn, before its error or since, or you cancelled, the error is shown as it is |
 | Native | the same chips; how the image reaches the model depends on the model: see below |
 | An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
@@ -936,7 +1024,7 @@ limit. `/clear` and a session change drop it.
 On native, the block is **redacted** before it reaches the model, the transcript
 or the journal: a value craze knows as a key (an API key variable's value, a
 stored key) in a command's output becomes `[craze:redacted-credential]`. The ACP agents (cursor,
-grok, gx) get the block verbatim.
+grok) get the block verbatim.
 
 What is attached is never drawn: your transcript row, the queue band, the queue
 editor and the session title show the message you typed, not the block that
@@ -953,16 +1041,17 @@ rendered by the same machinery as the main one. Cursor streams no sub-agent
 transcript, so the view is what its `cursor/task` receipt carried: a note
 saying so, the prompt, a `model · duration · agent id` line once the receipt
 landed, and the output when there is one. There is no composer here — you
-cannot prompt or message a sub-agent from craze. On native,
+cannot prompt or message a sub-agent from craze. On native and claude,
 `Delete`/`Backspace` in a running child's view stops it (see the banner
-below); a grok or cursor sub-agent cannot be stopped from craze.
+below); a grok or cursor sub-agent cannot be stopped from craze. Claude
+streams each child's own session too.
 
 The composer's top rule carries the chip `(model) description` —
 `(grok-4.6) List directory files` — and the input line is replaced by the
 banner:
 
 - running: `○ @explore · read-only · esc to return`, with `· tab next agent`
-  when more than one row is visible, and, on native, a further
+  when more than one row is visible, and, on native and claude (a claude child that can be stopped), a further
   ` · del to stop` at the tail's end — the full banner then reads exactly
   `○ @general-purpose · read-only · esc to return · tab next agent · del to
   stop`
@@ -996,7 +1085,7 @@ and its card (see [Cards](#cards)).
 
 `/btw <question>` asks the session a quick question about its work without
 interrupting it and without adding to it. It is offered where the session can
-answer one — **native, Grok and gx**; on Cursor `/btw` is not in the menu and
+answer one — **native and Grok**; on Cursor `/btw` is not in the menu and
 a typed `/btw …` goes to the agent as the text it is. Where it is offered, a
 plugin or skill named `btw` is shadowed, as `/connect` shadows one on native.
 
@@ -1016,7 +1105,7 @@ the edit left open.
 
 The answer opens in a **side view** that takes the transcript region: a dim
 `Side question — not saved. Esc returns to the session.`, your question, the
-answer streaming in (native streams it; Grok and gx answer in one piece), and a
+answer streaming in (native streams it; Grok answers in one piece), and a
 dim footer with the model that answered and, on native, its tokens —
 `Echo · 1.2k in (800 cached) · 40 out`. While it is answering the working line
 reads `Answering · <elapsed> · esc closes`; status row 2 reads
@@ -1352,10 +1441,9 @@ command starts with is a prompt (an agent's own slash command), and opens
 nothing.
 
 - **`/provider`** lists the providers the startup [provider
-  dialog](#tui-reference) offers — `gx` only where its binary resolves — the
+  dialog](#tui-reference) offers — the
   one in use marked `current`. Each opening checks them again, as the startup
-  dialog does ([provider states](#provider-states)): a `gx` installed since
-  craze started is listed, one removed is not, and a provider that cannot
+  dialog does ([provider states](#provider-states)): a provider that cannot
   start is dimmed with its reason beside it and its state (`unavailable`,
   `needs setup`) for its note. `Tab` or `Enter` on one does not choose it:
   the input and the provider new sessions run stay as they were, and the
@@ -1369,7 +1457,7 @@ nothing.
   the provider new sessions run — with what came of it on the hint line and
   the states checked again; choose native again once it is ready. Choosing one
   that can start **resets the model** to that
-  provider's default: for cursor, grok and gx, the agent's own (`default`: no
+  provider's default: for cursor and grok, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
@@ -1385,7 +1473,7 @@ nothing.
   order they were last picked and the rest by name, with no label — the same
   order a native session's own `/model` lists. The list reads the memory and
   never writes it: only a switch made inside a native session does.
-  cursor, grok and gx name their models only once a session has started, so
+  cursor and grok name their models only once a session has started, so
   craze lists **the catalog the last session of that provider installed** —
   every detached host records it in the [model catalog
   cache](configuration.md#model-catalog-cache) — titled with its age (`cursor
@@ -1436,7 +1524,7 @@ listed once what you type is the start of its name and of no other command —
   effort control. The table is read again at each opening of the list and
   each choice of model, since the start model follows the [model
   memory](configuration.md#model-memory-recentjson). On an ACP provider
-  (cursor, grok, gx), whose levels are known only once a session runs, it
+  (cursor, grok), whose levels are known only once a session runs, it
   offers every level: `default`, `minimal`, `low`, `medium`, `high`, `xhigh`
   and `max` (and so does native for the moment between a choice of model and
   its table being read).
@@ -1475,7 +1563,12 @@ mode the agent advertised it as: accent for an implement-like mode, purple for
 plan, teal for a read-only mode like ask. Clicking the chip cycles the mode the
 same way `Shift+Tab` does — see [Mouse](#mouse). Every change writes a
 `mode → <id>` note, followed by the agent's own description of the mode when
-it gave one.
+it gave one. On a `claude` session the modes are Claude Code's own —
+`default` (Manual), `acceptEdits`, `plan`, `auto` and `bypassPermissions` — and
+the cycle is `default` → `acceptEdits` → `plan` → `default` only: `auto` and
+`bypassPermissions` are reached by name, never by the key, and from either the
+key goes to `default`. claude has no read-only mode, so `/ask` (and `--ask`)
+is refused with `mode ask is not advertised`.
 
 When a turn in a plan-kind mode ends with an assistant reply, the composer's
 placeholder offers to act on it once craze is idle:
@@ -1499,6 +1592,10 @@ session transcript — by default
 craze. Ask mode denies every edit, write and shell command.
 Accepting the plan card ends the turn and arms the offer above, even when
 the model said nothing else in that turn.
+
+A `claude` session approves its plan on its own card instead (see
+[Cards](#cards)), so a claude plan-mode turn arms no offer, whatever it ends
+with.
 
 ### Sub-agent models
 
@@ -1596,6 +1693,17 @@ transcript:
 Token counts are plain under 1,000, else `k` or `M` to three significant
 figures (`890k`, `1.21M`).
 
+A **claude** session shows Claude Code's compactions the same way — the
+spinner's `compacting context…` while one runs, and a note when it ends — but
+Claude reports no sizes, so the note is `context compacted`, or `compaction
+failed: <why>` (`cancelled` for one a cancel cut short). One Claude runs while
+nothing else does is a turn of its own ([Claude working on its
+own](#claude-working-on-its-own)).
+
+Claude Code's **notices** — a hook's message, a background task it stopped, a
+model it fell back from — are notes too, in place: `<title>: <description>`,
+led by `warning:` or `error:` when Claude marks them so.
+
 ### `/compact`
 
 Native advertises one [slash command](#slash-commands), `/compact [focus]` —
@@ -1653,7 +1761,8 @@ spent, the turn's amount then the session's:
 | some usage had no price | `34% ctx · $0.04 / $1.20+` |
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
-| no usage yet (ACP, or before native's first step) | no part at all |
+| a claude session | `3% ctx · 59.6k / 122k tok · max · 7d 45%` |
+| no usage yet (cursor, grok, or before native's first step or claude's first report) | no part at all |
 
 `NN% ctx` is the context's share of the context the model works within: its
 [context default](configuration.md#native-context-default) when it has one,
@@ -1671,6 +1780,19 @@ spent, including its compactions' usage and its sub-agents', each priced by
 its own model. Row 1 drops its parts in a pinned order as the terminal
 narrows — elapsed first, then the branch, then this usage part, then the
 provider, and the model last of all.
+
+A **claude** session has a usage part too, from Claude's own reports. It is
+never in dollars: the cost the adapter reports is what the API would have
+charged, not what your plan pays, so the turn's and the session's amounts are
+tokens — the last turn's, and every turn's of this session added up, as
+Claude counts them. After them come your plan (`max`, as `claude auth status`
+says it) and the use of its latest limit window: `5h` for the five-hour
+window, `7d` for a seven-day one (`7d 45%`). Claude sends the window only when
+it changes, so the figure is the last one it sent, and the part shows the plan
+alone until the first. The context's share is of the window Claude reports for
+the model. See [Claude on your
+plan](../getting-started/claude.md#usage-and-your-plans-limits) for the
+overage guard that watches the same reports.
 
 ## Cards
 
@@ -1697,11 +1819,54 @@ reported again only when you come back to it.
 | Card | Keys |
 |---|---|
 | permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a`, `y` or `1` allow once, **`A` allow always**, `n`, `r` or `2` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
-| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. |
+| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request — on a `claude` session it **cancels** it instead (hint `esc cancel`; below). On a question that takes an answer of your own, the last row is `Other…` (below). |
 | plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a`, `y` or `1` accept, `r`, `n` or `2` reject. `Esc` cancels the turn. |
 
 A question card's option may carry a description, drawn dimmed on its own
 line under the label.
+
+**`Other…`.** A `claude` question (Claude Code's AskUserQuestion) also takes a
+free-text answer, so its card has one more row after the options, `Other…`,
+numbered after them. Its number, or `Enter` on it, opens a one-line input on
+that row (`Other: <text>▏`, hint `type your answer · enter send · esc back`):
+`Enter` takes the text, `Backspace` deletes, and `Esc` goes back to the
+options with nothing typed kept. On a single-choice question the text is the
+answer on its own; on a multiple-choice one it joins the options toggled, and
+`Enter` in the input confirms both. The row the answer leaves quotes the text
+(`? Do you prefer red or blue? → "teal"`). Claude reads text beside a pick as a
+note on it. A text answer is at most 4096 bytes. Cursor and grok questions take
+no free text and have no such row.
+
+**claude's cards.** `Esc` on a claude question card cancels the question, as
+`Esc` does in Claude Code: the tool that asked is aborted (a skip would let it
+run on empty answers). The row reads `? <question> → cancelled`. Cancelling the
+turn while it is up does the same. Its tool row is labelled `question`. A
+single-choice question takes one pick, on every provider; a claude question
+the form marks `required` must get an option picked — text in `Other…` alone
+does not answer it, and `Enter` on a multiple-choice one with nothing toggled
+does nothing — and its card cannot be skipped. When Claude takes a question or a permission back
+(its `$/cancel_request`, when the tool that asked is aborted), the card goes
+away with nothing sent, and a question's or plan's row reads `→ withdrawn by
+Claude`; an answer that crosses the withdrawal is refused (the request is
+already over), on every client. A question
+craze cannot show — a form of another shape than AskUserQuestion's, one whose
+fields carry a constraint the card cannot enforce (an `enum` or `pattern` on
+the free text, a `minItems` on a choice), one that is not a form, or a request
+that does not read as one — raises no card: it is withdrawn (the tool aborts)
+and the diag lane says so. Only a well-formed request of another mode is
+declined.
+
+When Claude leaves plan mode (ExitPlanMode) it asks for approval, and that is
+the plan card, with the plan in the transcript: accept sends Claude Code's
+"Yes, manually approve edits", so Claude goes on in `default` (Manual) and asks
+for each edit, which [force](cli.md) then answers; reject sends "No, keep
+planning", which ends the turn, and the card shows it rejected with no
+`cancelled` note — unless you cancelled the turn yourself after rejecting it. craze never picks Claude's options that switch to `auto`, bypass
+permissions, accept edits or clear the context, and force never approves a
+plan. A plan approval of any shape other than the one craze knows raises no
+card: it is answered "keep planning" — Claude's own `reject` option, and never
+another — or cancelled, when it offers no such option, and the diag lane says
+the approval had an unexpected shape.
 
 A native session that has not decided about [web
 search](configuration.md#native-web-search) asks once, with an ordinary
@@ -1816,7 +1981,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/plan` | Set plan mode — only where the agent advertises modes |
 | `/ask` | Set ask mode — only where the agent advertises modes |
 | `/agent` | Set agent mode — only where the agent advertises modes |
-| `/btw <question>` | Ask a side question, not saved — [native, Grok and gx only](#side-questions-btw); runs mid-turn |
+| `/btw <question>` | Ask a side question, not saved — [native and Grok only](#side-questions-btw); runs mid-turn |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
 | `/effort` | Change the current model's [effort](#effort): a picker, or `/effort <level>` — only where the current model has an effort control |
@@ -2003,7 +2168,7 @@ key with the provider: a wrong one shows as an error on first use. The
 signed in to instead, in the same box (below). **OpenAI** in the list is
 OpenAI's API on a key, billed per token
 ([OpenAI](configuration.md#openai)); the ChatGPT plan is the subscription.
-It exists in native sessions only: in a cursor, grok or gx session it is not in
+It exists in native sessions only: in a cursor or grok session it is not in
 the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
 what the last row of native's [`/model`](#model-dialog) opens, while some
 provider has no key, and what picking native opens before any session while
@@ -2309,7 +2474,10 @@ cursor's Claude models — gets a tab too, labelled with the agent's own name,
 lowercased, showing its raw values. A tab is shown whenever the catalog
 advertises the option; there is no capability-bit gate on a tab (the
 provider's effort/fast bits gate only the status-row chips, never a control
-the model itself advertises).
+the model itself advertises). The one exception is a `claude` session's
+`fast`, which is never offered: Claude's fast mode bills as extra usage on a
+Claude plan, and craze keeps it off ([The claude
+provider](configuration.md#what-craze-sets)).
 Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
 `context` and `thinking`; grok shows `effort` alone, never `fast`.
 
@@ -2323,7 +2491,7 @@ or name contains `grok`; then the rest, each group by name — except that the
 ChatGPT plan's models stay together in the account's own order, and
 Anthropic's together newest first, each block placed by its provider's name
 (so Anthropic's come first among the rest). An ACP provider
-(cursor, grok, gx) has no model memory, so its list starts at the `grok`
+(cursor, grok) has no model memory, so its list starts at the `grok`
 group.
 
 A native session lists only the models of providers that have a key — an
@@ -2397,7 +2565,7 @@ asked for and its row is that model's levels, as its facts state them; `Enter`
 then sends that row's effort for it, after the switch lands, so the switch
 ends on the effort the box showed.
 
-On an ACP provider (cursor, grok, gx), and against a host from before
+On an ACP provider (cursor, grok), and against a host from before
 `effortFacts`, the dialog does not rebuild itself for the model under the
 cursor: the tabs on screen are the current model's, and highlighting another
 model in the list never previews its options. A choice made on a tab still
@@ -2524,7 +2692,7 @@ keys — `enter on a row` to open one, `esc, ←` to return, and
 `tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
 `queued messages, sub-agent rows, or a list inside a dialog`. On native, `panels and views`
 also gains `del, backspace — stop the selected running sub-agent, or the one
-in view`. Where `/btw` is offered (native, Grok, gx) the box gains a
+in view`. Where `/btw` is offered (native, Grok) the box gains a
 `side questions` group with the side view's keys.
 
 ## Mouse

@@ -378,9 +378,11 @@ type wireEvent struct {
 	Replayed       bool             `json:"replayed,omitempty"`
 	Compaction     *wireCompaction  `json:"compaction,omitempty"`
 	StepRetry      *wireStepRetry   `json:"stepRetry,omitempty"`
+	Notice         *wireNotice      `json:"notice,omitempty"`
 	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
+	KeptPlanning   bool             `json:"keptPlanning,omitempty"`
 	At             time.Time        `json:"at,omitzero"`
 }
 
@@ -474,6 +476,8 @@ type wireQuestion struct {
 	Prompt        string       `json:"prompt,omitempty"`
 	Options       []wireOption `json:"options,omitempty"`
 	AllowMultiple bool         `json:"allowMultiple,omitempty"`
+	AllowText     bool         `json:"allowText,omitempty"`
+	Required      bool         `json:"required,omitempty"`
 }
 
 type wireOption struct {
@@ -514,6 +518,8 @@ type wireSubagent struct {
 	ToolsUsed    []string  `json:"toolsUsed,omitempty"`
 	Transcript   bool      `json:"transcript,omitempty"`
 	Background   bool      `json:"background,omitempty"`
+	NoCancel     bool      `json:"noCancel,omitempty"`
+	Retained     bool      `json:"retained,omitempty"`
 }
 
 type wireQueued struct {
@@ -542,10 +548,12 @@ type wirePluginCommand struct {
 }
 
 type wireForeignTurn struct {
-	ID      string `json:"id,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	Running bool   `json:"running,omitempty"`
+	ID        string     `json:"id,omitempty"`
+	Text      string     `json:"text,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
+	Running   bool       `json:"running,omitempty"`
+	Cancelled bool       `json:"cancelled,omitempty"`
+	Err       *TurnError `json:"err,omitempty"`
 }
 
 // wireTurn is TurnInfo, field for field in the same order, so it converts by
@@ -570,16 +578,18 @@ type wireTurn struct {
 // event already has on the wire, so an ending that carries its body and the
 // opening it stands in for read the same.
 type wireAsk struct {
-	ID       string              `json:"id,omitempty"`
-	Kind     AskKind             `json:"kind,omitempty"`
-	Outcome  AskOutcome          `json:"outcome,omitempty"`
-	By       string              `json:"by,omitempty"`
-	OptionID string              `json:"optionId,omitempty"`
-	Answers  map[string][]string `json:"answers,omitempty"`
-	Skip     bool                `json:"skip,omitempty"`
-	Accepted bool                `json:"accepted,omitempty"`
-	Label    string              `json:"label,omitempty"`
-	Body     *wireAskBody        `json:"body,omitempty"`
+	ID        string              `json:"id,omitempty"`
+	Kind      AskKind             `json:"kind,omitempty"`
+	Outcome   AskOutcome          `json:"outcome,omitempty"`
+	By        string              `json:"by,omitempty"`
+	OptionID  string              `json:"optionId,omitempty"`
+	Answers   map[string][]string `json:"answers,omitempty"`
+	Text      map[string]string   `json:"text,omitempty"`
+	Cancelled bool                `json:"cancelled,omitempty"`
+	Skip      bool                `json:"skip,omitempty"`
+	Accepted  bool                `json:"accepted,omitempty"`
+	Label     string              `json:"label,omitempty"`
+	Body      *wireAskBody        `json:"body,omitempty"`
 }
 
 // wireAskBody is an AskBody: exactly one of the three is set on an ask craze
@@ -814,12 +824,21 @@ type wireSendNow struct {
 // is, so a jq filter over a journal reads .state.usage.session.costPicoUsd
 // without a default — a 0 and a false are values here, not absences. The
 // section itself is absent when nil (wireState's omitempty), never null or
-// {}: no ACP session's delta ever carries one.
+// {}: no cursor or grok session's delta ever carries one.
+//
+// The plan's limit and the model in use (plan 052 § D2) are claude's alone,
+// additive and optional: plan, window, resetsAt and model absent when empty,
+// and windowUtilization written exactly when window is.
 type wireUsage struct {
-	ContextTokens int64     `json:"contextTokens"`
-	ContextWindow int64     `json:"contextWindow"`
-	Turn          wireSpend `json:"turn"`
-	Session       wireSpend `json:"session"`
+	ContextTokens     int64      `json:"contextTokens"`
+	ContextWindow     int64      `json:"contextWindow"`
+	Turn              wireSpend  `json:"turn"`
+	Session           wireSpend  `json:"session"`
+	Plan              string     `json:"plan,omitempty"`
+	Window            string     `json:"window,omitempty"`
+	WindowUtilization *float64   `json:"windowUtilization,omitempty"`
+	ResetsAt          *time.Time `json:"resetsAt,omitempty"`
+	Model             string     `json:"model,omitempty"`
 }
 
 // wireWebStatus is a WebStatusState (issues #137, #141), field for field in
@@ -908,6 +927,14 @@ type wireCompaction struct {
 	Err          string `json:"err,omitempty"`
 }
 
+// wireNotice is NoticeInfo, field for field in the same order, so it
+// converts by a plain pointer cast like wireCompaction does (plan 052 § B2).
+type wireNotice struct {
+	Severity    string `json:"severity,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 // wireStepRetry is StepRetryInfo, field for field in the same order, so it
 // converts by a plain pointer cast like wireCompaction does.
 type wireStepRetry struct {
@@ -988,8 +1015,10 @@ func toWireEvent(ev Event) wireEvent {
 		Replayed:       ev.Replayed,
 		Compaction:     (*wireCompaction)(ev.Compaction),
 		StepRetry:      (*wireStepRetry)(ev.StepRetry),
+		Notice:         (*wireNotice)(ev.Notice),
 		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
+		KeptPlanning:   ev.KeptPlanning,
 		At:             ev.At.UTC(),
 	}
 	if ev.Tool != nil {
@@ -1000,15 +1029,17 @@ func toWireEvent(ev Event) wireEvent {
 	w.Plan = toWirePlan(ev.Plan)
 	if a := ev.Ask; a != nil {
 		w.Ask = &wireAsk{
-			ID:       a.ID,
-			Kind:     a.Kind,
-			Outcome:  a.Outcome,
-			By:       a.By,
-			OptionID: a.OptionID,
-			Answers:  a.Answers,
-			Skip:     a.Skip,
-			Accepted: a.Accepted,
-			Label:    a.Label,
+			ID:        a.ID,
+			Kind:      a.Kind,
+			Outcome:   a.Outcome,
+			By:        a.By,
+			OptionID:  a.OptionID,
+			Answers:   a.Answers,
+			Text:      a.Text,
+			Cancelled: a.Cancelled,
+			Skip:      a.Skip,
+			Accepted:  a.Accepted,
+			Label:     a.Label,
 		}
 		if b := a.Body; b != nil {
 			w.Ask.Body = &wireAskBody{
@@ -1112,8 +1143,17 @@ func toWireUsage(u *UsageState) *wireUsage {
 	if u == nil {
 		return nil
 	}
-	return &wireUsage{ContextTokens: u.ContextTokens, ContextWindow: u.ContextWindow,
-		Turn: wireSpend(u.Turn), Session: wireSpend(u.Session)}
+	w := &wireUsage{ContextTokens: u.ContextTokens, ContextWindow: u.ContextWindow,
+		Turn: wireSpend(u.Turn), Session: wireSpend(u.Session), Plan: u.Plan, Window: u.Window, Model: u.Model}
+	if u.Window != "" {
+		util := u.WindowUtilization
+		w.WindowUtilization = &util
+	}
+	if !u.ResetsAt.IsZero() {
+		at := u.ResetsAt.UTC()
+		w.ResetsAt = &at
+	}
+	return w
 }
 
 // usage is a wireUsage back as a UsageState, nil for nil.
@@ -1121,8 +1161,15 @@ func (w *wireUsage) usage() *UsageState {
 	if w == nil {
 		return nil
 	}
-	return &UsageState{ContextTokens: w.ContextTokens, ContextWindow: w.ContextWindow,
-		Turn: Spend(w.Turn), Session: Spend(w.Session)}
+	u := &UsageState{ContextTokens: w.ContextTokens, ContextWindow: w.ContextWindow,
+		Turn: Spend(w.Turn), Session: Spend(w.Session), Plan: w.Plan, Window: w.Window, Model: w.Model}
+	if w.WindowUtilization != nil {
+		u.WindowUtilization = *w.WindowUtilization
+	}
+	if w.ResetsAt != nil {
+		u.ResetsAt = *w.ResetsAt
+	}
+	return u
 }
 
 // toWireQueued is a QueuedPrompt on the wire, nil for nil: an EventQueue's
@@ -1292,6 +1339,8 @@ func toWireQuestionEv(q *QuestionEvent) *wireQuestionEv {
 				Prompt:        qq.Prompt,
 				Options:       convertSlice(qq.Options, func(o Option) wireOption { return wireOption(o) }),
 				AllowMultiple: qq.AllowMultiple,
+				AllowText:     qq.AllowText,
+				Required:      qq.Required,
 			}
 		}),
 		Auto:    q.Auto,
@@ -1322,6 +1371,8 @@ func toWireSubagent(a *SubagentInfo) *wireSubagent {
 		ToolsUsed:    a.ToolsUsed,
 		Transcript:   a.Transcript,
 		Background:   a.Background,
+		NoCancel:     a.NoCancel,
+		Retained:     a.Retained,
 	}
 }
 
@@ -1342,8 +1393,10 @@ func (w *wireEvent) event() Event {
 		Replayed:       w.Replayed,
 		Compaction:     (*CompactionInfo)(w.Compaction),
 		StepRetry:      (*StepRetryInfo)(w.StepRetry),
+		Notice:         (*NoticeInfo)(w.Notice),
 		Cause:          w.Cause,
 		StopReason:     w.StopReason,
+		KeptPlanning:   w.KeptPlanning,
 		At:             w.At.UTC(),
 	}
 	if w.Tool != nil {
@@ -1354,17 +1407,21 @@ func (w *wireEvent) event() Event {
 	ev.Plan = w.Plan.plan()
 	if a := w.Ask; a != nil {
 		ev.Ask = &AskUpdate{
-			ID:       a.ID,
-			Kind:     a.Kind,
-			Outcome:  a.Outcome,
-			By:       a.By,
-			OptionID: a.OptionID,
-			Skip:     a.Skip,
-			Accepted: a.Accepted,
-			Label:    a.Label,
+			ID:        a.ID,
+			Kind:      a.Kind,
+			Outcome:   a.Outcome,
+			By:        a.By,
+			OptionID:  a.OptionID,
+			Cancelled: a.Cancelled,
+			Skip:      a.Skip,
+			Accepted:  a.Accepted,
+			Label:     a.Label,
 		}
 		if len(a.Answers) > 0 {
 			ev.Ask.Answers = a.Answers
+		}
+		if len(a.Text) > 0 {
+			ev.Ask.Text = a.Text
 		}
 		if b := a.Body; b != nil {
 			ev.Ask.Body = &AskBody{
@@ -1508,6 +1565,8 @@ func (w *wireQuestionEv) question() *QuestionEvent {
 				Prompt:        wq.Prompt,
 				Options:       convertSlice(wq.Options, func(o wireOption) Option { return Option(o) }),
 				AllowMultiple: wq.AllowMultiple,
+				AllowText:     wq.AllowText,
+				Required:      wq.Required,
 			}
 		}),
 		Auto: w.Auto,
@@ -1541,6 +1600,8 @@ func (w *wireSubagent) subagent() *SubagentInfo {
 		ToolsUsed:    nilIfEmpty(w.ToolsUsed),
 		Transcript:   w.Transcript,
 		Background:   w.Background,
+		NoCancel:     w.NoCancel,
+		Retained:     w.Retained,
 	}
 }
 

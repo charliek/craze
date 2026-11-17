@@ -29,7 +29,7 @@ func TestMissingAgentBinarySaysWhatToDo(t *testing.T) {
 		t.Fatalf("the config file is %q, want %q", got, config)
 	}
 	missing := filepath.Join(t.TempDir(), "no-such-agent")
-	cursor, grok, gx := CursorProvider(), GrokProvider(), GxProvider()
+	cursor, grok := CursorProvider(), GrokProvider()
 	for _, tc := range []struct {
 		name string
 		p    *Provider
@@ -40,7 +40,6 @@ func TestMissingAgentBinarySaysWhatToDo(t *testing.T) {
 		{"cursor's two candidates", &cursor, "", "",
 			"agent binary not found: cursor-agent is not on PATH (also tried agent); install it, or set [agents].cursor in " + config},
 		{"grok", &grok, "", "", "agent binary not found: grok is not on PATH; install it, or set [agents].grok in " + config},
-		{"gx", &gx, "", "", "agent binary not found: gx is not on PATH; install it, or set [agents].gx in " + config},
 		{"an explicit path", &grok, missing, "", "agent binary not found: " + missing + "; install it, or set [agents].grok in " + config},
 		{"CRAZE_AGENT_BIN", &cursor, "", missing, "agent binary not found: " + missing + "; install it, or set [agents].cursor in " + config},
 	} {

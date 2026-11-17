@@ -18,7 +18,7 @@ def test_plan_runs_skips_unsupported_and_orders_kimi_last(tmp_path):
     ms = load_models()
     models = [ms["fireworks/kimi-k3"], ms["glm-5.3-flash"], ms["muse-spark-1.3"]]
     tasks = select_tasks(load_tasks(), "smoke-explain,smoke-fix")
-    runs = plan_runs(cfg(tmp_path, ["craze", "gx", "opencode", "codex"], models, tasks, reps=2))
+    runs = plan_runs(cfg(tmp_path, ["craze", "opencode", "codex"], models, tasks, reps=2))
     keys = [r.key for r in runs]
     assert not any(k.startswith("codex/glm") for k in keys)  # Z.AI has no Responses API
     assert any(k.startswith("codex/muse-spark-1.3/") for k in keys)
@@ -83,7 +83,6 @@ def test_error_after_partial_text_is_a_failure():
     from crazeeval.runners.base import Extract
     from crazeeval.runners.codex import extract_codex
     from crazeeval.runners.craze import extract_craze
-    from crazeeval.runners.gx import extract_gx
     from crazeeval.runners.opencode import extract_opencode
     from crazeeval.sandbox import SandboxResult
 
@@ -102,8 +101,6 @@ def test_error_after_partial_text_is_a_failure():
     assert not cz.completed
     assert not extract_craze([{"type": "text", "text": "x"}, {"type": "done", "stopReason": "cancelled"}]).completed
     assert extract_craze([{"type": "text", "text": "x"}, {"type": "done", "stopReason": "end_turn"}]).completed
-    assert not extract_gx([{"type": "result", "subtype": "error_during_execution", "is_error": True}]).completed
-    assert extract_gx([{"type": "result", "subtype": "success", "is_error": False, "result": "x"}]).completed
     assert not extract_codex([{"type": "item.completed", "item": {"type": "agent_message", "text": "partial"}},
                               {"type": "turn.failed", "error": {"message": "x"}}], None).completed
     assert extract_codex([{"type": "error", "message": "Reconnecting..."}, {"type": "turn.completed", "usage": {}}], "x").completed
@@ -150,7 +147,7 @@ def test_batch_dir_is_exclusive_locked_and_resumed_only_on_match(tmp_path):
         open_batch_dir(c2, _ident(c2))  # the first batch still holds the lock
     lock.close()
     open_batch_dir(c2, _ident(c2)).close()  # now it may be resumed
-    c3 = cfg(tmp_path / "b1", ["gx"], [ms["glm-5.3-flash"]], t)
+    c3 = cfg(tmp_path / "b1", ["opencode"], [ms["glm-5.3-flash"]], t)
     c3.resume = True
     with pytest.raises(BatchDirError, match="different batch"):
         open_batch_dir(c3, _ident(c3))

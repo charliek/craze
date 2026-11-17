@@ -111,7 +111,7 @@ func TestKnownProviderIsFalseForAHiddenProvider(t *testing.T) {
 	}{
 		{"cursor", true},
 		{"grok", true},
-		{"gx", true},
+		{"gx", false}, // retired: an unknown id
 		{hiddenID, false},
 		{"codex", false},
 	} {
@@ -189,7 +189,7 @@ func TestProviderIDsNeverNameAHiddenProvider(t *testing.T) {
 	if err := cmd.Execute(); !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	if want := `craze: unknown provider "codex" (want cursor, grok, gx, or native)`; ee.msg != want {
+	if want := `craze: unknown provider "codex" (want cursor, grok, claude, or native)`; ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
 }

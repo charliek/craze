@@ -45,7 +45,7 @@ def run(cmd, timeout=900):
 out["go_version"] = run(["go", "version"])
 out["go_build"] = run(["go", "build", "./..."]) if exists("go.mod") else None
 out["pytest"] = run(["python", "-m", "pytest", "--version"])
-out["which"] = {t: shutil.which(t) for t in ["craze", "gx", "opencode", "codex", "node", "python", "pytest", "uv", "go", "rg", "git", "bash"]}
+out["which"] = {t: shutil.which(t) for t in ["craze", "opencode", "codex", "node", "python", "pytest", "uv", "go", "rg", "git", "bash"]}
 try:
     out["dns_api_meta_ai"] = bool(socket.getaddrinfo("api.meta.ai", 443))
 except Exception:
@@ -79,12 +79,7 @@ def probe_env(home: Path, em: EvalModel, snap: Snapshot) -> dict[str, str]:
     env: dict[str, str] = {}
     # The default harnesses only: craze-web shares craze's home directory, and would
     # add its config.toml and web route to the probe's craze.
-    # gx has no home on a model the snapshot has no gx entry for: no run builds one
-    # either (config.gx_problems refuses it).
-    no_gx = snap.model(em.key).get("gx") is None
     for h in DEFAULT_HARNESSES:
-        if h == "gx" and no_gx:
-            continue
         if em.supports(h):
             env.update(HOMES[h](home, em, snap, f"http://127.0.0.1:1/r/probe/{em.provider}/v1"))
     return env
@@ -101,7 +96,7 @@ async def run_probe(out: Path, tc: Toolchains, keyring: keymod.KeyRing, snap: Sn
     home.mkdir(parents=True)
     env = probe_env(home, em, snap)
     (home / "probe.py").write_text(PROBE_SCRIPT)
-    tools = {"craze", "grok", "opencode", "node"} if craze_bin else {"grok", "opencode", "node"}
+    tools = {"craze", "opencode", "node"} if craze_bin else {"opencode", "node"}
     # A stand-in proxy on a Unix socket: the relay must reach it and nothing else.
     sockdir = Path(tempfile.mkdtemp(prefix="crazeeval-probe-"))
     sock = sockdir / "proxy.sock"
@@ -128,7 +123,6 @@ async def run_probe(out: Path, tc: Toolchains, keyring: keymod.KeyRing, snap: Sn
         "campaign folder": str(paths.campaign_dir()),
         "owner ~/.claude/plans": str(Path.home() / ".claude/plans"),
         "owner ~/.craze": str(Path.home() / ".craze"),
-        "owner ~/.grok": str(Path.home() / ".grok"),
         "owner ~/.codex": str(Path.home() / ".codex"),
         "repo": str(paths.REPO_ROOT),
     }

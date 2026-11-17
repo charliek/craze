@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,27 +27,58 @@ const editedPathsCap = 64
 // editCall says how a provider's edit calls are told from its others.
 type editCall struct {
 	kinds, tools []string
+	// rawPathKeys are the rawInput keys a call names its file by, beside its
+	// locations and diffs (claude: file_path, notebook_path).
+	rawPathKeys []string
 	// grokPlan says the provider keeps its plan file in grok's session
 	// directory (isGrokPlanFile). Native's plan file is the harness's own.
 	grokPlan bool
+	// claudePlan says the provider writes its plan file under the Claude
+	// config directory's plans/ (claudePlanCheck): ExitPlanMode's plan.
+	claudePlan bool
 }
 
 // editCalls is every provider's rule (docs/reference/cli.md's table says the
-// same): native and cursor by kind, grok and gx by tool name.
+// same): native and cursor by kind, grok by tool name.
 //
 // Grok is by name because its kind is not a statement about the call: its
 // session/update carries none until the second update of a call, and its
 // _meta.updateParams says Other for every tool. search_replace and write are
 // what its own session records show changing files (tool_definitions.json and
 // updates.jsonl under ~/.grok/sessions; a real turn's are in
-// internal/agent/testdata/grok-edits.jsonl), and gx reports the same names
-// (eval/tests/samples/gx-smoke-fix.jsonl). A tool not named here does not count,
+// internal/agent/testdata/grok-edits.jsonl). A tool not named here does not count,
 // whatever kind it reports. A provider with no rule has no edits.
 var editCalls = map[string]editCall{
 	nativeName: {kinds: []string{string(tool.KindEdit)}},
 	cursorName: {kinds: []string{"edit", "delete", "move"}},
 	grokName:   {tools: []string{"search_replace", "write"}, grokPlan: true},
-	gxName:     {tools: []string{"search_replace", "write"}, grokPlan: true},
+	// Claude by its tool name, _meta.claudeCode.toolName (plan 052 § A5;
+	// confirmed against a real Write: kind edit, the path in rawInput.file_path,
+	// its locations and its diff).
+	claudeName: {
+		tools:       []string{"Edit", "MultiEdit", "Write", "NotebookEdit"},
+		rawPathKeys: []string{"file_path", "notebook_path"},
+		claudePlan:  true,
+	},
+}
+
+// rawInputPaths is every string value rawInput holds under keys.
+func rawInputPaths(raw json.RawMessage, keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	var out []string
+	for _, k := range keys {
+		var v string
+		if json.Unmarshal(obj[k], &v) == nil && v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // is reports whether t is an edit under the rule.
@@ -212,12 +244,18 @@ func relativeTo(ws, resolved string) (string, bool) {
 
 // grokHome is the directory grok keeps its sessions under, for an agent that sees
 // getenv and runs in cwd: GROK_HOME, else ~/.grok. A relative GROK_HOME is taken from
-// the agent's working directory, as grok and gx take it (grok 1.0 and gx 1.0.45 make
+// the agent's working directory, as grok takes it (grok 1.0 makes
 // <cwd>/<GROK_HOME>/sessions at session/new, whatever cwd the session names).
 func grokHome(getenv func(string) string, cwd string) string {
 	if h := getenv("GROK_HOME"); h != "" {
 		return resolveEditPath(cwd, h)
 	}
+	return homeDotDir(getenv, ".grok")
+}
+
+// homeDotDir is name under the home directory of an agent that sees getenv:
+// its HOME, else craze's own; "" when there is none.
+func homeDotDir(getenv func(string) string, name string) string {
 	home := getenv("HOME")
 	if home == "" {
 		home, _ = os.UserHomeDir()
@@ -225,7 +263,7 @@ func grokHome(getenv func(string) string, cwd string) string {
 	if home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".grok")
+	return filepath.Join(home, name)
 }
 
 // isGrokPlanFile reports whether resolved is the plan file of grok's session id:
@@ -248,6 +286,34 @@ func isGrokPlanFile(resolved, home, id string) bool {
 		root = real
 	}
 	return filepath.Dir(filepath.Dir(dir)) == filepath.Join(root, "sessions")
+}
+
+// claudeConfigDir is the directory Claude Code keeps its configuration in, for
+// an agent that sees getenv: CLAUDE_CONFIG_DIR, else ~/.claude. craze reads
+// nothing there; it only names where a plan file lands.
+func claudeConfigDir(getenv func(string) string) string {
+	if d := getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return filepath.Clean(d)
+	}
+	return homeDotDir(getenv, ".claude")
+}
+
+// claudePlanCheck reports whether a resolved path is under the Claude config
+// directory dir's plans/, where plan mode writes the plan ExitPlanMode presents
+// (plan 052 § A5): told by where it is, as grok's plan file is. plans/ is
+// resolved once, for every path the check is asked about.
+func claudePlanCheck(dir string) func(resolved string) bool {
+	if dir == "" {
+		return func(string) bool { return false }
+	}
+	root := filepath.Join(dir, "plans")
+	if real, err := tool.RealPath(root); err == nil {
+		root = real
+	}
+	return func(resolved string) bool {
+		_, inside := relativeTo(root, resolved)
+		return inside && resolved != root
+	}
 }
 
 // same reports whether e and o stamp the same thing.
@@ -313,6 +379,9 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 	if rule.grokPlan {
 		home := grokHome(s.childEnv(), scope.workspace)
 		scope.isPlan = func(resolved string) bool { return isGrokPlanFile(resolved, home, sid) }
+	}
+	if rule.claudePlan {
+		scope.isPlan = claudePlanCheck(claudeConfigDir(s.childEnv()))
 	}
 	edited := scope.edited(paths)
 	if edited.same(t.Edited) {

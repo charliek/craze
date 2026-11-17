@@ -1319,7 +1319,7 @@ var (
 		"queueHov", "queueEdit", "queueEditPos", "editDraft", "queueEditCtx", "queueEditVer", "confirm",
 		"tasksState", "todosSeen", "todosClosedAt", "turnSeq", "sawAssistantSeq", "planApprovedSeq",
 		"planOfferSeq", "planDeadSeq", "offerGen", "turnID", "ownTurn", "nextTurn", "armedDraft", "disarmed",
-		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
+		"turnStart", "foreignStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
 		"upDone", "indexTitle", "unstarted", "first", "cdlg", "attachReads", "editImages", "attached",
 		"provAvail", "providerBack", "availNative", "startAsk", "startWarn", "btw",

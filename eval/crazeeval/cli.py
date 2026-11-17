@@ -42,7 +42,7 @@ def _ledger_path(a) -> Path:
 def cmd_run(a) -> int:
     from crazeeval import keys as keymod
     from crazeeval.batch import BatchConfig, run_batch
-    from crazeeval.config import DEFAULT_HARNESSES, SUPPORTED_HARNESSES, gx_problems, load_models, load_snapshot
+    from crazeeval.config import DEFAULT_HARNESSES, SUPPORTED_HARNESSES, load_models, load_snapshot
     from crazeeval.pricing import load_prices
     from crazeeval.runners import RUNNERS
     from crazeeval.sandbox import Toolchains, bwrap_available
@@ -86,12 +86,6 @@ def cmd_run(a) -> int:
         print("no tasks selected", file=sys.stderr)
         return 2
     snap = load_snapshot(_opt_path(a.config))
-    # A model the owner's gx tables did not name at snapshot time has no gx entry: the gx
-    # harness cannot run on it, and every other harness can.
-    if problems := gx_problems(models, snap, harnesses):
-        for line in problems:
-            print(line, file=sys.stderr)
-        return 2
     prices = load_prices()
     for em in models:
         if em.wire_model not in prices:
@@ -103,7 +97,7 @@ def cmd_run(a) -> int:
             print(f"{em.key}: provider {em.provider!r} has no route or no key", file=sys.stderr)
             return 2
     # The snapshot freezes each route: a driver or endpoint that moved since -- the
-    # owner's entry, or the catalog an old gx import's entry is read through -- stops
+    # owner's entry, or the catalog an old import's entry is read through -- stops
     # the run.
     if problems := keymod.route_problems(models, snap, providers):
         for line in problems:
@@ -201,7 +195,7 @@ def cmd_validate(a) -> int:
 
 def cmd_proxy(a) -> int:
     from crazeeval import keys as keymod
-    from crazeeval.config import gx_problems, load_models, load_snapshot
+    from crazeeval.config import load_models, load_snapshot
     from crazeeval.homes import craze_home_multi
     from crazeeval.ledger import Ledger
     from crazeeval.pricing import load_prices
@@ -220,11 +214,6 @@ def cmd_proxy(a) -> int:
                     scrub=keyring.scrub)
 
     snap = load_snapshot(_opt_path(a.config))
-    # A route for gx on a model the snapshot has no gx entry for is refused, as a run is.
-    if problems := gx_problems(ems, snap, [a.harness]):
-        for line in problems:
-            print(line, file=sys.stderr)
-        return 2
 
     async def main():
         proxy = Proxy(providers, keyring, ledger, prices, port=a.port, refusal_log=out / "proxy-refusals.jsonl",
@@ -282,8 +271,7 @@ def cmd_snapshot_config(a) -> int:
     print(f"config snapshot: {d}")
     print(f"hash: {snapshot_hash(d)}")
     for k, m in snap["models"].items():
-        gx = m["eval"]["gx"] if m["gx"] is not None else "- (not in the owner's gx tables)"
-        print(f"  {k}: craze={m['eval']['craze']} gx={gx} opencode={m['eval']['opencode']} "
+        print(f"  {k}: craze={m['eval']['craze']} opencode={m['eval']['opencode']} "
               f"variants={m.get('opencode_variants')} codex={m['eval']['codex']}")
     # An override craze rejects (it keeps its shipped entry then) is still in the snapshot:
     # config.craze_models does not run craze's validation.
@@ -685,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
         return sub.add_parser(name, parents=[common], **kw)
 
     r = command("run", help="run a batch of sandboxed harness runs through the proxy")
-    r.add_argument("--harness", help="comma list of craze,gx,opencode,codex (default: those four) and craze-web "
+    r.add_argument("--harness", help="comma list of craze,opencode,codex (default: those three) and craze-web "
                    "(craze with web search, on web tasks only; never a default)")
     r.add_argument("--model", help="comma list of eval model keys (default: all)")
     r.add_argument("--tasks", help="comma list of task ids and/or split:<dev|heldout|smoke|web|all> "
@@ -773,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
     jb.add_argument("--batch", required=True)
     jb.add_argument("--batch-y", help="take the y runs from this batch (compare two builds)")
     jb.add_argument("--x", default="craze", help="the x harness (default craze)")
-    jb.add_argument("--y", default="gx,opencode,codex", help="comma list of y harnesses")
+    jb.add_argument("--y", default="opencode,codex", help="comma list of y harnesses")
     jb.add_argument("--model", help="comma list of eval model keys (default: all)")
     jb.add_argument("--tasks", help="comma list of task ids (default: all)")
     jb.add_argument("--judge", default="sol")

@@ -111,18 +111,16 @@ type availInputs struct {
 	hubPID int
 	// configPath is config.toml's path, for the fixes that name [agents].
 	configPath string
-	// pickerDefault is the provider the TUI's startup picker keeps as its
-	// default row even when its binary is missing, "" for none: an optional
-	// provider (gx) that does not resolve is left out of every answer, except
-	// as this default, where it is unavailable instead (plan 036 §3.1, the
-	// gx row). The hub and craze providers set none.
-	pickerDefault string
+	// getenv is the environment a companion binary resolves in
+	// (agent.Provider.ResolveCompanion: claude's CLAUDE_CODE_EXECUTABLE): this
+	// process's, which a host it spawns — and the hub's, which its hosts —
+	// inherit. nil is os.Getenv.
+	getenv func(string) string
 }
 
 // availability is one entry per row, in rows' order (agent.Providers()'s),
 // by §3.1's rules: an ACP provider is ready when its binary resolves, and
-// unavailable when it does not — an optional one is then left out, unless
-// it is in.pickerDefault — and cursor is unavailable besides when the
+// unavailable when it does not — and cursor is unavailable besides when the
 // process is known to run outside the macOS login session ("not GUI"),
 // checked only once its binary resolves, so a missing binary is the reason
 // whenever it applies. A login session that is not known never marks anything.
@@ -131,19 +129,15 @@ type availInputs struct {
 func availability(in availInputs, rows []agent.Provider) []providerAvail {
 	out := make([]providerAvail, 0, len(rows))
 	for _, p := range rows {
-		a, listed := providerAvailability(in, p)
-		if !listed {
-			continue
-		}
+		a := providerAvailability(in, p)
 		a.Reason, a.Fix = engine.RowLine(a.Reason), engine.RowLine(a.Fix)
 		out = append(out, a)
 	}
 	return out
 }
 
-// providerAvailability is p's entry (availability), and false when p is left
-// out: an optional provider whose binary is missing.
-func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool) {
+// providerAvailability is p's entry (availability).
+func providerAvailability(in availInputs, p agent.Provider) providerAvail {
 	a := providerAvail{P: p, State: availReady}
 	if p.InProcess() {
 		// Native is the one in-process provider any listing has; another —
@@ -151,16 +145,27 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 		if p.Name() == agent.NativeProvider().Name() {
 			a.State, a.Reason, a.Fix = in.native()
 		}
-		return a, true
+		return a
 	}
 	r := in.resolve(p)
 	if !r.OK {
-		if p.Optional() && p.Name() != in.pickerDefault {
-			return providerAvail{}, false
-		}
 		a.State = availUnavailable
 		a.Reason, a.Fix = missingBinary(p, r, in.configPath)
-		return a, true
+		return a
+	}
+	if len(p.CompanionBins()) > 0 {
+		// The binary the agent runs beside it (plan 052 § A2): claude's
+		// `claude`, from CLAUDE_CODE_EXECUTABLE or PATH. Either missing is
+		// unavailable, each naming itself.
+		getenv := in.getenv
+		if getenv == nil {
+			getenv = os.Getenv
+		}
+		if _, err := p.ResolveCompanion(getenv); err != nil {
+			a.State = availUnavailable
+			a.Reason, a.Fix = missingCompanion(p, getenv)
+			return a
+		}
 	}
 	if p.Name() == agent.CursorProvider().Name() {
 		if _, gui, known := in.gui(); known && !gui {
@@ -171,7 +176,7 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 			}
 		}
 	}
-	return a, true
+	return a
 }
 
 // startWarning is what a start of p this process is about to make with no
@@ -182,8 +187,8 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 // binary or an unreadable native table fails on its own, in its own words.
 // Nothing is refused: the start goes on (plan 036 decision 3).
 func startWarning(in availInputs, p agent.Provider) (reason, fix string) {
-	a, listed := providerAvailability(in, p)
-	if !listed || !a.notGUI {
+	a := providerAvailability(in, p)
+	if !a.notGUI {
 		return "", ""
 	}
 	return engine.RowLine(a.Reason), engine.RowLine(a.Fix)
@@ -217,8 +222,7 @@ const (
 // an override names its knob — the flag, the variable, or p's [agents] key —
 // and the path it tried, and its fix points that knob at a binary — in
 // config.toml for [agents], or unset for the variable (plan 036 X2); a PATH
-// miss names p's first PATH candidate. An optional provider's PATH miss is
-// shorter (§3.1's gx row): it is only ever listed as the TUI picker's default.
+// miss names p's first PATH candidate.
 func missingBinary(p agent.Provider, r binResolution, configPath string) (reason, fix string) {
 	var knob, tail string
 	switch r.Source {
@@ -236,10 +240,23 @@ func missingBinary(p agent.Provider, r binResolution, configPath string) (reason
 	if bins := p.Bins(); len(bins) > 0 {
 		bin = bins[0]
 	}
-	if p.Optional() {
-		return bin + " not found", "install " + bin + ", or set [agents]." + p.Name()
+	install := "install " + bin
+	if cmd := p.AdapterInstall(); cmd != "" {
+		// claude's adapter is an npm package, and says how it installs.
+		install = "install the adapter: " + cmd + " (Node ≥22)"
 	}
-	return bin + " not found on PATH", "install " + bin + ", or set [agents]." + p.Name() + " in " + configPath
+	return bin + " not found on PATH", install + ", or set [agents]." + p.Name() + " in " + configPath
+}
+
+// missingCompanion is the reason and fix for p's companion binary not
+// resolving (plan 052 § A2): the CLAUDE_CODE_EXECUTABLE it was pointed at,
+// or the PATH miss.
+func missingCompanion(p agent.Provider, getenv func(string) string) (reason, fix string) {
+	bin := p.CompanionBins()[0]
+	if v := strings.TrimSpace(getenv(agent.ClaudeExecutableEnv)); v != "" {
+		return agent.ClaudeExecutableEnv + " " + v + " not found", "point " + agent.ClaudeExecutableEnv + " at Claude Code's claude, or unset it"
+	}
+	return bin + " not found on PATH", "install Claude Code (" + bin + "), or set " + agent.ClaudeExecutableEnv
 }
 
 // Native's reasons and fixes (plan 036 §3.1, decision 9). A model table that

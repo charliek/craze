@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -34,6 +36,12 @@ func (s *session) interject(ctx context.Context, text string) error {
 	if !s.provider().Capabilities().Interject {
 		return ErrUnsupported
 	}
+	// A steer is model work like a prompt (review C2c 2): it waits for a
+	// claude fast reset in flight, and a stopped session refuses it with its
+	// own error. The client's prompt gate checks again just before the write.
+	if err := s.awaitFastFix(ctx); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	client := s.client
 	live := s.inPrompt && !s.doneEmitted && !s.cancelling
@@ -53,7 +61,27 @@ func (s *session) interject(ctx context.Context, text string) error {
 	}
 	// Text only (plan 033 P7): an envelope becomes [Image #N: <path>] lines.
 	// The TUI sends none here; a socket client's mode "interject" can.
-	return client.Interject(ctx, interjectText(s.log, text), id)
+	err := client.Interject(ctx, interjectText(s.log, text), id)
+	switch {
+	case errors.Is(err, acp.ErrSteerIdle):
+		// claude found no running turn (plan 052 § B7): the text was not
+		// taken, and is to go as the next prompt, which the engine sees to.
+		return ErrPromptRequired
+	case errors.Is(err, acp.ErrSteerStartedTurn):
+		// idleBehavior promptRequired should rule this out: the adapter
+		// took the text as a turn of its own. It was taken, so it is no
+		// failure; its frames arrive with no prompt in flight.
+		s.log.Note(journal.DiagNote{Kind: "claude_steer_started_turn"})
+		return nil
+	}
+	if err != nil {
+		if f := s.fatalErr(); f != nil {
+			// The session stopped under the steer: that is why, whatever the
+			// closed connection said, as for a prompt.
+			return f
+		}
+	}
+	return err
 }
 
 // onInterjection turns grok's broadcast into the transcript entry. The ack
@@ -67,6 +95,34 @@ func (s *session) onInterjection(n interjectionText) {
 // is the only file that names the acp type.
 type interjectionText struct{ Text string }
 
+// onACPForeignTurn is the client's foreign-turn bracket, as the session
+// records it: claude's reason, a cancelled ending, and a failed one with its
+// kind (plan 052 § E1, § E2). A turn the silence rule ended leaves a note.
+func (s *session) onACPForeignTurn(f acp.ForeignTurn) {
+	info := ForeignTurnInfo{ID: f.ID, Text: f.Text, Reason: f.Reason, Running: f.Running, Cancelled: f.Cancelled}
+	if f.Err != nil {
+		info.Err = &TurnError{Kind: ErrorInfo(f.Err).Kind, Message: f.Err.Error()}
+	}
+	// A turn claude opened on its own while the overage guard's record holds
+	// ends with the refusal, and the session stops (§ D3) — decided before
+	// anything here can wait on a reader (review C5b item 5).
+	s.guardForeignStart(f)
+	if f.Silent {
+		s.noteForeignSilence(f)
+	}
+	s.onForeignTurn(info)
+}
+
+// noteForeignSilence is the transcript note a foreign turn the silence rule
+// ended leaves (§ E1 (b)): the journal's diagnostic and the diagnostic lane's
+// line, as C2's and C3's notes are.
+func (s *session) noteForeignSilence(f acp.ForeignTurn) {
+	s.log.Note(journal.DiagNote{Kind: "claude_foreign_silence", Fields: map[string]any{"turn": f.ID, "reason": f.Reason}})
+	// Off the dispatch goroutine (C8 K5): this runs under the client's
+	// dispatch lock, and a sink that blocks must not hold the overage stop.
+	s.diagLine(fmt.Sprintf("craze: claude went quiet during a turn of its own (%s); treating it as over", sanitizeLine(f.ID)))
+}
+
 // onForeignTurn records a turn the agent started on its own and tells the
 // callers, so the drain that was about to run waits and re-runs at its end.
 func (s *session) onForeignTurn(info ForeignTurnInfo) {
@@ -78,9 +134,55 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 	if s.replaying.Load() {
 		return
 	}
+	// The state change and the event are one step with respect to any other
+	// bracket (review C4b item 1): an ending cannot be published between a
+	// start's state change and its event, so the stream never shows a start
+	// after its own ending, and a start that comes after it is dropped below.
+	s.foreignMu.Lock()
+	defer s.foreignMu.Unlock()
 	s.mu.Lock()
+	if info.Running && info.ID != "" && info.ID == s.foreignEnded {
+		// Its ending is out already: a start delivered after it is no
+		// turn running (review C4 item 2).
+		s.mu.Unlock()
+		return
+	}
 	s.foreign = info.Running
+	if !info.Running {
+		s.foreignEnded = info.ID
+	}
+	// Either bracket ends the open text run (review C4 item 11).
+	s.textRun = ""
 	s.mu.Unlock()
+	if info.Running && testForeignStartPublish != nil {
+		testForeignStartPublish()
+	}
 	cp := info
 	s.emit(Event{Type: EventForeignTurn, ForeignTurn: &cp})
+}
+
+// testForeignStartPublish is a test seam, nil in production: it runs between a
+// foreign start's state change and its event.
+var testForeignStartPublish func()
+
+// noteToolOwner records which turn opened a claude root tool call, the first
+// time its id is seen: the prompted turn running, unless the agent's own turn
+// holds the session — the client announces that ahead of the update.
+func (s *session) noteToolOwner(id string) {
+	if id == "" || !s.provider().isClaude() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.toolOwner[id]; ok {
+		return
+	}
+	owner := 0
+	if s.inPrompt && !s.foreign {
+		owner = s.turn
+	}
+	if s.toolOwner == nil {
+		s.toolOwner = make(map[string]int)
+	}
+	s.toolOwner[id] = owner
 }

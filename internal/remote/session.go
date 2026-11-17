@@ -758,7 +758,7 @@ func (s *Session) Interject(ctx context.Context, c engine.Command, text string) 
 func (s *Session) Answer(ctx context.Context, c engine.Command, id string, a agent.AskAnswer) error {
 	return s.command(ctx, c, protocol.MethodAsksAnswer, func(sid string) any {
 		return protocol.AsksAnswerParams{SessionID: sid, AskID: id, Answer: protocol.Answer{OptionID: a.OptionID,
-			Cancel: a.Cancel, Answers: a.Answers, Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}}
+			Cancel: a.Cancel, Answers: a.Answers, Text: a.Text, Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}}
 	}, nil)
 }
 
@@ -1147,7 +1147,7 @@ func askRecord(r *protocol.AskRecord) (agent.AskRecord, error) {
 	}
 	if a := r.Answer; a != nil {
 		rec.Answer = agent.AskAnswer{OptionID: a.OptionID, Cancel: a.Cancel, Answers: a.Answers,
-			Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}
+			Text: a.Text, Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}
 	}
 	if len(r.Body) == 0 {
 		return rec, nil

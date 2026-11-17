@@ -27,7 +27,6 @@ const (
 const (
 	cursorName = "cursor"
 	grokName   = "grok"
-	gxName     = "gx"
 	nativeName = "native"
 	// cursorImplementPrompt is what leaving plan mode sends as the user's
 	// turn; it is provider-shaped because the wording is the agent's, not
@@ -44,7 +43,11 @@ const (
 //
 // It is an immutable value with methods rather than a set of callbacks, so a
 // Snapshot can carry a copy of it and the UI can read it without holding a
-// session. A new provider adds a constructor here and changes nothing else.
+// session. A new provider adds a constructor and a registry line. Behaviour
+// that differs per provider beyond these fields — the spawn environment, the
+// companion binary, the preflight and the force pick (provider_claude.go) — is
+// a method that switches on the provider, never a function field, so the value
+// stays plain data a Snapshot can carry a copy of (plan 052 § A1).
 type Provider struct {
 	name            string
 	modeKinds       map[string]ModeKind
@@ -81,26 +84,22 @@ type Provider struct {
 	planUpdatesAreTodos bool
 	// imagesDespiteCapability sends a prompt's images as image blocks even to
 	// an agent whose initialize says promptCapabilities.image is false (plan
-	// 033 P5, §3.4). grok 1.0.30 and gx advertise false and their handler
+	// 033 P5, §3.4). grok 1.0.30 advertises false and its handler
 	// forwards image blocks all the same; without the flag, an agent that says
 	// false gets each image as [Image #N: <path>] text instead. A refusal is
 	// still caught either way: a -32602 before the agent did anything is sent
 	// again with path text (live_images.go).
 	imagesDespiteCapability bool
-	// subagentToolName is the wire tool name that is a sub-agent spawn:
-	// grok spawn_subagent, cursor task. Title-regex fallback only runs
-	// when this is unknown and titleTaskFallback is set (cursor).
-	subagentToolName  string
+	// subagentToolNames are the wire tool names that are a sub-agent spawn:
+	// grok spawn_subagent, cursor task, claude Agent and Task (the older
+	// name). Title-regex fallback only runs when the tool has no name and
+	// titleTaskFallback is set (cursor).
+	subagentToolNames []string
 	titleTaskFallback bool
-	// optional keeps a provider out of the startup picker unless a binary for
-	// it resolves. gx is a personal fork; cursor and grok are always offered,
-	// so an empty picker is impossible.
-	optional bool
 	// hidden keeps a provider out of Providers() altogether: it lives in the
 	// hidden list, which only ProviderByName reads, so it resolves by id but
 	// no listing ever shows it, and it is never persisted as the default
-	// (plan 018 §3.4). optional is "listed when installed"; hidden is "never
-	// listed".
+	// (plan 018 §3.4).
 	hidden bool
 	// resumable is a provider whose sessions craze can load again, so they
 	// are written to the session index and offered by --continue, --resume
@@ -250,7 +249,7 @@ func CursorProvider() Provider {
 			ParameterizedPicker: true,
 		},
 		dialect:           acp.DialectCursor,
-		subagentToolName:  "task",
+		subagentToolNames: []string{"task"},
 		titleTaskFallback: true,
 		skillScan: SkillScan{
 			RelRoots: []string{
@@ -301,10 +300,10 @@ func GrokProvider() Provider {
 			ParameterizedPicker: true,
 			Interject:           true,
 		},
-		// x.ai/btw (plan 040 §3.5); gx inherits it through GxProvider.
-		aside:            true,
-		dialect:          acp.DialectGrok,
-		subagentToolName: "spawn_subagent",
+		// x.ai/btw (plan 040 §3.5).
+		aside:             true,
+		dialect:           acp.DialectGrok,
+		subagentToolNames: []string{"spawn_subagent"},
 		// Grok advertises its whole catalog, plugin skills included, over
 		// ACP; the walk only adds SKILL.md trees the daemon has not loaded.
 		// grok-build always scans both .grok and .agents (.claude/.cursor sit
@@ -323,20 +322,6 @@ func GrokProvider() Provider {
 		planUpdatesAreTodos:     true,
 		imagesDespiteCapability: true,
 	}
-}
-
-// GxProvider is charliek/grok-build's `gx` fork. It is grok on the wire —
-// same dialect, same auth, same ~/.grok home, same skills and plugins — so it
-// is spelled as the difference rather than a second copy of the table: a
-// different binary, a different login hint, and the one field that keeps it
-// out of the picker on machines that do not have it.
-func GxProvider() Provider {
-	p := GrokProvider()
-	p.name = gxName
-	p.defaultBins = []string{gxName}
-	p.loginHint = "gx login"
-	p.optional = true
-	return p
 }
 
 // NativeProvider is craze's own harness (plan 018): a provider craze runs in
@@ -404,18 +389,19 @@ func NativeProvider() Provider {
 // listing — the picker, --help, the unknown-provider error, and any written
 // later — leaves it out without having to remember a filter (plan 018
 // §3.4). Native was one of those until H7's smoke passed on both platforms;
-// D-65 lists it here, after gx (plan 028 §3.16).
+// D-65 lists it here, after grok (plan 028 §3.16). claude was one until its
+// overage guard landed (plan 052 C5): it is listed after grok.
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), GxProvider(), NativeProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
 // and nothing lists. Listing them in Providers and filtering at each listing
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
-// hidden entry can never shadow a listed id. Nothing production code
-// registers is hidden any more (native was the one entry, until D-65); only
-// RegisterHiddenProviderForTest plants one now.
+// hidden entry can never shadow a listed id. Production code registers none
+// today (native was the entry before D-65, claude before plan 052 C5);
+// RegisterHiddenProviderForTest plants them.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -488,19 +474,6 @@ func ProviderNames() []string {
 	return names
 }
 
-// DefaultProviders is the non-optional subset of Providers: what the picker
-// falls back to when the caller supplies no availability-filtered list.
-func DefaultProviders() []Provider {
-	providers := Providers()
-	out := make([]Provider, 0, len(providers))
-	for _, p := range providers {
-		if !p.optional {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // ProviderByName looks up a provider by id: the listed providers first, then
 // the hidden ones, which is how --provider, $CRAZE_PROVIDER and config.toml
 // reach a provider no listing shows (plan 018 §3.4). An empty name is unset,
@@ -534,10 +507,6 @@ func (p Provider) DisplayName() string {
 	return p.name
 }
 
-// Optional reports whether p is left out of the startup picker on a machine
-// that has no binary for it.
-func (p Provider) Optional() bool { return p.optional }
-
 // Hidden reports whether p is one no listing shows: resolvable by id through
 // ProviderByName, never in Providers, and never persisted as the default
 // (plan 018 §3.4). Whether its sessions are indexed is Resumable's question,
@@ -546,7 +515,7 @@ func (p Provider) Hidden() bool { return p.hidden }
 
 // Resumable reports whether craze can load p's sessions again: they are
 // written to the session index, and --continue, --resume and the resume
-// picker offer them (plan 028 §3.5). Cursor, grok, gx and native are; a
+// picker offer them (plan 028 §3.5). Cursor, grok and native are; a
 // provider RegisterHiddenProviderForTest plants is not, so its sessions stay
 // out of the index and a row naming one is never offered.
 func (p Provider) Resumable() bool { return p.resumable }
@@ -556,8 +525,8 @@ func (p Provider) Resumable() bool { return p.resumable }
 func (p Provider) InProcess() bool { return p.inProcess }
 
 // Aside reports whether p's sessions answer side questions (/btw, plan 040
-// §3.3): native's do (its session's Asides is always true); grok's and gx's
-// are turned on with their x.ai/btw; cursor's stays false.
+// §3.3): native's do (its session's Asides is always true); grok's
+// is turned on with their x.ai/btw; cursor's stays false.
 func (p Provider) Aside() bool { return p.aside }
 
 // BinaryResolves reports whether binary lookup for p succeeds — the same
@@ -633,6 +602,29 @@ func (p Provider) authFor(initRes *acp.InitializeResult, getenv func(string) str
 // FallbackModes are the modes craze assumes when session/new advertises none.
 func (p Provider) FallbackModes() []ModeInfo { return append([]ModeInfo(nil), p.fallbackModes...) }
 
+// isSubagentTool reports whether a tool's wire name is one of p's sub-agent
+// spawns.
+func (p Provider) isSubagentTool(name string) bool {
+	return name != "" && slices.Contains(p.subagentToolNames, name)
+}
+
+// ForceOption is the option force answers a permission request with (plan
+// 052 § B6). Cursor and grok take allow_always, then allow_once
+// (acp.PickYoloAllow). Claude takes allow_once only: its allow_always is
+// allow-with-updates, which writes a permanent rule into the user's Claude
+// settings. ok is false when there is nothing p's force may pick: on claude
+// the card then shows, on the others the request is cancelled.
+func (p Provider) ForceOption(opts []acp.PermissionOption) (string, bool) {
+	if p.isClaude() {
+		return acp.PickKind(opts, acp.KindAllowOnce)
+	}
+	return acp.PickYoloAllow(opts)
+}
+
+// forceMissShowsCard reports whether a forced permission request with no
+// option ForceOption may pick is shown to the user rather than cancelled.
+func (p Provider) forceMissShowsCard() bool { return p.isClaude() }
+
 // LoginHint is the command the auth error tells the user to run.
 func (p Provider) LoginHint() string { return p.loginHint }
 
@@ -691,6 +683,20 @@ type ProviderInfo struct {
 	modeKinds       map[string]ModeKind
 	implementPrompt string
 }
+
+// QuestionDismissCancels reports whether a question card's dismissal (Esc)
+// cancels the question rather than skipping it: claude's, where Esc aborts the
+// tool that asked as it does in Claude Code, while a skip would let the tool
+// run on empty answers (plan 052 § B4 as amended, 2026-11-17). cursor, grok
+// and native skip.
+func (p ProviderInfo) QuestionDismissCancels() bool { return p.Name == claudeName }
+
+// ForeignTurnShowsWorking reports whether a turn the agent runs on its own
+// shows as work in progress — the working line and the queue's hint, as a
+// prompted turn does: claude's background turns (plan 052 L4 O1), which can
+// run for minutes. Grok's interjection fallback and native's wake keep their
+// own presentation.
+func (p ProviderInfo) ForeignTurnShowsWorking() bool { return p.Name == claudeName }
 
 // provider rebuilds the value with methods. The name alone decides which
 // constructor runs, so a snapshot keeps its provider's capabilities, dialect

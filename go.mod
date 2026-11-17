@@ -14,6 +14,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.10.1
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/creack/pty v1.1.24
+	github.com/goccy/go-yaml v1.19.2
 	github.com/kaptinlin/jsonschema v0.9.10
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/muesli/termenv v0.16.0
@@ -31,7 +32,6 @@ require (
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kaptinlin/jsonpointer v0.4.28 // indirect

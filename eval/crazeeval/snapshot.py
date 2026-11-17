@@ -3,10 +3,9 @@ definitions (plan 029 §3.1.4).
 
 Reads craze's model table as craze builds it (its shipped catalog with the owner's
 models.toml laid over it, or the owner's file alone with ``catalog = false``:
-config.craze_models), the owner's craze providers.toml and gx model tables (read-only),
-and keeps, per eval model, only allowlisted fields -- never a key, an env-key name, an
-auth helper or a header. A model the owner's gx tables do not name gets no gx entry
-(``"gx": None``); a run of the gx harness on it is refused (config.gx_problems).
+config.craze_models) and the owner's craze providers.toml (read-only), and keeps, per
+eval model, only allowlisted fields -- never a key, an env-key name, an auth helper or
+a header.
 Saves a models.dev catalog for opencode (``OPENCODE_MODELS_PATH``). Every run uses a
 snapshot and records its hash; runs never read the owner's live files.
 """
@@ -32,12 +31,6 @@ CRAZE_MODEL_FIELDS = (
     "default_effort", "vision", "tool_profile",
 )
 CRAZE_PROVIDER_FIELDS = ("driver", "base_url")
-GX_MODEL_FIELDS = (
-    "model", "name", "description", "model_provider", "model_family", "context_window", "max_completion_tokens",
-    "stream_tool_calls", "supports_reasoning_effort", "reasoning_effort", "reasoning_efforts", "system_prompt_label",
-    "supports_vision", "temperature", "top_p",
-)
-GX_PROVIDER_FIELDS = ("base_url", "api_backend")
 
 
 def take(src: dict, fields: tuple[str, ...]) -> dict:
@@ -52,25 +45,12 @@ def _load(p: Path) -> dict:
 def build_snapshot(
     models: dict[str, EvalModel],
     craze_dir: Path | None = None,
-    grok_dir: Path | None = None,
 ) -> dict:
     craze_dir = Path(craze_dir or paths.OWNER_CRAZE_NATIVE)
-    grok_dir = Path(grok_dir or paths.OWNER_GROK)
     catalog = catalog_on(craze_dir)
     cm = craze_models(craze_dir)
     cp = _load(craze_dir / "providers.toml").get("providers") or {}
     shipped = shipped_providers()
-    gx_models: dict = {}
-    gx_providers: dict = {}
-    # providers.toml deep-merges over config.toml (gx's user layer).
-    for name in ("config.toml", "providers.toml"):
-        p = grok_dir / name
-        if p.exists():
-            d = _load(p)
-            for k, v in (d.get("model") or {}).items():
-                gx_models.setdefault(k, {}).update(v)
-            for k, v in (d.get("model_providers") or {}).items():
-                gx_providers.setdefault(k, {}).update(v)
     out = {"version": 1, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "models": {}}
     for key, em in models.items():
         if em.craze not in cm:
@@ -104,34 +84,18 @@ def build_snapshot(
             cprov = take(legacy_entry(cp[em.provider], shipped[em.provider]), CRAZE_PROVIDER_FIELDS)
         else:
             cprov = take(cp[em.provider], CRAZE_PROVIDER_FIELDS)
-        # A gx entry is optional per model: none when the owner's gx tables do not name
-        # the alias (a gx run on it is refused: config.gx_problems). One they name must
-        # be complete and the eval's.
-        gentry = gpid = gprov = None
-        if em.gx in gx_models:
-            gentry = take(gx_models[em.gx], GX_MODEL_FIELDS)
-            gpid = gentry.get("model_provider")
-            if not gpid or gpid not in gx_providers:
-                raise KeyError(f"{key}: gx provider {gpid!r} not found")
-            if gentry.get("model", em.gx) != em.wire_model:
-                raise ValueError(f"{key}: gx wire model {gentry.get('model')!r} != {em.wire_model!r}")
-            gprov = take(gx_providers[gpid], GX_PROVIDER_FIELDS)
         out["models"][key] = {
             "eval": {
                 "provider": em.provider,
                 "wire_model": em.wire_model,
                 "effort": em.effort,
                 "craze": em.craze,
-                "gx": em.gx,
                 "opencode": em.opencode,
                 "codex": em.codex,
                 "codex_provider": em.codex_provider,
             },
             "craze": centry,
             "craze_provider": cprov,
-            "gx": gentry,
-            "gx_provider_id": gpid,
-            "gx_provider": gprov,
         }
     return out
 

@@ -14,7 +14,7 @@ Short and concrete; each item points at the section that explains it.
 
 - Pick a campaign name `YYYY-MM-<slug>` and `export CRAZEEVAL_CAMPAIGN_DIR=~/.craze-eval/<name>`
   (§1). Set the budget cap (§1).
-- Update the reference harnesses (gx, opencode, codex) and note their versions — versions
+- Update the reference harnesses (opencode, codex) and note their versions — versions
   are recorded automatically; see §2.
 - Update `eval/models.toml` and `eval/prices.toml` for the models to test: add new ones,
   drop retired ones. For Muse use `muse-spark-1.3-contributor` (§3). Then run
@@ -100,14 +100,14 @@ One budget is enforced per campaign: `--budget-cap` (default $95 committed + res
 ## 2. Before you start
 
 Prerequisites: `bwrap` (bubblewrap ≥ 0.11), `uv`, and the reference harnesses on `PATH` —
-`gx`, `opencode`, `codex` — plus `go` and `node` for the toolchains the sandbox binds in.
-Plan 029 ran gx 1.0.16+gx.12, opencode 1.18.32, codex-cli 0.157.1; a version drift between
+`opencode`, `codex` — plus `go` and `node` for the toolchains the sandbox binds in.
+Plan 029 ran gx 1.0.16+gx.12 (retired since), opencode 1.18.32, codex-cli 0.157.1; a version drift between
 campaigns is expected and gets recorded automatically (each batch's `manifest.json`, and
 `batches.json` in an archive, carry every executable's version and sha256).
 
 Provider keys live in the owner's `~/.craze/native/providers.toml` — the proxy reads them
 at startup and never writes or forwards them anywhere else. Nothing under `~/.craze`,
-`~/.grok`, `~/.config/opencode`, `~/.local/share/opencode` or `~/.codex` is ever copied or
+`~/.config/opencode`, `~/.local/share/opencode` or `~/.codex` is ever copied or
 written by the eval; a campaign only ever reads them.
 
 ```shell
@@ -115,8 +115,7 @@ written by the eval; a campaign only ever reads them.
 # again after building a craze whose shipped catalog changed. Each model's craze fields
 # come from craze's shipped catalog with the owner's native models.toml (optional)
 # merged over it by craze's own rule, or from the owner's file alone when it says
-# `catalog = false`. A model the owner's gx config does not name gets no gx entry, and
-# a run of the gx harness on it is refused:
+# `catalog = false`:
 uv run crazeeval snapshot-config
 
 # Every task's category controls must pass before the task may run:
@@ -131,8 +130,7 @@ uv run crazeeval probe --craze-bin ../bin/craze
 ## 3. Adding a model
 
 Edit `eval/models.toml` (the target's provider, wire model, one pinned reasoning effort,
-and each harness's id for it; the `craze` and `gx` aliases are kept in step by hand, since
-craze no longer imports gx's table) and `eval/prices.toml` (ledger and list prices per wire
+and each harness's id for it; the `craze` alias is the one in craze's model table) and `eval/prices.toml` (ledger and list prices per wire
 model, keyed the same way — a wire model missing from `prices.toml` is refused by the
 proxy). Both files are commented inline with what each field means; copy an existing
 entry and adjust it. Re-run `snapshot-config` afterwards so the new model's provider
@@ -152,16 +150,6 @@ through an owner override: check that `craze models <alias>` shows the same valu
 craze keeps its shipped entry when it rejects an override. The entry must offer the eval's
 pinned `effort`, or `snapshot-config` stops.
 
-The `gx` alias is optional on the owner's side. When the owner's gx config
-(`~/.grok/config.toml`, `providers.toml`) has no `[model."<alias>"]`, the snapshot records
-`gx` as none for that model, `snapshot-config` prints `gx=- (not in the owner's gx
-tables)`, and `run` with `gx` among `--harness` stops before starting anything (exit 2),
-naming the model, as does `proxy --harness gx`; every other harness runs on it as usual. `probe` builds the homes a run
-would, so on such a model it builds no gx home and checks the rest. To run gx, add the
-model (and its `[model_providers.*]`) to the owner's gx config and re-run
-`snapshot-config`. An alias the gx config does name must still name a provider it defines
-and the eval's wire model.
-
 The generated craze homes carry `catalog = false` in `models.toml` (craze plan 031): craze ships
 its own model catalog, and without that line every shipped model would join the run and the
 agent tool's description. With it, the run's two generated files are the whole table.
@@ -175,10 +163,6 @@ Per-harness support limits to know about before adding a model:
   It knows only its own bundled OpenAI models, so it runs every eval model on fallback
   metadata (a warning in its output, not a failure) — see `eval/README.md`'s *codex model
   metadata* note. It is always a reference, never a bar.
-- **gx** has no working headless plan mode either (X8/X12): its plan-category tasks run
-  with `--always-approve` and a "plan, no changes" prompt instead of `--permission-mode
-  plan`, recorded as `plan_mode: "prompt-only"` in `result.json`. The no-writes check still
-  applies, so this is still a meaningful measurement — just not literally gx's plan UI.
 - **Z.AI** (`zai-coding-plan`) has no Responses API, so codex never runs on it, and it's a
   flat coding-plan subscription: `zero_rated = true` in `prices.toml`, $0 against the
   budget cap, with its list-equivalent price reported alongside for comparison.
@@ -193,18 +177,9 @@ Per-harness support limits to know about before adding a model:
     set to the route without its `/v1` (craze keeps the path and adds `/v1/messages`); the
     generated `providers.toml` names `driver = "anthropic"` and no `base_url`. A live smoke
     through `crazeeval proxy --craze-home` must export the `craze_env` it prints.
-  - *opencode* uses its built-in `anthropic` provider; *gx* its `messages` backend
-    (`api_backend = "messages"`, which its user guide documents). gx on Anthropic is not
-    yet verified live: smoke it before a batch, and leave `gx` out of `--harness` for these
-    models if it cannot run. *codex* does not run (no Responses API).
+  - *opencode* uses its built-in `anthropic` provider. *codex* does not run (no Responses API).
   - *snapshot-config* takes the craze entries from craze's shipped catalog, which ships
-    all three, and needs no `[providers.anthropic]` (an exported key is enough). For gx
-    to run, the owner's gx config must name the models: a `[model_providers.anthropic]`
-    with `base_url = "https://api.anthropic.com/v1"` and `api_backend = "messages"`, and a
-    `[model."anthropic/claude-…-5-5"]` per model naming it (`model = "claude-…-5-5"`).
-    Without the `[model.…]` table the snapshot has no gx entry for the model and a gx run
-    on it is refused; a table that names a provider the gx config does not define stops
-    `snapshot-config`.
+    all three, and needs no `[providers.anthropic]` (an exported key is enough).
   - *Accounting.* Cache reads are priced at `cached_input`, cache writes
     (`cache_creation_input_tokens`) at `cache_write`, the 5-minute write -- the only TTL
     craze asks for. A 1-hour write costs 2× input and would be priced as a 5-minute one, so
@@ -239,7 +214,7 @@ Before running anything real, smoke it: one task, one rep, every harness that sh
 support the new model:
 
 ```shell
-uv run crazeeval run --harness craze,gx,opencode,codex --model <new-model> --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke-<new-model>
+uv run crazeeval run --harness craze,opencode,codex --model <new-model> --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke-<new-model>
 ```
 
 Cost per run varies a lot by model; ground a projection in plan 029's final-report medians
@@ -340,7 +315,7 @@ adding or changing a task never orphans this one's record of what happened.
 budget allows):
 
 ```shell
-uv run crazeeval run --harness craze,gx,opencode,codex --model <models> --tasks split:all --reps 1 --craze-bin ../bin/craze-B0 --label base-<lane>
+uv run crazeeval run --harness craze,opencode,codex --model <models> --tasks split:all --reps 1 --craze-bin ../bin/craze-B0 --label base-<lane>
 ```
 
 Run a lane per model/provider group so a slow or capped provider doesn't block the rest
@@ -383,7 +358,7 @@ comparison uses the same gates.
 **c. Baseline judging** (dev tasks, single order if the flip gate passed), then a report:
 
 ```shell
-uv run crazeeval judge-batch --batch <baseline-batch> --x craze --y gx,opencode,codex --tasks <dev-task-ids> --judge sol --seed 29 --calibration <baseline-batch>/calibration/calibration.json
+uv run crazeeval judge-batch --batch <baseline-batch> --x craze --y opencode,codex --tasks <dev-task-ids> --judge sol --seed 29 --calibration <baseline-batch>/calibration/calibration.json
 uv run crazeeval report --batch <baseline-batch> --baseline <baseline-batch> --losses --out <baseline-batch>/report
 ```
 
@@ -523,7 +498,7 @@ held-out numbers as informational only, precisely because those tasks had alread
 - **Runaway generations.** craze on deepseek-v4p1-flash ran away on 5 of 25 plan-mode task
   runs (20%): T-P1 twice, T-P2 three times, across builds with and without L7. Each
   response spun to `max_tokens` at 66–82k output tokens and 9–14 minutes, and the run was
-  scored as crashed. craze had 0 runaways on 159 non-plan deepseek runs; gx had 0 of 4
+  scored as crashed. craze had 0 runaways on 159 non-plan deepseek runs; gx (retired since) had 0 of 4
   plan runs and opencode 0 of 2 (samples too small to call either immune); codex has no
   plan mode. During plan 029 craze sent no output-token ceiling for that model —
   `models.toml` had no `max_output_tokens` entry for it, so the provider's own cap

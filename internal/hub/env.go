@@ -18,8 +18,10 @@ import (
 // marks of a ready pipe that is not the child's, the multiplexer of the pane
 // the first spawner ran in.
 //
-//   - CRAZE_HOME and the removed config-file variable are made absolute
-//     against the spawner's working directory when relative, the way the
+//   - CRAZE_HOME and the removed config-file variable — and a
+//     CLAUDE_CODE_EXECUTABLE that is a path rather than a bare name — are
+//     made absolute against the spawner's working directory when relative,
+//     the way the
 //     spawner itself resolves them (paths.CrazeDir: a leading "~" or "~/" is
 //     the home directory, whitespace around the value is not part of it); a
 //     value craze takes for unset (empty, or blank) is left as it is, and so
@@ -32,7 +34,9 @@ import (
 //     named here too so that no environment handed in can carry it), one launch's
 //     choices (CRAZE_PROVIDER, CRAZE_DETACH,
 //     CRAZE_CONTROL_SOCKET, CRAZE_AGENT_BIN: P7 scopes an agent binary to the
-//     launch that named it), and the terminal the first spawner ran in:
+//     launch that named it), the caller marker an agent's environment carries
+//     (CRAZE_SESSION_PROVIDER, plan 052 § J1: each agent is given its own at
+//     its spawn), and the terminal the first spawner ran in:
 //     every HERDR_* and ROOST_* variable, TMUX, TMUX_PANE and STY.
 //   - Everything else is kept: PATH, HOME, XDG_*, CRAZE_RUNTIME_DIR (the
 //     socket base, and the tests' process marker), CRAZE_JOURNAL, CRAZE_FAKE_*,
@@ -50,6 +54,11 @@ import (
 // contract removes it from whatever it hands on.
 const HubChildEnv = "CRAZE_HUB_CHILD"
 
+// claudeExecutableEnv is the `claude` a claude session runs
+// (agent.ClaudeExecutableEnv), named here because the hub does not import the
+// agent package: a relative path in it is made absolute (ChildEnv).
+const claudeExecutableEnv = "CLAUDE_CODE_EXECUTABLE"
+
 // crazeHomeEnv is the craze directory's variable (paths.CrazeDir).
 const crazeHomeEnv = "CRAZE_HOME"
 
@@ -57,6 +66,10 @@ const crazeHomeEnv = "CRAZE_HOME"
 var removedEnv = []string{
 	hostspawn.ReadyFDEnv, hostspawn.HostChildEnv, HubChildEnv, hostspawn.CommandMarkName,
 	"CRAZE_PROVIDER", "CRAZE_DETACH", "CRAZE_CONTROL_SOCKET", "CRAZE_AGENT_BIN",
+	// The caller marker an agent's environment carries (plan 052 § J1): a
+	// hub started from inside an agent's session must not hand it on to its
+	// hosts. Each agent gets its own, set fresh at its spawn.
+	"CRAZE_SESSION_PROVIDER",
 	"TMUX", "TMUX_PANE", "STY",
 }
 
@@ -83,6 +96,12 @@ func ChildEnv(environ []string, cwd string) []string {
 		case k == crazeHomeEnv:
 			kv = k + "=" + absCrazeHome(v, cwd, home)
 		case k == paths.RemovedConfigEnv:
+			kv = k + "=" + absValue(v, cwd)
+		case k == claudeExecutableEnv && strings.ContainsRune(v, '/'):
+			// A path, not a PATH lookup: made absolute here, against the
+			// spawner's directory, as the spawner would have read it — the
+			// host it reaches runs in the session's directory (plan 052
+			// review C2b 4).
 			kv = k + "=" + absValue(v, cwd)
 		}
 		out = append(out, kv)

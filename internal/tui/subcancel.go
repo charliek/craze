@@ -48,10 +48,12 @@ func isStopKey(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete
 }
 
-// canStopSubagent is the key's gate: the session has the verb and the child is
-// running.
+// canStopSubagent is the key's gate: the session has the verb, the child is
+// running, and the child itself can be stopped — a claude child whose
+// capabilities grant no cancel cannot (agent.SubagentInfo.NoCancel, plan 052 §
+// E3).
 func (m Model) canStopSubagent(info agent.SubagentInfo) bool {
-	return m.caps().SubagentCancel && info.ID != "" && subagentRunning(info)
+	return m.caps().SubagentCancel && info.ID != "" && subagentRunning(info) && !info.NoCancel
 }
 
 // stopRowKey is handleRowsKey's hook: a stop key on the focused row — the
@@ -102,11 +104,10 @@ func (m Model) stopSubagent(info agent.SubagentInfo) (bool, Model, tea.Cmd) {
 	}
 }
 
-// stopBannerHint is the banner's hint for a running child's view: the key's
-// name, only where the session has the verb. The caller draws it only for a
-// running child.
-func (m Model) stopBannerHint() string {
-	if !m.caps().SubagentCancel {
+// stopBannerHint is the banner's hint for a child's view: the key's name, only
+// where the key would stop that child (canStopSubagent).
+func (m Model) stopBannerHint(info agent.SubagentInfo) string {
+	if !m.canStopSubagent(info) {
 		return ""
 	}
 	return stopHint

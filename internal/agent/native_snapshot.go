@@ -413,16 +413,22 @@ func execGit(env []string) gitRunner {
 }
 
 // cappedWriter keeps the first limit bytes written to it and accepts, and
-// drops, the rest: a command writing more than is wanted is neither blocked
-// nor held whole in memory. It is deliberately not an io.ReaderFrom, which
-// io.Copy would use in place of Write and so skip the cap.
+// drops, the rest, noting in overflow that it did: a command writing more than
+// is wanted is neither blocked nor held whole in memory. It is deliberately
+// not an io.ReaderFrom, which io.Copy would use in place of Write and so skip
+// the cap.
 type cappedWriter struct {
-	buf   []byte
-	limit int
+	buf      []byte
+	limit    int
+	overflow bool
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
-	if room := w.limit - len(w.buf); room > 0 {
+	room := w.limit - len(w.buf)
+	if room < len(p) {
+		w.overflow = true
+	}
+	if room > 0 {
 		w.buf = append(w.buf, p[:min(len(p), room)]...)
 	}
 	return len(p), nil

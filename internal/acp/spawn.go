@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -202,17 +203,27 @@ type Child struct {
 	// request.
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
-	stderrDone   chan struct{}
+	// killNow, set before the shutdown request (Kill), makes the reaper send
+	// SIGKILL where it would send SIGTERM first: the overage guard's stop
+	// (plan 052 § D3), which gives the agent no grace to make one more call.
+	killNow atomic.Bool
+	// reapGate holds the reap while the overage guard reads the agent's
+	// process tree (SnapshotTree, review C5b item 3).
+	reapGate
+	stderrDone chan struct{}
 	// stderrTail keeps the end of what the agent wrote to its stderr, on its
 	// way to the sink (Client.StderrTail); nil for a child Spawn did not
 	// start.
 	stderrTail *stderrTail
+	// stderrSink is claude's queued sink (nil for every other dialect): what
+	// it dropped is counted there.
+	stderrSink *asyncSink
 }
 
 // newChild starts watching cmd, just started, and its reaper. Whether the
 // exit can be observed without a reap is settled here, before the reaper
 // runs and so before any signal: if it cannot, the reaper is the fallback
-// from the start (reapPolling), which never signals the group.
+// from the start (reapPolling), which signals the group only before its reap.
 func newChild(cmd *exec.Cmd) *Child {
 	ch := &Child{
 		cmd:        cmd,
@@ -285,16 +296,27 @@ func (ch *Child) PID() int {
 }
 
 // Wait waits for the agent to have been reaped and its stderr copied to the
-// end.
+// end — the copy at most stderrWaitBound.
 func (ch *Child) Wait() {
 	if ch == nil {
 		return
 	}
 	<-ch.reapedCh
 	if ch.stderrDone != nil {
-		<-ch.stderrDone
+		// Bounded (review C5b item 6): a stderr sink that blocks holds its
+		// copy, and a kill cannot unblock a write into the sink; the copy
+		// goes on alone, and nobody waits for it past the bound.
+		t := time.NewTimer(stderrWaitBound)
+		defer t.Stop()
+		select {
+		case <-ch.stderrDone:
+		case <-t.C:
+		}
 	}
 }
+
+// stderrWaitBound bounds Wait's wait for the stderr copy, a var for tests.
+var stderrWaitBound = 2 * time.Second
 
 // Shutdown asks the reaper to end the agent and waits until it has been
 // reaped. It sends no signal itself: the reaper sends every one (reaper.go),
@@ -302,7 +324,8 @@ func (ch *Child) Wait() {
 // SIGKILL if it outlives the grace; then, as after an agent's own exit, what
 // is left alive in its process group — a tool's subprocess — gets SIGTERM and,
 // past a second grace, SIGKILL, and the group a last SIGKILL. (In the
-// fallback, reapPolling, the agent alone is signalled.) An agent that had
+// fallback, reapPolling, the group is signalled while the agent is unreaped,
+// and not cleaned up after an exit of the agent's own.) An agent that had
 // already exited and been reaped is not signalled again: its group was
 // cleaned up at its exit, and its id may by now be someone else's. Every
 // call, the first and any later one, returns once the agent has been reaped.
@@ -312,6 +335,26 @@ func (ch *Child) Shutdown() {
 	}
 	ch.shutdownOnce.Do(func() { close(ch.shutdownCh) })
 	<-ch.reapedCh
+}
+
+// Kill is Shutdown with no grace: the reaper's signals are SIGKILL from the
+// first, to the agent's group as to what it leaves in it. It waits until the
+// agent has been reaped.
+func (ch *Child) Kill() {
+	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
+		return
+	}
+	ch.killNow.Store(true)
+	ch.Shutdown()
+}
+
+// termSignal is the first signal a shutdown sends: SIGTERM, or SIGKILL after
+// Kill.
+func (ch *Child) termSignal() syscall.Signal {
+	if ch.killNow.Load() {
+		return syscall.SIGKILL
+	}
+	return syscall.SIGTERM
 }
 
 func Spawn(opts SpawnOptions) (*Client, error) {
@@ -350,13 +393,34 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	if stderrDst == nil {
 		stderrDst = io.Discard
 	}
-	// Every byte still reaches the sink; the recorder keeps the last of
-	// them for a failed start's words (Client.StderrTail).
-	child.stderrTail = newStderrTail(stderrDst)
-	go func() {
-		_, _ = io.Copy(child.stderrTail, stderr)
-		close(child.stderrDone)
-	}()
+	// The recorder keeps the last of the bytes for a failed start's words
+	// (Client.StderrTail).
+	if opts.Dialect != DialectClaude {
+		// Every byte reaches the sink, the copy waiting for it: a sink that
+		// is behind holds the agent's writes back, and nothing is lost.
+		child.stderrTail = newStderrTail(stderrDst)
+		go func() {
+			_, _ = io.Copy(child.stderrTail, stderr)
+			close(child.stderrDone)
+		}()
+	} else {
+		// claude's sink sits behind a queue of its own, so a sink that blocks
+		// never holds the copy (review C5c item 11) — the overage stop's
+		// close must not wait on it — at the price of what a full queue
+		// drops, counted (Client.StderrDropped, review C5d item 8).
+		sink := newAsyncSink(stderrDst)
+		child.stderrSink = sink
+		child.stderrTail = newStderrTail(sink)
+		go func() {
+			_, _ = io.Copy(child.stderrTail, stderr)
+			// The copy has reached the pipe's end: the queue is handed to
+			// the sink for at most the cap, and the copy is over either way.
+			// Past it, only the sink's own writer is left, in the write that
+			// has not returned; it ends when that does.
+			sink.closeWithin(stderrWaitBound)
+			close(child.stderrDone)
+		}()
+	}
 
 	conn := NewConn(stdout, stdin)
 	conn.ended = child.endedWith

@@ -10,7 +10,7 @@
                        │provider                                            │                       
                        │> cursor                                     default│                       
                        │  grok                                              │                       
-                       │  gx                                                │                       
+                       │  claude                                            │                       
                        │  native                                            │                       
                        │↑↓ · tab · enter starts · esc uses default          │                       
                        ╰────────────────────────────────────────────────────╯                       

@@ -97,7 +97,7 @@ func newInProcess(t *testing.T, dialect acp.DialectID, wrap func(io.Writer) io.W
 	cwd := t.TempDir()
 	created := make(chan error, 1)
 	go func() {
-		_, err := client.NewSession(context.Background(), cwd)
+		_, err := client.NewSession(context.Background(), cwd, acp.SessionParams{})
 		created <- err
 	}()
 	req := p.expect(t, acp.MethodSessionNew)

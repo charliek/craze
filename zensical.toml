@@ -13,7 +13,7 @@
 [project]
 
 site_name = "craze"
-site_description = "A Linux and macOS terminal UI for coding agents: cursor-agent, grok or gx over ACP, or craze's own native agent"
+site_description = "A Linux and macOS terminal UI for coding agents: cursor-agent or grok over ACP, or craze's own native agent"
 site_author = "craze Contributors"
 site_url = "https://charliek.github.io/craze/"
 
@@ -31,6 +31,7 @@ nav = [
   { "Getting Started" = [
     { "Quick Start" = "getting-started/quick-start.md" },
     { "Upgrading" = "getting-started/upgrading.md" },
+    { "Claude on your plan" = "getting-started/claude.md" },
     { "Claude Code sub-agents" = "getting-started/claude-code.md" },
   ] },
   { "Reference" = [

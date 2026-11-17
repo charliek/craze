@@ -85,3 +85,92 @@ func TestStatusRowUsageFormats(t *testing.T) {
 		t.Fatalf("with no usage:\n got %q\nwant %q", got, want)
 	}
 }
+
+// TestStatusRowClaudePlan (plan 052 § D2, AC13): a claude session's usage
+// part — context, unpriced tokens, never `$`, then the plan and its window's
+// use: five_hour reads 5h and every seven_day window 7d.
+func TestStatusRowClaudePlan(t *testing.T) {
+	claude := agent.UsageState{ContextTokens: 30_938, ContextWindow: 1_000_000,
+		Turn:    agent.Spend{Input: 4, Output: 164, CacheRead: 28_511, CacheCreation: 30_907, Unpriced: true},
+		Session: agent.Spend{Input: 8, Output: 442, CacheRead: 90_427, CacheCreation: 31_234, Unpriced: true},
+		Plan:    "max", Window: "seven_day", WindowUtilization: 0.45}
+	with := func(edit func(*agent.UsageState)) *agent.UsageState {
+		u := claude
+		edit(&u)
+		return &u
+	}
+	for _, tc := range []struct {
+		name string
+		u    *agent.UsageState
+		want string
+	}{
+		{"seven days", &claude, "3% ctx · 59.6k / 122k tok · max · 7d 45%"},
+		{"five hours", with(func(u *agent.UsageState) { u.Window, u.WindowUtilization = "five_hour", 0.125 }), "3% ctx · 59.6k / 122k tok · max · 5h 13%"},
+		{"a seven-day model window", with(func(u *agent.UsageState) { u.Window = "seven_day_sonnet" }), "3% ctx · 59.6k / 122k tok · max · 7d 45%"},
+		{"a window the row has no word for", with(func(u *agent.UsageState) { u.Window = "overage" }), "3% ctx · 59.6k / 122k tok · max"},
+		{"no limit reported yet", with(func(u *agent.UsageState) { u.Window, u.WindowUtilization = "", 0 }), "3% ctx · 59.6k / 122k tok · max"},
+		{"no plan known", with(func(u *agent.UsageState) { u.Plan = "" }), "3% ctx · 59.6k / 122k tok · 7d 45%"},
+		{"a limit used up", with(func(u *agent.UsageState) { u.WindowUtilization = 1 }), "3% ctx · 59.6k / 122k tok · max · 7d 100%"},
+	} {
+		if got := usagePart(tc.u); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestStatusRowModelInUse (plan 052 L2): when the agent's usage reports name a
+// model of another family than the one picked — claude's plan mode runs on
+// Sonnet — the row says the one in use, and the picked one beside it.
+func TestStatusRowModelInUse(t *testing.T) {
+	m := statusFixture(t)
+	m.snap.Models = []agent.ModelInfo{{ID: "haiku", Name: "Haiku 5.5"}, {ID: "default", Name: "Default (recommended)"}}
+	m.snap.CurrentModel = "haiku"
+	for _, tc := range []struct {
+		model, inUse, want string
+	}{
+		{"haiku", "claude-sonnet-5-5", "sonnet (in use; picked Haiku 5.5 · high)"},
+		{"haiku", "claude-haiku-5-5", "Haiku 5.5 (high)"},
+		{"haiku", "", "Haiku 5.5 (high)"},
+		// The adapter's default names no family: nothing to compare.
+		{"default", "claude-sonnet-5-5", "Default (recommended) (high)"},
+	} {
+		m.snap.CurrentModel = tc.model
+		m.snap.Usage = &agent.UsageState{Model: tc.inUse}
+		if got := m.modelLabel(); got != tc.want {
+			t.Errorf("%s in use under %s: %q, want %q", tc.inUse, tc.model, got, tc.want)
+		}
+	}
+}
+
+// TestStatusRowClaudePlanModeStates (plan 052 L3 F1, O1): a haiku pick at low
+// effort, through plan mode, as the session reports it — the in-use model is
+// cleared whenever the mode or model option changes (internal/agent), so the
+// note shows only when a turn ran on another model than the option it ran
+// under, and the picked model reads as the model dialog names it.
+func TestStatusRowClaudePlanModeStates(t *testing.T) {
+	m := statusFixture(t)
+	m.snap.Models = nil
+	options := func(model string) []agent.ConfigOption {
+		return []agent.ConfigOption{
+			{ID: "model", Name: "Model", Category: "model", Type: "select", Current: model,
+				SelectValues: []agent.SelectValue{{Value: "haiku", Name: "Haiku 5.5"}, {Value: "sonnet", Name: "Sonnet 5.5"}}},
+			{ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "low",
+				SelectValues: []agent.SelectValue{{Value: "low", Name: "low"}, {Value: "high", Name: "high"}}},
+		}
+	}
+	for _, tc := range []struct {
+		state, model, inUse, want string
+	}{
+		{"entering plan: the adapter moves the option to sonnet", "sonnet", "", "sonnet (low)"},
+		{"a plan turn on sonnet", "sonnet", "claude-sonnet-5-5", "sonnet (low)"},
+		{"leaving plan: the option back to haiku", "haiku", "", "haiku (low)"},
+		{"/model haiku in plan mode, then a plan turn on sonnet", "haiku", "claude-sonnet-5-5", "sonnet (in use; picked Haiku 5.5 · low)"},
+	} {
+		m.snap.CurrentModel = tc.model
+		m.snap.Config = options(tc.model)
+		m.snap.Usage = &agent.UsageState{Model: tc.inUse}
+		if got := m.modelLabel(); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}

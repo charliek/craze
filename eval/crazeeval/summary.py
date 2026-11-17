@@ -150,7 +150,7 @@ def covered_models(rep: dict) -> list[str]:
     """The models a report covers: those with craze runs -- on any arm that runs craze,
     craze-web too, so a model a web campaign ran on craze-web alone keeps its ``web``
     rows -- or whose best open harness was fixed. A model with neither only has runs
-    reused from a batch shared across providers (the gx plan-task re-run) and has no
+    reused from a batch shared across providers (a plan-task re-run) and has no
     bar."""
     native = {m for m, h in map(_split_key, rep.get("objective") or {}) if harness_executable(h) == rp.NATIVE}
     out = set(native)

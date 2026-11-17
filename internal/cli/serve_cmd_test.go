@@ -740,14 +740,14 @@ func TestServeTakesEverySessionFlag(t *testing.T) {
 			mode: protocol.PermissionPrompt,
 		},
 		{
-			// gx speaks grok's dialect: the cursor-shaped echo script would
+			// grok speaks its own dialect: the cursor-shaped echo script would
 			// fail its start on auth.
 			name: "plan, force, another provider", script: "grok-echo",
 			argv: func(ws string) []string {
-				return []string{"--agent-bin", fake, "--workspace", ws, "--provider", "gx", "--plan", "--force"}
+				return []string{"--agent-bin", fake, "--workspace", ws, "--provider", "grok", "--plan", "--force"}
 			},
 			check: func(t *testing.T, ws string, o agent.Options) {
-				if o.Provider == nil || o.Provider.Name() != "gx" || o.Mode != "plan" || !o.Force || o.Model != "" ||
+				if o.Provider == nil || o.Provider.Name() != "grok" || o.Mode != "plan" || !o.Force || o.Model != "" ||
 					o.Effort != "" || o.Fast != nil {
 					t.Fatalf("options %+v", o)
 				}

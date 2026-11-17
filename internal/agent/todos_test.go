@@ -242,7 +242,7 @@ func TestCancelledTurnClosesInFlightTools(t *testing.T) {
 	s.mergeTool(toolDelta{id: "t-run", status: &running})
 	s.mergeTool(toolDelta{id: "t-done", status: &done})
 	s.mergeTool(toolDelta{id: "t-new"})
-	go s.closeInFlightTools(acp.StopCancelled)
+	go s.closeInFlightTools(acp.StopCancelled, 0)
 	select {
 	case ev := <-s.Events():
 		if ev.Type != EventTool || ev.Tool == nil || ev.Tool.ID != "t-run" || ev.Tool.Status != "cancelled" {

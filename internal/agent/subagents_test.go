@@ -318,7 +318,7 @@ func TestDivergentIDsKeyByChildSession(t *testing.T) {
 	s.onChildUpdate("session-abc", "", sessionUpdateWire{
 		SessionUpdate: updateUserMessage,
 		Content:       mustJSON(map[string]any{"type": "text", "text": "prompt"}),
-	})
+	}, nil)
 	if got := s.Snapshot().Subagents[0]; got.Prompt != "prompt" {
 		t.Fatalf("child update missed its record: %+v", got)
 	}
@@ -584,7 +584,7 @@ func TestSubagentStringCaps(t *testing.T) {
 		s.onChildUpdate("sub-1", "", sessionUpdateWire{
 			SessionUpdate: updateUserMessage,
 			Content:       mustJSON(map[string]any{"type": "text", "text": strings.Repeat("p", 64)}),
-		})
+		}, nil)
 		drainEvents(s)
 	}
 	longTitle, done := strings.Repeat("T", 900), "completed"
@@ -924,7 +924,7 @@ func TestSubagentSnapshotRace(t *testing.T) {
 		s.onChildUpdate(id, "list_dir", sessionUpdateWire{
 			SessionUpdate: acp.UpdateAgentMessage,
 			Content:       mustJSON(map[string]any{"type": "text", "text": "x"}),
-		})
+		}, nil)
 		st := "completed"
 		title := "list"
 		s.applyToolDelta(id, toolDelta{id: "call-1", status: &st, title: &title, wireName: "list_dir"})
@@ -989,18 +989,11 @@ func hasSubagentChange(log *eventLog, change, id string) bool {
 
 func lastSubagent(t *testing.T, evs []Event, id string) SubagentInfo {
 	t.Helper()
-	var got SubagentInfo
-	found := false
-	for _, ev := range evs {
-		if ev.Type == EventSubagent && ev.Subagent != nil && ev.Subagent.ID == id {
-			got = *ev.Subagent
-			found = true
-		}
-	}
-	if !found {
+	got := lastRow(evs, id)
+	if got == nil {
 		t.Fatalf("no subagent %s", id)
 	}
-	return got
+	return *got
 }
 
 func assertSpawnedThenStream(t *testing.T, evs []Event, id string) {

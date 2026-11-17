@@ -40,6 +40,7 @@ func optionsMachine(t *testing.T) (crazeDir, pathDir string) {
 	pathDir = availPath(t)
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv(envAgentBin, "")
+	t.Setenv(agent.ClaudeExecutableEnv, "")
 	return crazeDir, pathDir
 }
 
@@ -82,11 +83,13 @@ func hubOptions(t *testing.T) (protocol.CreateOptionsResult, optionsLog) {
 // HOME's own .craze; its binaries are found as a host the hub creates finds
 // them — [agents] in that config, then PATH — whatever CRAZE_AGENT_BIN says
 // (here, for a cursor launch, a binary that is not there, which the TUI's own
-// column would report); gx, missing, is not listed; the default is the
+// column would report); the default is the
 // config's provider; and nothing is logged.
 func TestHubCreateOptionsReadsTheProcessCrazeHome(t *testing.T) {
 	crazeDir, pathDir := optionsMachine(t)
 	writeExecutable(t, pathDir, "cursor-agent")
+	writeExecutable(t, pathDir, "claude-agent-acp")
+	writeExecutable(t, pathDir, "claude")
 	grok := writeExecutable(t, t.TempDir(), "my-grok")
 	writeFileT(t, filepath.Join(crazeDir, "config.toml"), fmt.Sprintf("provider = \"grok\"\n\n[agents]\ngrok = %q\n", grok))
 	work := t.TempDir()
@@ -99,6 +102,7 @@ func TestHubCreateOptionsReadsTheProcessCrazeHome(t *testing.T) {
 		Providers: []protocol.ProviderOption{
 			{ID: "cursor", Label: "cursor", State: protocol.ProviderReady},
 			{ID: "grok", Label: "grok", State: protocol.ProviderReady},
+			{ID: "claude", Label: "claude", State: protocol.ProviderReady},
 			{ID: "native", Label: "native", State: protocol.ProviderNeedsSetup, Reason: nativeNoKeyReason, Fix: nativeNoKeyFix},
 		},
 		DefaultProvider: "grok",
@@ -134,8 +138,7 @@ func TestHubCreateOptionsNamesTheHubsPID(t *testing.T) {
 }
 
 // TestHubDefaultProvider (decision 8): the default is present only for a
-// set, known provider — one craze knows need be neither listed (gx, not
-// installed) nor ready — and absent for none set, an empty one, an unknown
+// set, known provider — one craze knows need not be ready (native, with no key) — and absent for none set, an empty one, an unknown
 // one, and no config.toml at all: never agent.ProviderByName("")'s cursor.
 func TestHubDefaultProvider(t *testing.T) {
 	crazeDir, _ := optionsMachine(t)
@@ -150,7 +153,7 @@ func TestHubDefaultProvider(t *testing.T) {
 		{"an unknown provider", "provider = \"nope\"\n", ""},
 		{"grok", "provider = \"grok\"\n", "grok"},
 		{"native, not ready", "provider = \"native\"\n", "native"},
-		{"gx, not installed", "provider = \"gx\"\n", "gx"},
+		{"gx, a provider craze no longer has", "provider = \"gx\"\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_ = os.Remove(config)
@@ -269,7 +272,7 @@ func TestHubRecentDirsOfAnUnreadableIndex(t *testing.T) {
 	writeFileT(t, filepath.Join(crazeDir, "config.toml"), "provider = \"grok\"\n")
 	writeFileT(t, filepath.Join(crazeDir, "sessions.jsonl"), indexRow("s-1", t.TempDir(), "2026-10-03T12:00:00Z")+"{not json\n")
 	got, log := hubOptions(t)
-	if got.RecentDirs == nil || len(got.RecentDirs) != 0 || got.DefaultProvider != "grok" || len(got.Providers) != 3 {
+	if got.RecentDirs == nil || len(got.RecentDirs) != 0 || got.DefaultProvider != "grok" || len(got.Providers) != 4 {
 		t.Fatalf("the answer over a malformed index: %+v", got)
 	}
 	if len(log) != 1 || !strings.Contains(log[0], "the session index cannot be read") || !strings.Contains(log[0], "sessions.jsonl:2") {

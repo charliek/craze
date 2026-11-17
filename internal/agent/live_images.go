@@ -32,7 +32,7 @@ import (
 // so block 1 — what grok's queue correlation compares — is the same with images
 // as without (P6). An agent whose initialize says it takes no image blocks gets
 // each image as [Image #N: <path>] text in its block's place, unless its
-// provider sends them regardless (Provider.imagesDespiteCapability: grok and gx,
+// provider sends them regardless (Provider.imagesDespiteCapability: grok,
 // P5). And an agent that refuses the image blocks with -32602 before doing
 // anything with the prompt gets the same prompt once more with path text
 // (imageResendWire), so a file the user attached is never dropped silently.

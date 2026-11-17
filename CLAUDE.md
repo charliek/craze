@@ -4,8 +4,7 @@ Working conventions for agent sessions in this repo.
 
 ## What this is
 
-craze is a Linux and macOS TUI that drives `cursor-agent`, `grok`, or `gx` (a
-third-party fork of the Grok CLI) over ACP (Agent Client Protocol). It is a
+craze is a Linux and macOS TUI that drives `cursor-agent` or `grok` over ACP (Agent Client Protocol). It is a
 proof of concept. Multi-project harness integration is later work.
 
 ## Per-commit gate
@@ -36,7 +35,7 @@ path, never the working tree): `gate.sh` (the gate; a concurrent run waits on go
 commit `6581e0a`) and `v8.sh` (goldens, wire fixtures and schema files changed against the merge base). Each
 prints its usage with `--help` and ends with a `<NAME>_EXIT=` line; output goes to
 `~/.cache/craze-verify/<label>/`; `selftest.sh` checks their failure paths. A failure is diagnosed, never
-re-run. For live smokes (the real cursor-agent, grok, gx or native in a dedicated tmux server, or on the
+re-run. For live smokes (the real cursor-agent, grok or native in a dedicated tmux server, or on the
 mac-mini) follow the `craze-live-smoke` skill in `.claude/skills/`.
 
 ## Docs

@@ -61,8 +61,8 @@ func startProviderScript(t *testing.T, p Provider, script string) *session {
 }
 
 func TestAsideProviderBits(t *testing.T) {
-	if !GrokProvider().Aside() || !GxProvider().Aside() || !NativeProvider().Aside() {
-		t.Fatal("grok, gx and native should serve side questions")
+	if !GrokProvider().Aside() || !NativeProvider().Aside() {
+		t.Fatal("grok and native should serve side questions")
 	}
 	if CursorProvider().Aside() {
 		t.Fatal("cursor should not")
@@ -96,16 +96,6 @@ func TestLiveAsideAnswersThroughTheWire(t *testing.T) {
 	}
 	if res.Text != "btw: "+want {
 		t.Fatalf("text %q", res.Text)
-	}
-}
-
-func TestLiveAsideGxIsGrok(t *testing.T) {
-	s := startProviderScript(t, GxProvider(), "grok-btw")
-	if !s.Asides() {
-		t.Fatal("a gx session reports no asides")
-	}
-	if res, err := s.Aside(t.Context(), AsideRequest{Question: "q"}, nil); err != nil || res.Text != "btw: q" {
-		t.Fatalf("%+v, %v", res, err)
 	}
 }
 

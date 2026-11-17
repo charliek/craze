@@ -42,8 +42,6 @@ def executables(tc: Toolchains, craze_bin: Path | None) -> dict:
                 "repo_head": git(repo, "rev-parse", "HEAD", check=False).strip(),
                 "repo_dirty": bool(git(repo, "status", "--porcelain", "--", ".", ":(exclude)eval", check=False).strip()),
             }
-        if tc.grok_dir:
-            out["gx"] = _harness_binary(tc.grok_dir / "gx", home)
         if tc.opencode_dir:
             out["opencode"] = _harness_binary(tc.opencode_dir / "opencode", home)
         if tc.node_root:

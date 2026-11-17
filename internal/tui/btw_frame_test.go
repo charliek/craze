@@ -10,7 +10,7 @@ import (
 )
 
 // The side view's frames (plan 040 §3.6, §7.7), in process and over the
-// socket: an AsidingStub answers side questions as a native, grok or gx
+// socket: an AsidingStub answers side questions as a native or grok
 // session does, so the whole path — the slash catalog, the view, the
 // session.aside call and its aside notifications over the socket — is the
 // production one.

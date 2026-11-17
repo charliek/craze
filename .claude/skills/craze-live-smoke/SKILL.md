@@ -1,6 +1,6 @@
 ---
 name: craze-live-smoke
-description: Drive the real craze TUI live in a dedicated tmux server to verify a change by eye — a live smoke, tmux smoke, mac-mini smoke, ssh/256-colour colour check (decoding SGR codes), input-burst or typing check, or a layout check against the fake agent — with scratch HOME/CRAZE_HOME, bracketed-paste typing, bounded waits, and no paid turn beyond the owner's budget. Use when a change must be seen working against real cursor-agent, grok, gx or native, on Linux or the mac-mini.
+description: Drive the real craze TUI live in a dedicated tmux server to verify a change by eye — a live smoke, tmux smoke, mac-mini smoke, ssh/256-colour colour check (decoding SGR codes), input-burst or typing check, or a layout check against the fake agent — with scratch HOME/CRAZE_HOME, bracketed-paste typing, bounded waits, and no paid turn beyond the owner's budget. Use when a change must be seen working against real cursor-agent, grok, claude or native, on Linux or the mac-mini.
 ---
 
 # craze live smoke
@@ -46,7 +46,8 @@ from `locale -a`), which the panes inherit: under `C`, tmux draws every non-ASCI
    that exits non-zero means the smoke may still be running: look, do not assume it ended. Smokes that share
    a `CRAZE_SMOKE_SOCK` share one server, so stopping any of them ends them all: leave it unset to keep
    smokes independent.
-2. **A scratch environment.** Scratch `HOME`, `CRAZE_HOME` and `XDG_RUNTIME_DIR` (`mkdir -m 0700`), plus a
+2. **A scratch environment.** (A claude smoke keeps the real `HOME`: [below](#a-claude-smoke-the-real-home).)
+   Scratch `HOME`, `CRAZE_HOME` and `XDG_RUNTIME_DIR` (`mkdir -m 0700`), plus a
    short `CRAZE_RUNTIME_DIR` (`mktemp -d /tmp/czr.XXXX`): craze refuses a control socket path over 100 bytes
    (`internal/rundir`), and a scratch `XDG_RUNTIME_DIR` too long for one is passed over silently for the
    owner's own `/run/user/<uid>/craze`, while an unusable `CRAZE_RUNTIME_DIR` is an error. A scratch
@@ -95,6 +96,27 @@ from `locale -a`), which the panes inherit: under `C`, tmux draws every non-ASCI
    forward `COLORTERM`, but a pane does: the tmux server hands it the environment of the client that started
    it (yours, `COLORTERM=truecolor` included, on tmux 3.4), and tmux 3.7c sets it itself, so only an unset in
    the pane's own command takes it away.
+
+## A claude smoke: the real HOME
+
+A smoke of `--provider claude` is the one exception to rule 2's scratch `HOME`: the Claude login is the point,
+and craze reads nothing of it but runs the owner's own signed-in `claude`, which keeps it under the real `HOME`
+(the macOS Keychain on the mac-mini). So a claude smoke keeps the **real `HOME`** and the real `PATH` (the adapter
+under mise's Node, and `claude`), and still gives craze a **scratch `CRAZE_HOME`**, `CRAZE_RUNTIME_DIR`,
+`XDG_RUNTIME_DIR` and workspace. Never print, copy or read anything under `~/.claude`, and never run
+`claude auth login` or any other login yourself: if `claude` is not signed in (the mac-mini included), stop and
+ask the owner. A check of a refused login uses a scratch `CLAUDE_CONFIG_DIR` (login-less), never the real one
+logged out.
+
+Its turns are real and land on the owner's Claude plan (plan 052's run settings):
+
+- **Budget:** about 30 small turns on Linux and 15 on the mac-mini, mostly on `haiku` (`/model haiku` first),
+  plus one plan-mode turn on `sonnet`.
+- **Record the seven-day utilization before and after** every smoke: the `utilization` of
+  `usage_update._meta["_claude/rateLimit"]`, from a captured frame or the status row once it shows it.
+- **Stop rule:** stop and report if utilization rises more than 5 points across the smokes, or if any turn shows
+  `isUsingOverage` true.
+- The report says how many turns were spent, on which models, and the utilization before and after.
 
 ## The mac-mini
 

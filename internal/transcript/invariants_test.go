@@ -37,7 +37,9 @@ func checkInvariants(t testing.TB, m *Model) {
 		if !ok || row.info.ID != id {
 			t.Fatalf("roster row %q is in the order but not the map", id)
 		}
-		if s := row.info.Status; s != agent.SubagentRunning && s != "" {
+		// A retained row is the session's to bound (claude's, plan 052
+		// review C4c item 5): the model's cap is for the rest.
+		if s := row.info.Status; s != agent.SubagentRunning && s != "" && !row.info.Retained {
 			finished++
 		}
 	}

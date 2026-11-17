@@ -282,8 +282,12 @@ type Engine struct {
 	queue           agent.PromptQueue
 	armed           *armedSend
 	cancelsInFlight int
-	stopped         bool
-	closed          bool
+	// dropGen counts what told the engine to drop work — every cancel or stop
+	// held, every queue clear — under e.mu: a steer's fallback submit made
+	// across one is refused (Interject).
+	dropGen uint64
+	stopped bool
+	closed  bool
 	// closeCause is what began the close (CloseFor), "" when nothing said.
 	closeCause  string
 	prompted    bool
@@ -862,6 +866,7 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 		if refused == nil {
 			done, refused = e.admitLocked()
 		}
+		gen := e.dropGen
 		e.mu.Unlock()
 		if refused != nil {
 			return refused
@@ -871,7 +876,24 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 		if err != nil {
 			return err
 		}
-		return e.sess.Interject(ctx, admitted)
+		err = e.sess.Interject(ctx, admitted)
+		if errors.Is(err, agent.ErrPromptRequired) {
+			// The agent's turn ended while the text was on its way and the
+			// agent did not take it (claude's steering promptRequired, plan
+			// 052 § B7): it goes as the next prompt — at once when nothing
+			// runs, else queued — so the turn ending first loses nothing.
+			// Unless a cancel, a stop or a queue clear came since the steer
+			// was sent (review C3b 7): the user asked for the work to stop,
+			// and the text stays the client's — refused as an interjection
+			// with no turn, which keeps the draft.
+			_, err = e.submit(c, admitted, SubmitQueue, "", false, func() error {
+				if e.dropGen != gen {
+					return agent.ErrNotInTurn
+				}
+				return nil
+			})
+		}
+		return err
 	})
 }
 
@@ -951,10 +973,22 @@ func (e *Engine) Close() error {
 			// left that can say so (the doc comment above). It carries the
 			// turn's own cause, as every other ending does.
 			e.cur = nil
-			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+			info := &agent.TurnInfo{
 				ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
 				StopReason: stopClosing, Pending: e.queue.Len(), Cause: e.closeCause,
-			}}, t.cause))
+			}
+			if se, ok := e.sess.(agent.StopErrer); ok {
+				if err := se.StoppedErr(); err != nil {
+					// The session stopped itself (a claude overage trip, plan
+					// 052 § D3): the turn failed with that, not merely closed
+					// (review C5b item 7).
+					info.StopReason = ""
+					info.Err = err.Error()
+					info.ErrClass = agent.ClassifyEventErr(err)
+					info.Info = agent.ErrorInfo(err)
+				}
+			}
+			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: info}, t.cause))
 		}
 		// An armed send will never fire now, and the record says so before the
 		// log stops taking work: a mandatory completion, like every other
@@ -1037,6 +1071,14 @@ func (e *Engine) observe(ev agent.Event) {
 	}
 	e.observeRowTimes(ev)
 	e.observeCatalog(ev)
+	if ev.State != nil && (ev.State.Model != nil || ev.State.Config != nil) && e.idx.recordsModel() {
+		// The model or the options moved, and this provider's rows carry
+		// the model and the effort (plan 052 § C4, L5 F1): the row is
+		// rewritten with them. A touch, so a session with no
+		// row yet conjures none — its first write carries the model anyway —
+		// but one a close still writes (review C5d item 4).
+		e.idx.post(indexWork{settings: true})
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -1320,7 +1362,7 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		return e.submit(c, admitted, mode, fromRow, false)
+		return e.submit(c, admitted, mode, fromRow, false, nil)
 	})
 }
 
@@ -1366,7 +1408,12 @@ func (e *Engine) admitText(text string) (string, error) {
 // resend replays the answer rather than writing a second row. Its failure is
 // NOT this call's answer: the turn has been admitted and is the answer, so the
 // failure goes out as a StateDelta{IndexErr} naming this command (index.go).
-func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string, fence bool) (SubmitResult, error) {
+//
+// guard, when set, runs under e.mu once the admission has passed and before
+// anything is mutated, and an error it returns refuses the submit: what a
+// steer's fallback checks against a cancel or a clear since it began
+// (Interject).
+func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string, fence bool, guard func() error) (SubmitResult, error) {
 	var started []launch
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
@@ -1395,6 +1442,11 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string,
 		admitted = done
 		if err := e.exitFenceRefusalLocked(fromRow); err != nil {
 			return SubmitResult{}, err
+		}
+		if guard != nil {
+			if err := guard(); err != nil {
+				return SubmitResult{}, err
+			}
 		}
 		if !e.log.OutboxRoom() {
 			return SubmitResult{}, ErrUnavailable
@@ -2125,6 +2177,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	e.rememberErrLocked(t)
 
 	clear := func() {
+		e.dropGen++
 		for _, qev := range e.queue.Clear() {
 			batch = append(batch, e.stamp(qev.Event(), ""))
 		}
@@ -2228,7 +2281,14 @@ func (e *Engine) settleLocked(t *turn) []launch {
 // And never for a turn a cancel was validated against: the user asked for that
 // turn to stop, and a stop wins over a restore (cancelledRefusalLocked).
 func (e *Engine) restoresLocked(t *turn) bool {
-	return e.rowRefusedLocked(t) && !t.cancelAsked && !e.stopped
+	return (e.rowRefusedLocked(t) || e.textRequeuedLocked(t)) && !t.cancelAsked && !e.stopped
+}
+
+// textRequeuedLocked says t's text, which the client held itself, is to wait
+// in the queue: its session refused it as agent.ErrForeignTurnRequeue (claude,
+// review C4b item 3), under the TUI's policy.
+func (e *Engine) textRequeuedLocked(t *turn) bool {
+	return t.row == nil && errors.Is(t.err, agent.ErrForeignTurnRequeue) && !e.opts.Chain.RetryForeignTurn
 }
 
 // cancelledRefusalLocked says t's ending is the cancel-before-open one although
@@ -2245,7 +2305,9 @@ func (e *Engine) restoresLocked(t *turn) bool {
 // even after a cancel: a residual, recorded with R1. So does a turn under
 // ChainPolicy.RetryForeignTurn, whose client reads a foreign-turn refusal as one.
 func (e *Engine) cancelledRefusalLocked(t *turn) bool {
-	return e.rowRefusedLocked(t) && t.cancelAsked
+	// claude's direct text (textRequeuedLocked) too (review C4c item 8): a
+	// cancel validated against it ends it cancelled, not failed.
+	return (e.rowRefusedLocked(t) || e.textRequeuedLocked(t)) && t.cancelAsked
 }
 
 // rowRefusedLocked is what both of the above start from: a turn whose text came
@@ -2281,10 +2343,23 @@ func (e *Engine) rowRefusedLocked(t *turn) bool {
 // ran. Then nothing else would ever drain the row. The tick's pass drains it if a
 // turn may start; if the agent's turn is still running, that turn's end does.
 func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
-	batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+	rowID := ""
+	if t.row != nil {
+		batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+		rowID = t.row.ID
+	} else {
+		// Text the client held itself becomes a row at the head, as a
+		// steer the turn left unanswered does (textRequeuedLocked).
+		ev := e.queue.PushFront(t.text, e.now())
+		batch = append(batch, e.stamp(ev.Event(), t.cause))
+		rowID = ev.Prompt.ID
+	}
 	if f := e.exitFence; f != nil && f.turn == t.id {
-		// Back in the queue, and not over: the fence waits for its row again.
+		// Back in the queue, and not over: the fence waits for its row
+		// again — the row the direct text became, too (C8 S1), or the lift
+		// would find no row of its and lower it.
 		f.turn = ""
+		f.row = rowID
 	}
 	e.cur = nil
 	e.activity = ActivityIdle

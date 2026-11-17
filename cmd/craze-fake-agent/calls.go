@@ -30,11 +30,17 @@ func dumpCall(msg *acp.Message) {
 		_ = json.Unmarshal(msg.Params, &params)
 		line += " " + params.ConfigID + "=" + params.Value
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	appendLine(p, []byte(line))
+}
+
+// appendLine appends line and a newline to the file at path, made if missing;
+// a dump that cannot be written is skipped.
+func appendLine(path string, line []byte) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return
 	}
-	_, _ = f.WriteString(line + "\n")
+	_, _ = f.Write(append(line[:len(line):len(line)], '\n'))
 	_ = f.Close()
 }
 

@@ -3,7 +3,7 @@
 Through H7 the native provider was hidden (plan 018 §3.4): never listed,
 never persisted, never indexed. Plan 028 §3.16/D-65 lists it once H7's smoke
 passed on both platforms: it is now in `--help` and the unknown-provider
-error like cursor, grok and gx, and an explicit `--provider native` run
+error like cursor and grok, and an explicit `--provider native` run
 persists it as the default the same way theirs would (plan 028 §3.5 already
 made it indexed). These tests drive the real `craze` binary against a
 loopback SSE fixture standing in for a real OpenAI-compatible provider
@@ -903,7 +903,7 @@ def test_native_compat_non_bool_is_the_default_and_one_line(
 def test_native_is_in_help_and_unknown_provider_error(
     craze_bin: Path, tmp_path: Path
 ) -> None:
-    """Plan 028 §3.16/D-65: native is listed like cursor, grok and gx.
+    """Plan 028 §3.16/D-65: native is listed like cursor and grok.
 
     `--help`'s --provider flag names it -- as the one that runs inside craze,
     not one of the ACP agents (C19a) -- and an unknown --provider's error
@@ -914,7 +914,7 @@ def test_native_is_in_help_and_unknown_provider_error(
     )
     assert help_proc.returncode == 0, help_proc.stderr
     assert (
-        "cursor, grok, gx (ACP agents) or native (runs inside craze)"
+        "cursor, grok, claude (ACP agents) or native (runs inside craze)"
         in help_proc.stdout
     ), help_proc.stdout
     assert "ACP provider" not in help_proc.stdout, help_proc.stdout
@@ -935,7 +935,7 @@ def test_native_is_in_help_and_unknown_provider_error(
     )
     assert unknown_proc.returncode == 2
     assert "unknown provider" in unknown_proc.stderr
-    assert "cursor, grok, gx, or native" in unknown_proc.stderr, unknown_proc.stderr
+    assert "cursor, grok, claude, or native" in unknown_proc.stderr, unknown_proc.stderr
     assert unknown_proc.stdout == ""
 
 

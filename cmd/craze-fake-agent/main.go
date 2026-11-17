@@ -171,6 +171,35 @@ Flags:
                       then its own queue entry, dump, prompt_complete and a
                       reply carrying its promptId (p-<n>)
 
+          claude-basic claude-agent-acp 0.107.3's shape (claude.go): no auth
+                      methods, an _auth/status_update after initialize, setup
+                      requests whose configOptions apply in order and are
+                      skipped silently when refused; prompt directives STOP,
+                      WRITE, WRITE-NOONCE, FAST-ON, AUTH-LATER, TOOL-FAIL,
+                      TOOL-EXIT, HANG; the CRAZE_FAKE_CLAUDE_* knobs shape
+                      the rest
+          claude-load the same with loadSession, a short replay, and
+                      session/new refused
+          claude-ask, claude-ask-odd, claude-plan, claude-plan-odd,
+          claude-steer claude-basic whose other prompts run a card turn
+                      (claude_cards.go): AskUserQuestion's form (MULTI: two
+                      questions), forms craze cannot show, ExitPlanMode, every
+                      odd plan exit, and a turn held for _session/steering;
+                      each says the answer it got
+          claude-wake, claude-wake-early, claude-wake-placeholder,
+          claude-wake-placeholder-late, claude-wake-opentool,
+          claude-wake-nousage, claude-wake-trailing, claude-replay-load,
+          claude-notice-idle, claude-compaction-idle, claude-subagent,
+          claude-subagent-nested, claude-subagent-early-child,
+          claude-subagent-reuse, claude-subagent-unknown, claude-child-ask,
+          claude-held-bg-subagent, claude-unattended-bg
+                      background work and children (claude_bg.go): wakes
+                      with no prompt in flight, idle traffic, sub-agents
+                      announced with subagent_update, and the held prompt
+          claude-usage, claude-overage, claude-errors
+                      usage and plan limits, the overage guard's trips and
+                      the prompt errors (claude_usage.go)
+
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
 
@@ -180,6 +209,13 @@ both. Every other script advertises loadSession false and answers
 session/load with -32601.
 
 Environment:
+  --version            print CRAZE_FAKE_ADAPTER_VERSION (default 0.107.3) and
+                       exit, whatever the script: the claude adapter's
+                       preflight answer.
+  CRAZE_FAKE_DUMP_ENV=<path>  every script writes its environment here at
+                       startup, sorted, one variable a line: by name alone,
+                       except CRAZE_SESSION_PROVIDER, CLAUDE_AGENT_ACP_PROTOCOL
+                       and CLAUDE_CODE_EXECUTABLE, written NAME=value.
   CRAZE_FAKE_LINGER=1  do not exit when stdin closes: stay alive until a signal
                        ends the process, or 30 s at most. Without it the fake
                        dies of its own closed stdin however craze exits, so a
@@ -254,6 +290,13 @@ func main() {
 		script = env
 	}
 	args := os.Args[1:]
+	for _, a := range args {
+		if a == "--version" {
+			// The claude adapter's preflight (craze plan 052 § A4): answered
+			// whatever the script, since it is spawned with no -script.
+			adapterVersion()
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -288,12 +331,22 @@ func main() {
 		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after",
 		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image",
 		"grok-btw", "grok-btw-missing", "grok-btw-escape",
-		"exit-two-lines":
+		"exit-two-lines",
+		"claude-basic", "claude-load",
+		"claude-ask", "claude-ask-odd", "claude-plan", "claude-plan-odd", "claude-steer",
+		"claude-wake", "claude-wake-early", "claude-wake-placeholder", "claude-wake-placeholder-late",
+		"claude-wake-opentool", "claude-wake-nousage", "claude-wake-trailing",
+		"claude-replay-load", "claude-notice-idle", "claude-compaction-idle",
+		"claude-subagent", "claude-subagent-nested", "claude-subagent-early-child",
+		"claude-subagent-reuse", "claude-subagent-unknown", "claude-child-ask",
+		"claude-held-bg-subagent", "claude-unattended-bg",
+		"claude-usage", "claude-overage", "claude-errors":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)
 	}
 	dumpArgv()
+	dumpEnv()
 	if script == "exit-two-lines" {
 		exitTwoLines()
 	}

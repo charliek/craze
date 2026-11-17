@@ -86,7 +86,6 @@ func TestResumableSplitsFromHidden(t *testing.T) {
 	}{
 		{agent.CursorProvider(), false, true},
 		{agent.GrokProvider(), false, true},
-		{agent.GxProvider(), false, true},
 		{native, false, true},
 		{planted, true, false},
 	} {

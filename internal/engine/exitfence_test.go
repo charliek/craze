@@ -400,3 +400,32 @@ func TestAnAskDoesNotPinWhatDoesNotWaitForIt(t *testing.T) {
 		}
 	})
 }
+
+// TestARequeuedDirectSubmissionStaysFenced (plan 052 C8 S1): the fenced
+// prompt went straight to a turn, and claude's own turn refused it in a way
+// that requeues it (agent.ErrForeignTurnRequeue): the text is a row now, the
+// fence waits for that row — it is not lifted for want of one — and that
+// row's turn is the one that ends it.
+func TestARequeuedDirectSubmissionStaysFenced(t *testing.T) {
+	r := newRig(t, Options{})
+	r.s.script(&script{refuse: agent.ErrForeignTurnRequeue})
+	r.lastPrompt("the last")
+	got := r.until(ended("turn-1"))
+	if end := got[len(got)-1].Turn; !end.Synthetic || end.ErrClass != agent.EventErrForeignTurn {
+		t.Fatalf("the refusal's ending: %+v", end)
+	}
+	r.sync()
+	if st := r.e.State(); !st.ExitFenced {
+		t.Fatalf("the requeued last prompt lost its fence: %+v", st)
+	}
+	_, err := r.e.Submit(Command{}, "too late", SubmitQueue, "")
+	wantFenced(t, "a prompt with the requeued row waiting", err)
+	r.until(ended("turn-2"))
+	r.e.mu.Lock()
+	over := r.e.exitFenceEndedLocked()
+	r.e.mu.Unlock()
+	if !over {
+		t.Fatal("the requeued row's turn did not end the fence")
+	}
+	r.wantPrompts("the last", "the last")
+}

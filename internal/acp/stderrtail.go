@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -99,6 +100,16 @@ func StderrWait(d time.Duration) time.Duration {
 	return d
 }
 
+// StderrDropped is how many chunks of the agent's stderr claude's queued
+// sink dropped because its sink was behind (review C5d item 8): 0 for every
+// other dialect, whose copy waits for its sink and drops nothing.
+func (c *Client) StderrDropped() int64 {
+	if c.child == nil || c.child.stderrSink == nil {
+		return 0
+	}
+	return c.child.stderrSink.dropped.Load()
+}
+
 // StderrTail is the last 2 KiB of what the agent wrote to its stderr, raw:
 // what a start that failed because its agent exited can say in the agent's
 // own words (plan 035 C7). It waits up to wait for the copy of the agent's
@@ -118,4 +129,56 @@ func (c *Client) StderrTail(wait time.Duration) []byte {
 	case <-timer.C:
 	}
 	return c.child.stderrTail.tail()
+}
+
+// asyncSinkQueue bounds what an asyncSink holds for a sink that is behind: past
+// it, chunks are dropped.
+const asyncSinkQueue = 256
+
+// asyncSink is the agent's stderr sink behind a queue of its own (review C5c
+// item 11): the copy from the agent's pipe never waits on the sink, so a sink
+// that blocks for good leaves one goroutine — its writer, in the write that
+// has not returned, and at most asyncSinkQueue chunks behind it — not the copy,
+// its pipe and the child it belongs to. A sink that keeps up gets every byte,
+// in order.
+type asyncSink struct {
+	dst     io.Writer
+	ch      chan []byte
+	done    chan struct{}
+	once    sync.Once
+	dropped atomic.Int64
+}
+
+func newAsyncSink(dst io.Writer) *asyncSink {
+	a := &asyncSink{dst: dst, ch: make(chan []byte, asyncSinkQueue), done: make(chan struct{})}
+	go func() {
+		defer close(a.done)
+		for b := range a.ch {
+			_, _ = a.dst.Write(b)
+		}
+	}()
+	return a
+}
+
+// Write queues a copy of p for the sink, or drops it when the queue is full.
+func (a *asyncSink) Write(p []byte) (int, error) {
+	b := append([]byte(nil), p...)
+	select {
+	case a.ch <- b:
+	default:
+		a.dropped.Add(1)
+	}
+	return len(p), nil
+}
+
+// closeWithin ends the queue and waits, at most d, for the sink to have
+// taken what it held.
+func (a *asyncSink) closeWithin(d time.Duration) {
+	a.once.Do(func() { close(a.ch) })
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-a.done:
+	case <-t.C:
+	}
 }

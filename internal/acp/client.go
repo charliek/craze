@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/version"
@@ -18,6 +19,9 @@ import (
 type Client struct {
 	conn  *Conn
 	child *Child
+	// beforeSever is a test's hold on StopWithin's kill
+	// (SetBeforeSeverForTest), nil in production.
+	beforeSever atomic.Pointer[func()]
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -26,7 +30,11 @@ type Client struct {
 	mu        sync.Mutex
 	sessionID string
 	inPrompt  bool
-	dialect   DialectID
+	// gating is a claude prompt admitted and waiting at its gate: no turn
+	// yet (inPrompt and the turn counter move only once the gate has passed,
+	// review C4b item 4), but no second prompt either.
+	gating  bool
+	dialect DialectID
 	// promptWait is the grok prompt_complete racer. First of the RPC reply
 	// or a matching notify wins; the other is abandoned.
 	promptWait chan promptResult
@@ -101,14 +109,38 @@ type Client struct {
 	onUpdate        func(SessionNotification)
 	settingsHandler func(SettingsReply) error
 	subagentHandler func(SubagentNotification)
-	pendingUpdates  []SessionNotification
-	// children is the routed-child allowlist, in registration order. A
-	// subagent_spawned registers its child_session_id; subagent_finished
-	// deregisters after the handler ran. The 65th concurrent registration
-	// is refused, never evicting a registered child.
-	children   map[string]struct{}
-	childOrder []string
-	dropped    int64
+	authHandler     func(AuthStatus)
+	// rateLimitHandler is claude's (claude_usage.go): every live
+	// `_claude/rateLimit`, and the overage guard's trip.
+	rateLimitHandler func(RateLimit) error
+	promptGate       func(ctx context.Context) error
+	// refusedHandler is told of a claude request craze answered itself
+	// (claude_cards.go). claudeTools is the tool name the adapter stamped on
+	// each recent tool call, by id, in arrival order (claudeToolOrder), so a
+	// permission request can be checked against the call it names (§ B5).
+	refusedHandler  func(RefusedRequest)
+	claudeTools     map[toolKey]toolSeen
+	claudeToolOrder []toolKey
+	// steering is initialize's _meta.steering.supported, for claude: it alone
+	// lets Interject send _session/steering (§ B7). Written once, by
+	// Initialize, before any interjection can be made.
+	steering       bool
+	pendingUpdates []SessionNotification
+	// kids is the routed-child registry (children.go): grok's
+	// subagent_spawned and claude's subagent_update register a child, each
+	// dialect's policy says what its finish does, and claude's early buffer
+	// holds what a child sends before it is announced.
+	kids    childRegistry
+	dropped int64
+
+	// The claude foreign-turn state machine (foreign.go): its state, its
+	// clock and limits, and dispatchMu, which orders every announcement it
+	// makes — taken before c.mu by the read loop for each claude
+	// notification and by everything else that can announce one.
+	cf         claudeForeign
+	clock      Clock
+	ftiming    ForeignTiming
+	dispatchMu sync.Mutex
 
 	incomingMu sync.Mutex
 	incoming   map[string]*pendingReq
@@ -125,6 +157,9 @@ type pendingReq struct {
 	id     json.RawMessage
 	method string
 	turn   int
+	// child is the claude child session the request is about, "" for the
+	// root's: such a request is never stale for a root turn's sake.
+	child string
 	// inTurn says a prompt of craze's own was in flight when this request was
 	// registered. It is read in the same c.mu section as turn, because the two
 	// change together and only together do they say which turn — if any — this
@@ -148,6 +183,10 @@ type pendingReq struct {
 	// it.
 	ctx  context.Context
 	gone context.CancelFunc
+	// withdraw ends ctx as gone does, with ErrRequestWithdrawn as its cause:
+	// the agent took the request back ($/cancel_request), which a handler's
+	// parked ask reads off the context (context.Cause).
+	withdraw func()
 }
 
 // Who answered a blocking request, on pendingReq.repliedBy. The first three
@@ -164,7 +203,7 @@ const (
 // from", as the read loop recorded them, the request's own lifetime, and the
 // claim of its answer for its handler (claimIncoming).
 func (c *Client) arrival(in *pendingReq) Arrival {
-	return Arrival{Turn: in.turn, InTurn: in.inTurn, Call: in.ctx, claim: func() bool { return c.claimIncoming(in) }}
+	return Arrival{Turn: in.turn, InTurn: in.inTurn, Child: in.child, Call: in.ctx, claim: func() bool { return c.claimIncoming(in) }}
 }
 
 // claimIncoming is Arrival.Claim: the request's answer taken for its handler
@@ -281,10 +320,6 @@ func (c *Client) SetTodosHandler(h func(UpdateTodosRequest) []TodoItem) {
 	c.mu.Unlock()
 }
 
-// childRouteCap bounds concurrently routed children. A 65th registration is
-// refused (dropped and counted); no registered child is ever evicted.
-const childRouteCap = 64
-
 // SetSubagentHandler installs the subagent lifecycle handler. It runs on the
 // read goroutine in wire order; it must not go async.
 func (c *Client) SetSubagentHandler(h func(SubagentNotification)) {
@@ -300,42 +335,6 @@ func (c *Client) DroppedUpdates() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.dropped
-}
-
-// registerChild records a routed child. Re-registering a known id keeps its
-// original order slot. A new id past the cap is refused.
-func (c *Client) registerChild(id string) bool {
-	if _, ok := c.children[id]; ok {
-		return true
-	}
-	if len(c.childOrder) >= childRouteCap {
-		c.dropped++
-		return false
-	}
-	if c.children == nil {
-		c.children = make(map[string]struct{})
-	}
-	c.children[id] = struct{}{}
-	c.childOrder = append(c.childOrder, id)
-	return true
-}
-
-func (c *Client) deregisterChild(id string) {
-	if _, ok := c.children[id]; !ok {
-		return
-	}
-	delete(c.children, id)
-	for i, v := range c.childOrder {
-		if v == id {
-			c.childOrder = append(c.childOrder[:i], c.childOrder[i+1:]...)
-			break
-		}
-	}
-}
-
-func (c *Client) isChildLocked(id string) bool {
-	_, ok := c.children[id]
-	return ok
 }
 
 // SetTaskHandler installs a cursor/task receipt handler.
@@ -358,9 +357,28 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 			Terminal: false,
 		},
 	}
+	claude := c.Dialect() == DialectClaude
+	if claude {
+		// The form capability, claude's alone (plan 052 § B2): without it
+		// the adapter never asks AskUserQuestion's questions of a client.
+		params.ClientCapabilities.Elicitation = &ElicitationCapabilities{}
+		// Every claude session declares sub-agents, unattended ones included
+		// (plan 052 § E3, R2-5): children announce with subagent_update and
+		// stream on their own ids, and Agent's own call is replaced by the
+		// child's first session_message.
+		params.ClientCapabilities.Subagents = &struct{}{}
+		// Notices and compaction as their own updates (§ B2, C5): the
+		// session draws each as a transcript note.
+		params.ClientCapabilities.Session = &SessionCapabilities{}
+	}
 	var result InitializeResult
 	if err := c.conn.Call(ctx, MethodInitialize, params, &result); err != nil {
 		return nil, err
+	}
+	if claude {
+		c.mu.Lock()
+		c.steering = result.SteeringSupported()
+		c.mu.Unlock()
 	}
 	return &result, nil
 }
@@ -369,13 +387,30 @@ func (c *Client) Authenticate(ctx context.Context, methodID string, meta map[str
 	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: methodID, Meta: meta}, nil)
 }
 
-func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult, error) {
+func (c *Client) NewSession(ctx context.Context, cwd string, sp SessionParams) (*NewSessionResult, error) {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		return nil, err
 	}
-	params := NewSessionParams{CWD: abs, MCPServers: []any{}}
+	params := NewSessionParams{CWD: abs, MCPServers: sp.mcpServers(), ConfigOptions: sp.ConfigOptions, Meta: sp.Meta}
 	var result NewSessionResult
+	if c.Dialect() == DialectClaude {
+		// claude's setup happens where the reply is read (claudeSetup), so
+		// whatever the adapter sends after it — a wake's first content
+		// included — is judged on the read loop in wire order, after the
+		// updates buffered before it.
+		_, err := c.conn.callReply(ctx, MethodSessionNew, params, func(raw json.RawMessage) error {
+			if err := json.Unmarshal(raw, &result); err != nil {
+				return fmt.Errorf("%s: %w", MethodSessionNew, err)
+			}
+			c.claudeSetup(result.SessionID)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &result, nil
+	}
 	if err := c.conn.Call(ctx, MethodSessionNew, params, &result); err != nil {
 		return nil, err
 	}
@@ -383,16 +418,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	c.sessionID = result.SessionID
 	pending := c.pendingUpdates
 	c.pendingUpdates = nil
-	// A new session does not inherit the previous session's child
-	// allowlist: those ids belong to a session that is gone. Neither the
-	// foreign turn nor the interjection ids survive it.
-	c.children = nil
-	c.childOrder = nil
-	c.foreignID = ""
-	c.foreignText = ""
-	c.foreignSeen = false
-	c.interjectSeen = nil
-	c.interjectOrder = nil
+	c.resetSessionLocked()
 	h := c.onUpdate
 	c.mu.Unlock()
 	if dropped := flushSessionUpdates(result.SessionID, pending, h); dropped > 0 {
@@ -401,6 +427,21 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 		c.mu.Unlock()
 	}
 	return &result, nil
+}
+
+// resetSessionLocked forgets what belonged to the session before a new or
+// loaded one: a new session does not inherit the previous session's child
+// allowlist, its tool calls, its foreign turn or its interjection ids — they
+// all belong to a session that is gone. claude's state machine is reset by its
+// caller, to the phase that call starts in.
+func (c *Client) resetSessionLocked() {
+	c.kids.reset()
+	c.resetClaudeToolsLocked()
+	c.foreignID = ""
+	c.foreignText = ""
+	c.foreignSeen = false
+	c.interjectSeen = nil
+	c.interjectOrder = nil
 }
 
 // LoadSession reloads an existing agent session by id. The agent answers by
@@ -429,7 +470,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 // agent is still streaming lands in pendingUpdates again. That is only safe
 // because Start closes the client immediately on this error — the buffer, and
 // any child a replayed subagent_spawned registered, go with it.
-func (c *Client) LoadSession(ctx context.Context, id, cwd string) (*NewSessionResult, error) {
+func (c *Client) LoadSession(ctx context.Context, id, cwd string, sp SessionParams) (*NewSessionResult, error) {
 	if id == "" {
 		return nil, errors.New("acp: load session has no id")
 	}
@@ -437,27 +478,44 @@ func (c *Client) LoadSession(ctx context.Context, id, cwd string) (*NewSessionRe
 	if err != nil {
 		return nil, err
 	}
+	claude := c.Dialect() == DialectClaude
 	c.mu.Lock()
 	c.sessionID = id
 	c.pendingUpdates = nil
-	c.children = nil
-	c.childOrder = nil
-	c.foreignID = ""
-	c.foreignText = ""
-	c.foreignSeen = false
-	c.interjectSeen = nil
-	c.interjectOrder = nil
+	c.resetSessionLocked()
+	if claude {
+		// The machine replays from here until the reply is read (§ E1).
+		c.resetForeignLocked(phaseReplaying)
+	}
 	c.mu.Unlock()
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, loadSessionDeadline())
 	defer cancel()
-	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: []any{}}
+	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: sp.mcpServers(), ConfigOptions: sp.ConfigOptions, Meta: sp.Meta}
 	var result NewSessionResult
-	if err := c.conn.Call(ctx, MethodSessionLoad, params, &result); err != nil {
+	if claude {
+		var raw json.RawMessage
+		raw, err = c.conn.callReply(ctx, MethodSessionLoad, params, func(json.RawMessage) error {
+			c.claudeLoaded()
+			return nil
+		})
+		if err == nil {
+			err = decodeResult(raw, &result)
+		}
+	} else {
+		err = c.conn.Call(ctx, MethodSessionLoad, params, &result)
+	}
+	if err != nil {
 		c.mu.Lock()
 		c.sessionID = ""
 		c.mu.Unlock()
 		return nil, err
+	}
+	if claude {
+		// The hold behind the reply ends with the load's own context too
+		// (review C4b item 6).
+		c.watchHold(parent)
 	}
 	// The wire does not echo the id (grok returns models alone); the caller
 	// asked for this one and got it.
@@ -534,14 +592,15 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// another.
 	blocks = append([]ContentBlock(nil), blocks...)
 	c.mu.Lock()
-	if c.inPrompt {
+	if c.inPrompt || c.gating {
 		c.mu.Unlock()
 		return nil, ErrPromptInFlight
 	}
-	if c.foreignID != "" {
+	if c.foreignRunningLocked() {
 		// The agent is running a turn of its own; a prompt now would be
 		// queued server-side and its completion would be told apart from
-		// that turn's only by ids craze has not learned yet.
+		// that turn's only by ids craze has not learned yet. On claude the
+		// adapter would take the cycle over (§ E1): the engine queues it.
 		c.mu.Unlock()
 		return nil, ErrForeignTurn
 	}
@@ -551,10 +610,19 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.mu.Unlock()
 		return nil, ErrHeardSinceRefusal
 	}
-	c.inPrompt = true
-	// A new turn: every blocking request registered from here on belongs to it,
-	// and every request of the turn before it is now stale.
-	c.turn++
+	claude := c.dialect == DialectClaude
+	turn := 0
+	if claude {
+		// The turn opens once the gate has passed (below): a request that
+		// arrives while it waits is no turn's of craze's.
+		c.gating = true
+	} else {
+		c.inPrompt = true
+		// A new turn: every blocking request registered from here on belongs
+		// to it, and every request of the turn before it is now stale.
+		c.turn++
+		turn = c.turn
+	}
 	// The new turn's identity is not known yet: queue/changed teaches it, and
 	// until then nothing the last turn learned may speak for this one.
 	c.promptID = ""
@@ -574,12 +642,14 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	}
 	sid := c.sessionID
 	dialect := c.dialect
+	gate := c.promptGate
 	wait := make(chan promptResult, 1)
 	c.promptWait = wait
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		c.inPrompt = false
+		c.gating = false
 		c.promptWait = nil
 		if resend {
 			// Every id grok named since the refused attempt opened is the
@@ -593,6 +663,14 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		// refusal, the caller giving up — a completion naming it from here on
 		// is late and ends nothing.
 		c.retireLocked(c.promptID)
+		if dialect == DialectClaude {
+			// The prompted turn is over: its plan exits are no longer
+			// awaiting a request (review C3c 2).
+			c.settleClaudeToolsLocked(sid)
+			// A reply that was never read (the caller gave up, the
+			// connection closed) still ends the prompted phase.
+			c.promptOverLocked(turn)
+		}
 		c.promptID = ""
 		c.promptText = ""
 		c.promptJoined = ""
@@ -605,10 +683,58 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	if accepted != nil {
 		accepted()
 	}
+	// The caller's last word, at the last moment before the bytes go out
+	// (SetPromptGate): it may hold the prompt, or refuse it, in which case
+	// nothing is written.
+	if gate != nil {
+		if err := gate(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if dialect == DialectClaude {
+		// Prompted only now, the gate passed and the bytes next (review C4
+		// item 4): a wake that arrived while the gate held the prompt opened
+		// a foreign turn of its own, and the prompt goes back to the caller as
+		// refused, nothing written; a gate that refused changed nothing.
+		c.mu.Lock()
+		if c.foreignRunningLocked() {
+			// The claim stays this call's until its own cleanup releases
+			// it (review C4c item 9): no second prompt slips in between.
+			c.mu.Unlock()
+			if testGateRefused != nil {
+				testGateRefused()
+			}
+			return nil, ErrForeignTurn
+		}
+		c.gating = false
+		// The turn opens here, with the machine prompted, in one section
+		// (review C4b item 4).
+		c.inPrompt = true
+		c.turn++
+		turn = c.turn
+		c.enterPromptedLocked(turn)
+		c.mu.Unlock()
+		if testAfterPrompted != nil {
+			testAfterPrompted()
+		}
+	}
 
 	params := PromptParams{
 		SessionID: sid,
 		Prompt:    blocks,
+	}
+	if dialect == DialectClaude {
+		// The turn is over when its reply is read, on the read loop, in
+		// order with the updates around it (§ E1).
+		var result PromptResult
+		err := c.conn.callAnswered(ctx, MethodSessionPrompt, params, &result, sent, func() { c.claudePromptAnswered(turn) })
+		if testPromptReturned != nil {
+			testPromptReturned()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &result, nil
 	}
 	if dialect != DialectGrok {
 		var result PromptResult
@@ -887,11 +1013,30 @@ func (c *Client) Held() HeldRequests {
 // block.
 func (c *Client) CancelHeld(ctx context.Context, held HeldRequests) error {
 	c.completeCancelled(held.reqs, repliedByCancel)
+	c.mu.Lock()
+	foreign := ""
+	if c.dialect == DialectClaude && c.sessionID != "" {
+		// A cancel ends the turn's plan exits too (review C3c 2).
+		c.settleClaudeToolsLocked(c.sessionID)
+		foreign = c.foreignIDLocked()
+	}
+	c.mu.Unlock()
 	sid := c.SessionID()
 	if sid == "" {
 		return nil
 	}
-	return c.conn.Notify(ctx, MethodSessionCancel, CancelParams{SessionID: sid})
+	if err := c.conn.Notify(ctx, MethodSessionCancel, CancelParams{SessionID: sid}); err != nil {
+		return err
+	}
+	if foreign != "" {
+		// A turn the agent runs on its own ends cancelled (§ E1 (c)) — once
+		// the cancel is on the wire, and only the turn it was made in (review
+		// C4 item 1): a cancel that never left keeps the turn's own rules.
+		c.mu.Lock()
+		c.foreignCancelLocked(foreign)
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
@@ -941,6 +1086,14 @@ func (c *Client) Close() error {
 			default:
 			}
 		}
+		// A session still waiting on a claude load's hold is told the
+		// client is gone (LoadContext, review C4c item 1).
+		c.mu.Lock()
+		c.endHoldContextLocked(ErrClosed)
+		c.mu.Unlock()
+		// A claude turn of the agent's own ends with the client, failed with
+		// what FailForeign recorded, before the connection goes.
+		c.closeForeign()
 		c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
 		c.mu.Lock()
 		inFlight := c.inPrompt
@@ -1026,8 +1179,42 @@ func (c *Client) Exited() <-chan struct{} {
 // loop, before their handler goroutine starts: a cancel landing in between
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
+	if c.conn.severed.Load() {
+		// Severed (the overage guard's stop): a request ReplayDone releases
+		// after it is answered by no one (review C5 item 7).
+		return
+	}
 	c.noteHeard()
-	d := c.Dialect()
+	// dialect is written once, before the read loop starts: read off c.mu.
+	if dialectHandles(c.dialect, msg.Method) != decisionHandle {
+		// A method this dialect has no business sending (dialectHandles): the
+		// answer an unknown method gets.
+		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+		return
+	}
+	if c.dialect == DialectClaude {
+		// A request takes the dispatch ordering a notification does (review
+		// C4c item 3): it never overtakes an update still being routed — by
+		// the read loop, or by ReplayDone's drain.
+		c.dispatchMu.Lock()
+		defer c.dispatchMu.Unlock()
+		if c.conn.severed.Load() {
+			// Severed while this waited for the dispatch lock.
+			return
+		}
+		if c.holdClaude(heldFrame{req: msg}, len(msg.Params)) {
+			// Held with the updates after a load's reply (review C4b
+			// item 5).
+			return
+		}
+	}
+	c.dispatchRequest(msg)
+}
+
+// dispatchRequest is onRequest past its dialect check and its claude hold:
+// ReplayDone's drain dispatches a held request through it, under the
+// dispatchMu it already holds.
+func (c *Client) dispatchRequest(msg *Message) {
 	switch msg.Method {
 	case MethodRequestPermission:
 		var req PermissionRequest
@@ -1035,12 +1222,13 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid permission request")
 			return
 		}
-		c.dispatch(msg, RequestParams{Permission: &req}, func(in *pendingReq) { c.handlePermission(in, req) })
-	case MethodCursorAskQuestion:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+		if c.dialect == DialectClaude && c.routeClaudePermission(msg, req) {
+			// A suspected plan exit (plan 052 § B5): routed here, ahead of
+			// the permission handler and its force policy.
 			return
 		}
+		c.dispatch(msg, RequestParams{Permission: &req}, func(in *pendingReq) { c.handlePermission(in, req) })
+	case MethodCursorAskQuestion:
 		var req AskQuestionRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/ask_question params")
@@ -1048,10 +1236,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodCursorCreatePlan:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		var req CreatePlanRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/create_plan params")
@@ -1059,10 +1243,6 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
-		if d != DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		req, err := parseGrokAsk(msg.Params)
 		if err != nil {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/ask_user_question params")
@@ -1070,27 +1250,17 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
-		if d != DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		req, err := parseGrokPlan(msg.Params)
 		if err != nil {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/exit_plan_mode params")
 			return
 		}
 		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+	case MethodElicitationCreate:
+		c.routeElicitation(msg)
 	case MethodCursorUpdateTodos:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		c.handleUpdateTodos(msg.ID, msg.Params)
 	case MethodCursorTask:
-		if d == DialectGrok {
-			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
-			return
-		}
 		c.handleTask(msg.ID, msg.Params)
 	default:
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -1120,11 +1290,26 @@ func (c *Client) dispatch(msg *Message, params RequestParams, run func(*pendingR
 // instruction included — finds something to end (Arrival.Call). It is a child
 // of Background and costs no goroutine; runIncoming ends it on every path.
 func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
+	child := ""
+	if c.dialect == DialectClaude {
+		child = requestSession(msg.Params)
+	}
 	c.mu.Lock()
-	turn, inTurn := c.turn, c.inPrompt
+	turn, inTurn := c.turn, c.inTurnLocked()
+	if child != "" && (child == c.sessionID || !c.kids.has(child)) {
+		child = ""
+	}
+	if child != "" {
+		// A claude child's request belongs to no turn of the root's: a
+		// root turn ending never cancels a child's card (plan 052 § E3).
+		inTurn = false
+	}
 	c.mu.Unlock()
-	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, params: params, decide: make(chan any, 1)}
-	in.ctx, in.gone = context.WithCancel(context.Background())
+	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, child: child, params: params, decide: make(chan any, 1)}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	in.ctx = ctx
+	in.gone = func() { cancel(nil) }
+	in.withdraw = func() { cancel(ErrRequestWithdrawn) }
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
@@ -1178,6 +1363,8 @@ func (c *Client) reportEarlyAnswer(in *pendingReq, disp ReplyDisposition) {
 		reason = EarlyCancelled
 	case ReplyLostClosed:
 		reason = EarlyClosed
+	case ReplyLostWithdrawn:
+		reason = EarlyWithdrawn
 	}
 	h(EarlyAnswer{Reason: reason, Turn: in.turn, InTurn: in.inTurn, Params: in.params})
 }
@@ -1191,7 +1378,7 @@ func (c *Client) liveIncoming(in *pendingReq) bool {
 	c.mu.Unlock()
 	c.incomingMu.Lock()
 	defer c.incomingMu.Unlock()
-	return !in.replied && in.turn == turn
+	return !in.replied && (in.turn == turn || in.child != "")
 }
 
 // TurnLive reports whether turn is still the one the client is running. A
@@ -1225,28 +1412,49 @@ func (c *Client) TurnLive(turn int) bool {
 func (c *Client) TurnActive(turn int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.inPrompt && turn == c.turn
+	return c.inTurnLocked() && turn == c.turn
+}
+
+// inTurnLocked says a prompt of craze's own is in its turn. On claude the
+// turn ends at the wire boundary — the prompt's reply read (claudePromptAnswered
+// moves the machine off prompted) — not at the prompt goroutine's cleanup, so
+// a request a wake sends after the reply belongs to no turn of craze's (C8 K1).
+func (c *Client) inTurnLocked() bool {
+	if c.dialect == DialectClaude {
+		return c.inPrompt && c.cf.phase == phasePrompted && c.cf.turn == c.turn
+	}
+	return c.inPrompt
 }
 
 func (c *Client) onNotify(msg *Message) {
 	c.noteActivity(msg)
+	if dialectHandles(c.dialect, msg.Method) != decisionHandle {
+		return
+	}
+	if c.dialect == DialectClaude {
+		// Every claude notification is dispatched under dispatchMu, so what
+		// it announces is ordered against the foreign-turn timers (foreign.go).
+		if testClaudeDispatch != nil {
+			testClaudeDispatch(msg.Method)
+		}
+		c.dispatchMu.Lock()
+		defer c.dispatchMu.Unlock()
+		if c.conn.severed.Load() {
+			// Severed while this frame waited for the dispatch (review C5
+			// item 7): read before the kill, handed to no one after it.
+			return
+		}
+	}
 	switch msg.Method {
 	case MethodSessionUpdate:
 		c.handleSessionUpdate(msg)
 	case MethodCursorUpdateTodos:
-		if c.Dialect() != DialectGrok {
-			c.handleUpdateTodos(nil, msg.Params)
-		}
+		c.handleUpdateTodos(nil, msg.Params)
 	case MethodCursorTask:
-		if c.Dialect() != DialectGrok {
-			c.handleTask(nil, msg.Params)
-		}
+		c.handleTask(nil, msg.Params)
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped:
 		c.handlePromptComplete(msg)
 	case MethodGrokSessionNotification, MethodGrokSessionNotificationWrapped:
-		if c.Dialect() != DialectGrok {
-			return
-		}
 		// turn_completed rides the same notification as the sub-agent
 		// lifecycle and is not one: it ends the foreign turn it names and is
 		// not a lifecycle event, so it never reaches the subagent router.
@@ -1256,13 +1464,18 @@ func (c *Client) onNotify(msg *Message) {
 		}
 		c.handleSubagentNotification(msg)
 	case MethodGrokInterjection, MethodGrokInterjectionWrapped:
-		if c.Dialect() == DialectGrok {
-			c.handleInterjection(msg)
-		}
+		c.handleInterjection(msg)
 	case MethodGrokQueueChanged, MethodGrokQueueChangedWrapped:
-		if c.Dialect() == DialectGrok {
-			c.handleQueueChanged(msg)
+		c.handleQueueChanged(msg)
+	case MethodClaudeAuthStatus:
+		c.handleAuthStatus(msg)
+	case MethodCancelRequest:
+		// Only claude's dispatch reaches here (dialectHandles).
+		if c.holdClaude(heldFrame{cancel: msg}, len(msg.Params)) {
+			// A withdrawal stays behind the request it withdraws.
+			return
 		}
+		c.handleCancelRequest(msg)
 	}
 }
 
@@ -1349,8 +1562,13 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 	}
 	// dialect is written once, before the read loop starts, so the dialect
 	// check and grokToolName's own json.Unmarshal stay off c.mu.
-	if c.dialect == DialectGrok {
+	switch c.dialect {
+	case DialectGrok:
 		n.ToolName = grokToolName(n.Update)
+	case DialectClaude:
+		n.ToolName = claudeToolName(n.Update)
+		c.routeClaude(n)
+		return
 	}
 	c.mu.Lock()
 	if c.sessionID == "" {
@@ -1360,7 +1578,7 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		return
 	}
 	active := c.sessionID
-	routed := n.SessionID == active || c.isChildLocked(n.SessionID)
+	routed := n.SessionID == active || c.kids.has(n.SessionID)
 	h := c.onUpdate
 	c.mu.Unlock()
 	if !routed {
@@ -1399,8 +1617,8 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 	// finished also route when the child they are about is registered: a
 	// grandchild outlives its own parent child, whose finished already
 	// deregistered the outer id this notification arrives on.
-	outerRouted := active != "" && (n.SessionID == active || c.isChildLocked(n.SessionID))
-	childRouted := active != "" && c.isChildLocked(n.ChildSessionID)
+	outerRouted := active != "" && (n.SessionID == active || c.kids.has(n.SessionID))
+	childRouted := active != "" && c.kids.has(n.ChildSessionID)
 	parentRouted := outerRouted || childRouted
 	var h func(SubagentNotification)
 	switch n.Kind {
@@ -1411,8 +1629,10 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 			return
 		}
 		// Cap-refuse still delivers the notification so a row can show;
-		// registerChild counts the refusal. The child's stream is not routed.
-		c.registerChild(n.ChildSessionID)
+		// the refusal is counted. The child's stream is not routed.
+		if ok, _ := c.kids.childStarted(childPolicyGrok, n.SessionID, n.ChildSessionID); !ok {
+			c.dropped++
+		}
 		h = c.subagentHandler
 	case SubagentFinished:
 		if !parentRouted {
@@ -1426,7 +1646,7 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 			h(n)
 		}
 		c.mu.Lock()
-		c.deregisterChild(n.ChildSessionID)
+		c.kids.remove(n.ChildSessionID)
 		c.mu.Unlock()
 		return
 	default:
@@ -1671,7 +1891,7 @@ func (c *Client) completeCancelled(pending []*pendingReq, by string) {
 
 func cancelDecision(method string) any {
 	switch method {
-	case MethodCursorAskQuestion, MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
+	case MethodCursorAskQuestion, MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped, MethodElicitationCreate:
 		return AskDecision{Cancelled: true}
 	case MethodCursorCreatePlan, MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
 		return PlanDecision{Cancelled: true}

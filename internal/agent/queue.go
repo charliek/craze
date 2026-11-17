@@ -26,6 +26,12 @@ var (
 	// into: idle, already done, or being cancelled. Those are exactly the
 	// cases where grok would mint a turn of its own instead.
 	ErrNotInTurn = errors.New("agent: no running turn to interject into")
+	// ErrPromptRequired is an interjection the agent itself found no turn
+	// for — the turn ended while the text was on its way (claude's steering
+	// promptRequired, plan 052 § B7). The text was not taken and is to be sent
+	// as a prompt: the engine queues it (Engine.Interject). It is an
+	// ErrNotInTurn too.
+	ErrPromptRequired = fmt.Errorf("agent: the agent's turn had already ended: %w", ErrNotInTurn)
 )
 
 // QueuedPrompt is one message waiting for the running turn to end. Version is

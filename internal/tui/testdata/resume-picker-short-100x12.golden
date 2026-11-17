@@ -2,7 +2,7 @@
                        │resume                                              │                       
                        │> fix: the flaky pty test · grok · 3m               │                       
                        │  teach the composer to wrap · cursor · 2h          │                       
-                       │  port the docs site · gx · 5d                      │                       
+                       │  port the docs site · native · 5d                  │                       
                        │↑↓ · tab · enter loads · esc quits                  │                       
                        ╰────────────────────────────────────────────────────╯                       
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─

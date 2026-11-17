@@ -114,8 +114,8 @@ func TestProviderByNameLookup(t *testing.T) {
 	if p, err := ProviderByName("grok"); err != nil || p.Name() != "grok" {
 		t.Fatalf("grok = %+v, %v", p, err)
 	}
-	if p, err := ProviderByName("gx"); err != nil || p.Name() != "gx" {
-		t.Fatalf("gx = %+v, %v", p, err)
+	if p, err := ProviderByName("native"); err != nil || p.Name() != "native" {
+		t.Fatalf("native = %+v, %v", p, err)
 	}
 	if _, err := ProviderByName("codex"); err == nil {
 		t.Fatal("unknown provider must error")
@@ -123,7 +123,7 @@ func TestProviderByNameLookup(t *testing.T) {
 	if _, err := ProviderByName("Grok"); err == nil {
 		t.Fatal("provider ids are lowercase-exact")
 	}
-	if _, err := ProviderByName("GX"); err == nil {
+	if _, err := ProviderByName("GROK"); err == nil {
 		t.Fatal("provider ids are lowercase-exact")
 	}
 }

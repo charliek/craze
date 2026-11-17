@@ -151,6 +151,10 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string
 		// its row is not put back (cancelledRefusalLocked, the session-control R1).
 		e.cur.cancelAsked = true
 	}
+	// Accepted: work is being dropped (a steer's fallback made across it is
+	// refused, Interject). A cancel refused above — stale, or with nothing to
+	// cancel — drops nothing (review C3c 5).
+	e.dropGen++
 	e.cancelsInFlight++
 	return id, nil
 }

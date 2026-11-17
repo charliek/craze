@@ -96,7 +96,7 @@ const (
 var btwBuiltin = tableBuiltin("btw")
 
 // btwOffered reports whether this session has /btw: its backend says it
-// answers side questions (SessionInfo.Aside) — a native, grok or gx session,
+// answers side questions (SessionInfo.Aside) — a native or grok session,
 // in process or over the socket. Cursor's, and a host from before the
 // method, offer none.
 func (m Model) btwOffered() bool { return m.eng != nil && m.info().Aside }

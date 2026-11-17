@@ -31,7 +31,8 @@ func TestTheEnvironmentContract(t *testing.T) {
 				"SSH_AUTH_SOCK=/tmp/ssh/agent", "CRAZE_HUB_IDLE=2s", "TERM=xterm", "LANG=C"}},
 		{"one launch's choices and the pipes' marks removed",
 			[]string{"A=1", "CRAZE_READY_FD=3", "CRAZE_HOST_CHILD=1", "CRAZE_HUB_CHILD=1", "CRAZE_PROVIDER=grok",
-				"CRAZE_DETACH=0", "CRAZE_CONTROL_SOCKET=off", "CRAZE_AGENT_BIN=/bin/agent", "B=2"},
+				"CRAZE_DETACH=0", "CRAZE_CONTROL_SOCKET=off", "CRAZE_AGENT_BIN=/bin/agent",
+				"CRAZE_SESSION_PROVIDER=cursor", "B=2"},
 			[]string{"A=1", "B=2"}},
 		{"the first spawner's terminal removed",
 			[]string{"HERDR_ENV=1", "HERDR_PANE_ID=p", "ROOST_AGENT_HOOK=h", "ROOST_SOCKET=/s", "TMUX=/tmp/tmux,1,0",
@@ -122,5 +123,25 @@ func TestChildEnvRemovesACommandsMark(t *testing.T) {
 	got := ChildEnv([]string{hostspawn.CommandMark("0a0b0c0d0e0f"), "PATH=/bin"}, "/")
 	if len(got) != 1 || got[0] != "PATH=/bin" {
 		t.Fatalf("handed on: %q", got)
+	}
+}
+
+// TestChildEnvMakesTheClaudeExecutableAbsolute (plan 052 review C2b 4/F4): a
+// relative CLAUDE_CODE_EXECUTABLE is made absolute against the spawner's
+// directory before it crosses into a hub or host that runs elsewhere; a bare
+// name — a PATH lookup — and an absolute path are kept as they are.
+func TestChildEnvMakesTheClaudeExecutableAbsolute(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"CLAUDE_CODE_EXECUTABLE=./tools/claude", "CLAUDE_CODE_EXECUTABLE=/launch/tools/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=tools/claude", "CLAUDE_CODE_EXECUTABLE=/launch/tools/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=../bin/claude", "CLAUDE_CODE_EXECUTABLE=/bin/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=claude", "CLAUDE_CODE_EXECUTABLE=claude"},
+		{"CLAUDE_CODE_EXECUTABLE=/opt/claude", "CLAUDE_CODE_EXECUTABLE=/opt/claude"},
+		{"CLAUDE_CODE_EXECUTABLE=", "CLAUDE_CODE_EXECUTABLE="},
+	} {
+		got := ChildEnv([]string{tc.in}, "/launch")
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

@@ -1098,3 +1098,206 @@ func TestRangeIsWhatAFoldAppended(t *testing.T) {
 		t.Fatalf("a range from a dropped entry: %+v", gone)
 	}
 }
+
+// TestARejectedPlansCancelLeavesNoCancelledNote (plan 052 § B5, review C3
+// item 9): claude ends its turn cancelled when its plan is answered keep
+// planning, and its session marks that ending (Event.KeptPlanning): no
+// cancelled note. The fact rides on the event, so a client restored from a
+// snapshot taken between the rejection and the ending folds the same suffix
+// the same way. A cancelled ending that does not carry it — a cancel the user
+// asked for after the rejection, which clears it, and every cursor or grok
+// turn, which never set it — draws its note as ever.
+func TestARejectedPlansCancelLeavesNoCancelledNote(t *testing.T) {
+	plan := &agent.PlanEvent{ID: "plan-1", Name: "the plan", Plan: "## Steps"}
+	rejected := agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient}}
+	before := []agent.Event{
+		{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: "plan"}},
+		{Type: agent.EventPlan, Plan: plan},
+		rejected,
+		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "toolu_plan", Status: "failed"}},
+	}
+	cancelledNote := func(m *Model) bool {
+		for _, f := range facts(m.Main) {
+			if f.Kind == "note" && f.Text == NoteCancelled {
+				return true
+			}
+		}
+		return false
+	}
+	for _, tc := range []struct {
+		name string
+		done agent.Event
+		note bool
+	}{
+		{"kept planning (claude)", agent.Event{Type: agent.EventDone, StopReason: "cancelled", KeptPlanning: true}, false},
+		{"cancelled after the rejection, or any cursor/grok turn", agent.Event{Type: agent.EventDone, StopReason: "cancelled"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			for _, ev := range before {
+				m.Fold(ev)
+			}
+			snap, err := m.Snapshot(1 << 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored := Restore(snap, Options{})
+			for _, mm := range []*Model{m, restored} {
+				mm.Fold(tc.done)
+				if got := cancelledNote(mm); got != tc.note {
+					t.Fatalf("cancelled note drawn = %v, want %v: %v", got, tc.note, facts(mm.Main))
+				}
+			}
+		})
+	}
+}
+
+// TestAWithdrawnAskSaysSo (review C3 item 6): a question or a plan the agent
+// withdrew ends with its row saying so; a cancel's ending still draws none.
+func TestAWithdrawnAskSaysSo(t *testing.T) {
+	m := New(Options{})
+	m.Fold(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{ID: "q", Prompt: "Pick one"}}}})
+	m.Fold(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "the plan"}})
+	m.Fold(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-2", Questions: []agent.Question{{ID: "q", Prompt: "Other"}}}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskCancelled, By: agent.AskByWithdrawn}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskCancelled, By: agent.AskByWithdrawn}})
+	m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-2", Kind: agent.AskQuestion, Outcome: agent.AskCancelled, By: agent.AskByCancel}})
+	var notes []string
+	for _, f := range facts(m.Main) {
+		if f.Kind == "note" {
+			notes = append(notes, f.Text)
+		}
+	}
+	if want := []string{"? Pick one → withdrawn by Claude", "plan the plan → withdrawn by Claude"}; !reflect.DeepEqual(notes, want) {
+		t.Fatalf("notes %q, want %q", notes, want)
+	}
+}
+
+// TestClaudeForeignEndingDrawsItsFailure (plan 052 § E2): claude's reasons
+// pick their notes, and a foreign turn that ended failed draws its failure as a
+// turn's error row; a cancelled one draws nothing of the fold's own (the client
+// that cancelled notes it).
+func TestClaudeForeignEndingDrawsItsFailure(t *testing.T) {
+	for _, c := range []struct{ reason, want string }{
+		{agent.ReasonBackground, NoteBackgroundTurn},
+		{agent.ReasonCompaction, NoteCompactionTurn},
+	} {
+		m := New(Options{})
+		foldAll(t, m, true,
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: c.reason, Running: true}, At: at(1)},
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: c.reason,
+				Err: &agent.TurnError{Kind: "auth", Message: "the login changed"}}, At: at(2)},
+		)
+		if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{c.want}) {
+			t.Fatalf("reason %q: notes %q", c.reason, got)
+		}
+		if got := factTexts(m.Main, "error"); !slices.Equal(got, []string{"the login changed"}) {
+			t.Fatalf("reason %q: errors %q; want the failure", c.reason, got)
+		}
+	}
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}, At: at(1)},
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Cancelled: true}, At: at(2)},
+	)
+	if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{NoteBackgroundTurn}) || len(factTexts(m.Main, "error")) != 0 {
+		t.Fatalf("a cancelled foreign turn drew %q", got)
+	}
+}
+
+// TestClaudeNoticeAndCompactionNotes (plan 052 § B2): a notice is a note of
+// its title and description, a warning leading with its severity; a claude
+// compaction, which reports no sizes, notes that it ran and nothing more, and
+// one cancelled notes why.
+func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Severity: "info", Title: "Task stopped by user", Description: "build."}, At: at(1)},
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Severity: "warning", Title: "Stop hook says"}, At: at(2)},
+		agent.Event{Type: agent.EventNotice, Notice: &agent.NoticeInfo{Description: "only words"}, At: at(3)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionAuto}, At: at(4)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionAuto}, At: at(5)},
+		agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionAuto, Err: "cancelled"}, At: at(6)},
+	)
+	want := []string{"Task stopped by user: build.", "warning: Stop hook says", "only words", NoteCompacted, NoteCompactionFailed + ": cancelled"}
+	if got := factTexts(m.Main, "note"); !slices.Equal(got, want) {
+		t.Fatalf("notes %q\nwant %q", got, want)
+	}
+}
+
+// TestAForeignTurnsClockSurvivesTheSnapshot (plan 052 review C4b item 8): a
+// running foreign bracket's time travels in the snapshot — through its codec —
+// and a restored model, and its mirror, carry it; an ending clears it.
+func TestAForeignTurnsClockSurvivesTheSnapshot(t *testing.T) {
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}, At: at(7)},
+	)
+	snap, err := m.Snapshot(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := EncodeSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodeSnapshot(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Turn.ForeignAt; !got.Equal(at(7)) {
+		t.Fatalf("the snapshot's foreign clock %v; want %v", got, at(7))
+	}
+	if got := Restore(back, Options{}).Mirror().Turn.ForeignAt; !got.Equal(at(7)) {
+		t.Fatalf("the restored mirror's foreign clock %v", got)
+	}
+	foldAll(t, m, true, agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground}, At: at(8)})
+	if got := m.Mirror().Turn.ForeignAt; !got.IsZero() {
+		t.Fatalf("an ended turn keeps a clock: %v", got)
+	}
+}
+
+// TestRetainedRowsFollowTheSession (plan 052 review C4c item 5): rows the
+// session retains — claude's — are not evicted by the model's own 32-row
+// finished cap: the A/B sequence (A spawned before B, B finished first, then
+// 32 more) keeps B, and a removed event drops A and its child transcript.
+func TestRetainedRowsFollowTheSession(t *testing.T) {
+	m := New(Options{})
+	row := func(id string, st agent.SubagentStatus, end int) *agent.SubagentInfo {
+		r := &agent.SubagentInfo{ID: id, Status: st, Retained: true}
+		if end > 0 {
+			r.EndedAt = at(end)
+		}
+		return r
+	}
+	ev := func(info *agent.SubagentInfo, change string, n int) agent.Event {
+		return agent.Event{Type: agent.EventSubagent, Subagent: info, SubagentChange: change, At: at(n)}
+	}
+	evs := []agent.Event{
+		ev(row("A", agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 1),
+		ev(row("B", agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 2),
+		{Type: agent.EventText, Agent: "A", Text: "a's work", At: at(3)},
+		ev(row("B", agent.SubagentCompleted, 4), agent.SubagentChangeFinished, 4),
+		ev(row("A", agent.SubagentCompleted, 5), agent.SubagentChangeFinished, 5),
+	}
+	for i := range 32 {
+		id := fmt.Sprintf("c%d", i)
+		evs = append(evs, ev(row(id, agent.SubagentRunning, 0), agent.SubagentChangeSpawned, 10+2*i),
+			ev(row(id, agent.SubagentCompleted, 11+2*i), agent.SubagentChangeFinished, 11+2*i))
+	}
+	foldAll(t, m, true, evs...)
+	held := func() map[string]bool {
+		out := map[string]bool{}
+		for _, a := range m.Mirror().Agents {
+			out[a.ID] = true
+		}
+		return out
+	}
+	if h := held(); !h["A"] || !h["B"] || len(h) != 34 {
+		t.Fatalf("the model holds %d rows (A %v, B %v); want all 34 the session retains", len(h), h["A"], h["B"])
+	}
+	foldAll(t, m, true, ev(row("A", agent.SubagentCompleted, 5), agent.SubagentChangeRemoved, 100))
+	if h := held(); h["A"] || !h["B"] || len(h) != 33 {
+		t.Fatalf("after A's removal the model holds %d rows (A %v, B %v)", len(h), h["A"], h["B"])
+	}
+}

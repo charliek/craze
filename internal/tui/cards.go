@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -49,6 +50,13 @@ type card struct {
 	optSel  int
 	picked  []bool
 	answers map[string][]string
+	// The free text of a question that takes it (agent.Question.AllowText,
+	// claude's "Other…" row; plan 052 § B4): text is what each question was
+	// given, typing says the one-line input is open on the question on
+	// screen, and draft is what it holds so far.
+	text   map[string]string
+	typing bool
+	draft  string
 
 	// truncated says the card was raised from a snapshot that carried only
 	// the head of some text of its ask (transcript.Ask.Truncated, over the
@@ -430,36 +438,51 @@ func permissionOffers(p *agent.PermissionEvent, kind string) bool {
 
 // handleQuestionKey walks the questions one at a time: a number or Enter picks
 // and advances a single-select, a number or Space toggles a multi-select and
-// Enter confirms it. Esc skips the whole request.
+// Enter confirms it. Esc skips the whole request. A question that takes free
+// text has one more row, "Other…" (otherRow): picking it opens a one-line input
+// (handleQuestionTyping).
 func (m Model) handleQuestionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if c.typing {
+		return m.handleQuestionTyping(c, msg)
+	}
 	q := c.question()
 	n := len(q.Options)
-	if n == 0 {
+	rows := n
+	if q.AllowText {
+		rows++
+	}
+	if rows == 0 {
 		return m.skipQuestion()
 	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		return m.skipQuestion()
 	case tea.KeyUp:
-		c.optSel = (c.optSel - 1 + n) % n
+		c.optSel = (c.optSel - 1 + rows) % rows
 	case tea.KeyDown:
-		c.optSel = (c.optSel + 1) % n
+		c.optSel = (c.optSel + 1) % rows
 	case tea.KeyEnter:
+		if c.onOther() {
+			return m.openOther(c)
+		}
 		return m.commitQuestion(c)
 	default:
 		s := msg.String()
 		switch {
 		case s == " ":
-			if !q.AllowMultiple {
+			if !q.AllowMultiple || c.onOther() {
 				return m, nil
 			}
 			c = c.toggle(c.optSel)
 		case len(s) == 1 && s[0] >= '1' && s[0] <= '9':
 			i := int(s[0] - '1')
-			if i >= n {
+			if i >= rows {
 				return m, nil
 			}
 			c.optSel = i
+			if c.onOther() {
+				return m.openOther(c)
+			}
 			if !q.AllowMultiple {
 				return m.commitQuestion(c)
 			}
@@ -472,10 +495,96 @@ func (m Model) handleQuestionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// onOther reports whether the cursor is on the question's "Other…" row.
+func (c card) onOther() bool {
+	q := c.question()
+	return q.AllowText && c.optSel == len(q.Options)
+}
+
+// openOther opens the one-line input on the question on screen, holding what
+// it was given before, if anything.
+func (m Model) openOther(c card) (tea.Model, tea.Cmd) {
+	c.typing = true
+	c.draft = c.text[c.question().ID]
+	m.setHead(c)
+	return m, nil
+}
+
+// handleQuestionTyping is the "Other…" input's keyboard: text goes in, Enter
+// takes it, Esc goes back to the options with nothing typed kept. Taken, the
+// text answers a single-select on its own, and joins a multi-select's toggles
+// as Enter confirms them. An empty input is no answer: Enter just closes it.
+func (m Model) handleQuestionTyping(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		c.typing, c.draft = false, ""
+	case tea.KeyEnter:
+		text := strings.TrimSpace(c.draft)
+		c.typing, c.draft = false, ""
+		if text == "" {
+			break
+		}
+		q := c.question()
+		next := make(map[string]string, len(c.text)+1)
+		for k, v := range c.text {
+			next[k] = v
+		}
+		next[q.ID] = text
+		c.text = next
+		return m.commitQuestion(c)
+	case tea.KeyBackspace:
+		if r := []rune(c.draft); len(r) > 0 {
+			c.draft = string(r[:len(r)-1])
+		}
+	case tea.KeySpace:
+		c.draft = appendDraft(c.draft, " ")
+	case tea.KeyRunes:
+		c.draft = appendDraft(c.draft, string(msg.Runes))
+	default:
+		return m, nil
+	}
+	m.setHead(c)
+	return m, nil
+}
+
+// appendDraft is the "Other…" input taking more text: one line, so a pasted
+// newline or tab is a space and every other control character is dropped, and
+// never past the answer's bound (agent.MaxAnswerText).
+func appendDraft(draft, in string) string {
+	var b strings.Builder
+	b.WriteString(draft)
+	for _, r := range in {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			r = ' '
+		case r < 0x20 || r == 0x7f:
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > agent.MaxAnswerText {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // commitQuestion stores the answer to the question on screen and moves on; the
-// request is answered once the last question has one.
+// request is answered once the last question has one. A single-select on its
+// "Other…" row picks nothing: its typed text is its answer.
 func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	q := c.question()
+	picked := c.optSel >= 0 && c.optSel < len(q.Options)
+	if q.AllowMultiple {
+		picked = len(c.selectedIDs()) > 0
+	}
+	if q.Required && !picked {
+		// A question that must be answered takes an option, as the registry
+		// insists (agent.Question.Required): an empty confirm, or text in
+		// Other… alone, leaves the card on it, the text kept for a pick to
+		// carry as its note (review C3c 3).
+		m.setHead(c)
+		return m, nil
+	}
 	answers := make(map[string][]string, len(c.answers)+1)
 	for k, v := range c.answers {
 		answers[k] = v
@@ -484,6 +593,8 @@ func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 		answers[q.ID] = c.selectedIDs()
 	} else if c.optSel >= 0 && c.optSel < len(q.Options) {
 		answers[q.ID] = []string{q.Options[c.optSel].ID}
+	} else if c.text[q.ID] != "" {
+		answers[q.ID] = []string{}
 	}
 	c.answers = answers
 	if c.qIdx+1 < len(c.ask.Questions) {
@@ -499,14 +610,19 @@ func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	// The notes are the fold's, drawn from the ending the session publishes
 	// once it took the answer, so the transcript cannot claim a question was
 	// answered when the reply never reached the agent.
-	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers})
+	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers, Text: c.text})
 }
 
-// skipQuestion is Esc: the whole request is skipped, not just this question.
+// skipQuestion is Esc: the whole request is skipped, not just this question —
+// or, on claude, cancelled, as Esc cancels Claude Code's own question and the
+// tool that asked it (agent.ProviderInfo.QuestionDismissCancels).
 func (m Model) skipQuestion() (tea.Model, tea.Cmd) {
 	c, ok := m.popCard()
 	if !ok || c.ask == nil {
 		return m, nil
+	}
+	if m.snap.Provider.QuestionDismissCancels() {
+		return m.answerCard(c, c.ask.ID, agent.AskAnswer{Cancel: true})
 	}
 	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Skip: true})
 }
@@ -648,12 +764,51 @@ func (m Model) questionCardBody(c card) string {
 			rows = append(rows, renderSegs(inner, seg{strings.Repeat(" ", lipgloss.Width(prefix)) + desc, styleFG(m.theme.Dim)}))
 		}
 	}
-	hint := "1-9 pick · ↑↓ move · enter select · esc skip"
+	if q.AllowText {
+		rows = append(rows, m.otherRow(c, inner))
+	}
+	esc := "esc skip"
+	if m.snap.Provider.QuestionDismissCancels() {
+		esc = "esc cancel"
+	}
+	hint := "1-9 pick · ↑↓ move · enter select · " + esc
 	if q.AllowMultiple {
-		hint = "1-9 or space toggle · ↑↓ move · enter confirm · esc skip"
+		hint = "1-9 or space toggle · ↑↓ move · enter confirm · " + esc
+	}
+	if c.typing {
+		hint = "type your answer · enter send · esc back"
 	}
 	rows = append(rows, renderSegs(inner, seg{hint, styleFG(m.theme.Dim)}))
 	return strings.Join(rows, "\n")
+}
+
+// otherRow is a free-text question's last row (plan 052 § B4): "Other…", the
+// text it was given, or — the input open — what is being typed under a cursor.
+// It is numbered after the options, and a multi-select's box column is left
+// blank, since the text is not a toggle.
+func (m Model) otherRow(c card, inner int) string {
+	q := c.question()
+	i := len(q.Options)
+	mark, st := " ", styleFG(m.theme.FG)
+	if i == c.optSel {
+		mark, st = ">", styleFG(m.theme.Selection)
+	}
+	box := ""
+	if q.AllowMultiple {
+		box = "    "
+	}
+	label := "Other…"
+	switch {
+	case c.typing:
+		label = "Other: " + sanitizeLine(c.draft) + "▏"
+	case c.text[q.ID] != "":
+		label = "Other: " + sanitizeLine(c.text[q.ID])
+	}
+	num := " "
+	if i < 9 {
+		num = fmt.Sprint(i + 1)
+	}
+	return renderSegs(inner, seg{fmt.Sprintf("%s %s %s", mark, num, box) + label, st})
 }
 
 // planCardView is two lines: the plan itself is in the transcript, so the card

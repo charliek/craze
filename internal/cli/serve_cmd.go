@@ -583,6 +583,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// do with it (plan 035 C7, P3, P4). craze prompt and the in-process TUI
 	// do neither.
 	opts.StartErrAgentStderr = true
+	// A session that stops itself for good (a claude overage trip, plan 052 §
+	// D3) stops its host, as any other stop does (review C5 item 8).
+	opts.Stopped = lc.request
 	opts.StartErrExitHint = loginSessionHint(f.hubPID)
 	// Every host records its native shell commands' process groups, for whoever
 	// finds it dead (hostspawn.SweepDeadHosts). A spawned host also records its

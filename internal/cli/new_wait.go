@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"errors"
 	"os"
 	"path/filepath"
@@ -76,9 +77,23 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 	// (plan 037 LC-4).
 	provider := strings.TrimSpace(f.provider)
 	if provider != "" {
-		if _, err := agent.ProviderByName(provider); err != nil {
-			return unknownProviderError(provider)
+		if err := f.checkNamedProvider(provider); err != nil {
+			return err
 		}
+	}
+	// The default a hub-created session would have had, read once: what the
+	// guard checks is what starts. config.toml's provider (the hub's own
+	// hubCreates rule), never CRAZE_PROVIDER, which the host's environment
+	// does not carry.
+	configured := ""
+	if provider == "" {
+		configured = tui.ConfigProvider()
+	}
+	// The self-delegation guard (plan 052 § J2, R2-6), on the provider this
+	// starts — before the prompt is read, so a refused --remove-prompt-file
+	// keeps its file. An unknown or missing default is its own error below.
+	if err := selfDelegation(cmp.Or(provider, configured), f.allowSame); err != nil {
+		return err
 	}
 	stdout := cmd.OutOrStdout()
 	// craze new's rule: a stdout whose reader has gone fails its write rather
@@ -121,15 +136,16 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		return fail(errkind.Workspace, "%s is not a directory", abs)
 	}
 	if provider == "" {
-		// The default a hub-created session would have had: config.toml's
-		// provider (the hub's own hubCreates rule), never CRAZE_PROVIDER,
-		// which the host's environment does not carry.
-		provider = tui.ConfigProvider()
+		provider = configured
 		if provider == "" {
 			return fail(errkind.Config, "no default provider yet; pass --provider %s", newProviderChoices)
 		}
-		if _, err := agent.ProviderByName(provider); err != nil {
+		p, err := agent.ProviderByName(provider)
+		if err != nil {
 			return fail(errkind.Config, "config.toml's provider %q is not one this craze knows; pass --provider %s", provider, newProviderChoices)
+		}
+		if err := f.refuseFast(p); err != nil {
+			return err
 		}
 	}
 	if provider == agent.NativeProvider().Name() {

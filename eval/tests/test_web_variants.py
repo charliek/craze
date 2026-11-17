@@ -157,7 +157,7 @@ def test_plain_crazes_home_turns_web_search_off_on_a_web_task_alone(tmp_path):
         _, web = home("craze-web", tasks[tid], f"web-{tid}")
         assert web == {**bare, ".craze/config.toml": WEB_CONFIG.encode()}
     # The other harnesses add nothing.
-    for h in ("gx", "opencode", "codex"):
+    for h in ("opencode", "codex"):
         d = tmp_path / f"{h}-home"
         d.mkdir()
         RUNNERS[h].task_home(d, tasks["T-W1"])

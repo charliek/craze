@@ -97,6 +97,12 @@ const (
 
 	StopEndTurn   = "end_turn"
 	StopCancelled = "cancelled"
+	// The stop reasons a turn can end with short of its end (plan 052 B8):
+	// the model declined, ran out of output tokens, or hit the agent's cap on
+	// model requests in one turn.
+	StopRefusal         = "refusal"
+	StopMaxTokens       = "max_tokens"
+	StopMaxTurnRequests = "max_turn_requests"
 )
 
 // DialectID selects the provider-shaped branch of the ACP client. The client
@@ -107,6 +113,11 @@ type DialectID string
 const (
 	DialectCursor DialectID = "cursor"
 	DialectGrok   DialectID = "grok"
+	// DialectClaude is claude-agent-acp, the ACP bridge to Claude Code (plan
+	// 052 § B): plain session/prompt, the tool name in
+	// _meta.claudeCode.toolName, and the adapter's auth-status pushes read
+	// (claude.go).
+	DialectClaude DialectID = "claude"
 )
 
 type Implementation struct {
@@ -123,6 +134,33 @@ type ClientCapabilities struct {
 	Meta     map[string]any `json:"_meta,omitempty"`
 	FS       FSCapabilities `json:"fs"`
 	Terminal bool           `json:"terminal"`
+	// Elicitation is the RFD form capability (plan 052 § B2): declared by the
+	// claude dialect alone, whose AskUserQuestion reaches a client as an
+	// elicitation/create form only once the client says it renders one. nil
+	// for cursor and grok, whose initialize bytes stay as they were.
+	Elicitation *ElicitationCapabilities `json:"elicitation,omitempty"`
+	// Subagents is the RFD sub-agent capability (plan 052 § B2, § E3): an
+	// empty object, declared by the claude dialect alone, for every claude
+	// session. With it the adapter announces each child with subagent_update
+	// on its immediate parent and streams the child on its own session id.
+	Subagents *struct{} `json:"subagents,omitempty"`
+	// Session is the RFD session capabilities (plan 052 § B2): claude's
+	// alone, `session:{notices:{}, compaction:{}}`. With them the adapter
+	// sends its notices as `notice` updates instead of bold transcript text,
+	// and a compaction as `compaction_update` instead of a tool call.
+	Session *SessionCapabilities `json:"session,omitempty"`
+}
+
+// SessionCapabilities is clientCapabilities.session: two empty objects.
+type SessionCapabilities struct {
+	Notices    struct{} `json:"notices"`
+	Compaction struct{} `json:"compaction"`
+}
+
+// ElicitationCapabilities is clientCapabilities.elicitation: form only, an
+// empty object. URL elicitations are never declared.
+type ElicitationCapabilities struct {
+	Form struct{} `json:"form"`
 }
 
 type InitializeParams struct {
@@ -137,6 +175,25 @@ type InitializeResult struct {
 	AuthMethods       []AuthMethod    `json:"authMethods,omitempty"`
 	AgentCapabilities json.RawMessage `json:"agentCapabilities,omitempty"`
 	Meta              json.RawMessage `json:"_meta,omitempty"`
+}
+
+// SteeringSupported is initialize's top-level _meta.steering.supported: the
+// agent takes _session/steering, a message injected into its running turn
+// (claude-agent-acp, plan 052 § B7). Absent or malformed is a no.
+func (r InitializeResult) SteeringSupported() bool {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+	var meta struct {
+		Steering struct {
+			Supported bool `json:"supported"`
+		} `json:"steering"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return false
+	}
+	return meta.Steering.Supported
 }
 
 // ModelState is initialize._meta.modelState, the fallback when session/new
@@ -174,8 +231,8 @@ func (r InitializeResult) LoadSession() bool {
 
 // PromptImage is agentCapabilities.promptCapabilities.image: whether the agent
 // says it takes image blocks in session/prompt, and known, whether it said
-// anything at all (plan 033 §3.4). cursor advertises true; grok 1.0.30 and gx
-// advertise false and forward image blocks regardless, which is the provider's
+// anything at all (plan 033 §3.4). cursor advertises true; grok 1.0.30
+// advertises false and forward image blocks regardless, which is the provider's
 // call to make (agent.Provider), not this decoder's.
 //
 // The decode is tolerant, as LoadSession's is: only the one field is read, so
@@ -238,9 +295,43 @@ type AuthenticateParams struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 }
 
+// SessionParams is what a session/new or session/load carries beside its cwd
+// (plan 052 § B3). Every field is empty for cursor and grok, whose bytes on
+// the wire are unchanged: mcpServers is always [], and the other two are left
+// out when empty.
+//
+// MCPServers is always empty today: a limited preparation for a craze MCP
+// server a later plan injects (plan 052 § G2). ConfigOptions are the initial
+// values of the session's config options, which claude-agent-acp applies in
+// order on new, load and resume, and skips silently when it refuses one — so a
+// caller validates the effective values from the response. Meta is the
+// request's _meta (claude: _meta.claudeCode.options).
+type SessionParams struct {
+	MCPServers    []any
+	ConfigOptions []ConfigOptionValue
+	Meta          map[string]any
+}
+
+// ConfigOptionValue is one entry of a setup request's configOptions: the
+// select option configId set to value, as session/set_config_option sets it.
+type ConfigOptionValue struct {
+	ConfigID string `json:"configId"`
+	Value    string `json:"value"`
+}
+
+// mcpServers is p's MCPServers as the wire takes them: never null.
+func (p SessionParams) mcpServers() []any {
+	if p.MCPServers == nil {
+		return []any{}
+	}
+	return p.MCPServers
+}
+
 type NewSessionParams struct {
-	CWD        string `json:"cwd"`
-	MCPServers []any  `json:"mcpServers"`
+	CWD           string              `json:"cwd"`
+	MCPServers    []any               `json:"mcpServers"`
+	ConfigOptions []ConfigOptionValue `json:"configOptions,omitempty"`
+	Meta          map[string]any      `json:"_meta,omitempty"`
 }
 
 type NewSessionResult struct {
@@ -253,12 +344,14 @@ type NewSessionResult struct {
 // LoadSessionParams is session/load: NewSessionParams plus the id, which is
 // the shape all three agents were probed against. The result comes back in the
 // NewSessionResult shape (models/modes/configOptions, each optional — cursor
-// answers {modes, models}, grok and gx answer with models alone), with
+// answers {modes, models}, grok answers with models alone), with
 // sessionId filled in by the client because the wire does not echo it.
 type LoadSessionParams struct {
-	SessionID  string `json:"sessionId"`
-	CWD        string `json:"cwd"`
-	MCPServers []any  `json:"mcpServers"`
+	SessionID     string              `json:"sessionId"`
+	CWD           string              `json:"cwd"`
+	MCPServers    []any               `json:"mcpServers"`
+	ConfigOptions []ConfigOptionValue `json:"configOptions,omitempty"`
+	Meta          map[string]any      `json:"_meta,omitempty"`
 }
 
 // loadSessionTimeout is the session/load deadline. All three probed agents
@@ -447,6 +540,18 @@ const (
 	SubagentSpawned  = "subagent_spawned"
 	SubagentProgress = "subagent_progress"
 	SubagentFinished = "subagent_finished"
+	// SubagentUpdate is claude's RFD subagent_update (plan 052 § E3), carried
+	// on session/update and read into the same notification: its State,
+	// StopReason, Title and Cancel say what the grok kinds say by kind.
+	SubagentUpdate = "subagent_update"
+)
+
+// The claude child states (subagent_update.state.state).
+const (
+	ChildRunning        = "running"
+	ChildRequiresAction = "requires_action"
+	ChildIdle           = "idle"
+	ChildUnknown        = "unknown"
 )
 
 // SubagentNotification is one parsed subagent lifecycle event. SessionID is
@@ -474,6 +579,25 @@ type SubagentNotification struct {
 	TokensUsed      int
 	ToolsUsed       []string
 	WillWake        bool
+
+	// claude's subagent_update (Kind SubagentUpdate) alone. State is
+	// state.state ("" when the update carries none: a label, or a cwd);
+	// StopReason is an idle state's stopReason, and Error its error.message.
+	// Title is the parent's label for the child. Cancel is the child's
+	// capabilities as the update states them: nil when it says nothing, else
+	// whether capabilities.cancel is granted (null, for an unknown child, is
+	// false). Evicted marks a notification the client made itself: the child
+	// was dropped from the registry (its parent's unknown or eviction, or the
+	// cap), so nothing more of it will be routed.
+	State      string
+	StopReason string
+	Title      string
+	Cancel     *bool
+	Evicted    bool
+	// Unrouted marks an update for a child the registry would not register
+	// (the cap, every child working): its row shows, but nothing of it is
+	// routed (review C4c item 7).
+	Unrouted bool
 }
 
 type AvailableCommand struct {
@@ -519,11 +643,23 @@ type AskQuestion struct {
 	Prompt        string      `json:"prompt"`
 	Options       []AskOption `json:"options"`
 	AllowMultiple bool        `json:"allowMultiple,omitempty"`
+	// AllowText says the question also takes a free-text answer of the
+	// user's own: claude's per-question "Other" box, question_<i>_custom
+	// (plan 052 § B4). Only the claude dialect sets it; it is never read
+	// off cursor's wire.
+	AllowText bool `json:"-"`
+	// Required says the question must be answered — a pick or free text —
+	// when the request is answered at all: a claude form's `required`.
+	// Never read off cursor's wire.
+	Required bool `json:"-"`
 }
 
 type AskOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// Description is what picking the option means, when the request says:
+	// claude's form options carry one. Never read off cursor's wire.
+	Description string `json:"-"`
 }
 
 // AskDecision answers a cursor/ask_question request. Answers maps question id
@@ -532,6 +668,10 @@ type AskDecision struct {
 	Cancelled bool
 	Skip      bool
 	Answers   map[string][]string
+	// Text is each question's free-text answer, by question id, for the
+	// questions that take one (AskQuestion.AllowText). Only the claude
+	// dialect's reply carries it.
+	Text map[string]string
 	// Replied, when set, is called exactly once with what became of the reply
 	// this decision asked for: see ReplyDisposition.
 	Replied func(ReplyDisposition)
@@ -608,6 +748,10 @@ const (
 	// failed. The error itself is dropped, exactly as it always has been; only
 	// the fact is reported.
 	ReplyLostWriteFailed = "write_failed"
+	// ReplyLostWithdrawn: the agent took the request back ($/cancel_request)
+	// before the decision was written, so nothing was: it would answer a
+	// request the agent no longer waits on.
+	ReplyLostWithdrawn = "withdrawn"
 	// ReplyLostInvalidOption: the decision named an option the request never
 	// offered, so the client replaced it with the cancelled outcome. The reply
 	// reached the agent; the decision did not.
@@ -646,6 +790,10 @@ type Arrival struct {
 	// registered, so the request belongs to that turn. False means it arrived
 	// between craze's turns, or during a turn the agent started itself.
 	InTurn bool
+	// Child is the claude child session the request is about, "" for the
+	// root's. Such a request has InTurn false: it belongs to no turn of the
+	// root's, so a root turn's end never takes its card away (plan 052 § E3).
+	Child string
 	// Call is this request's own lifetime, as a context: it ends the moment
 	// something other than this handler answers the request — a Cancel, a
 	// CancelHeld, a Close, the stale-turn reply — and again when the handler
@@ -706,6 +854,9 @@ const (
 	// cancelled itself rather than let a card be raised for a turn that has
 	// ended.
 	EarlyStaleTurn EarlyAnswerReason = "stale_turn"
+	// EarlyWithdrawn: the agent took the request back ($/cancel_request)
+	// before any handler ran; nothing was written to it.
+	EarlyWithdrawn EarlyAnswerReason = "withdrawn"
 )
 
 // EarlyAnswer is one blocking request the client answered by itself, before any
@@ -827,6 +978,17 @@ type ForeignTurn struct {
 	ID      string
 	Text    string
 	Running bool
+	// Reason is why the agent started it: "" for grok's interjection
+	// fallback; ForeignReasonBackground or ForeignReasonCompaction for a claude
+	// turn the state machine opened (foreign.go). Both brackets carry it.
+	Reason string
+	// The ending's, claude's alone. Cancelled says a user cancel ended it.
+	// Silent says the silence rule ended it, the agent having said nothing for
+	// the limit. Err is what failed it: the session stopping for a reason of
+	// its own while the turn ran (Client.FailForeign).
+	Cancelled bool
+	Silent    bool
+	Err       error
 }
 
 // IsInterjectFallback reports whether a promptId is one grok minted for a

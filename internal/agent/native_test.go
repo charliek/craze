@@ -497,7 +497,7 @@ func TestNewBranchesOnInProcess(t *testing.T) {
 	if got := s.Snapshot().Provider.Name; got != "native" {
 		t.Fatalf("an unstarted native snapshot names provider %q", got)
 	}
-	for _, p := range []*Provider{nil, ptr(CursorProvider()), ptr(GrokProvider()), ptr(GxProvider())} {
+	for _, p := range []*Provider{nil, ptr(CursorProvider()), ptr(GrokProvider())} {
 		acpSess := New(Options{Provider: p})
 		if _, ok := acpSess.(*session); !ok {
 			t.Fatalf("New(%v) = %T, want the ACP session", p, acpSess)

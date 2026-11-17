@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/fakehost"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -727,5 +728,39 @@ func TestWaitMaxMessageWhenTheFullResultCannotBeSaved(t *testing.T) {
 	m := decodeResult(t, stdout)
 	if _, named := m["messageFile"]; code != 0 || m["message"] != "0123456789" || named || !strings.HasPrefix(stderr, note) {
 		t.Fatalf("--json --max-message with no results directory: exit %d, %v, %q", code, m, stderr)
+	}
+}
+
+// TestWaitOnAFailedOrCancelledForeignTurn (plan 052 § E2): a wait on a turn
+// the agent runs on its own reports how its bracket says it ended — failed,
+// with the failure's kind, or cancelled — not completed.
+func TestWaitOnAFailedOrCancelledForeignTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		end          agent.ForeignTurnInfo
+	}{
+		{"failed", "failed", agent.ForeignTurnInfo{ID: "claude-1", Err: &agent.TurnError{Kind: errkind.Auth, Message: "the login changed"}}},
+		{"cancelled", "cancelled", agent.ForeignTurnInfo{ID: "claude-1", Cancelled: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWaitRig(t, 0)
+			r.s.emit(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "claude-1", Reason: agent.ReasonBackground, Running: true}})
+			w := goCraze("wait", waitRigShort, "--json")
+			r.waitAttached(1)
+			end := tc.end
+			end.Reason = agent.ReasonBackground
+			r.s.emit(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &end})
+			stdout, stderr, code := w.wait(t)
+			m := decodeResult(t, stdout)
+			if m["status"] != tc.status || m["turn"] != "claude-1" {
+				t.Fatalf("wait on a %s foreign turn: exit %d, %v, %q", tc.name, code, m, stderr)
+			}
+			if tc.name == "failed" {
+				e, _ := m["error"].(map[string]any)
+				if e == nil || e["kind"] != "auth" || !strings.Contains(e["message"].(string), "the login changed") {
+					t.Fatalf("the failure: %v", m["error"])
+				}
+			}
+		})
 	}
 }

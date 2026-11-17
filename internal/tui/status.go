@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -87,8 +88,8 @@ func (m Model) statusView(lay frameLayout) string {
 // statusRow1 is workspace · branch · provider · model (effort) · usage ·
 // elapsed. It drops in the pinned order — elapsed, branch, usage, provider —
 // and gives the model up last, so the narrowest row is still the workspace
-// name. The usage part is a native session's alone (usagePart); every other
-// session has none, and its row is what it always was. The mode is not here:
+// name. The usage part is a native or claude session's alone (usagePart); every
+// other session has none, and its row is what it always was. The mode is not here:
 // it is row 2's chip, and it appears in exactly one place.
 func (m Model) statusRow1() (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
@@ -145,8 +146,12 @@ func (m Model) statusRow1() (string, []segSpan) {
 //     usage had no price — says the billed tokens instead, input, cache and
 //     output: `34% ctx · 12.3k / 1.21M tok`;
 //   - a window craze does not know leaves the `NN% ctx · ` prefix out;
-//   - no usage section — every ACP session, and a native one before its
-//     first step — is no part at all.
+//   - a plan's limit (claude, plan 052 § D2) follows: the plan and the
+//     window's use, `34% ctx · 12.3k / 1.21M tok · max · 7d 45%` — five_hour
+//     reads `5h` and every seven_day window `7d`; a claude session is never
+//     priced, so it always says tokens, never `$`;
+//   - no usage section — a cursor or grok session, and a native or claude one
+//     before its first report — is no part at all.
 func usagePart(u *agent.UsageState) string {
 	if u == nil {
 		return ""
@@ -157,10 +162,44 @@ func usagePart(u *agent.UsageState) string {
 	}
 	if u.Session.CostPicoUSD == 0 && u.Session.Unpriced {
 		b.WriteString(transcript.TokenCount(billedTokens(u.Turn)) + " / " + transcript.TokenCount(billedTokens(u.Session)) + " tok")
-		return b.String()
+	} else {
+		b.WriteString(spendMoney(u.Turn) + " / " + spendMoney(u.Session))
 	}
-	b.WriteString(spendMoney(u.Turn) + " / " + spendMoney(u.Session))
+	if plan := planPart(u); plan != "" {
+		b.WriteString(statusDot + plan)
+	}
 	return b.String()
+}
+
+// planPart is the plan's limit as the usage part ends with it (plan 052 §
+// D2): `max · 7d 45%`, the plan alone when no limit has been reported, the
+// window alone when no plan is known, "" for neither.
+func planPart(u *agent.UsageState) string {
+	var parts []string
+	if p := sanitizeLine(u.Plan); p != "" {
+		parts = append(parts, p)
+	}
+	if w := windowShort(u.Window); w != "" {
+		util := u.WindowUtilization
+		if util < 0 || math.IsNaN(util) {
+			util = 0
+		}
+		pct := int64(math.Round(math.Min(util, 9.99) * 100))
+		parts = append(parts, fmt.Sprintf("%s %d%%", w, pct))
+	}
+	return strings.Join(parts, statusDot)
+}
+
+// windowShort is a rate limit's window as the status row says it: `5h` for
+// five_hour, `7d` for every seven_day window, "" for any other.
+func windowShort(window string) string {
+	switch {
+	case window == "five_hour":
+		return "5h"
+	case strings.HasPrefix(window, "seven_day"):
+		return "7d"
+	}
+	return ""
 }
 
 // contextPercent is tokens as a whole percentage of window, rounded half up;
@@ -342,6 +381,7 @@ func (m Model) modelLabel() string {
 		}
 	}
 	name = sanitizeLine(name)
+	inUse := m.modelInUse(id, name)
 	var bits []string
 	if m.showEffort() {
 		if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
@@ -351,10 +391,53 @@ func (m Model) modelLabel() string {
 	if m.showFast() && agent.FastOn(m.snap) {
 		bits = append(bits, "fast")
 	}
+	if inUse != "" {
+		// The agent runs another model than the one picked (claude's plan
+		// mode runs on Sonnet, plan 052 L2): the one in use first, and the
+		// one picked as the model dialog names it (L3 O1).
+		picked := m.pickedModelName(id, name)
+		if len(bits) > 0 {
+			picked += statusDot + strings.Join(bits, statusDot)
+		}
+		return inUse + " (in use; picked " + picked + ")"
+	}
 	if len(bits) > 0 {
 		name += " (" + strings.Join(bits, statusDot) + ")"
 	}
 	return name
+}
+
+// pickedModelName is model id as the model option's own value list names it
+// (the model dialog's words: `Haiku 5.5` for `haiku`), else name.
+func (m Model) pickedModelName(id, name string) string {
+	if opt := agent.ModelConfigOptionIn(m.snap.Config); opt != nil {
+		for _, v := range opt.SelectValues {
+			if v.Value == id && v.Name != "" {
+				return sanitizeLine(v.Name)
+			}
+		}
+	}
+	return name
+}
+
+// modelInUse is the family of the model the agent's last usage report named
+// (UsageState.Model, claude's `_claude/model`) when it is not the family of
+// the model picked — id, or its display name — and "" when they agree or
+// either is unknown.
+func (m Model) modelInUse(id, name string) string {
+	u := m.snap.Usage
+	if u == nil || u.Model == "" {
+		return ""
+	}
+	used := agent.ClaudeModelFamily(u.Model)
+	picked := agent.ClaudeModelFamily(id)
+	if picked == "" {
+		picked = agent.ClaudeModelFamily(name)
+	}
+	if used == "" || picked == "" || used == picked {
+		return ""
+	}
+	return used
 }
 
 // inFlightCounts names what is running right now, by kind. Sub-agents are

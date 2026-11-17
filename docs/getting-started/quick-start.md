@@ -7,15 +7,12 @@
     - **craze's own native provider**, which needs no other CLI: an API key for
       one of the model providers craze ships a catalog for, or a ChatGPT plan
       to sign in with (see [Native provider](#native-provider) below); or
-    - **an ACP agent**: install the [Cursor CLI](https://cursor.com/cli), the
-      [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
-      [`gx`](https://github.com/charliek/grok-build) — a third-party fork of
-      the Grok CLI that speaks the same ACP dialect as `grok`, so everything
-      here about Grok applies to it too — and log in: `cursor-agent login` (the
-      same binary is also installed as `agent`), or `grok login` / set
-      `XAI_API_KEY`. `gx` currently shares grok's `~/.grok` home, so the same
-      login covers it — that is the fork's current behaviour, not a craze
-      guarantee.
+    - **an ACP agent**: install the [Cursor CLI](https://cursor.com/cli) or the
+      [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), and
+      log in: `cursor-agent login` (the same binary is also installed as
+      `agent`), or `grok login` / set `XAI_API_KEY`; or Claude Code signed in
+      to a Claude Pro or Max plan, with the `claude-agent-acp` adapter
+      ([Claude on your plan](claude.md)).
 
 Coming from v0.0.1? Read [Upgrading](upgrading.md) first.
 
@@ -94,8 +91,8 @@ make build
 ```
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
-is for tests; a live session uses the native provider, or `cursor-agent`, `grok`
-or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27.3+ (this repo pins 1.27.3 via
+is for tests; a live session uses the native provider, or `cursor-agent` or
+`grok` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27.3+ (this repo pins 1.27.3 via
 `.mise.toml`; `mise install`).
 
 ## First run
@@ -105,7 +102,7 @@ or `gx` on `PATH` (or `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.2
 
 ```bash
 ./bin/craze                      # picker, then the TUI in the current directory
-./bin/craze --provider cursor    # skip the picker (also grok, gx, native)
+./bin/craze --provider cursor    # skip the picker (also grok, claude, native)
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse
@@ -264,7 +261,7 @@ them detached ([a waiter run detached](../reference/cli.md#a-waiter-run-detached
 ## Exit codes
 
 craze exits **nonzero when the session never started** — not logged in to the
-provider, no native credential, or an agent binary (`cursor-agent`, `grok`, `gx`) that would not come up. It still draws the TUI and puts the
+provider, no native credential, or an agent binary (`cursor-agent`, `grok`) that would not come up. It still draws the TUI and puts the
 error in the transcript, because that is where you can read it, but the process
 tells a script that nothing ran. An error *during* a session leaves a usable
 craze, so quitting out of one is an ordinary exit 0. The commands that wait for

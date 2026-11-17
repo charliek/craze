@@ -1500,10 +1500,7 @@ func turnBoundary(e transcript.Entry) bool {
 	case transcript.KindUser:
 		return !e.Interject
 	case transcript.KindNote:
-		switch e.Text {
-		case transcript.NoteForeignTurn, transcript.NoteSubagentWake, transcript.NoteJobWake:
-			return true
-		}
+		return transcript.IsForeignTurnNote(e.Text)
 	}
 	return false
 }
@@ -1604,10 +1601,10 @@ func (w *turnWaiter) runningEvent(ctx context.Context, ev agent.Event) {
 				w.turnStarted(ev)
 				return
 			}
-			// A foreign turn's ending is always done: its bracket carries no
-			// outcome (protocol.TurnDone).
+			// A foreign turn's ending is done unless its bracket says it
+			// failed or was cancelled (plan 052 § E2).
 			w.acc.end(ev.At)
-			w.finish(w.newResult(statusCompleted))
+			w.foreignEnded(ft)
 			return
 		}
 	} else if tu := ev.Turn; ev.Type == agent.EventTurn && tu != nil && tu.ID == w.target.id {
@@ -1701,17 +1698,28 @@ func (w *turnWaiter) turnStarted(ev agent.Event) {
 // agent's own turn, and right behind the target's own row's `queued` — the
 // settlement's batch is [the row queued, the ending], one seq apart, which
 // the log never interleaves (EventLog.publishBatch) — and that row's id. Only
-// the target's own row: a turn submitted directly has none, and its refusal
-// is its ending, however close another client's queued row came before it.
+// the target's own row — or, for a turn submitted directly, the row claude's
+// requeueing refusal made of its text (agent.ErrForeignTurnRequeue, C8 S1);
+// any other direct refusal is its ending, however close another client's
+// queued row came before it.
 func (w *turnWaiter) restoring(ev agent.Event) (string, bool) {
 	tu := ev.Turn
-	if w.row == "" || !tu.Synthetic || tu.ErrClass != agent.EventErrForeignTurn {
+	if !tu.Synthetic || tu.ErrClass != agent.EventErrForeignTurn || w.lastQueuedSeq+1 != ev.Seq {
 		return "", false
 	}
-	if w.lastQueuedID != w.row || w.lastQueuedSeq+1 != ev.Seq {
+	if w.row != "" {
+		if w.lastQueuedID != w.row {
+			return "", false
+		}
+		return w.row, true
+	}
+	// A direct submission claude requeued (agent.ErrForeignTurnRequeue; C8
+	// S1): the text became the row queued right ahead of this ending, in the
+	// same batch, and its real turn is that row's.
+	if tu.Err != agent.ErrForeignTurnRequeue.Error() || w.lastQueuedID == "" {
 		return "", false
 	}
-	return w.row, true
+	return w.lastQueuedID, true
 }
 
 // ended is the target turn's ending as its result (§3.1): completed is
@@ -2431,4 +2439,22 @@ func (w *turnWaiter) hostChanged() {
 // reload hint when the session index has the session's row (§3.1, §3.4).
 func endedLine(id string) string {
 	return "the session ended" + reloadHint(matchCrazeID(indexCrazeIDs(), id))
+}
+
+// foreignEnded is a foreign target's ending: completed, unless its bracket
+// says it failed — the failure, with its kind — or that a user cancel ended it
+// (plan 052 § E2).
+func (w *turnWaiter) foreignEnded(ft *agent.ForeignTurnInfo) {
+	switch {
+	case ft.Err != nil:
+		res := w.newResult(statusFailed)
+		res.Error = newResultError(ft.Err.Error(), ft.Err.ErrorInfo())
+		w.finish(res)
+	case ft.Cancelled:
+		res := w.newResult(statusCancelled)
+		res.StopReason = stopCancelled
+		w.finish(res)
+	default:
+		w.finish(w.newResult(statusCompleted))
+	}
 }

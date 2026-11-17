@@ -55,6 +55,8 @@ import (
 type session struct {
 	opts   Options
 	client *acp.Client
+	// hooks are this session's test seams, nil in production (sessionHooks).
+	hooks sessionHooks
 	// log is where every event goes (eventlog.go): emitCtx publishes into it
 	// and Events is its primary. events is the same channel as Primary, kept
 	// receive-only so that nothing can send on it past the log's numbering;
@@ -153,8 +155,70 @@ type session struct {
 	planHold  chan struct{}
 	releasing bool
 	// foreign mirrors the client's foreign-turn state for Snapshot.
+	// foreignEnded is the id of the last foreign turn that ended: a start
+	// for it delivered late — a close that could not wait for the read loop
+	// (acp closeForeign) — is not a turn running (review C4 item 2).
 	foreign      bool
-	interjectSeq int
+	foreignEnded string
+	// foreignMu makes a foreign bracket's state change and its event one
+	// step (onForeignTurn). Taken before s.mu, never under it.
+	foreignMu sync.Mutex
+	// transportEnded: the claude agent's read loop has ended and its running
+	// children were retired (retireChildrenAtEnd), under s.mu.
+	transportEnded bool
+	// toolOwner is the turn of craze's own that opened each claude root tool
+	// call, by id: 0 for one a turn of the agent's own, or nothing, opened
+	// (closeInFlightTools; C8 K7). It grows as the tool map does.
+	toolOwner map[string]int
+	// textRun is the messageId of the claude root text the transcript's open
+	// run holds, "" when none is open: a chunk of another message starts a
+	// paragraph of its own (review C4 item 11).
+	textRun string
+	// gate is claude's effective-login gate (live_claude.go), under s.mu;
+	// fastFix is claude's fast mode being set back off (keepFastOffLocked,
+	// fixFast): non-nil while a reset runs, closed when it has ended — fast
+	// confirmed off, or the session stopped.
+	gate claudeGate
+	// usage is claude's usage section and its plan limits (claude_usage.go),
+	// under s.mu; overage is the overage guard's stop once it has begun
+	// (claude_overage.go): the error the session stopped with, nil until then.
+	usage   claudeUsage
+	overage error
+	// tripUntil is the hold a reset-less trip of this session computed, so
+	// one handled again keeps it (review C5b item 11); recordLineBusy says a
+	// line about the record's whereabouts is being written (fallbackLine).
+	tripUntil      time.Time
+	recordLineBusy atomic.Bool
+	// recordAt is where the session's trip record is, resolved once
+	// (recordPaths); recordPending holds a channel per record write in
+	// flight, closed as it ends, and overageKilled closes once the overage
+	// stop's kill is done — the close waits for both, bounded, by the
+	// deadlines in overageJoin, set once as it begins (joinOverage).
+	recordAt       overagePaths
+	recordResolved bool
+	recordPending  []chan struct{}
+	overageKilled  chan struct{}
+	overageJoin    *overageJoinState
+	// stalledReader is set once the outbox's hard bound has stopped the
+	// session (readerStalled).
+	stalledReader atomic.Bool
+	// compacting is the claude compaction open now ("-" for one with no id),
+	// "" for none; compactedLast the id of the last that ended (claude_notes.go).
+	compacting, compactedLast string
+	// fastTimer is the deadline of the fast reset in flight, if any (fixFast):
+	// teardown stops it, under s.mu.
+	fastTimer *time.Timer
+	// planKept is the turn whose claude plan exit was answered keep planning,
+	// under s.mu (notePlanKept); the zero token when none.
+	planKept TurnToken
+	// cancels counts the Cancels asked of this session, under s.mu: a plan's
+	// keep planning noted after a cancel it did not see is not noted
+	// (notePlanKept).
+	cancels uint64
+	// cancelsActive counts the Cancels still running, under s.mu.
+	cancelsActive int
+	fastFix       chan struct{}
+	interjectSeq  int
 	// plugins are the on-disk plugin entries discovered once, in Start,
 	// before session/new; they never change again. commandsSeen records that
 	// the agent's first available_commands_update has been applied, which is
@@ -383,6 +447,7 @@ func newSession(opts Options) *session {
 		commandsApplied: make(chan struct{}),
 		taskReceipts:    make(map[string]TaskInfo),
 		subagents:       make(map[string]*subagentRec),
+		gate:            claudeGate{first: make(chan struct{})},
 	}
 	// The marks of r27 finding 1 are for the session/new install alone. A LOAD
 	// records none: its replayed updates arrive BEFORE the load's reply by
@@ -404,6 +469,7 @@ func newSession(opts Options) *session {
 	s.events = s.log.Primary()
 	// Beside the log, and stamped from the same clock its own emits use.
 	s.asks = NewAskRegistry(s.log, s.Now)
+	s.asks.AllowQuestionCancel(s.provider().Info().QuestionDismissCancels())
 	s.askCtx, s.askStop = context.WithCancel(context.Background())
 	// The tee is the child's lane alone. Options.Stderr stays what it was, so
 	// craze's own notes about the session — which fall back to it when Diag is
@@ -534,6 +600,15 @@ var (
 // returned say the same.
 func (s *session) Start(ctx context.Context) error {
 	teardown, err := s.start(ctx)
+	if f := s.fatalErr(); f != nil {
+		// A login the gate refused while the start ran (a push after the
+		// first) stops the session: the start fails with it, whatever call it
+		// cut short, and tears down what a successful start built.
+		if err == nil {
+			teardown = true
+		}
+		err = f
+	}
 	if err == nil {
 		return nil
 	}
@@ -565,7 +640,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.started = true
 	s.mu.Unlock()
 
-	args := s.provider().Args(s.opts.ExtraArgs, s.opts.Force)
+	p := s.provider()
+	args := p.Args(s.opts.ExtraArgs, s.opts.Force)
+	if p.isClaude() {
+		// What claude refuses outright — a mode it has none of, --fast — is
+		// refused before anything is spawned.
+		if err := s.claudeStartRefusal(); err != nil {
+			s.unstart()
+			return false, err
+		}
+	}
 
 	cwd := s.opts.Workspace
 	if cwd == "" {
@@ -614,13 +698,47 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	if testAfterBinaryResolved != nil {
 		testAfterBinaryResolved()
 	}
+	// The companion binary (claude's `claude`, plan 052 § A2), resolved from
+	// the environment the agent will see, and that environment itself
+	// (spawnEnv, § A3): on every spawn path — the TUI's, a host's, the hub's,
+	// craze prompt's — since every one of them starts here.
+	companion, err := p.ResolveCompanion(s.childEnv())
+	if err != nil {
+		s.unstart()
+		return false, fmt.Errorf("agent: %w", err)
+	}
+	env := p.spawnEnv(s.opts.Env, companion, cwd)
+	// claude's preflight (§ A4), at the very paths the spawn uses, under the
+	// environment it spawns with, before anything is spawned.
+	if p.isClaude() {
+		// The overage guard's trip record first (plan 052 § D3), at the paths
+		// the session resolves once, here (review C5c item 3): while it holds,
+		// no claude session starts on this machine.
+		if err := overageRefusalAt(s.recordPaths()); err != nil {
+			s.unstart()
+			return false, err
+		}
+	}
+	info, err := p.preflight(ctx, binary, companion, env, cwd)
+	if err != nil {
+		s.unstart()
+		return false, err
+	}
+	if p.isClaude() {
+		// The plan the status row names (§ D2).
+		s.mu.Lock()
+		s.usage.plan = sanitizeLine(info.SubscriptionType)
+		s.mu.Unlock()
+	}
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary:  binary,
-		Args:    args,
+		Binary: binary,
+		Args:   args,
+		// The session's own directory: the adapter's auth probe reads that
+		// project's settings (§ A4, R2-1), as every agent reads its project.
 		Dir:     cwd,
-		Env:     s.opts.Env,
+		Env:     env,
 		Stderr:  s.stderrSink(),
-		Dialect: s.provider().Dialect(),
+		Dialect: p.Dialect(),
 	})
 	if err != nil {
 		s.unstart()
@@ -657,6 +775,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetSettingsHandler(s.onSettingsReply)
 	client.SetSubagentHandler(s.onSubagent)
 	client.SetPermissionHandler(s.onPermission)
+	client.SetRefusedRequestHandler(s.onRefusedRequest)
 	client.SetAskHandler(s.onAskQuestion)
 	client.SetPlanHandler(s.onCreatePlan)
 	client.SetTodosHandler(s.onUpdateTodos)
@@ -665,13 +784,40 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetInterjectionHandler(func(n acp.InterjectionNotification) {
 		s.onInterjection(interjectionText{Text: n.Text})
 	})
-	client.SetForeignTurnHandler(func(f acp.ForeignTurn) {
-		s.onForeignTurn(ForeignTurnInfo{ID: f.ID, Text: f.Text, Running: f.Running})
-	})
+	client.SetForeignTurnHandler(s.onACPForeignTurn)
+	if p.isClaude() {
+		// The foreign-turn state machine's limits (plan 052 § E1): the
+		// defaults, unless a test shortened them.
+		if claudeForeignTiming != nil {
+			client.SetForeignTiming(*claudeForeignTiming)
+		}
+	}
+	client.SetAuthStatusHandler(s.onAuthStatus)
+	if p.isClaude() {
+		// The plan's limit and the overage guard (plan 052 § D2, § D3).
+		client.SetRateLimitHandler(s.onClaudeRateLimit)
+	}
+	// The last check before a prompt's bytes go out (review C2b 2): held
+	// while claude's fast mode is being reset, refused once the session has
+	// stopped or while the overage guard's trip record holds. Cursor and grok
+	// never have any of these.
+	client.SetPromptGate(s.promptGate)
+	if p.isClaude() {
+		// A child whose agent is gone never reports again: its row ends
+		// with the transport (review C4 item 3).
+		go s.retireChildrenAtEnd(client)
+	}
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
 		return true, err
+	}
+	if p.isClaude() {
+		// The effective-login gate (§ A4): the adapter's own word on which
+		// login pays, before anything that could spend it.
+		if err := s.awaitLogin(ctx); err != nil {
+			return true, err
+		}
 	}
 	if methodID, meta, ok := s.authMethod(initRes); ok {
 		if err := client.Authenticate(ctx, methodID, meta); err != nil {
@@ -719,7 +865,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 	} else {
-		sess, err := client.NewSession(ctx, cwd)
+		sess, err := client.NewSession(ctx, cwd, s.sessionParams(false))
 		if err != nil {
 			return true, err
 		}
@@ -737,11 +883,17 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// a load that means after the restored snapshot has been installed and the
 	// replay bracket closed, so it writes through s.mu instead of into a
 	// snapshot that has not been published yet.
-	modes := snap.Modes
-	if loading {
-		modes = s.Snapshot().Modes
-	}
-	if s.opts.Mode != "" {
+	if p.isClaude() {
+		// The start mode, fast off and a load's recorded model went in the
+		// setup request; what the adapter applied is read back (§ B3).
+		if err := s.claudeSettle(ctx, client, loading, &snap); err != nil {
+			return true, err
+		}
+	} else if s.opts.Mode != "" {
+		modes := snap.Modes
+		if loading {
+			modes = s.Snapshot().Modes
+		}
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(modes))
 		if !ok {
 			return true, fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
@@ -749,20 +901,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		if err := client.SetMode(ctx, modeID); err != nil {
 			return true, err
 		}
-		if loading {
-			// On a load the snapshot has already been published, so this writes
-			// through s.mu — and says so, in the same section, or a client that
-			// folds the stream would keep the mode the replay left while
-			// Snapshot answers this one, for ever (r23 finding 2). Event.Mode
-			// stays empty: it is an *agent*-initiated update's field, and this
-			// is craze's own --mode.
-			s.mu.Lock()
-			s.snap.CurrentMode = modeID
-			s.enqueueDeltaLocked("", Event{}, s.owedModelLocked(&StateDelta{Mode: &modeID}))
-			s.mu.Unlock()
-		} else {
-			snap.CurrentMode = modeID
-		}
+		s.settleMode(loading, &snap, modeID)
 	}
 	if s.opts.Model != "" {
 		// --model is a model change like SetModel's, by the same path (plan 025
@@ -803,7 +942,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			// is announced here, in one delta carrying both sections as the read
 			// loop left them — the Model section it always carried, and the
 			// catalog the new model came with (or the previous model's options
-			// dropped: grok and gx answer a load with no catalog at all, which
+			// dropped: grok answers a load with no catalog at all, which
 			// leaves nothing to drop).
 			s.enqueueDeltaLocked("", Event{}, s.modelDeltaLocked())
 		} else {
@@ -816,6 +955,9 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			snap.Config = cloneConfig(s.snap.Config)
 			snap.CurrentModel = s.snap.CurrentModel
 		}
+		// claude's model in use belongs to the options it was reported under
+		// (L3 F1), and --model just changed them (review C5b item 9).
+		s.inUseCheckLocked()
 		s.mu.Unlock()
 	}
 	// The --effort/--fast tail (plan 032 §3.11, P6): after --model, so against
@@ -825,6 +967,11 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		return true, err
 	}
 	if loading {
+		// Fast mode on in the published catalog is set off before the start
+		// returns, or the start fails (review F1).
+		if err := s.ensureFastOff(ctx); err != nil {
+			return true, err
+		}
 		// The load's install has published the catalog (loadSession), and the
 		// end bracket is out: scans may run from here.
 		s.scanner.arm()
@@ -913,6 +1060,13 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// nothing.
 	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// An update of the agent's own that turned fast mode on while the install
+	// was pending was kept by it and checked by nothing (keepFastOffLocked
+	// waits for the install): it is set off here, before the start returns,
+	// or the start fails (review F1).
+	if err := s.ensureFastOff(ctx); err != nil {
+		return true, err
+	}
 	// The catalog is published, so a scan's result has something to be
 	// compared against: requests run from here, and one made during Start —
 	// an attach to a host whose session was still starting — runs now.
@@ -1104,8 +1258,8 @@ func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
 
 // modelBeforeSetCap bounds modelBeforeSet. Eight distinct pre-set values is
 // far past anything a real session reaches before its agent advertises a model
-// option at all — cursor advertises one from session/new, and grok and gx
-// advertise one as soon as they list anything — and the overflow answer
+// option at all — cursor advertises one from session/new, and grok
+// advertises one as soon as they list anything — and the overflow answer
 // suppresses rather than adopts, so the bound can be small.
 const modelBeforeSetCap = 8
 
@@ -1199,7 +1353,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
 	s.replaying.Store(true)
-	res, err := client.LoadSession(ctx, s.opts.LoadSessionID, cwd)
+	res, err := client.LoadSession(ctx, s.opts.LoadSessionID, cwd, s.sessionParams(true))
 	if err != nil {
 		// No end bracket: the load failed, so Start returns and closes the
 		// client. Clearing the flag keeps a late notification from being
@@ -1207,14 +1361,23 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 		s.replaying.Store(false)
 		return err
 	}
+	// Everything from here to ReplayDone waits on hctx, not on the
+	// background or s.done alone: on claude it ends when the hold behind the
+	// load's reply fails or the client closes (review C4c item 1), so a
+	// stalled replay completion fails the load instead of hanging Start.
+	hctx := client.LoadContext()
+	if s.hooks.loadStall != nil {
+		// A test's stalled replay completion: a wait that ends only with hctx.
+		s.hooks.loadStall(hctx)
+	}
 	// The last chunks of a replayed prompt have no update behind them to push
 	// them out, so replay end is their flush.
-	s.flushReplayUser()
+	s.flushReplayUserCtx(hctx)
 	restored := snapshotFromNewProvider(res, s.provider(), initRes)
 	s.mu.Lock()
 	s.sessionID = res.SessionID
 	// The merge. Models come from the result (else initialize's modelState),
-	// modes from the result else the provider's fallback — grok and gx return
+	// modes from the result else the provider's fallback — grok returns
 	// neither modes nor configOptions on a load — so the config chips are
 	// simply absent after a resume, which plan 013 §4 documents. Tools,
 	// Subagents, Todos, Commands, Plugins and Title keep whatever the replay
@@ -1259,19 +1422,47 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// restored snapshot is installed", so the delta that says what was
 	// installed has to be committed ahead of it (§3.8's ordering rule for a
 	// flush behind a boundary).
-	s.flushDelta()
+	_ = s.log.Flush(hctx, s.done)
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
-	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
-	return nil
+	s.emitCtx(hctx, Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
+	if hctx.Err() != nil {
+		return context.Cause(hctx)
+	}
+	// The one boundary (review C4 item 5): what claude sent after the load's
+	// reply was held until here, and is routed now as live, foreign turns
+	// and all, behind the end bracket. A hold that failed — past its bounds,
+	// or its load's context over — fails the load (review C4b item 6).
+	return client.ReplayDone()
 }
 
 // flushReplayUser emits the coalesced replayed prompt as exactly one EventUser.
 // The builder is drained under the lock, so the read loop and Start racing to
 // flush it cannot emit the same text twice.
-func (s *session) flushReplayUser() {
+func (s *session) flushReplayUser() { s.flushReplayUserCtx(context.Background()) }
+
+// sessionHooks are one session's test seams, nil in production. They are the
+// session's own, not package globals, because they run on goroutines a
+// session starts — its retirement, its client's dispatch — which can outlive
+// the test that made it: a global one test set while another test's leftover
+// goroutine read it was a data race (CI run 44171562439). A test sets them
+// before the goroutine that reads them starts.
+type sessionHooks struct {
+	// loadStall runs in a claude load right after the reply, with the context
+	// the load's own waits use.
+	loadStall func(context.Context)
+	// subagentPublish runs between a roster change and its events'
+	// publication.
+	subagentPublish func(acp.SubagentNotification)
+	// retireJoining runs in the retirement once the read loop has ended,
+	// before it joins the claude dispatch.
+	retireJoining func()
+}
+
+// flushReplayUserCtx is flushReplayUser whose publication gives up with ctx.
+func (s *session) flushReplayUserCtx(ctx context.Context) {
 	s.mu.Lock()
 	text := s.replayUser.String()
 	s.replayUser.Reset()
@@ -1279,7 +1470,7 @@ func (s *session) flushReplayUser() {
 	if text == "" {
 		return
 	}
-	s.emit(Event{Type: EventUser, Text: text})
+	s.emitCtx(ctx, Event{Type: EventUser, Text: text})
 }
 
 // discoverPlugins runs the provider's plugin scan for this workspace. It never
@@ -1345,7 +1536,12 @@ func (s *session) childEnv() func(string) string {
 	if s.opts.Env == nil {
 		return os.Getenv
 	}
-	env := s.opts.Env
+	return envLookup(s.opts.Env)
+}
+
+// envLookup is a lookup over env, KEY=value entries, the last entry of a key
+// winning.
+func envLookup(env []string) func(string) string {
 	return func(key string) string {
 		prefix := key + "="
 		for i := len(env) - 1; i >= 0; i-- {
@@ -1538,6 +1734,10 @@ func (s *session) claim(text string) func(context.Context) (Result, error) {
 	if s.claimed || s.inPrompt {
 		return func(context.Context) (Result, error) { return Result{}, acp.ErrPromptInFlight }
 	}
+	if f := s.gate.fatal; f != nil {
+		// The login gate stopped this session: no prompt goes anywhere.
+		return func(context.Context) (Result, error) { return Result{}, f }
+	}
 	s.claimed = true
 	s.cancelling = false
 	wire := &turnWire{done: make(chan struct{})}
@@ -1592,6 +1792,12 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// so a caller that gives up here gives up only its claim. Its refusal comes
 	// back the same way: the slot was already another prompt's, and returning
 	// here spends no turn number and rolls nothing back.
+	// A reset of claude's fast mode still in flight is waited for, and a
+	// session it stopped refuses the prompt (review F1): no turn goes out
+	// while fast mode may be on.
+	if err := s.awaitFastFix(ctx); err != nil {
+		return Result{}, err
+	}
 	abort, err := s.awaitCatalog(ctx, text)
 	if err != nil {
 		return Result{}, err
@@ -1642,6 +1848,9 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
+	myTurn := s.turn
+	// A turn of craze's own starts a run of its own (review C4 item 11).
+	s.textRun = ""
 	s.token = token
 	// A new turn: it has not ended, so an interjection is live again. No
 	// cancel has been asked for it either — the withdraw above says so.
@@ -1721,6 +1930,10 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.token = TurnToken{}
 		s.doneEmitted = prevDone
 		s.mu.Unlock()
+		if s.provider().isClaude() && errors.Is(err, acp.ErrForeignTurn) {
+			// The text waits for the agent's turn, wherever it came from.
+			return Result{}, ErrForeignTurnRequeue
+		}
 		return Result{}, err
 	}
 	// An agent that refused the image blocks (-32602) before doing anything
@@ -1741,12 +1954,40 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.mu.Lock()
 	s.doneEmitted = true
 	s.mu.Unlock()
+	if err != nil {
+		// A claude prompt error is classified by its errorKind (§ D4), and
+		// its rate limit read by the overage guard (§ D3), whose trip stops
+		// the session and is what the turn ends with.
+		err = s.classifyPromptErr(err)
+	} else {
+		s.claudeTurnUsage(res)
+	}
+	if f := s.fatalErr(); f != nil {
+		// The login gate, or the overage guard, stopped the session under
+		// this turn (live_claude.go, claude_overage.go): the turn ends with
+		// why, whatever the closed connection said.
+		err = f
+	}
+	if err == nil {
+		// A claude turn that stopped short of its end is an agent error
+		// naming why (plan 052 § B8).
+		if stop := refusedStopReason(s.provider(), res.StopReason); stop != nil {
+			err = stop
+		}
+	}
 	// Before the terminal event, whichever it is: every ask this turn still
 	// holds ends now, and the outbox is drained, so a late opening and every
 	// turn_ended ending are in the record ahead of the ending that says the turn
 	// is over (plan 021 §3.6).
 	s.endAskTurn(token)
 	if err != nil {
+		// A tool the failed turn left running ends with it (plan 052 § B9):
+		// no agent sends a terminal update for a call its own failure — or
+		// its exit — cut short, and a row left in progress would spin for
+		// ever. Every dialect alike. Ported from t3code's 47f90ee2e9 and
+		// 623047ccfd, which close open tool calls when the prompt fails or
+		// the process dies.
+		s.closeInFlightTools(toolFailed, myTurn)
 		// The error goes out first, so a consumer already in its error state
 		// by the time the engine's chain policy clears its own queue at
 		// settlement (plan 021 §3.5) — this session has none of its own any
@@ -1757,10 +1998,12 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.scanner.request()
 		return Result{}, err
 	}
+	kept := false
 	if res.StopReason == acp.StopCancelled {
-		s.closeInFlightTools(acp.StopCancelled)
+		s.closeInFlightTools(acp.StopCancelled, myTurn)
+		kept = s.keptPlanning(token)
 	}
-	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
+	s.emit(Event{Type: EventDone, StopReason: res.StopReason, KeptPlanning: kept})
 	// Every turn of craze's own that ran — done or cancelled here, failed
 	// above — is a trigger for the disk skills (plan 043 P5): a turn is what
 	// writes a SKILL.md. After the terminal event, and asking only: the walk
@@ -1799,9 +2042,19 @@ func refusedBeforeWire(err error) bool {
 // gets a terminal tool_call_update, so without this its row spins forever and
 // the status row keeps counting it. Cursor closes its own tools, so this
 // finds nothing there.
-func (s *session) closeInFlightTools(status string) {
+//
+// turn is the ending turn's number: on claude only the tools that turn opened
+// are closed (C8 K7), never one a turn of the agent's own opened after the
+// reply — its own ending closes those. turn 0 closes every open tool (the
+// agent gone). Other providers close every open tool, as they always have.
+func (s *session) closeInFlightTools(status string, turn int) {
 	s.mu.Lock()
-	ids := append([]string(nil), s.toolOrder...)
+	var ids []string
+	for _, id := range s.toolOrder {
+		if turn == 0 || !s.provider().isClaude() || s.toolOwner[id] == turn {
+			ids = append(ids, id)
+		}
+	}
 	s.mu.Unlock()
 	for _, id := range ids {
 		// The in-flight check happens under the merge lock: a terminal
@@ -1843,6 +2096,10 @@ func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutco
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// claude's model in use belongs to the options it was reported under (L3
+	// F1): checked after the set's own delta (deferred, so it follows the
+	// return's).
+	defer s.inUseCheckLocked()
 	// Steps (1) to (3) of design 2's order — CurrentModel from the installed
 	// catalog, the marker against it, no mark — were the reply's install's,
 	// on the read loop (adoptModelLocked); this is (4), the one delta.
@@ -1964,6 +2221,8 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// After the mode's own delta (deferred, so it follows the return's).
+	defer s.inUseCheckLocked()
 	s.snap.CurrentMode = modeID
 	// Event.Mode stays empty: it is what an *agent*-initiated update fills, and
 	// a client retires a plan offer on it (plan 021 correction 20).
@@ -2041,6 +2300,16 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 		return SetOutcome{}, ErrStaleModel
 	}
 	isModel := isModelOptionID(id, s.snap.Config)
+	if s.provider().RefusesFast() {
+		// Claude's fast mode bills as extra usage (plan 052 § D3): no client
+		// turns it on.
+		if fast := FastOption(Snapshot{Provider: s.provider().Info(), Config: s.snap.Config}); fast != nil && fast.ID == id {
+			if _, on, ok := FastOnOff(fast); ok && value == on {
+				s.mu.Unlock()
+				return SetOutcome{}, claudeErr(errkind.Config, "%s", FastBillsExtra)
+			}
+		}
+	}
 	s.mu.Unlock()
 	var err error
 	if isModel {
@@ -2068,6 +2337,9 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 		st.Model = &cur
 	}
 	t := s.enqueueDeltaLocked(cause, Event{}, s.owedModelLocked(st))
+	// claude's model in use belongs to the options it was reported under
+	// (L3 F1): after the set's own delta.
+	s.inUseCheckLocked()
 	switch {
 	case model:
 		// A model change answers with the model, as SetModel does — even when
@@ -2153,7 +2425,32 @@ func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *
 	if st != nil && st.Model != nil && *st.Model == s.snap.CurrentModel {
 		s.modelUnannounced = false
 	}
-	return s.log.EnqueueTicket(base)
+	t := s.log.EnqueueTicket(base)
+	if s.provider().isClaude() && s.log.OutboxPastHardBound() {
+		// A state delta is kept — it is the session's state — but the
+		// outbox past its hard bound stops the session all the same.
+		s.readerStalled()
+	}
+	return t
+}
+
+// readerStalled stops a claude session whose events nobody has read for the
+// outbox's hard bound (review C5d item 3): through stopFor — the agent is
+// halted and closed, the turn running ends with the error — once, and off the
+// caller's goroutine, which may hold s.mu or be the read loop.
+func (s *session) readerStalled() {
+	if !s.stalledReader.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		s.log.Note(journal.DiagNote{Kind: "event_reader_stalled", Fields: map[string]any{"refused": s.log.outboxRefused.Load()}})
+		s.stopFor(errReaderStalled())
+	}()
+}
+
+// errReaderStalled is the error of a session stopped by readerStalled.
+func errReaderStalled() error {
+	return claudeErr(errkind.Internal, "craze's event reader stalled; the session was stopped")
 }
 
 // owedModelLocked is st with the Model section added, at CurrentModel, when a
@@ -2189,6 +2486,11 @@ func (s *session) Snapshot() Snapshot {
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
 	out.Subagents = snapshotSubagents(s.subagentOrder, s.subagents)
 	out.ForeignTurn = s.foreign
+	if s.snap.Usage != nil {
+		// claude's usage section (plan 052 § D1): its own copy.
+		c := *s.snap.Usage
+		out.Usage = &c
+	}
 	return out
 }
 
@@ -2212,6 +2514,21 @@ func (s *session) ForeignTurn() bool {
 // finished the wait — only what it already knew before giving up, which is
 // exactly what is reported alongside the error.
 func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
+	// A cancel asked for after a plan was kept planning is a cancel: the turn's
+	// cancelled ending is no longer the plan's alone (keptPlanning).
+	s.mu.Lock()
+	s.planKept = TurnToken{}
+	s.cancels++
+	// In progress from here until it returns, before anything else can look
+	// (review C3c 6): a plan handler that snapshots meanwhile cannot note
+	// keep planning (notePlanKept).
+	s.cancelsActive++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.cancelsActive--
+		s.mu.Unlock()
+	}()
 	client := s.clientRef()
 	if client == nil {
 		return CancelOutcome{Settled: true}, nil
@@ -2438,9 +2755,19 @@ func (s *session) Close() error {
 func (s *session) teardown() {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
+		if s.provider().isClaude() {
+			// The overage guard's kill and record write in flight finish
+			// first, bounded (review C5c items 1, 2): a close that ends the
+			// process must not abandon either.
+			s.joinOverage()
+		}
 		s.mu.Lock()
 		s.closed = true
 		close(s.done)
+		if s.fastTimer != nil {
+			// A fast reset's deadline outlives nothing (review C2c 3).
+			s.fastTimer.Stop()
+		}
 		client := s.client
 		s.mu.Unlock()
 		// The skill scan in flight is cancelled and every later request
@@ -2461,6 +2788,19 @@ func (s *session) teardown() {
 		s.askStop()
 		if client != nil {
 			s.closeErr = client.Close()
+			if n := client.StderrDropped(); n > 0 {
+				// claude's stderr sink was behind, and its queue dropped
+				// what it could not hold (review C5d item 8): said once.
+				s.log.Note(journal.DiagNote{Kind: "stderr_dropped", Fields: map[string]any{"chunks": n}})
+				s.diagLine(fmt.Sprintf("craze: %d chunks of the agent's stderr were dropped: its sink was behind", n))
+			}
+		}
+		if s.provider().isClaude() {
+			// Again, within what is left of the same bounds (review C5d item
+			// 2): a trip the read loop handled while the close was under way
+			// — its write, its stop — is joined too. The client is closed: no
+			// trip comes after this.
+			s.joinOverage()
 		}
 		// The child's stderr copy has finished by now (Client.Close waits for
 		// it), so this is where its last unterminated line can be noted — and
@@ -2491,19 +2831,27 @@ func (s *session) teardown() {
 // is an ordering nicety lost, never a reason to change the decision.
 func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.PermissionDecision {
 	ask := AskRequest{Kind: AskPermission, Body: AskBody{Permission: permissionBody(req)}}
+	if label := s.childLabel(a); label != "" {
+		ask.Body.Permission.Tool = strings.TrimSpace(ask.Body.Permission.Tool + " · " + label)
+	}
 	token, live := s.askToken(a)
 	if EffectiveApproval(s.opts).Permission == ApprovalAllow {
 		// Force. An option that allows it, or — when the request offers none —
 		// the cancel today's PickYoloAllow miss produced, now with a record
 		// saying policy did it (§2.3's "none at all" row).
 		ans := AskAnswer{Cancel: true}
-		if id, ok := acp.PickYoloAllow(req.Options); ok {
+		id, ok := s.provider().ForceOption(req.Options)
+		if ok {
 			ans = AskAnswer{OptionID: id}
 		}
-		rec := s.automaticAsk(token, ask, ans)
-		dec := permissionDecision(rec)
-		dec.Replied = s.reportedBy(rec.ID)
-		return dec
+		if ok || !s.provider().forceMissShowsCard() {
+			rec := s.automaticAsk(token, ask, ans)
+			dec := permissionDecision(rec)
+			dec.Replied = s.reportedBy(rec.ID)
+			return dec
+		}
+		// Claude with no allow_once: force answers nothing, and the card
+		// shows (plan 052 § B6).
 	}
 	if !live {
 		return permissionDecision(s.staleAsk(ask))
@@ -2518,6 +2866,9 @@ func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.Per
 // with each question's first option and reports what it sent.
 func (s *session) onAskQuestion(a acp.Arrival, req acp.AskQuestionRequest) acp.AskDecision {
 	ask := AskRequest{Kind: AskQuestion, Body: AskBody{Question: questionBody(req)}}
+	if label := s.childLabel(a); label != "" {
+		ask.Body.Question.Title = strings.TrimSpace(label + " · " + ask.Body.Question.Title)
+	}
 	token, live := s.askToken(a)
 	if EffectiveApproval(s.opts).Question == ApprovalFirstOption {
 		rec := s.automaticAsk(token, ask, AskAnswer{Answers: acp.AskAutoAnswers(req)})
@@ -2539,7 +2890,7 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 	for _, q := range req.Questions {
 		opts := make([]Option, 0, len(q.Options))
 		for _, o := range q.Options {
-			opts = append(opts, Option{ID: o.ID, Label: sanitizeText(o.Label)})
+			opts = append(opts, Option{ID: o.ID, Label: sanitizeText(o.Label), Description: sanitizeText(o.Description)})
 		}
 		if len(opts) == 0 {
 			// A question with no options still needs something to press; the
@@ -2552,6 +2903,8 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 			Prompt:        sanitizeText(q.Prompt),
 			Options:       opts,
 			AllowMultiple: q.AllowMultiple,
+			AllowText:     q.AllowText,
+			Required:      q.Required,
 		})
 	}
 	return out
@@ -2572,12 +2925,19 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 		dec.Replied = s.reportedBy(rec.ID)
 		return dec
 	case ApprovalReturn:
+		if s.provider().isClaude() {
+			return s.claudeReturnPlan(token, live, ask)
+		}
 		return s.returnPlan(a, token, live, ask)
 	}
 	if !live {
 		return planDecision(s.staleAsk(ask))
 	}
+	gen, calm := s.cancelGen()
 	rec, replied := s.decideAsk(a, token, ask)
+	if rec.Outcome == AskAnswered && rec.Answer.Reject && calm {
+		s.notePlanKept(token, gen)
+	}
 	dec := planDecision(rec)
 	dec.Replied = replied
 	return dec
@@ -2720,18 +3080,20 @@ func (s *session) onEarlyAnswer(e acp.EarlyAnswer) {
 	if !ok {
 		return
 	}
-	outcome := AskCancelled
+	outcome, by := AskCancelled, AskByProvider
 	switch e.Reason {
 	case acp.EarlyStaleTurn:
 		outcome = AskTurnEnded
 	case acp.EarlyClosed:
 		outcome = AskClosing
+	case acp.EarlyWithdrawn:
+		by = AskByWithdrawn
 	}
 	// The token is only the record's: the ask is resolved as it is minted, so
 	// no turn's lifecycle can reach it. A request that belonged to no turn of
 	// craze's own says so.
 	token, _ := s.askToken(e.Arrival())
-	s.asks.AnsweredEarly(token, req, outcome, AskByProvider)
+	s.asks.AnsweredEarly(token, req, outcome, by)
 }
 
 // earlyAskRequest is one early-answered request as the registry takes it. The
@@ -2822,7 +3184,7 @@ func (s *session) askToken(a acp.Arrival) (TurnToken, bool) {
 func (s *session) decideAsk(a acp.Arrival, token TurnToken, req AskRequest) (AskRecord, func(acp.ReplyDisposition)) {
 	ctx := s.askCall(a)
 	if ctx.Err() != nil {
-		rec := s.asks.AnsweredEarly(token, req, AskCancelled, AskByCall)
+		rec := s.asks.AnsweredEarly(token, req, AskCancelled, callEndedBy(ctx))
 		s.flushAsks()
 		return rec, s.reportedBy(rec.ID)
 	}
@@ -2954,10 +3316,13 @@ func permissionDecision(rec AskRecord) acp.PermissionDecision {
 func askDecision(rec AskRecord) acp.AskDecision {
 	switch rec.Outcome {
 	case AskAnswered, AskAutomatic:
-		if rec.Answer.Skip {
+		switch {
+		case rec.Answer.Cancel:
+			return acp.AskDecision{Cancelled: true}
+		case rec.Answer.Skip:
 			return acp.AskDecision{Skip: true}
 		}
-		return acp.AskDecision{Answers: rec.Answer.Answers}
+		return acp.AskDecision{Answers: rec.Answer.Answers, Text: rec.Answer.Text}
 	default:
 		return acp.AskDecision{Cancelled: true}
 	}
@@ -3049,7 +3414,9 @@ type sessionUpdateWire struct {
 	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string                 `json:"currentModeId,omitempty"`
 	ConfigOptions     json.RawMessage        `json:"configOptions,omitempty"`
-	Entries           json.RawMessage        `json:"entries,omitempty"`
+	// MessageID is claude's message id on a text or thought chunk.
+	MessageID string          `json:"messageId,omitempty"`
+	Entries   json.RawMessage `json:"entries,omitempty"`
 }
 
 func (s *session) onUpdate(n acp.SessionNotification) {
@@ -3058,14 +3425,14 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		return
 	}
 	if n.Child != "" {
-		s.onChildUpdate(n.Child, n.ToolName, u)
+		s.onChildUpdate(n.Child, n.ToolName, u, n.Update)
 		return
 	}
 	if s.replaying.Load() {
 		// A replayed prompt arrives in chunks and has to draw one user block,
 		// so the chunks are coalesced and pushed out by the next update of
 		// any other kind (or by replay end). Outside a replay the case is
-		// deliberately absent: grok and gx echo the user's own prompt live,
+		// deliberately absent: grok echoes the user's own prompt live,
 		// and emitting that would double every user block in the TUI and add
 		// user lines to `craze prompt --json`.
 		if u.SessionUpdate == updateUserMessage {
@@ -3078,15 +3445,30 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.flushReplayUser()
 	}
 	switch u.SessionUpdate {
+	case acp.UpdateSessionMessage:
+		// claude: the root's copy of a prompt it sent a child (§ E3).
+		s.claudeSessionMessage(n.Update)
+	case acp.UpdateUsage:
+		// claude: the context meter and the model in use (§ D1).
+		s.onClaudeUsage(n.Update)
+	case acp.UpdateCompaction:
+		// claude: a compaction, as a transcript note (§ B2).
+		s.onClaudeCompaction(n.Update)
+	case acp.UpdateNotice:
+		// claude: one of Claude Code's notices, as a transcript note (§ B2).
+		s.onClaudeNotice(n.Update)
 	case acp.UpdateAgentMessage:
-		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
+		s.emit(Event{Type: EventText, Text: s.rootText(u)})
 	case acp.UpdateAgentThought:
+		s.endTextRun()
 		s.emit(Event{Type: EventThought, Text: messageText(u.Content)})
 	case acp.UpdateToolCall, acp.UpdateToolCallUpd:
 		delta, ok := toolDeltaFromWire(u)
 		if !ok {
 			return
 		}
+		s.endTextRun()
+		s.noteToolOwner(delta.id)
 		delta.wireName = n.ToolName
 		s.publishToolDelta(delta)
 	case acp.UpdateAvailableCommands:
@@ -3134,7 +3516,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			close(s.commandsApplied)
 		}
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 		// A new catalog is a trigger for the skills too (plan 043 P5): grok
 		// advertises the skills it has loaded, and one created since the last
 		// scan is as likely to be on disk. Asked for with s.mu released, and
@@ -3151,8 +3533,9 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			// Event.Mode as well as the section, because this is the agent's
 			// own change and a client retires a plan offer on that field.
 			s.enqueueDeltaLocked("", Event{Mode: mode}, &StateDelta{Mode: &mode})
+			s.inUseCheckLocked()
 			s.mu.Unlock()
-			s.flushDelta()
+			s.flushReadLoopDelta()
 		}
 	case acp.UpdateSessionInfo:
 		// session_info_update reuses the tool title field on the wire.
@@ -3179,7 +3562,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// folds state.
 		s.enqueueDeltaLocked("", Event{Text: title}, &StateDelta{Title: &title})
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
@@ -3190,6 +3573,8 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// or the model revision move (r23 finding 3).
 		moved := s.applyConfigLocked(cfg)
 		s.markAgentWroteLocked(&s.agentWrote.config)
+		// Claude's fast mode turned on is turned off again (plan 052 § D3).
+		s.keepFastOffLocked(cfg)
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
 		if moved {
 			model := s.snap.CurrentModel
@@ -3197,8 +3582,11 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			s.markAgentWroteLocked(&s.agentWrote.model)
 		}
 		s.enqueueDeltaLocked("", Event{}, st)
+		// claude's model in use belongs to the options it was reported
+		// under (L3 F1).
+		s.inUseCheckLocked()
 		s.mu.Unlock()
-		s.flushDelta()
+		s.flushReadLoopDelta()
 	case acp.UpdatePlan:
 		if !s.provider().planUpdatesAreTodos {
 			return
@@ -3363,6 +3751,12 @@ func (s *session) onSettingsReply(r acp.SettingsReply) error {
 	s.installReplyLocked(r, cfg)
 	if s.snap.CurrentModel != before {
 		s.modelUnannounced = true
+	}
+	if s.provider().isClaude() {
+		// A reply's catalog is enforced as an update's is (C8 K4): a model
+		// switch back that returns fast on starts a reset, whatever an
+		// earlier reset concluded while the option was hidden.
+		s.keepFastOffLocked(s.snap.Config)
 	}
 	return nil
 }
@@ -3536,6 +3930,17 @@ func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 // which is why every caller hands emit a payload of its own (cloneTool,
 // cloneSubagent, a copied slice): nothing may change it while it is read.
 // No caller holds s.mu here; the log's boundary is never taken under it.
+// flushReadLoopDelta is flushDelta for a delta the read loop enqueued: on
+// claude it is not waited for (review C5c item 5) — the dispatch is held, and a
+// stalled reader must never keep the read loop from a tripping usage behind it;
+// the queue keeps the delta's order (emitCtx).
+func (s *session) flushReadLoopDelta() {
+	if s.provider().isClaude() {
+		return
+	}
+	s.flushDelta()
+}
+
 func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
@@ -3548,6 +3953,27 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 		s.log.Abandoned()
 		return false
 	default:
+	}
+	if s.provider().isClaude() {
+		// claude's publication never waits for a reader (review C5c items 5,
+		// 10): the read loop that emits must always reach a tripping usage
+		// behind what it emits, so every event is queued — in the one order,
+		// beside the state deltas queued the same way. An event that carries
+		// an error, which the queue does not keep, is published directly,
+		// once the queue ahead of it is through.
+		if ev.Err == nil {
+			if !s.log.EnqueueBounded(ev) {
+				// Past the hard bound: nobody has read for that long, and
+				// the session is stopped rather than hold more (review C5d
+				// item 3).
+				s.readerStalled()
+				return false
+			}
+			return true
+		}
+		if s.log.Pending() {
+			_ = s.log.Flush(ctx, s.done)
+		}
 	}
 	return s.log.Publish(ctx, s.done, ev)
 }

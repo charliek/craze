@@ -2,7 +2,7 @@
 
 craze is a terminal UI and CLI for Linux and macOS that drives a coding agent
 over ACP (the Agent Client Protocol): **Cursor** (`cursor-agent`), **Grok**
-(`grok`), **gx** (a third-party fork of the Grok CLI), or craze's own **native**
+(`grok`), or craze's own **native**
 agent, which runs inside craze against a model provider's API or a ChatGPT plan
 with no other CLI to install. You own the chrome; the provider still runs the
 agent.
@@ -51,6 +51,10 @@ and want one fast, scriptable front end for several of them.
   [failure kinds](docs/reference/cli.md#failure-kinds),
   [what a dead host leaves running](docs/reference/cli.md#what-a-dead-host-leaves-running),
   [a waiter run detached](docs/reference/cli.md#a-waiter-run-detached)
+- **Claude on your plan**: your own Claude Code, on your Claude Pro or Max
+  plan, through the `claude-agent-acp` adapter — listed as `claude`, with its
+  plan usage on the status row and a guard that stops a session Claude says is
+  billing extra usage. [Claude on your plan](docs/getting-started/claude.md)
 - **Claude Code sub-agents**: a plugin that hands a task to a craze session.
   [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - **`/btw` side questions**: ask without adding to the session.
@@ -85,7 +89,7 @@ sudo apt install craze
 The [Quick Start](docs/getting-started/quick-start.md#install) has the direct
 `.deb`, `go install`, building from source and what `craze version` reports. To
 run craze you also need a way to reach a model: the native provider (an API key
-or a ChatGPT plan), or `cursor-agent`, `grok` or `gx` installed and logged in
+or a ChatGPT plan), or `cursor-agent` or `grok` installed and logged in
 ([prerequisites](docs/getting-started/quick-start.md#prerequisites)).
 Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
@@ -93,7 +97,7 @@ Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
 ```shell
 craze                       # pick a provider, then the TUI in the current directory
-craze --provider grok       # skip the picker (cursor, grok, gx or native)
+craze --provider grok       # skip the picker (cursor, grok, claude or native)
 craze auth login fireworks  # connect a native provider; `craze auth login chatgpt` signs in with a ChatGPT plan
 craze --provider native     # start a native session
 craze -c                    # continue the newest session in this workspace
@@ -123,6 +127,7 @@ Sources live under `docs/`:
 
 - [Quick Start](docs/getting-started/quick-start.md)
 - [Upgrading](docs/getting-started/upgrading.md)
+- [Claude on your plan](docs/getting-started/claude.md)
 - [Claude Code sub-agents](docs/getting-started/claude-code.md)
 - [CLI](docs/reference/cli.md)
 - [TUI](docs/reference/tui.md)
@@ -149,3 +154,15 @@ path, and `craze new --wait` and `craze send` drive sessions from other programs
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+- [t3code](https://github.com/pingdotgg/t3code) (MIT, © T3 Tools Inc.) is the
+  reference design for the Claude provider and much of craze's ACP handling;
+  what is ported is listed in [NOTICE](NOTICE).
+- [`claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp)
+  (Apache-2.0) is the adapter the Claude provider spawns; craze does not
+  bundle it.
+- [opencode](https://github.com/anomalyco/opencode) (MIT) and
+  [pandacode](https://github.com/aicodeking/pandacode) are references for
+  parts of the native harness and the Claude provider.

@@ -1,0 +1,1118 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// The claude foreign-turn state machine (plan 052 § E1) and the child
+// registry (§ E3, § G1), driven over a raw pipe with a fake clock: every timer
+// fires when the test says, and each test asserts the exact sequence of
+// announcements and updates the client handed on.
+
+// fakeClock is a Clock whose timers fire only in Advance, on the caller's
+// goroutine, in deadline order.
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	at             time.Time
+	d              time.Duration
+	f              func()
+	stopped, fired bool
+	clk            *fakeClock
+}
+
+func (t *fakeTimer) Stop() bool {
+	t.clk.mu.Lock()
+	defer t.clk.mu.Unlock()
+	live := !t.stopped && !t.fired
+	t.stopped = true
+	return live
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{now: time.Unix(1_800_000_000, 0)} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) AfterFunc(d time.Duration, f func()) Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t := &fakeTimer{at: c.now.Add(d), d: d, f: f, clk: c}
+	c.timers = append(c.timers, t)
+	return t
+}
+
+// Advance moves the clock on by d and runs every live timer now due.
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	var due []*fakeTimer
+	for _, t := range c.timers {
+		if !t.stopped && !t.fired && !t.at.After(c.now) {
+			t.fired = true
+			due = append(due, t)
+		}
+	}
+	c.mu.Unlock()
+	sort.SliceStable(due, func(i, j int) bool { return due[i].at.Before(due[j].at) })
+	for _, t := range due {
+		t.f()
+	}
+}
+
+// lastFunc is the newest timer's callback, armed for d, whatever became of it:
+// a test calls it by hand to play a callback that escaped its Stop.
+func (c *fakeClock) lastFunc(d time.Duration) func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.timers) - 1; i >= 0; i-- {
+		if c.timers[i].d == d {
+			return c.timers[i].f
+		}
+	}
+	return nil
+}
+
+type rigLog struct {
+	mu  sync.Mutex
+	evs []string
+}
+
+func (l *rigLog) add(s string) {
+	l.mu.Lock()
+	l.evs = append(l.evs, s)
+	l.mu.Unlock()
+}
+
+func (l *rigLog) get() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.evs...)
+}
+
+func foreignLine(f ForeignTurn) string {
+	if f.Running {
+		return "start " + f.ID + " " + f.Reason
+	}
+	s := "end " + f.ID + " " + f.Reason
+	if f.Cancelled {
+		s += " cancelled"
+	}
+	if f.Silent {
+		s += " silent"
+	}
+	if f.Err != nil {
+		s += " err"
+	}
+	return s
+}
+
+type claudeRig struct {
+	*rawPipe
+	// root is the session id session/new answers: rigRoot unless a fixture
+	// names its own.
+	root string
+	clk  *fakeClock
+	log  *rigLog
+	// subs are the sub-agent notifications, in order.
+	mu   sync.Mutex
+	subs []SubagentNotification
+}
+
+const rigRoot = "root"
+
+func newClaudeRig(t *testing.T) *claudeRig {
+	t.Helper()
+	p := newRawPipeDialect(t, DialectClaude)
+	r := &claudeRig{rawPipe: p, root: rigRoot, clk: newFakeClock(), log: &rigLog{}}
+	p.client.SetClock(r.clk)
+	p.client.SetUpdateHandler(func(n SessionNotification) {
+		k := sessionUpdateKind(n.Update)
+		if n.Child != "" {
+			k += "@" + n.Child
+		}
+		r.log.add(k)
+	})
+	p.client.SetForeignTurnHandler(func(f ForeignTurn) { r.log.add(foreignLine(f)) })
+	p.client.SetSubagentHandler(func(n SubagentNotification) {
+		r.mu.Lock()
+		r.subs = append(r.subs, n)
+		r.mu.Unlock()
+		s := "sub " + n.ChildSessionID + " " + n.State
+		if n.Evicted {
+			s += " evicted"
+		}
+		r.log.add(s)
+	})
+	return r
+}
+
+// ready runs session/new to its reply, pushing pre before the reply (they are
+// buffered: no session yet), so the machine is ready when it returns.
+func (r *claudeRig) ready(t *testing.T, pre ...string) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.client.NewSession(context.Background(), t.TempDir(), SessionParams{})
+		done <- err
+	}()
+	req := r.readWithin(t, 3*time.Second, "session/new")
+	for _, u := range pre {
+		r.pushUpdate(t, r.root, u)
+	}
+	r.answerWith(t, req, `{"sessionId":"`+r.root+`"}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// push writes root updates and waits until the client has dispatched them.
+func (r *claudeRig) push(t *testing.T, updates ...string) {
+	t.Helper()
+	r.pushOn(t, rigRoot, updates...)
+}
+
+// pushOn writes updates on sid and waits until they are dispatched.
+func (r *claudeRig) pushOn(t *testing.T, sid string, updates ...string) {
+	t.Helper()
+	for _, u := range updates {
+		r.pushUpdate(t, sid, u)
+	}
+	r.roundTrip(t)
+}
+
+func (r *claudeRig) want(t *testing.T, want ...string) {
+	t.Helper()
+	got := r.log.get()
+	if !slices.Equal(got, want) {
+		t.Fatalf("the client handed on\n %q\nwant\n %q", got, want)
+	}
+}
+
+// prompt sends a prompt and answers the request it reads, returning the
+// request and the call's result channel.
+func (r *claudeRig) prompt(t *testing.T) (*Message, chan error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.client.Prompt(context.Background(), "go")
+		done <- err
+	}()
+	return r.readWithin(t, 3*time.Second, "session/prompt"), done
+}
+
+func chunk(text string) string {
+	return `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":` + fmt.Sprintf("%q", text) + `}}`
+}
+
+const (
+	usageNoCost = `{"sessionUpdate":"usage_update","used":1,"size":2}`
+	usageCost   = `{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0.1,"currency":"USD"},"_meta":{"_claude/origin":{"kind":"task-notification"}}}`
+)
+
+func toolCall(id, status string) string {
+	return `{"sessionUpdate":"tool_call","toolCallId":"` + id + `","status":"` + status + `","title":"t","kind":"execute","_meta":{"claudeCode":{"toolName":"Bash"}}}`
+}
+
+func toolUpd(id, status string) string {
+	return `{"sessionUpdate":"tool_call_update","toolCallId":"` + id + `","status":"` + status + `"}`
+}
+
+var grace = DefaultForeignTiming.Grace
+
+// TestClaudeForeignWakeEndsAfterTheGrace: a wake's content opens one foreign
+// turn ahead of the content, its cost usage makes a candidate, and the turn
+// ends only once the quiet grace has passed.
+func TestClaudeForeignWakeEndsAfterTheGrace(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, usageNoCost, chunk("banana"), usageCost)
+	r.clk.Advance(grace - time.Millisecond)
+	r.want(t, "usage_update", "start claude-1 background", "agent_message_chunk", "usage_update")
+	r.clk.Advance(time.Millisecond)
+	r.want(t, "usage_update", "start claude-1 background", "agent_message_chunk", "usage_update", "end claude-1 background")
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("phase %s after the ending", got)
+	}
+}
+
+// TestClaudeForeignPlaceholderWithinTheGrace: a num_turns:0 placeholder's
+// usage followed by content within the grace is one turn; only the follow-up's
+// own cost usage ends it.
+func TestClaudeForeignPlaceholderWithinTheGrace(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), usageCost)
+	r.clk.Advance(grace / 2)
+	r.push(t, chunk("follow-up"))
+	r.clk.Advance(10 * grace)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "agent_message_chunk")
+	r.push(t, usageCost)
+	r.clk.Advance(grace)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "agent_message_chunk", "usage_update", "end claude-1 background")
+}
+
+// TestClaudeForeignPlaceholderAfterTheGrace: a follow-up whose first content
+// comes after the grace opens a second foreign turn (the v1 contract, R2-3).
+func TestClaudeForeignPlaceholderAfterTheGrace(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), usageCost)
+	r.clk.Advance(grace)
+	r.push(t, chunk("follow-up"))
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "end claude-1 background",
+		"start claude-2 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignFollowUpAbsorbedByAQueuedPrompt: when a queued prompt goes
+// out between the placeholder's ending and the follow-up, the follow-up is the
+// prompted turn's and opens nothing; after the prompt's reply, content opens.
+func TestClaudeForeignFollowUpAbsorbedByAQueuedPrompt(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), usageCost)
+	r.clk.Advance(grace)
+	req, done := r.prompt(t)
+	r.push(t, chunk("follow-up"))
+	r.answerWith(t, req, `{"stopReason":"end_turn"}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	r.push(t, chunk("later"))
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "end claude-1 background",
+		"agent_message_chunk", "start claude-2 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignNeverCompletesWithAToolOpen: a candidate waits for the open
+// tool call's close, then the grace.
+func TestClaudeForeignNeverCompletesWithAToolOpen(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), toolCall("t1", "in_progress"), usageCost)
+	r.clk.Advance(30 * grace)
+	if slices.Contains(r.log.get(), "end claude-1 background") {
+		t.Fatal("the turn ended with its tool call open")
+	}
+	r.push(t, toolUpd("t1", "completed"))
+	r.clk.Advance(grace - time.Millisecond)
+	if slices.Contains(r.log.get(), "end claude-1 background") {
+		t.Fatal("the turn ended before the grace after the close")
+	}
+	r.clk.Advance(time.Millisecond)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "tool_call", "usage_update", "tool_call_update", "end claude-1 background")
+}
+
+// TestClaudeForeignToolUpdateInsideTheGrace: a tool_call_update inside the
+// grace is applied and does not cancel the candidate.
+func TestClaudeForeignToolUpdateInsideTheGrace(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), toolCall("t1", "completed"), usageCost)
+	r.clk.Advance(grace / 2)
+	r.push(t, toolUpd("t1", "completed"))
+	r.clk.Advance(grace / 2)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "tool_call", "usage_update", "tool_call_update", "end claude-1 background")
+}
+
+// TestClaudeForeignSilence: a wake that sends no usage ends by silence after
+// the limit, and with a tool call open only after the longer one.
+func TestClaudeForeignSilence(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"))
+	r.clk.Advance(DefaultForeignTiming.Silence - time.Millisecond)
+	r.push(t, chunk("b"))
+	r.clk.Advance(DefaultForeignTiming.Silence - time.Millisecond)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "agent_message_chunk")
+	r.clk.Advance(time.Millisecond)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "agent_message_chunk", "end claude-1 background silent")
+
+	r.push(t, toolCall("t2", "in_progress"))
+	r.clk.Advance(DefaultForeignTiming.Silence)
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("a turn with a tool open ended at the short limit: %s", got)
+	}
+	r.clk.Advance(DefaultForeignTiming.SilenceToolOpen - DefaultForeignTiming.Silence)
+	if got := r.log.get(); got[len(got)-1] != "end claude-2 background silent" {
+		t.Fatalf("the long limit did not end it: %q", got)
+	}
+}
+
+// TestClaudeForeignTrailingAndIdleTrafficOpenNothing: a trailing
+// tool_call_update, a tool_call re-sent for a call already seen, idle notices,
+// a plan, usage with cost, sub-agent traffic and kinds this build does not
+// know open nothing; the session-level kinds neither.
+func TestClaudeForeignTrailingAndIdleTrafficOpenNothing(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	req, done := r.prompt(t)
+	r.push(t, toolCall("t1", "in_progress"))
+	r.answerWith(t, req, `{"stopReason":"end_turn"}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	idle := []string{
+		toolUpd("t1", "completed"),
+		toolCall("t1", "completed"),
+		usageCost,
+		`{"sessionUpdate":"notice","notice":{"text":"x"}}`,
+		`{"sessionUpdate":"compaction_summary_chunk","content":{"type":"text","text":"s"}}`,
+		`{"sessionUpdate":"compaction_update","status":"completed"}`,
+		`{"sessionUpdate":"plan","entries":[]}`,
+		`{"sessionUpdate":"session_message","messageId":"m"}`,
+		`{"sessionUpdate":"available_commands_update","availableCommands":[]}`,
+		`{"sessionUpdate":"config_option_update","configOptions":[]}`,
+		`{"sessionUpdate":"current_mode_update","currentModeId":"default"}`,
+		`{"sessionUpdate":"session_info_update","title":"t"}`,
+		`{"sessionUpdate":"something_new"}`,
+	}
+	r.push(t, idle...)
+	for _, e := range r.log.get() {
+		if strings.HasPrefix(e, "start") {
+			t.Fatalf("idle traffic opened a foreign turn: %q", r.log.get())
+		}
+	}
+	r.clk.Advance(DefaultForeignTiming.SilenceToolOpen)
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("phase %s", got)
+	}
+}
+
+// TestClaudeForeignIdleCompaction: compaction_update in_progress while idle is
+// a model call, and opens a compaction turn.
+func TestClaudeForeignIdleCompaction(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, `{"sessionUpdate":"compaction_update","status":"in_progress"}`, usageCost)
+	r.clk.Advance(grace)
+	r.want(t, "start claude-1 compaction", "compaction_update", "usage_update", "end claude-1 compaction")
+}
+
+// TestClaudeForeignUserEchoOpens: a user_message_chunk outside a replay is a
+// prompt the agent took that craze did not send: it opens.
+func TestClaudeForeignUserEchoOpens(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, `{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}`)
+	r.want(t, "start claude-1 background", "user_message_chunk")
+}
+
+// TestClaudeForeignNothingBeforeSessionNewReturns: what the adapter sends
+// before session/new's reply opens nothing, and is handed on in order; root
+// content after the reply opens a turn.
+func TestClaudeForeignNothingBeforeSessionNewReturns(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t, chunk("early"), toolCall("t0", "in_progress"))
+	r.push(t, chunk("after"))
+	r.want(t, "agent_message_chunk", "tool_call", "start claude-1 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignNothingDuringAReplay: a load's replay opens nothing; the
+// reply ends the replay on the read loop, so the very next update is judged by
+// the rules.
+func TestClaudeForeignNothingDuringAReplay(t *testing.T) {
+	r := newClaudeRig(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.client.LoadSession(context.Background(), rigRoot, t.TempDir(), SessionParams{})
+		done <- err
+	}()
+	req := r.readWithin(t, 3*time.Second, "session/load")
+	r.pushUpdate(t, rigRoot, `{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old"}}`)
+	r.pushUpdate(t, rigRoot, chunk("old reply"))
+	r.answerWith(t, req, `{}`)
+	r.pushUpdate(t, rigRoot, chunk("new"))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	r.roundTrip(t)
+	// Live, but held until the session's replay is over (review C4 item 5).
+	r.want(t, "user_message_chunk", "agent_message_chunk")
+	if err := r.client.ReplayDone(); err != nil {
+		t.Fatal(err)
+	}
+	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk")
+	r.push(t, chunk("after"))
+	r.want(t, "user_message_chunk", "agent_message_chunk", "start claude-1 background", "agent_message_chunk", "agent_message_chunk")
+}
+
+// TestClaudeForeignPromptRefusedAndPromptedAbsorbs: a prompt cannot start
+// while foreign; once the turn ends a prompt goes, and everything during it is
+// its own; the reply is processed in order, so an update right behind it on
+// the wire sees idle.
+func TestClaudeForeignPromptRefusedAndPromptedAbsorbs(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"))
+	if _, err := r.client.Prompt(context.Background(), "x"); !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("a prompt during a foreign turn = %v; want ErrForeignTurn", err)
+	}
+	if !r.client.ForeignTurnRunning() {
+		t.Fatal("ForeignTurnRunning false during a claude foreign turn")
+	}
+	r.push(t, usageCost)
+	r.clk.Advance(grace)
+	req, done := r.prompt(t)
+	r.pushUpdate(t, rigRoot, chunk("answer"))
+	r.answerWith(t, req, `{"stopReason":"end_turn"}`)
+	r.pushUpdate(t, rigRoot, chunk("wake again"))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	r.roundTrip(t)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "end claude-1 background",
+		"agent_message_chunk", "start claude-2 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignCancel: a cancel during a foreign turn writes
+// session/cancel and ends the turn cancelled after the grace; the cost usage
+// the stopped cycle sends restarts it, and content no longer holds it.
+func TestClaudeForeignCancel(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"), toolCall("t1", "in_progress"))
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- r.client.Cancel(context.Background()) }()
+	msg := r.readWithin(t, 3*time.Second, "session/cancel")
+	if msg.Method != MethodSessionCancel || !strings.Contains(string(msg.Params), `"sessionId":"root"`) {
+		t.Fatalf("the cancel wrote %s %s", msg.Method, msg.Params)
+	}
+	if err := <-cancelled; err != nil {
+		t.Fatal(err)
+	}
+	r.clk.Advance(grace / 2)
+	r.push(t, chunk("trailing"), usageCost)
+	r.clk.Advance(grace - time.Millisecond)
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("the cost usage did not restart the grace: %s", got)
+	}
+	r.clk.Advance(time.Millisecond)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "tool_call", "agent_message_chunk", "usage_update", "end claude-1 background cancelled")
+}
+
+// TestClaudeForeignStartedNewTurn: a stray startedNewTurn reply to a steer is
+// a foreign turn, opened on the read loop when the reply is read.
+func TestClaudeForeignStartedNewTurn(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.client.mu.Lock()
+	r.client.steering = true
+	r.client.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.client.Interject(context.Background(), "do it", "craze-1") }()
+	req := r.readWithin(t, 3*time.Second, "_session/steering")
+	r.answerWith(t, req, `{"outcome":"startedNewTurn"}`)
+	if err := <-done; !errors.Is(err, ErrSteerStartedTurn) {
+		t.Fatalf("steer = %v", err)
+	}
+	// Foreign from the reply itself, before anything of the turn is read.
+	r.want(t, "start claude-1 background")
+	if _, err := r.client.Prompt(context.Background(), "x"); !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("a prompt during the steered turn = %v; want ErrForeignTurn", err)
+	}
+	r.push(t, chunk("steered"))
+	r.want(t, "start claude-1 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignAnEndingAnnouncedBeforeTheNextStart parks a grace timer
+// between its decision and its announcement, with the read loop holding the
+// next turn's content at the dispatch lock: the ending is still announced
+// before the start that content makes.
+func TestClaudeForeignAnEndingAnnouncedBeforeTheNextStart(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), usageCost)
+	parked, release := make(chan struct{}), make(chan struct{})
+	arrived := make(chan struct{}, 1)
+	testForeignAnnounce = func(*ForeignTurn) { close(parked); <-release }
+	testClaudeDispatch = func(method string) {
+		if method == MethodSessionUpdate {
+			select {
+			case arrived <- struct{}{}:
+			default:
+			}
+		}
+	}
+	t.Cleanup(func() { testForeignAnnounce, testClaudeDispatch = nil, nil })
+	fired := make(chan struct{})
+	go func() { r.clk.Advance(grace); close(fired) }()
+	<-parked
+	r.pushUpdate(t, rigRoot, chunk("next"))
+	<-arrived
+	if r.client.dispatchMu.TryLock() {
+		t.Fatal("the parked timer does not hold the dispatch lock")
+	}
+	close(release)
+	<-fired
+	r.roundTrip(t)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "end claude-1 background",
+		"start claude-2 background", "agent_message_chunk")
+}
+
+// TestClaudeForeignAStaleTimerDoesNothing: a grace callback that escaped its
+// Stop — content cancelled the candidate after the callback was due — finds a
+// newer generation and ends nothing.
+func TestClaudeForeignAStaleTimerDoesNothing(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"), usageCost)
+	stale := r.clk.lastFunc(grace)
+	r.push(t, chunk("more"))
+	stale()
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("a stale grace callback ended the turn: %s", got)
+	}
+	r.want(t, "start claude-1 background", "agent_message_chunk", "usage_update", "agent_message_chunk")
+}
+
+// TestClaudeForeignFailedByTheSessionsStop: a turn still open when the client
+// closes ends failed with what FailForeign recorded.
+func TestClaudeForeignFailedByTheSessionsStop(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	var got ForeignTurn
+	r.client.SetForeignTurnHandler(func(f ForeignTurn) {
+		if !f.Running {
+			got = f
+		}
+	})
+	r.push(t, chunk("a"))
+	stop := errors.New("the login changed")
+	r.client.FailForeign(stop)
+	_ = r.client.Close()
+	if !errors.Is(got.Err, stop) || got.ID != "claude-1" || got.Cancelled {
+		t.Fatalf("the ending at close = %+v; want claude-1 failed with the stop", got)
+	}
+	if r.client.ForeignPhase() != "closed" {
+		t.Fatal("the machine is not closed")
+	}
+}
+
+// TestClaudeForeignWakeFrames replays the real wake capture (probe2's bgwait
+// and bgwait-idle, redacted): the prompted turn absorbs its own frames, and
+// each of the two wakes after it is one background turn that ends after the
+// grace that follows its cost usage.
+func TestClaudeForeignWakeFrames(t *testing.T) {
+	r := newClaudeRig(t)
+	r.root = "SESSION"
+	r.ready(t)
+	frames := fixtureFrames(t, "claude-wake")
+	var req *Message
+	var done chan error
+	wakes := 0
+	for _, f := range frames {
+		switch {
+		case f.Dir == "out":
+			req, done = r.prompt(t)
+		case f.Msg.Method == MethodSessionUpdate:
+			if err := r.enc.WriteMessage(&f.Msg); err != nil {
+				t.Fatal(err)
+			}
+			if f.Step == "bgwait-idle" && strings.Contains(string(f.Msg.Params), `"cost"`) {
+				r.roundTrip(t)
+				r.clk.Advance(grace)
+				wakes++
+			}
+		case f.Msg.ID != nil:
+			r.answerWith(t, req, string(f.Msg.Result))
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var brackets []string
+	for _, e := range r.log.get() {
+		if strings.HasPrefix(e, "start") || strings.HasPrefix(e, "end") {
+			brackets = append(brackets, e)
+		}
+	}
+	want := []string{"start claude-1 background", "end claude-1 background", "start claude-2 background", "end claude-2 background"}
+	if wakes != 2 || !slices.Equal(brackets, want) {
+		t.Fatalf("wakes %d, brackets %q; want 2 and %q", wakes, brackets, want)
+	}
+}
+
+func fixtureFrames(t *testing.T, dir string) []claudeFrame {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", dir, "frames.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []claudeFrame
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var f claudeFrame
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// TestClaudeForeignAnUnwrittenCancelEndsNothing (review C4 item 1): a cancel
+// whose session/cancel never left — its context was over before the write —
+// does not end the turn: content and an open tool call still hold it.
+func TestClaudeForeignAnUnwrittenCancelEndsNothing(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"), toolCall("t1", "in_progress"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.client.Cancel(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancel on an ended context = %v", err)
+	}
+	r.clk.Advance(10 * grace)
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("a cancel that was never written ended the turn: %s", got)
+	}
+	r.push(t, toolUpd("t1", "completed"), usageCost)
+	r.clk.Advance(grace)
+	r.want(t, "start claude-1 background", "agent_message_chunk", "tool_call", "tool_call_update", "usage_update", "end claude-1 background")
+}
+
+// TestClaudeForeignTheCloseAlwaysDeliversTheEnding (review C4 item 2): with
+// the read loop held inside a handler that cannot deliver, the close still
+// hands the session the failed ending — without the dispatch lock, past its
+// bound — and the read loop, released, announces nothing after it.
+func TestClaudeForeignTheCloseAlwaysDeliversTheEnding(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("wake"))
+	parked, release := make(chan struct{}), make(chan struct{})
+	ends := make(chan ForeignTurn, 2)
+	r.client.SetForeignTurnHandler(func(f ForeignTurn) {
+		if !f.Running {
+			ends <- f
+		}
+	})
+	r.client.SetUpdateHandler(func(n SessionNotification) {
+		close(parked)
+		<-release
+	})
+	var locked []bool
+	testCloseWait = 20 * time.Millisecond
+	testCloseForeignDeliver = func(l bool) { locked = append(locked, l) }
+	t.Cleanup(func() { testCloseWait, testCloseForeignDeliver = 0, nil })
+	r.pushUpdate(t, rigRoot, chunk("stuck"))
+	<-parked
+	stop := errors.New("the login changed")
+	r.client.FailForeign(stop)
+	closed := make(chan struct{})
+	go func() { _ = r.client.Close(); close(closed) }()
+	var end ForeignTurn
+	select {
+	case end = <-ends:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the close never delivered the foreign turn's ending")
+	}
+	if !errors.Is(end.Err, stop) || end.ID != "claude-1" || len(locked) != 1 || locked[0] {
+		t.Fatalf("the ending %+v (locked %v); want claude-1 failed, delivered without the lock", end, locked)
+	}
+	close(release)
+	<-closed
+	select {
+	case f := <-ends:
+		t.Fatalf("a second ending %+v", f)
+	default:
+	}
+}
+
+// TestClaudeForeignPromptedOnlyPastTheGate (review C4 item 4): a wake that
+// arrives while the prompt gate holds a prompt opens a foreign turn of its
+// own, and the prompt is refused when the gate lets go, nothing written; a
+// gate that refuses leaves the machine as it was.
+func TestClaudeForeignPromptedOnlyPastTheGate(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("prompted before the gate passed: %s", got)
+	}
+	r.push(t, chunk("a wake"))
+	release <- nil
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the held prompt = %v; want ErrForeignTurn", err)
+	}
+	r.want(t, "start claude-1 background", "agent_message_chunk")
+	r.push(t, usageCost)
+	r.clk.Advance(grace)
+	r.client.SetPromptGate(func(context.Context) error { return errors.New("refused") })
+	if _, err := r.client.Prompt(context.Background(), "y"); err == nil || r.client.ForeignPhase() != "idle" {
+		t.Fatalf("a refused gate: %v, phase %s", err, r.client.ForeignPhase())
+	}
+	r.push(t, chunk("another wake"))
+	if got := r.client.ForeignPhase(); got != "foreign" {
+		t.Fatalf("after a refused gate a wake did not open: %s", got)
+	}
+}
+
+// TestClaudeForeignSilenceIsNoContent (review C4 item 10): traffic that is
+// not content — a session-level update, a kind this build does not know —
+// does not restart the silence rule.
+func TestClaudeForeignSilenceIsNoContent(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	r.push(t, chunk("a"))
+	for range 3 {
+		r.clk.Advance(DefaultForeignTiming.Silence / 3)
+		if r.client.ForeignPhase() != "foreign" {
+			break
+		}
+		r.push(t, `{"sessionUpdate":"something_new"}`, usageNoCost)
+	}
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("non-content traffic held the turn past the silence limit: %s", got)
+	}
+}
+
+// loaded runs session/load to its reply, with ctx the load's own: the client
+// is then holding the agent's live traffic until ReplayDone.
+func (r *claudeRig) loaded(t *testing.T, ctx context.Context) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.client.LoadSession(ctx, rigRoot, t.TempDir(), SessionParams{})
+		done <- err
+	}()
+	req := r.readWithin(t, 3*time.Second, "session/load")
+	r.answerWith(t, req, `{}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClaudeForeignAGatedPromptHasNoTurn (review C4b item 4): while a prompt
+// waits at its gate no turn of craze's is open, so a request the agent's own
+// turn makes meanwhile arrives with no turn, and the refused prompt cannot
+// take it with it.
+func TestClaudeForeignAGatedPromptHasNoTurn(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "reject"}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	r.push(t, chunk("a wake"))
+	r.send(t, 41, MethodRequestPermission, `{"sessionId":"root","toolCall":{"toolCallId":"t1","title":"Read"},"options":[{"optionId":"reject","name":"No","kind":"reject_once"}]}`)
+	a := <-arrivals
+	if a.InTurn {
+		t.Fatalf("the wake's request arrived %+v; want no turn of craze's", a)
+	}
+	r.readWithin(t, 3*time.Second, "the wake's permission reply")
+	if _, err := r.client.Prompt(context.Background(), "y"); !errors.Is(err, ErrPromptInFlight) {
+		t.Fatalf("a second prompt while the first waits at its gate = %v", err)
+	}
+	release <- nil
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the gated prompt = %v; want ErrForeignTurn", err)
+	}
+}
+
+// TestClaudeChildRequestHeldBehindItsAnnounce (review C4b item 5): after a
+// load's reply a child's announce and the permission request that follows it
+// are held together, and released in that order: the request finds its child
+// registered instead of being refused.
+func TestClaudeChildRequestHeldBehindItsAnnounce(t *testing.T) {
+	r := newClaudeRig(t)
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	r.loaded(t, context.Background())
+	r.pushUpdate(t, rigRoot, subUpd("c1", running))
+	r.pushUpdate(t, rigRoot, subUpd("c1", requiresInput))
+	replies := make(chan *Message, 1)
+	go func() {
+		if msg, err := r.dec.ReadMessage(); err == nil {
+			replies <- msg
+		}
+	}()
+	r.send(t, 42, MethodRequestPermission, `{"sessionId":"c1","toolCall":{"toolCallId":"ct","title":"Write"},"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"}]}`)
+	// The barrier is an auth push, which is never held and writes nothing:
+	// everything before it has been dispatched once its handler has run.
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	if err := r.client.ReplayDone(); err != nil {
+		t.Fatal(err)
+	}
+	var msg *Message
+	select {
+	case msg = <-replies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child's request was never answered")
+	}
+	if !strings.Contains(string(msg.Result), "allow-once") {
+		t.Fatalf("the child's request was answered %s; want it held behind its announce and allowed", msg.Result)
+	}
+	if a := <-arrivals; a.Child != "c1" {
+		t.Fatalf("the held request arrived %+v; want child c1", a)
+	}
+}
+
+// TestClaudeLoadHoldIsBounded (review C4b item 6): the hold behind a load's
+// reply fails — ReplayDone answers ErrReplayHold and the client closes — past
+// its frame bound, past its time bound, and when the load's context ends.
+func TestClaudeLoadHoldIsBounded(t *testing.T) {
+	prev := holdFrameCap
+	holdFrameCap = 3
+	t.Cleanup(func() { holdFrameCap = prev })
+	for _, tc := range []string{"frames", "time", "context"} {
+		t.Run(tc, func(t *testing.T) {
+			r := newClaudeRig(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r.loaded(t, ctx)
+			switch tc {
+			case "frames":
+				for _, c := range []string{"1", "2", "3", "4"} {
+					r.pushUpdate(t, rigRoot, chunk(c))
+				}
+			case "time":
+				r.clk.Advance(replayHoldWait)
+			case "context":
+				cancel()
+			}
+			select {
+			case <-r.client.Conn().Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("the client did not close when its hold failed")
+			}
+			if err := r.client.ReplayDone(); !errors.Is(err, ErrReplayHold) {
+				t.Fatalf("ReplayDone = %v; want ErrReplayHold", err)
+			}
+		})
+	}
+}
+
+// TestClaudeGateClaimHeldUntilItsCleanup (review C4c item 9): a prompt refused
+// after its gate keeps its claim until its own cleanup has run: with the
+// agent's turn over by then, a second prompt in that gap is refused as in
+// flight rather than admitted beside the first's cleanup.
+func TestClaudeGateClaimHeldUntilItsCleanup(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	held, release := make(chan struct{}), make(chan error)
+	r.client.SetPromptGate(func(context.Context) error {
+		close(held)
+		return <-release
+	})
+	parked, resume := make(chan struct{}), make(chan struct{})
+	testGateRefused = func() { close(parked); <-resume }
+	t.Cleanup(func() { testGateRefused = nil })
+	done := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "x"); done <- err }()
+	<-held
+	r.push(t, chunk("a wake"), usageCost)
+	release <- nil
+	<-parked
+	// The agent's turn ends while the refused prompt has yet to clean up.
+	r.clk.Advance(grace)
+	if got := r.client.ForeignPhase(); got != "idle" {
+		t.Fatalf("phase %s", got)
+	}
+	r.client.SetPromptGate(nil)
+	second := make(chan error, 1)
+	go func() { _, err := r.client.Prompt(context.Background(), "y"); second <- err }()
+	select {
+	case err := <-second:
+		if !errors.Is(err, ErrPromptInFlight) {
+			t.Fatalf("a prompt while the refused one held its claim = %v; want ErrPromptInFlight", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second prompt was admitted while the refused one still held its claim")
+	}
+	close(resume)
+	if err := <-done; !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("the gated prompt = %v", err)
+	}
+}
+
+// TestClaudeADrainThatBlocksIsBounded (review C4c item 1): the hold's time
+// bound stays armed through ReplayDone's drain: a handler that blocks there
+// fails the hold — ReplayDone answers ErrReplayHold, LoadContext ends with it
+// — instead of holding Start for ever.
+func TestClaudeADrainThatBlocksIsBounded(t *testing.T) {
+	r := newClaudeRig(t)
+	r.loaded(t, context.Background())
+	hctx := r.client.LoadContext()
+	parked, release := make(chan struct{}), make(chan struct{})
+	r.client.SetUpdateHandler(func(SessionNotification) { close(parked); <-release })
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	r.pushUpdate(t, rigRoot, chunk("held"))
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	done := make(chan error, 1)
+	go func() { done <- r.client.ReplayDone() }()
+	<-parked
+	r.clk.Advance(replayHoldWait)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrReplayHold) {
+			t.Fatalf("ReplayDone = %v; want ErrReplayHold", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a drain blocked in a handler held ReplayDone past the hold's bound")
+	}
+	if !errors.Is(context.Cause(hctx), ErrReplayHold) {
+		t.Fatalf("the load's context ended with %v", context.Cause(hctx))
+	}
+}
+
+// TestClaudeARequestWaitsBehindTheDrain (review C4c item 3): a child's request
+// read while ReplayDone is still routing the held announce of that child
+// waits behind it, and finds the child registered.
+func TestClaudeARequestWaitsBehindTheDrain(t *testing.T) {
+	r := newClaudeRig(t)
+	r.loaded(t, context.Background())
+	parked, release := make(chan struct{}), make(chan struct{})
+	first := true
+	testDrainFrame = func() {
+		if first {
+			first = false
+			close(parked)
+			<-release
+		}
+	}
+	t.Cleanup(func() { testDrainFrame = nil })
+	r.pushUpdate(t, rigRoot, chunk("root text"))
+	r.pushUpdate(t, rigRoot, subUpd("c1", running))
+	r.pushUpdate(t, rigRoot, subUpd("c1", requiresInput))
+	barrier := make(chan struct{}, 1)
+	r.client.SetAuthStatusHandler(func(AuthStatus) { barrier <- struct{}{} })
+	r.send(t, nil, MethodClaudeAuthStatus, `{"authStatus":{"kind":"account"}}`)
+	<-barrier
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	replies := make(chan *Message, 1)
+	go func() {
+		if msg, err := r.dec.ReadMessage(); err == nil {
+			replies <- msg
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- r.client.ReplayDone() }()
+	<-parked
+	r.send(t, 43, MethodRequestPermission, `{"sessionId":"c1","toolCall":{"toolCallId":"ct","title":"Write"},"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"}]}`)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var msg *Message
+	select {
+	case msg = <-replies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child's request was never answered")
+	}
+	if !strings.Contains(string(msg.Result), "allow-once") {
+		t.Fatalf("the request overtook the drain: answered %s", msg.Result)
+	}
+	if a := <-arrivals; a.Child != "c1" {
+		t.Fatalf("arrival %+v", a)
+	}
+}
+
+// TestClaudeARequestAfterTheReplyIsNoTurns (C8 K1): with the prompt's
+// goroutine parked between its reply and its cleanup, a wake's request read
+// after the reply arrives with no turn of craze's: the turn ended on the wire.
+func TestClaudeARequestAfterTheReplyIsNoTurns(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	parked, release := make(chan struct{}), make(chan struct{})
+	testPromptReturned = func() { close(parked); <-release }
+	t.Cleanup(func() { testPromptReturned = nil })
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "reject"}
+	})
+	req, done := r.prompt(t)
+	r.answerWith(t, req, `{"stopReason":"end_turn"}`)
+	<-parked
+	r.push(t, chunk("a wake"))
+	r.send(t, 44, MethodRequestPermission, `{"sessionId":"root","toolCall":{"toolCallId":"t1","title":"Read"},"options":[{"optionId":"reject","name":"No","kind":"reject_once"}]}`)
+	a := <-arrivals
+	r.readWithin(t, 3*time.Second, "the wake's permission reply")
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if a.InTurn {
+		t.Fatalf("the wake's request arrived %+v; want no turn of craze's", a)
+	}
+}
+
+// TestClaudeTheRecordedStopOutlivesTheTransportsEnd (review C8 item 1): the
+// session's stop is recorded (FailForeign: a late auth refusal), the adapter
+// exits on stdin's end, and the transport's retirement ends the turn before
+// Close does: the turn ends with the recorded stop, not "the agent stopped".
+func TestClaudeTheRecordedStopOutlivesTheTransportsEnd(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	ended := make(chan ForeignTurn, 1)
+	r.client.SetForeignTurnHandler(func(f ForeignTurn) {
+		if !f.Running {
+			ended <- f
+		}
+	})
+	r.push(t, chunk("a"))
+	stop := errors.New("the login changed")
+	r.client.FailForeign(stop)
+	r.client.EndForeignWith(errors.New("the agent stopped"))
+	select {
+	case got := <-ended:
+		if !errors.Is(got.Err, stop) {
+			t.Fatalf("the ending = %+v; want the recorded stop", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn never ended")
+	}
+}

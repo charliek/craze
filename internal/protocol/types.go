@@ -322,7 +322,7 @@ var permissionModes = []PermissionMode{PermissionBypass, PermissionPrompt}
 // PermissionModes is every permission mode, bypass first.
 func PermissionModes() []PermissionMode { return slices.Clone(permissionModes) }
 
-// Provider is the session's provider: its id ("cursor", "grok", "gx",
+// Provider is the session's provider: its id ("cursor", "grok",
 // "native") and the label a client shows.
 type Provider struct {
 	Name  string `json:"name"`
@@ -417,7 +417,7 @@ type CatalogMode struct {
 // Aside is the session's own too (plan 040 §3.2): true where the host serves
 // session.aside and session.aside.cancel for the session — side questions
 // (/btw) its agent answers from the session's context: a native session, and
-// a grok or gx one — detached or TUI-hosted. It is omitted when false, as
+// a grok one — detached or TUI-hosted. It is omitted when false, as
 // modelsRefresh is: absent is cursor, or an older host, which answers the
 // methods unsupported (aside_unsupported, or unknown_method from a host from
 // before them), and a client then offers no side questions.
@@ -799,7 +799,7 @@ type ConnectParams struct {
 // CreateParams is session.create's params (plan 032 §3.10, P5): a new
 // session in Cwd, started in a host the hub spawns, given Prompt as its first
 // prompt when there is one. Cwd is an absolute path to an existing directory.
-// Provider is a provider id ("cursor", "grok", "gx", "native"), absent for
+// Provider is a provider id ("cursor", "grok", "native"), absent for
 // the hub's configured default — none configured is bad_request. Model,
 // Effort and Fast are the session's start settings, each absent for the
 // provider's own default (the host's --model, --effort, --fast/--no-fast);
@@ -899,7 +899,7 @@ type CreateOptionsParams struct{}
 // registry's order (at most CreateOptionsProvidersMax); the provider a
 // session.create that names none starts — config.toml's provider, present
 // only when it is set and names a provider craze knows, which need be
-// neither listed nor ready (a missing gx); and the directories sessions last
+// neither listed nor ready (a binary not installed); and the directories sessions last
 // ran in, newest first (at most CreateOptionsDirsMax, absolute, still
 // directories). Both lists are always written, [] for none, never null.
 type CreateOptionsResult struct {
@@ -1595,7 +1595,7 @@ type AsideTurnParam struct {
 // answer and authoritative — a client that dropped every aside notification
 // still has it. Model is the display name of the model that answered, absent
 // when unknown; Usage is what the call spent, where the provider reports it
-// (a native session; absent for grok and gx).
+// (a native session; absent for grok).
 type AsideResult struct {
 	Text  string            `json:"text"`
 	Model string            `json:"model,omitempty"`
@@ -1697,13 +1697,15 @@ type AsksAnswerParams struct {
 //   - permission: OptionID, an option the request offered (the exact id,
 //     never a kind), or Cancel;
 //   - question: Answers, each question's id to the option ids chosen (a null
-//     list is not an empty one), or Skip; a question that asks nothing takes
-//     no answers at all;
+//     list is not an empty one), and Text, a question's free-text answer for
+//     one that takes it (allowText; plan 052 § B4), or Skip; a question that
+//     asks nothing takes no answers at all;
 //   - plan: exactly one of Accept and Reject.
 type Answer struct {
 	OptionID string              `json:"optionId,omitempty"`
 	Cancel   bool                `json:"cancel,omitempty"`
 	Answers  map[string][]string `json:"answers,omitempty"`
+	Text     map[string]string   `json:"text,omitempty"`
 	Skip     bool                `json:"skip,omitempty"`
 	Accept   bool                `json:"accept,omitempty"`
 	Reject   bool                `json:"reject,omitempty"`

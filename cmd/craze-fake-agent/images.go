@@ -193,12 +193,7 @@ func dumpPromptFile(entry map[string]any) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
-		return
-	}
-	_, _ = f.Write(append(line, '\n'))
-	_ = f.Close()
+	appendLine(p, line)
 }
 
 // dumpPrompt records a session/prompt in CRAZE_FAKE_DUMP_PROMPTS.

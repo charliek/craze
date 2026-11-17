@@ -211,7 +211,9 @@ func catalogTabs(snap agent.Snapshot) []modelTab {
 	effort, fast := agent.EffortOption(once), agent.FastOption(once)
 	var out []modelTab
 	for _, opt := range kept {
-		if !isDialogTab(opt) {
+		if !isDialogTab(opt) || snap.Provider.ConfigHidden(opt) {
+			// A control the provider keeps fixed is not offered: claude's
+			// fast mode, which bills as extra usage (plan 052 § D3).
 			continue
 		}
 		t := modelTab{opt: opt, label: tabLabel(opt)}

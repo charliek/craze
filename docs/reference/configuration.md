@@ -62,6 +62,7 @@ fixed names:
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
 | `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
+| `claude-overage.json` | The claude overage guard's trip record, `{until, window, at}`: written when a claude session is stopped for billing extra usage, and refusing every claude start and prompt until `until` — see [Extra usage](../getting-started/claude.md#extra-usage-the-overage-guard). Absent until then; delete it to go on at once |
 | `native/` | The native provider's files: `providers.toml` (your API keys), `models.toml`, `recent.json`, `websearch.json` (the remembered [web search](#native-web-search) choice), `credentials.toml` (the [stored web search key](#the-stored-web-search-key)), `auth/chatgpt.json` (the ChatGPT plan's tokens), the ChatGPT and Anthropic accounts' model lists, the sign-in log and `sessions/` (native session transcripts) — see [Native models and providers](#native-models-and-providers). Made on first use |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
@@ -260,6 +261,15 @@ One JSON object per line:
     removed or changed once written, a row of the same session written later
     carries it too, and `craze send` has no flag to change it. A value other
     than `on` or `off` (a later craze's) is read as none and kept.
+- `model` is the model a [claude session](#the-claude-provider) was last on,
+  written with every write of its row and changed as `/model` changes it;
+  every other provider's rows have no key. A resume of the row asks the
+  adapter for it again unless `--model` names one. A value that is not a
+  string is read as none and kept.
+- `effort` is the effort a claude session was last at, written and read the
+  same way as `model`: changed as `/effort` (or the model picker) changes it,
+  asked for again by a resume unless `--effort` names one, absent from every
+  other provider's rows.
 
 **A `--continue` or `--resume` never changes the persisted default
 provider.** Loading yesterday's grok thread is not a decision about
@@ -581,7 +591,7 @@ session's terminal.
 
 ### Model catalog cache
 
-cursor, grok and gx name the models they offer only once a session has
+cursor and grok name the models they offer only once a session has
 started. So that the session list's [`/model`](tui.md#provider-and-model) can
 offer them before one has, every detached host records the model catalog its
 agent installs — at `session/new`, when a loaded session's replay ends, and
@@ -690,7 +700,7 @@ the tab back when it next reports after finding it unowned.
 ### The agent's environment
 
 **The agent loses each host's hook gate.** While craze reports to a host, the
-agent it spawns (cursor-agent, grok or gx) gets craze's environment without the
+agent it spawns (cursor-agent or grok) gets craze's environment without the
 one variable that host's agent integrations gate on: `HERDR_ENV` for herdr,
 `ROOST_AGENT_HOOK` for roost. Otherwise a herdr or roost cursor or grok hook
 installed on this machine would fire inside craze's child and take the pane or
@@ -731,33 +741,23 @@ terminal is reset, the same as the tab title.
 
 ## Provider precedence
 
-Ids are `cursor`, `grok`, `gx`, and `native`. An empty string (`--provider ""`,
+Ids are `cursor`, `grok`, `claude` ([The claude
+provider](#the-claude-provider)) and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
-`gx` is [`charliek/grok-build`](https://github.com/charliek/grok-build), a
-third-party fork of the Grok CLI that speaks the same ACP dialect as
-`grok` — same wire protocol, same auth, same skills and plugins — so
-everything on this page and in the rest of the docs about Grok's behaviour
-applies to it too. It currently shares grok's `~/.grok` home (config, auth,
-sessions, skills); that is the fork's current behaviour, not a guarantee
-craze makes.
-
-gx is gated separately from the other ids: it appears in the startup picker
-when a binary for it resolves, or when it is the resolved default (the default
-is always included, so `Esc` never starts a provider the picker did not show)
-— see [Environment](#environment) below for lookup order; cursor, grok and
-native are always offered, so the picker can never be empty. `--provider gx`
-works regardless of whether a binary resolves, and fails at spawn — `agent
-binary not found: …` — if it does
-not; this matches how `craze prompt --provider gx` and `craze frame
---provider gx` already behave, since neither consults the picker. The picker
-asks the question a gx session would ([Agent binaries](#agent-binaries)):
-`[agents].gx`, else `gx` on `PATH` — and `--agent-bin` or `$CRAZE_AGENT_BIN`
-only when gx is itself the resolved default, since they are that provider's
-binary. Then the override is exclusive, so one pointing at nothing hides gx
-even when `gx` is itself on `PATH`. `native` runs in process (see [Native
-compaction](#native-compaction) below and [Native sessions](tui.md#native-sessions))
-— there is no binary to resolve, so it is never gated the way gx is.
+Every id is always offered in the startup picker, so the picker can never be
+empty; a provider whose agent binary does not resolve is a row with a state,
+not a missing row ([provider states](tui.md#provider-states)), and
+`--provider <id>` works regardless of whether a binary resolves, failing at
+spawn — `agent binary not found: …` — if it does not, as `craze prompt` and
+`craze frame` do, since neither consults the picker. The picker asks the
+question a session of the provider would ([Agent binaries](#agent-binaries)):
+`[agents].<provider>`, else the provider's own name on `PATH` — and
+`--agent-bin` or `$CRAZE_AGENT_BIN` only for the resolved default, since they
+are that provider's binary. The override is then exclusive, so one pointing at
+nothing marks that provider unavailable even when its binary is on `PATH`.
+`native` runs in process (see [Native compaction](#native-compaction) below and
+[Native sessions](tui.md#native-sessions)) — there is no binary to resolve.
 
 For the TUI and `craze prompt`, the first hit wins:
 
@@ -783,7 +783,7 @@ path:
 [agents]
 cursor = "/opt/cursor/bin/cursor-agent"
 grok = "/home/me/.local/bin/grok"
-gx = "/home/me/src/grok-build/bin/gx"
+claude = "/home/me/.local/bin/claude-agent-acp"
 ```
 
 A session of an ACP provider runs the first of:
@@ -795,7 +795,11 @@ A session of an ACP provider runs the first of:
    `--continue` or `--resume` load, the loaded session's;
 3. `[agents].<provider>`;
 4. the provider's own name on `PATH`: `cursor-agent` then `agent` for
-   cursor, `grok` for grok, `gx` for gx.
+   cursor, `grok` for grok, `claude-agent-acp` for claude.
+
+For claude these name the **adapter** alone. The `claude` it runs — Claude
+Code itself — is `$CLAUDE_CODE_EXECUTABLE` when that is set, else `claude` on
+`PATH` ([The claude provider](#the-claude-provider)).
 
 So a session of any other provider — one the startup picker or the session
 list starts, or a saved one of another provider the list resumes — never runs
@@ -811,6 +815,126 @@ does not exist is not a fallback: that provider's sessions fail to start —
 `agent binary not found: …` — as an `--agent-bin` naming nothing does.
 `native` runs inside craze and has no key. `craze frame` never reads this
 file.
+
+## The claude provider
+
+`claude` runs **your own Claude Code, on your Claude plan**, through
+[`claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp),
+the ACP project's bridge to Claude Code. craze spawns the adapter, and the
+adapter runs your signed-in `claude`. craze holds no credential, never logs
+you in, and reads nothing under `~/.claude`. It is listed after grok by
+`craze providers`, the picker and `--help`, and reached with `--provider
+claude` (or `provider = "claude"`, `CRAZE_PROVIDER=claude`). The
+[getting-started page](../getting-started/claude.md) walks through the setup,
+and its [overage guard](../getting-started/claude.md#extra-usage-the-overage-guard)
+keeps a trip record, `claude-overage.json`, in craze's directory (`~/.craze`, or
+`$CRAZE_HOME`).
+
+### What it needs
+
+- **The adapter**, `npm i -g @agentclientprotocol/claude-agent-acp` (Node 22
+  or newer), found as [Agent binaries](#agent-binaries) says:
+  `--agent-bin`, `$CRAZE_AGENT_BIN`, `[agents].claude`, then
+  `claude-agent-acp` on `PATH`.
+- **Claude Code**, `claude`, signed in with `claude auth login`. craze runs the
+  one `$CLAUDE_CODE_EXECUTABLE` names when that is set — the way to point at a
+  `claude` that is not on `PATH` — else `claude` on `PATH`, and always hands
+  the adapter that same path, made absolute, in `CLAUDE_CODE_EXECUTABLE`. A
+  relative path is read from the directory the craze command ran in, also
+  for a session [the hub](cli.md#the-hub) starts elsewhere. `--agent-bin`,
+  `$CRAZE_AGENT_BIN` and `[agents].claude` never pick it.
+- **Versions.** craze refuses an adapter older than **0.107.0** or a Claude
+  Code older than **2.1.322** (kind `config`, with the update command). The
+  versions tested are adapter **0.107.3** and Claude Code **2.1.326**; a newer
+  one is not refused.
+
+### Plan only
+
+A claude session starts only on a Claude Pro or Max plan, checked twice
+before the first prompt:
+
+1. **Before the spawn**, craze runs `claude --setting-sources "" auth status
+   --json` in a fresh temporary directory (so no project's settings or
+   helpers run), `claude-agent-acp --version` in the session's directory and
+   `claude --version`, at once, five seconds each, ten in all. The saved login
+   must be signed in, through `claude.ai`, first party, on a plan that is not
+   `enterprise` (an enterprise seat can be billed by usage), with no API key
+   beside it. Anything else fails the start with kind `auth`, naming what was
+   found; a command that does not answer, or prints nothing craze can read,
+   fails it with `start_failed`.
+2. **After `initialize`**, the adapter — run in the session's directory, so it
+   reads that project's settings — reports which login it would bill
+   (`_auth/status_update`). craze waits up to ten seconds for it and goes on
+   only for an account on a named plan that is not enterprise and not an
+   OAuth token. An API key from an `apiKeyHelper` in your Claude settings, a
+   cloud or gateway login, or an enterprise seat fails the start with `auth`
+   (`an API key pays for this session, not your Claude plan: …`). No report at
+   all fails it closed, with `start_failed`: `craze could not confirm which
+   Claude login pays for this session`. A later report that fails the same
+   rule ends the turn running with `auth` and stops the session: every prompt
+   after it is refused with the same error.
+
+### The environment
+
+The adapter is spawned with your environment less what would bill a turn to
+something other than your plan or tie it to another Claude Code session:
+
+- a Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_HOST_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`,
+  `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+  `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_EXECPATH`,
+  `CLAUDE_CODE_DESKTOP_APP_VERSION`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_EFFORT`, `CLAUDE_PID`, `CLAUDE_AGENT_SDK_VERSION` and
+  `ELECTRON_RUN_AS_NODE`), so a craze started from inside Claude Code does
+  not join that session;
+- credentials, clouds and gateways (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+  `ANTHROPIC_{BEDROCK,VERTEX,FOUNDRY}_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`,
+  `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}`, `CLAUDE_CODE_OAUTH_TOKEN`, every
+  `CLAUDE_CODE_*_FILE_DESCRIPTOR`, `ANTHROPIC_PROFILE`,
+  `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID` and
+  `ANTHROPIC_IDENTITY_TOKEN_FILE`);
+- model pins (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_CUSTOM_MODEL_OPTION`,
+  `CLAUDE_MODEL_CONFIG` and `CLAUDE_CODE_SUBAGENT_MODEL`): craze owns the
+  session's model.
+
+It gains `CLAUDE_AGENT_ACP_PROTOCOL=v1`, `CLAUDE_CODE_EXECUTABLE` (the
+`claude` above) and `CRAZE_SESSION_PROVIDER=claude`. **This is the process
+environment only.** An `env` block in a Claude `settings.json`, managed policy
+or an `apiKeyHelper` can still route billing elsewhere; the login check after
+`initialize` is what catches those the adapter reports.
+
+### What craze sets
+
+Your Claude Code setup — settings, hooks, permission rules, `CLAUDE.md`,
+skills and MCP servers — applies as it does in Claude Code, but for these:
+
+- **The start mode.** A new session starts in Manual (`default`), or in
+  `plan` under `--plan`, whatever `permissions.defaultMode` says; a resumed
+  one is loaded in Manual (or `plan`), so a session last left in bypass
+  permissions comes back asking. A mode the adapter does not take is set once
+  more, and the start fails (`config`) if it still differs. Claude has no ask
+  mode: `--ask` fails with `mode ask is not advertised`.
+- **Fast mode stays off.** It bills as extra usage on a Claude plan: `--fast`
+  is refused (exit 2) — on `craze new` with no `--provider` too, when the
+  default it would start is claude — the model picker offers no fast tab, and
+  craze turns it off again whenever it finds it on, holding the next prompt
+  until it is off; a resumed session has it set off once whatever the load
+  said. A reset not confirmed within 20 seconds stops the session. A session where it will not go off fails to start
+  (`config`); a running one where it will not stops, the turn running ending
+  with `config` and every later prompt refused the same way.
+- **An unattended session** (`craze new --wait`) is started without
+  `ScheduleWakeup`, `Monitor` and `CronCreate`, which schedule work for after
+  the host has exited.
+- **The model and the effort are remembered.** A claude session's
+  [index](#session-index) row records its model (`model`) and its effort
+  (`effort`), and a resume asks for each again, unless `--model` or
+  `--effort` names one; a model or an effort the adapter no longer takes
+  leaves a note and the session runs on the adapter's.
+- **`--force`** answers a permission with the option that allows that one
+  call, never the one that saves a permanent rule into your Claude settings;
+  a request with no such option shows its card.
 
 ## Native models and providers
 
@@ -1799,7 +1923,7 @@ usage report holds it, so `usage` can be less than what was spent. A result's
 An absent key is `1`, silently. A file that cannot be read or parsed, a value that
 is not an integer, or one outside 0 to 3 is also `1`, with one line on craze's own
 diagnostics: stderr for `craze prompt`, the host's log for a detached host. It is
-read as each session starts, and an ACP agent (cursor, grok, gx) keeps its own
+read as each session starts, and an ACP agent (cursor, grok) keeps its own
 retries.
 
 ### Model memory: `recent.json`
@@ -2752,7 +2876,9 @@ same turn is waited on again, and craze does not read them back.
 |----------|---------|
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | The launch's own provider's agent binary when `--agent-bin` is unset; never a session of another provider's ([Agent binaries](#agent-binaries)) |
-| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `gx`, or `native`) |
+| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `claude` or `native`) |
+| `CRAZE_SESSION_PROVIDER` | Set by craze: every ACP agent a session spawns gets the session's provider id here (`cursor`, `grok`, `claude`), and so does every shell command a native session runs (`native`), replacing any it inherited, so a program the agent runs can tell which craze session it is inside. `craze new` reads it first to tell which provider the agent running it is on, and [refuses to start that same provider](cli.md#starting-your-own-provider) (exit 2) unless `--allow-same-provider` is given. [The hub](cli.md#the-hub) removes it from its hosts' environment |
+| `CLAUDE_CODE_EXECUTABLE` | The `claude` a [claude session](#the-claude-provider) runs, when it is not the one on `PATH`. craze sets it in the adapter's environment to the path it resolved |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
@@ -2767,5 +2893,4 @@ same turn is waited on again, and craze does not read them back.
 
 If none of `--agent-bin`, `CRAZE_AGENT_BIN` (each for the launch's own
 provider only) and `[agents]` names one, Cursor looks for
-`cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only. gx looks
-for `gx` only.
+`cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only.

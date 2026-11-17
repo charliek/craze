@@ -104,6 +104,11 @@ func (f *codecFiller) fill(path string, v reflect.Value) {
 		if !f.zero {
 			v.SetUint(uint64(f.next()))
 		}
+	case reflect.Float64:
+		// A fraction too, so a codec that rounded to an integer shows.
+		if !f.zero {
+			v.SetFloat(float64(f.next()) + 0.25)
+		}
 	case reflect.Bool:
 		if !f.zero {
 			n := f.next()
@@ -258,7 +263,7 @@ func codecCompare(path string, want, got reflect.Value, d *[]string) {
 			}
 			codecCompare(path+"."+name, want.Field(i), got.Field(i), d)
 		}
-	case reflect.String, reflect.Bool,
+	case reflect.String, reflect.Bool, reflect.Float64,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if !want.Equal(got) {
@@ -586,6 +591,13 @@ func emitSiteEvents() []emitSiteEvent {
 			Turn:    Spend{Input: 1_200, Output: 800, Reasoning: 300, CacheRead: 330_000, CostPicoUSD: 40_000_000_000},
 			Session: Spend{Input: 9_000, Output: 6_000, Reasoning: 2_000, CacheRead: 1_200_000, CacheCreation: 40_000, CostPicoUSD: 1_200_000_000_000, Unpriced: true},
 		}}, At: at}},
+		{"a claude session's usage, with its plan's limit", Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{
+			ContextTokens: 30_938, ContextWindow: 1_000_000,
+			Turn:    Spend{Input: 4, Output: 164, CacheRead: 28_511, CacheCreation: 30_907, Unpriced: true},
+			Session: Spend{Input: 8, Output: 442, CacheRead: 90_427, CacheCreation: 31_234, Unpriced: true},
+			Plan:    "max", Window: "seven_day", WindowUtilization: 0.45, ResetsAt: at.Add(72 * time.Hour), Model: "claude-sonnet-5-5",
+		}}, At: at}},
+		{"a claude notice", Event{Type: EventNotice, Notice: &NoticeInfo{Severity: "info", Title: "Task stopped by user", Description: "build."}, At: at}},
 		{"a load's install, carrying what the stored session spent", Event{Type: EventMeta, Replayed: true, State: &StateDelta{
 			Title: ptr("resumed"), Model: ptr("test/a"), Mode: ptr("agent"), Config: &ConfigState{},
 			Commands: &CommandsState{}, Plugins: &PluginsState{},
@@ -799,6 +811,23 @@ func pinnedWireShapes() []pinnedWireShape {
 			`{"type":"meta","state":{"usage":{"contextTokens":340000,"contextWindow":1000000,` +
 				`"turn":{"input":1200,"output":800,"reasoning":300,"cacheRead":330000,"cacheCreation":0,"costPicoUsd":40000000000,"unpriced":false},` +
 				`"session":{"input":9000,"output":6000,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":1200000000000,"unpriced":true}}}}`},
+		// claude's usage (plan 052 § D2): unpriced tokens, and the plan's
+		// limit after the always-present keys — windowUtilization written
+		// with window even at 0, resetsAt in UTC.
+		{Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{
+			ContextTokens: 30938, ContextWindow: 1000000,
+			Turn:    Spend{Input: 4, Output: 164, CacheRead: 28511, CacheCreation: 30907, Unpriced: true},
+			Session: Spend{Input: 4, Output: 164, CacheRead: 28511, CacheCreation: 30907, Unpriced: true},
+			Plan:    "max", Window: "seven_day", ResetsAt: time.Date(2026, 11, 20, 10, 0, 0, 0, time.FixedZone("X", 3600)),
+			Model: "claude-haiku-5-5",
+		}}},
+			`{"type":"meta","state":{"usage":{"contextTokens":30938,"contextWindow":1000000,` +
+				`"turn":{"input":4,"output":164,"reasoning":0,"cacheRead":28511,"cacheCreation":30907,"costPicoUsd":0,"unpriced":true},` +
+				`"session":{"input":4,"output":164,"reasoning":0,"cacheRead":28511,"cacheCreation":30907,"costPicoUsd":0,"unpriced":true},` +
+				`"plan":"max","window":"seven_day","windowUtilization":0,"resetsAt":"2026-11-20T09:00:00Z","model":"claude-haiku-5-5"}}}`},
+		// A claude notice (plan 052 § B2): each field left out when empty.
+		{Event{Type: EventNotice, Notice: &NoticeInfo{Severity: "warning", Title: "Stop hook says"}},
+			`{"type":"notice","notice":{"severity":"warning","title":"Stop hook says"}}`},
 		{Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{}}},
 			`{"type":"meta","state":{"usage":{"contextTokens":0,"contextWindow":0,` +
 				`"turn":{"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":0,"unpriced":false},` +

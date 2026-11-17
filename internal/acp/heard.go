@@ -83,7 +83,10 @@ func turnActivity(msg *Message) bool {
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped,
 		MethodGrokQueueChanged, MethodGrokQueueChangedWrapped,
 		MethodGrokModelsUpdate, MethodGrokModelsUpdateWrapped,
-		MethodGrokSessionsChanged, MethodGrokSessionsChangedWrapped:
+		MethodGrokSessionsChanged, MethodGrokSessionsChangedWrapped,
+		MethodClaudeAuthStatus, MethodAuthStatusUpdate:
+		// claude-agent-acp re-reads the login at the start of every prompt
+		// and pushes it when it changed: about the session, not the prompt.
 		return false
 	case MethodSessionUpdate:
 		return !sessionLevelUpdate(updateKind(msg.Params))
@@ -110,17 +113,66 @@ func updateKind(params json.RawMessage) string {
 
 // sessionLevelUpdate is the session/update kinds that are about the session,
 // not a prompt. user_message_chunk is the agent's echo of the prompt it was
-// sent (grok and gx echo live; craze never draws it outside a replay, live.go's
+// sent (grok echoes live; craze never draws it outside a replay, live.go's
 // onUpdate) — the user's own words, not anything the agent did with them, and
 // real grok 1.0.44 sends none before it answers (plan 033 V1). An empty kind
 // is not known, so it is not session-level.
 func sessionLevelUpdate(kind string) bool {
-	switch kind {
-	case UpdateAvailableCommands, UpdateCurrentMode, UpdateConfigOption, UpdateSessionInfo,
-		updateUsage, updateUserMessageChunk:
+	switch updateClassOf(kind) {
+	case classSession, classEcho:
 		return true
 	}
 	return false
+}
+
+// updateClass is what one session/update kind is, to the two readers that
+// judge kinds: the heard check (sessionLevelUpdate) and claude's foreign-turn
+// state machine (foreign.go), which opens a turn on content only (plan 052 §
+// E1). It is the one list of kinds both read; there is no second.
+type updateClass uint8
+
+const (
+	// classUnknown: a kind this build does not know, "" included. Heard (the
+	// safe side of not knowing), and it never opens a foreign turn.
+	classUnknown updateClass = iota
+	// classSession: about the session, not a prompt — the catalog, the mode,
+	// the config options, the title, usage. Not heard; never opens.
+	classSession
+	// classEcho: user_message_chunk, the agent's echo of a prompt. Not heard;
+	// outside a replay it opens a claude foreign turn (a prompt the agent took
+	// that craze did not send).
+	classEcho
+	// classContent: the agent's own text, thought and tool calls. Heard; opens
+	// (a tool_call only for an id not seen before).
+	classContent
+	// classCompaction: compaction_update. Heard; opens a compaction turn when
+	// its status is in_progress (idle compaction is a model call).
+	classCompaction
+	// classTrailing: a tool_call_update and a plan — the bookkeeping of a turn
+	// already running, such as the trailing close after a result. Heard; never
+	// opens.
+	classTrailing
+	// classAside: claude-agent-acp's notices, compaction summaries and
+	// sub-agent traffic (subagent_update, session_message). Heard; never opens.
+	classAside
+)
+
+func updateClassOf(kind string) updateClass {
+	switch kind {
+	case UpdateAvailableCommands, UpdateCurrentMode, UpdateConfigOption, UpdateSessionInfo, UpdateUsage:
+		return classSession
+	case updateUserMessageChunk:
+		return classEcho
+	case UpdateAgentMessage, UpdateAgentThought, UpdateToolCall:
+		return classContent
+	case UpdateCompaction:
+		return classCompaction
+	case UpdateToolCallUpd, UpdatePlan:
+		return classTrailing
+	case UpdateNotice, updateCompactionSum, SubagentUpdate, UpdateSessionMessage:
+		return classAside
+	}
+	return classUnknown
 }
 
 // grokSessionLevel is the x.ai/session_notification kinds that are about the
@@ -139,7 +191,7 @@ func grokSessionLevel(kind string) bool {
 
 // The update kinds above that craze reads nowhere else.
 const (
-	updateUsage                 = "usage_update"
+	UpdateUsage                 = "usage_update"
 	updateUserMessageChunk      = "user_message_chunk"
 	grokLastTurnSummary         = "last_turn_summary"
 	grokSessionSummaryGenerated = "session_summary_generated"

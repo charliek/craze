@@ -228,6 +228,11 @@ type indexWork struct {
 	// touch bumps the row's UpdatedAt, so --resume orders by when a session
 	// was last used. It is a no-op until a row exists.
 	touch bool
+	// settings is a touch that carries a changed model or effort (plan 052
+	// § C4, L5 F1) — a touch, a no-op until a row exists, but one that a
+	// close still writes (mustWrite, review C5d item 4): the next resume asks
+	// the adapter for what the row says.
+	settings bool
 	// load is the touch a loaded session owes when it comes up. It is not
 	// gated on row: a load's row is the very row its id came from, so there is
 	// always one, and writing it is how a resumed session sorts to the front
@@ -267,13 +272,18 @@ type userTitle struct {
 	cause string
 }
 
-func (w indexWork) any() bool { return w.touch || w.load || w.seed || w.title != "" || w.user.seq != 0 }
+func (w indexWork) any() bool {
+	return w.touch || w.settings || w.load || w.seed || w.title != "" || w.user.seq != 0
+}
 
 // mustWrite reports whether this work has to be ATTEMPTED even at close: a
-// seed, an agent title, a user title or a loaded-row touch. A plain touch on
-// its own is the one kind that may be dropped there — it records nothing but
-// an UpdatedAt the next run's first write bumps anyway (indexWriter.finish).
-func (w indexWork) mustWrite() bool { return w.seed || w.load || w.title != "" || w.user.seq != 0 }
+// seed, an agent title, a user title, a loaded-row touch or a settings touch.
+// A plain touch on its own is the one kind that may be dropped there — it
+// records nothing but an UpdatedAt the next run's first write bumps anyway
+// (indexWriter.finish).
+func (w indexWork) mustWrite() bool {
+	return w.seed || w.load || w.settings || w.title != "" || w.user.seq != 0
+}
 
 // indexWriter is the engine's half of the session index: the options, the
 // bookkeeping, the pending work and the one worker goroutine that drains it.
@@ -392,6 +402,7 @@ func (w *indexWriter) post(work indexWork) {
 	// kick below makes the pass that retries it (plan 043 P10).
 	w.userHeld = false
 	w.pending.touch = w.pending.touch || work.touch
+	w.pending.settings = w.pending.settings || work.settings
 	w.pending.load = w.pending.load || work.load
 	if work.title != "" {
 		w.pending.title = work.title
@@ -727,7 +738,7 @@ func (w *indexWriter) runPending(work indexWork) {
 			landed = w.write("", "", sessions.TitleKindNone)
 		}
 	}
-	if work.touch && !landed {
+	if (work.touch || work.settings) && !landed {
 		w.touch("")
 	}
 }
@@ -1026,6 +1037,15 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		Title:      w.titleLine(title),
 		TitleKind:  kind,
 	}
+	if recordsModel(provider) {
+		// The model the session is on, every write (plan 052 § C4): a load
+		// of the row sends it back.
+		row.Model = snap.CurrentModel
+		// And its effort (plan 052 L5 F1), which a load sends back too.
+		if opt := agent.EffortOption(snap); opt != nil {
+			row.Effort = opt.Current
+		}
+	}
 	if err := w.opts.Store.Upsert(row); err != nil {
 		if report {
 			w.report(cause, err.Error())
@@ -1048,6 +1068,19 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 	w.mu.Unlock()
 	return nil
 }
+
+// recordsModel reports whether rows of provider carry the session's model
+// (agent.Provider.RecordsModel).
+func recordsModel(provider string) bool {
+	p, err := agent.ProviderByName(provider)
+	return err == nil && p.RecordsModel()
+}
+
+// recordsModel reports whether this writer's session is one whose rows carry
+// its model, by the provider it was started as (IndexOptions.Provider). It is
+// the observer's to call, so it reads no snapshot: no lock, no I/O, nothing
+// of the session's.
+func (w *indexWriter) recordsModel() bool { return recordsModel(w.opts.Provider) }
 
 // retiresFallback reports whether a title of this kind, once written, leaves
 // the row wanting no first-prompt fallback: its own (which IS the fallback),

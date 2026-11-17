@@ -57,7 +57,7 @@ func (e *Engine) SubmitExitAfterTurn(c Command, text string) (SubmitResult, erro
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		return e.submit(c, admitted, SubmitQueue, "", true)
+		return e.submit(c, admitted, SubmitQueue, "", true, nil)
 	})
 }
 

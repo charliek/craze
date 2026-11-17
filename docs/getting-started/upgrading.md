@@ -100,6 +100,118 @@ end `it exits when idle`.
   native session's cached prompt prefix starts fresh once
   ([Native web search](../reference/configuration.md#native-web-search)).
 
+### A Claude provider
+
+craze can now drive **your own Claude Code on your Claude Pro or Max plan**
+through the `claude-agent-acp` adapter ([Claude on your
+plan](claude.md)). It is listed after grok — by `craze providers`, the
+startup picker, `/provider`, `--help` and the hub's `sessions.createOptions` —
+and `--provider claude`, `provider = "claude"` and `CRAZE_PROVIDER=claude`
+reach it. What changes for everyone else:
+
+- **Every provider listing has a fourth row**, `claude`, between grok and
+  native: unavailable on a machine without the adapter or Claude Code, named
+  with its install command. A script that reads `craze providers --json` or
+  `sessions.createOptions` by position, or counts three providers, sees four.
+  The unknown-provider and no-default errors name `claude` too
+  (`want cursor, grok, claude, or native`).
+- **The usage section is no longer native-only**: a claude session reports
+  one too, with optional `plan`, `window`, `windowUtilization`, `resetsAt` and
+  `model` keys after the four it always has ([Usage](../reference/protocol.md#usage)).
+  A client that does not know them is unaffected.
+- **A `notice` event** carries one of Claude Code's notices, and a claude
+  session sends `compaction` events too, with no sizes; `craze prompt --json`
+  prints a `notice` line ([JSON events](../reference/cli.md#json-events)).
+  Only claude sends `notice`; native sessions already sent `compaction`.
+- **The claude overage guard keeps a record**, `claude-overage.json` in
+  craze's directory, which refuses claude starts and prompts on the machine
+  until the limit it names resets ([Extra usage](claude.md#extra-usage-the-overage-guard)).
+  A session it stops ends with the new close cause `overage`, and its host
+  stops with it.
+
+- **`claude` is a provider id now.** It used to be an unknown one: `--provider
+  claude` exited 2, and `provider = "claude"` warned and started cursor. Both
+  now start a claude session, which checks your Claude login and refuses
+  anything but a Pro or Max plan ([Claude
+  sessions](../reference/cli.md#claude-sessions)).
+- **`[agents].claude`** in `config.toml` is read: the adapter's path, as the
+  other `[agents]` keys are.
+- **Every ACP agent's environment gains `CRAZE_SESSION_PROVIDER`**, set to the
+  session's provider (`cursor`, `grok`, `claude`), replacing any it inherited;
+  [the hub](../reference/cli.md#the-hub) removes it from its hosts'.
+  Nothing else in a cursor or grok agent's environment changes.
+- **`craze new` refuses the calling agent's own provider**, exit 2, kind
+  `usage`: `craze: this agent already runs on <provider>; use your own
+  sub-agent tool for <provider> work, not craze (--allow-same-provider
+  overrides)`. The caller is `CRAZE_SESSION_PROVIDER` (which a native session's
+  shell commands now carry too, as `native`), else Claude Code's `CLAUDECODE=1`
+  or a standalone cursor-agent's `CURSOR_AGENT`. A script run from inside a
+  craze session that starts a session on that session's own provider — `craze
+  new --provider native` from a native session's shell, say — now exits 2;
+  `--allow-same-provider` (new) restores the old behaviour ([Starting your own
+  provider](../reference/cli.md#starting-your-own-provider)). `craze send`,
+  `wait` and `cancel` are unchanged.
+- **The Claude Code plugin's skill is provider-neutral**: any agent, not only
+  Claude Code, can follow it, and it names claude as a target, reached with
+  `craze new --wait --provider claude` from an agent that does not run on
+  Claude. There is no `craze:claude` agent; every agent file now opens with
+  the rule never to call its own provider ([Claude Code
+  sub-agents](claude-code.md#dont-call-yourself)).
+- **A tool still running when a turn fails is shown failed.** A turn that
+  fails — the agent's error, or the agent exiting — closes the tool rows it
+  left running, on every provider, where they used to spin on.
+- **A claude session's index row records its model and its effort**
+  (`model` and `effort` in `sessions.jsonl`), which an older craze keeps as
+  unknown keys; a resume asks for both again.
+- **The protocol gains a question's free text**, additive and optional: a
+  question item's `allowText`, `asks.answer`'s `answer.text` and an ask
+  ending's `text` ([A question's free
+  text](../reference/protocol.md#a-questions-free-text)). Only claude sets
+  them; a client that does not know them is unaffected.
+- **A single-choice question takes one pick**, on every provider: an
+  `asks.answer` naming two option ids for a question without
+  `allowMultiple` is now `bad_request`, reason `bad_answer` (it used to be
+  accepted and only the first id sent). craze's own TUI never sent one.
+- **A question can be answered `cancel`**, and its ending carries
+  `cancelled`; claude's adds `by: withdrawn`, a `required` question item and a
+  `done`'s `keptPlanning` — all additive.
+- **A foreign turn's end can say how it ended**: `foreignTurn.cancelled` and
+  `foreignTurn.err` (`{kind, message}`), with two new `reason` values,
+  `background` and `compaction` ([The foreign
+  turn](../reference/protocol.md#the-foreign-turn)); a sub-agent row can carry
+  `noCancel`. All additive, and only claude sets them: a grok or native
+  foreign turn's brackets, and `lastTurn` for them, are unchanged.
+
+### The gx provider is gone
+
+craze no longer has a `gx` provider (the third-party fork of the Grok CLI): it
+is not listed by `craze providers`, offered by the picker, named in `--help` or
+accepted as a provider id. Nothing that mentions it breaks:
+
+- **`provider = "gx"` in `config.toml`, or `CRAZE_PROVIDER=gx`,** warns `craze:
+  unknown provider "gx", using cursor` and starts cursor, as any unknown id
+  does. Pick a provider again (`/provider`, or `provider = "grok"`) to replace
+  it. Two paths do not fall back, as for any unknown default: `craze new
+  --wait` with no `--provider` exits 1, and a hub `session.create` that names
+  no provider is `bad_request` (`sessions.createOptions` omits the stale
+  default). Name a provider, or fix `config.toml`.
+- **`--provider gx` is refused**, exit 2: `craze: unknown provider "gx" (want
+  cursor, grok, or native)`. The same refusal answers `craze new --provider gx`
+  and a `session.create` that names `gx`.
+- **Sessions that ran on gx stay in the session index but are not offered**:
+  `--continue`, `--resume`, the resume picker and `craze ps --saved` leave
+  them out, and opening one by its id says `that session's provider "gx" is
+  not one this craze can resume`. They are not deleted.
+- **`[agents].gx` in `config.toml` is ignored**, with no warning, and a stale
+  `models/gx.json` cache is never read.
+- **`source = "gx"` on a `models.toml` entry** still means what it did (the
+  legacy marker, see [how the files
+  merge](../reference/configuration.md#how-the-files-merge)): that is a mark on
+  an old file, not the provider.
+
+If you used gx, `grok` speaks the same protocol and uses the same `~/.grok`
+home: point `[agents].grok` at the binary, or set `CRAZE_AGENT_BIN`.
+
 ## Since v0.2.0
 
 **The waiting commands' JSON changes.** A program that reads `craze new --wait

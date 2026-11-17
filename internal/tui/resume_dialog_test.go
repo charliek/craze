@@ -57,7 +57,7 @@ func threeResumeRows() []sessions.Row {
 	return []sessions.Row{
 		resumeRow("s-1", "grok", "fix: the flaky pty test", 3*time.Minute),
 		resumeRow("s-2", "cursor", "teach the composer to wrap", 2*time.Hour),
-		resumeRow("s-3", "gx", "port the docs site", 5*24*time.Hour),
+		resumeRow("s-3", "native", "port the docs site", 5*24*time.Hour),
 	}
 }
 
@@ -255,7 +255,7 @@ func TestResumePickerCapsTheList(t *testing.T) {
 // again) but is never offered — there is nothing Enter could start.
 func TestResumePickerDropsAnUnknownProvider(t *testing.T) {
 	m, _ := newResumePicker(t, []sessions.Row{
-		resumeRow("s-1", "claude", "from another build", time.Minute),
+		resumeRow("s-1", "gx", "from another build", time.Minute),
 		resumeRow("s-2", "grok", "a session craze can start", 2*time.Minute),
 	}, 100, 30)
 	if len(m.resume) != 1 || m.resume[0].SessionID != "s-2" {
@@ -347,7 +347,7 @@ func TestFrameGoldenResumePickerShort(t *testing.T) {
 	rows := append(threeResumeRows(),
 		resumeRow("s-4", "cursor", "chase the pty flake", 6*24*time.Hour),
 		resumeRow("s-5", "grok", "write the release notes", 8*24*time.Hour),
-		resumeRow("s-6", "gx", "read the acp schema", 9*24*time.Hour),
+		resumeRow("s-6", "native", "read the acp schema", 9*24*time.Hour),
 	)
 	m, _ := newResumePicker(t, rows, 100, 12)
 	body := m.resumeDialogBody(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)

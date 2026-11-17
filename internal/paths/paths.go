@@ -28,6 +28,10 @@ const (
 	nativeName      = "native"
 	journalName     = "journal"
 	attachmentsName = "attachments"
+	// claudeOverageName is the claude overage guard's trip record (plan 052 §
+	// D3), machine-wide: every claude session started on this machine with
+	// this craze directory reads it.
+	claudeOverageName = "claude-overage.json"
 
 	// removedConfigEnv named the config *file* before CRAZE_HOME replaced it.
 	// It is kept only as a tripwire (tripped, CheckEnv): a script or test
@@ -133,6 +137,16 @@ func JournalDir() string {
 // the working directory cannot be read: nothing is pasted as an image then.
 func AttachmentsDir() string {
 	return absInCrazeDir(attachmentsName)
+}
+
+// ClaudeOveragePath is the claude overage guard's trip record (plan 052 §
+// D3): written when a claude session sees its plan limit reached with extra
+// usage on, and read before every claude start and prompt until the time it
+// names. It is absolute even when CRAZE_HOME is relative, for NativeDir's
+// reason. "" when CrazeDir is "" or the working directory cannot be read: no
+// record is kept then.
+func ClaudeOveragePath() string {
+	return absInCrazeDir(claudeOverageName)
 }
 
 // expandTilde cleans dir, first replacing a leading "~" or "~/" with the home

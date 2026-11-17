@@ -197,7 +197,7 @@ func TestTheSlashOpensTheListsCommands(t *testing.T) {
 	if v, _ := inputOf(m); v != "/provider " {
 		t.Fatalf("enter on /provider left %q", v)
 	}
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "native"}) {
 		t.Fatalf("/provider lists %v", got)
 	}
 	if it := cmdItem(t, m, "cursor"); it.Note != sessCurrentNote || it.Detail != "cursor-agent over ACP" {
@@ -215,33 +215,24 @@ func TestTheSlashOpensTheListsCommands(t *testing.T) {
 }
 
 // TestTheProvidersAreThePickersProviders (§3.14): /provider offers exactly
-// the startup picker's providers — agent.Providers() filtered for what this
-// machine can run (pickerRows over the launch's list): gx, optional, only
-// when its binary resolves — in the picker's order.
+// the startup picker's providers (pickerRows over the launch's list), in the
+// picker's order.
 func TestTheProvidersAreThePickersProviders(t *testing.T) {
 	m, _ := cmdList(t, 100, 30, nil)
 	var ids []string
 	for _, p := range m.providers {
 		ids = append(ids, p.Name())
 	}
-	if slices.Contains(ids, agent.GxProvider().Name()) {
-		t.Fatalf("fixture: the picker's default rows %v hold gx", ids)
-	}
 	m, _ = typeList(t, m, "/provider ")
 	if got := cmdItems(m); !slices.Equal(got, ids) {
 		t.Fatalf("/provider lists %v, the picker %v", got, ids)
 	}
-
-	// gx's binary resolved (the launch's list has it): offered, in order.
-	m = clearInput(t, m)
-	m.providers = pickerRows(agent.Providers(), m.providerDefault)
-	m, _ = typeList(t, m, "/provider ")
-	if got, want := cmdItems(m), []string{"cursor", "grok", "gx", "native"}; !slices.Equal(got, want) {
-		t.Fatalf("/provider lists %v, want %v", got, want)
+	if want := []string{"cursor", "grok", "claude", "native"}; !slices.Equal(ids, want) {
+		t.Fatalf("the picker's rows %v, want %v", ids, want)
 	}
 	// Narrowed by id.
 	m, _ = typeList(t, m, "g")
-	if got := cmdItems(m); !slices.Equal(got, []string{"grok", "gx"}) {
+	if got := cmdItems(m); !slices.Equal(got, []string{"grok"}) {
 		t.Fatalf("/provider g lists %v", got)
 	}
 	m, _ = typeList(t, m, "z")
@@ -506,8 +497,8 @@ func TestTypedCommandLines(t *testing.T) {
 		t.Fatalf("/model default: %+v, %q", spec, ruleOf(t, m))
 	}
 	for _, tc := range []struct{ line, note string }{
-		{"/provider nope", "no provider nope: one of cursor, grok, native"},
-		{"/provider ", sessNeedsProvider + "cursor, grok, native"},
+		{"/provider nope", "no provider nope: one of cursor, grok, claude, native"},
+		{"/provider ", sessNeedsProvider + "cursor, grok, claude, native"},
 		{"/model ", sessNeedsModel},
 	} {
 		before := m.sessPick

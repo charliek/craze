@@ -1,11 +1,11 @@
 # crazeeval: the craze native harness evaluation
 
-`eval/` is plan 029's evaluation harness. It runs craze native and three reference
-harnesses on the same models and the same tasks: gx (the grok-build fork), opencode and
-codex. It records what each one sends on the wire and scores the results. It is not part
+`eval/` is plan 029's evaluation harness. It runs craze native and two reference
+harnesses on the same models and the same tasks: opencode and codex (gx, the grok-build
+fork, was a third until it was retired; its plan 029 results stay in `results/`). It records what each one sends on the wire and scores the results. It is not part
 of CI or the per-commit gate. It costs money, and its runs are not deterministic.
 
-A fifth arm, `craze-web` (craze plan 051), is craze with web search on, its searches and
+An optional fourth arm, `craze-web` (craze plan 051), is craze with web search on, its searches and
 fetches answered by the proxy from a web task's frozen corpus; it runs only when named,
 and only on the `web` split (see *The web split*).
 
@@ -162,7 +162,7 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - Every capture and ledger line is scrubbed of every key before it is written.
 - `result.json`'s `key_scan` is a grep of the run directory. `crazeeval keyscan <dir>` does
   the same for any directory. Both print paths and counts only.
-- The owner's files are read-only inputs: nothing under `~/.craze`, `~/.grok`,
+- The owner's files are read-only inputs: nothing under `~/.craze`,
   `~/.config/opencode`, `~/.local/share/opencode` or `~/.codex` is ever written.
 
 **Accepted residuals** (review r2-c1; recorded, not closed):
@@ -295,7 +295,7 @@ allow-list, nothing fetched, nothing leaves the host.
   **largest** of `max_tokens`, `max_completion_tokens` and
   `max_output_tokens` at the output price. A request that names no limit is reserved at
   the **model's maximum output** -- the largest of every limit that applies: the snapshot's
-  craze `max_output_tokens`, gx `max_completion_tokens` (when it has a gx entry) and its models.dev
+  craze `max_output_tokens` and its models.dev
   `limit.output` (deepseek-v4p1-flash lists 384000); 131072 when none is known -- and is
   forwarded unchanged (the proxy never adds a limit). Only one completion per request is admitted.
   At Kimi K3's ledger price an unbounded request reserves about $2.95 of output, so a Kimi
@@ -309,7 +309,7 @@ allow-list, nothing fetched, nothing leaves the host.
   its reservation.
 - **Drains:** when a harness hangs up on a stream, the proxy reads the rest of the upstream
   stream (up to 2 min, bounded by the run's close) so the usage still arrives. This
-  happens with opencode's and gx's title calls when the harness exits, and with codex,
+  happens with opencode's title calls when the harness exits, and with codex,
   which closes a Responses stream once `response.completed` arrives. Without drains,
   every such request would keep a `max_tokens`-sized reservation. The capture marks these
   requests `client_disconnected` and `drained`.
@@ -330,9 +330,8 @@ allow-list, nothing fetched, nothing leaves the host.
 ## Config
 
 - `models.toml`: the eval models. Each entry has its provider, its wire model, its one
-  pinned reasoning effort, and each harness's id for it. The `craze` and `gx` aliases are
-  kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
-  so a renamed or retired alias has to be changed in both places. codex runs only where the provider
+  pinned reasoning effort, and each harness's id for it. The `craze` alias is the one in
+  craze's model table (a `gx` field in an older file is ignored). codex runs only where the provider
   serves `/responses` (Meta, Fireworks; not Z.AI or Anthropic). The Fireworks models are
   Kimi K3.1 Pro (`fireworks/kimi-k3p1-pro`) with Kimi K3 (`fireworks/kimi-k3`) as its
   baseline, both `last = true` so they run in the same place in a batch, and DeepSeek
@@ -343,7 +342,7 @@ allow-list, nothing fetched, nothing leaves the host.
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
   - It copies the target definitions from craze's model table (below), the owner's craze
-    `providers.toml` and the owner's gx config into
+    `providers.toml` into
     `<campaign>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
     fields are copied: no key, env-key name, auth helper or header. An old gx import's entry
     (`source = "gx"`) for a provider craze ships gives the catalog's `driver` and `base_url`
@@ -377,16 +376,6 @@ allow-list, nothing fetched, nothing leaves the host.
     With no owner `models.toml` there is nothing to compare. A generated home also cannot
     carry the catalog-only `thinking` key, and craze reads a Claude model without it as
     adaptive; `tests/test_snapshot_view.py` fails if an eval model ships another mode.
-  - **The gx fields** come from the owner's gx config (`~/.grok/config.toml`, with
-    `providers.toml` merged over it), and are optional per model: an alias it does not
-    name is recorded as `gx: null` (with `gx_provider_id` and `gx_provider`), and
-    `snapshot-config` prints `gx=- (not in the owner's gx tables)` for it. `run` with `gx`
-    among `--harness` then stops before starting anything (exit 2), one line per such
-    model saying to drop gx or add the model to the gx config and re-run `snapshot-config`;
-    craze, craze-web, opencode and codex run on it as usual, and `proxy --harness gx` is
-    refused the same way. `probe` builds the homes a run would, so it builds no gx home
-    for such a model. An alias the gx config does name must
-    still name a provider it defines and the eval's wire model.
   - It saves a models.dev catalog for opencode (`OPENCODE_MODELS_PATH`), and records which
     `--variant`s opencode offers per model, asked of opencode itself in a sandbox.
   - Every run uses the snapshot and records its hash; runs never read the owner's live files.
@@ -405,7 +394,6 @@ The generated homes, per harness:
 |---|---|---|
 | craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort. `models.toml` says `catalog = false` (craze plan 031 P10): craze ships a model catalog and merges it under the user's files, which would add every shipped model — funded by the proxy provider's dummy key — to the run and to the agent tool's description, changing the frozen prompt; with it off the two files are the whole table. `crazeeval proxy --craze-home` writes it too. **The driver** is the snapshot's: the owner's own, or for an old gx import's entry (`source = "gx"`, whose driver and `base_url` craze ignores for a provider it ships while its catalog is on) the one craze's shipped catalog (`internal/harness/modeltable/catalog.toml`) gave the provider at snapshot time, as craze itself runs it: Meta's `openai-responses` (craze plan 047 D14). An entry that names none runs on the catalog's. Such a gx entry's proxy route goes to craze's shipped endpoint too, and its key is chosen as craze chooses it (the catalog's variables, then the entry's own names, then its `api_key`). With the owner's `models.toml` at `catalog = false`, craze keeps every entry whole, so the snapshot and the route do too. An OpenRouter target is refused before its home is written: craze's `openrouter` driver has a fixed endpoint and cannot point at the proxy. **Anthropic:** craze's endpoint is fixed, so the provider entry is `driver = "anthropic"` and the dummy key, no `base_url` (craze refuses one; a `catalog = false` table must name the driver), and the run's environment carries `CRAZE_TEST_ANTHROPIC_API`, the route without its `/v1`: craze keeps the override's path and adds `/v1/messages` itself, and takes only an `http` URL on a loopback IP literal. `crazeeval proxy --craze-home` prints it as `craze_env`. |
 | craze-web | craze's home, byte for byte, plus `.craze/config.toml` (0600) | `[websearch] provider = "exa"` turns web search on (the config decides: no state file, no key), and the run's environment adds `CRAZE_TEST_EXA_MCP`: the run's web route, `http://127.0.0.1:<port>/r/<token>/web/mcp`, derived from its base URL (craze takes only an `http` URL on a loopback IP literal). The same binary, command and output reading as craze. `crazeeval probe` builds only the default harnesses' homes. |
-| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. **Anthropic:** gx's `messages` backend, with `anthropic-version` as an extra header (gx sends it no other way); the proxy drops gx's own credential header and sets `x-api-key`. |
 | opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan`, `fireworks-ai` and `anthropic` (Messages) providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
 | codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |
 
@@ -423,7 +411,7 @@ codex on its fallback. codex is a reference, never a bar.
 
 Every child also gets:
 
-- `SHELL=/bin/bash`, so gx and codex use the shell craze's bash tool uses;
+- `SHELL=/bin/bash`, so opencode and codex use the shell craze's bash tool uses;
 - a fixed git identity;
 - `GOTOOLCHAIN=local` and `GOPROXY=off`;
 - the tool venv (system python plus pytest) first on `PATH`.
@@ -442,9 +430,9 @@ uv run crazeeval snapshot-config
 uv run crazeeval validate [--tasks <ids|split:...>]
 
 # A batch. --craze-bin is required for craze and craze-web; never /usr/local/bin/craze.
-# --harness defaults to craze,gx,opencode,codex; craze-web runs only when named.
+# --harness defaults to craze,opencode,codex; craze-web runs only when named.
 # --tasks defaults to the dev and held-out splits; split:all is every split but web.
-uv run crazeeval run --harness craze,gx,opencode,codex --model muse-spark-1.3-contributor,glm-5.3-flash \
+uv run crazeeval run --harness craze,opencode,codex --model muse-spark-1.3-contributor,glm-5.3-flash \
     --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke [--parallel 4] \
     [--cap-zai 2] [--cap-other 3] [--out DIR] [--timeout S] [--first-rep N]
 # A web batch (see "The web split"): the web tasks on craze and craze-web.
@@ -481,7 +469,7 @@ uv run crazeeval judge-hash --stamp FILE [FILE ...] [--dry-run]
 # One pair (the judge smoke): two rep directories.
 uv run crazeeval judge-pair --a <rep-dir> --b <rep-dir> [--judge sol] [--both-orders] [--seed N]
 # Every pair of craze runs against the other harnesses' (held-out verdicts sealed):
-uv run crazeeval judge-batch --batch DIR [--x craze] [--y gx,opencode,codex] [--judge sol|luna] \
+uv run crazeeval judge-batch --batch DIR [--x craze] [--y opencode,codex] [--judge sol|luna] \
     [--both-orders | --success-bar] [--seed N] [--parallel 4] [--out DIR] \
     [--calibration FILE] [--override-calibration REASON]
 # A build against an earlier build of the same harness (a lever's before/after):
@@ -787,7 +775,7 @@ Each batch writes:
 
 Per-run disk stays small (a baseline batch is ~250 runs): after the key scan each attempt
 drops its Go cache, the harness's download and state caches (opencode's npm cache,
-workspace snapshot and XDG cache; gx's unpacked user guide; codex's bundled skills and
+workspace snapshot and XDG cache; codex's bundled skills and
 sqlite state) and, for a craze-repo task, the workspace itself (the repository with its
 history); `diff.patch`, the manifests, the capture, `result.json` and the logs stay.
 
@@ -837,8 +825,8 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   side between `<<<BEGIN/END UNTRUSTED CANDIDATE X>>>` markers: the final answer (for a plan
   task, the plan the harness presented), the execution evidence (every tool call in order,
   shown by its **kind** -- `shell`, `read`, `edit`, `write`, `search`, `list`, `todo`,
-  `delegate`... (`capture.TOOL_KINDS`, which maps every name the four harnesses use), with
-  argument names unified (`path=`, `pattern=`) and gx's `session_title` left out, since tool
+  `delegate`... (`capture.TOOL_KINDS`, which maps every name the harnesses use), with
+  argument names unified (`path=`, `pattern=`) and a harness's own `session_title` left out, since tool
   names alone would tell the judge which harness a side is -- with its command or path, and
   its result's exit status, first lines and, for a long result, last lines, since a test
   summary is at the end; at most 12 KB, counted in UTF-8 bytes, then a marker),
@@ -929,7 +917,7 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   an append made meanwhile waits and is never lost. Run it before adding or changing a
   task; `crazeeval archive` applies the same rule to such records in its own output.
 
-The judge smoke (C2): craze vs gx on `smoke-fix` (deepseek-v4p1-flash, C1's last smoke),
+The judge smoke (C2): craze vs gx (retired since) on `smoke-fix` (deepseek-v4p1-flash, C1's last smoke),
 sol, one order: a schema-valid verdict in 11 s.
 
 ## The report
@@ -951,8 +939,8 @@ sol, one order: a schema-valid verdict in 11 s.
   verdict is a missing verdict, not replaced by a lesser one. The report prints how many
   verdicts were loaded, bound and final;
 - the success bar per model: the **best open harness is fixed from the baseline batch**
-  (`--baseline`, default the first `--batch`) -- the higher objective count of gx and
-  opencode there, tiebreak their head-to-head win rate -- and, unsealed, recorded in
+  (`--baseline`, default the first `--batch`) -- the open harness's (opencode's,
+  since gx was retired) objective count there -- and, unsealed, recorded in
   `<baseline>/best-open-harness.json` the first time; after that the record stands, so no
   later rerun (a provider-drift check) can change it. Then (a) native's objective count ≥
   its, (b) native's win rate ≥ 50%, (c) both again on the held-out tasks alone, (d) coverage

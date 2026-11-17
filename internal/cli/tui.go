@@ -92,6 +92,9 @@ func (f *tuiFlags) refuse(p agent.Provider) error {
 	if err := refuseInProcess("craze", p, f.agentBin, f.mode()); err != nil {
 		return err
 	}
+	if err := refuseFast("craze", p, f.fastSetting()); err != nil {
+		return err
+	}
 	return webStartCheck("craze", f.webSearchSetting(), agent.WebFlagGiven, false, p)
 }
 
@@ -357,6 +360,11 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		LoadSessionID: row.SessionID,
 		Title:         row.Title,
 		TitlePinned:   row.Pinned,
+		// The model the row recorded, which claude's load sends back unless
+		// --model names one (plan 052 § C4); other providers ignore it.
+		LoadModel: row.Model,
+		// And its effort (plan 052 L5 F1).
+		LoadEffort: row.Effort,
 	}
 	opts.WebFlag, opts.WebFlagOrigin = f.webSearchSetting(), agent.WebFlagGiven
 	if opts.WebFlag == agent.WebFlagAbsent {
@@ -483,28 +491,18 @@ func noContinueMsg(index *sessions.Store, cwd, filter string) string {
 	return msg
 }
 
-// pickerProviders is the startup picker's row list: every provider craze knows,
-// less the optional ones whose binary does not resolve. gx is a personal fork,
-// so a machine without it is not shown a row that could only fail at spawn;
-// cursor and grok are never filtered, which is what makes an empty picker
-// impossible (§3.3).
+// pickerProviders is the startup picker's row list: every provider craze
+// lists, each with the availability check's verdict (plan 036 X13), so the
+// picker's rows and its states (pickerAvailability) cannot disagree about
+// which providers there are.
 //
 // Resolution is the same question the session's own lookup asks, by the same
 // per-provider rule (agentBinary, plan 032 §3.11, P7): launch is the resolved
 // provider — the picker's preselection — and explicitBin --agent-bin, which
-// with CRAZE_AGENT_BIN is that provider's alone. So an override makes gx
-// resolve only when gx is the resolved provider — a gx session started from
-// the picker then genuinely spawns it — and one that resolves to nothing hides
-// gx even with gx on PATH, because the override is exclusive; for any other
-// launch gx shows when `[agents].gx` or its PATH candidate resolves.
+// with CRAZE_AGENT_BIN is that provider's alone.
 //
-// This filters for availability and nothing else. Inserting the resolved
-// default belongs to tui.New, which guarantees it for every caller rather than
-// for the ones that remember (§3.4).
-//
-// The rows are the availability check's listed providers (plan 036 X13): the
-// check is what leaves a missing gx out, so the picker's rows and its states
-// (pickerAvailability) cannot disagree about which providers there are.
+// Inserting the resolved default belongs to tui.New, which guarantees it for
+// every caller rather than for the ones that remember (§3.4).
 func pickerProviders(launch agent.Provider, explicitBin string) []agent.Provider {
 	avail := availability(processAvailInputs(launch, explicitBin), agent.Providers())
 	out := make([]agent.Provider, 0, len(avail))
@@ -527,15 +525,13 @@ func pickerAvailabilityFor(def agent.Provider, explicitBin string) func() []tui.
 // process would resolve them, launch being the launch's own provider (whose
 // alone --agent-bin, explicitBin, and CRAZE_AGENT_BIN are) — over the
 // picker's rows: every listed provider, and def, the picker's configured
-// default, even when it is a gx whose binary is missing, which is then
-// unavailable rather than left out (§3.1's gx row) — the row tui.New always
-// adds for it (pickerRows). Native needing a key has the TUI's fix
+// default, a hidden one included — the row tui.New always adds for it
+// (pickerRows). Native needing a key has the TUI's fix
 // (nativeNoKeyFixTUI, X23): in the TUI picking it is the way to set it up;
 // the paid-source guard's refusal keeps its own (plan 050 C5).
 // It reads the disk: the TUI calls it off its Update.
 func pickerAvailability(launch agent.Provider, explicitBin string, def agent.Provider) []tui.ProviderAvail {
 	in := processAvailInputs(launch, explicitBin)
-	in.pickerDefault = def.Name()
 	rows := agent.Providers()
 	if !slices.ContainsFunc(rows, func(p agent.Provider) bool { return p.Name() == def.Name() }) {
 		// A hidden default (plan 018 §3.4) is a row of the picker's too.

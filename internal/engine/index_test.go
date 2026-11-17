@@ -2100,3 +2100,117 @@ func TestFallbackTitleIsTheFirstLine(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexRecordsClaudesModel (plan 052 § C4): a claude session's row carries
+// the model it is on, every write; another provider's carries none.
+func TestIndexRecordsClaudesModel(t *testing.T) {
+	for _, tc := range []struct{ provider, want string }{{"claude", "haiku"}, {"cursor", ""}} {
+		idx := newFakeIndex()
+		w := newIndexWriter(IndexOptions{Store: idx, CWD: "/w", Provider: tc.provider}, "018f-the-thread",
+			func() agent.Snapshot { return agent.Snapshot{SessionID: "fake-1", CurrentModel: "haiku"} },
+			func(string, string) {})
+		t.Cleanup(w.stop)
+		if !w.write("", "", sessions.TitleKindNone) {
+			t.Fatal("no write")
+		}
+		idx.mu.Lock()
+		got := idx.rows[len(idx.rows)-1].Model
+		idx.mu.Unlock()
+		if got != tc.want {
+			t.Fatalf("%s: model %q, want %q", tc.provider, got, tc.want)
+		}
+		if w.recordsModel() != (tc.provider == "claude") {
+			t.Fatalf("%s: recordsModel", tc.provider)
+		}
+	}
+}
+
+// TestAModelChangeRewritesAClaudeRow (plan 052 § C4): a delta that moves the
+// model is, on its own, a write of the row for a provider whose rows carry the
+// model (cursor's never do: TestIndexRecordsClaudesModel).
+func TestAModelChangeRewritesAClaudeRow(t *testing.T) {
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	model := "haiku"
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Model: &model}})
+	idx.waitRows(t, 3)
+	if got := idx.last(); got.TitleKind != sessions.TitleKindNone {
+		t.Fatalf("the model change wrote %+v, want a touch", got)
+	}
+}
+
+// TestIndexRecordsClaudesEffort (plan 052 L5 F1): a claude session's row
+// carries its effort beside its model, and an options change alone rewrites
+// it.
+func TestIndexRecordsClaudesEffort(t *testing.T) {
+	effort := []agent.ConfigOption{{ID: "effort", Type: "select", Current: "low", SelectValues: []agent.SelectValue{{Value: "low"}, {Value: "high"}}}}
+	for _, tc := range []struct{ provider, want string }{{"claude", "low"}, {"cursor", ""}} {
+		idx := newFakeIndex()
+		w := newIndexWriter(IndexOptions{Store: idx, CWD: "/w", Provider: tc.provider}, "018f-the-thread",
+			func() agent.Snapshot {
+				return agent.Snapshot{SessionID: "fake-1", CurrentModel: "haiku", Config: effort}
+			},
+			func(string, string) {})
+		t.Cleanup(w.stop)
+		if !w.write("", "", sessions.TitleKindNone) {
+			t.Fatal("no write")
+		}
+		idx.mu.Lock()
+		got := idx.rows[len(idx.rows)-1].Effort
+		idx.mu.Unlock()
+		if got != tc.want {
+			t.Fatalf("%s: effort %q, want %q", tc.provider, got, tc.want)
+		}
+	}
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: &agent.ConfigState{Options: effort}}})
+	idx.waitRows(t, 3)
+}
+
+// TestASettingsChangeSurvivesTheClose (review C5d item 4): a model or effort
+// change still owed to a claude row when the engine closes is written, not
+// dropped as a plain touch: the next resume asks for what the row says.
+func TestASettingsChangeSurvivesTheClose(t *testing.T) {
+	idx := newFakeIndex()
+	r := newRigHooked(t, Options{Index: IndexOptions{
+		Store: idx, CWD: "/w", Provider: "claude",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}}, agent.EventLogOptions{NoPrimary: true}, nil)
+	seededTurn(t, r, idx, "a prompt")
+	idx.waitRows(t, 2)
+	entered, release := idx.parkAt(3)
+	t.Cleanup(release)
+	r.e.idx.closeWait = watchdog
+	finishing := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(finishing) }
+	effort := func(v string) *agent.ConfigState {
+		return &agent.ConfigState{Options: []agent.ConfigOption{{ID: "effort", Type: "select", Current: v, SelectValues: []agent.SelectValue{{Value: "low"}, {Value: "high"}}}}}
+	}
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: effort("high")}})
+	await(t, entered, "the first change's write to park")
+	// The second change is owed while that write is held: the close finds it.
+	r.s.emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Config: effort("low")}})
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	await(t, finishing, "the worker's exit to begin")
+	release()
+	select {
+	case <-closed:
+	case <-time.After(watchdog):
+		t.Fatal("Close never returned")
+	}
+	if n := idx.tries(); n != 4 {
+		t.Fatalf("%d writes; want the seed's two, the parked change's and the owed one's", n)
+	}
+}

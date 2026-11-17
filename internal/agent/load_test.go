@@ -306,7 +306,7 @@ func TestLoadNeverCallsSessionNew(t *testing.T) {
 	}
 }
 
-// TestMainUserChunkOutsideReplayIsDropped: grok and gx echo the user's own
+// TestMainUserChunkOutsideReplayIsDropped: grok echoes the user's own
 // prompt live. Emitting that would double every user block in the TUI and add
 // user lines to `craze prompt --json`, so outside a replay the chunk is
 // dropped, exactly as it was before session/load existed.

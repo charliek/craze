@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
@@ -38,5 +39,16 @@ func TestMain(m *testing.M) {
 	// gets a refused connection instead of reaching Exa.
 	_ = os.Unsetenv(modeltable.ExaKeyEnv)
 	_ = os.Setenv(websearch.TestEndpointEnv, "http://127.0.0.1:9/mcp")
-	os.Exit(m.Run())
+	// The claude overage guard's trip record (plan 052 § D3) is the package's
+	// own, in a directory of its own: no test reads or writes the user's.
+	dir, err := os.MkdirTemp("", "craze-agent-overage-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "FAIL:", err)
+		os.Exit(1)
+	}
+	restore := SetClaudeOverageForTest(filepath.Join(dir, "claude-overage.json"), nil, 0)
+	code := m.Run()
+	restore()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }

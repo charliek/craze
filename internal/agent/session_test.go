@@ -131,6 +131,24 @@ func (e *eventLog) add(ev Event) {
 	e.mu.Unlock()
 }
 
+// caughtUp waits until this collector holds every event the session had
+// published when it was called (the session's own log's LastSeq): a test that
+// has synchronised with the session reads the events it published, not the
+// collector goroutine's lag behind them. A collector with no session log
+// fails the test.
+func (e *eventLog) caughtUp(t *testing.T) {
+	t.Helper()
+	if e.log == nil {
+		t.Fatal("caughtUp needs the session's own log")
+	}
+	want := e.log.LastSeq()
+	waitFor(t, "the collector to catch up", func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return len(e.list) > 0 && e.list[len(e.list)-1].Seq >= want || want == 0
+	})
+}
+
 func (e *eventLog) snapshot() []Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()

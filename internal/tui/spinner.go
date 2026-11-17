@@ -66,7 +66,7 @@ func (m *Model) handleTick(msg tickMsg) {
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
 		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() || m.viewedRunning() ||
-		m.shellRunning() || m.compacting("") || m.sessListSpinning() || m.btwPending()
+		m.shellRunning() || m.compacting("") || m.sessListSpinning() || m.btwPending() || m.foreignWorking()
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
@@ -92,7 +92,13 @@ func (m Model) spinnerVisible() bool {
 	// A foreign-turn or wake compaction can open main's fold while status
 	// stays idle and nothing else is running (no turn, no child): the working
 	// line still has to show while it does (plan 028 §3.13).
-	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning() || m.compacting("")
+	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning() || m.compacting("") || m.foreignWorking()
+}
+
+// foreignWorking says a turn the agent runs on its own shows as work in
+// progress: a claude background turn (agent.ProviderInfo.ForeignTurnShowsWorking).
+func (m Model) foreignWorking() bool {
+	return m.snap.ForeignTurn && m.snap.Provider.ForeignTurnShowsWorking()
 }
 
 // spinnerGlyph is the current frame of the cycle, shared with the merged form
@@ -121,7 +127,7 @@ func (m Model) spinnerView() string {
 	text := m.spinnerActivity() + " · " + m.spinnerElapsed()
 	// Under the side view Esc closes the view (plan 040 §3.6): it interrupts
 	// nothing, so the line does not offer it.
-	if m.status == statusWorking && m.btw == nil {
+	if (m.status == statusWorking || m.foreignWorking()) && m.btw == nil {
 		text += " · esc to interrupt"
 	}
 	return renderSegs(m.width,

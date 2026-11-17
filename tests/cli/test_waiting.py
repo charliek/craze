@@ -632,7 +632,7 @@ def _edits(craze_bin: Path, fake_agent_bin: Path, provider: str, workspace: Path
     """A waiting turn of the fake agent's edits script, as provider, in workspace."""
     _config(fake_agent_bin)
     with (Path(os.environ["CRAZE_HOME"]) / "config.toml").open("a", encoding="utf-8") as f:
-        f.write(f'grok = "{fake_agent_bin}"\ngx = "{fake_agent_bin}"\n')
+        f.write(f'grok = "{fake_agent_bin}"\n')
     out = _craze(craze_bin, "new", "--wait", "--json", "--provider", provider, "-C", str(workspace), "go", script=script)
     assert out.returncode == 0, out
     res = json.loads(out.stdout)
@@ -674,14 +674,13 @@ def test_files_from_a_cursor_turn(craze_bin: Path, fake_agent_bin: Path, tmp_pat
     assert "planFile" not in res, res
 
 
-@pytest.mark.parametrize("provider", ["grok", "gx"])
-def test_files_from_a_grok_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, provider: str) -> None:
-    """grok's and gx's edit tools by name, whatever kind they say. The plan file is
+def test_files_from_a_grok_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """grok's edit tools by name, whatever kind they say. The plan file is
     the one under the session id the agent gave, which is not craze's, and it is in
     neither list; another session's plan.md and a worktree's are files like others."""
     workspace = tmp_path.resolve() / "w"
     workspace.mkdir()
-    res = _edits(craze_bin, fake_agent_bin, provider, workspace, "grok-edits")
+    res = _edits(craze_bin, fake_agent_bin, "grok", workspace, "grok-edits")
     assert res["session"] != "fake-session-1", res
     sessions = Path(os.environ["HOME"]).resolve() / ".grok" / "sessions" / quote(str(workspace), safe="")
     assert res["planFile"] == str(sessions / "fake-session-1" / "plan.md"), res

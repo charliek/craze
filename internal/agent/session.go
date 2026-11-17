@@ -46,6 +46,15 @@ var ErrNoSuchSubagent = errors.New("agent: no such sub-agent")
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
 
+// ErrForeignTurnRequeue is ErrForeignTurn from a session whose refused text
+// is to wait in the queue whatever its source (review C4b item 3): claude's,
+// whose turns of its own open without warning — between the engine's look and
+// the prompt's gate — so a message typed straight into an idle session must
+// not be lost to one. The engine puts text the client held itself at the head
+// of the queue, as it puts back a refused row. It is ErrForeignTurn to
+// errors.Is.
+var ErrForeignTurnRequeue = fmt.Errorf("%w; the message waits for it in the queue", ErrForeignTurn)
+
 // ErrAgentExited is session.Close's answer when the agent's own exit had
 // been reaped before craze's first Close on it sampled the child's wait
 // channel — not that Close failed. Match it with errors.Is; internal/tui
@@ -156,8 +165,9 @@ const (
 	// after a request the model's window refused. Event.Compaction carries
 	// it, and Event.Agent names the sub-agent whose context it was, "" for
 	// the session's own. Every started is followed by its ended; a load's
-	// replay has only the ended of each stored compaction. No ACP provider
-	// emits it.
+	// replay has only the ended of each stored compaction. Of the ACP
+	// providers only claude emits it (plan 052 § B2), from its
+	// compaction_update: reason auto, and no sizes.
 	EventCompaction EventType = "compaction"
 	// EventStepRetry says a step's model request failed and will be sent again
 	// from the same input (StepRetryInfo): what its failed attempt streamed is
@@ -165,7 +175,22 @@ const (
 	// sub-agent whose step it was, "" for the session's own. No ACP provider
 	// emits it.
 	EventStepRetry EventType = "step_retry"
+	// EventNotice is a notice the agent sent the user (plan 052 § B2):
+	// Event.Notice carries it — a severity, a title and a description — and a
+	// client draws it as a note. Only claude sends one, from Claude Code's
+	// notices (a hook's message, a background task stopped, a model
+	// fallback).
+	EventNotice EventType = "notice"
 )
+
+// NoticeInfo is Event.Notice: one of the agent's notices. Severity is the
+// agent's word for it ("info", "warning", "error"), an open string; Title its
+// headline and Description the rest, either possibly empty but not both.
+type NoticeInfo struct {
+	Severity    string
+	Title       string
+	Description string
+}
 
 // A native step's retry budget, `provider_retries`: the harness's own.
 const (
@@ -298,11 +323,15 @@ const (
 	// StopCauseLostOwner: what the host answered to went away: the launcher
 	// that was waiting for its ready line, or its socket or registry entry.
 	StopCauseLostOwner = "lost_owner"
+	// StopCauseOverage: a claude session's overage guard stopped it (plan
+	// 052 § D3): Claude said a request was, or would be, billed as extra
+	// usage.
+	StopCauseOverage = "overage"
 )
 
 // StopCauses is every cause, for the docs' drift test.
 func StopCauses() []string {
-	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner}
+	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner, StopCauseOverage}
 }
 
 // The two phases a TurnInfo carries.
@@ -391,9 +420,11 @@ type StateDelta struct {
 	// Usage is what the session has spent and how full its context is, as
 	// Snapshot.Usage now stands (plan 028 §3.14): a native session's, authored
 	// under its lock from the harness's report after every step, every
-	// compaction and a load's replay. It is never cleared — a session that
-	// has spent something has spent it — so a non-nil Usage is always the
-	// whole of it, and no ACP session ever sends one.
+	// compaction and a load's replay; and a claude session's (plan 052 § D1),
+	// from the adapter's usage reports, its prompt results and its plan's
+	// limit. It is never cleared — a session that has spent something has
+	// spent it — so a non-nil Usage is always the whole of it. No cursor or
+	// grok session ever sends one.
 	Usage *UsageState
 	// Catalog is the models the session offers, as Snapshot.Models now
 	// stands, and the list's revision (plan 034 §3.4, Q17): a native session's
@@ -506,7 +537,8 @@ type SendNowState struct {
 // UsageState is a session's usage section (plan 028 §3.14), on
 // StateDelta.Usage and Snapshot.Usage alike: the context the next request
 // sends and the window it goes to, and what the session has spent — in its
-// current turn and in all.
+// current turn and in all. A native session reports it, and so does claude
+// (plan 052 § D1, § D2): its tokens unpriced, and its plan's limit.
 //
 // ContextTokens is the estimated size, in tokens, of what the session's next
 // request sends; ContextWindow is the context the model it goes to works
@@ -516,11 +548,24 @@ type SendNowState struct {
 // followed — after a load, the last turn the stored session recorded — and
 // Session the whole session's: its own requests, its compactions' and the
 // sub-agents its turns ran (a child's own transcript is never added in).
+//
+// Plan, Window, WindowUtilization and ResetsAt are a plan's limit (claude's
+// alone, plan 052 § D2; empty, 0 and the zero time for every other session):
+// the subscription ("max"), the window the latest limit report named
+// ("five_hour", "seven_day", ...), its use from 0 to 1 — 0 when the report
+// carried none — and when it resets. Model is the model the agent's last usage
+// report said it ran (claude's `_claude/model`), "" when none did: plan mode
+// runs on Sonnet whatever model is picked.
 type UsageState struct {
-	ContextTokens int64
-	ContextWindow int64
-	Turn          Spend
-	Session       Spend
+	ContextTokens     int64
+	ContextWindow     int64
+	Turn              Spend
+	Session           Spend
+	Plan              string
+	Window            string
+	WindowUtilization float64
+	ResetsAt          time.Time
+	Model             string
 }
 
 // WebStatusState is a native session's web search, session-wide (issues
@@ -624,6 +669,9 @@ const (
 	SubagentChangeSpawned  = "spawned"
 	SubagentChangeProgress = "progress"
 	SubagentChangeFinished = "finished"
+	// SubagentChangeRemoved is a Retained row the session has dropped: a
+	// client drops it, and its child transcript, too.
+	SubagentChangeRemoved = "removed"
 )
 
 type SubagentStatus string
@@ -745,8 +793,8 @@ type Snapshot struct {
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, as the last StateDelta.Usage left
 	// it. nil until a native session's first step — or its load's replay —
-	// reports one, and always nil for an ACP session. Its own copy, cloned by
-	// Snapshot.
+	// or a claude session's first report (plan 052 § D1) sets one, and always
+	// nil for a cursor or grok session. Its own copy, cloned by Snapshot.
 	Usage *UsageState
 	// WebStatus is the session's web search as the last StateDelta.WebStatus
 	// left it (issues #137, #141): nil until a native session that offered
@@ -784,6 +832,15 @@ type SubagentInfo struct {
 	ToolsUsed    []string
 	Transcript   bool
 	Background   bool
+	// NoCancel says this child cannot be stopped on its own even though the
+	// session has the verb (Capabilities.SubagentCancel): a claude child whose
+	// capabilities grant no cancel (plan 052 § E3), so its row offers no stop.
+	NoCancel bool
+	// Retained says the session alone decides when this row goes, and says so
+	// with a SubagentChangeRemoved event: a client keeps it until then rather
+	// than evicting it by its own finished-row cap. claude's rows, whose
+	// retention follows the ACP registry (plan 052 review C4c item 5).
+	Retained bool
 }
 
 // Todo is one entry of the cursor todo list. Status is normalised to
@@ -845,6 +902,8 @@ type Event struct {
 	// rather than produced now. It is stamped on every event emitted between
 	// the two EventReplay phases.
 	Replayed bool
+	// Notice is set on EventNotice: the agent's notice.
+	Notice *NoticeInfo
 	// Compaction is set on EventCompaction: one end of one compaction.
 	Compaction *CompactionInfo
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
@@ -873,7 +932,13 @@ type Event struct {
 	Cause      string
 	Err        error
 	StopReason string
-	At         time.Time
+	// KeptPlanning marks an EventDone whose cancelled stop is a plan's
+	// rejection, not a cancel: claude ends its turn cancelled when its plan is
+	// answered "keep planning" (plan 052 § B5), and nobody cancelled it since.
+	// The plan's own `→ rejected` row says what happened, so a client draws no
+	// cancelled note for it. Only claude sets it.
+	KeptPlanning bool
+	At           time.Time
 	// Seq is assigned by the session's event log; 0 on an event that never
 	// passed through one. It is the log's record envelope's, not the event's
 	// own: the codec does not carry it (eventcodec.go), and Record.Event
@@ -909,7 +974,50 @@ type ForeignTurnInfo struct {
 	Text    string
 	Reason  string
 	Running bool
+	// The ending's (Running false), each absent at its zero value. Cancelled
+	// says a user cancel ended it. Err says it failed (plan 052 § E2): the
+	// engine settles it as a failed turn, and a waiter reports the failure.
+	Cancelled bool
+	Err       *TurnError
 }
+
+// Clone is f with its own copy of Err, so a holder of one can change nothing
+// of another's.
+func (f ForeignTurnInfo) Clone() *ForeignTurnInfo {
+	if f.Err != nil {
+		e := *f.Err
+		f.Err = &e
+	}
+	return &f
+}
+
+// TurnError is a failure a turn's bracket carries as plain data: what kind of
+// failure it was, in the CLI reference's words (errkind), and its message. It
+// travels in the event codec as {kind, message}.
+type TurnError struct {
+	Kind    errkind.Kind `json:"kind,omitempty"`
+	Message string       `json:"message,omitempty"`
+}
+
+// Error is the failure's message, or a plain one when it carries none.
+func (e *TurnError) Error() string {
+	if e.Message == "" {
+		return "the agent's turn failed"
+	}
+	return e.Message
+}
+
+// ErrorInfo is its kind, with the kind's default retryable.
+func (e *TurnError) ErrorInfo() errkind.Info { return errkind.New(e.Kind) }
+
+// ReasonBackground is ForeignTurnInfo.Reason for a claude turn the agent ran
+// on its own: a background command's or a sub-agent's wake, or a steer that
+// started a turn (plan 052 § E1). ReasonCompaction is idle compaction, a model
+// call the agent makes while nothing runs.
+const (
+	ReasonBackground = acp.ForeignReasonBackground
+	ReasonCompaction = acp.ForeignReasonCompaction
+)
 
 // ReasonSubagentWake is ForeignTurnInfo.Reason for the native session's wake:
 // a turn of its own, bracketed as foreign, that delivers a finished background
@@ -1031,6 +1139,14 @@ type Question struct {
 	Prompt        string
 	Options       []Option
 	AllowMultiple bool
+	// AllowText says the question also takes a free-text answer of the
+	// user's own (AskAnswer.Text): claude's per-question "Other" box (plan
+	// 052 § B4). No other provider sets it.
+	AllowText bool
+	// Required says the question must be answered — a pick or free text —
+	// whenever the ask is answered: a claude form's `required`. Such an ask
+	// cannot be skipped (it can be cancelled).
+	Required bool
 }
 
 // QuestionEvent carries a cursor/ask_question request. Auto is set when craze
@@ -1179,6 +1295,18 @@ type Options struct {
 	// the call returns, bracketed by EventReplay; a load that fails fails
 	// Start, and craze never falls back to session/new.
 	LoadSessionID string
+	// LoadModel is the model the loaded session's index row recorded
+	// (sessions.Row.Model), which a provider that records one (claude, plan 052
+	// § C4) sends back in its session/load unless Model names one. Other
+	// providers ignore it.
+	LoadModel string
+	// LoadEffort is the effort the row recorded (sessions.Row.Effort), sent
+	// back the same way unless Effort names one (plan 052 L5 F1).
+	LoadEffort string
+	// Unattended marks a session nobody attends (craze new --wait's host,
+	// cli's unattendedPolicy): claude's is started without the tools that
+	// schedule work for after its host has exited (plan 052 § E3).
+	Unattended bool
 	// Title and TitlePinned seed the session's title and its /rename pin
 	// before the replay. No agent replays a title (plan 013 §2.1), so the
 	// index row craze loaded the id from is the only place a resumed
@@ -1225,6 +1353,13 @@ type Options struct {
 	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
 	// native session spawns no agent and never calls it.
 	AgentGroup func(pgid int) error
+	// Stopped, when set, is told that the session has stopped itself for
+	// good — a claude session's overage guard, once the agent is gone (plan
+	// 052 § D3, review C5 item 8) — with the stop's cause and why: the host
+	// it runs in stops, so a later load starts a fresh agent. It must not
+	// block. nil (craze prompt, the in-process TUI) leaves the session as it
+	// is, refusing every prompt with the error it stopped with.
+	Stopped func(cause, why string)
 	// ShellGroups, when set, is told of every process group a native session's
 	// tools start, a shell command's or ripgrep's: a host writes them down beside
 	// AgentGroup's, so that the commands of a host killed outright can be ended
@@ -1470,6 +1605,17 @@ type Clocked interface {
 	Now() time.Time
 }
 
+// StopErrer is a session that can stop itself for good — a claude session's
+// overage guard (plan 052 § D3) — and says with what: the engine's close
+// ends the turn it finds running with that failure rather than with its
+// synthetic closing ending, so a waiter reads the quota failure D3 requires
+// (review C5b item 7).
+type StopErrer interface {
+	// StoppedErr is the error the session stopped itself with, nil while it
+	// has not.
+	StoppedErr() error
+}
+
 // SeedAnnouncer is a session built with state its stream has to say before
 // anything else happens (plan 043 D8, branch review B9): a new session created
 // with a title (Options.Title, seedNewTitle), whose snapshot — so every state
@@ -1604,12 +1750,12 @@ type AsideResult struct {
 	Text string
 	// Model is the display name of the model that answered; may be "".
 	Model string
-	// Usage is nil when the provider reports none (grok, gx).
+	// Usage is nil when the provider reports none (grok).
 	Usage *AsideUsage
 }
 
 // Asider is the optional verb behind /btw (plan 040). Asides reports whether
-// this session serves it now (the provider's bit: grok and gx through x.ai/btw,
+// this session serves it now (the provider's bit: grok through x.ai/btw,
 // native always); Aside answers one side question from the session's context,
 // calling onDelta with each piece of a streamed answer (never for a provider
 // that answers in one piece). onDelta must not block. Nothing is journaled,

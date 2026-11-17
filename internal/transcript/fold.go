@@ -96,6 +96,7 @@ var kinds = map[agent.EventType]kindRow{
 	agent.EventTurn:        {class: classState | classStream, main: foldTurn, childIgnored: true},
 	agent.EventCompaction:  {class: classMarker | classStream, main: foldCompaction, child: childCompaction},
 	agent.EventStepRetry:   {class: classMarker | classStream, main: foldStepRetry, child: childStepRetry},
+	agent.EventNotice:      {class: classStream, main: foldNotice, childIgnored: true},
 }
 
 // ------------------------------------------------------------ stream kinds
@@ -364,7 +365,13 @@ func foldAsk(m *Model, ev agent.Event) {
 // cannot make the newest entry too large for any snapshot (review r3,
 // finding 2).
 func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
-	if u.Outcome != agent.AskAnswered || u.Kind != a.Kind {
+	// Two endings that are not answers still earn their row: a question a
+	// client cancelled (claude's Esc) — somebody chose it — and a request the
+	// agent withdrew (claude's $/cancel_request), whose card went away with
+	// nobody choosing anything.
+	dismissed := u.Outcome == agent.AskCancelled && u.Cancelled && u.Kind == agent.AskQuestion
+	withdrawn := u.Outcome == agent.AskCancelled && u.By == agent.AskByWithdrawn
+	if (u.Outcome != agent.AskAnswered && !dismissed && !withdrawn) || u.Kind != a.Kind {
 		return
 	}
 	c := capAsk(a)
@@ -379,16 +386,28 @@ func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
 		if q == nil || q.Auto || m.hidden.Questions {
 			return
 		}
+		if withdrawn {
+			note("? " + questionTitle(q) + " → " + noteWithdrawn)
+			return
+		}
 		if u.Skip {
 			note(skipNote(q))
 			return
 		}
-		for _, n := range answerNotes(q, u.Answers) {
+		if u.Cancelled {
+			note("? " + questionTitle(q) + " → cancelled")
+			return
+		}
+		for _, n := range answerNotes(q, u.Answers, u.Text) {
 			note(n)
 		}
 	case agent.AskPlan:
 		p := a.Body.Plan
 		if p == nil || p.Auto || m.hidden.Plans {
+			return
+		}
+		if withdrawn {
+			note("plan " + PlanName(p) + " → " + noteWithdrawn)
 			return
 		}
 		note(planNote(p, u.Accepted))
@@ -404,7 +423,11 @@ func foldDone(m *Model, ev agent.Event) {
 	at := m.stamp(ev.At)
 	m.Main.closeStream(at)
 	m.Main.clearCompaction()
-	if ev.StopReason == stopCancelled {
+	// A turn its plan's rejection ended (claude's keep planning) is no cancel:
+	// the plan's `→ rejected` row says what happened (Event.KeptPlanning). The
+	// fact rides on the event, so every client folding it — live, restored or
+	// replaying — draws the same.
+	if ev.StopReason == stopCancelled && !ev.KeptPlanning {
 		m.Main.addNote(NoteCancelled, at)
 	}
 	m.fc.state = true
@@ -418,7 +441,9 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	m.turn.Foreign = ev.ForeignTurn
 	m.fc.state = true
 	m.Main.closeStream(at)
+	m.turn.ForeignAt = time.Time{}
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
+		m.turn.ForeignAt = at
 		m.turn.Retries = 0
 		m.turn.WebSearch = nil
 		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)
@@ -427,6 +452,12 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	// A foreign turn has no EventDone of its own: its end is its turn's end,
 	// and a compaction a native wake ran cannot outlive it (P34).
 	m.Main.clearCompaction()
+	// An ending that failed draws its failure as a turn's does (plan 052 §
+	// E2). A cancelled one draws nothing here: the client whose Esc stopped it
+	// notes it itself, as for a native wake (the TUI's applyForeignCancelled).
+	if f := ev.ForeignTurn; f != nil && f.Err != nil {
+		m.Main.addError(f.Err.Error(), at)
+	}
 }
 
 // foldReplay is a session/load replay bracket. Its end closes the last
@@ -528,6 +559,15 @@ func childCompaction(t *Transcript, ev agent.Event) {
 	}
 }
 
+// foldNotice is the agent's notice (claude's, plan 052 § B2): a note, in
+// place, that ends the run above it.
+func foldNotice(m *Model, ev agent.Event) {
+	if ev.Notice == nil {
+		return
+	}
+	m.Main.addNote(capNote(noticeNote(ev.Notice)), m.stamp(ev.At))
+}
+
 // ------------------------------------------------------------------- queue
 
 // foldQueue keeps the queue keyed by id: queued inserts at QueuePos unless the
@@ -574,6 +614,20 @@ func foldSubagent(m *Model, ev agent.Event) {
 		return
 	}
 	id := info.ID
+	if ev.SubagentChange == agent.SubagentChangeRemoved {
+		// The session dropped a row it retains (plan 052 review C4c item 5):
+		// the model drops it, and its child transcript, in the session's
+		// order rather than by its own cap.
+		if _, ok := m.agents[id]; ok {
+			delete(m.agents, id)
+			if i := slices.Index(m.agentOrder, id); i >= 0 {
+				m.agentOrder = slices.Delete(m.agentOrder, i, i+1)
+			}
+			m.dropSub(id)
+			m.fc.state = true
+		}
+		return
+	}
 	// The TUI's applySubagentEvent ensures the child's transcript first.
 	t := m.ensureSub(id)
 	row, ok := m.agents[id]
@@ -636,7 +690,8 @@ func (m *Model) setActivity(id, a string) {
 func (m *Model) evictFinished(keep string) {
 	var finished []string
 	for _, id := range m.agentOrder {
-		if s := m.agents[id].info.Status; s != agent.SubagentRunning && s != "" {
+		// A retained row goes only when the session says so (removed).
+		if r := m.agents[id].info; r.Status != agent.SubagentRunning && r.Status != "" && !r.Retained {
 			finished = append(finished, id)
 		}
 	}

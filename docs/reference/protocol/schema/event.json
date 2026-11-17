@@ -8,7 +8,7 @@
     "type": {
       "description": "The event's kind. A client ignores a kind it does not know.",
       "type": "string",
-      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction", "step_retry"]
+      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction", "step_retry", "notice"]
     },
     "text": {"type": "string", "description": "A text, thought or user chunk; a title (meta)."},
     "mode": {"type": "string", "description": "The mode an agent-initiated meta reports."},
@@ -19,7 +19,7 @@
     "question": {"$ref": "#/$defs/question"},
     "plan": {"$ref": "#/$defs/plan"},
     "subagent": {"$ref": "#/$defs/subagent"},
-    "subagentChange": {"type": "string", "description": "spawned, progress or finished."},
+    "subagentChange": {"type": "string", "description": "spawned, progress, finished, or removed: a retained row the session has dropped, which a client drops too."},
     "queue": {"$ref": "#/$defs/queued"},
     "queueChange": {"type": "string", "description": "queued, edited, removed or sent."},
     "queuePos": {"type": "integer", "minimum": 0},
@@ -33,9 +33,11 @@
     "replayed": {"type": "boolean", "description": "The event came from a session/load replay."},
     "compaction": {"$ref": "#/$defs/compaction"},
     "stepRetry": {"$ref": "#/$defs/stepRetry"},
+    "notice": {"$ref": "#/$defs/notice"},
     "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
     "err": {"$ref": "#/$defs/error"},
     "stopReason": {"type": "string"},
+    "keptPlanning": {"type": "boolean", "description": "On a done whose stop reason is cancelled: the turn ended because its plan was answered keep planning (claude), not because anyone cancelled it, so no cancelled note is drawn."},
     "at": {"$ref": "#/$defs/time"}
   },
   "required": ["type"],
@@ -170,7 +172,9 @@
         "id": {"type": "string"},
         "prompt": {"type": "string"},
         "options": {"type": "array", "items": {"$ref": "#/$defs/option"}},
-        "allowMultiple": {"type": "boolean"}
+        "allowMultiple": {"type": "boolean"},
+        "allowText": {"type": "boolean", "description": "The question also takes a free-text answer of the user's own (answer text): claude's \"Other\" box. No other provider sets it."},
+        "required": {"type": "boolean", "description": "The question must be answered with an option id whenever the ask is answered, and the ask cannot be skipped: a claude form's required. No other provider sets it."}
       },
       "additionalProperties": false
     },
@@ -188,6 +192,11 @@
       "description": "Each question's id to the option ids chosen. A null list is not an empty one: null is written for a nil list, [] for an empty one.",
       "type": "object",
       "additionalProperties": {"type": ["array", "null"], "items": {"type": "string"}}
+    },
+    "answerText": {
+      "description": "Each question's id to its free-text answer, for a question with allowText.",
+      "type": "object",
+      "additionalProperties": {"type": "string"}
     },
     "plan": {
       "description": "A plan request (PlanEvent).",
@@ -227,7 +236,9 @@
         "tokensUsed": {"type": "integer"},
         "toolsUsed": {"type": "array", "items": {"type": "string"}},
         "transcript": {"type": "boolean"},
-        "background": {"type": "boolean"}
+        "background": {"type": "boolean"},
+        "retained": {"type": "boolean", "description": "The session alone decides when this row goes, and says so with a removed subagentChange; a client does not evict it by its own finished-row cap (claude's rows). Absent is false."},
+        "noCancel": {"type": "boolean", "description": "This child cannot be stopped on its own (a claude child whose capabilities grant no cancel): its row offers no stop, though the session has session.subagent.cancel. Absent is false."}
       },
       "additionalProperties": false
     },
@@ -266,16 +277,26 @@
       "additionalProperties": false
     },
     "foreignTurn": {
-      "description": "One end of a turn the agent ran on its own: running on its start, absent on its end. reason is on both ends when the agent gave one.",
+      "description": "One end of a turn the agent ran on its own: running on its start, absent on its end. reason is on both ends when the agent gave one. An end may say how the turn ended: cancelled, or err for a failed turn.",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
         "text": {"type": "string"},
         "reason": {
           "type": "string",
-          "description": "Why the agent started the turn: an open string, not an enum. Absent (\"\") is grok's interjection fallback; subagent_wake is the native session delivering a background sub-agent's result. A client reads a value it does not know as absent."
+          "description": "Why the agent started the turn: an open string, not an enum. Absent (\"\") is grok's interjection fallback; subagent_wake is the native session delivering a background sub-agent's result, job_wake one delivering background commands' results; background is claude running a cycle of its own (a background command's or a sub-agent's wake, or a steer that started a turn); compaction is claude compacting its context while idle. A client reads a value it does not know as absent."
         },
-        "running": {"type": "boolean"}
+        "running": {"type": "boolean"},
+        "cancelled": {"type": "boolean", "description": "On an end: a user cancel ended the turn. Absent is false."},
+        "err": {
+          "description": "On an end: the turn failed, and why — kind (one of the kinds in the CLI reference) and message. A failed foreign turn settles as a failed turn. Absent when it did not fail.",
+          "type": "object",
+          "properties": {
+            "kind": {"type": "string"},
+            "message": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -297,12 +318,12 @@
         "synthetic": {"type": "boolean"},
         "next": {"type": "string"},
         "pending": {"type": "integer", "minimum": 0},
-        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent from a host that predates it, and when a terminal closed its own session."}
+        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn, lost_owner or overage. Absent from a host that predates it, and when a terminal closed its own session."}
       },
       "additionalProperties": false
     },
     "ask": {
-      "description": "One ask's ending (AskUpdate): kind is permission, question or plan; outcome answered, cancelled, turn_ended, closing or automatic; by whose doing (client, call, cancel, turn, close, policy, provider, unavailable). body is set only when no opening was ever published.",
+      "description": "One ask's ending (AskUpdate): kind is permission, question or plan; outcome answered, cancelled, turn_ended, closing or automatic; by whose doing (client, call, cancel, turn, close, policy, provider, withdrawn — the agent took its request back, claude's $/cancel_request — unavailable). body is set only when no opening was ever published.",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
@@ -311,6 +332,8 @@
         "by": {"type": "string"},
         "optionId": {"type": "string"},
         "answers": {"$ref": "#/$defs/answers"},
+        "text": {"$ref": "#/$defs/answerText"},
+        "cancelled": {"type": "boolean", "description": "A question cancelled rather than answered (answer cancel): claude's Esc, which aborts the tool that asked."},
         "skip": {"type": "boolean"},
         "accepted": {"type": "boolean"},
         "label": {"type": "string"},
@@ -379,13 +402,18 @@
       "additionalProperties": false
     },
     "usage": {
-      "description": "The usage section (UsageState; native only, absent for every ACP session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context the model it goes to works within (contextWindow: its default_context when that is below its context window, else the window; 0 when the window is unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key.",
+      "description": "The usage section (UsageState; native and claude, absent for every cursor and grok session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context the model it goes to works within (contextWindow: its default_context when that is below its context window, else the window; 0 when the window is unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key but the plan's, which are claude's alone and optional: plan, the subscription (\"max\"); window, the window of the plan's latest limit report (five_hour, seven_day, seven_day_opus, seven_day_sonnet, seven_day_overage_included or overage; an open string); windowUtilization, that window's use from 0 to 1, written exactly when window is (0 when the report carried none); resetsAt, when it resets; and model, the model the agent's last usage report said it ran. A claude session's spend is tokens only: costPicoUsd 0 and unpriced true.",
       "type": "object",
       "properties": {
         "contextTokens": {"type": "integer"},
         "contextWindow": {"type": "integer"},
         "turn": {"$ref": "#/$defs/spend"},
-        "session": {"$ref": "#/$defs/spend"}
+        "session": {"$ref": "#/$defs/spend"},
+        "plan": {"type": "string"},
+        "window": {"type": "string"},
+        "windowUtilization": {"type": "number", "minimum": 0},
+        "resetsAt": {"$ref": "#/$defs/time"},
+        "model": {"type": "string"}
       },
       "required": ["contextTokens", "contextWindow", "turn", "session"],
       "additionalProperties": false
@@ -554,7 +582,7 @@
       "additionalProperties": false
     },
     "compaction": {
-      "description": "One end of a compaction of a session's context (CompactionInfo; native only): phase started, then ended. reason is auto, manual or overflow, an open string. An ended one carries tokensBefore, the context's estimated size before it, and either tokensAfter, its estimated size after, or err, why no summary was written. A replay carries only the ended one of each stored compaction. The event's agent names the sub-agent whose context it was.",
+      "description": "One end of a compaction of a session's context (CompactionInfo; native, and claude's compaction_update): phase started, then ended. reason is auto, manual or overflow, an open string. A native ended one carries tokensBefore, the context's estimated size before it, and either tokensAfter, its estimated size after, or err, why no summary was written; a claude one carries no sizes, only err for one that failed or was cancelled. A native replay carries only the ended one of each stored compaction. The event's agent names the sub-agent whose context it was.",
       "type": "object",
       "properties": {
         "phase": {"type": "string"},
@@ -562,6 +590,16 @@
         "tokensBefore": {"type": "integer", "minimum": 0},
         "tokensAfter": {"type": "integer", "minimum": 0},
         "err": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "notice": {
+      "description": "A notice the agent sent the user (NoticeInfo; claude only, from Claude Code's notices): severity, the agent's word for it (info, warning, error; an open string), title its headline and description the rest. Either of title and description may be absent, never both. A client draws it as a note.",
+      "type": "object",
+      "properties": {
+        "severity": {"type": "string"},
+        "title": {"type": "string"},
+        "description": {"type": "string"}
       },
       "additionalProperties": false
     },

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -250,6 +252,9 @@ const (
 	// AskByProvider: the provider answered the request before any handler of
 	// craze's ran, and reported it afterwards (AnsweredEarly).
 	AskByProvider = "provider"
+	// AskByWithdrawn: the agent took its request back before anyone answered
+	// it (claude's $/cancel_request), so no answer would reach it.
+	AskByWithdrawn = "withdrawn"
 	// AskByUnavailable: the log's outbox had no room to open it, so it was
 	// never raised and the provider sees a cancel (§3.3's rejectable
 	// admissions).
@@ -473,7 +478,9 @@ type AskRequest struct {
 //   - question: Answers maps each question's id to option ids it offered — the
 //     invented "OK" option's empty id included, since that is a real offered
 //     option (live.go's questionsFromRequest) — or Skip skips the lot. A
-//     question that asks nothing takes no answers at all.
+//     question that asks nothing takes no answers at all. Text is a question's
+//     free-text answer, beside its picks or alone, for a question that takes
+//     one (Question.AllowText).
 //   - plan: exactly one of Accept and Reject.
 //
 // The zero AskAnswer is not a valid answer to anything but a question that
@@ -486,10 +493,17 @@ type AskAnswer struct {
 	OptionID string
 	Cancel   bool
 	Answers  map[string][]string
-	Skip     bool
-	Accept   bool
-	Reject   bool
+	// Text is each question's free-text answer, by question id (plan 052 §
+	// B4): only a question with AllowText takes one.
+	Text   map[string]string
+	Skip   bool
+	Accept bool
+	Reject bool
 }
+
+// MaxAnswerText bounds one question's free-text answer, in bytes: a line
+// typed into a card, never a document.
+const MaxAnswerText = 4096
 
 // AskUpdate is Event.Ask: one ask's ending, and the only event kind the
 // registry adds. Every way an ask can end carries one, so a client that folds
@@ -508,8 +522,13 @@ type AskUpdate struct {
 	// skip, and whether a plan was accepted.
 	OptionID string
 	Answers  map[string][]string
-	Skip     bool
-	Accepted bool
+	// Text is a question's free-text answers, by question id (AskAnswer.Text).
+	Text map[string]string
+	// Cancelled is a question withdrawn rather than answered
+	// (AskAnswer.Cancel): claude's Esc, which aborts the tool that asked.
+	Cancelled bool
+	Skip      bool
+	Accepted  bool
 	// Label is a short human label of what was chosen: the name of the
 	// permission option, as it was offered. It is empty for every other kind
 	// and every outcome that chose nothing — a client that wants to word a
@@ -560,6 +579,7 @@ func (r AskRecord) clone() AskRecord {
 	c := r
 	c.Body = r.Body.clone()
 	c.Answer.Answers = cloneAnswers(r.Answer.Answers)
+	c.Answer.Text = maps.Clone(r.Answer.Text)
 	return c
 }
 
@@ -594,6 +614,10 @@ type askEntry struct {
 	// published says an opening event was written for this ask, which is what
 	// decides whether its ending carries the body.
 	published bool
+	// call is the asking call's context, for an ask Open parked (nil
+	// otherwise): once the agent has withdrawn the request it ends with
+	// acp.ErrRequestWithdrawn, and no answer may be taken for it (Answer).
+	call context.Context
 }
 
 // turnState is what the registry knows about one minted turn token.
@@ -612,6 +636,9 @@ var askRegistries atomic.Uint64
 type AskRegistry struct {
 	log *EventLog
 	now func() time.Time
+	// questionCancel says a question may be answered cancel
+	// (AllowQuestionCancel), under mu.
+	questionCancel bool
 	// id is this registry's identity, immutable and set at construction. Every
 	// nonzero token it mints carries it, and a token carrying another's is
 	// refused (foreign).
@@ -645,6 +672,15 @@ type AskRegistry struct {
 	// while (keptTurns).
 	retired []uint64
 	closed  bool
+}
+
+// AllowQuestionCancel says whether a question may be answered cancel — the
+// question withdrawn, which claude takes as its tool aborted (plan 052 § B4 as
+// amended). Off, as for cursor, grok and native, a cancel is a bad answer.
+func (r *AskRegistry) AllowQuestionCancel(on bool) {
+	r.mu.Lock()
+	r.questionCancel = on
+	r.mu.Unlock()
 }
 
 // NewAskRegistry builds a registry publishing into log and stamping its events
@@ -820,6 +856,7 @@ func (r *AskRegistry) Open(ctx context.Context, token TurnToken, req AskRequest)
 		e.published = true
 		r.log.Enqueue(r.opening(req.Kind, body, false, AskAnswer{}))
 	}
+	e.call = ctx
 	return &Ask{r: r, id: id, ctx: ctx, e: e}, nil
 }
 
@@ -936,6 +973,19 @@ func (r *AskRegistry) Answer(cause, id string, a AskAnswer) (AskRecord, error) {
 	e, ok := r.open[id]
 	if !ok {
 		return AskRecord{}, r.unknownLocked(id)
+	}
+	if e.call != nil && callEndedBy(e.call) == AskByWithdrawn && e.call.Err() != nil {
+		// The agent took the request back ($/cancel_request) and its parked
+		// handler has yet to notice: the ask ends withdrawn here, for every
+		// client, and this answer — which nobody would receive — is refused
+		// as one that came too late (review C3b 5).
+		r.log.Enqueue(r.retire(e, AskCancelled, AskByWithdrawn, "", AskAnswer{}, ""))
+		return AskRecord{}, fmt.Errorf("%w: %s was withdrawn by the agent", ErrAlreadyResolved, id)
+	}
+	if a.Cancel && e.rec.Kind == AskQuestion && !r.questionCancel {
+		// Only a provider whose questions can be withdrawn (claude: Esc
+		// aborts the tool) takes a question's cancel (review C3b 6).
+		return AskRecord{}, fmt.Errorf("%w: this agent's questions take their answers or a skip", ErrBadAnswer)
 	}
 	ans, label, err := validateAnswer(e.rec.Kind, e.rec.Body, a)
 	if err != nil {
@@ -1108,7 +1158,17 @@ func (r *AskRegistry) cancelByCall(a *Ask) {
 	if !ok || e != a.e {
 		return
 	}
-	r.log.Enqueue(r.retire(e, AskCancelled, AskByCall, "", AskAnswer{}, ""))
+	r.log.Enqueue(r.retire(e, AskCancelled, callEndedBy(a.ctx), "", AskAnswer{}, ""))
+}
+
+// callEndedBy is who ended an ask whose asking call's context ended: the
+// agent, when it withdrew the request (acp.ErrRequestWithdrawn as the
+// context's cause), else the call.
+func callEndedBy(ctx context.Context) string {
+	if ctx != nil && errors.Is(context.Cause(ctx), acp.ErrRequestWithdrawn) {
+		return AskByWithdrawn
+	}
+	return AskByCall
 }
 
 // newEntryLocked is a fresh open record for id.
@@ -1371,12 +1431,14 @@ func (r *AskRegistry) retire(e *askEntry, outcome AskOutcome, by, cause string, 
 			By:      by,
 			// A copy of the answer map, never the one the record keeps: the
 			// event and the registry must not share memory.
-			OptionID: ans.OptionID,
-			Answers:  cloneAnswers(ans.Answers),
-			Skip:     ans.Skip,
-			Accepted: ans.Accept,
-			Label:    label,
-			Body:     r.endingBody(e),
+			OptionID:  ans.OptionID,
+			Answers:   cloneAnswers(ans.Answers),
+			Text:      maps.Clone(ans.Text),
+			Cancelled: ans.Cancel && e.rec.Kind == AskQuestion,
+			Skip:      ans.Skip,
+			Accepted:  ans.Accept,
+			Label:     label,
+			Body:      r.endingBody(e),
 		},
 	}
 }
@@ -1540,7 +1602,7 @@ func setBodyID(kind AskKind, body AskBody, id string) {
 func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string, error) {
 	switch kind {
 	case AskPermission:
-		if a.Skip || a.Accept || a.Reject || len(a.Answers) > 0 {
+		if a.Skip || a.Accept || a.Reject || len(a.Answers) > 0 || len(a.Text) > 0 {
 			return AskAnswer{}, "", fmt.Errorf("%w: a permission takes an option id or an explicit cancel", ErrBadAnswer)
 		}
 		if a.Cancel {
@@ -1555,16 +1617,35 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 		}
 		return AskAnswer{OptionID: a.OptionID}, name, nil
 	case AskQuestion:
-		if a.OptionID != "" || a.Cancel || a.Accept || a.Reject {
-			return AskAnswer{}, "", fmt.Errorf("%w: a question takes its answers or a skip", ErrBadAnswer)
+		if a.OptionID != "" || a.Accept || a.Reject {
+			return AskAnswer{}, "", fmt.Errorf("%w: a question takes its answers, a skip or a cancel", ErrBadAnswer)
+		}
+		if a.Cancel {
+			// The question withdrawn rather than answered (plan 052 § B4 as
+			// amended): claude's Esc, which aborts the tool that asked.
+			if a.Skip || len(a.Answers) > 0 || len(a.Text) > 0 {
+				return AskAnswer{}, "", fmt.Errorf("%w: a cancelled question carries no answers", ErrBadAnswer)
+			}
+			return AskAnswer{Cancel: true}, "", nil
 		}
 		if a.Skip {
-			if len(a.Answers) > 0 {
+			if len(a.Answers) > 0 || len(a.Text) > 0 {
 				return AskAnswer{}, "", fmt.Errorf("%w: a skipped question carries no answers", ErrBadAnswer)
+			}
+			for _, one := range questionsOffered(body.Question) {
+				if one.Required {
+					return AskAnswer{}, "", fmt.Errorf("%w: question %q must be answered, and cannot be skipped", ErrBadAnswer, one.ID)
+				}
 			}
 			return AskAnswer{Skip: true}, "", nil
 		}
-		if len(a.Answers) == 0 {
+		text, err := checkQuestionText(body.Question, a.Text)
+		if err != nil {
+			return AskAnswer{}, "", err
+		}
+		// Free text alone answers the questions it is for (plan 052 § B4): the
+		// user typed their own answer instead of picking one.
+		if len(a.Answers) == 0 && len(text) == 0 {
 			// A question that asks nothing — cursor really does send
 			// ask_question with no questions — is answered with no answers, by
 			// craze's policy and by a client alike: it is the only thing either
@@ -1579,9 +1660,12 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 		if err := checkQuestionAnswers(body.Question, a.Answers); err != nil {
 			return AskAnswer{}, "", err
 		}
-		return AskAnswer{Answers: cloneAnswers(a.Answers)}, "", nil
+		if err := checkRequired(body.Question, a.Answers); err != nil {
+			return AskAnswer{}, "", err
+		}
+		return AskAnswer{Answers: cloneAnswers(a.Answers), Text: text}, "", nil
 	case AskPlan:
-		if a.OptionID != "" || a.Cancel || a.Skip || len(a.Answers) > 0 {
+		if a.OptionID != "" || a.Cancel || a.Skip || len(a.Answers) > 0 || len(a.Text) > 0 {
 			return AskAnswer{}, "", fmt.Errorf("%w: a plan takes an accept or a reject", ErrBadAnswer)
 		}
 		if a.Accept == a.Reject {
@@ -1624,8 +1708,55 @@ func checkQuestionAnswers(q *QuestionEvent, answers map[string][]string) error {
 				return fmt.Errorf("%w: %q is not an option question %q offered", ErrBadAnswer, pick, id)
 			}
 		}
+		if !one.AllowMultiple && len(chosen) > 1 {
+			// A single-select takes one pick: two are no answer to it, and
+			// keeping either would be a choice nobody made (review C3 item 5).
+			return fmt.Errorf("%w: question %q takes one answer, not %d", ErrBadAnswer, id, len(chosen))
+		}
 	}
 	return nil
+}
+
+// checkRequired refuses an answer that leaves a question that must be
+// answered (Question.Required, a claude form's `required`) without an option
+// pick; free text alone does not do.
+func checkRequired(q *QuestionEvent, answers map[string][]string) error {
+	for _, one := range questionsOffered(q) {
+		if one.Required && len(answers[one.ID]) == 0 {
+			// An option pick: free text rides in the question's own _custom
+			// property, so it leaves the required one absent (review C3b 3).
+			return fmt.Errorf("%w: question %q must be answered with an option", ErrBadAnswer, one.ID)
+		}
+	}
+	return nil
+}
+
+// checkQuestionText refuses free text for a question the request does not
+// have, or one that takes none (Question.AllowText), or text past
+// MaxAnswerText, and answers with the text as it is recorded: blank entries
+// dropped, nil when none is left.
+func checkQuestionText(q *QuestionEvent, text map[string]string) (map[string]string, error) {
+	var out map[string]string
+	for id, t := range text {
+		one, found := questionByID(q, id)
+		if !found {
+			return nil, fmt.Errorf("%w: %q is not a question this ask asked", ErrBadAnswer, id)
+		}
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		if !one.AllowText {
+			return nil, fmt.Errorf("%w: question %q takes no free text", ErrBadAnswer, id)
+		}
+		if len(t) > MaxAnswerText {
+			return nil, fmt.Errorf("%w: question %q's text is longer than %d bytes", ErrBadAnswer, id, MaxAnswerText)
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[id] = t
+	}
+	return out, nil
 }
 
 // questionsOffered is what a question ask actually asked, nil for one with no

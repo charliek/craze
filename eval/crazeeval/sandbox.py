@@ -50,7 +50,6 @@ TOOL_INSIDE = {
     "venv": f"{T}/venv",
     "go": f"{T}/go",
     "node": f"{T}/node",
-    "grok": f"{T}/grok",
     "opencode": f"{T}/opencode",
     "uv": f"{T}/bin/uv",
     "craze": f"{T}/bin/craze",
@@ -61,7 +60,6 @@ PATH_ORDER = [
     ("bin", f"{T}/bin"),
     ("go", f"{T}/go/bin"),
     ("node", f"{T}/node/bin"),
-    ("grok", f"{T}/grok"),
     ("opencode", f"{T}/opencode"),
 ]
 BASE_TOOLS = frozenset({"venv", "go", "uv"})
@@ -168,7 +166,6 @@ class Toolchains:
     uv: Path
     gomodcache: Path
     node_root: Path | None = None
-    grok_dir: Path | None = None
     opencode_dir: Path | None = None
 
     @classmethod
@@ -187,13 +184,6 @@ class Toolchains:
             node_root = Path(node).resolve().parent.parent
         if node_root is not None and not (node_root / "bin" / "node").is_file():
             node_root = None
-        # The install directory, not a mise shim (a shim resolves to mise itself).
-        grok_dir = _mise_install("github-charliek-grok-build", "gx-vlatest")
-        if grok_dir is None or not (grok_dir / "gx").is_file():
-            gx = shutil.which("gx")
-            grok_dir = Path(gx).resolve().parent if gx else None
-            if grok_dir is not None and not (grok_dir / "gx").is_file():
-                grok_dir = None
         oc = Path.home() / ".opencode/bin"
         uv = Path(shutil.which("uv") or Path.home() / ".local/bin/uv").resolve()
         gomodcache = Path(os.environ.get("GOMODCACHE") or Path.home() / "go/pkg/mod")
@@ -204,7 +194,6 @@ class Toolchains:
             uv=uv,
             gomodcache=gomodcache,
             node_root=node_root,
-            grok_dir=grok_dir,
             opencode_dir=oc if oc.exists() else None,
         )
 
@@ -213,7 +202,6 @@ class Toolchains:
             "venv": self.venv,
             "go": self.go_root,
             "node": self.node_root,
-            "grok": self.grok_dir,
             "opencode": self.opencode_dir,
             "uv": self.uv,
             "craze": craze_bin,
@@ -272,8 +260,8 @@ def build_env(spec: SandboxSpec) -> dict[str, str]:
         "HOME": paths.SANDBOX_HOME,
         "PATH": inside_path(spec.tools),
         "USER": "eval",
-        # Not in the plan's list: without it gx reports "Shell: /bin/sh" (dash) and
-        # runs its terminal tool there, while craze always uses /bin/bash. A real
+        # Not in the plan's list: without it a harness may report "Shell: /bin/sh" (dash)
+        # and run its terminal tool there, while craze always uses /bin/bash. A real
         # user has SHELL set; bash for every harness keeps them comparable.
         "SHELL": "/bin/bash",
         "LANG": "C.UTF-8",

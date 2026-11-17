@@ -76,7 +76,12 @@ var (
 	// TermGrace is how long a host sent SIGTERM has to run its stop
 	// sequence — the engine's close ends its agent — before its process
 	// group is killed, and the recorded agent groups with it; and how long
-	// a host that answered not ok has to exit on its own.
+	// a host that answered not ok has to exit on its own. A claude
+	// session's close waits for an overage record still being written for
+	// less than this (agent's recordWriteDrain, 3 s; plan 052 review C5d item
+	// 1), so a host stopped here gets to its warning rather than being killed
+	// mid-wait: shortening this needs that bound shortened too
+	// (agent.TestRecordJoinFitsTheLauncherGrace).
 	TermGrace = 5 * time.Second
 	// RendezvousWait bounds the held rendezvous: the holder's registry
 	// entry must carry the session within it.

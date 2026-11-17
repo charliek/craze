@@ -109,6 +109,9 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	}
 	if d.hasRawInput {
 		out.RawInput = stringifyRawInput(d.rawInput)
+		if owner == "" {
+			s.namedPaths.note(d.id, rawInputPaths(d.rawInput, editCalls[s.provider().Name()].rawPathKeys)...)
+		}
 		if name := toolNameOf(d.rawInput); name != "" {
 			out.ToolName = name
 		}

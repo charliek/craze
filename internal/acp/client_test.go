@@ -96,7 +96,7 @@ func handshake(t *testing.T, c *Client) {
 		t.Fatal(err)
 	}
 	cwd := t.TempDir()
-	if _, err := c.NewSession(ctx, cwd); err != nil {
+	if _, err := c.NewSession(ctx, cwd, SessionParams{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -573,7 +573,7 @@ func TestPermissionRepliesUseRequestOptionID(t *testing.T) {
 	if err := client.Authenticate(ctx, AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {
+	if _, err := client.NewSession(ctx, t.TempDir(), SessionParams{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.Prompt(ctx, "hi"); err != nil {
@@ -705,7 +705,7 @@ func TestSetConfigJSONShape(t *testing.T) {
 	if err := client.Authenticate(ctx, AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {
+	if _, err := client.NewSession(ctx, t.TempDir(), SessionParams{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.SetConfig(ctx, "effort", "high"); err != nil {
@@ -1172,7 +1172,7 @@ func TestLoadSessionRoutesReplayLive(t *testing.T) {
 	rec := &recorder{}
 	client.SetUpdateHandler(rec.add)
 
-	res, err := client.LoadSession(t.Context(), "s-load", t.TempDir())
+	res, err := client.LoadSession(t.Context(), "s-load", t.TempDir(), SessionParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,8 +1207,7 @@ func TestLoadSessionResetsSessionState(t *testing.T) {
 
 	client.mu.Lock()
 	client.sessionID = "s-old"
-	client.children = map[string]struct{}{"child-1": {}}
-	client.childOrder = []string{"child-1"}
+	client.kids.childStarted(childPolicyGrok, "s-old", "child-1")
 	client.foreignID = "prompt-9"
 	client.foreignText = "a turn of the agent's own"
 	client.foreignSeen = true
@@ -1220,7 +1219,7 @@ func TestLoadSessionResetsSessionState(t *testing.T) {
 	}}
 	client.mu.Unlock()
 
-	if _, err := client.LoadSession(t.Context(), "s-load", t.TempDir()); err != nil {
+	if _, err := client.LoadSession(t.Context(), "s-load", t.TempDir(), SessionParams{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1229,8 +1228,8 @@ func TestLoadSessionResetsSessionState(t *testing.T) {
 	if client.sessionID != "s-load" {
 		t.Fatalf("sessionID %q", client.sessionID)
 	}
-	if len(client.children) != 0 || len(client.childOrder) != 0 {
-		t.Fatalf("child allowlist survived the load: %v %v", client.children, client.childOrder)
+	if len(client.kids.entries) != 0 || len(client.kids.order) != 0 {
+		t.Fatalf("child allowlist survived the load: %v %v", client.kids.entries, client.kids.order)
 	}
 	if client.foreignID != "" || client.foreignText != "" || client.foreignSeen {
 		t.Fatalf("foreign-turn state survived the load: %q %q %v", client.foreignID, client.foreignText, client.foreignSeen)
@@ -1257,7 +1256,7 @@ func TestLoadSessionErrorClearsSessionID(t *testing.T) {
 	rec := &recorder{}
 	client.SetUpdateHandler(rec.add)
 
-	_, err := client.LoadSession(t.Context(), "s-load", t.TempDir())
+	_, err := client.LoadSession(t.Context(), "s-load", t.TempDir(), SessionParams{})
 	if err == nil {
 		t.Fatal("expected the agent's error")
 	}
@@ -1307,7 +1306,7 @@ func TestLoadSessionTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	if _, err := c.LoadSession(t.Context(), "s-load", t.TempDir()); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := c.LoadSession(t.Context(), "s-load", t.TempDir(), SessionParams{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("load error %v, want the deadline", err)
 	}
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
@@ -1345,7 +1344,7 @@ func TestLoadSessionCursorScript(t *testing.T) {
 	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir())
+	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir(), SessionParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1405,7 +1404,7 @@ func TestLoadSessionGrokScript(t *testing.T) {
 	if err := c.Authenticate(t.Context(), AuthXAIAPIKey, nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir())
+	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir(), SessionParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1442,7 +1441,7 @@ func TestLoadSessionLongReplay(t *testing.T) {
 	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.LoadSession(t.Context(), "s-restored", t.TempDir()); err != nil {
+	if _, err := c.LoadSession(t.Context(), "s-restored", t.TempDir(), SessionParams{}); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(up.snapshot()); n != 600 {
@@ -1466,7 +1465,7 @@ func TestLoadScriptsRefuseSessionNew(t *testing.T) {
 			if err := c.Authenticate(t.Context(), method, nil); err != nil {
 				t.Fatal(err)
 			}
-			_, err := c.NewSession(t.Context(), t.TempDir())
+			_, err := c.NewSession(t.Context(), t.TempDir(), SessionParams{})
 			if err == nil || !strings.Contains(err.Error(), "session/new must not be called") {
 				t.Fatalf("session/new error %v", err)
 			}
@@ -1482,7 +1481,7 @@ func TestLoadSessionMissingScript(t *testing.T) {
 	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, err := c.LoadSession(t.Context(), "s-gone", t.TempDir())
+	_, err := c.LoadSession(t.Context(), "s-gone", t.TempDir(), SessionParams{})
 	var rpc *RPCError
 	if !errors.As(err, &rpc) || rpc.Code != CodeInvalidParams || rpc.Message != "Session not found" {
 		t.Fatalf("load error %v, want -32602 Session not found", err)
@@ -1503,7 +1502,7 @@ func TestSessionLoadRefusedWithoutCapability(t *testing.T) {
 	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.LoadSession(t.Context(), "s-load", t.TempDir())
+	_, err = c.LoadSession(t.Context(), "s-load", t.TempDir(), SessionParams{})
 	var rpc *RPCError
 	if !errors.As(err, &rpc) || rpc.Code != CodeMethodNotFound {
 		t.Fatalf("load error %v, want -32601", err)
@@ -1516,7 +1515,7 @@ func TestLoadSessionRejectsEmptyID(t *testing.T) {
 		t.Error("session/load must not reach the wire without an id")
 		_ = srv.Reply(msg.ID, map[string]any{})
 	})
-	if _, err := client.LoadSession(t.Context(), "", t.TempDir()); err == nil {
+	if _, err := client.LoadSession(t.Context(), "", t.TempDir(), SessionParams{}); err == nil {
 		t.Fatal("expected an error for an empty session id")
 	}
 }

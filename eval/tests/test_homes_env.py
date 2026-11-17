@@ -27,18 +27,15 @@ FAKE = {
 }
 
 
-def owner_tree(tmp: Path, craze_models: bool = True, gx_models: bool = True) -> tuple[Path, Path]:
+def owner_tree(tmp: Path, craze_models: bool = True) -> Path:
     """Fake owner files shaped like the real ones, with fake keys in every key field.
 
     ``craze_models``: a models.toml overriding every eval model's shipped entry (the
     owner's own entries, no ``source``, so craze lays them over its catalog: name "x",
     context 1000000, default_effort "low"); False writes none, as craze no longer needs
-    one. ``gx_models``: gx tables naming every eval model; False names none (its
-    providers stay)."""
+    one."""
     craze = tmp / "owner" / ".craze" / "native"
-    grok = tmp / "owner" / ".grok"
     craze.mkdir(parents=True)
-    grok.mkdir(parents=True)
     models = load_models()
     prov_urls = {"meta": "https://api.meta.ai/v1", "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
                  "fireworks": "https://api.fireworks.ai/inference/v1"}
@@ -56,33 +53,19 @@ def owner_tree(tmp: Path, craze_models: bool = True, gx_models: bool = True) -> 
     # craze's locked Anthropic provider: the owner's entry holds a key and nothing else.
     pl += ["[providers.anthropic]", f'api_key = "{FAKE["anthropic"]}"', ""]
     (craze / "providers.toml").write_text("\n".join(pl))
-    gl = []
-    for name, url in prov_urls.items():
-        gl += [f'[model_providers."{name}"]', f'base_url = "{url}"', f'api_key = "{FAKE[name]}"',
-               'env_key = "SOME_KEY"', 'api_backend = "chat_completions"',
-               f'[model_providers."{name}".extra_headers]', f'x-secret = "{FAKE[name]}"', ""]
-    # gx on Anthropic, as its user guide sets it up: the key in an extra header.
-    gl += ['[model_providers."anthropic"]', 'base_url = "https://api.anthropic.com/v1"', 'api_backend = "messages"',
-           '[model_providers."anthropic".extra_headers]', f'x-api-key = "{FAKE["anthropic"]}"',
-           'anthropic-version = "2023-06-01"', ""]
-    for em in models.values() if gx_models else ():
-        gl += [f'[model."{em.gx}"]', f'model = "{em.wire_model}"', f'model_provider = "{em.provider}"',
-               f'api_key = "{FAKE[em.provider]}"', 'env_key = "ANOTHER_KEY"', 'reasoning_effort = "low"',
-               'reasoning_efforts = ["low", "high", "max"]', "context_window = 1000", ""]
-    (grok / "config.toml").write_text("\n".join(gl))
-    return craze, grok
+    return craze
 
 
 def fake_snapshot(tmp: Path, providers_edit=None) -> Snapshot:
     """A snapshot of owner_tree; providers_edit, if given, rewrites its providers.toml
     text first, and must change it."""
-    craze, grok = owner_tree(tmp)
+    craze = owner_tree(tmp)
     if providers_edit:
         text = (craze / "providers.toml").read_text()
         edited = providers_edit(text)
         assert edited != text, "the edit changed nothing, so the test would check owner_tree as it is"
         (craze / "providers.toml").write_text(edited)
-    snap = build_snapshot(load_models(), craze_dir=craze, grok_dir=grok)
+    snap = build_snapshot(load_models(), craze_dir=craze)
     d = tmp / "snap"
     d.mkdir()
     (d / "config.json").write_text(json.dumps(snap))
@@ -138,11 +121,7 @@ def test_generated_configs_name_only_the_target_model(tmp_path):
     assert doc["models"]["glm-5.3-flash"]["default_effort"] == "high"  # the pinned effort, not the owner's
     prov = home / "craze/.craze/native/providers.toml"
     assert oct(prov.stat().st_mode & 0o777) == "0o600"
-    HOMES["gx"](home / "gx", em, snap, "http://p/r/t/api.z.ai/api/coding/paas/v4")
-    g = tomllib.loads((home / "gx/.grok/config.toml").read_text())
-    assert list(g["model"]) == ["glm-5.3-flash"] and g["models"]["session_summary"] == "glm-5.3-flash"
-    assert g["disable_web_search"] is True and g["features"]["web_fetch"] is False
-    assert set(g["model"]["glm-5.3-flash"]) <= {"model", "model_provider", "reasoning_effort", "reasoning_efforts", "context_window"}
+    assert "gx" not in HOMES  # the gx harness is retired
     HOMES["opencode"](home / "oc", em, snap, "http://p/r/t/api.z.ai/api/coding/paas/v4")
     o = json.loads((home / "oc/opencode.json").read_text())
     assert o["model"] == o["small_model"] == "zai-coding-plan/glm-5.3-flash"
@@ -218,17 +197,14 @@ def test_a_gx_import_of_a_provider_craze_does_not_ship_keeps_its_driver(tmp_path
     another provider is the owner's own, driver and base_url included, so the snapshot
     keeps them. And a provider craze does not ship has no shipped driver to fall back
     on: a home for one whose entry names none is refused."""
-    craze, grok = owner_tree(tmp_path)
+    craze = owner_tree(tmp_path)
     with (craze / "models.toml").open("a") as f:
         f.write('\n[models."acme-m"]\nprovider = "acme"\nwire_model = "acme-1"\nefforts = ["high"]\nsource = "gx"\n')
     with (craze / "providers.toml").open("a") as f:
         f.write('\n[providers.acme]\nsource = "gx"\ndriver = "openai-compat"\nbase_url = "https://api.acme.example/v1"\n')
-    with (grok / "config.toml").open("a") as f:
-        f.write('\n[model_providers."acme"]\nbase_url = "https://api.acme.example/v1"\n'
-                '\n[model."acme-m"]\nmodel = "acme-1"\nmodel_provider = "acme"\n')
-    em = EvalModel(key="acme-m", provider="acme", wire_model="acme-1", effort="high", craze="acme-m", gx="acme-m",
+    em = EvalModel(key="acme-m", provider="acme", wire_model="acme-1", effort="high", craze="acme-m",
                    opencode="acme/acme-1")
-    snap = build_snapshot({"acme-m": em}, craze_dir=craze, grok_dir=grok)
+    snap = build_snapshot({"acme-m": em}, craze_dir=craze)
     assert snap["models"]["acme-m"]["craze_provider"] == {"driver": "openai-compat",
                                                           "base_url": "https://api.acme.example/v1"}
     with pytest.raises(ValueError):
@@ -241,7 +217,7 @@ def test_an_openrouter_target_is_refused_before_its_home(tmp_path):
     before any file of its home is written -- whether the driver is the owner's own or the
     catalog's (an entry naming none, or an old gx import's)."""
     em = EvalModel(key="openrouter/x", provider="openrouter", wire_model="~x/y-latest", effort="high",
-                   craze="openrouter/x", gx="x", opencode="openrouter/x")
+                   craze="openrouter/x", opencode="openrouter/x")
     assert shipped_driver("openrouter") == "openrouter"
     for name, cprov in [("catalog", {}), ("owner", {"driver": "openrouter"})]:
         snap = Snapshot(dir=tmp_path, config={"models": {em.key: {"craze": {"provider": "openrouter", "wire_model": "~x/y-latest"},
@@ -282,12 +258,12 @@ def test_with_the_catalog_off_a_gx_entry_is_the_owners_own(tmp_path):
     Either way the run's check finds the route the snapshot recorded."""
     on, off = tmp_path / "on", tmp_path / "off"
     for d in (on, off):
-        craze, grok = owner_tree(d)
+        craze = owner_tree(d)
         (craze / "providers.toml").write_text(gx_meta((craze / "providers.toml").read_text()))
         if d is off:
             catalog_off(craze)
             assert not catalog_on(craze)
-        snap = Snapshot(dir=d, config=build_snapshot(load_models(), craze_dir=craze, grok_dir=grok), hash="t")
+        snap = Snapshot(dir=d, config=build_snapshot(load_models(), craze_dir=craze), hash="t")
         table, _ = load_providers(craze / "providers.toml", env={})
         cprov = snap.model("muse-wonder-1.0")["craze_provider"]
         if d is off:
@@ -308,7 +284,7 @@ def test_a_gx_entrys_route_is_crazes_shipped_endpoint(tmp_path):
     is chosen as craze chooses it: the catalog's variables first, then the entry's own
     names, then its api_key. A hand-written entry's URL is still its own, and the run's
     check holds a snapshot of it to that URL."""
-    craze, _ = owner_tree(tmp_path)
+    craze = owner_tree(tmp_path)
     (craze / "providers.toml").write_text(gx_meta((craze / "providers.toml").read_text()))
     table, ring = load_providers(craze / "providers.toml", env={})
     meta = table["meta"]
@@ -343,13 +319,13 @@ def test_a_later_catalog_change_is_refused_at_run_time(tmp_path, monkeypatch):
     the run, naming what moved and saying to re-run snapshot-config. A hand-written
     entry's route does not follow the catalog, so the same change leaves its snapshot
     good. The control: before the change, both pass."""
-    craze, grok = owner_tree(tmp_path / "owner")
+    craze = owner_tree(tmp_path / "owner")
     hand_text = (craze / "providers.toml").read_text()
     models = list(load_models().values())
 
     def taken(text: str, name: str) -> tuple[Snapshot, dict]:
         (craze / "providers.toml").write_text(text)
-        snap = Snapshot(dir=tmp_path, config=build_snapshot(load_models(), craze_dir=craze, grok_dir=grok), hash=name)
+        snap = Snapshot(dir=tmp_path, config=build_snapshot(load_models(), craze_dir=craze), hash=name)
         return snap, load_providers(craze / "providers.toml", env={})[0]
 
     gx_snap, table = taken(marked("gx")(hand_text), "gx")
@@ -394,11 +370,11 @@ def test_run_refuses_a_snapshot_whose_route_moved(tmp_path, monkeypatch, capsys)
     import crazeeval.sandbox as sandbox
     from crazeeval.cli import main
 
-    craze, grok = owner_tree(tmp_path / "owner")
+    craze = owner_tree(tmp_path / "owner")
     (craze / "providers.toml").write_text(marked("gx")((craze / "providers.toml").read_text()))
     snapdir = tmp_path / "snap"
     snapdir.mkdir()
-    (snapdir / "config.json").write_text(json.dumps(build_snapshot(load_models(), craze_dir=craze, grok_dir=grok)))
+    (snapdir / "config.json").write_text(json.dumps(build_snapshot(load_models(), craze_dir=craze)))
     (snapdir / "opencode-models.json").write_text("{}")
     fake_bin = tmp_path / "craze"
     fake_bin.write_text("")
@@ -482,7 +458,7 @@ def test_keyring_never_prints_a_key():
 
 
 def test_load_providers_uses_crazes_rule(tmp_path):
-    craze, _ = owner_tree(tmp_path)
+    craze = owner_tree(tmp_path)
     table, ring = load_providers(craze / "providers.toml", env={"NOPE_KEY_VAR": ""})
     assert ring.key_for("meta") == FAKE["meta"]  # empty env var -> the file's key
     table, ring = load_providers(craze / "providers.toml", env={"NOPE_KEY_VAR": "env-key-value-123456"})

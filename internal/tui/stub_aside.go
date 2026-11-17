@@ -10,7 +10,7 @@ import (
 )
 
 // AsidingStub is the Stub as a session that answers side questions
-// (agent.Asider; plan 040 §3.8): what a native, grok or gx session is to the
+// (agent.Asider; plan 040 §3.8): what a native or grok session is to the
 // engine, the wire and a client — the capability aside, the methods
 // session.aside and session.aside.cancel, the aside notifications — with a
 // scripted answer and no model behind it. Every other method is the Stub's

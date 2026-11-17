@@ -40,6 +40,9 @@ func classifyTable() []classifyCase {
 		{"ErrIndexWrite", fmt.Errorf("%w: %w", ErrIndexWrite, boom), "index_write", "index_write", false},
 		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", "not_accepting", true},
 		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", "not_in_turn", true},
+		// Engine.Interject queues the text on it and never returns it; it is an
+		// ErrNotInTurn should one ever escape.
+		{"agent.ErrPromptRequired", agent.ErrPromptRequired, "not_accepting", "not_in_turn", true},
 		{"ErrExitFenced", ErrExitFenced, "not_accepting", "exit_fenced", true},
 		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", "in_progress", true},
 		// A DUPLICATE of a blocking command whose own wait timed out against an
@@ -105,6 +108,8 @@ func classifyTable() []classifyCase {
 		{"agent.ErrQueueTextTooLong", agent.ErrQueueTextTooLong, "text_too_long", "text_too_long", false},
 		{"agent.ErrPromptInFlight", agent.ErrPromptInFlight, "prompt_in_flight", "prompt_in_flight", false},
 		{"agent.ErrForeignTurn", agent.ErrForeignTurn, "foreign_turn", "foreign_turn", false},
+		// claude's requeueing refusal is ErrForeignTurn to the table (review C4b item 3).
+		{"agent.ErrForeignTurnRequeue", agent.ErrForeignTurnRequeue, "foreign_turn", "foreign_turn", false},
 		{"agent.ErrPromptCancelled", agent.ErrPromptCancelled, "prompt_cancelled", "prompt_cancelled", false},
 		{"agent.ErrUnsupported", agent.ErrUnsupported, "unsupported", "unsupported", false},
 		// Plan 040 §3.3's side question. ErrBadAside and ErrAsideTooLong are
@@ -291,21 +296,23 @@ func engineSentinels() map[string]error {
 // a Control method can answer with, and therefore that classify has to place.
 func agentSentinels() map[string]error {
 	return map[string]error{
-		"ErrBadAnswer":        agent.ErrBadAnswer,
-		"ErrAlreadyResolved":  agent.ErrAlreadyResolved,
-		"ErrUnknownAsk":       agent.ErrUnknownAsk,
-		"ErrNoSuchSubagent":   agent.ErrNoSuchSubagent,
-		"ErrAskUnavailable":   agent.ErrAskUnavailable,
-		"ErrQueueFull":        agent.ErrQueueFull,
-		"ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
-		"ErrNotInTurn":        agent.ErrNotInTurn,
-		"ErrPromptInFlight":   agent.ErrPromptInFlight,
-		"ErrUnsupported":      agent.ErrUnsupported,
-		"ErrForeignTurn":      agent.ErrForeignTurn,
-		"ErrPromptCancelled":  agent.ErrPromptCancelled,
-		"ErrSetUnavailable":   agent.ErrSetUnavailable,
-		"ErrOptionGone":       agent.ErrOptionGone,
-		"ErrBadCatalog":       agent.ErrBadCatalog,
+		"ErrBadAnswer":          agent.ErrBadAnswer,
+		"ErrAlreadyResolved":    agent.ErrAlreadyResolved,
+		"ErrUnknownAsk":         agent.ErrUnknownAsk,
+		"ErrNoSuchSubagent":     agent.ErrNoSuchSubagent,
+		"ErrAskUnavailable":     agent.ErrAskUnavailable,
+		"ErrQueueFull":          agent.ErrQueueFull,
+		"ErrQueueTextTooLong":   agent.ErrQueueTextTooLong,
+		"ErrNotInTurn":          agent.ErrNotInTurn,
+		"ErrPromptRequired":     agent.ErrPromptRequired,
+		"ErrPromptInFlight":     agent.ErrPromptInFlight,
+		"ErrUnsupported":        agent.ErrUnsupported,
+		"ErrForeignTurn":        agent.ErrForeignTurn,
+		"ErrForeignTurnRequeue": agent.ErrForeignTurnRequeue,
+		"ErrPromptCancelled":    agent.ErrPromptCancelled,
+		"ErrSetUnavailable":     agent.ErrSetUnavailable,
+		"ErrOptionGone":         agent.ErrOptionGone,
+		"ErrBadCatalog":         agent.ErrBadCatalog,
 		// The session's refusal of a Set bound to a model it has left, made just
 		// before the write. engine.ErrStaleModel is this very value, so the
 		// table's ErrStaleModel row is its row too.

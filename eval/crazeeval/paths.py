@@ -36,7 +36,6 @@ CACHE_DIR = Path(os.environ.get("CRAZEEVAL_CACHE_DIR", HOME / ".cache/crazeeval"
 
 # The owner's files: read-only inputs, never modified.
 OWNER_CRAZE_NATIVE = HOME / ".craze/native"
-OWNER_GROK = HOME / ".grok"
 
 # craze at the plan's base commit (plan 029 §3.1.5): the commit a craze-repo task
 # materialises unless its task.toml pins another (``[repo] commit``).

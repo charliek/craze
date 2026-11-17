@@ -968,6 +968,8 @@ type fakeFrameOpts struct {
 	// timeout is the per-wait timeout; zero takes the 15s the goldens have
 	// always used.
 	timeout time.Duration
+	// env is added to the agent's environment (claude's companion binary).
+	env []string
 }
 
 func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, o fakeFrameOpts) string {
@@ -982,12 +984,17 @@ func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, 
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
+	var env []string
+	if len(o.env) > 0 {
+		env = append(os.Environ(), o.env...)
+	}
 	plain, _, err := runFrameModes(t, func() Config {
 		ws := frameWorkspace(t)
 		return Config{
 			Session: agent.New(agent.Options{
 				Binary:      bin,
 				ExtraArgs:   []string{"-script=" + script},
+				Env:         env,
 				Workspace:   ws,
 				Force:       o.force,
 				PluginDirs:  o.pluginDirs,
@@ -1698,6 +1705,49 @@ func TestFrameGoldenGrokAsk(t *testing.T) {
 		for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("%s missing %q:\n%s", name, want, got)
+			}
+		}
+	}
+}
+
+// claudeFrameEnv is a claude session's environment for a frame: a stand-in
+// for Claude Code's `claude` that the preflight finds signed in to a Max plan
+// (CLAUDE_CODE_EXECUTABLE), the fake agent standing in for the adapter.
+func claudeFrameEnv(t *testing.T) []string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *'auth status'*) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}' ;;\n" +
+		"  *--version*) echo '2.1.326 (Claude Code)' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{agent.ClaudeExecutableEnv + "=" + p}
+}
+
+// TestFrameGoldenClaudeAsk (plan 052 § B4): claude's AskUserQuestion, from a
+// real session over the fake adapter, is the question card with its options'
+// descriptions and an "Other…" row; picking the row and typing draws the
+// one-line input.
+func TestFrameGoldenClaudeAsk(t *testing.T) {
+	for _, tc := range []struct {
+		name, keys string
+		want       []string
+	}{
+		{"claude-ask", "<wait:idle>go<enter><wait:card>", []string{"question 1/1  Do you prefer red or blue?", "> 1 Red", "Choose red", "  3 Other…", "esc cancel", "◌ question  Asking for your input"}},
+		{"claude-ask-other", "<wait:idle>go<enter><wait:card>3teal<wait:text:Other: teal>", []string{"> 3 Other: teal▏", "type your answer · enter send · esc back"}},
+	} {
+		for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+			got := runFakeFrameOpts(t, "claude-ask", size.cols, size.rows, tc.keys, fakeFrameOpts{
+				provider: agent.ClaudeProvider(), force: true, freeze: true, timeout: 20 * time.Second, env: claudeFrameEnv(t),
+			})
+			name := fmt.Sprintf("%s-%dx%d", tc.name, size.cols, size.rows)
+			assertGolden(t, name, size.cols, size.rows, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s missing %q:\n%s", name, want, got)
+				}
 			}
 		}
 	}

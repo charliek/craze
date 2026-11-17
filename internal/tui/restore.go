@@ -190,6 +190,15 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 		m.noteTodoLifecycle(m.snap.Todos)
 	}
 	m.restoreTurn(st.Turn, moved)
+	// The agent's own turn running at the cut keeps its clock (review C4b
+	// item 8): its bracket's time, else the restore's; none when none runs.
+	m.foreignStart = time.Time{}
+	if f := st.Turn.Foreign; f != nil && f.Running {
+		m.foreignStart = st.Turn.ForeignAt
+		if m.foreignStart.IsZero() {
+			m.foreignStart = m.now()
+		}
+	}
 	m.restoreCards(st.Asks, priorCards, moved)
 	m.restoreViewing()
 	wasReplaying := m.replaying

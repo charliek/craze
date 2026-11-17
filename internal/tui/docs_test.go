@@ -226,7 +226,7 @@ func configKeys(t *testing.T) (top []string, tables map[string][]string) {
 			t.Fatalf("config.go scrape lost the key %q (found %v): update configKeys", want, top)
 		}
 	}
-	if len(tables["compat.claude"]) < 6 || len(tables["agents"]) < 3 ||
+	if len(tables["compat.claude"]) < 6 || len(tables["agents"]) < 2 ||
 		!slices.Equal(tables["websearch"], []string{"provider"}) || !slices.Contains(top, "websearch") {
 		t.Fatalf("config.go scrape lost a table's keys: %v", tables)
 	}

@@ -168,7 +168,7 @@ type MethodInfo struct {
 	// session.models.refresh's is modelsRefresh — true for a native session,
 	// whoever hosts it, absent for an ACP session and on an older host (plan
 	// 034 §3.4); session.aside's and session.aside.cancel's is aside — true
-	// for a native, grok or gx session, absent for cursor and on an older
+	// for a native or grok session, absent for cursor and on an older
 	// host (plan 040 §3.2). "" for a method whose HostUnsupported, if any,
 	// holds on every host.
 	Capability string
@@ -186,7 +186,7 @@ const CapabilityModelsRefresh = "modelsRefresh"
 
 // CapabilityAside is the session capability that says a host serves
 // session.aside and session.aside.cancel (plan 040 §3.2;
-// SessionCapabilities.Aside's wire name): true for a native, grok or gx
+// SessionCapabilities.Aside's wire name): true for a native or grok
 // session, and absent — false — for cursor and on an older host.
 const CapabilityAside = "aside"
 

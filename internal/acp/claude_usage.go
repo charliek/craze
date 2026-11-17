@@ -1,0 +1,285 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
+
+// The claude dialect's usage and the overage guard's wire half (plan 052 §
+// D1, § D3). claude-agent-acp reports the account's plan limits as
+// `_meta["_claude/rateLimit"]` on a usage_update — only when they change
+// (v1/acp-agent.js:5018-5036, a rate_limit_event riding the next usage) — and
+// as `data.rateLimit` on a prompt's rate_limit failure (result-end.js
+// turnErrorData). The guard is containment, not prevention: what trips it has
+// already been billed, so the client ends whatever turn runs, stops sending,
+// and stops the agent's process group.
+
+// RateLimit is the adapter's `_claude/rateLimit`: the Agent SDK's
+// SDKRateLimitInfo (sdk.d.ts), the fields craze reads. The times are epoch
+// seconds, 0 for none.
+type RateLimit struct {
+	// Status is allowed, allowed_warning or rejected.
+	Status string `json:"status"`
+	// ResetsAt is when the limit RateLimitType names resets.
+	ResetsAt float64 `json:"resetsAt"`
+	// RateLimitType names the window: five_hour, seven_day,
+	// seven_day_opus, seven_day_sonnet, seven_day_overage_included or
+	// overage.
+	RateLimitType string `json:"rateLimitType"`
+	// Utilization is the window's use, 0..1; nil when the adapter sent none.
+	Utilization *float64 `json:"utilization"`
+	// OverageStatus is extra usage's own status, OverageResetsAt its reset.
+	OverageStatus   string  `json:"overageStatus"`
+	OverageResetsAt float64 `json:"overageResetsAt"`
+	// IsUsingOverage and OverageInUse say a request was billed as extra
+	// usage.
+	IsUsingOverage bool `json:"isUsingOverage"`
+	OverageInUse   bool `json:"overageInUse"`
+}
+
+// Trips reports whether r is one of the overage guard's four signals (plan
+// 052 § D3): extra usage in use, said either way; a window that is extra
+// usage itself; or the plan's limit rejected while extra usage is allowed —
+// the next request would be billed as extra usage, so this one trips before
+// it. The reading of extra usage as allowed or in use is t3code's
+// (apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts, its
+// overageAllowed, at 26f70e72fa), which treats a rejected limit with extra
+// usage allowed as not blocked: craze trips on it instead.
+func (r RateLimit) Trips() bool {
+	switch {
+	case r.IsUsingOverage, r.OverageInUse:
+		return true
+	case r.RateLimitType == "overage", r.RateLimitType == "seven_day_overage_included":
+		return true
+	case r.Status == "rejected" && (r.OverageStatus == "allowed" || r.OverageStatus == "allowed_warning"):
+		return true
+	}
+	return false
+}
+
+// UsageRateLimit is a usage_update's `_meta["_claude/rateLimit"]`, and
+// whether it carried one that reads as an object.
+func UsageRateLimit(update json.RawMessage) (RateLimit, bool) {
+	var w struct {
+		Meta struct {
+			RateLimit json.RawMessage `json:"_claude/rateLimit"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(update, &w) != nil {
+		return RateLimit{}, false
+	}
+	return decodeRateLimit(w.Meta.RateLimit)
+}
+
+// ErrorRateLimit is a prompt error's `data.rateLimit`, and whether it carried
+// one that reads as an object.
+func ErrorRateLimit(data json.RawMessage) (RateLimit, bool) {
+	var w struct {
+		RateLimit json.RawMessage `json:"rateLimit"`
+	}
+	if decodeObject(data, &w) != nil {
+		return RateLimit{}, false
+	}
+	return decodeRateLimit(w.RateLimit)
+}
+
+func decodeRateLimit(raw json.RawMessage) (RateLimit, bool) {
+	var r RateLimit
+	if decodeObject(raw, &r) != nil {
+		return RateLimit{}, false
+	}
+	return r, true
+}
+
+// SetRateLimitHandler installs the claude rate-limit handler (plan 052 § D2,
+// § D3). It runs on the read loop, in dispatch order, for every usage_update
+// that carries `_claude/rateLimit` — the root's, a child's, before the session
+// has returned or between turns alike; never one a session/load replays — and
+// BEFORE the foreign-turn state machine reads that update, so a trip is
+// processed before the same update could settle a turn. A non-nil answer is
+// the error the trip ends the running turn with: a foreign turn ends with it
+// at once, failed, and the machine is closed, so nothing opens again.
+func (c *Client) SetRateLimitHandler(h func(RateLimit) error) {
+	c.mu.Lock()
+	c.rateLimitHandler = h
+	c.mu.Unlock()
+}
+
+// noteRateLimit is routeClaude's first step for one update: a usage_update's
+// rate limit is handed to the handler, and a trip it answers ends the foreign
+// turn now. The caller holds dispatchMu and not c.mu.
+func (c *Client) noteRateLimit(kind string, n SessionNotification) {
+	if kind != UpdateUsage {
+		return
+	}
+	rl, ok := UsageRateLimit(n.Update)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	// A replay is history: what it says of a limit was said, and acted on,
+	// when it was live. What comes before session/new's reply is
+	// read now — a setup that then fails must not lose a trip (review C5
+	// item 9) — and again when claudeSetup routes it; an update for a child
+	// not yet announced is read now, and again if the early buffer replays
+	// it: the handler is idempotent, and a report that expires in a buffer
+	// is still read.
+	// Only history is skipped: from a load's reply on, a report is live
+	// even while the post-load hold keeps the update itself back, and it is
+	// read now — never left to the hold draining, which can fail and drop it
+	// (review C4c finding 2); ReplayDone's routing reads it again.
+	later := c.cf.phase == phaseReplaying && !c.cf.loaded
+	h := c.rateLimitHandler
+	c.mu.Unlock()
+	if later || h == nil {
+		return
+	}
+	if err := h(rl); err != nil {
+		c.endForeignForTrip(err, true)
+	}
+}
+
+// EndForeignWith is the overage guard's end of a claude foreign turn from
+// outside the read loop's dispatch (plan 052 § D3): one opened while the trip
+// record holds, a trip a prompt's error reported. The turn open now, if any,
+// ends failed with err, decided now, and the machine is closed, so nothing
+// opens again; the ending is delivered in dispatch order on a goroutine of its
+// own, so a caller already on the read loop — a foreign-turn handler — never
+// waits on itself. An error FailForeign recorded first is the ending's instead.
+func (c *Client) EndForeignWith(err error) {
+	if c.dialect != DialectClaude {
+		return
+	}
+	c.endForeignForTrip(err, false)
+}
+
+// endForeignForTrip ends the open foreign turn with err and closes the
+// machine. dispatching says the caller holds dispatchMu: the ending is then
+// delivered inline, in order; otherwise on a goroutine that takes it.
+func (c *Client) endForeignForTrip(err error, dispatching bool) {
+	c.mu.Lock()
+	if c.cf.failErr == nil {
+		c.cf.failErr = err
+	}
+	// The first fatal cause stands (review C8 item 1): a stop already recorded
+	// (FailForeign — an auth or config refusal) is what the turn ends with,
+	// not the transport's end it brought about.
+	err = c.cf.failErr
+	var end *ForeignTurn
+	if c.cf.phase == phaseForeign {
+		end = c.endForeignTurnLocked(false, err)
+	}
+	c.closeMachineLocked()
+	h := c.foreignHandler
+	c.mu.Unlock()
+	if end == nil || h == nil {
+		return
+	}
+	if dispatching {
+		h(*end)
+		return
+	}
+	go func() {
+		locked := c.lockDispatchWithin(closeWait())
+		defer func() {
+			if locked {
+				c.dispatchMu.Unlock()
+			}
+		}()
+		h(*end)
+	}()
+}
+
+// Fence is the overage guard's first step on the wire (plan 052 § D3): from
+// the moment it returns nothing but a session/cancel is written to the agent —
+// no prompt, no steer, no answer, no setting — whoever was about to write it
+// (review C5 item 5). A write already past the fence check is waited for, up
+// to fenceWait; one still held there (an agent that stopped reading) is failed
+// by closing the writer, which loses the cancel too: the kill follows anyway.
+func (c *Client) Fence() {
+	if !c.conn.enc.fence(fenceWait) {
+		c.conn.closeWriter()
+	}
+}
+
+// fenceWait bounds Fence's wait for a write in progress.
+var fenceWait = 100 * time.Millisecond
+
+// StopWithin is the overage guard's stop (plan 052 § D3): session/cancel to
+// the root, then, once grace has passed or the agent has exited on its own,
+// nothing more read from the agent — its frames are dropped unread from here
+// (Conn.sever) — and its process group killed outright, which takes Claude
+// Code and every child it runs with it; then the client closes. A child that
+// ignores the cancel cannot outlast it. It blocks until the client is closed;
+// callers run it on a goroutine of their own.
+func (c *Client) StopWithin(grace time.Duration) {
+	// The agent's tree as the stop begins, while it is most likely whole: a
+	// child the agent leaves behind by exiting first is still found
+	// (review C5b item 4).
+	var tree TreeSnapshot
+	if c.child != nil {
+		tree = c.child.SnapshotTree()
+	}
+	if sid := c.SessionID(); sid != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), grace)
+			defer cancel()
+			_ = c.conn.Notify(ctx, MethodSessionCancel, CancelParams{SessionID: sid})
+		}()
+	}
+	timer := time.NewTimer(grace)
+	select {
+	case <-timer.C:
+	case <-c.Exited():
+	}
+	timer.Stop()
+	if hold := c.beforeSever.Load(); hold != nil {
+		(*hold)()
+	}
+	c.conn.sever()
+	if testAfterSever != nil {
+		testAfterSever()
+	}
+	if c.child != nil {
+		c.child.KillTree(tree)
+	}
+	_ = c.Close()
+}
+
+// SetBeforeSeverForTest makes f run in this client's StopWithin once the
+// grace is over, before the connection is severed and the tree killed: a test
+// holds the kill until it has seen what must come first. Never called
+// outside tests.
+func (c *Client) SetBeforeSeverForTest(f func()) { c.beforeSever.Store(&f) }
+
+// testAfterSever is a test seam, nil in production: it runs in StopWithin
+// right after the connection is severed, before the kill.
+var testAfterSever func()
+
+// SetAfterSeverForTest sets testAfterSever for a test in another package and
+// returns the restore. Never called outside tests.
+func SetAfterSeverForTest(f func()) (restore func()) {
+	prev := testAfterSever
+	testAfterSever = f
+	return func() { testAfterSever = prev }
+}
+
+// PromptQuota is a claude prompt result's `_meta.quota.token_count`: the
+// turn's own tokens as the adapter counts them, and whether it carried them.
+type PromptQuota struct {
+	TotalTokens, InputTokens, CachedInputTokens, CachedWriteTokens, OutputTokens, ReasoningOutputTokens int64
+}
+
+// Quota is r's `_meta.quota.token_count` (claude), and whether there was one.
+func (r PromptResult) Quota() (PromptQuota, bool) {
+	var w struct {
+		Quota struct {
+			TokenCount *PromptQuota `json:"token_count"`
+		} `json:"quota"`
+	}
+	if decodeObject(r.Meta, &w) != nil || w.Quota.TokenCount == nil {
+		return PromptQuota{}, false
+	}
+	return *w.Quota.TokenCount, true
+}

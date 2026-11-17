@@ -615,7 +615,7 @@ func (c *conn) asksAnswer(b *bound, info protocol.MethodInfo, req *request) outc
 	}
 	cmd := engine.Command{Client: b.client, ID: p.CommandID}
 	a := agent.AskAnswer{OptionID: p.Answer.OptionID, Cancel: p.Answer.Cancel, Answers: p.Answer.Answers,
-		Skip: p.Answer.Skip, Accept: p.Answer.Accept, Reject: p.Answer.Reject}
+		Text: p.Answer.Text, Skip: p.Answer.Skip, Accept: p.Answer.Accept, Reject: p.Answer.Reject}
 	return c.command(b, req.method, func() outcome {
 		if err := b.eng.Answer(cmd, p.AskID, a); err != nil {
 			return refusal(engineError(err))

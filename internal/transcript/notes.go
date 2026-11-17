@@ -28,6 +28,13 @@ const (
 	// NoteJobWake heads the stream of a native wake that delivers background
 	// bash jobs' results alone (plan 033 §3.8, agent.ReasonJobWake).
 	NoteJobWake = "background command finished — the agent continues"
+	// NoteBackgroundTurn heads the stream of a turn claude ran on its own: a
+	// background command's or a sub-agent's wake, or a steer that started a
+	// turn (agent.ReasonBackground, plan 052 § E1).
+	NoteBackgroundTurn = "the agent continued on its own (background work)"
+	// NoteCompactionTurn heads the stream of claude compacting its context
+	// while idle (agent.ReasonCompaction).
+	NoteCompactionTurn = "the agent is compacting its context on its own"
 	// NoteRestored closes a session/load replay: everything above it is
 	// history the agent handed back, everything below is this session.
 	NoteRestored = "restored"
@@ -74,7 +81,30 @@ func compactionNote(c *agent.CompactionInfo) string {
 	case agent.CompactionOverflow:
 		head = NoteCompactedOverflow
 	}
+	if c.TokensBefore == 0 && c.TokensAfter == 0 {
+		// No sizes reported (claude's compaction_update, plan 052 § B2).
+		return head
+	}
 	return head + " · " + tokenCount(c.TokensBefore) + " → " + tokenCount(c.TokensAfter) + " tokens"
+}
+
+// noticeNote is the note an agent's notice draws (plan 052 § B2): its title
+// and its description, joined by a colon, on one line; a warning or an error
+// leads with its severity.
+func noticeNote(n *agent.NoticeInfo) string {
+	title, desc := sanitizeLine(n.Title), sanitizeLine(n.Description)
+	text := title
+	switch {
+	case title == "":
+		text = desc
+	case desc != "":
+		text = title + ": " + desc
+	}
+	switch n.Severity {
+	case "warning", "error":
+		text = n.Severity + ": " + text
+	}
+	return text
 }
 
 // TokenCount is a token count as craze says one anywhere it is drawn — the
@@ -130,8 +160,22 @@ func noteForForeignTurn(reason string) string {
 		return NoteSubagentWake
 	case agent.ReasonJobWake:
 		return NoteJobWake
+	case agent.ReasonBackground:
+		return NoteBackgroundTurn
+	case agent.ReasonCompaction:
+		return NoteCompactionTurn
 	}
 	return NoteForeignTurn
+}
+
+// IsForeignTurnNote says text is a note a foreign turn's start draws
+// (noteForForeignTurn), whatever its reason.
+func IsForeignTurnNote(text string) bool {
+	switch text {
+	case NoteForeignTurn, NoteSubagentWake, NoteJobWake, NoteBackgroundTurn, NoteCompactionTurn:
+		return true
+	}
+	return false
 }
 
 // The outcome notes an answered ask's ending draws (foldAsk, plan 032 §3.2
@@ -172,22 +216,23 @@ func capNote(s string) string {
 
 // answerNotes is one note per question of q, naming what answers picked for
 // it (answerNote). A question that asks nothing draws none.
-func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
+func answerNotes(q *agent.QuestionEvent, answers map[string][]string, text map[string]string) []string {
 	out := make([]string, 0, len(q.Questions))
 	for _, qq := range q.Questions {
-		out = append(out, answerNote(qq, answers[qq.ID]))
+		out = append(out, answerNote(qq, answers[qq.ID], text[qq.ID]))
 	}
 	return out
 }
 
 // answerNote is one question's note: `? <prompt> → ` and what each of ids
-// picks names (pickName), in their order, comma-separated. A pick that names
-// nothing is left out, and nothing named reads "nothing".
+// picks names (pickName), in their order, comma-separated, then the free text
+// typed beside them (plan 052 § B4), quoted. A pick that names nothing is left
+// out, and nothing named and nothing typed reads "nothing".
 //
 // It stops naming once the note is longer than outcomeNoteCap: capNote keeps
 // none of what would follow, and one long label picked over and over cannot
 // first build a note an answer's length times its size.
-func answerNote(qq agent.Question, ids []string) string {
+func answerNote(qq agent.Question, ids []string, text string) string {
 	var b strings.Builder
 	b.WriteString("? ")
 	b.WriteString(sanitizeLine(qq.Prompt))
@@ -205,6 +250,13 @@ func answerNote(qq agent.Question, ids []string) string {
 			b.WriteString(", ")
 		}
 		b.WriteString(name)
+		named++
+	}
+	if t := sanitizeLine(text); strings.TrimSpace(t) != "" && b.Len() <= outcomeNoteCap {
+		if named > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(`"` + strings.TrimSpace(t) + `"`)
 		named++
 	}
 	if named == 0 {
@@ -268,6 +320,11 @@ func questionTitle(q *agent.QuestionEvent) string {
 	}
 	return "question"
 }
+
+// noteWithdrawn is what a question's or a plan's row says when the agent took
+// the request back (agent.AskByWithdrawn): only claude does, with
+// $/cancel_request.
+const noteWithdrawn = "withdrawn by Claude"
 
 // planNote is what an answered plan draws.
 func planNote(p *agent.PlanEvent, accepted bool) string {

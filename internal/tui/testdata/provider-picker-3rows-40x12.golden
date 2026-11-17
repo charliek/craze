@@ -1,8 +1,8 @@
   ╭──────────────────────────────────╮  
   │provider                          │  
-  │  cursor                          │  
   │  grok                            │  
-  │> gx                       default│  
+  │  claude                          │  
+  │> native                   default│  
   │↑↓ · tab · enter starts · esc use…│  
   ╰──────────────────────────────────╯  
 ──────────────────────────────── craze ─
