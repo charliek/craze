@@ -2189,6 +2189,7 @@ ended. What the stream does after a result has been read is ignored.
 | `idle` | the host's idle exit, which waits until no client is attached, so a waiting command does not meet it live |
 | `exit_after_turn` | the stop a waiting command sends once its turn has ended |
 | `lost_owner` | what the host answered to went away: the launcher waiting for its ready line, or its socket or registry entry |
+| `overage` | a claude session's overage guard stopped it: Claude said a request was, or would be, billed as extra usage ([Extra usage](../getting-started/claude.md#extra-usage-the-overage-guard)) |
 
 `detail.cause` is absent from a host older than it, and when a terminal closed the
 session it was hosting: a `stopped` error still, with nothing more to say.

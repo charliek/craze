@@ -126,6 +126,8 @@ reach it. What changes for everyone else:
 - **The claude overage guard keeps a record**, `claude-overage.json` in
   craze's directory, which refuses claude starts and prompts on the machine
   until the limit it names resets ([Extra usage](claude.md#extra-usage-the-overage-guard)).
+  A session it stops ends with the new close cause `overage`, and its host
+  stops with it.
 
 - **`claude` is a provider id now.** It used to be an unknown one: `--provider
   claude` exited 2, and `provider = "claude"` warned and started cursor. Both

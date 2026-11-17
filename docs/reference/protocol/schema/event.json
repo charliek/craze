@@ -317,7 +317,7 @@
         "synthetic": {"type": "boolean"},
         "next": {"type": "string"},
         "pending": {"type": "integer", "minimum": 0},
-        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn or lost_owner. Absent from a host that predates it, and when a terminal closed its own session."}
+        "cause": {"type": "string", "description": "On a synthetic ended whose stopReason is closing: what began the session's close, one of stop, signal, idle, exit_after_turn, lost_owner or overage. Absent from a host that predates it, and when a terminal closed its own session."}
       },
       "additionalProperties": false
     },

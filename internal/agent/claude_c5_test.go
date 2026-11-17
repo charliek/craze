@@ -199,7 +199,7 @@ func TestClaudeOverageWakeWhileTheRecordHolds(t *testing.T) {
 	record, stopped := overageRig(t, 150*time.Millisecond)
 	r, log := startClaude(t, "claude-overage", Options{Interactive: true}, "CRAZE_FAKE_CLAUDE_IDLE_WAKE=300ms")
 	// Another session trips.
-	if _, err := writeOverageRecord(overageRecord{Until: time.Now().Add(time.Hour), Window: "seven_day", At: time.Now()}); err != nil {
+	if _, _, err := writeOverageRecord(overageRecord{Until: time.Now().Add(time.Hour), Window: "seven_day", At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	b := log.waitBrackets(t, 2)
@@ -220,7 +220,7 @@ func TestClaudeOverageRefusesWhileTheRecordHolds(t *testing.T) {
 	record, _ := overageRig(t, 150*time.Millisecond)
 	// A running session first, then the record.
 	r, _ := startClaude(t, "claude-basic", Options{Interactive: true})
-	if _, err := writeOverageRecord(overageRecord{Until: time.Now().Add(time.Hour), Window: "five_hour", At: time.Now()}); err != nil {
+	if _, _, err := writeOverageRecord(overageRecord{Until: time.Now().Add(time.Hour), Window: "five_hour", At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.s.Prompt(t.Context(), "hello"); !isQuota(err) || !strings.Contains(err.Error(), "5-hour") {
@@ -258,14 +258,14 @@ func TestClaudeOverageRecordKeepsTheLaterUntil(t *testing.T) {
 	record, _ := overageRig(t, 0)
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	later := now.Add(48 * time.Hour)
-	if _, err := writeOverageRecord(overageRecord{Until: later, Window: "seven_day", At: now}); err != nil {
+	if _, _, err := writeOverageRecord(overageRecord{Until: later, Window: "seven_day", At: now}); err != nil {
 		t.Fatal(err)
 	}
 	rec := newOverageRecord(acp.RateLimit{RateLimitType: "five_hour", ResetsAt: float64(now.Add(time.Hour).Unix())}, now)
-	if _, err := writeOverageRecord(rec); err != nil {
+	if _, _, err := writeOverageRecord(rec); err != nil {
 		t.Fatal(err)
 	}
-	if got := readRecord(t, record); !got.Until.Equal(later) || got.Window != "five_hour" {
+	if got := readRecord(t, record); !got.Until.Equal(later) || got.Window != "seven_day" {
 		t.Fatalf("record %+v; want the later until kept", got)
 	}
 	for _, rl := range []acp.RateLimit{{}, {ResetsAt: float64(now.Add(-time.Minute).Unix())}} {
@@ -419,9 +419,11 @@ func TestClaudeNoticeAndCompactionNotes(t *testing.T) {
 // TestRecordIsNeverTheUsersInTests: every test of this package reads and
 // writes a record of its own (TestMain).
 func TestRecordIsNeverTheUsersInTests(t *testing.T) {
-	path, _ := overageSeams()
-	if dir := filepath.Dir(path); !strings.Contains(dir, os.TempDir()) {
-		t.Fatalf("the package's record is %s; want a temporary one", path)
+	path, fallback, _ := overageSeams()
+	for _, p := range []string{path, fallback} {
+		if dir := filepath.Dir(p); !strings.Contains(dir, os.TempDir()) {
+			t.Fatalf("the package's record is %s; want a temporary one", p)
+		}
 	}
 }
 
@@ -436,7 +438,7 @@ func TestClaudeOverageRecordExpiresByTheClock(t *testing.T) {
 	if err := overageRefusal(); err != nil {
 		t.Fatalf("no record: %v", err)
 	}
-	if _, err := writeOverageRecord(overageRecord{Until: until, Window: "seven_day", At: now}); err != nil {
+	if _, _, err := writeOverageRecord(overageRecord{Until: until, Window: "seven_day", At: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := overageRefusal(); !isQuota(err) || !strings.Contains(err.Error(), "7-day") {

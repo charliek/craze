@@ -217,7 +217,7 @@ type Child struct {
 // newChild starts watching cmd, just started, and its reaper. Whether the
 // exit can be observed without a reap is settled here, before the reaper
 // runs and so before any signal: if it cannot, the reaper is the fallback
-// from the start (reapPolling), which never signals the group.
+// from the start (reapPolling), which signals the group only before its reap.
 func newChild(cmd *exec.Cmd) *Child {
 	ch := &Child{
 		cmd:        cmd,
@@ -307,7 +307,8 @@ func (ch *Child) Wait() {
 // SIGKILL if it outlives the grace; then, as after an agent's own exit, what
 // is left alive in its process group — a tool's subprocess — gets SIGTERM and,
 // past a second grace, SIGKILL, and the group a last SIGKILL. (In the
-// fallback, reapPolling, the agent alone is signalled.) An agent that had
+// fallback, reapPolling, the group is signalled while the agent is unreaped,
+// and not cleaned up after an exit of the agent's own.) An agent that had
 // already exited and been reaped is not signalled again: its group was
 // cleaned up at its exit, and its id may by now be someone else's. Every
 // call, the first and any later one, returns once the agent has been reaped.

@@ -1976,6 +1976,7 @@ raced: the engine publishes one ending for a turn.
 | `idle` | the host's idle exit. It waits for no client attached and nothing in flight, so a client attached through the turn never reads it live |
 | `exit_after_turn` | the stop a waiting command sends once its turn has ended |
 | `lost_owner` | what the host answered to went away: the launcher waiting for its ready line, or its socket or registry entry |
+| `overage` | a claude session's overage guard stopped it: Claude said a request was, or would be, billed as extra usage ([Extra usage](../getting-started/claude.md#extra-usage-the-overage-guard)) |
 
 `cause` is optional: absent from a host that predates it (a reader treats that as
 no cause, and no error), and when a terminal closed the session it was hosting.

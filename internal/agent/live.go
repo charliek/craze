@@ -2011,6 +2011,10 @@ func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutco
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// claude's model in use belongs to the options it was reported under (L3
+	// F1): checked after the set's own delta (deferred, so it follows the
+	// return's).
+	defer s.inUseCheckLocked()
 	// Steps (1) to (3) of design 2's order — CurrentModel from the installed
 	// catalog, the marker against it, no mark — were the reply's install's,
 	// on the read loop (adoptModelLocked); this is (4), the one delta.
@@ -2132,6 +2136,8 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// After the mode's own delta (deferred, so it follows the return's).
+	defer s.inUseCheckLocked()
 	s.snap.CurrentMode = modeID
 	// Event.Mode stays empty: it is what an *agent*-initiated update fills, and
 	// a client retires a plan offer on it (plan 021 correction 20).
@@ -2246,6 +2252,9 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 		st.Model = &cur
 	}
 	t := s.enqueueDeltaLocked(cause, Event{}, s.owedModelLocked(st))
+	// claude's model in use belongs to the options it was reported under
+	// (L3 F1): after the set's own delta.
+	s.inUseCheckLocked()
 	switch {
 	case model:
 		// A model change answers with the model, as SetModel does — even when
@@ -3394,6 +3403,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			// Event.Mode as well as the section, because this is the agent's
 			// own change and a client retires a plan offer on that field.
 			s.enqueueDeltaLocked("", Event{Mode: mode}, &StateDelta{Mode: &mode})
+			s.inUseCheckLocked()
 			s.mu.Unlock()
 			s.flushDelta()
 		}
@@ -3442,6 +3452,9 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			s.markAgentWroteLocked(&s.agentWrote.model)
 		}
 		s.enqueueDeltaLocked("", Event{}, st)
+		// claude's model in use belongs to the options it was reported
+		// under (L3 F1).
+		s.inUseCheckLocked()
 		s.mu.Unlock()
 		s.flushDelta()
 	case acp.UpdatePlan:

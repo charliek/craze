@@ -141,3 +141,36 @@ func TestStatusRowModelInUse(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusRowClaudePlanModeStates (plan 052 L3 F1, O1): a haiku pick at low
+// effort, through plan mode, as the session reports it — the in-use model is
+// cleared whenever the mode or model option changes (internal/agent), so the
+// note shows only when a turn ran on another model than the option it ran
+// under, and the picked model reads as the model dialog names it.
+func TestStatusRowClaudePlanModeStates(t *testing.T) {
+	m := statusFixture(t)
+	m.snap.Models = nil
+	options := func(model string) []agent.ConfigOption {
+		return []agent.ConfigOption{
+			{ID: "model", Name: "Model", Category: "model", Type: "select", Current: model,
+				SelectValues: []agent.SelectValue{{Value: "haiku", Name: "Haiku 5.5"}, {Value: "sonnet", Name: "Sonnet 5.5"}}},
+			{ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "low",
+				SelectValues: []agent.SelectValue{{Value: "low", Name: "low"}, {Value: "high", Name: "high"}}},
+		}
+	}
+	for _, tc := range []struct {
+		state, model, inUse, want string
+	}{
+		{"entering plan: the adapter moves the option to sonnet", "sonnet", "", "sonnet (low)"},
+		{"a plan turn on sonnet", "sonnet", "claude-sonnet-5-5", "sonnet (low)"},
+		{"leaving plan: the option back to haiku", "haiku", "", "haiku (low)"},
+		{"/model haiku in plan mode, then a plan turn on sonnet", "haiku", "claude-sonnet-5-5", "sonnet (in use; picked Haiku 5.5 · low)"},
+	} {
+		m.snap.CurrentModel = tc.model
+		m.snap.Config = options(tc.model)
+		m.snap.Usage = &agent.UsageState{Model: tc.inUse}
+		if got := m.modelLabel(); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}

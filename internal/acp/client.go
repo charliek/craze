@@ -1161,6 +1161,11 @@ func (c *Client) Exited() <-chan struct{} {
 // loop, before their handler goroutine starts: a cancel landing in between
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
+	if c.conn.severed.Load() {
+		// Severed (the overage guard's stop): a request ReplayDone releases
+		// after it is answered by no one (review C5 item 7).
+		return
+	}
 	c.noteHeard()
 	// dialect is written once, before the read loop starts: read off c.mu.
 	if dialectHandles(c.dialect, msg.Method) != decisionHandle {
@@ -1386,6 +1391,11 @@ func (c *Client) onNotify(msg *Message) {
 		}
 		c.dispatchMu.Lock()
 		defer c.dispatchMu.Unlock()
+		if c.conn.severed.Load() {
+			// Severed while this frame waited for the dispatch (review C5
+			// item 7): read before the kill, handed to no one after it.
+			return
+		}
 	}
 	switch msg.Method {
 	case MethodSessionUpdate:

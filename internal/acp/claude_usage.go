@@ -128,12 +128,17 @@ func (c *Client) noteRateLimit(kind string, n SessionNotification) {
 	}
 	c.mu.Lock()
 	// A replay is history: what it says of a limit was said, and acted on,
-	// when it was live. Live updates held behind the load's reply are read
-	// when ReplayDone routes them, and what came before session/new's reply
-	// when claudeSetup does. (An update for a child not yet announced is read
-	// now, and again if the early buffer replays it: the handler is
-	// idempotent, and a child's report that expired there is still read.)
-	later := c.sessionID == "" || c.cf.phase == phaseReplaying
+	// when it was live. What comes before session/new's reply is
+	// read now — a setup that then fails must not lose a trip (review C5
+	// item 9) — and again when claudeSetup routes it; an update for a child
+	// not yet announced is read now, and again if the early buffer replays
+	// it: the handler is idempotent, and a report that expires in a buffer
+	// is still read.
+	// Only history is skipped: from a load's reply on, a report is live
+	// even while the post-load hold keeps the update itself back, and it is
+	// read now — never left to the hold draining, which can fail and drop it
+	// (review C4c finding 2); ReplayDone's routing reads it again.
+	later := c.cf.phase == phaseReplaying && !c.cf.loaded
 	h := c.rateLimitHandler
 	c.mu.Unlock()
 	if later || h == nil {
@@ -192,10 +197,19 @@ func (c *Client) endForeignForTrip(err error, dispatching bool) {
 }
 
 // Fence is the overage guard's first step on the wire (plan 052 § D3): from
-// here nothing but a session/cancel is written to the agent — no prompt, no
-// steer, no answer, no setting — whoever is about to write it. It only sets a
-// flag, so it is safe under any lock and on the read loop.
-func (c *Client) Fence() { c.conn.enc.fence() }
+// the moment it returns nothing but a session/cancel is written to the agent —
+// no prompt, no steer, no answer, no setting — whoever was about to write it
+// (review C5 item 5). A write already past the fence check is waited for, up
+// to fenceWait; one still held there (an agent that stopped reading) is failed
+// by closing the writer, which loses the cancel too: the kill follows anyway.
+func (c *Client) Fence() {
+	if !c.conn.enc.fence(fenceWait) {
+		c.conn.closeWriter()
+	}
+}
+
+// fenceWait bounds Fence's wait for a write in progress.
+var fenceWait = 100 * time.Millisecond
 
 // StopWithin is the overage guard's stop (plan 052 § D3): session/cancel to
 // the root, then, once grace has passed or the agent has exited on its own,
@@ -223,7 +237,7 @@ func (c *Client) StopWithin(grace time.Duration) {
 		testAfterSever()
 	}
 	if c.child != nil {
-		c.child.Kill()
+		c.child.KillTree()
 	}
 	_ = c.Close()
 }

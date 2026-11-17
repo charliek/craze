@@ -104,9 +104,10 @@ it changes, so the figure is the last one it sent
 ([the usage part](../reference/tui.md#usage-and-cost)).
 
 **Plan mode runs on Sonnet,** whatever model you picked: Claude Code switches
-to it for planning, and it spends your plan accordingly. When Claude's usage
-reports name another model family than the one picked, the status row says
-the one in use first: `sonnet (in use; picked Haiku 5.5 · low)`.
+to it for planning (the model shows `sonnet` while you plan), and it spends
+your plan accordingly. When a turn runs on another model family than the one
+picked — `/model haiku` while planning still plans on Sonnet — the status row
+says the one in use first: `sonnet (in use; picked Haiku 5.5 · low)`.
 
 ## Extra usage: the overage guard
 
@@ -120,20 +121,35 @@ running, and on a prompt's rate-limit failure. When one arrives craze:
 
 1. **writes a trip record**, `claude-overage.json` in craze's directory
    (`~/.craze/claude-overage.json`, or under `$CRAZE_HOME`), holding until the
-   limit resets (an hour on when Claude gives no reset time);
+   limit resets (an hour on when Claude gives no reset time). A later sign
+   with a later reset extends it, and two craze processes writing at once
+   keep the later of the two;
 2. **ends the running turn** — yours, or one Claude started on its own — with
    a `quota` error: *Claude would bill this as extra usage: your plan's 7-day
    limit is reached (resets …). craze stopped this session; the request in
    flight may already have been billed.*;
-3. **stops the session:** it cancels the turn, gives Claude 2 seconds, then
-   kills the adapter's process group — Claude Code and every sub-agent and
-   background command with it. Nothing Claude sends after that is shown. The
-   session is still yours: `craze -c` resumes it once the limit has reset.
+3. **stops the session:** it sends Claude nothing more but the cancel, gives
+   Claude 2 seconds, then kills the adapter's process group outright — Claude
+   Code and every sub-agent and background command in it — and, first, every
+   process the adapter started that left that group (a command that made a
+   session of its own). Nothing Claude sends after that is shown. A session
+   that was idle says why in the transcript, and the session's host stops: it
+   is no one's until you resume it. `craze -c` (or `craze send`) resumes it,
+   in a fresh adapter, once the limit has reset.
 
 **The record is machine-wide.** Until it expires, every claude session start
 and every claude prompt on this machine — another project's too — is refused
 with `quota`, naming the reset time. It expires on its own; if you turned
 extra usage off, or your limit reset early, delete the file to go on at once.
+
+If craze's directory will not take the record (it is read-only, or the disk is
+full), craze writes it to a fallback in the system's temporary directory
+(`$TMPDIR/craze-<uid>/claude-overage-<id>.json`, named in the error and the
+session's journal), and every check reads both. If neither can be written, the
+session that tripped still stops, and its error says the hold could not be
+recorded: other claude sessions on the machine are not refused then. A record
+that is there and cannot be read refuses every claude session until it is
+fixed or removed.
 
 **What craze cannot do.** It is containment, not prevention:
 
@@ -141,7 +157,10 @@ extra usage off, or your limit reset early, delete the file to go on at once.
   one in flight when craze stops the session;
 - a session that starts while the account is already in extra usage gets no
   sign until its first usage report, so that first request is billed;
-- work Claude does that craze never hears about cannot be stopped by it.
+- work Claude does that craze never hears about cannot be stopped by it;
+- the kill reaches the adapter's process group and every process still in the
+  adapter's process tree when craze looks; a process that has already left
+  that tree (forked twice and handed to the system) is out of reach.
 
 **Turn off extra usage on your Claude account** (claude.ai, under your plan's
 usage settings): that is the only hard guarantee, and craze recommends it for

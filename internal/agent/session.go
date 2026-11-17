@@ -323,11 +323,15 @@ const (
 	// StopCauseLostOwner: what the host answered to went away: the launcher
 	// that was waiting for its ready line, or its socket or registry entry.
 	StopCauseLostOwner = "lost_owner"
+	// StopCauseOverage: a claude session's overage guard stopped it (plan
+	// 052 § D3): Claude said a request was, or would be, billed as extra
+	// usage.
+	StopCauseOverage = "overage"
 )
 
 // StopCauses is every cause, for the docs' drift test.
 func StopCauses() []string {
-	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner}
+	return []string{StopCauseStop, StopCauseSignal, StopCauseIdle, StopCauseExitAfterTurn, StopCauseLostOwner, StopCauseOverage}
 }
 
 // The two phases a TurnInfo carries.
@@ -1338,6 +1342,13 @@ type Options struct {
 	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
 	// native session spawns no agent and never calls it.
 	AgentGroup func(pgid int) error
+	// Stopped, when set, is told that the session has stopped itself for
+	// good — a claude session's overage guard, once the agent is gone (plan
+	// 052 § D3, review C5 item 8) — with the stop's cause and why: the host
+	// it runs in stops, so a later load starts a fresh agent. It must not
+	// block. nil (craze prompt, the in-process TUI) leaves the session as it
+	// is, refusing every prompt with the error it stopped with.
+	Stopped func(cause, why string)
 	// ShellGroups, when set, is told of every process group a native session's
 	// tools start, a shell command's or ripgrep's: a host writes them down beside
 	// AgentGroup's, so that the commands of a host killed outright can be ended

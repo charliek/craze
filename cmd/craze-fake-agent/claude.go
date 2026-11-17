@@ -237,7 +237,7 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 			"agentInfo":       map[string]string{"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": envOr("CRAZE_FAKE_ADAPTER_VERSION", fakeAdapterVersion)},
 			"authMethods":     []any{},
 			"agentCapabilities": map[string]any{
-				"loadSession":        s.script == "claude-load" || s.script == "claude-replay-load",
+				"loadSession":        s.script == "claude-load" || s.script == "claude-replay-load" || s.script == "claude-overage",
 				"promptCapabilities": map[string]any{"image": true, "embeddedContext": true},
 			},
 			"_meta": map[string]any{"steering": map[string]any{"supported": true}},
@@ -259,12 +259,19 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 		}
 		s.claude.applyInitial(msg.Params)
 		s.claudeSetupTraffic(fakeSessionID, false)
+		if s.script == "claude-overage" && os.Getenv("CRAZE_FAKE_CLAUDE_SETUP_TRIP") != "" {
+			// An adversarial adapter: the trip before the reply, then a
+			// failed setup (claude_usage.go).
+			s.usageReport(fakeSessionID, 30000, claudeModel, tripRateLimit(), false)
+			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: "Internal error: setup failed"})
+			return
+		}
 		s.reply(msg.ID, s.claude.setupResult(fakeSessionID))
 		s.advertiseCommands()
 		s.claudeSetupTraffic(fakeSessionID, true)
 	case acp.MethodSessionLoad:
 		dumpSetup(msg.Params)
-		if s.script != "claude-load" && s.script != "claude-replay-load" {
+		if s.script != "claude-load" && s.script != "claude-replay-load" && s.script != "claude-overage" {
 			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
 			return
 		}

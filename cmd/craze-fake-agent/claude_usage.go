@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -40,6 +42,11 @@ import (
 //	                             CRAZE_FAKE_CLAUDE_GAP, the tripping usage —
 //	                             a trailing report landing in the next turn
 //	                   HOLD      work until cancelled
+//	                   TWO-TRIPS a trip with no reset time, then one a week
+//	                             away inside the stop's grace
+//	                   ESCAPE    two real children, one in the adapter's
+//	                             group and one in a session of its own
+//	                             (CRAZE_FAKE_CHILD_PIDS), then the trip
 //	                   CHILD     a child that ticks on its own session every
 //	                             10 ms and ignores every cancel; the root's
 //	                             tripping usage, then the root settling at
@@ -49,6 +56,9 @@ import (
 //	                 session/new, the tripping usage with nothing running.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_WAKE (a duration): that long after
 //	                 session/new, a wake that does not trip.
+//	                 CRAZE_FAKE_CLAUDE_SETUP_TRIP (set): the trip before
+//	                 session/new's reply, and the reply an error. A load
+//	                 (loadSession true) replays a turn and answers.
 //	claude-errors    `ERR <errorKind>` fails the prompt -32603 with that
 //	                 data.errorKind; `ERR rate_limit rejected` adds a rejected
 //	                 rate limit with extra usage off, `ERR rate_limit TRIP` the
@@ -184,6 +194,24 @@ func (s *server) overageTurn(id json.RawMessage, sid, text string) {
 		}()
 	case strings.Contains(text, "HOLD"):
 		s.hang(id)
+	case strings.Contains(text, "TWO-TRIPS"):
+		// A first trip with no reset time, then, inside the stop's grace, a
+		// second whose reset is a week away.
+		first := tripRateLimit()
+		delete(first, "resetsAt")
+		s.usageReport(sid, 30000, claudeModel, first, false)
+		time.Sleep(50 * time.Millisecond)
+		second := tripRateLimit()
+		second["resetsAt"] = time.Now().Add(7 * 24 * time.Hour).Unix()
+		s.usageReport(sid, 30100, claudeModel, second, false)
+		s.hang(id)
+	case strings.Contains(text, "ESCAPE"):
+		// Two real OS children: one in the adapter's own process group, one
+		// in a session of its own (setsid) — a background command that left
+		// the group — each pid written to CRAZE_FAKE_CHILD_PIDS; then the trip.
+		s.spawnChildren()
+		trip()
+		s.hang(id)
 	case strings.Contains(text, "CHILD"):
 		s.announce(sid, fakeChild, "Stubborn", "never stop", "toolu_launch_1")
 		go s.tickForever(fakeChild, "tick")
@@ -262,4 +290,28 @@ func (s *server) errorTurn(id json.RawMessage, text string) {
 	}
 	raw, _ := json.Marshal(data)
 	_ = s.conn.ReplyErr(id, &acp.RPCError{Code: -32603, Message: msg, Data: raw})
+}
+
+// spawnChildren starts `sleep 600` twice — once in the adapter's process
+// group, once in a new session — and appends "group <pid>" and "escaped
+// <pid>" to CRAZE_FAKE_CHILD_PIDS.
+func (s *server) spawnChildren() {
+	var lines []string
+	for _, c := range []struct {
+		name   string
+		setsid bool
+	}{{"group", false}, {"escaped", true}} {
+		cmd := exec.Command("sleep", "600")
+		if c.setsid {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		}
+		if err := cmd.Start(); err != nil {
+			continue
+		}
+		lines = append(lines, c.name+" "+itoa(cmd.Process.Pid))
+		go func() { _ = cmd.Wait() }()
+	}
+	if p := os.Getenv("CRAZE_FAKE_CHILD_PIDS"); p != "" {
+		_ = os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	}
 }

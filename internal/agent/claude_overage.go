@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -46,29 +49,42 @@ type overageRecord struct {
 	At time.Time `json:"at"`
 }
 
-// The guard's seams. Production reads the craze directory's record, the
-// system clock and the plan's 2 s; a test points them elsewhere
-// (SetClaudeOverageForTest) — and every test in this package does
-// (TestMain), so none can ever touch the user's own record.
+// The guard's seams. Production reads the craze directory's record (and its
+// fallback beside the system's temporary directory), the system clock and the
+// plan's 2 s; a test points them elsewhere (SetClaudeOverageForTest) — and
+// every test in this package does (TestMain), so none can ever touch the
+// user's own record.
 var (
 	overageMu         sync.Mutex
 	overagePath       = paths.ClaudeOveragePath
+	overageFallback   = defaultOverageFallback
 	overageNow        = time.Now
 	overageStopGrace  atomic.Int64
 	defaultStopGrace  = 2 * time.Second
 	overageNoRecord   = time.Hour
+	overageLockWait   = 5 * time.Second
 	errRecordUnusable = errors.New("unreadable")
 )
 
+// defaultOverageFallback is where the trip record goes when the craze
+// directory will not take it (review C5 item 3): a per-user directory in the
+// system's temporary directory, under a name drawn from the record's own path,
+// so each craze directory has one fallback and every check of it reads both.
+func defaultOverageFallback(primary string) string {
+	sum := sha256.Sum256([]byte(primary))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("craze-%d", os.Getuid()), "claude-overage-"+hex.EncodeToString(sum[:6])+".json")
+}
+
 // SetClaudeOverageForTest points the overage guard at a record path of the
-// test's, a clock of its own (nil keeps the system's) and a stop grace (0
-// keeps the plan's 2 s), and returns the restore. It lives outside a _test.go
-// file because other packages' tests start claude sessions too; production
-// code never calls it.
+// test's (its fallback beside it, path + ".fallback"), a clock of its own (nil
+// keeps the system's) and a stop grace (0 keeps the plan's 2 s), and returns
+// the restore. It lives outside a _test.go file because other packages' tests
+// start claude sessions too; production code never calls it.
 func SetClaudeOverageForTest(path string, now func() time.Time, grace time.Duration) (restore func()) {
 	overageMu.Lock()
-	prevPath, prevNow := overagePath, overageNow
+	prevPath, prevFallback, prevNow := overagePath, overageFallback, overageNow
 	overagePath = func() string { return path }
+	overageFallback = func(string) string { return path + ".fallback" }
 	if now != nil {
 		overageNow = now
 	}
@@ -76,16 +92,18 @@ func SetClaudeOverageForTest(path string, now func() time.Time, grace time.Durat
 	prevGrace := overageStopGrace.Swap(int64(grace))
 	return func() {
 		overageMu.Lock()
-		overagePath, overageNow = prevPath, prevNow
+		overagePath, overageFallback, overageNow = prevPath, prevFallback, prevNow
 		overageMu.Unlock()
 		overageStopGrace.Store(prevGrace)
 	}
 }
 
-func overageSeams() (path string, now time.Time) {
+// overageSeams is the record's path, its fallback's and now.
+func overageSeams() (path, fallback string, now time.Time) {
 	overageMu.Lock()
 	defer overageMu.Unlock()
-	return overagePath(), overageNow()
+	path = overagePath()
+	return path, overageFallback(path), overageNow()
 }
 
 // epochTime is an epoch-seconds field of the adapter's as a time, the zero
@@ -113,34 +131,67 @@ func newOverageRecord(rl acp.RateLimit, now time.Time) overageRecord {
 }
 
 // writeOverageRecord writes rec as the machine's trip record, first of
-// everything a trip does. A record already there that holds longer keeps its
-// later until. It answers the path written ("" when craze has no directory to
-// keep one in) and why it could not be written.
-func writeOverageRecord(rec overageRecord) (string, error) {
-	overageMu.Lock()
-	defer overageMu.Unlock()
-	path := overagePath()
-	if path == "" {
-		return "", errors.New("craze has no directory to keep the trip record in")
+// everything a trip does. The craze directory's record is tried twice; when it
+// will not take it, the fallback is written instead (review C5 item 3), which
+// every check reads too, so the hold is machine-wide all the same. It answers
+// where the record went, and the craze directory's failure when the fallback
+// had to take it; err is set only when neither took it — the session that
+// tripped still stops, but the hold is not recorded.
+func writeOverageRecord(rec overageRecord) (where string, primaryErr, err error) {
+	path, fallback, _ := overageSeams()
+	if path != "" {
+		if primaryErr = writeOverageRecordAt(path, rec); primaryErr != nil {
+			primaryErr = writeOverageRecordAt(path, rec)
+		}
+		if primaryErr == nil {
+			return path, nil, nil
+		}
+	} else {
+		primaryErr = errors.New("craze has no directory to keep the trip record in")
 	}
+	if ferr := writeOverageRecordAt(fallback, rec); ferr != nil {
+		return "", primaryErr, fmt.Errorf("%v; and the fallback %s: %v", primaryErr, fallback, ferr)
+	}
+	return fallback, primaryErr, nil
+}
+
+// testOverageAfterRead runs, when a test sets it, in writeOverageRecordAt
+// between the read of the record there and the write that replaces it.
+var testOverageAfterRead func(rec overageRecord)
+
+// writeOverageRecordAt writes rec at path under an exclusive lock on its
+// sibling path + ".lock" (review C5 item 2): the read, the comparison and the
+// replacement are one transaction across every craze process on the machine,
+// so a record that holds longer is never replaced by a shorter one — the later
+// until, and its window, are kept.
+func writeOverageRecordAt(path string, rec overageRecord) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := atomicfile.LockWithin(path+".lock", overageLockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if prev, err := readOverageRecord(path); err == nil && prev != nil && prev.Until.After(rec.Until) {
-		rec.Until = prev.Until
+		rec.Until, rec.Window = prev.Until, prev.Window
+	}
+	if testOverageAfterRead != nil {
+		testOverageAfterRead(rec)
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
-		return path, err
+		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return path, err
-	}
-	return path, atomicfile.Write(path, append(b, '\n'), 0o600)
+	return atomicfile.Write(path, append(b, '\n'), 0o600)
 }
 
 // readOverageRecord is the record at path: nil for none, an error for one
 // that is there and cannot be read or does not parse.
 func readOverageRecord(path string) (*overageRecord, error) {
 	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		// Nothing there, or nothing could be: a path through a file.
 		return nil, nil
 	}
 	if err != nil {
@@ -154,22 +205,30 @@ func readOverageRecord(path string) (*overageRecord, error) {
 }
 
 // overageRefusal is the trip record's word before a claude start or prompt
-// (§ D3): the quota refusal while it holds, nil once it has expired or when
-// there is none. A record that is there and cannot be read refuses too, and
-// says which file: the guard fails closed.
+// (§ D3): the quota refusal while it — the craze directory's, or its fallback
+// (review C5 item 3), whichever holds longer — holds, nil once both have
+// expired or when there are none. A record that is there and cannot be read
+// refuses too, and says which file: the guard fails closed.
 func overageRefusal() error {
-	path, now := overageSeams()
-	if path == "" {
+	path, fallback, now := overageSeams()
+	var held *overageRecord
+	heldAt := ""
+	for _, p := range []string{path, fallback} {
+		if p == "" {
+			continue
+		}
+		rec, err := readOverageRecord(p)
+		if err != nil {
+			return claudeErr(errkind.Quota, "craze cannot read its Claude overage record %s (%v); it refuses Claude sessions until the file is fixed or removed", p, err)
+		}
+		if rec != nil && rec.Until.After(now) && (held == nil || rec.Until.After(held.Until)) {
+			held, heldAt = rec, p
+		}
+	}
+	if held == nil {
 		return nil
 	}
-	rec, err := readOverageRecord(path)
-	if err != nil {
-		return claudeErr(errkind.Quota, "craze cannot read its Claude overage record %s (%v); it refuses Claude sessions until the file is fixed or removed", path, err)
-	}
-	if rec == nil || !rec.Until.After(now) {
-		return nil
-	}
-	return claudeErr(errkind.Quota, "%s. craze refuses Claude sessions on this machine until then (%s)", overageWords(rec.Window, rec.Until), path)
+	return claudeErr(errkind.Quota, "%s. craze refuses Claude sessions on this machine until then (%s)", overageWords(held.Window, held.Until), heldAt)
 }
 
 // overageWords is the guard's opening sentence for a limit of window that
@@ -204,31 +263,44 @@ func stopGrace() time.Duration { return durationOr(&overageStopGrace, defaultSto
 
 // tripOverage is a trip this session saw, on the wire (a usage_update's rate
 // limit, the read loop) or in a prompt's error: the record written first,
-// then the session contained. It answers the error the running turn ends
-// with. A session already stopping answers the error it stopped with.
+// then the session contained, and only then anything that can block — a
+// diagnostic, the journal, an event (review C5 item 1). A trip while the
+// session is already stopping still writes its record, so a later reset it
+// carries extends the hold (review C5 item 4). It answers the error the
+// running turn ends with: the first trip's.
 func (s *session) tripOverage(rl acp.RateLimit) error {
-	s.mu.Lock()
-	prev := s.overage
-	s.mu.Unlock()
-	if prev != nil {
-		return prev
-	}
-	_, now := overageSeams()
+	_, _, now := overageSeams()
 	rec := newOverageRecord(rl, now)
-	path, werr := writeOverageRecord(rec)
-	fields := map[string]any{"window": rec.Window, "until": rec.Until.Format(time.RFC3339), "path": path,
+	where, primaryErr, werr := writeOverageRecord(rec)
+	err := overageTripErr(rec)
+	if werr != nil {
+		err = claudeErr(errkind.Quota, "%s. craze stopped this session; the request in flight may already have been billed. craze could not record the hold (%s), so other Claude sessions on this machine are not refused", overageWords(rec.Window, rec.Until), sanitizeLine(werr.Error()))
+	}
+	stopped := s.containOverage(err)
+	fields := map[string]any{"window": rec.Window, "until": rec.Until.Format(time.RFC3339), "path": where,
 		"isUsingOverage": rl.IsUsingOverage, "overageInUse": rl.OverageInUse, "status": rl.Status, "overageStatus": rl.OverageStatus}
+	if primaryErr != nil {
+		fields["primaryError"] = primaryErr.Error()
+	}
 	if werr != nil {
 		fields["recordError"] = werr.Error()
 	}
 	s.log.Note(journal.DiagNote{Kind: "claude_overage_trip", Fields: fields})
-	if werr != nil {
-		if w := diagWriter(s.opts); w != nil {
-			fmt.Fprintf(w, "craze: the Claude overage record could not be written (%s)\n", sanitizeLine(werr.Error()))
-		}
+	if primaryErr != nil && werr == nil {
+		s.diagLine(fmt.Sprintf("craze: the Claude overage record went to %s (%s)", where, sanitizeLine(primaryErr.Error())))
 	}
-	err := overageTripErr(rec)
-	return s.containOverage(err)
+	return stopped
+}
+
+// diagLine writes one line to the diagnostic lane off the caller's goroutine:
+// a sink that blocks never holds the read loop or the overage stop (review C5
+// item 1).
+func (s *session) diagLine(line string) {
+	w := diagWriter(s.opts)
+	if w == nil {
+		return
+	}
+	go func() { fmt.Fprintln(w, line) }()
 }
 
 // containOverage stops the session for err, once (§ D3, R2-2): nothing more
@@ -237,8 +309,12 @@ func (s *session) tripOverage(rl acp.RateLimit) error {
 // refused at the write); the turn running ends with err — a prompt's when it
 // returns, a foreign turn's at once (the caller's, or the client's on a wire
 // trip); and the agent is stopped: session/cancel, the grace, then its
-// process group killed, nothing it sends after that read. It answers the error
-// the session stopped with.
+// process group and the descendants that left it killed, nothing it sends
+// after that read. Then the session stops for real (review C5 item 8): an idle
+// session says why with an error event, and the host it runs in is asked to
+// stop (Options.Stopped), so a later `craze -c` loads it in a fresh adapter.
+// Nothing here waits on a reader before the stop has begun. It answers the
+// error the session stopped with.
 func (s *session) containOverage(err error) error {
 	s.mu.Lock()
 	if s.overage != nil {
@@ -254,23 +330,34 @@ func (s *session) containOverage(err error) error {
 	if s.gate.fatal == nil {
 		s.gate.fatal = err
 	}
+	idle := !s.inPrompt && !s.claimed && !s.foreign
 	s.mu.Unlock()
-	if w := diagWriter(s.opts); w != nil {
-		fmt.Fprintf(w, "craze: %s\n", sanitizeLine(err.Error()))
+	if client != nil {
+		// A foreign turn still open when the client closes ends with it too.
+		client.FailForeign(err)
+		grace := stopGrace()
+		go func() {
+			client.StopWithin(grace)
+			s.afterOverageStop(err, idle)
+		}()
 	}
-	if client == nil {
-		return err
-	}
-	// A foreign turn still open when the client closes ends with it too.
-	client.FailForeign(err)
-	grace := stopGrace()
-	go func() {
-		client.StopWithin(grace)
-		if testOverageStopped != nil {
-			testOverageStopped()
-		}
-	}()
+	s.diagLine("craze: " + sanitizeLine(err.Error()))
 	return err
+}
+
+// afterOverageStop is the session's end once the agent is gone (review C5
+// item 8): an idle session's error event — a running turn ends with err
+// already — and the host's stop.
+func (s *session) afterOverageStop(err error, idle bool) {
+	if testOverageStopped != nil {
+		testOverageStopped()
+	}
+	if idle {
+		s.emit(Event{Type: EventError, Err: err})
+	}
+	if stop := s.opts.Stopped; stop != nil {
+		stop(StopCauseOverage, err.Error())
+	}
 }
 
 // testOverageStopped runs, when a test sets it, once the overage stop has
@@ -278,15 +365,17 @@ func (s *session) containOverage(err error) error {
 var testOverageStopped func()
 
 // onClaudeRateLimit is the client's rate-limit handler (read loop, before the
-// foreign-turn machine reads the update): the plan fields of the usage
-// section, and the guard's trip. Its answer is the error a trip ends the
-// running foreign turn with.
+// foreign-turn machine reads the update): the guard's trip first, then the
+// plan fields of the usage section, whose publication can wait on a reader
+// (review C5 item 1). Its answer is the error a trip ends the running foreign
+// turn with.
 func (s *session) onClaudeRateLimit(rl acp.RateLimit) error {
-	s.noteRateLimit(rl)
-	if !rl.Trips() {
-		return nil
+	var err error
+	if rl.Trips() {
+		err = s.tripOverage(rl)
 	}
-	return s.tripOverage(rl)
+	s.noteRateLimit(rl)
+	return err
 }
 
 // guardForeignStart is the trip record's word on a foreign turn just opened
@@ -334,13 +423,15 @@ func (s *session) claudePromptTrip(err error) error {
 	if !ok {
 		return nil
 	}
-	s.noteRateLimit(rl)
 	if !rl.Trips() {
+		s.noteRateLimit(rl)
 		return nil
 	}
+	// The trip before anything that can wait on a reader (review C5 item 1).
 	trip := s.tripOverage(rl)
 	if c := s.clientRef(); c != nil {
 		c.EndForeignWith(trip)
 	}
+	s.noteRateLimit(rl)
 	return trip
 }

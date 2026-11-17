@@ -726,22 +726,22 @@ func stopAtFallback(t *testing.T) (entered <-chan struct{}, release func()) {
 	return in, func() { once.Do(func() { close(out) }) }
 }
 
-// checkFallback checks a reaped agent's events in the fallback: no group
-// signal, the agent's own signals as want lists them, then the reap wait4
-// made, and nothing after.
+// checkFallback checks a reaped agent's events in the fallback: its group's
+// signals as want lists them, each sent while the agent was unreaped (review
+// C5 item 6), then the reap wait4 made, and nothing after.
 func checkFallback(t *testing.T, r *lifeRecorder, ch *Child, want ...syscall.Signal) {
 	t.Helper()
 	events := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, ch))
 	var got []string
 	for _, e := range events {
-		if !e.reap && e.target != ch.pgid {
-			t.Fatalf("events %v: a signal to %d in the fallback, which signals the agent alone", events, e.target)
+		if !e.reap && e.target != -ch.pgid {
+			t.Fatalf("events %v: a signal to %d in the fallback, which signals the agent's group", events, e.target)
 		}
 		got = append(got, e.String())
 	}
 	var exp []string
 	for _, s := range want {
-		exp = append(exp, lifeEvent{target: ch.pgid, sig: s, pinned: true}.String())
+		exp = append(exp, lifeEvent{target: -ch.pgid, sig: s, pinned: true}.String())
 	}
 	exp = append(exp, "reap")
 	if strings.Join(got, ", ") != strings.Join(exp, ", ") {
@@ -860,7 +860,8 @@ func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
 // observed is settled before the reaper runs, so a Shutdown that comes at
 // once never finds the normal reaper escalating against the group while the
 // observation's refusal is still on its way: here the observation's wait
-// would be held until the test lets it go, and the group is never signalled.
+// would be held until the test lets it go, and the fallback is what signals
+// the group (review C5 item 6), each signal while the agent pins its id.
 func TestTheFallbackIsChosenBeforeAnySignal(t *testing.T) {
 	hold := make(chan struct{})
 	var released sync.Once
@@ -888,11 +889,11 @@ func TestTheFallbackIsChosenBeforeAnySignal(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	if !isClosed(entered) {
+		t.Fatalf("the group was signalled (%q) before the fallback was chosen", groupSignals(r.of(c.child.pgid)))
+	}
 	released.Do(func() { close(hold) })
 	waitClosed(t, done, 2*shutdownGrace+10*time.Second, "the Shutdown")
-	if got := groupSignals(r.of(c.child.pgid)); got != "" {
-		t.Fatalf("group signals %q with nothing pinning the group's id", got)
-	}
 	checkFallback(t, r, c.child, syscall.SIGTERM)
 }
 

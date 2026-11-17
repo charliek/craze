@@ -194,7 +194,7 @@ func TestClaudeStopWithinSevers(t *testing.T) {
 
 // TestClaudeReplayedRateLimitIsHistory (§ D3): a rate limit a session/load
 // replays was acted on when it was live; only the live ones held behind the
-// load's reply reach the handler, when ReplayDone routes them.
+// load's reply reach the handler — at once, and when ReplayDone routes them.
 func TestClaudeReplayedRateLimitIsHistory(t *testing.T) {
 	r := newClaudeRig(t)
 	var trips []bool
@@ -219,8 +219,10 @@ func TestClaudeReplayedRateLimitIsHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.roundTrip(t)
-	if !slices.Equal(trips, []bool{false}) {
-		t.Fatalf("the handler saw %v; want the live report alone", trips)
+	// The live report is read as it arrives, while held (review C4c finding
+	// 2), and again when ReplayDone routes it: the handler is idempotent.
+	if !slices.Equal(trips, []bool{false, false}) {
+		t.Fatalf("the handler saw %v; want the live report alone (twice)", trips)
 	}
 }
 

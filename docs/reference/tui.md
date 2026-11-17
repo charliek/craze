@@ -126,9 +126,12 @@ Top to bottom:
 Row 1 reads `workspace · branch · provider · model · usage · elapsed`. The
 model carries what the agent lets craze set beside it, `Name (high · fast)`:
 the effort when the model offers one, and `fast` only when it is on. On a
-claude session whose usage reports name another model family than the one
-picked — plan mode runs on Sonnet — the model reads the one in use first,
-`sonnet (in use; picked Haiku 5.5 · low)`. The usage part is the native and
+claude session whose last turn ran on another model family than the model
+option it ran under — `/model haiku` in plan mode, which runs on Sonnet — the
+model reads the one in use first and the one picked as the model dialog names
+it, `sonnet (in use; picked Haiku 5.5 · low)`. Entering or leaving plan mode,
+which moves the model option itself, or any change of the mode or model,
+clears the note until the next turn reports. The usage part is the native and
 claude providers' (see [Usage and cost](#usage-and-cost)), and the elapsed
 time is the session's age. When the terminal is too narrow the
 parts go in this order: elapsed, branch, usage, provider, then the model;

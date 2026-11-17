@@ -21,6 +21,11 @@ func (c *Client) resetForeignLocked(phase foreignPhase) {
 	failErr := f.failErr
 	seq := f.seq
 	graceGen, silenceGen := f.graceGen, f.silenceGen
+	if f.phase == phaseClosed {
+		// Closed stays closed: an overage trip read before session/new
+		// returned (review C5 item 9), or the client's close.
+		phase = phaseClosed
+	}
 	*f = claudeForeign{phase: phase, seq: seq, failErr: failErr, graceGen: graceGen, silenceGen: silenceGen}
 }
 
@@ -215,6 +220,11 @@ func (c *Client) ReplayDone() error {
 	// C4b item 5): a child's request comes after the announce that registers
 	// it, as it came on the wire.
 	for _, f := range held {
+		if c.conn.severed.Load() {
+			// The overage guard's stop (review C5 item 7): nothing held
+			// reaches the session after it.
+			break
+		}
 		switch {
 		case f.update != nil:
 			c.routeClaude(*f.update)
@@ -254,6 +264,11 @@ func requestSession(params json.RawMessage) string {
 //   - A root update is the foreign-turn machine's to read first; a turn it
 //     opens is announced ahead of the update.
 func (c *Client) routeClaude(n SessionNotification) {
+	if c.conn.severed.Load() {
+		// Severed (the overage guard's stop): an update a replay of a buffer
+		// would route after it reaches no one (review C5 item 7).
+		return
+	}
 	kind := sessionUpdateKind(n.Update)
 	// The overage guard reads every usage_update first, whoever it is for and
 	// whenever it comes (plan 052 § D3): a trip ends the running turn before

@@ -29,6 +29,10 @@ type claudeUsage struct {
 	// named (`_claude/model`).
 	used, size int64
 	model      string
+	// underMode and underModel are the mode and model option the in-use
+	// model was reported under (L3 F1): once either changes, the report says
+	// nothing of the model the session now runs, and model is cleared.
+	underMode, underModel string
 	// turn is the last prompted turn's tokens, session the sum of every
 	// prompted turn's this incarnation.
 	turn, session Spend
@@ -129,6 +133,7 @@ func (s *session) onClaudeUsage(raw json.RawMessage) {
 	}
 	if m := sanitizeLine(strings.TrimSpace(w.Meta.Model)); m != "" {
 		s.usage.model = m
+		s.usage.underMode, s.usage.underModel = s.claudeOptionsLocked()
 	}
 	if before.reported && before.used == s.usage.used && before.size == s.usage.size && before.model == s.usage.model {
 		s.mu.Unlock()
@@ -181,4 +186,33 @@ func ClaudeModelFamily(s string) string {
 		}
 	}
 	return ""
+}
+
+// claudeOptionsLocked is the session's mode and model as their options say
+// now; s.mu is held.
+func (s *session) claudeOptionsLocked() (mode, model string) {
+	mode = claudeEffectiveMode(s.snap.Config, s.snap.CurrentMode)
+	model = s.snap.CurrentModel
+	if opt := ModelConfigOptionIn(s.snap.Config); opt != nil && opt.Current != "" {
+		model = opt.Current
+	}
+	return mode, model
+}
+
+// inUseCheckLocked clears the model in use once the mode or the model option
+// has changed since it was reported (plan 052 L3 F1): entering plan mode, the
+// adapter moves the model option to Sonnet and the last report's model says
+// nothing of the next turn; a report under the new options says again. The
+// usage section is published when it changes. s.mu is held.
+func (s *session) inUseCheckLocked() {
+	if !s.provider().isClaude() || s.usage.model == "" {
+		return
+	}
+	if mode, model := s.claudeOptionsLocked(); mode == s.usage.underMode && model == s.usage.underModel {
+		return
+	}
+	s.usage.model = ""
+	if s.usage.reported {
+		s.publishUsageLocked()
+	}
 }

@@ -393,8 +393,9 @@ func (m Model) modelLabel() string {
 	}
 	if inUse != "" {
 		// The agent runs another model than the one picked (claude's plan
-		// mode runs on Sonnet, plan 052 L2): the one in use first.
-		picked := name
+		// mode runs on Sonnet, plan 052 L2): the one in use first, and the
+		// one picked as the model dialog names it (L3 O1).
+		picked := m.pickedModelName(id, name)
 		if len(bits) > 0 {
 			picked += statusDot + strings.Join(bits, statusDot)
 		}
@@ -402,6 +403,19 @@ func (m Model) modelLabel() string {
 	}
 	if len(bits) > 0 {
 		name += " (" + strings.Join(bits, statusDot) + ")"
+	}
+	return name
+}
+
+// pickedModelName is model id as the model option's own value list names it
+// (the model dialog's words: `Haiku 5.5` for `haiku`), else name.
+func (m Model) pickedModelName(id, name string) string {
+	if opt := agent.ModelConfigOptionIn(m.snap.Config); opt != nil {
+		for _, v := range opt.SelectValues {
+			if v.Value == id && v.Name != "" {
+				return sanitizeLine(v.Name)
+			}
+		}
 	}
 	return name
 }
