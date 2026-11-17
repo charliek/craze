@@ -1697,13 +1697,15 @@ type AsksAnswerParams struct {
 //   - permission: OptionID, an option the request offered (the exact id,
 //     never a kind), or Cancel;
 //   - question: Answers, each question's id to the option ids chosen (a null
-//     list is not an empty one), or Skip; a question that asks nothing takes
-//     no answers at all;
+//     list is not an empty one), and Text, a question's free-text answer for
+//     one that takes it (allowText; plan 052 § B4), or Skip; a question that
+//     asks nothing takes no answers at all;
 //   - plan: exactly one of Accept and Reject.
 type Answer struct {
 	OptionID string              `json:"optionId,omitempty"`
 	Cancel   bool                `json:"cancel,omitempty"`
 	Answers  map[string][]string `json:"answers,omitempty"`
+	Text     map[string]string   `json:"text,omitempty"`
 	Skip     bool                `json:"skip,omitempty"`
 	Accept   bool                `json:"accept,omitempty"`
 	Reject   bool                `json:"reject,omitempty"`

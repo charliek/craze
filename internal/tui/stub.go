@@ -194,6 +194,7 @@ type stubCall struct {
 	ID        string
 	Option    string
 	Answers   map[string][]string
+	Text      map[string]string
 	Skip      bool
 	Accept    bool
 	Cancelled bool
@@ -969,6 +970,7 @@ func stubCallOf(rec agent.AskRecord) stubCall {
 	}
 	c.Option = rec.Answer.OptionID
 	c.Answers = rec.Answer.Answers
+	c.Text = rec.Answer.Text
 	c.Skip = rec.Answer.Skip
 	c.Accept = rec.Answer.Accept
 	return c

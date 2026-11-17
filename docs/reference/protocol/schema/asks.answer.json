@@ -16,12 +16,13 @@
       "additionalProperties": false
     },
     "answer": {
-      "description": "An answer, each kind reading its own members and refusing any other kind's. permission: optionId, the exact id of an offered option (never a kind), or cancel. question: answers (each question's id to the option ids chosen), or skip; a question that asks nothing takes {}. plan: exactly one of accept and reject.",
+      "description": "An answer, each kind reading its own members and refusing any other kind's. permission: optionId, the exact id of an offered option (never a kind), or cancel. question: answers (each question's id to the option ids chosen) and, for a question with allowText, text (its id to a free-text answer, at most 4096 bytes, beside its picks or alone), or skip; a question that asks nothing takes {}. plan: exactly one of accept and reject.",
       "type": "object",
       "properties": {
         "optionId": {"type": "string"},
         "cancel": {"type": "boolean"},
         "answers": {"$ref": "event.json#/$defs/answers"},
+        "text": {"$ref": "event.json#/$defs/answerText"},
         "skip": {"type": "boolean"},
         "accept": {"type": "boolean"},
         "reject": {"type": "boolean"}

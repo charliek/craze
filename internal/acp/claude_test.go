@@ -23,6 +23,7 @@ var outboundOnly = []string{
 	MethodInitialize, MethodAuthenticate, MethodSessionNew, MethodSessionLoad, MethodSessionPrompt,
 	MethodSessionCancel, MethodSessionSetModel, MethodSessionSetMode, MethodSessionSetConfig,
 	MethodGrokInterject, MethodGrokInterjectWrapped, MethodGrokBtw, MethodGrokBtwWrapped,
+	MethodClaudeSteering,
 }
 
 // dialects is every dialect the client speaks, each held to a decision on
@@ -126,8 +127,8 @@ func TestDialectHandlesEveryMethod(t *testing.T) {
 
 // TestDialectDecisionsPinned holds the decisions the plan names (B1's table):
 // claude refuses or ignores cursor/* and x.ai/*, reads its auth push, and
-// refuses elicitation/create until it declares forms; cursor and grok keep
-// their own families.
+// handles elicitation/create, the form it declares (C3); cursor and grok keep
+// their own families and refuse it.
 func TestDialectDecisionsPinned(t *testing.T) {
 	for _, tc := range []struct {
 		d      DialectID
@@ -149,7 +150,9 @@ func TestDialectDecisionsPinned(t *testing.T) {
 		{DialectCursor, MethodClaudeAuthStatus, decisionIgnore},
 		{DialectGrok, MethodClaudeAuthStatus, decisionIgnore},
 		{DialectClaude, MethodAuthStatusUpdate, decisionIgnore},
-		{DialectClaude, MethodElicitationCreate, decisionRefuse},
+		{DialectClaude, MethodElicitationCreate, decisionHandle},
+		{DialectCursor, MethodElicitationCreate, decisionRefuse},
+		{DialectGrok, MethodElicitationCreate, decisionRefuse},
 		{DialectClaude, MethodRequestPermission, decisionHandle},
 	} {
 		if got := dialectHandles(tc.d, tc.method); got != tc.want {
@@ -160,18 +163,29 @@ func TestDialectDecisionsPinned(t *testing.T) {
 
 // TestClaudeRefusesOtherDialectsRequests is the behaviour behind the table: a
 // cursor/ask_question or x.ai/exit_plan_mode request sent to a claude client
-// is answered -32601 and raises nothing.
+// is answered -32601 and raises nothing, and so is an elicitation/create sent
+// to cursor or grok, which never declare the form capability.
 func TestClaudeRefusesOtherDialectsRequests(t *testing.T) {
 	p := newRawPipeDialect(t, DialectClaude)
 	p.setSession("s-1")
 	asked := false
 	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { asked = true; return AskDecision{} })
 	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision { asked = true; return PlanDecision{} })
-	for i, m := range []string{MethodCursorAskQuestion, MethodCursorCreatePlan, MethodGrokExitPlanModeWrapped, MethodElicitationCreate} {
+	for i, m := range []string{MethodCursorAskQuestion, MethodCursorCreatePlan, MethodGrokExitPlanModeWrapped} {
 		p.send(t, i+1, m, `{"sessionId":"s-1","questions":[],"plan":"x"}`)
 		msg := p.readWithin(t, 3*time.Second, m)
 		if msg.Error == nil || msg.Error.Code != CodeMethodNotFound {
 			t.Fatalf("%s: reply %+v", m, msg)
+		}
+	}
+	for _, d := range []DialectID{DialectCursor, DialectGrok} {
+		q := newRawPipeDialect(t, d)
+		q.setSession("s-1")
+		q.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { asked = true; return AskDecision{} })
+		q.send(t, 9, MethodElicitationCreate, `{"mode":"form","sessionId":"s-1","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]}}}}`)
+		msg := q.readWithin(t, 3*time.Second, string(d)+" elicitation/create")
+		if msg.Error == nil || msg.Error.Code != CodeMethodNotFound {
+			t.Fatalf("%s elicitation/create: reply %+v", d, msg)
 		}
 	}
 	if asked {
@@ -249,8 +263,9 @@ func TestClaudeToolNameFromMeta(t *testing.T) {
 
 // TestInitializeAndSessionParamsBytes pins cursor's and grok's initialize,
 // session/new and session/load params byte for byte (plan 052 AC5): the
-// SessionParams seam leaves them exactly as they were. Claude's initialize is
-// the same in C2; its session/new carries configOptions and _meta.
+// SessionParams seam leaves them exactly as they were. Claude's initialize
+// adds the elicitation form capability (C3); its session/new carries
+// configOptions and _meta.
 func TestInitializeAndSessionParamsBytes(t *testing.T) {
 	cwd := t.TempDir()
 	quotedCWD, _ := json.Marshal(cwd)
@@ -262,8 +277,12 @@ func TestInitializeAndSessionParamsBytes(t *testing.T) {
 		p := newRawPipeDialect(t, d)
 		go func() { _, _ = p.client.Initialize(t.Context()) }()
 		msg := p.readWithin(t, 3*time.Second, "initialize")
-		if string(msg.Params) != wantInit {
-			t.Fatalf("%s initialize\n got %s\nwant %s", d, msg.Params, wantInit)
+		want := wantInit
+		if d == DialectClaude {
+			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}}}}`
+		}
+		if string(msg.Params) != want {
+			t.Fatalf("%s initialize\n got %s\nwant %s", d, msg.Params, want)
 		}
 		if d == DialectClaude {
 			continue

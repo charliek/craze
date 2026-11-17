@@ -134,6 +134,17 @@ type ClientCapabilities struct {
 	Meta     map[string]any `json:"_meta,omitempty"`
 	FS       FSCapabilities `json:"fs"`
 	Terminal bool           `json:"terminal"`
+	// Elicitation is the RFD form capability (plan 052 § B2): declared by the
+	// claude dialect alone, whose AskUserQuestion reaches a client as an
+	// elicitation/create form only once the client says it renders one. nil
+	// for cursor and grok, whose initialize bytes stay as they were.
+	Elicitation *ElicitationCapabilities `json:"elicitation,omitempty"`
+}
+
+// ElicitationCapabilities is clientCapabilities.elicitation: form only, an
+// empty object. URL elicitations are never declared.
+type ElicitationCapabilities struct {
+	Form struct{} `json:"form"`
 }
 
 type InitializeParams struct {
@@ -148,6 +159,25 @@ type InitializeResult struct {
 	AuthMethods       []AuthMethod    `json:"authMethods,omitempty"`
 	AgentCapabilities json.RawMessage `json:"agentCapabilities,omitempty"`
 	Meta              json.RawMessage `json:"_meta,omitempty"`
+}
+
+// SteeringSupported is initialize's top-level _meta.steering.supported: the
+// agent takes _session/steering, a message injected into its running turn
+// (claude-agent-acp, plan 052 § B7). Absent or malformed is a no.
+func (r InitializeResult) SteeringSupported() bool {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+	var meta struct {
+		Steering struct {
+			Supported bool `json:"supported"`
+		} `json:"steering"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return false
+	}
+	return meta.Steering.Supported
 }
 
 // ModelState is initialize._meta.modelState, the fallback when session/new
@@ -566,11 +596,19 @@ type AskQuestion struct {
 	Prompt        string      `json:"prompt"`
 	Options       []AskOption `json:"options"`
 	AllowMultiple bool        `json:"allowMultiple,omitempty"`
+	// AllowText says the question also takes a free-text answer of the
+	// user's own: claude's per-question "Other" box, question_<i>_custom
+	// (plan 052 § B4). Only the claude dialect sets it; it is never read
+	// off cursor's wire.
+	AllowText bool `json:"-"`
 }
 
 type AskOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// Description is what picking the option means, when the request says:
+	// claude's form options carry one. Never read off cursor's wire.
+	Description string `json:"-"`
 }
 
 // AskDecision answers a cursor/ask_question request. Answers maps question id
@@ -579,6 +617,10 @@ type AskDecision struct {
 	Cancelled bool
 	Skip      bool
 	Answers   map[string][]string
+	// Text is each question's free-text answer, by question id, for the
+	// questions that take one (AskQuestion.AllowText). Only the claude
+	// dialect's reply carries it.
+	Text map[string]string
 	// Replied, when set, is called exactly once with what became of the reply
 	// this decision asked for: see ReplyDisposition.
 	Replied func(ReplyDisposition)

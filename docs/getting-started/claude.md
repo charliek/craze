@@ -9,8 +9,10 @@ adapter runs your signed-in `claude`.
 
 !!! note "A preview"
     The provider is reached with `--provider claude` and is not yet listed by
-    `craze providers`, the picker or `--help`. Question and plan cards, modes,
-    sub-agents and plan usage arrive in later releases, and it is listed then.
+    `craze providers`, the picker or `--help`. Its question and plan cards,
+    modes (`Shift+Tab` cycles Manual, accept edits and plan) and interjections
+    work ([Cards](../reference/tui.md#cards)); sub-agents and plan usage arrive
+    in later releases, and it is listed then.
 
 ## Set it up
 

@@ -81,10 +81,13 @@ var claudeCycleModes = []string{"default", "acceptEdits", "plan"}
 var claudeStartModes = []string{"default", "plan"}
 
 // ClaudeProvider is Claude Code through claude-agent-acp (plan 052 § A1). It
-// is hidden until its cards work (C3): resolvable by --provider claude,
-// CRAZE_PROVIDER and config.toml, listed by nothing. It is not optional: once
-// listed, a missing binary shows it unavailable. Its capabilities arrive in
-// the milestone that handles each one.
+// is hidden until its background work and overage guard land (C4, C5):
+// resolvable by --provider claude, CRAZE_PROVIDER and config.toml, listed by
+// nothing. It is not optional: once listed, a missing binary shows it
+// unavailable. Its capabilities arrive in the milestone that handles each
+// one: C3's cards (the question card from elicitation/create, the plan card
+// from a plan exit), modes, effort, todos, the parameterized picker and the
+// interjection (_session/steering).
 func ClaudeProvider() Provider {
 	return Provider{
 		name:        claudeName,
@@ -92,11 +95,20 @@ func ClaudeProvider() Provider {
 		modeKinds:   claudeModeKinds,
 		// No implement offer after a plan-mode turn: claude's plan is approved
 		// on its own card (§ B5), and an empty prompt turns the offer off.
-		implementPrompt:     "",
-		defaultBins:         []string{claudeAdapterBin},
-		loginHint:           claudeLoginHint,
-		resumable:           true,
-		hidden:              true,
+		implementPrompt: "",
+		defaultBins:     []string{claudeAdapterBin},
+		loginHint:       claudeLoginHint,
+		resumable:       true,
+		hidden:          true,
+		capabilities: Capabilities{
+			Effort:              true,
+			Modes:               true,
+			Todos:               true,
+			AskCards:            true,
+			PlanCards:           true,
+			ParameterizedPicker: true,
+			Interject:           true,
+		},
 		dialect:             acp.DialectClaude,
 		planUpdatesAreTodos: true,
 		// Used only when the session declares no sub-agent capability (§ E3).

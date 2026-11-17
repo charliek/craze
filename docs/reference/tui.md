@@ -454,7 +454,7 @@ off.
 | Key | Action |
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
-| `Ctrl+L` | the strong send: on Grok and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
+| `Ctrl+L` | the strong send: on Grok, claude and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | newline; `Shift+Enter` only in a terminal that sends it as one of the two sequences below, as Ghostty and Roost do (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
@@ -530,16 +530,19 @@ queue), and `Backspace` cancels it.
 
 ### The three verbs
 
-| Verb | Cursor | Grok, native | Cancels the turn? | Asks first? |
+| Verb | Cursor | Grok, claude, native | Cancels the turn? | Asks first? |
 |---|---|---|---|---|
 | queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
 | send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
-| interject (`Ctrl+L` on a draft under Grok or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+| interject (`Ctrl+L` on a draft under Grok, claude or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
 
 Grok and native have a mid-turn path: grok's `x.ai/interject` hands it
 text that it folds into the turn at its next safe point (after a tool result),
-and native steers it into the turn's next step. The transcript shows either as
-a `↳` entry.
+native steers it into the turn's next step, and claude's `_session/steering`
+injects it into the running turn (a tool running then is moved to the
+background, as in Claude Code). The transcript shows each as a `↳` entry. When
+claude finds its turn already over, the message is not taken: the note says
+`nothing to interject into` and the draft stays in the composer for `Enter`.
 Cursor has none — a second prompt there silently cancels the first — so craze
 never sends one and offers send now instead, always with
 
@@ -1470,10 +1473,12 @@ mode the agent advertised it as: accent for an implement-like mode, purple for
 plan, teal for a read-only mode like ask. Clicking the chip cycles the mode the
 same way `Shift+Tab` does — see [Mouse](#mouse). Every change writes a
 `mode → <id>` note, followed by the agent's own description of the mode when
-it gave one. On a `claude` session (whose modes the TUI shows from a later
-release) the cycle is `default` (Manual) →
-`acceptEdits` → `plan` only: `auto` and `bypassPermissions` are reached by
-name, never by the key, and from either the key goes to `default`.
+it gave one. On a `claude` session the modes are Claude Code's own —
+`default` (Manual), `acceptEdits`, `plan`, `auto` and `bypassPermissions` — and
+the cycle is `default` → `acceptEdits` → `plan` → `default` only: `auto` and
+`bypassPermissions` are reached by name, never by the key, and from either the
+key goes to `default`. claude has no read-only mode, so `/ask` (and `--ask`)
+is refused with `mode ask is not advertised`.
 
 When a turn in a plan-kind mode ends with an assistant reply, the composer's
 placeholder offers to act on it once craze is idle:
@@ -1497,6 +1502,10 @@ session transcript — by default
 craze. Ask mode denies every edit, write and shell command.
 Accepting the plan card ends the turn and arms the offer above, even when
 the model said nothing else in that turn.
+
+A `claude` session approves its plan on its own card instead (see
+[Cards](#cards)), so a claude plan-mode turn arms no offer, whatever it ends
+with.
 
 ### Sub-agent models
 
@@ -1695,11 +1704,40 @@ reported again only when you come back to it.
 | Card | Keys |
 |---|---|
 | permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a`, `y` or `1` allow once, **`A` allow always**, `n`, `r` or `2` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
-| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. |
+| question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. On a question that takes an answer of your own, the last row is `Other…` (below). |
 | plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a`, `y` or `1` accept, `r`, `n` or `2` reject. `Esc` cancels the turn. |
 
 A question card's option may carry a description, drawn dimmed on its own
 line under the label.
+
+**`Other…`.** A `claude` question (Claude Code's AskUserQuestion) also takes a
+free-text answer, so its card has one more row after the options, `Other…`,
+numbered after them. Its number, or `Enter` on it, opens a one-line input on
+that row (`Other: <text>▏`, hint `type your answer · enter send · esc back`):
+`Enter` takes the text, `Backspace` deletes, and `Esc` goes back to the
+options with nothing typed kept. On a single-choice question the text is the
+answer on its own; on a multiple-choice one it joins the options toggled, and
+`Enter` in the input confirms both. The row the answer leaves quotes the text
+(`? Do you prefer red or blue? → "teal"`). Claude reads text beside a pick as a
+note on it. A text answer is at most 4096 bytes. Cursor and grok questions take
+no free text and have no such row.
+
+**claude's cards.** A claude question that skips (`Esc`) tells Claude the user
+declined to answer; cancelling the turn while it is up withdraws it, which
+aborts the tool. A question craze cannot show — a form of another shape than
+AskUserQuestion's, or one that is not a form — raises no card: it is withdrawn
+(the tool aborts) and the diag lane says so.
+
+When Claude leaves plan mode (ExitPlanMode) it asks for approval, and that is
+the plan card, with the plan in the transcript: accept sends Claude Code's
+"Yes, manually approve edits", so Claude goes on in `default` (Manual) and asks
+for each edit, which [force](cli.md) then answers; reject sends "No, keep
+planning", which ends the turn, and the card shows it rejected with no cancel
+banner. craze never picks Claude's options that switch to `auto`, bypass
+permissions, accept edits or clear the context, and force never approves a
+plan. A plan approval of any shape other than the one craze knows raises no
+card: it is answered "keep planning" (or cancelled, when it offers no such
+option) and the diag lane says the approval had an unexpected shape.
 
 A native session that has not decided about [web
 search](configuration.md#native-web-search) asks once, with an ordinary

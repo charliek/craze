@@ -740,6 +740,20 @@ func answerSpelling(a agent.AskAnswer) string {
 			hashString(&b, v)
 		}
 	}
+	// The free text (plan 052 § B4), only when there is any, so every
+	// answer that carries none hashes exactly as it always did.
+	if len(a.Text) > 0 {
+		tkeys := make([]string, 0, len(a.Text))
+		for k := range a.Text {
+			tkeys = append(tkeys, k)
+		}
+		sort.Strings(tkeys)
+		hashCount(&b, len(tkeys))
+		for _, k := range tkeys {
+			hashString(&b, k)
+			hashString(&b, a.Text[k])
+		}
+	}
 	return b.String()
 }
 

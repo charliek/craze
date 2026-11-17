@@ -104,6 +104,45 @@ func TestAnUnattendedACPHostReturnsItsPlan(t *testing.T) {
 	}
 }
 
+// TestAnUnattendedClaudeHostReturnsItsPlan is plan 052 § B5 (AC7, and C2's
+// deferred gap) end to end: craze new --wait --plan on claude, under the
+// default force, never approves the plan — no exit-plan-default is ever sent.
+// The plan exit is answered reject at once, which ends claude's turn
+// cancelled, and no session/cancel is written at all, so none precedes the
+// answer; the result is completed, with the plan, auto-answered `returned`.
+func TestAnUnattendedClaudeHostReturnsItsPlan(t *testing.T) {
+	_, ws := serveHome(t)
+	fake := fakeAgentPath(t)
+	writeCrazeConfig(t, "host_idle_exit = \"30s\"\n\n[agents]\nclaude = \""+fake+"\"\n")
+	env := rundir.ProcessEnv()
+	spawnAsChild(t, nil)
+	spawnBounds(t, serveStep, serveStep, serveStep)
+	t.Cleanup(func() { stopEveryHost(t, env) })
+	calls := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("CRAZE_FAKE_DUMP_CALLS", calls)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "claude-plan")
+	claude := filepath.Join(t.TempDir(), "claude")
+	stub := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *'auth status'*) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}' ;;\n" +
+		"  *--version*) echo '2.1.326 (Claude Code)' ;;\nesac\n"
+	if err := os.WriteFile(claude, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(agent.ClaudeExecutableEnv, claude)
+	stdout, stderr, code := executeErr([]string{"new", "--wait", "--json", "--provider", "claude", "-C", ws, "--plan", "plan the change"})
+	m := decodeResult(t, stdout)
+	auto, _ := json.Marshal(m["autoAnswered"])
+	if code != 0 || m["status"] != "completed" || m["plan"] != "# Plan: create plan.txt\n\n1. Write plan.txt containing x.\n" ||
+		m["stopReason"] != "cancelled" || !strings.Contains(string(auto), `"choice":"returned"`) ||
+		strings.Contains(stdout, "exit-plan-default") || !strings.Contains(stdout, "plan answer: reject") {
+		t.Fatalf("craze new --wait --plan on claude: exit %d, %v, %q", code, m, stderr)
+	}
+	got, err := os.ReadFile(calls)
+	if err != nil || slices.Contains(strings.Split(strings.TrimSpace(string(got)), "\n"), "session/cancel") {
+		t.Fatalf("a session/cancel was written: %q, %v", got, err)
+	}
+}
+
 // TestAnAttendedHostStillParksItsPlan: the return is an unattended host's
 // alone — an ordinary host on the same provider parks the plan for a person,
 // as it always has (needs_input), and craze prompt still accepts it (its

@@ -124,6 +124,11 @@ What changes for everyone else:
   left running, on every provider, where they used to spin on.
 - **A claude session's index row records its model** (`model` in
   `sessions.jsonl`), which an older craze keeps as an unknown key.
+- **The protocol gains a question's free text**, additive and optional: a
+  question item's `allowText`, `asks.answer`'s `answer.text` and an ask
+  ending's `text` ([A question's free
+  text](../reference/protocol.md#a-questions-free-text)). Only claude sets
+  them; a client that does not know them is unaffected.
 
 ### The gx provider is gone
 

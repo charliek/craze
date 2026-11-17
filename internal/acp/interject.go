@@ -52,11 +52,22 @@ func (c *Client) PromptID() string {
 // The ack is nested one level under the JSON-RPC result
 // ({"result":{"result":{"status":"queued"}}}), and any status but "queued" is
 // an error — the text is the user's and must not be silently dropped.
+//
+// The claude dialect interjects with _session/steering (plan 052 § B7), and
+// only when its initialize said _meta.steering.supported: an idle session
+// answers ErrSteerIdle, the text untaken.
 func (c *Client) Interject(ctx context.Context, text, interjectionID string) error {
 	c.mu.Lock()
 	d := c.dialect
 	sid := c.sessionID
+	steering := c.steering
 	c.mu.Unlock()
+	if d == DialectClaude && steering {
+		if sid == "" {
+			return ErrNoSession
+		}
+		return c.steer(ctx, sid, text, interjectionID)
+	}
 	if d != DialectGrok {
 		return ErrUnsupported
 	}

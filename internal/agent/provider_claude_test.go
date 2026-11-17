@@ -724,10 +724,13 @@ func TestClaudeProviderIsHiddenAndResolvable(t *testing.T) {
 		t.Fatalf("%+v %v", p, err)
 	}
 	if slices.Contains(ProviderNames(), "claude") {
-		t.Fatal("claude is listed before C3")
+		t.Fatal("claude is listed before C5")
 	}
-	if p.Capabilities() != (Capabilities{}) {
-		t.Fatalf("claude declares %+v before the milestones that handle them", p.Capabilities())
+	// C3's capabilities, and nothing of a later milestone's: no sub-agent
+	// rows (C4), no fast toggle (craze keeps fast off, § D3).
+	want := Capabilities{Effort: true, Modes: true, Todos: true, AskCards: true, PlanCards: true, ParameterizedPicker: true, Interject: true}
+	if p.Capabilities() != want {
+		t.Fatalf("claude declares %+v, want C3's %+v", p.Capabilities(), want)
 	}
 	if !p.isSubagentTool("Agent") || !p.isSubagentTool("Task") || p.isSubagentTool("task") {
 		t.Fatal("claude's sub-agent tool names")

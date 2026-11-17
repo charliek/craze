@@ -295,14 +295,14 @@ func askRecord(r agent.AskRecord) (protocol.AskRecord, error) {
 		if r.Outcome == agent.AskAnswered || !answerIsZero(r.Answer) {
 			a := r.Answer
 			rec.Answer = &protocol.Answer{OptionID: a.OptionID, Cancel: a.Cancel, Answers: a.Answers,
-				Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}
+				Text: a.Text, Skip: a.Skip, Accept: a.Accept, Reject: a.Reject}
 		}
 	}
 	return rec, nil
 }
 
 func answerIsZero(a agent.AskAnswer) bool {
-	return a.OptionID == "" && !a.Cancel && a.Answers == nil && !a.Skip && !a.Accept && !a.Reject
+	return a.OptionID == "" && !a.Cancel && a.Answers == nil && a.Text == nil && !a.Skip && !a.Accept && !a.Reject
 }
 
 // wireAskBody is an ask's opening on the wire (event.json's askBody): each of

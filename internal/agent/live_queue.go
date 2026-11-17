@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -53,7 +55,21 @@ func (s *session) interject(ctx context.Context, text string) error {
 	}
 	// Text only (plan 033 P7): an envelope becomes [Image #N: <path>] lines.
 	// The TUI sends none here; a socket client's mode "interject" can.
-	return client.Interject(ctx, interjectText(s.log, text), id)
+	err := client.Interject(ctx, interjectText(s.log, text), id)
+	switch {
+	case errors.Is(err, acp.ErrSteerIdle):
+		// claude found no running turn (plan 052 § B7): the text was not
+		// taken, and is the caller's to send as a prompt, as any
+		// interjection that finds no turn is.
+		return ErrNotInTurn
+	case errors.Is(err, acp.ErrSteerStartedTurn):
+		// idleBehavior promptRequired should rule this out: the adapter
+		// took the text as a turn of its own. It was taken, so it is no
+		// failure; its frames arrive with no prompt in flight.
+		s.log.Note(journal.DiagNote{Kind: "claude_steer_started_turn"})
+		return nil
+	}
+	return err
 }
 
 // onInterjection turns grok's broadcast into the transcript entry. The ack

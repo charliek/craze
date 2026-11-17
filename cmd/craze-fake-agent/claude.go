@@ -25,6 +25,8 @@ import (
 //
 //	claude-basic  the above; loadSession false
 //	claude-load   the above; loadSession true, and session/new refused
+//	claude-ask, claude-ask-odd, claude-plan, claude-plan-odd, claude-steer
+//	              claude-basic with a card turn of their own (claude_cards.go)
 //
 // Environment (each read when the frame it shapes is sent):
 //
@@ -65,6 +67,9 @@ type claudeState struct {
 	// sid is the session the script streams on: session/new's, or the one
 	// a load named.
 	sid string
+	// steer is the turn claude-steer holds open for a _session/steering,
+	// under the server's mu; nil when none is (claude_cards.go).
+	steer chan string
 }
 
 func claudeSelect(id, name, category, current string, values ...string) map[string]any {
@@ -264,6 +269,8 @@ func (s *server) onClaudeRequest(msg *acp.Message) {
 		dumpPrompt(msg.Params)
 		s.cancelled.Store(false)
 		go s.claudePrompt(msg)
+	case acp.MethodClaudeSteering:
+		s.onClaudeSteer(msg)
 	case acp.MethodSessionSetConfig:
 		var p acp.SetConfigParams
 		_ = json.Unmarshal(msg.Params, &p)
@@ -359,6 +366,8 @@ func (s *server) claudePrompt(msg *acp.Message) {
 			os.Exit(3)
 		}
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: "Internal error", Data: json.RawMessage(`{"errorKind":"server_error"}`)})
+	case s.claudeCardTurn(msg.ID, sid, text):
+		// A card script's own turn (claude_cards.go).
 	default:
 		say("echo: " + text)
 		s.reply(msg.ID, map[string]any{"stopReason": acp.StopEndTurn})

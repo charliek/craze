@@ -604,7 +604,7 @@ endpoint-level reads.
 | `session.aside.cancel` | | `asideId` | `{}` | cancels this connection's `session.aside` of that `asideId`, which then answers `aborted`, reason `context`; answers `{}` always, after that aside's reply when it found one — see [`session.aside.cancel`](#sessionasidecancel); refused `aside_unsupported` where `aside` is absent |
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
-| `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
+| `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open. A question's `answer` may carry `text` — see [A question's free text](#a-questions-free-text) |
 | `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?`, `title?` (no `sessionId`, no `commandId`; `title` where `hello` says `createTitle`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 | `sessions.createOptions` | | — | `providers[]`, `defaultProvider?`, `recentDirs[]` | the hub's, where its `hello` says `createOptions: true`: what a create can start — see [`sessions.createOptions`](#sessionscreateoptions); a hub without it answers `unsupported`, reason `unsupported`; `unsupported` on a host, reason `hub_only` |
 | `sessions.saved` | | `workspace?`, `limit?`, `subAgents?` | `sessions[]` (each a `SavedSession`), `more` | the hub's, where its `hello` says `reopen: true`: the saved sessions — not running, each with the `id` that reopens it — see [`sessions.saved`](#sessionssaved); a hub without it answers `unsupported` (reason `unsupported`, or `unknown_method` from a hub before it); `unsupported` on a host, reason `hub_only` |
@@ -1832,6 +1832,28 @@ A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
 later always gets a wire name here before it is used: every field of that Go
 struct has a matching entry in this table, mechanically checked.
+
+### A question's free text
+
+A question may take an answer of the user's own beside its options: a
+`question` event's (and an open ask's) question item then has `allowText:
+true`. Only a `claude` session sets it — Claude Code's AskUserQuestion, whose
+every question has an "Other" box — and cursor's, grok's and native's
+questions never do. The answer carries it in `asks.answer`'s `answer.text`,
+each question's `id` to a string, beside that question's `answers` or alone
+(the user typed an answer instead of picking one):
+
+```json
+{"answers":{"question_0":["Blue"]},"text":{"question_0":"a darker blue"}}
+```
+
+`text` for a question without `allowText`, for a question the ask does not
+have, beside `skip`, or longer than 4096 bytes is `bad_request`, reason
+`bad_answer`, and leaves the ask open; a blank entry is dropped. The ask's
+ending (`ask` event) carries the text as it was taken, in `text`, and so does
+`asks.get`'s record of the answer. Both members are additive and optional: a
+client that does not know `allowText` draws the question with its options
+alone, and its answers are valid as ever; an older decoder skips `text`.
 
 ## Versioning
 

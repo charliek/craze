@@ -21,7 +21,8 @@ const (
 	MethodAuthStatusUpdate = "auth/status_update"
 	// MethodElicitationCreate is the RFD form request AskUserQuestion uses. It
 	// reaches a client only once that client declares elicitation.form, which
-	// nothing does yet: until then every dialect refuses it.
+	// the claude dialect alone does (plan 052 § B2); every other dialect
+	// refuses it.
 	MethodElicitationCreate = "elicitation/create"
 )
 
@@ -167,7 +168,7 @@ var inboundMethods = []string{
 // in one place. Cursor's and grok's rows are what their branches always did:
 // cursor/* is cursor's (and, as before, any dialect but grok's), x.ai/* is
 // grok's. Claude refuses or ignores both families, reads its auth pushes, and
-// refuses elicitation/create until it declares the form capability.
+// handles elicitation/create, the form it declares it renders.
 func dialectHandles(d DialectID, method string) decision {
 	if kind, ok := strings.CutPrefix(method, MethodSessionUpdate+"#"); ok {
 		return updateDecision(kind)
@@ -205,6 +206,9 @@ func dialectHandles(d DialectID, method string) decision {
 	case MethodAuthStatusUpdate:
 		return decisionIgnore
 	case MethodElicitationCreate:
+		if d == DialectClaude {
+			return decisionHandle
+		}
 		return decisionRefuse
 	}
 	return decisionNone

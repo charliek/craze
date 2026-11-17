@@ -700,6 +700,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetSettingsHandler(s.onSettingsReply)
 	client.SetSubagentHandler(s.onSubagent)
 	client.SetPermissionHandler(s.onPermission)
+	client.SetRefusedRequestHandler(s.onRefusedRequest)
 	client.SetAskHandler(s.onAskQuestion)
 	client.SetPlanHandler(s.onCreatePlan)
 	client.SetTodosHandler(s.onUpdateTodos)
@@ -2639,7 +2640,7 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 	for _, q := range req.Questions {
 		opts := make([]Option, 0, len(q.Options))
 		for _, o := range q.Options {
-			opts = append(opts, Option{ID: o.ID, Label: sanitizeText(o.Label)})
+			opts = append(opts, Option{ID: o.ID, Label: sanitizeText(o.Label), Description: sanitizeText(o.Description)})
 		}
 		if len(opts) == 0 {
 			// A question with no options still needs something to press; the
@@ -2652,6 +2653,7 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 			Prompt:        sanitizeText(q.Prompt),
 			Options:       opts,
 			AllowMultiple: q.AllowMultiple,
+			AllowText:     q.AllowText,
 		})
 	}
 	return out
@@ -2672,6 +2674,9 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 		dec.Replied = s.reportedBy(rec.ID)
 		return dec
 	case ApprovalReturn:
+		if s.provider().isClaude() {
+			return s.claudeReturnPlan(token, live, ask)
+		}
 		return s.returnPlan(a, token, live, ask)
 	}
 	if !live {
@@ -3057,7 +3062,7 @@ func askDecision(rec AskRecord) acp.AskDecision {
 		if rec.Answer.Skip {
 			return acp.AskDecision{Skip: true}
 		}
-		return acp.AskDecision{Answers: rec.Answer.Answers}
+		return acp.AskDecision{Answers: rec.Answer.Answers, Text: rec.Answer.Text}
 	default:
 		return acp.AskDecision{Cancelled: true}
 	}

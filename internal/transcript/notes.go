@@ -172,22 +172,23 @@ func capNote(s string) string {
 
 // answerNotes is one note per question of q, naming what answers picked for
 // it (answerNote). A question that asks nothing draws none.
-func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
+func answerNotes(q *agent.QuestionEvent, answers map[string][]string, text map[string]string) []string {
 	out := make([]string, 0, len(q.Questions))
 	for _, qq := range q.Questions {
-		out = append(out, answerNote(qq, answers[qq.ID]))
+		out = append(out, answerNote(qq, answers[qq.ID], text[qq.ID]))
 	}
 	return out
 }
 
 // answerNote is one question's note: `? <prompt> → ` and what each of ids
-// picks names (pickName), in their order, comma-separated. A pick that names
-// nothing is left out, and nothing named reads "nothing".
+// picks names (pickName), in their order, comma-separated, then the free text
+// typed beside them (plan 052 § B4), quoted. A pick that names nothing is left
+// out, and nothing named and nothing typed reads "nothing".
 //
 // It stops naming once the note is longer than outcomeNoteCap: capNote keeps
 // none of what would follow, and one long label picked over and over cannot
 // first build a note an answer's length times its size.
-func answerNote(qq agent.Question, ids []string) string {
+func answerNote(qq agent.Question, ids []string, text string) string {
 	var b strings.Builder
 	b.WriteString("? ")
 	b.WriteString(sanitizeLine(qq.Prompt))
@@ -205,6 +206,13 @@ func answerNote(qq agent.Question, ids []string) string {
 			b.WriteString(", ")
 		}
 		b.WriteString(name)
+		named++
+	}
+	if t := sanitizeLine(text); strings.TrimSpace(t) != "" && b.Len() <= outcomeNoteCap {
+		if named > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(`"` + strings.TrimSpace(t) + `"`)
 		named++
 	}
 	if named == 0 {

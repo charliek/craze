@@ -1031,6 +1031,10 @@ type Question struct {
 	Prompt        string
 	Options       []Option
 	AllowMultiple bool
+	// AllowText says the question also takes a free-text answer of the
+	// user's own (AskAnswer.Text): claude's per-question "Other" box (plan
+	// 052 § B4). No other provider sets it.
+	AllowText bool
 }
 
 // QuestionEvent carries a cursor/ask_question request. Auto is set when craze

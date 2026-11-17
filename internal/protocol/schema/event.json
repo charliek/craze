@@ -170,7 +170,8 @@
         "id": {"type": "string"},
         "prompt": {"type": "string"},
         "options": {"type": "array", "items": {"$ref": "#/$defs/option"}},
-        "allowMultiple": {"type": "boolean"}
+        "allowMultiple": {"type": "boolean"},
+        "allowText": {"type": "boolean", "description": "The question also takes a free-text answer of the user's own (answer text): claude's \"Other\" box. No other provider sets it."}
       },
       "additionalProperties": false
     },
@@ -188,6 +189,11 @@
       "description": "Each question's id to the option ids chosen. A null list is not an empty one: null is written for a nil list, [] for an empty one.",
       "type": "object",
       "additionalProperties": {"type": ["array", "null"], "items": {"type": "string"}}
+    },
+    "answerText": {
+      "description": "Each question's id to its free-text answer, for a question with allowText.",
+      "type": "object",
+      "additionalProperties": {"type": "string"}
     },
     "plan": {
       "description": "A plan request (PlanEvent).",
@@ -311,6 +317,7 @@
         "by": {"type": "string"},
         "optionId": {"type": "string"},
         "answers": {"$ref": "#/$defs/answers"},
+        "text": {"$ref": "#/$defs/answerText"},
         "skip": {"type": "boolean"},
         "accepted": {"type": "boolean"},
         "label": {"type": "string"},

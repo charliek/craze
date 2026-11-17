@@ -474,6 +474,7 @@ type wireQuestion struct {
 	Prompt        string       `json:"prompt,omitempty"`
 	Options       []wireOption `json:"options,omitempty"`
 	AllowMultiple bool         `json:"allowMultiple,omitempty"`
+	AllowText     bool         `json:"allowText,omitempty"`
 }
 
 type wireOption struct {
@@ -576,6 +577,7 @@ type wireAsk struct {
 	By       string              `json:"by,omitempty"`
 	OptionID string              `json:"optionId,omitempty"`
 	Answers  map[string][]string `json:"answers,omitempty"`
+	Text     map[string]string   `json:"text,omitempty"`
 	Skip     bool                `json:"skip,omitempty"`
 	Accepted bool                `json:"accepted,omitempty"`
 	Label    string              `json:"label,omitempty"`
@@ -1006,6 +1008,7 @@ func toWireEvent(ev Event) wireEvent {
 			By:       a.By,
 			OptionID: a.OptionID,
 			Answers:  a.Answers,
+			Text:     a.Text,
 			Skip:     a.Skip,
 			Accepted: a.Accepted,
 			Label:    a.Label,
@@ -1292,6 +1295,7 @@ func toWireQuestionEv(q *QuestionEvent) *wireQuestionEv {
 				Prompt:        qq.Prompt,
 				Options:       convertSlice(qq.Options, func(o Option) wireOption { return wireOption(o) }),
 				AllowMultiple: qq.AllowMultiple,
+				AllowText:     qq.AllowText,
 			}
 		}),
 		Auto:    q.Auto,
@@ -1365,6 +1369,9 @@ func (w *wireEvent) event() Event {
 		}
 		if len(a.Answers) > 0 {
 			ev.Ask.Answers = a.Answers
+		}
+		if len(a.Text) > 0 {
+			ev.Ask.Text = a.Text
 		}
 		if b := a.Body; b != nil {
 			ev.Ask.Body = &AskBody{
@@ -1508,6 +1515,7 @@ func (w *wireQuestionEv) question() *QuestionEvent {
 				Prompt:        wq.Prompt,
 				Options:       convertSlice(wq.Options, func(o wireOption) Option { return Option(o) }),
 				AllowMultiple: wq.AllowMultiple,
+				AllowText:     wq.AllowText,
 			}
 		}),
 		Auto: w.Auto,

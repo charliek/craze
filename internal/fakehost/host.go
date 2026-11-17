@@ -736,6 +736,8 @@ type QuestionSpec struct {
 	Prompt        string
 	Options       []QuestionOption
 	AllowMultiple bool
+	// AllowText is a question that also takes free text (claude's "Other").
+	AllowText bool
 }
 
 // Question opens a question ask.
@@ -746,7 +748,7 @@ func (h *Host) Question(id, title string, qs []QuestionSpec) {
 		for j, o := range q.Options {
 			opts[j] = agent.Option{ID: o.ID, Label: o.Label}
 		}
-		questions[i] = agent.Question{ID: q.ID, Prompt: q.Prompt, Options: opts, AllowMultiple: q.AllowMultiple}
+		questions[i] = agent.Question{ID: q.ID, Prompt: q.Prompt, Options: opts, AllowMultiple: q.AllowMultiple, AllowText: q.AllowText}
 	}
 	h.currentStub().Emit(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: id, Title: title, Questions: questions}})
 }
@@ -1195,6 +1197,7 @@ type opQuestion struct {
 	Prompt        string             `json:"prompt"`
 	Options       []opQuestionOption `json:"options,omitempty"`
 	AllowMultiple bool               `json:"allowMultiple,omitempty"`
+	AllowText     bool               `json:"allowText,omitempty"`
 }
 
 // Do runs one op from its wire bytes ({"name": "...", ...}): the NDJSON
@@ -1245,7 +1248,7 @@ func (h *Host) do(p opParams) error {
 			for j, o := range q.Options {
 				opts[j] = QuestionOption(o)
 			}
-			qs[i] = QuestionSpec{ID: q.ID, Prompt: q.Prompt, Options: opts, AllowMultiple: q.AllowMultiple}
+			qs[i] = QuestionSpec{ID: q.ID, Prompt: q.Prompt, Options: opts, AllowMultiple: q.AllowMultiple, AllowText: q.AllowText}
 		}
 		h.Question(p.ID, p.Title, qs)
 	case "plan":

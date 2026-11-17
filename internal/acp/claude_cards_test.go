@@ -1,0 +1,634 @@
+package acp
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// cardFrame is one line of testdata/claude-cards/frames.jsonl: a real
+// claude-agent-acp 0.107.3 frame of L0's ask, plan and steer steps, redacted
+// (the session id, the tool call ids, the paths).
+type cardFrame struct {
+	Step string  `json:"step"`
+	Dir  string  `json:"dir"`
+	Msg  Message `json:"msg"`
+}
+
+func cardFrames(t *testing.T, step string) []cardFrame {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "claude-cards", "frames.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []cardFrame
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var f cardFrame
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatal(err)
+		}
+		if f.Step == step {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no %s frames", step)
+	}
+	return out
+}
+
+// replayIn sends every incoming frame of a step but its replies, in order,
+// and answers with the request (the one frame with both an id and a method).
+func replayIn(t *testing.T, p *rawPipe, frames []cardFrame) *Message {
+	t.Helper()
+	var req *Message
+	for _, f := range frames {
+		if f.Dir != "in" || f.Msg.Method == "" {
+			continue
+		}
+		if len(f.Msg.ID) > 0 {
+			m := f.Msg
+			req = &m
+		}
+		var id any
+		if len(f.Msg.ID) > 0 {
+			id = json.RawMessage(f.Msg.ID)
+		}
+		p.send(t, id, f.Msg.Method, string(f.Msg.Params))
+	}
+	return req
+}
+
+func outResult(t *testing.T, frames []cardFrame) string {
+	t.Helper()
+	for _, f := range frames {
+		if f.Dir == "out" && f.Msg.Method == "" {
+			return string(f.Msg.Result)
+		}
+	}
+	t.Fatal("no reply frame")
+	return ""
+}
+
+// TestClaudeAskFrames replays the real AskUserQuestion exchange (§ B4): the
+// form becomes one question whose prompt is the request's message, whose
+// options are the consts with their titles and descriptions, and which takes
+// free text (question_0_custom). Answered Red with the text "blue", the reply
+// is byte for byte what the real exchange sent.
+func TestClaudeAskFrames(t *testing.T) {
+	frames := cardFrames(t, "ask")
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("SESSION")
+	asked := make(chan AskQuestionRequest, 1)
+	p.client.SetAskHandler(func(_ Arrival, req AskQuestionRequest) AskDecision {
+		asked <- req
+		return AskDecision{Answers: map[string][]string{"question_0": {"Red"}}, Text: map[string]string{"question_0": "blue"}}
+	})
+	replayIn(t, p, frames)
+	got := p.readWithin(t, 3*time.Second, "the elicitation's answer")
+	if want := outResult(t, frames); string(got.Result) != want {
+		t.Fatalf("answer\n got %s\nwant %s", got.Result, want)
+	}
+	req := <-asked
+	want := AskQuestionRequest{ToolCallID: "toolu_ASK", Questions: []AskQuestion{{
+		ID: "question_0", Prompt: "Do you prefer red or blue?", AllowText: true,
+		Options: []AskOption{{ID: "Red", Label: "Red", Description: "Choose red"}, {ID: "Blue", Label: "Blue", Description: "Choose blue"}},
+	}}}
+	if !askRequestsEqual(req, want) {
+		t.Fatalf("request %+v\nwant %+v", req, want)
+	}
+}
+
+func askRequestsEqual(a, b AskQuestionRequest) bool {
+	ja, _ := json.Marshal(struct {
+		R AskQuestionRequest
+		X []bool
+		D [][]string
+	}{a, allowTexts(a), descriptions(a)})
+	jb, _ := json.Marshal(struct {
+		R AskQuestionRequest
+		X []bool
+		D [][]string
+	}{b, allowTexts(b), descriptions(b)})
+	return string(ja) == string(jb)
+}
+
+func allowTexts(r AskQuestionRequest) []bool {
+	var out []bool
+	for _, q := range r.Questions {
+		out = append(out, q.AllowText)
+	}
+	return out
+}
+
+func descriptions(r AskQuestionRequest) [][]string {
+	var out [][]string
+	for _, q := range r.Questions {
+		var d []string
+		for _, o := range q.Options {
+			d = append(d, o.Description)
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+const twoQuestionForm = `{"mode":"form","sessionId":"s-1","toolCallId":"t1","message":"Please answer the following questions.","requestedSchema":{"type":"object","properties":{` +
+	`"question_0":{"type":"string","title":"Color","description":"Which color?","oneOf":[{"const":"Red","title":"Red"},{"const":"Blue","title":"Blue"}]},` +
+	`"question_0_custom":{"type":"string","title":"Other"},` +
+	`"question_1":{"type":"array","title":"Sizes","description":"Which sizes?","items":{"anyOf":[{"const":"S","title":"Small"},{"const":"L","title":"Large"}]}},` +
+	`"question_1_custom":{"type":"string","title":"Other"}}}}`
+
+// TestClaudeElicitationAnswers covers the answers a form gets (§ B4, AC6):
+// several questions, a multi-select as a list of consts, free text beside a
+// pick or alone, and only offered options; Skip is decline, a cancel cancel,
+// and with no handler — unattended — the first option of each question.
+func TestClaudeElicitationAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dec  *AskDecision
+		want string
+	}{
+		{"picks and text", &AskDecision{
+			Answers: map[string][]string{"question_0": {"Blue", "made-up"}, "question_1": {"S", "L"}},
+			Text:    map[string]string{"question_1": "  XL  "},
+		}, `{"action":"accept","content":{"question_0":"Blue","question_1":["S","L"],"question_1_custom":"XL"}}`},
+		{"text alone", &AskDecision{Answers: map[string][]string{}, Text: map[string]string{"question_0": "green"}},
+			`{"action":"accept","content":{"question_0_custom":"green"}}`},
+		{"skip", &AskDecision{Skip: true}, `{"action":"decline"}`},
+		{"cancel", &AskDecision{Cancelled: true}, `{"action":"cancel"}`},
+		{"unattended", nil, `{"action":"accept","content":{"question_0":"Red","question_1":["S"]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			got := make(chan AskQuestionRequest, 1)
+			if tc.dec != nil {
+				p.client.SetAskHandler(func(_ Arrival, req AskQuestionRequest) AskDecision { got <- req; return *tc.dec })
+			}
+			p.send(t, 5, MethodElicitationCreate, twoQuestionForm)
+			reply := p.readWithin(t, 3*time.Second, "the answer")
+			if string(reply.Result) != tc.want {
+				t.Fatalf("answer\n got %s\nwant %s", reply.Result, tc.want)
+			}
+			if tc.dec == nil {
+				return
+			}
+			req := <-got
+			if req.Title != "Please answer the following questions." || len(req.Questions) != 2 {
+				t.Fatalf("request %+v", req)
+			}
+			q0, q1 := req.Questions[0], req.Questions[1]
+			if q0.ID != "question_0" || q0.Prompt != "Which color?" || q0.AllowMultiple || !q0.AllowText {
+				t.Fatalf("question 0 %+v", q0)
+			}
+			if q1.ID != "question_1" || q1.Prompt != "Which sizes?" || !q1.AllowMultiple || !q1.AllowText || q1.Options[1].Label != "Large" {
+				t.Fatalf("question 1 %+v", q1)
+			}
+		})
+	}
+}
+
+// TestClaudeElicitationUnanswerable: a mode never declared is declined, and a
+// form of any other shape is answered cancel — the tool aborted, never run on
+// empty answers — with a note, and no card (§ B4).
+func TestClaudeElicitationUnanswerable(t *testing.T) {
+	q := func(props string) string {
+		return `{"mode":"form","sessionId":"s-1","message":"m","requestedSchema":{"type":"object","properties":{` + props + `}}}`
+	}
+	for _, tc := range []struct {
+		name, params, want, kind string
+	}{
+		{"url mode", `{"mode":"url","sessionId":"s-1","message":"m","url":"https://example.com","elicitationId":"e1"}`, `{"action":"decline"}`, RefusedElicitationMode},
+		{"another property", q(`"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]},"email":{"type":"string"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"no options", q(`"question_0":{"type":"string","oneOf":[]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"free string", q(`"question_0":{"type":"string"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"number", q(`"question_0":{"type":"number"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"custom alone", q(`"question_0_custom":{"type":"string"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"custom not text", q(`"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]},"question_0_custom":{"type":"boolean"}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"numeric const", q(`"question_0":{"type":"string","oneOf":[{"const":1,"title":"one"}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"duplicate const", q(`"question_0":{"type":"string","oneOf":[{"const":"a"},{"const":"a"}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"array of oneOf", q(`"question_0":{"type":"array","items":{"oneOf":[{"const":"a"}]}}`), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"empty form", q(``), `{"action":"cancel"}`, RefusedElicitationForm},
+		{"refusal fallback", q(`"choice":{"type":"string","oneOf":[{"const":"retry_fallback","title":"Retry"},{"const":"cancelled","title":"Keep"}]}`), `{"action":"cancel"}`, RefusedElicitationForm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
+				t.Error("an unanswerable form raised a card")
+				return AskDecision{}
+			})
+			refused := make(chan RefusedRequest, 1)
+			p.client.SetRefusedRequestHandler(func(r RefusedRequest) { refused <- r })
+			p.send(t, 3, MethodElicitationCreate, tc.params)
+			if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != tc.want {
+				t.Fatalf("answer %s, want %s", got, tc.want)
+			}
+			select {
+			case r := <-refused:
+				if r.Kind != tc.kind || r.Detail == "" {
+					t.Fatalf("refusal %+v, want kind %s with a detail", r, tc.kind)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no refusal note")
+			}
+		})
+	}
+}
+
+// TestClaudeElicitationCancelHeld: an elicitation open when the turn is
+// cancelled is answered cancel (§ B4's CancelHeld row).
+func TestClaudeElicitationCancelHeld(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	asked := make(chan Arrival, 1)
+	p.client.SetAskHandler(func(a Arrival, _ AskQuestionRequest) AskDecision {
+		asked <- a
+		<-a.Call.Done()
+		return AskDecision{Answers: map[string][]string{"question_0": {"a"}}}
+	})
+	p.send(t, 7, MethodElicitationCreate, `{"mode":"form","message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a","title":"a"}]}}}}`)
+	<-asked
+	go func() { _ = p.client.Cancel(t.Context()) }()
+	if got := string(p.readWithin(t, 3*time.Second, "the cancel's answer").Result); got != `{"action":"cancel"}` {
+		t.Fatalf("answer %s", got)
+	}
+	requestsDone(t, p)
+	p.noReply(t)
+}
+
+// planRequest is a claude permission request; the empty strings leave a field
+// out.
+type planRequest struct {
+	name, title, kind, metaName, plan, content string
+	options                                    []PermissionOption
+}
+
+func (r planRequest) params() string {
+	tc := map[string]any{"toolCallId": "toolu_PLAN", "status": "pending"}
+	if r.name != "" {
+		tc["name"] = r.name
+	}
+	if r.title != "" {
+		tc["title"] = r.title
+	}
+	if r.kind != "" {
+		tc["kind"] = r.kind
+	}
+	if r.metaName != "" {
+		tc["_meta"] = map[string]any{"claudeCode": map[string]any{"toolName": r.metaName}}
+	}
+	if r.plan != "" {
+		tc["rawInput"] = map[string]any{"plan": r.plan}
+	}
+	if r.content != "" {
+		tc["content"] = []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": r.content}}}
+	}
+	raw, _ := json.Marshal(map[string]any{"sessionId": "s-1", "toolCall": tc, "options": r.options})
+	return string(raw)
+}
+
+// realExitOptions are ExitPlanMode's options as 0.107.3 offers them.
+func realExitOptions() []PermissionOption {
+	return []PermissionOption{
+		{OptionID: "exit-plan-default", Name: "Yes, manually approve edits", Kind: KindAllowOnce},
+		{OptionID: "exit-plan-clear-auto", Name: "Yes, clear context and use auto mode", Kind: KindAllowAlways},
+		{OptionID: "exit-plan-auto", Name: "Yes, and use auto mode", Kind: KindAllowAlways},
+		{OptionID: "exit-plan-bypass", Name: "Yes, and bypass permissions", Kind: KindAllowAlways},
+		{OptionID: "reject", Name: "No, keep planning", Kind: KindRejectOnce},
+	}
+}
+
+func realExit() planRequest {
+	return planRequest{name: "ExitPlanMode", title: "Approve Plan", kind: "switch_mode", plan: "# Plan\n1. do it", content: "# Plan\n1. do it", options: realExitOptions()}
+}
+
+func withOptions(r planRequest, opts ...PermissionOption) planRequest {
+	r.options = opts
+	return r
+}
+
+// claudePlanOdd is every adversarial plan-exit shape (§ B5's tests, AC7's
+// claude-plan-odd): each is suspected, none is the safe shape, and each is
+// answered with the option named, never a card. The fake agent's
+// claude-plan-odd script sends the same shapes.
+func claudePlanOdd() []struct {
+	name    string
+	tool    string // a preceding tool_call's stamped name, "" for none
+	req     planRequest
+	wantOpt string // "" is the cancelled outcome
+} {
+	r := realExit()
+	return []struct {
+		name    string
+		tool    string
+		req     planRequest
+		wantOpt string
+	}{
+		{"missing exit-plan-default", "", withOptions(r, realExitOptions()[1:]...), "reject"},
+		{"exit-plan-default allow_always", "", withOptions(r, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowAlways}, PermissionOption{OptionID: "reject", Kind: KindRejectOnce}), "reject"},
+		{"duplicate ids", "", withOptions(r, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}, PermissionOption{OptionID: "reject", Kind: KindRejectOnce}), "reject"},
+		{"contradictory name", "", func() planRequest { x := r; x.name = "Write"; return x }(), "reject"},
+		{"contradictory meta", "", func() planRequest { x := r; x.metaName = "Bash"; return x }(), "reject"},
+		{"preceding call is another tool", "Write", r, "reject"},
+		{"kind edit", "", func() planRequest { x := r; x.kind = "edit"; return x }(), "reject"},
+		{"no plan", "", func() planRequest { x := r; x.plan, x.content = "", ""; return x }(), "reject"},
+		{"no reject option", "", withOptions(r, realExitOptions()[:4]...), ""},
+		{"reject of kind allow", "", withOptions(r, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}, PermissionOption{OptionID: "reject", Kind: KindAllowAlways}, PermissionOption{OptionID: "deny", Kind: KindRejectOnce}), "deny"},
+		{"options only", "", planRequest{title: "Run tool?", kind: "execute", options: []PermissionOption{{OptionID: "exit-plan-bypass", Kind: KindAllowAlways}, {OptionID: "allow-once", Kind: KindAllowOnce}}}, ""},
+		{"titled only", "", planRequest{title: "Approve Plan", options: []PermissionOption{{OptionID: "allow-once", Kind: KindAllowOnce}, {OptionID: "allow-with-updates", Kind: KindAllowAlways}, {OptionID: "reject", Kind: KindRejectOnce}}}, "reject"},
+	}
+}
+
+// TestClaudePlanExitOddShapes (§ B5, AC7): no suspected exit of an odd shape
+// reaches a card or the permission handler (so force never sees one), and the
+// answer is never an allow_always option nor any exit-plan-* — exit-plan-default
+// included.
+func TestClaudePlanExitOddShapes(t *testing.T) {
+	for _, tc := range claudePlanOdd() {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+				t.Error("an odd plan exit reached the permission handler")
+				return PermissionDecision{OptionID: "exit-plan-bypass"}
+			})
+			p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
+				t.Error("an odd plan exit raised the plan card")
+				return PlanDecision{Accept: true}
+			})
+			refused := make(chan RefusedRequest, 1)
+			p.client.SetRefusedRequestHandler(func(r RefusedRequest) { refused <- r })
+			if tc.tool != "" {
+				p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"`+tc.tool+`"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","status":"pending"}}`)
+			}
+			p.send(t, 4, MethodRequestPermission, tc.req.params())
+			reply := p.readWithin(t, 3*time.Second, "the answer")
+			assertNoPlanBypass(t, tc.req.options, reply.Result)
+			want := cancelledReply
+			if tc.wantOpt != "" {
+				want = string(selectedOutcome(tc.wantOpt))
+			}
+			if string(reply.Result) != want {
+				t.Fatalf("answer %s, want %s", reply.Result, want)
+			}
+			select {
+			case r := <-refused:
+				if r.Kind != RefusedPlanExitShape || r.Detail == "" {
+					t.Fatalf("refusal %+v", r)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no note for an odd plan exit")
+			}
+		})
+	}
+}
+
+// assertNoPlanBypass is AC7's invariant on one reply: no allow_always option
+// was selected, and no exit-plan-* other than exit-plan-default.
+func assertNoPlanBypass(t *testing.T, opts []PermissionOption, result json.RawMessage) {
+	t.Helper()
+	var r struct {
+		Outcome struct {
+			OptionID string `json:"optionId"`
+		} `json:"outcome"`
+	}
+	_ = json.Unmarshal(result, &r)
+	id := r.Outcome.OptionID
+	if id == "" {
+		return
+	}
+	if strings.HasPrefix(id, "exit-plan-") && id != ClaudeExitPlanDefault {
+		t.Fatalf("selected %s", id)
+	}
+	for _, o := range opts {
+		if o.OptionID == id && o.Kind == KindAllowAlways {
+			t.Fatalf("selected allow_always option %s", id)
+		}
+	}
+}
+
+// TestClaudePlanExitSafeShapes: the safe shape raises the plan card whatever
+// its options' order, with or without a preceding tool_call and its name, from
+// rawInput.plan or else the content; approve sends exit-plan-default, keep
+// planning reject, a cancel the cancelled outcome. The permission handler —
+// and so force — never sees it.
+func TestClaudePlanExitSafeShapes(t *testing.T) {
+	r := realExit()
+	reordered := slices.Clone(realExitOptions())
+	slices.Reverse(reordered)
+	noName := r
+	noName.name = ""
+	contentOnly := r
+	contentOnly.plan = ""
+	for _, tc := range []struct {
+		name string
+		tool string
+		req  planRequest
+		dec  PlanDecision
+		want string
+	}{
+		{"approve", "ExitPlanMode", r, PlanDecision{Accept: true}, `{"outcome":{"outcome":"selected","optionId":"exit-plan-default"}}`},
+		{"keep planning", "ExitPlanMode", r, PlanDecision{}, `{"outcome":{"outcome":"selected","optionId":"reject"}}`},
+		{"cancelled", "ExitPlanMode", r, PlanDecision{Cancelled: true}, cancelledReply},
+		{"reordered options", "", withOptions(r, reordered...), PlanDecision{Accept: true}, `{"outcome":{"outcome":"selected","optionId":"exit-plan-default"}}`},
+		{"no preceding tool_call, no name", "", noName, PlanDecision{Accept: true}, `{"outcome":{"outcome":"selected","optionId":"exit-plan-default"}}`},
+		{"plan from content", "", contentOnly, PlanDecision{}, `{"outcome":{"outcome":"selected","optionId":"reject"}}`},
+		{"minimal options", "", withOptions(r, PermissionOption{OptionID: "reject", Kind: KindRejectOnce}, PermissionOption{OptionID: "exit-plan-default", Kind: KindAllowOnce}), PlanDecision{Accept: true}, `{"outcome":{"outcome":"selected","optionId":"exit-plan-default"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			p.setSession("s-1")
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+				t.Error("a plan exit reached the permission handler")
+				return PermissionDecision{OptionID: "exit-plan-auto"}
+			})
+			plans := make(chan CreatePlanRequest, 1)
+			p.client.SetPlanHandler(func(_ Arrival, req CreatePlanRequest) PlanDecision { plans <- req; return tc.dec })
+			if tc.tool != "" {
+				p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"`+tc.tool+`"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","status":"pending"}}`)
+			}
+			p.send(t, 4, MethodRequestPermission, tc.req.params())
+			reply := p.readWithin(t, 3*time.Second, "the answer")
+			if string(reply.Result) != tc.want {
+				t.Fatalf("answer %s, want %s", reply.Result, tc.want)
+			}
+			assertNoPlanBypass(t, tc.req.options, reply.Result)
+			if got := (<-plans).PlanText(); got != "# Plan\n1. do it" {
+				t.Fatalf("plan %q", got)
+			}
+		})
+	}
+}
+
+// TestClaudePlanFrames replays the real ExitPlanMode exchange: the request is
+// the safe shape, the plan card gets rawInput.plan, and approving it sends
+// what the real exchange sent.
+func TestClaudePlanFrames(t *testing.T) {
+	frames := cardFrames(t, "plan")
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("SESSION")
+	plans := make(chan CreatePlanRequest, 1)
+	p.client.SetPlanHandler(func(_ Arrival, req CreatePlanRequest) PlanDecision { plans <- req; return PlanDecision{Accept: true} })
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+		t.Error("the real plan exit reached the permission handler")
+		return PermissionDecision{}
+	})
+	replayIn(t, p, frames)
+	got := p.readWithin(t, 3*time.Second, "the plan's answer")
+	if want := outResult(t, frames); string(got.Result) != want {
+		t.Fatalf("answer\n got %s\nwant %s", got.Result, want)
+	}
+	if plan := (<-plans).PlanText(); !strings.HasPrefix(plan, "# Plan: create plan.txt") {
+		t.Fatalf("plan %q", plan)
+	}
+}
+
+// TestClaudeEnterPlanModeIsAPermission: EnterPlanMode's request is of kind
+// switch_mode too, but entering plan mode allows nothing — it is an ordinary
+// permission, as cursor's and grok's are.
+func TestClaudeEnterPlanModeIsAPermission(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	perms := make(chan PermissionRequest, 1)
+	p.client.SetPermissionHandler(func(_ Arrival, req PermissionRequest) PermissionDecision {
+		perms <- req
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
+		t.Error("EnterPlanMode raised the plan card")
+		return PlanDecision{}
+	})
+	p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"EnterPlanMode"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","kind":"switch_mode"}}`)
+	req := planRequest{name: "EnterPlanMode", title: "EnterPlanMode", kind: "switch_mode", options: []PermissionOption{
+		{OptionID: "allow-once", Kind: KindAllowOnce}, {OptionID: "reject", Kind: KindRejectOnce},
+	}}
+	p.send(t, 4, MethodRequestPermission, req.params())
+	if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != `{"outcome":{"outcome":"selected","optionId":"allow-once"}}` {
+		t.Fatalf("answer %s", got)
+	}
+	<-perms
+}
+
+// TestClaudePlanExitCancelBeforeHandler: a cancel that lands before a safe plan
+// exit's handler has run answers it cancelled — never an exit-plan option —
+// and the early answer carries the plan.
+func TestClaudePlanExitCancelBeforeHandler(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	early := watchEarly(p.client)
+	msg := &Message{JSONRPC: jsonrpcVersion, ID: json.RawMessage(`12`), Method: MethodRequestPermission, Params: json.RawMessage(realExit().params())}
+	var req PermissionRequest
+	if err := json.Unmarshal(msg.Params, &req); err != nil {
+		t.Fatal(err)
+	}
+	pe := p.client.classifyPlanExit(msg.Params, req)
+	if !pe.safe {
+		t.Fatalf("the real shape is not safe: %s", pe.why)
+	}
+	plan, _ := json.Marshal(pe.plan)
+	preq := CreatePlanRequest{Plan: plan}
+	in := p.client.register(msg, RequestParams{Plan: &preq})
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- p.client.Cancel(t.Context()) }()
+	if got := string(p.readWithin(t, 3*time.Second, "the cancel's reply").Result); got != cancelledReply {
+		t.Fatalf("the cancel replied %s", got)
+	}
+	if err := <-cancelDone; err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	p.client.runIncoming(in, func(in *pendingReq) { ran = true; p.client.handleClaudePlanExit(in, preq) })
+	if ran {
+		t.Fatal("the plan handler ran for a request the cancel had answered")
+	}
+	ea := oneEarlyAnswer(t, early)
+	if ea.Params.Plan == nil || ea.Params.Plan.PlanText() != "# Plan\n1. do it" {
+		t.Fatalf("early answer %+v", ea)
+	}
+	p.noReply(t)
+}
+
+// TestClaudePlanExitNoHandlerRejects: with no plan handler a plan exit is
+// rejected; nothing approves a plan by default.
+func TestClaudePlanExitNoHandlerRejects(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	p.send(t, 4, MethodRequestPermission, realExit().params())
+	if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != `{"outcome":{"outcome":"selected","optionId":"reject"}}` {
+		t.Fatalf("answer %s", got)
+	}
+}
+
+// TestClaudeSteering (§ B7, AC9): with _meta.steering.supported, Interject is
+// _session/steering with the text as one block and idleBehavior
+// promptRequired; injected is success and tells the interjection handler;
+// promptRequired is ErrSteerIdle with no handler call; startedNewTurn is
+// ErrSteerStartedTurn. Without the flag, ErrUnsupported and nothing on the
+// wire. The real exchange's reply is replayed.
+func TestClaudeSteering(t *testing.T) {
+	frames := cardFrames(t, "steer")
+	var injected string
+	for _, f := range frames {
+		if f.Dir == "in" {
+			injected = string(f.Msg.Result)
+		}
+	}
+	for _, tc := range []struct {
+		name, reply string
+		want        error
+		told        bool
+	}{
+		{"injected (real)", injected, nil, true},
+		{"prompt required", `{"outcome":"promptRequired","reason":"noRunningTurn"}`, ErrSteerIdle, false},
+		{"started new turn", `{"outcome":"startedNewTurn"}`, ErrSteerStartedTurn, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectClaude)
+			initDone := make(chan struct{})
+			go func() { _, _ = p.client.Initialize(t.Context()); close(initDone) }()
+			init := p.readWithin(t, 3*time.Second, "initialize")
+			if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: init.ID, Result: json.RawMessage(`{"protocolVersion":1,"_meta":{"steering":{"supported":true}}}`)}); err != nil {
+				t.Fatal(err)
+			}
+			<-initDone
+			p.setSession("SESSION")
+			var mu sync.Mutex
+			var told []InterjectionNotification
+			p.client.SetInterjectionHandler(func(n InterjectionNotification) { mu.Lock(); told = append(told, n); mu.Unlock() })
+			errc := make(chan error, 1)
+			go func() { errc <- p.client.Interject(t.Context(), "The secret word is banana.", "craze-1") }()
+			req := p.readWithin(t, 3*time.Second, "the steer")
+			if req.Method != MethodClaudeSteering {
+				t.Fatalf("method %s", req.Method)
+			}
+			wantParams := `{"_meta":{"steering":{"idleBehavior":"promptRequired"}},"prompt":[{"type":"text","text":"The secret word is banana."}],"sessionId":"SESSION"}`
+			if string(req.Params) != wantParams {
+				t.Fatalf("params\n got %s\nwant %s", req.Params, wantParams)
+			}
+			if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Result: json.RawMessage(tc.reply)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-errc; err != tc.want {
+				t.Fatalf("err %v, want %v", err, tc.want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.told != (len(told) == 1) || (tc.told && (told[0].Text != "The secret word is banana." || told[0].InterjectionID != "craze-1")) {
+				t.Fatalf("interjection handler got %+v", told)
+			}
+		})
+	}
+	t.Run("not advertised", func(t *testing.T) {
+		p := newRawPipeDialect(t, DialectClaude)
+		p.setSession("SESSION")
+		if err := p.client.Interject(t.Context(), "x", "craze-1"); err != ErrUnsupported {
+			t.Fatalf("err %v, want ErrUnsupported", err)
+		}
+		p.noReply(t)
+	})
+}

@@ -97,6 +97,10 @@ var goldenManifest = map[string]goldenRuns{
 	"diff-expanded-120x40":                   bothTransports,
 	"echo-80x24":                             bothTransports,
 	"effort-picker-100x30":                   bothTransports,
+	"claude-ask-100x30":                      bothTransports,
+	"claude-ask-80x24":                       bothTransports,
+	"claude-ask-other-100x30":                bothTransports,
+	"claude-ask-other-80x24":                 bothTransports,
 	"grok-ask-100x30":                        bothTransports,
 	"grok-ask-80x24":                         bothTransports,
 	"grok-echo-100x30":                       bothTransports,
@@ -532,8 +536,9 @@ func transportList(set map[frameTransport]bool) string {
 // saved live (C6, native-live-model-dialog), plan 040's four of the side
 // view (C4: btw-* and native-btw), and plan 047's four of C2 — native's model
 // dialog with a highlighted model's effort row and with a model that has
-// none, the /effort picker and the slash menu on `/ef` — under both — 143 in
-// all.
+// none, the /effort picker and the slash menu on `/ef` — and plan 052's four
+// of claude's question card with its "Other…" row, shut and open (C3,
+// claude-ask-*) — under both — 147 in all.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -561,8 +566,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 143 || inprocAlone != 48 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 143 and 48 (A8)", both, inprocAlone)
+	if both != 147 || inprocAlone != 48 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 147 and 48 (A8)", both, inprocAlone)
 	}
 }
 

@@ -602,7 +602,7 @@ func TestAnswerNoteStopsPastTheCapAndCapsAsTheWholeNote(t *testing.T) {
 		qq := agent.Question{ID: "q1", Prompt: "Pick", Options: []agent.Option{{ID: "x", Label: label}, {ID: "y", Label: "Y"}}}
 		for _, picks := range []int{0, 1, 2, 3, 5, 100, 1000, 1500, 2000, 2100, 3000} {
 			ids := slices.Repeat([]string{"x", "nope", "y"}, picks)
-			built := answerNote(qq, ids)
+			built := answerNote(qq, ids, "")
 			// The reference builds the whole note: past a MiB it proves no
 			// more than the rows below it do, and only costs time.
 			if len(label)*picks <= 1<<20 {

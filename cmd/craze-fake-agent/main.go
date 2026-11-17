@@ -180,6 +180,12 @@ Flags:
                       the rest
           claude-load the same with loadSession, a short replay, and
                       session/new refused
+          claude-ask, claude-ask-odd, claude-plan, claude-plan-odd,
+          claude-steer claude-basic whose other prompts run a card turn
+                      (claude_cards.go): AskUserQuestion's form (MULTI: two
+                      questions), forms craze cannot show, ExitPlanMode, every
+                      odd plan exit, and a turn held for _session/steering;
+                      each says the answer it got
 
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
@@ -313,7 +319,8 @@ func main() {
 		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image",
 		"grok-btw", "grok-btw-missing", "grok-btw-escape",
 		"exit-two-lines",
-		"claude-basic", "claude-load":
+		"claude-basic", "claude-load",
+		"claude-ask", "claude-ask-odd", "claude-plan", "claude-plan-odd", "claude-steer":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -473,7 +474,9 @@ type AskRequest struct {
 //   - question: Answers maps each question's id to option ids it offered — the
 //     invented "OK" option's empty id included, since that is a real offered
 //     option (live.go's questionsFromRequest) — or Skip skips the lot. A
-//     question that asks nothing takes no answers at all.
+//     question that asks nothing takes no answers at all. Text is a question's
+//     free-text answer, beside its picks or alone, for a question that takes
+//     one (Question.AllowText).
 //   - plan: exactly one of Accept and Reject.
 //
 // The zero AskAnswer is not a valid answer to anything but a question that
@@ -486,10 +489,17 @@ type AskAnswer struct {
 	OptionID string
 	Cancel   bool
 	Answers  map[string][]string
-	Skip     bool
-	Accept   bool
-	Reject   bool
+	// Text is each question's free-text answer, by question id (plan 052 §
+	// B4): only a question with AllowText takes one.
+	Text   map[string]string
+	Skip   bool
+	Accept bool
+	Reject bool
 }
+
+// MaxAnswerText bounds one question's free-text answer, in bytes: a line
+// typed into a card, never a document.
+const MaxAnswerText = 4096
 
 // AskUpdate is Event.Ask: one ask's ending, and the only event kind the
 // registry adds. Every way an ask can end carries one, so a client that folds
@@ -508,6 +518,8 @@ type AskUpdate struct {
 	// skip, and whether a plan was accepted.
 	OptionID string
 	Answers  map[string][]string
+	// Text is a question's free-text answers, by question id (AskAnswer.Text).
+	Text     map[string]string
 	Skip     bool
 	Accepted bool
 	// Label is a short human label of what was chosen: the name of the
@@ -560,6 +572,7 @@ func (r AskRecord) clone() AskRecord {
 	c := r
 	c.Body = r.Body.clone()
 	c.Answer.Answers = cloneAnswers(r.Answer.Answers)
+	c.Answer.Text = maps.Clone(r.Answer.Text)
 	return c
 }
 
@@ -1373,6 +1386,7 @@ func (r *AskRegistry) retire(e *askEntry, outcome AskOutcome, by, cause string, 
 			// event and the registry must not share memory.
 			OptionID: ans.OptionID,
 			Answers:  cloneAnswers(ans.Answers),
+			Text:     maps.Clone(ans.Text),
 			Skip:     ans.Skip,
 			Accepted: ans.Accept,
 			Label:    label,
@@ -1540,7 +1554,7 @@ func setBodyID(kind AskKind, body AskBody, id string) {
 func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string, error) {
 	switch kind {
 	case AskPermission:
-		if a.Skip || a.Accept || a.Reject || len(a.Answers) > 0 {
+		if a.Skip || a.Accept || a.Reject || len(a.Answers) > 0 || len(a.Text) > 0 {
 			return AskAnswer{}, "", fmt.Errorf("%w: a permission takes an option id or an explicit cancel", ErrBadAnswer)
 		}
 		if a.Cancel {
@@ -1559,10 +1573,19 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 			return AskAnswer{}, "", fmt.Errorf("%w: a question takes its answers or a skip", ErrBadAnswer)
 		}
 		if a.Skip {
-			if len(a.Answers) > 0 {
+			if len(a.Answers) > 0 || len(a.Text) > 0 {
 				return AskAnswer{}, "", fmt.Errorf("%w: a skipped question carries no answers", ErrBadAnswer)
 			}
 			return AskAnswer{Skip: true}, "", nil
+		}
+		text, err := checkQuestionText(body.Question, a.Text)
+		if err != nil {
+			return AskAnswer{}, "", err
+		}
+		if len(a.Answers) == 0 && len(text) > 0 {
+			// Free text alone answers the questions it is for (plan 052 §
+			// B4): the user typed their own answer instead of picking one.
+			return AskAnswer{Answers: cloneAnswers(a.Answers), Text: text}, "", nil
 		}
 		if len(a.Answers) == 0 {
 			// A question that asks nothing — cursor really does send
@@ -1579,9 +1602,9 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 		if err := checkQuestionAnswers(body.Question, a.Answers); err != nil {
 			return AskAnswer{}, "", err
 		}
-		return AskAnswer{Answers: cloneAnswers(a.Answers)}, "", nil
+		return AskAnswer{Answers: cloneAnswers(a.Answers), Text: text}, "", nil
 	case AskPlan:
-		if a.OptionID != "" || a.Cancel || a.Skip || len(a.Answers) > 0 {
+		if a.OptionID != "" || a.Cancel || a.Skip || len(a.Answers) > 0 || len(a.Text) > 0 {
 			return AskAnswer{}, "", fmt.Errorf("%w: a plan takes an accept or a reject", ErrBadAnswer)
 		}
 		if a.Accept == a.Reject {
@@ -1626,6 +1649,34 @@ func checkQuestionAnswers(q *QuestionEvent, answers map[string][]string) error {
 		}
 	}
 	return nil
+}
+
+// checkQuestionText refuses free text for a question the request does not
+// have, or one that takes none (Question.AllowText), or text past
+// MaxAnswerText, and answers with the text as it is recorded: blank entries
+// dropped, nil when none is left.
+func checkQuestionText(q *QuestionEvent, text map[string]string) (map[string]string, error) {
+	var out map[string]string
+	for id, t := range text {
+		one, found := questionByID(q, id)
+		if !found {
+			return nil, fmt.Errorf("%w: %q is not a question this ask asked", ErrBadAnswer, id)
+		}
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		if !one.AllowText {
+			return nil, fmt.Errorf("%w: question %q takes no free text", ErrBadAnswer, id)
+		}
+		if len(t) > MaxAnswerText {
+			return nil, fmt.Errorf("%w: question %q's text is longer than %d bytes", ErrBadAnswer, id, MaxAnswerText)
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[id] = t
+	}
+	return out, nil
 }
 
 // questionsOffered is what a question ask actually asked, nil for one with no

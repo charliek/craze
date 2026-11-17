@@ -102,7 +102,18 @@ type Client struct {
 	settingsHandler func(SettingsReply) error
 	subagentHandler func(SubagentNotification)
 	authHandler     func(AuthStatus)
-	pendingUpdates  []SessionNotification
+	// refusedHandler is told of a claude request craze answered itself
+	// (claude_cards.go). claudeTools is the tool name the adapter stamped on
+	// each recent tool call, by id, in arrival order (claudeToolOrder), so a
+	// permission request can be checked against the call it names (§ B5).
+	refusedHandler  func(RefusedRequest)
+	claudeTools     map[string]string
+	claudeToolOrder []string
+	// steering is initialize's _meta.steering.supported, for claude: it alone
+	// lets Interject send _session/steering (§ B7). Written once, by
+	// Initialize, before any interjection can be made.
+	steering       bool
+	pendingUpdates []SessionNotification
 	// children is the routed-child allowlist, in registration order. A
 	// subagent_spawned registers its child_session_id; subagent_finished
 	// deregisters after the handler ran. The 65th concurrent registration
@@ -359,9 +370,20 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 			Terminal: false,
 		},
 	}
+	claude := c.Dialect() == DialectClaude
+	if claude {
+		// The form capability, claude's alone (plan 052 § B2): without it
+		// the adapter never asks AskUserQuestion's questions of a client.
+		params.ClientCapabilities.Elicitation = &ElicitationCapabilities{}
+	}
 	var result InitializeResult
 	if err := c.conn.Call(ctx, MethodInitialize, params, &result); err != nil {
 		return nil, err
+	}
+	if claude {
+		c.mu.Lock()
+		c.steering = result.SteeringSupported()
+		c.mu.Unlock()
 	}
 	return &result, nil
 }
@@ -1042,6 +1064,11 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid permission request")
 			return
 		}
+		if c.dialect == DialectClaude && c.routeClaudePermission(msg, req) {
+			// A suspected plan exit (plan 052 § B5): routed here, ahead of
+			// the permission handler and its force policy.
+			return
+		}
 		c.dispatch(msg, RequestParams{Permission: &req}, func(in *pendingReq) { c.handlePermission(in, req) })
 	case MethodCursorAskQuestion:
 		var req AskQuestionRequest
@@ -1071,6 +1098,8 @@ func (c *Client) onRequest(msg *Message) {
 			return
 		}
 		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+	case MethodElicitationCreate:
+		c.routeElicitation(msg)
 	case MethodCursorUpdateTodos:
 		c.handleUpdateTodos(msg.ID, msg.Params)
 	case MethodCursorTask:
@@ -1331,6 +1360,9 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		n.ToolName = grokToolName(n.Update)
 	case DialectClaude:
 		n.ToolName = claudeToolName(n.Update)
+		if n.ToolName != "" {
+			c.noteClaudeTool(n.Update)
+		}
 	}
 	c.mu.Lock()
 	if c.sessionID == "" {
@@ -1651,7 +1683,7 @@ func (c *Client) completeCancelled(pending []*pendingReq, by string) {
 
 func cancelDecision(method string) any {
 	switch method {
-	case MethodCursorAskQuestion, MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
+	case MethodCursorAskQuestion, MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped, MethodElicitationCreate:
 		return AskDecision{Cancelled: true}
 	case MethodCursorCreatePlan, MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
 		return PlanDecision{Cancelled: true}

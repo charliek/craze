@@ -115,6 +115,11 @@ func cancelledResult(d DialectID, method string) json.RawMessage {
 	if d == DialectGrok && (isGrokAskMethod(method) || isGrokPlanMethod(method)) {
 		return grokFlatOutcome("cancelled")
 	}
+	if method == MethodElicitationCreate {
+		// An elicitation still open at a cancel, a close or its turn's end
+		// is withdrawn as Esc withdraws it in Claude Code (plan 052 § B4).
+		return elicitationResult("cancel", nil)
+	}
 	return cancelledOutcome()
 }
 
@@ -126,8 +131,12 @@ type askAnswer struct {
 // askOutcome answers every question of the request in request order, keeping
 // only option ids the request itself offered.
 func askOutcome(d DialectID, req AskQuestionRequest, dec AskDecision) json.RawMessage {
-	if d == DialectGrok {
+	switch d {
+	case DialectGrok:
 		return grokAskOutcome(req, dec)
+	case DialectClaude:
+		// claude asks only through elicitation/create (plan 052 § B4).
+		return elicitationOutcome(req, dec)
 	}
 	switch {
 	case dec.Cancelled:

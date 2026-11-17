@@ -1098,3 +1098,42 @@ func TestRangeIsWhatAFoldAppended(t *testing.T) {
 		t.Fatalf("a range from a dropped entry: %+v", gone)
 	}
 }
+
+// TestARejectedPlansCancelLeavesNoCancelledNote (plan 052 § B5): claude ends
+// its turn cancelled when its plan is rejected ("keep planning"). The plan's
+// own `→ rejected` row says what happened, so that ending draws no cancelled
+// note — its ExitPlanMode call settling between the two included. Anything new
+// in between (words here) makes the cancel a cancel again, and so does a plan
+// that was accepted.
+func TestARejectedPlansCancelLeavesNoCancelledNote(t *testing.T) {
+	plan := &agent.PlanEvent{ID: "plan-1", Name: "the plan", Plan: "## Steps"}
+	ending := func(accepted bool) agent.Event {
+		return agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient, Accepted: accepted}}
+	}
+	settled := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "toolu_plan", Status: "failed"}}
+	done := agent.Event{Type: agent.EventDone, StopReason: "cancelled"}
+	for _, tc := range []struct {
+		name   string
+		evs    []agent.Event
+		banner bool
+	}{
+		{"rejected", []agent.Event{ending(false), settled, done}, false},
+		{"rejected, then words", []agent.Event{ending(false), {Type: agent.EventText, Text: "ok"}, done}, true},
+		{"accepted", []agent.Event{ending(true), done}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			m.Fold(agent.Event{Type: agent.EventPlan, Plan: plan})
+			for _, ev := range tc.evs {
+				m.Fold(ev)
+			}
+			got := false
+			for _, f := range facts(m.Main) {
+				got = got || (f.Kind == "note" && f.Text == NoteCancelled)
+			}
+			if got != tc.banner {
+				t.Fatalf("cancelled note drawn = %v, want %v: %v", got, tc.banner, facts(m.Main))
+			}
+		})
+	}
+}

@@ -402,3 +402,45 @@ func (e *stopReasonError) Error() string {
 	return fmt.Sprintf("agent: the turn stopped (%s): %s", e.reason, e.why)
 }
 func (e *stopReasonError) ErrorInfo() errkind.Info { return errkind.New(errkind.Agent) }
+
+// claudeReturnPlan is ApprovalReturn on claude (plan 052 § B5): the plan is
+// recorded as returned — the automatic answer that does not accept, which is
+// how a waiter knows the turn ended at its plan — and the plan exit is
+// answered reject at once. reject is claude's own "keep planning", which ends
+// the turn cancelled, so none of returnPlan's cancel-first path is needed: no
+// session/cancel is written, and nothing waits for one. A plan whose turn is
+// over is recorded as any stale request is, and answered cancelled.
+func (s *session) claudeReturnPlan(token TurnToken, live bool, ask AskRequest) acp.PlanDecision {
+	if !live {
+		s.staleAsk(ask)
+		return acp.PlanDecision{Cancelled: true}
+	}
+	rec := s.automaticAsk(token, ask, AskAnswer{Reject: true})
+	dec := planDecision(rec)
+	dec.Replied = s.reportedBy(rec.ID)
+	return dec
+}
+
+// onRefusedRequest is the client's word that it answered a claude request
+// itself (acp.RefusedRequest): a form it cannot render, an elicitation mode it
+// never declared, a plan exit of a shape it does not know (§ B4, § B5). The
+// session notes it in the journal and on the diag lane, as C2's other notes
+// are, so a tool that aborted or a plan that was rejected has its reason on
+// record.
+func (s *session) onRefusedRequest(r acp.RefusedRequest) {
+	s.log.Note(journal.DiagNote{Kind: "claude_" + r.Kind, Fields: map[string]any{
+		"method": r.Method, "answer": r.Answer, "detail": r.Detail,
+	}})
+	w := diagWriter(s.opts)
+	if w == nil {
+		return
+	}
+	switch r.Kind {
+	case acp.RefusedPlanExitShape:
+		fmt.Fprintf(w, "craze: the plan approval had an unexpected shape (%s); answered %s\n", sanitizeLine(r.Detail), sanitizeLine(r.Answer))
+	case acp.RefusedElicitationMode:
+		fmt.Fprintf(w, "craze: claude asked in an elicitation mode craze does not show (%s); declined\n", sanitizeLine(r.Detail))
+	default:
+		fmt.Fprintf(w, "craze: claude asked a question craze cannot show (%s); cancelled\n", sanitizeLine(r.Detail))
+	}
+}

@@ -32,6 +32,9 @@ func (m *Model) Fold(ev agent.Event) Change {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.begin(ev.Seq)
+	if ev.Agent == "" && newWork(ev) {
+		m.planKept = false
+	}
 	row, ok := kinds[ev.Type]
 	switch {
 	case !ok:
@@ -47,6 +50,23 @@ func (m *Model) Fold(ev agent.Event) Change {
 		}
 	}
 	return m.finish()
+}
+
+// newWork says ev is the main session doing something new — words, a tool
+// starting, a request, a turn — which a plan's rejection is no longer the last
+// thing before (Model.planKept). A tool call settling is not: the rejected
+// ExitPlanMode's own call closes as failed between the answer and the turn's
+// end.
+func newWork(ev agent.Event) bool {
+	switch ev.Type {
+	case agent.EventText, agent.EventThought:
+		return ev.Text != ""
+	case agent.EventTool:
+		return ev.Tool == nil || (ev.Tool.Status != "failed" && ev.Tool.Status != "completed")
+	case agent.EventUser, agent.EventQuestion, agent.EventPermission, agent.EventPlan, agent.EventCommand, agent.EventTurn:
+		return true
+	}
+	return false
 }
 
 // class is what a kind does to the model (§3.3): stream rows append history
@@ -318,6 +338,7 @@ func foldAsk(m *Model, ev agent.Event) {
 	if a, open := m.asks.get(u.ID); open {
 		m.noteOutcome(a, u, at)
 	}
+	m.planKept = u.Kind == agent.AskPlan && u.Outcome == agent.AskAnswered && !u.Accepted
 	m.asks.remove(u.ID)
 	if !m.ended.has(u.ID) && m.ended.len() >= maxEnded {
 		m.ended.dropOldest()
@@ -383,7 +404,7 @@ func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
 			note(skipNote(q))
 			return
 		}
-		for _, n := range answerNotes(q, u.Answers) {
+		for _, n := range answerNotes(q, u.Answers, u.Text) {
 			note(n)
 		}
 	case agent.AskPlan:
@@ -404,9 +425,10 @@ func foldDone(m *Model, ev agent.Event) {
 	at := m.stamp(ev.At)
 	m.Main.closeStream(at)
 	m.Main.clearCompaction()
-	if ev.StopReason == stopCancelled {
+	if ev.StopReason == stopCancelled && !m.planKept {
 		m.Main.addNote(NoteCancelled, at)
 	}
+	m.planKept = false
 	m.fc.state = true
 }
 
