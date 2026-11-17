@@ -123,9 +123,11 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 	}
 	// The registry's word on routing is the row's (C8 K3): a child it routes
 	// now — admitted after an earlier cap refusal — gets its tool store back,
-	// and a reused row's transcript flag follows.
-	s.claudeRouteLocked(rec, !n.Unrouted)
+	// and a reused row's transcript flag follows. The row as it was is taken
+	// first, so a readmission's transcript flag is published as progress
+	// (review C8 item 2).
 	prev := cloneSubagent(rec.info)
+	s.claudeRouteLocked(rec, !n.Unrouted)
 	s.applyClaudeLabelsLocked(rec, n)
 	capSubagent(&rec.info)
 	switch n.State {

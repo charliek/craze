@@ -146,7 +146,7 @@ func (c *Client) noteRateLimit(kind string, n SessionNotification) {
 // ends failed with err, decided now, and the machine is closed, so nothing
 // opens again; the ending is delivered in dispatch order on a goroutine of its
 // own, so a caller already on the read loop — a foreign-turn handler — never
-// waits on itself.
+// waits on itself. An error FailForeign recorded first is the ending's instead.
 func (c *Client) EndForeignWith(err error) {
 	if c.dialect != DialectClaude {
 		return
@@ -162,6 +162,10 @@ func (c *Client) endForeignForTrip(err error, dispatching bool) {
 	if c.cf.failErr == nil {
 		c.cf.failErr = err
 	}
+	// The first fatal cause stands (review C8 item 1): a stop already recorded
+	// (FailForeign — an auth or config refusal) is what the turn ends with,
+	// not the transport's end it brought about.
+	err = c.cf.failErr
 	var end *ForeignTurn
 	if c.cf.phase == phaseForeign {
 		end = c.endForeignTurnLocked(false, err)

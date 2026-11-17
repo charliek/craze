@@ -111,7 +111,8 @@ func TestClaudeAnAgentGoneEndsItsForeignTurn(t *testing.T) {
 
 // TestClaudeAChildAdmittedAfterARefusalRoutes (C8 K3): a child the cap refused
 // has no tool store; once the registry admits it, the row routes — its tool
-// store and its transcript flag come back — and its tool calls land.
+// store and its transcript flag come back, on the event stream too — and its
+// tool calls land.
 func TestClaudeAChildAdmittedAfterARefusalRoutes(t *testing.T) {
 	s, log := claudeUnit(t)
 	refused := claudeChildUpdate("c65", acp.ChildRunning, nil)
@@ -134,6 +135,18 @@ func TestClaudeAChildAdmittedAfterARefusalRoutes(t *testing.T) {
 		}
 		return false
 	})
+	// And a consumer of the stream sees it (review C8 item 2): the row it
+	// folds from the events — the last one for c65, every one of them in by
+	// the tool event that follows — says so too.
+	var folded *SubagentInfo
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventSubagent && ev.Subagent != nil && ev.Subagent.ID == "c65" {
+			folded = ev.Subagent
+		}
+	}
+	if folded == nil || !folded.Transcript {
+		t.Fatalf("the stream's c65 row %+v; want the readmission's transcript flag", folded)
+	}
 }
 
 // TestClaudeAFailedPromptClosesOnlyItsOwnTools (C8 K7): a prompted turn that

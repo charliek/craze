@@ -1089,3 +1089,30 @@ func TestClaudeARequestAfterTheReplyIsNoTurns(t *testing.T) {
 		t.Fatalf("the wake's request arrived %+v; want no turn of craze's", a)
 	}
 }
+
+// TestClaudeTheRecordedStopOutlivesTheTransportsEnd (review C8 item 1): the
+// session's stop is recorded (FailForeign: a late auth refusal), the adapter
+// exits on stdin's end, and the transport's retirement ends the turn before
+// Close does: the turn ends with the recorded stop, not "the agent stopped".
+func TestClaudeTheRecordedStopOutlivesTheTransportsEnd(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	ended := make(chan ForeignTurn, 1)
+	r.client.SetForeignTurnHandler(func(f ForeignTurn) {
+		if !f.Running {
+			ended <- f
+		}
+	})
+	r.push(t, chunk("a"))
+	stop := errors.New("the login changed")
+	r.client.FailForeign(stop)
+	r.client.EndForeignWith(errors.New("the agent stopped"))
+	select {
+	case got := <-ended:
+		if !errors.Is(got.Err, stop) {
+			t.Fatalf("the ending = %+v; want the recorded stop", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn never ended")
+	}
+}
