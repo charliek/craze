@@ -1089,11 +1089,50 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome; with `--load`, `session.reopen`'s) on one line |
 | `--wait` | Start an unattended session without the hub, send it the prompt and wait for its turn's result ([below](#craze-new-wait)) |
 | `--load <id>` | Reopen a saved session through the hub instead of starting one ([below](#craze-new-load)): an id [`craze ps --saved`](#saved-sessions) prints, or a whole one |
+| `--allow-same-provider` | Start the session even on the provider the agent running this command is on, which `craze new` otherwise refuses ([below](#starting-your-own-provider)). Taken by every path: plain, `--wait` and `--load` |
 
 `--timeout`, `--max-message`, `--prompt-file`, `--remove-prompt-file`,
 `--plan`, `--ask`, `--web-search` and `--no-web-search` are `--wait`'s alone:
 without it each is a usage error (`craze new: --plan needs --wait`, exit 2). A
 session plain `craze new` starts is a person's, whose web search asks.
+
+#### Starting your own provider
+
+`craze new` is how one coding agent hands work to another, and an agent never
+needs it for its own provider: its own sub-agent tool does that. So when craze
+can tell which provider the agent running it is on, and the session would start
+on that same provider, it refuses, **exit 2**, kind `usage`, before any hub or
+session is started (a `--prompt-file` is not read, and stays where it was):
+
+```text
+craze: this agent already runs on claude; use your own sub-agent tool for claude work, not craze (--allow-same-provider overrides)
+```
+
+With `--json` it is the [usage object](#usage-errors-under-json).
+`--allow-same-provider` starts the session anyway.
+
+The caller is read from the environment, in this order:
+
+1. `CRAZE_SESSION_PROVIDER`, when set: craze sets it for every agent a session
+   starts, to the session's provider — an ACP agent in its own environment,
+   native in its shell commands' — replacing any it inherited, so it names the
+   immediate caller.
+2. Otherwise `claude` when `CLAUDECODE=1` (Claude Code's Bash tool sets it), or
+   `cursor` when `CURSOR_AGENT` is set (a standalone `cursor-agent`'s shell
+   sets it) — one of them alone. With both, one started the other and the
+   caller is unknown: nothing is refused.
+
+grok sets no marker craze trusts, so a grok agent is never refused here. So a
+cursor session that Claude Code started (both `CLAUDECODE=1` and
+`CRAZE_SESSION_PROVIDER=cursor`) may start claude, and not cursor.
+
+The provider checked is the one each path would start: `--provider`'s; for plain
+`craze new` without it, the hub's default (`sessions.createOptions`'s
+`defaultProvider`, or `config.toml`'s `provider` when no hub runs), which the
+create is then bound to, and none (no default, or one craze does not know) is
+not checked; for `--wait` without it, `config.toml`'s `provider`, never
+`CRAZE_PROVIDER`; for `--load`, the saved session's own. `craze send`, `wait`
+and `cancel` are never refused: they continue a session already started.
 
 The session's host finds its agent binary as a session the list starts for
 another provider does — `[agents]` in `config.toml`, then `PATH`: a hub never

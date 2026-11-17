@@ -23,7 +23,8 @@ import (
 // spells it this way.
 const minCraze = "0.2.0"
 
-// wantAgents are the agents plan 041 §3.6 lists.
+// wantAgents are the agents plan 041 §3.6 lists. There is no claude preset
+// (plan 052 R2-9): only Claude Code loads these, and it must not target claude.
 var wantAgents = []string{"astra", "cursor", "delegate", "grok", "muse", "sol", "wonder"}
 
 func repoRoot(t *testing.T) string {
@@ -80,6 +81,37 @@ func frontmatter(text string) (map[string]string, string, error) {
 	return fm, body, nil
 }
 
+// noSelfRule is how every preset's body opens (plan 052 § J4): the no-self
+// rule, ahead of its forwarding mandate, so a preset added later inherits it.
+const noSelfRule = "## Don't call yourself\n\nNever use craze to reach the provider you already run on: " +
+	"Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok` and a craze native session on `native`. " +
+	"For your own provider use your own sub-agent tool (Claude Code's is the Agent tool), not craze."
+
+// forwardMandate is the start of every preset's forwarding mandate.
+const forwardMandate = "You forward a task to a craze session"
+
+// checkNoSelfRule returns what is wrong with a preset's opening: its body
+// must start with noSelfRule, which must come before the forwarding mandate,
+// and say what to do with craze's refusal.
+func checkNoSelfRule(text string) []string {
+	_, body, err := frontmatter(text)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	body = strings.TrimLeft(body, "\n")
+	var bad []string
+	if !strings.HasPrefix(body, noSelfRule) {
+		bad = append(bad, "body does not open with the no-self rule")
+	}
+	if rule, mandate := strings.Index(body, noSelfRule), strings.Index(body, forwardMandate); rule < 0 || mandate < 0 || rule > mandate {
+		bad = append(bad, "the no-self rule does not come before the forwarding mandate")
+	}
+	if !strings.Contains(body, "Exit 2 and stderr says `this agent already runs on`: reply with the stderr text exactly, and stop.") {
+		bad = append(bad, "body does not relay craze's self-delegation refusal")
+	}
+	return bad
+}
+
 // checkAgent returns what is wrong with one agent file, or nil.
 func checkAgent(text string) []string {
 	fm, body, err := frontmatter(text)
@@ -127,6 +159,10 @@ func checkAgent(text string) []string {
 	}
 	return bad
 }
+
+// claudeNote is the phrase every place that states a minimum for the claude
+// target spells; the release that ships it replaces it, as webNote's.
+const claudeNote = "a craze newer than 0.3.0"
 
 // webNote is the phrase every place that states a minimum for web= spells;
 // RELEASING.md's release step replaces it with the version that ships the
@@ -287,6 +323,9 @@ func TestAgents(t *testing.T) {
 		for _, bad := range checkAgent(text) {
 			t.Errorf("agents/%s.md: %s", name, bad)
 		}
+		for _, bad := range checkNoSelfRule(text) {
+			t.Errorf("agents/%s.md: %s", name, bad)
+		}
 		if fm, _, err := frontmatter(text); err == nil && fm["name"] != name {
 			t.Errorf("agents/%s.md: name is %q, want %q", name, fm["name"], name)
 		}
@@ -370,6 +409,55 @@ func checkAllowList(text string, mustList bool) []string {
 	return bad
 }
 
+// TestClaudeTarget (plan 052 § J3–J5, AC25): craze:delegate accepts claude and
+// refuses mode=ask and web= with it; the "rules do not apply" line is per
+// target; the skill is provider-neutral, names claude (with its direct
+// command and its minimum), web search and each agent's own sub-agent tool,
+// and states the no-self rule; the plugin page has claude's cost row.
+func TestClaudeTarget(t *testing.T) {
+	root := repoRoot(t)
+	delegate := readFile(t, root, "agents/delegate.md")
+	for _, want := range []string{
+		"the provider: `native`, `cursor`, `grok` or `claude`",
+		"`delegate: invalid target line: mode=ask is not available on claude`",
+		"delegate: invalid target line: web= applies to the native provider",
+		"a claude session runs under the user's own Claude Code settings, hooks and permission rules",
+	} {
+		if !strings.Contains(delegate, want) {
+			t.Errorf("agents/delegate.md does not contain %s", want)
+		}
+	}
+	for _, name := range wantAgents {
+		if strings.Contains(readFile(t, root, "agents/"+name+".md"), "do not apply inside craze") {
+			t.Errorf("agents/%s.md: the rules-and-hooks line is not per target", name)
+		}
+	}
+	fm, _, err := frontmatter(readFile(t, root, "skills/craze/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"from your agent (Claude Code, Cursor, Grok or a craze session)", "Claude", "your own sub-agent tool"} {
+		if !strings.Contains(fm["description"], want) {
+			t.Errorf("skills/craze/SKILL.md: description does not contain %s", want)
+		}
+	}
+	for rel, wants := range map[string][]string{
+		"skills/craze/SKILL.md": {"## Don't call yourself", "the Agent tool", "Cursor's own sub-agents", "Grok's own sub-agents",
+			"the `agent` tool", "use `agent`, not `craze:sol`", "| `claude` |", "--provider claude", claudeNote, webNote,
+			"this agent already runs on", "unpriced", "`run_in_background`) is **not**", "There is no `craze:claude`"},
+		"skills/craze/references/commands.md": {"`claude`", claudeNote, "--allow-same-provider", "this agent already runs on"},
+		"docs/getting-started/claude-code.md": {"Don't call yourself", "--provider claude", "this agent already runs on",
+			"claude: unpriced, on your Claude plan", claudeNote},
+	} {
+		text := readFile(t, root, rel)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %s", rel, want)
+			}
+		}
+	}
+}
+
 // TestCheckersRefuse proves the checkers above can fail: each broken input
 // is reported, so a passing TestAgents is not vacuous.
 func TestCheckersRefuse(t *testing.T) {
@@ -402,6 +490,16 @@ func TestCheckersRefuse(t *testing.T) {
 	}
 	if len(checkAgent(strings.Replace(good, "<12 hex digits>", "3fa91c07be42", 1))) == 0 {
 		t.Error("checkAgent accepted a body with no placeholder")
+	}
+	agent := "---\nname: x\n---\n" + noSelfRule + "\n\n" + forwardMandate + "\nExit 2 and stderr says `this agent already runs on`: reply with the stderr text exactly, and stop.\n"
+	if bad := checkNoSelfRule(agent); len(bad) != 0 {
+		t.Errorf("checkNoSelfRule refused a good opening: %v", bad)
+	}
+	if len(checkNoSelfRule(strings.Replace(agent, noSelfRule+"\n\n", "", 1))) == 0 {
+		t.Error("checkNoSelfRule accepted a body without the rule")
+	}
+	if len(checkNoSelfRule("---\nname: x\n---\n"+forwardMandate+"\n\n"+noSelfRule)) == 0 {
+		t.Error("checkNoSelfRule accepted the rule after the forwarding mandate")
 	}
 	if len(checkSkill("---\nname: x\n---\nbody")) == 0 {
 		t.Error("checkSkill accepted a skill with no description")

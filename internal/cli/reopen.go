@@ -154,6 +154,11 @@ func runNewLoad(cmd *cobra.Command, f *newFlags, args []string) error {
 	if err != nil {
 		return fail(errkind.Config, err, "%s", err.Error())
 	}
+	// The self-delegation guard (plan 052 § J2, R2-6) on the saved row's
+	// provider, before anything is reopened: a usage error, exit 2.
+	if err := selfDelegation(row.Provider, f.allowSame); err != nil {
+		return err
+	}
 	env := rundir.ProcessEnv()
 	raw, hello, err := reopenThroughHub(ctx, env, roster.SavedID(row), row.WebSearch)
 	if err != nil {

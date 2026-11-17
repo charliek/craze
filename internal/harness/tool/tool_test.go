@@ -76,3 +76,18 @@ func TestTruncationTruncated(t *testing.T) {
 		}
 	}
 }
+
+// TestWithSessionProvider (plan 052 § J1): the caller marker is set to the
+// session's provider, once, last, over any the environment inherited.
+func TestWithSessionProvider(t *testing.T) {
+	base := []string{"A=1", SessionProviderEnv + "=cursor", "NOEQUALS", SessionProviderEnv + "=grok", "B=2"}
+	orig := slices.Clone(base)
+	got := WithSessionProvider(base, "native")
+	want := []string{"A=1", "NOEQUALS", "B=2", SessionProviderEnv + "=native"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("WithSessionProvider =\n%q\nwant\n%q", got, want)
+	}
+	if !slices.Equal(base, orig) {
+		t.Fatal("WithSessionProvider changed its input")
+	}
+}

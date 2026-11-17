@@ -101,6 +101,12 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     # written -- or, unparseable, print a diagnostic into a run whose stderr a
     # case reads. A case that wants it sets it itself.
     monkeypatch.delenv("CRAZE_JOURNAL", raising=False)
+    # The caller markers craze new's self-delegation guard reads (plan 052
+    # § J2): a suite run from inside Claude Code (CLAUDECODE=1), cursor-agent
+    # or a craze session would otherwise refuse a test's craze new on that
+    # provider. A case that wants one sets it.
+    for name in ("CLAUDECODE", "CURSOR_AGENT", "CRAZE_SESSION_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
     # The shipped model catalog brings its providers' variable names into
     # every native table (plan 031 §3.13): a key exported in the developer's
     # shell would fund a test's native session, change its model list and be

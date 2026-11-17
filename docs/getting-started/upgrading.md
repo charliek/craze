@@ -140,6 +140,23 @@ reach it. What changes for everyone else:
   session's provider (`cursor`, `grok`, `claude`), replacing any it inherited;
   [the hub](../reference/cli.md#the-hub) removes it from its hosts'.
   Nothing else in a cursor or grok agent's environment changes.
+- **`craze new` refuses the calling agent's own provider**, exit 2, kind
+  `usage`: `craze: this agent already runs on <provider>; use your own
+  sub-agent tool for <provider> work, not craze (--allow-same-provider
+  overrides)`. The caller is `CRAZE_SESSION_PROVIDER` (which a native session's
+  shell commands now carry too, as `native`), else Claude Code's `CLAUDECODE=1`
+  or a standalone cursor-agent's `CURSOR_AGENT`. A script run from inside a
+  craze session that starts a session on that session's own provider — `craze
+  new --provider native` from a native session's shell, say — now exits 2;
+  `--allow-same-provider` (new) restores the old behaviour ([Starting your own
+  provider](../reference/cli.md#starting-your-own-provider)). `craze send`,
+  `wait` and `cancel` are unchanged.
+- **The Claude Code plugin's skill is provider-neutral**: any agent, not only
+  Claude Code, can follow it, and it names claude as a target, reached with
+  `craze new --wait --provider claude` from an agent that does not run on
+  Claude. There is no `craze:claude` agent; every agent file now opens with
+  the rule never to call its own provider ([Claude Code
+  sub-agents](claude-code.md#dont-call-yourself)).
 - **A tool still running when a turn fails is shown failed.** A turn that
   fails — the agent's error, or the agent exiting — closes the tool rows it
   left running, on every provider, where they used to spin on.

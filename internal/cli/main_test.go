@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -101,6 +102,13 @@ func TestMain(m *testing.M) {
 	// Mac would not. A test about the session sets rundir.GUISessionEnv
 	// itself, over this.
 	_ = os.Setenv(rundir.GUISessionEnv, "1")
+	// The caller markers the self-delegation guard reads (plan 052 § J2): a
+	// run of the suite from inside Claude Code (CLAUDECODE=1), cursor-agent
+	// or a craze session would otherwise refuse a test's craze new on that
+	// provider. None is set for the package; a test that wants one sets it.
+	for _, name := range []string{claudeCodeEnv, cursorAgentEnv, agent.SessionProviderEnv} {
+		_ = os.Unsetenv(name)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(runtimeDir)
 	if leaked := journaledBy(os.Getpid(), dirs, before); len(leaked) > 0 {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/harness"
 )
 
 // okStatus is a saved claude.ai Max login, `claude auth status --json`'s
@@ -83,6 +84,15 @@ func TestSpawnEnvCursorAndGrokGainOnlyTheMarker(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Fatalf("%s: %q, want %q", p.Name(), got, want)
 		}
+	}
+}
+
+// TestNativeMarkerIsNativesName (plan 052 § J1): the marker native's shell
+// carries (harness.NativeProvider; the harness cannot import this package) is
+// the native provider's id, which the guard compares against a --provider.
+func TestNativeMarkerIsNativesName(t *testing.T) {
+	if harness.NativeProvider != NativeProvider().Name() {
+		t.Fatalf("harness.NativeProvider = %q, native's name = %q", harness.NativeProvider, NativeProvider().Name())
 	}
 }
 

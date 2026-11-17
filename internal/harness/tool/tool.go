@@ -304,7 +304,8 @@ type Env struct {
 	// an Env the dispatcher did not hand out.
 	live *atomic.Pointer[redact.Replacer]
 	// Environ is the environment a child process gets: the user's, less
-	// craze's own provider keys (ChildEnviron). nil is no environment
+	// craze's own provider keys (ChildEnviron), and with the caller marker
+	// (WithSessionProvider). nil is no environment
 	// configured, and a tool that starts processes refuses to run rather
 	// than fall back to craze's own, provider keys and all (plan 019 §3.8).
 	Environ []string
@@ -474,6 +475,26 @@ func (e Env) Resolve(path string) string {
 // AbortedText is opencode's result text for a call cut short by a cancel
 // (session/processor.ts:585-608).
 const AbortedText = "Tool execution aborted"
+
+// SessionProviderEnv is the caller marker (plan 052 § J1): every agent a craze
+// session starts is told its session's provider in it — an ACP agent in its
+// own environment, native in its shell's — so a `craze new` run from there
+// knows which provider it would be calling itself on.
+const SessionProviderEnv = "CRAZE_SESSION_PROVIDER"
+
+// WithSessionProvider returns environ with SessionProviderEnv set to
+// provider: any it carried, from whoever started craze, is dropped, and the
+// marker is the last entry. It returns a new slice and leaves environ alone.
+func WithSessionProvider(environ []string, provider string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, kv := range environ {
+		if name, _, _ := strings.Cut(kv, "="); name == SessionProviderEnv {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, SessionProviderEnv+"="+provider)
+}
 
 // ChildEnviron returns environ (os.Environ's form, NAME=value) without the
 // variables that carry craze's own provider keys: every name in keyNames —

@@ -181,6 +181,11 @@ type toolset struct {
 	closeOnce sync.Once
 }
 
+// NativeProvider is the native provider's id (agent.NativeProvider's name):
+// the caller marker's value in the environment of every command a native
+// session runs (tool.WithSessionProvider, plan 052 § J1).
+const NativeProvider = "native"
+
 // openTools builds a session's tools for r, its starting model:
 //
 //   - the redactor, over every key the table knows of — every provider's,
@@ -480,11 +485,15 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if child != nil && child.Locks != nil {
 		ts.locks = child.Locks
 	}
+	// native's caller marker (plan 052 § J1) in every command's environment,
+	// a sub-agent's too: a native session that runs `craze new` calls it from
+	// native.
+	environ := tool.WithSessionProvider(tool.ChildEnviron(os.Environ(), keyNames), NativeProvider)
 	env := tool.Env{
 		Workspace: workspace,
 		Home:      home,
 		Redactor:  red,
-		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
+		Environ:   environ,
 		Locks:     ts.locks,
 		Closing:   ts.closing,
 		// Every session's commands are tracked (plan 033 C14r, r12 #6a),

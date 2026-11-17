@@ -617,6 +617,52 @@ def test_new_start_failure_names_the_missing_agent(craze_bin: Path, fake_agent_b
     _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
 
 
+def _same_provider(p: str) -> str:
+    """The self-delegation guard's refusal of provider p (plan 052 § J2)."""
+    return (f"craze: this agent already runs on {p}; use your own sub-agent tool for {p} work, "
+            "not craze (--allow-same-provider overrides)")
+
+
+def test_new_refuses_the_callers_own_provider(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 052 § J2, J6: from Claude Code (CLAUDECODE=1, no craze marker)
+    `craze new --provider claude` is refused before any hub is asked -- exit 2,
+    the guard's line, and under --json the usage object. With
+    CRAZE_SESSION_PROVIDER=cursor beside it (a cursor session Claude Code
+    started) the marker wins and the guard lets claude by: the create goes to
+    the hub, and its start fails at the adapter that is nowhere on an empty
+    PATH, as test_new_start_failure_names_the_missing_agent's does -- no claude
+    is spawned."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    config = craze_home / "config.toml"
+    config.write_text(f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n', encoding="utf-8")
+    work = tmp_path / "proj-guard"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDECODE", "1")
+    line = _same_provider("claude")
+    out = _new(craze_bin, "--provider", "claude", "-C", str(work), "hello")
+    assert (out.returncode, out.stdout, out.stderr.decode()) == (2, b"", line + "\n"), out
+    out = _new(craze_bin, "--json", "--provider", "claude", "-C", str(work), "hello")
+    assert out.returncode == 2 and out.stderr.decode() == line + "\n", out
+    assert json.loads(out.stdout) == {"error": {"message": line, "kind": "usage", "retryable": False}}, out
+    assert not list(_hubs(_home()).glob("*.json"))
+
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    out = subprocess.run(
+        [str(craze_bin), "new", "--json", "--provider", "claude", "-C", str(work)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env={**os.environ, "CRAZE_SESSION_PROVIDER": "cursor", "PATH": str(empty), "CRAZE_AGENT_BIN": ""},
+        timeout=6 * WAIT,
+    )
+    cause = _start_failure(out)
+    assert cause.startswith("agent binary not found: claude-agent-acp is not on PATH"), cause
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
 def test_new_json_failure_with_its_stdout_gone_still_says_why(craze_bin: Path, tmp_path: Path) -> None:
     """A `craze new --json` failure whose stdout reader has already gone: the
     JSON object cannot be written, but craze new still exits 1 with its stderr

@@ -88,6 +88,9 @@ type newFlags struct {
 	// load is --load (plan 046 B6): a saved session to reopen through the
 	// hub instead of a new one (reopen.go's runNewLoad).
 	load string
+	// allowSame is --allow-same-provider (plan 052 § J2): the self-delegation
+	// guard's override (selfguard.go).
+	allowSame bool
 
 	// --wait and the flags only it takes (plan 041 §3.2, new_wait.go).
 	wait      bool
@@ -150,6 +153,8 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo: the session's agent asks for permission, and a client answers")
 	cmd.Flags().StringVar(&f.title, "title", "", "name the session this from its start, pinned as /rename pins a title (one line, at most 120 characters)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result, or with --load session.reopen's) as JSON; with --wait, the result")
+	cmd.Flags().BoolVar(&f.allowSame, allowSameProviderFlag, false, "start the session even on the provider the agent running this command is on "+
+		"(CRAZE_SESSION_PROVIDER, or Claude Code's or cursor-agent's own marker), which craze new otherwise refuses")
 	cmd.Flags().StringVar(&f.load, "load", "", "reopen this saved session through the hub instead of starting one: an id craze ps --saved prints, "+
 		"or a whole craze or provider session id; it waits for the session's start and sends no prompt")
 	// --wait (plan 041 §3.2): another path, past the hub — the session's
@@ -184,6 +189,9 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	// hub chooses: its configured default.
 	provider, err := newProvider(f, newDefaultTarget)
 	if err != nil {
+		return err
+	}
+	if provider, err = newGuard(f, provider, newDefaultTarget); err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
@@ -456,4 +464,25 @@ func newProvider(f *newFlags, target func() string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// newGuard is plain craze new's self-delegation guard (plan 052 § J2, R2-6),
+// on the provider the create would start: provider when one is named, and
+// otherwise the hub's own default (target: newDefaultTarget, read before the
+// create), resolved only when there is a caller to check it against. A
+// default that passes is bound into the create, as --fast's is (newProvider),
+// so the id checked is the one the create starts; with no default, or one no
+// provider has, nothing is checked and the hub's own refusal stands.
+func newGuard(f *newFlags, provider string, target func() string) (string, error) {
+	if f.allowSame || !callerKnown() {
+		return provider, nil
+	}
+	if provider != "" {
+		return provider, selfDelegation(provider, false)
+	}
+	id := target()
+	if _, err := agent.ProviderByName(id); id == "" || err != nil {
+		return "", nil
+	}
+	return id, selfDelegation(id, false)
 }

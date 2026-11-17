@@ -19,6 +19,7 @@ import (
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/harness/tool"
 )
 
 // The claude provider (plan 052 § A): claude-agent-acp, the ACP project's
@@ -44,7 +45,8 @@ const (
 	ClaudeExecutableEnv = "CLAUDE_CODE_EXECUTABLE"
 	// SessionProviderEnv is the caller marker (plan 052 § J1): every agent a
 	// craze session starts gets it, set to the session's provider id.
-	SessionProviderEnv = "CRAZE_SESSION_PROVIDER"
+	// Native's shell carries it too (tool.WithSessionProvider).
+	SessionProviderEnv = tool.SessionProviderEnv
 	// claudeLoginHint is what an auth error tells the user to run.
 	claudeLoginHint = "claude auth login"
 	// claudeAdapterInstall is the adapter's install command (Node 22 or newer);
