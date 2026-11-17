@@ -10,8 +10,8 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
-// The live ACP session's side questions (/btw, plan 040 §3.5): grok's and
-// gx's x.ai/btw, which answers in one piece beside a running turn. Nothing is
+// The live ACP session's side questions (/btw, plan 040 §3.5): grok's
+// x.ai/btw, which answers in one piece beside a running turn. Nothing is
 // journaled or emitted: the question is not a prompt and the answer is not
 // part of the transcript.
 
@@ -28,7 +28,7 @@ const (
 	asideTruncated = "[…truncated]"
 )
 
-// Asides is Asider's: the provider's bit (grok and gx on, cursor off).
+// Asides is Asider's: the provider's bit (grok on, cursor off).
 func (s *session) Asides() bool { return s.provider().Aside() }
 
 // Aside is Asider's. onDelta is never called: x.ai/btw answers in one piece.
@@ -51,7 +51,7 @@ func (s *session) Aside(ctx context.Context, req AsideRequest, onDelta func(stri
 	answer, err := client.Aside(ctx, foldAside(req))
 	switch {
 	case errors.Is(err, acp.ErrUnsupported):
-		return AsideResult{}, fmt.Errorf("%w: this agent does not serve x.ai/btw; update grok or gx", ErrAsideUnsupported)
+		return AsideResult{}, fmt.Errorf("%w: this agent does not serve x.ai/btw; update grok", ErrAsideUnsupported)
 	case errors.Is(err, acp.ErrNoSession):
 		return AsideResult{}, fmt.Errorf("%w: no session", ErrAsideNotReady)
 	case errors.Is(err, acp.ErrEmptyAnswer):

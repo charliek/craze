@@ -26,7 +26,7 @@ func NewRootCmd() *cobra.Command {
 		// "built-in agent", never "native": the root --help names native
 		// exactly once, as a --provider choice (plan 028 D-65,
 		// TestRootHelpNamesNativeOnceAndNeverTheHarness).
-		Long: "craze is a terminal UI for coding agents: cursor-agent, grok or gx over ACP, or craze's own " +
+		Long: "craze is a terminal UI for coding agents: cursor-agent or grok over ACP, or craze's own " +
 			"built-in agent, which needs only a model provider's API key or a ChatGPT plan (see craze auth).",
 		SilenceUsage:  true,
 		SilenceErrors: true,

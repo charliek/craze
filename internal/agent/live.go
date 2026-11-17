@@ -803,7 +803,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			// is announced here, in one delta carrying both sections as the read
 			// loop left them — the Model section it always carried, and the
 			// catalog the new model came with (or the previous model's options
-			// dropped: grok and gx answer a load with no catalog at all, which
+			// dropped: grok answers a load with no catalog at all, which
 			// leaves nothing to drop).
 			s.enqueueDeltaLocked("", Event{}, s.modelDeltaLocked())
 		} else {
@@ -1104,8 +1104,8 @@ func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
 
 // modelBeforeSetCap bounds modelBeforeSet. Eight distinct pre-set values is
 // far past anything a real session reaches before its agent advertises a model
-// option at all — cursor advertises one from session/new, and grok and gx
-// advertise one as soon as they list anything — and the overflow answer
+// option at all — cursor advertises one from session/new, and grok
+// advertises one as soon as they list anything — and the overflow answer
 // suppresses rather than adopts, so the bound can be small.
 const modelBeforeSetCap = 8
 
@@ -1214,7 +1214,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.mu.Lock()
 	s.sessionID = res.SessionID
 	// The merge. Models come from the result (else initialize's modelState),
-	// modes from the result else the provider's fallback — grok and gx return
+	// modes from the result else the provider's fallback — grok returns
 	// neither modes nor configOptions on a load — so the config chips are
 	// simply absent after a resume, which plan 013 §4 documents. Tools,
 	// Subagents, Todos, Commands, Plugins and Title keep whatever the replay
@@ -3065,7 +3065,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// A replayed prompt arrives in chunks and has to draw one user block,
 		// so the chunks are coalesced and pushed out by the next update of
 		// any other kind (or by replay end). Outside a replay the case is
-		// deliberately absent: grok and gx echo the user's own prompt live,
+		// deliberately absent: grok echoes the user's own prompt live,
 		// and emitting that would double every user block in the TUI and add
 		// user lines to `craze prompt --json`.
 		if u.SessionUpdate == updateUserMessage {

@@ -2,7 +2,7 @@
 
 craze is a terminal UI and CLI for Linux and macOS that drives a coding agent
 over ACP (the Agent Client Protocol): **Cursor** (`cursor-agent`), **Grok**
-(`grok`), **gx** (a third-party fork of the Grok CLI), or craze's own **native**
+(`grok`), or craze's own **native**
 agent, which runs inside craze against a model provider's API or a ChatGPT plan
 with no other CLI to install. You own the chrome; the provider still runs the
 agent.
@@ -85,7 +85,7 @@ sudo apt install craze
 The [Quick Start](docs/getting-started/quick-start.md#install) has the direct
 `.deb`, `go install`, building from source and what `craze version` reports. To
 run craze you also need a way to reach a model: the native provider (an API key
-or a ChatGPT plan), or `cursor-agent`, `grok` or `gx` installed and logged in
+or a ChatGPT plan), or `cursor-agent` or `grok` installed and logged in
 ([prerequisites](docs/getting-started/quick-start.md#prerequisites)).
 Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
@@ -93,7 +93,7 @@ Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
 ```shell
 craze                       # pick a provider, then the TUI in the current directory
-craze --provider grok       # skip the picker (cursor, grok, gx or native)
+craze --provider grok       # skip the picker (cursor, grok or native)
 craze auth login fireworks  # connect a native provider; `craze auth login chatgpt` signs in with a ChatGPT plan
 craze --provider native     # start a native session
 craze -c                    # continue the newest session in this workspace

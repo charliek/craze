@@ -72,17 +72,17 @@ func TestServeUnattendedIsCrazePromptsPolicy(t *testing.T) {
 // TestPromptsPolicyIsHeadless: craze prompt's session runs headlessApproval's
 // policy — the one unattendedPolicy hands an unattended host — so the two
 // cannot drift apart: whole for a native session, and for an ACP one (cursor,
-// grok, gx; nil is cursor) all but the plan, which an unattended host returns
+// grok; nil is cursor) all but the plan, which an unattended host returns
 // (X28) where craze prompt accepts it (unchanged: v2 parity).
 func TestPromptsPolicyIsHeadless(t *testing.T) {
 	native, cursor := agent.NativeProvider(), agent.CursorProvider()
-	grok, gx := agent.GrokProvider(), agent.GxProvider()
+	grok := agent.GrokProvider()
 	for _, force := range []bool{true, false} {
 		o := (&promptOpts{force: force}).agentOptions("/w", headlessApproval(force), nil)
 		if o.Approval == nil || o.Approval.Plan != agent.ApprovalAccept {
 			t.Fatalf("craze prompt's plan policy changed: %+v", o.Approval)
 		}
-		for _, p := range []*agent.Provider{nil, &cursor, &grok, &gx, &native} {
+		for _, p := range []*agent.Provider{nil, &cursor, &grok, &native} {
 			u := agent.Options{Force: force, Provider: p}
 			unattendedPolicy(&u)
 			want := *o.Approval

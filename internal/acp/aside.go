@@ -18,7 +18,7 @@ type BtwParams struct {
 
 // btwAck is the reply, nested one level under the JSON-RPC result:
 // {"result":{"result":{"answer":"…"}}} as the client sees it (verified live on
-// grok 1.0.50 and gx 1.0.45).
+// grok 1.0.50).
 type btwAck struct {
 	Result struct {
 		Answer string `json:"answer"`

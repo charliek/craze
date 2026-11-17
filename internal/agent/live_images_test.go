@@ -221,13 +221,13 @@ func TestImageBlockURIIsAFileURL(t *testing.T) {
 	}
 }
 
-// TestImagesDespiteCapabilityIsGrokAndGx: the dialect flag is on for grok and
-// gx (P5) and off for cursor; native never reaches the ACP path.
-func TestImagesDespiteCapabilityIsGrokAndGx(t *testing.T) {
+// TestImagesDespiteCapabilityIsGrok: the dialect flag is on for grok
+// (P5) and off for cursor; native never reaches the ACP path.
+func TestImagesDespiteCapabilityIsGrok(t *testing.T) {
 	for _, tc := range []struct {
 		p    Provider
 		want bool
-	}{{GrokProvider(), true}, {GxProvider(), true}, {CursorProvider(), false}, {NativeProvider(), false}} {
+	}{{GrokProvider(), true}, {CursorProvider(), false}, {NativeProvider(), false}} {
 		if got := tc.p.imagesDespiteCapability; got != tc.want {
 			t.Errorf("%s: imagesDespiteCapability = %v, want %v", tc.p.Name(), got, tc.want)
 		}
@@ -271,7 +271,7 @@ func TestPromptDumpReceivesTheImageBlocks(t *testing.T) {
 }
 
 // TestTheDialectFlagDecidesImagesAgainstImageFalse: grok-prompt-dump
-// advertises image:false, as grok 1.0.30 and gx do. grok and gx send the image
+// advertises image:false, as grok 1.0.30 does. grok sends the image
 // block regardless (imagesDespiteCapability, P5); a provider without the flag
 // sends the image as [Image #1: <path>] text in the block's place.
 func TestTheDialectFlagDecidesImagesAgainstImageFalse(t *testing.T) {
@@ -281,7 +281,7 @@ func TestTheDialectFlagDecidesImagesAgainstImageFalse(t *testing.T) {
 		name  string
 		p     Provider
 		image bool
-	}{{"grok", GrokProvider(), true}, {"gx", GxProvider(), true}, {"image:false without the flag", noFlag, false}} {
+	}{{"grok", GrokProvider(), true}, {"image:false without the flag", noFlag, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			imageHome(t)
 			t.Setenv("XAI_API_KEY", "")

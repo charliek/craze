@@ -82,7 +82,7 @@ func hubOptions(t *testing.T) (protocol.CreateOptionsResult, optionsLog) {
 // HOME's own .craze; its binaries are found as a host the hub creates finds
 // them — [agents] in that config, then PATH — whatever CRAZE_AGENT_BIN says
 // (here, for a cursor launch, a binary that is not there, which the TUI's own
-// column would report); gx, missing, is not listed; the default is the
+// column would report); the default is the
 // config's provider; and nothing is logged.
 func TestHubCreateOptionsReadsTheProcessCrazeHome(t *testing.T) {
 	crazeDir, pathDir := optionsMachine(t)
@@ -134,8 +134,7 @@ func TestHubCreateOptionsNamesTheHubsPID(t *testing.T) {
 }
 
 // TestHubDefaultProvider (decision 8): the default is present only for a
-// set, known provider — one craze knows need be neither listed (gx, not
-// installed) nor ready — and absent for none set, an empty one, an unknown
+// set, known provider — one craze knows need not be ready (native, with no key) — and absent for none set, an empty one, an unknown
 // one, and no config.toml at all: never agent.ProviderByName("")'s cursor.
 func TestHubDefaultProvider(t *testing.T) {
 	crazeDir, _ := optionsMachine(t)
@@ -150,7 +149,7 @@ func TestHubDefaultProvider(t *testing.T) {
 		{"an unknown provider", "provider = \"nope\"\n", ""},
 		{"grok", "provider = \"grok\"\n", "grok"},
 		{"native, not ready", "provider = \"native\"\n", "native"},
-		{"gx, not installed", "provider = \"gx\"\n", "gx"},
+		{"gx, a provider craze no longer has", "provider = \"gx\"\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_ = os.Remove(config)

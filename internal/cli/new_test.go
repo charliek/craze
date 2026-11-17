@@ -59,8 +59,8 @@ func TestNewRefusesBeforeTheHub(t *testing.T) {
 // case that reaches the hub meets this test binary's none (hub.ErrNoHub).
 func TestNewProviderBeforeTheHub(t *testing.T) {
 	const (
-		unknown   = `craze: unknown provider "nosuch" (want cursor, grok, gx, or native)` + "\n"
-		noDefault = "craze new: no default provider yet; pass --provider cursor, grok, gx or native\n"
+		unknown   = `craze: unknown provider "nosuch" (want cursor, grok, or native)` + "\n"
+		noDefault = "craze new: no default provider yet; pass --provider cursor, grok or native\n"
 	)
 	noHub := regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`)
 	for _, tc := range []struct {
@@ -79,7 +79,7 @@ func TestNewProviderBeforeTheHub(t *testing.T) {
 		{name: "valid", argv: []string{"--provider", "grok"}, code: 1, wantLike: noHub},
 		{name: "valid, an invalid env and config not consulted", config: "provider = \"bogus\"\n", env: "bogus",
 			argv: []string{"--provider", "native"}, code: 1, wantLike: noHub},
-		{name: "valid, padded", argv: []string{"--provider", " gx "}, code: 1, wantLike: noHub},
+		{name: "valid, padded", argv: []string{"--provider", " grok "}, code: 1, wantLike: noHub},
 		{name: "absent, no default", code: 1, want: noDefault},
 		{name: "empty, no default", argv: []string{"--provider", ""}, code: 1, want: noDefault},
 		{name: "absent, no default, CRAZE_PROVIDER is not the hub's default", env: "grok", code: 1, want: noDefault},

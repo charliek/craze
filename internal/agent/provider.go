@@ -27,7 +27,6 @@ const (
 const (
 	cursorName = "cursor"
 	grokName   = "grok"
-	gxName     = "gx"
 	nativeName = "native"
 	// cursorImplementPrompt is what leaving plan mode sends as the user's
 	// turn; it is provider-shaped because the wording is the agent's, not
@@ -81,7 +80,7 @@ type Provider struct {
 	planUpdatesAreTodos bool
 	// imagesDespiteCapability sends a prompt's images as image blocks even to
 	// an agent whose initialize says promptCapabilities.image is false (plan
-	// 033 P5, §3.4). grok 1.0.30 and gx advertise false and their handler
+	// 033 P5, §3.4). grok 1.0.30 advertises false and its handler
 	// forwards image blocks all the same; without the flag, an agent that says
 	// false gets each image as [Image #N: <path>] text instead. A refusal is
 	// still caught either way: a -32602 before the agent did anything is sent
@@ -92,15 +91,10 @@ type Provider struct {
 	// when this is unknown and titleTaskFallback is set (cursor).
 	subagentToolName  string
 	titleTaskFallback bool
-	// optional keeps a provider out of the startup picker unless a binary for
-	// it resolves. gx is a personal fork; cursor and grok are always offered,
-	// so an empty picker is impossible.
-	optional bool
 	// hidden keeps a provider out of Providers() altogether: it lives in the
 	// hidden list, which only ProviderByName reads, so it resolves by id but
 	// no listing ever shows it, and it is never persisted as the default
-	// (plan 018 §3.4). optional is "listed when installed"; hidden is "never
-	// listed".
+	// (plan 018 §3.4).
 	hidden bool
 	// resumable is a provider whose sessions craze can load again, so they
 	// are written to the session index and offered by --continue, --resume
@@ -301,7 +295,7 @@ func GrokProvider() Provider {
 			ParameterizedPicker: true,
 			Interject:           true,
 		},
-		// x.ai/btw (plan 040 §3.5); gx inherits it through GxProvider.
+		// x.ai/btw (plan 040 §3.5).
 		aside:            true,
 		dialect:          acp.DialectGrok,
 		subagentToolName: "spawn_subagent",
@@ -323,20 +317,6 @@ func GrokProvider() Provider {
 		planUpdatesAreTodos:     true,
 		imagesDespiteCapability: true,
 	}
-}
-
-// GxProvider is charliek/grok-build's `gx` fork. It is grok on the wire —
-// same dialect, same auth, same ~/.grok home, same skills and plugins — so it
-// is spelled as the difference rather than a second copy of the table: a
-// different binary, a different login hint, and the one field that keeps it
-// out of the picker on machines that do not have it.
-func GxProvider() Provider {
-	p := GrokProvider()
-	p.name = gxName
-	p.defaultBins = []string{gxName}
-	p.loginHint = "gx login"
-	p.optional = true
-	return p
 }
 
 // NativeProvider is craze's own harness (plan 018): a provider craze runs in
@@ -404,9 +384,9 @@ func NativeProvider() Provider {
 // listing — the picker, --help, the unknown-provider error, and any written
 // later — leaves it out without having to remember a filter (plan 018
 // §3.4). Native was one of those until H7's smoke passed on both platforms;
-// D-65 lists it here, after gx (plan 028 §3.16).
+// D-65 lists it here, after grok (plan 028 §3.16).
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), GxProvider(), NativeProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
@@ -488,19 +468,6 @@ func ProviderNames() []string {
 	return names
 }
 
-// DefaultProviders is the non-optional subset of Providers: what the picker
-// falls back to when the caller supplies no availability-filtered list.
-func DefaultProviders() []Provider {
-	providers := Providers()
-	out := make([]Provider, 0, len(providers))
-	for _, p := range providers {
-		if !p.optional {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // ProviderByName looks up a provider by id: the listed providers first, then
 // the hidden ones, which is how --provider, $CRAZE_PROVIDER and config.toml
 // reach a provider no listing shows (plan 018 §3.4). An empty name is unset,
@@ -534,10 +501,6 @@ func (p Provider) DisplayName() string {
 	return p.name
 }
 
-// Optional reports whether p is left out of the startup picker on a machine
-// that has no binary for it.
-func (p Provider) Optional() bool { return p.optional }
-
 // Hidden reports whether p is one no listing shows: resolvable by id through
 // ProviderByName, never in Providers, and never persisted as the default
 // (plan 018 §3.4). Whether its sessions are indexed is Resumable's question,
@@ -546,7 +509,7 @@ func (p Provider) Hidden() bool { return p.hidden }
 
 // Resumable reports whether craze can load p's sessions again: they are
 // written to the session index, and --continue, --resume and the resume
-// picker offer them (plan 028 §3.5). Cursor, grok, gx and native are; a
+// picker offer them (plan 028 §3.5). Cursor, grok and native are; a
 // provider RegisterHiddenProviderForTest plants is not, so its sessions stay
 // out of the index and a row naming one is never offered.
 func (p Provider) Resumable() bool { return p.resumable }
@@ -556,8 +519,8 @@ func (p Provider) Resumable() bool { return p.resumable }
 func (p Provider) InProcess() bool { return p.inProcess }
 
 // Aside reports whether p's sessions answer side questions (/btw, plan 040
-// §3.3): native's do (its session's Asides is always true); grok's and gx's
-// are turned on with their x.ai/btw; cursor's stays false.
+// §3.3): native's do (its session's Asides is always true); grok's
+// is turned on with their x.ai/btw; cursor's stays false.
 func (p Provider) Aside() bool { return p.aside }
 
 // BinaryResolves reports whether binary lookup for p succeeds — the same

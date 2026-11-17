@@ -71,7 +71,7 @@ const (
 )
 
 // newProviderChoices is the providers craze new's no-default refusal names,
-// as a choice: "cursor, grok, gx or native".
+// as a choice: "cursor, grok or native".
 var newProviderChoices = joinOrPlain(agent.ProviderNames())
 
 // newClient is who craze new says it is to the hub.
@@ -120,7 +120,7 @@ func newNewCmd() *cobra.Command {
 			"session instead (craze ps --saved lists them), or answers the one running it already. Without --provider the hub's " +
 			"configured default (config.toml's provider) starts it. With --wait it starts an unattended " +
 			"session itself, without the hub — questions answered with their first option; a plan ends its " +
-			"turn and comes back in the result (cursor, grok and gx are never told it was accepted) — " +
+			"turn and comes back in the result (cursor and grok are never told it was accepted) — " +
 			"sends it the prompt (PROMPT, --prompt-file, or stdin) and waits for its turn's result, as " +
 			"craze wait prints one; craze send continues the session.",
 		Args: cobra.ArbitraryArgs,

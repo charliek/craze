@@ -32,7 +32,7 @@ type editCall struct {
 }
 
 // editCalls is every provider's rule (docs/reference/cli.md's table says the
-// same): native and cursor by kind, grok and gx by tool name.
+// same): native and cursor by kind, grok by tool name.
 //
 // Grok is by name because its kind is not a statement about the call: its
 // session/update carries none until the second update of a call, and its
@@ -46,7 +46,6 @@ var editCalls = map[string]editCall{
 	nativeName: {kinds: []string{string(tool.KindEdit)}},
 	cursorName: {kinds: []string{"edit", "delete", "move"}},
 	grokName:   {tools: []string{"search_replace", "write"}, grokPlan: true},
-	gxName:     {tools: []string{"search_replace", "write"}, grokPlan: true},
 }
 
 // is reports whether t is an edit under the rule.
@@ -212,7 +211,7 @@ func relativeTo(ws, resolved string) (string, bool) {
 
 // grokHome is the directory grok keeps its sessions under, for an agent that sees
 // getenv and runs in cwd: GROK_HOME, else ~/.grok. A relative GROK_HOME is taken from
-// the agent's working directory, as grok and gx take it (grok 1.0 and gx 1.0.45 make
+// the agent's working directory, as grok takes it (grok 1.0 makes
 // <cwd>/<GROK_HOME>/sessions at session/new, whatever cwd the session names).
 func grokHome(getenv func(string) string, cwd string) string {
 	if h := getenv("GROK_HOME"); h != "" {

@@ -581,7 +581,7 @@ session's terminal.
 
 ### Model catalog cache
 
-cursor, grok and gx name the models they offer only once a session has
+cursor and grok name the models they offer only once a session has
 started. So that the session list's [`/model`](tui.md#provider-and-model) can
 offer them before one has, every detached host records the model catalog its
 agent installs — at `session/new`, when a loaded session's replay ends, and
@@ -690,7 +690,7 @@ the tab back when it next reports after finding it unowned.
 ### The agent's environment
 
 **The agent loses each host's hook gate.** While craze reports to a host, the
-agent it spawns (cursor-agent, grok or gx) gets craze's environment without the
+agent it spawns (cursor-agent or grok) gets craze's environment without the
 one variable that host's agent integrations gate on: `HERDR_ENV` for herdr,
 `ROOST_AGENT_HOOK` for roost. Otherwise a herdr or roost cursor or grok hook
 installed on this machine would fire inside craze's child and take the pane or
@@ -731,33 +731,22 @@ terminal is reset, the same as the tab title.
 
 ## Provider precedence
 
-Ids are `cursor`, `grok`, `gx`, and `native`. An empty string (`--provider ""`,
+Ids are `cursor`, `grok`, and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
-`gx` is [`charliek/grok-build`](https://github.com/charliek/grok-build), a
-third-party fork of the Grok CLI that speaks the same ACP dialect as
-`grok` — same wire protocol, same auth, same skills and plugins — so
-everything on this page and in the rest of the docs about Grok's behaviour
-applies to it too. It currently shares grok's `~/.grok` home (config, auth,
-sessions, skills); that is the fork's current behaviour, not a guarantee
-craze makes.
-
-gx is gated separately from the other ids: it appears in the startup picker
-when a binary for it resolves, or when it is the resolved default (the default
-is always included, so `Esc` never starts a provider the picker did not show)
-— see [Environment](#environment) below for lookup order; cursor, grok and
-native are always offered, so the picker can never be empty. `--provider gx`
-works regardless of whether a binary resolves, and fails at spawn — `agent
-binary not found: …` — if it does
-not; this matches how `craze prompt --provider gx` and `craze frame
---provider gx` already behave, since neither consults the picker. The picker
-asks the question a gx session would ([Agent binaries](#agent-binaries)):
-`[agents].gx`, else `gx` on `PATH` — and `--agent-bin` or `$CRAZE_AGENT_BIN`
-only when gx is itself the resolved default, since they are that provider's
-binary. Then the override is exclusive, so one pointing at nothing hides gx
-even when `gx` is itself on `PATH`. `native` runs in process (see [Native
-compaction](#native-compaction) below and [Native sessions](tui.md#native-sessions))
-— there is no binary to resolve, so it is never gated the way gx is.
+Every id is always offered in the startup picker, so the picker can never be
+empty; a provider whose agent binary does not resolve is a row with a state,
+not a missing row ([provider states](tui.md#provider-states)), and
+`--provider <id>` works regardless of whether a binary resolves, failing at
+spawn — `agent binary not found: …` — if it does not, as `craze prompt` and
+`craze frame` do, since neither consults the picker. The picker asks the
+question a session of the provider would ([Agent binaries](#agent-binaries)):
+`[agents].<provider>`, else the provider's own name on `PATH` — and
+`--agent-bin` or `$CRAZE_AGENT_BIN` only for the resolved default, since they
+are that provider's binary. The override is then exclusive, so one pointing at
+nothing marks that provider unavailable even when its binary is on `PATH`.
+`native` runs in process (see [Native compaction](#native-compaction) below and
+[Native sessions](tui.md#native-sessions)) — there is no binary to resolve.
 
 For the TUI and `craze prompt`, the first hit wins:
 
@@ -783,7 +772,6 @@ path:
 [agents]
 cursor = "/opt/cursor/bin/cursor-agent"
 grok = "/home/me/.local/bin/grok"
-gx = "/home/me/src/grok-build/bin/gx"
 ```
 
 A session of an ACP provider runs the first of:
@@ -795,7 +783,7 @@ A session of an ACP provider runs the first of:
    `--continue` or `--resume` load, the loaded session's;
 3. `[agents].<provider>`;
 4. the provider's own name on `PATH`: `cursor-agent` then `agent` for
-   cursor, `grok` for grok, `gx` for gx.
+   cursor, `grok` for grok.
 
 So a session of any other provider — one the startup picker or the session
 list starts, or a saved one of another provider the list resumes — never runs
@@ -1799,7 +1787,7 @@ usage report holds it, so `usage` can be less than what was spent. A result's
 An absent key is `1`, silently. A file that cannot be read or parsed, a value that
 is not an integer, or one outside 0 to 3 is also `1`, with one line on craze's own
 diagnostics: stderr for `craze prompt`, the host's log for a detached host. It is
-read as each session starts, and an ACP agent (cursor, grok, gx) keeps its own
+read as each session starts, and an ACP agent (cursor, grok) keeps its own
 retries.
 
 ### Model memory: `recent.json`
@@ -2752,7 +2740,7 @@ same turn is waited on again, and craze does not read them back.
 |----------|---------|
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | The launch's own provider's agent binary when `--agent-bin` is unset; never a session of another provider's ([Agent binaries](#agent-binaries)) |
-| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `gx`, or `native`) |
+| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `native`) |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
@@ -2767,5 +2755,4 @@ same turn is waited on again, and craze does not read them back.
 
 If none of `--agent-bin`, `CRAZE_AGENT_BIN` (each for the launch's own
 provider only) and `[agents]` names one, Cursor looks for
-`cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only. gx looks
-for `gx` only.
+`cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only.

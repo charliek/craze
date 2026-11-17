@@ -110,7 +110,7 @@ func updateKind(params json.RawMessage) string {
 
 // sessionLevelUpdate is the session/update kinds that are about the session,
 // not a prompt. user_message_chunk is the agent's echo of the prompt it was
-// sent (grok and gx echo live; craze never draws it outside a replay, live.go's
+// sent (grok echoes live; craze never draws it outside a replay, live.go's
 // onUpdate) — the user's own words, not anything the agent did with them, and
 // real grok 1.0.44 sends none before it answers (plan 033 V1). An empty kind
 // is not known, so it is not session-level.

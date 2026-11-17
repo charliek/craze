@@ -236,13 +236,13 @@ func TestABusyLockIsAnErrorNotAWait(t *testing.T) {
 	t.Cleanup(func() { lockWait = saved })
 	dir := t.TempDir()
 	held, release := holdIn(t, "first")
-	fd := write(dir, catalog("gx", t0, "first"))
+	fd := write(dir, catalog("grok", t0, "first"))
 	select {
 	case <-held:
 	case <-time.After(step):
 		t.Fatalf("the first writer did not reach its replace within %v", step)
 	}
-	ok, err := Write(dir, catalog("gx", t0.Add(time.Second), "second"))
+	ok, err := Write(dir, catalog("grok", t0.Add(time.Second), "second"))
 	close(release)
 	if ok || err == nil || !strings.Contains(err.Error(), "lock") {
 		t.Fatalf("a writer that could not have the lock: %v, %v", ok, err)
@@ -250,7 +250,7 @@ func TestABusyLockIsAnErrorNotAWait(t *testing.T) {
 	if r := await(t, fd, "the first writer"); !r.written || r.err != nil {
 		t.Fatalf("the first writer: %+v", r)
 	}
-	if got := read(t, dir, "gx"); got.Models[0].ID != "first" {
+	if got := read(t, dir, "grok"); got.Models[0].ID != "first" {
 		t.Fatalf("the file holds %q", got.Models[0].ID)
 	}
 }
@@ -322,11 +322,11 @@ func TestReadIgnoresAnythingButARegularFile(t *testing.T) {
 	if _, err := Read(dir, "grok"); err == nil {
 		t.Fatal("a directory was read as a catalog")
 	}
-	if err := syscall.Mkfifo(filepath.Join(dir, "gx.json"), 0o600); err != nil {
+	if err := syscall.Mkfifo(filepath.Join(dir, "native.json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { _, err := Read(dir, "gx"); done <- err }()
+	go func() { _, err := Read(dir, "native"); done <- err }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrCorrupt) {
@@ -378,7 +378,7 @@ func TestWriteRefusesWhatItWouldNotRead(t *testing.T) {
 			t.Errorf("read %q: %v", id, err)
 		}
 	}
-	for _, id := range []string{"cursor", "grok", "gx", "native", "a", "x-1_y"} {
+	for _, id := range []string{"cursor", "grok", "native", "a", "x-1_y"} {
 		if !ValidProvider(id) {
 			t.Errorf("%q is not a provider id", id)
 		}

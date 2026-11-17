@@ -14,7 +14,7 @@ failed 1 ───────────────────────�
                                                                                 
 idle 2 ─────────────────────────────────────────────────────────────────────────
   ○ triage the flaky pty…  Found it: os.NewFile(0) rac…  grok    craze        1h
-  ○ port the docs site     waiting for a… · craze 0.0.9  gx      folio          
+  ○ port the docs site     waiting for a… · craze 0.0.9  grok    folio          
                                                                                 
 unreachable 1 ──────────────────────────────────────────────────────────────────
 ❯ ? spike the prox sweep   not answering                 native  prox        20m

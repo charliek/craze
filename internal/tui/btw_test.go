@@ -21,7 +21,7 @@ import (
 // Esc or Ctrl+C without touching the main session, and never written into it.
 
 // asideModel is the standard config around an AsidingStub — a session that
-// answers side questions, as a native, grok or gx one does — sized and
+// answers side questions, as a native or grok one does — sized and
 // started.
 func asideModel(t *testing.T) (Model, *Stub) {
 	t.Helper()

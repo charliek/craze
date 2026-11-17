@@ -269,7 +269,7 @@ func TestTheRecorderIsOnlyAnACPProviders(t *testing.T) {
 	if r := newCatalogRecorder(catalogEnv(t), agent.NativeProvider(), nil, nil); r != nil {
 		t.Fatal("native has a catalog recorder")
 	}
-	for _, p := range []agent.Provider{agent.CursorProvider(), agent.GrokProvider(), agent.GxProvider()} {
+	for _, p := range []agent.Provider{agent.CursorProvider(), agent.GrokProvider()} {
 		r := newCatalogRecorder(catalogEnv(t), p, func() agent.Snapshot { return agent.Snapshot{} }, nil)
 		if r == nil {
 			t.Fatalf("%s has no catalog recorder", p.Name())

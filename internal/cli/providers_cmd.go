@@ -21,7 +21,7 @@ import (
 // craze providers (plan 036 §3.2): the agent providers this craze could
 // start a session of, from this process's own view — the availability check's
 // TUI and CLI column (processAvailInputs), with no --agent-bin, over the
-// listed providers (a missing gx is left out) — each with its state and, when
+// listed providers — each with its state and, when
 // it is not ready, why and what to do. It exits 0 whenever it answered,
 // whatever the states say.
 //
@@ -42,8 +42,8 @@ func newProvidersCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "providers",
 		Short: "List the agent providers and whether each can start here",
-		Long: "craze providers lists the agent providers craze can start a session of — cursor, grok, " +
-			"gx when it is installed, and native — with each one's state on this machine: ready, " +
+		Long: "craze providers lists the agent providers craze can start a session of — cursor, grok " +
+			"and native — with each one's state on this machine: ready, " +
 			"needs setup, or unavailable, and for the last two why and what to do about it. These are " +
 			"agent providers; craze auth list shows the native provider's model providers. --hub asks " +
 			"the running hub instead, and never starts one.",

@@ -1604,12 +1604,12 @@ type AsideResult struct {
 	Text string
 	// Model is the display name of the model that answered; may be "".
 	Model string
-	// Usage is nil when the provider reports none (grok, gx).
+	// Usage is nil when the provider reports none (grok).
 	Usage *AsideUsage
 }
 
 // Asider is the optional verb behind /btw (plan 040). Asides reports whether
-// this session serves it now (the provider's bit: grok and gx through x.ai/btw,
+// this session serves it now (the provider's bit: grok through x.ai/btw,
 // native always); Aside answers one side question from the session's context,
 // calling onDelta with each piece of a streamed answer (never for a provider
 // that answers in one piece). onDelta must not block. Nothing is journaled,

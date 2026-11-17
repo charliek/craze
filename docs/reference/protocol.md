@@ -600,7 +600,7 @@ endpoint-level reads.
 | `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
 | `session.stop` | ✓ | `cause?` | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
 | `session.models.refresh` | | `nativeDir?` | `status`, `revision`, `sameDir?` | served where the session capability `modelsRefresh` is `true` (a native session): the session takes up the models funded since it opened — see [`session.models.refresh`](#sessionmodelsrefresh); idempotent, so not mutating; a session whose `modelsRefresh` is absent (an ACP session) is refused `unsupported`, reason `models_refresh_unsupported` |
-| `session.aside` | | `asideId`, `question`, `prior?[]` | `text`, `model?`, `usage?` | served where the session capability `aside` is `true` (a native, grok or gx session): a side question answered from the session's context, its answer streamed as [`aside`](#aside) notifications to this connection and whole in the reply, nothing of it journaled or in the session's history — see [`session.aside`](#sessionaside); not mutating; a session whose `aside` is absent (cursor) is refused `unsupported`, reason `aside_unsupported` |
+| `session.aside` | | `asideId`, `question`, `prior?[]` | `text`, `model?`, `usage?` | served where the session capability `aside` is `true` (a native or grok session): a side question answered from the session's context, its answer streamed as [`aside`](#aside) notifications to this connection and whole in the reply, nothing of it journaled or in the session's history — see [`session.aside`](#sessionaside); not mutating; a session whose `aside` is absent (cursor) is refused `unsupported`, reason `aside_unsupported` |
 | `session.aside.cancel` | | `asideId` | `{}` | cancels this connection's `session.aside` of that `asideId`, which then answers `aborted`, reason `context`; answers `{}` always, after that aside's reply when it found one — see [`session.aside.cancel`](#sessionasidecancel); refused `aside_unsupported` where `aside` is absent |
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
@@ -789,12 +789,12 @@ about the session's work, without interrupting a running turn and without
 touching the session: nothing of it is journaled, appended to the session's
 history, or published on its stream, and no other client sees it. The agent
 answers from the session's context as it stands (a native session's stored
-history; grok's and gx's own), with no tools. A side conversation is the
+history; grok's own), with no tools. A side conversation is the
 client's to keep: a follow-up carries the earlier pairs in `prior`, and the
 host remembers nothing between calls.
 
 It is served where the session capability `aside` is `true`: a native session
-(it streams its answer) and a grok or gx session (answered in one piece,
+(it streams its answer) and a grok session (answered in one piece,
 through grok's own `x.ai/btw`). Where it is absent — cursor, and every host
 from before the method — a client offers no side questions and makes **no
 call**; a host refuses the call anyway `unsupported`, reason
@@ -821,7 +821,7 @@ it fits. craze's TUI cuts an answer it resends to 64 KiB, keeping its head.
 |---|---|
 | `text` | the whole answer. It is authoritative: a client that ignored every `aside` notification still has it |
 | `model` | the display name of the model that answered; absent when unknown |
-| `usage` | `{input, output, cacheRead}`, the call's token counts, where the provider reports them (a native session); absent for grok and gx |
+| `usage` | `{input, output, cacheRead}`, the call's token counts, where the provider reports them (a native session); absent for grok |
 
 While the answer is produced, the host sends the asking connection — and
 only it — [`aside`](#aside) notifications carrying its pieces, every one
@@ -851,7 +851,7 @@ every request does: asides finished but not yet written, beside other
 requests in flight, can fill them all, and a `session.aside.cancel` behind
 them then waits to be read (the connection's close still cancels). Asides do
 not count toward the session's activity: they hold no turn, fence no close
-and keep no idle host alive. On grok and gx a cancel abandons the wait and
+and keep no idle host alive. On grok a cancel abandons the wait and
 frees the session's slot while grok may still be generating the answer, in
 its own process.
 
@@ -1101,8 +1101,8 @@ create sheet offers; `craze providers --hub` prints it.
 `unknown_field`.
 
 **`providers`** is every agent provider this machine lists, in craze's own
-order — `cursor`, `grok`, `gx`, `native` — at most 16. `gx`, a fork few
-machines have, is listed only when its binary is found. Each has its `id`
+order — `cursor`, `grok`, `native` — at most 16, each listed whether or not
+its binary is found. Each has its `id`
 (what `session.create`'s `provider` takes), its `label` (what a client shows)
 and its `state`:
 
@@ -1117,10 +1117,10 @@ not `ready`, each one line of at most 200 terminal cells, cut as a [row
 fact](#the-row-facts) is. The hub judges each provider as a host it creates
 would start it, in the hub's own process:
 
-- **cursor, grok and gx** are `ready` when their binary resolves as a created
+- **cursor and grok** are `ready` when their binary resolves as a created
   host resolves it: `[agents].<provider>` in the hub's `config.toml`, else the
   provider's own binary names on the hub's `PATH` (`cursor-agent` then `agent` for
-  cursor, `grok`, `gx`) — never `CRAZE_AGENT_BIN`, which the
+  cursor, `grok`) — never `CRAZE_AGENT_BIN`, which the
   hub hands no host. A binary not found is `unavailable`, and the reason names
   where the hub looked: `cursor-agent not found on PATH`, or `[agents].cursor
   /opt/x/cursor-agent not found`.
@@ -1145,8 +1145,8 @@ same start failure as ever when it cannot start.
 **`defaultProvider`** is the provider a `session.create` that names none
 starts: `provider` in the hub's `config.toml` (the provider the last session
 to start persisted). It is absent when none is set, or when it names no
-provider craze knows, and it may name one that is not listed (a missing gx)
-or not ready.
+provider craze knows, and it may name one that is not ready (a binary not
+installed, say).
 
 **`recentDirs`** is the directories sessions ran in, from the hub's own
 session index (its `CRAZE_HOME`'s `sessions.jsonl`), newest first: each once
@@ -1195,7 +1195,7 @@ function computes both:
    ids (no `crazeId`) is the row it is, by its provider and provider session
    id.
 2. That row is listed only when it can be resumed: of a provider this craze
-   can resume (`cursor`, `grok`, `gx`, `native`), and within the bounds
+   can resume (`cursor`, `grok`, `native`), and within the bounds
    below. A craze id whose newest row cannot be — a newer craze's row of a
    provider this one does not know, a malformed row — is not listed at all,
    never by an older row a load would not take.
@@ -1533,7 +1533,7 @@ answer, at most 4 KiB (`AsideNoticeMax`), cut between characters.
 - It is no session event: nothing sequences, journals or replays it, and no
   cursor covers it.
 - The host gathers the pieces an agent streams and sends what has arrived
-  every 50 ms, a full 4 KiB at once. A grok or gx answer comes in one piece,
+  every 50 ms, a full 4 KiB at once. A grok answer comes in one piece,
   and so has no notification before its reply.
 - A connection that is not reading holds them back: once 1 MiB
   (`AsidePendingMax`) of an aside's text waits unsent, the host sends no more
@@ -1746,7 +1746,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `incarnation` | the event log's id: the scope of seqs, turn ids and ask ids, and a cursor's first half |
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
-| `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok` or `gx` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
+| `provider` | `{name, label}` — `name` is the provider id (`cursor` or `grok` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
 | `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
@@ -1823,8 +1823,8 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `rowFacts` | the host's own too, and omitted when `false`: the session's `sessions.list` row carries the [row facts](#the-row-facts). It is a session capability, not a connection one, because it describes the row, and a hub's roster carries rows of hosts of different builds |
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
-| `aside` | the session's own, and omitted when `false`: the session answers side questions (a native, grok or gx session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
-| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, gx or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
+| `aside` | the session's own, and omitted when `false`: the session answers side questions (a native or grok session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
+| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
 | `exitAfterTurn` | the host's own, and omitted when `false`: `session.prompt` takes `exitAfterTurn` ([the exit fence](#the-exit-fence)) and `session.stop` takes `cause`, on a host that serves `session.stop`. It fences what craze admits, not a turn an agent starts entirely on its own. Absent on a TUI-hosted session and an older host, which refuse both, so a client sends neither |
 | `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
 
@@ -2357,10 +2357,10 @@ catalog section — `state.slash` on a `meta` event — and a snapshot's
 `settings.slash`. The host builds it with the same builder the TUI's own menu
 uses, from the session's facts: craze's builtins under the session's gates,
 the agent's advertised commands, the plugin commands and skills craze found,
-and (for cursor, grok and gx) the provider's disk skills. A client renders the
+and (for cursor and grok) the provider's disk skills. A client renders the
 rows instead of re-deriving the TUI's rules. A session publishes it where
-[`capabilities.slashCatalog`](#capabilities) is `true` — every cursor, grok,
-gx and native session on a host that has it.
+[`capabilities.slashCatalog`](#capabilities) is `true` — every cursor, grok
+and native session on a host that has it.
 
 ```json
 {"type":"meta","state":{"commands":{"commands":[{"name":"research","description":"Agent-advertised command"},{"name":"btw","description":"The agent's own btw"}]},"slash":{"items":[
@@ -2472,7 +2472,7 @@ folding the whole stream gives.
   alone carries `slash` alone; an update that changes nothing publishes
   nothing. Every install restates it: session/new's, and a load's, stamped
   `replayed` before the replay's `end`.
-- **Disk skills.** For a cursor, grok or gx session the host looks at the
+- **Disk skills.** For a cursor or grok session the host looks at the
   provider's skills on disk at the install, after every turn of craze's ends
   (done, cancelled or failed), at each `available_commands_update`, and at
   each `session.attach`: a skill created while the session sat idle reaches
@@ -3007,7 +3007,7 @@ hub's when the bridge starts it. The hub hands that environment on (less one
 launch's choices: see [`session.create`](#sessioncreate)) to every host it
 creates, and each host hands it to its agent. An exported API key would fund
 native, a stray `CRAZE_FAKE_*` variable would change the fake agent's
-script, and an installed `cursor-agent`, `agent`, `grok` or `gx` would answer
+script, and an installed `cursor-agent`, `agent` or `grok` would answer
 in place of the fakes. The environment is fixed when the hub starts, so it is
 set before the first bridge runs.
 
@@ -3016,7 +3016,7 @@ set before the first bridge runs.
 | `HOME` | `/tmp/craze-recipe/home` | the registry, `$HOME/.cache/craze/`: where the hub lists hosts and keeps its record, and where `craze-fake-host --registry` lists itself. A scratch one, so no session or hub of the machine's is seen |
 | `CRAZE_HOME` | `/tmp/craze-recipe/craze-home` | `config.toml`, the session index that `recentDirs` reads, and native's keys (there are none). The hub and every host under it share its namespace |
 | `CRAZE_RUNTIME_DIR` | `/tmp/craze-recipe/run` | where the sockets are bound. It must be short, because craze refuses a socket path over 100 bytes ([above](#the-namespace-and-the-socket-path)) and a macOS `$TMPDIR` alone can crowd one out. It is mode `0700`, because craze refuses a runtime directory others can write |
-| `PATH` | `/tmp/craze-recipe/path` | a directory of the recipe's own, holding copies of the two programs it runs, `craze` and `craze-fake-host`, and nothing else. So `cursor-agent` and `agent` (cursor's two names), `grok` and `gx` are found nowhere, whatever a system directory or `BIN` holds. `cursor` is `unavailable`, "not found", on Linux and macOS alike: a missing binary is reported ahead of the macOS login-session rule, whose answer depends on how the machine was reached. `gx` is not listed |
+| `PATH` | `/tmp/craze-recipe/path` | a directory of the recipe's own, holding copies of the two programs it runs, `craze` and `craze-fake-host`, and nothing else. So `cursor-agent` and `agent` (cursor's two names) and `grok` are found nowhere, whatever a system directory or `BIN` holds. `cursor` is `unavailable`, "not found", on Linux and macOS alike: a missing binary is reported ahead of the macOS login-session rule, whose answer depends on how the machine was reached. |
 | `CRAZE_FAKE_SCRIPT` | `grok-echo` | the fake agent speaks grok's dialect and answers each prompt with `echo: <prompt>`. No other `CRAZE_FAKE_*` variable reaches it |
 | `CRAZE_FAKE_SESSION_ID` | `{dir}` | the fake agent names its session after its working directory (`work`), so each session's index row is its own |
 
@@ -3256,7 +3256,6 @@ The answer, exactly, on Linux and macOS:
 - cursor is `unavailable` because neither `cursor-agent` nor `agent` is on
   `PATH`.
 - grok is `ready` because `[agents].grok` names a binary that exists.
-- gx is absent: it is listed only when its binary is found.
 - native is `needs_setup` because no API key is set and the native directory
   is empty.
 - `defaultProvider` is `config.toml`'s `provider`.

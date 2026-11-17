@@ -2,7 +2,7 @@
   │provider                          │  
   │  cursor                          │  
   │  grok                            │  
-  │> gx                       default│  
+  │> native                   default│  
   │↑↓ · tab · enter starts · esc use…│  
   ╰──────────────────────────────────╯  
 ──────────────────────────────── craze ─

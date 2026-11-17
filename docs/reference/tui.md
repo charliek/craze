@@ -7,11 +7,8 @@
 
 The TUI is the default command. It refuses to start on a non-tty.
 
-Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-`gx` and `native` — `gx` shown when a binary for it resolves, or when it is
-the resolved default (the default is always listed, so `Esc` never starts a
-row the picker did not show), since gx is a third-party fork nobody can assume
-is installed (see [Configuration](configuration.md#provider-precedence)) —
+Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`
+and `native` (see [Configuration](configuration.md#provider-precedence)) —
 before the session is constructed. The preselected row is the resolved default
 (see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
@@ -85,9 +82,8 @@ row that cannot start:
 - The check reads only files, never the network, and runs as the dialog
   opens. Until it answers every row is ready and a choice is taken as it
   always was. Each answer also decides the rows, as `/provider`'s does: a
-  `gx` installed since the dialog opened is listed, and one removed is
-  dropped — unless it is the default, which always stays, marked
-  `unavailable`.
+  provider the answer names is listed and one it leaves out is dropped —
+  unless it is the default, which always stays, marked `unavailable`.
 
 The states are advice for the dialogs alone: `--provider <id>` and
 `--resume` start exactly as they always have, whatever the check says, so a
@@ -318,7 +314,7 @@ A restored session does not reconstruct everything:
 - **Sub-agent transcripts** are not reconstructed. A finished sub-agent's
   row comes back from the replayed spawn/finish lifecycle, but there is no
   transcript behind it to open.
-- **Grok and gx** show no tabs in the [model dialog](#model-dialog) right
+- **Grok** shows no tabs in the [model dialog](#model-dialog) right
   after a resume — their `session/load` result carries no catalog, unlike a
   fresh `session/new`. A later live turn may supply one again.
 - A rename is craze's own and is never sent to the agent: `agent ls` and
@@ -402,7 +398,7 @@ another craze since counts; else X's default. A remembered level X no longer
 offers is its default. Asking for the model you are already on keeps its
 effort. `/model X <effort>` still sets a level directly, as two steps: the
 switch, then the effort. A model with no effort control has none either way.
-ACP providers (cursor, grok, gx) are unchanged: their effort is whatever the
+ACP providers (cursor, grok) are unchanged: their effort is whatever the
 agent's option says after the switch.
 
 #### What the model is told
@@ -458,7 +454,7 @@ off.
 | Key | Action |
 |---|---|
 | `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
-| `Ctrl+L` | the strong send: on Grok, gx and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
+| `Ctrl+L` | the strong send: on Grok and native, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send. On a `/btw` draft, where `/btw` is offered, it opens the [side view](#side-questions-btw) as `Enter` does and is never sent into the turn |
 | `Alt+Enter`, `Ctrl+J`, `Shift+Enter` | newline; `Shift+Enter` only in a terminal that sends it as one of the two sequences below, as Ghostty and Roost do (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); close the [side view](#side-questions-btw); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`), or stop a turn the agent runs on its own (a native [wake](#background-sub-agents)), or, with nothing running, decline the plan offer. An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open. Inside the [side view](#side-questions-btw), with no card up, it closes the view and does nothing else |
@@ -478,7 +474,7 @@ off.
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
-| `Enter` on `/btw <question>` | where the session answers side questions (native, Grok, gx): open the [side view](#side-questions-btw) and ask it, even mid-turn; inside the view, `Enter` asks a follow-up |
+| `Enter` on `/btw <question>` | where the session answers side questions (native, Grok): open the [side view](#side-questions-btw) and ask it, even mid-turn; inside the view, `Enter` asks a follow-up |
 | `Esc` or `Ctrl+C` inside the side view | close it: the question in flight is cancelled and the side thread discarded; the main turn runs on, and `Ctrl+C` arms no quit (with a card up, `Ctrl+C` is what it always is) |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -534,13 +530,13 @@ queue), and `Backspace` cancels it.
 
 ### The three verbs
 
-| Verb | Cursor | Grok, gx, native | Cancels the turn? | Asks first? |
+| Verb | Cursor | Grok, native | Cancels the turn? | Asks first? |
 |---|---|---|---|---|
 | queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
 | send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
-| interject (`Ctrl+L` on a draft under Grok, gx or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+| interject (`Ctrl+L` on a draft under Grok or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
 
-Grok (and gx) and native have a mid-turn path: grok's `x.ai/interject` hands it
+Grok and native have a mid-turn path: grok's `x.ai/interject` hands it
 text that it folds into the turn at its next safe point (after a tool result),
 and native steers it into the turn's next step. The transcript shows either as
 a `↳` entry.
@@ -803,7 +799,7 @@ Two other notes can appear when you paste:
 
 | Agent | Receives |
 |---|---|
-| Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in place of each image block instead (the chip stays in the message text) (Grok and gx are sent images regardless, since they take them without saying so) |
+| Cursor, Grok | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in place of each image block instead (the chip stays in the message text) (Grok is sent images regardless, since it takes them without saying so) |
 | An agent that rejects the images | when it answers the prompt with an invalid-params error without having done anything with it, craze sends the message once more with each image as `[Image #N: <path>]` text. Updates about the session itself (its command list, mode, settings or title) do not count as doing something. After the agent has done anything for the turn, before its error or since, or you cancelled, the error is shown as it is |
 | Native | the same chips; how the image reaches the model depends on the model: see below |
 | An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
@@ -936,7 +932,7 @@ limit. `/clear` and a session change drop it.
 On native, the block is **redacted** before it reaches the model, the transcript
 or the journal: a value craze knows as a key (an API key variable's value, a
 stored key) in a command's output becomes `[craze:redacted-credential]`. The ACP agents (cursor,
-grok, gx) get the block verbatim.
+grok) get the block verbatim.
 
 What is attached is never drawn: your transcript row, the queue band, the queue
 editor and the session title show the message you typed, not the block that
@@ -996,7 +992,7 @@ and its card (see [Cards](#cards)).
 
 `/btw <question>` asks the session a quick question about its work without
 interrupting it and without adding to it. It is offered where the session can
-answer one — **native, Grok and gx**; on Cursor `/btw` is not in the menu and
+answer one — **native and Grok**; on Cursor `/btw` is not in the menu and
 a typed `/btw …` goes to the agent as the text it is. Where it is offered, a
 plugin or skill named `btw` is shadowed, as `/connect` shadows one on native.
 
@@ -1016,7 +1012,7 @@ the edit left open.
 
 The answer opens in a **side view** that takes the transcript region: a dim
 `Side question — not saved. Esc returns to the session.`, your question, the
-answer streaming in (native streams it; Grok and gx answer in one piece), and a
+answer streaming in (native streams it; Grok answers in one piece), and a
 dim footer with the model that answered and, on native, its tokens —
 `Echo · 1.2k in (800 cached) · 40 out`. While it is answering the working line
 reads `Answering · <elapsed> · esc closes`; status row 2 reads
@@ -1352,10 +1348,9 @@ command starts with is a prompt (an agent's own slash command), and opens
 nothing.
 
 - **`/provider`** lists the providers the startup [provider
-  dialog](#tui-reference) offers — `gx` only where its binary resolves — the
+  dialog](#tui-reference) offers — the
   one in use marked `current`. Each opening checks them again, as the startup
-  dialog does ([provider states](#provider-states)): a `gx` installed since
-  craze started is listed, one removed is not, and a provider that cannot
+  dialog does ([provider states](#provider-states)): a provider that cannot
   start is dimmed with its reason beside it and its state (`unavailable`,
   `needs setup`) for its note. `Tab` or `Enter` on one does not choose it:
   the input and the provider new sessions run stay as they were, and the
@@ -1369,7 +1364,7 @@ nothing.
   the provider new sessions run — with what came of it on the hint line and
   the states checked again; choose native again once it is ready. Choosing one
   that can start **resets the model** to that
-  provider's default: for cursor, grok and gx, the agent's own (`default`: no
+  provider's default: for cursor and grok, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
   on](#which-model-a-session-starts-on)) — the newest remembered model whose
@@ -1385,7 +1380,7 @@ nothing.
   order they were last picked and the rest by name, with no label — the same
   order a native session's own `/model` lists. The list reads the memory and
   never writes it: only a switch made inside a native session does.
-  cursor, grok and gx name their models only once a session has started, so
+  cursor and grok name their models only once a session has started, so
   craze lists **the catalog the last session of that provider installed** —
   every detached host records it in the [model catalog
   cache](configuration.md#model-catalog-cache) — titled with its age (`cursor
@@ -1436,7 +1431,7 @@ listed once what you type is the start of its name and of no other command —
   effort control. The table is read again at each opening of the list and
   each choice of model, since the start model follows the [model
   memory](configuration.md#model-memory-recentjson). On an ACP provider
-  (cursor, grok, gx), whose levels are known only once a session runs, it
+  (cursor, grok), whose levels are known only once a session runs, it
   offers every level: `default`, `minimal`, `low`, `medium`, `high`, `xhigh`
   and `max` (and so does native for the moment between a choice of model and
   its table being read).
@@ -1816,7 +1811,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/plan` | Set plan mode — only where the agent advertises modes |
 | `/ask` | Set ask mode — only where the agent advertises modes |
 | `/agent` | Set agent mode — only where the agent advertises modes |
-| `/btw <question>` | Ask a side question, not saved — [native, Grok and gx only](#side-questions-btw); runs mid-turn |
+| `/btw <question>` | Ask a side question, not saved — [native and Grok only](#side-questions-btw); runs mid-turn |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | End this session |
 | `/effort` | Change the current model's [effort](#effort): a picker, or `/effort <level>` — only where the current model has an effort control |
@@ -2003,7 +1998,7 @@ key with the provider: a wrong one shows as an error on first use. The
 signed in to instead, in the same box (below). **OpenAI** in the list is
 OpenAI's API on a key, billed per token
 ([OpenAI](configuration.md#openai)); the ChatGPT plan is the subscription.
-It exists in native sessions only: in a cursor, grok or gx session it is not in
+It exists in native sessions only: in a cursor or grok session it is not in
 the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
 what the last row of native's [`/model`](#model-dialog) opens, while some
 provider has no key, and what picking native opens before any session while
@@ -2323,7 +2318,7 @@ or name contains `grok`; then the rest, each group by name — except that the
 ChatGPT plan's models stay together in the account's own order, and
 Anthropic's together newest first, each block placed by its provider's name
 (so Anthropic's come first among the rest). An ACP provider
-(cursor, grok, gx) has no model memory, so its list starts at the `grok`
+(cursor, grok) has no model memory, so its list starts at the `grok`
 group.
 
 A native session lists only the models of providers that have a key — an
@@ -2397,7 +2392,7 @@ asked for and its row is that model's levels, as its facts state them; `Enter`
 then sends that row's effort for it, after the switch lands, so the switch
 ends on the effort the box showed.
 
-On an ACP provider (cursor, grok, gx), and against a host from before
+On an ACP provider (cursor, grok), and against a host from before
 `effortFacts`, the dialog does not rebuild itself for the model under the
 cursor: the tabs on screen are the current model's, and highlighting another
 model in the list never previews its options. A choice made on a tab still
@@ -2524,7 +2519,7 @@ keys — `enter on a row` to open one, `esc, ←` to return, and
 `tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
 `queued messages, sub-agent rows, or a list inside a dialog`. On native, `panels and views`
 also gains `del, backspace — stop the selected running sub-agent, or the one
-in view`. Where `/btw` is offered (native, Grok, gx) the box gains a
+in view`. Where `/btw` is offered (native, Grok) the box gains a
 `side questions` group with the side view's keys.
 
 ## Mouse

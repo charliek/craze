@@ -1,6 +1,6 @@
 ---
 name: craze-live-smoke
-description: Drive the real craze TUI live in a dedicated tmux server to verify a change by eye — a live smoke, tmux smoke, mac-mini smoke, ssh/256-colour colour check (decoding SGR codes), input-burst or typing check, or a layout check against the fake agent — with scratch HOME/CRAZE_HOME, bracketed-paste typing, bounded waits, and no paid turn beyond the owner's budget. Use when a change must be seen working against real cursor-agent, grok, gx or native, on Linux or the mac-mini.
+description: Drive the real craze TUI live in a dedicated tmux server to verify a change by eye — a live smoke, tmux smoke, mac-mini smoke, ssh/256-colour colour check (decoding SGR codes), input-burst or typing check, or a layout check against the fake agent — with scratch HOME/CRAZE_HOME, bracketed-paste typing, bounded waits, and no paid turn beyond the owner's budget. Use when a change must be seen working against real cursor-agent, grok or native, on Linux or the mac-mini.
 ---
 
 # craze live smoke

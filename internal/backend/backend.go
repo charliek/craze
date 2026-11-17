@@ -321,7 +321,7 @@ type SessionInfo struct {
 	Incarnation string
 	// Workspace is the session's working directory.
 	Workspace string
-	// Provider is the session's provider's name ("cursor", "grok", "gx",
+	// Provider is the session's provider's name ("cursor", "grok",
 	// "native"), and Label the name a client shows for it.
 	Provider string
 	Label    string
@@ -348,7 +348,7 @@ type SessionInfo struct {
 	// makes no call.
 	ModelsRefresh bool
 	// Aside says the session answers side questions (/btw, plan 040 §3.7),
-	// and Aside asks one: a native, grok or gx session, in process
+	// and Aside asks one: a native or grok session, in process
 	// (engine.Asides) or over the socket (the session capability aside, as
 	// the host sent it). False for cursor and from a host from before the
 	// method: a client then offers no /btw and makes no call.

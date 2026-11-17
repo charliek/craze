@@ -111,18 +111,11 @@ type availInputs struct {
 	hubPID int
 	// configPath is config.toml's path, for the fixes that name [agents].
 	configPath string
-	// pickerDefault is the provider the TUI's startup picker keeps as its
-	// default row even when its binary is missing, "" for none: an optional
-	// provider (gx) that does not resolve is left out of every answer, except
-	// as this default, where it is unavailable instead (plan 036 §3.1, the
-	// gx row). The hub and craze providers set none.
-	pickerDefault string
 }
 
 // availability is one entry per row, in rows' order (agent.Providers()'s),
 // by §3.1's rules: an ACP provider is ready when its binary resolves, and
-// unavailable when it does not — an optional one is then left out, unless
-// it is in.pickerDefault — and cursor is unavailable besides when the
+// unavailable when it does not — and cursor is unavailable besides when the
 // process is known to run outside the macOS login session ("not GUI"),
 // checked only once its binary resolves, so a missing binary is the reason
 // whenever it applies. A login session that is not known never marks anything.
@@ -131,19 +124,15 @@ type availInputs struct {
 func availability(in availInputs, rows []agent.Provider) []providerAvail {
 	out := make([]providerAvail, 0, len(rows))
 	for _, p := range rows {
-		a, listed := providerAvailability(in, p)
-		if !listed {
-			continue
-		}
+		a := providerAvailability(in, p)
 		a.Reason, a.Fix = engine.RowLine(a.Reason), engine.RowLine(a.Fix)
 		out = append(out, a)
 	}
 	return out
 }
 
-// providerAvailability is p's entry (availability), and false when p is left
-// out: an optional provider whose binary is missing.
-func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool) {
+// providerAvailability is p's entry (availability).
+func providerAvailability(in availInputs, p agent.Provider) providerAvail {
 	a := providerAvail{P: p, State: availReady}
 	if p.InProcess() {
 		// Native is the one in-process provider any listing has; another —
@@ -151,16 +140,13 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 		if p.Name() == agent.NativeProvider().Name() {
 			a.State, a.Reason, a.Fix = in.native()
 		}
-		return a, true
+		return a
 	}
 	r := in.resolve(p)
 	if !r.OK {
-		if p.Optional() && p.Name() != in.pickerDefault {
-			return providerAvail{}, false
-		}
 		a.State = availUnavailable
 		a.Reason, a.Fix = missingBinary(p, r, in.configPath)
-		return a, true
+		return a
 	}
 	if p.Name() == agent.CursorProvider().Name() {
 		if _, gui, known := in.gui(); known && !gui {
@@ -171,7 +157,7 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 			}
 		}
 	}
-	return a, true
+	return a
 }
 
 // startWarning is what a start of p this process is about to make with no
@@ -182,8 +168,8 @@ func providerAvailability(in availInputs, p agent.Provider) (providerAvail, bool
 // binary or an unreadable native table fails on its own, in its own words.
 // Nothing is refused: the start goes on (plan 036 decision 3).
 func startWarning(in availInputs, p agent.Provider) (reason, fix string) {
-	a, listed := providerAvailability(in, p)
-	if !listed || !a.notGUI {
+	a := providerAvailability(in, p)
+	if !a.notGUI {
 		return "", ""
 	}
 	return engine.RowLine(a.Reason), engine.RowLine(a.Fix)
@@ -217,8 +203,7 @@ const (
 // an override names its knob — the flag, the variable, or p's [agents] key —
 // and the path it tried, and its fix points that knob at a binary — in
 // config.toml for [agents], or unset for the variable (plan 036 X2); a PATH
-// miss names p's first PATH candidate. An optional provider's PATH miss is
-// shorter (§3.1's gx row): it is only ever listed as the TUI picker's default.
+// miss names p's first PATH candidate.
 func missingBinary(p agent.Provider, r binResolution, configPath string) (reason, fix string) {
 	var knob, tail string
 	switch r.Source {
@@ -235,9 +220,6 @@ func missingBinary(p agent.Provider, r binResolution, configPath string) (reason
 	bin := p.Name()
 	if bins := p.Bins(); len(bins) > 0 {
 		bin = bins[0]
-	}
-	if p.Optional() {
-		return bin + " not found", "install " + bin + ", or set [agents]." + p.Name()
 	}
 	return bin + " not found on PATH", "install " + bin + ", or set [agents]." + p.Name() + " in " + configPath
 }

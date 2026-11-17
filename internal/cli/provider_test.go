@@ -47,7 +47,7 @@ func TestJoinOr(t *testing.T) {
 		{nil, ""},
 		{[]string{"cursor"}, "cursor"},
 		{[]string{"cursor", "grok"}, "cursor or grok"},
-		{[]string{"cursor", "grok", "gx"}, "cursor, grok, or gx"},
+		{[]string{"cursor", "grok", "native"}, "cursor, grok, or native"},
 	}
 	for _, c := range cases {
 		if got := joinOr(c.names); got != c.want {
@@ -66,7 +66,7 @@ func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	const want = `craze: unknown provider "codex" (want cursor, grok, gx, or native)`
+	const want = `craze: unknown provider "codex" (want cursor, grok, or native)`
 	if ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
@@ -269,55 +269,41 @@ func providerNames(list []agent.Provider) []string {
 	return out
 }
 
-// TestPickerProviders pins the picker's availability filter: cursor, grok and
-// native are unconditional, so the picker is never empty, and gx appears only
-// when a binary for it resolves. Resolution is the question gx's own session
-// would ask, by the per-provider rule (agentBinary, plan 032 §3.11, P7): the
-// launch's --agent-bin and CRAZE_AGENT_BIN are its resolved provider's alone,
-// so either reveals gx only when gx is that provider — and an unresolvable one
-// then hides it even with gx on PATH, the override being exclusive — while for
-// a launch of another provider gx shows by `[agents].gx` or its PATH
-// candidate, whatever the override says (§3.3, AC 4 and AC 9). Native is
-// in-process and never optional (plan 028 §3.16), so it is unaffected by PATH
-// or --agent-bin.
+// TestPickerProviders pins the picker's row list: every listed provider —
+// cursor, grok and native — whatever is installed, so the picker is never empty
+// and a provider whose binary is missing is a row with a state
+// (pickerAvailability), not a row left out. Native is in-process, so it is
+// unaffected by PATH or --agent-bin (plan 028 §3.16).
 //
 // CRAZE_AGENT_BIN is cleared once for every case and each builds its own PATH
 // and craze directory in temp directories, so none of them can read what the
 // host happens to have installed or configured.
 func TestPickerProviders(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
-	cursor, gx := agent.CursorProvider(), agent.GxProvider()
-	withGx := []string{"cursor", "grok", "gx", "native"}
-	withoutGx := []string{"cursor", "grok", "native"}
+	cursor, grok := agent.CursorProvider(), agent.GrokProvider()
+	want := []string{"cursor", "grok", "native"}
 	for _, tc := range []struct {
 		name   string
 		launch agent.Provider
-		onPath bool   // gx is on PATH
+		onPath bool   // grok is on PATH
 		flag   string // --agent-bin: "ok" a binary, "missing" none
 		env    string // CRAZE_AGENT_BIN, the same spelling
-		config string // [agents].gx: "ok", "missing", "relative"
-		want   []string
+		config string // [agents].grok: "ok", "missing", "relative"
 	}{
-		{name: "gx absent", launch: cursor, want: withoutGx},
-		{name: "gx on PATH", launch: cursor, onPath: true, want: withGx},
-		{name: "agent-bin reveals gx for a gx launch", launch: gx, flag: "ok", want: withGx},
-		{name: "CRAZE_AGENT_BIN reveals gx for a gx launch", launch: gx, env: "ok", want: withGx},
-		// The negative control of P7: before it, a cursor launch's binary
-		// revealed gx too, and a gx session picked there spawned it.
-		{name: "agent-bin is the cursor launch's, not gx's", launch: cursor, flag: "ok", want: withoutGx},
-		{name: "CRAZE_AGENT_BIN is the cursor launch's, not gx's", launch: cursor, env: "ok", want: withoutGx},
-		{name: "an invalid agent-bin hides gx for a gx launch", launch: gx, onPath: true, flag: "missing", want: withoutGx},
-		{name: "an invalid agent-bin of a cursor launch leaves gx on PATH", launch: cursor, onPath: true, flag: "missing", want: withGx},
-		{name: "[agents].gx reveals gx", launch: cursor, config: "ok", want: withGx},
-		{name: "[agents].gx under a cursor launch's agent-bin", launch: cursor, flag: "ok", config: "ok", want: withGx},
-		{name: "a missing [agents].gx hides gx on PATH", launch: cursor, onPath: true, config: "missing", want: withoutGx},
-		{name: "a relative [agents].gx is ignored", launch: cursor, onPath: true, config: "relative", want: withGx},
-		{name: "a gx launch's agent-bin wins over [agents].gx", launch: gx, flag: "missing", config: "ok", want: withoutGx},
+		{name: "nothing installed", launch: cursor},
+		{name: "grok on PATH", launch: cursor, onPath: true},
+		{name: "agent-bin of a grok launch", launch: grok, flag: "ok"},
+		{name: "CRAZE_AGENT_BIN of a grok launch", launch: grok, env: "ok"},
+		{name: "an invalid agent-bin of a grok launch", launch: grok, onPath: true, flag: "missing"},
+		{name: "an invalid agent-bin of a cursor launch", launch: cursor, onPath: true, flag: "missing"},
+		{name: "[agents].grok", launch: cursor, config: "ok"},
+		{name: "a missing [agents].grok", launch: cursor, onPath: true, config: "missing"},
+		{name: "a relative [agents].grok", launch: cursor, onPath: true, config: "relative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := t.TempDir()
 			if tc.onPath {
-				writeExecutable(t, path, "gx")
+				writeExecutable(t, path, "grok")
 			}
 			t.Setenv("PATH", path)
 			bin := func(how string) string {
@@ -327,39 +313,41 @@ func TestPickerProviders(t *testing.T) {
 				case "missing":
 					return filepath.Join(t.TempDir(), "does-not-exist")
 				case "relative":
-					return "bin/gx"
+					return "bin/grok"
 				}
 				return ""
 			}
 			t.Setenv("CRAZE_AGENT_BIN", bin(tc.env))
 			crazeHome(t)
 			if c := bin(tc.config); c != "" {
-				writeCrazeConfig(t, fmt.Sprintf("[agents]\ngx = %q\n", c))
+				writeCrazeConfig(t, fmt.Sprintf("[agents]\ngrok = %q\n", c))
 			}
-			if got := providerNames(pickerProviders(tc.launch, bin(tc.flag))); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("rows %q, want %q", got, tc.want)
+			if got := providerNames(pickerProviders(tc.launch, bin(tc.flag))); !reflect.DeepEqual(got, want) {
+				t.Fatalf("rows %q, want %q", got, want)
 			}
 		})
 	}
 }
 
-// TestGxResolvesThroughEveryEntryPoint pins §3.2: gx is a provider id like any
-// other at all three precedence levels, and resolution never consults PATH — a
-// missing binary is a spawn error, not an unknown provider (AC 5).
-func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
-	// No binary override and an empty PATH for every case: whichever entry
-	// point names gx, resolution must succeed without one.
+// TestGxIsNoLongerAProvider pins the upgrade path of the removed gx provider
+// at all three precedence levels: --provider gx is an unknown provider (exit
+// 2), while CRAZE_PROVIDER=gx and config.toml's provider = "gx" warn and fall
+// back to cursor, as any unknown id does — a config written before the
+// removal still starts a session.
+func TestGxIsNoLongerAProvider(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
 	t.Setenv("PATH", t.TempDir())
 	t.Run("flag", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "")
 		crazeHome(t)
-		got, _, err := providerFor(t, false, "--provider", "gx")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.Provider.Name() != "gx" || !got.Locked || got.Fallback {
-			t.Fatalf("%+v", got)
+		cmd := NewRootCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"prompt", "--provider", "gx", "hi"})
+		err := cmd.Execute()
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 2 || ee.msg != `craze: unknown provider "gx" (want cursor, grok, or native)` {
+			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("env", func(t *testing.T) {
@@ -369,7 +357,7 @@ func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Provider.Name() != "gx" || got.Fallback {
+		if !got.Fallback || got.Provider.Name() != "cursor" || !strings.Contains(stderr, `unknown provider "gx"`) {
 			t.Fatalf("%+v stderr %q", got, stderr)
 		}
 	})
@@ -380,17 +368,17 @@ func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Provider.Name() != "gx" || got.Fallback {
+		if !got.Fallback || got.Provider.Name() != "cursor" || !strings.Contains(stderr, `unknown provider "gx"`) {
 			t.Fatalf("%+v stderr %q", got, stderr)
 		}
 	})
 }
 
-// TestPromptPersistsGxProviderKeepingOtherKeys is AC 5's automatable half:
-// choosing gx writes provider = "gx" and leaves the rest of the config file
+// TestPromptPersistsGrokProviderKeepingOtherKeys is AC 5's automatable half:
+// choosing grok writes provider = "grok" and leaves the rest of the config file
 // alone. The run goes through --agent-bin, so it proves the id flows all the
-// way through CLI resolution without gx being installed.
-func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
+// way through CLI resolution without grok being installed.
+func TestPromptPersistsGrokProviderKeepingOtherKeys(t *testing.T) {
 	bin := fakeAgentPath(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
@@ -403,11 +391,11 @@ func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
 	cmd.SetIn(&bytes.Buffer{})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"prompt", "--json", "--provider", "gx", "--agent-bin", bin, "--workspace", t.TempDir(), "hi"})
+	cmd.SetArgs([]string{"prompt", "--json", "--provider", "grok", "--agent-bin", bin, "--workspace", t.TempDir(), "hi"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
 	}
-	if got := tui.ConfigProvider(); got != "gx" {
+	if got := tui.ConfigProvider(); got != "grok" {
 		t.Fatalf("persisted %q", got)
 	}
 	if got := tui.ConfigTheme(); got != "gruvbox" {
@@ -416,7 +404,7 @@ func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
 }
 
 // TestNativeIsListedAndPersistable is A34, plan 028 §3.16/D-65: native sits in
-// Providers() right after gx and ProviderNames names it, so it is no longer
+// Providers() right after grok and ProviderNames names it, so it is no longer
 // the hidden exception knownProvider and the picker used to carve out — and,
 // being a listed in-process provider, it can be loaded again and has modes,
 // the safe answer C19's narrowed registry test (internal/agent) also pins.
@@ -424,7 +412,7 @@ func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
 // (persistProvider/SaveProvider), which through H7 a hidden provider never
 // did (TestPersistProviderSkipsAHiddenProvider, above).
 func TestNativeIsListedAndPersistable(t *testing.T) {
-	if got, want := agent.ProviderNames(), []string{"cursor", "grok", "gx", "native"}; !reflect.DeepEqual(got, want) {
+	if got, want := agent.ProviderNames(), []string{"cursor", "grok", "native"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ProviderNames %q, want %q", got, want)
 	}
 	native, err := agent.ProviderByName("native")
@@ -456,7 +444,7 @@ func TestNativeIsListedAndPersistable(t *testing.T) {
 // one — it runs inside craze. Every command that takes the flag says which are
 // the ACP agents craze spawns and which runs inside craze.
 func TestProviderFlagUsageSaysWhatRunsWhere(t *testing.T) {
-	const want = "provider: cursor, grok, gx (ACP agents) or native (runs inside craze)"
+	const want = "provider: cursor, grok (ACP agents) or native (runs inside craze)"
 	root := NewRootCmd()
 	for _, path := range [][]string{nil, {"prompt"}, {"frame"}} {
 		cmd, _, err := root.Find(path)

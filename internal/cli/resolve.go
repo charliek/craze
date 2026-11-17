@@ -73,7 +73,7 @@ func resolveLive(env rundir.Env, what, id string, reload bool) (rundir.Entry, er
 // liveGone is the refusal of an id no live host serves (§3.1): `the session
 // has ended` when the session index has a row for it — with, when reload,
 // `craze send <short> <prompt>`, which reloads it (§3.4) — and `no session
-// <id>` when it has none (a gx session, which craze cannot load again, has no
+// <id>` when it has none (a session of a provider this craze does not list has no
 // row). An index that cannot be read places nothing: the id is no session.
 func liveGone(what, id string, reload bool) error {
 	matches := matchCrazeID(indexCrazeIDs(), id)

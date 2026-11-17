@@ -49,11 +49,6 @@ func TestEngineAsidesOverTheFakeGrok(t *testing.T) {
 		t.Fatalf("result %+v", res)
 	}
 
-	gx := start("grok-btw", agent.GxProvider())
-	if !gx.Asides() {
-		t.Fatal("a gx session does not say it answers side questions")
-	}
-
 	if start("echo", agent.CursorProvider()).Asides() {
 		t.Fatal("a cursor session says it answers side questions")
 	}

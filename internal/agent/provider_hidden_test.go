@@ -38,17 +38,9 @@ func TestHiddenProviderResolvesButIsNeverListed(t *testing.T) {
 	if slices.Contains(ProviderNames(), "hush") {
 		t.Fatalf("ProviderNames lists a hidden provider: %q", ProviderNames())
 	}
-	for _, list := range []struct {
-		name string
-		got  []Provider
-	}{
-		{"Providers", Providers()},
-		{"DefaultProviders", DefaultProviders()},
-	} {
-		for _, q := range list.got {
-			if q.Name() == "hush" || q.Hidden() {
-				t.Fatalf("%s lists the hidden provider %q", list.name, q.Name())
-			}
+	for _, q := range Providers() {
+		if q.Name() == "hush" || q.Hidden() {
+			t.Fatalf("Providers lists the hidden provider %q", q.Name())
 		}
 	}
 	for _, q := range Providers() {
@@ -84,7 +76,7 @@ func TestHiddenProviderRestoreRemovesIt(t *testing.T) {
 // second entry under one id would be removed along with the first.
 func TestRegisterHiddenProviderForTestRefusesATakenId(t *testing.T) {
 	hiddenForTest(t, "hush-once", "")
-	for _, id := range []string{"", cursorName, gxName, "hush-once"} {
+	for _, id := range []string{"", cursorName, grokName, "hush-once"} {
 		func() {
 			defer func() {
 				if recover() == nil {

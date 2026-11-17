@@ -54,7 +54,7 @@ type Options struct {
 	//
 	// The zero value hides nothing, and it is what a construction site with
 	// no capabilities to hand assumes — a probe, a unit test's model — since
-	// every shipped provider (cursor, grok, gx, native) shows both cards.
+	// every shipped provider (cursor, grok, native) shows both cards.
 	Hidden HiddenAsks
 }
 

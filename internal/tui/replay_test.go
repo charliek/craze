@@ -425,7 +425,7 @@ func TestOneUserBlockPerReplayedPrompt(t *testing.T) {
 }
 
 // TestLiveUserEchoIsStillDropped is the regression the replay case must not
-// cause: grok and gx echo every prompt back as a main-session user chunk, and
+// cause: grok echoes every prompt back as a main-session user chunk, and
 // craze has already written that block from its own send.
 func TestLiveUserEchoIsStillDropped(t *testing.T) {
 	m := sized(t)

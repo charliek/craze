@@ -275,7 +275,7 @@ func TestTheShorthandIsTheCapabilityBit(t *testing.T) {
 	if !m.effortShorthand() {
 		t.Fatal("cursor has efforts, so the shorthand is on")
 	}
-	for _, p := range []agent.Provider{agent.GrokProvider(), agent.GxProvider(), agent.NativeProvider()} {
+	for _, p := range []agent.Provider{agent.GrokProvider(), agent.NativeProvider()} {
 		if !p.Capabilities().Effort {
 			t.Fatalf("%s has no Effort bit", p.Name())
 		}

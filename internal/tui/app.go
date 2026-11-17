@@ -98,13 +98,13 @@ type Config struct {
 	Provider agent.Provider
 	// Providers is the picker's rows, filtered for availability by the caller.
 	// tui.New inserts Config.Provider if it is missing, so the resolved default is
-	// always offered (§3.4). Empty means the built-in default set —
-	// agent.DefaultProviders(), every provider that is not optional — which keeps
-	// every test that builds a Config by hand hermetic.
+	// always offered (§3.4). Empty means every listed provider —
+	// agent.Providers() — which keeps every test that builds a Config by hand
+	// hermetic.
 	Providers []agent.Provider
 	// Availability answers the picker's providers' states (plan 036 §3.3):
 	// internal/cli's availability check over the picker's rows — every listed
-	// provider, and the configured default even when it is a missing gx,
+	// provider, and the configured default even when its binary is missing,
 	// then unavailable. A row it does not name is ready. It reads the disk,
 	// so the picker calls it from a tea.Cmd as it opens, never from Update;
 	// until it answers every row is ready and a choice is taken as ever. A
@@ -3828,7 +3828,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		// A new session not spawned yet (plan 030 §3.13): its first prompt
 		// spawns it. A builtin or a shell command needs a session to run in.
 		// So does /btw where the session would answer side questions (plan
-		// 040 §3.6) — a native, grok or gx one, by its provider: refused
+		// 040 §3.6) — a native or grok one, by its provider: refused
 		// with a line, rather than spawning a session whose first prompt is
 		// the side question; on cursor it is the text it always was.
 		if _, isBtw := btwDraft(m.input.Value()); isBtw && m.unstarted.spec.Provider.Aside() {
@@ -4732,7 +4732,7 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 	switch ev.Type {
 	case agent.EventUser:
 		// An interjection's row and a replayed prompt's are the fold's. A live
-		// main-session echo — grok and gx send one for every prompt the user
+		// main-session echo — grok sends one for every prompt the user
 		// types — draws nothing anywhere: the row is the turn's started's
 		// (§2.2).
 		return nil

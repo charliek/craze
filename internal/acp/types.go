@@ -174,8 +174,8 @@ func (r InitializeResult) LoadSession() bool {
 
 // PromptImage is agentCapabilities.promptCapabilities.image: whether the agent
 // says it takes image blocks in session/prompt, and known, whether it said
-// anything at all (plan 033 §3.4). cursor advertises true; grok 1.0.30 and gx
-// advertise false and forward image blocks regardless, which is the provider's
+// anything at all (plan 033 §3.4). cursor advertises true; grok 1.0.30
+// advertises false and forward image blocks regardless, which is the provider's
 // call to make (agent.Provider), not this decoder's.
 //
 // The decode is tolerant, as LoadSession's is: only the one field is read, so
@@ -253,7 +253,7 @@ type NewSessionResult struct {
 // LoadSessionParams is session/load: NewSessionParams plus the id, which is
 // the shape all three agents were probed against. The result comes back in the
 // NewSessionResult shape (models/modes/configOptions, each optional — cursor
-// answers {modes, models}, grok and gx answer with models alone), with
+// answers {modes, models}, grok answers with models alone), with
 // sessionId filled in by the client because the wire does not echo it.
 type LoadSessionParams struct {
 	SessionID  string `json:"sessionId"`

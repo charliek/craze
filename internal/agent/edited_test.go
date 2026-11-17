@@ -26,7 +26,7 @@ func realDir(t *testing.T) string {
 }
 
 // TestWhichCallsAreEdits is the table docs/reference/cli.md prints, a provider at
-// a time: native and cursor by kind, grok and gx by tool name, whatever kind they
+// a time: native and cursor by kind, grok by tool name, whatever kind they
 // report, and a tool neither knows not at all.
 func TestWhichCallsAreEdits(t *testing.T) {
 	for _, tc := range []struct {
@@ -46,14 +46,10 @@ func TestWhichCallsAreEdits(t *testing.T) {
 		{cursorName, ToolEvent{Kind: "execute"}, false},
 		{cursorName, ToolEvent{Kind: "other", ToolName: "write"}, false},
 		{grokName, ToolEvent{Kind: "delete", ToolName: "something_new"}, false},
-		{gxName, ToolEvent{Kind: "move"}, false},
 		{grokName, ToolEvent{ToolName: "search_replace"}, true},
 		{grokName, ToolEvent{Kind: "Other", ToolName: "write"}, true},
 		{grokName, ToolEvent{Kind: "edit", ToolName: "image_edit"}, false},
 		{grokName, ToolEvent{Kind: "edit"}, false},
-		{gxName, ToolEvent{Kind: "other", ToolName: "search_replace"}, true},
-		{gxName, ToolEvent{ToolName: "write"}, true},
-		{gxName, ToolEvent{Kind: "edit", ToolName: "something_new"}, false},
 		{"a provider with no rule", ToolEvent{Kind: "edit", ToolName: "write"}, false},
 	} {
 		if got := editCalls[tc.provider].is(tc.call); got != tc.want {
@@ -377,7 +373,7 @@ func TestGrokFixture(t *testing.T) {
 	if !strings.Contains(string(raw), `"updateParams":{"toolCallId":"call-write","title":"write","kind":"Other"`) {
 		t.Fatal("the fixture no longer shows grok saying Other for an edit")
 	}
-	for _, provider := range []Provider{GrokProvider(), GxProvider()} {
+	for _, provider := range []Provider{GrokProvider()} {
 		t.Run(provider.Name(), func(t *testing.T) {
 			ws := realDir(t)
 			home := filepath.Join(realDir(t), ".grok")

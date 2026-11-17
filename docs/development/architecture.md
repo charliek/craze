@@ -1,14 +1,12 @@
 # Architecture
 
-craze is an ACP client. It owns the chrome; `cursor-agent`, `grok`, or `gx`
+craze is an ACP client. It owns the chrome; `cursor-agent` or `grok`
 (or `craze-fake-agent` in tests) is the agent process. The **native** provider
 is the exception: its agent loop, tools and model clients run inside craze
 (`internal/harness`), behind the same `agent.Session`, so the layers above it
-cannot tell it from an ACP agent. `gx` is a third-party
-fork of the Grok CLI that speaks the same ACP dialect as `grok` — see
-[Configuration](../reference/configuration.md#provider-precedence) — so on
-the wire a gx session *is* a grok session and the diagram below has no
-separate node for it.
+cannot tell it from an ACP agent. See
+[Configuration](../reference/configuration.md#provider-precedence) for how a
+provider is chosen.
 
 ```mermaid
 flowchart LR
@@ -208,8 +206,8 @@ question and answer are written nowhere in the transcript, put on the
 session's event stream or steered into a running turn. The one trace is
 usage: on native, the tokens a side question spends reach the session's
 stream as a usage update, which is how the session's total counts them. Native builds the request from the
-session's own context, so a provider's prefix cache still matches it. Grok and
-gx answer through their one-shot `_x.ai/btw` method. Cursor has no
+session's own context, so a provider's prefix cache still matches it. Grok
+answers through their one-shot `_x.ai/btw` method. Cursor has no
 equivalent, so `/btw` is not offered there. See [Side
 questions](../reference/tui.md#side-questions-btw).
 

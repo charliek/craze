@@ -94,7 +94,7 @@ Docs are not in that gate. See [Documentation](#documentation) and
 
 `scripts/verify/` holds the reviewed helpers a change is checked with, run on a
 committed sha rather than the working tree. See [Testing](testing.md#verification-scripts).
-A live check against the real `cursor-agent`, `grok`, `gx` or native, in tmux
+A live check against the real `cursor-agent`, `grok` or native, in tmux
 or on a second machine, follows the `craze-live-smoke` skill in
 `.claude/skills/craze-live-smoke/`. How a release is cut is in `RELEASING.md`
 at the repository root.

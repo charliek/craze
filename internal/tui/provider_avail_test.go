@@ -796,58 +796,57 @@ func TestSessProviderTypedBeforeAnyAnswer(t *testing.T) {
 
 // TestSessProviderRecomputesAtEachOpening (A6): each opening of /provider's
 // values reads the providers' availability again, so what it offers follows
-// the answer — gx appearing, then going — with each provider's state; a
+// the answer — grok appearing, then going — with each provider's state; a
 // typed line follows it too; and the list read as it opens again takes the
 // answer as it stands then.
 func TestSessProviderRecomputesAtEachOpening(t *testing.T) {
-	allReady := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "native", State: AvailReady}}
-	m, as := availListModel(t, allReady)
+	noGrok := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "native", State: AvailReady}}
+	m, as := availListModel(t, noGrok)
 	m, cmd := openAvailList(t, m, as)
 	m = takeOpenRead(t, m, cmd)
 	m = providersLoaded(t, m, "/provider ")
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "native"}) {
 		t.Fatalf("first opening: %v", got)
 	}
 
-	withGx := []ProviderAvail{
+	withGrok := []ProviderAvail{
 		{ID: "cursor", State: AvailUnavailable, Reason: availCursorReason, Fix: availCursorFix},
 		{ID: "grok", State: AvailReady},
-		{ID: "gx", State: AvailReady},
 		{ID: "native", State: AvailNeedsSetup, Reason: availNativeReason, Fix: availNativeFix},
 	}
-	as.set(withGx)
-	m = clearInput(t, m)
-	m = providersLoaded(t, m, "/provider ")
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "gx", "native"}) {
-		t.Fatalf("gx installed: %v", got)
-	}
-	if cmdItem(t, m, "cursor").Refusal == "" || cmdItem(t, m, "gx").Refusal != "" || cmdItem(t, m, "native").Note != "needs setup" {
-		t.Fatalf("the states did not follow the answer: %+v", m.sessList.in.cmd.ans.Items)
-	}
-	m = clearInput(t, m)
-	m, _ = typeList(t, m, "/provider gx")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = press(m, enter())
-	if m.sessPick.prov.Name() != "gx" {
-		t.Fatalf("typed /provider gx with gx installed: pick %+v, note %q", m.sessPick, m.sessList.note)
-	}
-
-	as.set(allReady)
+	as.set(withGrok)
 	m = clearInput(t, m)
 	m = providersLoaded(t, m, "/provider ")
 	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
-		t.Fatalf("gx gone: %v", got)
+		t.Fatalf("grok installed: %v", got)
+	}
+	if cmdItem(t, m, "cursor").Refusal == "" || cmdItem(t, m, "grok").Refusal != "" || cmdItem(t, m, "native").Note != "needs setup" {
+		t.Fatalf("the states did not follow the answer: %+v", m.sessList.in.cmd.ans.Items)
 	}
 	m = clearInput(t, m)
-	m, _ = typeList(t, m, "/provider gx")
+	m, _ = typeList(t, m, "/provider grok")
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
 	m, _ = press(m, enter())
-	if m.sessList.note != "no provider gx: one of cursor, grok, native" {
-		t.Fatalf("typed /provider gx with gx gone: note %q", m.sessList.note)
+	if m.sessPick.prov.Name() != "grok" {
+		t.Fatalf("typed /provider grok with grok installed: pick %+v, note %q", m.sessPick, m.sessList.note)
+	}
+
+	as.set(noGrok)
+	m = clearInput(t, m)
+	m = providersLoaded(t, m, "/provider ")
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "native"}) {
+		t.Fatalf("grok gone: %v", got)
+	}
+	m = clearInput(t, m)
+	m, _ = typeList(t, m, "/provider grok")
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, enter())
+	if m.sessList.note != "no provider grok: one of cursor, native" {
+		t.Fatalf("typed /provider grok with grok gone: note %q", m.sessList.note)
 	}
 
 	// The list opened again reads the answer as it stands then.
-	as.set(withGx)
+	as.set(withGrok)
 	m = clearInput(t, m)
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.sessList.open {
@@ -855,7 +854,7 @@ func TestSessProviderRecomputesAtEachOpening(t *testing.T) {
 	}
 	m, cmd = openAvailList(t, m, as)
 	m = takeOpenRead(t, m, cmd)
-	if got := m.sessProviderChoices(); len(got) != 4 || got[2].p.Name() != "gx" || got[0].refusal() == "" {
+	if got := m.sessProviderChoices(); len(got) != 3 || got[1].p.Name() != "grok" || got[0].refusal() == "" {
 		t.Fatalf("the list opened again offers %+v", got)
 	}
 }
@@ -908,7 +907,7 @@ func TestSessProviderAsksOffTheUpdate(t *testing.T) {
 // opening it was not asked for: the list's, or the popup's.
 func TestSessProviderTakesNoStaleAnswer(t *testing.T) {
 	older := []ProviderAvail{{ID: "cursor", State: AvailUnavailable, Reason: availCursorReason}, {ID: "grok", State: AvailReady}}
-	newer := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "gx", State: AvailReady}}
+	newer := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}, {ID: "native", State: AvailReady}}
 	ids := func(m Model) []string {
 		var out []string
 		for _, c := range m.sessProviderChoices() {
@@ -923,7 +922,7 @@ func TestSessProviderTakesNoStaleAnswer(t *testing.T) {
 	late := runWatched(t, mustCmd(t, open, "readSessAvail")).(sessAvailMsg)
 	as.set(newer)
 	m = providersLoaded(t, m, "/provider ")
-	want := []string{"cursor:ready", "grok:ready", "gx:ready"}
+	want := []string{"cursor:ready", "grok:ready", "native:ready"}
 	if got := ids(m); !slices.Equal(got, want) {
 		t.Fatalf("after /provider's read: %v", got)
 	}
@@ -1007,105 +1006,111 @@ func pickerRowNames(m Model) []string {
 
 // TestProviderPickerRowsFollowTheAnswers (plan 036 X42, r9): each answer the
 // startup picker takes is its membership too, as /provider's is: a row the
-// answer leaves out is dropped — a gx whose binary went while the picker was
-// up, which the check leaves out unless it is the default — so no row the
-// answer did not judge is drawn or started as ready; a provider it names that
-// the rows lack — a gx installed since — is added, in the registry's order.
+// answer leaves out is dropped, so no row the answer did not judge is drawn or
+// started as ready; a provider it names that the rows lack is added, in the
+// registry's order.
 // The default is always a row: one a non-empty answer leaves out is
 // unavailable, but for a hidden or in-process default, which keeps today's
 // rule. The cursor stays on its provider, or goes to the default when its
 // row went.
 func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
-	cursor, grok, gx, native := agent.CursorProvider(), agent.GrokProvider(), agent.GxProvider(), agent.NativeProvider()
-	// states answers cursor and grok ready, gx ready while installed says
-	// so, and native as the fixture's store says (needing setup).
+	cursor, grok, native := agent.CursorProvider(), agent.GrokProvider(), agent.NativeProvider()
+	// states answers cursor ready, grok ready while installed says so, and
+	// native as the fixture's store says (needing setup).
 	states := func(installed *atomic.Bool, dir string, getenv func(string) string) func() []ProviderAvail {
 		return func() []ProviderAvail {
-			out := []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "grok", State: AvailReady}}
+			out := []ProviderAvail{{ID: "cursor", State: AvailReady}}
 			if installed.Load() {
-				out = append(out, ProviderAvail{ID: "gx", State: AvailReady})
+				out = append(out, ProviderAvail{ID: "grok", State: AvailReady})
 			}
 			return append(out, preNative(dir, getenv, nil))
 		}
 	}
 
-	t.Run("a gx removed under the pre-session dialog", func(t *testing.T) {
+	t.Run("a grok removed under the pre-session dialog", func(t *testing.T) {
 		var installed atomic.Bool
 		installed.Store(true)
 		dir, getenv := preFixture(t, false, false)
 		log := &builtLog{}
-		cfg := availPickerConfig(t, grok, states(&installed, dir, getenv), nil, log.build)
+		cfg := availPickerConfig(t, cursor, states(&installed, dir, getenv), nil, log.build)
 		cfg.NativeDir, cfg.Getenv = dir, getenv
-		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		cfg.Providers = []agent.Provider{cursor, grok, native}
 		m := availPicker(t, cfg, 100, 30)
 		t.Cleanup(func() { _ = m.signIns.closeLog() })
-		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "gx", "native"}) {
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
 			t.Fatalf("fixture: the rows %v", got)
 		}
 		m, _ = preOpen(t, returnPicker, m)
-		installed.Store(false) // gx's binary removed while the dialog is up
+		installed.Store(false) // grok's binary removed while the dialog is up
 		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
 		m = preBack(t, "Esc", returnPicker, m, cmd, connectBack{}, listShown{})
-		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) {
-			t.Fatalf("after the fresh answer the rows are %v; want gx gone", got)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "native"}) {
+			t.Fatalf("after the fresh answer the rows are %v; want grok gone", got)
 		}
-		if m.providers[m.providerCursor].Name() != "native" || strings.Contains(plainView(m), " gx ") {
+		if m.providers[m.providerCursor].Name() != "native" || strings.Contains(plainView(m), " grok ") {
 			t.Fatalf("cursor on %s, frame:\n%s", m.providers[m.providerCursor].Name(), plainView(m))
 		}
-		// Every row Enter can reach: none is gx.
+		// Every row Enter can reach: none is grok.
 		for range m.providers {
 			m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
-			if m.providers[m.providerCursor].Name() == "gx" {
-				t.Fatal("the cursor reached a gx row")
+			if m.providers[m.providerCursor].Name() == "grok" {
+				t.Fatal("the cursor reached a grok row")
 			}
 		}
 	})
 	t.Run("the cursor's row dropped", func(t *testing.T) {
-		var installed atomic.Bool // gx missing by the time the first answer is read
+		var installed atomic.Bool // grok missing by the time the first answer is read
 		dir, getenv := preFixture(t, false, false)
-		cfg := availPickerConfig(t, grok, states(&installed, dir, getenv), nil, (&builtLog{}).build)
-		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		cfg := availPickerConfig(t, cursor, states(&installed, dir, getenv), nil, (&builtLog{}).build)
+		cfg.Providers = []agent.Provider{cursor, grok, native}
 		m := New(cfg)
 		tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 		m = tm.(Model)
 		answer := runWatched(t, m.Init()).(providerAvailMsg)
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown}) // grok → gx, before the answer
-		if m.providers[m.providerCursor].Name() != "gx" {
+		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown}) // cursor → grok, before the answer
+		if m.providers[m.providerCursor].Name() != "grok" {
 			t.Fatalf("fixture: the cursor is on %s", m.providers[m.providerCursor].Name())
 		}
 		m = applyMsg(t, m, answer)
-		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) || m.providers[m.providerCursor].Name() != "grok" {
-			t.Fatalf("rows %v, cursor on %s — want gx gone and the cursor on the default", got, m.providers[m.providerCursor].Name())
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "native"}) || m.providers[m.providerCursor].Name() != "cursor" {
+			t.Fatalf("rows %v, cursor on %s — want grok gone and the cursor on the default", got, m.providers[m.providerCursor].Name())
 		}
 	})
-	t.Run("a gx installed since", func(t *testing.T) {
+	t.Run("a grok installed since", func(t *testing.T) {
 		var installed atomic.Bool
 		installed.Store(true)
 		dir, getenv := preFixture(t, false, false)
-		m := availPicker(t, availPickerConfig(t, grok, states(&installed, dir, getenv), nil, (&builtLog{}).build), 80, 24)
-		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "gx", "native"}) || m.providers[m.providerCursor].Name() != "grok" {
-			t.Fatalf("rows %v, cursor on %s — want gx added in order, the cursor on grok still", got, m.providers[m.providerCursor].Name())
+		cfg := availPickerConfig(t, cursor, states(&installed, dir, getenv), nil, (&builtLog{}).build)
+		cfg.Providers = []agent.Provider{cursor, native}
+		m := availPicker(t, cfg, 80, 24)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"cursor", "grok", "native"}) || m.providers[m.providerCursor].Name() != "cursor" {
+			t.Fatalf("rows %v, cursor on %s — want grok added in order, the cursor on cursor still", got, m.providers[m.providerCursor].Name())
 		}
 	})
 	t.Run("an unlisted default", func(t *testing.T) {
 		log := &builtLog{}
-		cfg := availPickerConfig(t, gx, availFixture, nil, log.build) // the answer never names gx
+		// The answer never names grok, the default.
+		answer := func() []ProviderAvail {
+			return []ProviderAvail{{ID: "cursor", State: AvailReady}, {ID: "native", State: AvailReady}}
+		}
+		cfg := availPickerConfig(t, grok, answer, nil, log.build)
 		m := availPicker(t, cfg, 80, 24)
-		c := m.providerChoice(gx)
-		if !slices.Contains(pickerRowNames(m), "gx") || c.a.State != AvailUnavailable || c.a.Reason != availUnlistedReason {
-			t.Fatalf("rows %v, gx %+v — want the default kept, unavailable", pickerRowNames(m), c.a)
+		c := m.providerChoice(grok)
+		if !slices.Contains(pickerRowNames(m), "grok") || c.a.State != AvailUnavailable || c.a.Reason != availUnlistedReason {
+			t.Fatalf("rows %v, grok %+v — want the default kept, unavailable", pickerRowNames(m), c.a)
 		}
 		next, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
-		if !next.pickingProvider || len(log.got()) != 0 || !strings.HasPrefix(next.providerErr, "can't start gx: ") {
+		if !next.pickingProvider || len(log.got()) != 0 || !strings.HasPrefix(next.providerErr, "can't start grok: ") {
 			t.Fatalf("Esc to the unlisted default: picking %v, built %v, error %q", next.pickingProvider, log.got(), next.providerErr)
 		}
 	})
 	t.Run("an answer that names no provider", func(t *testing.T) {
 		// Non-nil and empty (r11): the default alone stays, judged as left
-		// out; gx, a row before the answer, can no longer be reached.
+		// out; the other rows, rows before the answer, can no longer be
+		// reached.
 		log := &builtLog{}
 		cfg := availPickerConfig(t, grok, func() []ProviderAvail { return []ProviderAvail{} }, nil, log.build)
-		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		cfg.Providers = []agent.Provider{cursor, grok, native}
 		m := availPicker(t, cfg, 80, 24)
 		if got := pickerRowNames(m); !slices.Equal(got, []string{"grok"}) || m.providerChoice(grok).a.State != AvailUnavailable {
 			t.Fatalf("rows %v, grok %+v — want the default alone, unavailable", got, m.providerChoice(grok).a)

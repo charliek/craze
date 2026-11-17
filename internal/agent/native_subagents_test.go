@@ -1379,7 +1379,7 @@ func TestNativeCancelSubagent(t *testing.T) {
 
 // TestSubagentCancelIsNativeOnly (§3.10): the per-child stop is the native
 // session's alone. The ACP session does not implement SubagentCanceller — the
-// engine answers ErrUnsupported for it — and neither grok, gx nor cursor
+// engine answers ErrUnsupported for it — and neither grok nor cursor
 // advertises SubagentCancel, so the TUI never offers the key there.
 func TestSubagentCancelIsNativeOnly(t *testing.T) {
 	if _, ok := any((*session)(nil)).(SubagentCanceller); ok {
@@ -1388,7 +1388,7 @@ func TestSubagentCancelIsNativeOnly(t *testing.T) {
 	if _, ok := any((*nativeSession)(nil)).(SubagentCanceller); !ok {
 		t.Fatal("the native session does not implement SubagentCanceller")
 	}
-	for _, p := range []Provider{CursorProvider(), GrokProvider(), GxProvider()} {
+	for _, p := range []Provider{CursorProvider(), GrokProvider()} {
 		if p.Capabilities().SubagentCancel {
 			t.Fatalf("%s advertises SubagentCancel", p.Name())
 		}

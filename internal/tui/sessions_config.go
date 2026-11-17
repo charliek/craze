@@ -93,9 +93,8 @@ type SessionStarter interface {
 
 // ProviderAvailabilitySource is what a Sessions has when it can say which
 // providers a session started from the list could run (plan 036 §3.3): the
-// list's /provider then offers its answer's providers — a gx installed since
-// the last opening appears, one gone goes — dimming one that is not ready,
-// with its reason, and refusing it when it is chosen (Enter, Tab, or typed
+// list's /provider then offers its answer's providers, dimming one that is not
+// ready, with its reason, and refusing it when it is chosen (Enter, Tab, or typed
 // in full). It is an interface of its own, not a SessionStarter method, so
 // a Sessions without it — every fake the list's frames were made against —
 // is still a SessionStarter, and its /provider offers the startup picker's

@@ -291,12 +291,12 @@ func richSnapshot(home string, here sessKey) roster.Snapshot {
 			answered("pty", "triage the flaky pty test", "grok", ws("craze"), time.Hour, func(s *roster.Session) {
 				s.LastReply = "Found it: os.NewFile(0) races the pty close in the test helper."
 			}),
-			older("folio", "port the docs site", "gx", ws("folio"), nil),
+			older("folio", "port the docs site", "grok", ws("folio"), nil),
 			unreachable,
 		},
 		Saved: []sessions.Row{
 			{SessionID: "p-wrap", Provider: "cursor", CWD: ws("craze"), Title: "teach the composer to wrap", CrazeID: "wrap", UpdatedAt: sessNow.Add(-2 * time.Hour)},
-			{SessionID: "p-docs", Provider: "gx", CWD: ws("folio"), Title: "port the docs site to zensical", CrazeID: "docs", UpdatedAt: sessNow.Add(-5 * 24 * time.Hour)},
+			{SessionID: "p-docs", Provider: "grok", CWD: ws("folio"), Title: "port the docs site to zensical", CrazeID: "docs", UpdatedAt: sessNow.Add(-5 * 24 * time.Hour)},
 			{SessionID: "p-legacy", Provider: "native", CWD: ws("prox"), Title: "spike a stale-entry sweep for prox", UpdatedAt: sessNow.Add(-6 * 24 * time.Hour)},
 		},
 	}
@@ -379,7 +379,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 	ws := func(name string) string { return filepath.Join(os.Getenv("HOME"), "projects", name) }
 	m = listSnap(t, m, roster.Snapshot{Running: []roster.Row{
 		answeredInc(here.id, here.inc, "write the v0.1.0 release notes", "native", ws("craze"), 4*time.Minute, nil),
-		older("folio", "port the docs site", "gx", ws("folio"), nil),
+		older("folio", "port the docs site", "grok", ws("folio"), nil),
 		older("index", "migrate the index", "cursor", ws("lumen"), func(s *roster.Session) {
 			s.PendingAsks = 1
 			s.HeadAsk = &roster.HeadAsk{ID: "ask-9", Kind: "permission", Label: "permission Shell"}

@@ -714,7 +714,7 @@ func TestPromptPlainSaysNothingAboutCommands(t *testing.T) {
 }
 
 // TestPromptJSONHasNoMainUserOrReplayLines is the blast radius of plan 013's
-// replay work on the headless stream. grok and gx echo the user's own prompt
+// replay work on the headless stream. grok echoes the user's own prompt
 // back as a main-session user_message_chunk; craze still drops it, so a `user`
 // line without an agent — a doubled user block in the TUI, and a line
 // `prompt --json` never wrote — cannot appear. And `craze prompt` never sets a

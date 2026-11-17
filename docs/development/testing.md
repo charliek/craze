@@ -367,7 +367,7 @@ usage with `--help`, ends with a `<NAME>_EXIT=` line, and writes its output to
 | `selftest.sh` | The scripts' own failure paths, in a scratch module |
 
 A failure is diagnosed, not re-run. A live check against the real
-`cursor-agent`, `grok`, `gx` or native in a dedicated tmux server, on Linux or
+`cursor-agent`, `grok` or native in a dedicated tmux server, on Linux or
 macOS, follows the `craze-live-smoke` skill (`.claude/skills/craze-live-smoke/`).
 
 ## tmux smoke

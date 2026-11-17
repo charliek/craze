@@ -40,7 +40,7 @@ func providersMachine(t *testing.T) (config string) {
 // TestProvidersTable (A2): the human table — a header, then one row per
 // listed provider in the registry's order, its id, its state in words, and
 // its reason and fix, "-" for a ready one's — and exit 0 although cursor is
-// unavailable. gx, not installed, is not listed; nothing goes to stderr.
+// unavailable. nothing goes to stderr.
 func TestProvidersTable(t *testing.T) {
 	config := providersMachine(t)
 	stdout, stderr, code := executeErr([]string{"providers"})

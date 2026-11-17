@@ -268,10 +268,8 @@ const availUnlistedReason = "the availability check does not list it"
 // names — a known provider each, under its own id — and the default, in
 // agent.Providers() order (pickerRows), as /provider's membership follows its
 // answers (sessProviderChoices; plan 036 X42). A row the answer leaves out is
-// dropped — a gx whose binary went while the picker was up, which the check
-// leaves out unless it is the default — so a fresh answer never leaves a row
-// it did not judge, drawn and started as ready; a provider it names that the
-// rows lack — a gx installed meanwhile — is added. The default is always a
+// dropped, so a fresh answer never leaves a row it did not judge, drawn and
+// started as ready; a provider it names that the rows lack is added. The default is always a
 // row (pickerRows' invariant): left out of a non-empty answer it is
 // unavailable rather than ready, unless it is hidden or runs in process — a
 // default the TUI alone knows of (a hidden --provider/$CRAZE_PROVIDER, which
@@ -321,9 +319,8 @@ func (m Model) providerChoice(p agent.Provider) provChoice {
 }
 
 // pickerRows settles the picker's list, and tui.New is its only caller: the
-// rows are the caller's availability-filtered list — or the built-in
-// non-optional set when it is empty, which keeps a hand-built Config hermetic —
-// unioned with the resolved default.
+// rows are the caller's list — or every listed provider when it is
+// empty, which keeps a hand-built Config hermetic — unioned with the resolved default.
 //
 // The union is the invariant, not a convention the caller honours (§3.4). Esc
 // starts providerDefault whatever the list says, so a default that is missing
@@ -333,7 +330,7 @@ func (m Model) providerChoice(p agent.Provider) provChoice {
 // move the rows around.
 func pickerRows(list []agent.Provider, def agent.Provider) []agent.Provider {
 	if len(list) == 0 {
-		list = agent.DefaultProviders()
+		list = agent.Providers()
 	}
 	want := make(map[string]agent.Provider, len(list)+1)
 	arrived := make([]string, 0, len(list)+1)

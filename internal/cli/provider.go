@@ -65,11 +65,11 @@ func registerProviderFlag(cmd *cobra.Command, dst *string) {
 
 // providerUsage is --provider's help: every listed provider, with the ACP
 // agents craze spawns told apart from the one that runs inside it — "cursor,
-// grok, gx (ACP agents) or native (runs inside craze)". Computed from the
+// grok (ACP agents) or native (runs inside craze)". Computed from the
 // registry, as providerIDs is, so a new provider cannot be named in one and
 // missing from the other. "Runs inside craze" is the refusal's own wording
 // (refuseInProcess) and not "harness", an implementation word the root --help
-// must not carry (TestImportGxHelpNeverMentionsTheHarness).
+// must not carry (TestRootHelpNamesNativeOnceAndNeverTheHarness).
 func providerUsage(ps []agent.Provider) string {
 	var acp, own []string
 	for _, p := range ps {

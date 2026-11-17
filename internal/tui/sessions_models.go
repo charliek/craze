@@ -26,9 +26,8 @@ import (
 //   - /provider lists the providers the startup picker lists (Model.providers:
 //     pickerRows over the availability-filtered list the launch passes) — or,
 //     once the list's ProviderAvailabilitySource has answered (plan 036
-//     §3.3), the providers its latest answer names, a gx installed or gone
-//     since the launch among them: one that is not ready is dimmed with its
-//     reason and refused when chosen (sessProviderChoices).
+//     §3.3), the providers its latest answer names: one that is not ready is dimmed
+//     with its reason and refused when chosen (sessProviderChoices).
 //     Choosing one resets the model to that provider's default: native's is
 //     read from its model table off the Update (nativeDefaultModel) — the
 //     model a native session with no --model starts on — and an ACP
@@ -134,7 +133,6 @@ const (
 var sessProviderDetail = map[string]string{
 	agent.CursorProvider().Name(): "cursor-agent over ACP",
 	agent.GrokProvider().Name():   "grok over ACP",
-	agent.GxProvider().Name():     "the gx fork of grok",
 	agent.NativeProvider().Name(): "craze's own harness",
 }
 
@@ -971,9 +969,8 @@ func (m Model) sessProviderIDs() string {
 
 // sessProviderChoices is the providers /provider offers and takes (plan 036
 // §3.3): the list's latest availability answer's, in its order, each with its
-// state — membership recomputed with the states, so a gx installed since the
-// launch is offered and one gone is not, and a missing gx that is the
-// configured default is offered unavailable — each a provider this craze
+// state — membership recomputed with the states, so a provider the answer
+// names is offered and one it leaves out is not — each a provider this craze
 // knows; or, with no answer yet (or no ProviderAvailabilitySource), the
 // startup picker's rows, every one ready, as /provider always offered them.
 func (m Model) sessProviderChoices() []provChoice {

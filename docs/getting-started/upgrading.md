@@ -100,6 +100,33 @@ end `it exits when idle`.
   native session's cached prompt prefix starts fresh once
   ([Native web search](../reference/configuration.md#native-web-search)).
 
+### The gx provider is gone
+
+craze no longer has a `gx` provider (the third-party fork of the Grok CLI): it
+is not listed by `craze providers`, offered by the picker, named in `--help` or
+accepted as a provider id. Nothing that mentions it breaks:
+
+- **`provider = "gx"` in `config.toml`, or `CRAZE_PROVIDER=gx`,** warns `craze:
+  unknown provider "gx", using cursor` and starts cursor, as any unknown id
+  does. Pick a provider again (`/provider`, or `provider = "grok"`) to replace
+  it.
+- **`--provider gx` is refused**, exit 2: `craze: unknown provider "gx" (want
+  cursor, grok, or native)`. The same refusal answers `craze new --provider gx`
+  and a `session.create` that names `gx`.
+- **Sessions that ran on gx stay in the session index but are not offered**:
+  `--continue`, `--resume`, the resume picker and `craze ps --saved` leave
+  them out, and opening one by its id says `that session's provider "gx" is
+  not one this craze can resume`. They are not deleted.
+- **`[agents].gx` in `config.toml` is ignored**, with no warning, and a stale
+  `models/gx.json` cache is never read.
+- **`source = "gx"` on a `models.toml` entry** still means what it did (the
+  legacy marker, see [how the files
+  merge](../reference/configuration.md#how-the-files-merge)): that is a mark on
+  an old file, not the provider.
+
+If you used gx, `grok` speaks the same protocol and uses the same `~/.grok`
+home: point `[agents].grok` at the binary, or set `CRAZE_AGENT_BIN`.
+
 ## Since v0.2.0
 
 **The waiting commands' JSON changes.** A program that reads `craze new --wait

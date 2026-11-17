@@ -65,7 +65,7 @@ def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> 
     (os.Executable()) as the hub and as each host. The one agent a host
     starts here, grok's, is config.toml's [agents].grok, an absolute path.
     Neither fake starts anything. So the list is craze and craze-fake-host.
-    Then cursor's candidates (cursor-agent, then agent), grok and gx are
+    Then cursor's candidates (cursor-agent, then agent) and grok are
     found nowhere, on every machine, wherever the binaries under test live:
     no system directory, and no directory a CRAZE_BIN override sits in, is
     ever searched.
@@ -102,10 +102,10 @@ def recipe_env(path_dir: Path) -> dict[str, str]:
       CRAZE_RUNTIME_DIR the socket base, kept short under /tmp because a
       socket's path is capped at 100 bytes. The last is also the marker that
       conftest.host_cleanup finds this test's processes by.
-    - PATH is private_path's directory alone. cursor-agent, agent, grok and
-      gx are then not found, so cursor is `unavailable`, "not found", on both
+    - PATH is private_path's directory alone. cursor-agent, agent and grok
+      are then not found, so cursor is `unavailable`, "not found", on both
       OSes, because a missing binary is reported ahead of the macOS
-      login-session rule. gx is not listed. grok reaches the fake agent only
+      login-session rule. grok reaches the fake agent only
       through config.toml's [agents], the one route a hub's host takes, since
       the hub strips CRAZE_AGENT_BIN and CRAZE_PROVIDER.
     - CRAZE_FAKE_SCRIPT=grok-echo has the fake agent speak grok's dialect and

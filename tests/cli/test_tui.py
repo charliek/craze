@@ -1433,9 +1433,8 @@ def test_tui_picker_refuses_native_under_agent_bin(
         env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump), "CRAZE_PROVIDER": "grok"},
     ) as tui:
         tui.wait_contains("esc uses default")
-        # The rows are cursor, grok and native -- gx too only where `gx` is on
-        # PATH, --agent-bin being the resolved grok's alone (plan 032 P7) --
-        # with grok preselected, so Up reaches cursor and then wraps onto
+        # The rows are cursor, grok and native -- every listed provider, whatever
+        # is installed (plan 032 P7) -- with grok preselected, so Up reaches cursor and then wraps onto
         # native either way.
         mark = tui.mark()
         tui.write(b"\x1b[A")

@@ -53,7 +53,6 @@ var (
 		"install grok, or set [agents].grok in " + availConfig}
 	cursorReady  = availEntry{"cursor", "ready", "", ""}
 	grokReady    = availEntry{"grok", "ready", "", ""}
-	gxReady      = availEntry{"gx", "ready", "", ""}
 	nativeReady  = availEntry{"native", "ready", "", ""}
 	cursorNotGUI = availEntry{"cursor", "unavailable",
 		"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain",
@@ -83,8 +82,7 @@ func nativeAs(state availState, reason, fix string) func() (availState, string, 
 
 // TestAvailabilityRules (plan 036 §3.1, A1): every row of §3.1's table, over
 // injected inputs — cursor and grok missing on PATH and through each override,
-// found each way; gx missing (left out, or unavailable as the TUI picker's
-// default) and found; cursor outside the login session (unavailable, with the
+// found each way; cursor outside the login session (unavailable, with the
 // TUI's or CLI's fix, and the hub's naming its pid), in a session that is not
 // known (ready), and missing while outside (the missing binary wins); native's
 // state as its check gives it. The rows come back in rows' order.
@@ -94,21 +92,20 @@ func TestAvailabilityRules(t *testing.T) {
 	gui, notGUI, unknown := session(true, true), session(false, true), session(false, false)
 	native := nativeAs(availReady, "", "")
 	for _, tc := range []struct {
-		name          string
-		resolve       map[string]binResolution
-		gui           func() (uint32, bool, bool)
-		hubPID        int
-		pickerDefault string
-		native        func() (availState, string, string)
-		want          []availEntry
+		name    string
+		resolve map[string]binResolution
+		gui     func() (uint32, bool, bool)
+		hubPID  int
+		native  func() (availState, string, string)
+		want    []availEntry
 	}{
 		{
 			name: "everything found on PATH",
-			want: []availEntry{cursorReady, grokReady, gxReady, nativeReady},
+			want: []availEntry{cursorReady, grokReady, nativeReady},
 		},
 		{
-			name:    "cursor and grok missing on PATH, gx left out",
-			resolve: map[string]binResolution{"cursor": miss(binFromPath, ""), "grok": miss(binFromPath, ""), "gx": miss(binFromPath, "")},
+			name:    "cursor and grok missing on PATH",
+			resolve: map[string]binResolution{"cursor": miss(binFromPath, ""), "grok": miss(binFromPath, "")},
 			want:    []availEntry{cursorOnPath, grokOnPath, nativeReady},
 		},
 		{
@@ -116,7 +113,7 @@ func TestAvailabilityRules(t *testing.T) {
 			resolve: map[string]binResolution{"cursor": miss(binFromFlag, "/opt/x/cursor-agent")},
 			want: []availEntry{
 				{"cursor", "unavailable", "--agent-bin /opt/x/cursor-agent not found", "point --agent-bin at an existing binary"},
-				grokReady, gxReady, nativeReady,
+				grokReady, nativeReady,
 			},
 		},
 		{
@@ -125,7 +122,7 @@ func TestAvailabilityRules(t *testing.T) {
 			want: []availEntry{
 				cursorReady,
 				{"grok", "unavailable", "CRAZE_AGENT_BIN /opt/x/grok not found", "point CRAZE_AGENT_BIN at an existing binary, or unset it"},
-				gxReady, nativeReady,
+				nativeReady,
 			},
 		},
 		{
@@ -134,40 +131,18 @@ func TestAvailabilityRules(t *testing.T) {
 			want: []availEntry{
 				{"cursor", "unavailable", "[agents].cursor /opt/x/cursor-agent not found",
 					"point [agents].cursor at an existing binary in " + availConfig},
-				grokReady, gxReady, nativeReady,
+				grokReady, nativeReady,
 			},
 		},
 		{
-			name: "found through each override",
-			resolve: map[string]binResolution{"cursor": hit(binFromFlag, "/a/cursor-agent"), "grok": hit(binFromEnv, "/a/grok"),
-				"gx": hit(binFromAgents, "/a/gx")},
-			want: []availEntry{cursorReady, grokReady, gxReady, nativeReady},
-		},
-		{
-			name:          "a missing gx kept as the TUI picker's default",
-			resolve:       map[string]binResolution{"gx": miss(binFromPath, "")},
-			pickerDefault: "gx",
-			want: []availEntry{cursorReady, grokReady,
-				{"gx", "unavailable", "gx not found", "install gx, or set [agents].gx"}, nativeReady},
-		},
-		{
-			name:          "a missing gx default through [agents] names the knob",
-			resolve:       map[string]binResolution{"gx": miss(binFromAgents, "/opt/gx")},
-			pickerDefault: "gx",
-			want: []availEntry{cursorReady, grokReady,
-				{"gx", "unavailable", "[agents].gx /opt/gx not found", "point [agents].gx at an existing binary in " + availConfig},
-				nativeReady},
-		},
-		{
-			name:          "another default leaves a missing gx out",
-			resolve:       map[string]binResolution{"gx": miss(binFromPath, "")},
-			pickerDefault: "grok",
-			want:          []availEntry{cursorReady, grokReady, nativeReady},
+			name:    "found through each override",
+			resolve: map[string]binResolution{"cursor": hit(binFromFlag, "/a/cursor-agent"), "grok": hit(binFromEnv, "/a/grok")},
+			want:    []availEntry{cursorReady, grokReady, nativeReady},
 		},
 		{
 			name: "cursor outside the login session, the TUI's or CLI's answer",
 			gui:  notGUI,
-			want: []availEntry{cursorNotGUI, grokReady, gxReady, nativeReady},
+			want: []availEntry{cursorNotGUI, grokReady, nativeReady},
 		},
 		{
 			name:   "cursor outside the login session, the hub's answer",
@@ -175,41 +150,40 @@ func TestAvailabilityRules(t *testing.T) {
 			hubPID: 4242,
 			want: []availEntry{
 				{"cursor", "unavailable", cursorNotGUI.Reason, `kill 4242 (no session ends), then run "craze ps" in a terminal on the Mac`},
-				grokReady, gxReady, nativeReady,
+				grokReady, nativeReady,
 			},
 		},
 		{
 			name: "a login session that is not known marks nothing",
 			gui:  unknown,
-			want: []availEntry{cursorReady, grokReady, gxReady, nativeReady},
+			want: []availEntry{cursorReady, grokReady, nativeReady},
 		},
 		{
 			name:    "missing while outside the login session: the missing binary wins",
 			resolve: map[string]binResolution{"cursor": miss(binFromPath, "")},
 			gui:     notGUI,
 			hubPID:  4242,
-			want:    []availEntry{cursorOnPath, grokReady, gxReady, nativeReady},
+			want:    []availEntry{cursorOnPath, grokReady, nativeReady},
 		},
 		{
 			name:   "native needs setup",
 			native: nativeAs(availNeedsSetup, nativeNoKeyReason, nativeNoKeyFix),
-			want:   []availEntry{cursorReady, grokReady, gxReady, {"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}},
+			want:   []availEntry{cursorReady, grokReady, {"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}},
 		},
 		{
 			name:   "native unavailable",
 			native: nativeAs(availUnavailable, "models.toml could not be read", nativeUnreadFix),
-			want: []availEntry{cursorReady, grokReady, gxReady,
+			want: []availEntry{cursorReady, grokReady,
 				{"native", "unavailable", "models.toml could not be read", nativeUnreadFix}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := availInputs{
-				resolve:       resolvesAs(tc.resolve),
-				native:        native,
-				gui:           gui,
-				hubPID:        tc.hubPID,
-				configPath:    availConfig,
-				pickerDefault: tc.pickerDefault,
+				resolve:    resolvesAs(tc.resolve),
+				native:     native,
+				gui:        gui,
+				hubPID:     tc.hubPID,
+				configPath: availConfig,
 			}
 			if tc.gui != nil {
 				in.gui = tc.gui
@@ -730,34 +704,31 @@ func pickerEntries(as []tui.ProviderAvail) []availEntry {
 }
 
 // TestPickerAvailability (plan 036 §3.3, X13): the TUI's pickers' answer is
-// the check's TUI column over the picker's rows — every listed provider; a
-// gx whose binary is missing left out, unless it is the picker's configured
-// default, which is then unavailable in §3.1's words — and the rows
+// the check's TUI column over the picker's rows — every listed provider, a
+// missing binary unavailable in §3.1's words and never left out — and the rows
 // pickerProviders gives tui.New are exactly the providers that answer
 // names, less a default only the answer adds (tui.New adds it to the rows
 // itself), so the rows and their states cannot disagree about which
 // providers there are. Native needing setup carries the TUI's fix (X23),
 // while the check itself — craze providers', the hub's — keeps the CLI's.
 func TestPickerAvailability(t *testing.T) {
-	cursor, gx := agent.CursorProvider(), agent.GxProvider()
+	cursor, grok := agent.CursorProvider(), agent.GrokProvider()
 	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFixTUI}
-	gxMissing := availEntry{"gx", "unavailable", "gx not found", "install gx, or set [agents].gx"}
+	rows := []string{"cursor", "grok", "native"}
 	for _, tc := range []struct {
 		name   string
 		onPath []string
 		def    agent.Provider
 		want   []availEntry
-		rows   []string
 	}{
-		{name: "gx missing", onPath: []string{"cursor-agent", "grok"}, def: cursor,
-			want: []availEntry{cursorReady, grokReady, needsSetup}, rows: []string{"cursor", "grok", "native"}},
-		{name: "gx missing and the default", onPath: []string{"cursor-agent", "grok"}, def: gx,
-			want: []availEntry{cursorReady, grokReady, gxMissing, needsSetup}, rows: []string{"cursor", "grok", "native"}},
-		{name: "gx installed", onPath: []string{"cursor-agent", "grok", "gx"}, def: cursor,
-			want: []availEntry{cursorReady, grokReady, gxReady, needsSetup}, rows: []string{"cursor", "grok", "gx", "native"}},
-		{name: "gx installed and the default", onPath: []string{"grok", "gx"}, def: gx,
-			want: []availEntry{{"cursor", "unavailable", "cursor-agent not found on PATH", ""}, grokReady, gxReady, needsSetup},
-			rows: []string{"cursor", "grok", "gx", "native"}},
+		{name: "everything installed", onPath: []string{"cursor-agent", "grok"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, needsSetup}},
+		{name: "grok missing stays a row, unavailable", onPath: []string{"cursor-agent"}, def: cursor,
+			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, needsSetup}},
+		{name: "grok missing and the default", onPath: []string{"cursor-agent"}, def: grok,
+			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, needsSetup}},
+		{name: "cursor missing and grok the default", onPath: []string{"grok"}, def: grok,
+			want: []availEntry{{"cursor", "unavailable", "cursor-agent not found on PATH", ""}, grokReady, needsSetup}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			availPath(t, tc.onPath...)
@@ -770,25 +741,25 @@ func TestPickerAvailability(t *testing.T) {
 				}
 			}
 			for i := range got {
-				if tc.want[i].ID == "cursor" && tc.want[i].Fix == "" {
+				if tc.want[i].State == "unavailable" && tc.want[i].Fix == "" {
 					got[i].Fix = "" // the config path, which the case does not pin
 				}
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("the picker's answer:\n%+v\nwant:\n%+v", got, tc.want)
 			}
-			rows := providerNames(pickerProviders(tc.def, ""))
-			if !reflect.DeepEqual(rows, tc.rows) {
-				t.Fatalf("the picker's rows %v, want %v", rows, tc.rows)
+			gotRows := providerNames(pickerProviders(tc.def, ""))
+			if !reflect.DeepEqual(gotRows, rows) {
+				t.Fatalf("the picker's rows %v, want %v", gotRows, rows)
 			}
 			var listed []string
 			for _, e := range got {
-				if e.ID != tc.def.Name() || slices.Contains(rows, e.ID) {
+				if e.ID != tc.def.Name() || slices.Contains(gotRows, e.ID) {
 					listed = append(listed, e.ID)
 				}
 			}
-			if !slices.Equal(listed, rows) {
-				t.Fatalf("the answer names %v beside the default, the rows are %v", listed, rows)
+			if !slices.Equal(listed, gotRows) {
+				t.Fatalf("the answer names %v beside the default, the rows are %v", listed, gotRows)
 			}
 		})
 	}
@@ -796,15 +767,14 @@ func TestPickerAvailability(t *testing.T) {
 
 // TestSessionListAvailabilityFollowsTheBinaries (plan 036 §3.3, A6): the
 // list's /provider asks sessionList at each opening, and it answers from the
-// machine as it is then — a gx installed between two openings is offered,
-// ready, and one removed is gone — with the launch's own --agent-bin
-// resolving the launch's provider, and a gx that is the launch's configured
-// default kept, unavailable.
+// machine as it is then — a grok installed between two openings is ready, and
+// one removed is unavailable again — with the launch's own --agent-bin
+// resolving the launch's provider.
 func TestSessionListAvailabilityFollowsTheBinaries(t *testing.T) {
-	path := availPath(t, "grok")
+	path := availPath(t)
 	crazeHome(t)
 	t.Setenv(envAgentBin, "")
-	cursor, gx := agent.CursorProvider(), agent.GxProvider()
+	cursor := agent.CursorProvider()
 	own := writeExecutable(t, t.TempDir(), "some-agent")
 	list := sessionList{&launcher{flags: tuiFlags{agentBin: own}, resolved: resolvedProvider{Provider: cursor}, own: cursor}}
 	ids := func(as []tui.ProviderAvail) []string {
@@ -814,22 +784,18 @@ func TestSessionListAvailabilityFollowsTheBinaries(t *testing.T) {
 		}
 		return out
 	}
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "native:needs_setup"}; !slices.Equal(got, want) {
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
 		t.Fatalf("first opening: %v, want %v", got, want)
 	}
-	bin := writeExecutable(t, path, "gx")
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "gx:ready", "native:needs_setup"}; !slices.Equal(got, want) {
-		t.Fatalf("gx installed: %v, want %v", got, want)
+	bin := writeExecutable(t, path, "grok")
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("grok installed: %v, want %v", got, want)
 	}
 	if err := os.Remove(bin); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "native:needs_setup"}; !slices.Equal(got, want) {
-		t.Fatalf("gx removed: %v, want %v", got, want)
-	}
-	gxDefault := sessionList{&launcher{resolved: resolvedProvider{Provider: gx}, own: gx}}
-	if got, want := ids(gxDefault.ProviderAvailability()), []string{"cursor:unavailable", "grok:ready", "gx:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
-		t.Fatalf("gx the configured default, missing: %v, want %v", got, want)
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("grok removed: %v, want %v", got, want)
 	}
 }
 

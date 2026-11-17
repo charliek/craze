@@ -37,7 +37,7 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line in the session's diagnostics (below). Applies to this start only — a `--continue` or `--resume` load included — and is never remembered. `craze new --wait` on the native provider is strict instead: with `--model`, a level the model does not list is [refused](#model-checks) |
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below). No native model has one: `craze new --wait` on the native provider [refuses `--fast`](#model-checks) |
 | `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
-| `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
+| `--provider` | Provider: `cursor`, `grok` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
@@ -46,7 +46,7 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok, gx and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one, skipping sub-agent sessions. No matching session exits 1 |
 | `--version`, `-v` | Print the craze version and exit, as `craze version` does. Answered before any argument is checked |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
@@ -134,7 +134,7 @@ refusal — checked before either flag is considered, so it fires even for a
 workspace with no sessions at all.
 
 A load the agent itself refuses (no `session/load` support, an unknown
-session id, a working directory Grok or gx reject) is shown as an on-screen
+session id, a working directory Grok rejects) is shown as an on-screen
 error exactly like a failed `session/new`; the row stays in the index, craze
 never falls back to starting a new session, and the exit code on quit is 1.
 
@@ -412,14 +412,14 @@ echo "hello" | ./bin/craze prompt --json
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one; neither leaves it as the model has it. Both together exit 2 |
 | `--web-search`, `--no-web-search` | Offer this run's native session the web tools, or offer none, whatever the home says ([web search](#web-search-flags)). Both together exit 2. `--web-search` that cannot be honoured (an explicit off in `config.toml`, a provider other than native) is exit 1 before any provider is called: the message on stderr and, with `--json`, the `error` event; `--no-web-search` is never refused |
 | `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
-| `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
+| `--provider` | Provider: `cursor`, `grok` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok, gx and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
 | `--json` | Write only JSON events to stdout |
 
 Without `--json`, only the **main session's** assistant text is written to
@@ -1009,7 +1009,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | Flag | Description |
 |------|-------------|
 | `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
-| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok, gx or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, kind `config` under `--json` |
+| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, kind `config` under `--json` |
 | `--model <id>` | The model to start on. Without it the session uses the agent's own default: craze keeps no default model of its own for an ACP provider |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
@@ -1611,7 +1611,7 @@ result from files later. What it needs to know:
   (`retries`: a discarded attempt may have been billed), or when some usage had no price
   (`unpriced: true`, [Usage](protocol.md#usage)). A failure (exit 1) carries `usage` only
   [when the session ended under a turn](#no-ending-seen), so keep the last `usage.session`
-  you read. cursor, grok and gx sessions report no usage.
+  you read. cursor and grok sessions report no usage.
 
 ## craze send
 
@@ -1982,7 +1982,7 @@ workspace. It is what the agent's tools said, not a look at the disk:
     |----------|------------------------|
     | `native` | its kind is `edit` (`write`, `edit`) |
     | `cursor` | its kind is `edit`, `delete` or `move`: a delete lists the deleted path, a rename both names |
-    | `grok`, `gx` | its tool is `search_replace` or `write`, whatever kind it reports; any other tool does not count |
+    | `grok` | its tool is `search_replace` or `write`, whatever kind it reports; any other tool does not count |
 
 - **Shell writes are never in `files`.** Plan mode refuses edit tools but lets the
   shell through, so a plan-mode turn can change the workspace with `files` empty.
@@ -2009,7 +2009,7 @@ workspace. It is what the agent's tools said, not a look at the disk:
 - **`outsideFiles` is the same list for paths outside the workspace,** absolute.
 - **`planFile` is the session's plan file,** when the turn wrote it. It is told by
   where the file is, never by its name: native's is the one under
-  `<craze home>/native/sessions`, and grok's and gx's is
+  `<craze home>/native/sessions`, and grok's is
   `<GROK_HOME or ~/.grok>/sessions/<encoded cwd>/<session>/plan.md` (a relative
   `GROK_HOME` is from the agent's working directory, the workspace), for the session id
   the agent gave this session (`providerSessionId` in the [session info
@@ -2228,7 +2228,7 @@ are harmless: each holds the record's lock while it acts on it.
   cannot read, a failed write, or more than 1000 groups running at once in one host.
   Crossing off is what keeps a long session of short commands far from that cap.
 - **The instant between a command's start and its line being written.**
-- **A cursor, grok or gx agent's commands**, which are the agent's own. An agent's
+- **A cursor or grok agent's commands**, which are the agent's own. An agent's
   group is ended only while the agent itself is running. An agent that has already
   exited leaves anything still in its group alone. A cursor agent runs its shell
   commands in a session of their own, so after a `SIGKILL`ed host they keep running,
@@ -2814,8 +2814,8 @@ nor any part of one, is ever printed.
 ./bin/craze providers --hub --json
 ```
 
-Lists the agent providers craze can start a session of — cursor, grok, gx when
-it is installed, and native — with each one's state on this machine and, for a
+Lists the agent providers craze can start a session of — cursor, grok and
+native — with each one's state on this machine and, for a
 provider that is not ready, why and what to do about it. These are **agent**
 providers, what [`--provider`](#flags) picks; [`craze auth
 list`](#craze-auth-list) lists the native provider's **model** providers and
@@ -2836,7 +2836,7 @@ native    needs setup  no model provider has a key     craze auth login (an API 
 
 How each is judged:
 
-- **cursor, grok and gx** are ready when their agent binary resolves the way a
+- **cursor and grok** are ready when their agent binary resolves the way a
   session of theirs would find it ([Agent binaries](configuration.md#agent-binaries)):
   `$CRAZE_AGENT_BIN` for the provider a plain `craze` would start
   (`$CRAZE_PROVIDER`, else `provider` in `config.toml`, else cursor), then
@@ -2844,8 +2844,8 @@ How each is judged:
   is not found makes it unavailable, and the reason names where craze looked:
   `cursor-agent not found on PATH`, or the override and its path,
   `[agents].cursor /opt/x/cursor-agent not found` (the fix then says to point
-  that override at an existing binary). gx is a fork few machines have, so
-  when it is not found it is not listed at all.
+  that override at an existing binary). A provider whose binary is not found
+  is still listed, as unavailable.
 - **cursor, on macOS,** is also unavailable when this craze runs outside the
   Mac's login session — started over `ssh` — where cursor may not reach the
   login keychain (`this craze runs outside the macOS login session (over
