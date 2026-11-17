@@ -121,6 +121,10 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 		rec.info.StartedAt = time.Now()
 		spawned = true
 	}
+	// The registry's word on routing is the row's (C8 K3): a child it routes
+	// now — admitted after an earlier cap refusal — gets its tool store back,
+	// and a reused row's transcript flag follows.
+	s.claudeRouteLocked(rec, !n.Unrouted)
 	prev := cloneSubagent(rec.info)
 	s.applyClaudeLabelsLocked(rec, n)
 	capSubagent(&rec.info)
@@ -177,6 +181,23 @@ func (s *session) handleClaudeSubagentLocked(n acp.SubagentNotification) []Event
 func subagentRowEvent(rec *subagentRec, change string) Event {
 	info := cloneSubagent(rec.info)
 	return Event{Type: EventSubagent, Subagent: &info, SubagentChange: change}
+}
+
+// claudeRouteLocked makes rec routed or not, as the ACP registry says: a
+// routed child has a tool store and, where the provider streams children, a
+// transcript; an unrouted one has neither.
+func (s *session) claudeRouteLocked(rec *subagentRec, routed bool) {
+	switch {
+	case routed && rec.unrouted:
+		rec.unrouted = false
+		rec.tools = make(map[string]ToolEvent)
+		rec.evicted = make(map[string]struct{})
+	case !routed && !rec.unrouted:
+		rec.unrouted = true
+		rec.tools, rec.toolOrder = nil, nil
+		rec.evicted, rec.evictedOrder = nil, nil
+	}
+	rec.info.Transcript = routed && s.provider().Capabilities().SubagentTranscript
 }
 
 // applyClaudeLabelsLocked takes what an update says of the child's labels and
@@ -418,7 +439,15 @@ func (s *session) retireChildrenAtEnd(client *acp.Client) {
 	}
 	s.mu.Unlock()
 	s.emitAll(evs)
+	// And the agent's own turn, if one runs (C8 K2): it will never report
+	// again either, so its open tool calls fail and it ends failed now —
+	// not after the silence rule's minute, or ten, and not as a success.
+	s.closeInFlightTools(toolFailed, 0)
+	client.EndForeignWith(errAgentStopped)
 }
+
+// errAgentStopped ends a turn of the agent's own whose agent is gone.
+var errAgentStopped = fmt.Errorf("%w: %s", acp.ErrAgentExited, agentStopped)
 
 // agentStopped is the error of a claude child whose agent stopped under it.
 const agentStopped = "the agent stopped"

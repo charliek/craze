@@ -723,7 +723,11 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		// The turn is over when its reply is read, on the read loop, in
 		// order with the updates around it (§ E1).
 		var result PromptResult
-		if err := c.conn.callAnswered(ctx, MethodSessionPrompt, params, &result, sent, func() { c.claudePromptAnswered(turn) }); err != nil {
+		err := c.conn.callAnswered(ctx, MethodSessionPrompt, params, &result, sent, func() { c.claudePromptAnswered(turn) })
+		if testPromptReturned != nil {
+			testPromptReturned()
+		}
+		if err != nil {
 			return nil, err
 		}
 		return &result, nil
@@ -1287,7 +1291,7 @@ func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 		child = requestSession(msg.Params)
 	}
 	c.mu.Lock()
-	turn, inTurn := c.turn, c.inPrompt
+	turn, inTurn := c.turn, c.inTurnLocked()
 	if child != "" && (child == c.sessionID || !c.kids.has(child)) {
 		child = ""
 	}
@@ -1404,7 +1408,18 @@ func (c *Client) TurnLive(turn int) bool {
 func (c *Client) TurnActive(turn int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.inPrompt && turn == c.turn
+	return c.inTurnLocked() && turn == c.turn
+}
+
+// inTurnLocked says a prompt of craze's own is in its turn. On claude the
+// turn ends at the wire boundary — the prompt's reply read (claudePromptAnswered
+// moves the machine off prompted) — not at the prompt goroutine's cleanup, so
+// a request a wake sends after the reply belongs to no turn of craze's (C8 K1).
+func (c *Client) inTurnLocked() bool {
+	if c.dialect == DialectClaude {
+		return c.inPrompt && c.cf.phase == phasePrompted && c.cf.turn == c.turn
+	}
+	return c.inPrompt
 }
 
 func (c *Client) onNotify(msg *Message) {

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -58,6 +59,8 @@ import (
 //	CRAZE_FAKE_CLAUDE_LOAD_FAST_HIDDEN  1: a load turns fast mode on and pushes
 //	                              it during the replay, and its reply — built
 //	                              before — still says off
+//	CRAZE_FAKE_CLAUDE_WAKE_BEFORE_SET  text: the first session/set_config_option
+//	                              is answered behind a wake saying it
 //	CRAZE_FAKE_DUMP_SETUP         every session/new and session/load params
 //	                              object is appended to this file, one line
 //	                              each
@@ -84,6 +87,8 @@ type claudeState struct {
 	// race is the prompt STEER-RACE holds, under the server's mu: the next
 	// steer answers it first, then startedNewTurn (claude_bg.go).
 	race json.RawMessage
+	// wakeBeforeSet: CRAZE_FAKE_CLAUDE_WAKE_BEFORE_SET's wake has been sent.
+	wakeBeforeSet atomic.Bool
 }
 
 func claudeSelect(id, name, category, current string, values ...string) map[string]any {
@@ -330,6 +335,12 @@ func (s *server) claudeSetConfig(msg *acp.Message) {
 	if _, refused := s.claude.set(p.ConfigID, p.Value); refused {
 		_ = s.conn.ReplyErr(msg.ID, pmInvalidParams("Invalid value for config option "+p.ConfigID+": "+p.Value))
 		return
+	}
+	if text := os.Getenv("CRAZE_FAKE_CLAUDE_WAKE_BEFORE_SET"); text != "" && s.claude.wakeBeforeSet.CompareAndSwap(false, true) {
+		// Once: a wake on the wire ahead of this set's reply (plan 052 C8
+		// S1), so a prompt held at its gate for the reset finds the agent's
+		// own turn open when the reset ends.
+		s.wake(s.claude.sid, text)
 	}
 	s.reply(msg.ID, map[string]any{"configOptions": s.claude.catalog()})
 	if p.ConfigID == "mode" {

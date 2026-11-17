@@ -216,6 +216,14 @@ func (s *server) claudeBGTurn(id json.RawMessage, sid, text string) bool {
 		s.usage(sid, true)
 		time.Sleep(gap)
 		s.toolOn(sid, "toolu_wake", acp.UpdateToolCallUpd, "completed")
+	case s.script == "claude-wake-nousage" && bg && strings.Contains(text, "EXIT"):
+		// A wake the adapter dies in, its tool call open (C8 K2).
+		endTurn("started")
+		time.Sleep(delay)
+		s.claudeSay(sid, "working in the background")
+		s.toolOn(sid, "toolu_dying", acp.UpdateToolCall, "in_progress")
+		time.Sleep(50 * time.Millisecond)
+		os.Exit(3)
 	case s.script == "claude-wake-nousage" && bg:
 		endTurn("started")
 		time.Sleep(delay)

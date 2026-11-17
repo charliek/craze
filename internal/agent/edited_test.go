@@ -547,7 +547,7 @@ func TestACursorCallIsStampedByHowItEnded(t *testing.T) {
 	t.Run("a turn's end cancels what was never finished", func(t *testing.T) {
 		s, _ := newCursor(t)
 		s.mergeTool(liveDelta("c", "edit", "in_progress", "a.go"))
-		s.closeInFlightTools("cancelled")
+		s.closeInFlightTools("cancelled", 0)
 		if tool := s.Snapshot().Tools[0]; tool.Status != "cancelled" || tool.Edited != nil {
 			t.Fatalf("%+v", tool)
 		}
@@ -569,7 +569,7 @@ func TestACursorCallIsStampedByHowItEnded(t *testing.T) {
 	t.Run("a turn's end leaves a stamp alone", func(t *testing.T) {
 		s, _ := newCursor(t)
 		s.mergeTool(liveDelta("c", "edit", "completed", "a.go"))
-		s.closeInFlightTools("cancelled")
+		s.closeInFlightTools("cancelled", 0)
 		if tool := s.Snapshot().Tools[0]; tool.Status != toolCompleted || tool.Edited == nil {
 			t.Fatalf("%+v", tool)
 		}

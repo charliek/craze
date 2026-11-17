@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -132,5 +133,49 @@ func TestClaudeOverageStopsTheHostAndResumes(t *testing.T) {
 	stdout, stderr, code = executeErr([]string{"send", short, "--wait", "--json", "hello"})
 	if m := decodeResult(t, stdout); code != 0 || m["status"] != "completed" || m["message"] != "echo: hello" {
 		t.Fatalf("the reload after the record expired: exit %d, %v, %q", code, m, stderr)
+	}
+}
+
+// TestClaudeRequeuedLastPromptKeepsItsWait (plan 052 C8 S1): craze send
+// --wait --exit-after-turn whose prompt the engine took straight to a turn,
+// and which a wake then refused at claude's prompt gate — the wake on the
+// wire while the prompt waited there for a fast-mode reset — waits for the
+// prompt's real turn, the row its text became: the result is that turn's,
+// and the host stops after it, not before.
+func TestClaudeRequeuedLastPromptKeepsItsWait(t *testing.T) {
+	env, ws, fake := claudeHostHome(t, "claude-basic")
+	gate := filepath.Join(t.TempDir(), "set")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_SET_GATE", gate)
+	t.Setenv("CRAZE_FAKE_CLAUDE_WAKE_BEFORE_SET", "a wake in the gate window")
+	// The host is this process, so it is never gone: the wait for it is cut
+	// short, as exit_after_turn_test.go's are.
+	prev := exitAfterTurnWait
+	exitAfterTurnWait = 300 * time.Millisecond
+	t.Cleanup(func() { exitAfterTurnWait = prev })
+	r := runServeIn(t, hostEnv{}, "--agent-bin", fake, "--workspace", ws, "--provider", "claude")
+	e := r.waitServing(t, env, true)
+	short := e.CrazeSessionID[len(e.CrazeSessionID)-8:]
+	// Fast mode turned on: the reset's set is held at the gate.
+	if stdout, stderr, code := executeErr([]string{"send", short, "--wait", "--json", "FAST-ON"}); code != 0 {
+		t.Fatalf("the fast-on turn: exit %d, %s, %q", code, stdout, stderr)
+	}
+	last := goCraze("send", short, "--wait", "--json", "--exit-after-turn", "the last")
+	// The engine has taken it to a turn: the session's prompt waits at the
+	// gate for the reset, which answers behind a wake.
+	waitFor(t, "the last prompt's turn", func() bool { return serveTurnRunning(t, e) })
+	if err := releaseGate(gate, serveStep); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := last.within(t, serveStep)
+	m := decodeResult(t, stdout)
+	msg, _ := m["message"].(string)
+	if code != 0 || m["status"] != "completed" || m["stopping"] != true || !strings.Contains(msg, "echo: the last") {
+		t.Fatalf("the requeued last prompt: exit %d, %v, %q", code, m, stderr)
+	}
+	if err := r.result(t, serveStep); err != nil {
+		t.Fatalf("the host ended with %v", err)
 	}
 }

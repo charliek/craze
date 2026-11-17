@@ -2343,16 +2343,23 @@ func (e *Engine) rowRefusedLocked(t *turn) bool {
 // ran. Then nothing else would ever drain the row. The tick's pass drains it if a
 // turn may start; if the agent's turn is still running, that turn's end does.
 func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
+	rowID := ""
 	if t.row != nil {
 		batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+		rowID = t.row.ID
 	} else {
 		// Text the client held itself becomes a row at the head, as a
 		// steer the turn left unanswered does (textRequeuedLocked).
-		batch = append(batch, e.stamp(e.queue.PushFront(t.text, e.now()).Event(), t.cause))
+		ev := e.queue.PushFront(t.text, e.now())
+		batch = append(batch, e.stamp(ev.Event(), t.cause))
+		rowID = ev.Prompt.ID
 	}
 	if f := e.exitFence; f != nil && f.turn == t.id {
-		// Back in the queue, and not over: the fence waits for its row again.
+		// Back in the queue, and not over: the fence waits for its row
+		// again — the row the direct text became, too (C8 S1), or the lift
+		// would find no row of its and lower it.
 		f.turn = ""
+		f.row = rowID
 	}
 	e.cur = nil
 	e.activity = ActivityIdle

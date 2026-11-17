@@ -118,9 +118,9 @@ func (s *session) onACPForeignTurn(f acp.ForeignTurn) {
 // line, as C2's and C3's notes are.
 func (s *session) noteForeignSilence(f acp.ForeignTurn) {
 	s.log.Note(journal.DiagNote{Kind: "claude_foreign_silence", Fields: map[string]any{"turn": f.ID, "reason": f.Reason}})
-	if w := diagWriter(s.opts); w != nil {
-		fmt.Fprintf(w, "craze: claude went quiet during a turn of its own (%s); treating it as over\n", sanitizeLine(f.ID))
-	}
+	// Off the dispatch goroutine (C8 K5): this runs under the client's
+	// dispatch lock, and a sink that blocks must not hold the overage stop.
+	s.diagLine(fmt.Sprintf("craze: claude went quiet during a turn of its own (%s); treating it as over", sanitizeLine(f.ID)))
 }
 
 // onForeignTurn records a turn the agent started on its own and tells the
@@ -164,3 +164,25 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 // testForeignStartPublish is a test seam, nil in production: it runs between a
 // foreign start's state change and its event.
 var testForeignStartPublish func()
+
+// noteToolOwner records which turn opened a claude root tool call, the first
+// time its id is seen: the prompted turn running, unless the agent's own turn
+// holds the session — the client announces that ahead of the update.
+func (s *session) noteToolOwner(id string) {
+	if id == "" || !s.provider().isClaude() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.toolOwner[id]; ok {
+		return
+	}
+	owner := 0
+	if s.inPrompt && !s.foreign {
+		owner = s.turn
+	}
+	if s.toolOwner == nil {
+		s.toolOwner = make(map[string]int)
+	}
+	s.toolOwner[id] = owner
+}

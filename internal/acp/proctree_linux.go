@@ -67,13 +67,15 @@ func parseStatTree(pid int, line []byte) (treeEntry, bool) {
 // snapshot is never signalled: the pidfd names one process for its life.
 // A kernel with no pidfd_open (before 5.3) gets the start-time check and
 // kill(2), best effort.
+//
+// A pidfd the kernel or a sandbox will not give or use — ENOSYS, or EPERM /
+// EACCES from a seccomp profile (C8 K6) — falls back to the same checked
+// kill(2), so a captured descendant is not left running because the safer
+// path was refused.
 func platformKillVerified(e treeEntry) bool {
-	fd, err := unix.PidfdOpen(e.pid, 0)
-	if errors.Is(err, unix.ENOSYS) {
-		if now, ok := statEntry(e.pid); !ok || now.start != e.start {
-			return false
-		}
-		return syscall.Kill(e.pid, syscall.SIGKILL) == nil
+	fd, err := pidfdOpen(e.pid, 0)
+	if pidfdRefused(err) {
+		return checkedKill(e)
 	}
 	if err != nil {
 		return false
@@ -82,5 +84,30 @@ func platformKillVerified(e treeEntry) bool {
 	if now, ok := statEntry(e.pid); !ok || now.start != e.start {
 		return false
 	}
-	return unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0) == nil
+	err = pidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+	if pidfdRefused(err) {
+		return checkedKill(e)
+	}
+	return err == nil
+}
+
+// pidfdOpen and pidfdSendSignal are the pidfd calls, vars so a test can
+// refuse them as a sandbox would.
+var (
+	pidfdOpen       = unix.PidfdOpen
+	pidfdSendSignal = unix.PidfdSendSignal
+)
+
+// pidfdRefused reports a pidfd call the kernel lacks or a sandbox denies.
+func pidfdRefused(err error) bool {
+	return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES)
+}
+
+// checkedKill is kill(2) after the start-time check: best effort against pid
+// reuse, where no pidfd can be had.
+func checkedKill(e treeEntry) bool {
+	if now, ok := statEntry(e.pid); !ok || now.start != e.start {
+		return false
+	}
+	return syscall.Kill(e.pid, syscall.SIGKILL) == nil
 }

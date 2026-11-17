@@ -164,6 +164,10 @@ type session struct {
 	// transportEnded: the claude agent's read loop has ended and its running
 	// children were retired (retireChildrenAtEnd), under s.mu.
 	transportEnded bool
+	// toolOwner is the turn of craze's own that opened each claude root tool
+	// call, by id: 0 for one a turn of the agent's own, or nothing, opened
+	// (closeInFlightTools; C8 K7). It grows as the tool map does.
+	toolOwner map[string]int
 	// textRun is the messageId of the claude root text the transcript's open
 	// run holds, "" when none is open: a chunk of another message starts a
 	// paragraph of its own (review C4 item 11).
@@ -1828,6 +1832,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
+	myTurn := s.turn
 	// A turn of craze's own starts a run of its own (review C4 item 11).
 	s.textRun = ""
 	s.token = token
@@ -1966,7 +1971,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		// ever. Every dialect alike. Ported from t3code's 47f90ee2e9 and
 		// 623047ccfd, which close open tool calls when the prompt fails or
 		// the process dies.
-		s.closeInFlightTools(toolFailed)
+		s.closeInFlightTools(toolFailed, myTurn)
 		// The error goes out first, so a consumer already in its error state
 		// by the time the engine's chain policy clears its own queue at
 		// settlement (plan 021 §3.5) — this session has none of its own any
@@ -1979,7 +1984,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	}
 	kept := false
 	if res.StopReason == acp.StopCancelled {
-		s.closeInFlightTools(acp.StopCancelled)
+		s.closeInFlightTools(acp.StopCancelled, myTurn)
 		kept = s.keptPlanning(token)
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason, KeptPlanning: kept})
@@ -2021,9 +2026,19 @@ func refusedBeforeWire(err error) bool {
 // gets a terminal tool_call_update, so without this its row spins forever and
 // the status row keeps counting it. Cursor closes its own tools, so this
 // finds nothing there.
-func (s *session) closeInFlightTools(status string) {
+//
+// turn is the ending turn's number: on claude only the tools that turn opened
+// are closed (C8 K7), never one a turn of the agent's own opened after the
+// reply — its own ending closes those. turn 0 closes every open tool (the
+// agent gone). Other providers close every open tool, as they always have.
+func (s *session) closeInFlightTools(status string, turn int) {
 	s.mu.Lock()
-	ids := append([]string(nil), s.toolOrder...)
+	var ids []string
+	for _, id := range s.toolOrder {
+		if turn == 0 || !s.provider().isClaude() || s.toolOwner[id] == turn {
+			ids = append(ids, id)
+		}
+	}
 	s.mu.Unlock()
 	for _, id := range ids {
 		// The in-flight check happens under the merge lock: a terminal
@@ -3437,6 +3452,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			return
 		}
 		s.endTextRun()
+		s.noteToolOwner(delta.id)
 		delta.wireName = n.ToolName
 		s.publishToolDelta(delta)
 	case acp.UpdateAvailableCommands:
@@ -3719,6 +3735,12 @@ func (s *session) onSettingsReply(r acp.SettingsReply) error {
 	s.installReplyLocked(r, cfg)
 	if s.snap.CurrentModel != before {
 		s.modelUnannounced = true
+	}
+	if s.provider().isClaude() {
+		// A reply's catalog is enforced as an update's is (C8 K4): a model
+		// switch back that returns fast on starts a reset, whatever an
+		// earlier reset concluded while the option was hidden.
+		s.keepFastOffLocked(s.snap.Config)
 	}
 	return nil
 }

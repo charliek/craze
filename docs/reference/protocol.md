@@ -377,7 +377,7 @@ own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
 | `outcome` | `done` (ran to its end — and every foreign turn whose closing bracket says neither `cancelled` nor `err`), `failed` (its ending carried an error, a foreign turn's `err` included), or `cancelled` (a cancel — a foreign turn's `cancelled` included —, a prompt withdrawn before it was sent, or the session's close) |
 | `err` | a failed turn's error text; absent otherwise |
 | `stopReason` | the ending's own stop reason; absent for a foreign turn, a failure that has none, and an older host |
-| `cause` | on a stop reason of `closing`, [what began the close](#what-began-a-close); absent otherwise |
+| `cause` | on a stop reason of `closing`, [what began the close](#what-began-a-close). It also comes with no `stopReason` on a failed ending the close itself decided: a claude turn the [overage stop](#what-began-a-close) closed the session under ends `failed`, kind `quota`, with `cause: "overage"`. Absent otherwise |
 | `withdrawn` | `true` on a cancelled turn whose prompt never reached the agent (its ending synthetic, stopped `cancelled`): no step of it ran. Absent otherwise, and from an older host |
 | `kind`, `retryable`, `status`, `provider_code` | what a failed turn [said of itself](#what-a-failure-says-of-itself); absent otherwise |
 | `endedAt` | the ending event's time, UTC |
@@ -1094,7 +1094,7 @@ create sheet offers; `craze providers --hub` prints it.
 
 ```json
 {"jsonrpc":"2.0","id":"3","method":"sessions.createOptions","params":{}}
-{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
+{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
 ```
 
 **Params.** None: `{}`, or none at all. Any member is `bad_request`, reason
@@ -3383,12 +3383,14 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"sessions.createOptions","params
 The answer, exactly, on Linux and macOS:
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /tmp/craze-recipe/craze-home/config.toml"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
 ```
 
 - cursor is `unavailable` because neither `cursor-agent` nor `agent` is on
   `PATH`.
 - grok is `ready` because `[agents].grok` names a binary that exists.
+- claude is `unavailable` because its adapter, `claude-agent-acp`, is not on
+  `PATH`.
 - native is `needs_setup` because no API key is set and the native directory
   is empty.
 - `defaultProvider` is `config.toml`'s `provider`.

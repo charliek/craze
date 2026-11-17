@@ -587,6 +587,10 @@ var testAfterPrompted func()
 // PromptBlocks refused after its gate, before its cleanup.
 var testGateRefused func()
 
+// testPromptReturned is a test seam, nil in production: it runs in a claude
+// PromptBlocks once its reply is in, before its cleanup.
+var testPromptReturned func()
+
 // closeMachineLocked retires the timers and closes the machine: nothing opens
 // again.
 func (c *Client) closeMachineLocked() {

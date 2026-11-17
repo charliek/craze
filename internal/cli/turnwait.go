@@ -1698,17 +1698,28 @@ func (w *turnWaiter) turnStarted(ev agent.Event) {
 // agent's own turn, and right behind the target's own row's `queued` — the
 // settlement's batch is [the row queued, the ending], one seq apart, which
 // the log never interleaves (EventLog.publishBatch) — and that row's id. Only
-// the target's own row: a turn submitted directly has none, and its refusal
-// is its ending, however close another client's queued row came before it.
+// the target's own row — or, for a turn submitted directly, the row claude's
+// requeueing refusal made of its text (agent.ErrForeignTurnRequeue, C8 S1);
+// any other direct refusal is its ending, however close another client's
+// queued row came before it.
 func (w *turnWaiter) restoring(ev agent.Event) (string, bool) {
 	tu := ev.Turn
-	if w.row == "" || !tu.Synthetic || tu.ErrClass != agent.EventErrForeignTurn {
+	if !tu.Synthetic || tu.ErrClass != agent.EventErrForeignTurn || w.lastQueuedSeq+1 != ev.Seq {
 		return "", false
 	}
-	if w.lastQueuedID != w.row || w.lastQueuedSeq+1 != ev.Seq {
+	if w.row != "" {
+		if w.lastQueuedID != w.row {
+			return "", false
+		}
+		return w.row, true
+	}
+	// A direct submission claude requeued (agent.ErrForeignTurnRequeue; C8
+	// S1): the text became the row queued right ahead of this ending, in the
+	// same batch, and its real turn is that row's.
+	if tu.Err != agent.ErrForeignTurnRequeue.Error() || w.lastQueuedID == "" {
 		return "", false
 	}
-	return w.row, true
+	return w.lastQueuedID, true
 }
 
 // ended is the target turn's ending as its result (§3.1): completed is

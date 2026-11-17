@@ -1059,3 +1059,33 @@ func TestClaudeARequestWaitsBehindTheDrain(t *testing.T) {
 		t.Fatalf("arrival %+v", a)
 	}
 }
+
+// TestClaudeARequestAfterTheReplyIsNoTurns (C8 K1): with the prompt's
+// goroutine parked between its reply and its cleanup, a wake's request read
+// after the reply arrives with no turn of craze's: the turn ended on the wire.
+func TestClaudeARequestAfterTheReplyIsNoTurns(t *testing.T) {
+	r := newClaudeRig(t)
+	r.ready(t)
+	parked, release := make(chan struct{}), make(chan struct{})
+	testPromptReturned = func() { close(parked); <-release }
+	t.Cleanup(func() { testPromptReturned = nil })
+	arrivals := make(chan Arrival, 1)
+	r.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		arrivals <- a
+		return PermissionDecision{OptionID: "reject"}
+	})
+	req, done := r.prompt(t)
+	r.answerWith(t, req, `{"stopReason":"end_turn"}`)
+	<-parked
+	r.push(t, chunk("a wake"))
+	r.send(t, 44, MethodRequestPermission, `{"sessionId":"root","toolCall":{"toolCallId":"t1","title":"Read"},"options":[{"optionId":"reject","name":"No","kind":"reject_once"}]}`)
+	a := <-arrivals
+	r.readWithin(t, 3*time.Second, "the wake's permission reply")
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if a.InTurn {
+		t.Fatalf("the wake's request arrived %+v; want no turn of craze's", a)
+	}
+}

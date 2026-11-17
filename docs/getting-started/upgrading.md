@@ -122,7 +122,7 @@ reach it. What changes for everyone else:
 - **A `notice` event** carries one of Claude Code's notices, and a claude
   session sends `compaction` events too, with no sizes; `craze prompt --json`
   prints a `notice` line ([JSON events](../reference/cli.md#json-events)).
-  Only claude sends either.
+  Only claude sends `notice`; native sessions already sent `compaction`.
 - **The claude overage guard keeps a record**, `claude-overage.json` in
   craze's directory, which refuses claude starts and prompts on the machine
   until the limit it names resets ([Extra usage](claude.md#extra-usage-the-overage-guard)).
