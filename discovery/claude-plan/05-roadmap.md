@@ -7,8 +7,8 @@ commitments.
 | phase | what | spends | exit criterion |
 |---|---|---|---|
 | **CL0** (done 2026-11-11) | Two probes, no repo code | a few cents of plan quota, with the owner's go-ahead | the billing question and the adapter fit are answered with evidence |
-| CL1 | Route A as a listed, optional provider (CLD-03, CLD-06) | engineering + live smoke | a turn, a permission card, a plan card, a question card, cancel, resume, background wakes and the overage error work against the real adapter on Linux; docs |
-| CL2 | Full integration | engineering + live smoke | grok-level integration (child sessions, interject) on Linux and the mac-mini |
+| CL1 (done 2026-11-17, plan 052) | Route A as a listed, optional provider (CLD-03, CLD-06) | engineering + live smoke | a turn, a permission card, a plan card, a question card, cancel, resume, background wakes and the overage error work against the real adapter on Linux; docs |
+| CL2 (done 2026-11-17, plan 052) | Full integration | engineering + live smoke | grok-level integration (child sessions, interject) on Linux and the mac-mini |
 | CL3 | Route B (only if CL1/CL2 show A falls short) | engineering | B passes the same live gate as A, and A is retired |
 
 ## CL0: probes
@@ -105,6 +105,17 @@ should have its own section on background work (CLD-04).
   - the not-signed-in error;
   - "unavailable" when either binary is missing.
 
+**Result (plan 052, 2026-11-17).** Every CL1 exit item passed live on Linux against the real adapter and the
+owner's login (smokes L1-L4b; the reports sit with plan 052, outside the repo):
+- a turn, the permission card and `craze -c` resume (L1); the not-signed-in error, and "unavailable" when the adapter is missing (L1);
+- the question card with its free-text answer, the plan card, approve then implement, and keep-planning (L2);
+- `/model` and effort, plan usage with no `$` (L1, L3); the overage guard recorded no overage and created no record file (L3);
+- background wakes as foreign turns, queued input during a wake, and Esc cancelling one (L4).
+
+What differs from the sketch above: plan mode runs on Sonnet whatever the pick, so the status row notes the model
+in use (L2 F1, fixed in C5; confirmed live in plan mode on the mac-mini, L5); the overage stop writes a guard record that survives restarts and kills; `craze new`
+refuses the caller's own provider, so the plugin is provider-neutral (L4b).
+
 ## CL2: full integration
 
 - Declare the `subagents` capability, so child sessions show in the sub-agent
@@ -116,6 +127,18 @@ should have its own section on background work (CLD-04).
 - **Exit:** the CL1 list plus sub-agent transcripts, interject, and unattended
   `craze new --wait` (first-option answers, the plan returned), on both
   platforms.
+
+**Result (plan 052, 2026-11-17).** On Linux: child-session rows with viewable transcripts, cancel of a child by its
+own id, reuse of a row by a follow-up, and unattended `craze new --wait --plan` (plan returned, no file written,
+`--wait` returning only after a background sub-agent and its hand-back) all passed (L2, L4). Interject maps to
+`_session/steering` and injected mid-turn (L2). On the mac-mini (L5, 8 of 8 checks): read and write cards, resume,
+question and "Other", plan approve and reject, a sub-agent row, an image prompt, `/compact` and two concurrent
+sessions all passed. Known and left: no "Working" line during a foreign turn, finished child rows show no model,
+`--wait` counts no tool calls for the Agent call (L4), `craze -c` restores a claude session's model but not its
+effort (L5 F1), and a new session without `--model` starts on Claude Code's default (L5 O1).
+
+On macOS an old tmux server can lose login-keychain access (`claude auth status` reads signed out in its panes); a
+fresh server started from the ssh login works.
 
 ## CL3: route B (conditional)
 

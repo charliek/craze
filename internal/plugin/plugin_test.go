@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/charliek/craze/internal/version"
+	"github.com/goccy/go-yaml"
 )
 
 // minCraze is the first craze release with the commands the plugin runs
@@ -54,9 +55,9 @@ func readFile(t *testing.T, root, rel string) string {
 	return string(b)
 }
 
-// frontmatter splits a markdown file into its `---` fenced header's
-// key: value pairs (one line each, surrounding double quotes removed) and
-// its body.
+// frontmatter splits a markdown file into its `---` fenced header and its
+// body. The header is parsed as real YAML, so a value a strict host would
+// refuse (an unquoted `: ` inside a plain scalar) fails here too.
 func frontmatter(text string) (map[string]string, string, error) {
 	rest, ok := strings.CutPrefix(text, "---\n")
 	if !ok {
@@ -67,16 +68,8 @@ func frontmatter(text string) (map[string]string, string, error) {
 		return nil, "", fmt.Errorf("frontmatter is not closed by a --- line")
 	}
 	fm := map[string]string{}
-	for _, line := range strings.Split(head, "\n") {
-		key, val, ok := strings.Cut(line, ": ")
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, "", fmt.Errorf("frontmatter line %q is not key: value", line)
-		}
-		val = strings.TrimSpace(val)
-		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-			val = val[1 : len(val)-1]
-		}
-		fm[strings.TrimSpace(key)] = val
+	if err := yaml.Unmarshal([]byte(head), &fm); err != nil {
+		return nil, "", fmt.Errorf("frontmatter is not valid YAML: %w", err)
 	}
 	return fm, body, nil
 }
@@ -473,6 +466,7 @@ func TestCheckersRefuse(t *testing.T) {
 		"no tools":       strings.Replace(good, "tools: Bash, Write\n", "", 1),
 		"no description": strings.Replace(good, "description: \"d\"\n", "", 1),
 		"no frontmatter": "just text",
+		"unquoted colon": strings.Replace(good, "description: \"d\"\n", "description: a native (x): use it\n", 1),
 	}
 	for name, text := range cases {
 		if len(checkAgent(text)) == 0 {

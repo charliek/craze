@@ -23,8 +23,9 @@ Plain `C0` is already taken by session-control's progress log.
 | 2026-11-11 | Owner's call CLD-01: t3code's model (the user's own signed-in `claude`, driven through the Agent SDK ecosystem, no craze login) is the accepted model. CL0 run the same day ([08](08-cl0-results.md)): both routes bill to plan limits on the owner's account; route A fits with a known list of dialect items; unmodified craze 0.2.0 already completes a turn through the adapter. |
 | 2026-11-11 | Owner's review of the approach ([10](10-review.md)): CLD-02 overage is an error; CLD-03 a listed provider, unavailable when its binaries are missing; CLD-04 background work gets its own design section; CLD-05 inherit Claude Code's setup as is; CLD-06 route A is the plan, B the pivot. The owner reads opencode's October trouble as its Console breach. The folder moved to branch `discovery/claude-plan` (its own worktree, while plan 050 was built in the main checkout), and the CL0 probe scripts were added under [probes/](probes/README.md). **Parked**: the owner will decide whether to build as their use cases develop. |
 | 2026-11-16 | The owner decided to build it (plan 052, CL1 and CL2 in one PR). The folder came onto main. CLD-07..CLD-15 added ([09](09-decisions.md)); CLQ-3, -4, -5, -7, -8, -10 and -11 resolved ([06](06-open-questions.md)). Adapter 0.107.3 and t3code's v2-only handling noted in [03](03-reference-implementations.md). |
+| 2026-11-17 | CL1 and CL2 built (plan 052, one PR): the listed `claude` provider on route A, with the live smokes L0-L4b on Linux and L5 on the mac-mini. Exit results under each phase in [05](05-roadmap.md). |
 
-**Current phase: CL1+CL2 in progress (plan 052).** CL0 is done. The build is a
+**Current phase: CL1 and CL2 done on Linux and the mac-mini (plan 052).** CL0 is done. The build is a
 listed provider on route A. See [05](05-roadmap.md).
 
 ## Picking this up later
