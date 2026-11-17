@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -226,6 +227,12 @@ func TestClaudeElicitationUnanswerable(t *testing.T) {
 		{"url mode malformed", `{"mode":"url","message":{"x":1},"url":"https://example.com"}`, `{"action":"cancel"}`, RefusedElicitationForm},
 		{"toolCallId not a string", `{"mode":"form","toolCallId":3,"message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
 		{"not an object", `[1,2]`, `{"action":"cancel"}`, RefusedElicitationForm},
+		// null is not omission (review C3b 1).
+		{"mode null", `{"mode":null,"message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"message null", `{"mode":"form","message":null,"requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"url mode, message null", `{"mode":"url","message":null,"url":"https://example.com"}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"schema null", `{"mode":"form","message":"m","requestedSchema":null}`, `{"action":"cancel"}`, RefusedElicitationForm},
+		{"toolCallId null", `{"mode":"form","toolCallId":null,"message":"m","requestedSchema":{"type":"object","properties":{"question_0":{"type":"string","oneOf":[{"const":"a"}]}}}}`, `{"action":"cancel"}`, RefusedElicitationForm},
 		// Constraints the card cannot enforce (review C3 item 4).
 		{"custom enum", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","enum":["No"]}`), `{"action":"cancel"}`, RefusedElicitationForm},
 		{"custom pattern", q(`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_0_custom":{"type":"string","pattern":"^x$"}`), `{"action":"cancel"}`, RefusedElicitationForm},
@@ -517,29 +524,71 @@ func TestClaudePlanFrames(t *testing.T) {
 }
 
 // TestClaudeEnterPlanModeIsAPermission: EnterPlanMode's request is of kind
-// switch_mode too, but entering plan mode allows nothing — it is an ordinary
-// permission, as cursor's and grok's are.
+// switch_mode too, but entering plan mode allows nothing: the real-shaped
+// request (its own name and title EnterPlanMode, the adapter's allow-once and
+// reject) is an ordinary permission, which force answers allow-once.
 func TestClaudeEnterPlanModeIsAPermission(t *testing.T) {
 	p := newRawPipeDialect(t, DialectClaude)
 	p.setSession("s-1")
 	perms := make(chan PermissionRequest, 1)
 	p.client.SetPermissionHandler(func(_ Arrival, req PermissionRequest) PermissionDecision {
 		perms <- req
-		return PermissionDecision{OptionID: "allow-once"}
+		id, _ := PickKind(req.Options, KindAllowOnce)
+		return PermissionDecision{OptionID: id}
 	})
 	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 		t.Error("EnterPlanMode raised the plan card")
 		return PlanDecision{}
 	})
-	p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"EnterPlanMode"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","kind":"switch_mode"}}`)
+	p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"EnterPlanMode"}},"toolCallId":"toolu_PLAN","sessionUpdate":"tool_call","kind":"switch_mode","title":"EnterPlanMode"}}`)
 	req := planRequest{name: "EnterPlanMode", title: "EnterPlanMode", kind: "switch_mode", options: []PermissionOption{
-		{OptionID: "allow-once", Kind: KindAllowOnce}, {OptionID: "reject", Kind: KindRejectOnce},
+		{OptionID: "allow-once", Name: "Yes, enter plan mode", Kind: KindAllowOnce}, {OptionID: "reject", Name: "No, start implementing now", Kind: KindRejectOnce},
 	}}
 	p.send(t, 4, MethodRequestPermission, req.params())
 	if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != `{"outcome":{"outcome":"selected","optionId":"allow-once"}}` {
 		t.Fatalf("answer %s", got)
 	}
-	<-perms
+	if len(perms) != 1 {
+		t.Fatal("the request did not reach the permission handler")
+	}
+}
+
+// TestClaudeOpenExitIsNeverForgotten is review C3b item 2's sequence: the
+// active session names t ExitPlanMode, then announces 256 other tool calls. t
+// is still open, so it is not forgotten, and a malformed permission about it
+// that calls itself EnterPlanMode and offers allow-once is a suspect: never
+// force's. Once t has settled it may be forgotten like any other call.
+func TestClaudeOpenExitIsNeverForgotten(t *testing.T) {
+	p := newRawPipeDialect(t, DialectClaude)
+	p.setSession("s-1")
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
+		t.Error("the malformed exit reached the permission handler (force)")
+		return PermissionDecision{OptionID: "allow-once"}
+	})
+	tool := func(id, name, status string) {
+		p.send(t, nil, MethodSessionUpdate, `{"sessionId":"s-1","update":{"_meta":{"claudeCode":{"toolName":"`+name+`"}},"toolCallId":"`+id+`","sessionUpdate":"tool_call","status":"`+status+`"}}`)
+	}
+	tool("t", "ExitPlanMode", "pending")
+	for i := range claudeToolsCap {
+		tool(fmt.Sprintf("other-%d", i), "Read", "pending")
+	}
+	waitUntil(t, func() bool { return p.client.claudeTool("s-1", fmt.Sprintf("other-%d", claudeToolsCap-1)).name != "" })
+	if !p.client.claudeTool("s-1", "t").exit {
+		t.Fatal("the open ExitPlanMode call was forgotten")
+	}
+	req := planRequest{name: "EnterPlanMode", kind: "switch_mode", options: []PermissionOption{{OptionID: "allow-once", Kind: KindAllowOnce}}}
+	params := strings.Replace(req.params(), `"toolu_PLAN"`, `"t"`, 1)
+	p.send(t, 4, MethodRequestPermission, params)
+	if got := string(p.readWithin(t, 3*time.Second, "the answer").Result); got != cancelledReply {
+		t.Fatalf("answer %s", got)
+	}
+	// Settled, it is forgettable: the next announcement evicts it first.
+	tool("t", "ExitPlanMode", "completed")
+	tool("one-more", "Read", "pending")
+	waitUntil(t, func() bool { return p.client.claudeTool("s-1", "one-more").name != "" })
+	if p.client.claudeTool("s-1", "t").name != "" {
+		t.Fatal("a settled call was kept past the cap")
+	}
 }
 
 // TestClaudePlanExitCancelBeforeHandler: a cancel that lands before a safe plan

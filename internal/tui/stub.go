@@ -1435,6 +1435,8 @@ func (s *Stub) SetProvider(p agent.Provider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.Provider = p.Info()
+	// As the live session's registry is: a question cancel is claude's.
+	s.asks.AllowQuestionCancel(p.Info().QuestionDismissCancels())
 }
 
 func (s *Stub) Snapshot() agent.Snapshot {

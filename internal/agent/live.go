@@ -164,7 +164,11 @@ type session struct {
 	fastTimer *time.Timer
 	// planKept is the turn whose claude plan exit was answered keep planning,
 	// under s.mu (notePlanKept); the zero token when none.
-	planKept     TurnToken
+	planKept TurnToken
+	// cancels counts the Cancels asked of this session, under s.mu: a plan's
+	// keep planning noted after a cancel it did not see is not noted
+	// (notePlanKept).
+	cancels      uint64
 	fastFix      chan struct{}
 	interjectSeq int
 	// plugins are the on-disk plugin entries discovered once, in Start,
@@ -417,6 +421,7 @@ func newSession(opts Options) *session {
 	s.events = s.log.Primary()
 	// Beside the log, and stamped from the same clock its own emits use.
 	s.asks = NewAskRegistry(s.log, s.Now)
+	s.asks.AllowQuestionCancel(s.provider().Info().QuestionDismissCancels())
 	s.askCtx, s.askStop = context.WithCancel(context.Background())
 	// The tee is the child's lane alone. Options.Stderr stays what it was, so
 	// craze's own notes about the session — which fall back to it when Diag is
@@ -2324,6 +2329,7 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	// cancelled ending is no longer the plan's alone (keptPlanning).
 	s.mu.Lock()
 	s.planKept = TurnToken{}
+	s.cancels++
 	s.mu.Unlock()
 	client := s.clientRef()
 	if client == nil {
@@ -2704,9 +2710,10 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 	if !live {
 		return planDecision(s.staleAsk(ask))
 	}
+	gen := s.cancelGen()
 	rec, replied := s.decideAsk(a, token, ask)
 	if rec.Outcome == AskAnswered && rec.Answer.Reject {
-		s.notePlanKept(token)
+		s.notePlanKept(token, gen)
 	}
 	dec := planDecision(rec)
 	dec.Replied = replied

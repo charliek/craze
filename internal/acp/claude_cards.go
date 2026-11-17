@@ -92,10 +92,11 @@ func (c *Client) reportRefused(r RefusedRequest) {
 // just announced, never one long gone.
 const claudeToolsCap = 256
 
-// claudeToolCall reads a claude tool update's id and tool name.
-func claudeToolCall(update json.RawMessage) (id, name string) {
+// claudeToolCall reads a claude tool update's id, tool name and status.
+func claudeToolCall(update json.RawMessage) (id, name, status string) {
 	var w struct {
 		ToolCallID string `json:"toolCallId"`
+		Status     string `json:"status"`
 		Meta       struct {
 			ClaudeCode struct {
 				ToolName string `json:"toolName"`
@@ -103,9 +104,9 @@ func claudeToolCall(update json.RawMessage) (id, name string) {
 		} `json:"_meta"`
 	}
 	if err := json.Unmarshal(update, &w); err != nil {
-		return "", ""
+		return "", "", ""
 	}
-	return w.ToolCallID, w.Meta.ClaudeCode.ToolName
+	return w.ToolCallID, w.Meta.ClaudeCode.ToolName, w.Status
 }
 
 // toolKey is one tool call of one session: a toolCallId is the adapter's,
@@ -118,6 +119,10 @@ type toolKey struct{ session, call string }
 type toolSeen struct {
 	name      string
 	conflicts bool
+	// exit says the call was ever named ExitPlanMode, and settled that it
+	// reached a terminal status: such a call is never forgotten while it is
+	// open (noteClaudeTool), so a request about it is always suspected.
+	exit, settled bool
 }
 
 // noteClaudeTool remembers the tool name the adapter stamped on a tool call of
@@ -126,16 +131,19 @@ type toolSeen struct {
 // active session's or a registered child's — never for one it dropped. The
 // latest name wins, and a second, different name marks the call.
 func (c *Client) noteClaudeTool(sid string, update json.RawMessage) {
-	id, name := claudeToolCall(update)
+	id, name, status := claudeToolCall(update)
 	if id == "" || name == "" {
 		return
 	}
 	k := toolKey{sid, id}
+	settled := status == "completed" || status == "failed"
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if seen, ok := c.claudeTools[k]; ok {
 		seen.conflicts = seen.conflicts || seen.name != name
 		seen.name = name
+		seen.exit = seen.exit || name == claudeExitPlanTool
+		seen.settled = seen.settled || settled
 		c.claudeTools[k] = seen
 		return
 	}
@@ -143,11 +151,26 @@ func (c *Client) noteClaudeTool(sid string, update json.RawMessage) {
 		c.claudeTools = make(map[toolKey]toolSeen)
 	}
 	if len(c.claudeToolOrder) >= claudeToolsCap {
-		delete(c.claudeTools, c.claudeToolOrder[0])
-		c.claudeToolOrder = c.claudeToolOrder[1:]
+		c.evictClaudeToolLocked()
 	}
-	c.claudeTools[k] = toolSeen{name: name}
+	c.claudeTools[k] = toolSeen{name: name, exit: name == claudeExitPlanTool, settled: settled}
 	c.claudeToolOrder = append(c.claudeToolOrder, k)
+}
+
+// evictClaudeToolLocked forgets the oldest call it may: never one named
+// ExitPlanMode that is still open, whose forgetting would let a request about
+// it pass for an ordinary one (review C3b 2). With every remembered call such
+// a one, nothing is forgotten and the memory grows past its cap — bounded by
+// the plan exits the adapter leaves open at once. c.mu is held.
+func (c *Client) evictClaudeToolLocked() {
+	for i, k := range c.claudeToolOrder {
+		if seen := c.claudeTools[k]; seen.exit && !seen.settled {
+			continue
+		}
+		delete(c.claudeTools, k)
+		c.claudeToolOrder = append(c.claudeToolOrder[:i:i], c.claudeToolOrder[i+1:]...)
+		return
+	}
 }
 
 // claudeTool is what the session sid's tool call id was stamped with.
@@ -201,7 +224,9 @@ type planExit struct {
 // either _meta tool name, or its title), no option id starts with exit-plan-,
 // it has no plan title, and no source at all, the remembered tool_call
 // included, names anything else. A remembered name alone never makes a request
-// ordinary. Entering plan mode allows nothing; it is an ordinary permission.
+// ordinary, and a call ever named ExitPlanMode is remembered until it settles
+// (noteClaudeTool), so a request about an open exit is always a suspect
+// (review C3b 2).
 func (c *Client) classifyPlanExit(params json.RawMessage, req PermissionRequest) planExit {
 	var w struct {
 		Title    string     `json:"title"`
@@ -503,6 +528,17 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 	}
 	if err := json.Unmarshal(params, &w); err != nil {
 		return "", AskQuestionRequest{}, errFormMalformed
+	}
+	// A field that is there and null is malformed, not absent: Go would read
+	// mode:null as no mode (form) and message:null as "" (review C3b 1).
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil {
+		return "", AskQuestionRequest{}, errFormMalformed
+	}
+	for _, k := range []string{"mode", "message", "toolCallId", "requestedSchema", "sessionId"} {
+		if raw, ok := fields[k]; ok && string(bytes.TrimSpace(raw)) == "null" {
+			return "", AskQuestionRequest{}, errFormMalformed
+		}
 	}
 	mode = "form"
 	if w.Mode != nil {

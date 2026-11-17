@@ -573,7 +573,7 @@ func appendDraft(draft, in string) string {
 // "Other…" row picks nothing: its typed text is its answer.
 func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	q := c.question()
-	if q.Required && q.AllowMultiple && len(c.selectedIDs()) == 0 && c.text[q.ID] == "" {
+	if q.Required && q.AllowMultiple && len(c.selectedIDs()) == 0 {
 		// A question that must be answered takes no empty confirm: the card
 		// stays on it (agent.Question.Required).
 		m.setHead(c)

@@ -614,6 +614,10 @@ type askEntry struct {
 	// published says an opening event was written for this ask, which is what
 	// decides whether its ending carries the body.
 	published bool
+	// call is the asking call's context, for an ask Open parked (nil
+	// otherwise): once the agent has withdrawn the request it ends with
+	// acp.ErrRequestWithdrawn, and no answer may be taken for it (Answer).
+	call context.Context
 }
 
 // turnState is what the registry knows about one minted turn token.
@@ -632,6 +636,9 @@ var askRegistries atomic.Uint64
 type AskRegistry struct {
 	log *EventLog
 	now func() time.Time
+	// questionCancel says a question may be answered cancel
+	// (AllowQuestionCancel), under mu.
+	questionCancel bool
 	// id is this registry's identity, immutable and set at construction. Every
 	// nonzero token it mints carries it, and a token carrying another's is
 	// refused (foreign).
@@ -665,6 +672,15 @@ type AskRegistry struct {
 	// while (keptTurns).
 	retired []uint64
 	closed  bool
+}
+
+// AllowQuestionCancel says whether a question may be answered cancel — the
+// question withdrawn, which claude takes as its tool aborted (plan 052 § B4 as
+// amended). Off, as for cursor, grok and native, a cancel is a bad answer.
+func (r *AskRegistry) AllowQuestionCancel(on bool) {
+	r.mu.Lock()
+	r.questionCancel = on
+	r.mu.Unlock()
 }
 
 // NewAskRegistry builds a registry publishing into log and stamping its events
@@ -840,6 +856,7 @@ func (r *AskRegistry) Open(ctx context.Context, token TurnToken, req AskRequest)
 		e.published = true
 		r.log.Enqueue(r.opening(req.Kind, body, false, AskAnswer{}))
 	}
+	e.call = ctx
 	return &Ask{r: r, id: id, ctx: ctx, e: e}, nil
 }
 
@@ -956,6 +973,19 @@ func (r *AskRegistry) Answer(cause, id string, a AskAnswer) (AskRecord, error) {
 	e, ok := r.open[id]
 	if !ok {
 		return AskRecord{}, r.unknownLocked(id)
+	}
+	if e.call != nil && callEndedBy(e.call) == AskByWithdrawn && e.call.Err() != nil {
+		// The agent took the request back ($/cancel_request) and its parked
+		// handler has yet to notice: the ask ends withdrawn here, for every
+		// client, and this answer — which nobody would receive — is refused
+		// as one that came too late (review C3b 5).
+		r.log.Enqueue(r.retire(e, AskCancelled, AskByWithdrawn, "", AskAnswer{}, ""))
+		return AskRecord{}, fmt.Errorf("%w: %s was withdrawn by the agent", ErrAlreadyResolved, id)
+	}
+	if a.Cancel && e.rec.Kind == AskQuestion && !r.questionCancel {
+		// Only a provider whose questions can be withdrawn (claude: Esc
+		// aborts the tool) takes a question's cancel (review C3b 6).
+		return AskRecord{}, fmt.Errorf("%w: this agent's questions take their answers or a skip", ErrBadAnswer)
 	}
 	ans, label, err := validateAnswer(e.rec.Kind, e.rec.Body, a)
 	if err != nil {
@@ -1694,12 +1724,14 @@ func checkQuestionAnswers(q *QuestionEvent, answers map[string][]string) error {
 }
 
 // checkRequired refuses an answer that leaves a question that must be
-// answered (Question.Required, a claude form's `required`) with neither a
-// pick nor free text.
+// answered (Question.Required, a claude form's `required`) without an option
+// pick; free text alone does not do.
 func checkRequired(q *QuestionEvent, answers map[string][]string, text map[string]string) error {
 	for _, one := range questionsOffered(q) {
-		if one.Required && len(answers[one.ID]) == 0 && text[one.ID] == "" {
-			return fmt.Errorf("%w: question %q must be answered", ErrBadAnswer, one.ID)
+		if one.Required && len(answers[one.ID]) == 0 {
+			// An option pick: free text rides in the question's own _custom
+			// property, so it leaves the required one absent (review C3b 3).
+			return fmt.Errorf("%w: question %q must be answered with an option", ErrBadAnswer, one.ID)
 		}
 	}
 	return nil

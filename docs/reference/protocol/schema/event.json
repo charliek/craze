@@ -173,7 +173,7 @@
         "options": {"type": "array", "items": {"$ref": "#/$defs/option"}},
         "allowMultiple": {"type": "boolean"},
         "allowText": {"type": "boolean", "description": "The question also takes a free-text answer of the user's own (answer text): claude's \"Other\" box. No other provider sets it."},
-        "required": {"type": "boolean", "description": "The question must be answered (a pick or text) whenever the ask is answered, and the ask cannot be skipped: a claude form's required. No other provider sets it."}
+        "required": {"type": "boolean", "description": "The question must be answered with an option id whenever the ask is answered, and the ask cannot be skipped: a claude form's required. No other provider sets it."}
       },
       "additionalProperties": false
     },

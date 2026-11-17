@@ -282,8 +282,12 @@ type Engine struct {
 	queue           agent.PromptQueue
 	armed           *armedSend
 	cancelsInFlight int
-	stopped         bool
-	closed          bool
+	// dropGen counts what told the engine to drop work — every cancel or stop
+	// held, every queue clear — under e.mu: a steer's fallback submit made
+	// across one is refused (Interject).
+	dropGen uint64
+	stopped bool
+	closed  bool
 	// closeCause is what began the close (CloseFor), "" when nothing said.
 	closeCause  string
 	prompted    bool
@@ -862,6 +866,7 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 		if refused == nil {
 			done, refused = e.admitLocked()
 		}
+		gen := e.dropGen
 		e.mu.Unlock()
 		if refused != nil {
 			return refused
@@ -877,7 +882,16 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 			// agent did not take it (claude's steering promptRequired, plan
 			// 052 § B7): it goes as the next prompt — at once when nothing
 			// runs, else queued — so the turn ending first loses nothing.
-			_, err = e.submit(c, admitted, SubmitQueue, "", false)
+			// Unless a cancel, a stop or a queue clear came since the steer
+			// was sent (review C3b 7): the user asked for the work to stop,
+			// and the text stays the client's — refused as an interjection
+			// with no turn, which keeps the draft.
+			_, err = e.submit(c, admitted, SubmitQueue, "", false, func() error {
+				if e.dropGen != gen {
+					return agent.ErrNotInTurn
+				}
+				return nil
+			})
 		}
 		return err
 	})
@@ -1334,7 +1348,7 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		return e.submit(c, admitted, mode, fromRow, false)
+		return e.submit(c, admitted, mode, fromRow, false, nil)
 	})
 }
 
@@ -1380,7 +1394,12 @@ func (e *Engine) admitText(text string) (string, error) {
 // resend replays the answer rather than writing a second row. Its failure is
 // NOT this call's answer: the turn has been admitted and is the answer, so the
 // failure goes out as a StateDelta{IndexErr} naming this command (index.go).
-func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string, fence bool) (SubmitResult, error) {
+//
+// guard, when set, runs under e.mu once the admission has passed and before
+// anything is mutated, and an error it returns refuses the submit: what a
+// steer's fallback checks against a cancel or a clear since it began
+// (Interject).
+func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string, fence bool, guard func() error) (SubmitResult, error) {
 	var started []launch
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
@@ -1409,6 +1428,11 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string,
 		admitted = done
 		if err := e.exitFenceRefusalLocked(fromRow); err != nil {
 			return SubmitResult{}, err
+		}
+		if guard != nil {
+			if err := guard(); err != nil {
+				return SubmitResult{}, err
+			}
 		}
 		if !e.log.OutboxRoom() {
 			return SubmitResult{}, ErrUnavailable
@@ -2139,6 +2163,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	e.rememberErrLocked(t)
 
 	clear := func() {
+		e.dropGen++
 		for _, qev := range e.queue.Clear() {
 			batch = append(batch, e.stamp(qev.Event(), ""))
 		}

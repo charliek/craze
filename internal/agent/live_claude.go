@@ -501,8 +501,9 @@ func (s *session) claudeReturnPlan(token TurnToken, live bool, ask AskRequest) a
 		s.staleAsk(ask)
 		return acp.PlanDecision{Cancelled: true}
 	}
+	gen := s.cancelGen()
 	rec := s.automaticAsk(token, ask, AskAnswer{Reject: true})
-	s.notePlanKept(token)
+	s.notePlanKept(token, gen)
 	dec := planDecision(rec)
 	dec.Replied = s.reportedBy(rec.ID)
 	return dec
@@ -511,14 +512,26 @@ func (s *session) claudeReturnPlan(token TurnToken, live bool, ask AskRequest) a
 // notePlanKept records that turn token's plan exit was answered reject (keep
 // planning), which ends a claude turn cancelled (plan 052 § B5). Only claude's,
 // and only for a turn of craze's own; a cancel asked for afterwards clears it
-// (Cancel), and so does the turn's end (keptPlanning).
-func (s *session) notePlanKept(token TurnToken) {
+// (Cancel), and so does the turn's end (keptPlanning). gen is cancelGen as it
+// was when the plan was raised: a cancel asked since — which Cancel cleared
+// the mark for before this could set it — means the turn's cancelled ending is
+// that cancel's, and nothing is noted (review C3b 8).
+func (s *session) notePlanKept(token TurnToken, gen uint64) {
 	if !s.provider().isClaude() || token.NoTurn() {
 		return
 	}
 	s.mu.Lock()
-	s.planKept = token
+	if s.cancels == gen {
+		s.planKept = token
+	}
 	s.mu.Unlock()
+}
+
+// cancelGen is how many Cancels have been asked of the session so far.
+func (s *session) cancelGen() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancels
 }
 
 // keptPlanning reports, once, whether turn token's cancelled ending is its

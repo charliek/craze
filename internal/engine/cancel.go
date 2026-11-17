@@ -114,6 +114,7 @@ func (e *Engine) holdCancel(turn string, stop bool, asks int, cause string) (str
 // session's cancel, which would land on it. The caller's section syncs it.
 func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string) (string, error) {
 	e.raiseFenceLocked()
+	e.dropGen++
 	if e.closed {
 		return "", ErrNotAccepting
 	}

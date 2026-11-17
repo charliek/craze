@@ -1851,16 +1851,19 @@ each question's `id` to a string, beside that question's `answers` or alone
 have, beside `skip`, or longer than 4096 bytes is `bad_request`, reason
 `bad_answer`, and leaves the ask open; a blank entry is dropped. A
 question item may also carry `required: true` (a claude form's `required`):
-the answer must then give that question a pick or text, and the ask cannot be
+the answer must then give that question an option id (text alone does not
+do: it travels in the question's own free-text field), and the ask cannot be
 skipped. A single-choice question (no `allowMultiple`) takes at most one option
-id, on every provider. A question can also be answered `{"cancel": true}`:
+id, on every provider. A claude question can also be answered `{"cancel": true}`:
 withdrawn rather than answered — a claude client's `Esc`, which Claude takes as
 the tool aborted — its ending then `outcome` `cancelled`, `by` `client`, with
-`cancelled: true`.
+`cancelled: true`. Any other provider's question refuses it `bad_request`,
+reason `bad_answer`.
 
 Three more ending facts are claude's alone. An ask the agent took back (its
-`$/cancel_request`) ends `cancelled`, `by` `withdrawn`, and an answer that
-crosses it is never delivered. A `done` whose stop reason is `cancelled` and
+`$/cancel_request`) ends `cancelled`, `by` `withdrawn`; an answer that arrives
+after the withdrawal is refused `already_resolved`, and ends the ask so if
+nothing had yet. A `done` whose stop reason is `cancelled` and
 that carries `keptPlanning: true` ended because its plan was answered keep
 planning, not because anyone cancelled it: no cancelled note is drawn for it.
 All of them are additive. The ask's

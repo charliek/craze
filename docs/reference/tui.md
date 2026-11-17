@@ -544,7 +544,9 @@ background, as in Claude Code). The transcript shows each as a `↳` entry. When
 claude finds its turn already over, it does not take the message, and craze
 sends it as the next prompt instead: the draft clears and the message is
 queued (or goes at once, if nothing is running), so a turn that ends just
-before the interjection loses nothing.
+before the interjection loses nothing — unless the turn was cancelled or the
+queue cleared meanwhile, when the message is not sent: the note says `nothing
+to interject into` and the draft stays in the composer.
 Cursor has none — a second prompt there silently cancels the first — so craze
 never sends one and offers send now instead, always with
 
@@ -1729,12 +1731,13 @@ no free text and have no such row.
 run on empty answers). The row reads `? <question> → cancelled`. Cancelling the
 turn while it is up does the same. Its tool row is labelled `question`. A
 single-choice question takes one pick, on every provider; a claude question
-the form marks `required` must get a pick or text — `Enter` on a
-multiple-choice one with nothing toggled and nothing typed does nothing — and
-its card cannot be skipped. When Claude takes a question or a permission back
+the form marks `required` must get an option picked — text in `Other…` alone
+does not answer it, and `Enter` on a multiple-choice one with nothing toggled
+does nothing — and its card cannot be skipped. When Claude takes a question or a permission back
 (its `$/cancel_request`, when the tool that asked is aborted), the card goes
 away with nothing sent, and a question's or plan's row reads `→ withdrawn by
-Claude`; an answer that crosses the withdrawal is not delivered. A question
+Claude`; an answer that crosses the withdrawal is refused (the request is
+already over), on every client. A question
 craze cannot show — a form of another shape than AskUserQuestion's, one whose
 fields carry a constraint the card cannot enforce (an `enum` or `pattern` on
 the free text, a `minItems` on a choice), one that is not a form, or a request

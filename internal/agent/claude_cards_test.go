@@ -417,7 +417,10 @@ func TestQuestionAnswerShapes(t *testing.T) {
 		{"required left empty", required, AskAnswer{Answers: map[string][]string{"r": {}}}, false},
 		{"required skipped", required, AskAnswer{Skip: true}, false},
 		{"required picked", required, AskAnswer{Answers: map[string][]string{"r": {"x"}}}, true},
-		{"required typed", required, AskAnswer{Text: map[string]string{"r": "own"}}, true},
+		// Text alone leaves the required property absent from the reply: it
+		// rides in r's own _custom field (review C3b 3).
+		{"required typed only", required, AskAnswer{Text: map[string]string{"r": "own"}}, false},
+		{"required picked and typed", required, AskAnswer{Answers: map[string][]string{"r": {"x"}}, Text: map[string]string{"r": "own"}}, true},
 		{"required cancelled", required, AskAnswer{Cancel: true}, true},
 		{"cancel with answers", body, AskAnswer{Cancel: true, Answers: map[string][]string{"one": {"a"}}}, false},
 		{"cancel with skip", body, AskAnswer{Cancel: true, Skip: true}, false},
@@ -490,18 +493,18 @@ func TestKeptPlanningIsClaudesAndYieldsToACancel(t *testing.T) {
 	p := ClaudeProvider()
 	s := newAskSession(t, Options{Provider: &p})
 	turn := s.asks.BeginTurn()
-	s.notePlanKept(turn)
+	s.notePlanKept(turn, s.cancelGen())
 	if !s.keptPlanning(turn) {
 		t.Fatal("the rejected turn's ending is not marked")
 	}
 	if s.keptPlanning(turn) {
 		t.Fatal("the mark outlived the ending it was for")
 	}
-	s.notePlanKept(turn)
+	s.notePlanKept(turn, s.cancelGen())
 	if s.keptPlanning(s.asks.BeginTurn()) {
 		t.Fatal("another turn's ending was marked")
 	}
-	s.notePlanKept(turn)
+	s.notePlanKept(turn, s.cancelGen())
 	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -511,8 +514,79 @@ func TestKeptPlanningIsClaudesAndYieldsToACancel(t *testing.T) {
 	g := GrokProvider()
 	gs := newAskSession(t, Options{Provider: &g})
 	gt := gs.asks.BeginTurn()
-	gs.notePlanKept(gt)
+	gs.notePlanKept(gt, gs.cancelGen())
 	if gs.keptPlanning(gt) {
 		t.Fatal("grok's rejection marked its ending")
+	}
+}
+
+// TestQuestionCancelIsClaudes (review C3b 6): a question's cancel answer is
+// taken only by a registry whose provider can withdraw a question — claude's;
+// cursor's and grok's refuse it as a bad answer and keep the card open.
+func TestQuestionCancelIsClaudes(t *testing.T) {
+	req := AskRequest{Kind: AskQuestion, Body: AskBody{Question: &QuestionEvent{Questions: []Question{{ID: "q", Options: []Option{{ID: "a"}}}}}}}
+	for _, tc := range []struct {
+		p  Provider
+		ok bool
+	}{{ClaudeProvider(), true}, {CursorProvider(), false}, {GrokProvider(), false}} {
+		p := tc.p
+		s := newAskSession(t, Options{Provider: &p})
+		ask, err := s.asks.Open(t.Context(), TurnToken{}, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.asks.Answer("", ask.ID(), AskAnswer{Cancel: true})
+		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrBadAnswer)) {
+			t.Fatalf("%s: %v", p.Name(), err)
+		}
+		if !tc.ok {
+			if _, err := s.asks.Answer("", ask.ID(), AskAnswer{Skip: true}); err != nil {
+				t.Fatalf("%s: the card did not stay open for a skip: %v", p.Name(), err)
+			}
+		}
+	}
+}
+
+// TestAWithdrawnAskRefusesALateAnswer (review C3b 5): once the agent has
+// withdrawn a request, an answer that reaches the registry before the parked
+// handler notices is refused, and the ask ends withdrawn for every client —
+// never as an answer nobody received.
+func TestAWithdrawnAskRefusesALateAnswer(t *testing.T) {
+	p := ClaudeProvider()
+	s := newAskSession(t, Options{Provider: &p})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	req := AskRequest{Kind: AskQuestion, Body: AskBody{Question: &QuestionEvent{Questions: []Question{{ID: "q", Options: []Option{{ID: "a"}}}}}}}
+	ask, err := s.asks.Open(ctx, TurnToken{}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel(acp.ErrRequestWithdrawn)
+	if _, err := s.asks.Answer("", ask.ID(), AskAnswer{Answers: map[string][]string{"q": {"a"}}}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("a late answer: %v", err)
+	}
+	rec, ok := s.asks.Record(ask.ID())
+	if !ok || rec.Outcome != AskCancelled || rec.By != AskByWithdrawn {
+		t.Fatalf("record %+v", rec)
+	}
+	if got := ask.Wait(); got.By != AskByWithdrawn {
+		t.Fatalf("the handler's wait %+v", got)
+	}
+}
+
+// TestKeptPlanningLosesToACancelBetween is review C3b 8's sequence: the plan
+// is rejected, a cancel lands before the rejection's handler notes it, and
+// the handler then resumes. The cancel cleared nothing yet to clear, so the
+// mark must not be set behind it: the turn's ending is the cancel's.
+func TestKeptPlanningLosesToACancelBetween(t *testing.T) {
+	p := ClaudeProvider()
+	s := newAskSession(t, Options{Provider: &p})
+	turn := s.asks.BeginTurn()
+	gen := s.cancelGen() // the plan card raised
+	if _, err := s.Cancel(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.notePlanKept(turn, gen) // the delayed rejection handler resumes
+	if s.keptPlanning(turn) {
+		t.Fatal("a cancel between the rejection and its note still reads as kept planning")
 	}
 }

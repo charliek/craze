@@ -152,6 +152,7 @@ func (e *Engine) ClearQueue(c Command) ([]agent.QueuedPrompt, error) {
 		if !e.log.OutboxRoom() {
 			return nil, ErrUnavailable
 		}
+		e.dropGen++
 		qevs := e.queue.Clear()
 		batch := make([]agent.Event, 0, len(qevs))
 		rows := make([]agent.QueuedPrompt, 0, len(qevs))
