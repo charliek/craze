@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/version"
@@ -18,6 +19,9 @@ import (
 type Client struct {
 	conn  *Conn
 	child *Child
+	// beforeSever is a test's hold on StopWithin's kill
+	// (SetBeforeSeverForTest), nil in production.
+	beforeSever atomic.Pointer[func()]
 
 	closeOnce sync.Once
 	closeDone chan struct{}

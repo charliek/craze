@@ -234,6 +234,9 @@ func (c *Client) StopWithin(grace time.Duration) {
 	case <-c.Exited():
 	}
 	timer.Stop()
+	if hold := c.beforeSever.Load(); hold != nil {
+		(*hold)()
+	}
 	c.conn.sever()
 	if testAfterSever != nil {
 		testAfterSever()
@@ -243,6 +246,12 @@ func (c *Client) StopWithin(grace time.Duration) {
 	}
 	_ = c.Close()
 }
+
+// SetBeforeSeverForTest makes f run in this client's StopWithin once the
+// grace is over, before the connection is severed and the tree killed: a test
+// holds the kill until it has seen what must come first. Never called
+// outside tests.
+func (c *Client) SetBeforeSeverForTest(f func()) { c.beforeSever.Store(&f) }
 
 // testAfterSever is a test seam, nil in production: it runs in StopWithin
 // right after the connection is severed, before the kill.

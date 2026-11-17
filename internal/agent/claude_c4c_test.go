@@ -201,14 +201,17 @@ func TestClaudeChildOneEvictionOrder(t *testing.T) {
 		t.Fatal("the session dropped B, which the registry still routes")
 	}
 	pc.push(t, "B", map[string]any{"sessionUpdate": acp.UpdateAgentMessage, "content": map[string]string{"type": "text", "text": "late"}})
-	pc.barrier(t)
-	found := false
-	for _, ev := range pc.log.snapshot() {
-		found = found || (ev.Type == EventText && ev.Agent == "B" && ev.Text == "late")
-	}
-	if !found {
-		t.Fatal("B's late text did not land on its row")
-	}
+	// The barrier says the client dispatched it; the collector appends what
+	// the session published on a goroutine of its own, so the test waits
+	// for the event itself (CI run 44171562439 read the log too soon).
+	waitFor(t, "B's late text on its row", func() bool {
+		for _, ev := range pc.log.snapshot() {
+			if ev.Type == EventText && ev.Agent == "B" && ev.Text == "late" {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // TestClaudeForeignRefusalWaitsInTheQueue (review C4b item 3): claude's
@@ -236,11 +239,10 @@ func TestClaudeAStalledLoadCompletionFails(t *testing.T) {
 	r := newClaudeRig(t, "claude-replay-load", Options{Interactive: true, LoadSessionID: "s-loaded"})
 	collect(t, r.s)
 	stalled := make(chan struct{})
-	testLoadStall = func(ctx context.Context) {
+	r.s.hooks.loadStall = func(ctx context.Context) {
 		close(stalled)
 		<-ctx.Done()
 	}
-	t.Cleanup(func() { testLoadStall = nil })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan error, 1)
@@ -265,6 +267,16 @@ func TestClaudeChildRetiredAfterTheDrain(t *testing.T) {
 	p := ClaudeProvider()
 	s := newSession(Options{Provider: &p})
 	t.Cleanup(func() { _ = s.Close() })
+	// The seams, set before any goroutine of the session's reads them.
+	parked, release := make(chan struct{}), make(chan struct{})
+	s.hooks.subagentPublish = func(n acp.SubagentNotification) {
+		if n.ChildSessionID == "c1" && n.State == acp.ChildRunning {
+			close(parked)
+			<-release
+		}
+	}
+	joining := make(chan struct{})
+	s.hooks.retireJoining = func() { close(joining) }
 	log := collect(t, s)
 	cr, sw := io.Pipe()
 	sr, cw := io.Pipe()
@@ -307,16 +319,6 @@ func TestClaudeChildRetiredAfterTheDrain(t *testing.T) {
 	_ = enc.WriteMessage(&acp.Message{JSONRPC: "2.0", Method: acp.MethodClaudeAuthStatus, Params: json.RawMessage(`{"authStatus":{"kind":"account"}}`)})
 	<-barrier
 
-	parked, release := make(chan struct{}), make(chan struct{})
-	testSubagentPublish = func(n acp.SubagentNotification) {
-		if n.ChildSessionID == "c1" && n.State == acp.ChildRunning {
-			close(parked)
-			<-release
-		}
-	}
-	joining := make(chan struct{})
-	testRetireJoining = func() { close(joining) }
-	t.Cleanup(func() { testSubagentPublish, testRetireJoining = nil, nil })
 	go s.retireChildrenAtEnd(client)
 	drained := make(chan error, 1)
 	go func() { drained <- client.ReplayDone() }()

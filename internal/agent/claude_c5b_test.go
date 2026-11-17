@@ -261,7 +261,9 @@ func TestClaudeOverageStopsTheSession(t *testing.T) {
 	type stop struct{ cause, why string }
 	asked := make(chan stop, 2)
 	opts := Options{Interactive: true, Stopped: func(cause, why string) { asked <- stop{cause, why} }}
-	r, log := startClaude(t, "claude-overage", opts, "CRAZE_FAKE_CLAUDE_IDLE_TRIP=100ms")
+	gate, tripIdle := idleTripGate(t)
+	r, log := startClaude(t, "claude-overage", opts, gate)
+	tripIdle()
 	waitStopped(t, r, stopped, 5*time.Second)
 	select {
 	case s := <-asked:

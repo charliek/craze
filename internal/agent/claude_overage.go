@@ -323,8 +323,8 @@ func (s *session) containOverage(err error) error {
 // item 8): an idle session's error event — a running turn ends with err
 // already — and the host's stop.
 func (s *session) afterOverageStop(err error, idle bool) {
-	if testOverageStopped != nil {
-		testOverageStopped()
+	if f := testOverageStopped.Load(); f != nil {
+		(*f)()
 	}
 	if idle {
 		s.emit(Event{Type: EventError, Err: err})
@@ -336,7 +336,10 @@ func (s *session) afterOverageStop(err error, idle bool) {
 
 // testOverageStopped runs, when a test sets it, once the overage stop has
 // closed the client.
-var testOverageStopped func()
+//
+// An atomic, not a plain func: the stop runs on a goroutine of the session's,
+// which a test's cleanup can still be restoring the seam under.
+var testOverageStopped atomic.Pointer[func()]
 
 // onClaudeRateLimit is the client's rate-limit handler (read loop, before the
 // foreign-turn machine reads the update): the guard's trip first, then the

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,10 +33,49 @@ func overageRig(t *testing.T, grace time.Duration) (record string, stopped <-cha
 func overageStops(t *testing.T) <-chan time.Time {
 	t.Helper()
 	ch := make(chan time.Time, 8)
-	prev := testOverageStopped
-	testOverageStopped = func() { ch <- time.Now() }
-	t.Cleanup(func() { testOverageStopped = prev })
+	f := func() {
+		select {
+		case ch <- time.Now():
+		default:
+		}
+	}
+	prev := testOverageStopped.Swap(&f)
+	t.Cleanup(func() { testOverageStopped.Store(prev) })
 	return ch
+}
+
+// idleTripGate is a FIFO for the fake's CRAZE_FAKE_CLAUDE_IDLE_TRIP, and the
+// env entry naming it: tripIdle releases the trip, once the test's Start is
+// done.
+func idleTripGate(t *testing.T) (env string, tripIdle func()) {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "idle-trip")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "CRAZE_FAKE_CLAUDE_IDLE_TRIP=" + fifo, func() {
+		t.Helper()
+		// The fake holds the FIFO open for reading and writing while it
+		// waits, so this open does not block once it does; until then it
+		// waits for the fake, which opens it right after session/new.
+		done := make(chan error, 1)
+		go func() {
+			f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+			if err == nil {
+				_, err = f.Write([]byte{1})
+				err = errors.Join(err, f.Close())
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the fake never opened its idle-trip gate")
+		}
+	}
 }
 
 // overageRefusal is the trip record's word for the record's paths as the
@@ -98,8 +138,11 @@ func TestClaudeOverageTripsWhereverItLands(t *testing.T) {
 				const grace = 150 * time.Millisecond
 				record, stopped := overageRig(t, grace)
 				env := []string{"CRAZE_FAKE_CLAUDE_OVERAGE=" + sig, "CRAZE_FAKE_CLAUDE_GAP=150ms"}
+				tripIdle := func() {}
 				if where == "IDLE" {
-					env = append(env, "CRAZE_FAKE_CLAUDE_IDLE_TRIP=100ms")
+					var gate string
+					gate, tripIdle = idleTripGate(t)
+					env = append(env, gate)
 				}
 				r, log := startClaude(t, "claude-overage", Options{Interactive: true}, env...)
 				before := time.Now()
@@ -121,6 +164,7 @@ func TestClaudeOverageTripsWhereverItLands(t *testing.T) {
 					}
 					readRecord(t, record)
 				case "IDLE":
+					tripIdle()
 				case "TRAILING":
 					if _, err := r.s.Prompt(t.Context(), "TRAILING"); err != nil {
 						t.Fatal(err)
@@ -156,26 +200,35 @@ func TestClaudeOverageTripsWhereverItLands(t *testing.T) {
 // settles at once on the cancel while a child keeps working; the process
 // group is killed within the grace, and nothing the child sends after the
 // kill reaches the session.
+//
+// "At once" is an order, not a duration (a starved run took 500 ms to get
+// there): the kill is held until the prompt has returned, so a root that
+// settled only because of the kill never returns, and fails on its context.
 func TestClaudeOverageStopsAChildThatIgnoresTheCancel(t *testing.T) {
 	const grace = 300 * time.Millisecond
 	_, stopped := overageRig(t, grace)
 	r, log := startClaude(t, "claude-overage", Options{Interactive: true})
+	returned := make(chan struct{})
+	r.s.clientRef().SetBeforeSeverForTest(func() { <-returned })
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_, err := r.s.Prompt(ctx, "CHILD")
+	released := time.Now()
+	close(returned)
 	if !isQuota(err) {
-		t.Fatalf("the prompt ended with %v; want quota", err)
+		t.Fatalf("the prompt ended with %v; want quota, with the kill held", err)
 	}
-	settled := time.Since(start)
 	at := waitStopped(t, r, stopped, 5*time.Second)
-	if settled >= grace {
-		t.Fatalf("the root took %s to settle; the fake answers its cancel at once", settled)
-	}
 	// The kill is outright: the agent ignores SIGTERM, and a stop that sent
-	// one first would wait out the reaper's own grace too.
-	if took := at.Sub(start); took < grace || took > grace+time.Second {
-		t.Fatalf("stopped %s after the prompt; want the grace (%s) and the kill", took, grace)
+	// one first would wait out the reaper's own grace too. It comes after the
+	// grace, and right after the later of the grace's end and the release.
+	from := start.Add(grace)
+	if released.After(from) {
+		from = released
+	}
+	if took := at.Sub(start); took < grace || at.Sub(from) > time.Second {
+		t.Fatalf("stopped %s after the prompt (%s after the grace and the release); want the grace (%s) and the kill", took, at.Sub(from), grace)
 	}
 	ticks := func() int {
 		n := 0
@@ -187,13 +240,17 @@ func TestClaudeOverageStopsAChildThatIgnoresTheCancel(t *testing.T) {
 		return n
 	}
 	// The child was still ticking after the root settled: it ignored the
-	// cancel, so only the kill could stop it.
-	time.Sleep(100 * time.Millisecond)
+	// cancel, so only the kill could stop it. Everything published by the
+	// stop is in the collector before it is counted.
+	log.caughtUp(t)
 	n := ticks()
 	if n < 5 {
 		t.Fatalf("%d ticks before the kill; want the child to have outlived the root's cancel", n)
 	}
+	// Nothing after the kill: a window to look in, then the collector caught
+	// up again, so a late tick is counted, not missed.
 	time.Sleep(400 * time.Millisecond)
+	log.caughtUp(t)
 	if after := ticks(); after != n {
 		t.Fatalf("%d ticks after the kill (from %d); want none", after-n, n)
 	}

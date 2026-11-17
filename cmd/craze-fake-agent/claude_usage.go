@@ -64,8 +64,10 @@ import (
 //	                             tripping usage, then the root settling at
 //	                             once on its cancel
 //	                 The script ignores SIGTERM: only SIGKILL ends it at once.
-//	                 CRAZE_FAKE_CLAUDE_IDLE_TRIP (a duration): that long after
-//	                 session/new, the tripping usage with nothing running.
+//	                 CRAZE_FAKE_CLAUDE_IDLE_TRIP (a FIFO's path): once a byte
+//	                 arrives on it, the tripping usage with nothing running —
+//	                 the test sends it when its Start is done, so the trip
+//	                 never lands in the start however slow that is.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_WAKE (a duration): that long after
 //	                 session/new, a wake that does not trip.
 //	                 CRAZE_FAKE_CLAUDE_IDLE_LIMIT (a duration): that long after
@@ -287,9 +289,9 @@ func (s *server) tickForever(sid, what string) {
 // as a Claude Code busy with a request might: only a kill ends it at once.
 func (s *server) claudeOverageSetup(sid string) {
 	signal.Ignore(syscall.SIGTERM)
-	if d := envDuration("CRAZE_FAKE_CLAUDE_IDLE_TRIP", 0); d > 0 {
+	if gate := os.Getenv("CRAZE_FAKE_CLAUDE_IDLE_TRIP"); gate != "" {
 		go func() {
-			time.Sleep(d)
+			awaitSetGate(gate)
 			s.usageReport(sid, 30000, claudeModel, tripRateLimit(), false)
 		}()
 	}

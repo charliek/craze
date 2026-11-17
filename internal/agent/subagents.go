@@ -191,19 +191,11 @@ func (s *session) onSubagent(n acp.SubagentNotification) {
 		evs = s.handleClaudeSubagentLocked(n)
 	}
 	s.mu.Unlock()
-	if testSubagentPublish != nil && len(evs) > 0 {
-		testSubagentPublish(n)
+	if s.hooks.subagentPublish != nil && len(evs) > 0 {
+		s.hooks.subagentPublish(n)
 	}
 	s.emitAll(evs)
 }
-
-// Test seams, nil in production: testSubagentPublish runs between a roster
-// change and its events' publication; testRetireJoining in the retirement
-// once the read loop has ended, before it joins the claude dispatch.
-var (
-	testSubagentPublish func(acp.SubagentNotification)
-	testRetireJoining   func()
-)
 
 // subagentRecOf finds a record by ChildSessionID first (the routing key) and
 // falls back to SubagentID for shapes that only carry it.

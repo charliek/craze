@@ -409,8 +409,8 @@ func (s *session) retireChildrenAtEnd(client *acp.Client) {
 	case <-s.done:
 		return
 	}
-	if testRetireJoining != nil {
-		testRetireJoining()
+	if s.hooks.retireJoining != nil {
+		s.hooks.retireJoining()
 	}
 	// And after a load's hold, when one is pending (review C5c item 6): what
 	// the agent sent behind the load's reply was read before the end, and is

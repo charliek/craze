@@ -55,6 +55,8 @@ import (
 type session struct {
 	opts   Options
 	client *acp.Client
+	// hooks are this session's test seams, nil in production (sessionHooks).
+	hooks sessionHooks
 	// log is where every event goes (eventlog.go): emitCtx publishes into it
 	// and Events is its primary. events is the same channel as Primary, kept
 	// receive-only so that nothing can send on it past the log's numbering;
@@ -1364,9 +1366,9 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// load's reply fails or the client closes (review C4c item 1), so a
 	// stalled replay completion fails the load instead of hanging Start.
 	hctx := client.LoadContext()
-	if testLoadStall != nil {
+	if s.hooks.loadStall != nil {
 		// A test's stalled replay completion: a wait that ends only with hctx.
-		testLoadStall(hctx)
+		s.hooks.loadStall(hctx)
 	}
 	// The last chunks of a replayed prompt have no update behind them to push
 	// them out, so replay end is their flush.
@@ -1441,9 +1443,23 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 // flush it cannot emit the same text twice.
 func (s *session) flushReplayUser() { s.flushReplayUserCtx(context.Background()) }
 
-// testLoadStall is a test seam, nil in production: it runs in a claude load
-// right after the reply, with the context the load's own waits use.
-var testLoadStall func(context.Context)
+// sessionHooks are one session's test seams, nil in production. They are the
+// session's own, not package globals, because they run on goroutines a
+// session starts — its retirement, its client's dispatch — which can outlive
+// the test that made it: a global one test set while another test's leftover
+// goroutine read it was a data race (CI run 44171562439). A test sets them
+// before the goroutine that reads them starts.
+type sessionHooks struct {
+	// loadStall runs in a claude load right after the reply, with the context
+	// the load's own waits use.
+	loadStall func(context.Context)
+	// subagentPublish runs between a roster change and its events'
+	// publication.
+	subagentPublish func(acp.SubagentNotification)
+	// retireJoining runs in the retirement once the read loop has ended,
+	// before it joins the claude dispatch.
+	retireJoining func()
+}
 
 // flushReplayUserCtx is flushReplayUser whose publication gives up with ctx.
 func (s *session) flushReplayUserCtx(ctx context.Context) {
