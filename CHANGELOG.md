@@ -2,6 +2,79 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.4.0 — 2026-11-17
+
+craze can drive your own Claude Code on your Claude Pro or Max plan (the
+`claude` provider, through `claude-agent-acp`), and the gx provider is gone.
+Native web search retries Exa's rate limits, takes a key stored mid-session,
+asks with a three-way card and gains `/websearch`, `domains` and
+`num_results`. The model catalog adds GPT-6.2 Sol and Astra (on the ChatGPT
+plan and an OpenAI key), Gemini 4 Hydrogen and Qwen4 Max, and deprecates three
+models. [Upgrading, since
+v0.3.0](docs/getting-started/upgrading.md#since-v030) lists every change in
+behaviour. Nothing in `~/.craze` needs migrating; restart a running hub after
+upgrading.
+
+### Behaviour changes
+
+- **gx is gone**: `--provider gx` is refused (exit 2), and `provider = "gx"` or
+  `CRAZE_PROVIDER=gx` warns and falls back; sessions that ran on gx stay in the
+  index but are not offered.
+- **Every provider listing has a fourth row, `claude`**, between grok and
+  native (`craze providers`, the picker, `/provider`, the hub's create
+  options).
+- **`craze new` refuses the calling agent's own provider** (exit 2, kind
+  `usage`; `--allow-same-provider` overrides), read from the new
+  `CRAZE_SESSION_PROVIDER` every ACP agent's environment carries.
+- **Deprecated** (still run by name, no longer offered): `openai/gpt-6.1-sol`
+  (use `openai/gpt-6.2-sol`), `openai/gpt-6-astra` (use
+  `openai/gpt-6.2-astra`) and `openrouter/gemini-flash-latest` (use
+  `openrouter/gemini-4-hydrogen`).
+- **Start models**: the ChatGPT plan starts on `gpt-6.2-sol` where the account
+  lists it, an OpenAI key on `openai/gpt-6.2-sol`, and OpenRouter on
+  `openrouter/gemini-4-hydrogen`.
+- **The web search consent card has three options** (Always allow, Allow for
+  this session, Disable web search): a program answering it by index moves a
+  disable from the second option to the third.
+
+### Claude on your plan
+
+- A `claude` provider with cursor's and grok's chrome: streaming, permission,
+  question and plan cards, todos, sub-agents, modes, `/model` and effort,
+  resume, detached hosts and `craze new --wait`. craze holds no credential and
+  reads nothing under `~/.claude`; fast mode, which bills extra usage, is kept
+  off.
+- An overage guard: on any extra-usage signal the turn ends as `quota`, the
+  adapter is stopped and a machine-wide record refuses claude starts until the
+  reset. The account's own extra-usage setting stays the only hard guarantee.
+- The usage section reports a claude session's plan, window and utilization; a
+  question takes free text, and can be cancelled.
+- The Claude Code plugin and its skill are provider-neutral.
+
+### The native provider
+
+- **Models**: GPT-6.2 Sol and Astra on the ChatGPT plan (its model list is now
+  asked for as client 0.166.0) and on an OpenAI key (`openai/gpt-6.2-sol`,
+  `openai/gpt-6.2-astra`, $8 / $40 for Astra); `openrouter/gemini-4-hydrogen`
+  and `openrouter/qwen4-max`; `openrouter/gpt-astra-latest` repriced for
+  GPT-6.2 Astra. The plugin's `craze:sol` and `craze:astra` run the GPT-6.2
+  models.
+- A `--model chatgpt/…` the cached plan list lacks fetches a stale list before
+  the start answers, so the first start after an upgrade finds a new plan
+  model.
+- **Web search**: rate-limited calls are retried (up to three attempts, with
+  `Retry-After`), at most four calls per session are at Exa at once, and the
+  model reads failures in plain words; a key stored mid-session is used from the
+  next turn; `/websearch` shows and sets it; `websearch` takes `domains` and
+  `num_results`.
+
+### Fixes
+
+- A cancelled or closed ChatGPT sign-in's callback port stops taking
+  connections at once (it could linger until the server's goroutine started).
+- A tool still running when a turn fails is shown failed.
+- `/websearch`'s note no longer says "host elsewhere".
+
 ## v0.3.0 — 2026-11-15
 
 Native sessions can search the web and fetch pages (`websearch`, `webfetch`,
