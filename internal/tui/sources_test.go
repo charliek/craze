@@ -53,7 +53,7 @@ func envOf(vars map[string]string) func(string) string {
 func TestTheListsStartHeldBySourceGuard(t *testing.T) {
 	env := envOf(map[string]string{"OPENAI_API_KEY": "sk-openai-tui-dummy-0001"})
 	_, err := nativeDefaultModel(shippedDir(t, true), env)
-	want := "signed in to ChatGPT, but its models are not available, so craze does not pick openai/gpt-6.1-sol for you — run craze auth login chatgpt, or pick a model with /model"
+	want := "signed in to ChatGPT, but its models are not available, so craze does not pick openai/gpt-6.2-sol for you — run craze auth login chatgpt, or pick a model with /model"
 	if err == nil || err.Error() != want {
 		t.Fatalf("nativeDefaultModel = %v;\nwant %s", err, want)
 	}
@@ -62,7 +62,7 @@ func TestTheListsStartHeldBySourceGuard(t *testing.T) {
 		t.Fatalf("nativeModelChoices = %+v, %v; want the four OpenAI models", models, err)
 	}
 	_, err = nativeDefaultModel(shippedDir(t, false), env)
-	want = "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, so craze does not pick openai/gpt-6.1-sol for you — run craze auth login openai, or pick a model with /model"
+	want = "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, so craze does not pick openai/gpt-6.2-sol for you — run craze auth login openai, or pick a model with /model"
 	if err == nil || err.Error() != want || strings.Contains(err.Error(), "sk-openai-tui-dummy-0001") {
 		t.Fatalf("signed out, the key in the environment: %v;\nwant %s", err, want)
 	}
@@ -73,8 +73,8 @@ func TestTheListsStartHeldBySourceGuard(t *testing.T) {
 	if err := modeltable.SetKey(stored, "openai", "sk-openai-tui-dummy-0001"); err != nil {
 		t.Fatal(err)
 	}
-	if md, err := nativeDefaultModel(stored, envOf(nil)); err != nil || md.ID != "openai/gpt-6.1-sol" {
-		t.Fatalf("signed out, the key stored: %+v, %v; want openai/gpt-6.1-sol", md, err)
+	if md, err := nativeDefaultModel(stored, envOf(nil)); err != nil || md.ID != "openai/gpt-6.2-sol" {
+		t.Fatalf("signed out, the key stored: %+v, %v; want openai/gpt-6.2-sol", md, err)
 	}
 }
 

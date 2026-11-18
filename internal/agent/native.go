@@ -1326,6 +1326,19 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		if err != nil {
 			return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
 		}
+		// A --model naming a plan model the cached list lacks, where that
+		// list is stale for this craze (fetched with an older pin, say: the
+		// first start after an upgrade), fetches the list now and reads the
+		// table again, rather than refusing a model the account does list —
+		// also when another session's refresh wrote the list meanwhile.
+		if strings.TrimSpace(s.opts.Model) != "" {
+			if _, miss := MatchNativeModel(table, s.opts.Model); miss != nil && refreshPlanListForMiss(context.Background(), signIn, s.opts.Model) {
+				stamps = statModelInputs(hopts.Home)
+				if table, err = modeltable.Load(hopts.Home); err != nil {
+					return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: " + err.Error(), cause: err}
+				}
+			}
+		}
 		hopts.Table = table
 		if s.loadedSeam != nil {
 			s.loadedSeam()

@@ -153,7 +153,7 @@ func runNewWait(cmd *cobra.Command, f *newFlags, args []string, sigs <-chan os.S
 		// refuse of --model, and the strict --effort and --fast, refused here
 		// before a host is spawned, with a reason a program reads.
 		// The alias it matched is what the notices are about, a refusal's too.
-		asked, err := nativeStartCheck(newWhat, strings.TrimSpace(f.model), strings.TrimSpace(f.effort), f.fast)
+		asked, err := nativeStartCheck(r.ctx, newWhat, strings.TrimSpace(f.model), strings.TrimSpace(f.effort), f.fast)
 		r.out.asked = asked
 		if err != nil {
 			return failJSON(stdout, r.out, err)

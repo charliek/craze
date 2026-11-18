@@ -406,7 +406,13 @@ echo ready >&2; sleep 0.8; exit 0`, &stderr)
 // copy waits for a sink that is behind and loses nothing; claude's queue drops
 // what it cannot hold, and counts it.
 func TestStderrSinkQueueIsClaudesAlone(t *testing.T) {
-	script := `i=0; while [ $i -lt 600 ]; do echo "line $i" >&2; sleep 0.001; i=$((i+1)); done; exit 0`
+	// 600 lines of about 33KB each, by the shell's own echo: the copy reads at
+	// most 32KB at a time, so the ~20MB arrive as some 600 chunks however the
+	// reads coalesce, well past the queue's 256 (asyncSinkQueue), with no
+	// timing in it. It used to space short lines with an external sleep 0.001
+	// per line, 600 fork-execs that took 6s on an idle Mac and passed the 10s
+	// bound on a loaded macOS runner under -race.
+	script := `pad=$(printf "%033000d" 0); i=0; while [ $i -lt 600 ]; do echo "line $i $pad" >&2; i=$((i+1)); done; exit 0`
 	for _, d := range []DialectID{"", DialectClaude} {
 		t.Run("dialect="+string(d), func(t *testing.T) {
 			release := make(chan struct{})

@@ -27,8 +27,8 @@ In Claude Code, dispatch them with the Agent tool, `subagent_type` `craze:<name>
 | Agent | Runs | Use for |
 |---|---|---|
 | `craze:delegate` | the provider and model **you** name | anything the presets do not cover |
-| `craze:sol` | native `chatgpt/gpt-6.1-sol`, effort high | hard coding, debugging, review |
-| `craze:astra` | native `chatgpt/gpt-6-astra`, effort high | the hardest design and review questions |
+| `craze:sol` | native `chatgpt/gpt-6.2-sol`, effort high | hard coding, debugging, review |
+| `craze:astra` | native `chatgpt/gpt-6.2-astra`, effort high | the hardest design and review questions |
 | `craze:muse` | native `muse-spark-1.3-contributor` | routine, bounded tasks, cheaply |
 | `craze:wonder` | native `muse-wonder-1.0`, effort high | hard tasks, at about three times Spark's price per token |
 | `craze:grok` | grok `grok-4.7`, effort high | Grok's own agent |
@@ -36,16 +36,16 @@ In Claude Code, dispatch them with the Agent tool, `subagent_type` `craze:<name>
 
 There is no `craze:claude`: Claude Code is the only agent that loads these, and it must not target claude.
 
-- `craze:delegate` takes a first line `target: <provider> [<model>] [effort=<low|medium|high|xhigh|max>] [mode=plan|ask] [web=on|off]`, then the task. Providers: `native`, `cursor`, `grok`, `claude`; `web=` is for `native` only, and `mode=ask` is not available on `claude`. Example: `target: native chatgpt/gpt-6.1-sol effort=high mode=plan`. From Claude Code itself craze refuses `claude` (above).
+- `craze:delegate` takes a first line `target: <provider> [<model>] [effort=<low|medium|high|xhigh|max>] [mode=plan|ask] [web=on|off]`, then the task. Providers: `native`, `cursor`, `grok`, `claude`; `web=` is for `native` only, and `mode=ask` is not available on `claude`. Example: `target: native chatgpt/gpt-6.2-sol effort=high mode=plan`. From Claude Code itself craze refuses `claude` (above).
 - The native presets (`sol`, `astra`, `muse`, `wonder`) take an optional first line of `mode=plan` or `mode=ask` and `web=on` or `web=off`, in either order (`mode=plan web=on`), then the task. A first line made only of `key=value` words with a bad or repeated `mode` or `web` is answered with an error and nothing runs. `craze:grok` and `craze:cursor` take `mode=` only and answer an error to `web=`.
-- `craze:sol` and `craze:astra` run on a ChatGPT plan sign-in. With an OpenAI API key instead (billed per token; a craze newer than 0.2.0), use `craze:delegate` with `target: native openai/gpt-6.1-sol effort=high` (or `openai/gpt-6-astra`).
+- `craze:sol` and `craze:astra` run on a ChatGPT plan sign-in. With an OpenAI API key instead (billed per token; a craze newer than 0.2.0), use `craze:delegate` with `target: native openai/gpt-6.2-sol effort=high` (or `openai/gpt-6.2-astra`). The GPT-6.2 models need a craze newer than 0.3.0.
 - To continue a session, send the agent a follow-up with SendMessage: it runs `craze send` on the same session, and the model keeps its context. The agent forwards every message you send it, a recap or a question about an earlier turn included; it never answers from the earlier results.
 
 ## The targets
 
 | Provider | Runs | Notes |
 |---|---|---|
-| `native` | craze's own agent, on a model provider's API or a ChatGPT plan | `--model` names a native model (`chatgpt/gpt-6.1-sol`, `muse-spark-1.3-contributor`, …); the only one with web search |
+| `native` | craze's own agent, on a model provider's API or a ChatGPT plan | `--model` names a native model (`chatgpt/gpt-6.2-sol`, `muse-spark-1.3-contributor`, …); the only one with web search |
 | `grok` | the Grok CLI's agent | |
 | `cursor` | the Cursor agent | |
 | `claude` | the user's own Claude Code, on their Claude Pro or Max plan | needs a craze newer than 0.3.0; no `mode=ask` (`--ask`), no web search, no `--fast` (it bills extra usage). From an agent that does not run on claude (Cursor, Grok, a native, cursor or grok craze session), run it directly: `craze new --wait --timeout 9m --max-message 20000 --provider claude --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file` |
@@ -91,7 +91,7 @@ From Claude Code, dispatch several agents in one message, each in the background
 This is the path for every agent without Claude Code's Agent tool (Cursor, Grok, a craze session), and for your own Bash calls in Claude Code. **Every shell call that waits must be allowed ten minutes** (in Claude Code, Bash `timeout: 600000`; its default is 120 s) and use `--timeout 9m` under it; add `--max-message 20000` so a long answer does not overflow the Bash output (the rest goes to a file named in the output).
 
 ```bash
-craze new --wait --timeout 9m --max-message 20000 --provider native --model chatgpt/gpt-6.1-sol --effort high --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
+craze new --wait --timeout 9m --max-message 20000 --provider native --model chatgpt/gpt-6.2-sol --effort high --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze new --wait --timeout 9m --max-message 20000 --provider claude --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze send 175bfe79 --wait --timeout 9m --max-message 20000 --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 craze wait 175bfe79 --from <handle> --timeout 9m --max-message 20000

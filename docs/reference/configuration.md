@@ -986,8 +986,8 @@ with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 answers as Google's flagship reasoning model (Gemini 4 Carbon since
 2026-11-10), for complex coding and long agent work. It takes images, offers
 effort `low`, `medium` (its default) and `high`, and costs $2 per million input
-tokens and $10 per million output, against Gemini Flash Latest's $0.75 and
-$3.75. A request the Vertex endpoints cannot take may be answered by Gemini 4
+tokens and $10 per million output, against Gemini 4 Hydrogen's $1.50 and
+$7.50. A request the Vertex endpoints cannot take may be answered by Gemini 4
 Argon, the router's fallback, at the same price. It is not OpenRouter's start
 model: pick it with `/model`, `--model openrouter/gemini-pro-latest`, a
 `default_model` pin or a sub-agent's model. It replaces
@@ -999,6 +999,21 @@ Flash, which lists efforts `low` to `max`, default `high`, at half M3's price),
 `fireworks/deepseek-v4p1-flash` (use
 `fireworks/deepseek-v4p1-flash-1017`).
 
+`openrouter/gemini-4-hydrogen` is Gemini 4 Hydrogen, Google's high-efficiency
+Gemini 4 model, for high-throughput agent work, and OpenRouter's start model.
+It takes images, offers effort `low` to `xhigh` (default `medium`), has an
+[output ceiling](#native-output-ceiling) of 65,536 and costs $1.50 per million
+input tokens and $7.50 output (cached input $0.075). Google dropped the Flash
+name with Gemini 4, so it is on its numbered id rather than a router, and
+`openrouter/gemini-flash-latest` is [deprecated](#deprecated-models) in its
+favour: OpenRouter's Flash router already answers as Hydrogen, at twice the
+price craze listed for it. `openrouter/qwen4-max` is Qwen4 Max, Alibaba's
+flagship, on its numbered id (OpenRouter has no Qwen router): it takes images,
+offers effort `low`, `high` (its default) and `xhigh`, has an output ceiling
+of 131,072 and a window of 1,000,000, and costs $1.425 per million input
+tokens and $4.275 output (cached input $0.07125). `fireworks/qwen3p8-max`
+stays: Fireworks does not serve Qwen4 Max yet.
+
 **What a router costs.** A router's price is the one its *maker's own endpoint*
 charges on OpenRouter, not the one OpenRouter's model list shows: the list
 gives the cheapest endpoint's rate, but a request goes to whichever endpoint
@@ -1008,9 +1023,12 @@ input tokens and $1.20 output (cached input $0.006), and
 `openrouter/glm-flash-latest` and `openrouter/glm-latest` at Z.AI's: $0.15 and
 $0.50 (cached $0.03), and $1.40 and $4.40 (cached $0.26). The four GPT routers
 (`gpt-sol-latest`, `gpt-astra-latest`, `gpt-terra-latest`,
-`gpt-luna-latest`; Terra is new) carry OpenAI's prices with its tier above
-272,000 input tokens (the same as the rows in [OpenAI](#openai)) and, like the
-OpenAI models, a [context default](#native-context-default) of 272,000. They
+`gpt-luna-latest`) carry OpenAI's prices with its tier above 272,000 input
+tokens (the same as the rows in [OpenAI](#openai)) and, like the OpenAI
+models, a [context default](#native-context-default) of 272,000. The Sol and
+Astra routers answer as GPT-6.2 Sol and GPT-6.2 Astra since 2026-11-17, so
+`gpt-astra-latest` costs GPT-6.2 Astra's $8 and $40 (cached $0.40), where it
+cost GPT-6 Astra's $10 and $50. They
 set no `cache_write` rate: OpenRouter lists cache-write rates for them, but its
 driver reports no cache-write tokens, so a rate would never apply.
 
@@ -1060,17 +1078,17 @@ starts](#model-memory-recentjson)):
 | Rank | Provider | Start model |
 |------|----------|-------------|
 | 1 | `zai-coding-plan` | `glm-5.3` |
-| 2 | `chatgpt` | the first of `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
+| 2 | `chatgpt` | the first of `chatgpt/gpt-6.2-sol`, `chatgpt/gpt-6.1-sol`, `chatgpt/gpt-5.6-sol` the account lists |
 | 3 | `fireworks` | `fireworks/deepseek-v4p1-flash-1017` |
-| 4 | `openrouter` | `openrouter/gemini-flash-latest` |
+| 4 | `openrouter` | `openrouter/gemini-4-hydrogen` |
 | 5 | `meta` | `muse-spark-1.3-contributor` |
 | 6 | `anthropic` | the newest Opus the account lists (`anthropic/claude-opus-5-5` until it lists a newer one), at `medium` |
-| 7 | `openai` | `openai/gpt-6.1-sol`, at `medium` |
+| 7 | `openai` | `openai/gpt-6.2-sol`, at `medium` |
 
 So a machine with only a Fireworks key starts on `fireworks/deepseek-v4p1-flash-1017`, one with
 only a Z.AI key on `glm-5.3`, one with only an Anthropic key on
 `anthropic/claude-opus-5-5`, one with only an OpenAI key stored (`craze auth
-login openai`) on `openai/gpt-6.1-sol`, and one signed in to the ChatGPT plan
+login openai`) on `openai/gpt-6.2-sol`, and one signed in to the ChatGPT plan
 with a Fireworks key as well on the plan's model. OpenAI's key is last: a
 machine on which another provider's start model resolves starts there. An
 `OPENAI_API_KEY` found only in the environment (exported for another tool,
@@ -1078,11 +1096,11 @@ say) is never where craze starts a session for you ([OpenAI](#openai)): a
 machine whose only other funded models are your own (a local provider, say)
 starts on the first of them by alias, and one with nothing else is told to
 store the key or name the model. With the key stored, such a machine starts
-on `openai/gpt-6.1-sol`, a paid model, since a provider's start model is
+on `openai/gpt-6.2-sol`, a paid model, since a provider's start model is
 tried before that last resort (an exported `ANTHROPIC_API_KEY` does the
 same); and one whose `provider_order` leaves `openai` out, where no listed
 provider's start resolves, falls to the first funded model by alias, which
-may be `openai/gpt-6-astra`. To start on a model of your choosing, set
+may be `openai/gpt-6-luna`. To start on a model of your choosing, set
 `default_model`. `provider_order` in your `models.toml` changes the order;
 `default_model` picks one model outright. A start model is taken only while
 it is offered and craze may choose it: of a maker several providers reach,
@@ -1444,7 +1462,8 @@ provider that loses its key.
 The shipped catalog's `[chatgpt_defaults]` table holds craze's own settings for
 the plan's models, laid over the account's list: `start`, the plan's start
 model in the [provider order](#the-shipped-catalog), an ordered list
-(`gpt-6.1-sol`, then `gpt-5.6-sol`; the first the account lists wins), and
+(`gpt-6.2-sol`, then `gpt-6.1-sol`, then `gpt-5.6-sol`; the first the account
+lists wins), and
 per-slug `name`, `efforts` (which can only
 narrow the account's), `default_effort` and `tool_profile` (`gpt-6-astra`
 defaults to `low`). It ships in the binary like the rest of the catalog; it is
@@ -1455,7 +1474,13 @@ is, so craze asks for the list as one pinned version that it has tested; the
 list's file records it, and a list fetched with another version is fetched
 again at the next sign-in or session start. A model the list says needs a newer
 client than the one this craze pins is not offered. The pin ships in the binary
-and is not something to set.
+and is not something to set: it is 0.166.0, the version GPT-6.2 Sol and
+GPT-6.2 Astra are listed from. A `--model` naming a plan model the cached
+list lacks, when that list is stale for this craze (fetched with an older
+pin, as after an upgrade, over a day old, or missing), fetches the list
+before the start answers, so the first `craze new --model
+chatgpt/gpt-6.2-sol` after an upgrade starts on it rather than refusing it
+as an unknown model.
 
 **Its files** are in the native directory (`~/.craze/native/`, or
 `$CRAZE_HOME/native/`), each `0600`, the sign-in's under `auth/`, a directory
@@ -1666,14 +1691,14 @@ it. So while the variable is the provider's only key — no key stored for
 `openai` — craze never chooses an OpenAI model for you: not as a new
 session's start, not as the first funded model by alias, and not as the
 model a resumed session falls back to. Each model still runs and is still
-listed: `--model openai/gpt-6.1-sol`, a `default_model` pin, a model you
+listed: `--model openai/gpt-6.2-sol`, a `default_model` pin, a model you
 picked with `/model` (the model memory starts it again), a sub-agent's
 configured model and a resumed session on its own model all run on the
 variable. With nothing else to start on, a new session does not start, kind
 `config`:
 
 ```
-native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.1-sol
+native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.2-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.2-sol
 ```
 
 and [`craze providers`](cli.md#craze-providers) shows native as `needs
@@ -1688,10 +1713,17 @@ yours can set it, and an entry that moves the provider's `driver` or
 
 | Alias | Efforts | Default effort | $ per 1M input, cached input, cache write, output | Above 272,000 input tokens |
 |-------|---------|----------------|------------------------------|-----------|
-| `openai/gpt-6.1-sol` (its start) | `low` to `max` | `medium` | 2.00, 0.10, 2.50, 10.00 | 4.00, 0.20, 5.00, 15.00 |
-| `openai/gpt-6-astra` | `low` to `max` | `low` | 10.00, 1.00, 12.50, 50.00 | 20.00, 2.00, 25.00, 75.00 |
+| `openai/gpt-6.2-sol` (its start) | `low` to `max` | `medium` | 2.00, 0.10, 2.50, 10.00 | 4.00, 0.20, 5.00, 15.00 |
+| `openai/gpt-6.2-astra` | `low` to `max` | `low` | 8.00, 0.40, 10.00, 40.00 | 16.00, 0.80, 20.00, 60.00 |
 | `openai/gpt-6.1-terra` | `none` to `max` | `medium` | 1.00, 0.05, 1.25, 5.00 | 2.00, 0.10, 2.50, 7.50 |
 | `openai/gpt-6-luna` | `none` to `max` | `medium` | 0.10, 0.01, 0.125, 0.50 | 0.20, 0.02, 0.25, 0.75 |
+| `openai/gpt-6.1-sol` ([deprecated](#deprecated-models): use `openai/gpt-6.2-sol`) | `low` to `max` | `medium` | 2.00, 0.10, 2.50, 10.00 | 4.00, 0.20, 5.00, 15.00 |
+| `openai/gpt-6-astra` ([deprecated](#deprecated-models): use `openai/gpt-6.2-astra`) | `low` to `max` | `low` | 10.00, 1.00, 12.50, 50.00 | 20.00, 2.00, 25.00, 75.00 |
+
+GPT-6.2 Sol and GPT-6.2 Astra are new (2026-11-17): Sol at GPT-6.1 Sol's
+prices, Astra a fifth below GPT-6 Astra (its cached input less than half).
+GPT-6.1 Sol and GPT-6 Astra are deprecated in their favour: OpenAI still
+serves both, so they run by name, but no picker offers them.
 
 Each takes images, has a context window of 1,048,576 tokens and an [output
 ceiling](#native-output-ceiling) of 128,000, OpenAI's own, which bounds
@@ -1699,8 +1731,8 @@ reasoning as well. OpenAI documents a window of 1,050,000; the API was
 measured to refuse input of 921,907 tokens, so craze's is a little smaller,
 and a request its compaction lets through is one the API takes. None of them
 offers `minimal`, and Sol and Astra do not offer `none`: OpenAI refuses those
-with an HTTP 400. Their names end in `(OpenAI)`, so `--model gpt-6.1-sol` alone still names the
-ChatGPT plan's model; `--model openai/gpt-6.1-sol` names this one.
+with an HTTP 400. Their names end in `(OpenAI)`, so `--model gpt-6.2-sol` alone still names the
+ChatGPT plan's model; `--model openai/gpt-6.2-sol` names this one.
 
 **272,000 tokens.** OpenAI prices a request whose input is over 272,000 tokens
 at twice the input and cache rates and 1.5 times the output, for the whole
@@ -2011,10 +2043,11 @@ on the first of:
 3. for each provider in the provider order — your `provider_order`, else the
    [catalog's](#the-shipped-catalog): Z.AI Coding Plan, ChatGPT plan,
    Fireworks, OpenRouter, Meta, Anthropic, OpenAI — that has a key, the
-   provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.1-sol` and
-   `chatgpt/gpt-5.6-sol` that the account lists; `fireworks/deepseek-v4p1-flash-1017`;
-   `openrouter/gemini-flash-latest`; `muse-spark-1.3-contributor`; the newest
-   Opus the Anthropic account lists; `openai/gpt-6.1-sol`);
+   provider's start model (`glm-5.3`; the first of `chatgpt/gpt-6.2-sol`,
+   `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-5.6-sol` that the account lists;
+   `fireworks/deepseek-v4p1-flash-1017`; `openrouter/gemini-4-hydrogen`;
+   `muse-spark-1.3-contributor`; the newest Opus the Anthropic account lists;
+   `openai/gpt-6.2-sol`);
 4. otherwise the first model, by alias, whose provider has a key and that is
    not [deprecated](#deprecated-models) — with a note saying so. This step
    considers every funded model, a provider your `provider_order` leaves out
@@ -2214,18 +2247,18 @@ start, kind `config`, and says why instead of "no model provider has an API
 key", naming the first model it passed over:
 
 ```
-native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.1-sol
+native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.2-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.2-sol
 ```
 
 [`craze providers`](cli.md#craze-providers) and the hub's create options show
 native as `needs setup` with the reason `signed in to ChatGPT, but its models
 are not available` and the fix `craze auth login chatgpt, or start with
---model openai/gpt-6.1-sol` (with a Fireworks key instead, `--model
+--model openai/gpt-6.2-sol` (with a Fireworks key instead, `--model
 fireworks/deepseek-v4p1-flash-1017`), and the session list says so when you pick
 native. When a model is passed over for more than one reason, the sign-in's
 is the one given. The memory and the pin are your own choices, and are not
 held back: a remembered `fireworks/kimi-k3p1-pro`, or `default_model =
-"openrouter/gemini-flash-latest"`, still starts beside a broken sign-in, and
+"openrouter/gemini-4-hydrogen"`, still starts beside a broken sign-in, and
 `provider_order = ["fireworks", "chatgpt"]` puts Fireworks before it.
 
 **Sub-agents.** The model an agent-tool call names is held to what the menu
@@ -2240,7 +2273,7 @@ inside it — naming the other sources of the model's maker that are funded,
 who pays for each, and the route, for example:
 
 ```
-OpenAI models are also funded by your OpenAI key (billed per token): openai/gpt-6-astra, openai/gpt-6-luna, openai/gpt-6.1-sol, openai/gpt-6.1-terra. To use one, end this session with /exit, then run craze -c --model openai/gpt-6.1-sol
+OpenAI models are also funded by your OpenAI key (billed per token): openai/gpt-6-luna, openai/gpt-6.1-terra, openai/gpt-6.2-astra, openai/gpt-6.2-sol. To use one, end this session with /exit, then run craze -c --model openai/gpt-6.2-sol
 ```
 
 It is text only: craze never switches for you. The TUI works it out from its

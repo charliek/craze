@@ -200,10 +200,10 @@ them connected:
     ChatGPT plan, Fireworks, OpenRouter, Meta, Anthropic, OpenAI, each on its
     own start model ([the table](../reference/configuration.md#the-shipped-catalog);
     Anthropic's is the newest Claude Opus your account lists, OpenAI's
-    `openai/gpt-6.1-sol`). An `OPENAI_API_KEY` already exported for other
+    `openai/gpt-6.2-sol`). An `OPENAI_API_KEY` already exported for other
     tools runs OpenAI's models, but craze does not choose one for a new
     session on its own until you store the key with `craze auth login
-    openai`. Until then, pass `--model openai/gpt-6.1-sol`, pick one with
+    openai`. Until then, pass `--model openai/gpt-6.2-sol`, pick one with
     `/model` (the model memory then starts it again), or set a
     `default_model`.
     `env_keys = []` under `[providers.openai]` in `providers.toml` turns the

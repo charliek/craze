@@ -50,7 +50,7 @@ Call `Bash` once, with `timeout: 600000`. The command is exactly this, with your
 
 craze new --wait --timeout 9m --max-message 20000 <target flags> --prompt-file <path> --remove-prompt-file
 
-Example: for `target: grok grok-4.7 effort=high` and the file above (with `target: native chatgpt/gpt-6.1-sol mode=ask web=on` the flags are `--provider native --model chatgpt/gpt-6.1-sol --ask --web-search`):
+Example: for `target: grok grok-4.7 effort=high` and the file above (with `target: native chatgpt/gpt-6.2-sol mode=ask web=on` the flags are `--provider native --model chatgpt/gpt-6.2-sol --ask --web-search`):
 
 craze new --wait --timeout 9m --max-message 20000 --provider grok --model grok-4.7 --effort high --prompt-file /tmp/craze-delegate-<12 hex digits>.md --remove-prompt-file
 

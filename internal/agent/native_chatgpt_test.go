@@ -633,6 +633,88 @@ func TestNativeModelsRefreshRefetchesAnotherClientVersion(t *testing.T) {
 	}
 }
 
+// TestNativeStartFetchesAStalePlanListForAMissedModel: a --model naming a
+// plan model the cached list lacks, where the list was fetched with another
+// client_version — the first start after an upgrade that raised the pin,
+// which is how a new plan model first reaches a machine — fetches the list
+// at once, with the pin, and starts on the model the new list names, rather
+// than refusing it and leaving the list to a background fetch the refusal
+// never reaches. RefreshPlanListForMiss, which craze new --wait's pre-check
+// calls, answers the same. Controls: a list fetched with the pin is current,
+// so the miss fetches nothing and is refused; and a miss that names no plan
+// model fetches nothing.
+func TestNativeStartFetchesAStalePlanListForAMissedModel(t *testing.T) {
+	newList := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","priority":0,`+
+			`"context_window":500000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"default_reasoning_level":"low"},`+
+			`{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol","visibility":"list","priority":1,`+
+			`"context_window":272000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}]}`)
+	}
+	pin := modeltable.ChatGPTModelsClientVersion()
+	setUp := func(t *testing.T, version string) (dir string, api *fakeEndpoint) {
+		t.Helper()
+		api, _ = noOpenAI(t)
+		api.queue(newList)
+		home := t.TempDir()
+		t.Setenv("CRAZE_HOME", home)
+		dir = filepath.Join(home, "native")
+		writePlanAccount(t, dir)
+		writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+		fetchedWith(t, dir, version)
+		return dir, api
+	}
+	start := func(t *testing.T, model string) (*nativeSession, error) {
+		t.Helper()
+		s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir(), Model: model}, func(o *harness.Options) {
+			o.Getenv = func(string) string { return "" }
+		})
+		closeAtCleanup(t, s)
+		return s, s.Start(context.Background())
+	}
+
+	t.Run("a list fetched with an older pin", func(t *testing.T) {
+		dir, api := setUp(t, "0.1.0")
+		s, err := start(t, "chatgpt/gpt-6.2-sol")
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if got := s.Snapshot().CurrentModel; got != "chatgpt/gpt-6.2-sol" {
+			t.Fatalf("the session started on %q", got)
+		}
+		reqs := api.requests()
+		if len(reqs) != 1 || reqs[0].path != "/v1/models" || !slices.Equal(reqs[0].query["client_version"], []string{pin}) {
+			t.Fatalf("the API saw %d requests, want one model list request with the pin", len(reqs))
+		}
+		if m, err := chatgptauth.ReadModels(dir); err != nil || m.ClientVersion != pin || len(m.Models) != 2 {
+			t.Fatalf("the list written: %+v, %v", m, err)
+		}
+	})
+	t.Run("RefreshPlanListForMiss", func(t *testing.T) {
+		dir, api := setUp(t, "0.1.0")
+		if RefreshPlanListForMiss(context.Background(), dir, "fireworks/nope") || len(api.requests()) != 0 {
+			t.Fatal("a miss naming no plan model fetched the list")
+		}
+		if !RefreshPlanListForMiss(context.Background(), dir, " ChatGPT/gpt-6.2-sol ") || len(api.requests()) != 1 {
+			t.Fatalf("a plan model's miss on a stale list wrote nothing (%d requests)", len(api.requests()))
+		}
+		// Current now: answered true, so a caller whose table predates the
+		// write reads it again, and nothing is fetched.
+		if !RefreshPlanListForMiss(context.Background(), dir, "chatgpt/gpt-9") || len(api.requests()) != 1 {
+			t.Fatal("a list now current was fetched again, or answered not current")
+		}
+	})
+	t.Run("a list fetched with the pin (control)", func(t *testing.T) {
+		_, api := setUp(t, pin)
+		if _, err := start(t, "chatgpt/gpt-6.2-sol"); err == nil || !strings.Contains(err.Error(), "chatgpt/gpt-6.2-sol") {
+			t.Fatalf("Start = %v, want the miss refused", err)
+		}
+		if n := len(api.requests()); n != 0 {
+			t.Fatalf("a current list was fetched again: %d requests", n)
+		}
+	})
+}
+
 // fetchedWith rewrites dir's model list as fetched now with client_version
 // v ("" is none: a legacy file), fresh by age whatever its version.
 func fetchedWith(t *testing.T, dir, v string) {

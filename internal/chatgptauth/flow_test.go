@@ -799,6 +799,36 @@ func TestListenerClosesAfterTheRedirect(t *testing.T) {
 	}
 }
 
+// TestAClosedAttemptRefusesAtOnce: once Close returns, the callback port
+// takes no connection, even when Begin's Serve goroutine had not yet started
+// and so had not taken the listener up — srv.Close alone left it open, its
+// backlog still completing connections, until that goroutine ran (seen as a
+// CI flake of TestListenerClosesOnCancel; about one attempt in 200 on one
+// CPU). Many attempts, each closed before anything yields, so the window is
+// hit without a seam.
+func TestAClosedAttemptRefusesAtOnce(t *testing.T) {
+	f := newFake(t)
+	useFake(t, f)
+	useListener(t, false)
+	const attempts = 1000
+	open := 0
+	for range attempts {
+		a, err := Begin(context.Background(), nativeDir(t), BeginOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := a.ln.Addr().String()
+		a.Close(CloseDone)
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			open++
+		}
+	}
+	if open > 0 {
+		t.Fatalf("%d of %d closed attempts still took a connection", open, attempts)
+	}
+}
+
 // TestListenerClosesOnCancel (plan 033 §3.10): a cancelled Wait returns the
 // context's error and closes the listener; Close does the same for a Wait
 // in progress (ErrAttemptOver). The control: the listener accepts before.

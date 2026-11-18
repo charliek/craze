@@ -41,6 +41,42 @@ end `it exits when idle`.
 
 ## Since v0.3.0
 
+### GPT-6.2 Sol and Astra, Gemini 4 Hydrogen and Qwen4 Max
+
+- **The ChatGPT plan lists GPT-6.2 Sol and GPT-6.2 Astra**
+  (`chatgpt/gpt-6.2-sol`, `chatgpt/gpt-6.2-astra`). ChatGPT names them only
+  to a client of version 0.166.0 or newer, so craze now asks for its list as
+  0.166.0 (it was 0.160.0). The plan's start model is `chatgpt/gpt-6.2-sol`
+  where the account lists it, then `gpt-6.1-sol`, then `gpt-5.6-sol`. The
+  cached list is fetched again the first time it is needed: a session's
+  start, a sign-in, or a `--model chatgpt/…` the old list lacks, which no
+  longer fails as an unknown model when that list is stale. A session's own
+  refresh runs after it has chosen its model, so the first session after the
+  upgrade that names no model may still start on `chatgpt/gpt-6.1-sol` from
+  the old list; later ones start on 6.2 Sol. To get it at once, pass
+  `--model chatgpt/gpt-6.2-sol`, or pick it with `/model`.
+- **The plugin's `craze:sol` and `craze:astra` presets** run
+  `chatgpt/gpt-6.2-sol` and `chatgpt/gpt-6.2-astra` (they ran
+  `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-6-astra`), and need this release: an
+  older craze answers them `unknown model`.
+- **On an OpenAI API key**, `openai/gpt-6.2-sol` (the start model, at GPT-6.1
+  Sol's prices) and `openai/gpt-6.2-astra` ($8 / $40 per million tokens,
+  cached $0.40) are new. `openai/gpt-6.1-sol` and `openai/gpt-6-astra` are
+  [deprecated](../reference/configuration.md#deprecated-models): they still run
+  by name, a pin or the model memory, with a warning naming the replacement,
+  but no picker offers them and nothing starts on them for you.
+- **On OpenRouter**, `openrouter/gemini-4-hydrogen` (Gemini 4 Hydrogen, $1.50
+  / $7.50) is the start model, and `openrouter/gemini-flash-latest` is
+  deprecated in its favour: Google dropped the Flash name with Gemini 4, and
+  that router already answered as Hydrogen at twice the price craze showed.
+  `openrouter/qwen4-max` (Qwen4 Max, $1.425 / $4.275) is new.
+  `openrouter/gpt-astra-latest` now answers as GPT-6.2 Astra and is priced at
+  its $8 / $40 (cached $0.40), down from $10 / $50.
+- **What to do:** nothing, unless you pinned a deprecated model
+  (`default_model`, a `[subagents]` model or tier, a persona's `model:`) or
+  name one in a script: move it to its replacement before a later release
+  retires it ([the shipped catalog](../reference/configuration.md#the-shipped-catalog)).
+
 ### Web search retries a rate limit, and says what went wrong
 
 - **A rate-limited search or fetch is tried again** before the model sees it:

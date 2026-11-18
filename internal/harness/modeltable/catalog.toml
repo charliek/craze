@@ -38,7 +38,7 @@ version = 1
 # that funds any provider before it starts there; one with only an Anthropic
 # key starts on the newest Opus. OpenAI's key comes after it (plan 050, the
 # owner's pin): a machine on which another provider's start model resolves
-# starts there. A key stored for openai starts on GPT-6.1 Sol when nothing
+# starts there. A key stored for openai starts on GPT-6.2 Sol when nothing
 # before it is funded; OPENAI_API_KEY in the environment alone never does
 # (env_key_by_name_only, below): such a machine starts on the user's own
 # model when it has one, and otherwise is told to store the key or name the
@@ -127,7 +127,7 @@ replaced_by = "openrouter/gpt-sol-latest"
 [[retired]]
 alias = "openrouter/gemini-3.8-flash"
 provider = "openrouter"
-replaced_by = "openrouter/gemini-flash-latest"
+replaced_by = "openrouter/gemini-4-hydrogen"
 
 [[retired]]
 alias = "openrouter/glm-5.3-flash"
@@ -190,12 +190,15 @@ start = ["muse-spark-1.3-contributor"]
 maker = "meta"
 
 # OpenRouter's start is Gemini: its other models overlap with ones a cheaper
-# provider ships.
+# provider ships. Gemini 4 Hydrogen since 2026-11-17, on its numbered id:
+# Google dropped the Flash name with the Gemini 4 family, so
+# ~google/gemini-flash-latest, deprecated below, is no longer where its
+# successor will be found.
 [providers.openrouter]
 name = "OpenRouter"
 driver = "openrouter"
 env_keys = ["OPENROUTER_API_KEY"]
-start = ["openrouter/gemini-flash-latest"]
+start = ["openrouter/gemini-4-hydrogen"]
 
 [providers.zai-coding-plan]
 name = "Z.AI Coding Plan"
@@ -250,7 +253,7 @@ name = "OpenAI"
 driver = "openai-responses"
 base_url = "https://api.openai.com/v1"
 env_keys = ["OPENAI_API_KEY"]
-start = ["openai/gpt-6.1-sol"]
+start = ["openai/gpt-6.2-sol"]
 maker = "openai"
 env_key_by_name_only = true
 
@@ -274,13 +277,17 @@ env_key_by_name_only = true
 # note it in discovery/native-harness/08-decisions.md, and release. A cache
 # fetched with another version is refetched at the next sign-in, open or
 # refresh, and a reader drops a model above its own pin, so an older binary
-# never offers a newer pin's models.
+# never offers a newer pin's models. 0.166.0 since 2026-11-17: GPT-6.2 Sol and
+# GPT-6.2 Astra are listed only from 0.166.0 (their minimal_client_version;
+# 0.165.0 gets the same 8 models as 0.160.0, 0.166.0 and up the 10), and both
+# were seen live through craze at that pin (a tool loop, an image read from
+# disk, a sub-agent).
 #
 # start is in order of preference: the first slug the account lists and the
 # sign-in funds wins; with none, provider_order goes on to the next provider.
 [chatgpt_defaults]
-models_client_version = "0.160.0"
-start = ["gpt-6.1-sol", "gpt-5.6-sol"]
+models_client_version = "0.166.0"
+start = ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-5.6-sol"]
 
 [chatgpt_defaults.models."gpt-6-astra"]
 default_effort = "low"
@@ -883,6 +890,67 @@ cache_read = 0.2
 # which OpenAI reports as cache_write_tokens inside input_tokens; above
 # 272,000 input tokens, twice the input and cache rates and 1.5 times the
 # output.
+#
+# GPT-6.2 Sol and GPT-6.2 Astra (2026-11-17) follow the same rules, from
+# OpenAI's model pages of that day: a 1,050,000 window (922,000 input), a
+# 128,000 output ceiling, images in, none refused, and the same 272,000 tier.
+# Sol keeps 6.1 Sol's prices; Astra is $8 / $0.40 cached / $10 cache write /
+# $40 output, a fifth below GPT-6 Astra, its cached input less than half.
+# Their efforts and defaults are their predecessors' (low to max; Sol medium,
+# Astra low), measured one by one on the API on 2026-11-17: none, minimal and
+# ultra are refused (HTTP 400), low to max taken, max reasoning the most. Seen
+# live through craze on 2026-11-17 on their wire ids: a tool loop, and an
+# image read from disk described, with cache writes reported. GPT-6 Astra and
+# GPT-6.1 Sol are deprecated in their favour; OpenAI still serves both, so
+# they run by name.
+
+[models."openai/gpt-6.2-astra"]
+provider = "openai"
+wire_model = "gpt-6.2-astra"
+name = "GPT-6.2 Astra (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "low"
+vision = true
+
+[models."openai/gpt-6.2-astra".cost]
+input = 8.0
+output = 40.0
+cache_read = 0.4
+cache_write = 10.0
+long_context_above = 272000
+
+[models."openai/gpt-6.2-astra".cost.long_context]
+input = 16.0
+output = 60.0
+cache_read = 0.8
+cache_write = 20.0
+
+[models."openai/gpt-6.2-sol"]
+provider = "openai"
+wire_model = "gpt-6.2-sol"
+name = "GPT-6.2 Sol (OpenAI)"
+context_window = 1048576
+default_context = 272000
+max_output_tokens = 128000
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+vision = true
+
+[models."openai/gpt-6.2-sol".cost]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+cache_write = 2.5
+long_context_above = 272000
+
+[models."openai/gpt-6.2-sol".cost.long_context]
+input = 4.0
+output = 15.0
+cache_read = 0.2
+cache_write = 5.0
 
 [models."openai/gpt-6-astra"]
 provider = "openai"
@@ -894,6 +962,8 @@ max_output_tokens = 128000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "low"
 vision = true
+deprecated = true
+replaced_by = "openai/gpt-6.2-astra"
 
 [models."openai/gpt-6-astra".cost]
 input = 10.0
@@ -942,6 +1012,8 @@ max_output_tokens = 128000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 vision = true
+deprecated = true
+replaced_by = "openai/gpt-6.2-sol"
 
 [models."openai/gpt-6.1-sol".cost]
 input = 2.0
@@ -985,7 +1057,11 @@ cache_write = 2.5
 # with no change here. Their window, efforts and vision are the family's
 # newest on 2026-10-09 (DeepSeek V4.1 Flash, Gemini 3.8 Flash, GLM 5.3 Flash,
 # GLM 5.3, GPT-6 Astra, GPT-6 Luna, GPT-6.1 Sol), and GPT-6.1 Terra on
-# 2026-11-11, and want a look when the family moves on. Efforts are the
+# 2026-11-11, and want a look when the family moves on. On 2026-11-17 the
+# Astra and Sol routers moved to GPT-6.2 Astra and GPT-6.2 Sol (OpenRouter's
+# alias_target): their window, efforts and vision are unchanged, Astra's price
+# fell to $8 / $40 / $0.40 cached (twice each above 272,000, output 1.5
+# times), and Sol's is 6.1 Sol's. Efforts are the
 # router's supported_efforts in OpenRouter's model list. Each was seen live
 # through craze on 2026-10-09 (Terra on 2026-11-11): a tool loop on its ~ wire
 # id, and every vision model described an image read from disk.
@@ -1009,7 +1085,7 @@ cache_write = 2.5
 # session compacts at 85% of 272,000 (default_context, a trigger, not a cap)
 # with the true window kept; a request that runs over is priced at the tier.
 # They set no cache_write: OpenRouter lists cache-write rates for them (Sol
-# 2.50, Astra 12.50, Terra 1.25, Luna 0.125), but the openrouter driver
+# 2.50, Astra 10.00, Terra 1.25, Luna 0.125), but the openrouter driver
 # reports no cache-write tokens, so a rate would never be applied; a left-out
 # rate prices any such token at the input rate.
 
@@ -1028,6 +1104,11 @@ input = 0.3
 output = 1.2
 cache_read = 0.006
 
+# Deprecated since 2026-11-17: Google's Gemini 4 models drop the Flash name,
+# so the router's family ends with Gemini 4 Hydrogen, which it answers as
+# now (OpenRouter's alias_target), at twice the price below; Hydrogen is
+# openrouter/gemini-4-hydrogen. The router still answers: the alias is out of
+# the pickers and still runs by name.
 [models."openrouter/gemini-flash-latest"]
 provider = "openrouter"
 wire_model = "~google/gemini-flash-latest"
@@ -1037,6 +1118,8 @@ max_output_tokens = 65536
 efforts = ["low", "medium", "high"]
 default_effort = "medium"
 vision = true
+deprecated = true
+replaced_by = "openrouter/gemini-4-hydrogen"
 
 [models."openrouter/gemini-flash-latest".cost]
 input = 0.75
@@ -1112,15 +1195,15 @@ vision = true
 maker = "openai"
 
 [models."openrouter/gpt-astra-latest".cost]
-input = 10.0
-output = 50.0
-cache_read = 1.0
+input = 8.0
+output = 40.0
+cache_read = 0.4
 long_context_above = 272000
 
 [models."openrouter/gpt-astra-latest".cost.long_context]
-input = 20.0
-output = 75.0
-cache_read = 2.0
+input = 16.0
+output = 60.0
+cache_read = 0.8
 
 [models."openrouter/gpt-luna-latest"]
 provider = "openrouter"
@@ -1215,6 +1298,32 @@ replaced_by = "openrouter/gemini-pro-latest"
 input = 2.0
 output = 10.0
 cache_read = 0.1
+
+# Gemini 4 Hydrogen, Google's high-efficiency Gemini 4 model (2026-11-12), for
+# high-throughput agent work at a lower price than Carbon, and OpenRouter's
+# start. Its ceiling is 65536, what its AI Studio standard and regional Vertex
+# endpoints take (Vertex global and AI Studio's flex and priority tiers take
+# more), so a request may go to any of them. Efforts are its
+# supported_efforts, low to xhigh at OpenRouter's default of medium; on a
+# probe on 2026-11-17 none was refused (reasoning is mandatory), and xhigh
+# reasoned the most. Its price is the model list's, the standard tier ($1.50
+# / $7.50 / $0.075 cached; AI Studio's flex tier is half, the priority tiers
+# dearer, the regional Vertex endpoints a tenth more). Seen live through craze
+# on 2026-11-17: a tool loop, and an image read from disk described.
+[models."openrouter/gemini-4-hydrogen"]
+provider = "openrouter"
+wire_model = "google/gemini-4-hydrogen"
+name = "Gemini 4 Hydrogen (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 65536
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "medium"
+vision = true
+
+[models."openrouter/gemini-4-hydrogen".cost]
+input = 1.5
+output = 7.5
+cache_read = 0.075
 
 # OpenRouter lists no reasoning_effort for MiMo (its endpoints take only
 # reasoning on or off), so it offers no efforts (MiniMax M3, deprecated below,
@@ -1311,3 +1420,30 @@ maker = "meta"
 input = 4.0
 output = 20.0
 cache_read = 0.2
+
+# Qwen4 Max, the flagship of Alibaba's Qwen4 series (2026-11-16), on its
+# numbered id: OpenRouter has no Qwen router. Alibaba is its one endpoint, so
+# the list's price is the maker's: $1.425 / $4.275 / $0.07125 cached (the
+# cache-write rate is left out, as for the GPT routers: the openrouter driver
+# reports no cache-write tokens). Its window is 1,000,000 and its ceiling the
+# endpoint's 131072. Efforts are its supported_efforts less none, which turns
+# reasoning off (a probe on 2026-11-17 answered a two-step time sum wrongly
+# with it): low and high reasoned alike on that probe, xhigh about two and a
+# half times as much. It takes images (and video, which craze does not send).
+# Fireworks does not serve it yet; fireworks/qwen3p8-max stays. Seen live
+# through craze on 2026-11-17: a tool loop, and an image read from disk
+# described.
+[models."openrouter/qwen4-max"]
+provider = "openrouter"
+wire_model = "qwen/qwen4-max"
+name = "Qwen4 Max (OpenRouter)"
+context_window = 1000000
+max_output_tokens = 131072
+efforts = ["low", "high", "xhigh"]
+default_effort = "high"
+vision = true
+
+[models."openrouter/qwen4-max".cost]
+input = 1.425
+output = 4.275
+cache_read = 0.07125

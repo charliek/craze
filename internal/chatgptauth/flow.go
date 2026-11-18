@@ -382,6 +382,14 @@ func (a *Attempt) shut() {
 		if a.srv != nil {
 			_ = a.srv.Close()
 		}
+		// The listener too, itself: srv.Close closes only the listeners
+		// Serve has taken up, and Serve runs on a goroutine of its own
+		// (Begin), which may not have started yet — until it does, the
+		// kernel still completes connections to the callback port into the
+		// listener's backlog. Serve's own close of it later is a no-op.
+		if a.ln != nil {
+			_ = a.ln.Close()
+		}
 	})
 }
 

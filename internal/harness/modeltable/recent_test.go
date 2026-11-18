@@ -574,7 +574,7 @@ func TestStartPickSteps(t *testing.T) {
 // on glm-5.3, Fireworks alone on fireworks/deepseek-v4p1-flash-1017 (the
 // owner's choice of 2026-11-14 from the November 2026 start-model eval; Kimi
 // K3.1 Pro and, before it, Ember-1 were its start), OpenRouter alone on
-// openrouter/gemini-flash-latest, Meta alone on muse-spark-1.3-contributor, and
+// openrouter/gemini-4-hydrogen, Meta alone on muse-spark-1.3-contributor, and
 // with every key the eval winner, Z.AI. The user's pin in
 // models.toml beats the order, the user's provider_order reorders it, and an
 // order that leaves out the funded provider falls back to the first funded,
@@ -595,7 +595,7 @@ func TestStartModelOverTheShippedCatalog(t *testing.T) {
 	}{
 		{"Z.AI alone", "", []string{zai}, Start{Alias: "glm-5.3", Effort: "max"}},
 		{"Fireworks alone", "", []string{fw}, Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high"}},
-		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-flash-latest", Effort: "medium"}},
+		{"OpenRouter alone", "", []string{or}, Start{Alias: "openrouter/gemini-4-hydrogen", Effort: "medium"}},
 		{"Meta alone", "", []string{mt}, Start{Alias: "muse-spark-1.3-contributor", Effort: "high"}},
 		{"every key", "", []string{zai, fw, or, mt}, Start{Alias: "glm-5.3", Effort: "max"}},
 		{"Fireworks and Meta", "", []string{fw, mt}, Start{Alias: "fireworks/deepseek-v4p1-flash-1017", Effort: "high"}},

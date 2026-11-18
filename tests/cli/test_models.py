@@ -184,7 +184,7 @@ def test_an_openai_key_in_the_environment_alone_is_not_chosen(
     dummy = "sk-guard-openai-dummy-0001"
     monkeypatch.setenv("OPENAI_API_KEY", dummy)
     reason = "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI"
-    fix = "craze auth login openai, or start with --model openai/gpt-6.1-sol"
+    fix = "craze auth login openai, or start with --model openai/gpt-6.2-sol"
     with _ProxyRecorder() as proxy:
         for name in ("HTTPS_PROXY", "HTTP_PROXY"):
             monkeypatch.setenv(name, proxy.url)
@@ -199,7 +199,7 @@ def test_an_openai_key_in_the_environment_alone_is_not_chosen(
         assert out.returncode == 1, out
         err = _one_object(out)["error"]
         assert set(err) == {"message", "kind", "retryable"} and err["kind"] == "config" and err["retryable"] is False, err
-        assert f"native: {reason}, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run {fix}" in err["message"], err
+        assert f"native: {reason}, and craze does not start a new session on openai/gpt-6.2-sol (OpenAI) on its own; run {fix}" in err["message"], err
         assert dummy.encode() not in out.stdout + out.stderr, out
         assert _entries(_home()) == []
     assert proxy.lines == [], proxy.lines
