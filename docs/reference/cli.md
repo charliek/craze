@@ -2728,7 +2728,7 @@ Redirect address:
 Signed in to ChatGPT as you@example.com.
 You're using your ChatGPT plan.
 Eligible usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT settings: https://chatgpt.com/settings/usage
-ChatGPT plan models: chatgpt/gpt-6.1-sol, chatgpt/gpt-6-astra, chatgpt/gpt-6-sol, chatgpt/gpt-6-luna, chatgpt/gpt-5.6-sol, …
+ChatGPT plan models: chatgpt/gpt-6.2-sol, chatgpt/gpt-6.2-astra, chatgpt/gpt-6.1-terra, chatgpt/gpt-6.1-sol, chatgpt/gpt-6-astra, …
 ```
 
 The two notice lines appear once, the first time an account signs in with
@@ -2793,7 +2793,7 @@ help.
 {"time":"2026-10-03T12:35:26.789Z","surface":"cli","attempt":"0a1b2c3d","event":"paste_refused","refusal":"mismatch","part":"state","elapsed_ms":30000}
 {"time":"2026-10-03T12:35:41.789Z","surface":"cli","attempt":"0a1b2c3d","event":"redirect_received","via":"paste","elapsed_ms":45000}
 {"time":"2026-10-03T12:35:42.789Z","surface":"cli","attempt":"0a1b2c3d","event":"signed_in","usage":"plan","registration":"new","elapsed_ms":46000}
-{"time":"2026-10-03T12:35:43.589Z","surface":"cli","attempt":"0a1b2c3d","event":"models_fetched","models":8,"client_version":"0.160.0","elapsed_ms":800}
+{"time":"2026-10-03T12:35:43.589Z","surface":"cli","attempt":"0a1b2c3d","event":"models_fetched","models":10,"client_version":"0.166.0","elapsed_ms":800}
 ```
 
 | Event | What happened | Its fields |
@@ -2985,12 +2985,12 @@ How each is judged:
   token (on a provider whose models are priced) after `chatgpt` in the start
   order or on a provider left out of it, it is `signed in to
   ChatGPT, but its models are not available`, fix `craze auth login chatgpt,
-  or start with --model openai/gpt-6.1-sol` (with only a Fireworks key, the
+  or start with --model openai/gpt-6.2-sol` (with only a Fireworks key, the
   fix names `fireworks/deepseek-v4p1-flash-1017`). When the only funded models are
   `openai`'s, by an `OPENAI_API_KEY` in the environment with no key stored,
   it is `OPENAI_API_KEY is set in the environment, but no key is stored for
   OpenAI`, fix `craze auth login openai, or start with --model
-  openai/gpt-6.1-sol`; the variable's value is never shown. The hub's create
+  openai/gpt-6.2-sol`; the variable's value is never shown. The hub's create
   options say the same.
   `providers.toml` or `models.toml` that cannot be read makes it unavailable;
   the reason names the file and nothing from it, since the error can quote a
@@ -3066,7 +3066,7 @@ flag it does not take.
 ```bash
 ./bin/craze models
 ./bin/craze models --json
-./bin/craze models openai/gpt-6.1-sol --json
+./bin/craze models openai/gpt-6.2-sol --json
 env -i ./bin/craze models --shipped --json
 ```
 
@@ -3167,7 +3167,7 @@ local form, then a `retired:` line a retired alias:
 ```text
 ALIAS               PROVIDER   STATUS                                    EFFORTS                    CONTEXT            FUNDED  OFFERED
 fireworks/kimi-k3   fireworks  deprecated (use fireworks/kimi-k3p1-pro)  low,medium,high,xhigh,max  1048576            yes     no
-openai/gpt-6.1-sol  openai     active                                    low,medium,high,xhigh,max  272000 of 1048576  yes     yes
+openai/gpt-6.2-sol  openai     active                                    low,medium,high,xhigh,max  272000 of 1048576  yes     yes
 retired: openrouter/gpt-6.1-sol (use openrouter/gpt-sol-latest)
 ```
 

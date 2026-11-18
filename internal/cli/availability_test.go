@@ -448,12 +448,12 @@ func openAIKeyOnly(k string) string {
 // nativeHeld is native's entry when the paid-source guard held its start back
 // (plan 050 C5).
 var nativeHeld = availEntry{"native", "needs_setup", "signed in to ChatGPT, but its models are not available",
-	"craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"}
+	"craze auth login chatgpt, or start with --model openai/gpt-6.2-sol"}
 
 // nativeEnvHeld is native's entry when the only key is OPENAI_API_KEY in
 // the environment (guard 2, G1).
 var nativeEnvHeld = availEntry{"native", "needs_setup", "OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI",
-	"craze auth login openai, or start with --model openai/gpt-6.1-sol"}
+	"craze auth login openai, or start with --model openai/gpt-6.2-sol"}
 
 // TestNativeAvailabilityNamesTheFileOnly (plan 036 §3.1, A1): a model table
 // whose providers.toml has an unknown key that looks like a secret fails to

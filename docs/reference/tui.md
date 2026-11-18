@@ -449,8 +449,8 @@ it starts on your `default_model` when you set one and its provider has a key;
 else on the start model of the first provider, in craze's provider order, that
 you have connected — `glm-5.3` for the Z.AI Coding Plan, the ChatGPT plan's
 preferred model its account lists, `fireworks/deepseek-v4p1-flash-1017`,
-`openrouter/gemini-flash-latest`, `muse-spark-1.3-contributor`, the newest
-Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.1-sol`
+`openrouter/gemini-4-hydrogen`, `muse-spark-1.3-contributor`, the newest
+Claude Opus the Anthropic account lists (at `medium`), `openai/gpt-6.2-sol`
 for an OpenAI key stored with `craze auth login openai`, in that order
 ([the provider order](configuration.md#the-shipped-catalog), which
 `provider_order` in `models.toml` changes); and otherwise on the first model
@@ -2317,7 +2317,7 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   one-time notice follows — `You're using your ChatGPT plan.` and `Eligible
   usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT
   settings: https://chatgpt.com/settings/usage` — and is not shown again. Then
-  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-6.1-sol,
+  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-6.2-sol,
   …`), asks the running session to take the list up, and says `The plan's
   models are in /model now.` (or `The plan's models will be in /model after
   this turn.`; when the session could not take them up, the older `New
@@ -2510,9 +2510,9 @@ model, end the session with `/exit` and continue it with `craze -c --model
 switch to one. A native turn that fails on a quota or plan limit is followed by
 a note, after the failure's row, naming the other funded sources of the
 model's maker, who pays for each, and that route (`OpenAI models are also
-funded by your OpenAI key (billed per token): openai/gpt-6-astra, … To use
+funded by your OpenAI key (billed per token): openai/gpt-6-luna, … To use
 one, end this session with /exit, then run craze -c --model
-openai/gpt-6.1-sol`); the TUI works it out from its own craze directory, and
+openai/gpt-6.2-sol`); the TUI works it out from its own craze directory, and
 the failure's own message is unchanged. A session that opens on a deprecated model says
 so once, as a note, in the words the waiting commands print (`<alias> is
 deprecated; use <replacement>`, [model notices](cli.md#model-notices)), judged
@@ -2540,11 +2540,11 @@ picking native says why and which `craze auth login` sets it up, and its
 `/model` still offers the model. A ChatGPT sign-in that offers none of its
 models (no usable model list, another account's list or plan usage off),
 with an OpenAI key, is `signed in to ChatGPT, but its models are not
-available, so craze does not pick openai/gpt-6.1-sol for you — run craze auth
+available, so craze does not pick openai/gpt-6.2-sol for you — run craze auth
 login chatgpt, or pick a model with /model`; an `OPENAI_API_KEY` in the
 environment with no key stored for `openai` is `OPENAI_API_KEY is set in the
 environment, but no key is stored for OpenAI, so craze does not pick
-openai/gpt-6.1-sol for you — run craze auth login openai, or pick a model
+openai/gpt-6.2-sol for you — run craze auth login openai, or pick a model
 with /model`.
 
 **The effort row follows the highlight on native.** A native session states

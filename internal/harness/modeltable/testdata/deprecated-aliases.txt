@@ -13,3 +13,6 @@ fireworks/kimi-k3 0.2.0
 fireworks/deepseek-v4p1-flash 0.2.0
 openrouter/gemini-4-argon 0.2.0
 openrouter/minimax-m3 0.2.0
+openai/gpt-6-astra 0.3.0
+openai/gpt-6.1-sol 0.3.0
+openrouter/gemini-flash-latest 0.3.0

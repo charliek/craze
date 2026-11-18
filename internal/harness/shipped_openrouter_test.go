@@ -142,7 +142,7 @@ func TestShippedGeminiArgonReachesTheWire(t *testing.T) {
 		if len(reqs) != 2 {
 			t.Fatalf("the server saw %d requests, want 2", len(reqs))
 		}
-		checkSent(t, 1, reqs[0], "~google/gemini-flash-latest", "medium", 65536)
+		checkSent(t, 1, reqs[0], "google/gemini-4-hydrogen", "medium", 65536)
 		checkSent(t, 2, reqs[1], argonWire, "low", 65536)
 	})
 }

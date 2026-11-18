@@ -146,6 +146,12 @@ func TestShippedCatalog(t *testing.T) {
 		"openrouter/gpt-astra-latest": true, "openrouter/gpt-luna-latest": true,
 		"openrouter/gpt-sol-latest": true, "openrouter/mimo-v2.6-pro": true,
 		"openrouter/minimax-m3": true,
+		// The 2026-11-17 refresh: Hydrogen and Qwen4 Max each described an
+		// image read from disk through craze; the GPT-6.2 seeds take image
+		// input by their model pages, and each described one through craze on
+		// an OpenAI key.
+		"openrouter/gemini-4-hydrogen": true, "openrouter/qwen4-max": true,
+		"openai/gpt-6.2-astra": true, "openai/gpt-6.2-sol": true,
 		// Plan 050 C5's Muse models through OpenRouter: vision as OpenRouter's
 		// model list says and Meta's direct entries are (both take image
 		// input); live through craze on 2026-11-11 only a tool loop was run on
@@ -304,7 +310,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	if p := c.Providers["meta"]; p.Driver != DriverOpenAIResponses || p.BaseURL != "https://api.meta.ai/v1" || !slices.Equal(p.EnvKeys, []string{"META_API_KEY"}) {
 		t.Fatalf("meta = %+v, want driver %q at https://api.meta.ai/v1 on META_API_KEY", p, DriverOpenAIResponses)
 	}
-	wantDefaults := ChatGPTDefaults{Start: []string{"gpt-6.1-sol", "gpt-5.6-sol"}, startSet: true, ModelsClientVersion: "0.160.0", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
+	wantDefaults := ChatGPTDefaults{Start: []string{"gpt-6.2-sol", "gpt-6.1-sol", "gpt-5.6-sol"}, startSet: true, ModelsClientVersion: "0.166.0", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
 	if !reflect.DeepEqual(c.ChatGPT, wantDefaults) {
 		t.Fatalf("[chatgpt_defaults] = %+v, want %+v", c.ChatGPT, wantDefaults)
 	}
@@ -364,19 +370,20 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	wantStarts := map[string][]string{
 		"zai-coding-plan": {"glm-5.3"},
 		"fireworks":       {"fireworks/deepseek-v4p1-flash-1017"},
-		"openrouter":      {"openrouter/gemini-flash-latest"},
+		"openrouter":      {"openrouter/gemini-4-hydrogen"},
 		"meta":            {"muse-spark-1.3-contributor"},
-		"openai":          {"openai/gpt-6.1-sol"},
+		"openai":          {"openai/gpt-6.2-sol"},
 	}
 	if !reflect.DeepEqual(c.Starts, wantStarts) {
 		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
 	}
 	// OpenRouter's models and their wire ids: a family's router where
-	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon,
-	// MiMo, MiniMax, Meta's Muse models).
+	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon and
+	// Hydrogen, MiMo, MiniMax, Meta's Muse models, Qwen4 Max).
 	wantOpenRouter := map[string]string{
 		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
 		"openrouter/gemini-4-argon":        "google/gemini-4-argon",
+		"openrouter/gemini-4-hydrogen":     "google/gemini-4-hydrogen",
 		"openrouter/gemini-flash-latest":   "~google/gemini-flash-latest",
 		"openrouter/gemini-pro-latest":     "~google/gemini-pro-latest",
 		"openrouter/glm-flash-latest":      "~z-ai/glm-flash-latest",
@@ -390,6 +397,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		"openrouter/minimax-m3.1-flash":    "minimax/minimax-m3.1-flash",
 		"openrouter/muse-spark-1.3":        "meta/muse-spark-1.3",
 		"openrouter/muse-wonder":           "meta/muse-wonder",
+		"openrouter/qwen4-max":             "qwen/qwen4-max",
 	}
 	gotOpenRouter := map[string]string{}
 	for alias, m := range c.Models {
@@ -559,6 +567,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	wantTiered := []string{
 		"anthropic/claude-haiku-5-5", "muse-ember-1.0",
 		"openai/gpt-6-astra", "openai/gpt-6-luna", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra",
+		"openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
 		"openrouter/gpt-astra-latest", "openrouter/gpt-luna-latest", "openrouter/gpt-sol-latest", "openrouter/gpt-terra-latest",
 	}
 	var tiered []string
@@ -599,21 +608,24 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	lowToMax := []string{"low", "medium", "high", "xhigh", "max"}
 	noneToMax := append([]string{"none"}, lowToMax...)
 	for alias, want := range map[string]struct {
-		name    string
-		efforts []string
-		effort  string
-		base    [4]float64 // input, output, cache_read, cache_write
-		long    [4]float64
+		name       string
+		efforts    []string
+		effort     string
+		base       [4]float64 // input, output, cache_read, cache_write
+		long       [4]float64
+		deprecated bool // GPT-6.1 Sol and GPT-6 Astra, for GPT-6.2's (2026-11-17)
 	}{
-		"openai/gpt-6.1-sol":   {"GPT-6.1 Sol (OpenAI)", lowToMax, "medium", [4]float64{2, 10, 0.1, 2.5}, [4]float64{4, 15, 0.2, 5}},
-		"openai/gpt-6-astra":   {"GPT-6 Astra (OpenAI)", lowToMax, "low", [4]float64{10, 50, 1, 12.5}, [4]float64{20, 75, 2, 25}},
-		"openai/gpt-6.1-terra": {"GPT-6.1 Terra (OpenAI)", noneToMax, "medium", [4]float64{1, 5, 0.05, 1.25}, [4]float64{2, 7.5, 0.1, 2.5}},
-		"openai/gpt-6-luna":    {"GPT-6 Luna (OpenAI)", noneToMax, "medium", [4]float64{0.1, 0.5, 0.01, 0.125}, [4]float64{0.2, 0.75, 0.02, 0.25}},
+		"openai/gpt-6.2-sol":   {"GPT-6.2 Sol (OpenAI)", lowToMax, "medium", [4]float64{2, 10, 0.1, 2.5}, [4]float64{4, 15, 0.2, 5}, false},
+		"openai/gpt-6.2-astra": {"GPT-6.2 Astra (OpenAI)", lowToMax, "low", [4]float64{8, 40, 0.4, 10}, [4]float64{16, 60, 0.8, 20}, false},
+		"openai/gpt-6.1-sol":   {"GPT-6.1 Sol (OpenAI)", lowToMax, "medium", [4]float64{2, 10, 0.1, 2.5}, [4]float64{4, 15, 0.2, 5}, true},
+		"openai/gpt-6-astra":   {"GPT-6 Astra (OpenAI)", lowToMax, "low", [4]float64{10, 50, 1, 12.5}, [4]float64{20, 75, 2, 25}, true},
+		"openai/gpt-6.1-terra": {"GPT-6.1 Terra (OpenAI)", noneToMax, "medium", [4]float64{1, 5, 0.05, 1.25}, [4]float64{2, 7.5, 0.1, 2.5}, false},
+		"openai/gpt-6-luna":    {"GPT-6 Luna (OpenAI)", noneToMax, "medium", [4]float64{0.1, 0.5, 0.01, 0.125}, [4]float64{0.2, 0.75, 0.02, 0.25}, false},
 	} {
 		m := c.Models[alias]
 		if m.Provider != "openai" || "openai/"+m.WireModel != alias || m.Name != want.name || m.ContextWindow != 1048576 ||
 			m.DefaultContext != 272000 || m.MaxOutputTokens != 128000 || !slices.Equal(m.Efforts, want.efforts) ||
-			m.DefaultEffort != want.effort || !m.Vision || m.Deprecated {
+			m.DefaultEffort != want.effort || !m.Vision || m.Deprecated != want.deprecated {
 			t.Errorf("%s = %+v", alias, m)
 			continue
 		}
@@ -638,12 +650,12 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, err = stored.StartPick(nil, fakeEnv(nil))
-	if err != nil || start != (Start{Alias: "openai/gpt-6.1-sol", Effort: "medium"}) {
-		t.Fatalf("an OpenAI key stored alone starts on %+v, %v; want openai/gpt-6.1-sol at medium", start, err)
+	if err != nil || start != (Start{Alias: "openai/gpt-6.2-sol", Effort: "medium"}) {
+		t.Fatalf("an OpenAI key stored alone starts on %+v, %v; want openai/gpt-6.2-sol at medium", start, err)
 	}
 	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret"}))
-	if h := (*HeldError)(nil); !errors.As(err, &h) || h.EnvVar != "OPENAI_API_KEY" || h.Alias != "openai/gpt-6.1-sol" {
-		t.Fatalf("an OpenAI key in the environment alone starts on %+v, %v; want openai/gpt-6.1-sol held", start, err)
+	if h := (*HeldError)(nil); !errors.As(err, &h) || h.EnvVar != "OPENAI_API_KEY" || h.Alias != "openai/gpt-6.2-sol" {
+		t.Fatalf("an OpenAI key in the environment alone starts on %+v, %v; want openai/gpt-6.2-sol held", start, err)
 	}
 	start, err = tbl.StartPick(nil, fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai-canary-not-a-secret", "ANTHROPIC_API_KEY": anthropicKey}))
 	if err != nil || start.Alias != "anthropic/claude-opus-5-5" {
@@ -953,7 +965,7 @@ func TestShippedCatalogRefresh(t *testing.T) {
 			t.Errorf("%s: resolves %v, offered %v; want it to run and not be offered", alias, err, offered[alias])
 		}
 	}
-	for _, alias := range []string{"fireworks/glm-5p3", "openrouter/gemini-flash-latest", "openrouter/mimo-v2.6-pro"} {
+	for _, alias := range []string{"fireworks/glm-5p3", "openrouter/gemini-4-hydrogen", "openrouter/mimo-v2.6-pro"} {
 		if !offered[alias] {
 			t.Errorf("%s is not offered", alias)
 		}
@@ -1025,7 +1037,7 @@ func TestShippedCatalogRefresh(t *testing.T) {
 	// no cache_write (the openrouter driver reports no cache-write tokens).
 	for alias, want := range map[string]struct{ base, long [3]float64 }{
 		"openrouter/gpt-sol-latest":   {[3]float64{2, 10, 0.1}, [3]float64{4, 15, 0.2}},
-		"openrouter/gpt-astra-latest": {[3]float64{10, 50, 1}, [3]float64{20, 75, 2}},
+		"openrouter/gpt-astra-latest": {[3]float64{8, 40, 0.4}, [3]float64{16, 60, 0.8}},
 		"openrouter/gpt-terra-latest": {[3]float64{1, 5, 0.05}, [3]float64{2, 7.5, 0.1}},
 		"openrouter/gpt-luna-latest":  {[3]float64{0.1, 0.5, 0.01}, [3]float64{0.2, 0.75, 0.02}},
 	} {
@@ -1059,12 +1071,100 @@ func TestShippedCatalogRefresh(t *testing.T) {
 		"openrouter/gpt-6.1-sol":      "openrouter/gpt-sol-latest",
 		"openrouter/gpt-6-astra":      "openrouter/gpt-astra-latest",
 		"openrouter/gpt-6-luna":       "openrouter/gpt-luna-latest",
-		"openrouter/gemini-3.8-flash": "openrouter/gemini-flash-latest",
+		"openrouter/gemini-3.8-flash": "openrouter/gemini-4-hydrogen",
 		"openrouter/glm-5.3-flash":    "openrouter/glm-flash-latest",
 	}
 	for _, r := range cat.Retired {
 		if r.ReplacedBy != wantRepl[r.Alias] {
 			t.Errorf("retired %s replaced_by = %q, want %q", r.Alias, r.ReplacedBy, wantRepl[r.Alias])
+		}
+	}
+}
+
+// TestShippedCatalogGPT62 pins the 2026-11-17 refresh as the owner decided
+// it: the ChatGPT plan's pin at 0.166.0, where GPT-6.2 Sol and Astra are
+// listed, and its start on 6.2 Sol; the OpenAI key's GPT-6.2 seeds, with
+// GPT-6.1 Sol and GPT-6 Astra deprecated in their favour and the key's start
+// on 6.2 Sol; Gemini Flash Latest deprecated for Gemini 4 Hydrogen, now
+// OpenRouter's start; and Qwen4 Max on OpenRouter.
+func TestShippedCatalogGPT62(t *testing.T) {
+	tbl, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.ChatGPT.ModelsClientVersion != "0.166.0" || !slices.Equal(cat.ChatGPT.Start, []string{"gpt-6.2-sol", "gpt-6.1-sol", "gpt-5.6-sol"}) {
+		t.Errorf("[chatgpt_defaults] = %+v, want pin 0.166.0 and start gpt-6.2-sol, gpt-6.1-sol, gpt-5.6-sol", cat.ChatGPT)
+	}
+	for provider, want := range map[string]string{"openai": "openai/gpt-6.2-sol", "openrouter": "openrouter/gemini-4-hydrogen"} {
+		if got := cat.Starts[provider]; !slices.Equal(got, []string{want}) {
+			t.Errorf("%s starts on %q, want %s", provider, got, want)
+		}
+	}
+	env := fakeEnv(map[string]string{"OPENROUTER_API_KEY": "or-key-not-a-secret-01"})
+	offered := tbl.Offered(env)
+	for old, replacement := range map[string]string{
+		"openai/gpt-6.1-sol":             "openai/gpt-6.2-sol",
+		"openai/gpt-6-astra":             "openai/gpt-6.2-astra",
+		"openrouter/gemini-flash-latest": "openrouter/gemini-4-hydrogen",
+	} {
+		m, ok := tbl.Models[old]
+		if !ok || !m.Deprecated || m.ReplacedBy != replacement {
+			t.Errorf("%s = %+v (present %v), want deprecated, replaced by %s", old, m, ok, replacement)
+		}
+		if r, ok := tbl.Models[replacement]; !ok || r.Deprecated {
+			t.Errorf("%s replaces %s but is %+v (present %v), want an active model", replacement, old, r, ok)
+		}
+		if offered[old] {
+			t.Errorf("%s is deprecated but offered", old)
+		}
+	}
+	for _, alias := range []string{"openrouter/gemini-4-hydrogen", "openrouter/qwen4-max"} {
+		if !offered[alias] {
+			t.Errorf("%s is not offered", alias)
+		}
+	}
+	type rates struct{ input, output, cacheRead, cacheWrite float64 }
+	baseOf := func(c *Cost) rates {
+		return rates{deref(c.Input), deref(c.Output), deref(c.CacheRead), deref(c.CacheWrite)}
+	}
+	allEfforts := []string{"low", "medium", "high", "xhigh", "max"}
+	for alias, want := range map[string]struct {
+		wire, name      string
+		window, ceiling int
+		defaultContext  int
+		efforts         []string
+		effort          string
+		base, long      rates
+	}{
+		"openai/gpt-6.2-sol":           {"gpt-6.2-sol", "GPT-6.2 Sol (OpenAI)", 1048576, 128000, 272000, allEfforts, "medium", rates{2, 10, 0.1, 2.5}, rates{4, 15, 0.2, 5}},
+		"openai/gpt-6.2-astra":         {"gpt-6.2-astra", "GPT-6.2 Astra (OpenAI)", 1048576, 128000, 272000, allEfforts, "low", rates{8, 40, 0.4, 10}, rates{16, 60, 0.8, 20}},
+		"openrouter/gemini-4-hydrogen": {"google/gemini-4-hydrogen", "Gemini 4 Hydrogen (OpenRouter)", 1048576, 65536, 0, []string{"low", "medium", "high", "xhigh"}, "medium", rates{1.5, 7.5, 0.075, 0}, rates{}},
+		"openrouter/qwen4-max":         {"qwen/qwen4-max", "Qwen4 Max (OpenRouter)", 1000000, 131072, 0, []string{"low", "high", "xhigh"}, "high", rates{1.425, 4.275, 0.07125, 0}, rates{}},
+	} {
+		m, ok := tbl.Models[alias]
+		if !ok || m.WireModel != want.wire || m.Name != want.name || m.ContextWindow != want.window || m.MaxOutputTokens != want.ceiling ||
+			m.DefaultContext != want.defaultContext || !slices.Equal(m.Efforts, want.efforts) || m.DefaultEffort != want.effort || !m.Vision || m.Deprecated {
+			t.Errorf("%s = %+v (present %v)", alias, m, ok)
+			continue
+		}
+		if m.Cost == nil || baseOf(m.Cost) != want.base {
+			t.Errorf("%s cost = %+v, want %+v", alias, m.Cost, want.base)
+			continue
+		}
+		if want.long == (rates{}) {
+			if m.Cost.LongContext != nil || m.Cost.LongContextAbove != nil {
+				t.Errorf("%s has a long-context tier %+v, want none", alias, m.Cost.LongContext)
+			}
+			continue
+		}
+		l := m.Cost.LongContext
+		if m.Cost.LongContextAbove == nil || *m.Cost.LongContextAbove != 272000 || l == nil ||
+			(rates{deref(l.Input), deref(l.Output), deref(l.CacheRead), deref(l.CacheWrite)}) != want.long {
+			t.Errorf("%s tier = %+v above %v, want %+v above 272000", alias, l, m.Cost.LongContextAbove, want.long)
 		}
 	}
 }

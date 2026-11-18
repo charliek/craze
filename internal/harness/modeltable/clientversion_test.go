@@ -51,8 +51,8 @@ func TestMinimumMet(t *testing.T) {
 // accepts.
 func TestChatGPTModelsClientVersionIsTheShippedPin(t *testing.T) {
 	v := ChatGPTModelsClientVersion()
-	if v != "0.160.0" {
-		t.Fatalf("ChatGPTModelsClientVersion() = %q, want the shipped 0.160.0", v)
+	if v != "0.166.0" {
+		t.Fatalf("ChatGPTModelsClientVersion() = %q, want the shipped 0.166.0", v)
 	}
 	if !validPinVersion(v) {
 		t.Fatalf("the shipped pin %q fails the catalog's own rule", v)
@@ -63,8 +63,8 @@ func TestChatGPTModelsClientVersionIsTheShippedPin(t *testing.T) {
 // test account: one at the pin, one below, one above.
 func pinnedModels() string {
 	return fmt.Sprintf(`{"version":1,"subject":%q,"client_id":%q,"client_version":"9.9.9","fetched_at":"2026-10-01T00:00:00Z","models":[
-{"slug":"gpt-new","display_name":"New","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":0,"minimal_client_version":"0.161.0"},
-{"slug":"gpt-at","display_name":"At","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":1,"minimal_client_version":"0.160"},
+{"slug":"gpt-new","display_name":"New","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":0,"minimal_client_version":"0.167.0"},
+{"slug":"gpt-at","display_name":"At","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":1,"minimal_client_version":"0.166"},
 {"slug":"gpt-old","display_name":"Old","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":2,"minimal_client_version":"0.144.0"},
 {"slug":"gpt-junk","display_name":"Junk","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":3,"minimal_client_version":"not a version"},
 {"slug":"gpt-none","display_name":"None","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":4}
@@ -87,7 +87,7 @@ func TestDiscoveredModelsAreDowngradeSafe(t *testing.T) {
 	}
 	want := []string{"chatgpt/gpt-at", "chatgpt/gpt-junk", "chatgpt/gpt-none", "chatgpt/gpt-old"}
 	if got := planAliases(tbl); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("plan aliases = %v, want %v (gpt-new needs 0.161.0 > the pin)", got, want)
+		t.Fatalf("plan aliases = %v, want %v (gpt-new needs 0.167.0 > the pin)", got, want)
 	}
 	if len(tbl.Warnings) != 0 {
 		t.Fatalf("a model above the pin is dropped with warnings %q; it is silent", tbl.Warnings)
@@ -98,7 +98,7 @@ func TestDiscoveredModelsAreDowngradeSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat.ChatGPT.ModelsClientVersion = "0.161.0"
+	cat.ChatGPT.ModelsClientVersion = "0.167.0"
 	tbl, err = LoadWith(dir, cat)
 	if err != nil {
 		t.Fatal(err)

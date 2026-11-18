@@ -652,11 +652,11 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 		{name: "broken ChatGPT and a Fireworks key", s: signedInNone, keys: []string{fw},
 			held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT and an OpenRouter key", s: signedInNone, keys: []string{or},
-			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
+			held: held{"openrouter/gemini-4-hydrogen", ChatGPTProvider, ""}},
 		{name: "another account's list and a Fireworks key", s: otherAccount, keys: []string{fw},
 			held: held{"fireworks/deepseek-v4p1-flash-1017", ChatGPTProvider, ""}},
 		{name: "plan usage off and an OpenRouter key", s: planOff, keys: []string{or},
-			held: held{"openrouter/gemini-flash-latest", ChatGPTProvider, ""}},
+			held: held{"openrouter/gemini-4-hydrogen", ChatGPTProvider, ""}},
 		{name: "broken ChatGPT and a Z.AI key, which comes before it", s: signedInNone, keys: []string{zai}, start: "glm-5.3"},
 		{name: "broken ChatGPT and the user's unpriced local model", s: signedInNone, providers: guardLocal, models: guardLocalModel,
 			start: "zz-local", fallback: true},
@@ -683,36 +683,36 @@ func TestPaidSourceGuardOverTheShippedCatalog(t *testing.T) {
 		{name: "broken ChatGPT and a remembered Fireworks model", s: signedInNone, keys: []string{fw},
 			remember: "fireworks/kimi-k3p1-pro", start: "fireworks/kimi-k3p1-pro"},
 		{name: "broken ChatGPT and a pin on OpenRouter", s: signedInNone, keys: []string{or},
-			models: `default_model = "openrouter/gemini-flash-latest"` + "\n", start: "openrouter/gemini-flash-latest"},
+			models: `default_model = "openrouter/gemini-4-hydrogen"` + "\n", start: "openrouter/gemini-4-hydrogen"},
 		{name: "a working ChatGPT sign-in", s: signedInList, keys: []string{fw, or, an},
 			start: "chatgpt/gpt-5.6-sol", holdsNothing: true},
 		{name: "a registration a sign-out left", s: signedOutOff, keys: []string{fw, or},
 			start: "fireworks/deepseek-v4p1-flash-1017", holdsNothing: true},
 		// G1: OPENAI_API_KEY.
 		{name: "OPENAI_API_KEY alone", s: signedOut, openai: oaKey,
-			held: held{"openai/gpt-6.1-sol", "openai", "OPENAI_API_KEY"}},
+			held: held{"openai/gpt-6.2-sol", "openai", "OPENAI_API_KEY"}},
 		{name: "the user's local model and OPENAI_API_KEY", s: signedOut, openai: oaKey, providers: guardLocal, models: guardLocalModel,
 			start: "zz-local", fallback: true},
 		{name: "OPENAI_API_KEY and the same key stored", s: signedOut, openai: oaKey, providers: storedOpenAI,
-			start: "openai/gpt-6.1-sol", holdsNothing: true},
+			start: "openai/gpt-6.2-sol", holdsNothing: true},
 		{name: "an unusable OPENAI_API_KEY and a key stored", s: signedOut, openai: "short", providers: storedOpenAI,
-			start: "openai/gpt-6.1-sol", holdsNothing: true},
-		{name: "a key stored for openai alone", s: signedOut, providers: storedOpenAI, start: "openai/gpt-6.1-sol", holdsNothing: true},
+			start: "openai/gpt-6.2-sol", holdsNothing: true},
+		{name: "a key stored for openai alone", s: signedOut, providers: storedOpenAI, start: "openai/gpt-6.2-sol", holdsNothing: true},
 		{name: "OPENAI_API_KEY and a remembered openai/gpt-6-luna", s: signedOut, openai: oaKey,
 			remember: "openai/gpt-6-luna", start: "openai/gpt-6-luna"},
 		{name: "OPENAI_API_KEY and a pin on openai/gpt-6.1-terra", s: signedOut, openai: oaKey,
 			models: `default_model = "openai/gpt-6.1-terra"` + "\n", start: "openai/gpt-6.1-terra"},
 		{name: "OPENAI_API_KEY and a Fireworks key", s: signedOut, openai: oaKey, keys: []string{fw}, start: "fireworks/deepseek-v4p1-flash-1017"},
 		{name: "FIREWORKS_API_KEY alone", s: signedOut, keys: []string{fw}, start: "fireworks/deepseek-v4p1-flash-1017", holdsNothing: true},
-		{name: "OPENROUTER_API_KEY alone", s: signedOut, keys: []string{or}, start: "openrouter/gemini-flash-latest", holdsNothing: true},
+		{name: "OPENROUTER_API_KEY alone", s: signedOut, keys: []string{or}, start: "openrouter/gemini-4-hydrogen", holdsNothing: true},
 		{name: "ANTHROPIC_API_KEY alone", s: signedOut, keys: []string{an}, start: "anthropic/claude-opus-5-5", holdsNothing: true},
 		// Both reasons: the sign-in's wins — the per-maker rule's, and,
 		// with the key first in the user's source_order, where that rule
 		// holds nothing, the start order's.
 		{name: "plan usage off and OPENAI_API_KEY", s: planOff, openai: oaKey,
-			held: held{"openai/gpt-6.1-sol", ChatGPTProvider, ""}},
+			held: held{"openai/gpt-6.2-sol", ChatGPTProvider, ""}},
 		{name: "plan usage off, OPENAI_API_KEY and the key first in source_order", s: planOff, openai: oaKey,
-			models: `source_order = ["openai"]` + "\n", sourceOrder: true, held: held{"openai/gpt-6.1-sol", ChatGPTProvider, ""}},
+			models: `source_order = ["openai"]` + "\n", sourceOrder: true, held: held{"openai/gpt-6.2-sol", ChatGPTProvider, ""}},
 	} {
 		for _, hidingOff := range []bool{false, true} {
 			if hidingOff && tc.sourceOrder {
@@ -917,7 +917,7 @@ func TestSourceRuleOverTheShippedCatalog(t *testing.T) {
 		zai = "ZHIPU_API_KEY"
 		mt  = "META_API_KEY"
 	)
-	openaiKey := []string{"openai/gpt-6-astra", "openai/gpt-6-luna", "openai/gpt-6.1-sol", "openai/gpt-6.1-terra"}
+	openaiKey := []string{"openai/gpt-6-luna", "openai/gpt-6.1-terra", "openai/gpt-6.2-astra", "openai/gpt-6.2-sol"}
 	gptRouters := []string{"openrouter/gpt-astra-latest", "openrouter/gpt-luna-latest", "openrouter/gpt-sol-latest", "openrouter/gpt-terra-latest"}
 	museRouters := []string{"openrouter/muse-spark-1.3", "openrouter/muse-wonder"}
 	glmRouters := []string{"openrouter/glm-flash-latest", "openrouter/glm-latest"}
@@ -933,14 +933,14 @@ func TestSourceRuleOverTheShippedCatalog(t *testing.T) {
 			append(slices.Clone(planListed), museRouters...), append(slices.Clone(openaiKey), gptRouters...)},
 		// The sign-in with no list holds OpenRouter's start back too: it is
 		// priced per token and after chatgpt in the start order (guard 2).
-		{"ChatGPT with no list, an OpenAI key and an OpenRouter key", signedInNone, []string{oa, or}, "", "openrouter/gemini-flash-latest",
+		{"ChatGPT with no list, an OpenAI key and an OpenRouter key", signedInNone, []string{oa, or}, "", "openrouter/gemini-4-hydrogen",
 			append(slices.Clone(openaiKey), museRouters...), gptRouters},
-		{"plan usage off and an OpenAI key", planOff, []string{oa}, "", "openai/gpt-6.1-sol", openaiKey, nil},
-		{"an OpenRouter key alone", signedOut, []string{or}, "openrouter/gemini-flash-latest", "",
+		{"plan usage off and an OpenAI key", planOff, []string{oa}, "", "openai/gpt-6.2-sol", openaiKey, nil},
+		{"an OpenRouter key alone", signedOut, []string{or}, "openrouter/gemini-4-hydrogen", "",
 			append(slices.Clone(gptRouters), append(museRouters, glmRouters...)...), nil},
 		{"Z.AI and Fireworks", signedOut, []string{zai, fw}, "glm-5.3", "",
 			[]string{"glm-5.3", "glm-5.3-flash", "fireworks/deepseek-v4p1-flash-1017"}, []string{"fireworks/glm-5p3", "fireworks/glm-5p3-flash"}},
-		{"Meta and OpenRouter", signedOut, []string{mt, or}, "openrouter/gemini-flash-latest", "",
+		{"Meta and OpenRouter", signedOut, []string{mt, or}, "openrouter/gemini-4-hydrogen", "",
 			[]string{"muse-spark-1.3", "muse-wonder-1.0", "openrouter/gpt-sol-latest"}, museRouters},
 		{"Fireworks and OpenRouter", signedOut, []string{fw, or}, "fireworks/deepseek-v4p1-flash-1017", "",
 			[]string{"fireworks/glm-5p3", "fireworks/deepseek-v4p1-flash-1017", "openrouter/gpt-sol-latest", "openrouter/muse-wonder"},
@@ -1005,19 +1005,19 @@ func TestOpenAIsOwnEndpointSpelledOtherwiseKeepsItsMaker(t *testing.T) {
 				return tbl
 			}
 			listed := load(signedInList)
-			if m := listed.Models["openai/gpt-6.1-sol"]; m.Maker != "openai" {
-				t.Fatalf("openai/gpt-6.1-sol's maker = %q, want openai", m.Maker)
+			if m := listed.Models["openai/gpt-6.2-sol"]; m.Maker != "openai" {
+				t.Fatalf("openai/gpt-6.2-sol's maker = %q, want openai", m.Maker)
 			}
 			if p := listed.Providers["openai"]; !slices.Equal(p.EnvKeys, []string{"OPENAI_API_KEY"}) {
 				t.Fatalf("openai = %+v; want the shipped variable still its own", p)
 			}
-			if o := listed.Offers(fakeEnv(nil)); !o.Hidden["openai/gpt-6.1-sol"] || o.Offered["openai/gpt-6.1-sol"] {
-				t.Fatalf("openai/gpt-6.1-sol: hidden %v, offered %v; want hidden behind the plan's list", o.Hidden["openai/gpt-6.1-sol"], o.Offered["openai/gpt-6.1-sol"])
+			if o := listed.Offers(fakeEnv(nil)); !o.Hidden["openai/gpt-6.2-sol"] || o.Offered["openai/gpt-6.2-sol"] {
+				t.Fatalf("openai/gpt-6.2-sol: hidden %v, offered %v; want hidden behind the plan's list", o.Hidden["openai/gpt-6.2-sol"], o.Offered["openai/gpt-6.2-sol"])
 			}
 			got, err := load(signedInNone).StartPick(nil, fakeEnv(nil))
 			var h *HeldError
-			if !errors.As(err, &h) || h.Alias != "openai/gpt-6.1-sol" || h.Source != ChatGPTProvider {
-				t.Fatalf("StartPick = %+v, %v; want openai/gpt-6.1-sol held by the sign-in", got, err)
+			if !errors.As(err, &h) || h.Alias != "openai/gpt-6.2-sol" || h.Source != ChatGPTProvider {
+				t.Fatalf("StartPick = %+v, %v; want openai/gpt-6.2-sol held by the sign-in", got, err)
 			}
 		})
 	}

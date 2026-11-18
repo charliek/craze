@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"time"
 
 	"github.com/charliek/craze/internal/anthropicmodels"
@@ -275,6 +276,43 @@ func planSource(src *chatgptauth.TokenSource) listSource {
 		return nil
 	}
 	return planList{src, planAccountID(src.Dir())}
+}
+
+// RefreshPlanListForMiss is the one fetch a start makes before it answers an
+// unknown model: when raw, a --model the native directory's table did not
+// resolve, names a ChatGPT plan model (chatgpt/…), and the account signed in
+// there with plan usage has a list that is stale for this craze — fetched
+// with another client_version (an upgrade that raised the pin, which is how
+// a new plan model first reaches a machine), over a day old, or missing — the
+// list is fetched now, under its own lock and timeout, rather than only in
+// the background of a session the miss would refuse to start. It answers
+// whether the list is current now — fetched here, or by another session's
+// refresh this one waited for under the list's lock — so the caller reads
+// its table again and matches once more: true even when nothing was written
+// here (the caller's table may predate another's write). Any failure, and a
+// raw that names no plan model, is false: the miss stands as it was.
+// craze new --wait's pre-check calls it; a session's open calls
+// refreshPlanListForMiss with its own sign-in.
+func RefreshPlanListForMiss(ctx context.Context, nativeDir, raw string) bool {
+	if nativeDir == "" {
+		return false
+	}
+	return refreshPlanListForMiss(ctx, chatgptauth.Source(nativeDir), raw)
+}
+
+// refreshPlanListForMiss is RefreshPlanListForMiss for src's directory: nil
+// (a seam's own sign-in), a raw that names no plan model, or no account
+// signed in with plan usage fetch nothing.
+func refreshPlanListForMiss(ctx context.Context, src *chatgptauth.TokenSource, raw string) bool {
+	if src == nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), modeltable.ChatGPTAliasPrefix) {
+		return false
+	}
+	list := planSource(src)
+	if list == nil {
+		return false
+	}
+	_, err := list.fetch(ctx)
+	return err == nil
 }
 
 // planAccountID is the id of the account signed in to dir: the first 12 hex

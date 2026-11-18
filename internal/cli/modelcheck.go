@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -172,16 +173,31 @@ func detailModel(s string) string {
 // --model, or one that resolves to nothing), which the notices are about until
 // the session names its model — on an effort's or --fast's refusal too — and
 // the refusal as command what's exit. A table that does not load checks
-// nothing.
-func nativeStartCheck(what, model, effort string, fast bool) (string, error) {
+// nothing, and neither does a miss whose plan-list fetch ctx (the command's:
+// --timeout's end, its first signal) cut short: the spawn that follows meets
+// the same end and reports it as it reports any.
+func nativeStartCheck(ctx context.Context, what, model, effort string, fast bool) (string, error) {
 	t, err := loadNativeTable()
 	if err != nil {
 		return "", nil
 	}
 	alias := ""
 	if model != "" {
-		// Matched exactly as the host's start matches it.
-		if alias, err = agent.MatchNativeModel(t, model); err != nil {
+		// Matched exactly as the host's start matches it, a plan model the
+		// cached list lacks after the list is fetched again when it is stale
+		// for this craze (agent.RefreshPlanListForMiss), as the host's start
+		// would.
+		alias, err = agent.MatchNativeModel(t, model)
+		if err != nil && agent.RefreshPlanListForMiss(ctx, paths.NativeDir(), model) {
+			if again, lerr := loadNativeTable(); lerr == nil {
+				t = again
+				alias, err = agent.MatchNativeModel(t, model)
+			}
+		}
+		if err != nil && ctx.Err() != nil {
+			return "", nil
+		}
+		if err != nil {
 			return "", nativeModelMiss(t, model, err).exit(what)
 		}
 		if effort != "" && !offersEffort(t.Models[alias].Efforts, effort) {

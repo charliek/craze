@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -874,5 +875,25 @@ func TestTheModelsDocumentSaysItHasWebSearch(t *testing.T) {
 		if stdout, _, _ := executeErr(args); strings.Contains(stdout, "capabilities") || strings.Contains(stdout, "webSearch") {
 			t.Errorf("%q names the capability: %s", args, stdout)
 		}
+	}
+}
+
+// TestNativeStartCheckCutShortRefusesNothing: craze new --wait's pre-check on
+// a plan model the table misses refuses it as unknown while the command's
+// context lives, and refuses nothing once --timeout's end or a signal has
+// ended it — the spawn that follows meets the same end and reports it as it
+// reports any, rather than a miss the plan list's fetch was cut short of
+// settling.
+func TestNativeStartCheckCutShortRefusesNothing(t *testing.T) {
+	t.Setenv("CRAZE_HOME", t.TempDir())
+	_, err := nativeStartCheck(context.Background(), newWhat, "chatgpt/gpt-9-nowhere", "", false)
+	var miss *modelRefusal
+	if !errors.As(err, &miss) || miss.reason != reasonModelUnknown {
+		t.Fatalf("a live context: %v; want the model_unknown refusal", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if alias, err := nativeStartCheck(ctx, newWhat, "chatgpt/gpt-9-nowhere", "", false); alias != "" || err != nil {
+		t.Fatalf("an ended context: %q, %v; want no refusal", alias, err)
 	}
 }

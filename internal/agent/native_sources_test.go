@@ -87,12 +87,12 @@ const (
 // ChatGPT plan with no model list and an OpenAI key, nothing remembered and
 // no pin, a new session does not start on an openai/* model; the refusal is
 // kind config, names the sign-in and --model, and is not "no model provider
-// has a key". --model openai/gpt-6.1-sol starts it.
+// has a key". --model openai/gpt-6.1-sol (deprecated, still runs by name) starts it.
 func TestNativeStartHeldBySourceGuard(t *testing.T) {
 	f := shippedFixture(t, map[string]string{"OPENAI_API_KEY": dummyOpenAI}, signedInNoList(t))
 	s := f.session(Options{})
 	err := s.Start(context.Background())
-	want := "native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.1-sol"
+	want := "native: signed in to ChatGPT, but its models are not available, and craze does not start a new session on openai/gpt-6.2-sol (OpenAI) on its own; run craze auth login chatgpt, or start with --model openai/gpt-6.2-sol"
 	if err == nil || err.Error() != want {
 		t.Fatalf("Start = %v;\nwant %s", err, want)
 	}
@@ -116,7 +116,7 @@ func TestNativeStartHeldBySourceGuard(t *testing.T) {
 func TestNativeStartHeldByAnEnvOnlyKey(t *testing.T) {
 	f := shippedFixture(t, map[string]string{"OPENAI_API_KEY": dummyOpenAI}, nil)
 	err := f.session(Options{}).Start(context.Background())
-	want := "native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.1-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.1-sol"
+	want := "native: OPENAI_API_KEY is set in the environment, but no key is stored for OpenAI, and craze does not start a new session on openai/gpt-6.2-sol (OpenAI) on its own; run craze auth login openai, or start with --model openai/gpt-6.2-sol"
 	if err == nil || err.Error() != want {
 		t.Fatalf("Start = %v;\nwant %s", err, want)
 	}
@@ -132,7 +132,7 @@ func TestNativeStartHeldByAnEnvOnlyKey(t *testing.T) {
 	if err := modeltable.SetKey(f.dir, "openai", dummyOpenAI); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.started(Options{}).Snapshot().CurrentModel; got != "openai/gpt-6.1-sol" {
+	if got := f.started(Options{}).Snapshot().CurrentModel; got != "openai/gpt-6.2-sol" {
 		t.Fatalf("with the key stored, a new session started on %q", got)
 	}
 }
@@ -155,7 +155,7 @@ func TestNativeListOneSourcePerMaker(t *testing.T) {
 			t.Fatalf("the list offers %s: %q", id, ids)
 		}
 	}
-	if !slices.Contains(ids, "openrouter/gemini-flash-latest") || !slices.Contains(ids, "openrouter/muse-wonder") {
+	if !slices.Contains(ids, "openrouter/gemini-4-hydrogen") || !slices.Contains(ids, "openrouter/muse-wonder") {
 		t.Fatalf("the list %q lacks OpenRouter's models of other makers", ids)
 	}
 	explicit := f.started(Options{Model: "openai/gpt-6.1-sol"})
@@ -171,7 +171,7 @@ func TestNativeListOneSourcePerMaker(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := offeredIDs(f.started(Options{}).Snapshot().Models)
-	for _, id := range []string{"chatgpt/gpt-5.6-sol", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "openrouter/gpt-sol-latest"} {
+	for _, id := range []string{"chatgpt/gpt-5.6-sol", "openai/gpt-6.2-sol", "openai/gpt-6-luna", "openrouter/gpt-sol-latest"} {
 		if !slices.Contains(all, id) {
 			t.Fatalf("with source_order = [] the list %q lacks %s", all, id)
 		}
@@ -279,9 +279,9 @@ func TestNativeQuotaHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := QuotaHint(planTable, "chatgpt/gpt-5.6-sol", env)
-	if !strings.HasPrefix(msg, "OpenAI models are also funded by your OpenAI key (billed per token): openai/gpt-6-astra, ") ||
+	if !strings.HasPrefix(msg, "OpenAI models are also funded by your OpenAI key (billed per token): openai/gpt-6-luna, ") ||
 		!strings.Contains(msg, "; and by your OpenRouter key (billed per token): ") ||
-		!strings.HasSuffix(msg, "craze -c --model openai/gpt-6.1-sol") {
+		!strings.HasSuffix(msg, "craze -c --model openai/gpt-6.2-sol") {
 		t.Fatalf("the plan model's hint = %q", msg)
 	}
 }
