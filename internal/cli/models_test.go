@@ -7,6 +7,8 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +16,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -895,5 +899,77 @@ func TestNativeStartCheckCutShortRefusesNothing(t *testing.T) {
 	cancel()
 	if alias, err := nativeStartCheck(ctx, newWhat, "chatgpt/gpt-9-nowhere", "", false); alias != "" || err != nil {
 		t.Fatalf("an ended context: %q, %v; want no refusal", alias, err)
+	}
+}
+
+// TestNativeStartCheckCancelsAPlanListFetch: with an account signed in with
+// plan usage and a list fetched with another client_version, the pre-check's
+// miss on a plan model fetches the list under the command's context, and the
+// context's end (--timeout's, a signal's) ends that fetch at once rather than
+// at the fetch's own timeout: the check returns promptly and refuses nothing.
+// The fake's model list request blocks until its request is cancelled.
+func TestNativeStartCheckCancelsAPlanListFetch(t *testing.T) {
+	arrived := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			arrived <- struct{}{}
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(chatgptauth.APIEnv, srv.URL+"/v1")
+	t.Setenv(chatgptauth.IssuerEnv, srv.URL)
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	dir := filepath.Join(home, "native")
+	if err := os.MkdirAll(chatgptauth.AuthDir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, v any) {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const subject, client = "user-subject-0001", "app_client-0001"
+	write(chatgptauth.ClientFile(dir), chatgptauth.Client{ClientID: client, Subject: subject, Email: "someone@example.com", PlanUsage: true, NoticeShown: true})
+	write(chatgptauth.TokenFile(dir), map[string]any{
+		"version": 1, "client_id": client, "issuer": "https://auth.openai.com", "subject": subject,
+		"email": "someone@example.com", "scopes": []string{"openid", "offline_access"},
+		"access_token": "test-plan-access-0011", "access_expires_at": time.Now().Add(time.Hour).UTC(),
+		"refresh_token": "test-plan-refresh-0012", "id_token": "test-plan-idtoken-0013", "incarnation": "inc-1", "generation": 1,
+	})
+	write(chatgptauth.ModelsFile(dir), chatgptauth.Models{Version: 1, Subject: subject, ClientID: client, ClientVersion: "0.1.0",
+		FetchedAt: time.Now().UTC(), Models: []chatgptauth.Model{{Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", ContextWindow: 272000,
+			Efforts: []string{"low"}, DefaultEffort: "low", InputModalities: []string{"text"}}}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type answer struct {
+		alias string
+		err   error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		alias, err := nativeStartCheck(ctx, newWhat, "chatgpt/gpt-6.2-sol", "", false)
+		done <- answer{alias, err}
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pre-check made no model list request")
+	}
+	cancel()
+	select {
+	case a := <-done:
+		if a.alias != "" || a.err != nil {
+			t.Fatalf("a check cut short answered %q, %v; want no refusal", a.alias, a.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pre-check did not return when its context ended: the fetch ignores it")
 	}
 }

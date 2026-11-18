@@ -50,7 +50,11 @@ end `it exits when idle`.
   where the account lists it, then `gpt-6.1-sol`, then `gpt-5.6-sol`. The
   cached list is fetched again the first time it is needed: a session's
   start, a sign-in, or a `--model chatgpt/…` the old list lacks, which no
-  longer fails as an unknown model when that list is stale.
+  longer fails as an unknown model when that list is stale. A session's own
+  refresh runs after it has chosen its model, so the first session after the
+  upgrade that names no model may still start on `chatgpt/gpt-6.1-sol` from
+  the old list; later ones start on 6.2 Sol. To get it at once, pass
+  `--model chatgpt/gpt-6.2-sol`, or pick it with `/model`.
 - **The plugin's `craze:sol` and `craze:astra` presets** run
   `chatgpt/gpt-6.2-sol` and `chatgpt/gpt-6.2-astra` (they ran
   `chatgpt/gpt-6.1-sol` and `chatgpt/gpt-6-astra`), and need this release: an
