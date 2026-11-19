@@ -16,3 +16,4 @@ openrouter/minimax-m3 0.2.0
 openai/gpt-6-astra 0.3.0
 openai/gpt-6.1-sol 0.3.0
 openrouter/gemini-flash-latest 0.3.0
+openrouter/gemini-pro-latest 0.4.0

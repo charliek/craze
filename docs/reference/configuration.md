@@ -982,17 +982,25 @@ as `openrouter/mimo-v2.6-pro`, uses its numbered id. To stay on one numbered
 model, add it as a model of your own in [`models.toml`](#your-two-files),
 with its wire id (say `wire_model = "openai/gpt-6.1-sol"`).
 
-`openrouter/gemini-pro-latest` is OpenRouter's Gemini Pro router, which
-answers as Google's flagship reasoning model (Gemini 4 Carbon since
-2026-11-10), for complex coding and long agent work. It takes images, offers
-effort `low`, `medium` (its default) and `high`, and costs $2 per million input
-tokens and $10 per million output, against Gemini 4 Hydrogen's $1.50 and
-$7.50. A request the Vertex endpoints cannot take may be answered by Gemini 4
-Argon, the router's fallback, at the same price. It is not OpenRouter's start
-model: pick it with `/model`, `--model openrouter/gemini-pro-latest`, a
-`default_model` pin or a sub-agent's model. It replaces
-`openrouter/gemini-4-argon`, which is [deprecated](#deprecated-models): out of
-the pickers, still runs by name. The other deprecations of this release are
+OpenRouter's Gemini models are Gemini 4 Neon and Gemini 4 Hydrogen.
+`openrouter/gemini-4-neon` is Gemini 4 Neon, Google's fast, mid-priced Gemini 4
+model for coding and agent work. It takes images, offers effort `low` to `xhigh`
+(default `medium`), has an [output ceiling](#native-output-ceiling) of 65,536
+and costs $3 per million input tokens and $15 output (cached input $0.15),
+twice Hydrogen's price. It is not OpenRouter's start model: pick it with
+`/model`, `--model openrouter/gemini-4-neon`, a `default_model` pin or a
+sub-agent's model. It is on its numbered id, as OpenRouter's Gemini Pro router
+still answers as Gemini 4 Carbon.
+
+`openrouter/gemini-pro-latest`, that router, is
+[deprecated](#deprecated-models) in Neon's favour since Neon's release: out of
+the pickers, still runs by name, at $2 per million input tokens and $10
+output, with effort `low` to `high`. Neon scores above Carbon on every
+Artificial Analysis index OpenRouter lists, at half as much again. A request
+the router's Vertex endpoints cannot take may be answered by Gemini 4 Argon,
+its fallback, at the same price. `openrouter/gemini-4-argon`, deprecated
+earlier for the router, now names Neon as its replacement too. The other
+deprecations of the release that deprecated Argon are
 `openrouter/minimax-m3` (use `openrouter/minimax-m3.1-flash`, MiniMax's M3.1
 Flash, which lists efforts `low` to `max`, default `high`, at half M3's price),
 `fireworks/kimi-k3` (use `fireworks/kimi-k3p1-pro`) and
