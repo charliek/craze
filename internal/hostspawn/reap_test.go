@@ -1468,10 +1468,13 @@ func TestATestsCleanupKeepsToItsOwn(t *testing.T) {
 }
 
 // TestALogComesAfterTheSignal: nothing is written between a group's read and its
-// signal, and no group's signal waits on another's log.
+// signal, and no group's signal waits on another's log. The commands ignore SIGTERM:
+// one that dies of it can be gone before its SIGCONT, which is then rightly not sent
+// (seen under -race on a loaded runner), and the first round would send fewer than
+// its four.
 func TestALogComesAfterTheSignal(t *testing.T) {
 	env := holderEnv(t)
-	a, b := shellCommand(t, `exec sleep 120`), shellCommand(t, `exec sleep 120`)
+	a, b := stubbornCommand(t), stubbornCommand(t)
 	owner := deadHost(t)
 	id := rundir.NewHostID()
 	recordIn(t, env, id, a.entry(owner), b.entry(owner))
