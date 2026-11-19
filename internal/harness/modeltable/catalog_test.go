@@ -1209,7 +1209,8 @@ func TestShippedCatalogGeminiNeon(t *testing.T) {
 	// Deprecated, not retired: the entry stays whole, at its numbers, runs
 	// with its key, and is never offered.
 	p, ok := tbl.Models[pro]
-	if !ok || !p.Deprecated || p.ReplacedBy != neon || p.WireModel != "~google/gemini-pro-latest" || p.MaxOutputTokens != 65536 ||
+	if !ok || !p.Deprecated || p.ReplacedBy != neon || p.WireModel != "~google/gemini-pro-latest" || p.Name != "Gemini Pro Latest (OpenRouter)" ||
+		p.ContextWindow != 1048576 || p.MaxOutputTokens != 65536 ||
 		!slices.Equal(p.Efforts, []string{"low", "medium", "high"}) || p.DefaultEffort != "medium" || !p.Vision {
 		t.Errorf("%s = %+v (present %v), want deprecated, replaced by %s, its entry whole", pro, p, ok, neon)
 	}

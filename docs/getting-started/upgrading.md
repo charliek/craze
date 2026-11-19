@@ -700,7 +700,7 @@ later.
 |---|---|
 | `fireworks/kimi-k3` | `fireworks/kimi-k3p1-pro` |
 | `fireworks/deepseek-v4p1-flash` | `fireworks/deepseek-v4p1-flash-1017` |
-| `openrouter/gemini-4-argon` | `openrouter/gemini-pro-latest` |
+| `openrouter/gemini-4-argon` | `openrouter/gemini-pro-latest`, itself deprecated [since v0.4.0](#since-v040): use `openrouter/gemini-4-neon` |
 | `openrouter/minimax-m3` | `openrouter/minimax-m3.1-flash` |
 
 A replacement has its own price (Kimi K3.1 Pro is two thirds of Kimi K3's, M3.1
