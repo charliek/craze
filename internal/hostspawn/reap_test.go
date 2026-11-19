@@ -1468,10 +1468,12 @@ func TestATestsCleanupKeepsToItsOwn(t *testing.T) {
 }
 
 // TestALogComesAfterTheSignal: nothing is written between a group's read and its
-// signal, and no group's signal waits on another's log. The commands ignore SIGTERM:
-// one that dies of it can be gone before its SIGCONT, which is then rightly not sent
-// (seen under -race on a loaded runner), and the first round would send fewer than
-// its four.
+// signal, and no group's signal waits on another's log, in either round. The
+// commands ignore SIGTERM: one that dies of it can be gone before its SIGCONT, which
+// is then rightly not sent (seen under -race on a loaded runner), and the first round
+// would send fewer than its four. The rounds run as ReapHost runs them, but with a
+// test's bound for the first in place of ReapHost's second, so a stalled runner
+// cannot cut it short either.
 func TestALogComesAfterTheSignal(t *testing.T) {
 	env := holderEnv(t)
 	a, b := stubbornCommand(t), stubbornCommand(t)
@@ -1482,11 +1484,30 @@ func TestALogComesAfterTheSignal(t *testing.T) {
 	sent := 0
 	signalsAre(t, func(int, syscall.Signal) { sent++ })
 	waitForGroupsIs(t, func(context.Context, []entry, time.Time) {})
-	ReapHost(context.Background(), env, id, func(format string, _ ...any) {
+	dir, err := rundir.ExistingHostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, pidNS, err := rundir.ProcessScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := examine(env, dir, id, boot, pidNS, hostNote(dir, id, func(format string, _ ...any) {
 		seq = append(seq, fmt.Sprintf("%d signals, then %s", sent, format))
-	})
-	if len(seq) == 0 || !strings.HasPrefix(seq[0], "4 signals") {
-		t.Fatalf("a log came before the round's signals had gone: %q", seq)
+	}))
+	if rec == nil {
+		t.Fatal("the record was not taken")
+	}
+	r := &reaper{ctx: context.Background(), firstBy: time.Now().Add(testStep), grace: ReapGrace}
+	r.second([]*groupRecord{rec}, r.first([]*groupRecord{rec}))
+	want := []string{
+		"4 signals, then %s process group %d sent SIGTERM",
+		"4 signals, then %s process group %d sent SIGTERM",
+		"6 signals, then %s process group %d sent SIGKILL",
+		"6 signals, then %s process group %d sent SIGKILL",
+	}
+	if !slices.Equal(seq, want) {
+		t.Fatalf("a log came before its round's signals had gone: %q, want %q", seq, want)
 	}
 }
 
