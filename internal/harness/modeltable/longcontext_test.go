@@ -552,15 +552,16 @@ func TestALowerWindowTurnsAnInheritedTierOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Save writes the whole table, the catalog's deprecated models (plan 050
-	// C4's four and 2026-11-17's three) among them, and a file's entry for a deprecated alias is a
+	// C4's four, 2026-11-17's three and 2026-11-18's one) among them, and a file's entry for a deprecated alias is a
 	// reference to it: one warning each, in alias order.
 	wantWarnings(t, again,
 		[]string{`models."fireworks/deepseek-v4p1-flash"`, "deprecated", "fireworks/deepseek-v4p1-flash-1017"},
 		[]string{`models."fireworks/kimi-k3"`, "deprecated", "fireworks/kimi-k3p1-pro"},
 		[]string{`models."openai/gpt-6-astra"`, "deprecated", "openai/gpt-6.2-astra"},
 		[]string{`models."openai/gpt-6.1-sol"`, "deprecated", "openai/gpt-6.2-sol"},
-		[]string{`models."openrouter/gemini-4-argon"`, "deprecated", "openrouter/gemini-pro-latest"},
+		[]string{`models."openrouter/gemini-4-argon"`, "deprecated", "openrouter/gemini-4-neon"},
 		[]string{`models."openrouter/gemini-flash-latest"`, "deprecated", "openrouter/gemini-4-hydrogen"},
+		[]string{`models."openrouter/gemini-pro-latest"`, "deprecated", "openrouter/gemini-4-neon"},
 		[]string{`models."openrouter/minimax-m3"`, "deprecated", "openrouter/minimax-m3.1-flash"})
 	check(again)
 

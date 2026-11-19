@@ -152,6 +152,9 @@ func TestShippedCatalog(t *testing.T) {
 		// an OpenAI key.
 		"openrouter/gemini-4-hydrogen": true, "openrouter/qwen4-max": true,
 		"openai/gpt-6.2-astra": true, "openai/gpt-6.2-sol": true,
+		// 2026-11-18: Gemini 4 Neon described an image read from disk
+		// through craze.
+		"openrouter/gemini-4-neon": true,
 		// Plan 050 C5's Muse models through OpenRouter: vision as OpenRouter's
 		// model list says and Meta's direct entries are (both take image
 		// input); live through craze on 2026-11-11 only a tool loop was run on
@@ -378,12 +381,13 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 		t.Fatalf("starts = %q, want %q", c.Starts, wantStarts)
 	}
 	// OpenRouter's models and their wire ids: a family's router where
-	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon and
-	// Hydrogen, MiMo, MiniMax, Meta's Muse models, Qwen4 Max).
+	// OpenRouter has one, the numbered id where it does not (Gemini 4 Argon,
+	// Hydrogen and Neon, MiMo, MiniMax, Meta's Muse models, Qwen4 Max).
 	wantOpenRouter := map[string]string{
 		"openrouter/deepseek-flash-latest": "~deepseek/deepseek-flash-latest",
 		"openrouter/gemini-4-argon":        "google/gemini-4-argon",
 		"openrouter/gemini-4-hydrogen":     "google/gemini-4-hydrogen",
+		"openrouter/gemini-4-neon":         "google/gemini-4-neon",
 		"openrouter/gemini-flash-latest":   "~google/gemini-flash-latest",
 		"openrouter/gemini-pro-latest":     "~google/gemini-pro-latest",
 		"openrouter/glm-flash-latest":      "~z-ai/glm-flash-latest",
@@ -912,9 +916,11 @@ func TestLoadReportsABrokenCatalog(t *testing.T) {
 
 // TestShippedCatalogRefresh pins plan 050 C4's catalog refresh as the owner
 // decided it (2026-11-11/12): four models deprecated (out of the pickers,
-// still resolvable with their key, naming an active replacement), Fireworks'
-// start (Kimi K3.1 Pro then; DeepSeek V4.1 Flash 1017 since 2026-11-14),
-// each new entry's numbers, the GPT routers'
+// still resolvable with their key, naming an active replacement; Gemini 4
+// Argon's is Gemini 4 Neon since Gemini Pro Latest's deprecation on
+// 2026-11-18), Fireworks' start (Kimi K3.1 Pro then; DeepSeek V4.1 Flash 1017
+// since 2026-11-14), each new entry's numbers (Gemini Pro Latest's in
+// TestShippedCatalogGeminiNeon since its deprecation), the GPT routers'
 // tier and context default, the open-weight routers at their maker's own
 // rate, and the backfilled replacements of the retired rows.
 func TestShippedCatalogRefresh(t *testing.T) {
@@ -933,7 +939,7 @@ func TestShippedCatalogRefresh(t *testing.T) {
 	for old, replacement := range map[string]string{
 		"fireworks/kimi-k3":             "fireworks/kimi-k3p1-pro",
 		"fireworks/deepseek-v4p1-flash": "fireworks/deepseek-v4p1-flash-1017",
-		"openrouter/gemini-4-argon":     "openrouter/gemini-pro-latest",
+		"openrouter/gemini-4-argon":     "openrouter/gemini-4-neon",
 		"openrouter/minimax-m3":         "openrouter/minimax-m3.1-flash",
 	} {
 		m, ok := tbl.Models[old]
@@ -1001,7 +1007,6 @@ func TestShippedCatalogRefresh(t *testing.T) {
 	}{
 		"fireworks/kimi-k3p1-pro":            {"accounts/fireworks/models/kimi-k3p1-pro", "Kimi K3.1 Pro (Fireworks)", 1048576, 0, allEfforts, "high", [3]float64{2, 10, 0.2}},
 		"fireworks/deepseek-v4p1-flash-1017": {"accounts/fireworks/models/deepseek-v4p1-flash-1017", "DeepSeek V4.1 Flash 1017 (Fireworks)", 1048576, 0, allEfforts, "high", [3]float64{0.3, 1.2, 0.006}},
-		"openrouter/gemini-pro-latest":       {"~google/gemini-pro-latest", "Gemini Pro Latest (OpenRouter)", 1048576, 65536, []string{"low", "medium", "high"}, "medium", [3]float64{2, 10, 0.1}},
 		"openrouter/gpt-terra-latest":        {"~openai/gpt-terra-latest", "GPT Terra Latest (OpenRouter)", 1050000, 0, allEfforts, "medium", [3]float64{1, 5, 0.05}},
 		"openrouter/minimax-m3.1-flash":      {"minimax/minimax-m3.1-flash", "MiniMax M3.1 Flash (OpenRouter)", 1048576, 0, allEfforts, "high", [3]float64{0.15, 0.6, 0.015}},
 		"muse-ember-1.0":                     {"muse-ember-1.0", "Muse Ember 1.0 (Meta)", 1048576, 131072, allSix, "high", [3]float64{0.1, 0.5, 0.004}},
@@ -1166,5 +1171,52 @@ func TestShippedCatalogGPT62(t *testing.T) {
 			(rates{deref(l.Input), deref(l.Output), deref(l.CacheRead), deref(l.CacheWrite)}) != want.long {
 			t.Errorf("%s tier = %+v above %v, want %+v above 272000", alias, l, m.Cost.LongContextAbove, want.long)
 		}
+	}
+}
+
+// TestShippedCatalogGeminiNeon pins the 2026-11-18 change as the owner decided
+// it: Gemini 4 Neon on OpenRouter, on its numbered id, and Gemini Pro Latest
+// (Gemini 4 Carbon) deprecated in its favour, the owner's Gemini lineup being
+// Neon and Hydrogen. Hydrogen stays OpenRouter's start.
+func TestShippedCatalogGeminiNeon(t *testing.T) {
+	tbl, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cat.Starts["openrouter"]; !slices.Equal(got, []string{"openrouter/gemini-4-hydrogen"}) {
+		t.Errorf("openrouter starts on %q, want openrouter/gemini-4-hydrogen", got)
+	}
+	const neon, pro = "openrouter/gemini-4-neon", "openrouter/gemini-pro-latest"
+	env := fakeEnv(map[string]string{"OPENROUTER_API_KEY": "or-key-not-a-secret-01"})
+	offered := tbl.Offered(env)
+	m, ok := tbl.Models[neon]
+	if !ok || m.WireModel != "google/gemini-4-neon" || m.Name != "Gemini 4 Neon (OpenRouter)" || m.ContextWindow != 1048576 ||
+		m.MaxOutputTokens != 65536 || m.DefaultContext != 0 || !slices.Equal(m.Efforts, []string{"low", "medium", "high", "xhigh"}) ||
+		m.DefaultEffort != "medium" || !m.Vision || m.Deprecated {
+		t.Errorf("%s = %+v (present %v)", neon, m, ok)
+	}
+	if m.Cost == nil || [3]float64{deref(m.Cost.Input), deref(m.Cost.Output), deref(m.Cost.CacheRead)} != [3]float64{3, 15, 0.15} ||
+		m.Cost.CacheWrite != nil || m.Cost.LongContext != nil || m.Cost.LongContextAbove != nil {
+		t.Errorf("%s cost = %+v, want 3 / 15 / 0.15 and no tier", neon, m.Cost)
+	}
+	if !offered[neon] {
+		t.Errorf("%s is not offered", neon)
+	}
+	// Deprecated, not retired: the entry stays whole, at its numbers, runs
+	// with its key, and is never offered.
+	p, ok := tbl.Models[pro]
+	if !ok || !p.Deprecated || p.ReplacedBy != neon || p.WireModel != "~google/gemini-pro-latest" || p.MaxOutputTokens != 65536 ||
+		!slices.Equal(p.Efforts, []string{"low", "medium", "high"}) || p.DefaultEffort != "medium" || !p.Vision {
+		t.Errorf("%s = %+v (present %v), want deprecated, replaced by %s, its entry whole", pro, p, ok, neon)
+	}
+	if r, err := tbl.Resolve(pro, env); err != nil || !r.Deprecated || r.ReplacedBy != neon {
+		t.Errorf("Resolve(%s) = %+v, %v; want it to run, deprecated, replaced by %s", pro, r, err, neon)
+	}
+	if offered[pro] {
+		t.Errorf("%s is deprecated but offered", pro)
 	}
 }

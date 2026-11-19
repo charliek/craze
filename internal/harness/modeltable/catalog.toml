@@ -1128,16 +1128,20 @@ cache_read = 0.075
 
 # Gemini Pro Latest is OpenRouter's router for Google's flagship reasoning
 # model: Gemini 4 Carbon since its release on 2026-11-10, replacing
-# openrouter/gemini-4-argon (deprecated, below). Its ceiling is 65536, what
-# Carbon's Vertex endpoints take. AI Studio's standard endpoint takes 32768
-# today, so a request goes to Vertex; one pinned to AI Studio at 65536 was
-# answered by Gemini 4 Argon, the router's fallback, at the same price, so a
-# request the Vertex endpoints cannot take may be answered by Gemini 4 Argon.
-# Efforts are its supported_efforts, at OpenRouter's default; low reported no
-# reasoning tokens on a probe, medium and high did. Its price is the model
-# list's, the standard tier (AI Studio's flex tier is cheaper, both priority
-# tiers dearer). Seen live through craze on 2026-11-11: a tool loop, and an
-# image read from disk described.
+# openrouter/gemini-4-argon (deprecated, below). Deprecated since 2026-11-18:
+# the owner's Gemini lineup is Gemini 4 Neon (openrouter/gemini-4-neon, below),
+# which scores above Carbon at half as much again, and Gemini 4 Hydrogen. The
+# router still answers as Carbon: the alias is out of the pickers and still
+# runs by name. Its ceiling is 65536, what Carbon's Vertex endpoints take. AI
+# Studio's standard endpoint takes 32768 today, so a request goes to Vertex;
+# one pinned to AI Studio at 65536 was answered by Gemini 4 Argon, the
+# router's fallback, at the same price, so a request the Vertex endpoints
+# cannot take may be answered by Gemini 4 Argon. Efforts are its
+# supported_efforts, at OpenRouter's default; low reported no reasoning tokens
+# on a probe, medium and high did. Its price is the model list's, the standard
+# tier (AI Studio's flex tier is cheaper, both priority tiers dearer). Seen
+# live through craze on 2026-11-11: a tool loop, and an image read from disk
+# described.
 [models."openrouter/gemini-pro-latest"]
 provider = "openrouter"
 wire_model = "~google/gemini-pro-latest"
@@ -1147,6 +1151,8 @@ max_output_tokens = 65536
 efforts = ["low", "medium", "high"]
 default_effort = "medium"
 vision = true
+deprecated = true
+replaced_by = "openrouter/gemini-4-neon"
 
 [models."openrouter/gemini-pro-latest".cost]
 input = 2.0
@@ -1275,10 +1281,11 @@ cache_read = 0.1
 # was on its numbered id because ~google/gemini-pro-latest still answered as
 # Gemini 3.1 Pro Preview then. Deprecated since 2026-11-12 (plan 050):
 # openrouter/gemini-pro-latest, above, now answers as Gemini 4 Carbon, Argon's
-# successor. google/gemini-4-argon still answers: the alias is out of the
-# pickers and still runs by name. Its ceiling is 65536, what its
-# Vertex endpoints take (AI Studio's take more), so a request may go to any of
-# them. Efforts are its supported_efforts, at OpenRouter's default; its price
+# successor; since 2026-11-18, when Gemini Pro Latest was deprecated in turn,
+# it is replaced by openrouter/gemini-4-neon. google/gemini-4-argon still
+# answers: the alias is out of the pickers and still runs by name. Its ceiling
+# is 65536, what its Vertex endpoints take (AI Studio's take more), so a
+# request may go to any of them. Efforts are its supported_efforts, at OpenRouter's default; its price
 # is the model list's, the standard tier (AI Studio's flex tier is cheaper,
 # both priority tiers dearer). Seen live through craze on 2026-10-13: a tool
 # loop, and an image read from disk described.
@@ -1292,7 +1299,7 @@ efforts = ["low", "medium", "high"]
 default_effort = "medium"
 vision = true
 deprecated = true
-replaced_by = "openrouter/gemini-pro-latest"
+replaced_by = "openrouter/gemini-4-neon"
 
 [models."openrouter/gemini-4-argon".cost]
 input = 2.0
@@ -1324,6 +1331,33 @@ vision = true
 input = 1.5
 output = 7.5
 cache_read = 0.075
+
+# Gemini 4 Neon, Google's fast, mid-priced Gemini 4 model for coding and agent
+# work (2026-11-18), replacing openrouter/gemini-pro-latest (deprecated,
+# above): it scores above Carbon on every Artificial Analysis index OpenRouter
+# lists (61.4 against 60.0 for intelligence), at half as much again. On its
+# numbered id: ~google/gemini-pro-latest still answers as Carbon. Its ceiling
+# is 65536, what its AI Studio standard endpoint takes (Vertex global and AI
+# Studio's flex and priority tiers take more), so a request may go to any of
+# them. Efforts are its supported_efforts, low to xhigh at OpenRouter's
+# default of medium (reasoning is mandatory). Its price is the model list's,
+# the standard tier ($3 / $15 / $0.15 cached; AI Studio's flex tier is half,
+# the priority tiers dearer). Seen live through craze on 2026-11-18: a tool
+# loop, an image read from disk described, and a turn at xhigh.
+[models."openrouter/gemini-4-neon"]
+provider = "openrouter"
+wire_model = "google/gemini-4-neon"
+name = "Gemini 4 Neon (OpenRouter)"
+context_window = 1048576
+max_output_tokens = 65536
+efforts = ["low", "medium", "high", "xhigh"]
+default_effort = "medium"
+vision = true
+
+[models."openrouter/gemini-4-neon".cost]
+input = 3.0
+output = 15.0
+cache_read = 0.15
 
 # OpenRouter lists no reasoning_effort for MiMo (its endpoints take only
 # reasoning on or off), so it offers no efforts (MiniMax M3, deprecated below,

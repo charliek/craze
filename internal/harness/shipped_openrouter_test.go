@@ -146,3 +146,37 @@ func TestShippedGeminiArgonReachesTheWire(t *testing.T) {
 		checkSent(t, 2, reqs[1], argonWire, "low", 65536)
 	})
 }
+
+// TestShippedGeminiNeonReachesTheWire: Gemini 4 Neon goes out on its numbered
+// wire id at its default effort, medium, or the one asked for up to xhigh,
+// with its 65536 ceiling; and a session on OpenRouter's start, Gemini 4
+// Hydrogen, that switches to Neon at xhigh sends the start's request, then
+// Neon's.
+func TestShippedGeminiNeonReachesTheWire(t *testing.T) {
+	const neon, neonWire = "openrouter/gemini-4-neon", "google/gemini-4-neon"
+	for _, tc := range []struct{ effort, want string }{{"", "medium"}, {"xhigh", "xhigh"}} {
+		t.Run("at "+tc.want, func(t *testing.T) {
+			s, sent := onShippedOpenRouter(t, neon, tc.effort)
+			run(t, s, "hello")
+			reqs := sent()
+			if len(reqs) != 1 {
+				t.Fatalf("the server saw %d requests, want 1", len(reqs))
+			}
+			checkSent(t, 1, reqs[0], neonWire, tc.want, 65536)
+		})
+	}
+	t.Run("switched to from the start", func(t *testing.T) {
+		s, sent := onShippedOpenRouter(t, "", "")
+		run(t, s, "hello")
+		if err := s.SetModelEffort(neon, "xhigh"); err != nil {
+			t.Fatalf("SetModelEffort: %v", err)
+		}
+		run(t, s, "again")
+		reqs := sent()
+		if len(reqs) != 2 {
+			t.Fatalf("the server saw %d requests, want 2", len(reqs))
+		}
+		checkSent(t, 1, reqs[0], "google/gemini-4-hydrogen", "medium", 65536)
+		checkSent(t, 2, reqs[1], neonWire, "xhigh", 65536)
+	})
+}

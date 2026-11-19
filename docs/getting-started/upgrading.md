@@ -1,7 +1,7 @@
 # Upgrading
 
-Five sections: [since v0.3.0](#since-v030), the changes after the fifth
-release; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
+Six sections: [since v0.4.0](#since-v040), the changes after v0.4.0;
+[since v0.3.0](#since-v030), v0.4.0's; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
 v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
 first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
@@ -38,6 +38,28 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.4.0
+
+### Gemini 4 Neon on OpenRouter
+
+Nothing needs migrating. `openrouter/gemini-4-neon` is Gemini 4 Neon, Google's
+fast, mid-priced Gemini 4 model for coding and agent work ($3 / $15 per million
+tokens, effort `low` to `xhigh`). OpenRouter's Gemini models are now Neon and
+Gemini 4 Hydrogen, which stays OpenRouter's start model. This release
+deprecates one model: it is out of the pickers (`/model`, the session list, the
+agent tool's list), but it runs by name as before, with a
+[notice](../reference/cli.md#model-notices) on a waiting command's result.
+
+| Deprecated (out of the pickers, still runs by name) | Use |
+|---|---|
+| `openrouter/gemini-pro-latest` | `openrouter/gemini-4-neon` |
+
+The router still answers as Gemini 4 Carbon at $2 / $10; Neon costs half as
+much again, so craze never switches you to it. A `default_model` or
+`[subagents]` reference to `openrouter/gemini-pro-latest` stands, with a
+warning naming Neon. `openrouter/gemini-4-argon`, deprecated in v0.3.0 for the
+router, now names `openrouter/gemini-4-neon` as its replacement.
 
 ## Since v0.3.0
 

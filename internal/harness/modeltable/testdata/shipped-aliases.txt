@@ -62,3 +62,4 @@ openai/gpt-6.2-astra
 openai/gpt-6.2-sol
 openrouter/gemini-4-hydrogen
 openrouter/qwen4-max
+openrouter/gemini-4-neon
