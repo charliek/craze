@@ -2,6 +2,33 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.4.1 — 2026-11-19
+
+Gemini 4 Neon joins the catalog on OpenRouter, and Gemini Pro Latest is
+deprecated in its favour. Nothing in `~/.craze` needs migrating: [Upgrading,
+since v0.4.0](docs/getting-started/upgrading.md#since-v040) lists the change.
+
+### Behaviour changes
+
+- **Deprecated** (still runs by name, no longer offered):
+  `openrouter/gemini-pro-latest` (use `openrouter/gemini-4-neon`). The router
+  still answers as Gemini 4 Carbon at $2 / $10; Neon costs half as much again,
+  so craze never switches you to it. `openrouter/gemini-4-argon`, already
+  deprecated, now names Neon as its replacement.
+
+### The native provider
+
+- **OpenRouter**: Gemini 4 Neon (`openrouter/gemini-4-neon`), Google's fast,
+  mid-priced Gemini 4 model for coding and agent work: images, effort `low` to
+  `xhigh` (default `medium`), a 65,536 output ceiling, $3 / $15 per million
+  tokens ($0.15 cached input). Gemini 4 Hydrogen stays OpenRouter's start model.
+
+### Tests
+
+- `TestALogComesAfterTheSignal` no longer flakes under `-race` on a loaded
+  runner: its commands survive SIGTERM, it runs the reap rounds on a test's
+  bound, and it checks the whole log order.
+
 ## v0.4.0 — 2026-11-17
 
 craze can drive your own Claude Code on your Claude Pro or Max plan (the
