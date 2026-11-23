@@ -744,8 +744,9 @@ type wireSlashSetting struct {
 // session offers now, under a key of their own as the list sections keep
 // theirs, and the list's revision, always written — the revision is what a
 // client compares, so a 0 is a value here, not an absence. The section itself
-// is absent when nil, never null or {}: no ACP session's delta, and no native
-// session's before its first reload, carries one. An older decoder ignores
+// is absent when nil, never null or {}: no native session's delta before its
+// first reload carries one, and no ACP session's but antigravity's, whose
+// model list is its model option's values (plan 053 § C2). An older decoder ignores
 // the key (a decoder ignores keys it does not know), so the section is
 // additive: no codec version bump.
 //

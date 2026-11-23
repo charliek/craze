@@ -2128,6 +2128,8 @@ workspace. It is what the agent's tools said, not a look at the disk:
 
 - **Shell writes are never in `files`.** Plan mode refuses edit tools but lets the
   shell through, so a plan-mode turn can change the workspace with `files` empty.
+  On `antigravity` plan mode is `agy`'s own and craze refuses nothing: a plan-mode
+  turn's edits, if `agy` makes any, are in `files` like any other turn's.
   **A caller that must know every change should diff the workspace itself.**
 - **A sub-agent's edits are not in its parent's `files`.** The list is the turn's own
   calls.

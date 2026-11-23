@@ -433,9 +433,11 @@ type StateDelta struct {
 	// lock in the section that swapped the list. It is never inside a load's
 	// replay bracket: a reload that lands there waits for the end bracket. It
 	// carries the whole list, and its Revision only ever grows within one
-	// incarnation; no ACP session sends one, and a session that has not
-	// reloaded has sent none (its list is the one it started with, revision
-	// 0).
+	// incarnation. The one ACP session that sends one is antigravity's, whose
+	// list is its model option's values (plan 053 § C2): a catalog that
+	// changes them carries the new list (configModelsLocked). A session that
+	// has not changed its list has sent none (its list is the one it started
+	// with, revision 0).
 	Catalog *CatalogState
 	// WebSearch is the open turn's web tally (plan 051 F.4.3): the native
 	// session's count of the web service's calls whose reports reached it
@@ -804,7 +806,8 @@ type Snapshot struct {
 	// CatalogRevision is the revision of Models (plan 034 §3.4, Q17): 0 for
 	// the list a session started with, and the Revision of the last
 	// StateDelta.Catalog after it, read with Models in one locked section, so
-	// the two always describe one list. Only a native session moves it.
+	// the two always describe one list. A native session moves it, and an
+	// antigravity one whose model option's values change (plan 053 § C2).
 	CatalogRevision uint64
 }
 

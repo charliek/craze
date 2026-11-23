@@ -340,6 +340,11 @@ type session struct {
 	// then A unannounced) and the call's before and after then agree while the
 	// fold is on B (astra r2 item 1).
 	modelUnannounced bool
+	// catalogUnannounced is true while Snapshot.Models holds a list rebuilt
+	// from the catalog (configModelsLocked) that no delta has carried yet:
+	// the next delta enqueued carries it as its catalog section
+	// (enqueueDeltaLocked). Guarded by s.mu.
+	catalogUnannounced bool
 	// beforeSetSection is a test barrier, nil in every build but a test's: it
 	// runs on a setter's own goroutine after the provider has taken the change
 	// and before the locked section that mutates the snapshot and enqueues its
@@ -1053,6 +1058,12 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// protected from, and the marks are cleared with it.
 	s.installPending = false
 	s.agentWrote = agentSections{}
+	// The model list the merged catalog offers, for a provider whose list is
+	// its model option (configModels): the response's list is session/new's,
+	// and an update kept above — or a --model/--effort reply copied into snap
+	// — may have changed the option since (review branch item 5). A list that
+	// changed rides the install delta below.
+	s.configModelsLocked()
 	// Same locked section as the carry-over on purpose: the names resolve
 	// against whatever commands survived it, so an update that arrived early
 	// is honoured and one that arrives next redoes the work.
@@ -2574,6 +2585,15 @@ func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *
 	if st != nil && st.Model != nil && *st.Model == s.snap.CurrentModel {
 		s.modelUnannounced = false
 	}
+	if st != nil && s.catalogUnannounced {
+		// A model list rebuilt from the catalog (configModelsLocked) rides on
+		// the next delta, the one that carries the catalog it came from: an
+		// update's, a setter's, an install's.
+		if st.Catalog == nil {
+			st.Catalog = &CatalogState{Models: CloneModels(s.snap.Models), Revision: s.snap.CatalogRevision}
+		}
+		s.catalogUnannounced = false
+	}
 	t := s.log.EnqueueTicket(base)
 	if s.provider().isClaude() && s.log.OutboxPastHardBound() {
 		// A state delta is kept — it is the session's state — but the
@@ -3952,14 +3972,27 @@ func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 // values (Provider.configModels, plan 053 § C2): a catalog that adds, drops or
 // renames a model changes the list every reader of Snapshot.Models sees, as
 // the install's did. A catalog with no model option leaves the list as it
-// was. s.mu is held.
+// was. A list that changed moves CatalogRevision and is owed to the stream
+// (catalogUnannounced): the next delta enqueued carries it as the catalog
+// section, which is how an attached client's picker learns a model list
+// changed (review branch item 5). Before a new session's install nothing is
+// published and the install rebuilds from the final catalog, so the window
+// does nothing here. s.mu is held.
 func (s *session) configModelsLocked() {
-	if !s.provider().configModels {
+	if !s.provider().configModels || s.installPending {
 		return
 	}
-	if opt := ModelConfigOptionIn(s.snap.Config); opt != nil {
-		s.snap.Models = configModelInfos(*opt)
+	opt := ModelConfigOptionIn(s.snap.Config)
+	if opt == nil {
+		return
 	}
+	models := configOptionModels(*opt)
+	if EqualModels(models, s.snap.Models) {
+		return
+	}
+	s.snap.Models = models
+	s.snap.CatalogRevision++
+	s.catalogUnannounced = true
 }
 
 // catalogOnModelLocked reports whether the catalog the session holds is

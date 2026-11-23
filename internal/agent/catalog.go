@@ -103,7 +103,7 @@ func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.In
 		// control it is.
 		models, curModel = nil, ""
 		if opt := ModelConfigOptionIn(config); opt != nil {
-			models, curModel = configModelInfos(*opt), opt.Current
+			models, curModel = configOptionModels(*opt), opt.Current
 		}
 	}
 	if curModel == "" {
@@ -401,6 +401,16 @@ func snapshotModels(snap Snapshot) []ModelInfo {
 		return configModelInfos(c)
 	}
 	return nil
+}
+
+// configOptionModels is the model list of a provider whose models are its
+// model option's values (Provider.configModels, plan 053 § C2): the option's
+// values, within the catalog's bounds (boundCatalog) — the list rides the
+// catalog section (configModelsLocked), whose bounds are the session's to
+// keep — its current model kept among them.
+func configOptionModels(opt ConfigOption) []ModelInfo {
+	models, _ := boundCatalog(configModelInfos(opt), opt.Current)
+	return models
 }
 
 // configModelInfos is a model option's values as models: the value the id,

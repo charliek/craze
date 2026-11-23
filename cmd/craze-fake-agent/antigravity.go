@@ -59,6 +59,9 @@ import (
 //	                           reply instead of preceding it
 //	CRAZE_FAKE_AGY_REPLAY_RUNNING  1: a load's replay also carries an
 //	                           invoke_subagent still in progress
+//	CRAZE_FAKE_AGY_PUSH_ON_NEW  a model id: session/new's catalog gains it in
+//	                           an update sent ahead of the reply, which
+//	                           still lists the nine
 //	CRAZE_FAKE_AGY_EXIT_AFTER_LOAD  a Go duration: the agent exits that long
 //	                           after answering session/load
 //	CRAZE_FAKE_SET_REFUSE, CRAZE_FAKE_SET_GATE as for every script
@@ -124,6 +127,9 @@ type agyState struct {
 	mu                 sync.Mutex
 	sid                string
 	model, level, mode string
+	// extra is a model the catalog offers beyond agy's nine, once
+	// CRAZE_FAKE_AGY_PUSH_ON_NEW has added it.
+	extra string
 }
 
 func newAgyState() *agyState {
@@ -138,6 +144,9 @@ func (a *agyState) catalog() []map[string]any {
 	models := make([]map[string]string, 0, len(agyModels))
 	for _, m := range agyModels {
 		models = append(models, map[string]string{"value": m.id, "name": m.name})
+	}
+	if a.extra != "" {
+		models = append(models, map[string]string{"value": a.extra, "name": "Extra " + a.extra})
 	}
 	out := []map[string]any{{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": a.model, "options": models}}
 	if m, _ := agyModelByID(a.model); len(m.levels) > 0 {
@@ -268,7 +277,16 @@ func (s *server) onAgyRequest(msg *acp.Message) {
 	case acp.MethodAuthenticate:
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "authenticate must not be called"})
 	case acp.MethodSessionNew:
-		s.reply(msg.ID, s.agy.setupResult(fakeSessionID))
+		res := s.agy.setupResult(fakeSessionID)
+		if extra := os.Getenv("CRAZE_FAKE_AGY_PUSH_ON_NEW"); extra != "" {
+			// The catalog changes before the reply is read: the update is
+			// the client's to keep over the reply's own list.
+			s.agy.mu.Lock()
+			s.agy.extra = extra
+			s.agy.mu.Unlock()
+			s.update(fakeSessionID, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": s.agy.catalog()})
+		}
+		s.reply(msg.ID, res)
 		s.agyCommands(fakeSessionID)
 		s.update(fakeSessionID, map[string]any{"sessionUpdate": acp.UpdateUsage, "used": 0, "size": 1048576})
 	case acp.MethodSessionLoad:

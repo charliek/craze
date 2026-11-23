@@ -162,6 +162,11 @@ func agyModelIDs(s *session) []string {
 // model option.
 func TestAgyModelsFollowTheCatalog(t *testing.T) {
 	s := agySession(t)
+	// An installed session: before the install the list is the install's to
+	// build (TestAgyInstallKeepsTheRefreshedModels).
+	s.mu.Lock()
+	s.installPending = false
+	s.mu.Unlock()
 	upd := mustJSON(map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": agyCatalog("a", "a", "b")})
 	s.onUpdate(acp.SessionNotification{SessionID: "s", Update: upd})
 	if got := agyModelIDs(s); !slices.Equal(got, []string{"a", "b"}) {
@@ -245,5 +250,88 @@ func TestAgySettledRowsEndTheirToolRows(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// agyCatalogDeltas is every catalog section the session's deltas carried, in
+// order, its outbox drained first.
+func agyCatalogDeltas(t *testing.T, s *session) []CatalogState {
+	t.Helper()
+	s.flushDelta()
+	var out []CatalogState
+	for _, ev := range pendingEvents(s) {
+		if ev.Type == EventMeta && ev.State != nil && ev.State.Catalog != nil {
+			out = append(out, *ev.State.Catalog)
+		}
+	}
+	return out
+}
+
+func catalogIDs(c CatalogState) []string {
+	var ids []string
+	for _, m := range c.Models {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// TestAgyModelListReachesTheStream (review branch item 5, first finding): a
+// model list rebuilt from a later catalog — an update of the agent's own, or
+// a settings reply announced by its setter — reaches a client that folds the
+// stream as the catalog section, each with a revision past the last; a
+// catalog whose models did not change sends none.
+func TestAgyModelListReachesTheStream(t *testing.T) {
+	s := agySession(t)
+	s.mu.Lock()
+	s.installPending = false
+	s.mu.Unlock()
+	drainEvents(s)
+	upd := func(cat json.RawMessage) {
+		s.onUpdate(acp.SessionNotification{SessionID: "s", Update: mustJSON(map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": cat})})
+	}
+	upd(agyCatalog("a", "a", "b"))
+	upd(agyCatalog("b", "a", "b"))
+	got := agyCatalogDeltas(t, s)
+	if len(got) != 1 || !slices.Equal(catalogIDs(got[0]), []string{"a", "b"}) || got[0].Revision != 1 || s.Snapshot().CatalogRevision != 1 {
+		t.Fatalf("after two updates: %+v (revision %d)", got, s.Snapshot().CatalogRevision)
+	}
+	// A reply's list rides its setter's delta (here SetTitle's, the next one
+	// craze enqueues).
+	if err := s.onSettingsReply(acp.SettingsReply{Method: acp.MethodSessionSetConfig, ConfigID: "model", Value: "c", ModelChange: true,
+		Catalog: acp.ConfigCatalog{Present: true, Options: agyCatalog("c", "a", "c")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTitle("", "x"); err != nil {
+		t.Fatal(err)
+	}
+	got = agyCatalogDeltas(t, s)
+	if len(got) != 1 || !slices.Equal(catalogIDs(got[0]), []string{"a", "c"}) || got[0].Revision != 2 {
+		t.Fatalf("after a reply: %+v", got)
+	}
+}
+
+// TestAgyInstallKeepsTheRefreshedModels (review branch item 5, second
+// finding): a catalog update that changes the model list between session/new
+// and the install — kept by the install over the reply's own — leaves the
+// installed list matching it, with or without a --model reply copied back, and
+// the install delta says so.
+func TestAgyInstallKeepsTheRefreshedModels(t *testing.T) {
+	for _, opts := range []Options{{}, {Model: "gemini-4-argon"}, {Effort: "low"}} {
+		r := newAgyRig(t, "antigravity-basic", opts, "CRAZE_FAKE_AGY_PUSH_ON_NEW=gemini-5-preview").start(t)
+		snap := r.s.Snapshot()
+		if len(snap.Models) != 10 || snap.Models[9].ID != "gemini-5-preview" || snap.CatalogRevision == 0 {
+			t.Fatalf("--model %q --effort %q: installed models %q revision %d", opts.Model, opts.Effort, agyModelIDs(r.s), snap.CatalogRevision)
+		}
+		r.s.flushDelta()
+		r.log.caughtUp(t)
+		var last *CatalogState
+		for _, ev := range r.log.snapshot() {
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Catalog != nil {
+				last = ev.State.Catalog
+			}
+		}
+		if last == nil || last.Revision != snap.CatalogRevision || len(last.Models) != 10 {
+			t.Fatalf("--model %q --effort %q: the stream's catalog %+v", opts.Model, opts.Effort, last)
+		}
 	}
 }
