@@ -29,7 +29,12 @@ type agyRig struct {
 
 func newAgyRig(t *testing.T, script string, opts Options, env ...string) *agyRig {
 	t.Helper()
-	dir := t.TempDir()
+	// Resolved: the stamps name resolved paths, and macOS's temporary
+	// directory is under /var, a symlink to /private/var.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(dir, "home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
