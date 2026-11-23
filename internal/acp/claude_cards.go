@@ -533,7 +533,43 @@ func elicitationResult(action string, content map[string]any) json.RawMessage {
 	return b.Bytes()
 }
 
-var questionKey = regexp.MustCompile(`^question_(0|[1-9][0-9]{0,3})(_custom)?$`)
+// elicitationKeys is how a dialect names a form's questions (plan 053 § B4):
+// one key per question and, beside it, the key of that question's free-text
+// answer. The parser and the reply both read it, so a form keyed for another
+// dialect is unrenderable — every one of its properties fails pattern — and
+// the reply writes back exactly the keys the form was read with.
+type elicitationKeys struct {
+	// pattern is a question's key, or its free-text key: group 1 the index,
+	// group 2 the free-text suffix when it is that.
+	pattern *regexp.Regexp
+	// textSuffix turns a question's key into its free-text key.
+	textSuffix string
+	// titleIsPrompt says a field's title is the question itself and the
+	// request's message only says how many there are (agy's "The agent has a
+	// question."); off, the title is claude's short header and a lone
+	// question's text is the message.
+	titleIsPrompt bool
+}
+
+// claudeKeys is claude-agent-acp's scheme: question_<i>, 0-based, and
+// question_<i>_custom (elicitation.js askUserQuestionsToCreateRequest).
+var claudeKeys = elicitationKeys{
+	pattern:    regexp.MustCompile(`^question_(0|[1-9][0-9]{0,3})(_custom)?$`),
+	textSuffix: "_custom",
+}
+
+// text is the key of the free-text answer beside question id.
+func (k elicitationKeys) text(id string) string { return id + k.textSuffix }
+
+// elicitationKeysFor is dialect d's scheme. Only claude and antigravity
+// handle elicitation/create (dialectHandles); every other dialect's request
+// is refused before it is read.
+func elicitationKeysFor(d DialectID) elicitationKeys {
+	if d == DialectAntigravity {
+		return antigravityKeys
+	}
+	return claudeKeys
+}
 
 // The keywords a form may carry, each at its level: exactly what the
 // adapter's own AskUserQuestion form uses (elicitation.js
@@ -571,17 +607,19 @@ func strictObject(raw json.RawMessage, allowed []string) (map[string]json.RawMes
 	return m, "", true
 }
 
-// parseElicitation reads a claude elicitation/create (§ B4). mode is the
+// parseElicitation reads an elicitation/create (plan 052 § B4) keyed by keys
+// (plan 053 § B4): claude's question_<i>, antigravity's q<i>. mode is the
 // request's mode — set only when the envelope is well formed: a request whose
 // mode, message, toolCallId or schema is of the wrong type is malformed, and
 // cancelled, never declined (review C3 item 3). For a form, req is the
 // questions it asks, and why says what made it unanswerable ("" when it is
-// not). A form is answerable only when every property is a question_<i> — a
+// not). A form is answerable only when every property is a question key — a
 // string with a oneOf of {const,title} options, or an array whose items are an
-// anyOf of them — or a question_<i>_custom string beside its question_<i>,
-// each carrying no keyword but those (formSchemaKeys and the rest); its
-// `required` may name questions, which must then be answered.
-func parseElicitation(params json.RawMessage) (mode string, req AskQuestionRequest, why string) {
+// anyOf of them — or a free-text key beside its question, each carrying no
+// keyword but those (formSchemaKeys and the rest); its `required` may name
+// questions, which must then be answered. The checks are the same whatever
+// the scheme: only the keys differ.
+func parseElicitation(keys elicitationKeys, params json.RawMessage) (mode string, req AskQuestionRequest, why string) {
 	var w struct {
 		Mode            *string         `json:"mode"`
 		ToolCallID      string          `json:"toolCallId"`
@@ -634,9 +672,9 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 		return mode, AskQuestionRequest{}, "the form asks nothing"
 	}
 	questions := map[int]*formQuestion{}
-	customs := map[int]bool{}
+	customs := map[int]string{}
 	for key, raw := range schema.Properties {
-		m := questionKey.FindStringSubmatch(key)
+		m := keys.pattern.FindStringSubmatch(key)
 		if m == nil {
 			return mode, AskQuestionRequest{}, fmt.Sprintf("property %q is not a question", key)
 		}
@@ -649,7 +687,7 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 			case extra != "":
 				return mode, AskQuestionRequest{}, fmt.Sprintf("property %q carries %q, which the card cannot enforce", key, extra)
 			}
-			customs[i] = true
+			customs[i] = key
 			continue
 		}
 		q, err := parseQuestionProperty(raw)
@@ -659,14 +697,14 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 		q.ID = key
 		questions[i] = &q
 	}
-	for i := range customs {
+	for i, key := range customs {
 		if questions[i] == nil {
-			return mode, AskQuestionRequest{}, fmt.Sprintf("question_%d_custom has no question", i)
+			return mode, AskQuestionRequest{}, fmt.Sprintf("%s has no question", key)
 		}
 		questions[i].AllowText = true
 	}
 	for _, key := range schema.Required {
-		m := questionKey.FindStringSubmatch(key)
+		m := keys.pattern.FindStringSubmatch(key)
 		if m == nil || m[2] != "" {
 			// A required free text the card would have to insist on.
 			return mode, AskQuestionRequest{}, fmt.Sprintf("the form requires %q, which the card cannot enforce", key)
@@ -690,7 +728,13 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 		// (each field carries its question there), the request's message when
 		// it has one (the adapter carries a lone question's text there), and
 		// the field's title — the question's short header — as the last word.
+		// agy carries the question itself in the title, and its message only
+		// counts the questions: the title first, the description after it.
 		switch {
+		case keys.titleIsPrompt:
+			if q.header != "" {
+				q.Prompt = q.header
+			}
 		case q.Prompt != "" && !single:
 		case single && strings.TrimSpace(w.Message) != "":
 			q.Prompt = w.Message
@@ -706,7 +750,7 @@ func parseElicitation(params json.RawMessage) (mode string, req AskQuestionReque
 	return mode, req, ""
 }
 
-// formQuestion is one question_<i> as read, with the field's title kept apart
+// formQuestion is one question as read, with the field's title kept apart
 // until the prompt is chosen.
 type formQuestion struct {
 	AskQuestion
@@ -726,7 +770,7 @@ type enumOption struct {
 	Description string          `json:"description"`
 }
 
-// parseQuestionProperty reads one question_<i>, or says what is wrong with it.
+// parseQuestionProperty reads one question, or says what is wrong with it.
 func parseQuestionProperty(raw json.RawMessage) (formQuestion, string) {
 	var p struct {
 		Type        string          `json:"type"`
@@ -796,12 +840,14 @@ func parseQuestionProperty(raw json.RawMessage) (formQuestion, string) {
 	return q, ""
 }
 
-// routeElicitation is claude's elicitation/create (§ B4): a mode it never
-// declared is declined, a form it cannot render cancelled — which aborts the
-// tool rather than letting it run on empty answers (t3code 4aead9e6d9) — and
-// an answerable form raised as a question.
+// routeElicitation is an elicitation/create (plan 052 § B4), read by the
+// dialect's key scheme (plan 053 § B4): a mode it never declared is declined,
+// a form it cannot render cancelled — which aborts the tool rather than
+// letting it run on empty answers (t3code 4aead9e6d9) — and an answerable
+// form raised as a question. dialect is written once, before the read loop
+// starts: read off c.mu.
 func (c *Client) routeElicitation(msg *Message) {
-	mode, req, why := parseElicitation(msg.Params)
+	mode, req, why := parseElicitation(elicitationKeysFor(c.dialect), msg.Params)
 	if why == "" {
 		if bad := c.requestSessionUnknown(msg.Params); bad != "" {
 			_ = c.conn.Reply(msg.ID, elicitationResult("cancel", nil))
@@ -828,10 +874,11 @@ func (c *Client) routeElicitation(msg *Message) {
 
 // elicitationOutcome is a question decision as an elicitation reply: accept
 // with each answered question's pick (a const, or a list of them for a
-// multi-select) and its free text; Skip is decline; a cancel is cancel. Only
-// options the form offered are sent, and text only for a question that takes
-// it.
-func elicitationOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage {
+// multi-select) and its free text under the scheme's key for it (claude's
+// question_<i>_custom, agy's q<i>_other); Skip is decline; a cancel is
+// cancel. Only options the form offered are sent, and text only for a
+// question that takes it.
+func elicitationOutcome(keys elicitationKeys, req AskQuestionRequest, dec AskDecision) json.RawMessage {
 	switch {
 	case dec.Cancelled:
 		return elicitationResult("cancel", nil)
@@ -851,7 +898,7 @@ func elicitationOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage
 			continue
 		}
 		if text := strings.TrimSpace(dec.Text[q.ID]); text != "" {
-			content[q.ID+"_custom"] = text
+			content[keys.text(q.ID)] = text
 		}
 	}
 	return elicitationResult("accept", content)

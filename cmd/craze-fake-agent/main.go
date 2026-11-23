@@ -199,6 +199,14 @@ Flags:
           claude-usage, claude-overage, claude-errors
                       usage and plan limits, the overage guard's trips and
                       the prompt errors (claude_usage.go)
+          antigravity-basic agy 1.5.14's shape (antigravity.go): string ids
+                      on its requests, a catalog of base models with
+                      thought_level beside them, a load that replays and
+                      comes back on the default; a prompt's first word picks
+                      its turn (ASK, RUN, SLEEP, EDITS, PLAN, SUBAGENTS, ...)
+          antigravity-loggedout
+                      session/new and session/load answer -32000
+                      "Authentication required"
 
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
@@ -280,8 +288,8 @@ starts. Sent twice with the same names it is a repeat of an identical catalog. L
 its own session.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
---yolo, --no-auto-update, --trust) are ignored so this binary can stand in
-for cursor-agent acp or grok agent stdio.
+--yolo, --no-auto-update, --trust, --dangerously-skip-permissions) are ignored
+so this binary can stand in for cursor-agent acp, grok agent stdio or agy acp.
 `
 
 func main() {
@@ -340,7 +348,8 @@ func main() {
 		"claude-subagent", "claude-subagent-nested", "claude-subagent-early-child",
 		"claude-subagent-reuse", "claude-subagent-unknown", "claude-child-ask",
 		"claude-held-bg-subagent", "claude-unattended-bg",
-		"claude-usage", "claude-overage", "claude-errors":
+		"claude-usage", "claude-overage", "claude-errors",
+		"antigravity-basic", "antigravity-loggedout":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

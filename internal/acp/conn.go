@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -71,7 +72,18 @@ type Conn struct {
 	// D3), after which nothing the agent or a child of it sends reaches the
 	// session.
 	severed atomic.Bool
+
+	// stringIDs numbers this connection's requests "1", "2", … rather than 1,
+	// 2, …: agy's own numbering (plan 053 § B6), which the fake agent speaks
+	// to hold the client to answering an id of either type as it came. Set
+	// before Start (UseStringIDs) and never written again.
+	stringIDs bool
 }
+
+// UseStringIDs makes every request this connection sends from here on carry a
+// string id. Call it before Start; the client never does — it is the fake
+// agent's, standing in for agy.
+func (c *Conn) UseStringIDs() { c.stringIDs = true }
 
 // sever drops every frame read from here on, and answers every call still
 // pending with ErrClosed: nothing the agent sends after it is seen.
@@ -185,7 +197,11 @@ func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func
 		return nil, err
 	}
 	idNum := atomic.AddInt64(&c.nextID, 1)
-	id, err := json.Marshal(idNum)
+	var idVal any = idNum
+	if c.stringIDs {
+		idVal = strconv.FormatInt(idNum, 10)
+	}
+	id, err := json.Marshal(idVal)
 	if err != nil {
 		return nil, err
 	}

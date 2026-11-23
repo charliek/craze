@@ -56,7 +56,11 @@ type subagentRec struct {
 	stopAsked bool
 	// gone: the ACP registry no longer routes the child (unknown, evicted,
 	// the agent gone), so its row is the session's own to keep or drop.
-	gone      bool
+	gone bool
+	// turn is the prompt turn of craze's own that launched a tool-backed row
+	// which outlives its call (agy's, plan 053 § D4), and settles it; 0 for
+	// every other row.
+	turn      int
 	promptIDs map[string]bool
 }
 
@@ -599,10 +603,47 @@ func (s *session) evictFinishedLocked(keep string) (dropped []*subagentRec) {
 		id := finished[drop]
 		finished = append(finished[:drop], finished[drop+1:]...)
 		dropped = append(dropped, s.subagents[id])
+		if s.provider().rowsOutliveCall() {
+			// Its call is still in the tool map, and a late update of it
+			// must not bring the row back running under another turn
+			// (syncToolRowLocked; plan 053 § D4).
+			s.retiredRows.note(id)
+		}
 		delete(s.subagents, id)
 		s.removeSubagentOrderLocked(id)
 	}
 	return dropped
+}
+
+// idTombstones is a bounded set of ids: past childEvictedCap only the newest
+// childEvictedKeep survive, as a child's evicted tool ids do (noteEvicted). An
+// id that old is not coming back.
+type idTombstones struct {
+	set   map[string]struct{}
+	order []string
+}
+
+func (t *idTombstones) note(id string) {
+	if t.set == nil {
+		t.set = make(map[string]struct{})
+	}
+	if _, dup := t.set[id]; dup {
+		return
+	}
+	t.set[id] = struct{}{}
+	t.order = append(t.order, id)
+	if len(t.order) <= childEvictedCap {
+		return
+	}
+	for _, old := range t.order[:len(t.order)-childEvictedKeep] {
+		delete(t.set, old)
+	}
+	t.order = append([]string(nil), t.order[len(t.order)-childEvictedKeep:]...)
+}
+
+func (t *idTombstones) has(id string) bool {
+	_, ok := t.set[id]
+	return ok
 }
 
 func (s *session) removeSubagentOrderLocked(id string) {
@@ -958,15 +999,31 @@ func (s *session) eachToolStoreLocked(fn func(owner string, tools map[string]Too
 	}
 }
 
-func (s *session) syncCursorLocked(tool ToolEvent) []Event {
-	if s.provider().dialect != acp.DialectCursor || tool.Task == nil {
+// syncToolRowLocked keeps the row of a tool-backed sub-agent — one whose
+// only trace on the wire is the tool call that launched it — in step with
+// that call (plan 053 § D4): cursor's task calls and agy's invoke_subagent,
+// each row keyed by its call's id. Cursor's row ends with its call, as it
+// always has. agy's call completes about 20 ms after the launch while the
+// child runs on, so a row launched in a prompt turn stays running past it and
+// is settled with that turn (settleToolRowsLocked); one created outside a
+// turn — a load's replay, an update no turn of craze's own is waiting on — is
+// settled from its call at once. Either way a call that fails settles its row
+// at once, and a settled row is never reopened by a later update.
+func (s *session) syncToolRowLocked(tool ToolEvent) []Event {
+	p := s.provider()
+	if !p.toolBackedRows() || tool.Task == nil {
 		return nil
 	}
 	rec, ok := s.subagents[tool.ID]
 	if !ok {
-		// Cursor synthesises a record per task tool, so the same running bound
-		// grok's spawns get applies here. There is no transcript to lose, so a
-		// record past the cap is simply dropped.
+		if s.retiredRows.has(tool.ID) {
+			// Settled and evicted (evictFinishedLocked): a late update of its
+			// call is about a row that is over, never a new launch.
+			return nil
+		}
+		// A record per call, so the same running bound grok's spawns get
+		// applies here. There is no transcript to lose, so a record past the
+		// cap is simply dropped.
 		if running, _ := s.runningSubagentsLocked(); running >= subagentRunCap {
 			return nil
 		}
@@ -980,24 +1037,27 @@ func (s *session) syncCursorLocked(tool ToolEvent) []Event {
 			tools:   make(map[string]ToolEvent),
 			evicted: make(map[string]struct{}),
 		}
-		s.fillCursorLocked(rec, tool)
+		if p.rowsOutliveCall() && s.inPrompt && s.turn > s.rowsSettled {
+			rec.turn = s.turn
+		}
+		s.fillToolRowLocked(rec, tool)
 		s.subagents[tool.ID] = rec
 		s.subagentOrder = append(s.subagentOrder, tool.ID)
-		s.writeCursorTaskLocked(tool.ID, rec)
+		s.writeToolRowTaskLocked(tool.ID, rec)
 		evs := []Event{subagentRowEvent(rec, SubagentChangeSpawned)}
-		if terminalToolStatus(tool.Status) {
-			s.applyCursorTerminalLocked(rec, tool)
+		if s.callSettlesRow(rec, tool) {
+			s.finishToolRowLocked(rec, tool)
 			evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
 		}
 		return evs
 	}
 	prev := cloneSubagent(rec.info)
-	s.fillCursorLocked(rec, tool)
-	if terminalToolStatus(tool.Status) && prev.Status == SubagentRunning {
-		s.applyCursorTerminalLocked(rec, tool)
+	s.fillToolRowLocked(rec, tool)
+	if prev.Status == SubagentRunning && s.callSettlesRow(rec, tool) {
+		s.finishToolRowLocked(rec, tool)
 		return []Event{subagentRowEvent(rec, SubagentChangeFinished)}
 	}
-	s.writeCursorTaskLocked(tool.ID, rec)
+	s.writeToolRowTaskLocked(tool.ID, rec)
 	if sameSubagentFull(prev, rec.info) {
 		return nil
 	}
@@ -1008,7 +1068,90 @@ func (s *session) syncCursorLocked(tool ToolEvent) []Event {
 	return []Event{subagentRowEvent(rec, change)}
 }
 
-func (s *session) writeCursorTaskLocked(toolID string, rec *subagentRec) {
+// callSettlesRow reports whether tool's status ends rec, its tool-backed row:
+// any terminal status, except that a row a prompt turn launched which
+// outlives its call (rec.turn) is ended by its call only when the call itself
+// failed or was cancelled — a completed launch is the child running.
+func (s *session) callSettlesRow(rec *subagentRec, tool ToolEvent) bool {
+	if !terminalToolStatus(tool.Status) {
+		return false
+	}
+	return rec.turn == 0 || tool.Status != toolCompleted
+}
+
+// settleToolRowsLocked settles every tool-backed row turn launched that is
+// still running, with status — the turn's outcome as a tool status
+// (turnRowStatus; plan 053 § D4): completed
+// for a turn that stopped normally, cancelled for a cancelled one, failed for
+// a prompt error, which is also how a turn whose agent died ends. Rows other
+// turns launched are theirs to settle, and none created after this for turn
+// belongs to it (rowsSettled). s.mu is held.
+func (s *session) settleToolRowsLocked(turn int, status string) []Event {
+	if !s.provider().rowsOutliveCall() || turn == 0 {
+		return nil
+	}
+	if turn > s.rowsSettled {
+		s.rowsSettled = turn
+	}
+	var evs []Event
+	for _, id := range append([]string(nil), s.subagentOrder...) {
+		rec := s.subagents[id]
+		if rec == nil || rec.turn != turn || rec.info.Status != SubagentRunning {
+			continue
+		}
+		s.finishToolRowLocked(rec, ToolEvent{ID: id, Status: status})
+		evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+	}
+	return evs
+}
+
+// settleToolRows is settleToolRowsLocked, its events published. It holds
+// toolPub, as every tool update's merge and publish does (publishToolDelta),
+// so an update the read loop merged before the settlement is published before
+// it, and one merged after finds the row settled: no running event for a
+// settled row can follow its finish, and its finish precedes the turn's end
+// event, which the caller publishes after this returns. Lock order is
+// toolPub, then s.mu.
+func (s *session) settleToolRows(turn int, status string) {
+	if !s.provider().rowsOutliveCall() {
+		return
+	}
+	s.toolPub.Lock()
+	defer s.toolPub.Unlock()
+	s.mu.Lock()
+	evs := s.settleToolRowsLocked(turn, status)
+	s.mu.Unlock()
+	s.emitAll(evs)
+}
+
+// retireToolRowsAtEnd waits for the agent's transport to end, or the session
+// to close, and then fails every tool-backed row still running (plan 053 §
+// D4): its agent is gone, so no update will ever settle it. A turn the agent
+// died under settles its own rows failed too (turnRowStatus); this is for the
+// ones no turn owns — a row created outside a turn whose call never reached a
+// terminal status.
+func (s *session) retireToolRowsAtEnd(client *acp.Client) {
+	select {
+	case <-client.Conn().ReadDone():
+	case <-s.done:
+	}
+	s.toolPub.Lock()
+	defer s.toolPub.Unlock()
+	s.mu.Lock()
+	var evs []Event
+	for _, id := range append([]string(nil), s.subagentOrder...) {
+		rec := s.subagents[id]
+		if rec == nil || rec.info.Status != SubagentRunning {
+			continue
+		}
+		s.finishToolRowLocked(rec, ToolEvent{ID: id, Status: toolFailed})
+		evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+	}
+	s.mu.Unlock()
+	s.emitAll(evs)
+}
+
+func (s *session) writeToolRowTaskLocked(toolID string, rec *subagentRec) {
 	t, ok := s.tools[toolID]
 	if !ok {
 		return
@@ -1024,7 +1167,7 @@ func (s *session) writeCursorTaskLocked(toolID string, rec *subagentRec) {
 	s.tools[toolID] = t
 }
 
-func (s *session) fillCursorLocked(rec *subagentRec, tool ToolEvent) {
+func (s *session) fillToolRowLocked(rec *subagentRec, tool ToolEvent) {
 	if tool.Task != nil {
 		if tool.Task.Description != "" {
 			rec.info.Description = tool.Task.Description
@@ -1051,7 +1194,7 @@ func (s *session) fillCursorLocked(rec *subagentRec, tool ToolEvent) {
 	capSubagent(&rec.info)
 }
 
-func (s *session) applyCursorTerminalLocked(rec *subagentRec, tool ToolEvent) {
+func (s *session) finishToolRowLocked(rec *subagentRec, tool ToolEvent) {
 	rec.info.Status = toolStatusToSubagent(tool.Status)
 	if rec.info.EndedAt.IsZero() {
 		rec.info.EndedAt = time.Now()
@@ -1065,7 +1208,7 @@ func (s *session) applyCursorTerminalLocked(rec *subagentRec, tool ToolEvent) {
 		rec.info.Output = tool.ContentText
 	}
 	capSubagent(&rec.info)
-	s.writeCursorTaskLocked(tool.ID, rec)
+	s.writeToolRowTaskLocked(tool.ID, rec)
 	s.stampFinishLocked(rec)
 	s.evictFinishedLocked(rec.info.ID)
 }

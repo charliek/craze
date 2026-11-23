@@ -134,9 +134,10 @@ func askOutcome(d DialectID, req AskQuestionRequest, dec AskDecision) json.RawMe
 	switch d {
 	case DialectGrok:
 		return grokAskOutcome(req, dec)
-	case DialectClaude:
-		// claude asks only through elicitation/create (plan 052 § B4).
-		return elicitationOutcome(req, dec)
+	case DialectClaude, DialectAntigravity:
+		// claude and agy ask only through elicitation/create (plan 052 § B4,
+		// plan 053 § B4), each answered in its own key scheme.
+		return elicitationOutcome(elicitationKeysFor(d), req, dec)
 	}
 	switch {
 	case dec.Cancelled:

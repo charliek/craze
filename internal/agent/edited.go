@@ -36,6 +36,11 @@ type editCall struct {
 	// claudePlan says the provider writes its plan file under the Claude
 	// config directory's plans/ (claudePlanCheck): ExitPlanMode's plan.
 	claudePlan bool
+	// antigravityBrain says the provider writes its plans, todo lists and
+	// other artifacts into its session's brain directory (plan 053 § D3,
+	// antigravityBrainCheck): the write that asked for feedback is the plan
+	// file, and every other one there is dropped from the stamp.
+	antigravityBrain bool
 }
 
 // editCalls is every provider's rule (docs/reference/cli.md's table says the
@@ -59,6 +64,14 @@ var editCalls = map[string]editCall{
 		tools:       []string{"Edit", "MultiEdit", "Write", "NotebookEdit"},
 		rawPathKeys: []string{"file_path", "notebook_path"},
 		claudePlan:  true,
+	},
+	// agy by its tool name, the update's top-level name (plan 053 § D2):
+	// edit_file and write_file, the path in rawInput.Path beside the
+	// locations and the diff.
+	antigravityName: {
+		tools:            []string{"edit_file", "write_file"},
+		rawPathKeys:      []string{"Path"},
+		antigravityBrain: true,
 	},
 }
 
@@ -86,6 +99,17 @@ func (r editCall) is(t ToolEvent) bool {
 	return slices.Contains(r.kinds, t.Kind) || slices.Contains(r.tools, t.ToolName)
 }
 
+// callFlags is one flag per call of a main session, by id, beside callPaths.
+type callFlags map[string]bool
+
+// note sets call id's flag to v.
+func (c *callFlags) note(id string, v bool) {
+	if *c == nil {
+		*c = callFlags{}
+	}
+	(*c)[id] = v
+}
+
 // callPaths is every distinct path each call of a main session has named, in
 // the order they were named: up to one past editedPathsCap, which is what tells
 // a stamp it was cut. It sits beside the rows rather than on them because a row
@@ -108,11 +132,15 @@ func (c *callPaths) note(id string, paths ...string) {
 	(*c)[id] = named
 }
 
-// editScope is what a path is judged against: the session's workspace, and which
-// resolved path is its plan file (nil for a session with none).
+// editScope is what a path is judged against: the session's workspace, which
+// resolved path is its plan file (nil for a session with none), and which are
+// the agent's own artifacts, dropped from the stamp (nil for none; agy's brain
+// directory, plan 053 § D3). The plan check comes first: a plan file can be
+// an artifact too.
 type editScope struct {
-	workspace string
-	isPlan    func(resolved string) bool
+	workspace  string
+	isPlan     func(resolved string) bool
+	isArtifact func(resolved string) bool
 }
 
 // edited is the stamp for a call that completed having named paths: nil when
@@ -140,6 +168,7 @@ func (sc editScope) edited(paths []string) *ToolEdited {
 		switch {
 		case sc.isPlan != nil && sc.isPlan(resolved):
 			e.PlanFile = resolved
+		case sc.isArtifact != nil && sc.isArtifact(resolved):
 		case !inside:
 			e.OutsideFiles = appendDistinct(e.OutsideFiles, resolved)
 		case rel != ".":
@@ -310,9 +339,15 @@ func claudePlanCheck(dir string) func(resolved string) bool {
 	if real, err := tool.RealPath(root); err == nil {
 		root = real
 	}
+	return strictlyUnder(root)
+}
+
+// strictlyUnder reports whether a resolved path is inside dir and not dir
+// itself.
+func strictlyUnder(dir string) func(resolved string) bool {
 	return func(resolved string) bool {
-		_, inside := relativeTo(root, resolved)
-		return inside && resolved != root
+		_, inside := relativeTo(dir, resolved)
+		return inside && resolved != dir
 	}
 }
 
@@ -349,6 +384,9 @@ func (s *session) publishToolDelta(d toolDelta) {
 	s.toolPub.Lock()
 	defer s.toolPub.Unlock()
 	tool, changed, extras := s.applyToolDelta("", d)
+	if s.hooks.toolPublish != nil {
+		s.hooks.toolPublish()
+	}
 	if changed {
 		s.emit(Event{Type: EventTool, Tool: &tool})
 	}
@@ -371,6 +409,17 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 	s.mu.Lock()
 	paths := s.namedPaths[d.id]
 	sid := s.snap.SessionID
+	if sid == "" && rule.antigravityBrain {
+		// Before the install: the id session/new answered, or on a load the
+		// one being loaded, whose replayed calls arrive before the restored
+		// snapshot names it (plan 053 § D3). Antigravity's alone: grok's
+		// replayed plan writes keep the stamp they have always had.
+		sid = s.sessionID
+		if sid == "" {
+			sid = s.opts.LoadSessionID
+		}
+	}
+	feedback := s.feedbackCalls[d.id]
 	s.mu.Unlock()
 	if testBeforeEditStamp != nil {
 		testBeforeEditStamp()
@@ -382,6 +431,9 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 	}
 	if rule.claudePlan {
 		scope.isPlan = claudePlanCheck(claudeConfigDir(s.childEnv()))
+	}
+	if rule.antigravityBrain {
+		scope.isPlan, scope.isArtifact = antigravityBrainCheck(antigravityBrainRoot(s.childEnv()), sid, feedback)
 	}
 	edited := scope.edited(paths)
 	if edited.same(t.Edited) {

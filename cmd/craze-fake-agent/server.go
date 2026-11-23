@@ -86,6 +86,9 @@ type server struct {
 	// claude is the claude scripts' session state (claude.go), nil for every
 	// other script.
 	claude *claudeState
+	// agy is the antigravity scripts' session state (antigravity.go), nil for
+	// every other script.
+	agy *agyState
 	// order is every session/set_mode and session/prompt in arrival order, with
 	// the mode each set_mode asked for. It is what lets the planmode scripts
 	// prove craze chained the two rather than racing them; recording it anywhere
@@ -268,6 +271,12 @@ func newServer(conn *acp.Conn, script string) *server {
 	if claudeScript(script) {
 		s.claude = newClaudeState()
 		conn.SetRequestHandler(withCalls(s.onClaudeRequest))
+	}
+	if antigravityScript(script) {
+		s.agy = newAgyState()
+		conn.SetRequestHandler(withCalls(s.onAgyRequest))
+		// agy numbers the requests it sends with strings (plan 053 § B6).
+		conn.UseStringIDs()
 	}
 	conn.SetNotifyHandler(withCalls(s.onNotify))
 	return s

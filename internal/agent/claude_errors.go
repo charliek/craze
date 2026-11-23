@@ -94,11 +94,12 @@ func (e *claudePromptError) ErrorInfo() errkind.Info { return e.info }
 
 // classifyPromptErr is a failed claude prompt's error as the turn ends with
 // it: a trip of the overage guard's in its rate limit first (§ D3) — the
-// session stops, and the trip's error is the turn's — then § D4's kind. Every
-// other provider's error is left as it is.
+// session stops, and the trip's error is the turn's — then § D4's kind. Any
+// other provider's is what its own classifier says (Provider.classifyAuth:
+// agy's logged-out -32000 is auth, plan 053 § A3), else left as it is.
 func (s *session) classifyPromptErr(err error) error {
 	if !s.provider().isClaude() {
-		return err
+		return s.provider().classifyAuth(err)
 	}
 	if trip := s.claudePromptTrip(err); trip != nil {
 		return trip

@@ -28,7 +28,9 @@ var outboundOnly = []string{
 
 // dialects is every dialect the client speaks, each held to a decision on
 // every method (dialectHandles).
-func dialects() []DialectID { return []DialectID{DialectCursor, DialectGrok, DialectClaude} }
+func dialects() []DialectID {
+	return []DialectID{DialectCursor, DialectGrok, DialectClaude, DialectAntigravity}
+}
 
 // notUpdateKinds is every Update constant that is not a session/update kind:
 // turn_completed rides x.ai/session_notification.
@@ -268,7 +270,8 @@ func TestClaudeToolNameFromMeta(t *testing.T) {
 // session/new and session/load params byte for byte (plan 052 AC5): the
 // SessionParams seam leaves them exactly as they were. Claude's initialize
 // adds the elicitation form capability (C3); its session/new carries
-// configOptions and _meta.
+// configOptions and _meta. Antigravity's adds the form capability alone (plan
+// 053 § B2) and its setup requests are cursor's.
 func TestInitializeAndSessionParamsBytes(t *testing.T) {
 	cwd := t.TempDir()
 	quotedCWD, _ := json.Marshal(cwd)
@@ -281,8 +284,11 @@ func TestInitializeAndSessionParamsBytes(t *testing.T) {
 		go func() { _, _ = p.client.Initialize(t.Context()) }()
 		msg := p.readWithin(t, 3*time.Second, "initialize")
 		want := wantInit
-		if d == DialectClaude {
+		switch d {
+		case DialectClaude:
 			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}},"subagents":{},"session":{"notices":{},"compaction":{}}}}`
+		case DialectAntigravity:
+			want = strings.TrimSuffix(wantInit, "}}") + `,"elicitation":{"form":{}}}}`
 		}
 		if string(msg.Params) != want {
 			t.Fatalf("%s initialize\n got %s\nwant %s", d, msg.Params, want)

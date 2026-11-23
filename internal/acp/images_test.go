@@ -26,14 +26,15 @@ func imageTestBlocks(data string) []ContentBlock {
 // TestImageBlockWireShape: an image block is ACP's image content — type,
 // standard base64 data, mimeType and a file:// uri — in the one
 // session/prompt, after block 1; a text block carries none of the image
-// fields; and block 1 alone is the correlation text, on both dialects.
+// fields; and block 1 alone is the correlation text, on every dialect that
+// sends them (agy advertises image true, plan 053 § A4).
 func TestImageBlockWireShape(t *testing.T) {
 	data := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n not really"))
 	want := `{"sessionId":"s1","prompt":[` +
 		`{"type":"text","text":"look at [Image #1]"},` +
 		`{"type":"image","data":"` + data + `","mimeType":"image/png","uri":"file:///h/attachments/0123456789abcdef.png"},` +
 		`{"type":"text","text":"[Image #1 was downscaled from 3024×1964 to 2000×1299]"}]}`
-	for _, d := range []DialectID{DialectCursor, DialectGrok} {
+	for _, d := range []DialectID{DialectCursor, DialectGrok, DialectAntigravity} {
 		t.Run(string(d), func(t *testing.T) {
 			p := newRawPipeDialect(t, d)
 			p.setSession("s1")

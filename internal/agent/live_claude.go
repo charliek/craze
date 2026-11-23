@@ -28,27 +28,36 @@ type claudeGate struct {
 	fatal error
 }
 
-// claudeStartMode is the mode a claude session starts or loads in (§ C2):
-// Manual, or plan under --plan. A mode the adapter never has — ask — fails
-// the start before anything is spawned, in the words /ask is refused with.
-func (s *session) claudeStartMode() (string, error) {
-	if s.opts.Mode == "" {
-		return claudeStartModes[0], nil
+// startMode is the mode a session of a provider with a static mode table
+// (Provider.startModes) starts or loads in: the table's first — claude's
+// Manual, agy's Default — or what --plan and the other mode flags resolve to
+// in it. A mode the table lacks — ask, on both — fails the start before
+// anything is spawned, in the words /ask is refused with (plan 052 § C2, plan
+// 053 § C1). A provider with no table has nothing to resolve here: "" and no
+// error.
+func (s *session) startMode() (string, error) {
+	modes := s.provider().startModes
+	if len(modes) == 0 {
+		return "", nil
 	}
-	id, ok := ResolveMode(s.opts.Mode, claudeStartModes)
+	if s.opts.Mode == "" {
+		return modes[0], nil
+	}
+	id, ok := ResolveMode(s.opts.Mode, modes)
 	if !ok {
 		return "", claudeErr(errkind.Config, "mode %s is not advertised", sanitizeLine(s.opts.Mode))
 	}
 	return id, nil
 }
 
-// claudeStartRefusal is what a claude start refuses before the spawn: a mode
-// it has none of, and --fast (§ D3).
-func (s *session) claudeStartRefusal() error {
-	if _, err := s.claudeStartMode(); err != nil {
+// startRefusal is what a start refuses before the spawn: a mode the
+// provider's static table has none of (startMode), and on claude --fast (§
+// D3).
+func (s *session) startRefusal() error {
+	if _, err := s.startMode(); err != nil {
 		return err
 	}
-	if s.opts.Fast != nil && *s.opts.Fast {
+	if s.provider().RefusesFast() && s.opts.Fast != nil && *s.opts.Fast {
 		return claudeErr(errkind.Usage, "--fast: %s", FastBillsExtra)
 	}
 	return nil
@@ -69,7 +78,7 @@ func (s *session) sessionParams(loading bool) acp.SessionParams {
 	if !p.isClaude() {
 		return acp.SessionParams{}
 	}
-	mode, _ := s.claudeStartMode()
+	mode, _ := s.startMode()
 	sp := acp.SessionParams{ConfigOptions: []acp.ConfigOptionValue{{ConfigID: "mode", Value: mode}}}
 	if loading && s.opts.Model == "" && strings.TrimSpace(s.opts.LoadModel) != "" {
 		sp.ConfigOptions = append(sp.ConfigOptions, acp.ConfigOptionValue{ConfigID: "model", Value: strings.TrimSpace(s.opts.LoadModel)})
@@ -237,7 +246,7 @@ func (s *session) claudeSettle(ctx context.Context, client *acp.Client, loading 
 		out.Config = cloneConfig(s.snap.Config)
 		return out
 	}
-	want, _ := s.claudeStartMode()
+	want, _ := s.startMode()
 	cur := read()
 	if got := claudeEffectiveMode(cur.Config, cur.CurrentMode); got != want {
 		opt := configOptionByID(cur.Config, "mode")
@@ -360,8 +369,20 @@ func (s *session) noteRecordedEffort(cur Snapshot) {
 	s.noteRecordedRefused("effort", "at", want, got)
 }
 
+// noteRecordedUnoffered journals and says that the load's recorded effort
+// want was not applied because model, the one the session runs, has no
+// effort setting (plan 053 § C4: agy's gpt-oss and orchestrators).
+func (s *session) noteRecordedUnoffered(want, model string) {
+	s.log.Note(journal.DiagNote{Kind: "recorded_effort_unoffered", Fields: map[string]any{"recorded": want, "model": model}})
+	if w := diagWriter(s.opts); w != nil {
+		fmt.Fprintf(w, "craze: the session's recorded effort %s was not applied; model %s has no effort setting\n", sanitizeLine(want), sanitizeLine(model))
+	}
+}
+
 // noteRecordedRefused journals and says that the load's recorded setting
-// (model or effort) want was not applied and the session runs prep got.
+// (model or effort) want was not applied and the session runs prep got. It
+// is claude's load check's note (noteRecordedModel, noteRecordedEffort) and
+// agy's restore's (restoreRecorded).
 func (s *session) noteRecordedRefused(setting, prep, want, got string) {
 	s.log.Note(journal.DiagNote{Kind: "recorded_" + setting + "_refused", Fields: map[string]any{"recorded": want, setting: got}})
 	if w := diagWriter(s.opts); w != nil {
@@ -640,12 +661,14 @@ func (s *session) keptPlanning(token TurnToken) bool {
 	return kept
 }
 
-// onRefusedRequest is the client's word that it answered a claude request
-// itself (acp.RefusedRequest): a form it cannot render, an elicitation mode it
-// never declared, a plan exit of a shape it does not know (§ B4, § B5). The
-// session notes it in the journal and on the diag lane, as C2's other notes
-// are, so a tool that aborted or a plan that was rejected has its reason on
-// record.
+// onRefusedRequest is the client's word that it answered a request itself
+// (acp.RefusedRequest): a form it cannot render, an elicitation mode it never
+// declared, a plan exit of a shape it does not know (§ B4, § B5) — claude's,
+// and agy's forms (plan 053 § B4). The session notes it in the journal and on
+// the diag lane, as C2's other notes are, so a tool that aborted or a plan
+// that was rejected has its reason on record, naming the provider that asked.
+// The journal kind keeps its claude_ prefix: it names the refusal, whichever
+// dialect it came from.
 func (s *session) onRefusedRequest(r acp.RefusedRequest) {
 	s.log.Note(journal.DiagNote{Kind: "claude_" + r.Kind, Fields: map[string]any{
 		"method": r.Method, "answer": r.Answer, "detail": r.Detail,
@@ -654,13 +677,14 @@ func (s *session) onRefusedRequest(r acp.RefusedRequest) {
 	if w == nil {
 		return
 	}
+	who := s.provider().Name()
 	switch r.Kind {
 	case acp.RefusedPlanExitShape:
 		fmt.Fprintf(w, "craze: the plan approval had an unexpected shape (%s); answered %s\n", sanitizeLine(r.Detail), sanitizeLine(r.Answer))
 	case acp.RefusedElicitationMode:
-		fmt.Fprintf(w, "craze: claude asked in an elicitation mode craze does not show (%s); declined\n", sanitizeLine(r.Detail))
+		fmt.Fprintf(w, "craze: %s asked in an elicitation mode craze does not show (%s); declined\n", who, sanitizeLine(r.Detail))
 	default:
-		fmt.Fprintf(w, "craze: claude asked a question craze cannot show (%s); cancelled\n", sanitizeLine(r.Detail))
+		fmt.Fprintf(w, "craze: %s asked a question craze cannot show (%s); cancelled\n", who, sanitizeLine(r.Detail))
 	}
 }
 
