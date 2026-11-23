@@ -497,6 +497,13 @@ def test_a_client_against_a_real_hub(
                 ),
             },
             {
+                "id": "antigravity",
+                "label": "antigravity",
+                "state": "unavailable",
+                "reason": "agy not found on PATH",
+                "fix": row_line(f"install agy, or set [agents].antigravity in {config}"),
+            },
+            {
                 "id": "native",
                 "label": "native",
                 "state": "needs_setup",

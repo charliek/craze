@@ -130,7 +130,7 @@ func TestAntigravityProviderData(t *testing.T) {
 	if p.CycleModes() != nil || p.ImplementPrompt() != "Implement the plan above." {
 		t.Fatalf("cycle %q implement %q", p.CycleModes(), p.ImplementPrompt())
 	}
-	if !p.Hidden() || !p.Resumable() || p.InProcess() || p.Aside() || !p.RecordsModel() || p.RefusesFast() {
+	if p.Hidden() || !p.Resumable() || p.InProcess() || p.Aside() || !p.RecordsModel() || p.RefusesFast() {
 		t.Fatalf("hidden %v resumable %v inProcess %v aside %v records %v fast %v", p.Hidden(), p.Resumable(), p.InProcess(), p.Aside(), p.RecordsModel(), p.RefusesFast())
 	}
 	if len(p.SkillScan().RelRoots) != 0 || p.PluginScan() != (PluginScan{}) || p.CompanionBins() != nil || p.AdapterInstall() != "" {
@@ -140,11 +140,11 @@ func TestAntigravityProviderData(t *testing.T) {
 		t.Fatal("Esc on an agy question skips it")
 	}
 	got, err := ProviderByName("antigravity")
-	if err != nil || got.Name() != "antigravity" || !got.Hidden() {
+	if err != nil || got.Name() != "antigravity" || got.Hidden() {
 		t.Fatalf("ProviderByName = %+v, %v", got, err)
 	}
-	if slices.Contains(ProviderNames(), "antigravity") {
-		t.Fatalf("a hidden provider is listed: %q", ProviderNames())
+	if want := []string{"cursor", "grok", "claude", "antigravity", "native"}; !slices.Equal(ProviderNames(), want) {
+		t.Fatalf("listed providers %q, want %q", ProviderNames(), want)
 	}
 	// Images go as image blocks: agy says image true, so no override.
 	if p.imagesDespiteCapability {

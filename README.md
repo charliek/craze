@@ -2,7 +2,7 @@
 
 craze is a terminal UI and CLI for Linux and macOS that drives a coding agent
 over ACP (the Agent Client Protocol): **Cursor** (`cursor-agent`), **Grok**
-(`grok`), or craze's own **native**
+(`grok`), **Claude Code**, **Antigravity** (`agy`), or craze's own **native**
 agent, which runs inside craze against a model provider's API or a ChatGPT plan
 with no other CLI to install. You own the chrome; the provider still runs the
 agent.
@@ -16,6 +16,9 @@ and want one fast, scriptable front end for several of them.
 
 - **The TUI**: transcript, queued messages, tasks, sub-agent rows, cards, mouse
   and copy. [TUI reference](docs/reference/tui.md)
+- **Antigravity**: Google's `agy` (Gemini 4 Neon and the Antigravity plan's other
+  models) as a provider, with effort, plan mode and sub-agent rows.
+  [The antigravity provider](docs/reference/configuration.md#the-antigravity-provider)
 - **Native providers and the ChatGPT plan**: Anthropic (Claude), Fireworks,
   Meta, OpenAI, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in;
   no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
@@ -97,7 +100,7 @@ Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 
 ```shell
 craze                       # pick a provider, then the TUI in the current directory
-craze --provider grok       # skip the picker (cursor, grok, claude or native)
+craze --provider grok       # skip the picker (cursor, grok, claude, antigravity or native)
 craze auth login fireworks  # connect a native provider; `craze auth login chatgpt` signs in with a ChatGPT plan
 craze --provider native     # start a native session
 craze -c                    # continue the newest session in this workspace
@@ -109,7 +112,7 @@ More in the [Quick Start](docs/getting-started/quick-start.md).
 ## Use from Claude Code
 
 This repository is also a Claude Code plugin: sub-agents that hand a task to a
-craze session on a native, Grok or Cursor model and return its result. It needs
+craze session on a native, Grok, Cursor or Antigravity model and return its result. It needs
 craze 0.2.0 or newer on your `PATH`.
 
 ```text

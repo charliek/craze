@@ -914,7 +914,7 @@ def test_native_is_in_help_and_unknown_provider_error(
     )
     assert help_proc.returncode == 0, help_proc.stderr
     assert (
-        "cursor, grok, claude (ACP agents) or native (runs inside craze)"
+        "cursor, grok, claude, antigravity (ACP agents) or native (runs inside craze)"
         in help_proc.stdout
     ), help_proc.stdout
     assert "ACP provider" not in help_proc.stdout, help_proc.stdout
@@ -935,7 +935,7 @@ def test_native_is_in_help_and_unknown_provider_error(
     )
     assert unknown_proc.returncode == 2
     assert "unknown provider" in unknown_proc.stderr
-    assert "cursor, grok, claude, or native" in unknown_proc.stderr, unknown_proc.stderr
+    assert "cursor, grok, claude, antigravity, or native" in unknown_proc.stderr, unknown_proc.stderr
     assert unknown_proc.stdout == ""
 
 

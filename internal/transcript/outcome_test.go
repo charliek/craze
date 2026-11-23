@@ -250,9 +250,11 @@ func TestAHiddenAskDrawsNoNote(t *testing.T) {
 	}
 }
 
-// HiddenBy reads the two card capabilities, and every shipped provider shows
-// both: the zero HiddenAsks, which a construction site with no capabilities
-// to hand assumes, is every real session's.
+// HiddenBy reads the two card capabilities, and every shipped provider but
+// antigravity shows both: the zero HiddenAsks, which a construction site with
+// no capabilities to hand assumes, is those sessions'. agy has questions but
+// no plan cards (its plan mode ends at a plan file, plan 053 § A4), so plan
+// notes are hidden for it.
 func TestHiddenByReadsTheCardCapabilities(t *testing.T) {
 	for _, tc := range []struct {
 		caps agent.Capabilities
@@ -268,8 +270,12 @@ func TestHiddenByReadsTheCardCapabilities(t *testing.T) {
 		}
 	}
 	for _, p := range agent.Providers() {
-		if got := HiddenBy(p.Capabilities()); got != (HiddenAsks{}) {
-			t.Errorf("provider %s hides %+v: the zero default no longer matches every shipped provider", p.Name(), got)
+		want := HiddenAsks{}
+		if p.Name() == "antigravity" {
+			want = HiddenAsks{Plans: true}
+		}
+		if got := HiddenBy(p.Capabilities()); got != want {
+			t.Errorf("provider %s hides %+v, want %+v: the zero default no longer matches every shipped provider but antigravity", p.Name(), got, want)
 		}
 	}
 }

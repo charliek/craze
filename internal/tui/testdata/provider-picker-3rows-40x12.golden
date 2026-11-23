@@ -1,7 +1,7 @@
   ╭──────────────────────────────────╮  
   │provider                          │  
-  │  grok                            │  
   │  claude                          │  
+  │  antigravity                     │  
   │> native                   default│  
   │↑↓ · tab · enter starts · esc use…│  
   ╰──────────────────────────────────╯  

@@ -55,6 +55,7 @@ var (
 	grokReady    = availEntry{"grok", "ready", "", ""}
 	nativeReady  = availEntry{"native", "ready", "", ""}
 	claudeReady  = availEntry{"claude", "ready", "", ""}
+	agyReady     = availEntry{"antigravity", "ready", "", ""}
 	cursorNotGUI = availEntry{"cursor", "unavailable",
 		"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain",
 		"run craze from a terminal on the Mac"}
@@ -114,19 +115,19 @@ func TestAvailabilityRules(t *testing.T) {
 	}{
 		{
 			name: "everything found on PATH",
-			want: []availEntry{cursorReady, grokReady, claudeReady, nativeReady},
+			want: []availEntry{cursorReady, grokReady, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name:    "cursor and grok missing on PATH",
 			resolve: map[string]binResolution{"cursor": miss(binFromPath, ""), "grok": miss(binFromPath, "")},
-			want:    []availEntry{cursorOnPath, grokOnPath, claudeReady, nativeReady},
+			want:    []availEntry{cursorOnPath, grokOnPath, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name:    "missing through --agent-bin",
 			resolve: map[string]binResolution{"cursor": miss(binFromFlag, "/opt/x/cursor-agent")},
 			want: []availEntry{
 				{"cursor", "unavailable", "--agent-bin /opt/x/cursor-agent not found", "point --agent-bin at an existing binary"},
-				grokReady, claudeReady, nativeReady,
+				grokReady, claudeReady, agyReady, nativeReady,
 			},
 		},
 		{
@@ -135,7 +136,7 @@ func TestAvailabilityRules(t *testing.T) {
 			want: []availEntry{
 				cursorReady,
 				{"grok", "unavailable", "CRAZE_AGENT_BIN /opt/x/grok not found", "point CRAZE_AGENT_BIN at an existing binary, or unset it"},
-				claudeReady, nativeReady,
+				claudeReady, agyReady, nativeReady,
 			},
 		},
 		{
@@ -144,18 +145,18 @@ func TestAvailabilityRules(t *testing.T) {
 			want: []availEntry{
 				{"cursor", "unavailable", "[agents].cursor /opt/x/cursor-agent not found",
 					"point [agents].cursor at an existing binary in " + availConfig},
-				grokReady, claudeReady, nativeReady,
+				grokReady, claudeReady, agyReady, nativeReady,
 			},
 		},
 		{
 			name:    "found through each override",
 			resolve: map[string]binResolution{"cursor": hit(binFromFlag, "/a/cursor-agent"), "grok": hit(binFromEnv, "/a/grok")},
-			want:    []availEntry{cursorReady, grokReady, claudeReady, nativeReady},
+			want:    []availEntry{cursorReady, grokReady, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name: "cursor outside the login session, the TUI's or CLI's answer",
 			gui:  notGUI,
-			want: []availEntry{cursorNotGUI, grokReady, claudeReady, nativeReady},
+			want: []availEntry{cursorNotGUI, grokReady, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name:   "cursor outside the login session, the hub's answer",
@@ -163,30 +164,30 @@ func TestAvailabilityRules(t *testing.T) {
 			hubPID: 4242,
 			want: []availEntry{
 				{"cursor", "unavailable", cursorNotGUI.Reason, `kill 4242 (no session ends), then run "craze ps" in a terminal on the Mac`},
-				grokReady, claudeReady, nativeReady,
+				grokReady, claudeReady, agyReady, nativeReady,
 			},
 		},
 		{
 			name: "a login session that is not known marks nothing",
 			gui:  unknown,
-			want: []availEntry{cursorReady, grokReady, claudeReady, nativeReady},
+			want: []availEntry{cursorReady, grokReady, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name:    "missing while outside the login session: the missing binary wins",
 			resolve: map[string]binResolution{"cursor": miss(binFromPath, "")},
 			gui:     notGUI,
 			hubPID:  4242,
-			want:    []availEntry{cursorOnPath, grokReady, claudeReady, nativeReady},
+			want:    []availEntry{cursorOnPath, grokReady, claudeReady, agyReady, nativeReady},
 		},
 		{
 			name:   "native needs setup",
 			native: nativeAs(availNeedsSetup, nativeNoKeyReason, nativeNoKeyFix),
-			want:   []availEntry{cursorReady, grokReady, claudeReady, {"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}},
+			want:   []availEntry{cursorReady, grokReady, claudeReady, agyReady, {"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}},
 		},
 		{
 			name:   "native unavailable",
 			native: nativeAs(availUnavailable, "models.toml could not be read", nativeUnreadFix),
-			want: []availEntry{cursorReady, grokReady, claudeReady,
+			want: []availEntry{cursorReady, grokReady, claudeReady, agyReady,
 				{"native", "unavailable", "models.toml could not be read", nativeUnreadFix}},
 		},
 	} {
@@ -649,7 +650,7 @@ func TestHubResolution(t *testing.T) {
 // to the cap; native from the process's craze directory, and unavailable
 // with no home directory at all.
 func TestAvailabilityInputsFromTheProcess(t *testing.T) {
-	availPath(t, "cursor-agent", "grok", "claude-agent-acp", "claude")
+	availPath(t, "cursor-agent", "grok", "claude-agent-acp", "claude", "agy")
 	crazeHome(t)
 	t.Setenv(envAgentBin, "")
 	t.Setenv(agent.ClaudeExecutableEnv, "")
@@ -658,13 +659,13 @@ func TestAvailabilityInputsFromTheProcess(t *testing.T) {
 
 	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}
 	own := availEntries(availability(processAvailInputs(cursor, ""), agent.Providers()))
-	if want := []availEntry{cursorNotGUI, grokReady, claudeReady, needsSetup}; !reflect.DeepEqual(own, want) {
+	if want := []availEntry{cursorNotGUI, grokReady, claudeReady, agyReady, needsSetup}; !reflect.DeepEqual(own, want) {
 		t.Fatalf("the TUI's answer outside the login session:\n%+v\nwant:\n%+v", own, want)
 	}
 	hub := availEntries(availability(hubAvailInputs(4242), agent.Providers()))
 	hubCursor := cursorNotGUI
 	hubCursor.Fix = `kill 4242 (no session ends), then run "craze ps" in a terminal on the Mac`
-	if want := []availEntry{hubCursor, grokReady, claudeReady, needsSetup}; !reflect.DeepEqual(hub, want) {
+	if want := []availEntry{hubCursor, grokReady, claudeReady, agyReady, needsSetup}; !reflect.DeepEqual(hub, want) {
 		t.Fatalf("the hub's answer outside the login session:\n%+v\nwant:\n%+v", hub, want)
 	}
 
@@ -698,15 +699,16 @@ func TestAvailabilityIsNeverCached(t *testing.T) {
 	t.Setenv(agent.ClaudeExecutableEnv, "")
 	in := processAvailInputs(agent.CursorProvider(), "")
 	before := availEntries(availability(in, agent.Providers()))
-	if before[1].State != "unavailable" || before[2].State != "unavailable" || before[3].State != "needs_setup" {
+	if before[1].State != "unavailable" || before[2].State != "unavailable" || before[3].State != "unavailable" || before[4].State != "needs_setup" {
 		t.Fatalf("before: %+v", before)
 	}
 	writeExecutable(t, path, "grok")
 	writeExecutable(t, path, "claude-agent-acp")
+	writeExecutable(t, path, "agy")
 	writeNativeFile(t, native, modeltable.ProvidersFile,
 		"version = 1\n\n[providers.openrouter]\napi_key = \"sk-avail-canary-0003\"\n")
 	after := availEntries(availability(in, agent.Providers()))
-	if want := []availEntry{cursorReady, grokReady, claudeReady, nativeReady}; !reflect.DeepEqual(after, want) {
+	if want := []availEntry{cursorReady, grokReady, claudeReady, agyReady, nativeReady}; !reflect.DeepEqual(after, want) {
 		t.Fatalf("after a grok, the claude adapter and a key:\n%+v\nwant:\n%+v", after, want)
 	}
 }
@@ -731,7 +733,8 @@ func pickerEntries(as []tui.ProviderAvail) []availEntry {
 func TestPickerAvailability(t *testing.T) {
 	cursor, grok := agent.CursorProvider(), agent.GrokProvider()
 	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFixTUI}
-	rows := []string{"cursor", "grok", "claude", "native"}
+	rows := []string{"cursor", "grok", "claude", "antigravity", "native"}
+	agyMissing := availEntry{"antigravity", "unavailable", "agy not found on PATH", ""}
 	claudeMissing := availEntry{"claude", "unavailable", "claude-agent-acp not found on PATH", ""}
 	for _, tc := range []struct {
 		name   string
@@ -739,16 +742,18 @@ func TestPickerAvailability(t *testing.T) {
 		def    agent.Provider
 		want   []availEntry
 	}{
-		{name: "everything installed", onPath: []string{"cursor-agent", "grok", "claude-agent-acp", "claude"}, def: cursor,
-			want: []availEntry{cursorReady, grokReady, claudeReady, needsSetup}},
-		{name: "grok missing stays a row, unavailable", onPath: []string{"cursor-agent", "claude-agent-acp", "claude"}, def: cursor,
-			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, claudeReady, needsSetup}},
-		{name: "grok missing and the default", onPath: []string{"cursor-agent", "claude-agent-acp", "claude"}, def: grok,
-			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, claudeReady, needsSetup}},
-		{name: "cursor missing and grok the default", onPath: []string{"grok", "claude-agent-acp", "claude"}, def: grok,
-			want: []availEntry{{"cursor", "unavailable", "cursor-agent not found on PATH", ""}, grokReady, claudeReady, needsSetup}},
-		{name: "claude's adapter missing stays a row, unavailable", onPath: []string{"cursor-agent", "grok", "claude"}, def: cursor,
-			want: []availEntry{cursorReady, grokReady, claudeMissing, needsSetup}},
+		{name: "everything installed", onPath: []string{"cursor-agent", "grok", "claude-agent-acp", "claude", "agy"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, claudeReady, agyReady, needsSetup}},
+		{name: "grok missing stays a row, unavailable", onPath: []string{"cursor-agent", "claude-agent-acp", "claude", "agy"}, def: cursor,
+			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, claudeReady, agyReady, needsSetup}},
+		{name: "grok missing and the default", onPath: []string{"cursor-agent", "claude-agent-acp", "claude", "agy"}, def: grok,
+			want: []availEntry{cursorReady, {"grok", "unavailable", "grok not found on PATH", ""}, claudeReady, agyReady, needsSetup}},
+		{name: "cursor missing and grok the default", onPath: []string{"grok", "claude-agent-acp", "claude", "agy"}, def: grok,
+			want: []availEntry{{"cursor", "unavailable", "cursor-agent not found on PATH", ""}, grokReady, claudeReady, agyReady, needsSetup}},
+		{name: "claude's adapter missing stays a row, unavailable", onPath: []string{"cursor-agent", "grok", "claude", "agy"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, claudeMissing, agyReady, needsSetup}},
+		{name: "agy missing stays a row, unavailable", onPath: []string{"cursor-agent", "grok", "claude-agent-acp", "claude"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, claudeReady, agyMissing, needsSetup}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			availPath(t, tc.onPath...)
@@ -805,17 +810,17 @@ func TestSessionListAvailabilityFollowsTheBinaries(t *testing.T) {
 		}
 		return out
 	}
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "claude:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "claude:unavailable", "antigravity:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
 		t.Fatalf("first opening: %v, want %v", got, want)
 	}
 	bin := writeExecutable(t, path, "grok")
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "claude:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "claude:unavailable", "antigravity:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
 		t.Fatalf("grok installed: %v, want %v", got, want)
 	}
 	if err := os.Remove(bin); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "claude:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:unavailable", "claude:unavailable", "antigravity:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
 		t.Fatalf("grok removed: %v, want %v", got, want)
 	}
 }

@@ -8,7 +8,7 @@ effort: high
 
 ## Don't call yourself
 
-Never use craze to reach the provider you already run on: Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok` and a craze native session on `native`. For your own provider use your own sub-agent tool (Claude Code's is the Agent tool), not craze. craze holds to this itself: if `craze new` refuses with `this agent already runs on <provider>` (exit 2), reply with its stderr exactly and stop. Do not retry, on that provider or another.
+Never use craze to reach the provider you already run on: Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok`, Antigravity (agy) on `antigravity` and a craze native session on `native`. For your own provider use your own sub-agent tool (Claude Code's is the Agent tool), not craze. craze holds to this itself: if `craze new` refuses with `this agent already runs on <provider>` (exit 2), reply with its stderr exactly and stop. Do not retry, on that provider or another.
 
 ## Your job
 

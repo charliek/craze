@@ -48,6 +48,12 @@ func claudeAdapterFix(config string) string {
 	return engine.RowLine("install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in " + config)
 }
 
+// agyMissingFix is craze providers' fix for agy missing, cut as
+// claudeAdapterFix's is.
+func agyMissingFix(config string) string {
+	return engine.RowLine("install agy, or set [agents].antigravity in " + config)
+}
+
 // cursorMissingFix is craze providers' fix for cursor-agent missing, cut as
 // claudeAdapterFix's is.
 func cursorMissingFix(config string) string {
@@ -65,12 +71,13 @@ func TestProvidersTable(t *testing.T) {
 		t.Fatalf("craze providers: exit %d %q", code, stderr)
 	}
 	row := func(cells ...string) string {
-		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
+		return fmt.Sprintf("%-13s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
 		row("cursor", "unavailable", "cursor-agent not found on PATH", cursorMissingFix(config)) +
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
+		row("antigravity", "unavailable", "agy not found on PATH", agyMissingFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix)
 	if stdout != want {
 		t.Fatalf("craze providers:\n%s\nwant:\n%s", stdout, want)
@@ -102,6 +109,8 @@ func TestProvidersJSON(t *testing.T) {
 		`{"id":"grok","label":"grok","state":"ready"},` +
 		`{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":` +
 		q(claudeAdapterFix(config)) + `},` +
+		`{"id":"antigravity","label":"antigravity","state":"unavailable","reason":"agy not found on PATH","fix":` +
+		q(agyMissingFix(config)) + `},` +
 		`{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":` +
 		q(nativeNoKeyFix) + `}]}` + "\n"
 	if stdout != want {
@@ -159,7 +168,7 @@ func TestProvidersJSONIsTheWiresProviderOption(t *testing.T) {
 	var doc struct {
 		Providers []json.RawMessage `json:"providers"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 4 {
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 5 {
 		t.Fatalf("craze providers --json printed %q (%v)", stdout, err)
 	}
 	for _, p := range doc.Providers {
@@ -261,12 +270,13 @@ func TestProvidersHub(t *testing.T) {
 		t.Fatalf("craze providers --hub: exit %d %q", code, stderr)
 	}
 	row := func(cells ...string) string {
-		return fmt.Sprintf("%-10s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
+		return fmt.Sprintf("%-13s%-13s%-36s%s\n", cells[0], cells[1], cells[2], cells[3])
 	}
 	want := row("PROVIDER", "STATE", "REASON", "FIX") +
 		row("cursor", "unavailable", "cursor-agent not found on PATH", cursorMissingFix(config)) +
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
+		row("antigravity", "unavailable", "agy not found on PATH", agyMissingFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix) +
 		"default: grok\n" +
 		"recent: " + work + "\n" +
@@ -283,7 +293,7 @@ func TestProvidersHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	var res protocol.CreateOptionsResult
-	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 4 ||
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 5 ||
 		len(res.RecentDirs) != 2 || res.RecentDirs[0].Dir != work {
 		t.Fatalf("craze providers --hub --json printed %q (%v)", stdout, err)
 	}

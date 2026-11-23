@@ -37,6 +37,7 @@ as the prompt.
 | `craze:muse` | native `muse-spark-1.3-contributor` | routine, bounded tasks, cheaply |
 | `craze:wonder` | native `muse-wonder-1.0`, effort high | hard tasks, at about three times Spark's price per token |
 | `craze:grok` | grok `grok-4.7`, effort high | Grok's own agent |
+| `craze:neon` | antigravity `gemini-4-neon`, effort high | Antigravity's agent (Gemini 4 Neon); no `mode=ask` |
 | `craze:cursor` | cursor `composer-2.5` | Cursor's agent |
 
 `craze:delegate` reads a first line naming the target, then the task:
@@ -46,13 +47,16 @@ target: native chatgpt/gpt-6.2-sol effort=high mode=plan
 Review internal/cache/evict.go for races. Report each one with the line and a fix.
 ```
 
-The provider is `native`, `cursor`, `grok` or `claude` (`claude` takes no
-`mode=ask`, and craze refuses it from Claude Code itself: [below](#dont-call-yourself));
+The provider is `native`, `cursor`, `grok`, `claude` or `antigravity` (`claude` and
+`antigravity` take no `mode=ask`, and craze refuses `claude` from Claude Code itself:
+[below](#dont-call-yourself));
 the model, effort (`low`, `medium`, `high`, `xhigh`, `max`) and mode (`plan` or
 `ask`) are optional. The
 native presets take the task alone, or an optional first line of `mode=plan` or
 `mode=ask` and `web=on` or `web=off`, in either order; `craze:grok` and `craze:cursor` take
-`mode=` only.
+`mode=` only, and `craze:neon` takes `mode=plan` only: it answers `mode=ask` with a refusal and
+runs nothing. An Antigravity session's asynchronous sub-agents may still be running when the
+turn ends, and their results are not in that turn's result.
 
 `web=on` (native only, `target:` line included: `target: native … web=on`) gives the session
 web search and page fetch, for information newer than the model's training or not in the
@@ -138,6 +142,7 @@ does that better:
 | Claude Code | `claude` | the Agent tool |
 | Cursor | `cursor` | Cursor's own sub-agents |
 | Grok | `grok` | Grok's own sub-agents |
+| Antigravity (`agy`) | `antigravity` | agy's own sub-agents |
 | a craze native session | `native` | the `agent` tool, which runs any native model (`craze:sol`'s included) |
 
 Every agent file opens with this rule, and there is no `craze:claude` preset:
@@ -147,8 +152,9 @@ the caller's own provider, exit 2: `craze: this agent already runs on claude;
 use your own sub-agent tool for claude work, not craze (--allow-same-provider
 overrides)`. It knows a craze session by `CRAZE_SESSION_PROVIDER` (craze sets
 it for every agent it starts, native's shell included), Claude Code by
-`CLAUDECODE=1` and a standalone `cursor-agent` by `CURSOR_AGENT`. With both of
-those and no `CRAZE_SESSION_PROVIDER`, one started the other and the caller is
+`CLAUDECODE=1`, a standalone `cursor-agent` by `CURSOR_AGENT` and a standalone
+`agy` by `ANTIGRAVITY_AGENT`. With two or more of those and no
+`CRAZE_SESSION_PROVIDER`, one started the other and the caller is
 unknown, so craze does not refuse. Grok sets no marker craze
 trusts, so from Grok the rule is the text alone. The agents return the
 refusal as it is and do not retry; `--allow-same-provider` is for a person who

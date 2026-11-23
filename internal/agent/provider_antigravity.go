@@ -52,9 +52,8 @@ var antigravityModeKinds = map[string]ModeKind{
 	"plan":         ModePlan,
 }
 
-// AntigravityProvider is agy (plan 053 § A). It is hidden until its listing
-// milestone (M2), as claude was through its first ones: resolvable by id,
-// shown by no listing. Under craze's default --force it runs `agy acp
+// AntigravityProvider is agy (plan 053 § A), listed after claude and before
+// native. Under craze's default --force it runs `agy acp
 // --dangerously-skip-permissions`, under --no-force `agy acp`; the user's own
 // agy login and HOME are used, and the environment gains nothing but the
 // caller marker (spawnEnv). Its capabilities (§ A4): questions over
@@ -85,7 +84,6 @@ func AntigravityProvider() Provider {
 		forceAfter:      1,
 		forceArgs:       []string{"--dangerously-skip-permissions"},
 		loginHint:       antigravityLoginHint,
-		hidden:          true,
 		resumable:       true,
 		capabilities: Capabilities{
 			Effort:              true,

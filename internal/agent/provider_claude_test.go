@@ -718,7 +718,7 @@ func TestClaudeProviderIsListedAndResolvable(t *testing.T) {
 	if err != nil || p.Hidden() || !p.Resumable() || p.Dialect() != acp.DialectClaude || !slices.Equal(p.Bins(), []string{"claude-agent-acp"}) {
 		t.Fatalf("%+v %v", p, err)
 	}
-	if !slices.Equal(ProviderNames(), []string{"cursor", "grok", "claude", "native"}) {
+	if !slices.Equal(ProviderNames(), []string{"cursor", "grok", "claude", "antigravity", "native"}) {
 		t.Fatalf("listed %q; want claude after grok", ProviderNames())
 	}
 	// The capabilities: sub-agent rows, transcripts and the per-child stop (§

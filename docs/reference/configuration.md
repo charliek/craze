@@ -742,7 +742,8 @@ terminal is reset, the same as the tab title.
 ## Provider precedence
 
 Ids are `cursor`, `grok`, `claude` ([The claude
-provider](#the-claude-provider)) and `native`. An empty string (`--provider ""`,
+provider](#the-claude-provider)), `antigravity` ([The antigravity
+provider](#the-antigravity-provider)) and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
 Every id is always offered in the startup picker, so the picker can never be
@@ -784,6 +785,7 @@ path:
 cursor = "/opt/cursor/bin/cursor-agent"
 grok = "/home/me/.local/bin/grok"
 claude = "/home/me/.local/bin/claude-agent-acp"
+antigravity = "/home/me/.local/bin/agy"
 ```
 
 A session of an ACP provider runs the first of:
@@ -795,7 +797,7 @@ A session of an ACP provider runs the first of:
    `--continue` or `--resume` load, the loaded session's;
 3. `[agents].<provider>`;
 4. the provider's own name on `PATH`: `cursor-agent` then `agent` for
-   cursor, `grok` for grok, `claude-agent-acp` for claude.
+   cursor, `grok` for grok, `claude-agent-acp` for claude, `agy` for antigravity.
 
 For claude these name the **adapter** alone. The `claude` it runs — Claude
 Code itself — is `$CLAUDE_CODE_EXECUTABLE` when that is set, else `claude` on
@@ -935,6 +937,108 @@ skills and MCP servers — applies as it does in Claude Code, but for these:
 - **`--force`** answers a permission with the option that allows that one
   call, never the one that saves a permanent rule into your Claude settings;
   a request with no such option shows its card.
+
+## The antigravity provider
+
+`antigravity` runs **Google's Antigravity CLI, `agy`, on your Antigravity
+plan**, over ACP: craze spawns `agy acp` and `agy` runs the agent, with its own
+tools, skills and models (Gemini 4 Neon, Argon and Hydrogen among them). craze
+holds no credential, never logs you in, and uses your own `agy` login and
+`$HOME`. It is listed after claude and before native by `craze providers`, the
+picker and `--help`, and reached with `--provider antigravity` (or `provider =
+"antigravity"`, `CRAZE_PROVIDER=antigravity`). The versions tested are `agy`
+**1.5.14**; craze does not check the version, and a newer or older one is not
+refused.
+
+### What it needs
+
+- **`agy`**, found as [Agent binaries](#agent-binaries) says: `--agent-bin`,
+  `$CRAZE_AGENT_BIN`, `[agents].antigravity`, then `agy` on `PATH`. A missing
+  one is `unavailable` in the picker and `craze providers`, with `install agy,
+  or set [agents].antigravity in …`.
+- **A sign-in.** craze never calls `authenticate` (every method `agy` offers is
+  interactive, or needs a key or application default credentials). Sign in
+  once, in a terminal, with `agy acp --login`, which prints a URL and reads a
+  pasted code. A logged-out `agy` answers `Authentication required` (JSON-RPC
+  `-32000`) to the first `session/new`, `session/load` or prompt, and craze
+  fails the start, or ends the turn, with kind `auth`:
+  ``agent: Authentication required (run `agy acp --login`)``. A `-32000` with
+  any other message is left as `agy` said it.
+
+### What craze sets
+
+- **The command.** Under craze's default `--force`, `agy acp
+  --dangerously-skip-permissions`; under `--no-force`, `agy acp`. With the flag,
+  `agy` stops asking before `run_command`; without it a permission card shows
+  for each shell command (the options are allow once and deny). Questions and
+  plan mode behave the same either way. craze adds no `--process-per-session`,
+  no `--gemini-dir` and no environment but `CRAZE_SESSION_PROVIDER=antigravity`.
+- **Models.** `agy` lists each model several times, once per effort
+  (`gemini-4-neon-high`); craze shows the nine base models the `model` option
+  offers (`gemini-4-neon` is `agy`'s default), and the effort as its own
+  control: `agy`'s `thought_level` option, `low`, `medium`, `high` and `xhigh`
+  (`xhigh` on Neon and Hydrogen only). A model with no effort option, such as
+  `gpt-oss-120b-medium` and the orchestrator models, shows no `/effort`.
+  `--model gemini-4-neon-high` still works: `agy` splits it into a model and a
+  level.
+- **Modes.** `default`, `accept-edits` and `auto` are implement modes and
+  `plan` is the plan mode; `Shift+Tab` cycles all four. `agy` has no
+  read-only mode, so `--ask` fails **before the spawn** with `mode ask is not
+  advertised` (kind `config`), and `/ask` is refused with the same words.
+- **Plan mode.** A plan-mode turn writes its plan as a markdown file under
+  `agy`'s brain directory and ends; `agy` sends no plan card and asks nothing.
+  The composer offers `Enter implements this plan`: accepting it leaves plan
+  mode for `default` and sends `Implement the plan above.` `agy`'s plan
+  discipline is its own: craze does not stop a plan-mode turn from editing.
+- **Questions.** `agy`'s questions arrive as question cards (the free-text
+  answer goes back as the question's "other" answer); `Esc` skips one, which
+  `agy` reads as "User Skipped". An unattended session answers with the
+  first option.
+- **Skills and slash commands** are `agy`'s: it advertises its built-in and
+  workspace skills in its command list and expands them itself, so craze scans
+  no skill directories for it. craze's own commands (`/plan` among them) win a
+  name clash.
+- **The model and the effort are remembered.** An antigravity session's
+  [index](#session-index) row records its model and its effort, and a resume
+  asks for each again after `session/load`, because `agy` ignores a model or
+  effort in the load request and answers on its default (`gemini-4-neon`,
+  `high`). `--model` on the resume names the model (no recorded value is then
+  applied, and the effort is the model's default unless `--effort` is given);
+  `--effort` alone keeps the recorded model. A value `agy` refuses leaves one
+  note saying so, and the session runs on `agy`'s value; the start does not
+  fail.
+
+### What it does not do
+
+- **A stale session loads empty.** `agy` answers a load of a session id it no
+  longer has with an empty session and no error. craze loads only ids its own
+  index holds, so this is a session deleted outside craze: it comes back with
+  no history, where every other provider refuses. craze cannot tell the two
+  apart.
+- **Asynchronous sub-agents can outlive their turn.** `invoke_subagent`
+  returns at once and the children run on in `agy`; a parent that ends its turn
+  first leaves them running, and what they find reaches the session only if
+  `agy` reports it in a later turn. In an unattended session (`craze new
+  --wait`) the turn's result does not include them; the host keeps `agy` until
+  its idle limit (ten minutes by default), or stops it at once under
+  `--exit-after-turn`, and children still running then are lost. Their rows
+  say `completed` at the turn's end all the same: a row stays running until its
+  turn settles and then takes the turn's outcome (see [Sub-agents](tui.md#antigravity-sub-agents)).
+- **The brain directory is assumed at `$HOME/.gemini/antigravity-cli/brain`.**
+  craze tells `agy`'s plan file from its other artifacts by that path (the
+  session's own `<session id>` directory under it); `agy` run with a custom
+  gemini directory, which craze never passes, would show those writes as
+  edits outside the workspace.
+- **No fast toggle, no todo list, no plan card, no `/btw`, no mid-turn
+  interjection, no usage or cost report, and no sub-agent transcript, stop or
+  background row**: `agy` exposes none of them over ACP. craze lists no
+  `agy`-native sessions (`session/list` is not used).
+- **`ANTIGRAVITY_AGENT` outside an agent.** `agy` sets `ANTIGRAVITY_AGENT=1` in
+  its shell commands, and craze reads it as the
+  [caller marker](cli.md#starting-your-own-provider) of a standalone `agy`. If
+  your terminal exports it without running `agy` (the Antigravity desktop app's
+  may), `craze new --provider antigravity` from there is refused as
+  self-delegation; `--allow-same-provider` starts it.
 
 ## Native models and providers
 

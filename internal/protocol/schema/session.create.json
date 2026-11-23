@@ -9,7 +9,7 @@
       "properties": {
         "cwd": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "The session's directory: an absolute path to an existing directory."},
         "prompt": {"type": "string", "minLength": 1, "description": "The first prompt, sent once the session has started; absent for none."},
-        "provider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "A provider id (cursor, grok, native); absent for the hub's configured default, and with none configured the create is bad_request."},
+        "provider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "A provider id (cursor, grok, claude, antigravity, native); absent for the hub's configured default, and with none configured the create is bad_request."},
         "model": {"type": "string", "minLength": 1, "maxLength": 256, "description": "The model to start on (the host's --model); absent for the provider's default."},
         "effort": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The effort to start at, where the model offers one (the host's --effort); absent for the model's own."},
         "fast": {"type": "boolean", "description": "The fast setting to start with, where the model offers one (--fast or --no-fast); absent for the model's own."},

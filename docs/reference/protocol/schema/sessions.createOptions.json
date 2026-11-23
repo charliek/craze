@@ -8,7 +8,7 @@
     "result": {
       "type": "object",
       "properties": {
-        "providers": {"type": "array", "items": {"$ref": "#/$defs/providerOption"}, "maxItems": 16, "description": "The agent providers this machine lists, in craze's registry order (cursor, grok, claude, native), each with its state on this machine. Each provider's binary is resolved as a host the hub creates resolves it — [agents] in the hub's config.toml, then PATH — and native and the macOS login session are the hub's own, which its hosts inherit."},
+        "providers": {"type": "array", "items": {"$ref": "#/$defs/providerOption"}, "maxItems": 16, "description": "The agent providers this machine lists, in craze's registry order (cursor, grok, claude, antigravity, native), each with its state on this machine. Each provider's binary is resolved as a host the hub creates resolves it — [agents] in the hub's config.toml, then PATH — and native and the macOS login session are the hub's own, which its hosts inherit."},
         "defaultProvider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The provider a session.create that names none starts: provider in the hub's config.toml (the one the last session to start persisted). Absent when none is set, or when it names no provider craze knows. It may name a provider that is not ready (a binary not installed, or native with no key)."},
         "recentDirs": {"type": "array", "items": {"$ref": "#/$defs/recentDir"}, "maxItems": 20, "description": "The directories sessions ran in, newest first, from the hub's session index: distinct once cleaned, absolute, and still directories. [] for none, and when the index cannot be read (the hub logs why)."}
       },
