@@ -61,7 +61,10 @@ import (
 //	                           invoke_subagent still in progress
 //	CRAZE_FAKE_AGY_PUSH_ON_NEW  a model id: session/new's catalog gains it in
 //	                           an update sent ahead of the reply, which
-//	                           still lists the nine
+//	                           still lists the nine; a set can then choose it
+//	CRAZE_FAKE_AGY_REPLAY_CATALOG  a model id: a load's replay carries a
+//	                           catalog update offering it, which the reply
+//	                           does not
 //	CRAZE_FAKE_AGY_EXIT_AFTER_LOAD  a Go duration: the agent exits that long
 //	                           after answering session/load
 //	CRAZE_FAKE_SET_REFUSE, CRAZE_FAKE_SET_GATE as for every script
@@ -206,6 +209,12 @@ func (a *agyState) set(id, value string) string {
 	defer a.mu.Unlock()
 	switch id {
 	case "model":
+		if a.extra != "" && value == a.extra {
+			// The model CRAZE_FAKE_AGY_PUSH_ON_NEW added: it offers no
+			// thought levels.
+			a.model, a.level = value, ""
+			return ""
+		}
 		m, ok := agyModelByID(value)
 		level := ""
 		if !ok {
@@ -379,6 +388,18 @@ func (s *server) agyReplay(sid string) {
 		map[string]any{"locations": []map[string]string{{"path": plan}}, "rawOutput": map[string]any{}, "content": []map[string]any{{"type": "diff", "path": plan, "newText": "# plan"}}}))
 	s.update(sid, agyTool(acp.UpdateToolCall, "call_replay_sub", "invoke_subagent", "other", "Run invoke_subagent", "completed",
 		map[string]any{"Prompt": "count", "Role": "Replayed runner", "TypeName": "self"}, nil))
+	if extra := os.Getenv("CRAZE_FAKE_AGY_REPLAY_CATALOG"); extra != "" {
+		// A catalog update in the replay offering a model the load's reply,
+		// built after it, no longer lists.
+		s.agy.mu.Lock()
+		s.agy.extra = extra
+		s.agy.mu.Unlock()
+		cat := s.agy.catalog()
+		s.agy.mu.Lock()
+		s.agy.extra = ""
+		s.agy.mu.Unlock()
+		s.update(sid, map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": cat})
+	}
 	if os.Getenv("CRAZE_FAKE_AGY_REPLAY_RUNNING") == "1" {
 		// A call replayed short of its end: a row no turn owns.
 		s.update(sid, agyTool(acp.UpdateToolCall, "call_replay_running", "invoke_subagent", "other", "Run invoke_subagent", "in_progress",

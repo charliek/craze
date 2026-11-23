@@ -157,6 +157,15 @@ func checkAgent(text string) []string {
 // target spells; the release that ships it replaces it, as webNote's.
 const claudeNote = "a craze newer than 0.3.0"
 
+// agyNote is the phrase every place that states a minimum for the
+// antigravity target spells (plan 053); the release that ships it replaces
+// it, as webNote's.
+const agyNote = "a craze newer than 0.4.1"
+
+// agyUnknown is what a craze that predates the antigravity provider says to
+// --provider antigravity (exit 2): what the agents' too-old rule for it reads.
+const agyUnknown = "unknown provider \"antigravity\""
+
 // webNote is the phrase every place that states a minimum for web= spells;
 // RELEASING.md's release step replaces it with the version that ships the
 // feature.
@@ -443,6 +452,50 @@ func TestClaudeTarget(t *testing.T) {
 		"skills/craze/references/commands.md": {"`claude`", claudeNote, "--allow-same-provider", "this agent already runs on"},
 		"docs/getting-started/claude-code.md": {"Don't call yourself", "--provider claude", "this agent already runs on",
 			"claude: unpriced, on your Claude plan", claudeNote},
+	} {
+		text := readFile(t, root, rel)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %s", rel, want)
+			}
+		}
+	}
+}
+
+// TestAntigravityTarget (plan 053): every place that states the antigravity
+// target's minimum says agyNote; craze:neon and craze:delegate answer an old
+// craze's unknown-provider refusal with their own too-old line, ahead of the
+// general one; and the plan-mode and unattended caveats are stated.
+func TestAntigravityTarget(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct{ name, line string }{
+		{"neon", "`this craze is too old; craze:neon needs " + agyNote + "`"},
+		{"delegate", "`this craze is too old; the antigravity target needs " + agyNote + "`"},
+	} {
+		fm, body, err := frontmatter(readFile(t, root, "agents/"+tc.name+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(fm["description"], agyNote) {
+			t.Errorf("agents/%s.md: description does not say %s", tc.name, agyNote)
+		}
+		rule := strings.Index(body, tc.line)
+		general := strings.Index(body, "this craze is too old; the plugin needs")
+		if rule < 0 || general < 0 || rule > general || !strings.Contains(body, agyUnknown) {
+			t.Errorf("agents/%s.md: no %s rule on %s ahead of the general one", tc.name, tc.line, agyUnknown)
+		}
+	}
+	fm, _, err := frontmatter(readFile(t, root, "skills/craze/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fm["description"], agyNote) {
+		t.Errorf("skills/craze/SKILL.md: description does not say %s", agyNote)
+	}
+	for rel, wants := range map[string][]string{
+		"agents/delegate.md":                  {"on antigravity craze does not stop agy from editing in plan mode"},
+		"skills/craze/SKILL.md":               {agyNote, agyUnknown, "On antigravity the plan mode is agy's own", "On antigravity, a sub-agent agy launched"},
+		"skills/craze/references/commands.md": {agyNote, agyUnknown, "On `antigravity` it is agy's own plan mode"},
 	} {
 		text := readFile(t, root, rel)
 		for _, want := range wants {

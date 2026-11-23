@@ -1722,7 +1722,7 @@ than that is future work behind a new capability.
 Carried by an attach reply's `session`, a `ready` notification's `session`,
 and the first half of a `sessions.list` row. It is **final** once the
 session is up — its catalogs are empty and `providerSessionId` may be `""`
-until then — but for a native session's model list, which
+until then — but for a native or antigravity session's model list, which
 [changes while it runs](#live-models): each document carries the list as it
 stands when it is built.
 
@@ -2458,9 +2458,10 @@ catalog section, its revision one past the last. Its models carry `id` and
   switched to ranks first, and its row's `switchEffort` is the effort it was
   left at — the same models, at the next revision. A change that changes no
   row publishes no section.
-- No ACP session publishes one, and neither does a native session before its
-  first change: the key is **absent** then — never `null`, never `{}` — and
-  the list is the info document's.
+- No ACP session but an antigravity one publishes one, and neither a native
+  nor an antigravity session does before its list's first change: the key is
+  **absent** then — never `null`, never `{}` — and the list is the info
+  document's.
 
 The section stands in the reads of where things are, as usage does: a
 snapshot's `settings.catalog` (the last section a delta carried) and

@@ -92,7 +92,9 @@ sudo apt install craze
 The [Quick Start](docs/getting-started/quick-start.md#install) has the direct
 `.deb`, `go install`, building from source and what `craze version` reports. To
 run craze you also need a way to reach a model: the native provider (an API key
-or a ChatGPT plan), or `cursor-agent` or `grok` installed and logged in
+or a ChatGPT plan), `cursor-agent` or `grok` installed and logged in, Claude
+Code signed in to a Claude plan, or `agy` (Google's Antigravity CLI) installed
+and signed in
 ([prerequisites](docs/getting-started/quick-start.md#prerequisites)).
 Upgrading? See [Upgrading](docs/getting-started/upgrading.md).
 

@@ -403,7 +403,7 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 	if d.onlyIfInFlight || t.Status != toolCompleted || !rule.is(*t) {
 		return
 	}
-	if t.Edited != nil && !d.hasLocations && !d.hasContent {
+	if t.Edited != nil && !d.hasLocations && !d.hasContent && !s.feedbackMovedSinceStamp(rule, d.id) {
 		return
 	}
 	s.mu.Lock()
@@ -420,6 +420,10 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 		}
 	}
 	feedback := s.feedbackCalls[d.id]
+	if rule.antigravityBrain {
+		// What this stamp was classified with, for feedbackMovedSinceStamp.
+		s.stampedFeedback.note(d.id, feedback)
+	}
 	s.mu.Unlock()
 	if testBeforeEditStamp != nil {
 		testBeforeEditStamp()
@@ -446,6 +450,20 @@ func (s *session) stampEditedLive(d toolDelta, t *ToolEvent, changed *bool) {
 	}
 	s.mu.Unlock()
 	t.Edited, *changed = edited.clone(), true
+}
+
+// feedbackMovedSinceStamp reports whether call id's plan-file flag — the one
+// input of an antigravity stamp a rawInput-only update can change (plan 053 §
+// D3) — differs from the one its last stamp was classified with, so the stamp
+// is worked out again rather than kept. Any other provider's, and an agy call
+// whose flag stands, keeps the shortcut.
+func (s *session) feedbackMovedSinceStamp(rule editCall, id string) bool {
+	if !rule.antigravityBrain {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.feedbackCalls[id] != s.stampedFeedback[id]
 }
 
 // editWorkspace is the directory the agent runs in, as start works it out.

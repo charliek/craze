@@ -125,6 +125,9 @@ type session struct {
 	// feedbackCalls is, per main-session call of agy's, whether its rawInput
 	// asked for feedback on what it wrote: its plan file (plan 053 § D3).
 	feedbackCalls callFlags
+	// stampedFeedback is, per such call, the flag its stamp was last worked
+	// out with (stampEditedLive).
+	stampedFeedback callFlags
 	// toolPub keeps an update's merge, stamp and publish together
 	// (publishToolDelta). Never taken with mu held.
 	toolPub sync.Mutex
@@ -1520,7 +1523,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// simply absent after a resume, which plan 013 §4 documents. Tools,
 	// Subagents, Todos, Commands, Plugins and Title keep whatever the replay
 	// left behind.
-	s.snap.Models = restored.Models
+	s.installModelsLocked(restored.Models)
 	s.snap.Modes = restored.Modes
 	s.snap.Config = restored.Config
 	s.snap.CurrentModel = restored.CurrentModel
@@ -3965,6 +3968,22 @@ func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 		}
 	}
 	s.applyConfigLocked(cfg)
+}
+
+// installModelsLocked installs a load's model list. For a provider whose list
+// is its model option (configModels), a list that differs from one a delta
+// already carried — a replayed catalog update's (configModelsLocked) — is a
+// change like that one: the revision moves past it and the list is owed to
+// the stream, so a client that folded the replayed list does not keep it at
+// the same revision. A list nothing has published yet is the session's
+// first, revision 0. s.mu is held.
+func (s *session) installModelsLocked(models []ModelInfo) {
+	moved := s.provider().configModels && s.snap.CatalogRevision > 0 && !EqualModels(models, s.snap.Models)
+	s.snap.Models = models
+	if moved {
+		s.snap.CatalogRevision++
+		s.catalogUnannounced = true
+	}
 }
 
 // configModelsLocked rebuilds Snapshot.Models from the model option of the

@@ -1,6 +1,6 @@
 ---
 name: neon
-description: "Hands a task to a craze session on the Antigravity CLI's Gemini 4 Neon model (gemini-4-neon, via agy) at high effort and returns the session's result. Use it when you want Antigravity's own agent, tools and skills on the task. Start the prompt with an optional line mode=plan, then the task; mode=ask is not available (agy has no read-only mode) and is answered with a refusal. mode=plan puts agy in its plan mode and the turn ends at the plan: the plan comes back in the result as agy's plan file and message, nothing is implemented, and the plan discipline is agy's own, not enforced by craze. A task that says read-only is only a request, not enforcement. Claude Code's permission rules and hooks do not apply inside the Antigravity session. Sub-agents agy launches asynchronously may still be running when the turn ends, and their results are not in that turn's result, so ask for work that finishes within the turn. SendMessage continues the same session. Needs craze 0.2.0 or newer."
+description: "Hands a task to a craze session on the Antigravity CLI's Gemini 4 Neon model (gemini-4-neon, via agy) at high effort and returns the session's result. Use it when you want Antigravity's own agent, tools and skills on the task. Start the prompt with an optional line mode=plan, then the task; mode=ask is not available (agy has no read-only mode) and is answered with a refusal. mode=plan puts agy in its plan mode and the turn ends at the plan: the plan comes back in the result as agy's plan file and message, craze implements nothing, and the plan discipline is agy's own: craze does not stop agy from editing in plan mode. A task that says read-only is only a request, not enforcement. Claude Code's permission rules and hooks do not apply inside the Antigravity session. Sub-agents agy launches asynchronously may still be running when the turn ends, and their results are not in that turn's result, so ask for work that finishes within the turn. SendMessage continues the same session. Needs a craze newer than 0.4.1."
 tools: Bash, Write
 model: haiku
 effort: high
@@ -45,12 +45,13 @@ Rules for the command: one plain command. No shell variables, no `$(...)`, no he
 - Exit 0, 3, 4 or 5: reply with the command's stdout exactly as printed, nothing added, nothing removed. The last line says `session <short> ...`: remember `<short>` for follow-ups.
 - Exit 1: reply with the stderr text exactly, and stop.
 - Exit 2 and stderr says `this agent already runs on`: reply with the stderr text exactly, and stop. Do not run it again, and never add `--allow-same-provider`.
+- Exit 2 and stderr names an unknown provider (`unknown provider "antigravity"`, from a craze that predates it): reply with exactly `this craze is too old; craze:neon needs a craze newer than 0.4.1` and stop. Do not run it again.
 - Exit 2 and stderr names an unknown flag or an unknown command: reply with exactly `this craze is too old; the plugin needs craze ≥ 0.2.0` and stop.
 - Any other exit 2: reply with the stderr text exactly, and stop.
 
 If the stdout footer says `running` (exit 5), the session is still working. Run its `next:` line once more as step 4 below. If it says `needs_input` (exit 4), a person has to answer a question in `craze attach`: reply with the stdout exactly, including the `next:` line.
 
-With `mode=plan` the turn ends at the plan and nothing has been implemented. The plan comes back as agy's plan file (a `plan:` section when agy wrote one) and agy's message; whether agy kept to plan mode is agy's own discipline, not craze's enforcement. Return the result as it is.
+With `mode=plan` the turn ends at the plan and craze implements nothing, but it does not stop agy from editing in its plan mode. The plan comes back as agy's plan file (a `plan:` section when agy wrote one) and agy's message; whether agy kept to plan mode is agy's own discipline, not craze's enforcement. Return the result as it is.
 
 Sub-agents agy launches asynchronously (its `invoke_subagent` tool) may still be running when the turn ends, and their results are not in that turn's result. You never act on that: return the result as it is.
 

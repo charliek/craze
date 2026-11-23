@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -333,5 +335,99 @@ func TestAgyInstallKeepsTheRefreshedModels(t *testing.T) {
 		if last == nil || last.Revision != snap.CatalogRevision || len(last.Models) != 10 {
 			t.Fatalf("--model %q --effort %q: the stream's catalog %+v", opts.Model, opts.Effort, last)
 		}
+	}
+}
+
+// TestAgyLoadMovesTheRevisionPastTheReplay (CodeRabbit, PR #153): a load whose
+// replay published a model list, and whose reply installs another, publishes
+// the reply's at a revision past the replay's, so a client that folded the
+// replayed list does not keep it at the same revision.
+func TestAgyLoadMovesTheRevisionPastTheReplay(t *testing.T) {
+	r := newAgyRig(t, "antigravity-basic", Options{LoadSessionID: fakeSessionIDForTests}, "CRAZE_FAKE_AGY_REPLAY_CATALOG=gemini-5-preview").start(t)
+	snap := r.s.Snapshot()
+	if len(snap.Models) != 9 || snap.CatalogRevision != 2 {
+		t.Fatalf("installed %q at revision %d, want the reply's nine past the replay's revision 1", agyModelIDs(r.s), snap.CatalogRevision)
+	}
+	r.s.flushDelta()
+	r.log.caughtUp(t)
+	var last *CatalogState
+	for _, ev := range r.log.snapshot() {
+		if ev.Type == EventMeta && ev.State != nil && ev.State.Catalog != nil {
+			last = ev.State.Catalog
+		}
+	}
+	if last == nil || last.Revision != 2 || len(last.Models) != 9 {
+		t.Fatalf("the stream's last catalog %+v", last)
+	}
+	// A load with no replayed catalog installs its first list at revision 0.
+	r = newAgyRig(t, "antigravity-basic", Options{LoadSessionID: fakeSessionIDForTests}).start(t)
+	if rev := r.s.Snapshot().CatalogRevision; rev != 0 {
+		t.Fatalf("a plain load's revision %d", rev)
+	}
+}
+
+// TestAgyStampFollowsTheFeedbackFlag (CodeRabbit, PR #153): a rawInput-only
+// update of a stamped, completed brain write that changes its RequestFeedback
+// works the stamp out again — a plan file no longer asked about is dropped as
+// an artifact, and one asked about again is the plan — while an update that
+// changes nothing that classifies keeps the stamp.
+func TestAgyStampFollowsTheFeedbackFlag(t *testing.T) {
+	s := agySession(t)
+	s.mu.Lock()
+	s.snap.SessionID = "sid"
+	s.mu.Unlock()
+	root := filepath.Join(os.Getenv("HOME"), ".gemini", "antigravity-cli", "brain")
+	if err := os.MkdirAll(filepath.Join(root, "sid"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, _ = filepath.EvalSymlinks(root)
+	path := filepath.Join(root, "sid", "plan.md")
+	write := func(feedback, located bool) toolDelta {
+		completed, title := "completed", "File plan.md"
+		d := toolDelta{id: "w1", title: &title, status: &completed, wireName: "write_file",
+			rawInput: mustJSON(map[string]any{"Path": path, "Content": "x", "ArtifactMetadata": map[string]any{"RequestFeedback": feedback}}), hasRawInput: true}
+		if located {
+			d.locations, d.hasLocations = mustJSON([]map[string]string{{"path": path}}), true
+		}
+		return d
+	}
+	stamp := func() *ToolEdited {
+		for _, tl := range s.Snapshot().Tools {
+			if tl.ID == "w1" {
+				return tl.Edited
+			}
+		}
+		return nil
+	}
+	s.publishToolDelta(write(true, true))
+	if e := stamp(); e == nil || e.PlanFile != path {
+		t.Fatalf("the plan write %+v", e)
+	}
+	s.publishToolDelta(write(true, false))
+	if e := stamp(); e == nil || e.PlanFile != path {
+		t.Fatalf("an update that changed nothing %+v", e)
+	}
+	s.publishToolDelta(write(false, false))
+	if e := stamp(); e != nil {
+		t.Fatalf("no longer asked about, still stamped %+v", e)
+	}
+	s.publishToolDelta(write(true, false))
+	if e := stamp(); e == nil || e.PlanFile != path {
+		t.Fatalf("asked about again %+v", e)
+	}
+}
+
+// TestAgyFakeSetsTheExtraModel: the fake's model PUSH_ON_NEW adds can be set,
+// and has no effort.
+func TestAgyFakeSetsTheExtraModel(t *testing.T) {
+	r := newAgyRig(t, "antigravity-basic", Options{}, "CRAZE_FAKE_AGY_PUSH_ON_NEW=gemini-5-preview").start(t)
+	if _, err := r.s.SetModel(t.Context(), "", "gemini-5-preview"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := r.s.Snapshot(); snap.CurrentModel != "gemini-5-preview" || EffortOption(snap) != nil {
+		t.Fatalf("model %q effort %+v", snap.CurrentModel, EffortOption(snap))
+	}
+	if _, err := r.s.SetModel(t.Context(), "", "bogus"); err == nil {
+		t.Fatal("an unknown model was taken")
 	}
 }
