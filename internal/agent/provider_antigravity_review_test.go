@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -114,6 +115,17 @@ func TestAgyOutsideTurnRowRetiredWithTheAgent(t *testing.T) {
 		t.Fatalf("the replayed running row %+v", row)
 	}
 	waitFor(t, "the outside-turn row retired", func() bool { return r.row(t, "call_replay_running").Status == SubagentFailed })
+	// And its call's transcript row with it (plan 053 M3): the last tool
+	// event of the call says failed.
+	waitFor(t, "the retired call's tool event", func() bool {
+		var last *ToolEvent
+		for _, ev := range r.log.snapshot() {
+			if ev.Type == EventTool && ev.Tool != nil && ev.Tool.ID == "call_replay_running" {
+				last = ev.Tool
+			}
+		}
+		return last != nil && last.Task != nil && last.Task.Status == SubagentFailed
+	})
 	// And from its own later terminal update, while the agent lives.
 	s := agySession(t)
 	s.publishToolDelta(agySub("c1", "in_progress", "Runner"))
@@ -175,5 +187,63 @@ func TestAgyModelsFollowTheCatalog(t *testing.T) {
 	cs.onUpdate(acp.SessionNotification{SessionID: "s", Update: upd})
 	if got := agyModelIDs(cs); len(got) != 0 {
 		t.Fatalf("cursor's models moved: %q", got)
+	}
+}
+
+// TestAgySettledRowsEndTheirToolRows (live smoke, plan 053 M3): a settled
+// invoke_subagent's call ends with the row — its last tool event carries the
+// settled status, which the transcript draws the call from, and it is
+// published before the turn's terminal event — at end_turn, on a cancel and
+// on a failed turn.
+func TestAgySettledRowsEndTheirToolRows(t *testing.T) {
+	for _, tc := range []struct {
+		name, prompt string
+		calls        []string
+		cancel       bool
+		want         SubagentStatus
+	}{
+		{"end_turn", "SUBAGENTS", []string{"call_sub_a", "call_sub_b"}, false, SubagentCompleted},
+		{"cancelled", "SUBAGENT hold", []string{"call_sub_hold"}, true, SubagentCancelled},
+		{"failed", "SUBAGENT error", []string{"call_sub_err"}, false, SubagentFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newAgyRig(t, "antigravity-basic", Options{}).start(t)
+			done := make(chan struct{})
+			go func() { _, _ = r.s.Prompt(context.Background(), tc.prompt); close(done) }()
+			if tc.cancel {
+				waitFor(t, "the held call completed", func() bool {
+					for _, tl := range r.s.Snapshot().Tools {
+						if tl.ID == tc.calls[0] && tl.Status == toolCompleted {
+							return true
+						}
+					}
+					return false
+				})
+				if _, err := r.s.Cancel(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			<-done
+			r.log.caughtUp(t)
+			evs := r.log.snapshot()
+			end := slices.IndexFunc(evs, func(ev Event) bool { return ev.Type == EventDone || ev.Type == EventError })
+			if end < 0 {
+				t.Fatal("no terminal event")
+			}
+			for _, id := range tc.calls {
+				last := -1
+				for i, ev := range evs {
+					if ev.Type == EventTool && ev.Tool != nil && ev.Tool.ID == id {
+						last = i
+					}
+				}
+				if last < 0 {
+					t.Fatalf("%s: no tool event", id)
+				}
+				if evs[last].Tool.Task == nil || evs[last].Tool.Task.Status != tc.want || last > end {
+					t.Fatalf("%s: last tool event at %d (turn ended at %d): %+v", id, last, end, evs[last].Tool.Task)
+				}
+			}
+		})
 	}
 }

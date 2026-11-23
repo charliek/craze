@@ -1099,10 +1099,27 @@ func (s *session) settleToolRowsLocked(turn int, status string) []Event {
 		if rec == nil || rec.turn != turn || rec.info.Status != SubagentRunning {
 			continue
 		}
-		s.finishToolRowLocked(rec, ToolEvent{ID: id, Status: status})
-		evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+		evs = append(evs, s.settleToolRowLocked(rec, id, status)...)
 	}
 	return evs
+}
+
+// settleToolRowLocked ends rec, the tool-backed row of call id, with status
+// when nothing of the call's own ends it (a turn's settlement, the agent
+// gone), and returns what says so: the call's tool event — whose Task now
+// carries the settled status, which the transcript's row of the call is drawn
+// from (live smoke, plan 053 M3) — then the row's finish. Each is what
+// publishToolDelta and syncToolRowLocked would publish had an update of the
+// call settled it. s.mu is held, and the caller holds toolPub across the
+// publication.
+func (s *session) settleToolRowLocked(rec *subagentRec, id, status string) []Event {
+	s.finishToolRowLocked(rec, ToolEvent{ID: id, Status: status})
+	var evs []Event
+	if t, ok := s.tools[id]; ok {
+		tool := cloneTool(t)
+		evs = append(evs, Event{Type: EventTool, Tool: &tool})
+	}
+	return append(evs, subagentRowEvent(rec, SubagentChangeFinished))
 }
 
 // settleToolRows is settleToolRowsLocked, its events published. It holds
@@ -1144,8 +1161,7 @@ func (s *session) retireToolRowsAtEnd(client *acp.Client) {
 		if rec == nil || rec.info.Status != SubagentRunning {
 			continue
 		}
-		s.finishToolRowLocked(rec, ToolEvent{ID: id, Status: toolFailed})
-		evs = append(evs, subagentRowEvent(rec, SubagentChangeFinished))
+		evs = append(evs, s.settleToolRowLocked(rec, id, toolFailed)...)
 	}
 	s.mu.Unlock()
 	s.emitAll(evs)
