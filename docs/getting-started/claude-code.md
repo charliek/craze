@@ -1,13 +1,13 @@
 # Claude Code sub-agents
 
 This repository is a Claude Code plugin. It adds sub-agents that hand a task to
-a craze session — on craze's own **native** provider, **Grok** or **Cursor** —
-and return the session's result to Claude Code, the way a native Claude Code
+a craze session — on craze's own **native** provider, **Grok**, **Cursor** or
+**Antigravity** — and return the session's result to Claude Code, the way a native Claude Code
 sub-agent returns its own. Use it to put another model on a task, to get a
 second opinion, or to run several models side by side.
 
 Its skill (`skills/craze`) is provider-neutral: it shows any agent — Claude
-Code, Cursor, Grok or a craze session — how to hand work to another provider
+Code, Cursor, Grok, Antigravity's `agy` or a craze session — how to hand work to another provider
 through craze, [Claude included](#claude-as-a-target), and never to its own
 ([Don't call yourself](#dont-call-yourself)).
 
@@ -23,6 +23,26 @@ In Claude Code:
 /plugin marketplace add charliek/craze
 /plugin install craze@craze
 ```
+
+### In Cursor, Grok and Antigravity
+
+The same plugin installs in the other agents' own plugin systems. There the
+part that matters is the skill: its *Driving craze directly* section teaches
+the agent the commands any agent can run (`craze new --wait`, `send`, `wait`,
+`cancel`). The sub-agent files under `agents/` are written for Claude
+Code's Agent tool, and another agent may load them or not.
+
+| Agent | Install |
+|-------|---------|
+| Cursor | `agent plugin marketplace add https://github.com/charliek/craze`, then install `craze` from that marketplace in Cursor |
+| Grok | `grok plugin install charliek/craze` (`grok plugin validate` accepts the plugin as it is) |
+| Antigravity | `agy plugin install <directory>` on a checkout: `git clone --depth 1 https://github.com/charliek/craze <dir>`. `agy` converts a Claude Code plugin as it installs it (the skill and the eight agents, into `~/.gemini/config/plugins/craze`); it copies the whole directory and refuses a symlink that points outside it, so install from a fresh clone rather than a working checkout |
+
+A craze **native** session needs nothing: it reads the plugins Claude Code has
+enabled ([Claude content](../reference/configuration.md#claude-content-compatclaude)).
+Each agent is still refused its own provider ([Don't call
+yourself](#dont-call-yourself)); Grok sets no marker craze trusts, so from Grok
+that rule is the skill's alone.
 
 ## The agents
 

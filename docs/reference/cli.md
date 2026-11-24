@@ -46,7 +46,7 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--ask` | Set session mode to ask after `session/new`. `claude` and `antigravity` have no ask mode: the start fails, `mode ask is not advertised` (on antigravity before the agent is spawned) |
 | `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on every provider but cursor — grok, claude and antigravity load their own plugins, and native reads Claude Code's enabled ones |
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one, skipping sub-agent sessions. No matching session exits 1 |
 | `--version`, `-v` | Print the craze version and exit, as `craze version` does. Answered before any argument is checked |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
@@ -504,7 +504,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--no-force` | Disable yolo and handle permission requests |
 | `--ask` | Set session mode to ask after `session/new`. `claude` has no ask mode: its start fails, `mode ask is not advertised` |
 | `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on every provider but cursor — grok, claude and antigravity load their own plugins, and native reads Claude Code's enabled ones |
 | `--json` | Write only JSON events to stdout |
 
 Without `--json`, only the **main session's** assistant text is written to
