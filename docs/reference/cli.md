@@ -497,7 +497,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one; neither leaves it as the model has it. Both together exit 2 |
 | `--web-search`, `--no-web-search` | Offer this run's native session the web tools, or offer none, whatever the home says ([web search](#web-search-flags)). Both together exit 2. `--web-search` that cannot be honoured (an explicit off in `config.toml`, a provider other than native) is exit 1 before any provider is called: the message on stderr and, with `--json`, the `error` event; `--no-web-search` is never refused |
 | `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
-| `--provider` | Provider: `cursor`, `grok`, `claude` (ACP agents) or `native` (runs inside craze) |
+| `--provider` | Provider: `cursor`, `grok`, `claude`, `antigravity` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |

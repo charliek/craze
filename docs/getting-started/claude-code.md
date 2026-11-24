@@ -40,9 +40,11 @@ Code's Agent tool, and another agent may load them or not.
 
 A craze **native** session needs nothing: it reads the plugins Claude Code has
 enabled ([Claude content](../reference/configuration.md#claude-content-compatclaude)).
-Each agent is still refused its own provider ([Don't call
-yourself](#dont-call-yourself)); Grok sets no marker craze trusts, so from Grok
-that rule is the skill's alone.
+craze still refuses each agent its own provider where it can tell who is
+calling ([Don't call yourself](#dont-call-yourself)). Where it cannot, the rule
+is the skill's alone: from Grok, which sets no marker craze trusts, and when two
+caller markers are set with no `CRAZE_SESSION_PROVIDER` (`CLAUDECODE=1` and
+`ANTIGRAVITY_AGENT`, say), which leaves the caller ambiguous.
 
 ## The agents
 
