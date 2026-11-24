@@ -28,6 +28,9 @@ const (
 	// cursorAgentEnv is set by a standalone cursor-agent in its shell tool's
 	// commands (plan 052 L2: with CURSOR_INVOKED_AS, and per-run ids beside).
 	cursorAgentEnv = "CURSOR_AGENT"
+	// antigravityAgentEnv is set to 1 by agy (Antigravity) in its run_command
+	// shell (plan 053 E1).
+	antigravityAgentEnv = "ANTIGRAVITY_AGENT"
 )
 
 // callerProvider is the provider the agent that ran this craze is on, by
@@ -35,21 +38,27 @@ const (
 // sets it fresh for each agent it spawns, so it names the immediate caller
 // (a cursor session Claude Code started has CLAUDECODE too, and may target
 // claude). Without it, claude when CLAUDECODE=1, cursor when CURSOR_AGENT is
-// set — but not both: each inherits the other's environment when one launches
-// the other, so the immediate caller is unknown, and the guard stands aside
-// (the plugin's text rule still holds). grok sets no marker craze trusts, so
-// its rule is the text alone.
+// set, antigravity when ANTIGRAVITY_AGENT is set — but only when exactly one
+// of them is: each inherits the others' environment when one launches
+// another, so with two or more the immediate caller is unknown, and the guard
+// stands aside (the plugin's text rule still holds). grok sets no marker craze
+// trusts, so its rule is the text alone.
 func callerProvider(getenv func(string) string) string {
 	if p := strings.TrimSpace(getenv(agent.SessionProviderEnv)); p != "" {
 		return p
 	}
-	claude := getenv(claudeCodeEnv) == "1"
-	cursor := getenv(cursorAgentEnv) != ""
-	switch {
-	case claude && !cursor:
-		return agent.ClaudeProvider().Name()
-	case cursor && !claude:
-		return agent.CursorProvider().Name()
+	var named []string
+	if getenv(claudeCodeEnv) == "1" {
+		named = append(named, agent.ClaudeProvider().Name())
+	}
+	if getenv(cursorAgentEnv) != "" {
+		named = append(named, agent.CursorProvider().Name())
+	}
+	if getenv(antigravityAgentEnv) != "" {
+		named = append(named, agent.AntigravityProvider().Name())
+	}
+	if len(named) == 1 {
+		return named[0]
 	}
 	return ""
 }

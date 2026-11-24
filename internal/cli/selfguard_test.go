@@ -23,10 +23,15 @@ func sameProvider(p string) string {
 		" work, not craze (--allow-same-provider overrides)"
 }
 
-// markers sets the three caller markers for one case: "" unsets one.
-func markers(t *testing.T, session, claudeCode, cursorAgent string) {
+// markers sets the caller markers for one case: "" unsets one. The optional
+// fourth value is ANTIGRAVITY_AGENT.
+func markers(t *testing.T, session, claudeCode, cursorAgent string, antigravity ...string) {
 	t.Helper()
-	for name, v := range map[string]string{agent.SessionProviderEnv: session, claudeCodeEnv: claudeCode, cursorAgentEnv: cursorAgent} {
+	agy := ""
+	if len(antigravity) > 0 {
+		agy = antigravity[0]
+	}
+	for name, v := range map[string]string{agent.SessionProviderEnv: session, claudeCodeEnv: claudeCode, cursorAgentEnv: cursorAgent, antigravityAgentEnv: agy} {
 		t.Setenv(name, v)
 		if v == "" {
 			_ = os.Unsetenv(name)
@@ -58,6 +63,32 @@ func TestCallerProviderMarkers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			markers(t, tc.session, tc.claudeCode, tc.cursorA)
+			if got := callerProvider(os.Getenv); got != tc.want {
+				t.Fatalf("callerProvider = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCallerProviderAntigravityMarker: ANTIGRAVITY_AGENT is a third standalone
+// marker: alone it names antigravity, with any other marker the caller is
+// unknown, and CRAZE_SESSION_PROVIDER still wins.
+func TestCallerProviderAntigravityMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		session, claudeCode, cursor string
+		agy, want                   string
+	}{
+		{"alone", "", "", "", "1", "antigravity"},
+		{"with CLAUDECODE", "", "1", "", "1", ""},
+		{"with CURSOR_AGENT", "", "", "1", "1", ""},
+		{"all three", "", "1", "1", "1", ""},
+		{"claude and cursor, no agy", "", "1", "1", "", ""},
+		{"the session marker wins", "grok", "", "", "1", "grok"},
+		{"the session marker settles the ambiguity", "antigravity", "1", "", "1", "antigravity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			markers(t, tc.session, tc.claudeCode, tc.cursor, tc.agy)
 			if got := callerProvider(os.Getenv); got != tc.want {
 				t.Fatalf("callerProvider = %q, want %q", got, tc.want)
 			}

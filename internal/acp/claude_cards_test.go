@@ -17,14 +17,20 @@ import (
 // (the session id, the tool call ids, the paths).
 func cardFrames(t *testing.T, step string) []claudeFrame {
 	t.Helper()
+	return stepFrames(t, "claude-cards", step)
+}
+
+// stepFrames is one step's frames of testdata/<dir>/frames.jsonl.
+func stepFrames(t *testing.T, dir, step string) []claudeFrame {
+	t.Helper()
 	var out []claudeFrame
-	for _, f := range fixtureFrames(t, "claude-cards") {
+	for _, f := range fixtureFrames(t, dir) {
 		if f.Step == step {
 			out = append(out, f)
 		}
 	}
 	if len(out) == 0 {
-		t.Fatalf("no %s frames", step)
+		t.Fatalf("no %s/%s frames", dir, step)
 	}
 	return out
 }
@@ -765,7 +771,7 @@ func TestClaudeToolNamesForgottenOnANewSession(t *testing.T) {
 // one constraint beyond the adapter's own form that the card takes, and it is
 // carried to the question, which must then be answered.
 func TestClaudeElicitationRequired(t *testing.T) {
-	_, req, why := parseElicitation(json.RawMessage(`{"mode":"form","message":"m","requestedSchema":{"type":"object","required":["question_1"],"properties":{` +
+	_, req, why := parseElicitation(claudeKeys, json.RawMessage(`{"mode":"form","message":"m","requestedSchema":{"type":"object","required":["question_1"],"properties":{`+
 		`"question_0":{"type":"string","oneOf":[{"const":"a"}]},"question_1":{"type":"array","items":{"anyOf":[{"const":"b"}]}}}}}`))
 	if why != "" || len(req.Questions) != 2 || req.Questions[0].Required || !req.Questions[1].Required {
 		t.Fatalf("%q %+v", why, req)

@@ -8,7 +8,7 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-`claude` and `native` (see [Configuration](configuration.md#provider-precedence)) —
+`claude`, `antigravity` and `native` (see [Configuration](configuration.md#provider-precedence)) —
 before the session is constructed. The preselected row is the resolved default
 (see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
@@ -28,7 +28,7 @@ box starts the default.
 As the dialog opens, craze checks each provider the way
 [`craze providers`](cli.md#craze-providers) does — whether its binary
 resolves (claude's two: the adapter and Claude Code's `claude`, the missing
-one named), whether native has a model provider with a key, and on a Mac
+one named; antigravity's `agy`), whether native has a model provider with a key, and on a Mac
 whether this craze runs in the login session cursor needs — and marks every
 row that cannot start:
 
@@ -38,6 +38,7 @@ row that cannot start:
 │> cursor                       unavailable · default│
 │  grok                                              │
 │  claude                                 unavailable│
+│  antigravity                            unavailable│
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
 │install cursor-agent, or set [agents].cursor in     │
@@ -197,9 +198,25 @@ On a provider that can stop one child (native and claude), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn
 goes on and the parent reads that the user stopped it. On any other row —
-grok, cursor, a finished row, or a claude child that does not let itself be
+grok, cursor, antigravity, a finished row, or a claude child that does not let itself be
 stopped — the key goes to the composer as before. This works the same on a
 background sub-agent's row (below).
+
+### Antigravity sub-agents
+
+An `antigravity` session declares sub-agent rows: each `invoke_subagent` call
+`agy` makes is a row of its own, labelled with the role the call names, with its
+prompt and type. `agy` returns that call within milliseconds of the launch and
+the child then runs on out of sight (its tools never reach craze, and `agy`
+exposes no transcript or stop), so the row **stays running after its call
+completes** and settles when the turn that launched it does: `completed` for a
+turn that ended normally, `cancelled` for one cancelled, `failed` for a failed
+prompt, a launch that itself failed, or an agent that died. Each turn settles only
+the rows it launched; a settled row never reopens. Rows a `--continue` or
+`--resume` replays are already settled, so none is running after a load. The
+`completed` of a row means the parent's turn ended, not that the child finished:
+it may still be running in `agy`, and its result reaches the session only if
+`agy` reports it in a later turn. The row has no output, no [view](#sub-agent-view) and no stop key.
 
 ### Claude sub-agents
 
@@ -1597,6 +1614,14 @@ A `claude` session approves its plan on its own card instead (see
 [Cards](#cards)), so a claude plan-mode turn arms no offer, whatever it ends
 with.
 
+On an `antigravity` session the modes are `agy`'s own — `default`,
+`accept-edits`, `auto` and `plan` — and `Shift+Tab` cycles all four. `agy`
+has no read-only mode, so `/ask` (and `--ask`) is refused with `mode ask is not
+advertised`. A plan-mode turn writes its plan as a markdown file in `agy`'s
+brain directory and ends with no plan card, so the offer above does arm:
+`Enter` leaves plan mode for `default` and sends `Implement the plan above.`
+Plan mode's discipline is `agy`'s own; craze does not enforce it.
+
 ### Sub-agent models
 
 On native, `~/.craze/native/models.toml` (or `$CRAZE_HOME/native/` when the
@@ -1762,7 +1787,7 @@ spent, the turn's amount then the session's:
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
 | a claude session | `3% ctx · 59.6k / 122k tok · max · 7d 45%` |
-| no usage yet (cursor, grok, or before native's first step or claude's first report) | no part at all |
+| no usage yet (cursor, grok, antigravity, or before native's first step or claude's first report) | no part at all |
 
 `NN% ctx` is the context's share of the context the model works within: its
 [context default](configuration.md#native-context-default) when it has one,
@@ -2033,6 +2058,10 @@ the selection's position, `n` the match count — followed by `▲` once the
 window has scrolled past the top; the last row carries `▼` when there is more
 below. A band cropped to a single row shows `k/n` alone: it is both the first
 and the last row, and the count already says what the arrows would.
+
+On an `antigravity` session the catalog is `agy`'s alone: it advertises its
+built-in commands (`/goal`, `/compact`, `/schedule`, …) and the skills of the
+workspace, and expands them itself, so craze scans no directory for it.
 
 Skills come from the agent's own ACP catalog first: Grok's ACP server loads a
 plugins service, so its catalog already carries every plugin skill it has

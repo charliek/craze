@@ -107,10 +107,27 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	if d.status != nil {
 		out.Status = sanitizeText(*d.status)
 	}
+	// agy's rows are read its own way (plan 053 § D1): the command line its
+	// rawInput carries, and run_command's {output, exit_code} with its
+	// header. Every other provider's rows are read as they always were.
+	agy := s.provider().isAntigravity()
 	if d.hasRawInput {
-		out.RawInput = stringifyRawInput(d.rawInput)
+		var in antigravityInput
+		if agy {
+			in = parseAntigravityInput(d.rawInput)
+			out.RawInput = in.rowText(d.rawInput)
+		} else {
+			out.RawInput = stringifyRawInput(d.rawInput)
+		}
 		if owner == "" {
-			s.namedPaths.note(d.id, rawInputPaths(d.rawInput, editCalls[s.provider().Name()].rawPathKeys)...)
+			rule := editCalls[s.provider().Name()]
+			s.namedPaths.note(d.id, rawInputPaths(d.rawInput, rule.rawPathKeys)...)
+			if rule.antigravityBrain {
+				// Noted at merge time, replayed calls included, so a call is
+				// classified the same way however it reached the session
+				// (§ D3). Every update repeats rawInput: the last one says.
+				s.feedbackCalls.note(d.id, in.requestsFeedback())
+			}
 		}
 		if name := toolNameOf(d.rawInput); name != "" {
 			out.ToolName = name
@@ -136,7 +153,11 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 		}
 	}
 	if d.hasContent {
-		out.ContentText = contentText(d.content)
+		if agy {
+			out.ContentText = antigravityContentText(d.content, out.ToolName)
+		} else {
+			out.ContentText = contentText(d.content)
+		}
 		if diffs := contentDiffs(d.content); len(diffs) > 0 {
 			out.Diffs = diffs
 		}
@@ -145,7 +166,11 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 		}
 	}
 	if d.hasRawOutput {
-		out.Output = parseToolOutput(d.rawOutput)
+		if agy {
+			out.Output = antigravityOutput(d.rawOutput)
+		} else {
+			out.Output = parseToolOutput(d.rawOutput)
+		}
 		if ms := durationFromRawOutput(d.rawOutput); ms > 0 && out.IsTask() {
 			out.Task = mergeTaskInfo(out.Task, TaskInfo{DurationMs: ms})
 		}
@@ -169,7 +194,7 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	}
 
 	var extras []Event
-	extras = append(extras, s.syncCursorLocked(out)...)
+	extras = append(extras, s.syncToolRowLocked(out)...)
 	if t, ok := tools[d.id]; ok {
 		out = t
 	}
@@ -177,7 +202,7 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 		out.Task = mergeTaskInfo(out.Task, r)
 		s.dropTaskReceiptLocked(d.id)
 		tools[d.id] = out
-		extras = append(extras, s.syncCursorLocked(out)...)
+		extras = append(extras, s.syncToolRowLocked(out)...)
 		if t, ok := tools[d.id]; ok {
 			out = t
 		}
@@ -379,6 +404,12 @@ func stringifyRawInput(raw json.RawMessage) string {
 }
 
 func contentText(raw json.RawMessage) string {
+	return tailUTF8(sanitizeText(contentTextRaw(raw)), contentTextCap)
+}
+
+// contentTextRaw is every text block of a tool_call content[], joined, as the
+// agent wrote it: contentText before it is sanitized and capped.
+func contentTextRaw(raw json.RawMessage) string {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
@@ -394,7 +425,7 @@ func contentText(raw json.RawMessage) string {
 		}
 		b = append(b, it.Content.Text...)
 	}
-	return tailUTF8(sanitizeText(string(b)), contentTextCap)
+	return string(b)
 }
 
 func locationPaths(raw json.RawMessage) []string {
@@ -501,6 +532,9 @@ type grokSpawnRawInput struct {
 // taskFromRawInput reads the sub-agent fields off a spawn tool's rawInput.
 // toolName is already resolved (_toolName else wire _meta).
 func taskFromRawInput(raw json.RawMessage, toolName string) *TaskInfo {
+	if toolName == antigravitySubagentTool {
+		return antigravityTask(raw)
+	}
 	if toolName == "spawn_subagent" {
 		var in grokSpawnRawInput
 		if err := json.Unmarshal(raw, &in); err != nil {
@@ -576,6 +610,13 @@ func parseToolOutput(raw json.RawMessage) *ToolOutput {
 	if w.ExitCode == nil && stdout == "" && stderr == "" && content == "" {
 		return nil
 	}
+	return cappedToolOutput(stdout, stderr, content, w.ExitCode)
+}
+
+// cappedToolOutput is a row's output from its sanitized streams: each kept to
+// its tail (its head beside it for stdout and stderr), Truncated when any was
+// cut, and the exit code when there is one.
+func cappedToolOutput(stdout, stderr, content string, exitCode *int) *ToolOutput {
 	out := &ToolOutput{
 		Stdout:     tailUTF8(stdout, outputTailCap),
 		Stderr:     tailUTF8(stderr, outputTailCap),
@@ -586,8 +627,8 @@ func parseToolOutput(raw json.RawMessage) *ToolOutput {
 			len(stderr) > outputTailCap ||
 			len(content) > outputTailCap,
 	}
-	if w.ExitCode != nil {
-		code := *w.ExitCode
+	if exitCode != nil {
+		code := *exitCode
 		out.ExitCode = &code
 	}
 	return out

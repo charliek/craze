@@ -1,6 +1,7 @@
 # Upgrading
 
-Six sections: [since v0.4.0](#since-v040), the changes after v0.4.0;
+Seven sections: [since v0.4.1](#since-v041), the changes after v0.4.1;
+[since v0.4.0](#since-v040), v0.4.1's;
 [since v0.3.0](#since-v030), v0.4.0's; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
 v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
 first release's. Whatever the version, [upgrading
@@ -38,6 +39,46 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.4.1
+
+### An antigravity provider
+
+craze can now drive **Google's Antigravity CLI, `agy`, on your Antigravity
+plan** ([the antigravity
+provider](../reference/configuration.md#the-antigravity-provider)). It is
+listed after claude and before native, and `--provider antigravity`,
+`provider = "antigravity"` and `CRAZE_PROVIDER=antigravity` reach it. Nothing
+needs migrating for the providers you use. What changes:
+
+- **Every provider listing has a fifth row**, `antigravity`, between claude and
+  native: unavailable on a machine without `agy`, with `install agy, or set
+  [agents].antigravity in …`. A script that reads `craze providers --json` or
+  `sessions.createOptions` by position, or counts four providers, sees five.
+  The unknown-provider and no-default errors name `antigravity` too (`want
+  cursor, grok, claude, antigravity, or native`), and the picker's last row is
+  still native.
+- **`[agents].antigravity`** in `config.toml` is read: `agy`'s absolute path,
+  as the other `[agents]` keys are.
+- **`antigravity` is a provider id now.** It used to be an unknown one:
+  `--provider antigravity` exited 2.
+- **`craze new` refuses the calling agent's own provider** on antigravity too:
+  `ANTIGRAVITY_AGENT`, which `agy` sets in its shell commands, is a third
+  caller marker beside `CLAUDECODE` and `CURSOR_AGENT`. With exactly one of the
+  three set (and no `CRAZE_SESSION_PROVIDER`) it names the caller; with two or
+  more, the caller is unknown and nothing is refused. If a terminal of yours
+  exports `ANTIGRAVITY_AGENT` without running `agy`, `craze new --provider
+  antigravity` from it exits 2 until you pass `--allow-same-provider`
+  ([Starting your own provider](../reference/cli.md#starting-your-own-provider)).
+- **The Claude Code plugin gains `craze:neon`**, a preset on antigravity's
+  `gemini-4-neon` at high effort, and `craze:delegate` takes `antigravity` as a
+  target. Neither takes `mode=ask`: `agy` has no read-only mode. Every agent
+  file's no-self rule now names antigravity ([Claude
+  Code](claude-code.md)).
+- **`agy`'s limits** ([the provider's page](../reference/configuration.md#what-it-does-not-do)):
+  `--ask` is refused before the spawn, a session id `agy` no longer has loads
+  as an empty session, and sub-agents `agy` launches asynchronously may be cut
+  off when an unattended turn ends.
 
 ## Since v0.4.0
 

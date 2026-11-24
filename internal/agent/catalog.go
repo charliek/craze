@@ -95,6 +95,17 @@ func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.In
 		}
 	}
 	config := parseConfigOptions(res.ConfigOptions)
+	if p.configModels {
+		// The model option is the catalog (plan 053 § C2): its values the
+		// models, its value the current one. The legacy block is not read —
+		// agy lists each model there once per effort level — so every reader
+		// of Snapshot.Models sees the base models, and effort stays the
+		// control it is.
+		models, curModel = nil, ""
+		if opt := ModelConfigOptionIn(config); opt != nil {
+			models, curModel = configOptionModels(*opt), opt.Current
+		}
+	}
 	if curModel == "" {
 		// A provider that keeps its model in a config option and names no
 		// current model in its models block — the shape a session/set_model-less
@@ -387,20 +398,36 @@ func snapshotModels(snap Snapshot) []ModelInfo {
 		if c.Category != "model" {
 			continue
 		}
-		out := make([]ModelInfo, 0, len(c.SelectValues))
-		for _, v := range c.SelectValues {
-			if v.Value == "" {
-				continue
-			}
-			name := v.Name
-			if name == "" {
-				name = v.Value
-			}
-			out = append(out, ModelInfo{ID: v.Value, Name: name})
-		}
-		return out
+		return configModelInfos(c)
 	}
 	return nil
+}
+
+// configOptionModels is the model list of a provider whose models are its
+// model option's values (Provider.configModels, plan 053 § C2): the option's
+// values, within the catalog's bounds (boundCatalog) — the list rides the
+// catalog section (configModelsLocked), whose bounds are the session's to
+// keep — its current model kept among them.
+func configOptionModels(opt ConfigOption) []ModelInfo {
+	models, _ := boundCatalog(configModelInfos(opt), opt.Current)
+	return models
+}
+
+// configModelInfos is a model option's values as models: the value the id,
+// its name the name (else the value).
+func configModelInfos(c ConfigOption) []ModelInfo {
+	out := make([]ModelInfo, 0, len(c.SelectValues))
+	for _, v := range c.SelectValues {
+		if v.Value == "" {
+			continue
+		}
+		name := v.Name
+		if name == "" {
+			name = v.Value
+		}
+		out = append(out, ModelInfo{ID: v.Value, Name: name})
+	}
+	return out
 }
 
 // CatalogModels is the model catalog snap advertises, in the agent's own
@@ -519,16 +546,19 @@ func OrderModels(snap Snapshot) []ModelInfo {
 }
 
 func isEffortSelect(opt ConfigOption) bool {
-	if opt.Type != "" && opt.Type != "select" {
-		return false
-	}
-	if len(opt.SelectValues) == 0 {
+	if !usableSelect(opt) {
 		return false
 	}
 	id := strings.ToLower(opt.ID)
 	name := strings.ToLower(opt.Name)
 	return strings.Contains(id, "effort") || strings.Contains(id, "reasoning") ||
 		strings.Contains(name, "effort") || strings.Contains(name, "reasoning")
+}
+
+// usableSelect reports whether opt is a select craze can set: of type select
+// (or none said) with at least one value.
+func usableSelect(opt ConfigOption) bool {
+	return (opt.Type == "" || opt.Type == "select") && len(opt.SelectValues) > 0
 }
 
 // effortRank orders the options isEffortSelect admits. The exact id `effort`

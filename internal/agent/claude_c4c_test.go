@@ -84,14 +84,27 @@ func (p *pipeClaude) push(t *testing.T, sid string, update map[string]any) {
 	}
 }
 
-// barrier waits until everything pushed so far has reached the session: a
-// mode update it can see, behind them on the wire.
+// barrier waits until everything pushed so far has reached the session and
+// the test's collector: a mode update behind them on the wire. The snapshot
+// alone is not enough — it holds the mode before the collector's goroutine
+// has appended the events published ahead of it (a slow macOS -race runner
+// read an empty log that way) — so the barrier also waits for the mode's own
+// event, which the session publishes after every event the pushes before it
+// produced: the subagent handler runs on the read goroutine in wire order.
 func (p *pipeClaude) barrier(t *testing.T) {
 	t.Helper()
 	p.sync++
 	mode := fmt.Sprintf("sync-%d", p.sync)
 	p.push(t, "root", map[string]any{"sessionUpdate": acp.UpdateCurrentMode, "currentModeId": mode})
 	waitFor(t, "the barrier "+mode, func() bool { return p.s.Snapshot().CurrentMode == mode })
+	waitFor(t, "the collector at the barrier "+mode, func() bool {
+		for _, ev := range p.log.snapshot() {
+			if ev.Mode == mode {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func announce(child, state string) map[string]any {

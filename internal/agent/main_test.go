@@ -47,8 +47,14 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	restore := SetClaudeOverageForTest(filepath.Join(dir, "claude-overage.json"), nil, 0)
+	// The fake executables, before anything forks (fakescripts_test.go).
+	if err := installFakeScripts(); err != nil {
+		fmt.Fprintln(os.Stderr, "FAIL:", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	restore()
 	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(fakeScriptDir)
 	os.Exit(code)
 }

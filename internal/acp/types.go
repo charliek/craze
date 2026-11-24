@@ -118,6 +118,11 @@ const (
 	// _meta.claudeCode.toolName, and the adapter's auth-status pushes read
 	// (claude.go).
 	DialectClaude DialectID = "claude"
+	// DialectAntigravity is agy, the Antigravity CLI's `agy acp` (plan 053 §
+	// B): plain ACP v1 with the tool name at the update's top-level `name`,
+	// questions over elicitation/create keyed q<i>/q<i>_other, and string ids
+	// on the requests it sends (antigravity.go).
+	DialectAntigravity DialectID = "antigravity"
 )
 
 type Implementation struct {
@@ -135,9 +140,11 @@ type ClientCapabilities struct {
 	FS       FSCapabilities `json:"fs"`
 	Terminal bool           `json:"terminal"`
 	// Elicitation is the RFD form capability (plan 052 § B2): declared by the
-	// claude dialect alone, whose AskUserQuestion reaches a client as an
-	// elicitation/create form only once the client says it renders one. nil
-	// for cursor and grok, whose initialize bytes stay as they were.
+	// claude dialect, whose AskUserQuestion reaches a client as an
+	// elicitation/create form only once the client says it renders one, and
+	// by antigravity's, whose ask_question otherwise hangs pending and prints
+	// the question as text (plan 053 § B2). nil for cursor and grok, whose
+	// initialize bytes stay as they were.
 	Elicitation *ElicitationCapabilities `json:"elicitation,omitempty"`
 	// Subagents is the RFD sub-agent capability (plan 052 § B2, § E3): an
 	// empty object, declared by the claude dialect alone, for every claude

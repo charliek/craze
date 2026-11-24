@@ -489,9 +489,7 @@ func TestSessionStartAgainstRealGit(t *testing.T) {
 	// runs it. The control: a plain status runs it.
 	mark := filepath.Join(t.TempDir(), "fsmonitor-ran")
 	hook := filepath.Join(t.TempDir(), "fsmonitor-hook")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+mark+"'\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	linkFakeScript(t, "mark", hook, map[string]string{".mark": mark})
 	gitIn(t, repo, "config", "core.fsmonitor", hook)
 	gitIn(t, repo, "status", "--porcelain")
 	if _, err := os.Stat(mark); err != nil {
@@ -578,10 +576,7 @@ func TestSessionStartIgnoresRepositoryOverrides(t *testing.T) {
 // budget. The wrapper stands in for git on PATH and records each child's pid.
 func TestSessionStartKillsWhatGitStarted(t *testing.T) {
 	bin, pids := t.TempDir(), filepath.Join(t.TempDir(), "pids")
-	wrapper := "#!/bin/sh\nsleep 30 &\necho $! >> '" + pids + "'\nwait\n"
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	linkFakeScript(t, "sleeper", filepath.Join(bin, "git"), map[string]string{".pids": pids})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	run := execGit(gitEnviron(nativeTestTable("http://127.0.0.1:9/v1")))
 

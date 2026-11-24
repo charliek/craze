@@ -131,10 +131,11 @@ const (
 // sessProviderDetail is each provider's line in /provider's list (the
 // mockup's words); a provider it does not name has none.
 var sessProviderDetail = map[string]string{
-	agent.CursorProvider().Name(): "cursor-agent over ACP",
-	agent.GrokProvider().Name():   "grok over ACP",
-	agent.NativeProvider().Name(): "craze's own harness",
-	agent.ClaudeProvider().Name(): "your Claude Code, on your Claude plan",
+	agent.CursorProvider().Name():      "cursor-agent over ACP",
+	agent.GrokProvider().Name():        "grok over ACP",
+	agent.NativeProvider().Name():      "craze's own harness",
+	agent.ClaudeProvider().Name():      "your Claude Code, on your Claude plan",
+	agent.AntigravityProvider().Name(): "agy over ACP, on your Antigravity plan",
 }
 
 // sessPick is what /provider and /model — and /effort and /fast (plan 032

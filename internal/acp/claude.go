@@ -190,7 +190,11 @@ var inboundMethods = []string{
 // in one place. Cursor's and grok's rows are what their branches always did:
 // cursor/* is cursor's (and, as before, any dialect but grok's), x.ai/* is
 // grok's. Claude refuses or ignores both families, reads its auth pushes, and
-// handles elicitation/create, the form it declares it renders.
+// handles elicitation/create, the form it declares it renders. Antigravity
+// (plan 053 § B1) is claude's row without the auth pushes or the request
+// withdrawal: it refuses cursor/* and x.ai's ask and plan, ignores the rest of
+// both families, and handles elicitation/create, which it too is told it may
+// send.
 func dialectHandles(d DialectID, method string) decision {
 	if kind, ok := strings.CutPrefix(method, MethodSessionUpdate+"#"); ok {
 		return updateDecision(kind)
@@ -228,7 +232,7 @@ func dialectHandles(d DialectID, method string) decision {
 	case MethodAuthStatusUpdate:
 		return decisionIgnore
 	case MethodElicitationCreate:
-		if d == DialectClaude {
+		if d == DialectClaude || d == DialectAntigravity {
 			return decisionHandle
 		}
 		return decisionRefuse

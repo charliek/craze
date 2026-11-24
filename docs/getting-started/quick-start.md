@@ -12,7 +12,9 @@
       log in: `cursor-agent login` (the same binary is also installed as
       `agent`), or `grok login` / set `XAI_API_KEY`; or Claude Code signed in
       to a Claude Pro or Max plan, with the `claude-agent-acp` adapter
-      ([Claude on your plan](claude.md)).
+      ([Claude on your plan](claude.md)); or Google's Antigravity CLI (`agy`),
+      signed in with `agy acp --login`
+      ([the antigravity provider](../reference/configuration.md#the-antigravity-provider)).
 
 Coming from v0.0.1? Read [Upgrading](upgrading.md) first.
 
@@ -102,7 +104,7 @@ is for tests; a live session uses the native provider, or `cursor-agent` or
 
 ```bash
 ./bin/craze                      # picker, then the TUI in the current directory
-./bin/craze --provider cursor    # skip the picker (also grok, claude, native)
+./bin/craze --provider cursor    # skip the picker (also grok, claude, antigravity, native)
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse

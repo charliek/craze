@@ -93,6 +93,7 @@ func ClaudeProvider() Provider {
 		name:        claudeName,
 		displayName: claudeName,
 		modeKinds:   claudeModeKinds,
+		startModes:  claudeStartModes,
 		// No implement offer after a plan-mode turn: claude's plan is approved
 		// on its own card (§ B5), and an empty prompt turns the offer off.
 		implementPrompt: "",
@@ -134,10 +135,12 @@ func (p Provider) CycleModes() []string {
 }
 
 // RecordsModel reports whether p's session index rows carry the session's
-// model, which a load sends back (plan 052 § C4). Only claude's: the adapter's
-// own choice on a load (ANTHROPIC_MODEL, then the settings, then the
-// transcript) would otherwise beat the model the user picked in craze.
-func (p Provider) RecordsModel() bool { return p.isClaude() }
+// model and effort, which a load restores (plan 052 § C4): claude's, whose
+// adapter's own choice on a load (ANTHROPIC_MODEL, then the settings, then
+// the transcript) would otherwise beat the model the user picked in craze;
+// and antigravity's, whose load resets both to agy's default (plan 053 § C4,
+// restoreRecorded).
+func (p Provider) RecordsModel() bool { return p.isClaude() || p.isAntigravity() }
 
 // RefusesFast reports whether p refuses its fast setting being turned on (plan
 // 052 § D3): claude's fast mode bills as extra usage on a Claude plan.
@@ -314,8 +317,9 @@ func dedupeEnv(env []string) []string {
 	return out
 }
 
-// claudeStartError is a claude start refused by craze's own checks, with the
-// kind it is (plan 052 § A4's failure table).
+// claudeStartError is a start refused by craze's own checks, with the kind it
+// is (plan 052 § A4's failure table): claude's, and the static mode table's
+// refusal on any provider that has one (startMode).
 type claudeStartError struct {
 	kind errkind.Kind
 	msg  string

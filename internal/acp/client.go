@@ -358,10 +358,14 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 		},
 	}
 	claude := c.Dialect() == DialectClaude
-	if claude {
-		// The form capability, claude's alone (plan 052 § B2): without it
-		// the adapter never asks AskUserQuestion's questions of a client.
+	if claude || c.Dialect() == DialectAntigravity {
+		// The form capability (plan 052 § B2, plan 053 § B2): without it
+		// claude's adapter never asks AskUserQuestion's questions of a
+		// client, and agy's ask_question hangs pending with the question
+		// printed as text.
 		params.ClientCapabilities.Elicitation = &ElicitationCapabilities{}
+	}
+	if claude {
 		// Every claude session declares sub-agents, unattended ones included
 		// (plan 052 § E3, R2-5): children announce with subagent_update and
 		// stream on their own ids, and Agent's own call is replaced by the
@@ -1569,6 +1573,8 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 		n.ToolName = claudeToolName(n.Update)
 		c.routeClaude(n)
 		return
+	case DialectAntigravity:
+		n.ToolName = antigravityToolName(n.Update)
 	}
 	c.mu.Lock()
 	if c.sessionID == "" {

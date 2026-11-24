@@ -1,6 +1,7 @@
 # Architecture
 
-craze is an ACP client. It owns the chrome; `cursor-agent` or `grok`
+craze is an ACP client. It owns the chrome; `cursor-agent`, `grok`, Claude
+Code's adapter or Antigravity's `agy`
 (or `craze-fake-agent` in tests) is the agent process. The **native** provider
 is the exception: its agent loop, tools and model clients run inside craze
 (`internal/harness`), behind the same `agent.Session`, so the layers above it
@@ -77,6 +78,13 @@ The diagram shows the session layer. Around it, a session runs in a
 
 The TUI turns those events into transcript rows, the tasks panel, status
 rows, and cards. `craze prompt --json` writes the same events as JSON lines.
+
+Antigravity (`agy acp`, the `antigravity` dialect) is standard ACP v1 with a
+few seams of its own: questions over `elicitation/create` (keys `q<i>`), tool
+names from each update's top-level `name`, and sub-agent rows backed by the
+`invoke_subagent` tool call, which stay running until the launching turn settles
+because agy's call completes at launch. See [the antigravity
+provider](../reference/configuration.md#the-antigravity-provider).
 
 Grok runs its own sub-agents and reports them: lifecycle notifications
 (`subagent_spawned` / `-progress` / `-finished`) arrive on the parent session

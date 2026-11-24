@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,28 +24,28 @@ import (
 // shape (no email or organisation: nothing of them is read).
 const okStatus = `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}`
 
-// fakeClaude writes a stand-in for Claude Code's `claude`: `auth status` prints
-// status (after sleeping sleep seconds, when set) and records its argv and
-// directory in <dir>/auth-args; `--version` prints version. It returns the
-// script's path.
+// fakeClaude is a stand-in for Claude Code's `claude` in a directory of its
+// own: `auth status` prints status (after sleeping sleep seconds, when set)
+// and records its argv and directory in <dir>/auth-args; `--version` prints
+// version. It returns the stand-in's path, a link to the package's one fake
+// claude (fakescripts_test.go), never a script written here.
 func fakeClaude(t *testing.T, status, version string, sleep string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return fakeClaudeIn(t, t.TempDir(), status, version, sleep, nil)
+}
+
+// fakeClaudeIn is fakeClaude in dir, with extra data files for the fake.
+func fakeClaudeIn(t *testing.T, dir, status, version, sleep string, extra map[string]string) string {
+	t.Helper()
 	p := filepath.Join(dir, "claude")
-	var b strings.Builder
-	b.WriteString("#!/bin/sh\n")
-	b.WriteString("case \"$*\" in\n")
-	b.WriteString("  *'auth status'*)\n")
-	fmt.Fprintf(&b, "    { for a in \"$@\"; do printf '[%%s]' \"$a\"; done; echo; pwd; } > %q\n", filepath.Join(dir, "auth-args"))
+	data := map[string]string{"status": status + "\n", "version": version + " (Claude Code)\n"}
 	if sleep != "" {
-		fmt.Fprintf(&b, "    sleep %s\n", sleep)
+		data["sleep"] = sleep
 	}
-	fmt.Fprintf(&b, "    cat <<'EOF'\n%s\nEOF\n    ;;\n", status)
-	fmt.Fprintf(&b, "  *--version*) echo %q ;;\n", version+" (Claude Code)")
-	b.WriteString("esac\n")
-	if err := os.WriteFile(p, []byte(b.String()), 0o755); err != nil {
-		t.Fatal(err)
+	for k, v := range extra {
+		data[k] = v
 	}
+	linkFakeScript(t, "claude", p, data)
 	return p
 }
 
@@ -284,11 +283,7 @@ func TestClaudePreflightCancelled(t *testing.T) {
 func TestClaudePreflightKillsItsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pid")
-	claude := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\ncase \"$*\" in\n  *'auth status'*) sleep 30 & echo $! > " + strconv.Quote(pidFile) + "\n    echo '" + okStatus + "' ;;\n  *--version*) echo 2.1.326 ;;\nesac\n"
-	if err := os.WriteFile(claude, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	claude := fakeClaudeIn(t, dir, okStatus, "2.1.326", "", map[string]string{"bgpid": pidFile})
 	if _, err := runClaudePreflight(t, claude); err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +718,7 @@ func TestClaudeProviderIsListedAndResolvable(t *testing.T) {
 	if err != nil || p.Hidden() || !p.Resumable() || p.Dialect() != acp.DialectClaude || !slices.Equal(p.Bins(), []string{"claude-agent-acp"}) {
 		t.Fatalf("%+v %v", p, err)
 	}
-	if !slices.Equal(ProviderNames(), []string{"cursor", "grok", "claude", "native"}) {
+	if !slices.Equal(ProviderNames(), []string{"cursor", "grok", "claude", "antigravity", "native"}) {
 		t.Fatalf("listed %q; want claude after grok", ProviderNames())
 	}
 	// The capabilities: sub-agent rows, transcripts and the per-child stop (§
@@ -839,14 +834,7 @@ func TestResolveCompanionIsAbsolute(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "tools"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	claude := fakeClaude(t, okStatus, "2.1.326", "")
-	raw, err := os.ReadFile(claude)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "tools", "claude"), raw, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeClaudeIn(t, filepath.Join(dir, "tools"), okStatus, "2.1.326", "", nil)
 	t.Chdir(dir)
 	got, err := ClaudeProvider().ResolveCompanion(func(k string) string {
 		if k == ClaudeExecutableEnv {

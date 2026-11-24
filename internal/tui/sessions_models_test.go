@@ -197,7 +197,7 @@ func TestTheSlashOpensTheListsCommands(t *testing.T) {
 	if v, _ := inputOf(m); v != "/provider " {
 		t.Fatalf("enter on /provider left %q", v)
 	}
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "native"}) {
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "antigravity", "native"}) {
 		t.Fatalf("/provider lists %v", got)
 	}
 	if it := cmdItem(t, m, "cursor"); it.Note != sessCurrentNote || it.Detail != "cursor-agent over ACP" {
@@ -227,7 +227,7 @@ func TestTheProvidersAreThePickersProviders(t *testing.T) {
 	if got := cmdItems(m); !slices.Equal(got, ids) {
 		t.Fatalf("/provider lists %v, the picker %v", got, ids)
 	}
-	if want := []string{"cursor", "grok", "claude", "native"}; !slices.Equal(ids, want) {
+	if want := []string{"cursor", "grok", "claude", "antigravity", "native"}; !slices.Equal(ids, want) {
 		t.Fatalf("the picker's rows %v, want %v", ids, want)
 	}
 	// Narrowed by id.
@@ -497,8 +497,8 @@ func TestTypedCommandLines(t *testing.T) {
 		t.Fatalf("/model default: %+v, %q", spec, ruleOf(t, m))
 	}
 	for _, tc := range []struct{ line, note string }{
-		{"/provider nope", "no provider nope: one of cursor, grok, claude, native"},
-		{"/provider ", sessNeedsProvider + "cursor, grok, claude, native"},
+		{"/provider nope", "no provider nope: one of cursor, grok, claude, antigravity, native"},
+		{"/provider ", sessNeedsProvider + "cursor, grok, claude, antigravity, native"},
 		{"/model ", sessNeedsModel},
 	} {
 		before := m.sessPick

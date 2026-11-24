@@ -3,7 +3,6 @@ package agent
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -237,12 +236,13 @@ func linkAgent(t *testing.T, agent, path string) {
 // writeDecoy puts an executable at path that is not an agent at all: it
 // records that it ran and exits. A session that spawned it would hang on
 // initialize, so the marker is what a test asserts on rather than the failure.
+//
+// It is a link to the package's one fake (fakescripts_test.go), never a script
+// written here: writing one while another test forks can leave it unrunnable
+// (ETXTBSY).
 func writeDecoy(t *testing.T, path, marker string) {
 	t.Helper()
-	script := fmt.Sprintf("#!/bin/sh\n: > %q\nexit 1\n", marker)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	linkFakeScript(t, "mark", path, map[string]string{".mark": marker})
 }
 
 // TestJournalSessionNoteNamesTheBinaryThatRan: the agent binary is resolved

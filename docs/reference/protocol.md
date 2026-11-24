@@ -1094,14 +1094,14 @@ create sheet offers; `craze providers --hub` prints it.
 
 ```json
 {"jsonrpc":"2.0","id":"3","method":"sessions.createOptions","params":{}}
-{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
+{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"ready"},{"id":"antigravity","label":"antigravity","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
 ```
 
 **Params.** None: `{}`, or none at all. Any member is `bad_request`, reason
 `unknown_field`.
 
 **`providers`** is every agent provider this machine lists, in craze's own
-order — `cursor`, `grok`, `claude`, `native` — at most 16, each listed whether or not
+order — `cursor`, `grok`, `claude`, `antigravity`, `native` — at most 16, each listed whether or not
 its binary is found. Each has its `id`
 (what `session.create`'s `provider` takes), its `label` (what a client shows)
 and its `state`:
@@ -1124,6 +1124,11 @@ would start it, in the hub's own process:
   hub hands no host. A binary not found is `unavailable`, and the reason names
   where the hub looked: `cursor-agent not found on PATH`, or `[agents].cursor
   /opt/x/cursor-agent not found`.
+- **antigravity** is `ready` when `agy` resolves the same way
+  (`[agents].antigravity`, else `agy` on the hub's `PATH`), and `unavailable`
+  with `agy not found on PATH` and the fix `install agy, or set
+  [agents].antigravity in …` when not. Whether `agy` is signed in is not
+  checked: a logged-out one fails the create with `auth`.
 - **cursor, on macOS,** is also `unavailable` when the hub runs outside the
   Mac's login session — first started over `ssh` — where cursor may not reach
   the login keychain; its hosts inherit that session. The fix names the hub's
@@ -1717,7 +1722,7 @@ than that is future work behind a new capability.
 Carried by an attach reply's `session`, a `ready` notification's `session`,
 and the first half of a `sessions.list` row. It is **final** once the
 session is up — its catalogs are empty and `providerSessionId` may be `""`
-until then — but for a native session's model list, which
+until then — but for a native or antigravity session's model list, which
 [changes while it runs](#live-models): each document carries the list as it
 stands when it is built.
 
@@ -1747,7 +1752,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
 | `provider` | `{name, label}` — `name` is the provider id (`cursor` or `grok` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
+| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's but an antigravity session whose model list has changed, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -2210,7 +2215,7 @@ A native session reports what it has spent and how full its context is: the
 state delta section like the model or the config — `state.usage` on a `meta`
 event — and it stands in the two reads of where things are: `session.state`'s
 `settings.usage` and a snapshot's `settings.usage`. A **claude** session
-reports one too ([below](#a-claude-sessions-usage)). Cursor and grok report no
+reports one too ([below](#a-claude-sessions-usage)). Cursor, grok and antigravity report no
 usage through craze, so for their sessions the key is **absent** — never
 `null` and never `{}` — as it is for a native session before its first step
 and a claude one before Claude's first report. A client reads the key's
@@ -2423,6 +2428,11 @@ the session offers now, in the picker's order, and the list's revision:
 {"type":"meta","state":{"catalog":{"models":[{"id":"grok","name":"Grok"},{"id":"fast","name":"Fast"},{"id":"fireworks/kimi-k3","name":"Kimi K3 (Fireworks)","recent":1}],"revision":1}},"at":"2026-01-01T00:00:00Z"}
 ```
 
+An antigravity session's model list is agy's model option's values, so it
+changes when agy's catalog does: each change reaches a client as the same
+catalog section, its revision one past the last. Its models carry `id` and
+`name` only.
+
 - Each model is the info document's catalog model: `id` and `name` always,
   `recent` its rank and absent for a model not remembered, and its effort
   facts (`efforts`, `defaultEffort`, `switchEffort`) where the session
@@ -2448,9 +2458,10 @@ the session offers now, in the picker's order, and the list's revision:
   switched to ranks first, and its row's `switchEffort` is the effort it was
   left at — the same models, at the next revision. A change that changes no
   row publishes no section.
-- No ACP session publishes one, and neither does a native session before its
-  first change: the key is **absent** then — never `null`, never `{}` — and
-  the list is the info document's.
+- No ACP session but an antigravity one publishes one, and neither a native
+  nor an antigravity session does before its list's first change: the key is
+  **absent** then — never `null`, never `{}` — and the list is the info
+  document's.
 
 The section stands in the reads of where things are, as usage does: a
 snapshot's `settings.catalog` (the last section a delta carried) and
@@ -3383,7 +3394,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"sessions.createOptions","params
 The answer, exactly, on Linux and macOS:
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /tmp/craze-recipe/craze-home/config.toml"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /tmp/craze-recipe/craze-home/config.toml"},{"id":"antigravity","label":"antigravity","state":"unavailable","reason":"agy not found on PATH","fix":"install agy, or set [agents].antigravity in /tmp/craze-recipe/craze-home/config.toml"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
 ```
 
 - cursor is `unavailable` because neither `cursor-agent` nor `agent` is on

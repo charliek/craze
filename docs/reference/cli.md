@@ -37,16 +37,16 @@ flags (not `--continue`); see [craze prompt](#craze-prompt).
 | `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line in the session's diagnostics (below). Applies to this start only — a `--continue` or `--resume` load included — and is never remembered. `craze new --wait` on the native provider is strict instead: with `--model`, a level the model does not list is [refused](#model-checks) |
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line in the session's diagnostics (below). No native model has one: `craze new --wait` on the native provider [refuses `--fast`](#model-checks). On `claude` `--fast` is refused, exit 2 (`--fast cannot be used with provider claude: fast mode bills extra usage on a Claude plan`), by every command that takes it; `--no-fast` is accepted |
 | `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
-| `--provider` | Provider: `cursor`, `grok`, `claude` (ACP agents; claude is Claude Code on your Claude plan, [Claude sessions](#claude-sessions)) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
-| `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
+| `--provider` | Provider: `cursor`, `grok`, `claude`, `antigravity` (ACP agents; claude is Claude Code on your Claude plan, [Claude sessions](#claude-sessions); antigravity is Google's `agy` on your Antigravity plan, [Antigravity sessions](#antigravity-sessions)) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
+| `--force` | Spawn the agent with `--force` / `--always-approve` (yolo): Cursor's `--force`, Grok's `--always-approve`, and on antigravity `agy acp --dangerously-skip-permissions` (without it, `agy acp`). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--no-background` | Keep the terminal's own background and text colours instead of the theme's. Same as `background = false` |
 | `--no-host-status` | Report nothing to the herdr pane or roost tab craze runs in, and leave the agent's environment whole. Same as `host_status = false`. See [Host status](configuration.md#host-status) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
-| `--ask` | Set session mode to ask after `session/new`. `claude` has no ask mode: its start fails, `mode ask is not advertised` |
+| `--ask` | Set session mode to ask after `session/new`. `claude` and `antigravity` have no ask mode: the start fails, `mode ask is not advertised` (on antigravity before the agent is spawned) |
 | `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on every provider but cursor — grok, claude and antigravity load their own plugins, and native reads Claude Code's enabled ones |
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one, skipping sub-agent sessions. No matching session exits 1 |
 | `--version`, `-v` | Print the craze version and exit, as `craze version` does. Answered before any argument is checked |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
@@ -279,6 +279,30 @@ a newer craze build — one this version does not recognize — is never
 trimmed, and the load is refused instead, so nothing unrecognized is thrown
 away.
 
+### Antigravity sessions
+
+`--provider antigravity` runs **Google's Antigravity CLI, `agy`, on your
+Antigravity plan** over ACP (`agy acp`); [The antigravity
+provider](configuration.md#the-antigravity-provider) is the reference: the
+sign-in, models and effort, modes, what a resume restores and what `agy` does not
+offer over ACP. It is listed after claude and before native. The tested
+version is `agy` 1.5.14.
+
+| Case | Kind | Words |
+|------|------|-------|
+| `agy` is not found | `start_failed` | `agent binary not found: agy is not on PATH; install it, or set [agents].antigravity in …` |
+| `agy` is not signed in (`-32000`, `Authentication required`, on start, load or a prompt) | `auth` | ``agent: Authentication required (run `agy acp --login`)`` |
+| `--ask` (checked before `agy` is spawned) | `config` | `mode ask is not advertised` |
+| A `--model` `agy` does not list (`-32602`) | `model_not_found` | `the agent refused model "<model>": <agy's reason>` |
+
+Under the default `--force`, `agy` runs as `agy acp
+--dangerously-skip-permissions`; `--no-force` runs `agy acp` and the session's
+`run_command` calls ask. `craze new --wait` on antigravity returns the files
+`edit_file` and `write_file` changed, and under `--plan` the brain plan file as
+`planFile` ([What `files` lists](#what-files-lists)). `agy` runs sub-agents
+asynchronously: in an unattended session they may be cut off when the turn ends.
+A session id `agy` no longer has loads as an empty session, with no error.
+
 ### Claude sessions
 
 `--provider claude` starts **your own Claude Code on your Claude plan**
@@ -473,14 +497,14 @@ echo "hello" | ./bin/craze prompt --json
 | `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one; neither leaves it as the model has it. Both together exit 2 |
 | `--web-search`, `--no-web-search` | Offer this run's native session the web tools, or offer none, whatever the home says ([web search](#web-search-flags)). Both together exit 2. `--web-search` that cannot be honoured (an explicit off in `config.toml`, a provider other than native) is exit 1 before any provider is called: the message on stderr and, with `--json`, the `error` event; `--no-web-search` is never refused |
 | `--agent-bin` | Path to the agent binary for this launch's provider (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
-| `--provider` | Provider: `cursor`, `grok`, `claude` (ACP agents) or `native` (runs inside craze) |
+| `--provider` | Provider: `cursor`, `grok`, `claude`, `antigravity` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--ask` | Set session mode to ask after `session/new`. `claude` has no ask mode: its start fails, `mode ask is not advertised` |
 | `--plan` | Set session mode to plan after `session/new` (on `claude`, in `session/new` itself) |
-| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on grok and native |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic (see below), not an error; ignored (with a diagnostic) on every provider but cursor — grok, claude and antigravity load their own plugins, and native reads Claude Code's enabled ones |
 | `--json` | Write only JSON events to stdout |
 
 Without `--json`, only the **main session's** assistant text is written to
@@ -1080,7 +1104,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | Flag | Description |
 |------|-------------|
 | `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
-| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok, claude or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, kind `config` under `--json` |
+| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused (plain mode: `craze new: no default provider yet; pass --provider cursor, grok, claude, antigravity or native`, exit 1; `--json` passes the hub's refusal through). An unknown id is a usage error, exit 2, kind `config` under `--json` |
 | `--model <id>` | The model to start on. Without it the session uses the agent's own default: craze keeps no default model of its own for an ACP provider |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
@@ -1117,12 +1141,16 @@ The caller is read from the environment, in this order:
    starts, to the session's provider — an ACP agent in its own environment,
    native in its shell commands' — replacing any it inherited, so it names the
    immediate caller.
-2. Otherwise `claude` when `CLAUDECODE=1` (Claude Code's Bash tool sets it), or
+2. Otherwise `claude` when `CLAUDECODE=1` (Claude Code's Bash tool sets it),
    `cursor` when `CURSOR_AGENT` is set (a standalone `cursor-agent`'s shell
-   sets it) — one of them alone. With both, one started the other and the
-   caller is unknown: nothing is refused.
+   sets it), or `antigravity` when `ANTIGRAVITY_AGENT` is set (a standalone
+   `agy`'s shell commands set it) — exactly one of them. With two or more, one
+   started another and the caller is unknown: nothing is refused.
 
-grok sets no marker craze trusts, so a grok agent is never refused here. So a
+grok sets no marker craze trusts, so a grok agent is never refused here. If
+your terminal exports `ANTIGRAVITY_AGENT` outside `agy` (the Antigravity desktop
+app's may), `craze new --provider antigravity` from it is refused: pass
+`--allow-same-provider`. So a
 cursor session that Claude Code started (both `CLAUDECODE=1` and
 `CRAZE_SESSION_PROVIDER=cursor`) may start claude, and not cursor.
 
@@ -2096,9 +2124,12 @@ workspace. It is what the agent's tools said, not a look at the disk:
     | `native` | its kind is `edit` (`write`, `edit`) |
     | `cursor` | its kind is `edit`, `delete` or `move`: a delete lists the deleted path, a rename both names |
     | `grok` | its tool is `search_replace` or `write`, whatever kind it reports; any other tool does not count |
+    | `antigravity` | its tool is `edit_file` or `write_file`, whatever kind it reports; any other tool does not count. A write into the session's own `agy` brain directory is not a workspace edit: the one `agy` asks feedback on is the plan file, any other (`task_list.md`, a walkthrough) is dropped |
 
 - **Shell writes are never in `files`.** Plan mode refuses edit tools but lets the
   shell through, so a plan-mode turn can change the workspace with `files` empty.
+  On `antigravity` plan mode is `agy`'s own and craze refuses nothing: a plan-mode
+  turn's edits, if `agy` makes any, are in `files` like any other turn's.
   **A caller that must know every change should diff the workspace itself.**
 - **A sub-agent's edits are not in its parent's `files`.** The list is the turn's own
   calls.
@@ -2127,7 +2158,11 @@ workspace. It is what the agent's tools said, not a look at the disk:
   `GROK_HOME` is from the agent's working directory, the workspace), for the session id
   the agent gave this session (`providerSessionId` in the [session info
   document](protocol.md#the-session-info-document), not craze's). A `plan.md` anywhere
-  else is a file like any other. cursor's plan is not a file of its own, and it has no
+  else is a file like any other. antigravity's is the markdown file `agy` writes into
+  its own brain directory for the session, `$HOME/.gemini/antigravity-cli/brain/<session id>/`,
+  and asks feedback on (`RequestFeedback` in its tool call); `task_list.md` and the
+  other artifacts `agy` writes there are not reported, and a write into another
+  session's brain directory is an `outsideFiles` entry. cursor's plan is not a file of its own, and it has no
   `planFile`.
 - **One call lists at most 64 paths.** `filesTruncated: true` says one named more.
 
@@ -2437,7 +2472,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | `start_failed` | The agent or host did not start | true |
 | `timeout_before_prompt` | `--timeout` ended before the prompt was sent (for `craze wait`, before the turn could be followed) | true |
 | `provider` | A model provider's failure of no kind below. Retryable for a connection that failed, a 5xx, a 408, and a 429 or an in-stream server error or overload (`server_is_overloaded`, `service_unavailable_error`) it did not mark final; not for any other 4xx, or what the ChatGPT route marks final (its every 429 and 400). On `claude`, an `errorKind` of no kind below: retryable for `overloaded`, `server_error` and a `rate_limit` that is not rejected | per class |
-| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send; on `claude`, a login that is not a Claude Pro or Max plan, a `-32000`, or an `errorKind` of a login refused ([Claude sessions](#claude-sessions)) | false |
+| `auth` | The provider refused the credentials (a 401, or a 403 — on every driver but `chatgpt` and `anthropic` one whose code is not `model_not_found`, its message giving the provider's own reason first; on those two every 403), or there are none to send; on `claude`, a login that is not a Claude Pro or Max plan, a `-32000`, or an `errorKind` of a login refused ([Claude sessions](#claude-sessions)); on `antigravity`, a `-32000` whose message says `Authentication required`, worded with the login to run, `agy acp --login` ([Antigravity sessions](#antigravity-sessions)) | false |
 | `quota` | The account's quota, credit or plan limit is gone (a 402; a 429 or an in-stream error that says so). On the `openai-responses` driver a 429 or an in-stream error whose code or type is `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` or `organization_usage_limit_exceeded` ends the turn after one request, never retried in it. On `claude`, a `billing_error`, a rejected rate limit, and the [overage guard](#claude-sessions): its stop, and its refusal while its record holds | false |
 | `context_too_large` | The request does not fit the model's context window (on `claude`, an `invalid_request` saying the prompt is too long) | false |
 | `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found`; on `claude`, its `model_not_found` | false |
@@ -2928,7 +2963,7 @@ nor any part of one, is ever printed.
 ./bin/craze providers --hub --json
 ```
 
-Lists the agent providers craze can start a session of — cursor, grok, claude
+Lists the agent providers craze can start a session of — cursor, grok, claude, antigravity
 and native — with each one's state on this machine and, for a
 provider that is not ready, why and what to do about it. These are **agent**
 providers, what [`--provider`](#flags) picks; [`craze auth
@@ -2939,8 +2974,9 @@ their keys.
 PROVIDER  STATE        REASON                              FIX
 cursor    unavailable  cursor-agent not found on PATH      install cursor-agent, or set [agents].cursor in /home/you/.craze/config.toml
 grok      ready        -                                   -
-claude    unavailable  claude-agent-acp not found on PATH  install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /home/you/.craze/config.toml
-native    needs setup  no model provider has a key         craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan)
+claude       unavailable  claude-agent-acp not found on PATH  install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /home/you/.craze/config.toml
+antigravity  unavailable  agy not found on PATH               install agy, or set [agents].antigravity in /home/you/.craze/config.toml
+native       needs setup  no model provider has a key         craze auth login (an API key, or "craze auth login chatgpt" for a ChatGPT plan)
 ```
 
 | State | When |
@@ -2968,6 +3004,10 @@ How each is judged:
   missing is unavailable, named with its install: `install the adapter: npm i
   -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude
   in …`, and `install Claude Code (claude), or set CLAUDE_CODE_EXECUTABLE`.
+- **antigravity** ([Antigravity sessions](#antigravity-sessions)) is judged as
+  cursor's and grok's are, for its one binary, `agy`: `agy not found on PATH`,
+  fix `install agy, or set [agents].antigravity in …`. Signing in is not checked
+  here: a logged-out `agy` fails the start, with kind `auth`.
 - **cursor, on macOS,** is also unavailable when this craze runs outside the
   Mac's login session — started over `ssh` — where cursor may not reach the
   login keychain (`this craze runs outside the macOS login session (over

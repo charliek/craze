@@ -122,6 +122,12 @@ type session struct {
 	// namedPaths is the paths each main-session call has named, for its stamp
 	// (edited.go); under mu.
 	namedPaths callPaths
+	// feedbackCalls is, per main-session call of agy's, whether its rawInput
+	// asked for feedback on what it wrote: its plan file (plan 053 § D3).
+	feedbackCalls callFlags
+	// stampedFeedback is, per such call, the flag its stamp was last worked
+	// out with (stampEditedLive).
+	stampedFeedback callFlags
 	// toolPub keeps an update's merge, stamp and publish together
 	// (publishToolDelta). Never taken with mu held.
 	toolPub sync.Mutex
@@ -170,6 +176,13 @@ type session struct {
 	// call, by id: 0 for one a turn of the agent's own, or nothing, opened
 	// (closeInFlightTools; C8 K7). It grows as the tool map does.
 	toolOwner map[string]int
+	// rowsSettled is the last turn whose tool-backed sub-agent rows were
+	// settled (settleToolRowsLocked): a row created for it after that is
+	// created settled, as one outside a turn is. Under s.mu.
+	rowsSettled int
+	// retiredRows are the tool-backed rows retention evicted once settled
+	// (evictFinishedLocked), never created again. Under s.mu.
+	retiredRows idTombstones
 	// textRun is the messageId of the claude root text the transcript's open
 	// run holds, "" when none is open: a chunk of another message starts a
 	// paragraph of its own (review C4 item 11).
@@ -330,6 +343,11 @@ type session struct {
 	// then A unannounced) and the call's before and after then agree while the
 	// fold is on B (astra r2 item 1).
 	modelUnannounced bool
+	// catalogUnannounced is true while Snapshot.Models holds a list rebuilt
+	// from the catalog (configModelsLocked) that no delta has carried yet:
+	// the next delta enqueued carries it as its catalog section
+	// (enqueueDeltaLocked). Guarded by s.mu.
+	catalogUnannounced bool
 	// beforeSetSection is a test barrier, nil in every build but a test's: it
 	// runs on a setter's own goroutine after the provider has taken the change
 	// and before the locked section that mutates the snapshot and enqueues its
@@ -642,13 +660,12 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 
 	p := s.provider()
 	args := p.Args(s.opts.ExtraArgs, s.opts.Force)
-	if p.isClaude() {
-		// What claude refuses outright — a mode it has none of, --fast — is
-		// refused before anything is spawned.
-		if err := s.claudeStartRefusal(); err != nil {
-			s.unstart()
-			return false, err
-		}
+	// What a provider refuses outright — a mode its static table has none of
+	// (claude's and agy's ask), claude's --fast — is refused before anything
+	// is spawned.
+	if err := s.startRefusal(); err != nil {
+		s.unstart()
+		return false, err
 	}
 
 	cwd := s.opts.Workspace
@@ -807,6 +824,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		// with the transport (review C4 item 3).
 		go s.retireChildrenAtEnd(client)
 	}
+	if p.rowsOutliveCall() {
+		// So does a tool-backed row no turn settles (plan 053 § D4).
+		go s.retireToolRowsAtEnd(client)
+	}
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
@@ -867,7 +888,9 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	} else {
 		sess, err := client.NewSession(ctx, cwd, s.sessionParams(false))
 		if err != nil {
-			return true, err
+			// A logged-out agy's -32000 is an auth error naming its login
+			// (plan 053 § A3); every other provider's is as it was.
+			return true, s.provider().classifyAuth(err)
 		}
 		snap = snapshotFromNewProvider(sess, s.provider(), initRes)
 		snap.Provider = s.provider().Info()
@@ -902,6 +925,14 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 		s.settleMode(loading, &snap, modeID)
+	}
+	if loading && p.restoresAfterLoad() {
+		// The model and effort the index row recorded, which agy's load
+		// forgot (plan 053 § C4): before --model, which outranks them, and
+		// --effort, which is set against the restored model's catalog.
+		if err := s.restoreRecorded(ctx, client); err != nil {
+			return true, err
+		}
 	}
 	if s.opts.Model != "" {
 		// --model is a model change like SetModel's, by the same path (plan 025
@@ -1030,6 +1061,12 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// protected from, and the marks are cleared with it.
 	s.installPending = false
 	s.agentWrote = agentSections{}
+	// The model list the merged catalog offers, for a provider whose list is
+	// its model option (configModels): the response's list is session/new's,
+	// and an update kept above — or a --model/--effort reply copied into snap
+	// — may have changed the option since (review branch item 5). A list that
+	// changed rides the install delta below.
+	s.configModelsLocked()
 	// Same locked section as the carry-over on purpose: the names resolve
 	// against whatever commands survived it, so an update that arrived early
 	// is honoured and one that arrives next redoes the work.
@@ -1127,6 +1164,110 @@ func (s *session) startSettings(ctx context.Context, client *acp.Client, loading
 		}
 	}
 	return nil
+}
+
+// restoreRecorded is a load's restore of the model and effort its session
+// index row recorded (plan 053 § C4), for a provider whose load answers on its
+// own default whatever the request carried (restoresAfterLoad: agy resets to
+// neon/high). It runs on the load path only, after the restored snapshot is
+// installed and published, and before the --model and --effort tails:
+//
+//   - --model given: nothing recorded applies — the user chose a model, and
+//     its effort is the agent's default for it unless --effort says one (a
+//     suffixed --model, gemini-4-neon-high, says both).
+//   - otherwise the recorded model, then — unless --effort says one, which
+//     startSettings then sets against the same catalog — the recorded effort.
+//
+// The model goes first, by the path any model change takes (changeModel), and
+// the effort is chosen against the catalog the model's reply left: agy resets
+// or drops thought_level on a switch. A step whose value the session already
+// holds is skipped; a model with no effort option skips the effort and says
+// so. A refusal of a recorded value (-32602, -32601) is not fatal: the session
+// keeps the agent's and says which two (noteRecordedRefused). An auth error,
+// a transport failure, or a set unanswered past startSettingWait fails the
+// start, as any start setting's does. What the replies installed is announced
+// in one delta carrying the Model and Config sections, as the load's --model
+// is.
+func (s *session) restoreRecorded(ctx context.Context, client *acp.Client) error {
+	if s.opts.Model != "" {
+		return nil
+	}
+	moved := false
+	if want := strings.TrimSpace(s.opts.LoadModel); want != "" && s.currentModel() != want {
+		set, err := s.restoreSet(ctx, "the recorded model "+want, func(c context.Context) error {
+			return s.changeModel(c, client, want)
+		}, func() { s.noteRecordedRefused("model", "on", want, s.currentModel()) })
+		if err != nil {
+			return err
+		}
+		moved = moved || set
+	}
+	if want := strings.TrimSpace(s.opts.LoadEffort); want != "" && strings.TrimSpace(s.opts.Effort) == "" {
+		s.mu.Lock()
+		opt := EffortOption(Snapshot{Provider: s.provider().Info(), Config: s.snap.Config})
+		model := s.snap.CurrentModel
+		s.mu.Unlock()
+		value, why := effortValue(opt, want)
+		refused := func() { s.noteRecordedRefused("effort", "at", want, opt.Current) }
+		switch {
+		case opt == nil:
+			s.noteRecordedUnoffered(want, model)
+		case opt.Current == want:
+		case why != "":
+			refused()
+		default:
+			set, err := s.restoreSet(ctx, "the recorded effort "+want, func(c context.Context) error {
+				_, err := client.SetConfig(c, opt.ID, value)
+				return err
+			}, refused)
+			if err != nil {
+				return err
+			}
+			moved = moved || set
+		}
+	}
+	if moved {
+		s.mu.Lock()
+		s.enqueueDeltaLocked("", Event{}, s.modelDeltaLocked())
+		s.inUseCheckLocked()
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// restoreSet runs one of restoreRecorded's sets, bounded as a start setting's
+// set is (startSettingWait), and reports whether it was set. The agent's
+// refusal of the recorded value (recordedRefused) is not fatal: refused notes
+// it. Any other failure is said as the start would say it: an auth error in
+// the provider's words (classifyAuth), the bound naming what, anything else
+// as it is.
+func (s *session) restoreSet(ctx context.Context, what string, set func(context.Context) error, refused func()) (bool, error) {
+	setCtx, cancel := context.WithTimeoutCause(ctx, startSettingWait, errStartSettingWait)
+	defer cancel()
+	err := s.provider().classifyAuth(startSetFailure(setCtx, set(setCtx), what))
+	switch {
+	case err == nil:
+		return true, nil
+	case recordedRefused(err):
+		refused()
+		return false, nil
+	}
+	return false, err
+}
+
+// recordedRefused reports whether err is the agent refusing a recorded value
+// itself — -32602, a value it does not offer, or -32601, a call it does not
+// have — which leaves the session on its own value. Any other error is not.
+func recordedRefused(err error) bool {
+	var rpc *acp.RPCError
+	return errors.As(err, &rpc) && rpc != nil && (rpc.Code == acp.CodeInvalidParams || rpc.Code == acp.CodeMethodNotFound)
+}
+
+// currentModel is the session's current model.
+func (s *session) currentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snap.CurrentModel
 }
 
 // startOption is the option find picks out of the catalog a start setting is
@@ -1359,7 +1500,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 		// client. Clearing the flag keeps a late notification from being
 		// stamped replayed on its way into a channel nobody will read.
 		s.replaying.Store(false)
-		return err
+		return s.provider().classifyAuth(err)
 	}
 	// Everything from here to ReplayDone waits on hctx, not on the
 	// background or s.done alone: on claude it ends when the hold behind the
@@ -1382,7 +1523,7 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// simply absent after a resume, which plan 013 §4 documents. Tools,
 	// Subagents, Todos, Commands, Plugins and Title keep whatever the replay
 	// left behind.
-	s.snap.Models = restored.Models
+	s.installModelsLocked(restored.Models)
 	s.snap.Modes = restored.Modes
 	s.snap.Config = restored.Config
 	s.snap.CurrentModel = restored.CurrentModel
@@ -1459,6 +1600,9 @@ type sessionHooks struct {
 	// retireJoining runs in the retirement once the read loop has ended,
 	// before it joins the claude dispatch.
 	retireJoining func()
+	// toolPublish runs in publishToolDelta between a main-session update's
+	// merge and its publication.
+	toolPublish func()
 }
 
 // flushReplayUserCtx is flushReplayUser whose publication gives up with ctx.
@@ -1980,6 +2124,10 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// turn_ended ending are in the record ahead of the ending that says the turn
 	// is over (plan 021 §3.6).
 	s.endAskTurn(token)
+	// The sub-agent rows this turn launched end with it, ahead of its
+	// terminal event (plan 053 § D4): agy's children report nothing of their
+	// own, so the turn's outcome is theirs.
+	s.settleToolRows(myTurn, turnRowStatus(res, err))
 	if err != nil {
 		// A tool the failed turn left running ends with it (plan 052 § B9):
 		// no agent sends a terminal update for a call its own failure — or
@@ -2012,6 +2160,21 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// reaches this function, nor does one the agent ran on its own.
 	s.scanner.request()
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// turnRowStatus is a turn's outcome as its tool-backed sub-agent rows take it
+// (plan 053 § D4), a tool status their settling reads as their call's: failed
+// for a prompt error — an agent that died under the turn included — cancelled
+// for a cancelled turn, and completed for any other stop reason (end_turn,
+// max_tokens, max_turn_requests, refusal).
+func turnRowStatus(res *acp.PromptResult, err error) string {
+	switch {
+	case err != nil:
+		return toolFailed
+	case res != nil && res.StopReason == acp.StopCancelled:
+		return toolCancelled
+	}
+	return toolCompleted
 }
 
 // endAskTurn ends token for the registry and then waits for the outbox, so
@@ -2424,6 +2587,15 @@ func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *
 	}
 	if st != nil && st.Model != nil && *st.Model == s.snap.CurrentModel {
 		s.modelUnannounced = false
+	}
+	if st != nil && s.catalogUnannounced {
+		// A model list rebuilt from the catalog (configModelsLocked) rides on
+		// the next delta, the one that carries the catalog it came from: an
+		// update's, a setter's, an install's.
+		if st.Catalog == nil {
+			st.Catalog = &CatalogState{Models: CloneModels(s.snap.Models), Revision: s.snap.CatalogRevision}
+		}
+		s.catalogUnannounced = false
 	}
 	t := s.log.EnqueueTicket(base)
 	if s.provider().isClaude() && s.log.OutboxPastHardBound() {
@@ -3394,7 +3566,7 @@ func (s *session) onTaskReceipt(req acp.TaskRequest) {
 	}
 	tool.Task = mergeTaskInfo(tool.Task, info)
 	s.tools[req.ToolCallID] = tool
-	extras := s.syncCursorLocked(tool)
+	extras := s.syncToolRowLocked(tool)
 	out := cloneTool(s.tools[req.ToolCallID])
 	s.mu.Unlock()
 	s.emit(Event{Type: EventTool, Tool: &out})
@@ -3645,6 +3817,7 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 	was := ModelConfigOptionIn(s.snap.Config)
 	now := ModelConfigOptionIn(cfg)
 	s.snap.Config = cfg
+	s.configModelsLocked()
 	stale := was == nil && now != nil && (s.modelBeforeAny || s.modelBeforeSet[now.Current])
 	if now != nil {
 		// The marker's whole life is "until the option appears", whether or not
@@ -3779,6 +3952,7 @@ func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 		case !s.catalogOnModelLocked(r.Value):
 			s.snap.Config = withoutModelOptions(s.snap.Config, r.Value)
 		}
+		s.configModelsLocked()
 		s.adoptModelLocked(r.Value)
 		return
 	}
@@ -3794,6 +3968,50 @@ func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 		}
 	}
 	s.applyConfigLocked(cfg)
+}
+
+// installModelsLocked installs a load's model list. For a provider whose list
+// is its model option (configModels), a list that differs from one a delta
+// already carried — a replayed catalog update's (configModelsLocked) — is a
+// change like that one: the revision moves past it and the list is owed to
+// the stream, so a client that folded the replayed list does not keep it at
+// the same revision. A list nothing has published yet is the session's
+// first, revision 0. s.mu is held.
+func (s *session) installModelsLocked(models []ModelInfo) {
+	moved := s.provider().configModels && s.snap.CatalogRevision > 0 && !EqualModels(models, s.snap.Models)
+	s.snap.Models = models
+	if moved {
+		s.snap.CatalogRevision++
+		s.catalogUnannounced = true
+	}
+}
+
+// configModelsLocked rebuilds Snapshot.Models from the model option of the
+// catalog just installed, for a provider whose models are that option's
+// values (Provider.configModels, plan 053 § C2): a catalog that adds, drops or
+// renames a model changes the list every reader of Snapshot.Models sees, as
+// the install's did. A catalog with no model option leaves the list as it
+// was. A list that changed moves CatalogRevision and is owed to the stream
+// (catalogUnannounced): the next delta enqueued carries it as the catalog
+// section, which is how an attached client's picker learns a model list
+// changed (review branch item 5). Before a new session's install nothing is
+// published and the install rebuilds from the final catalog, so the window
+// does nothing here. s.mu is held.
+func (s *session) configModelsLocked() {
+	if !s.provider().configModels || s.installPending {
+		return
+	}
+	opt := ModelConfigOptionIn(s.snap.Config)
+	if opt == nil {
+		return
+	}
+	models := configOptionModels(*opt)
+	if EqualModels(models, s.snap.Models) {
+		return
+	}
+	s.snap.Models = models
+	s.snap.CatalogRevision++
+	s.catalogUnannounced = true
 }
 
 // catalogOnModelLocked reports whether the catalog the session holds is

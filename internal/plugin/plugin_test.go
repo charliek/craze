@@ -26,7 +26,7 @@ const minCraze = "0.2.0"
 
 // wantAgents are the agents plan 041 §3.6 lists. There is no claude preset
 // (plan 052 R2-9): only Claude Code loads these, and it must not target claude.
-var wantAgents = []string{"astra", "cursor", "delegate", "grok", "muse", "sol", "wonder"}
+var wantAgents = []string{"astra", "cursor", "delegate", "grok", "muse", "neon", "sol", "wonder"}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -77,7 +77,7 @@ func frontmatter(text string) (map[string]string, string, error) {
 // noSelfRule is how every preset's body opens (plan 052 § J4): the no-self
 // rule, ahead of its forwarding mandate, so a preset added later inherits it.
 const noSelfRule = "## Don't call yourself\n\nNever use craze to reach the provider you already run on: " +
-	"Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok` and a craze native session on `native`. " +
+	"Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok`, Antigravity (agy) on `antigravity` and a craze native session on `native`. " +
 	"For your own provider use your own sub-agent tool (Claude Code's is the Agent tool), not craze."
 
 // forwardMandate is the start of every preset's forwarding mandate.
@@ -157,6 +157,15 @@ func checkAgent(text string) []string {
 // target spells; the release that ships it replaces it, as webNote's.
 const claudeNote = "a craze newer than 0.3.0"
 
+// agyNote is the phrase every place that states a minimum for the
+// antigravity target spells (plan 053); the release that ships it replaces
+// it, as webNote's.
+const agyNote = "a craze newer than 0.4.1"
+
+// agyUnknown is what a craze that predates the antigravity provider says to
+// --provider antigravity (exit 2): what the agents' too-old rule for it reads.
+const agyUnknown = "unknown provider \"antigravity\""
+
 // webNote is the phrase every place that states a minimum for web= spells;
 // RELEASING.md's release step replaces it with the version that ships the
 // feature.
@@ -232,7 +241,7 @@ func checkWebAgent(name, text string) []string {
 }
 
 // checkNoWebAgent returns what is wrong with an agent that must not accept
-// web= (grok, cursor): no web flag, and an error for a web= line.
+// web= (grok, cursor, neon): no web flag, and an error for a web= line.
 func checkNoWebAgent(name, text string) []string {
 	var bad []string
 	if strings.Contains(text, "--web-search") || strings.Contains(text, "--no-web-search") {
@@ -336,7 +345,7 @@ func TestWebAgents(t *testing.T) {
 			t.Errorf("agents/%s.md: %s", name, bad)
 		}
 	}
-	for _, name := range []string{"grok", "cursor"} {
+	for _, name := range []string{"grok", "cursor", "neon"} {
 		for _, bad := range checkNoWebAgent(name, readFile(t, root, "agents/"+name+".md")) {
 			t.Errorf("agents/%s.md: %s", name, bad)
 		}
@@ -411,7 +420,9 @@ func TestClaudeTarget(t *testing.T) {
 	root := repoRoot(t)
 	delegate := readFile(t, root, "agents/delegate.md")
 	for _, want := range []string{
-		"the provider: `native`, `cursor`, `grok` or `claude`",
+		"the provider: `native`, `cursor`, `grok`, `claude` or `antigravity`",
+		"`delegate: invalid target line: mode=ask is not available on antigravity`",
+		"a session on antigravity (agy) runs the Antigravity agent with its own tools",
 		"`delegate: invalid target line: mode=ask is not available on claude`",
 		"delegate: invalid target line: web= applies to the native provider",
 		"a claude session runs under the user's own Claude Code settings, hooks and permission rules",
@@ -441,6 +452,50 @@ func TestClaudeTarget(t *testing.T) {
 		"skills/craze/references/commands.md": {"`claude`", claudeNote, "--allow-same-provider", "this agent already runs on"},
 		"docs/getting-started/claude-code.md": {"Don't call yourself", "--provider claude", "this agent already runs on",
 			"claude: unpriced, on your Claude plan", claudeNote},
+	} {
+		text := readFile(t, root, rel)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %s", rel, want)
+			}
+		}
+	}
+}
+
+// TestAntigravityTarget (plan 053): every place that states the antigravity
+// target's minimum says agyNote; craze:neon and craze:delegate answer an old
+// craze's unknown-provider refusal with their own too-old line, ahead of the
+// general one; and the plan-mode and unattended caveats are stated.
+func TestAntigravityTarget(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct{ name, line string }{
+		{"neon", "`this craze is too old; craze:neon needs " + agyNote + "`"},
+		{"delegate", "`this craze is too old; the antigravity target needs " + agyNote + "`"},
+	} {
+		fm, body, err := frontmatter(readFile(t, root, "agents/"+tc.name+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(fm["description"], agyNote) {
+			t.Errorf("agents/%s.md: description does not say %s", tc.name, agyNote)
+		}
+		rule := strings.Index(body, tc.line)
+		general := strings.Index(body, "this craze is too old; the plugin needs")
+		if rule < 0 || general < 0 || rule > general || !strings.Contains(body, agyUnknown) {
+			t.Errorf("agents/%s.md: no %s rule on %s ahead of the general one", tc.name, tc.line, agyUnknown)
+		}
+	}
+	fm, _, err := frontmatter(readFile(t, root, "skills/craze/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fm["description"], agyNote) {
+		t.Errorf("skills/craze/SKILL.md: description does not say %s", agyNote)
+	}
+	for rel, wants := range map[string][]string{
+		"agents/delegate.md":                  {"on antigravity craze does not stop agy from editing in plan mode"},
+		"skills/craze/SKILL.md":               {agyNote, agyUnknown, "On antigravity the plan mode is agy's own", "On antigravity, a sub-agent agy launched"},
+		"skills/craze/references/commands.md": {agyNote, agyUnknown, "On `antigravity` it is agy's own plan mode"},
 	} {
 		text := readFile(t, root, rel)
 		for _, want := range wants {

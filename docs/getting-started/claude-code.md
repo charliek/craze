@@ -1,13 +1,13 @@
 # Claude Code sub-agents
 
 This repository is a Claude Code plugin. It adds sub-agents that hand a task to
-a craze session — on craze's own **native** provider, **Grok** or **Cursor** —
-and return the session's result to Claude Code, the way a native Claude Code
+a craze session — on craze's own **native** provider, **Grok**, **Cursor** or
+**Antigravity** — and return the session's result to Claude Code, the way a native Claude Code
 sub-agent returns its own. Use it to put another model on a task, to get a
 second opinion, or to run several models side by side.
 
 Its skill (`skills/craze`) is provider-neutral: it shows any agent — Claude
-Code, Cursor, Grok or a craze session — how to hand work to another provider
+Code, Cursor, Grok, Antigravity's `agy` or a craze session — how to hand work to another provider
 through craze, [Claude included](#claude-as-a-target), and never to its own
 ([Don't call yourself](#dont-call-yourself)).
 
@@ -24,6 +24,28 @@ In Claude Code:
 /plugin install craze@craze
 ```
 
+### In Cursor, Grok and Antigravity
+
+The same plugin installs in the other agents' own plugin systems. There the
+part that matters is the skill: its *Driving craze directly* section teaches
+the agent the commands any agent can run (`craze new --wait`, `send`, `wait`,
+`cancel`). The sub-agent files under `agents/` are written for Claude
+Code's Agent tool, and another agent may load them or not.
+
+| Agent | Install |
+|-------|---------|
+| Cursor | `agent plugin marketplace add https://github.com/charliek/craze`, then install `craze` from that marketplace in Cursor |
+| Grok | `grok plugin install charliek/craze` (`grok plugin validate` accepts the plugin as it is) |
+| Antigravity | `agy plugin install <directory>` on a checkout: `git clone --depth 1 https://github.com/charliek/craze <dir>`. `agy` converts a Claude Code plugin as it installs it (the skill and the eight agents, into `~/.gemini/config/plugins/craze`); it copies the whole directory and refuses a symlink that points outside it, so install from a fresh clone rather than a working checkout |
+
+A craze **native** session needs nothing: it reads the plugins Claude Code has
+enabled ([Claude content](../reference/configuration.md#claude-content-compatclaude)).
+craze still refuses each agent its own provider where it can tell who is
+calling ([Don't call yourself](#dont-call-yourself)). Where it cannot, the rule
+is the skill's alone: from Grok, which sets no marker craze trusts, and when two
+caller markers are set with no `CRAZE_SESSION_PROVIDER` (`CLAUDECODE=1` and
+`ANTIGRAVITY_AGENT`, say), which leaves the caller ambiguous.
+
 ## The agents
 
 Dispatch one with the Agent tool: `subagent_type` `craze:<name>`, and the task
@@ -37,6 +59,7 @@ as the prompt.
 | `craze:muse` | native `muse-spark-1.3-contributor` | routine, bounded tasks, cheaply |
 | `craze:wonder` | native `muse-wonder-1.0`, effort high | hard tasks, at about three times Spark's price per token |
 | `craze:grok` | grok `grok-4.7`, effort high | Grok's own agent |
+| `craze:neon` | antigravity `gemini-4-neon`, effort high | Antigravity's agent (Gemini 4 Neon); no `mode=ask` |
 | `craze:cursor` | cursor `composer-2.5` | Cursor's agent |
 
 `craze:delegate` reads a first line naming the target, then the task:
@@ -46,13 +69,16 @@ target: native chatgpt/gpt-6.2-sol effort=high mode=plan
 Review internal/cache/evict.go for races. Report each one with the line and a fix.
 ```
 
-The provider is `native`, `cursor`, `grok` or `claude` (`claude` takes no
-`mode=ask`, and craze refuses it from Claude Code itself: [below](#dont-call-yourself));
+The provider is `native`, `cursor`, `grok`, `claude` or `antigravity` (`claude` and
+`antigravity` take no `mode=ask`, and craze refuses `claude` from Claude Code itself:
+[below](#dont-call-yourself));
 the model, effort (`low`, `medium`, `high`, `xhigh`, `max`) and mode (`plan` or
 `ask`) are optional. The
 native presets take the task alone, or an optional first line of `mode=plan` or
 `mode=ask` and `web=on` or `web=off`, in either order; `craze:grok` and `craze:cursor` take
-`mode=` only.
+`mode=` only, and `craze:neon` takes `mode=plan` only: it answers `mode=ask` with a refusal and
+runs nothing. An Antigravity session's asynchronous sub-agents may still be running when the
+turn ends, and their results are not in that turn's result.
 
 `web=on` (native only, `target:` line included: `target: native … web=on`) gives the session
 web search and page fetch, for information newer than the model's training or not in the
@@ -138,6 +164,7 @@ does that better:
 | Claude Code | `claude` | the Agent tool |
 | Cursor | `cursor` | Cursor's own sub-agents |
 | Grok | `grok` | Grok's own sub-agents |
+| Antigravity (`agy`) | `antigravity` | agy's own sub-agents |
 | a craze native session | `native` | the `agent` tool, which runs any native model (`craze:sol`'s included) |
 
 Every agent file opens with this rule, and there is no `craze:claude` preset:
@@ -147,8 +174,9 @@ the caller's own provider, exit 2: `craze: this agent already runs on claude;
 use your own sub-agent tool for claude work, not craze (--allow-same-provider
 overrides)`. It knows a craze session by `CRAZE_SESSION_PROVIDER` (craze sets
 it for every agent it starts, native's shell included), Claude Code by
-`CLAUDECODE=1` and a standalone `cursor-agent` by `CURSOR_AGENT`. With both of
-those and no `CRAZE_SESSION_PROVIDER`, one started the other and the caller is
+`CLAUDECODE=1`, a standalone `cursor-agent` by `CURSOR_AGENT` and a standalone
+`agy` by `ANTIGRAVITY_AGENT`. With two or more of those and no
+`CRAZE_SESSION_PROVIDER`, one started the other and the caller is
 unknown, so craze does not refuse. Grok sets no marker craze
 trusts, so from Grok the rule is the text alone. The agents return the
 refusal as it is and do not retry; `--allow-same-provider` is for a person who

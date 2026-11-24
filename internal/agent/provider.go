@@ -122,6 +122,19 @@ type Provider struct {
 	// is not one of Capabilities (that would be a required wire field); the
 	// host reports it as the session capability aside.
 	aside bool
+	// startModes is a provider with a static mode table of its own: the
+	// modes a session may be started in, so that a mode it has none of is
+	// refused before anything is spawned, in the words /ask is refused with
+	// (startMode; claude's Manual and plan, plan 052 § C2; agy's four,
+	// plan 053 § C1). nil reads the modes off the wire after session/new, as
+	// cursor and grok always have.
+	startModes []string
+	// configModels builds the model list from the model config option's
+	// values and the current model from its value, ignoring a legacy models
+	// block (plan 053 § C2): agy's models block lists every model once per
+	// effort level (gemini-4-neon-high, …), while its model option lists the
+	// base models and thought_level is a control of its own.
+	configModels bool
 }
 
 // authMethod is one way a provider can authenticate, in preference order.
@@ -390,9 +403,10 @@ func NativeProvider() Provider {
 // later — leaves it out without having to remember a filter (plan 018
 // §3.4). Native was one of those until H7's smoke passed on both platforms;
 // D-65 lists it here, after grok (plan 028 §3.16). claude was one until its
-// overage guard landed (plan 052 C5): it is listed after grok.
+// overage guard landed (plan 052 C5): it is listed after grok. antigravity
+// was one until plan 053 M2: it is listed after claude, before native.
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), NativeProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), AntigravityProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
@@ -400,8 +414,8 @@ func Providers() []Provider {
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
 // hidden entry can never shadow a listed id. Production code registers none
-// today (native was the entry before D-65, claude before plan 052 C5);
-// RegisterHiddenProviderForTest plants them.
+// (native was hidden before D-65, claude before plan 052 C5 and antigravity before
+// plan 053 M2); RegisterHiddenProviderForTest plants them for tests.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -409,7 +423,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders []Provider
+	hiddenProviders = []Provider{}
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are
@@ -653,8 +667,20 @@ func (p Provider) ModeKind(id string) ModeKind { return p.modeKinds[id] }
 func (p Provider) ImplementPrompt() string { return p.implementPrompt }
 
 // isEffortOption is the heuristic that finds the reasoning-effort select among
-// the advertised options; EffortOption ranks the matches.
-func (p Provider) isEffortOption(opt ConfigOption) bool { return isEffortSelect(opt) }
+// the advertised options; EffortOption ranks the matches. agy's is its
+// thought_level option, "Thinking Level" (plan 053 § C3), which the names
+// alone do not find: it is antigravity's by its id, and held to the same
+// usable-select checks. Cursor's own thought_level select is `thinking`, not
+// an effort, and stays out — this is antigravity's rule alone.
+func (p Provider) isEffortOption(opt ConfigOption) bool {
+	if isEffortSelect(opt) {
+		return true
+	}
+	return p.isAntigravity() && opt.ID == agyEffortID && usableSelect(opt)
+}
+
+// agyEffortID is agy's effort option's id.
+const agyEffortID = "thought_level"
 
 // isFastOption finds cursor's fast toggle, which is a model_config option
 // rather than a model option and is not an effort level.
