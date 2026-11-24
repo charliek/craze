@@ -449,9 +449,9 @@ func TestClaudeUsageSection(t *testing.T) {
 	if u.Model != "claude-sonnet-5-5" {
 		t.Fatalf("model in use %q; want the last report's", u.Model)
 	}
-	if firstIndex(log.snapshot(), isUsageDelta) < 0 {
-		t.Fatal("no usage delta published")
-	}
+	// Read off the session's stream by the collector: waited for, not
+	// assumed there the moment the prompt returns.
+	waitFor(t, "a usage delta", func() bool { return firstIndex(log.snapshot(), isUsageDelta) >= 0 })
 }
 
 // TestClaudeNoticeAndCompactionNotes (§ B2): a notice is an EventNotice, and
