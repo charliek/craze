@@ -151,9 +151,9 @@ func TestClaudeForeignSessionNoUsage(t *testing.T) {
 	if b[1].Running || b[1].Cancelled || b[1].Err != nil {
 		t.Fatalf("the ending %+v", b[1])
 	}
-	if !strings.Contains(r.diag.String(), "went quiet") {
-		t.Fatalf("no silence note: %q", r.diag.String())
-	}
+	// diagLine writes off the dispatch goroutine (C8 K5), so the note can
+	// land after the ending bracket: wait for it rather than read once.
+	waitFor(t, "the silence note", func() bool { return strings.Contains(r.diag.String(), "went quiet") })
 }
 
 // TestClaudeForeignSessionOpensNothing (AC17): a trailing tool_call_update,
