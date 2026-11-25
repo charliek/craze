@@ -2,6 +2,55 @@
 
 Each release gets its own section headed `## vX.Y.Z — YYYY-MM-DD`, newest first.
 
+## v0.5.0 — 2026-11-24
+
+craze can drive Google's Antigravity CLI, `agy`, on your own Antigravity plan
+(the `antigravity` provider): the Gemini 4 models (Neon, Argon, Hydrogen) and
+the plan's bundled Claude and GPT-OSS models, in the TUI, `craze new --wait`
+and the Claude Code plugin. Nothing in `~/.craze` needs migrating: [Upgrading,
+since v0.4.1](docs/getting-started/upgrading.md#since-v041) lists every change
+in behaviour; restart a running hub after upgrading.
+
+### Behaviour changes
+
+- **Every provider listing has a fifth row, `antigravity`**, between claude and
+  native (`craze providers`, the picker, `/provider`, the hub's create
+  options); the unknown-provider and no-default errors name it too.
+- **`[agents].antigravity`** in `config.toml` is read: `agy`'s absolute path.
+- **`craze new` refuses the calling agent's own provider** on antigravity:
+  `ANTIGRAVITY_AGENT` is a third caller marker beside `CLAUDECODE` and
+  `CURSOR_AGENT`. Exactly one marker names the caller; with two or more set
+  (and no `CRAZE_SESSION_PROVIDER`) nothing is refused.
+
+### Antigravity on your plan
+
+- `agy acp` with cursor's, grok's and claude's chrome: streaming, permission
+  and question cards, `run_command` rows, edits and `files`, sub-agent rows,
+  the default, accept-edits, auto and plan modes (leaving plan offers
+  "Implement the plan above."), `/model` and effort, resume and detached hosts.
+  craze never signs in for `agy`; a logged-out `agy` is an `auth` error naming
+  `agy acp --login`.
+- `--continue` re-applies the session's model and effort, which `agy` resets on
+  load; a value it refuses is noted and the session starts anyway.
+- `--ask` is refused before the spawn: `agy` has no read-only mode.
+- Known limits: a sub-agent row's `completed` means its parent turn ended, and
+  a session id `agy` no longer has loads as an empty session.
+
+### The Claude Code plugin
+
+- **`craze:neon`**, a preset on antigravity's `gemini-4-neon` at high effort;
+  `craze:delegate` takes `antigravity` targets. Neither takes `mode=ask`.
+- The plugin's install in Cursor, Grok and `agy` is documented, and
+  `--plugin-dir` is documented as ignored (with a diagnostic) on every
+  provider but cursor.
+
+### Tests
+
+- The agent package's fake agents are written once per test binary, fixing an
+  `ETXTBSY` flake.
+- Two claude-provider tests no longer race their event collector (a macOS
+  `-race` flake).
+
 ## v0.4.1 — 2026-11-19
 
 Gemini 4 Neon joins the catalog on OpenRouter, and Gemini Pro Latest is
