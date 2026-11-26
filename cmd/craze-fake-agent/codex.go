@@ -140,7 +140,7 @@ func (s *codexServer) notify(method string, params any) {
 	})
 }
 
-func (s *codexServer) sendRequest(method string, params any) (codexFrame, bool) {
+func (s *codexServer) sendRequest(cancelCh <-chan struct{}, method string, params any) (codexFrame, bool, bool) {
 	s.mu.Lock()
 	id := s.nextReqID
 	s.nextReqID++
@@ -154,14 +154,41 @@ func (s *codexServer) sendRequest(method string, params any) (codexFrame, bool) 
 		"id":     id,
 		"params": params,
 	})
-	resp, ok := <-ch
-	if ok {
+	select {
+	case resp, ok := <-ch:
+		if ok {
+			s.notify("serverRequest/resolved", map[string]any{
+				"threadId":  s.getThreadID(),
+				"requestId": id,
+			})
+		}
+		return resp, ok, false
+	case <-cancelCh:
+		s.mu.Lock()
+		_, stillPending := s.pendingReqs[key]
+		if stillPending {
+			delete(s.pendingReqs, key)
+		}
+		s.mu.Unlock()
+		if !stillPending {
+			// Reply raced in and already removed the pending entry; drain it
+			// and still emit serverRequest/resolved once.
+			resp, ok := <-ch
+			if ok {
+				s.notify("serverRequest/resolved", map[string]any{
+					"threadId":  s.getThreadID(),
+					"requestId": id,
+				})
+				return resp, true, false
+			}
+			return codexFrame{}, false, true
+		}
 		s.notify("serverRequest/resolved", map[string]any{
 			"threadId":  s.getThreadID(),
 			"requestId": id,
 		})
+		return codexFrame{}, false, true
 	}
-	return resp, ok
 }
 
 func (s *codexServer) deliverReply(msg codexFrame) {
@@ -587,6 +614,7 @@ func (s *codexServer) handleTurnStart(msg codexFrame) {
 		s.lastSandbox = p.SandboxPolicy.Type
 	}
 	s.lastApprove = p.ApprovalPolicy
+	turnCwd := s.cwd
 	s.mu.Unlock()
 
 	var textParts []string
@@ -613,7 +641,7 @@ func (s *codexServer) handleTurnStart(msg codexFrame) {
 	}
 
 	s.reply(msg.ID, map[string]any{"turn": map[string]any{"id": turnID, "status": "inProgress"}})
-	go s.runTurn(p.ThreadID, turnID, promptText, skillNames, imagePaths, p.ApprovalPolicy, p.SandboxPolicy, cancelCh)
+	go s.runTurn(p.ThreadID, turnID, turnCwd, promptText, skillNames, imagePaths, p.ApprovalPolicy, p.SandboxPolicy, cancelCh)
 }
 
 func (s *codexServer) clearActiveTurn(turnID string) {
@@ -662,7 +690,7 @@ func (s *codexServer) emitSimpleTurn(threadID, turnID, replyText string) {
 	})
 }
 
-func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, images []string, approval string, sandbox *struct {
+func (s *codexServer) runTurn(threadID, turnID, cwd, promptText string, skills, images []string, approval string, sandbox *struct {
 	Type string `json:"type"`
 }, cancelCh chan struct{}) {
 	defer s.clearActiveTurn(turnID)
@@ -764,7 +792,7 @@ func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, image
 			"turnId":   turnID,
 			"item":     map[string]any{"type": "commandExecution", "id": "cmd-1", "command": "touch out.txt", "status": "inProgress"},
 		})
-		resp, ok := s.sendRequest("item/commandExecution/requestApproval", map[string]any{
+		resp, ok, cancelled := s.sendRequest(cancelCh, "item/commandExecution/requestApproval", map[string]any{
 			"threadId": threadID,
 			"turnId":   turnID,
 			"itemId":   "cmd-1",
@@ -777,6 +805,13 @@ func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, image
 				"cancel",
 			},
 		})
+		if cancelled {
+			s.notify("turn/completed", map[string]any{
+				"threadId": threadID,
+				"turn":     map[string]any{"id": turnID, "status": "interrupted"},
+			})
+			return
+		}
 		dec := "decline"
 		if ok {
 			var r struct {
@@ -804,12 +839,19 @@ func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, image
 		return
 
 	case "codex-filechange-approval":
-		resp, ok := s.sendRequest("item/fileChange/requestApproval", map[string]any{
+		resp, ok, cancelled := s.sendRequest(cancelCh, "item/fileChange/requestApproval", map[string]any{
 			"threadId": threadID,
 			"turnId":   turnID,
 			"itemId":   "fc-1",
 			"reason":   "Allow editing foo.txt?",
 		})
+		if cancelled {
+			s.notify("turn/completed", map[string]any{
+				"threadId": threadID,
+				"turn":     map[string]any{"id": turnID, "status": "interrupted"},
+			})
+			return
+		}
 		dec := "decline"
 		if ok {
 			var r struct {
@@ -842,12 +884,19 @@ func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, image
 		if s.script == "codex-ask-freetext" {
 			q["options"] = nil
 		}
-		resp, _ := s.sendRequest("item/tool/requestUserInput", map[string]any{
+		resp, _, cancelled := s.sendRequest(cancelCh, "item/tool/requestUserInput", map[string]any{
 			"threadId":  threadID,
 			"turnId":    turnID,
 			"itemId":    "rui-1",
 			"questions": []map[string]any{q},
 		})
+		if cancelled {
+			s.notify("turn/completed", map[string]any{
+				"threadId": threadID,
+				"turn":     map[string]any{"id": turnID, "status": "interrupted"},
+			})
+			return
+		}
 		s.emitMessage(threadID, turnID, "msg-"+turnID, "answers="+string(resp.Result))
 		s.notify("turn/completed", map[string]any{
 			"threadId": threadID,
@@ -888,7 +937,6 @@ func (s *codexServer) runTurn(threadID, turnID, promptText string, skills, image
 		return
 
 	case "codex-edits":
-		cwd := s.cwd
 		pAdd := filepath.Join(cwd, "added.txt")
 		pUpd := filepath.Join(cwd, "updated.txt")
 		pMov := filepath.Join(cwd, "moved.txt")

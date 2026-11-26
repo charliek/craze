@@ -23,9 +23,13 @@ var (
 	ErrClosed = errors.New("codexrpc: connection closed")
 	// ErrLineTooLong is returned when an incoming NDJSON frame exceeds MaxLineBytes.
 	ErrLineTooLong = errors.New("codexrpc: frame exceeds maximum line length")
-	// ErrAgentExited aliases agentproc.ErrAgentExited so all process-backed
-	// transports share one sentinel.
-	ErrAgentExited = agentproc.ErrAgentExited
+	// ErrQueueOverflow is returned when queued notifications exceed the transport bound.
+	ErrQueueOverflow = errors.New("codexrpc: notification queue overflow")
+	// ErrTooManyRequests is returned when concurrent server requests exceed the transport bound.
+	ErrTooManyRequests = errors.New("codexrpc: too many concurrent server requests")
+	// ErrAgentExited wraps agentproc.ErrAgentExited with codexrpc prefix so both
+	// codexrpc.ErrAgentExited and agentproc.ErrAgentExited match via errors.Is.
+	ErrAgentExited = fmt.Errorf("codexrpc: %w", agentproc.ErrAgentExited)
 )
 
 // ExitError aliases agentproc.ExitError so errors.As matches across transports.
@@ -91,9 +95,9 @@ type CodexErrorInfo struct {
 }
 
 func (c *CodexErrorInfo) UnmarshalJSON(data []byte) error {
+	*c = CodexErrorInfo{}
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		*c = CodexErrorInfo{}
 		return nil
 	}
 	c.Raw = append(json.RawMessage(nil), trimmed...)
@@ -119,21 +123,23 @@ func (c *CodexErrorInfo) UnmarshalJSON(data []byte) error {
 		}
 		return nil
 	}
-	// Rust externally-tagged enum: single key naming the variant.
-	for k, v := range obj {
-		c.Kind = k
-		var nested struct {
-			HTTPStatusCode int `json:"httpStatusCode"`
-			StatusCode     int `json:"statusCode"`
-		}
-		if json.Unmarshal(v, &nested) == nil {
-			if nested.HTTPStatusCode != 0 {
-				c.HTTPStatusCode = nested.HTTPStatusCode
-			} else if nested.StatusCode != 0 {
-				c.HTTPStatusCode = nested.StatusCode
+	// Rust externally-tagged enum: require exactly one key naming the variant
+	// so multi-key objects do not depend on Go map iteration order.
+	if len(obj) == 1 {
+		for k, v := range obj {
+			c.Kind = k
+			var nested struct {
+				HTTPStatusCode int `json:"httpStatusCode"`
+				StatusCode     int `json:"statusCode"`
+			}
+			if json.Unmarshal(v, &nested) == nil {
+				if nested.HTTPStatusCode != 0 {
+					c.HTTPStatusCode = nested.HTTPStatusCode
+				} else if nested.StatusCode != 0 {
+					c.HTTPStatusCode = nested.StatusCode
+				}
 			}
 		}
-		break
 	}
 	return nil
 }

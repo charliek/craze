@@ -1136,7 +1136,7 @@ func (c *Client) Close() error {
 		if c.child != nil {
 			c.child.Wait()
 			if exitedFirst {
-				c.closeErr = agentproc.AgentExitedErr(c.child.ExitErr())
+				c.closeErr = agentproc.WrapAgentExited(ErrAgentExited, c.child.ExitErr())
 			}
 		}
 	})

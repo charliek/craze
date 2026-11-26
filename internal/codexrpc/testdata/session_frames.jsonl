@@ -1,4 +1,4 @@
-{"id":1,"result":{"userAgent":"craze/0.172.0 (linux; x86_64)","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}
+{"id":1,"result":{"userAgent":"craze/0.172.0 (linux; x86_64)","platformFamily":"unix","platformOs":"linux"}}
 {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","planType":"prolite","primary":{"usedPercent":33,"windowDurationMins":10080,"resetsAt":1796193406},"secondary":null,"credits":{"hasCredits":false,"unlimited":false,"balance":"0"}}},"emittedAtMs":1795720550000}
 {"method":"turn/started","params":{"threadId":"01a21949-0000-7000-8000-000000000001","turn":{"id":"01a21949-0000-7000-8000-000000000002","status":"inProgress","items":[],"itemsView":"notLoaded"}},"emittedAtMs":1795720550100}
 {"method":"item/reasoning/summaryPartAdded","params":{"threadId":"01a21949-0000-7000-8000-000000000001","turnId":"01a21949-0000-7000-8000-000000000002","itemId":"rs_1","summaryIndex":0},"emittedAtMs":1795720550200}

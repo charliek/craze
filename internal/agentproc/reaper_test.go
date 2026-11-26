@@ -308,6 +308,23 @@ func TestCloseReapsSurvivingGrandchild(t *testing.T) {
 	}
 }
 
+func TestPollingFallbackKillsIgnoredSIGTERMGrandchild(t *testing.T) {
+	prev := watch
+	watch = func(int) (func() (syscall.WaitStatus, bool, error), error) {
+		return nil, syscall.ENOSYS
+	}
+	t.Cleanup(func() { watch = prev })
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	var stderr syncBuffer
+	ch := spawnShell(t, `(trap '' TERM; sleep 60) & echo $! > `+pidFile+`; echo ready >&2; sleep 0.2; exit 0`, &stderr)
+	stderr.waitFor(t, "ready")
+	grandchild := readPID(t, pidFile)
+	waitClosed(t, ch.Reaped(), 2*ShutdownGrace+10*time.Second, "polling fallback reap")
+	waitGone(t, grandchild, 2*ShutdownGrace+10*time.Second, "grandchild ignoring SIGTERM in polling fallback")
+}
+
 func TestShutdownKillsALeaderThatIgnoresSIGTERM(t *testing.T) {
 	var stderr syncBuffer
 	ch := spawnShell(t, `trap '' TERM; echo ready >&2; exec sleep 60`, &stderr)

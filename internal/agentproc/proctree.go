@@ -133,6 +133,22 @@ func leftBehind(pgid int, captured []treeEntry) []treeEntry {
 	return out
 }
 
+// killCapturedTree terminates every descendant in earlier plus any surviving
+// members found by leftBehind, using identity-checked killVerified and never
+// waiting on ch.reapedCh (safe to invoke from inside the reaper goroutine).
+func killCapturedTree(pgid int, earlier TreeSnapshot) {
+	entries := append(TreeSnapshot(nil), earlier...)
+	entries = append(entries, leftBehind(pgid, entries)...)
+	seen := map[treeEntry]bool{}
+	for _, e := range entries {
+		if e.pid <= 1 || seen[e] {
+			continue
+		}
+		seen[e] = true
+		killVerified(e)
+	}
+}
+
 var groupKill = func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
 
 type reapGate struct {

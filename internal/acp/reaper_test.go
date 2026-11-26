@@ -173,13 +173,24 @@ func forcePollingReaper(t *testing.T) {
 }
 
 func TestTheExitStatusIsObservedOnEveryPath(t *testing.T) {
+	if ErrAgentExited.Error() != "acp: agent exited" {
+		t.Fatalf("ErrAgentExited.Error() = %q, want %q", ErrAgentExited.Error(), "acp: agent exited")
+	}
+	t.Run("its own clean exit", func(t *testing.T) {
+		c := spawnShell(t, "exit 0", nil)
+		waitClosed(t, c.child.Exited(), 10*time.Second, "the agent's clean exit")
+		err := c.Close()
+		if !errors.Is(err, ErrAgentExited) || err.Error() != "acp: agent exited: exit 0" {
+			t.Fatalf("Close = %v, want %q", err, "acp: agent exited: exit 0")
+		}
+	})
 	t.Run("its own exit", func(t *testing.T) {
 		c := spawnShell(t, "exit 3", nil)
 		waitClosed(t, c.child.Exited(), 10*time.Second, "the agent's exit")
 		checkExit(t, c.child, "exit status 3", 3)
 		err := c.Close()
-		if !errors.Is(err, ErrAgentExited) || !strings.HasSuffix(err.Error(), ": exit status 3") {
-			t.Fatalf("Close = %v, want ErrAgentExited with exit status 3", err)
+		if !errors.Is(err, ErrAgentExited) || err.Error() != "acp: agent exited: exit status 3" {
+			t.Fatalf("Close = %v, want %q", err, "acp: agent exited: exit status 3")
 		}
 	})
 	for _, tc := range []struct {

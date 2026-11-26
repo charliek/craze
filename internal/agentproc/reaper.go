@@ -147,8 +147,17 @@ func (ch *Child) reapPolling() {
 		termed  time.Time
 		killed  bool
 		request = ch.shutdownCh
+		tree    TreeSnapshot
 	)
 	for {
+		// Capture live descendants while the leader is still unreaped so even
+		// if pollReap observes exit before escalation, surviving descendants
+		// can still be cleaned up with identity-checked killCapturedTree (never
+		// raw -pgid after reap).
+		snap := ch.SnapshotTree()
+		if len(snap) > 0 {
+			tree = snap
+		}
 		ch.reapMu.Lock()
 		st, reaped, err := pollReap(ch.pid)
 		if reaped || err != nil {
@@ -160,6 +169,7 @@ func (ch *Child) reapPolling() {
 			ch.endedByShutdown = isClosed(ch.shutdownCh)
 			ch.setStatus(reapedExit(ch.cmd.ProcessState, ch.waitErr))
 			close(ch.exitedCh)
+			killCapturedTree(ch.pgid, tree)
 			close(ch.reapedCh)
 			return
 		}
@@ -184,6 +194,7 @@ func (ch *Child) reapPolling() {
 		}
 		poll.Stop()
 	}
+	killCapturedTree(ch.pgid, tree)
 	ch.drainStderr()
 	_ = ch.cmd.Process.Release()
 	_ = finalWait(ch.cmd)

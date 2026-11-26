@@ -35,10 +35,16 @@ var ErrAgentExited = errors.New("agent exited")
 // end (Child.ExitErr): an *ExitError when it exited non-zero or on a signal,
 // and "exit 0" when it exited clean.
 func AgentExitedErr(exitErr error) error {
+	return WrapAgentExited(ErrAgentExited, exitErr)
+}
+
+// WrapAgentExited wraps sentinel (typically a transport-prefixed error wrapping
+// ErrAgentExited) with how the reaper recorded the agent end.
+func WrapAgentExited(sentinel, exitErr error) error {
 	if exitErr != nil {
-		return fmt.Errorf("%w: %v", ErrAgentExited, exitErr)
+		return fmt.Errorf("%w: %v", sentinel, exitErr)
 	}
-	return fmt.Errorf("%w: exit 0", ErrAgentExited)
+	return fmt.Errorf("%w: exit 0", sentinel)
 }
 
 // ExitError is how the agent ended — non-zero, or on a signal — as the reaper
@@ -137,6 +143,10 @@ type StartOptions struct {
 	// blocked sink cannot stall draining the child's stderr pipe (used by
 	// claude's overage stop).
 	AsyncStderr bool
+	// OwnedStdout allocates an explicit os.Pipe for stdout instead of using
+	// exec.Cmd.StdoutPipe so the caller owns the read end and cmd.Wait never
+	// closes stdout before the caller finishes draining buffered replies.
+	OwnedStdout bool
 }
 
 // Child is the agent process Start spawned, the leader of a process group of
@@ -185,16 +195,41 @@ func Start(opts StartOptions) (*Child, io.ReadCloser, io.WriteCloser, error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, nil, err
+	var (
+		stdout      io.ReadCloser
+		stdoutWrite *os.File
+	)
+	if opts.OwnedStdout {
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			return nil, nil, nil, pipeErr
+		}
+		cmd.Stdout = w
+		stdout = r
+		stdoutWrite = w
+	} else {
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		if stdoutWrite != nil {
+			_ = stdoutWrite.Close()
+			_ = stdout.Close()
+		}
 		return nil, nil, nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		if stdoutWrite != nil {
+			_ = stdoutWrite.Close()
+			_ = stdout.Close()
+		}
 		return nil, nil, nil, fmt.Errorf("start agent: %w", err)
+	}
+	if stdoutWrite != nil {
+		_ = stdoutWrite.Close()
 	}
 
 	child := newChild(cmd)

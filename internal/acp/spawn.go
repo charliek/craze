@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"fmt"
 	"io"
 	"time"
 
@@ -8,9 +9,9 @@ import (
 )
 
 // ErrAgentExited is Client.Close's answer when the non-blocking probe of
-// child.Exited() found it already closed. Aliased to agentproc.ErrAgentExited
-// so all process-backed transports share one sentinel.
-var ErrAgentExited = agentproc.ErrAgentExited
+// child.Exited() found it already closed. Wraps agentproc.ErrAgentExited while
+// preserving ACP's original error text ("acp: agent exited").
+var ErrAgentExited = fmt.Errorf("acp: %w", agentproc.ErrAgentExited)
 
 // ExitError is how the agent ended — non-zero, or on a signal — as the reaper
 // observed it before reaping it. Aliased to agentproc.ExitError so errors.As
