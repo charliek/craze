@@ -305,6 +305,13 @@ func main() {
 			adapterVersion()
 		}
 	}
+	isCodexArg := false
+	for _, a := range args {
+		if a == "app-server" {
+			isCodexArg = true
+			break
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -323,6 +330,32 @@ func main() {
 		case strings.HasPrefix(a, "--script="):
 			script = strings.TrimPrefix(a, "--script=")
 		}
+	}
+	if isCodexArg && !strings.HasPrefix(script, "codex-") {
+		script = "codex-basic"
+	}
+	if strings.HasPrefix(script, "codex-") {
+		switch script {
+		case "codex-basic", "codex-loggedout", "codex-apikey", "codex-custom-provider",
+			"codex-approval", "codex-filechange-approval", "codex-ask", "codex-ask-secret",
+			"codex-ask-freetext", "codex-hang", "codex-steer", "codex-resume",
+			"codex-resume-missing", "codex-child-thread", "codex-foreign",
+			"codex-completed-before-reply", "codex-error-401", "codex-edits",
+			"codex-exit-two-lines":
+		default:
+			fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown codex script %q\n", script)
+			os.Exit(2)
+		}
+		dumpArgv()
+		dumpEnv()
+		if script == "codex-exit-two-lines" {
+			exitTwoLines()
+		}
+		if err := runCodex(script); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",

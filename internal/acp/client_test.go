@@ -365,10 +365,10 @@ func TestCancelSemantics(t *testing.T) {
 func TestChildCrash(t *testing.T) {
 	c := spawnScript(t, "echo")
 	handshake(t, c)
-	if c.child == nil || c.child.cmd.Process == nil {
+	if c.child == nil {
 		t.Fatal("missing child")
 	}
-	if err := c.child.cmd.Process.Kill(); err != nil {
+	if err := c.child.KillProcess(); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.Prompt(t.Context(), "hello")
@@ -378,7 +378,7 @@ func TestChildCrash(t *testing.T) {
 }
 
 // TestClientCloseReportsWhetherTheAgentExitedFirst is issue #23's §3.7.2/
-// §3.7.3: Close's non-blocking probe of child.exitedCh has to tell an agent
+// §3.7.3: Close's non-blocking probe of child.Exited() has to tell an agent
 // that ended on its own — including the exit-0 case Conn.Err() cannot see,
 // since it reads ErrClosed either way — from a close craze asked for, and
 // the answer must not flip on a second call, because something already
@@ -396,7 +396,7 @@ func TestClientCloseReportsWhetherTheAgentExitedFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-c.child.exitedCh // deterministic: the reaper has already published the exit
+		<-c.child.Exited() // deterministic: the reaper has already published the exit
 		first := c.Close()
 		if !errors.Is(first, ErrAgentExited) {
 			t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited", first)
@@ -416,7 +416,7 @@ func TestClientCloseReportsWhetherTheAgentExitedFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-c.child.exitedCh
+		<-c.child.Exited()
 		first := c.Close()
 		if !errors.Is(first, ErrAgentExited) {
 			t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited (exit 0 included)", first)

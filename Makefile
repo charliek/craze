@@ -19,7 +19,7 @@ build:
 lint:
 	golangci-lint run
 	GOOS=darwin golangci-lint run
-	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -c internal/acp || true); \
+	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -cE 'internal/(acp|codexrpc|agentproc)$$' || true); \
 	echo "$$n"; test "$$n" = "0"
 
 # CRAZE_GOLDEN_TRANSPORT is pinned to both in the two test targets, whatever
@@ -89,7 +89,7 @@ test:
 # internal/tui's -race run at 636s and 547s (ubuntu's at about 431s), so the
 # old 15m would be clipped by the next slower runner.
 test-race:
-	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile ./internal/caplog ./internal/signinlog ./internal/anthropicmodels
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/agentproc ./internal/codexrpc ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile ./internal/caplog ./internal/signinlog ./internal/anthropicmodels
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

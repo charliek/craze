@@ -1,6 +1,6 @@
 //go:build linux
 
-package acp
+package agentproc
 
 import (
 	"errors"
@@ -24,11 +24,6 @@ func init() {
 	if os.Getenv(helperEnv) != "main-thread-exits" {
 		return
 	}
-	// A tool whose main thread exits while the rest of it runs on. init runs
-	// on the main thread, locked to it, so SYS_EXIT — the thread's own exit,
-	// not the group's — ends that thread alone; the runtime's other threads,
-	// and this goroutine, go on. /proc then reads the process as a zombie
-	// thread-group leader with threads left.
 	go func() {
 		for {
 			time.Sleep(time.Hour)
@@ -38,11 +33,6 @@ func init() {
 	_, _, _ = syscall.RawSyscall(syscall.SYS_EXIT, 0, 0, 0)
 }
 
-// stubObserve puts a stub over the observation's system call (waitid) for the
-// rest of the test. refuse, when set, answers every call — the probe at once,
-// a blocking wait once hold (when set) is closed; otherwise the first
-// interrupts blocking waits are answered EINTR and every other call made. It
-// counts the blocking waits.
 func stubObserve(t *testing.T, interrupts int32, refuse error, hold <-chan struct{}) *atomic.Int32 {
 	t.Helper()
 	var waits atomic.Int32
@@ -64,13 +54,10 @@ func stubObserve(t *testing.T, interrupts int32, refuse error, hold <-chan struc
 		}
 		return real(idType, id, info, options, rusage)
 	}
-	// Registered before any Spawn, so it runs after every Close.
 	t.Cleanup(func() { waitid = real })
 	return &waits
 }
 
-// TestCLDStatus: a child's exit, as waitid's si_code and si_status say it,
-// reads as the wait status the reap's would.
 func TestCLDStatus(t *testing.T) {
 	for _, tc := range []struct {
 		code, status int32
@@ -91,16 +78,13 @@ func TestCLDStatus(t *testing.T) {
 			t.Errorf("cldStatus(%d, %d) reads %q, want %q", tc.code, tc.status, got, tc.want)
 		}
 	}
-	for _, code := range []int32{0, 4, 5, 6} { // not an exit: trapped, stopped, continued
+	for _, code := range []int32{0, 4, 5, 6} {
 		if _, err := cldStatus(code, 0); err == nil {
 			t.Errorf("cldStatus(%d) took a stop or a continue for an exit", code)
 		}
 	}
 }
 
-// TestSigchldInfoLayout: the _sigchld member of siginfo_t's union starts
-// where the union does, after the three int header aligned as a pointer is,
-// and the whole fits in unix.Siginfo.
 func TestSigchldInfoLayout(t *testing.T) {
 	ptr := unsafe.Sizeof(uintptr(0))
 	want := (12 + ptr - 1) &^ (ptr - 1)
@@ -115,19 +99,13 @@ func TestSigchldInfoLayout(t *testing.T) {
 	}
 }
 
-// TestAToolWhoseMainThreadExitedIsLive (X71): a tool whose main thread has
-// exited while a worker runs on reads as a zombie in /proc — a zombie
-// thread-group leader with threads left — and is live all the same: the
-// cleanup at the agent's exit sends the group its SIGTERM, ahead of the last
-// SIGKILL, and the tool dies.
 func TestAToolWhoseMainThreadExitedIsLive(t *testing.T) {
 	r := recordLife(t)
 	exe, args := helperArgs(t)
 	dir := t.TempDir()
-	c := spawnShell(t, helperEnv+"=main-thread-exits '"+exe+"' "+args[0]+" & echo $! > "+dir+"/tool.pid; "+
+	ch := spawnShell(t, helperEnv+"=main-thread-exits '"+exe+"' "+args[0]+" & echo $! > "+dir+"/tool.pid; "+
 		"while [ ! -e "+dir+"/go ]; do sleep 0.01; done; exit 0", nil)
 	tool := readPID(t, dir+"/tool.pid")
-	// The premise: the tool's main thread has exited, and the tool runs on.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		raw, err := os.ReadFile("/proc/" + strconv.Itoa(tool) + "/stat")
@@ -145,20 +123,14 @@ func TestAToolWhoseMainThreadExitedIsLive(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
-	waitGone(t, tool, 2*shutdownGrace+10*time.Second, "the tool whose main thread exited")
-	sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, c.child))
+	waitClosed(t, ch.exitedCh, 10*time.Second, "the agent's exit")
+	waitGone(t, tool, 2*ShutdownGrace+10*time.Second, "the tool whose main thread exited")
+	sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, ch))
 	if got := groupSignals(sent); len(got) < 3 || got[:3] != fmt.Sprintf("%d ", syscall.SIGTERM) {
 		t.Fatalf("group signals %q: the cleanup never found the tool live", got)
 	}
 }
 
-// TestAForkTheScanCannotSeeDiesAtTheFinalKill (X71): /proc is read a process
-// at a time, so a process that joins the agent's group after the listing —
-// a member's fork — is not in the scan, which can then find the group empty.
-// The last SIGKILL, sent whatever the scans said while the zombie agent still
-// pins the group's id, ends it. Here the scan's seam starts that process in
-// the group between the listing and the reads.
 func TestAForkTheScanCannotSeeDiesAtTheFinalKill(t *testing.T) {
 	r := recordLife(t)
 	var (
@@ -179,11 +151,10 @@ func TestAForkTheScanCannotSeeDiesAtTheFinalKill(t *testing.T) {
 			close(started)
 		})
 	}
-	// Registered before any Spawn, so it runs after every Close.
 	t.Cleanup(func() { procListed = nil })
 	dir := t.TempDir()
-	c := spawnShell(t, "while [ ! -e "+dir+"/go ]; do sleep 0.01; done; exit 0", nil)
-	target.Store(int64(c.child.pgid))
+	ch := spawnShell(t, "while [ ! -e "+dir+"/go ]; do sleep 0.01; done; exit 0", nil)
+	target.Store(int64(ch.pgid))
 	if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +163,7 @@ func TestAForkTheScanCannotSeeDiesAtTheFinalKill(t *testing.T) {
 		t.Fatal(lateErr)
 	}
 	t.Cleanup(func() { _ = late.Process.Kill() })
-	waitClosed(t, c.child.reapedCh, 10*time.Second, "the reap")
+	waitClosed(t, ch.reapedCh, 10*time.Second, "the reap")
 	ended := make(chan error, 1)
 	go func() { ended <- late.Wait() }()
 	select {
@@ -204,18 +175,15 @@ func TestAForkTheScanCannotSeeDiesAtTheFinalKill(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the process the scan could not see outlived the reap")
 	}
-	if got, want := groupSignals(r.of(c.child.pgid)), fmt.Sprintf("%d ", syscall.SIGKILL); got != want {
-		t.Fatalf("group signals %q, want %q: the scan should have found the group empty", got, want)
+	if got, want := groupSignals(r.of(ch.pgid)), fmt.Sprintf("%d ", syscall.SIGKILL); got != want {
+		t.Fatalf("group signals %q, want %q", got, want)
 	}
 }
 
-// TestAStatReadErrorCountsAsLive (X71): a /proc/<pid>/stat that cannot be read
-// makes the group live, with the error — unknown is live; a process gone
-// since the listing (ENOENT, ESRCH) is not there; EINTR is retried.
 func TestAStatReadErrorCountsAsLive(t *testing.T) {
 	real := statRead
 	t.Cleanup(func() { statRead = real })
-	own := syscall.Getpgrp() // this process lives in it
+	own := syscall.Getpgrp()
 	for _, tc := range []struct {
 		err      error
 		live     bool
@@ -229,7 +197,7 @@ func TestAStatReadErrorCountsAsLive(t *testing.T) {
 		statRead = func(string, []byte) (int, error) { return 0, tc.err }
 		live, err := groupHasLiveMember(own)
 		if live != tc.live || (err != nil) != tc.reported {
-			t.Errorf("every read failing with %v: live %v, err %v; want live %v, an error %v", tc.err, live, err, tc.live, tc.reported)
+			t.Errorf("every read failing with %v: live %v, err %v; want live %v, err %v", tc.err, live, err, tc.live, tc.reported)
 		}
 	}
 	interrupted := map[string]bool{}
@@ -241,6 +209,6 @@ func TestAStatReadErrorCountsAsLive(t *testing.T) {
 		return real(path, buf)
 	}
 	if live, err := groupHasLiveMember(own); !live || err != nil {
-		t.Fatalf("every read interrupted once: live %v, err %v; want this process's group live", live, err)
+		t.Fatalf("every read interrupted once: live %v, err %v; want live", live, err)
 	}
 }

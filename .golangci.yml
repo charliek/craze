@@ -158,6 +158,39 @@ linters:
             - github.com/charliek/craze/internal/chatgptauth
             - github.com/charliek/craze/internal/atomicfile
             - github.com/charliek/craze/internal/paths
+        # Shared agent child process reaper and stderr tail (plan 054 § A1):
+        # a leaf shared by internal/acp and internal/codexrpc, stdlib + x/sys/unix only.
+        agentproc:
+          list-mode: strict
+          files:
+            - "**/internal/agentproc/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - golang.org/x/sys/unix
+        # Codex app-server v2 JSON-RPC transport (plan 054 § A2): imports only
+        # stdlib, internal/agentproc, internal/errkind, and internal/version.
+        codexrpc:
+          list-mode: strict
+          files:
+            - "**/internal/codexrpc/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/charliek/craze/internal/agentproc
+            - github.com/charliek/craze/internal/errkind
+            - github.com/charliek/craze/internal/version
+        # Client packages (tui, cli) must not import transport packages directly.
+        tui-cli-transport:
+          list-mode: lax
+          files:
+            - "**/internal/tui/**"
+            - "**/internal/cli/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "client packages speak to agent.Session/engine, never codexrpc directly (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "client packages speak to agent.Session/engine, never agentproc directly (plan 054 § A2)"
         # The engine's own import boundary (plan 021 §3.1): it sits above the
         # provider seam (agent.Session) and knows nothing of any one client or
         # provider transport, so a non-test file here may import neither
@@ -179,6 +212,10 @@ linters:
               desc: "the engine drives every client uniformly; a client package is exactly what it must not know about (plan 021 §3.1)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the engine speaks to agent.Session alone; the process transport below that seam is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern (plan 021 §3.1)"
         # The transcript model's import boundary (plan 024 §3.1): the fold every
@@ -203,6 +240,10 @@ linters:
               desc: "the engine folds the model; the model knows nothing of the engine that holds one of its instances (plan 024 §3.1)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the model folds agent.Events; the wire protocol below that seam is not its concern (plan 024 §3.1)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the model folds agent.Events; the wire protocol below that seam is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the model folds agent.Events; the process transport below that seam is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the model folds agent.Events; a provider transport below that seam is not its concern (plan 024 §3.1)"
             - pkg: github.com/charmbracelet
@@ -224,6 +265,10 @@ linters:
               desc: "the engine's own tests drive it over tui.Stub, never a CLI client (plan 021 §3.1)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern, in a test either (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern, in a test either (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the engine speaks to agent.Session alone; the process transport below that seam is not its concern, in a test either (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern, in a test either (plan 021 §3.1)"
         # The control socket's server (plan 027 §3.7): it serves the engine
@@ -245,6 +290,10 @@ linters:
               desc: "the control server serves every client uniformly; a client package is exactly what it must not know about (plan 027 §3.7)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the control server speaks to engine.Control alone; the ACP wire below the session seam is not its concern (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the control server speaks to engine.Control alone; the wire below the session seam is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the control server speaks to engine.Control alone; the process transport below the session seam is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the control server speaks to engine.Control alone; a provider transport below the session seam is not its concern (plan 027 §3.7)"
         control-test:
@@ -259,6 +308,10 @@ linters:
               desc: "the control server's tests drive it over tui.Stub and a raw socket client, never a CLI client (plan 027 §3.7)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the control server speaks to engine.Control alone; the ACP wire is not its concern, in a test either (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the control server speaks to engine.Control alone; the wire is not its concern, in a test either (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the control server speaks to engine.Control alone; the process transport is not its concern, in a test either (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the control server speaks to engine.Control alone; a provider transport is not its concern, in a test either (plan 027 §3.7)"
         # The TUI's seam onto a session (plan 027 §3.12): the Backend
@@ -279,6 +332,10 @@ linters:
               desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; a client package builds on it, never the reverse (plan 027 §3.12)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the TUI's seam onto a session is in engine/agent types; the ACP wire below the session seam is not its concern (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the TUI's seam onto a session is in engine/agent types; the wire below the session seam is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the TUI's seam onto a session is in engine/agent types; the process transport below the session seam is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the TUI's seam onto a session is in engine/agent types; a provider transport below the session seam is not its concern (plan 027 §3.12)"
             - pkg: github.com/charliek/craze/internal/control
@@ -313,6 +370,10 @@ linters:
               desc: "the protocol client serves every client uniformly; a client package builds on it, never the reverse (plan 027 §3.14)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the protocol client speaks the control socket's wire alone; codexrpc is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the protocol client speaks the control socket's wire alone; agentproc is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern (plan 027 §3.14)"
         remote-test:
@@ -327,6 +388,10 @@ linters:
               desc: "the protocol client's tests drive a real server over tui.Stub, never a CLI client (plan 027 §3.14)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern, in a test either (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the protocol client speaks the control socket's wire alone; codexrpc is not its concern, in a test either (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the protocol client speaks the control socket's wire alone; agentproc is not its concern, in a test either (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern, in a test either (plan 027 §3.14)"
         # The fake host (plan 027 §3.11): the in-process twin of
@@ -343,6 +408,10 @@ linters:
               desc: "the fake host is a test double for the wire fixtures, not a CLI client (plan 027 §3.11)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the fake host speaks the control socket's wire over a Stub; the ACP wire below the session seam is not its concern (plan 027 §3.11)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the fake host speaks the control socket's wire over a Stub; codexrpc below the session seam is not its concern (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the fake host speaks the control socket's wire over a Stub; agentproc below the session seam is not its concern (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the fake host speaks the control socket's wire over a Stub; a provider transport below the session seam is not its concern (plan 027 §3.11)"
         # The runtime namespace (plan 027 §3.8): where a host's socket, its
@@ -406,6 +475,10 @@ linters:
               desc: "the hub serves every client uniformly; a client package is exactly what it must not know about (plan 032 §3.16)"
             - pkg: github.com/charliek/craze/internal/acp
               desc: "the hub lists and spawns hosts; the ACP wire is the hosts' concern, not the hub's (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/codexrpc
+              desc: "the hub lists and spawns hosts; codexrpc is the hosts' concern, not the hub's (plan 054 § A2)"
+            - pkg: github.com/charliek/craze/internal/agentproc
+              desc: "the hub lists and spawns hosts; agentproc is the hosts' concern, not the hub's (plan 054 § A2)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the hub lists and spawns hosts; a provider transport is the hosts' concern, not the hub's (plan 032 §3.16)"
   exclusions:

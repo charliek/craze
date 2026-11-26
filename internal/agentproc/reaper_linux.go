@@ -1,6 +1,6 @@
 //go:build linux
 
-package acp
+package agentproc
 
 import (
 	"errors"
@@ -12,17 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// waitid is unix.Waitid: a variable so a test can interrupt the observation
-// (EINTR) or refuse it outright; nothing else replaces it.
 var waitid = unix.Waitid
 
-// watchExit is the reaper's observation of the agent's exit on Linux:
-// waitid(P_PID, pid, WEXITED|WNOWAIT), which waits for the process to exit
-// and leaves it unreaped — a zombie, its pid still taken — and reports its
-// status in a siginfo. EINTR is retried. The same call with WNOHANG is made
-// here first, so a waitid the environment refuses (ENOSYS under a seccomp
-// filter or an emulator) is known before the reaper runs: the error, and the
-// reaper is the fallback (reapPolling). The wait is the returned function.
 func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 	var probe unix.Siginfo
 	for {
@@ -51,10 +42,6 @@ func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 	}, nil
 }
 
-// sigchldInfo is a siginfo_t as waitid fills it for a child: the header
-// (unix.Siginfo's own Signo, Errno and Code, read from there, where their
-// order is the architecture's), then the union, aligned as a pointer is,
-// whose _sigchld member starts with the child's pid, its uid and its status.
 type sigchldInfo struct {
 	_      [3]int32
 	_      [0]uintptr
@@ -63,14 +50,12 @@ type sigchldInfo struct {
 	status int32
 }
 
-// The si_code values of a child's exit (asm-generic/siginfo.h).
 const (
-	cldExited = 1 // exited: si_status is the exit code
-	cldKilled = 2 // killed by a signal: si_status is the signal
-	cldDumped = 3 // killed by a signal, and dumped core
+	cldExited = 1
+	cldKilled = 2
+	cldDumped = 3
 )
 
-// siginfoStatus reads the exit waitid reported for pid as a wait status.
 func siginfoStatus(info *unix.Siginfo, pid int) (syscall.WaitStatus, error) {
 	sc := (*sigchldInfo)(unsafe.Pointer(info))
 	if syscall.Signal(info.Signo) != syscall.SIGCHLD || int(sc.pid) != pid {
@@ -79,9 +64,6 @@ func siginfoStatus(info *unix.Siginfo, pid int) (syscall.WaitStatus, error) {
 	return cldStatus(info.Code, sc.status)
 }
 
-// cldStatus is a child's exit, as si_code and si_status say it, in the wait
-// status encoding syscall.WaitStatus reads: the exit code in the second byte,
-// or the signal in the low seven bits and 0x80 for a core dump.
 func cldStatus(code, status int32) (syscall.WaitStatus, error) {
 	switch code {
 	case cldExited:
@@ -94,13 +76,8 @@ func cldStatus(code, status int32) (syscall.WaitStatus, error) {
 	return 0, fmt.Errorf("waitid: si_code %d is not an exit", code)
 }
 
-// procListed, a test seam, runs in groupHasLiveMember between the listing of
-// /proc and the reads of what it listed; nil in production.
 var procListed func(pgid int)
 
-// statRead reads up to len(buf) bytes of the file at path — an open, a read
-// and a close — and answers the first error it met. A variable so a test can
-// fail it; nothing else replaces it.
 var statRead = func(path string, buf []byte) (int, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -111,14 +88,6 @@ var statRead = func(path string, buf []byte) (int, error) {
 	return n, err
 }
 
-// groupHasLiveMember reports whether a live process is in the process group
-// pgid: a scan of /proc/<pid>/stat, whose fields 3, 5 and 20 are a process's
-// state, its process group and its thread count (parseStat). A zombie is not
-// live, except a zombie thread-group leader with threads left — its main
-// thread exited, a worker still runs. A process gone between the listing and
-// its read (ENOENT, ESRCH) is not there; a read that fails any other way, or
-// a line that cannot be read, answers live with the error, and so does a
-// /proc that cannot be listed. EINTR is retried.
 func groupHasLiveMember(pgid int) (bool, error) {
 	d, err := os.Open("/proc")
 	if err != nil {

@@ -1,6 +1,6 @@
 //go:build linux
 
-package acp
+package agentproc
 
 import (
 	"os/exec"
@@ -10,10 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestPidfdRefusedFallsBackToTheCheckedKill (C8 K6): a sandbox that refuses
-// pidfd_open, or allows it and refuses pidfd_send_signal, with EPERM or
-// EACCES, does not leave the process running: the start-time-checked kill(2)
-// ends it, as it does on a kernel with no pidfds.
 func TestPidfdRefusedFallsBackToTheCheckedKill(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
