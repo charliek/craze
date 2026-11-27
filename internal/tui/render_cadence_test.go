@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -186,7 +186,7 @@ func (r *cadenceRun) check(what string) {
 	if lt, et := l.selectionText(), e.selectionText(); lt != et {
 		t.Fatalf("%s: the selection holds %q; painting every event, %q", what, lt, et)
 	}
-	if lv, ev := l.View(), e.View(); lv != ev {
+	if lv, ev := l.View().Content, e.View().Content; lv != ev {
 		t.Fatalf("%s: the frame differs from painting every event\ncadence:\n%s\nevery event:\n%s", what, plain(lv), plain(ev))
 	}
 }
@@ -302,24 +302,24 @@ func (x *replayMix) gesture(r *cadenceRun) {
 	px := rng.Intn(max(1, r.lazy.width))
 	switch rng.Intn(15) {
 	case 0, 1:
-		r.send(tea.MouseMsg{X: px, Y: y, Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress}, "wheel up")
+		r.send(tea.MouseWheelMsg{X: px, Y: y, Button: tea.MouseWheelUp}, "wheel up")
 	case 2:
-		r.send(tea.MouseMsg{X: px, Y: y, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress}, "wheel down")
+		r.send(tea.MouseWheelMsg{X: px, Y: y, Button: tea.MouseWheelDown}, "wheel down")
 	case 3:
-		r.send(tea.KeyMsg{Type: tea.KeyPgUp}, "pgup")
+		r.send(tea.KeyPressMsg{Code: tea.KeyPgUp}, "pgup")
 	case 4:
-		r.send(tea.KeyMsg{Type: tea.KeyPgDown}, "pgdown")
+		r.send(tea.KeyPressMsg{Code: tea.KeyPgDown}, "pgdown")
 	case 5, 6:
-		r.send(tea.MouseMsg{X: px, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}, "press")
+		r.send(tea.MouseClickMsg{X: px, Y: y, Button: tea.MouseLeft}, "press")
 	case 7, 8:
 		y = top - 1 + rng.Intn(max(1, bottom-top+2))
-		r.send(tea.MouseMsg{X: px, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}, "drag")
+		r.send(tea.MouseMotionMsg{X: px, Y: y, Button: tea.MouseLeft}, "drag")
 	case 9:
-		r.copyGesture(tea.MouseMsg{X: px, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}, "release")
+		r.copyGesture(tea.MouseReleaseMsg{X: px, Y: y, Button: tea.MouseLeft}, "release")
 	case 10:
 		r.copyGesture(dblClickMsg{X: px, Y: y}, "double-click")
 	case 11:
-		r.copyGesture(tea.KeyMsg{Type: tea.KeyCtrlY}, "ctrl+y")
+		r.copyGesture(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl}, "ctrl+y")
 	case 12:
 		switch {
 		case r.lazy.viewing != "" && rng.Intn(2) == 0:
@@ -329,13 +329,13 @@ func (x *replayMix) gesture(r *cadenceRun) {
 		}
 	case 13:
 		if r.lazy.viewing != "" {
-			k := []tea.KeyType{tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown}[rng.Intn(4)]
-			r.send(tea.KeyMsg{Type: k}, "view key")
+			k := []string{"up", "down", "pgup", "pgdown"}[rng.Intn(4)]
+			r.send(testKey(k), "view key")
 			return
 		}
 		r.send(tea.WindowSizeMsg{Width: 60 + rng.Intn(61), Height: 18 + rng.Intn(19)}, "resize")
 	default:
-		r.send(tea.KeyMsg{Type: tea.KeyCtrlO}, "ctrl+o")
+		r.send(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl}, "ctrl+o")
 	}
 }
 
@@ -352,9 +352,7 @@ func (x *replayMix) gesture(r *cadenceRun) {
 func (x *replayMix) motif(r *cadenceRun) {
 	rng := x.rng
 	top, bottom := r.region()
-	mouse := func(y int, b tea.MouseButton, a tea.MouseAction) tea.MouseMsg {
-		return tea.MouseMsg{X: 1 + rng.Intn(20), Y: y, Button: b, Action: a}
-	}
+	mouse := func(y int, b tea.MouseButton) tea.Mouse { return tea.Mouse{X: 1 + rng.Intn(20), Y: y, Button: b} }
 	switch rng.Intn(5) {
 	case 0:
 		x.tools++
@@ -370,12 +368,12 @@ func (x *replayMix) motif(r *cadenceRun) {
 		r.event(agent.Event{Type: agent.EventText, Text: x.fragment()})
 		// Back to the bottom, and three rows up from it.
 		for i := 0; i < 40 && !r.lazy.vp.AtBottom(); i++ {
-			r.send(tea.KeyMsg{Type: tea.KeyPgDown}, "pgdown")
+			r.send(tea.KeyPressMsg{Code: tea.KeyPgDown}, "pgdown")
 		}
-		r.send(mouse(top+1, tea.MouseButtonWheelUp, tea.MouseActionPress), "wheel up")
+		r.send(tea.MouseWheelMsg(mouse(top+1, tea.MouseWheelUp)), "wheel up")
 		r.event(edit([]agent.ToolDiff{{Path: "a.go", Truncated: true}}))
 	case 1:
-		r.send(mouse(top+rng.Intn(max(1, bottom-top)), tea.MouseButtonLeft, tea.MouseActionPress), "press")
+		r.send(tea.MouseClickMsg(mouse(top+rng.Intn(max(1, bottom-top)), tea.MouseLeft)), "press")
 		for range 1 + rng.Intn(3) {
 			r.event(agent.Event{Type: agent.EventText, Text: x.fragment()})
 		}
@@ -383,14 +381,14 @@ func (x *replayMix) motif(r *cadenceRun) {
 		if rng.Intn(2) == 0 {
 			edge = bottom - 1
 		}
-		r.send(mouse(edge, tea.MouseButtonLeft, tea.MouseActionMotion), "a drag off an edge")
-		r.copyGesture(mouse(edge, tea.MouseButtonLeft, tea.MouseActionRelease), "release")
+		r.send(tea.MouseMotionMsg(mouse(edge, tea.MouseLeft)), "a drag off an edge")
+		r.copyGesture(tea.MouseReleaseMsg(mouse(edge, tea.MouseLeft)), "release")
 	case 2:
-		r.send(mouse(top+1, tea.MouseButtonLeft, tea.MouseActionPress), "press")
-		r.send(mouse(bottom-2, tea.MouseButtonLeft, tea.MouseActionMotion), "drag")
-		r.copyGesture(mouse(bottom-2, tea.MouseButtonLeft, tea.MouseActionRelease), "release")
+		r.send(tea.MouseClickMsg(mouse(top+1, tea.MouseLeft)), "press")
+		r.send(tea.MouseMotionMsg(mouse(bottom-2, tea.MouseLeft)), "drag")
+		r.copyGesture(tea.MouseReleaseMsg(mouse(bottom-2, tea.MouseLeft)), "release")
 		r.event(agent.Event{Type: agent.EventText, Text: x.fragment()})
-		r.copyGesture(tea.KeyMsg{Type: tea.KeyCtrlY}, "ctrl+y")
+		r.copyGesture(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl}, "ctrl+y")
 	case 3:
 		for range 1 + rng.Intn(3) {
 			r.event(agent.Event{Type: agent.EventText, Text: x.fragment()})
@@ -408,8 +406,8 @@ func (x *replayMix) motif(r *cadenceRun) {
 				Subagent: &agent.SubagentInfo{ID: id, Description: "child " + id, Prompt: "do " + id,
 					Status: agent.SubagentRunning, Output: strings.Repeat("so far ", x.seq%40)}})
 		}
-		k := []tea.KeyType{tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown}[rng.Intn(4)]
-		r.send(tea.KeyMsg{Type: k}, "view key")
+		k := []string{"up", "down", "pgup", "pgdown"}[rng.Intn(4)]
+		r.send(testKey(k), "view key")
 		r.view("")
 	}
 }
@@ -529,12 +527,12 @@ func TestAScrollMidReplayScrollsTheRowsAsTheyStand(t *testing.T) {
 		viewed bool
 		scroll func(r *cadenceRun) tea.Msg
 	}{
-		{"pgup", false, func(*cadenceRun) tea.Msg { return tea.KeyMsg{Type: tea.KeyPgUp} }},
+		{"pgup", false, func(*cadenceRun) tea.Msg { return tea.KeyPressMsg{Code: tea.KeyPgUp} }},
 		{"the wheel", false, func(r *cadenceRun) tea.Msg {
-			return tea.MouseMsg{X: 2, Y: top(r), Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress}
+			return tea.MouseWheelMsg{X: 2, Y: top(r), Button: tea.MouseWheelUp}
 		}},
-		{"a sub-agent view's up arrow", true, func(*cadenceRun) tea.Msg { return tea.KeyMsg{Type: tea.KeyUp} }},
-		{"a sub-agent view's pgup", true, func(*cadenceRun) tea.Msg { return tea.KeyMsg{Type: tea.KeyPgUp} }},
+		{"a sub-agent view's up arrow", true, func(*cadenceRun) tea.Msg { return tea.KeyPressMsg{Code: tea.KeyUp} }},
+		{"a sub-agent view's pgup", true, func(*cadenceRun) tea.Msg { return tea.KeyPressMsg{Code: tea.KeyPgUp} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			grok := agent.GrokProvider()
@@ -587,13 +585,13 @@ func TestAScrollMidReplayScrollsTheRowsAsTheyStand(t *testing.T) {
 // itself paints.
 func TestASelectionOverAnUnpaintedChunkGoesWithIt(t *testing.T) {
 	press := func(x, y int) tea.Msg {
-		return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+		return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 	}
 	motion := func(x, y int) tea.Msg {
-		return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
+		return tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseLeft}
 	}
 	release := func(x, y int) tea.Msg {
-		return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}
+		return tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft}
 	}
 	// painted starts a replay whose transcript, past a screen, is painted
 	// by a forced refresh, with the reply open on a paragraph that a chunk
@@ -654,7 +652,7 @@ func TestASelectionOverAnUnpaintedChunkGoesWithIt(t *testing.T) {
 			t.Fatal("fixture: the drag selected and copied nothing")
 		}
 		unpainted(t, r, agent.Event{Type: agent.EventText, Text: "more of the reply\n\n"})
-		r.copyGesture(tea.KeyMsg{Type: tea.KeyCtrlY}, "ctrl+y")
+		r.copyGesture(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl}, "ctrl+y")
 		if r.copies != 2 {
 			t.Fatal("ctrl+y copied nothing")
 		}
@@ -707,7 +705,7 @@ func TestAReceiptPaneKeepsTheReplaysCadence(t *testing.T) {
 	}
 	// A selection is up over the receipt when its roster moves.
 	top, _ := r.region()
-	r.send(tea.MouseMsg{X: 2, Y: top, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}, "press")
+	r.send(tea.MouseClickMsg{X: 2, Y: top, Button: tea.MouseLeft}, "press")
 	drawn, paints := pane.drawn, pane.work.paints
 	for i := 0; r.lazy.replayFolded%replayPaintEvery != replayPaintEvery-1; i++ {
 		if i%2 == 0 {
@@ -837,7 +835,7 @@ func TestAReplayScrolledAwayPaintsEveryEvent(t *testing.T) {
 		r.event(para("line " + strconv.Itoa(i)))
 	}
 	top, _ := r.region()
-	r.send(tea.MouseMsg{X: 2, Y: top + 2, Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress}, "wheel up")
+	r.send(tea.MouseWheelMsg{X: 2, Y: top + 2, Button: tea.MouseWheelUp}, "wheel up")
 	if r.lazy.vp.AtBottom() {
 		t.Fatal("fixture: the wheel left the viewport at the bottom")
 	}
@@ -899,11 +897,11 @@ func TestAQuitMidReplayPaintsTheLastFrame(t *testing.T) {
 				if r.lazy.cur().dirty {
 					t.Fatalf("%s left the drawn pane unpainted: the last frame misses the events folded since the boundary", what)
 				}
-				if lv, ev := r.lazy.View(), r.eager.View(); lv != ev {
+				if lv, ev := r.lazy.View().Content, r.eager.View().Content; lv != ev {
 					t.Fatalf("after %s the last frame differs from painting every event\ncadence:\n%s\nevery event:\n%s", what, plain(lv), plain(ev))
 				}
 			}
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlD}, "ctrl+d")
+			r.send(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, "ctrl+d")
 			if !r.lazy.quitting || !r.lazy.replaying || (tc.remote && !r.lazy.exit.stopping) {
 				t.Fatalf("fixture: after ctrl+d quitting %v, replaying %v, stopping %v", r.lazy.quitting, r.lazy.replaying, r.lazy.exit.stopping)
 			}
@@ -915,9 +913,9 @@ func TestAQuitMidReplayPaintsTheLastFrame(t *testing.T) {
 			}
 			var quits [2]int
 			for i, m := range []*Model{&r.lazy, &r.eager} {
-				tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				*m = tm.(Model)
-				quits[i] = len(namedCmds(cmd, "bubbletea.Quit"))
+				quits[i] = len(namedCmds(cmd, teaPkg+"Quit"))
 			}
 			if quits != [2]int{1, 1} {
 				t.Fatalf("fixture: the second quit answered %v tea.Quit, want one each", quits)

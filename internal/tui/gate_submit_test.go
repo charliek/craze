@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -425,8 +425,8 @@ func siteOrders(labels []string) [][]string {
 // row sent now while idle, and one confirmed as a send-now while working; and
 // the plan offer's implement prompt.
 func submitSites() []submitSite {
-	ctrlL := tea.KeyMsg{Type: tea.KeyCtrlL}
-	up := tea.KeyMsg{Type: tea.KeyUp}
+	ctrlL := tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}
+	up := tea.KeyPressMsg{Code: tea.KeyUp}
 	return []submitSite{
 		{
 			name:  "a send that starts a turn",
@@ -469,7 +469,7 @@ func submitSites() []submitSite {
 					}
 				}
 				r.feed()
-				r.key(tea.KeyMsg{Type: tea.KeyUp})
+				r.key(tea.KeyPressMsg{Code: tea.KeyUp})
 				if sel, _ := r.m().queueSelected(); !r.m().queueFocus || sel.Text != "NEXT" {
 					r.t.Fatalf("prepare: ↑ did not reach the band's last row (focus %v, %+v)", r.m().queueFocus, sel)
 				}
@@ -504,7 +504,7 @@ func submitSites() []submitSite {
 		{
 			name: "the plan offer's implement prompt",
 			prepare: func(r *schedRun) {
-				r.key(tea.KeyMsg{Type: tea.KeyShiftTab})
+				r.key(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 				r.step(r.runOthers())
 				r.feed()
 				if r.m().snap.CurrentMode != "plan" {
@@ -853,8 +853,8 @@ func TestAQueuedRowSentNowThatNeverAnswersKeepsTheBand(t *testing.T) {
 				r.read()
 			}
 			if answered {
-				r.send(tea.KeyMsg{Type: tea.KeyUp})
-				r.send(tea.KeyMsg{Type: tea.KeyCtrlL})
+				r.send(tea.KeyPressMsg{Code: tea.KeyUp})
+				r.send(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 				if !r.m.queueFocus {
 					t.Fatal("the band gave up the keyboard before the reply")
 				}
@@ -864,8 +864,8 @@ func TestAQueuedRowSentNowThatNeverAnswersKeepsTheBand(t *testing.T) {
 				}
 				return
 			}
-			r.send(tea.KeyMsg{Type: tea.KeyUp})
-			r.send(tea.KeyMsg{Type: tea.KeyCtrlL})
+			r.send(tea.KeyPressMsg{Code: tea.KeyUp})
+			r.send(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			r.answer()
 			if !r.m.queueFocus || r.m.status == statusWorking {
 				t.Fatalf("an unanswered row: queue focus %v, status %s; want the band's keyboard kept", r.m.queueFocus, r.m.status)
@@ -892,7 +892,7 @@ func TestTheConfirmComesDownInTheUpdateThatAnswersIt(t *testing.T) {
 	r.send(enter())
 	r.answer()
 	r.m.input.SetValue("NOW")
-	r.send(tea.KeyMsg{Type: tea.KeyCtrlL})
+	r.send(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if r.m.confirm == nil {
 		t.Fatal("Ctrl+L over a working turn raised no confirm")
 	}

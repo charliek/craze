@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -127,11 +127,11 @@ func TestEffortComesAfterExitInTheMenu(t *testing.T) {
 	if got := slashNames(m); len(got) < 2 || got[0] != "exit" || got[1] != "effort" {
 		t.Fatalf("/e lists %v; want /exit first, then /effort", got)
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if v := m.input.Value(); v != "/exit " {
 		t.Fatalf("enter on /e left %q; want /exit completed", v)
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if !m.quitting {
 		t.Fatal("the second enter did not run /exit")
 	}
@@ -167,8 +167,8 @@ func TestTheEffortPickerMarksCurrentAndDefault(t *testing.T) {
 		if !strings.Contains(plainView(m), "effort · One") || !strings.Contains(plainView(m), effortPickerHint) {
 			t.Fatalf("facts %v: the picker's title or footer:\n%s", facts, plainView(m))
 		}
-		m = pressKey(t, m, tea.KeyDown)
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m = pressKey(t, m, "down")
+		m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = applyPending(t, drainCmd(t, m, cmd))
 		if m.dialog != dialogNone || len(writes()) != 0 {
 			t.Fatalf("facts %v: esc left dialog %v and sent %v", facts, m.dialog, writes())
@@ -188,7 +188,7 @@ func TestTheEffortPickerAppliesToTheModelItShows(t *testing.T) {
 	m, stub := factsStub(t, "one", true)
 	writes := configWrites(stub)
 	m, _ = typeCommand(t, m, "/effort")
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	m, cmd := press(m, enter())
 	// Another client's switch to two — which offers high too — lands right
 	// after the step has read the session on one, before its write.
@@ -204,7 +204,7 @@ func TestTheEffortPickerAppliesToTheModelItShows(t *testing.T) {
 	m, stub = factsStub(t, "one", true)
 	writes = configWrites(stub)
 	m, _ = typeCommand(t, m, "/effort")
-	m = pressKey(t, m, tea.KeyDown) // high
+	m = pressKey(t, m, "down") // high
 	if _, err := stub.SetModel(context.Background(), "", "two"); err != nil {
 		t.Fatal(err)
 	}
@@ -379,8 +379,8 @@ func TestEffortOverTheFakePerModelAgent(t *testing.T) {
 	if got := effortPickerRows(t, m); !slices.Equal(got, want) {
 		t.Fatalf("on claude-opus-5 the picker's rows are\n%q\nwant\n%q", got, want)
 	}
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = pumpSettled(t, m)
 	if opt := agent.EffortOption(sess.Snapshot()); opt == nil || opt.Current != "xhigh" {
 		t.Fatalf("the session's effort is %+v; want xhigh", opt)
@@ -413,7 +413,7 @@ func TestThePickerOnAModelWithNoLevelsSendsNothing(t *testing.T) {
 	if view := plainView(m); !strings.Contains(view, "effort · None") || !strings.Contains(view, "this model has no effort levels") {
 		t.Fatalf("on none the picker draws:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	m, cmd := press(m, enter())
 	if m.dialog != dialogNone || cmd != nil || len(writes()) != 0 {
 		t.Fatalf("enter on a model with no levels: dialog %v, a command %v, sent %v", m.dialog, cmd != nil, writes())

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -14,13 +14,13 @@ import (
 func TestCtrlLWhileEditingSavesThenSendsNowOnce(t *testing.T) {
 	m, stub := heldWorking(t)
 	m = pumpEnter(t, m, "PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	m = pumpKey(t, m, enter())
 	if m.queueEdit == "" {
 		t.Fatal("setup: expected edit mode")
 	}
 	m.input.SetValue("PINEAPPLE!")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.queueEdit != "" {
 		t.Fatal("ctrl+l saves the edit first")
 	}
@@ -52,19 +52,19 @@ func TestCtrlLWhileEditingSavesThenSendsNowOnce(t *testing.T) {
 func TestEmptiedBandGivesTheKeyboardBackForGood(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if !m.queueFocus {
 		t.Fatal("setup: the band has the keyboard")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = tm.(Model)
 	if !queueEmpty(m) || m.queueFocus || !m.input.Focused() {
 		t.Fatalf("the emptied band returns the keyboard: queue=%q focus=%v composer=%v", queueTexts(m), m.queueFocus, m.input.Focused())
 	}
 	m = typeEnter(t, m, "two")
 	m.input.SetValue("ab")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = tm.(Model)
 	if m.input.Value() != "a" || len(queueTexts(m)) != 1 {
 		t.Fatalf("backspace belongs to the composer again: draft %q, queue %q", m.input.Value(), queueTexts(m))
@@ -81,8 +81,8 @@ func TestArmedSendNowWaitsOutAForeignTurn(t *testing.T) {
 	m, stub := heldWorking(t)
 	stub.SetProvider(agent.GrokProvider())
 	m = pumpEnter(t, m, "PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	release := stub.HoldNextCancel()
 	m = pumpKey(t, m, enter())
 	awaitBarrier(t, stub.Cancels(), "the arm's cancel reaching the session")
@@ -136,7 +136,7 @@ func TestPlaceholderSaysNothingUnderACard(t *testing.T) {
 func TestStrongSendClearsADraftWithTrailingWhitespace(t *testing.T) {
 	m, stub := heldWorking(t)
 	m.input.SetValue("PINEAPPLE  ")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = pumpKey(t, m, enter())
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
 	m = pumpSettled(t, m)
@@ -160,7 +160,7 @@ func TestCtrlLRefusedWhileCancelling(t *testing.T) {
 	stub.cancelling = true
 	stub.mu.Unlock()
 	m.input.SetValue("BANANA")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.input.Value() != "BANANA" {
 		t.Fatalf("a refused interjection keeps the draft: %q", m.input.Value())
@@ -176,7 +176,7 @@ func TestConfirmOutranksTheSubagentView(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.confirm == nil {
 		t.Fatal("setup: expected the confirm")
@@ -197,9 +197,9 @@ func TestConfirmOutranksTheSubagentView(t *testing.T) {
 	// send now, then click where [cancel] sits — the click declines and
 	// does not remove the row.
 	m = typeEnter(t, got, "MANGO")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.confirm == nil {
 		t.Fatal("setup: expected the row's confirm")
@@ -243,7 +243,7 @@ func TestEditChipFollowsTheRow(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)

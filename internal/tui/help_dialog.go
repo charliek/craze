@@ -3,8 +3,8 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -137,17 +137,17 @@ func (m Model) openHelp() Model {
 	return m
 }
 
-func (m Model) handleHelpDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleHelpDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "esc":
 		return m.closeDialog(true), nil
-	case tea.KeyUp:
+	case "up":
 		return m.scrollHelp(-1), nil
-	case tea.KeyDown:
+	case "down":
 		return m.scrollHelp(1), nil
-	case tea.KeyPgUp:
+	case "pgup":
 		return m.scrollHelp(-m.helpPage()), nil
-	case tea.KeyPgDown:
+	case "pgdown":
 		return m.scrollHelp(m.helpPage()), nil
 	}
 	// Everything else is swallowed, the way the box has always swallowed it: a

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from conftest import both_modes, host_env_names  # noqa: F401
 from test_bridge import _wait_running_entry
-from test_tui import _ANSI, PTYCraze, _wait_fake_gone, _wait_glob, _wait_output, quit_craze
+from test_tui import PTYCraze, _wait_fake_gone, _wait_glob, _wait_output, quit_craze
 
 WAIT = 10.0
 
@@ -85,7 +85,7 @@ def test_attach_joins_the_session_and_its_quit_follows_the_host(
             host.wait_contains_since("echo: from the viewer", host_mark)
             view.write(b"\x04")
             assert view.wait_exit() == 0, view.screen()[-3000:]
-            text = _ANSI.sub("", view.screen())
+            text = view.history()
             assert "session ended" not in text
 
             if both_modes == "detached":
@@ -139,7 +139,7 @@ def test_attach_and_its_host_both_show_two_attached(
         host.write(b"before the view\r")
         host.wait_contains("echo: before the view")
         _wait_running_entry(tmp_path / ".cache" / "craze")
-        assert "attached" not in _ANSI.sub("", host.screen()), host.screen()[-3000:]
+        assert "attached" not in host.history(), host.screen()[-3000:]
         host_mark = host.mark()
 
         with _attach(craze_bin, tmp_path, tmp_path) as view:

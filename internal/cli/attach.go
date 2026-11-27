@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/paths"
@@ -323,8 +321,7 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 		Yolo:          true,
 		NoMouse:       view.noMouse,
 		TerminalTitle: tui.ConfigTerminalTitle(),
-		Background: tui.ConfigBackground() && !view.noBackground &&
-			lipgloss.ColorProfile() != termenv.Ascii,
+		Background:    tui.ConfigBackground() && !view.noBackground,
 	}, nil
 }
 

@@ -10,8 +10,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -488,8 +488,8 @@ func (m Model) slashActive() bool { return m.slashRows() > 0 }
 // rather than wrapped, because a page that jumped to the far end of the
 // catalog is not a page. Enter is not here: §3.3 pins its position inside
 // handleEnter, between the confirm and the queue edit's save.
-func (m Model) handleSlashKey(k tea.KeyType, rows int) Model {
-	if k == tea.KeyTab {
+func (m Model) handleSlashKey(k string, rows int) Model {
+	if k == "tab" {
 		if name, ok := m.slashTypedBuiltin(); ok {
 			// The builtin the token spells, not the row the menu offers in
 			// its place (slashTypedBuiltin).
@@ -499,13 +499,13 @@ func (m Model) handleSlashKey(k tea.KeyType, rows int) Model {
 	}
 	items := m.filteredSlash()
 	switch k {
-	case tea.KeyDown:
+	case "down":
 		m.slashSel = (m.slashSel + 1) % len(items)
-	case tea.KeyUp:
+	case "up":
 		m.slashSel = (m.slashSel - 1 + len(items)) % len(items)
-	case tea.KeyPgDown:
+	case "pgdown":
 		m.slashSel = min(m.slashSel+rows, len(items)-1)
-	case tea.KeyPgUp:
+	case "pgup":
 		m.slashSel = max(m.slashSel-rows, 0)
 	}
 	return m

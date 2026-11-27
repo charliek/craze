@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -64,7 +64,7 @@ func claimingPicker(t *testing.T, claim func(sessions.Row) (string, func(), erro
 // build nothing yet.
 func pressEnter(t *testing.T, m Model, loaded *[]sessions.Row) (Model, tea.Cmd) {
 	t.Helper()
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	out := tm.(Model)
 	if cmd == nil {
 		t.Fatal("Enter returned no command")
@@ -116,7 +116,7 @@ func TestASecondEnterWhileClaimingDoesNothing(t *testing.T) {
 	f := &fakeClaim{id: "018f-one"}
 	m, loaded := claimingPicker(t, f.claim)
 	m, _ = pressEnter(t, m, loaded)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil || tm.(Model).resumeWaiting != m.resumeWaiting {
 		t.Fatal("a second Enter while a claim is in flight started another")
 	}
@@ -130,7 +130,7 @@ func TestAStalePickerClaimIsReleased(t *testing.T) {
 		f := &fakeClaim{id: "018f-late"}
 		m, loaded := claimingPicker(t, f.claim)
 		m, cmd := pressEnter(t, m, loaded)
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 		m = tm.(Model)
 		if !m.quitting {
 			t.Fatal("Esc did not quit while a claim was in flight")
@@ -181,10 +181,10 @@ func TestAPickerRefusalShowsAnErrorRow(t *testing.T) {
 			t.Fatalf("the error row pushed %q out of a full-size box:\n%s", want, view)
 		}
 	}
-	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd == nil {
 		t.Fatal("Enter after a refusal started no new attempt")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if view := plainView(tm.(Model)); strings.Contains(view, "pid 4242") {
 		t.Fatalf("the cursor moved and the error row stayed:\n%s", view)
 	}
@@ -319,7 +319,7 @@ func TestOnEngineSeesEveryInstalledEngine(t *testing.T) {
 	if len(seen) != 0 || !p.pickingProvider {
 		t.Fatalf("setup: a provider picker with no engine yet (seen %d)", len(seen))
 	}
-	tm, _ := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	tm, _ := p.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	out := tm.(Model)
 	t.Cleanup(func() { _ = out.eng.Close() })
 	if len(seen) != 1 || seen[0] != engineOf(t, out) {

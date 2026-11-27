@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -570,8 +570,8 @@ func (p *pump) pending() string {
 func pumpSkips(cmd tea.Cmd) bool {
 	name := cmdFuncName(cmd)
 	switch {
-	case strings.HasPrefix(name, "github.com/charmbracelet/bubbletea.Tick"),
-		strings.HasPrefix(name, "github.com/charmbracelet/bubbletea.Every"):
+	case strings.HasPrefix(name, teaPkg+"Tick"),
+		strings.HasPrefix(name, teaPkg+"Every"):
 		return true
 	case strings.HasPrefix(name, "github.com/charliek/craze/internal/tui.waitEvent"):
 		return true
@@ -864,7 +864,7 @@ func (p *pump) popFront() (pumpItem, bool) {
 }
 
 // pumpKey presses a key the way a terminal delivers it.
-func pumpKey(t *testing.T, m Model, k tea.KeyMsg) Model {
+func pumpKey(t *testing.T, m Model, k tea.KeyPressMsg) Model {
 	t.Helper()
 	return pumpApply(t, m, k)
 }
@@ -895,7 +895,7 @@ func pumpEnter(t *testing.T, m Model, text string) Model {
 // pumpEsc presses Esc, which is a cancel while a turn is running.
 func pumpEsc(t *testing.T, m Model) Model {
 	t.Helper()
-	return pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	return pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 }
 
 // pumpAwaitEvent arms a barrier that closes once the reader has taken an event

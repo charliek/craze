@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -128,7 +128,7 @@ func toNative(t *testing.T, m Model) Model {
 		if m.providers[m.providerCursor].Name() == "native" {
 			return m
 		}
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	t.Fatal("the picker has no native row")
 	return m
@@ -142,7 +142,7 @@ func toListNative(m Model) Model {
 		if it, ok := m.sessList.in.cmd.selected(); ok && it.Value == "provider:native" {
 			return m
 		}
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	}
 	return m
 }
@@ -262,7 +262,7 @@ func preList(t *testing.T, dir string, getenv func(string) string, extra func() 
 	m.nativeDir, m.nativeEnv = dir, getenv
 	cb := &countingBackend{Backend: m.eng}
 	m.eng = cb
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open || !m.sessList.in.on {
 		t.Fatalf("← did not open a list with an input:\n%s", plainView(m))
 	}
@@ -330,7 +330,7 @@ func preSelect(t *testing.T, m Model, id string) Model {
 		if p, ok := m.cdlg.provider(); ok && p.ID == id {
 			return m
 		}
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	t.Fatalf("step one has no %s", id)
 	return m
@@ -340,7 +340,7 @@ func preSelect(t *testing.T, m Model, id string) Model {
 // step opened, the canary pasted, Enter — answering the save's command.
 func preSubmit(t *testing.T, m Model, id string) (Model, tea.Cmd) {
 	t.Helper()
-	m = pressKey(t, preSelect(t, m, id), tea.KeyEnter)
+	m = pressKey(t, preSelect(t, m, id), "enter")
 	m, _ = press(m, pasteKey(connectCanary))
 	return press(m, enter())
 }
@@ -466,10 +466,10 @@ func TestPreConnectOpensOnNative(t *testing.T) {
 	opened(t, "Enter on native", next, log)
 
 	def, defLog := prePicker(t, agent.NativeProvider(), dir, getenv, nil)
-	def, _ = press(def, tea.KeyMsg{Type: tea.KeyUp}) // off the default
-	next, _ = press(def, tea.KeyMsg{Type: tea.KeyEsc})
+	def, _ = press(def, tea.KeyPressMsg{Code: tea.KeyUp}) // off the default
+	next, _ = press(def, tea.KeyPressMsg{Code: tea.KeyEsc})
 	opened(t, "Esc to the native default", next, defLog)
-	tm, _ := def.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+	tm, _ := def.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 0, Y: 0})
 	opened(t, "a click outside the box to the native default", tm.(Model), defLog)
 }
 
@@ -487,11 +487,11 @@ func TestPreConnectPutsTheCursorOnNative(t *testing.T) {
 		t.Helper()
 		dir, getenv := preFixture(t, false, false)
 		m, log := prePicker(t, agent.NativeProvider(), dir, getenv, nil)
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 		if m.providers[m.providerCursor].Name() != "grok" {
 			t.Fatalf("fixture: the cursor is on %s", m.providers[m.providerCursor].Name())
 		}
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		if !m.preConnectOpen() {
 			t.Fatal("fixture: Esc to the native default did not open the dialog")
 		}
@@ -529,7 +529,7 @@ func TestPreConnectPutsTheCursorOnNative(t *testing.T) {
 	})
 	t.Run("the cursor moved before the answer", func(t *testing.T) {
 		m, ask, _ := back(t, "gamma")
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 		at := m.providerCursor
 		if m.providerBack.text != "" {
 			t.Fatal("moving the cursor kept the dialog's note")
@@ -559,7 +559,7 @@ func TestPreConnectExits(t *testing.T) {
 				m, _, cb, _ := preModel(t, o.origin, false, nil)
 				transcript := transcriptText(m)
 				m, shown := preOpen(t, o.origin, m)
-				m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+				m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 				preQuiet(t, "Esc on step one", m, cb, transcript)
 				m = preBack(t, "Esc on step one", o.origin, m, cmd, connectBack{}, shown)
 				if nativeState(o.origin, m) != AvailNeedsSetup {
@@ -570,12 +570,12 @@ func TestPreConnectExits(t *testing.T) {
 				m, _, cb, _ := preModel(t, o.origin, false, nil)
 				transcript := transcriptText(m)
 				m, shown := preOpen(t, o.origin, m)
-				m = pressKey(t, preSelect(t, m, "gamma"), tea.KeyEnter)
+				m = pressKey(t, preSelect(t, m, "gamma"), "enter")
 				m, _ = press(m, pasteKey(connectCanary))
 				if m.cdlg.step != connectKey || m.cdlg.key.Value() != connectCanary {
 					t.Fatal("fixture: the key field does not hold the paste")
 				}
-				m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+				m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 				connectLeak(t, m, nil)
 				preQuiet(t, "Esc on the key field", m, cb, transcript)
 				preBack(t, "Esc on the key field", o.origin, m, cmd, connectBack{}, shown)
@@ -584,7 +584,7 @@ func TestPreConnectExits(t *testing.T) {
 				m, _, cb, log := preModel(t, o.origin, false, nil)
 				transcript := transcriptText(m)
 				m, shown := preOpen(t, o.origin, m)
-				tm, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+				tm, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 0, Y: 0})
 				m = tm.(Model)
 				preQuiet(t, "a click outside", m, cb, transcript)
 				preBack(t, "a click outside", o.origin, m, cmd, connectBack{}, shown)
@@ -613,7 +613,7 @@ func TestPreConnectExits(t *testing.T) {
 				if got, ok := storedKey(t, dir, "gamma"); !ok || got != connectCanary {
 					t.Fatal("gamma's key was not stored")
 				}
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+				m, _ = press(m, textKey("x"))
 				if m.cdlg.step != connectSaving || m.cdlg.key.Value() != "" {
 					t.Fatal("a key typed on the save step was taken")
 				}
@@ -645,7 +645,7 @@ func TestPreConnectExits(t *testing.T) {
 				}
 				typed := clearInput(t, m)
 				typed, _ = typeList(t, typed, "/provider native")
-				typed, _ = press(typed, tea.KeyMsg{Type: tea.KeyEsc})
+				typed, _ = press(typed, tea.KeyPressMsg{Code: tea.KeyEsc})
 				typed, _ = press(typed, enter())
 				if typed.preConnectOpen() || !typed.sessPick.provSet || typed.sessPick.prov.Name() != "native" {
 					t.Fatalf("/provider native once ready: dialog %v, pick %+v", typed.preConnectOpen(), typed.sessPick)
@@ -672,7 +672,7 @@ func TestPreConnectExits(t *testing.T) {
 				m, dir, cb, _ := preModel(t, o.origin, false, nil)
 				transcript := transcriptText(m)
 				m, shown := preOpen(t, o.origin, m)
-				m = pressKey(t, preSelect(t, m, "gamma"), tea.KeyEnter)
+				m = pressKey(t, preSelect(t, m, "gamma"), "enter")
 				path := filepath.Join(dir, modeltable.ProvidersFile)
 				target := filepath.Join(t.TempDir(), "elsewhere.toml")
 				if err := os.Rename(path, target); err != nil {
@@ -761,7 +761,7 @@ func TestPreConnectLateAnswers(t *testing.T) {
 			// the late save has stored it, and opens the dialog again.
 			m, cmd := preSubmit(t, m, "delta")
 			save := mustCmd(t, cmd, "preStampedSave")
-			m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 			if o.origin == returnPicker {
 				m = applyMsg(t, m, runWatched(t, mustCmd(t, cmd, "providerAvailCmd")))
 			} else {
@@ -924,7 +924,7 @@ func TestPreConnectSignIn(t *testing.T) {
 				if m.cdlg.step != connectNotice {
 					t.Fatal("fixture: the notice step is not up")
 				}
-				m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+				m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 				if f.s.marks.Load() != 0 {
 					t.Fatalf("Esc on the notice recorded it as shown (%d)", f.s.marks.Load())
 				}
@@ -935,7 +935,7 @@ func TestPreConnectSignIn(t *testing.T) {
 				f, wait := begin(t, o.origin, withNotice, nil)
 				m, cmd := signIn(t, f, wait)
 				finish := mustCmd(t, cmd, "finishSignInCmd")
-				m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+				m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 				preQuiet(t, "Esc while fetching", m, f.cb, f.transcript)
 				m = preBack(t, "Esc while fetching", o.origin, m, cmd, connectBack{}, f.shown)
 				before := preDigest(m)
@@ -992,7 +992,7 @@ func TestPreConnectSignIn(t *testing.T) {
 			t.Run("esc on the sign-in step", func(t *testing.T) {
 				f, _ := begin(t, o.origin, withNotice, nil)
 				att := f.m.cdlg.signIn.att.(*fakeSignIn)
-				m, cmd := press(f.m, tea.KeyMsg{Type: tea.KeyEsc})
+				m, cmd := press(f.m, tea.KeyPressMsg{Code: tea.KeyEsc})
 				if !att.isClosed() || !slices.Contains(att.closeReasons(), chatgptauth.CloseDialog) {
 					t.Fatalf("Esc left the attempt open (reasons %v)", att.closeReasons())
 				}
@@ -1022,17 +1022,17 @@ func TestPreConnectOpensFromTheList(t *testing.T) {
 	onNative := toListNative(providersLoaded(t, base, "/provider "))
 	next, _ := press(onNative, enter())
 	opened(t, "Enter on native", next)
-	next, _ = press(onNative, tea.KeyMsg{Type: tea.KeyTab})
+	next, _ = press(onNative, tea.KeyPressMsg{Code: tea.KeyTab})
 	opened(t, "Tab on native", next)
 	typed, _ := typeList(t, base, "/provider native")
-	typed, _ = press(typed, tea.KeyMsg{Type: tea.KeyEsc})
+	typed, _ = press(typed, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if typed.sessList.in.cmd.visible() {
 		t.Fatal("fixture: esc left the popup up")
 	}
 	next, _ = press(typed, enter())
 	opened(t, "/provider native typed", next)
 	grok, _ := typeList(t, base, "/provider grok")
-	grok, _ = press(grok, tea.KeyMsg{Type: tea.KeyEsc})
+	grok, _ = press(grok, tea.KeyPressMsg{Code: tea.KeyEsc})
 	grok, _ = press(grok, enter())
 	if grok.preConnectOpen() || grok.sessPick.prov.Name() != "grok" {
 		t.Fatalf("/provider grok: dialog %v, pick %+v", grok.preConnectOpen(), grok.sessPick)
@@ -1051,9 +1051,9 @@ func TestPreConnectPasteOverTheList(t *testing.T) {
 	m, _, cb, _ := preModel(t, returnList, false, nil)
 	transcript, composer := transcriptText(m), m.input.Value()
 	m, shown := preOpen(t, returnList, m)
-	m = pressKey(t, preSelect(t, m, "gamma"), tea.KeyEnter)
+	m = pressKey(t, preSelect(t, m, "gamma"), "enter")
 	m, _ = press(m, pasteKey(connectCanary))
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	paste, ok := runCmd(cmd).(pasteMsg)
 	if !ok || paste.key != m.cdlg.openField() || paste.key == (keyField{}) || paste.listGen != 0 {
 		t.Fatalf("Ctrl+V asked for %+v; want the clipboard for the key field", paste)
@@ -1066,7 +1066,7 @@ func TestPreConnectPasteOverTheList(t *testing.T) {
 	if v, _ := inputOf(m); v != "" || m.input.Value() != composer {
 		t.Fatal("a paste landed in the list's input or the composer")
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	connectLeak(t, m, nil, clip)
 	preQuiet(t, "the pastes", m, cb, transcript)
 	preBack(t, "Esc after the pastes", returnList, m, cmd, connectBack{}, shown)
@@ -1091,7 +1091,7 @@ func TestPreConnectOverAWorkingSessionWithACard(t *testing.T) {
 	if !m.cardOpen() || !m.connectBusy() {
 		t.Fatal("fixture: no card open, or /connect not refused in the session")
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = listSnap(t, m, richSnapshot(m.sessList.home, m.hereKey()))
 	m = takeOpenRead(t, m, cmd)
 	m, shown := preOpen(t, returnList, m)
@@ -1099,7 +1099,7 @@ func TestPreConnectOverAWorkingSessionWithACard(t *testing.T) {
 		t.Fatal("the pre-session dialog is refused as busy")
 	}
 	// The card owns neither the keyboard nor the mouse while the dialog is up.
-	m = pressKey(t, preSelect(t, m, "gamma"), tea.KeyEnter)
+	m = pressKey(t, preSelect(t, m, "gamma"), "enter")
 	if m.cdlg.step != connectKey {
 		t.Fatal("Enter went to the card, not the dialog")
 	}
@@ -1111,7 +1111,7 @@ func TestPreConnectOverAWorkingSessionWithACard(t *testing.T) {
 	if m.cdlg.key.Value() != connectCanary {
 		t.Fatal("the paste went to the card, not the key field")
 	}
-	tm, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+	tm, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 0, Y: 0})
 	m = tm.(Model)
 	connectLeak(t, m, stub)
 	m = preBack(t, "a click outside over a card", returnList, m, cmd, connectBack{}, shown)
@@ -1183,7 +1183,7 @@ func TestPreConnectQuitClosesTheLogInOrder(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("the control: the exchange never began")
 			}
-			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+			m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 			if !m.quitting || m.preConnectOpen() || m.sessList.open || cmd == nil {
 				t.Fatalf("Ctrl+C: quitting %v, dialog %v, list %v — want craze quitting, nothing reopened",
 					m.quitting, m.preConnectOpen(), m.sessList.open)
@@ -1229,7 +1229,7 @@ func TestPreConnectLeavesTheLogNoteToTheExit(t *testing.T) {
 	}
 	m = applyMsg(t, m, off)
 	preQuiet(t, "the log's refusal, the dialog up", m, nil, transcript)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = preBack(t, "Esc", returnPicker, m, cmd, connectBack{}, listShown{})
 	m = applyMsg(t, m, off)
 	preQuiet(t, "the log's refusal, the picker up", m, nil, transcript)
@@ -1316,9 +1316,9 @@ func preFirstPrompt(t *testing.T, startErr error) (Model, tea.Msg, *hostBackend,
 	}
 	hb.startErr = startErr
 	start := runWatched(t, mustCmd(t, cmd, "startCmd"))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m, cmd = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open || m.sessList.none || m.sessList.here.zero() {
 		t.Fatalf("fixture: ← over the adopted session: list %v, none %v, here %+v", m.sessList.open, m.sessList.none, m.sessList.here)
 	}
@@ -1357,7 +1357,7 @@ func TestPreConnectFirstPromptFailsBehindTheDialog(t *testing.T) {
 	if cmds, sent := hb.sent(); len(cmds) != 0 || slices.Contains(log.seen(), "submit") {
 		t.Fatalf("the first prompt was sent: %v with %q", cmds, sent)
 	}
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = preBack(t, "Esc after the failure", returnList, m, cmd, connectBack{}, shown)
 	if m.unstarted != nil || m.sessList.none {
 		t.Fatalf("the list came back over an unstarted session (unstarted %v, none %v)", m.unstarted, m.sessList.none)
@@ -1408,7 +1408,7 @@ func TestPreConnectFirstPromptEndsBehindTheDialog(t *testing.T) {
 func TestPreConnectComposerPasteLandsInTheDraft(t *testing.T) {
 	m, _, _, _ := preModel(t, returnList, false, nil)
 	m, _ = preOpen(t, returnList, m)
-	m = pressKey(t, preSelect(t, m, "gamma"), tea.KeyEnter)
+	m = pressKey(t, preSelect(t, m, "gamma"), "enter")
 	m = applyMsg(t, m, pasteMsg{text: "pasted before the list", shownGen: m.shownGen})
 	if got := m.input.Value(); got != "pasted before the list" || m.cdlg.key.Value() != "" {
 		t.Fatalf("the composer's paste: draft %q, key field %d bytes — want it in the draft alone", got, len(m.cdlg.key.Value()))
@@ -1436,11 +1436,11 @@ func TestPreConnectLogNoteNeverReachesASession(t *testing.T) {
 			if logWait == nil {
 				t.Fatal("fixture: the first begin armed no wait for the log")
 			}
-			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 			m = preBack(t, "Esc", o.origin, m, cmd, connectBack{}, shown)
 			if o.origin == returnPicker {
 				// The picker starts a session before the stop lands.
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+				m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 				m, _ = press(m, enter())
 				if m.pickingProvider || !slices.Equal(log.got(), []string{"grok"}) {
 					t.Fatalf("fixture: grok did not start (picking %v, built %v)", m.pickingProvider, log.got())
@@ -1600,7 +1600,7 @@ func inSessionSignIn(t *testing.T, m Model) (Model, tea.Cmd) {
 // leaveInSession is Esc twice: off the sign-in, then out of the dialog.
 func leaveInSession(t *testing.T, m Model) Model {
 	t.Helper()
-	m = pressKey(t, pressKey(t, m, tea.KeyEsc), tea.KeyEsc)
+	m = pressKey(t, pressKey(t, m, "esc"), "esc")
 	if m.dialog != dialogNone {
 		t.Fatalf("fixture: Esc twice left dialog %v up", m.dialog)
 	}
@@ -1612,7 +1612,7 @@ func leaveInSession(t *testing.T, m Model) Model {
 // armed for the log.
 func preSessionSignIn(t *testing.T, m Model) (Model, tea.Cmd) {
 	t.Helper()
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = listSnap(t, m, roster.Snapshot{})
 	m = takeOpenRead(t, m, cmd)
 	m, _ = preOpen(t, returnList, m)
@@ -1624,7 +1624,7 @@ func preSessionSignIn(t *testing.T, m Model) (Model, tea.Cmd) {
 // left for the session behind it.
 func leavePre(t *testing.T, m Model) Model {
 	t.Helper()
-	m = pressKey(t, clearInput(t, pressKey(t, m, tea.KeyEsc)), tea.KeyEsc)
+	m = pressKey(t, clearInput(t, pressKey(t, m, "esc")), "esc")
 	if m.sessList.open || m.dialog != dialogNone {
 		t.Fatalf("fixture: leaving the dialog and the list: list %v, dialog %v", m.sessList.open, m.dialog)
 	}

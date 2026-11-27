@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -231,7 +231,7 @@ func TestASideQuestionReadsTheRawDraft(t *testing.T) {
 	if !slices.Equal(m.shellCtx, pending) {
 		t.Fatalf("the pending shell context is %+v after the side question", m.shellCtx)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	m, _ = pressBtw(t, m, "/btw")
 	if m.btw != nil || m.input.Value() != "" || !paneHas(m.main, btwUsage) {
@@ -364,7 +364,7 @@ func scrolledWorking(t *testing.T) (Model, *Stub) {
 	for i := range 100 {
 		m.addNote(fmt.Sprintf("main row %d", i))
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyPgUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if m.vp.AtBottom() || m.vp.YOffset == 0 {
 		t.Fatalf("fixture: the main pane is not scrolled (offset %d)", m.vp.YOffset)
 	}
@@ -376,8 +376,8 @@ func scrolledWorking(t *testing.T) (Model, *Stub) {
 // at its offset — and touch nothing else: the main turn runs on, nothing is
 // cancelled, and Ctrl+C arms no quit (the next press cancels the main turn).
 func TestEscAndCtrlCCloseTheSideView(t *testing.T) {
-	for _, key := range []tea.KeyType{tea.KeyEsc, tea.KeyCtrlC} {
-		t.Run(tea.KeyMsg{Type: key}.String(), func(t *testing.T) {
+	for _, key := range []string{"esc", "ctrl+c"} {
+		t.Run(testKey(key).String(), func(t *testing.T) {
 			m, stub := scrolledWorking(t)
 			off := m.vp.YOffset
 			held, release := stub.HoldNextAside()
@@ -390,7 +390,7 @@ func TestEscAndCtrlCCloseTheSideView(t *testing.T) {
 			m = typeComposer(t, m, "a follow-up half typed")
 			gen := m.composerGen
 
-			m, _ = press(m, tea.KeyMsg{Type: key})
+			m, _ = press(m, testKey(key))
 			switch {
 			case m.btw != nil || m.cur() != m.main:
 				t.Fatal("the side view is still open")
@@ -412,7 +412,7 @@ func TestEscAndCtrlCCloseTheSideView(t *testing.T) {
 					t.Fatal("the cancelled question's answer landed")
 				}
 			}
-			m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+			m, cmd = press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 			if m.quitting {
 				t.Fatal("the next ctrl+c quit: the view's close armed the window")
 			}
@@ -438,7 +438,7 @@ func TestACardOverTheSideView(t *testing.T) {
 		if !m.cardOpen() || !strings.Contains(plainView(m), "Waiting for your answer") {
 			t.Fatalf("no card over the view:\n%s", plainView(m))
 		}
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		if m.cardOpen() || m.btw == nil || m.cur() != m.btw.pane {
 			t.Fatalf("esc: card %v, view %v", m.cardOpen(), m.btw != nil)
 		}
@@ -452,7 +452,7 @@ func TestACardOverTheSideView(t *testing.T) {
 		m, cmd := pressBtw(t, m, "/btw why?")
 		m = answerBtw(t, m, cmd)
 		m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: parityPermission("perm-2")})
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+		m, cmd = press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 		runCmd(cmd)
 		if m.btw == nil || m.ctrlCDeadline.IsZero() || m.quitting || stub.CancelsSent() != 1 {
 			t.Fatalf("ctrl+c with a card: view %v, armed %v, quitting %v, cancels %d",
@@ -480,7 +480,7 @@ func TestTheMainSessionsRowsStayInTheMainPane(t *testing.T) {
 	if strings.Contains(plainView(m), "the main turn speaks") {
 		t.Fatal("the main pane's row is drawn over the side view")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if v := plainView(m); !strings.Contains(v, "the main turn speaks") || strings.Contains(v, btwHeaderNote) {
 		t.Fatalf("after the return:\n%s", v)
 	}
@@ -535,7 +535,7 @@ func TestCtrlLOnABtwDraftOpensTheSideView(t *testing.T) {
 			m, _ = press(m, enter())
 			waitInTurn(t, stub)
 			m.input.SetValue("/btw a side matter")
-			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlL})
+			m, cmd := press(m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			if m.btw == nil || m.confirm != nil || findCmd(cmd, "askBtwCmd") == nil {
 				t.Fatalf("ctrl+l: view %v, confirm %v", m.btw != nil, m.confirm != nil)
 			}
@@ -557,7 +557,7 @@ func TestCtrlLOnABtwDraftOpensTheSideView(t *testing.T) {
 // the main session. Negative control: without the refusal in saveQueueEdit
 // the row is saved as "/btw why?" and Ctrl+L sends it now.
 func TestAQueueEditNeverSavesASideQuestion(t *testing.T) {
-	for _, key := range []tea.KeyMsg{enter(), {Type: tea.KeyCtrlL}} {
+	for _, key := range []tea.KeyPressMsg{enter(), {Code: 'l', Mod: tea.ModCtrl}} {
 		t.Run(key.String(), func(t *testing.T) {
 			m, stub := asideWorking(t)
 			m = typeEnter(t, m, "later")
@@ -618,21 +618,21 @@ func TestTheSideComposerMovesItsCursorAcrossLines(t *testing.T) {
 	}
 	m, cmd := pressBtw(t, m, "/btw why?")
 	m = answerBtw(t, m, cmd)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.queueFocus || m.agentFocus || !m.input.Focused() {
 		t.Fatal("↑ on the side view's empty composer left it")
 	}
 	m = typeComposer(t, m, "first")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	m = typeComposer(t, m, "second")
 	if m.input.Value() != "first\nsecond" || m.input.Line() != 1 {
 		t.Fatalf("fixture: %q on line %d", m.input.Value(), m.input.Line())
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.input.Line() != 0 || m.queueFocus || m.btw == nil {
 		t.Fatalf("↑ in a draft of two lines: line %d, queue focus %v", m.input.Line(), m.queueFocus)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.input.Line() != 1 {
 		t.Fatalf("↓ back: line %d", m.input.Line())
 	}
@@ -651,20 +651,20 @@ func TestAPasteNeverCrossesTheSideView(t *testing.T) {
 	m, _ := asideModel(t)
 	m, cmd := pressBtw(t, m, "/btw why?")
 	m = answerBtw(t, m, cmd)
-	m, paste := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, paste := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m, _ = press(m, runWatched(t, mustCmd(t, paste, "pasteFromClipboard")))
 	if m.input.Value() != "pasted" {
 		t.Fatalf("a paste in the view's own draft: %q", m.input.Value())
 	}
-	m, paste = press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, paste = press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	late := runWatched(t, mustCmd(t, paste, "pasteFromClipboard"))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	m, _ = press(m, late)
 	if m.input.Value() != "" {
 		t.Fatalf("the view's paste landed in the main composer: %q", m.input.Value())
 	}
 
-	m, paste = press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	m, paste = press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	late = runWatched(t, mustCmd(t, paste, "pasteFromClipboard"))
 	m, cmd = pressBtw(t, m, "/btw again?")
 	m = answerBtw(t, m, cmd)
@@ -745,7 +745,7 @@ func TestASideViewOpensAgainAfterACancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() { ask(); close(done) }()
 	awaitStep(t, held, "the first parking")
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	awaitStep(t, done, "the cancelled call returning")
 
 	m, cmd = pressBtw(t, m, "/btw second")
@@ -797,7 +797,7 @@ func TestASessionSwitchClosesTheSideView(t *testing.T) {
 	})
 	t.Run("quit", func(t *testing.T) {
 		m, done := open(t)
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+		m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 		if !m.quitting || m.btw != nil {
 			t.Fatalf("ctrl+d: quitting %v, view %v", m.quitting, m.btw != nil)
 		}
@@ -842,7 +842,7 @@ func TestCtrlYCopiesTheSideAnswer(t *testing.T) {
 	}
 	m, cmd := pressBtw(t, m, "/btw why?")
 	m = answerBtw(t, m, cmd)
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	runCmd(cmd)
 	want := stubAnswer(agent.AsideRequest{Question: "why?"})
 	if copies := rec.copies(); len(copies) != 1 || copies[0] != want {
@@ -879,11 +879,11 @@ func TestTheSideViewsChromeIsInert(t *testing.T) {
 	if q.Empty() {
 		t.Fatal("fixture: no queue strip")
 	}
-	m, _ = press(m, tea.MouseMsg{X: 4, Y: q.Top, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+	m, _ = press(m, tea.MouseMotionMsg{X: 4, Y: q.Top, Button: tea.MouseNone})
 	if m.queueHov != noHover() {
 		t.Fatalf("the strip shows its actions: %+v", m.queueHov)
 	}
-	m, _ = press(m, tea.MouseMsg{X: 4, Y: q.Top, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m, _ = press(m, tea.MouseClickMsg{X: 4, Y: q.Top, Button: tea.MouseLeft})
 	if m.queueEdit != "" || m.queueFocus || m.btw == nil {
 		t.Fatalf("a click on the strip: edit %q, focus %v, view %v", m.queueEdit, m.queueFocus, m.btw != nil)
 	}
@@ -892,11 +892,11 @@ func TestTheSideViewsChromeIsInert(t *testing.T) {
 		t.Fatal("the status row's first span is still the mode")
 	}
 	mode := m.snap.CurrentMode
-	m, _ = press(m, tea.MouseMsg{X: 0, Y: m.lay.Region(regionStatus).Top + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m, _ = press(m, tea.MouseClickMsg{X: 0, Y: m.lay.Region(regionStatus).Top + 1, Button: tea.MouseLeft})
 	if m.modeInFlight != "" || m.snap.CurrentMode != mode {
 		t.Fatal("a click on the status row cycled the mode")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.modeInFlight != "" {
 		t.Fatal("shift+tab cycled the mode")
 	}

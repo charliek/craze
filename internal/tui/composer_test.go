@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -43,10 +43,9 @@ var wrapCases = []struct{ name, line string }{
 	{"mixed widths", "aい" + strings.Repeat("bう", 9)},
 }
 
-// TestWrapRowsMatchesTextareaLineInfo is the parity contract: wrapRows has to
-// return what bubbles itself wrapped the line to, or the composer counts rows
-// the textarea did not draw.
-func TestWrapRowsMatchesTextareaLineInfo(t *testing.T) {
+// TestComposerRowsMatchTextareaLineInfo checks the layout’s requested height
+// against the actual soft wraps on each line.
+func TestComposerRowsMatchTextareaLineInfo(t *testing.T) {
 	const inner = 18
 	lines := make([]string, 0, len(wrapCases))
 	for _, tc := range wrapCases {
@@ -70,11 +69,7 @@ func TestWrapRowsMatchesTextareaLineInfo(t *testing.T) {
 		if ta.Line() != i {
 			t.Fatalf("%s: cursor is on line %d, want %d", tc.name, ta.Line(), i)
 		}
-		got, want := wrapRows(tc.line, inner), ta.LineInfo().Height
-		if got != want {
-			t.Fatalf("%s: wrapRows = %d, bubbles wrapped it to %d", tc.name, got, want)
-		}
-		total += want
+		total += ta.LineInfo().Height
 	}
 
 	// And the sum is what the composer asks the layout for.
@@ -87,34 +82,52 @@ func TestWrapRowsMatchesTextareaLineInfo(t *testing.T) {
 	}
 }
 
+// A completion or chip uses byte offsets while the textarea moves by visible
+// characters. A ZWJ emoji occupies several runes at one cursor stop.
+func TestComposerCursorAcrossEmoji(t *testing.T) {
+	m, _ := press(sized(t), tea.PasteMsg{Content: "a👩‍💻界"})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got, want := m.composerCursorOffset(), len("a👩‍💻"); got != want {
+		t.Fatalf("cursor after emoji at byte %d, want %d", got, want)
+	}
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got := m.composerCursorOffset(); got != len("a") {
+		t.Fatalf("left through emoji landed at byte %d", got)
+	}
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if got := m.input.Value(); got != "a界" || m.composerCursorOffset() != len("a") {
+		t.Fatalf("backspace left %q with cursor at byte %d", got, m.composerCursorOffset())
+	}
+}
+
 // composerKeys is one pass over everything that can change the draft's shape:
 // typing, a newline, a wrap boundary, a paste, cursor movement and a resize.
 func composerKeys() []tea.Msg {
 	out := []tea.Msg{}
 	for _, r := range "line one" {
-		out = append(out, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		out = append(out, runeKey(r))
 	}
-	out = append(out, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	out = append(out, tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	for _, r := range "line two" {
-		out = append(out, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		out = append(out, runeKey(r))
 	}
 	out = append(out,
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(strings.Repeat("w", 240)), Paste: true},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a\nb\nc\nd\ne"), Paste: true},
-		tea.KeyMsg{Type: tea.KeyUp},
-		tea.KeyMsg{Type: tea.KeyUp},
-		tea.KeyMsg{Type: tea.KeyHome},
+		tea.PasteMsg{Content: strings.Repeat("w", 240)},
+		tea.PasteMsg{Content: "a\nb\nc\nd\ne"},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+		tea.KeyPressMsg{Code: tea.KeyHome},
 		tea.WindowSizeMsg{Width: 60, Height: 24},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'!'}},
+		runeKey('!'),
 		tea.WindowSizeMsg{Width: 100, Height: 30},
-		tea.KeyMsg{Type: tea.KeyBackspace},
+		tea.KeyPressMsg{Code: tea.KeyBackspace},
 	)
 	return out
 }
 
-// TestComposerHeightTracksRowsAfterEveryUpdate is the other half of the
-// headroom mechanism: the 1<<16 rows updateComposer lends the textarea must
-// never survive an Update, or View would draw a 65536-row band.
+// TestComposerHeightTracksRowsAfterEveryUpdate checks the height the layout
+// grants the growing draft after edits, cursor motion and resizing.
 func TestComposerHeightTracksRowsAfterEveryUpdate(t *testing.T) {
 	m := sized(t)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -122,11 +135,12 @@ func TestComposerHeightTracksRowsAfterEveryUpdate(t *testing.T) {
 	for i, msg := range composerKeys() {
 		tm, _ = m.Update(msg)
 		m = tm.(Model)
-		if got, want := m.input.Height(), m.composerRows(); got != want {
-			t.Fatalf("after message %d (%T): textarea is %d rows, the draft is %d", i, msg, got, want)
+		limit := composerMaxRows
+		if m.height < shortFrameRows {
+			limit = composerShortRows
 		}
-		if m.input.Height() >= composerHeadroom {
-			t.Fatalf("after message %d (%T): the headroom height survived", i, msg)
+		if got, want := m.lay.ComposerRows, min(m.input.Height(), limit); got != want {
+			t.Fatalf("after message %d (%T): composer band is %d rows, want %d", i, msg, got, want)
 		}
 	}
 }
@@ -163,11 +177,11 @@ func TestComposerWindowFollowsTheCursor(t *testing.T) {
 	m = tm.(Model)
 	for i := 0; i < 9; i++ {
 		for _, r := range []rune{'l', rune('1' + i)} {
-			tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			tm, _ = m.Update(runeKey(r))
 			m = tm.(Model)
 		}
 		if i < 8 {
-			tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+			tm, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 			m = tm.(Model)
 		}
 	}
@@ -183,7 +197,7 @@ func TestComposerWindowFollowsTheCursor(t *testing.T) {
 	}
 
 	for i := 0; i < 8; i++ {
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 		m = tm.(Model)
 	}
 	band = composerBand(t, m)
@@ -307,7 +321,7 @@ const keyBound = 5 * time.Second
 // updateWithin is m.Update(k) on a goroutine of its own, bounded by
 // keyBound: a key that never returns fails the test there instead of hanging
 // the suite (its goroutine is left spinning; the test has failed).
-func updateWithin(t *testing.T, m Model, k tea.KeyMsg) Model {
+func updateWithin(t *testing.T, m Model, k tea.KeyPressMsg) Model {
 	t.Helper()
 	done := make(chan Model, 1)
 	go func() {
@@ -325,7 +339,7 @@ func updateWithin(t *testing.T, m Model, k tea.KeyMsg) Model {
 
 // parsedKey is the one key bubbletea reads from the terminal bytes in: what
 // a real terminal's sequence arrives as.
-func parsedKey(t *testing.T, in string) tea.KeyMsg {
+func parsedKey(t *testing.T, in string) tea.KeyPressMsg {
 	t.Helper()
 	r := &keyRecorder{}
 	p := tea.NewProgram(r, tea.WithInput(strings.NewReader(in)), tea.WithOutput(io.Discard),
@@ -348,19 +362,19 @@ func parsedKey(t *testing.T, in string) tea.KeyMsg {
 }
 
 // keyRecorder is a program that keeps the first key it is sent, and quits.
-type keyRecorder struct{ keys []tea.KeyMsg }
+type keyRecorder struct{ keys []tea.KeyPressMsg }
 
 func (r *keyRecorder) Init() tea.Cmd { return nil }
 
 func (r *keyRecorder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok {
+	if k, ok := msg.(tea.KeyPressMsg); ok {
 		r.keys = append(r.keys, k)
 		return r, tea.Quit
 	}
 	return r, nil
 }
 
-func (r *keyRecorder) View() string { return "" }
+func (r *keyRecorder) View() tea.View { return tea.View{} }
 
 // TestWordMotionOverBlankTextReturns (plan 030 C9r, found by C10): bubbles'
 // word-left never returned with nothing but whitespace before the cursor, so
@@ -372,19 +386,25 @@ func (r *keyRecorder) View() string { return "" }
 // nothing). The forward motions, the word case changes and the word
 // deletions return over blank text too — bubbles' own, unguarded.
 func TestWordMotionOverBlankTextReturns(t *testing.T) {
+	for _, binding := range []string{"alt+b", "alt+left"} {
+		m := pasteText(t, sized(t), binding)
+		if got := m.input.Value(); got != binding {
+			t.Errorf("paste of %q left %q", binding, got)
+		}
+	}
 	escB := parsedKey(t, "\x1bb")
-	if !key.Matches(escB, textarea.DefaultKeyMap.WordBackward) {
+	if !key.Matches(escB, textarea.DefaultKeyMap().WordBackward) {
 		t.Fatalf("ESC b was read as %s, not a word-left key", escB)
 	}
 	back := []struct {
 		name string
-		k    tea.KeyMsg
+		k    tea.KeyPressMsg
 		word bool // a word-left key
 	}{
-		{"alt+←", tea.KeyMsg{Type: tea.KeyLeft, Alt: true}, true},
-		{"alt+b", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}, Alt: true}, true},
+		{"alt+←", tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModAlt}, true},
+		{"alt+b", tea.KeyPressMsg{Code: 'b', Mod: tea.ModAlt}, true},
 		{"ESC b", escB, true},
-		{"ctrl+←", tea.KeyMsg{Type: tea.KeyCtrlLeft}, false},
+		{"ctrl+←", tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl}, false},
 	}
 	texts := []struct {
 		name, text string
@@ -433,17 +453,17 @@ func TestWordMotionOverBlankTextReturns(t *testing.T) {
 		}
 	}
 
-	forward := []tea.KeyMsg{
-		{Type: tea.KeyRight, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'f'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'u'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'c'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true},
-		{Type: tea.KeyDelete, Alt: true},
-		{Type: tea.KeyBackspace, Alt: true},
-		{Type: tea.KeyCtrlW},
-		{Type: tea.KeyCtrlRight},
+	forward := []tea.KeyPressMsg{
+		{Code: tea.KeyRight, Mod: tea.ModAlt},
+		{Code: 'f', Mod: tea.ModAlt},
+		{Code: 'u', Mod: tea.ModAlt},
+		{Code: 'l', Mod: tea.ModAlt},
+		{Code: 'c', Mod: tea.ModAlt},
+		{Code: 'd', Mod: tea.ModAlt},
+		{Code: tea.KeyDelete, Mod: tea.ModAlt},
+		{Code: tea.KeyBackspace, Mod: tea.ModAlt},
+		{Code: 'w', Mod: tea.ModCtrl},
+		{Code: tea.KeyRight, Mod: tea.ModCtrl},
 	}
 	for _, tc := range []struct {
 		name, text string

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -271,7 +271,7 @@ func TestCtrlYWorksWithNoMouse(t *testing.T) {
 	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "the reply"}})
 	m = tm.(Model)
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if msg := runCmd(cmd); msg != nil {
 		tm, _ = m.Update(msg)
@@ -386,7 +386,7 @@ func TestCtrlVPastesThroughTheSeam(t *testing.T) {
 		swapImagePaste(prevImage)
 	})
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	msg := runCmd(cmd)
 	if got, want := msg, (pasteMsg{text: "pasted text", shownGen: m.shownGen, composerGen: m.composerGen}); !reflect.DeepEqual(got, want) {

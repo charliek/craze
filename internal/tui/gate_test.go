@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -11,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -111,10 +112,9 @@ func (r *gateRig) send(msg tea.Msg) {
 	r.sort(cmd)
 }
 
-const (
-	tuiPkg = "github.com/charliek/craze/internal/tui."
-	teaPkg = "github.com/charmbracelet/bubbletea."
-)
+const tuiPkg = "github.com/charliek/craze/internal/tui."
+
+var teaPkg = reflect.TypeFor[tea.Cmd]().PkgPath() + "."
 
 func (r *gateRig) sort(cmd tea.Cmd) {
 	r.t.Helper()
@@ -258,9 +258,9 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 	stub.Emit(agent.Event{Type: agent.EventText, Text: "a held reply"})
 	arrivals := []tea.Msg{
 		runeKey('x'),
-		tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress},
+		tea.MouseWheelMsg{Button: tea.MouseWheelDown},
 		pasteMsg{text: "pasted"},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" more"), Paste: true},
+		tea.PasteMsg{Content: " more"},
 		tea.WindowSizeMsg{Width: 90, Height: 24},
 		tickMsg{gen: r.m.tickGen},
 		nil, // the event, read off the stream here
@@ -321,7 +321,7 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 			t.Fatalf("drain %d left %d held, want %d", i+1, n, len(want)-i-1)
 		}
 		switch want[i] {
-		case "tea.KeyMsg":
+		case "tea.KeyPressMsg":
 			if i == 0 && r.m.input.Value() != "x" {
 				t.Fatalf("the first drain typed %q, want the held key", r.m.input.Value())
 			}
@@ -381,7 +381,7 @@ func TestANestedGateAtReleaseIsKept(t *testing.T) {
 	if len(r.calls) != 1 || r.drains != 0 {
 		t.Fatalf("after the first link: %d calls waiting, %d drains owed; want the successor's call and no drain", len(r.calls), r.drains)
 	}
-	if got := heldKinds(r.m); !slices.Equal(got, []string{"tea.KeyMsg"}) || r.m.input.Value() != "" {
+	if got := heldKinds(r.m); !slices.Equal(got, []string{"tea.KeyPressMsg"}) || r.m.input.Value() != "" {
 		t.Fatalf("the held key moved during the chain: held %v, composer %q", got, r.m.input.Value())
 	}
 	if len(r.reads) != 1 {

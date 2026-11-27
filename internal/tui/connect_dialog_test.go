@@ -9,8 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -99,12 +100,12 @@ func connectKeyStep(t *testing.T, stub *Stub, dir string, getenv func(string) st
 	t.Helper()
 	m := connectModel(t, stub, dir, getenv)
 	m, _ = typeCommand(t, m, "/connect")
-	return pressKey(t, m, tea.KeyEnter)
+	return pressKey(t, m, "enter")
 }
 
 // pasteKey is a terminal's bracketed paste of text.
-func pasteKey(text string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true}
+func pasteKey(text string) tea.PasteMsg {
+	return tea.PasteMsg{Content: text}
 }
 
 // connectPiece is the shortest piece of a key the canaries look for: a
@@ -306,7 +307,7 @@ func TestConnectStoresAKeyAndSaysSo(t *testing.T) {
 		t.Fatalf("marks %v, want %v", marks, want)
 	}
 
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	view = connectView(t, m)
 	for _, want := range []string{"Gamma API key", "Stored in ~/.craze/native/providers.toml.", connectKeyHint} {
 		if !strings.Contains(view, want) {
@@ -324,7 +325,7 @@ func TestConnectStoresAKeyAndSaysSo(t *testing.T) {
 		t.Fatalf("the field does not show the key masked:\n%s", view)
 	}
 
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	connectLeak(t, m, stub)
 	if m.dialog != dialogNone || m.cdlg.gen != 0 || m.cdlg.key.Value() != "" {
 		t.Fatalf("the box is still open after the save: dialog %v", m.dialog)
@@ -348,8 +349,8 @@ func TestConnectEnvHint(t *testing.T) {
 	dir, getenv := connectFixture(t, nil)
 	m := connectModel(t, nativeStub(), dir, getenv)
 	m, _ = typeCommand(t, m, "/connect")
-	m = pressKey(t, m, tea.KeyUp) // Beta, above Gamma
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "up") // Beta, above Gamma
+	m = pressKey(t, m, "enter")
 	view := connectView(t, m)
 	for _, want := range []string{"Beta API key", "PICKER_BETA_KEY is set in this environment; craze", "uses it before the stored key."} {
 		if !strings.Contains(view, want) {
@@ -377,7 +378,7 @@ func TestConnectRefusesKeysTheStoreWouldNot(t *testing.T) {
 			tm, _ := m.Update(pasteKey(tc.key))
 			m = tm.(Model)
 		}
-		m = pressKey(t, m, tea.KeyEnter)
+		m = pressKey(t, m, "enter")
 		var keys []string
 		if strings.TrimSpace(tc.key) != "" {
 			keys = append(keys, tc.key)
@@ -396,7 +397,7 @@ func TestConnectRefusesKeysTheStoreWouldNot(t *testing.T) {
 			t.Fatalf("%s: a refused key was stored", tc.why)
 		}
 		// Typing again takes the refusal down.
-		m = pressKey(t, m, tea.KeyEnter)
+		m = pressKey(t, m, "enter")
 		tm, _ := m.Update(runeKey('x'))
 		if m = tm.(Model); m.cdlg.keyErr != "" {
 			t.Fatalf("%s: the refusal outlived the next key", tc.why)
@@ -414,7 +415,7 @@ func TestConnectSaveRefusedOnceWorkStarts(t *testing.T) {
 	tm, _ := m.Update(pasteKey(connectCanary))
 	m = tm.(Model)
 	m.status = statusWorking
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	connectLeak(t, m, stub)
 	if m.dialog != dialogConnect || m.cdlg.keyErr != connectBusySaveText || m.cdlg.key.Value() != connectCanary {
 		t.Fatalf("a save while busy: dialog %v, refusal %q, key kept %v", m.dialog, m.cdlg.keyErr, m.cdlg.key.Value() == connectCanary)
@@ -423,7 +424,7 @@ func TestConnectSaveRefusedOnceWorkStarts(t *testing.T) {
 		t.Fatal("a key was stored while work ran")
 	}
 	m.status = statusIdle
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if got, ok := storedKey(t, dir, "gamma"); !ok || got != connectCanary {
 		t.Fatalf("the Enter after the work ended stored nothing (stored: %v)", ok)
 	}
@@ -447,7 +448,7 @@ func TestConnectClipboardPasteLandsOnlyInItsField(t *testing.T) {
 	}
 	ctrlV := func(t *testing.T, m Model) (Model, pasteMsg) {
 		t.Helper()
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+		m, cmd := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 		msg, ok := runCmd(cmd).(pasteMsg)
 		if !ok || msg.key != m.cdlg.openField() || msg.key == (keyField{}) {
 			t.Fatalf("ctrl+v in the key field answered %T tagged %v, want the open field %v", runCmd(cmd), msg.key, m.cdlg.openField())
@@ -465,7 +466,7 @@ func TestConnectClipboardPasteLandsOnlyInItsField(t *testing.T) {
 	})
 	t.Run("after esc", func(t *testing.T) {
 		m, msg := ctrlV(t, open(t))
-		m = pressKey(t, m, tea.KeyEsc)
+		m = pressKey(t, m, "esc")
 		tm, _ := m.Update(msg)
 		m = tm.(Model)
 		if m.cdlg.step != connectPick || m.input.Value() != "" {
@@ -475,8 +476,8 @@ func TestConnectClipboardPasteLandsOnlyInItsField(t *testing.T) {
 	})
 	t.Run("into a field opened since", func(t *testing.T) {
 		m, msg := ctrlV(t, open(t))
-		m = pressKey(t, m, tea.KeyEsc)
-		m = pressKey(t, m, tea.KeyEnter)
+		m = pressKey(t, m, "esc")
+		m = pressKey(t, m, "enter")
 		tm, _ := m.Update(msg)
 		if m = tm.(Model); m.cdlg.key.Value() != "" {
 			t.Fatal("a paste asked for in one field landed in the next")
@@ -484,8 +485,8 @@ func TestConnectClipboardPasteLandsOnlyInItsField(t *testing.T) {
 	})
 	t.Run("once the box has closed", func(t *testing.T) {
 		m, msg := ctrlV(t, open(t))
-		m = pressKey(t, m, tea.KeyEsc)
-		m = pressKey(t, m, tea.KeyEsc)
+		m = pressKey(t, m, "esc")
+		m = pressKey(t, m, "esc")
 		if m.dialog != dialogNone || m.composerCovered() {
 			t.Fatal("fixture: the composer is not where the keys are")
 		}
@@ -524,22 +525,22 @@ func TestConnectFieldEmptiedOnEveryExit(t *testing.T) {
 		// happened, when set, says the exit took place: the premise.
 		happened func(m Model) bool
 	}{
-		{"esc", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, tea.KeyEsc) }, nil},
+		{"esc", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, "esc") }, nil},
 		{"a card", false, func(t *testing.T, m Model, stub *Stub) Model {
 			return cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 		}, nil},
 		{"another dialog", false, func(_ *testing.T, m Model, _ *Stub) Model { return m.openHelp() }, nil},
-		{"a save", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, tea.KeyEnter) }, nil},
+		{"a save", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, "enter") }, nil},
 		{"a session switch", false, func(_ *testing.T, m Model, _ *Stub) Model {
 			return m.withSession(sessionSeed{workspace: m.cwd, provider: "native"})
 		}, nil},
-		{"ctrl+d", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, tea.KeyCtrlD) }, quitting},
-		{"an idle ctrl+c", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, tea.KeyCtrlC) }, quitting},
+		{"ctrl+d", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, "ctrl+d") }, quitting},
+		{"an idle ctrl+c", false, func(t *testing.T, m Model, _ *Stub) Model { return pressKey(t, m, "ctrl+c") }, quitting},
 		{"a served session's quit", false, func(t *testing.T, m Model, _ *Stub) Model {
 			// A backend served elsewhere quits by asking its host to stop
 			// the session (stopQuit); the command that asks is not run here.
 			m.remote = true
-			return pressKey(t, m, tea.KeyCtrlD)
+			return pressKey(t, m, "ctrl+d")
 		}, func(m Model) bool { return m.quitting && m.exit.stopping }},
 		{"the session's end, back to the list", true, func(t *testing.T, m Model, _ *Stub) Model {
 			return applyMsg(t, m, endMsg{})
@@ -557,7 +558,7 @@ func TestConnectFieldEmptiedOnEveryExit(t *testing.T) {
 			if tc.list {
 				m = connectModelOf(t, Config{Session: stub, NativeDir: dir, Getenv: getenv, Sessions: &fakeSessions{}})
 				m, _ = typeCommand(t, m, "/connect")
-				m = pressKey(t, m, tea.KeyEnter)
+				m = pressKey(t, m, "enter")
 			} else {
 				m = connectKeyStep(t, stub, dir, getenv)
 			}
@@ -609,16 +610,16 @@ func TestConnectNotesOtherUnusableStoredKeys(t *testing.T) {
 	if view := connectView(t, m, short); !strings.Contains(view, "Beta") || !strings.Contains(view, connectUnusableMark) {
 		t.Fatalf("beta's unusable key is not marked:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyDown) // from Alpha, the first unconnected, to Beta
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "down") // from Alpha, the first unconnected, to Beta
+	m = pressKey(t, m, "enter")
 	if view, want := connectView(t, m, short), "The stored key cannot be used: it is shorter than 8"; !strings.Contains(view, want) {
 		t.Fatalf("beta's field does not say its stored key cannot be used:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyEsc)
-	m = pressKey(t, m, tea.KeyUp) // back to Alpha
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "esc")
+	m = pressKey(t, m, "up") // back to Alpha
+	m = pressKey(t, m, "enter")
 	tm, _ := m.Update(pasteKey(connectCanary))
-	m = pressKey(t, tm.(Model), tea.KeyEnter)
+	m = pressKey(t, tm.(Model), "enter")
 	connectLeak(t, m, stub, short)
 
 	want := `the stored Beta key cannot be used: it is shorter than 8 bytes; replace it with /connect, or remove it with "craze auth logout beta"`
@@ -646,7 +647,7 @@ func TestConnectStoreErrorsNeverQuoteTheKey(t *testing.T) {
 	}
 	stub := nativeStub()
 	tm, _ := connectKeyStep(t, stub, dir, getenv).Update(pasteKey(connectCanary))
-	m := pressKey(t, tm.(Model), tea.KeyEnter)
+	m := pressKey(t, tm.(Model), "enter")
 	connectLeak(t, m, stub)
 	errs := texts(m, entryError)
 	if len(errs) != 1 || !strings.HasPrefix(errs[0], "/connect: providers.toml is a symlink") {
@@ -692,11 +693,11 @@ func TestNativeModelDialogConnectRow(t *testing.T) {
 	if view := connectView(t, m); !m.mdlg.connect || lastRow(m) != connectRowText || !strings.Contains(view, connectRowText) {
 		t.Fatalf("gamma has no key, and the list does not end with the connect row:\n%s", view)
 	}
-	m = pressKey(t, m, tea.KeyUp) // wraps from the current model to the last row
+	m = pressKey(t, m, "up") // wraps from the current model to the last row
 	if m.mdlg.sel != len(m.dialogModelList()) {
 		t.Fatalf("↑ from the top lands on row %d, not the connect row", m.mdlg.sel)
 	}
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.dialog != dialogConnect {
 		t.Fatalf("enter on the connect row opened dialog %v, not /connect", m.dialog)
 	}
@@ -721,20 +722,17 @@ func TestConnectRowRefusedWhileBusy(t *testing.T) {
 	dir, getenv := connectFixture(t, nil)
 	m := connectModel(t, stub, dir, getenv)
 	m, _ = typeCommand(t, m, "/model")
-	m = pressKey(t, m, tea.KeyUp)
+	m = pressKey(t, m, "up")
 	m.status = statusWorking
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	if m.dialog != dialogNone || !slices.Equal(texts(m, entryError), []string{connectBusyText}) {
 		t.Fatalf("the connect row while busy: dialog %v, errors %q", m.dialog, texts(m, entryError))
 	}
 }
 
-// keyFieldCursor is where /connect's key field draws its cursor — the one
-// cell of the field's row drawn in reverse video — as a column of the box's
-// inner row (0 is the prompt's first cell), and whether it is drawn at all: a
-// cursor bubbles drew past the field's width is clipped off the row with the
-// cell under it, leaving the reverse-video switch with no cell behind it. The
-// frame is screened for keys first (connectView).
+// keyFieldCursor locates the visible reverse-video cell inside the field.
+// Check the rendered cells after the leak check, so changes to SGR encoding
+// do not affect the cursor assertion.
 func keyFieldCursor(t *testing.T, m Model, keys ...string) (col int, ok bool) {
 	t.Helper()
 	connectView(t, m, keys...)
@@ -743,13 +741,14 @@ func keyFieldCursor(t *testing.T, m Model, keys ...string) (col int, ok bool) {
 		t.Fatalf("fixture: no key field on screen (dialog %v, box %+v)", m.dialog, r)
 	}
 	// The border, then the title: the field is the box's third row.
-	row := strings.Split(m.View(), "\n")[r.Y+2]
-	const reverse = "\x1b[7m"
-	i := strings.Index(row, reverse)
-	if i < 0 || i+len(reverse) >= len(row) || row[i+len(reverse)] == ansi.ESC {
-		return 0, false
+	row := strings.Split(m.View().Content, "\n")[r.Y+2]
+	cells := uv.NewStyledString(row).Lines(ansi.GraphemeWidth)[0]
+	for x := r.X + 1; x < r.X+r.W-1 && x < len(cells); x++ {
+		if cells[x].Style.Attrs&uv.AttrReverse != 0 {
+			return x - r.X - 1, true
+		}
 	}
-	return ansi.StringWidth(row[:i]) - r.X - 1, true
+	return 0, false
 }
 
 // TestConnectLongKeyKeepsItsCursor (astra r4 3): a key longer than the field
@@ -776,8 +775,8 @@ func TestConnectLongKeyKeepsItsCursor(t *testing.T) {
 	at := func(t *testing.T, m Model, when string) (col, inner int) {
 		t.Helper()
 		inner = m.lay.Dialog.W - dialogBorder
-		if w := dialogFieldWidth(inner); m.cdlg.key.Width != w {
-			t.Fatalf("%s: the field holds width %d, its row gives %d", when, m.cdlg.key.Width, w)
+		if w := dialogFieldWidth(inner); m.cdlg.key.Width() != w {
+			t.Fatalf("%s: the field holds width %d, its row gives %d", when, m.cdlg.key.Width(), w)
 		}
 		col, ok := keyFieldCursor(t, m, long)
 		if !ok {
@@ -790,13 +789,13 @@ func TestConnectLongKeyKeepsItsCursor(t *testing.T) {
 	if end != inner-1 {
 		t.Fatalf("after the paste the cursor is at column %d, want the row's last, %d", end, inner-1)
 	}
-	m = pressKey(t, m, tea.KeyHome)
+	m = pressKey(t, m, "home")
 	if col, _ := at(t, m, "home"); col != lipgloss.Width(modelFilterPrompt) {
 		t.Fatalf("home puts the cursor at column %d, want the field's first, %d", col, lipgloss.Width(modelFilterPrompt))
 	}
-	m = pressKey(t, m, tea.KeyEnd)
+	m = pressKey(t, m, "end")
 	for range 10 {
-		m = pressKey(t, m, tea.KeyLeft)
+		m = pressKey(t, m, "left")
 	}
 	// The window stays where the end left it: the cursor moves ten cells
 	// left on the row, the ten cells after it still drawn.
@@ -810,7 +809,7 @@ func TestConnectLongKeyKeepsItsCursor(t *testing.T) {
 	if narrow >= inner || col < 0 || col >= narrow {
 		t.Fatalf("at 40 columns the cursor is at column %d of %d (was %d wide)", col, narrow, inner)
 	}
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "right")
 	at(t, m, "a right at 40 columns")
 
 	tm, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -818,7 +817,7 @@ func TestConnectLongKeyKeepsItsCursor(t *testing.T) {
 	if col, wide := at(t, m, "a resize back to 100 columns"); wide != inner || col < 0 || col >= wide {
 		t.Fatalf("back at 100 columns the cursor is at column %d of %d", col, wide)
 	}
-	m = pressKey(t, m, tea.KeyEnd)
+	m = pressKey(t, m, "end")
 	if col, _ := at(t, m, "end at 100 columns"); col != end {
 		t.Fatalf("end at 100 columns puts the cursor at column %d, want %d", col, end)
 	}
@@ -854,8 +853,8 @@ func TestConnectKeyPasteWithTheSessionListOpen(t *testing.T) {
 		t.Run("a key paste after "+end.name, func(t *testing.T) {
 			stub := nativeStub()
 			m, _ := typeCommand(t, listModel(t, stub), "/connect")
-			m = pressKey(t, m, tea.KeyEnter)
-			m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+			m = pressKey(t, m, "enter")
+			m, cmd := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 			msg, ok := runCmd(cmd).(pasteMsg)
 			if !ok || msg.key == (keyField{}) || msg.text == "" {
 				t.Fatal("fixture: ctrl+v in the key field answered no paste tagged with the field")
@@ -878,17 +877,17 @@ func TestConnectKeyPasteWithTheSessionListOpen(t *testing.T) {
 		if !m.sessList.in.on {
 			t.Fatal("fixture: the list has no input")
 		}
-		m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+		m, cmd := press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 		msg, ok := runCmd(mustCmd(t, cmd, "pasteFromClipboard")).(pasteMsg)
 		if !ok || msg.listGen == 0 || msg.key != (keyField{}) {
 			t.Fatal("fixture: ctrl+v in the list's input answered no paste tagged with the list")
 		}
-		m = pressKey(t, m, tea.KeyEsc)
+		m = pressKey(t, m, "esc")
 		if m.sessList.open {
 			t.Fatal("fixture: esc on the empty input did not leave the list")
 		}
 		m, _ = typeCommand(t, m, "/connect")
-		m = pressKey(t, m, tea.KeyEnter)
+		m = pressKey(t, m, "enter")
 		if m.cdlg.openField() == (keyField{}) {
 			t.Fatal("fixture: the key field is not open")
 		}
@@ -914,7 +913,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	m, _ := typeCommand(t, connectModel(t, stub, dir, getenv), "/connect")
 	late := connectLoadedMsg{gen: m.cdlg.gen, err: "a read that answered late"}
 
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if m = applyMsg(t, m, late); m.dialog != dialogNone || len(texts(m, entryError)) != 0 {
 		t.Fatalf("a read for a closed box: dialog %v, errors %q", m.dialog, texts(m, entryError))
 	}
@@ -927,7 +926,7 @@ func TestConnectLateAnswers(t *testing.T) {
 		t.Fatalf("the first opening's read changed the second's box: error %q, selection %d (was %d)", m.cdlg.loadErr, m.cdlg.sel, again.sel)
 	}
 
-	m = pressKey(t, m, tea.KeyEnter)
+	m = pressKey(t, m, "enter")
 	tm, _ := m.Update(pasteKey(connectCanary))
 	m = tm.(Model)
 	field := m.cdlg.openField()
@@ -959,7 +958,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	mstub.SetModels([]agent.ModelInfo{{ID: "alpha/one", Name: "Alpha One"}})
 	md, _ := typeCommand(t, connectModel(t, mstub, dir, getenv), "/model")
 	first := md.mdlg.gen
-	md = pressKey(t, md, tea.KeyEsc)
+	md = pressKey(t, md, "esc")
 	md, _ = typeCommand(t, md, "/model")
 	if md.mdlg.gen == first || !md.mdlg.connect {
 		t.Fatal("fixture: the model dialog opened again has no connect row of its own")

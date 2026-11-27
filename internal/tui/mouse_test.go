@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -18,9 +18,8 @@ func clickAt(t *testing.T, m Model, y int) Model {
 
 func clickXY(t *testing.T, m Model, x, y int) Model {
 	t.Helper()
-	tm, cmd := m.Update(tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
+	tm, cmd := m.Update(tea.MouseClickMsg{
+		Button: tea.MouseLeft,
 		X:      x,
 		Y:      y,
 	})
@@ -99,7 +98,7 @@ func TestClickOnTheModeChipWhileWorking(t *testing.T) {
 
 func wheel(t *testing.T, m Model, button tea.MouseButton) Model {
 	t.Helper()
-	tm, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: button, X: 1, Y: 1})
+	tm, _ := m.Update(tea.MouseWheelMsg{Button: button, X: 1, Y: 1})
 	return tm.(Model)
 }
 
@@ -125,18 +124,18 @@ func TestWheelScrollsTheTranscript(t *testing.T) {
 		t.Fatalf("not enough scrollback to test with: offset %d", bottom)
 	}
 
-	m = wheel(t, m, tea.MouseButtonWheelUp)
+	m = wheel(t, m, tea.MouseWheelUp)
 	if got, want := m.vp.YOffset, bottom-wheelLines; got != want {
 		t.Fatalf("wheel up moved to %d, want %d (%d lines per notch)", got, want, wheelLines)
 	}
-	m = wheel(t, m, tea.MouseButtonWheelDown)
+	m = wheel(t, m, tea.MouseWheelDown)
 	if got := m.vp.YOffset; got != bottom {
 		t.Fatalf("wheel down moved to %d, want %d", got, bottom)
 	}
 
 	// Motion with nothing pressed is not a drag: the selection needs a press to
 	// anchor it, so a bare motion report changes nothing at all.
-	tm, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Y: m.lay.Region(regionStatus).Top})
+	tm, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, Y: m.lay.Region(regionStatus).Top})
 	next := tm.(Model)
 	if got := next.vp.YOffset; got != bottom {
 		t.Fatalf("a motion with no press moved the viewport to %d", got)
@@ -290,10 +289,10 @@ func TestWheelIsIgnoredWhileACardIsUp(t *testing.T) {
 	if bottom < 2*wheelLines {
 		t.Fatalf("not enough scrollback to test with: offset %d", bottom)
 	}
-	if got := wheel(t, m, tea.MouseButtonWheelUp).vp.YOffset; got != bottom {
+	if got := wheel(t, m, tea.MouseWheelUp).vp.YOffset; got != bottom {
 		t.Fatalf("the wheel scrolled to %d behind the card, want %d", got, bottom)
 	}
-	if got := wheel(t, m, tea.MouseButtonWheelDown).vp.YOffset; got != bottom {
+	if got := wheel(t, m, tea.MouseWheelDown).vp.YOffset; got != bottom {
 		t.Fatalf("the wheel scrolled to %d behind the card, want %d", got, bottom)
 	}
 }
@@ -383,8 +382,8 @@ func TestWheelOverTheBandMovesTheSlashSelection(t *testing.T) {
 		t.Fatalf("fixture: selection %d, want 3", m.slashSel)
 	}
 	y := m.lay.Region(regionOverlay).Top
-	down := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Y: y}
-	up := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, Y: y}
+	down := tea.MouseWheelMsg{Button: tea.MouseWheelDown, Y: y}
+	up := tea.MouseWheelMsg{Button: tea.MouseWheelUp, Y: y}
 
 	tm, _ := m.Update(down)
 	m = tm.(Model)
@@ -435,7 +434,7 @@ func TestWheelOverTheTranscriptStillScrollsWithTheSlashMenuOpen(t *testing.T) {
 	if !m.lay.Region(regionTranscript).Contains(1) {
 		t.Fatal("fixture: y=1 should be inside the transcript, not the band")
 	}
-	m = wheel(t, m, tea.MouseButtonWheelUp)
+	m = wheel(t, m, tea.MouseWheelUp)
 	if got, want := m.vp.YOffset, bottom-wheelLines; got != want {
 		t.Fatalf("wheel up over the transcript moved to %d, want %d (%d lines per notch)", got, want, wheelLines)
 	}

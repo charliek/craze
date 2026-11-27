@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -280,7 +280,7 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 	events := func(evs ...agent.Event) func(*testing.T, Model) Model {
 		return func(t *testing.T, m Model) Model { return feed(t, m, evs...) }
 	}
-	keys := func(ks ...tea.KeyMsg) func(*testing.T, Model) Model {
+	keys := func(ks ...tea.KeyPressMsg) func(*testing.T, Model) Model {
 		return func(_ *testing.T, m Model) Model {
 			for _, k := range ks {
 				m, _ = press(m, k)
@@ -293,7 +293,7 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 	}
 	// answered presses the keys that answer the card, then delivers the ending
 	// the answer caused, which is what draws its row (plan 032 C4).
-	answered := func(ks ...tea.KeyMsg) func(*testing.T, Model) Model {
+	answered := func(ks ...tea.KeyPressMsg) func(*testing.T, Model) Model {
 		return func(t *testing.T, m Model) Model {
 			m = keys(ks...)(t, m)
 			return feed(t, m, awaitStubEvent(t, stubOf(t, m), agent.EventAsk))
@@ -366,7 +366,7 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 		// here from the first list (plan 032 C4): the ending draws them, for
 		// this client's own answer and another's alike.
 		{name: "an answer's notes", build: withQuestion, act: answered(runeKey('1'), runeKey('1'), enter())},
-		{name: "a skip's note", build: withQuestion, act: answered(tea.KeyMsg{Type: tea.KeyEsc})},
+		{name: "a skip's note", build: withQuestion, act: answered(tea.KeyPressMsg{Code: tea.KeyEsc})},
 		{name: "a plan's verb", build: withPlan, act: answered(runeKey('a'))},
 		{name: "another client's answer to its card", build: withQuestion,
 			act: events(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +8,15 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"errors"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/testutil/ptyscreen"
 )
 
 func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
@@ -28,40 +32,33 @@ func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
 	}
 
 	m := New(Config{
-		Session:   NewStub(),
-		Theme:     "tokyo-night",
-		Workspace: t.TempDir(),
-		Yolo:      true,
+		Session:       NewStub(),
+		Theme:         "tokyo-night",
+		Workspace:     t.TempDir(),
+		Yolo:          true,
+		TerminalTitle: true,
 	})
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(tty))
+	p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(tty))
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.Run()
 		done <- err
 	}()
 
+	var output lockedBuffer
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&output, ptmx)
+		close(readDone)
+	}()
 	deadline := time.Now().Add(3 * time.Second)
-	var buf bytes.Buffer
-	tmp := make([]byte, 4096)
-	sawAlt := false
-	for time.Now().Before(deadline) && !sawAlt {
-		_ = ptmx.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		n, rerr := ptmx.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			if bytes.Contains(buf.Bytes(), []byte("\x1b[?1049h")) {
-				sawAlt = true
-				break
-			}
+	for !strings.Contains(output.String(), ansi.SetWindowTitle("✦ craze")) {
+		if time.Now().After(deadline) {
+			p.Kill()
+			t.Fatalf("terminal title never appeared: %q", output.String())
 		}
-		if rerr != nil && !os.IsTimeout(rerr) && rerr != io.EOF {
-			t.Fatalf("read pty: %v", rerr)
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if !sawAlt {
-		t.Fatalf("did not observe alt-screen enter; got %q", buf.Bytes())
-	}
-	drainPTY(ptmx)
 
 	if _, err := ptmx.Write([]byte{0x04}); err != nil {
 		t.Fatal(err)
@@ -74,6 +71,19 @@ func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		p.Kill()
 		t.Fatal("TUI did not quit after ctrl+d")
+	}
+	// Wait for the PTY master to consume the renderer’s final writes.
+	_ = tty.Close()
+	select {
+	case <-readDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("PTY output did not drain on close")
+	}
+	recorded := output.String()
+	for _, seq := range []string{"\x1b[?1049h", "\x1b[?1049l", ansi.SetWindowTitle("")} {
+		if !strings.Contains(recorded, seq) {
+			t.Fatalf("missing terminal sequence %q", seq)
+		}
 	}
 }
 
@@ -92,6 +102,7 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 		t.Skipf("pty resize: %v", err)
 	}
 
+	screen := newPTYScreen(t, ptmx)
 	m := New(Config{
 		Session:   NewStub(),
 		Theme:     "tokyo-night",
@@ -102,7 +113,6 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 		m.addNote(fmt.Sprintf("scrollback line %02d", i))
 	}
 	p := tea.NewProgram(m,
-		tea.WithAltScreen(), tea.WithMouseCellMotion(),
 		tea.WithInput(tty), tea.WithOutput(tty))
 	done := make(chan error, 1)
 	go func() {
@@ -119,7 +129,7 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 		}
 	}()
 
-	if !waitPTY(t, ptmx, "scrollback line 59", 3*time.Second) {
+	if !screen.wait(t, "scrollback line 59", 3*time.Second) {
 		t.Fatal("the bottom of the transcript never rendered")
 	}
 	// Enough notches to bring the very first line back into view.
@@ -128,7 +138,7 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !waitPTY(t, ptmx, "scrollback line 00", 3*time.Second) {
+	if !screen.wait(t, "scrollback line 00", 3*time.Second) {
 		t.Fatal("the wheel sequence did not scroll the transcript")
 	}
 }
@@ -172,6 +182,7 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 				t.Skipf("pty resize: %v", err)
 			}
 
+			screen := newPTYScreen(t, ptmx)
 			ws := frameWorkspace(t)
 			sess := agent.New(agent.Options{
 				Binary:      bin,
@@ -182,7 +193,7 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 				Stderr:      io.Discard,
 			})
 			m := New(Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true})
-			p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(tty))
+			p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(tty))
 			done := make(chan error, 1)
 			go func() {
 				_, err := p.Run()
@@ -199,21 +210,21 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 				_ = sess.Close()
 			}()
 
-			if !waitPTY(t, ptmx, "cursor", 10*time.Second) {
+			if !screen.wait(t, "cursor", 10*time.Second) {
 				t.Fatal("craze never started")
 			}
 			if _, err := ptmx.Write([]byte("go\r")); err != nil {
 				t.Fatal(err)
 			}
 			for _, step := range tc.steps {
-				if !waitPTY(t, ptmx, step[0], 10*time.Second) {
+				if !screen.wait(t, step[0], 10*time.Second) {
 					t.Fatalf("card never showed %q", step[0])
 				}
 				if _, err := ptmx.Write([]byte(step[1])); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if !waitPTY(t, ptmx, tc.want, 10*time.Second) {
+			if !screen.wait(t, tc.want, 10*time.Second) {
 				t.Fatalf("the agent never saw the answer %q", tc.want)
 			}
 		})
@@ -242,13 +253,14 @@ func TestPTYShellModeRunsAndDrawsItsOutput(t *testing.T) {
 		t.Skipf("pty resize: %v", err)
 	}
 
+	screen := newPTYScreen(t, ptmx)
 	m := New(Config{
 		Session:   NewStub(),
 		Theme:     "tokyo-night",
 		Workspace: t.TempDir(),
 		Yolo:      true,
 	})
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(tty))
+	p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(tty))
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.Run()
@@ -264,13 +276,13 @@ func TestPTYShellModeRunsAndDrawsItsOutput(t *testing.T) {
 		}
 	}()
 
-	if !waitPTY(t, ptmx, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
+	if !screen.wait(t, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
 		t.Fatal("craze never drew its composer")
 	}
 	if _, err := ptmx.Write([]byte("!echo CRAZEPTYSHELL | tr A-Z a-z\r")); err != nil {
 		t.Fatal(err)
 	}
-	if !waitPTY(t, ptmx, "crazeptyshell", 20*time.Second) {
+	if !screen.wait(t, "crazeptyshell", 20*time.Second) {
 		t.Fatal("the command's output never reached the transcript")
 	}
 }
@@ -281,33 +293,50 @@ func TestPTYShellModeRunsAndDrawsItsOutput(t *testing.T) {
 // frame from inside renderer.stop() — so an unread master turns "quit" into a
 // deadlock rather than a slow exit. Linux happens to buffer a whole 24x80
 // styled frame; darwin's tty output queue is a few KiB and does not. Call it
-// after the last waitPTY, never alongside one: two readers on one descriptor
+// after the last screen read, never alongside one: two readers on one descriptor
 // would split the stream between them.
 func drainPTY(ptmx *os.File) {
 	_ = ptmx.SetReadDeadline(time.Time{})
 	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
 }
 
-// waitPTY reads until needle shows up in the stream or the deadline passes.
-func waitPTY(t *testing.T, ptmx *os.File, needle string, d time.Duration) bool {
+// A v2 repaint can replace a single cell or scroll existing rows. Keep the
+// terminal screen across waits so assertions see the same text as the user.
+type ptyScreen struct {
+	master *os.File
+	em     *ptyscreen.Screen
+}
+
+func newPTYScreen(t *testing.T, master *os.File) ptyScreen {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	var buf bytes.Buffer
-	tmp := make([]byte, 4096)
-	for time.Now().Before(deadline) {
-		_ = ptmx.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		n, err := ptmx.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			if bytes.Contains(buf.Bytes(), []byte(needle)) {
-				return true
-			}
+	return ptyScreen{master, ptyscreen.New(t, master)}
+}
+
+func (s ptyScreen) wait(t *testing.T, needle string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	fds := []unix.PollFd{{Fd: int32(s.master.Fd()), Events: unix.POLLIN}}
+	buf := make([]byte, 32768)
+	for !strings.Contains(s.em.String(), needle) {
+		left := time.Until(deadline)
+		if left <= 0 {
+			t.Logf("screen while waiting for %q:\n%s", needle, s.em.String())
+			return false
 		}
-		if err != nil && !os.IsTimeout(err) && err != io.EOF {
-			t.Fatalf("read pty: %v", err)
+		n, err := unix.Poll(fds, int(left.Milliseconds())+1)
+		if errors.Is(err, unix.EINTR) || (n == 0 && err == nil) {
+			continue
 		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err = s.master.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.em.Feed(t, buf[:n])
 	}
-	return false
+	return true
 }
 
 // TestPTYSyncWriterKeepsTheWindowSize is the regression the writer nearly was.
@@ -327,6 +356,7 @@ func TestPTYSyncWriterKeepsTheWindowSize(t *testing.T) {
 		t.Skipf("pty resize: %v", err)
 	}
 
+	screen := newPTYScreen(t, ptmx)
 	out := newSyncWriter(tty)
 	m := New(Config{
 		Session:   NewStub(),
@@ -334,7 +364,7 @@ func TestPTYSyncWriterKeepsTheWindowSize(t *testing.T) {
 		Workspace: t.TempDir(),
 		Yolo:      true,
 	})
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(out))
+	p := tea.NewProgram(m, tea.WithInput(tty), tea.WithOutput(out))
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.Run()
@@ -353,7 +383,7 @@ func TestPTYSyncWriterKeepsTheWindowSize(t *testing.T) {
 	// The composer rule is only drawn once the model has a width, and it is
 	// drawn to exactly that width: 80 cells, the last eight of which are the
 	// placeholder title.
-	if !waitPTY(t, ptmx, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
+	if !screen.wait(t, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
 		t.Fatal("no frame at the pty's own size: bubbletea lost the descriptor")
 	}
 }

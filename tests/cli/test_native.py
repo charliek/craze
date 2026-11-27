@@ -47,7 +47,7 @@ from sse_fixture import (
     user_prompt,
     write_native_config,
 )
-from test_tui import PTYCraze, _ANSI, quit_craze
+from test_tui import PTYCraze, quit_craze
 
 
 @pytest.fixture
@@ -2273,7 +2273,7 @@ def test_native_resume_round_trip(
         env_extra={"CRAZE_HOME": str(craze_home)},
     ) as tui:
         tui.wait_contains("restored", timeout=30)
-        restored = _ANSI.sub("", tui.screen())
+        restored = tui.screen()
         # The gutter mark proves the replayed USER ROW was drawn, not just the
         # composer rule's title (which also reads "check it" -- the title is
         # the first prompt's text, plan 028 §3.4): "❯ " is how craze draws a
@@ -2455,7 +2455,7 @@ def test_native_resume_refuses_agent_bin(craze_bin: Path, tmp_path: Path) -> Non
         env_extra={"CRAZE_HOME": str(craze_home)},
     ) as tui:
         code = tui.wait_exit(timeout=10)
-        text = _ANSI.sub("", tui.screen())
+        text = tui.screen()
         assert code == 2, text[-2000:]
         assert "--agent-bin" in text and "native" in text, text
 
@@ -2471,7 +2471,7 @@ def test_native_resume_refuses_agent_bin(craze_bin: Path, tmp_path: Path) -> Non
         env_extra={"CRAZE_HOME": str(craze_home), "CRAZE_AGENT_BIN": "/bin/true"},
     ) as tui:
         code = tui.wait_exit(timeout=10)
-        text = _ANSI.sub("", tui.screen())
+        text = tui.screen()
         assert code == 2, text[-2000:]
         assert "CRAZE_AGENT_BIN" in text and "native" in text, text
 
@@ -2641,7 +2641,7 @@ def test_native_resume_of_a_compacted_session(
         env_extra={"CRAZE_HOME": str(craze_home)},
     ) as tui:
         tui.wait_contains("restored", timeout=30)
-        restored = _ANSI.sub("", tui.screen())
+        restored = tui.screen()
         assert "read the two files" in restored, restored[-4000:]
         assert "▸ Explored · 2 reads" in restored, restored[-4000:]
         assert "context compacted" in restored, restored[-4000:]
@@ -2662,7 +2662,7 @@ def test_native_resume_of_a_compacted_session(
         tui.wait_contains("Compact · f2")
         mark = tui.mark()
         tui.write(b"\x1bOQ")  # F2, Classic
-        individual = _ANSI.sub("", tui.wait_contains_since("✓ read  small.txt", mark))
+        individual = tui.wait_contains_since("✓ read  small.txt", mark)
         assert individual.index("✓ read  big.txt") < individual.index("✓ read  small.txt")
 
         tui.write(b"keep going now\r")

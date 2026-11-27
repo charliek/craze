@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -238,10 +238,10 @@ func TestResultOverlaysRetireOnTheirOwnEvent(t *testing.T) {
 		r := newSchedRun(t, true)
 		queuedBehind(r, "ROW")
 		row := queuedRowOf(t, r.m(), "ROW")
-		r.key(tea.KeyMsg{Type: tea.KeyUp})
+		r.key(tea.KeyPressMsg{Code: tea.KeyUp})
 		r.key(enter())
 		for range "ROW" {
-			r.key(tea.KeyMsg{Type: tea.KeyBackspace})
+			r.key(tea.KeyPressMsg{Code: tea.KeyBackspace})
 		}
 		r.typeText("MINE")
 		r.key(enter())
@@ -308,8 +308,8 @@ func TestARestoredRowReappears(t *testing.T) {
 	// Sent now, it starts a turn of its own, and the agent's own turn refuses
 	// it.
 	r.sess.Script(scriptRefused(agent.ErrForeignTurn))
-	r.key(tea.KeyMsg{Type: tea.KeyUp})
-	r.key(tea.KeyMsg{Type: tea.KeyCtrlL})
+	r.key(tea.KeyPressMsg{Code: tea.KeyUp})
+	r.key(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	submitTurn := r.m().turnID
 	if submitTurn == "" || r.m().queueHasID(row.ID) {
 		t.Fatalf("the Submit's result: turn %q, band %+v — want a turn begun and the row gone", submitTurn, r.m().queue)
@@ -353,13 +353,13 @@ func TestARestoredRowReappears(t *testing.T) {
 // saved.
 func editRow(r *schedRun, text string) {
 	r.t.Helper()
-	r.key(tea.KeyMsg{Type: tea.KeyUp})
+	r.key(tea.KeyPressMsg{Code: tea.KeyUp})
 	r.key(enter())
 	if r.m().queueEdit == "" {
 		r.t.Fatal("prepare: no row is being edited")
 	}
 	for range r.m().input.Value() {
-		r.key(tea.KeyMsg{Type: tea.KeyBackspace})
+		r.key(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	r.typeText(text)
 }
@@ -377,7 +377,7 @@ func TestASentRowShowsTheTextThatWasSent(t *testing.T) {
 			r := newSchedRun(t, mode.sync)
 			strandedRows(r, "ROW")
 			row := r.m().queue[0]
-			r.key(tea.KeyMsg{Type: tea.KeyUp})
+			r.key(tea.KeyPressMsg{Code: tea.KeyUp})
 			if sel, ok := r.m().queueSelected(); !ok || sel.ID != row.ID || sel.Text != "ROW" {
 				t.Fatalf("fixture: the band's selection is %+v, %v", sel, ok)
 			}
@@ -385,7 +385,7 @@ func TestASentRowShowsTheTextThatWasSent(t *testing.T) {
 			if err := r.eng.EditQueued(otherClient(t, r.m()), row.ID, "THEIRS", nil); err != nil {
 				t.Fatal(err)
 			}
-			r.key(tea.KeyMsg{Type: tea.KeyCtrlL})
+			r.key(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 			if r.m().turnID == "" || r.m().queueHasID(row.ID) {
 				t.Fatalf("fixture: the send-now: turn %q, band %+v — want a turn begun from the row", r.m().turnID, r.m().queue)
 			}

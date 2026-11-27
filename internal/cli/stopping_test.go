@@ -420,7 +420,7 @@ func tuiHostedQuit(t *testing.T, wired bool) {
 	}
 	t.Cleanup(func() { teardownStep = func(string) {} })
 
-	tail := newPTYTail(ptmx)
+	tail := newTUITail(t, ptmx)
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr })
@@ -428,7 +428,7 @@ func tuiHostedQuit(t *testing.T, wired bool) {
 	go func() {
 		done <- runTUI(nil, &tuiFlags{agentBin: fakeAgentPath(t), workspace: t.TempDir(), force: true}, hostEnv{})
 	}()
-	if !tail.wait(" craze ─", 10*time.Second) {
+	if !tail.waitScreen(t, " craze ─", 10*time.Second) {
 		t.Fatalf("craze never drew a frame; got %q", tail.text())
 	}
 	waitSessionStarted(t, ptmx, tail)

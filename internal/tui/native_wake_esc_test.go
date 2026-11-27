@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/host"
@@ -114,7 +114,7 @@ func TestEscOnAForeignTurnCancelsItOnceAndSwallowsALateRefusal(t *testing.T) {
 	if !m.snap.ForeignTurn {
 		t.Fatal("setup: the model has already heard the turn ended")
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if msg := runCmd(cmd); msg != nil {
 		t.Fatalf("a cancel the engine refused as not accepting produced %T %+v", msg, msg)
@@ -203,7 +203,7 @@ func TestAForeignCancelsNoteSurvivesAFollowUpStartedFirst(t *testing.T) {
 	if got := queueTexts(m); len(got) != 1 {
 		t.Fatalf("setup: Enter under the wake queues, got %q", got)
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	answer := foreignCancelAnswer(t, cmd)
 
@@ -243,7 +243,7 @@ func TestAForeignCancelThatLandsOnACrazeTurnDrawsOneNote(t *testing.T) {
 				t.Fatalf("setup: Enter under the wake queues, got %q", got)
 			}
 			hung := stub.HangNext()
-			tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 			m = tm.(Model)
 			endWake(stub, "wake-1")
 			awaitBarrier(t, hung, "the follow-up's turn opening")
@@ -281,7 +281,7 @@ func TestAForeignCancelThatLandsOnACrazeTurnDrawsOneNote(t *testing.T) {
 // and its cancel draws its own.
 func TestRepeatedEscOnOneForeignTurnDrawsOneNote(t *testing.T) {
 	m, stub := wakeRunning(t, "wake-1")
-	esc := tea.KeyMsg{Type: tea.KeyEsc}
+	esc := tea.KeyPressMsg{Code: tea.KeyEsc}
 	tm, first := m.Update(esc)
 	tm, second := tm.(Model).Update(esc)
 	m = tm.(Model)
@@ -351,7 +351,7 @@ func TestAForeignCancelIsACancellationToTheHost(t *testing.T) {
 // turn — not the cancellation of the wake before it.
 func TestALateForeignCancelAnswerLeavesTheNextWakeAlone(t *testing.T) {
 	m, stub := wakeRunning(t, "wake-1")
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	answer := foreignCancelAnswer(t, cmd)
 	endWake(stub, "wake-1")
@@ -404,7 +404,7 @@ func TestEscOnAForeignTurnMasksAnOpeningItsCancelAnswered(t *testing.T) {
 	opening := agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}
 	stub.Emit(opening)
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	answer := foreignCancelAnswer(t, cmd)
 	if open := stub.Asks().Asks(); len(open) != 0 {
 		t.Fatalf("setup: the cancel left %+v open", open)

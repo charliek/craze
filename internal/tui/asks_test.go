@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -309,7 +309,7 @@ func TestAPermissionEndingWritesNoRow(t *testing.T) {
 func TestTheModelsOwnAnswerDrawsItsRowFromItsEnding(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.cardOpen() {
 		t.Fatal("fixture: the skip did not take the card")
 	}
@@ -550,7 +550,7 @@ func TestAnAnswerRefusedForRoomKeepsTheCard(t *testing.T) {
 	release := saturate(t, stub)
 
 	// Esc skips the question: the card is popped, and the answer is refused.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.cardOpen() {
 		t.Fatal("the card was popped and never put back: nothing would ever raise it again")
 	}
@@ -567,7 +567,7 @@ func TestAnAnswerRefusedForRoomKeepsTheCard(t *testing.T) {
 
 	// Once the backlog drains, the same key answers it.
 	release()
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.cardOpen() {
 		t.Fatalf("the retry did not take: %+v", m.cards)
 	}
@@ -766,7 +766,7 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 	}
 
 	// This client answers the card it is still showing, and loses.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.cardOpen() {
 		t.Fatal("the card must stay until the winner's ending removes it")
 	}

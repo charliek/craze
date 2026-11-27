@@ -62,9 +62,7 @@ WAIT_TIMEOUT = 15.0
 # suite calls it a failure instead of waiting for ever.
 TMUX_TIMEOUT = 20.0
 EXIT_TIMEOUT = 10.0
-# One keystroke per send-keys call, spaced out: bubbletea v1 coalesces
-# consecutive printable bytes from one read into a single KeyRunes message, so
-# "1", " ", "3" arriving together would reach the question card as one key.
+# Space separate key presses so the live program observes each intermediate state.
 KEY_GAP = 0.15
 
 # 005 §3.2 put the mode chip at the start of status row 2, which is the bottom
@@ -172,7 +170,7 @@ class WaitTitle:
     exactly ``text``.
 
     This is plan 013 §3.10's tab title, not the composer's rule that ``Ends``
-    checks: craze writes it with ``tea.SetWindowTitle``, which the running
+    checks: craze writes it through its Bubble Tea view, which the running
     Program turns into OSC 2, and tmux tracks OSC 0/2 into ``#{pane_title}`` the
     same way Ghostty and roost apply it to a real tab. Exact match, not a
     substring, because the whole point is the mark prefix (``✦``/``❖``/
@@ -856,7 +854,7 @@ class TmuxPane:
     def pane_title(self) -> str:
         """tmux's own idea of the pane's title, tracking OSC 0/2 exactly as a
         real terminal's tab would — this is the one place the suite reads what
-        ``tea.SetWindowTitle`` actually produced, rather than what craze drew
+        the Bubble Tea renderer actually produced, rather than what craze drew
         inside its own frame.
         """
         return self._tmux(
@@ -1091,9 +1089,11 @@ def _run_case(
         provider=case.provider,
         env=case.env,
     ) as pane:
-        # The status rows carry no status word; the provider segment of row 1
-        # is what says a frame was drawn, and it only exists once it was.
-        pane.wait_for(case.provider, "start", timeout=START_TIMEOUT)
+        # The provider is drawn before its session advertises the current mode.
+        # Wait for the expected chip before inspecting the first complete frame.
+        ready = pane.wait_for(case.chip or case.provider, "start", timeout=START_TIMEOUT)
+        if case.provider not in "\n".join(ready):
+            raise SmokeFailure(f"ready screen is missing provider {case.provider!r}")
         if case.prompt is not None:
             pane.send(case.prompt, ENTER)
         for step in case.steps:

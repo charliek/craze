@@ -11,10 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	bubblesvp "github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -129,12 +127,24 @@ func checkPaint(m *Model, tr *pane) error {
 
 // ------------------------------------------------------------ viewport parity
 
-// crazeKeyMap is the keymap craze gave bubbles' viewport.
-func crazeKeyMap() bubblesvp.KeyMap {
-	return bubblesvp.KeyMap{
-		PageUp:   key.NewBinding(key.WithKeys("pgup")),
-		PageDown: key.NewBinding(key.WithKeys("pgdown")),
+// joinedLines rebuilds the entire transcript as the original eager viewport
+// did. Keep this independent of physicalLines and the incremental row index.
+func joinedLines(rows []string) []string {
+	return strings.Split(strings.ReplaceAll(strings.Join(rows, "\n"), "\r\n", "\n"), "\n")
+}
+
+// joinedView crops and pads the eager transcript at an explicit offset.
+// A resize may leave the offset beyond the last full page.
+func joinedView(lines []string, width, height, offset int) string {
+	start := min(offset, len(lines))
+	visible := slices.Clone(lines[start:min(start+height, len(lines))])
+	if width > 0 {
+		for i, line := range visible {
+			visible[i] = truncateCells(line, width, "")
+		}
 	}
+	return lipgloss.NewStyle().Width(width).Height(height).MaxWidth(width).MaxHeight(height).
+		Render(strings.Join(visible, "\n"))
 }
 
 // parityRow is one random row of the kinds a transcript draws, and a few it
@@ -149,7 +159,7 @@ func parityRow(rng *rand.Rand) string {
 	if rng.Intn(8) == 0 {
 		return ""
 	}
-	bits := []string{"word", "a", "longer-word", " ", "  ", "\t", "日本語", "🙂", "é", "🇯🇵", "x", "│", "…", "tail   ", "two\nlines"}
+	bits := []string{"word", "a", "longer-word", " ", "  ", "\t", "日本語", "🙂", "é", "🇯🇵", "1️⃣", "नमस्ते", "x", "│", "…", "tail   ", "two\nlines"}
 	styles := []lipgloss.Style{
 		lipgloss.NewStyle(),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#ff8800")),
@@ -187,21 +197,21 @@ func parityIndex(rng *rand.Rand, rows []string) *rowIndex {
 	return &rowIndex{base: spans[:cut:cut], tail: spans[cut:], total: start}
 }
 
-// TestViewportMatchesBubbles is the viewport's parity (plan 032 §3.3 C5): the
-// craze viewport and bubbles' v0.21.0, configured as craze configured it, are
-// driven through the same seeded operations — content changes (bubbles is
-// handed the rows joined, as craze handed them before C5, and craze the index
-// of their lines; some rows hold a "\n" or a "\r\n"), resizes,
-// scrolls, page keys (with and without alt), goto top and bottom, offsets set
-// in and out of range — from a viewport never given content, and after every
-// operation they draw the same View and stand at the same offset.
-func TestViewportMatchesBubbles(t *testing.T) {
+// TestViewportMatchesJoinedRows checks the paged row index against scrolling
+// an eager transcript through the same sequence of repaints, moves and resizes.
+func TestViewportMatchesJoinedRows(t *testing.T) {
 	const opsPerSeed = 1000
 	for seed := int64(1); seed <= 8; seed++ {
 		rng := rand.New(rand.NewSource(seed))
-		bv := bubblesvp.New(0, 0)
-		bv.KeyMap = crazeKeyMap()
 		var cv viewport
+		var lines []string
+		offset := 0
+		bottom := func() int { return max(0, len(lines)-cv.Height) }
+		scroll := func(delta int) {
+			if delta < 0 && offset > 0 || delta > 0 && offset < bottom() {
+				offset = max(0, min(offset+delta, bottom()))
+			}
+		}
 		for op := 0; op < opsPerSeed; op++ {
 			var did string
 			switch k := rng.Intn(10); k {
@@ -210,49 +220,57 @@ func TestViewportMatchesBubbles(t *testing.T) {
 				for i := range rows {
 					rows[i] = parityRow(rng)
 				}
-				bv.SetContent(strings.Join(rows, "\n"))
+				lines = joinedLines(rows)
+				if offset >= len(lines) {
+					offset = bottom()
+				}
 				cv.setRows(parityIndex(rng, rows))
 				did = fmt.Sprintf("content of %d rows", len(rows))
 			case 2:
 				w, h := rng.Intn(26), rng.Intn(14)
-				bv.Width, bv.Height = w, h
 				cv.Width, cv.Height = w, h
 				did = fmt.Sprintf("resize %dx%d", w, h)
 			case 3:
 				n := []int{0, 1, 3, rng.Intn(30)}[rng.Intn(4)]
-				bv.ScrollUp(n)
+				scroll(-n)
 				cv.ScrollUp(n)
 				did = fmt.Sprintf("scroll up %d", n)
 			case 4:
 				n := []int{0, 1, 3, rng.Intn(30)}[rng.Intn(4)]
-				bv.ScrollDown(n)
+				scroll(n)
 				cv.ScrollDown(n)
 				did = fmt.Sprintf("scroll down %d", n)
 			case 5:
-				msg := tea.KeyMsg{Type: []tea.KeyType{tea.KeyPgUp, tea.KeyPgDown}[rng.Intn(2)], Alt: rng.Intn(4) == 0}
-				bv, _ = bv.Update(msg)
+				msg := tea.KeyPressMsg{Code: []rune{tea.KeyPgUp, tea.KeyPgDown}[rng.Intn(2)]}
+				if rng.Intn(4) == 0 {
+					msg.Mod = tea.ModAlt
+				} else if msg.Code == tea.KeyPgUp {
+					scroll(-cv.Height)
+				} else {
+					scroll(cv.Height)
+				}
 				cv, _ = cv.Update(msg)
 				did = "key " + msg.String()
 			case 6:
-				bv.GotoTop()
+				offset = 0
 				cv.GotoTop()
 				did = "goto top"
 			case 7:
-				bv.GotoBottom()
+				offset = bottom()
 				cv.GotoBottom()
 				did = "goto bottom"
 			default:
 				n := rng.Intn(60) - 10
-				bv.SetYOffset(n)
+				offset = max(0, min(n, bottom()))
 				cv.SetYOffset(n)
 				did = fmt.Sprintf("set offset %d", n)
 			}
-			if bv.YOffset != cv.YOffset || bv.AtBottom() != cv.AtBottom() || bv.AtTop() != cv.AtTop() {
-				t.Fatalf("seed %d op %d (%s): bubbles at %d (bottom %v, top %v), craze at %d (bottom %v, top %v)",
-					seed, op, did, bv.YOffset, bv.AtBottom(), bv.AtTop(), cv.YOffset, cv.AtBottom(), cv.AtTop())
+			if offset != cv.YOffset || (offset >= bottom()) != cv.AtBottom() || (offset == 0) != cv.AtTop() {
+				t.Fatalf("seed %d op %d (%s): joined offset %d, bottom %d; indexed offset %d (bottom %v, top %v)",
+					seed, op, did, offset, bottom(), cv.YOffset, cv.AtBottom(), cv.AtTop())
 			}
-			if want, got := bv.View(), cv.View(); got != want {
-				t.Fatalf("seed %d op %d (%s): View differs\nbubbles: %q\ncraze:   %q", seed, op, did, want, got)
+			if want, got := joinedView(lines, cv.Width, cv.Height, offset), cv.View(); got != want {
+				t.Fatalf("seed %d op %d (%s): View differs\njoined:  %q\nindexed: %q", seed, op, did, want, got)
 			}
 		}
 	}
@@ -411,7 +429,7 @@ func (s *paneScript) step() string {
 		s.m = tm.(Model)
 		return "ctrl+o"
 	case 18:
-		tm, _ := s.m.Update(tea.KeyMsg{Type: []tea.KeyType{tea.KeyPgUp, tea.KeyPgDown}[rng.Intn(2)]})
+		tm, _ := s.m.Update(testKey([]string{"pgup", "pgdown"}[rng.Intn(2)]))
 		s.m = tm.(Model)
 		return "page"
 	default:
@@ -478,7 +496,7 @@ func TestIncrementalAssemblyMatchesAFullRebuild(t *testing.T) {
 	const window = 16
 	for seed := int64(1); seed <= 6; seed++ {
 		s := newPaneScript(t, seed)
-		// Compare the historical ungrouped layout with the independent bubbles oracle.
+		// Compare the historical ungrouped layout with the eager transcript.
 		s.m.transcriptLayout = layoutClassic
 		s.m.refreshViewport()
 		var olds []held
@@ -490,13 +508,11 @@ func TestIncrementalAssemblyMatchesAFullRebuild(t *testing.T) {
 				t.Fatalf("seed %d step %d (%s): the assembled rows differ from a full rebuild\n got %d rows %q\nwant %d rows %q",
 					seed, i, did, len(got), got, len(want), want)
 			}
-			// bubbles at the same offset — set, not scrolled to: a viewport made
-			// taller while scrolled up stands past its bottom, as bubbles' did.
-			bv := bubblesvp.New(m.vp.Width, m.vp.Height)
-			bv.SetContent(strings.Join(logicalRows(m, tr), "\n"))
-			bv.YOffset = m.vp.YOffset
-			if bv.AtBottom() != m.vp.AtBottom() || bv.View() != m.vp.View() {
-				t.Fatalf("seed %d step %d (%s): at offset %d the viewport draws\n%q\nbubbles over the same rows draws\n%q", seed, i, did, m.vp.YOffset, m.vp.View(), bv.View())
+			lines := joinedLines(logicalRows(m, tr))
+			wantView := joinedView(lines, m.vp.Width, m.vp.Height, m.vp.YOffset)
+			wantBottom := m.vp.YOffset >= len(lines)-m.vp.Height
+			if wantBottom != m.vp.AtBottom() || wantView != m.vp.View() {
+				t.Fatalf("seed %d step %d (%s): at offset %d the viewport draws\n%q\njoined rows draw\n%q", seed, i, did, m.vp.YOffset, m.vp.View(), wantView)
 			}
 			for k, o := range olds {
 				if again := o.idx.appendRows(nil, 0, o.idx.total); !slices.Equal(again, o.rows) {
@@ -623,22 +639,21 @@ func TestALineBreakInARowIsALineOfItsOwn(t *testing.T) {
 			if n := m.main.drawnLen(); n != 5 {
 				t.Fatalf("the transcript is %d lines, want 5 (three notes, and the tool's two): %q", n, m.main.plainRows())
 			}
-			bv := bubblesvp.New(m.vp.Width, m.vp.Height)
-			bv.SetContent(strings.Join(logicalRows(&m, m.main), "\n"))
-			bv.GotoBottom()
-			if bv.YOffset != m.vp.YOffset || bv.View() != m.vp.View() {
-				t.Fatalf("bubbles over the same rows stands at %d and draws\n%q\ncraze stands at %d and draws\n%q", bv.YOffset, bv.View(), m.vp.YOffset, m.vp.View())
+			lines := joinedLines(logicalRows(&m, m.main))
+			want := joinedView(lines, m.vp.Width, m.vp.Height, max(0, len(lines)-m.vp.Height))
+			if got := m.vp.View(); got != want {
+				t.Fatalf("joined rows at bottom draw\n%q\nindexed viewport draws\n%q", want, got)
 			}
 		})
 	}
 }
 
-// TestPhysicalLinesAreBubblesLines is physicalLines against the split it
+// TestPhysicalLinesMatchJoinedLines is physicalLines against the split it
 // stands in for: rows holding "\n", "\r\n", a break at either end and nothing
 // but a break, laid out as two entries, draw in craze's viewport what bubbles
 // draws over the rows joined, at every offset; and rows with no break come
 // back as the same slice, with nothing allocated.
-func TestPhysicalLinesAreBubblesLines(t *testing.T) {
+func TestPhysicalLinesMatchJoinedLines(t *testing.T) {
 	first := []string{"plain", "a\r\nb", "c\nd\n", "\r\n", "cr\r", "crcr\r\r", "lf-cr\n\r"}
 	second := []string{"", "\ne\n\nf", "x\r\n\r\ny", "ends\r", "\nstarts", "tail"}
 	lines1, lines2 := physicalLines(first), physicalLines(second)
@@ -647,26 +662,21 @@ func TestPhysicalLinesAreBubblesLines(t *testing.T) {
 		tail:  []rowSpan{{rows: lines2, start: len(lines1)}},
 		total: len(lines1) + len(lines2),
 	}
-	bv := bubblesvp.New(12, 3)
-	bv.SetContent(strings.Join(slices.Concat(first, second), "\n"))
+	lines := joinedLines(slices.Concat(first, second))
 	cv := viewport{Width: 12, Height: 3}
 	cv.setRows(idx)
-	bv.GotoBottom()
 	cv.GotoBottom()
-	if bv.YOffset != cv.YOffset {
-		t.Fatalf("at the bottom bubbles stands at %d, craze at %d", bv.YOffset, cv.YOffset)
+	bottom := max(0, len(lines)-cv.Height)
+	if bottom != cv.YOffset {
+		t.Fatalf("at the bottom joined offset is %d, indexed offset is %d", bottom, cv.YOffset)
 	}
-	// The bottom's offset is taken before the walk moves it (r12 7): read in
-	// the loop's condition, it was 0 after the first step.
-	bottom := bv.YOffset
 	if bottom == 0 {
 		t.Fatal("fixture: the rows fit the viewport, so there is no offset to walk")
 	}
 	for off := 0; off <= bottom; off++ {
-		bv.SetYOffset(off)
 		cv.SetYOffset(off)
-		if want, got := bv.View(), cv.View(); got != want {
-			t.Fatalf("at offset %d bubbles draws %q, craze %q", off, want, got)
+		if want, got := joinedView(lines, cv.Width, cv.Height, off), cv.View(); got != want {
+			t.Fatalf("at offset %d joined rows draw %q, indexed viewport %q", off, want, got)
 		}
 	}
 	for _, row := range slices.Concat(lines1, lines2) {

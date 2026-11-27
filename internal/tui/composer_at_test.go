@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -132,7 +132,7 @@ func typeAt(t *testing.T, m Model, text string) (Model, tea.Cmd) {
 	var load tea.Cmd
 	for _, r := range text {
 		var cmd tea.Cmd
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, cmd = press(m, runeKey(r))
 		if l := atLoadIn(cmd); l != nil {
 			load = l
 		}
@@ -160,7 +160,7 @@ func atOpen(t *testing.T, m Model, text string) Model {
 }
 
 // atKey presses k and answers the search it started, if one.
-func atKey(t *testing.T, m Model, k tea.KeyMsg) (Model, tea.Cmd) {
+func atKey(t *testing.T, m Model, k tea.KeyPressMsg) (Model, tea.Cmd) {
 	t.Helper()
 	m, cmd := press(m, k)
 	return m, atLoadIn(cmd)
@@ -178,7 +178,7 @@ func atNames(m Model) []string {
 	return out
 }
 
-func keyType(k tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: k} }
+func keyType(k string) tea.KeyPressMsg { return testKey(k) }
 
 // TestFrameGoldenComposerAt (§3.17): the composer's `@` popup at 100×30 and
 // 80×24 — a token typed after a word, what matches it ranked under the title
@@ -202,7 +202,7 @@ func TestFrameGoldenComposerAt(t *testing.T) {
 		if names := atNames(dir); len(names) == 0 || names[0] != "internal/" {
 			t.Fatalf("@int offers %q, want internal/ first", names)
 		}
-		dir, _ = atKey(t, dir, keyType(tea.KeyTab))
+		dir, _ = atKey(t, dir, keyType("tab"))
 		if v, _ := draftOf(dir); v != "@internal/" || !dir.composerAt.visible() {
 			t.Fatalf("tab on internal/ left %q (popup up %v), want @internal/ with the popup open", v, dir.composerAt.visible())
 		}
@@ -222,33 +222,33 @@ func TestAComposerAtPickWritesExactlyItsPath(t *testing.T) {
 		name string
 		// typed is typed; then keys, each after its search is delivered.
 		typed string
-		keys  []tea.KeyMsg
+		keys  []tea.KeyPressMsg
 		// draft is the composer's text after, the cursor at its end but
 		// where cursor says.
 		draft  string
 		cursor int
 	}{
-		{name: "plain", typed: "@main", keys: []tea.KeyMsg{enter()}, draft: "@cmd/craze/main.go ", cursor: -1},
-		{name: "tab accepts a file", typed: "@main", keys: []tea.KeyMsg{keyType(tea.KeyTab)}, draft: "@cmd/craze/main.go ", cursor: -1},
-		{name: "spaces", typed: "read @getting", keys: []tea.KeyMsg{enter()}, draft: `read @"docs/guide/getting started.md" `, cursor: -1},
-		{name: "unicode", typed: "@caf", keys: []tea.KeyMsg{enter()}, draft: "@notes/café.md ", cursor: -1},
-		{name: "a directory", typed: "@internal", keys: []tea.KeyMsg{enter()}, draft: "@internal/ ", cursor: -1},
+		{name: "plain", typed: "@main", keys: []tea.KeyPressMsg{enter()}, draft: "@cmd/craze/main.go ", cursor: -1},
+		{name: "tab accepts a file", typed: "@main", keys: []tea.KeyPressMsg{keyType("tab")}, draft: "@cmd/craze/main.go ", cursor: -1},
+		{name: "spaces", typed: "read @getting", keys: []tea.KeyPressMsg{enter()}, draft: `read @"docs/guide/getting started.md" `, cursor: -1},
+		{name: "unicode", typed: "@caf", keys: []tea.KeyPressMsg{enter()}, draft: "@notes/café.md ", cursor: -1},
+		{name: "a directory", typed: "@internal", keys: []tea.KeyPressMsg{enter()}, draft: "@internal/ ", cursor: -1},
 		{
 			name: "descend then accept", typed: "@int",
-			keys:  []tea.KeyMsg{keyType(tea.KeyTab), runeKey('a'), runeKey('p'), runeKey('p'), enter()},
+			keys:  []tea.KeyPressMsg{keyType("tab"), runeKey('a'), runeKey('p'), runeKey('p'), enter()},
 			draft: "@internal/tui/app.go ", cursor: -1,
 		},
 		{
 			name: "descend then a quoted accept", typed: "@guide",
-			keys:  []tea.KeyMsg{keyType(tea.KeyTab), runeKey('g'), runeKey('e'), runeKey('t'), keyType(tea.KeyTab)},
+			keys:  []tea.KeyPressMsg{keyType("tab"), runeKey('g'), runeKey('e'), runeKey('t'), keyType("tab")},
 			draft: `@"docs/guide/getting started.md" `, cursor: -1,
 		},
 		{
 			// The token inside the draft: the space after it is taken in, not
 			// doubled, and the cursor lands on the word after it.
 			name: "mid-draft", typed: "fix  now",
-			keys: []tea.KeyMsg{
-				keyType(tea.KeyLeft), keyType(tea.KeyLeft), keyType(tea.KeyLeft), keyType(tea.KeyLeft),
+			keys: []tea.KeyPressMsg{
+				keyType("left"), keyType("left"), keyType("left"), keyType("left"),
 				runeKey('@'), runeKey('c'), runeKey('o'), runeKey('m'), runeKey('p'), enter(),
 			},
 			draft: "fix @internal/tui/complete.go now", cursor: len("fix @internal/tui/complete.go "),
@@ -257,7 +257,7 @@ func TestAComposerAtPickWritesExactlyItsPath(t *testing.T) {
 			// Every `@` token opens the popup, and only the one under the
 			// cursor is completed.
 			name: "the token under the cursor", typed: "@README.md @eng",
-			keys:  []tea.KeyMsg{enter()},
+			keys:  []tea.KeyPressMsg{enter()},
 			draft: "@README.md @internal/engine/ ", cursor: -1,
 		},
 	} {
@@ -306,13 +306,13 @@ func TestAComposerAtRowShowsWhatItsPathHolds(t *testing.T) {
 
 	m, _ := atModel(t, 100, 30, listing)
 	m = atOpen(t, m, "@")
-	atIgnorableAt(t, "the frame", m.View())
+	atIgnorableAt(t, "the frame", m.View().Content)
 
 	for _, tc := range atShownPaths {
 		// A model of its own for each: a textarea's copies share its lines.
 		m, _ := atModel(t, 100, 30, listing)
 		m = atOpen(t, m, tc.typed)
-		atIgnorableAt(t, "the frame for "+tc.typed, m.View())
+		atIgnorableAt(t, "the frame for "+tc.typed, m.View().Content)
 		if frame := plainView(m); !strings.Contains(frame, agentGutterMark+tc.name) {
 			t.Fatalf("%s: no selected row reads %q:\n%s", tc.typed, tc.name, frame)
 		}
@@ -331,17 +331,17 @@ func TestTheComposerAtPopupOpensOnATokenStart(t *testing.T) {
 	cases := []struct {
 		name   string
 		typed  string
-		keys   []tea.KeyMsg
+		keys   []tea.KeyPressMsg
 		up     bool
 		prep   func(Model) Model
 		reason string
 	}{
 		{name: "the draft's start", typed: "@", up: true},
 		{name: "after a space", typed: "see @x", up: true},
-		{name: "after a newline", typed: "first", keys: []tea.KeyMsg{{Type: tea.KeyEnter, Alt: true}, runeKey('@')}, up: true},
+		{name: "after a newline", typed: "first", keys: []tea.KeyPressMsg{{Code: tea.KeyEnter, Mod: tea.ModAlt}, runeKey('@')}, up: true},
 		{name: "inside a word", typed: "user@example", up: false},
-		{name: "on the @ itself", typed: "@x", keys: []tea.KeyMsg{keyType(tea.KeyLeft), keyType(tea.KeyLeft)}, up: false},
-		{name: "one rune into the token", typed: "@x", keys: []tea.KeyMsg{keyType(tea.KeyLeft)}, up: true},
+		{name: "on the @ itself", typed: "@x", keys: []tea.KeyPressMsg{keyType("left"), keyType("left")}, up: false},
+		{name: "one rune into the token", typed: "@x", keys: []tea.KeyPressMsg{keyType("left")}, up: true},
 		{name: "shell mode", typed: "!ls @", up: false},
 		{name: "no workspace", typed: "@", up: false, prep: func(m Model) Model { m.cwd = ""; return m }},
 	}
@@ -415,7 +415,7 @@ func TestTheComposerAtPopupClosesUnderACardOrADialog(t *testing.T) {
 	held.awaitStarted(t)
 	opening := m.composerAt.gen
 
-	m, _ = press(m, keyType(tea.KeyCtrlG))
+	m, _ = press(m, keyType("ctrl+g"))
 	if m.dialog != dialogTheme || m.composerAt.visible() || m.composerAtShown() {
 		t.Fatalf("the theme picker left the popup up (dialog %v):\n%s", m.dialog, plainView(m))
 	}
@@ -423,7 +423,7 @@ func TestTheComposerAtPopupClosesUnderACardOrADialog(t *testing.T) {
 		t.Fatalf("the search under the dialog ended with %v, want it cancelled", err)
 	}
 	late := awaitLoaded(t, ch)
-	m, again := atKey(t, m, keyType(tea.KeyEsc))
+	m, again := atKey(t, m, keyType("esc"))
 	if m.dialog != dialogNone || !m.composerAt.visible() || m.composerAt.gen == opening || again == nil {
 		t.Fatalf("closing the dialog did not open the popup again, afresh and searching (up %v, opening %d → %d)",
 			m.composerAt.visible(), opening, m.composerAt.gen)
@@ -501,7 +501,7 @@ func TestComposerAtEnterAcceptsOnlyWithACandidate(t *testing.T) {
 func TestComposerAtEscHidesUntilTheTokenChanges(t *testing.T) {
 	m, _ := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 	m = atOpen(t, m, "@comp")
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("esc"))
 	if v, _ := draftOf(m); v != "@comp" || m.composerAt.visible() || strings.Contains(plainView(m), "files in ") {
 		t.Fatalf("esc: draft %q, popup up %v:\n%s", v, m.composerAt.visible(), plainView(m))
 	}
@@ -510,14 +510,14 @@ func TestComposerAtEscHidesUntilTheTokenChanges(t *testing.T) {
 	}
 	// The cursor moving within the token, leaving it (onto its `@`) and
 	// coming back, and a tick: still hidden.
-	for _, k := range []tea.KeyType{tea.KeyLeft, tea.KeyLeft, tea.KeyLeft, tea.KeyLeft, tea.KeyLeft} {
+	for _, k := range []string{"left", "left", "left", "left", "left"} {
 		m, _ = press(m, keyType(k))
 		if m.composerAt.visible() {
 			t.Fatalf("the hidden popup came back over the same token, the cursor at %d", m.composerCursorOffset())
 		}
 	}
 	for range 5 {
-		m, _ = press(m, keyType(tea.KeyRight))
+		m, _ = press(m, keyType("right"))
 	}
 	tm, _ := m.Update(tickMsg{})
 	m = tm.(Model)
@@ -541,11 +541,11 @@ func TestComposerAtEscUnderARunningTurnHidesThenCancels(t *testing.T) {
 	if !m.composerAtActive() {
 		t.Fatal("fixture: the popup should be up mid-message")
 	}
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("esc"))
 	if m.composerAt.visible() || m.cardMask != "" || m.status != statusWorking {
 		t.Fatalf("the first esc: popup up %v, cancel mask %q, status %v", m.composerAt.visible(), m.cardMask, m.status)
 	}
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("esc"))
 	if m.cardMask == "" {
 		t.Fatal("the second esc did not cancel the turn")
 	}
@@ -627,11 +627,11 @@ func TestComposerAtSlashOverlapLeavesPagingToTheTranscript(t *testing.T) {
 		t.Fatalf("fixture: the transcript should be at its bottom with scrollback (offset %d)", bottom)
 	}
 
-	m, _ = press(m, keyType(tea.KeyPgUp))
+	m, _ = press(m, keyType("pgup"))
 	if m.vp.YOffset >= bottom || m.slashSel != 0 {
 		t.Fatalf("PgUp: transcript at %d (was %d), slash selection %d", m.vp.YOffset, bottom, m.slashSel)
 	}
-	m, _ = press(m, keyType(tea.KeyPgDown))
+	m, _ = press(m, keyType("pgdown"))
 	if m.vp.YOffset != bottom || m.slashSel != 0 {
 		t.Fatalf("PgDn: transcript at %d, want %d; slash selection %d", m.vp.YOffset, bottom, m.slashSel)
 	}
@@ -639,7 +639,7 @@ func TestComposerAtSlashOverlapLeavesPagingToTheTranscript(t *testing.T) {
 	if !m.composerAtShown() || !m.lay.Region(regionOverlay).Contains(y) {
 		t.Fatalf("fixture: the popup should still be drawn in the band:\n%s", plainView(m))
 	}
-	m = mouse(t, m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 1, Y: y})
+	m = mouse(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 1, Y: y})
 	if m.vp.YOffset != bottom-wheelLines || m.slashSel != 0 {
 		t.Fatalf("the wheel over the popup: transcript at %d, want %d; slash selection %d", m.vp.YOffset, bottom-wheelLines, m.slashSel)
 	}
@@ -671,7 +671,7 @@ func TestComposerAtSlashOverlapEscHidesThenCancels(t *testing.T) {
 	m, _ := queueWorking(t)
 	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	m = atSlashOverlap(t, m)
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("esc"))
 	if m.composerAt.visible() || m.cardMask != "" || m.status != statusWorking {
 		t.Fatalf("the first esc: popup up %v, cancel mask %q, status %v", m.composerAt.visible(), m.cardMask, m.status)
 	}
@@ -679,7 +679,7 @@ func TestComposerAtSlashOverlapEscHidesThenCancels(t *testing.T) {
 	if h := m.lay.Region(regionOverlay).Height(); h != 0 {
 		t.Fatalf("the band kept %d rows with the popup hidden:\n%s", h, plainView(m))
 	}
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("esc"))
 	if m.cardMask == "" {
 		t.Fatalf("the second esc did not cancel the turn:\n%s", plainView(m))
 	}
@@ -701,8 +701,8 @@ func TestComposerAtSlashOverlapStaysOutWhileTheQueueHasTheKeys(t *testing.T) {
 		t.Fatalf("fixture: nothing queued: %q", queueTexts(m))
 	}
 	m = atSlashOverlap(t, m)
-	m, _ = press(m, keyType(tea.KeyEsc))
-	m, _ = press(m, keyType(tea.KeyUp))
+	m, _ = press(m, keyType("esc"))
+	m, _ = press(m, keyType("up"))
 	if !m.queueFocus || m.composerAtOn() {
 		t.Fatalf("↑ with the popup hidden did not reach the queue (focus %v):\n%s", m.queueFocus, plainView(m))
 	}
@@ -729,7 +729,7 @@ func TestComposerAtSlashMenuOutsideAnAtToken(t *testing.T) {
 			if !m.slashBandActive() || m.lay.Region(regionOverlay).Height() == 0 || !strings.Contains(plainView(m), "advertised commit") {
 				t.Fatalf("no slash menu for %q:\n%s", tc.typed, plainView(m))
 			}
-			m, _ = press(m, keyType(tea.KeyTab))
+			m, _ = press(m, keyType("tab"))
 			if v, cur := draftOf(m); v != tc.want || cur != len(tc.want) {
 				t.Fatalf("tab: draft %q, cursor %d; want %q at its end", v, cur, tc.want)
 			}
@@ -752,27 +752,27 @@ func TestComposerAtKeysShadowTheComposersOnlyWhileUp(t *testing.T) {
 	}
 	m = atOpen(t, m, "@comp")
 	first := atNames(m)[0]
-	m, _ = press(m, keyType(tea.KeyUp))
+	m, _ = press(m, keyType("up"))
 	if m.queueFocus || m.composerAt.sel == 0 || !m.composerAt.visible() {
 		t.Fatalf("↑ with the popup up: queue focus %v, selection %d", m.queueFocus, m.composerAt.sel)
 	}
-	m, _ = press(m, keyType(tea.KeyCtrlN))
+	m, _ = press(m, keyType("ctrl+n"))
 	if m.composerAt.sel != 0 {
 		t.Fatalf("ctrl+n did not move the popup's selection back to %s (at %d)", first, m.composerAt.sel)
 	}
-	m, _ = press(m, keyType(tea.KeyCtrlP))
-	m, _ = press(m, keyType(tea.KeyDown))
+	m, _ = press(m, keyType("ctrl+p"))
+	m, _ = press(m, keyType("down"))
 	if m.composerAt.sel != 0 {
 		t.Fatalf("ctrl+p then ↓ is back where it began: at %d", m.composerAt.sel)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	if v, _ := draftOf(m); v != "@comp\n" || m.composerAt.visible() {
 		t.Fatalf("alt+enter: draft %q, popup up %v", v, m.composerAt.visible())
 	}
-	m, _ = press(m, keyType(tea.KeyBackspace))
-	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType("backspace"))
+	m, _ = press(m, keyType("esc"))
 	m.input.SetValue("")
-	m, _ = press(m, keyType(tea.KeyUp))
+	m, _ = press(m, keyType("up"))
 	if !m.queueFocus {
 		t.Fatal("↑ with no popup up did not reach the queue")
 	}
@@ -790,7 +790,7 @@ func TestComposerAtASwitchClosesThePopupAndCancelsItsSearch(t *testing.T) {
 	r.m.composerAt.setSource(atFileSource{search: held.search})
 	lateAt := make(chan tea.Msg, 1)
 	for _, ch := range "@comp" {
-		r.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		r.send(runeKey(ch))
 		if l := atLoadIn(r.last); l != nil {
 			go func() { lateAt <- l() }()
 		}
@@ -845,7 +845,7 @@ func TestComposerAtAResultAfterThePopupClosedIsDropped(t *testing.T) {
 		t.Fatal("the closed popup's answer opened it")
 	}
 
-	m, again := atKey(t, m, keyType(tea.KeyBackspace))
+	m, again := atKey(t, m, keyType("backspace"))
 	if !m.composerAt.pending() || again == nil {
 		t.Fatalf("backspace into the token did not open it afresh, searching (up %v)", m.composerAt.visible())
 	}

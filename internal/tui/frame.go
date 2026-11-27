@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
+	"github.com/rivo/uniseg"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/transcript"
@@ -214,7 +214,7 @@ type waitSpec struct {
 type frameToken struct {
 	kind frameTokenKind
 	text string
-	key  tea.KeyMsg
+	key  keyInput
 	// msgs is what a tokMouse sends, in order: one message for a click or a
 	// wheel notch, three for a <drag:>.
 	msgs []tea.Msg
@@ -223,65 +223,52 @@ type frameToken struct {
 	wait waitSpec
 }
 
-var simpleFrameKeys = map[string]tea.KeyMsg{
-	"enter":     {Type: tea.KeyEnter},
-	"esc":       {Type: tea.KeyEsc},
-	"tab":       {Type: tea.KeyTab},
-	"backspace": {Type: tea.KeyBackspace},
-	"delete":    {Type: tea.KeyDelete},
-	"space":     {Type: tea.KeyRunes, Runes: []rune{' '}},
-	"up":        {Type: tea.KeyUp},
-	"down":      {Type: tea.KeyDown},
-	"left":      {Type: tea.KeyLeft},
-	"right":     {Type: tea.KeyRight},
-	"pgup":      {Type: tea.KeyPgUp},
-	"pgdn":      {Type: tea.KeyPgDown},
-	"shift-tab": {Type: tea.KeyShiftTab},
-	"alt-enter": {Type: tea.KeyEnter, Alt: true},
+var simpleFrameKeys = map[string]tea.KeyPressMsg{
+	"enter":     {Code: tea.KeyEnter},
+	"esc":       {Code: tea.KeyEsc},
+	"tab":       {Code: tea.KeyTab},
+	"backspace": {Code: tea.KeyBackspace},
+	"delete":    {Code: tea.KeyDelete},
+	"space":     {Code: ' ', Text: " "},
+	"up":        {Code: tea.KeyUp},
+	"down":      {Code: tea.KeyDown},
+	"left":      {Code: tea.KeyLeft},
+	"right":     {Code: tea.KeyRight},
+	"pgup":      {Code: tea.KeyPgUp},
+	"pgdn":      {Code: tea.KeyPgDown},
+	"shift-tab": {Code: tea.KeyTab, Mod: tea.ModShift},
+	"alt-enter": {Code: tea.KeyEnter, Mod: tea.ModAlt},
 }
 
 var simpleFrameMouse = map[string]tea.MouseMsg{
-	"wheel-up":   {Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress},
-	"wheel-down": {Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress},
+	"wheel-up":   tea.MouseWheelMsg{Button: tea.MouseWheelUp},
+	"wheel-down": tea.MouseWheelMsg{Button: tea.MouseWheelDown},
 }
 
-// leftMouse is one left-button report at a cell, which is what every selection
-// token is made of.
-func leftMouse(x, y int, action tea.MouseAction) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: action}
-}
-
-func runeKey(r rune) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
-}
-
-// parseFrameScript turns a key script into tokens. Literal text is typed rune
-// by rune; anything in angle brackets is a token.
+// parseFrameScript types each literal grapheme as one key and expands the
+// angle-bracket commands into the same events a terminal sends.
 func parseFrameScript(script string) ([]frameToken, error) {
 	var out []frameToken
-	rs := []rune(script)
-	for i := 0; i < len(rs); {
-		if rs[i] != '<' {
-			out = append(out, frameToken{kind: tokKey, text: string(rs[i]), key: runeKey(rs[i])})
-			i++
-			continue
+	for script != "" {
+		literal, token, found := strings.Cut(script, "<")
+		clusters := uniseg.NewGraphemes(literal)
+		for clusters.Next() {
+			text := clusters.Str()
+			out = append(out, frameToken{kind: tokKey, text: text, key: textKey(text)})
 		}
-		j := -1
-		for k := i + 1; k < len(rs); k++ {
-			if rs[k] == '>' {
-				j = k
-				break
-			}
+		if !found {
+			break
 		}
-		if j < 0 {
-			return nil, &ScriptError{Token: string(rs[i:]), Reason: "unterminated token"}
+		body, rest, closed := strings.Cut(token, ">")
+		if !closed {
+			return nil, &ScriptError{Token: "<" + token, Reason: "unterminated token"}
 		}
-		tok, err := parseFrameToken(string(rs[i+1 : j]))
+		tok, err := parseFrameToken(body)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, tok)
-		i = j + 1
+		script = rest
 	}
 	return out, nil
 }
@@ -304,7 +291,7 @@ func parseFrameToken(body string) (frameToken, error) {
 		if len(r) != 1 || r[0] < 'a' || r[0] > 'z' {
 			return frameToken{}, &ScriptError{Token: raw, Reason: "want <ctrl-a>..<ctrl-z>"}
 		}
-		key := tea.KeyMsg{Type: tea.KeyCtrlA + tea.KeyType(r[0]-'a')}
+		key := tea.KeyPressMsg{Code: rune(r[0]), Mod: tea.ModCtrl}
 		return frameToken{kind: tokKey, text: raw, key: key}, nil
 
 	case strings.HasPrefix(name, "sleep:"):
@@ -328,7 +315,7 @@ func parseFrameToken(body string) (frameToken, error) {
 			return frameToken{}, &ScriptError{Token: raw, Reason: "want <hover:X,Y>"}
 		}
 		return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{
-			tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion},
+			tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone},
 		}}, nil
 
 	case strings.HasPrefix(name, "drag:"):
@@ -339,9 +326,9 @@ func parseFrameToken(body string) (frameToken, error) {
 			return frameToken{}, &ScriptError{Token: raw, Reason: "want <drag:X1,Y1,X2,Y2>"}
 		}
 		return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{
-			leftMouse(x1, y1, tea.MouseActionPress),
-			leftMouse(x2, y2, tea.MouseActionMotion),
-			leftMouse(x2, y2, tea.MouseActionRelease),
+			tea.MouseClickMsg{X: x1, Y: y1, Button: tea.MouseLeft},
+			tea.MouseMotionMsg{X: x2, Y: y2, Button: tea.MouseLeft},
+			tea.MouseReleaseMsg{X: x2, Y: y2, Button: tea.MouseLeft},
 		}}, nil
 
 	case strings.HasPrefix(name, "resize:"):
@@ -359,7 +346,7 @@ func parseFrameToken(body string) (frameToken, error) {
 		if text == "" {
 			return frameToken{}, &ScriptError{Token: raw, Reason: "want <paste:TEXT>"}
 		}
-		key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true}
+		key := tea.PasteMsg{Content: text}
 		return frameToken{kind: tokKey, text: raw, key: key}, nil
 
 	case strings.HasPrefix(name, "wait:"):
@@ -380,13 +367,13 @@ func parseMouseToken(raw, name string) (frameToken, error) {
 	var msg tea.Msg
 	switch kind {
 	case "click", "press":
-		msg = leftMouse(x, y, tea.MouseActionPress)
+		msg = tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 	case "motion":
-		msg = leftMouse(x, y, tea.MouseActionMotion)
+		msg = tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseLeft}
 	case "release":
 		// Deliberately ButtonNone: that is what an X10 terminal reports, and
 		// the release has to finalise the drag anyway.
-		msg = tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease}
+		msg = tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone}
 	case "dblclick":
 		msg = dblClickMsg{X: x, Y: y}
 	}
@@ -799,7 +786,7 @@ type frameQuitMsg struct{ linger bool }
 // it never runs the Update wrapper.
 type frameSyncMsg struct{ n int }
 
-// frameModel wraps the real Model and publishes inner.View() after every
+// frameModel wraps the real Model and publishes the rendered contents after every
 // message, so the script runner sees exactly what a terminal would. meet is
 // the frame runner's program: an Update that acknowledges a sync token waits
 // there for the runner to take its barrier (frameBus.meet). A test driving a
@@ -837,10 +824,12 @@ func (f frameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return f, cmd
 }
 
-func (f frameModel) View() string { return f.inner.View() }
+// publish already renders each model update for the script. The headless
+// program also calls View, but has no terminal to paint.
+func (frameModel) View() tea.View { return tea.View{} }
 
 func (f frameModel) publish() {
-	view := f.inner.View()
+	view := f.inner.render()
 	f.bus.publish(frameState{
 		view:      view,
 		plain:     ansi.Strip(view),
@@ -960,12 +949,6 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	_, restoreClipboard := recordCopies()
 	defer restoreClipboard()
 
-	if opts.ANSI {
-		prev := lipgloss.ColorProfile()
-		lipgloss.SetColorProfile(termenv.TrueColor)
-		defer lipgloss.SetColorProfile(prev)
-	}
-
 	var print io.Writer
 	if opts.PrintFrames {
 		print = opts.Out
@@ -976,7 +959,11 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	bus := newFrameBus(print)
 	bus.stall, bus.moved = opts.stall, time.Now()
 
-	m := New(cfg)
+	profile := colorprofile.TrueColor
+	if !opts.ANSI {
+		profile = terminalProfile()
+	}
+	m := newModel(cfg, profile)
 	// The backend the run starts over: a socket run's session to its host,
 	// until a switch to another session (plan 030 §3.11) replaces it.
 	served := m.owner.current()
@@ -986,7 +973,16 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	// is the baseline (gateSyncDefault), and a frame is asynchronous unless its
 	// caller asked for the baseline.
 	m.gateSync = opts.gateSync
-	p := tea.NewProgram(frameModel{inner: m, bus: bus, meet: true}, tea.WithoutRenderer(), tea.WithInput(nil))
+	// Frame dimensions come exclusively from script tokens. Bubble Tea also
+	// sends an asynchronous initial resize, even for a headless program.
+	p := tea.NewProgram(frameModel{inner: m, bus: bus, meet: true},
+		tea.WithoutRenderer(), tea.WithInput(nil), tea.WithOutput(io.Discard),
+		tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if _, ok := msg.(tea.WindowSizeMsg); ok {
+				return nil
+			}
+			return msg
+		}))
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	go func() {
@@ -1012,8 +1008,8 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	// what a gate held open by a call that never answers is waiting on — and
 	// the program is killed, and then waited for. It is never abandoned (astra
 	// r47): a program still running — blocked in a PrintFrames writer, say —
-	// would outlive the run that restores HOME, the clipboard's recording and
-	// the colour profile around it, and overlap the next run. A program that
+	// would outlive the run that restores HOME and the clipboard's recording,
+	// and overlap the next run. A program that
 	// never ends even then is the test binary's timeout's to catch.
 	//
 	// The engine is the owner's, not m's: a pre-start picker has none at New,

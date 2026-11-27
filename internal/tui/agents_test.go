@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -177,7 +177,7 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 		t.Fatalf("enter in the composer opened %q (cmd %v)", m.viewing, cmd != nil)
 	}
 	// ↓ moves the keyboard to the rows; the composer loses its cursor.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if !m.agentFocus || m.input.Focused() {
 		t.Fatalf("down: rows focused %v, composer focused %v", m.agentFocus, m.input.Focused())
@@ -201,7 +201,7 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 		t.Fatalf("the receipt view shows the prompt:\n%s", view)
 	}
 
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.viewing != "" {
 		t.Fatal("esc should leave the view")
@@ -218,7 +218,7 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 	if !m.agentFocus || m.input.Focused() {
 		t.Fatal("leaving the view should keep the keyboard on the rows")
 	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.agentFocus || !m.input.Focused() || cmd != nil || m.status != statusWorking {
 		t.Fatalf("esc on the rows: focus %v composer %v cmd %v status %s", m.agentFocus, m.input.Focused(), cmd != nil, m.status)
@@ -241,7 +241,7 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 	}
 	// The first ↓ only moves the keyboard to the rows (the mark appears on
 	// the row the selection already sits on); the next one moves the mark.
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if !m.agentFocus || m.agentID != "task-a" {
 		t.Fatalf("first down: focus %v, selected %q", m.agentFocus, m.agentID)
@@ -249,25 +249,25 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 	if !strings.Contains(plainView(m), "❯ ○ task  job a") {
 		t.Fatalf("the focused row carries the gutter mark:\n%s", plainView(m))
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.agentID != "task-b" {
 		t.Fatalf("down selected %q", m.agentID)
 	}
 	// ↓ on the last row stays put: the rows do not wrap.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.agentID != "task-b" {
 		t.Fatalf("down on the last row moved to %q", m.agentID)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if m.agentID != "task-a" {
 		t.Fatalf("up selected %q", m.agentID)
 	}
 	// ↑ past the first row hands the keyboard back to the composer and the
 	// mark goes away.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if m.agentFocus || !m.input.Focused() {
 		t.Fatal("up past the top should return to the composer")
@@ -278,9 +278,9 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 
 	// ctrl+p / ctrl+n belong to the textarea, not the rows.
 	sel := m.agentID
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.agentID != sel {
 		t.Fatalf("ctrl+n/ctrl+p moved the selection to %q", m.agentID)
@@ -289,9 +289,9 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 	// Arrows select rows even while a draft is being typed (user-directed
 	// 2026-09-13), and the draft itself is untouched.
 	m.input.SetValue("hey")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.agentID == sel || m.agentID != "task-b" {
 		t.Fatalf("down with composer text selected %q, want task-b", m.agentID)
@@ -300,7 +300,7 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 		t.Fatalf("selection stole the draft: %q", m.input.Value())
 	}
 	// Typing hands the keyboard back to the composer and the key lands.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+	tm, _ = m.Update(textKey("!"))
 	m = tm.(Model)
 	if m.agentFocus || m.input.Value() != "hey!" {
 		t.Fatalf("typing on the rows: focus %v, draft %q", m.agentFocus, m.input.Value())
@@ -326,9 +326,9 @@ func TestAgentOrderIsSpawnOrderAndStable(t *testing.T) {
 	if got := ids(); got != "task-a,task-b,task-c" {
 		t.Fatalf("start order %s", got)
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.agentID != "task-b" || m.agentSel != 1 {
 		t.Fatalf("down: %q at row %d", m.agentID, m.agentSel)
@@ -428,7 +428,7 @@ func TestAgentSelectionNeverLeavesTheVisibleRows(t *testing.T) {
 	// each of them.
 	seen := map[string]bool{}
 	for i := 0; i < agentRowsMax*2; i++ {
-		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		m = tm.(Model)
 		if !visible[m.agentID] {
 			t.Fatalf("step %d selected the hidden %q", i, m.agentID)
@@ -608,9 +608,9 @@ func TestFinishSeenInASnapshotBeforeItsEventKeepsTheRow(t *testing.T) {
 		t.Fatalf("selection after finished: %q at row %d", m.agentID, m.agentSel)
 	}
 	// Enter opens the row the mark is on.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = tm.(Model)
 	if m.viewing != "task-a" {
 		t.Fatalf("enter opened %q", m.viewing)

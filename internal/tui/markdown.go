@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 

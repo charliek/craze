@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -123,19 +123,19 @@ func (m Model) openEffortPicker() Model {
 	return m
 }
 
-func (m Model) handleEffortPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleEffortPickerKey(msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "esc":
 		return m.closeDialog(true), nil
-	case tea.KeyEnter:
+	case "enter":
 		return m.applyEffortPicker()
-	case tea.KeyUp, tea.KeyDown:
+	case "up", "down":
 		opt := agent.EffortOption(m.snap)
 		if opt == nil {
 			return m, nil
 		}
 		delta := 1
-		if msg.Type == tea.KeyUp {
+		if shortcut(msg) == "up" {
 			delta = -1
 		}
 		n := len(opt.SelectValues)

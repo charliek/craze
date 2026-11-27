@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -201,8 +201,8 @@ func TestAKeyAndItsTokenAreOneMessage(t *testing.T) {
 		if tok, ok := msg.(frameTokenMsg); ok {
 			msg = tok.msg
 		}
-		k, ok := msg.(tea.KeyMsg)
-		return ok && k.Type == tea.KeyEnter
+		k, ok := msg.(tea.KeyPressMsg)
+		return ok && shortcut(k) == "enter"
 	}
 	for _, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {
@@ -417,7 +417,7 @@ func TestAHeldKeysTokenIsAcknowledgedAfterIt(t *testing.T) {
 				if acked || f.inner.syncPending != 0 {
 					t.Fatalf("the token was acked (%v) or parked (%d) under a gate its key did not open", acked, f.inner.syncPending)
 				}
-				if got := heldKinds(f.inner); !slices.Equal(got, []string{"tea.KeyMsg", "tui.frameSyncMsg"}) {
+				if got := heldKinds(f.inner); !slices.Equal(got, []string{"tea.KeyPressMsg", "tui.frameSyncMsg"}) {
 					t.Fatalf("held %v, want the key and its token behind it", got)
 				}
 			}

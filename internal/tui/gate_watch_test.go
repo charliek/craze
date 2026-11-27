@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 )
 
 // The command gate's invisibility watch (plan 027 §3.12 (d),
@@ -169,7 +169,6 @@ var gateDigestSkips = map[string]string{
 	"eng":          "the backend (its own goroutines)",
 	"owner":        "the session owner (a lock, read by the exit tails)",
 	"shell":        "the shell controller (its own goroutine and lock)",
-	"term":         "the terminal colours' writer",
 	"chains":       "the model-change chain lock",
 	"host":         "the host hub",
 	"sessionIndex": "the index store",

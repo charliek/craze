@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -589,30 +589,30 @@ func btwErrText(err error) string {
 // suppressed: ↑ out of an empty composer into the rows, ← into the session
 // list, Ctrl+L, Shift+Tab, an image paste, and the slash and `@` popups (off
 // while the view is open, so Tab completes nothing).
-func (m Model) handleBtwKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleBtwKey(msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "esc":
 		m.leaveBtw()
 		return m, nil
-	case tea.KeyCtrlY:
+	case "ctrl+y":
 		return m.copySelectionOrLastReply()
-	case tea.KeyCtrlO:
+	case "ctrl+o":
 		return m.toggleExpanded()
-	case tea.KeyCtrlT:
+	case "ctrl+t":
 		return m.cycleTasks()
-	case tea.KeyCtrlG:
+	case "ctrl+g":
 		return m.openThemePicker(), nil
-	case tea.KeyCtrlV:
+	case "ctrl+v":
 		return m, m.composerPaste()
-	case tea.KeyCtrlL, tea.KeyShiftTab:
+	case "ctrl+l", "shift+tab":
 		return m, nil
-	case tea.KeyPgUp, tea.KeyPgDown:
+	case "pgup", "pgdown":
 		m.catchUp()
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
 	}
-	if msg.Type == tea.KeyEnter && !isNewlineKey(msg) {
+	if shortcut(msg) == "enter" && !isNewlineKey(msg) {
 		return m.btwEnter()
 	}
 	return m, m.updateComposer(msg)

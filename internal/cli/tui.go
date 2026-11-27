@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
@@ -252,8 +250,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		// profile. NO_COLOR and TERM=dumb land on the Ascii profile, and a
 		// craze that paints no SGR colour must not repaint the terminal
 		// either.
-		Background: tui.ConfigBackground() && !f.noBackground &&
-			lipgloss.ColorProfile() != termenv.Ascii,
+		Background: tui.ConfigBackground() && !f.noBackground,
 	}
 	if err := resolveLoad(cmd, f, indexCWD, &cfg, build, rh.claims); err != nil {
 		var held *rundir.HeldError

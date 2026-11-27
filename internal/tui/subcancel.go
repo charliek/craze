@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -44,8 +44,8 @@ const (
 )
 
 // isStopKey reports whether msg is one of the two stop keys.
-func isStopKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete
+func isStopKey(msg keyInput) bool {
+	return shortcut(msg) == "backspace" || shortcut(msg) == "delete"
 }
 
 // canStopSubagent is the key's gate: the session has the verb, the child is
@@ -59,7 +59,7 @@ func (m Model) canStopSubagent(info agent.SubagentInfo) bool {
 // stopRowKey is handleRowsKey's hook: a stop key on the focused row — the
 // gutter mark's, items[agentSelection] — when that child can be stopped.
 // handled false leaves the key to the rows' own handling, unchanged.
-func (m Model) stopRowKey(msg tea.KeyMsg, items []agent.SubagentInfo) (handled bool, next Model, cmd tea.Cmd) {
+func (m Model) stopRowKey(msg keyInput, items []agent.SubagentInfo) (handled bool, next Model, cmd tea.Cmd) {
 	if !isStopKey(msg) || len(items) == 0 {
 		return false, m, nil
 	}
@@ -69,7 +69,7 @@ func (m Model) stopRowKey(msg tea.KeyMsg, items []agent.SubagentInfo) (handled b
 // stopViewKey is handleViewKey's hook: a stop key in the view of a child that
 // can be stopped. handled false leaves the key to the view's own handling,
 // unchanged.
-func (m Model) stopViewKey(msg tea.KeyMsg) (handled bool, next Model, cmd tea.Cmd) {
+func (m Model) stopViewKey(msg keyInput) (handled bool, next Model, cmd tea.Cmd) {
 	if !isStopKey(msg) {
 		return false, m, nil
 	}

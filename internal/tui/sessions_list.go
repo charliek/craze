@@ -4,14 +4,15 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"image/color"
 	"os"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
@@ -913,12 +914,13 @@ func (m Model) hereAsRow() roster.Row {
 // Ctrl+C. With an input under the list (§3.13) the input has every key first
 // — its popup's, what is typed — and leaves the list's own to it
 // (sessInputKey); without one, every other key does nothing.
-func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleSessionsKey(msg keyInput) (tea.Model, tea.Cmd) {
+	binding := shortcut(msg)
 	l := &m.sessList
-	if msg.Type != tea.KeyCtrlC {
+	if binding != "ctrl+c" {
 		m.ctrlCDeadline = time.Time{}
 	}
-	if msg.Type != tea.KeyCtrlX {
+	if binding != "ctrl+x" {
 		l.armed = sessKey{}
 	}
 	l.note = ""
@@ -927,10 +929,10 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 	}
-	switch msg.Type {
-	case tea.KeyCtrlD:
+	switch binding {
+	case "ctrl+d":
 		return m.sessQuit()
-	case tea.KeyCtrlC:
+	case "ctrl+c":
 		now := m.now()
 		if !m.ctrlCDeadline.IsZero() && now.Before(m.ctrlCDeadline) {
 			return m.sessQuit()
@@ -938,28 +940,24 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCDeadline = now.Add(ctrlCWindow)
 		gen := l.gen
 		return m, tea.Tick(ctrlCWindow, func(time.Time) tea.Msg { return sessRedrawMsg{gen: gen} })
-	case tea.KeyUp:
+	case "up":
 		m.sessMove(-1)
-	case tea.KeyDown:
+	case "down":
 		m.sessMove(1)
-	case tea.KeyCtrlS:
+	case "ctrl+s":
 		l.byDir = !l.byDir
 		m.syncSessList()
-	case tea.KeyCtrlX:
+	case "ctrl+x":
 		return m.sessCtrlX()
-	case tea.KeyEsc:
+	case "esc":
 		return m.leaveSessions()
-	case tea.KeyLeft:
+	case "left":
 		// alt+← is not a list key (plan 030: no cycling keys).
-		if !msg.Alt {
-			return m.leaveSessions()
-		}
-	case tea.KeyEnter:
+		return m.leaveSessions()
+	case "enter":
 		return m.sessEnter()
-	case tea.KeyRight:
-		if !msg.Alt {
-			return m.sessEnter()
-		}
+	case "right":
+		return m.sessEnter()
 	}
 	return m, nil
 }
@@ -1347,7 +1345,7 @@ type sessLine struct {
 	kind sessLineKind
 	// A group's header: its label, colour and count.
 	label string
-	color lipgloss.CompleteColor
+	color color.Color
 	count int
 	// row is a session row's; for sessLineNote its text is want, and
 	// noteErr colours it as an error.
@@ -1368,7 +1366,7 @@ func (m Model) sessLines() []sessLine {
 	running := m.sessRunningRows()
 	slices.SortStableFunc(running, sessOrder)
 	var out []sessLine
-	group := func(label string, color lipgloss.CompleteColor, rows []sessRow) {
+	group := func(label string, color color.Color, rows []sessRow) {
 		if len(rows) == 0 {
 			return
 		}
@@ -1401,7 +1399,7 @@ func (m Model) sessLines() []sessLine {
 		for _, g := range []struct {
 			state sessState
 			label string
-			color lipgloss.CompleteColor
+			color color.Color
 		}{
 			{sessNeedsYou, "needs you", th.Warn},
 			{sessWorking, "working", th.Accent},
@@ -1666,7 +1664,7 @@ func (m Model) sessHeaderRow(lines []sessLine) string {
 	var chips []seg
 	for i, c := range []struct {
 		text  string
-		color lipgloss.CompleteColor
+		color color.Color
 	}{
 		{"! %d need you", th.Warn},
 		{m.spinnerGlyph() + " %d working", th.Accent},

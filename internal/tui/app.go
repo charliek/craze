@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/term"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -183,18 +183,14 @@ type Config struct {
 	// review F2). The resume picker carries its row's itself, as it does the
 	// craze id; a new session leaves this empty.
 	WebSearch string
-	// TerminalTitle turns on the tab title the Update wrapper maintains
-	// (§3.10). It defaults false, which is what every test Config and the
-	// frame runner leave it — the frame runner's tea.WithoutRenderer() makes
-	// the message a no-op anyway, so nothing depends on it there. runTUI is
-	// the one caller that reads ConfigTerminalTitle() into this.
+	// TerminalTitle shows the current session and activity in the terminal tab.
 	TerminalTitle bool
 	// Background turns on the themed terminal background: while craze runs it
 	// sets the terminal's own default colours with OSC 11/10 and resets them
 	// with OSC 111/110 on the way out (§3.3). Like TerminalTitle it defaults
 	// false, so every test Config and the frame runner emit nothing at all.
-	// runTUI is the one caller that fills it, from ConfigBackground(),
-	// --no-background and the colour profile.
+	// The CLI combines ConfigBackground() with --no-background; Run also
+	// gates it on the output color profile.
 	Background bool
 	// Host receives the derived host status (plan 015 §3.1) — what herdr
 	// shows for this pane. nil means nothing is reported, which is what every
@@ -942,9 +938,6 @@ type Model struct {
 	// engine's armed send (the mirror's sendNowArmed), because the cancel that
 	// makes room for it is the engine's.
 	confirm *strongSend
-	// mouseAll records which motion mode the terminal is in, so the queue
-	// going 0 → 1 rows and back issues exactly one transition each way.
-	mouseAll bool
 
 	tasksState    tasksPanelState
 	todosSeen     bool
@@ -1055,21 +1048,12 @@ type Model struct {
 	// the clock itself is left alone.
 	frameStart time.Time
 
-	// terminalTitle is Config.TerminalTitle: the off switch. false means the
-	// Update wrapper never computes or emits a title at all, which is what
-	// craze frame relies on (its Config never sets this) and what
-	// terminal_title = false gives a real run.
 	terminalTitle bool
-	// lastTitle is the last string windowTitle() emitted a tea.SetWindowTitle
-	// for, so the Update wrapper can write on change alone (§3.10) instead of
-	// on every tick. It also doubles as "a title was ever set": Run's exit
-	// clear checks it on the final model rather than carrying a second flag.
-	lastTitle string
 
-	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
-	term *terminalColors
+	// background asks the renderer to set and restore the default terminal colors.
+	background bool
 	// shell owns the command the composer is running, if any (plan 022 §3.6).
-	// It is a shared pointer for the same reason term and owner are: the model
+	// It is a shared pointer for the same reason as owner: the model
 	// is copied on every Update, and the quit paths — SIGTERM's especially,
 	// which reaches finishRun with the model Run *started* with — have to be
 	// able to kill a command a much later copy started. Nil only in a zero
@@ -1083,7 +1067,7 @@ type Model struct {
 	// goroutine, exactly as the draft it will lead is.
 	shellCtx []agent.ShellResult
 	// owner is the session the program holds, shared by every copy the way
-	// term is; see sessionOwner. Nil only in a zero Model a test built.
+	// owner is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
 	// exit is what the explicit quit came to over a backend served elsewhere
 	// (stopQuit): shared by every copy, as owner is, because the quit's
@@ -1098,8 +1082,8 @@ type Model struct {
 
 	// host is Config.Host: nil means no host status is derived at all. The
 	// rest is what host.go reads into host.Input. lastHost is the last status
-	// handed to host, so the Update wrapper publishes on change alone, the
-	// way lastTitle does. cancelled says the last turn ended cancelled, by
+	// handed to host, so the Update wrapper publishes on change alone.
+	// cancelled says the last turn ended cancelled, by
 	// either ending; prompted says a prompt has been sent this session, so the
 	// idle a session comes up with is "ready" and not a turn that stopped (a
 	// flag of its own, not a reading of turnSeq, which starts at 1).
@@ -1799,10 +1783,14 @@ func (m *Model) nextCmds(n int) []engine.Command {
 }
 
 func New(cfg Config) Model {
+	return newModel(cfg, colorprofile.TrueColor)
+}
+
+func newModel(cfg Config, profile colorprofile.Profile) Model {
 	cfg = cfg.viewing().launching()
 	cwd := configWorkspace(cfg.Workspace)
 
-	th := Preset(cfg.Theme)
+	th := presetFor(cfg.Theme, profile)
 	prov := configProvider(cfg.Provider)
 	loads := &completeLoadSet{}
 	// The TUI's half, from the Config; the session's half is the one
@@ -1838,9 +1826,9 @@ func New(cfg Config) Model {
 		terminalTitle:   cfg.TerminalTitle,
 		host:            cfg.Host,
 		viewer:          cfg.Viewer,
-		// Discard until Run says otherwise: a model built by a test, by
-		// `craze frame` or by any direct caller writes no OSC at all.
-		term:          newTerminalColors(io.Discard),
+		// Ask the live renderer to set terminal colors only when the
+		// caller requests them and the output supports color.
+		background:    cfg.Background && profile >= colorprofile.ANSI,
 		owner:         &sessionOwner{},
 		exit:          &exitState{},
 		shell:         newShellController(),
@@ -1970,32 +1958,22 @@ type Result struct {
 func Run(cfg Config) (Result, error) {
 	cfg = cfg.viewing()
 	sweepAttachmentsAtStart()
-	m := New(cfg)
+	profile := terminalProfile()
+	m := newModel(cfg, profile)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
 	// would tear it, so both go through the same lock.
 	out := newSyncWriter(os.Stdout)
 	prevOut := setClipboardOut(out)
 	defer setClipboardOut(prevOut)
-	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(out)}
-	if term.IsTerminal(os.Stdin.Fd()) {
-		// The terminal bubbletea would read anyway (this is its own test,
-		// tea.go), with Shift+Enter made a newline on the way in
-		// (shiftEnterInput). Without a terminal on stdin bubbletea opens
-		// /dev/tty itself, and Shift+Enter there stays as bubbletea reads it.
-		opts = append(opts, tea.WithInput(&shiftEnterInput{f: os.Stdin}))
+	opts := []tea.ProgramOption{tea.WithOutput(out), tea.WithColorProfile(profile)}
+	input, closeInput, err := terminalInput()
+	if err != nil {
+		_, _ = finishRun(out, nil, m, cfg.Host)
+		return Result{AgentDiag: true}, fmt.Errorf("opening input terminal: %w", err)
 	}
-	if !cfg.NoMouse {
-		// Cell motion, not all motion: the quieter mode reports a drag once per
-		// cell rather than per pixel, which is all the selection needs.
-		opts = append(opts, tea.WithMouseCellMotion())
-	}
-	if cfg.Background {
-		// Set once, before the first frame: the pair goes through the same
-		// lock bubbletea renders through, so it can never tear a frame.
-		m.term = newTerminalColors(out)
-		m.term.apply(m.theme)
-	}
+	defer closeInput()
+	opts = append(opts, tea.WithInput(input))
 	p := tea.NewProgram(m, opts...)
 	// A terminal hangup — what a closed tab or window sends — is an exit like
 	// SIGTERM. Left to its default action it kills craze before the tail
@@ -2075,11 +2053,9 @@ func runErrAfterHangup(err error, hungUp bool) error {
 	return err
 }
 
-// finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
-// is cleared, the terminal's colours are reset, Config.OnQuit is told (plan 046
-// B4: a TUI-hosted session's registry entry says stopping), the host hub
-// releases, and the session closes — a session list's roster still open, and any backend a
-// switch retired whose close has not run, closed just before it (plan 030).
+// finishRun runs after the renderer restores the terminal. Config.OnQuit marks
+// a TUI-hosted session as stopping, then the host hub releases and the session
+// closes. Any open roster and retired backend close just before the session.
 // p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
 // own handler) and on a recovered panic, and every one of them lands here.
 //
@@ -2105,16 +2081,8 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	if fm, ok := final.(Model); ok {
 		startErr = fm.startErr
 		started = fm.started
-		// Every exit path lands here: clearWindowTitle no-ops when titles
-		// were off or a title was never set, and otherwise writes OSC 2
-		// through the same writer bubbletea rendered into (§3.10).
-		clearWindowTitle(out, fm)
+
 	}
-	// Unconditional, and immediately after the title clear: the controller is
-	// a pointer m and fm share, reset is a no-op unless a set was written, and
-	// this also covers a final that is not a Model. The terminal gets its own
-	// colours back on every exit path — before the engine's Close, which may block.
-	m.term.reset()
 	// The host this process serves says it is stopping (Config.OnQuit), before
 	// anything of the session is closed: SIGTERM, SIGHUP and a recovered panic
 	// reach only this, and a quit craze asked for has said it already (it is
@@ -2260,7 +2228,7 @@ func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng 
 // is split first (burst.go), so each of its keys meets the gate as a key typed
 // alone does.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok {
+	if k, ok := msg.(tea.KeyPressMsg); ok {
 		if keys := burstKeys(k); len(keys) > 1 {
 			return m.burst(keys)
 		}
@@ -2303,12 +2271,6 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	// only follows it down when the chrome above it changed shape.
 	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
 	next.storeViewport(next.cur())
-	// The queue going 0 → 1 rows and back is the only thing that changes the
-	// terminal's motion mode, and it is decided from the state the handler
-	// left behind, once per Update.
-	if mouse := next.queueMouseCmd(); mouse != nil {
-		cmd = tea.Batch(cmd, mouse)
-	}
 	// A hidden answer the outbox refused for room is retried from here for the
 	// same reason: it is the one place every transition passes through, and the
 	// retry must not depend on another event ever arriving (armHiddenRetry).
@@ -2320,18 +2282,6 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	if tick := next.armTick(); tick != nil {
 		cmd = tea.Batch(cmd, tick)
 	}
-	// The one place every transition passes through on its way to the frame:
-	// no handler sets the title itself, so no transition can miss it, and
-	// nothing is written on a tick because this only fires on change (§3.10).
-	if next.terminalTitle {
-		if title := next.windowTitle(); title != next.lastTitle {
-			next.lastTitle = title
-			cmd = tea.Batch(cmd, tea.SetWindowTitle(title))
-		}
-	}
-	// The host status rides the same choke point for the same reason, and is
-	// handed to the hub on change alone, so a tick never reaches its lock
-	// (plan 015 §3.1).
 	if next.host != nil {
 		next.publishHost()
 	}
@@ -2397,7 +2347,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+			return m, m.updateComposer(tea.PasteMsg{Content: msg.text})
 		case endMsg:
 			// An unstarted session's first prompt (§3.13) whose session ended
 			// with the list up over it — its composer emptied and ← pressed
@@ -2770,7 +2720,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
 		// inserts the whole thing as text instead of reading it as keys.
-		return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+		return m, m.updateComposer(tea.PasteMsg{Content: msg.text})
 
 	case attachDoneMsg:
 		// A chip's processing (plan 033 §3.3). One for a session the model
@@ -2868,7 +2818,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		return m.handleKey(msg)
+	case tea.PasteMsg:
 		return m.handleKey(msg)
 
 	case tea.MouseMsg:
@@ -2893,10 +2845,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// arrived while the button was down, so the drag goes with it.
 		return m, nil
 	}
-	switch msg.Action {
-	case tea.MouseActionPress:
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
 		switch msg.Button {
-		case tea.MouseButtonWheelUp:
+		case tea.MouseWheelUp:
 			// slashBandActive, not slashActive: over the composer's `@`
 			// popup the wheel is the transcript's (plan 030 X187), even
 			// for a quoted `@"a /` whose `/` the menu would read.
@@ -2908,32 +2860,34 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// scroll is from the rows as they stand (catchUp).
 			m.catchUp()
 			m.vp.ScrollUp(wheelLines)
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			if m.slashBandActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
 				return m.slashWheel(1), nil
 			}
 			m.catchUp()
 			m.vp.ScrollDown(wheelLines)
-		case tea.MouseButtonLeft:
+		}
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
 			m.inspector = transcriptInspector{}
 			return m.handlePress(msg.X, msg.Y)
 		}
-	case tea.MouseActionMotion:
+	case tea.MouseMotionMsg:
 		// Motion with no button down is a hover, which is what the queue's
 		// action strip appears on. Only a drag extends a selection: a
 		// double-click's word is already the selection it meant, and the
 		// pointer wobbling over it must not eat into it.
-		if msg.Button == tea.MouseButtonNone {
+		if msg.Button == tea.MouseNone {
 			m.queueHov = m.queueHoverAt(msg.X, msg.Y)
 			return m, nil
 		}
-		if m.pressed == tea.MouseButtonLeft && m.sel.drag {
+		if m.pressed == tea.MouseLeft && m.sel.drag {
 			return m.handleDrag(msg.X, msg.Y), nil
 		}
-	case tea.MouseActionRelease:
+	case tea.MouseReleaseMsg:
 		// X10 terminals report ButtonNone on release, so the button that went
 		// down is the only record of which one came up.
-		if m.pressed == tea.MouseButtonLeft {
+		if m.pressed == tea.MouseLeft {
 			return m.handleRelease(msg.X, msg.Y)
 		}
 	}
@@ -2973,7 +2927,7 @@ func (m Model) handlePress(x, y int) (tea.Model, tea.Cmd) {
 		m.clicks = 0
 		return m.handleClick(x, y)
 	}
-	m.pressed = tea.MouseButtonLeft
+	m.pressed = tea.MouseLeft
 	pos, ok := m.transcriptCell(x, y)
 	if !ok {
 		return m, nil
@@ -3028,7 +2982,7 @@ func (m Model) handleDrag(x, y int) tea.Model {
 // handleRelease finalises the drag: the head is the cell under the pointer, and
 // a selection of more than the one cell the press made is copied.
 func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
-	m.pressed = tea.MouseButtonNone
+	m.pressed = tea.MouseNone
 	// As a drag does (handleDrag): a selection over rows the cadence left
 	// unpainted goes with the paint, so nothing is hit-tested or copied from
 	// them.
@@ -3249,12 +3203,13 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKey(msg keyInput) (tea.Model, tea.Cmd) {
+	binding := shortcut(msg)
 	// The sign-in step's copied line lasts until the next key (plan 034 Q10):
 	// every key but the Ctrl+Y that copies ends it, here, before any layer
 	// takes the key — Ctrl+C's stop of running work among them, which never
 	// reaches the step (review r4 #5b).
-	if msg.Type != tea.KeyCtrlY {
+	if binding != "ctrl+y" {
 		m.cdlg.signIn.copied = false
 	}
 	// The session list is the first rung while it is open (plan 030 §3.10):
@@ -3271,13 +3226,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// The highlight is a mouse gesture: any key but the one that copies it
 	// means the user has moved on.
-	if msg.Type != tea.KeyCtrlY {
+	if binding != "ctrl+y" {
 		m.sel = selection{}
 	}
-	switch msg.Type {
-	case tea.KeyCtrlD:
+	switch binding {
+	case "ctrl+d":
 		return m.requestQuit()
-	case tea.KeyCtrlC:
+	case "ctrl+c":
 		// The side view takes Ctrl+C first, with no card up (plan 040 §3.6):
 		// it closes — its question cancelled, its thread discarded — and
 		// nothing else happens: the main turn is not touched, and the
@@ -3312,7 +3267,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// back (leaveSessions touches none of them). No card binds ←, and Alt+←
 	// stays the card's (swallowed): only the bare key passes through.
 	if m.cardOpen() {
-		if msg.Type == tea.KeyLeft && !msg.Alt && m.sessions != nil {
+		if binding == "left" && m.sessions != nil {
 			return m.openSessions()
 		}
 		return m.handleCardKey(msg)
@@ -3340,8 +3295,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// sub-agent view: a view opened over it would leave it armed and
 	// unanswerable.
 	if m.confirm != nil {
-		switch msg.Type {
-		case tea.KeyEnter:
+		switch binding {
+		case "enter":
 			return m.confirmStrongSend()
 		default:
 			m.declineStrongSend()
@@ -3365,27 +3320,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleViewKey(msg)
 	}
 
-	if msg.Type == tea.KeyCtrlL {
+	if binding == "ctrl+l" {
 		return m.handleStrongSend()
 	}
 
-	if msg.Type == tea.KeyCtrlY {
+	if binding == "ctrl+y" {
 		// A keyboard feature, so it works under --no-mouse as well.
 		return m.copySelectionOrLastReply()
 	}
-	if msg.Type == tea.KeyCtrlV {
+	if binding == "ctrl+v" {
 		return m, m.composerPaste()
 	}
-	if msg.Type == tea.KeyCtrlO {
+	if binding == "ctrl+o" {
 		return m.toggleExpanded()
 	}
-	if msg.Type == tea.KeyCtrlT {
+	if binding == "ctrl+t" {
 		return m.cycleTasks()
 	}
-	if msg.Type == tea.KeyCtrlG {
+	if binding == "ctrl+g" {
 		return m.openThemePicker(), nil
 	}
-	if msg.Type == tea.KeyShiftTab {
+	if binding == "shift+tab" {
 		return m.cycleMode()
 	}
 	if m.queueFocus {
@@ -3402,7 +3357,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	}
-	if msg.Type == tea.KeyEsc {
+	if binding == "esc" {
 		// The ladder's first rung: Esc stops the command the composer is
 		// running. Everything that takes Esc *earlier* — a card, a dialog, the
 		// confirm line, the sub-agent view, the two focus bands — keeps its
@@ -3485,19 +3440,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// arrows that leave the composer and of the textarea's own line keys —
 	// and PgUp/PgDn stay the transcript's, the slash menu having no rows
 	// inside an `@` token (slashBandRows). Enter is handleEnter's.
-	switch msg.Type {
-	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyCtrlP, tea.KeyCtrlN:
+	switch binding {
+	case "tab", "up", "down", "ctrl+p", "ctrl+n":
 		if next, ok := m.composerAtKey(msg); ok {
 			return next, nil
 		}
 	}
-	switch msg.Type {
-	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+	switch binding {
+	case "tab", "up", "down", "pgup", "pgdown":
 		if rows := m.slashBandRows(); rows > 0 {
-			return m.handleSlashKey(msg.Type, rows), nil
+			return m.handleSlashKey(binding, rows), nil
 		}
 	}
-	if msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown {
+	if binding == "pgup" || binding == "pgdown" {
 		// A page of the rows as they stand (catchUp), so where it leaves the
 		// transcript, and whether it still follows the bottom, is decided on
 		// them.
@@ -3509,7 +3464,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if isNewlineKey(msg) {
 		return m, m.updateComposer(msg)
 	}
-	if msg.Type == tea.KeyEnter {
+	if binding == "enter" {
 		return m.handleEnter()
 	}
 	// Only the arrow keys move the keyboard out of the composer, empty
@@ -3520,11 +3475,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// messages") and the sub-agent rows otherwise; ↓ reaches the sub-agent
 	// rows first, because they are the band below the composer, and the queue
 	// only when there are none.
-	if msg.Type == tea.KeyUp || msg.Type == tea.KeyDown {
+	if binding == "up" || binding == "down" {
 		queued := len(m.visibleQueue())
 		agents := len(m.visibleAgents())
 		switch {
-		case msg.Type == tea.KeyUp && queued > 0:
+		case binding == "up" && queued > 0:
 			m.focusQueue(queued - 1)
 			return m, nil
 		case agents > 0:
@@ -3541,7 +3496,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// motion. Everything that owns the keyboard — a card, a dialog, the
 	// confirm line, the sub-agent view, the focused bands — has had the key
 	// above; a queue edit holds its text in the composer, so it is not empty.
-	if msg.Type == tea.KeyLeft && !msg.Alt && m.sessions != nil && m.input.Value() == "" && m.queueEdit == "" {
+	if binding == "left" && m.sessions != nil && m.input.Value() == "" && m.queueEdit == "" {
 		return m.openSessions()
 	}
 	return m, m.updateComposer(msg)
@@ -3567,7 +3522,7 @@ func (m *Model) focusComposer() {
 // Esc and any key that is not a row key return to the composer; that key is
 // then handled as usual (handled == false), so typing never needs a second
 // press.
-func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
+func (m Model) handleRowsKey(msg keyInput) (bool, Model, tea.Cmd) {
 	items := m.visibleAgents()
 	if len(items) == 0 {
 		m.focusComposer()
@@ -3576,8 +3531,8 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 	if stopped, next, cmd := m.stopRowKey(msg, items); stopped { // subcancel.go
 		return true, next, cmd
 	}
-	switch msg.Type {
-	case tea.KeyUp:
+	switch shortcut(msg) {
+	case "up":
 		switch {
 		case m.agentSel > 0:
 			m.moveAgent(-1)
@@ -3588,19 +3543,19 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 			m.focusComposer()
 		}
 		return true, m, nil
-	case tea.KeyDown:
+	case "down":
 		if m.agentSel < len(items)-1 {
 			m.moveAgent(1)
 		}
 		return true, m, nil
-	case tea.KeyEnter:
+	case "enter":
 		if m.agentID != "" {
 			m.enterView(m.agentID)
 		} else {
 			m.selectAgent(m.agentSelection(len(items)))
 		}
 		return true, m, nil
-	case tea.KeyEsc:
+	case "esc":
 		m.focusComposer()
 		return true, m, nil
 	}
@@ -3608,34 +3563,22 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 	return false, m, nil
 }
 
-func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) updateComposer(msg keyInput) tea.Cmd {
 	// A blurred textarea drops every key, so whatever took the cursor away
 	// (Esc on an idle turn, the rows) gives it back before the key lands.
 	if !m.input.Focused() {
 		_ = m.input.Focus()
 	}
-	// bubbles' word-left (textarea v0.21.0's wordLeft, on its WordBackward
-	// keys: alt+←, alt+b, and macOS Terminal's ESC b, which arrives as alt+b)
-	// never returns when nothing but whitespace is before the cursor — an
-	// empty composer among them: it steps left looking for a word's end, and
-	// at the start of the text a step left no longer moves, so it steps for
-	// ever and craze hangs. Wherever it does return with only whitespace
-	// before the cursor (the cursor at the very start, a word under it), it
-	// has not moved the cursor, so the key is dropped there: the same result,
-	// without the hang. The forward motions and the word deletions stop at
-	// the end of the text on their own (TestWordMotionOverBlankTextReturns).
-	if key.Matches(msg, m.input.KeyMap.WordBackward) && strings.TrimSpace(m.input.Value()[:m.composerCursorOffset()]) == "" {
-		return nil
-	}
 	// Images (plan 033 §3.3, composer_image.go). Every composer paste, drop,
 	// Alt+V, Backspace and Delete passes here, and nowhere else does: never
 	// the session list's input, /connect's key field, or a dialog's.
 	var imgCmd tea.Cmd
+	paste, pasting := msg.(tea.PasteMsg)
 	switch {
-	case msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'v':
+	case shortcut(msg) == "alt+v":
 		// Alt+V is Ctrl+V's alias: the clipboard's image, then its text.
 		return m.composerPaste()
-	case msg.Paste && len(msg.Runes) == 0:
+	case pasting && paste.Content == "":
 		// An empty bracketed paste: what a terminal sends for an image it
 		// could not paste as text. Its clipboard is the GUI's — except over
 		// SSH, where the clipboard craze could read is the remote machine's,
@@ -3645,23 +3588,18 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		return probeClipboardImage(m.shownGen, m.composerGen)
-	case msg.Paste:
+	case pasting:
 		// A paste of image paths becomes their chips, inserted as the paste
 		// would have been; any other paste goes in as it came.
-		if chips, cmd := m.pasteImages(string(msg.Runes)); cmd != nil {
-			msg.Runes, imgCmd = []rune(chips), cmd
+		if chips, cmd := m.pasteImages(paste.Content); cmd != nil {
+			msg, imgCmd = tea.PasteMsg{Content: chips}, cmd
 		}
+	case key.Matches(msg, m.input.KeyMap.WordBackward) && strings.TrimSpace(m.input.Value()[:m.composerCursorOffset()]) == "":
+		// A word-left keystroke without a preceding word keeps the cursor put.
+		m.input.ClearSelection()
+		return nil
 	}
 	prev := m.input.Value()
-	// bubbles repositions its own viewport inside Update (textarea.go:1087),
-	// against the height in force *before* the key, and never rewinds slack
-	// afterwards: at height 1 a second line scrolled the first one — and the
-	// `❯` that only ever marks display row 0 — off the top, and SetHeight does
-	// not reposition. Lending the textarea more rows than any draft can have
-	// keeps the cursor inside the view, so the offset stays 0 through newline,
-	// wrap boundary and bracketed paste. relayout puts the real height back
-	// before anything is drawn.
-	m.input.SetHeight(composerHeadroom)
 	var cmd tea.Cmd
 	// Backspace at a chip's end, or Delete at its start, takes the whole chip
 	// and its image (plan 033 §3.3); any other key is the textarea's.
@@ -3809,7 +3747,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// searching, or nothing matches — Enter is the composer's, and the draft
 	// goes as it is typed: not to a slash menu over a `/` inside the token
 	// (slashBandActive), which would write a command into it.
-	if next, ok := m.composerAtKey(tea.KeyMsg{Type: tea.KeyEnter}); ok {
+	if next, ok := m.composerAtKey(tea.KeyPressMsg{Code: tea.KeyEnter}); ok {
 		return next, nil
 	}
 	// The menu owns Enter while it is up, and it owns it before the queue edit
@@ -5586,9 +5524,27 @@ func capRunes(s string, n int) string {
 	return s
 }
 
-// View places the regions the layout decided, each forced to exactly its own
+// View describes both the screen contents and the terminal modes for this frame.
+func (m Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+		if m.btw == nil && len(m.queueItems()) > 0 {
+			// The queue's action links track hover, even with no button held.
+			v.MouseMode = tea.MouseModeAllMotion
+		}
+	}
+	if m.terminalTitle {
+		v.WindowTitle = m.windowTitle()
+	}
+	m.terminalAppearance(&v)
+	return v
+}
+
+// render places the regions the layout decided, each forced to exactly its own
 // row count, so the frame is always exactly as tall as the terminal.
-func (m Model) View() string {
+func (m Model) render() string {
 	if !m.ready || m.width <= 0 || m.height <= 0 {
 		// A degenerate size still owes the terminal exactly its own rows.
 		return blankFrame(m.width, m.height)

@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -853,10 +853,10 @@ func (m Model) sessCmdSourceNow() sessCmdSource {
 // /fast are written, with the space that opens their values; /exit quits
 // craze on enter, every session left running, and is only written by tab,
 // which never submits. handled false: write what the popup chose.
-func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, bool) {
+func (m Model) sessCmdChosen(key string, it completeItem) (Model, tea.Cmd, bool) {
 	kind, id, _ := strings.Cut(it.Value, ":")
 	switch {
-	case kind == "cmd" && id == sessCmdExit && key == tea.KeyEnter:
+	case kind == "cmd" && id == sessCmdExit && key == "enter":
 		tm, cmd := m.sessQuit()
 		return tm.(Model), cmd, true
 	case kind == "provider" && it.Refusal != "":

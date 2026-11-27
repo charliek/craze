@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -240,7 +240,7 @@ func TestAViewerDrawsWhatTheHostTUIDraws(t *testing.T) {
 	view := startedOverTheSocket(t, h, true, ws)
 	same := func(step string) {
 		t.Helper()
-		a, b := full.m.View(), view.m.View()
+		a, b := full.m.View().Content, view.m.View().Content
 		if a != b {
 			t.Fatalf("%s: the viewer draws another frame\n--- host TUI\n%s\n--- viewer\n%s", step, plain(a), plain(b))
 		}
@@ -260,19 +260,19 @@ func TestAViewerDrawsWhatTheHostTUIDraws(t *testing.T) {
 	}
 	full.readTo(seq)
 	view.readTo(seq)
-	if v := plain(view.m.View()); !strings.Contains(v, "echo: a prompt from the host") {
+	if v := plain(view.m.View().Content); !strings.Contains(v, "echo: a prompt from the host") {
 		t.Fatalf("fixture: the host's turn is not on screen:\n%s", v)
 	}
 	same("after the host's turn")
 
 	for _, r := range []*gateRig{full, view} {
-		r.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a draft of mine")})
+		r.send(textKey("a draft of mine"))
 	}
 	same("a draft")
 	for _, r := range []*gateRig{full, view} {
-		r.send(tea.KeyMsg{Type: tea.KeyCtrlU})
-		r.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/help")})
-		r.send(tea.KeyMsg{Type: tea.KeyEnter})
+		r.send(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+		r.send(textKey("/help"))
+		r.send(tea.KeyPressMsg{Code: tea.KeyEnter})
 		if r.m.dialog != dialogHelp {
 			t.Fatalf("fixture: /help opened dialog %v", r.m.dialog)
 		}
@@ -292,7 +292,7 @@ func TestAViewersQuitLeavesTheSessionRunning(t *testing.T) {
 	isolateSkillsHome(t)
 	h := newAttachHost(t, true)
 	r := startedOverTheSocket(t, h, true, frameWorkspace(t))
-	tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	tm, cmd := r.m.gated(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, Model.update)
 	r.m = tm.(Model)
 	quits := namedCmds(cmd, "stopQuit")
 	if len(quits) != 1 {
@@ -339,7 +339,7 @@ func TestAViewersQuitStopsASessionItsHostCanStop(t *testing.T) {
 	if err := other.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	tm, cmd := r.m.gated(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, Model.update)
 	r.m = tm.(Model)
 	quits := namedCmds(cmd, "stopQuit")
 	if len(quits) != 1 {
@@ -369,7 +369,7 @@ func TestAViewersQuitStopsASessionItsHostCanStop(t *testing.T) {
 		}
 	}
 	// A second quit while the first would still wait quits at once.
-	tm, cmd = r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	tm, cmd = r.m.gated(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, Model.update)
 	r.m = tm.(Model)
 	if len(namedCmds(cmd, "stopQuit")) != 0 {
 		t.Fatal("a second quit asked for a second stop")

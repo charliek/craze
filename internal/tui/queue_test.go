@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -188,18 +187,18 @@ func TestFocusMatrix(t *testing.T) {
 	subs := []agent.SubagentInfo{{ID: "sub-1", Description: "one", Status: agent.SubagentRunning}}
 	for _, tc := range []struct {
 		name   string
-		key    tea.KeyType
+		key    string
 		queued bool
 		agents bool
 		want   string // "queue", "rows" or "composer"
 	}{
-		{"up with a queue", tea.KeyUp, true, false, "queue"},
-		{"up with a queue and rows", tea.KeyUp, true, true, "queue"},
-		{"up with rows only", tea.KeyUp, false, true, "rows"},
-		{"up with neither", tea.KeyUp, false, false, "composer"},
-		{"down with rows", tea.KeyDown, true, true, "rows"},
-		{"down with a queue only", tea.KeyDown, true, false, "queue"},
-		{"down with neither", tea.KeyDown, false, false, "composer"},
+		{"up with a queue", "up", true, false, "queue"},
+		{"up with a queue and rows", "up", true, true, "queue"},
+		{"up with rows only", "up", false, true, "rows"},
+		{"up with neither", "up", false, false, "composer"},
+		{"down with rows", "down", true, true, "rows"},
+		{"down with a queue only", "down", true, false, "queue"},
+		{"down with neither", "down", false, false, "composer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, stub := queueWorking(t)
@@ -215,7 +214,7 @@ func TestFocusMatrix(t *testing.T) {
 			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)
-			tm, _ = m.Update(tea.KeyMsg{Type: tc.key})
+			tm, _ = m.Update(testKey(tc.key))
 			m = tm.(Model)
 			got := "composer"
 			switch {
@@ -243,22 +242,22 @@ func TestQueueBandAndRowsCross(t *testing.T) {
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if !m.queueFocus {
 		t.Fatal("↑ reaches the band")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.queueFocus || !m.agentFocus {
 		t.Fatal("↓ past the last row reaches the sub-agent rows")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if !m.queueFocus || m.agentFocus {
 		t.Fatal("↑ past the first sub-agent row comes back to the band")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if m.queueFocus {
 		t.Fatal("↑ past the first queued row returns to the composer")
@@ -269,12 +268,12 @@ func TestBackspaceRemovesAndClampsTheSelection(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if got := m.queueID; got == "" {
 		t.Fatal("nothing selected")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = tm.(Model)
 	if got := queueTexts(m); len(got) != 1 || got[0] != "one" {
 		t.Fatalf("queue %q", got)
@@ -282,7 +281,7 @@ func TestBackspaceRemovesAndClampsTheSelection(t *testing.T) {
 	if m.queueSel != 0 {
 		t.Fatalf("the selection is clamped: %d", m.queueSel)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = tm.(Model)
 	if got := queuedRows(m); len(got) != 0 {
 		t.Fatalf("queue %+v", got)
@@ -298,7 +297,7 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	m = typeEnter(t, m, "two")
 	before := queuedRows(m)[1]
 	m.input.SetValue("a draft in progress")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
@@ -326,12 +325,12 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	}
 
 	// Esc leaves the row untouched and puts the draft back.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
 	m.input.SetValue("not saved")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.queueEdit != "" {
 		t.Fatal("esc leaves edit mode")
@@ -350,7 +349,7 @@ func TestCtrlLInterjectsOnGrok(t *testing.T) {
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 	m.input.SetValue("BANANA")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.status != statusWorking {
 		t.Fatalf("an interjection does not change the status: %s", m.status)
@@ -390,7 +389,7 @@ func TestCtrlLRefusedAfterTheTurnIsDone(t *testing.T) {
 		t.Fatalf("setup: status %s, want working", m.status)
 	}
 	m.input.SetValue("BANANA")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.input.Value() != "BANANA" {
 		t.Fatalf("a refused interjection keeps the draft: %q", m.input.Value())
 	}
@@ -408,7 +407,7 @@ func TestCtrlLRefusedWhenTheAckFails(t *testing.T) {
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 	m.input.SetValue("BANANA")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.input.Value() != "BANANA" {
 		t.Fatalf("a failed interjection keeps the draft: %q", m.input.Value())
@@ -424,7 +423,7 @@ func TestCtrlLRefusedWhenTheAckFails(t *testing.T) {
 func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 	m, stub := heldWorking(t)
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.confirm == nil {
 		t.Fatal("cursor asks first")
@@ -437,7 +436,7 @@ func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 	}
 
 	// Esc declines and loses nothing.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.confirm != nil {
 		t.Fatal("esc declines")
@@ -453,7 +452,7 @@ func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 	// a goroutine of its own. Nothing is drawn and nothing has been prompted in
 	// this Update, which is the claim that matters — the row and the draft are
 	// where they were until the send actually fires.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	m = pumpKey(t, m, enter())
 	if m.cardMask == "" {
@@ -482,7 +481,7 @@ func TestOnlyOneStrongSendIsPending(t *testing.T) {
 	// the first one lasts.
 	m, sess := armedSendNow(t, "PINEAPPLE")
 	m.input.SetValue("MANGO")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.confirm != nil {
 		t.Fatal("a second send now is refused, not queued")
 	}
@@ -494,7 +493,7 @@ func TestOnlyOneStrongSendIsPending(t *testing.T) {
 
 func TestEscWhilePendingDropsItAndRestoresTheText(t *testing.T) {
 	m, _ := armedSendNow(t, "PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if sendNowArmed(m) {
 		t.Fatal("esc drops the pending send")
 	}
@@ -516,7 +515,7 @@ func armedSendNow(t *testing.T, text string) (Model, *scriptedSession) {
 	m, sess := scriptedModel(t)
 	m = startScripted(t, m, sess, "go", scriptHeld())
 	m.input.SetValue(text)
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.confirm == nil {
 		t.Fatalf("setup: cursor asks first:\n%s", plainView(m))
 	}
@@ -545,7 +544,7 @@ func TestCancelFailedDropsThePendingSend(t *testing.T) {
 	m, sess := scriptedModel(t)
 	m = startScripted(t, m, sess, "go", scriptHeld())
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	sess.FailNextCancel(errors.New("nope"))
 	m = pumpKey(t, m, enter())
 	m = pumpUntil(t, m, allOf(viewHas("cancel failed"), errorRows(1)))
@@ -586,7 +585,7 @@ func TestEscCancelFailedDrawsTheRow(t *testing.T) {
 func TestCardHidesTheConfirm(t *testing.T) {
 	m, stub := queueWorking(t)
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.confirm == nil {
 		t.Fatal("the confirm is up")
@@ -612,7 +611,7 @@ func TestCtrlCClearsEverythingPendingThenCancels(t *testing.T) {
 	m = pumpEnter(t, m, "one")
 	m = pumpEnter(t, m, "two")
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	// The cancel the arm asks for is the engine's, made on a goroutine of its
 	// own, and it is what would end this turn — so it is held on arrival. That is
 	// what makes "armed, with two rows still queued" a state and not a moment.
@@ -622,7 +621,7 @@ func TestCtrlCClearsEverythingPendingThenCancels(t *testing.T) {
 	if !sendNowArmed(m) || len(queueTexts(m)) != 2 {
 		t.Fatalf("set up: armed %v queue %q", sendNowArmed(m), queueTexts(m))
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if cmd == nil {
 		t.Fatal("ctrl+c cancels")
@@ -641,7 +640,7 @@ func TestEscLetsTheQueueContinue(t *testing.T) {
 	m = pumpEnter(t, m, "PINEAPPLE")
 	// The cancel's command is held back, so the queue can be inspected in a
 	// moment when the cancelled turn provably has not ended yet.
-	m, cancel := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, cancel := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if got := queueTexts(m); len(got) != 1 {
 		t.Fatalf("esc does not touch the queue: %q", got)
 	}
@@ -838,12 +837,12 @@ func TestHoverOnlyOnButtonlessMotion(t *testing.T) {
 	if band.Empty() {
 		t.Fatal("the band is drawn")
 	}
-	tm, _ := m.Update(tea.MouseMsg{X: 4, Y: band.Top, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	tm, _ := m.Update(tea.MouseMotionMsg{X: 4, Y: band.Top, Button: tea.MouseLeft})
 	m = tm.(Model)
 	if m.queueHov.row != -1 {
 		t.Fatalf("a held button is a drag, not a hover: %+v", m.queueHov)
 	}
-	tm, _ = m.Update(tea.MouseMsg{X: 4, Y: band.Top, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+	tm, _ = m.Update(tea.MouseMotionMsg{X: 4, Y: band.Top, Button: tea.MouseNone})
 	m = tm.(Model)
 	if m.queueHov.row != 0 {
 		t.Fatalf("hover %+v", m.queueHov)
@@ -852,7 +851,7 @@ func TestHoverOnlyOnButtonlessMotion(t *testing.T) {
 		t.Fatalf("the actions are missing:\n%s", plainView(m))
 	}
 	// Off the band again.
-	tm, _ = m.Update(tea.MouseMsg{X: 4, Y: 0, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+	tm, _ = m.Update(tea.MouseMotionMsg{X: 4, Y: 0, Button: tea.MouseNone})
 	m = tm.(Model)
 	if m.queueHov.row != -1 {
 		t.Fatalf("hover %+v", m.queueHov)
@@ -863,7 +862,7 @@ func TestHoverChangesNoFrameSizes(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "PINEAPPLE")
 	before := m.lay
-	tm, _ := m.Update(tea.MouseMsg{X: 4, Y: before.Region(regionQueue).Top, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+	tm, _ := m.Update(tea.MouseMotionMsg{X: 4, Y: before.Region(regionQueue).Top, Button: tea.MouseNone})
 	m = tm.(Model)
 	if m.lay.regions != before.regions {
 		t.Fatalf("a hover relaid the frame:\n%+v\n%+v", before.regions, m.lay.regions)
@@ -884,13 +883,13 @@ func TestQueueActionClicks(t *testing.T) {
 	hoverRow := func(t *testing.T, m Model, row int) Model {
 		t.Helper()
 		y := m.lay.Region(regionQueue).Top + row
-		tm, _ := m.Update(tea.MouseMsg{X: 4, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+		tm, _ := m.Update(tea.MouseMotionMsg{X: 4, Y: y, Button: tea.MouseNone})
 		return tm.(Model)
 	}
 	press := func(t *testing.T, m Model, x, row int) Model {
 		t.Helper()
 		y := m.lay.Region(regionQueue).Top + row
-		tm, _ := m.Update(tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+		tm, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 		return tm.(Model)
 	}
 
@@ -949,26 +948,25 @@ func TestQueueActionClicks(t *testing.T) {
 	})
 }
 
-// TestMouseModeFollowsTheQueue: all-motion is what hover needs, and neither
-// escape disables the other, so every transition goes through DisableMouse.
 func TestMouseModeFollowsTheQueue(t *testing.T) {
 	m, _ := queueWorking(t)
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("empty queue: mouse mode %v", got)
+	}
 	m.input.SetValue("PINEAPPLE")
-	tm, cmd := m.Update(enter())
+	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !hasMouseSequence(t, cmd, "all") {
-		t.Fatal("0 → 1 rows enables all motion through DisableMouse")
+	if got := m.View().MouseMode; got != tea.MouseModeAllMotion {
+		t.Fatalf("queue hover: mouse mode %v", got)
 	}
-	// Still one row: nothing is issued.
-	tm, cmd = m.Update(refreshSnapMsg{})
+	tm, _ = m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	if hasMouseSequence(t, cmd, "all") || hasMouseSequence(t, cmd, "cell") {
-		t.Fatal("no transition, no command")
+	if got := m.View().MouseMode; got != tea.MouseModeAllMotion {
+		t.Fatalf("queue refresh: mouse mode %v", got)
 	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-	m = tm.(Model)
-	if !hasMouseSequence(t, cmd, "cell") {
-		t.Fatal("1 → 0 rows restores cell motion through DisableMouse")
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if got := tm.(Model).View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("cleared queue: mouse mode %v", got)
 	}
 }
 
@@ -991,60 +989,14 @@ func TestMouseModeNeverIssuedUnderNoMouse(t *testing.T) {
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
 	m.input.SetValue("PINEAPPLE")
-	tm, cmd := m.Update(enter())
+	tm, _ = m.Update(enter())
 	m = tm.(Model)
 	if got := queuedRows(m); len(got) != 1 {
 		t.Fatalf("the queue still works: %+v", got)
 	}
-	if hasMouseSequence(t, cmd, "all") || hasMouseSequence(t, cmd, "cell") {
+	if m.View().MouseMode != tea.MouseModeNone {
 		t.Fatal("--no-mouse asked the terminal for no reporting; craze must not start now")
 	}
-}
-
-// hasMouseSequence walks a batched command for the motion-mode transition.
-// bubbletea's own mode messages are unexported types, so the test identifies
-// them by the escape sequence they carry — which is what the terminal sees,
-// and what the PTY test asserts on the other side.
-func hasMouseSequence(t *testing.T, cmd tea.Cmd, want string) bool {
-	t.Helper()
-	var disable, mode bool
-	var walk func(tea.Cmd, int)
-	walk = func(c tea.Cmd, depth int) {
-		if c == nil || depth > 4 {
-			return
-		}
-		msg := c()
-		if batch, ok := msg.(tea.BatchMsg); ok {
-			for _, sub := range batch {
-				walk(sub, depth+1)
-			}
-			return
-		}
-		// tea.Sequence returns an unexported []tea.Cmd type; reflection is
-		// the only way in, and it is the same shape a batch has.
-		if v := reflect.ValueOf(msg); v.Kind() == reflect.Slice {
-			for i := 0; i < v.Len(); i++ {
-				if sub, ok := v.Index(i).Interface().(tea.Cmd); ok {
-					walk(sub, depth+1)
-				}
-			}
-			return
-		}
-		name := fmt.Sprintf("%T", msg)
-		switch {
-		case strings.Contains(name, "disableMouse"):
-			disable = true
-		case want == "all" && strings.Contains(name, "enableMouseAllMotion"):
-			mode = true
-		case want == "cell" && strings.Contains(name, "enableMouseCellMotion"):
-			mode = true
-		}
-	}
-	walk(cmd, 0)
-	if mode && !disable {
-		t.Fatal("a mode change must go through DisableMouse: neither escape disables the other")
-	}
-	return mode && disable
 }
 
 // TestEmptyQueueChangesNoFrameSizes is the compatibility contract: the new
@@ -1130,20 +1082,20 @@ func TestQueueFrameHeightInEveryState(t *testing.T) {
 				m = typeEnter(t, m, "two")
 				switch state {
 				case "selected":
-					tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+					tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 					m = tm.(Model)
 				case "hover":
 					band := m.lay.Region(regionQueue)
-					tm, _ = m.Update(tea.MouseMsg{X: 4, Y: band.Top, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion})
+					tm, _ = m.Update(tea.MouseMotionMsg{X: 4, Y: band.Top, Button: tea.MouseNone})
 					m = tm.(Model)
 				case "edit":
-					tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+					tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 					m = tm.(Model)
 					tm, _ = m.Update(enter())
 					m = tm.(Model)
 				case "confirm":
 					m.input.SetValue("PINEAPPLE")
-					tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+					tm, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 					m = tm.(Model)
 				}
 				view := plainView(m)
@@ -1165,12 +1117,12 @@ func TestQueueFrameHeightInEveryState(t *testing.T) {
 func TestQueueLaysOutOncePerUpdate(t *testing.T) {
 	m, _ := queueWorking(t)
 	for _, msg := range []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")},
+		textKey("x"),
 		enter(),
-		tea.KeyMsg{Type: tea.KeyUp},
-		tea.MouseMsg{X: 4, Y: 20, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion},
-		tea.KeyMsg{Type: tea.KeyCtrlL},
-		tea.KeyMsg{Type: tea.KeyEsc},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+		tea.MouseMotionMsg{X: 4, Y: 20, Button: tea.MouseNone},
+		tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl},
+		tea.KeyPressMsg{Code: tea.KeyEsc},
 	} {
 		before := m.layouts
 		tm, _ := m.Update(msg)
@@ -1187,7 +1139,7 @@ func TestQueueLaysOutOncePerUpdate(t *testing.T) {
 func TestEditedRowSentUnderTheEditor(t *testing.T) {
 	m, stub := heldWorking(t)
 	m = pumpEnter(t, m, "PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	m = pumpKey(t, m, enter())
 	if m.queueEdit == "" {
 		t.Fatal("edit mode is on")
@@ -1218,7 +1170,7 @@ func TestActionStripHitTestMatchesTheDraw(t *testing.T) {
 			tm, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
 			m = tm.(Model)
 			m = typeEnter(t, m, "PINEAPPLE")
-			tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+			tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 			m = tm.(Model)
 			row := plain(m.queueRow(0, queuedRows(m)[0], true, false))
 			if !strings.Contains(row, "[send now] [edit] [cancel]") {
@@ -1255,12 +1207,12 @@ func TestSendNowOnARowSendsItExactlyOnce(t *testing.T) {
 	m = pumpEnter(t, m, "PINEAPPLE")
 	m = pumpEnter(t, m, "MANGO")
 	// Select the first row and send it now.
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if got, _ := m.queueSelected(); got.Text != "PINEAPPLE" {
 		t.Fatalf("selected %+v", got)
 	}
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.confirm == nil {
 		t.Fatal("send now on a row asks first")
 	}
@@ -1303,7 +1255,7 @@ func TestSendNowOnARowSendsItExactlyOnce(t *testing.T) {
 func TestConfirmDroppedWhenTheTurnEndsFirst(t *testing.T) {
 	m, stub := heldWorking(t)
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	if m.confirm == nil {
 		t.Fatal("the confirm is up")
 	}
@@ -1339,7 +1291,7 @@ func TestArmedSendDroppedByAnErroredTurn(t *testing.T) {
 	sc := scriptFailed(errors.New("boom")).held()
 	m = startScripted(t, m, sess, "go", sc)
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	release := sess.HoldNextCancel()
 	m = pumpKey(t, m, enter())
 	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
@@ -1372,17 +1324,17 @@ func TestEditingASecondRowKeepsTheOriginalDraft(t *testing.T) {
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
 	m.input.SetValue("my draft")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
 	m.input.SetValue("edited two")
 	// Switch to the other row without saving.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.input.Value() != "my draft" {
 		t.Fatalf("the original draft comes back: %q", m.input.Value())
@@ -1396,7 +1348,7 @@ func TestEditSurvivesTheBandBeingDegradedAway(t *testing.T) {
 	for _, text := range []string{"one", "two", "three", "four"} {
 		m = typeEnter(t, m, text)
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
@@ -1448,7 +1400,7 @@ func TestQueueEditChipSurvivesTheNarrowestRule(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: minFrameCols, Height: 24})
 	m = tm.(Model)
 	m = typeEnter(t, m, "PINEAPPLE")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	tm, _ = m.Update(enter())
 	m = tm.(Model)

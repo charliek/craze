@@ -17,8 +17,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The composer's `@` file source (at_files.go, plan 030 §3.16): the search —
@@ -726,7 +724,7 @@ func TestAtFilesCandidatesWriteTheirPath(t *testing.T) {
 	env := completeEnv{Workspace: "/w", Shown: 1}
 	p := newCompletePopup(src, atGrammar)
 	p.loaded(awaitLoaded(t, runLoad(t, synced(&p, "see @my", env))))
-	c, _ := popKey(&p, keyOf(tea.KeyEnter))
+	c, _ := popKey(&p, keyOf("enter"))
 	if c.value != `see @"notes/my plan.txt" ` {
 		t.Fatalf("accepting a path with a space wrote %q", c.value)
 	}
@@ -737,7 +735,7 @@ func TestAtFilesCandidatesWriteTheirPath(t *testing.T) {
 		t.Fatal("the popup is still open after the accept's space")
 	}
 	p.loaded(awaitLoaded(t, runLoad(t, synced(&p, "@internal/tu", env))))
-	c, _ = popKey(&p, keyOf(tea.KeyTab))
+	c, _ = popKey(&p, keyOf("tab"))
 	if c.verb != completeDescended || c.value != "@internal/tui/" {
 		t.Fatalf("tab on internal/tui/: %v %q", c.verb, c.value)
 	}
@@ -747,7 +745,7 @@ func TestAtFilesCandidatesWriteTheirPath(t *testing.T) {
 	if got := popupNames(p); len(got) != 9 || got[0] != "internal/tui/app.go" {
 		t.Fatalf("inside internal/tui/: %q", got)
 	}
-	c, _ = popKey(&p, keyOf(tea.KeyEnter))
+	c, _ = popKey(&p, keyOf("enter"))
 	if c.value != "@internal/tui/app.go " {
 		t.Fatalf("accepting inside wrote %q", c.value)
 	}
@@ -875,7 +873,7 @@ func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
 		if rows := trimmed(popupText(p, 60, 12)); !slices.Contains(rows, agentGutterMark+tc.name) {
 			t.Errorf("%s: no selected row reads %q:\n%s", tc.typed, tc.name, strings.Join(rows, "\n"))
 		}
-		if c, _ := popKey(&p, keyOf(tea.KeyEnter)); c.value != tc.token {
+		if c, _ := popKey(&p, keyOf("enter")); c.value != tc.token {
 			t.Errorf("accepting %s wrote %q, want %q", tc.typed, c.value, tc.token)
 		}
 	}
@@ -948,7 +946,7 @@ func TestAtFilesHandsThePopupItsBestAndCountsTheRest(t *testing.T) {
 	if l := last(); l != "  ↓ 142 more" || p.height(40, 20) != 10 {
 		t.Fatalf("at the top: %q, height %d", l, p.height(40, 20))
 	}
-	popKey(&p, keyOf(tea.KeyUp)) // wraps to the last of the 100
+	popKey(&p, keyOf("up")) // wraps to the last of the 100
 	if l := last(); l != "  ↓ 50 more" {
 		t.Fatalf("at the last row handed: %q", l)
 	}

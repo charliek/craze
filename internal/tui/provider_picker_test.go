@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -201,7 +201,7 @@ func TestProviderLockedSkipsPicker(t *testing.T) {
 func TestProviderPickerEnterStartsSelected(t *testing.T) {
 	build, built := capturingFactory(t)
 	m := newPickerWithFactory(t, agent.CursorProvider(), nil, build)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if m.providerCursor != 1 {
 		t.Fatalf("cursor %d", m.providerCursor)
@@ -241,12 +241,12 @@ func TestProviderPickerEscStartsDefault(t *testing.T) {
 	if m.providerCursor != 1 {
 		t.Fatalf("preselect %d", m.providerCursor)
 	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if m.providerCursor != 0 {
 		t.Fatalf("cursor after up %d", m.providerCursor)
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	assertOwned(t, m, *built)
 	msg := runCmd(cmd)
@@ -324,7 +324,7 @@ func TestProviderPickerRefusesWhatTheCommandLineRefuses(t *testing.T) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	// Up from the default wraps to the last row, which is native.
-	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = tm.(Model)
 	if got := m.providers[m.providerCursor].Name(); got != "native" {
 		t.Fatalf("fixture: the cursor is on %q, want native", got)
@@ -357,7 +357,7 @@ func TestProviderPickerRefusesWhatTheCommandLineRefuses(t *testing.T) {
 
 	// Down wraps back to the default: the refusal was about native, so its row
 	// goes with the cursor.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	if strings.Contains(plainView(m), "cannot be used") {
 		t.Fatalf("the cursor moved and the error row stayed:\n%s", plainView(m))
@@ -392,7 +392,7 @@ func TestProviderPickerClickClearsTheRefusal(t *testing.T) {
 		NewSession: pickerFactory(t),
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	tm, _ = tm.Update(enter())
 	m = tm.(Model)
 	if !strings.Contains(plainView(m), "craze: native refused") {
@@ -641,7 +641,7 @@ func TestProviderPickerCtrlDQuitsWithoutSession(t *testing.T) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.quitting {
 		t.Fatal("ctrl+d should quit")
@@ -675,7 +675,7 @@ func TestFallbackPickerEnterPersistsChosenProvider(t *testing.T) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = tm.(Model)
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
@@ -702,7 +702,7 @@ func TestFallbackPickerEscDoesNotPersist(t *testing.T) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	tm, _ = m.Update(runCmd(cmd))
 	_ = tm
@@ -820,22 +820,22 @@ func TestProviderPickerWrapsOverThreeRows(t *testing.T) {
 	three := []agent.Provider{agent.CursorProvider(), agent.GrokProvider(), agent.NativeProvider()}
 	for _, keys := range []struct {
 		name     string
-		fwd, rev tea.KeyType
+		fwd, rev string
 	}{
-		{"arrows", tea.KeyDown, tea.KeyUp},
-		{"tab", tea.KeyTab, tea.KeyShiftTab},
+		{"arrows", "down", "up"},
+		{"tab", "tab", "shift+tab"},
 	} {
 		t.Run(keys.name, func(t *testing.T) {
 			m := newPickerRows(t, agent.CursorProvider(), three)
 			for _, want := range []int{1, 2, 0, 1} {
-				tm, _ := m.Update(tea.KeyMsg{Type: keys.fwd})
+				tm, _ := m.Update(testKey(keys.fwd))
 				m = tm.(Model)
 				if m.providerCursor != want {
 					t.Fatalf("forward cursor %d, want %d", m.providerCursor, want)
 				}
 			}
 			for _, want := range []int{0, 2, 1, 0} {
-				tm, _ := m.Update(tea.KeyMsg{Type: keys.rev})
+				tm, _ := m.Update(testKey(keys.rev))
 				m = tm.(Model)
 				if m.providerCursor != want {
 					t.Fatalf("backward cursor %d, want %d", m.providerCursor, want)
@@ -873,7 +873,7 @@ func TestProviderPickerShowsDefaultMissingFromTheList(t *testing.T) {
 	if row := pickerRowLine(t, m, "grok"); !strings.Contains(row, "default") {
 		t.Fatalf("the inserted row is not tagged default: %q", row)
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	tm, _ = m.Update(runCmd(cmd))
 	m = tm.(Model)

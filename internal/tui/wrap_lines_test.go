@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -167,18 +167,18 @@ func TestProviderPickerKeepsItsHeightAcrossEveryRow(t *testing.T) {
 		refused, _ := press(m, enter())
 		if refused.providerErr != "" {
 			same(refused, "a refusal on "+m.providers[m.providerCursor].Name())
-			moved, _ := press(refused, tea.KeyMsg{Type: tea.KeyDown})
+			moved, _ := press(refused, tea.KeyPressMsg{Code: tea.KeyDown})
 			if moved.providerErr != "" {
 				t.Fatal("moving off the refused row kept the refusal")
 			}
 			same(moved, "the refusal cleared")
 		}
 		if i < n {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 		}
 	}
-	onGrok, _ := press(m, tea.KeyMsg{Type: tea.KeyDown}) // the walk ended on cursor
-	esc, _ := press(onGrok, tea.KeyMsg{Type: tea.KeyEsc})
+	onGrok, _ := press(m, tea.KeyPressMsg{Code: tea.KeyDown}) // the walk ended on cursor
+	esc, _ := press(onGrok, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if esc.providerErr != availCursorRefusal {
 		t.Fatalf("fixture: Esc from grok was not refused: %q", esc.providerErr)
 	}
@@ -206,7 +206,7 @@ func TestProviderPickerKeepsItsHeightAcrossEveryRow(t *testing.T) {
 		if !strings.Contains(view, "│"+want) {
 			t.Fatalf("at 40x12 the selected row %q is not drawn:\n%s", want, view)
 		}
-		narrow, _ = press(narrow, tea.KeyMsg{Type: tea.KeyDown})
+		narrow, _ = press(narrow, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 }
 
@@ -429,14 +429,14 @@ func TestTheHintNoteGivesWayToThePopupAndTheArmedClose(t *testing.T) {
 	armed, _, _ := sessModel(t, 80, 24)
 	armed = richList(t, armed)
 	armed = selectKey(t, armed, runKey("pty"))
-	armed, _ = press(armed, tea.KeyMsg{Type: tea.KeyCtrlX})
+	armed, _ = press(armed, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	armed.sessNote(long, sessNoteErr)
 	reg = sessRegionsOf(t, armed)
 	if len(reg.hint) != 1 || !strings.Contains(plain(reg.hint[0]), "ctrl+x again closes it") {
 		t.Fatalf("an armed close under a note: %q", reg.hint)
 	}
 	// A Ctrl+C window, likewise.
-	quit, _ := press(armed, tea.KeyMsg{Type: tea.KeyCtrlC})
+	quit, _ := press(armed, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	quit.sessNote(long, sessNoteErr)
 	reg = sessRegionsOf(t, quit)
 	if len(reg.hint) != 1 || !strings.Contains(plain(reg.hint[0]), "again quits craze") {

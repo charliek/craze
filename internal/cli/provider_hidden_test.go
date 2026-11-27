@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -470,14 +470,14 @@ func TestALoadIsRefusedByItsRowsProvider(t *testing.T) {
 			if cmd != nil {
 				t.Fatalf("claiming %v: Enter on the refused native row returned a command", claiming)
 			}
-			if view := ansi.Strip(m.View()); !strings.Contains(view, "craze: --agent-bin cannot be used with provider") {
+			if view := ansi.Strip(m.View().Content); !strings.Contains(view, "craze: --agent-bin cannot be used with provider") {
 				t.Fatalf("claiming %v: the picker does not show the refusal:\n%s", claiming, view)
 			}
 			if claims.Load() != 0 || len(loaded) != 0 {
 				t.Fatalf("claiming %v: the refused row was claimed %d times, built %v", claiming, claims.Load(), loaded)
 			}
 			// The cursor row goes through under the same flags.
-			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 			_, cmd = m.Update(enterKey)
 			if claiming {
 				if cmd == nil {

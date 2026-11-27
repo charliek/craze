@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -235,7 +235,7 @@ func TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror(t *testing.T) {
 		m = startScripted(t, m, sess, "go", first)
 		sess.Script(sent)
 		m.input.SetValue("PINEAPPLE")
-		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 		// The cancel the arm asks for is held, so "armed" is a state the test can
 		// stand in rather than a moment.
 		release := sess.HoldNextCancel()

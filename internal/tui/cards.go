@@ -7,8 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -186,7 +186,7 @@ func (m *Model) makeWayForCard() {
 	// A card takes the mouse too, so an in-progress drag is dropped rather
 	// than left waiting for a release that will never be handled.
 	m.sel = selection{}
-	m.pressed = tea.MouseButtonNone
+	m.pressed = tea.MouseNone
 	m.queueHov = noHover()
 	// A card owns the keyboard, so a confirm waiting for Enter cannot stay on
 	// screen behind it. It is discarded rather than remembered: the answer
@@ -369,7 +369,7 @@ func (m *Model) raiseCard(c card) {
 // before this, and everything else — Ctrl+T, Ctrl+G, Ctrl+O, the arrow-key
 // row selection — falls through to the card and is ignored unless the card
 // binds it.
-func (m Model) handleCardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleCardKey(msg keyInput) (tea.Model, tea.Cmd) {
 	c, ok := m.headCard()
 	if !ok {
 		return m, nil
@@ -387,12 +387,12 @@ func (m Model) handleCardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handlePermissionKey keeps the pinned line: allow once, allow always, reject
 // once — each one bound only while the request actually offers that kind, so a
 // key that is not on the line does nothing. Esc cancels the turn, as always.
-func (m Model) handlePermissionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyEsc {
+func (m Model) handlePermissionKey(c card, msg keyInput) (tea.Model, tea.Cmd) {
+	if shortcut(msg) == "esc" {
 		return m.cancelTurn()
 	}
 	kind := ""
-	switch msg.String() {
+	switch shortcut(msg) {
 	case "a", "y", "1":
 		kind = kindAllowOnce
 	case "A":
@@ -441,7 +441,7 @@ func permissionOffers(p *agent.PermissionEvent, kind string) bool {
 // Enter confirms it. Esc skips the whole request. A question that takes free
 // text has one more row, "Other…" (otherRow): picking it opens a one-line input
 // (handleQuestionTyping).
-func (m Model) handleQuestionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleQuestionKey(c card, msg keyInput) (tea.Model, tea.Cmd) {
 	if c.typing {
 		return m.handleQuestionTyping(c, msg)
 	}
@@ -454,22 +454,22 @@ func (m Model) handleQuestionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if rows == 0 {
 		return m.skipQuestion()
 	}
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch shortcut(msg) {
+	case "esc":
 		return m.skipQuestion()
-	case tea.KeyUp:
+	case "up":
 		c.optSel = (c.optSel - 1 + rows) % rows
-	case tea.KeyDown:
+	case "down":
 		c.optSel = (c.optSel + 1) % rows
-	case tea.KeyEnter:
+	case "enter":
 		if c.onOther() {
 			return m.openOther(c)
 		}
 		return m.commitQuestion(c)
 	default:
-		s := msg.String()
+		s := shortcut(msg)
 		switch {
-		case s == " ":
+		case s == "space":
 			if !q.AllowMultiple || c.onOther() {
 				return m, nil
 			}
@@ -514,11 +514,11 @@ func (m Model) openOther(c card) (tea.Model, tea.Cmd) {
 // takes it, Esc goes back to the options with nothing typed kept. Taken, the
 // text answers a single-select on its own, and joins a multi-select's toggles
 // as Enter confirms them. An empty input is no answer: Enter just closes it.
-func (m Model) handleQuestionTyping(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleQuestionTyping(c card, msg keyInput) (tea.Model, tea.Cmd) {
+	switch shortcut(msg) {
+	case "esc":
 		c.typing, c.draft = false, ""
-	case tea.KeyEnter:
+	case "enter":
 		text := strings.TrimSpace(c.draft)
 		c.typing, c.draft = false, ""
 		if text == "" {
@@ -532,16 +532,22 @@ func (m Model) handleQuestionTyping(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		next[q.ID] = text
 		c.text = next
 		return m.commitQuestion(c)
-	case tea.KeyBackspace:
+	case "backspace":
 		if r := []rune(c.draft); len(r) > 0 {
 			c.draft = string(r[:len(r)-1])
 		}
-	case tea.KeySpace:
+	case "space":
 		c.draft = appendDraft(c.draft, " ")
-	case tea.KeyRunes:
-		c.draft = appendDraft(c.draft, string(msg.Runes))
 	default:
-		return m, nil
+		switch msg := msg.(type) {
+		case tea.KeyPressMsg:
+			if msg.Text == "" {
+				return m, nil
+			}
+			c.draft = appendDraft(c.draft, msg.Text)
+		case tea.PasteMsg:
+			c.draft = appendDraft(c.draft, msg.Content)
+		}
 	}
 	m.setHead(c)
 	return m, nil
@@ -630,11 +636,11 @@ func (m Model) skipQuestion() (tea.Model, tea.Cmd) {
 // handlePlanKey is accept, reject, or Esc. Esc cancels the turn, which is how
 // the plan request reaches cursor as `cancelled`: the session answers every
 // request it is still holding.
-func (m Model) handlePlanKey(_ card, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyEsc {
+func (m Model) handlePlanKey(_ card, msg keyInput) (tea.Model, tea.Cmd) {
+	if shortcut(msg) == "esc" {
 		return m.cancelTurn()
 	}
-	switch msg.String() {
+	switch shortcut(msg) {
 	case "a", "y", "1":
 		return m.answerPlan(true)
 	case "r", "n", "2":
@@ -831,6 +837,6 @@ func (m Model) cardBox(body string) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Accent).
-		Width(max(1, m.width-2)).
+		Width(m.width).
 		Render(body)
 }

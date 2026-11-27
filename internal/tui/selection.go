@@ -1,13 +1,13 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
-	"github.com/rivo/uniseg"
 )
 
 // doubleClickWindow is how close two presses on the same cell have to be to
@@ -157,11 +157,9 @@ func cutCells(s string, lo, hi int) string {
 	}
 	var b strings.Builder
 	x := 0
-	g := uniseg.NewGraphemes(s)
-	for g.Next() {
-		w := max(g.Width(), 1)
+	for cluster, w := range displayCells(s) {
 		if x < hi && x+w > lo {
-			b.WriteString(g.Str())
+			b.WriteString(cluster)
 		}
 		x += w
 		if x >= hi {
@@ -180,10 +178,8 @@ func wordAt(s string, col int) (lo, hi int, ok bool) {
 	}
 	var cells []cell
 	x := 0
-	g := uniseg.NewGraphemes(s)
-	for g.Next() {
-		w := max(g.Width(), 1)
-		cells = append(cells, cell{x: x, w: w, space: strings.TrimSpace(g.Str()) == ""})
+	for cluster, w := range displayCells(s) {
+		cells = append(cells, cell{x: x, w: w, space: strings.TrimSpace(cluster) == ""})
 		x += w
 	}
 	at := -1
@@ -215,7 +211,7 @@ func (m Model) transcriptView() string {
 		return m.inspectedViewport()
 	}
 	from, to := m.sel.bounds()
-	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)
+	bg := selectionSeq(m.theme.profile, m.theme.SelectionBG)
 	top := m.vp.YOffset
 	var rows []string
 	if drawn := m.cur().drawn; drawn != nil {
@@ -243,28 +239,23 @@ func (m Model) transcriptView() string {
 // own palette keeps FG, Dim and Bright all legible on it; reverse keeps each
 // slot's own contrast against the background, whatever the palette is.
 // highlightSpan's closing reset turns it off after the span.
-func selectionSeq(p termenv.Profile, c lipgloss.CompleteColor) string {
-	var col termenv.Color
+func selectionSeq(p colorprofile.Profile, c color.Color) string {
 	switch p {
-	case termenv.TrueColor:
-		col = p.Color(c.TrueColor)
-	case termenv.ANSI256:
-		col = p.Color(c.ANSI256)
-	case termenv.ANSI:
-		return termenv.CSI + "7m"
-	}
-	if col == nil {
+	case colorprofile.ANSI:
+		return ansi.NewStyle().Reverse(true).String()
+	case colorprofile.ANSI256, colorprofile.TrueColor:
+		return ansi.NewStyle().BackgroundColor(c).String()
+	default:
 		return ""
 	}
-	return termenv.CSI + col.Sequence(true) + "m"
 }
 
 // selectionBand is st on the selection band under profile p: the band's own
 // colour, or reverse video at 16 colours (selectionSeq says why). It is the
 // style half of selectionSeq, for a row craze styles itself: the dialog
 // cursor row and the /model value row.
-func selectionBand(p termenv.Profile, st lipgloss.Style, c lipgloss.CompleteColor) lipgloss.Style {
-	if p == termenv.ANSI {
+func selectionBand(p colorprofile.Profile, st lipgloss.Style, c color.Color) lipgloss.Style {
+	if p == colorprofile.ANSI {
 		return st.Reverse(true)
 	}
 	return st.Background(c)
@@ -274,7 +265,7 @@ func selectionBand(p termenv.Profile, st lipgloss.Style, c lipgloss.CompleteColo
 // selection background, leaving the row exactly as wide as it was.
 //
 // The row is split at cell boundaries with the same truncation pair spliceRow
-// uses — Truncate stops short of a straddling grapheme, TruncateLeft replays
+// uses — truncateCells stops short of a straddling grapheme, dropCells replays
 // every sequence it skipped — so the head and the tail keep their own styles.
 // Inside the span the background is re-emitted after every escape sequence,
 // reset or not, which is what makes a diff row's own background, a bold
@@ -283,7 +274,7 @@ func selectionBand(p termenv.Profile, st lipgloss.Style, c lipgloss.CompleteColo
 // Both cuts snap outward, the way cutCells does, so the highlight covers
 // exactly the graphemes the copy takes. The head falls short of a grapheme
 // straddling `from`, which leaves it in the middle; the right edge needs a
-// nudge, because Truncate would leave a straddling grapheme in the tail —
+// nudge, because truncation would leave a straddling grapheme in the tail —
 // copied but unpainted.
 func highlightSpan(line string, from, to int, bg string) string {
 	w := ansi.StringWidth(line)
@@ -293,21 +284,21 @@ func highlightSpan(line string, from, to int, bg string) string {
 	from = max(from, 0)
 	to = min(to, w-1)
 
-	head := ansi.Truncate(line, from, "")
+	head := truncateCells(line, from, "")
 	hw := ansi.StringWidth(head)
-	rest := ansi.TruncateLeft(line, hw, "")
+	rest := dropCells(line, hw, "")
 	span := to + 1 - hw
-	mid := ansi.Truncate(rest, span, "")
+	mid := truncateCells(rest, span, "")
 	mw := ansi.StringWidth(mid)
 	// Ask for one more cell until the cut reaches the end of the span. mw only
 	// grows, and hw+mw == w is the whole row, so this terminates.
 	for n := span + 1; mw < span && hw+mw < w; n++ {
-		mid = ansi.Truncate(rest, n, "")
+		mid = truncateCells(rest, n, "")
 		mw = ansi.StringWidth(mid)
 	}
 	tail := ""
 	if hw+mw < w {
-		tail = ansi.TruncateLeft(rest, mw, "")
+		tail = dropCells(rest, mw, "")
 	}
 
 	var b strings.Builder
@@ -336,22 +327,8 @@ func highlightSpan(line string, from, to int, bg string) string {
 // order, so a caller can rewrite the printable cells without disturbing the
 // sequences between them.
 func walkANSI(s string, fn func(chunk string, esc bool)) {
-	state := -1
-	for len(s) > 0 {
-		if s[0] == ansi.ESC {
-			n := escLen(s)
-			fn(s[:n], true)
-			s = s[n:]
-			state = -1
-			continue
-		}
-		cluster, rest, _, ns := uniseg.FirstGraphemeClusterInString(s, state)
-		if cluster == "" {
-			fn(s, false)
-			return
-		}
-		fn(cluster, false)
-		s, state = rest, ns
+	for chunk, width := range displayCells(s) {
+		fn(chunk, width < 0)
 	}
 }
 

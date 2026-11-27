@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
@@ -168,8 +166,7 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 		LoadBackend:     l.loadBackend,
 		RefuseLoad:      f.refuse,
 		TerminalTitle:   tui.ConfigTerminalTitle(),
-		Background: tui.ConfigBackground() && !f.noBackground &&
-			lipgloss.ColorProfile() != termenv.Ascii,
+		Background:      tui.ConfigBackground() && !f.noBackground,
 	}
 	if err := l.resolveLoad(cmd, f, absDir(ws), &cfg); err != nil {
 		return err

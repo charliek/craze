@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -1308,17 +1308,17 @@ func signInFailureText(err error) string {
 // among them — is the field's, until an address has been handed over. Every
 // key but Ctrl+Y has ended the copied line already, whatever layer takes it
 // (handleKey; plan 034 Q10).
-func (m Model) handleSignInKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleSignInKey(msg keyInput) (tea.Model, tea.Cmd) {
 	s := m.cdlg.signIn
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch shortcut(msg) {
+	case "esc":
 		m.cdlg = m.cdlg.leaveKeyStep()
 		return m, nil
-	case tea.KeyCtrlY:
+	case "ctrl+y":
 		return m.copySignInAddress()
-	case tea.KeyEnter:
+	case "enter":
 		return m.pasteSignIn(), nil
-	case tea.KeyCtrlV:
+	case "ctrl+v":
 		if s.handed {
 			return m, nil
 		}

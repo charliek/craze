@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -213,11 +213,11 @@ func TestTooSmallTerminal(t *testing.T) {
 		t.Fatalf("the message should wrap, not truncate:\n%s", view)
 	}
 
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	if !tm.(Model).quitting || cmd == nil {
 		t.Fatal("ctrl+d must still quit from the too-small screen")
 	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !tm.(Model).quitting || cmd == nil {
 		t.Fatal("ctrl+c must still quit from the too-small screen")
 	}
@@ -248,20 +248,20 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 
 	inner := 80 - composerPromptW
 	m.input.SetValue(strings.Repeat("x", inner*3))
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	tm, _ = m.Update(runeKey('x'))
 	m = tm.(Model)
 	if m.lay.ComposerRows != 4 {
 		t.Fatalf("a pasted paragraph is %d rows, want 4", m.lay.ComposerRows)
 	}
 	if m.input.Height() != m.composerRows() {
-		t.Fatalf("SetHeight was not called: textarea is %d, the draft is %d", m.input.Height(), m.composerRows())
+		t.Fatalf("textarea is %d rows, the draft is %d", m.input.Height(), m.composerRows())
 	}
 	if h := lipgloss.Height(plainView(m)); h != 40 {
 		t.Fatalf("a grown composer broke the height contract: %d rows", h)
 	}
 
 	m.input.SetValue(strings.Repeat("y", inner*12))
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	tm, _ = m.Update(runeKey('y'))
 	m = tm.(Model)
 	if m.lay.ComposerRows != composerMaxRows {
 		t.Fatalf("composer grew to %d rows, want the %d cap", m.lay.ComposerRows, composerMaxRows)
@@ -275,9 +275,9 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 	// Past the visible cap the buffer must still take new logical lines.
 	m.input.SetValue("")
 	for i := 0; i < 9; i++ {
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		tm, _ = m.Update(runeKey('a'))
 		m = tm.(Model)
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+		tm, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 		m = tm.(Model)
 	}
 	if got := m.input.LineCount(); got != 10 {
@@ -294,7 +294,7 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 func TestEscKeepsTheDraft(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("half a thought")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = tm.(Model)
 	if m.input.Value() != "half a thought" {
 		t.Fatalf("esc cleared the composer: %q", m.input.Value())
@@ -304,7 +304,7 @@ func TestEscKeepsTheDraft(t *testing.T) {
 func TestCtrlTIsNotTranspose(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("ab")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.input.Value() != "ab" {
 		t.Fatalf("ctrl+t reached the textarea: %q", m.input.Value())
@@ -510,7 +510,7 @@ func TestLayoutIsComputedOncePerUpdate(t *testing.T) {
 	m := loadedModel(t, 100, 30)
 	for _, msg := range []tea.Msg{
 		tea.WindowSizeMsg{Width: 120, Height: 40},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}},
+		runeKey('x'),
 		refreshSnapMsg{},
 	} {
 		before := m.layouts
@@ -538,7 +538,7 @@ func TestDegenerateSizeStillFillsTheFrame(t *testing.T) {
 	}
 	// And a frame with no rows at all is nothing, not a stray placeholder.
 	tm, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 0})
-	if got := tm.(Model).View(); got != "" {
+	if got := tm.(Model).View().Content; got != "" {
 		t.Fatalf("a zero-height frame is %q", got)
 	}
 }

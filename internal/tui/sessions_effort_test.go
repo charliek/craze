@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -137,7 +137,7 @@ func TestTheListsEffortOffersTheModelsLevels(t *testing.T) {
 	}
 	m, _ = typeList(t, m, "/effort high")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, _ = press(m, enter())
 	if h := sessHint(m); h != "no effort high: one of default" || m.sessPick.effort != "" {
@@ -148,7 +148,7 @@ func TestTheListsEffortOffersTheModelsLevels(t *testing.T) {
 	m = clearInput(t, m)
 	m, _ = typeList(t, m, "/model default")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, cmd = press(m, enter())
 	m = sessRead(t, m, cmd, "readNativeLevels")
@@ -170,7 +170,7 @@ func TestAKeptEffortTheModelDoesNotOfferIsShownSo(t *testing.T) {
 		t.Helper()
 		m, _ = typeList(t, m, line)
 		if m.sessList.in.cmd.visible() {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		}
 		m, cmd := press(m, enter())
 		if c := findCmd(cmd, "readNativeLevels"); c != nil {
@@ -266,7 +266,7 @@ func TestATypedModelIsResolvedForItsLevels(t *testing.T) {
 
 	m, _ = typeList(t, m, "/model SPARK")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, cmd = press(m, enter())
 	m = sessRead(t, m, cmd, "readNativeLevels")
@@ -275,7 +275,7 @@ func TestATypedModelIsResolvedForItsLevels(t *testing.T) {
 	}
 	m, _ = typeList(t, m, "/effort max")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, _ = press(m, enter())
 	if h := sessHint(m); h != "no effort max: one of default, minimal, low, medium, high, xhigh" || m.sessPick.effort != "" {
@@ -315,7 +315,7 @@ func TestAnOriginWithoutFactsHasItsLevelsRead(t *testing.T) {
 	if m.effortFacts() {
 		t.Fatal("fixture: the origin states effort facts")
 	}
-	m, open := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, open := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open {
 		t.Fatal("← did not open the list")
 	}
@@ -325,7 +325,7 @@ func TestAnOriginWithoutFactsHasItsLevelsRead(t *testing.T) {
 	}
 	m, _ = typeList(t, m, "/effort high")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, _ = press(m, enter())
 	if h := sessHint(m); h != "no effort high: one of default" || m.sessPick.effort != "" {
@@ -357,7 +357,7 @@ func TestTheDefaultModelsLevelsAreReadAgain(t *testing.T) {
 		t.Helper()
 		m, _ = typeList(t, m, "/effort high")
 		if m.sessList.in.cmd.visible() {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		}
 		m, _ = press(m, enter())
 		return m
@@ -368,7 +368,7 @@ func TestTheDefaultModelsLevelsAreReadAgain(t *testing.T) {
 	m = sessRead(t, m, cmd, "readNativeDefault")
 	m, _ = typeList(t, m, "/model default")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, cmd = press(m, enter())
 	m = sessRead(t, m, cmd, "readNativeLevels")
@@ -378,11 +378,11 @@ func TestTheDefaultModelsLevelsAreReadAgain(t *testing.T) {
 
 	remember("plain", sessNow)
 	m = clearInput(t, m)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc on an empty input did not leave the list")
 	}
-	m, open := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, open := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = sessRead(t, m, open, "readNativeLevels")
 	if got, _ := effortValues(t, m); !slices.Equal(got, []string{"default"}) || m.sessPick.levels.alias != "plain" {
 		t.Fatalf("reopened on the default, the memory now plain: /effort lists %v (from %q)", got, m.sessPick.levels.alias)
@@ -397,7 +397,7 @@ func TestTheDefaultModelsLevelsAreReadAgain(t *testing.T) {
 	m = clearInput(t, m)
 	m, _ = typeList(t, m, "/model default")
 	if m.sessList.in.cmd.visible() {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	m, cmd = press(m, enter())
 	m = sessRead(t, m, cmd, "readNativeLevels")

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -61,7 +61,7 @@ func threeResumeRows() []sessions.Row {
 	}
 }
 
-func resumeKey(t *testing.T, m Model, k tea.KeyMsg) Model {
+func resumeKey(t *testing.T, m Model, k tea.KeyPressMsg) Model {
 	t.Helper()
 	tm, _ := m.Update(k)
 	return tm.(Model)
@@ -98,13 +98,13 @@ func TestResumePickerWraps(t *testing.T) {
 	m, _ := newResumePicker(t, threeResumeRows(), 100, 30)
 	for _, tc := range []struct {
 		name string
-		key  tea.KeyMsg
+		key  tea.KeyPressMsg
 		want []int
 	}{
-		{"down", tea.KeyMsg{Type: tea.KeyDown}, []int{1, 2, 0}},
-		{"tab", tea.KeyMsg{Type: tea.KeyTab}, []int{1, 2, 0}},
-		{"up", tea.KeyMsg{Type: tea.KeyUp}, []int{2, 1, 0}},
-		{"shift-tab", tea.KeyMsg{Type: tea.KeyShiftTab}, []int{2, 1, 0}},
+		{"down", tea.KeyPressMsg{Code: tea.KeyDown}, []int{1, 2, 0}},
+		{"tab", tea.KeyPressMsg{Code: tea.KeyTab}, []int{1, 2, 0}},
+		{"up", tea.KeyPressMsg{Code: tea.KeyUp}, []int{2, 1, 0}},
+		{"shift-tab", tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}, []int{2, 1, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cur := m
@@ -124,8 +124,8 @@ func TestResumePickerWraps(t *testing.T) {
 // first event, because Start is already reading a transcript back.
 func TestResumePickerEnterLoadsTheRow(t *testing.T) {
 	m, loaded := newResumePicker(t, threeResumeRows(), 100, 30)
-	m = resumeKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = resumeKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	out := tm.(Model)
 	if len(*loaded) != 1 || (*loaded)[0].SessionID != "s-2" {
 		t.Fatalf("loaded %v", *loaded)
@@ -165,7 +165,7 @@ func TestResumePickerNilLoadFallsBackToAStub(t *testing.T) {
 		t.Fatal("setup: no resume picker, or a session before a row was chosen")
 	}
 	assertOwned(t, m)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	out := tm.(Model)
 	if out.pickingResume {
 		t.Fatal("setup: Enter did not confirm the row")
@@ -213,7 +213,7 @@ func TestResumePickerSwallowsAClickOutside(t *testing.T) {
 // the opposite of what Esc means.
 func TestResumePickerEscQuitsClean(t *testing.T) {
 	m, loaded := newResumePicker(t, threeResumeRows(), 100, 30)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	out := tm.(Model)
 	if !out.quitting {
 		t.Fatal("Esc did not quit")

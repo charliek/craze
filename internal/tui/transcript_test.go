@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -67,7 +67,7 @@ func TestResizeAndCtrlOInvalidateEveryEntry(t *testing.T) {
 		t.Fatalf("resize rendered %d entries, want 5", got)
 	}
 	before = m.main.renders
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.expanded {
 		t.Fatal("ctrl+o did not toggle")
@@ -93,7 +93,7 @@ func TestStickToBottomAcrossChunkResizeThemeAndCtrlO(t *testing.T) {
 	if !m.vp.AtBottom() {
 		t.Fatal("resize unstuck the viewport")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !m.vp.AtBottom() {
 		t.Fatal("ctrl+o unstuck the viewport")
@@ -108,7 +108,7 @@ func TestStickToBottomAcrossChunkResizeThemeAndCtrlO(t *testing.T) {
 func TestScrolledUpSurvivesChunkResizeThemeAndCtrlO(t *testing.T) {
 	m := sized(t)
 	fill(&m, 60)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = tm.(Model)
 	if m.vp.AtBottom() {
 		t.Fatal("page up did not scroll")
@@ -125,7 +125,7 @@ func TestScrolledUpSurvivesChunkResizeThemeAndCtrlO(t *testing.T) {
 	if m.vp.AtBottom() {
 		t.Fatal("resize jumped to the bottom while scrolled up")
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if m.vp.AtBottom() {
 		t.Fatal("ctrl+o jumped to the bottom while scrolled up")
@@ -183,7 +183,7 @@ func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 	if strings.Contains(view, "0s") {
 		t.Fatalf("a thought run that took no measurable time must not print a duration:\n%s", view)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	tm, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !strings.Contains(plainView(m), "weighing the options") {
 		t.Fatalf("ctrl+o did not expand the thought:\n%s", plainView(m))
@@ -326,7 +326,7 @@ func TestExecRowShowsExitCodeAndStderrPreview(t *testing.T) {
 		t.Fatalf("collapsed bash shows one preview row only:\n%s", row)
 	}
 
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = tm.(Model)
 	if !strings.Contains(lastToolRow(t, m), "sudo apt install golang-go") {
 		t.Fatalf("ctrl+o should show the whole tail:\n%s", lastToolRow(t, m))
@@ -411,7 +411,7 @@ func TestToolRowsClampToWidth(t *testing.T) {
 
 func TestModeChangeLeavesANote(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = tm.(Model)
 	notes := texts(m, entryNote)
 	if len(notes) != 1 || !strings.HasPrefix(notes[0], "mode → ") {

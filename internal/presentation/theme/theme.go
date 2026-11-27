@@ -153,14 +153,23 @@ func resolve[C any](p paletteSpec, color func(Tone) C) Theme[C] {
 // Preset is the theme by name, falling back to the default for anything craze
 // does not know.
 func Preset[C any](name string, color func(Tone) C) Theme[C] {
+	return resolve(palette(name), color)
+}
+
+// TerminalColors returns the preset’s canonical RGB defaults for OSC 10 and 11.
+func TerminalColors(name string) (foreground, background string) {
+	p := palette(name)
+	return p.fg, p.bg
+}
+
+func palette(name string) paletteSpec {
 	want := normalizeThemeName(name)
 	for _, p := range palettes {
 		if p.name == want {
-			return resolve(p, color)
+			return p
 		}
 	}
-	// palettes[0] is the default, so an unknown name cannot recurse.
-	return resolve(palettes[0], color)
+	return palettes[0]
 }
 
 func KnownPreset(name string) bool {

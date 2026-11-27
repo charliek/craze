@@ -2,11 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -319,7 +320,7 @@ func (m Model) modeChip() (string, lipgloss.Style) {
 
 // modeColor is the chip colour for a mode kind. A mode craze does not
 // recognise is dim rather than miscoloured.
-func (m Model) modeColor(kind agent.ModeKind) lipgloss.CompleteColor {
+func (m Model) modeColor(kind agent.ModeKind) color.Color {
 	switch kind {
 	case agent.ModeImplement:
 		return m.theme.ModeImplement

@@ -2,15 +2,11 @@ package tui
 
 import (
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	runewidth "github.com/mattn/go-runewidth"
-	"github.com/rivo/uniseg"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -20,11 +16,6 @@ const (
 	composerShortRows = 3
 	// composerPromptW is the width of "❯ ", reserved on every input row.
 	composerPromptW = 2
-	// composerHeadroom is the height the textarea is lent for the duration of
-	// one key. See updateComposer. It has to exceed the display rows of any
-	// draft: a draft that reached this many rows would be gigabytes of text,
-	// which is past what the composer could hold anyway.
-	composerHeadroom = 1 << 30
 	// composerTitleShare is the fraction of the width the session title may
 	// take on the top rule.
 	composerTitleShare = 2
@@ -48,6 +39,7 @@ func newComposer(th Theme) textarea.Model {
 	ta.Placeholder = "message  / for commands"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
+	ta.DynamicHeight = true
 	// MaxHeight stays unset on purpose: bubbles refuses to open a new logical
 	// line once the buffer reaches MaxHeight, so setting it would turn the
 	// visible height into a text limit instead of a window.
@@ -59,10 +51,11 @@ func newComposer(th Theme) textarea.Model {
 	ta.SetPromptFunc(composerPromptW, composerPrompt)
 	ta.SetHeight(1)
 
-	km := textarea.DefaultKeyMap
-	// Shift+Enter is not named here: bubbletea v1 has no such key, and the
-	// terminal's Shift+Enter arrives as ctrl+j (shiftEnterInput).
-	km.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	km := textarea.DefaultKeyMap()
+	// Craze uses Alt for word motion; Ctrl+arrows leave the draft in place.
+	km.WordBackward.SetKeys("alt+left", "alt+b")
+	km.WordForward.SetKeys("alt+right", "alt+f")
+	km.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
 	km.DeleteCharacterForward = key.NewBinding(key.WithKeys("delete"))
 	// ctrl+t is the tasks panel, not transpose; ctrl+d is left unbound so it
 	// quits rather than deleting forward.
@@ -72,59 +65,47 @@ func newComposer(th Theme) textarea.Model {
 	// test or `craze frame` could stand in front of. craze keeps the key and
 	// handles it itself, through the same kind of seam a copy goes through.
 	km.Paste = key.NewBinding()
+	km.CopySelection = key.NewBinding()
 	ta.KeyMap = km
 
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	styleComposer(&ta, th)
 	ta.Focus()
 	return ta
 }
 
-// styleComposer applies the theme colours a live re-theme has to re-apply.
-//
-// bubbles keeps an unexported pointer at whichever of the two style sets is
-// active, and Update copies the whole Model, so that pointer still aims at the
-// styles of an older copy. Writing new colours into this copy's fields would
-// change nothing on screen; Focus/Blur re-seat the pointer, which is the only
-// way in. The blink command they return is dropped: the cursor keeps the phase
-// it is in and the next keystroke restarts the chain (textarea does that
-// itself whenever the cursor moves).
+// styleComposer applies both focus states so a live theme change reaches the
+// prompt, text and placeholder even while the draft is covered by a dialog.
 func styleComposer(ta *textarea.Model, th Theme) {
-	prompt := lipgloss.NewStyle().Foreground(th.Accent)
-	placeholder := lipgloss.NewStyle().Foreground(th.Dim)
-	// bubbles leaves FocusedStyle.Text an empty style and makes the blurred
-	// one an AdaptiveColor, so typed text would carry no foreground of its
-	// own — and a light theme on a dark terminal would then show the
-	// terminal's light default text on the theme's light background. Naming
-	// the colour here makes OSC 10 synchronisation rather than a necessity
-	// (§3.3).
-	text := lipgloss.NewStyle().Foreground(th.FG)
-	ta.FocusedStyle.Prompt = prompt
-	ta.BlurredStyle.Prompt = prompt
-	ta.FocusedStyle.Placeholder = placeholder
-	ta.BlurredStyle.Placeholder = placeholder
-	ta.FocusedStyle.Text = text
-	ta.BlurredStyle.Text = text
-	if ta.Focused() {
-		_ = ta.Focus()
-	} else {
-		ta.Blur()
+	styles := ta.Styles()
+	// The composer receives editing events; static cursors keep frames stable
+	// without scheduling blink events that the model would discard.
+	styles.Cursor.Blink = false
+	styles.Cursor.Color = th.FG
+	for _, state := range []*textarea.StyleState{&styles.Focused, &styles.Blurred} {
+		state.CursorLine = lipgloss.NewStyle()
+		state.Prompt = styleFG(th.Accent)
+		state.Placeholder = styleFG(th.Dim)
+		state.Text = styleFG(th.FG)
 	}
+	ta.SetStyles(styles)
 }
 
 // composerPrompt marks only the first display row, Claude Code style.
-func composerPrompt(line int) string {
-	if line == 0 {
+func composerPrompt(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
 		return "❯ "
 	}
 	return "  "
 }
 
-// isNewlineKey is alt+enter or ctrl+j. Shift+Enter, where the terminal tells
-// it from Enter, reaches bubbletea as ctrl+j already (shiftEnterInput).
-func isNewlineKey(msg tea.KeyMsg) bool {
-	return msg.String() == "alt+enter" || msg.Type == tea.KeyCtrlJ
+// isNewlineKey accepts Shift+Enter from extended keyboards and the
+// Alt+Enter and Ctrl+J equivalents available in legacy terminals.
+func isNewlineKey(msg keyInput) bool {
+	switch shortcut(msg) {
+	case "alt+enter", "shift+enter", "ctrl+j":
+		return true
+	}
+	return false
 }
 
 // composerInner is the cell width one input row has for text, which is what
@@ -154,13 +135,8 @@ func (m Model) composerPlain() bool {
 // composerCursorOffset is the cursor's byte offset into the draft, which is
 // what slashToken works in.
 //
-// bubbles reports the cursor in runes and in two pieces: Line() is the logical
-// row, and LineInfo().StartColumn + ColumnOffset the rune column inside that
-// row. Both are rune indices into the row despite the "column" names, and at
-// the exact end of a wrapped row bubbles reports StartColumn = col with
-// ColumnOffset = 0, which sums to the same thing — so the sum is the column
-// whatever the width wraps at. CharOffset is cells, not runes, and would count
-// a double-width rune twice; it is never what this wants.
+// The textarea indexes its logical row by runes; completion and image chips
+// use byte offsets in the complete draft.
 func (m Model) composerCursorOffset() int {
 	value := m.input.Value()
 	lines := strings.Split(value, "\n")
@@ -170,10 +146,8 @@ func (m Model) composerCursorOffset() int {
 		// +1 for the "\n" the split took out.
 		off += len(lines[i]) + 1
 	}
-	info := m.input.LineInfo()
-	col := max(info.StartColumn+info.ColumnOffset, 0)
 	rs := []rune(lines[row])
-	col = min(col, len(rs))
+	col := min(m.input.Column(), len(rs))
 	return off + len(string(rs[:col]))
 }
 
@@ -189,7 +163,7 @@ func (m *Model) setComposerCursor(value string, off int) {
 	for guard := m.composerRows(); m.input.Line() > row && guard > 0; guard-- {
 		m.input.CursorUp()
 	}
-	m.input.SetCursor(col)
+	m.input.SetCursorColumn(col)
 }
 
 // runeRowCol splits a byte offset into the logical row it falls on and the
@@ -204,65 +178,14 @@ func runeRowCol(value string, off int) (row, col int) {
 	return row, utf8.RuneCountInString(head)
 }
 
-// composerCursorRow is the cursor's row in the same coordinates: the rows the
-// logical lines above it take, plus its offset inside its own line.
+// composerCursorRow uses the widget’s soft-wrapped cursor coordinates. Ask a
+// copy for a terminal cursor so the live widget keeps its virtual cursor and
+// focus state. Its dynamically sized viewport contains the entire draft.
 func (m Model) composerCursorRow() int {
-	inner := m.composerInner()
-	lines := strings.Split(m.input.Value(), "\n")
-	row := 0
-	for i := 0; i < m.input.Line() && i < len(lines); i++ {
-		row += wrapRows(lines[i], inner)
-	}
-	return row + m.input.LineInfo().RowOffset
-}
-
-// wrapRows is how many display rows one logical line takes at this width.
-//
-// It reproduces bubbles v0.21's unexported textarea.wrap (textarea.go:1398)
-// step for step, because a count that disagrees with what the textarea drew is
-// how the composer loses rows: ceil(width/inner) under-reports an exactly-full
-// line, which the textarea's ">= width" tail rule spills onto a second row.
-func wrapRows(line string, width int) int {
-	width = max(width, 1)
-	var (
-		rows   = [][]rune{{}}
-		word   []rune
-		row    int
-		spaces int
-	)
-	for _, r := range line {
-		if unicode.IsSpace(r) {
-			spaces++
-		} else {
-			word = append(word, r)
-		}
-		if spaces > 0 {
-			if uniseg.StringWidth(string(rows[row]))+uniseg.StringWidth(string(word))+spaces > width {
-				row++
-				rows = append(rows, []rune{})
-			}
-			rows[row] = append(rows[row], word...)
-			rows[row] = append(rows[row], []rune(strings.Repeat(" ", spaces))...)
-			spaces, word = 0, nil
-			continue
-		}
-		// A word that fills the line on its own breaks mid-word, and the last
-		// rune may be double-width, so the check is per rune and not per word.
-		if uniseg.StringWidth(string(word))+runewidth.RuneWidth(word[len(word)-1]) > width {
-			if len(rows[row]) > 0 {
-				row++
-				rows = append(rows, []rune{})
-			}
-			rows[row] = append(rows[row], word...)
-			word = nil
-		}
-	}
-	// bubbles gives the tail a trailing space, so a line that already reaches
-	// the width spills one more row.
-	if uniseg.StringWidth(string(rows[row]))+uniseg.StringWidth(string(word))+spaces >= width {
-		row++
-	}
-	return row + 1
+	input := m.input
+	input.SetVirtualCursor(false)
+	_ = input.Focus()
+	return input.Cursor().Y
 }
 
 // planPlaceholder is the plan offer's placeholder, or "" when the composer

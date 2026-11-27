@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -177,7 +177,7 @@ func sessModel(t *testing.T, cols, rows int) (Model, *fakeSessions, *Stub) {
 // openList presses ← on m's empty composer: the list opens.
 func openList(t *testing.T, m Model) Model {
 	t.Helper()
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open {
 		t.Fatalf("← on an empty composer did not open the list:\n%s", plainView(m))
 	}
@@ -205,9 +205,9 @@ func selectKey(t *testing.T, m Model, key sessKey) Model {
 		case at == want:
 			return m
 		case at < want:
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 		default:
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyUp})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyUp})
 		}
 	}
 	t.Fatalf("the selection never reached %+v (at %+v)", key, m.sessList.sel)
@@ -330,7 +330,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 				"error: 402 Payment Required", "unreachable 1 ", "not answering", "craze 0.0.9", "· here", "▸ saved · 3 not running"},
 			[]string{"agents"})
 
-		dirs, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+		dirs, _ := press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 		assertFrameGolden(t, "sessions-dirs"+suffix, size.cols, size.rows, plainView(dirs),
 			[]string{"~/projects/craze 3 ", "~/projects/roost 1 ", "ctrl+s by state"}, []string{"needs you", "· here"})
 
@@ -339,8 +339,8 @@ func TestFrameGoldenSessions(t *testing.T) {
 		if !saved.sessList.savedOpen {
 			t.Fatal("enter on the saved line did not expand it")
 		}
-		saved, _ = press(saved, tea.KeyMsg{Type: tea.KeyDown})
-		saved, _ = press(saved, tea.KeyMsg{Type: tea.KeyDown})
+		saved, _ = press(saved, tea.KeyPressMsg{Code: tea.KeyDown})
+		saved, _ = press(saved, tea.KeyPressMsg{Code: tea.KeyDown})
 		if saved.sessList.sel != (sessKey{id: "\x00saved:docs"}) {
 			t.Fatalf("↓↓ from the saved line selected %+v", saved.sessList.sel)
 		}
@@ -362,14 +362,14 @@ func TestFrameGoldenSessions(t *testing.T) {
 	m, _, _ = sessModel(t, 80, 24)
 	m = richList(t, m)
 	m = selectKey(t, m, runKey("pty"))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	assertFrameGolden(t, "sessions-armed-80x24", 80, 24, plainView(m),
 		[]string{"ctrl+x again closes it; the transcript stays resumable"}, nil)
 
 	m, _, _ = sessModel(t, 80, 24)
 	m = richList(t, m)
 	m = selectKey(t, m, runKey("prox"))
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	assertFrameGolden(t, "sessions-unreachable-80x24", 80, 24, plainView(m),
 		[]string{"? spike the prox sweep", sessUnreachNote}, nil)
 
@@ -397,7 +397,7 @@ func TestFrameGoldenSessions(t *testing.T) {
 func TestSessionsListIsAbsentWithoutASessionList(t *testing.T) {
 	m := sized(t)
 	before := plainView(m)
-	after, _ := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	after, _ := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if after.sessList.open || plainView(after) != before {
 		t.Fatalf("← without a session list changed the screen:\n%s", plainView(after))
 	}
@@ -440,7 +440,7 @@ func TestSessionsListIsAbsentWithoutASessionList(t *testing.T) {
 func TestSessionsListOpensOnLeftAndSlashSessions(t *testing.T) {
 	draft, _, _ := sessModel(t, 80, 24)
 	draft = typeInto(t, draft, "hi")
-	if d, _ := press(draft, tea.KeyMsg{Type: tea.KeyLeft}); d.sessList.open || d.input.Value() != "hi" {
+	if d, _ := press(draft, tea.KeyPressMsg{Code: tea.KeyLeft}); d.sessList.open || d.input.Value() != "hi" {
 		t.Fatalf("← with a draft: open %v, draft %q", d.sessList.open, d.input.Value())
 	}
 	m, fs, _ := sessModel(t, 80, 24)
@@ -449,13 +449,13 @@ func TestSessionsListOpensOnLeftAndSlashSessions(t *testing.T) {
 		t.Fatalf("%d rosters started, want 1", n)
 	}
 	m = listSnap(t, m, richSnapshot(os.Getenv("HOME"), m.hereKey()))
-	for _, k := range []tea.KeyMsg{{Type: tea.KeyLeft, Alt: true}, {Type: tea.KeyRight, Alt: true}} {
+	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyLeft, Mod: tea.ModAlt}, {Code: tea.KeyRight, Mod: tea.ModAlt}} {
 		if alt, _ := press(m, k); !alt.sessList.open || alt.sessList.note != "" {
 			t.Fatalf("%v on the list: open %v, note %q", k, alt.sessList.open, alt.sessList.note)
 		}
 	}
 	r := fs.rosters[0]
-	back, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	back, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if back.sessList.open {
 		t.Fatal("esc did not leave the list")
 	}
@@ -472,7 +472,7 @@ func TestSessionsListOpensOnLeftAndSlashSessions(t *testing.T) {
 	if n, _, _ := fs.calls(); n != 2 || m.sessList.gen != back.sessList.gen+1 {
 		t.Fatalf("%d rosters, opening %d after %d", n, m.sessList.gen, back.sessList.gen)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if m.sessList.open {
 		t.Fatal("← did not leave the list")
 	}
@@ -495,21 +495,21 @@ func TestSessionsListKeysComeFirst(t *testing.T) {
 		t.Fatalf("the card is drawn over the list:\n%s", plainView(m))
 	}
 	was := m.sessList.sel
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.sessList.sel == was || !m.cardOpen() {
 		t.Fatalf("↓ with a card behind the list: selection %+v (was %+v), card open %v", m.sessList.sel, was, m.cardOpen())
 	}
 	m = m.openHelp()
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	m, _ = press(m, textKey("1"))
 	if !m.cardOpen() {
 		t.Fatal("a key reached the card behind the list")
 	}
-	clicked, _ := m.Update(tea.MouseMsg{X: 3, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	clicked, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 5, Button: tea.MouseLeft})
 	if c := clicked.(Model); c.sessList.sel != m.sessList.sel || !c.sessList.open {
 		t.Fatal("the mouse reached the list")
 	}
 
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if m.quitting || !m.sessList.open || m.ctrlCDeadline.IsZero() || cmd == nil {
 		t.Fatalf("the first ctrl+c: quitting %v, open %v, window %v", m.quitting, m.sessList.open, m.ctrlCDeadline)
 	}
@@ -519,7 +519,7 @@ func TestSessionsListKeysComeFirst(t *testing.T) {
 	if _, cancels, stops := fs.calls(); cancels != 0 || stops != 0 {
 		t.Fatalf("the first ctrl+c cancelled %d and stopped %d", cancels, stops)
 	}
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !m.quitting {
 		t.Fatal("the second ctrl+c did not quit")
 	}
@@ -538,7 +538,7 @@ func TestSessionsListKeysComeFirst(t *testing.T) {
 
 	d, fs2, _ := sessModel(t, 80, 24)
 	d = richList(t, d)
-	d, cmd = press(d, tea.KeyMsg{Type: tea.KeyCtrlD})
+	d, cmd = press(d, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	if !d.quitting || runCmd(cmd) != (tea.QuitMsg{}) || !fs2.rosters[0].closed.Load() {
 		t.Fatal("ctrl+d from the list did not quit and close the roster")
 	}
@@ -550,7 +550,7 @@ func TestSessionsListLeavesToTheCard(t *testing.T) {
 	m, _, stub := sessModel(t, 80, 24)
 	m = richList(t, m)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open || !strings.Contains(plainView(m), "Pick one") {
 		t.Fatalf("after the list, the card:\n%s", plainView(m))
 	}
@@ -584,11 +584,11 @@ func TestSessionsSelectionHeldByIdentity(t *testing.T) {
 		t.Fatalf("a row that changed only what it says moved: %+v", got)
 	}
 
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if m.sessList.sel != runKey("b") {
 		t.Fatalf("regrouping moved the selection to %+v", m.sessList.sel)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = press(m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 
 	replaced := answeredInc("b", "inc-b2", "session b", "grok", ws, 0, nil)
 	m = listSnap(t, m, roster.Snapshot{Running: []roster.Row{a, replaced, c}})
@@ -619,7 +619,7 @@ func TestSessionsArmedCloseHeldByIdentity(t *testing.T) {
 	m = openList(t, m)
 	m = listSnap(t, m, roster.Snapshot{Running: []roster.Row{a, b}})
 	m = selectKey(t, m, runKey("b"))
-	ctrlX := tea.KeyMsg{Type: tea.KeyCtrlX}
+	ctrlX := tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}
 
 	m, _ = press(m, ctrlX)
 	if m.sessList.armed != runKey("b") {
@@ -640,7 +640,7 @@ func TestSessionsArmedCloseHeldByIdentity(t *testing.T) {
 	}
 
 	m, _ = press(m, ctrlX)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if !m.sessList.armed.zero() {
 		t.Fatal("another key left the close armed")
 	}
@@ -698,7 +698,7 @@ func TestSessionsCtrlXStopsAWorkingRow(t *testing.T) {
 	for _, id := range []string{"queue", "lumen"} {
 		m = selectKey(t, m, runKey(id))
 		var cmd tea.Cmd
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+		m, cmd = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 		if !m.sessList.armed.zero() {
 			t.Fatalf("ctrl+x on %s armed a close", id)
 		}
@@ -713,7 +713,7 @@ func TestSessionsCtrlXStopsAWorkingRow(t *testing.T) {
 
 	fs.cancelErr = errors.New("the socket went away")
 	m = selectKey(t, m, runKey("queue"))
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m, cmd := press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	m = applyMsg(t, m, runCmd(cmd))
 	if !strings.Contains(plainView(m), "could not stop move queue edits onto remote.Session: the socket went away") {
 		t.Fatalf("a failed cancel's note:\n%s", plainView(m))
@@ -721,8 +721,8 @@ func TestSessionsCtrlXStopsAWorkingRow(t *testing.T) {
 
 	fs.stopErr = backend.ErrStopUnsupported
 	m = selectKey(t, m, sessKey{id: "folio", inc: "inc-folio"})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
-	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m, _ = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m, cmd = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	m = applyMsg(t, m, runCmd(cmd))
 	if !strings.Contains(plainView(m), sessOlderNote) {
 		t.Fatalf("an older host's close:\n%s", plainView(m))
@@ -732,7 +732,7 @@ func TestSessionsCtrlXStopsAWorkingRow(t *testing.T) {
 	for _, key := range []sessKey{{id: "\x00host:host-new"}, sessSavedLine} {
 		m = selectKey(t, m, key)
 		var cmd tea.Cmd
-		m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+		m, cmd = press(m, tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 		if cmd != nil && runCmd(cmd) != nil {
 			t.Fatalf("ctrl+x on %+v made a call", key)
 		}
@@ -813,7 +813,7 @@ func TestSessionsListWhenTheSessionBehindItEnds(t *testing.T) {
 	if !ok || !r.ended || r.want != "ended" {
 		t.Fatalf("the session's row: %+v", r)
 	}
-	for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}, {Type: tea.KeyEnter}} {
+	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEsc}, {Code: tea.KeyLeft}, {Code: tea.KeyEnter}} {
 		m = selectKey(t, m, m.hereKey())
 		m, _ = press(m, k)
 		if !m.sessList.open || !strings.Contains(plainView(m), sessEndedNote) {
@@ -831,7 +831,7 @@ func TestSessionsEnterOpensTheSessionBehind(t *testing.T) {
 	m, fs, _ := sessModel(t, 100, 30)
 	m = richList(t, m)
 	other := selectKey(t, m, runKey("pty"))
-	other, cmd := press(other, tea.KeyMsg{Type: tea.KeyRight})
+	other, cmd := press(other, tea.KeyPressMsg{Code: tea.KeyRight})
 	if !other.sessList.open || other.sessList.dialing == 0 || !strings.Contains(plainView(other), "opening triage the flaky pty test…") {
 		t.Fatalf("→ on another session:\n%s", plainView(other))
 	}
@@ -883,7 +883,7 @@ func TestSessionsListTooSmall(t *testing.T) {
 // dropped.
 func TestSessionsListReadsItsRoster(t *testing.T) {
 	m, fs, _ := sessModel(t, 100, 30)
-	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd := press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	fs.rosters[0].ch <- roster.Snapshot{Running: []roster.Row{answered("a", "session a", "grok", "/w", time.Minute, nil)}}
 	msg, ok := runCmd(cmd).(sessSnapMsg)
 	if !ok || msg.gen != m.sessList.gen || len(msg.snap.Running) != 1 {
@@ -897,7 +897,7 @@ func TestSessionsListReadsItsRoster(t *testing.T) {
 	if !m.sessList.have || len(m.sessRunningRows()) != 1 {
 		t.Fatal("the opening's own snapshot was not applied")
 	}
-	closed, _ := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	closed, _ := press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if after := applyMsg(t, closed, msg); after.sessList.have {
 		t.Fatal("a snapshot for a closed list was applied")
 	}
@@ -985,7 +985,7 @@ func TestSessionsEndedRowOutlivesItsHost(t *testing.T) {
 			t.Fatalf("the list after the host left lacks %q:\n%s", want, view)
 		}
 	}
-	for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}, {Type: tea.KeyEnter}} {
+	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEsc}, {Code: tea.KeyLeft}, {Code: tea.KeyEnter}} {
 		m = selectKey(t, m, here)
 		m, _ = press(m, k)
 		if !m.sessList.open || !strings.Contains(plainView(m), sessEndedNote) {
@@ -1088,7 +1088,7 @@ func TestFinishRunClosesTheSessionList(t *testing.T) {
 		{"the final model has the list up", func(open Model) tea.Model { return open }},
 		{"no final model (a recovered panic)", func(Model) tea.Model { return nil }},
 		{"the list left, its close never run", func(open Model) tea.Model {
-			left, _ := press(open, tea.KeyMsg{Type: tea.KeyEsc})
+			left, _ := press(open, tea.KeyPressMsg{Code: tea.KeyEsc})
 			return left
 		}},
 	} {

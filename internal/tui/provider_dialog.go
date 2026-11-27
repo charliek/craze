@@ -3,8 +3,8 @@ package tui
 import (
 	"sync/atomic"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
@@ -468,20 +468,20 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
 }
 
-func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleProviderDialogKey(msg keyInput) (tea.Model, tea.Cmd) {
 	n := len(m.providers)
 	if n == 0 {
 		return m, nil
 	}
-	switch msg.Type {
-	case tea.KeyEnter:
+	switch shortcut(msg) {
+	case "enter":
 		return m.confirmProvider(m.providers[m.providerCursor], true)
-	case tea.KeyEsc:
+	case "esc":
 		return m.confirmProvider(m.providerDefault, false)
-	case tea.KeyUp, tea.KeyShiftTab:
+	case "up", "shift+tab":
 		m.providerCursor = (m.providerCursor - 1 + n) % n
 		return m.providerMoved(), nil
-	case tea.KeyDown, tea.KeyTab:
+	case "down", "tab":
 		m.providerCursor = (m.providerCursor + 1) % n
 		return m.providerMoved(), nil
 	}

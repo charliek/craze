@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -395,7 +395,7 @@ func TestTheBareSlashRescanIsTheLocalMenus(t *testing.T) {
 				t.Fatalf("fixture: the menu draws the host's catalog %v", m.slashHosted())
 			}
 			writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "later", "SKILL.md"), skill)
-			tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+			tm, _ := m.Update(runeKey('/'))
 			m = tm.(Model)
 			walked := slices.ContainsFunc(m.skills, func(s agent.Skill) bool { return s.Name == "later" })
 			_, listed := catalogByName(m, "later")
@@ -444,7 +444,7 @@ func TestLeavingTheHostsCatalogWalksTheDiskAgain(t *testing.T) {
 	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "later", "SKILL.md"), "---\nname: later\ndescription: saved after the start\n---\n")
 	stub.SetSkills(agent.DiscoverSkills(agent.CursorProvider(), ws, homeDir()))
 	m = applyPending(t, m)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m, _ = press(m, runeKey('/'))
 	if !m.slashHosted() || len(m.skills) != 0 {
 		t.Fatalf("fixture: the menu draws the host's catalog %v; this client's walk holds %+v", m.slashHosted(), m.skills)
 	}
@@ -502,7 +502,7 @@ func TestAFullyTypedBuiltinTheHostHidesStillRuns(t *testing.T) {
 		t.Fatalf("Enter on /help: dialog %v, composer %q; want help open", m.dialog, m.input.Value())
 	}
 
-	m, _ = press(draft(fresh(t), "/help"), tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = press(draft(fresh(t), "/help"), tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.input.Value() != "/help " {
 		t.Fatalf("Tab on /help wrote %q, want %q", m.input.Value(), "/help ")
 	}

@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Presence (plan 032 §3.14, SF-64): how many clients are attached to the

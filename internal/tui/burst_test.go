@@ -7,40 +7,29 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
-// Input bursts (SF-40, plan 037 §3.5): bubbletea groups the runes that reach
-// it together up to a space into one KeyRunes message, and a non-paste key's
-// String() is its bare text, so a burst spelling a key name — "up", "end",
-// "home", "delete", "backspace" — matched that key's binding and the word
-// vanished into a cursor move or a deletion. Update splits a burst first, into
-// one KeyRunes message per extended grapheme cluster (X23), each through the
-// command gate exactly as a key typed alone: so a burst is the same keys typed
-// one at a time, in the composer, beside its chips, in every input box, and
-// under the gate — and a key of several runes (a keycap emoji, a letter and
-// its combining accent, a ZWJ sequence) stays one key.
-
-// parserSplit is text as bubbletea's input parser hands it over when it
-// arrives in one read (key.go's detectOneMsg): the runes up to a space as one
-// KeyRunes message, and each space as its own KeySpace message.
-func parserSplit(text string) []tea.KeyMsg {
-	var out []tea.KeyMsg
+// Build a sequence with words delivered in a single key event. A Kitty key
+// may carry associated text, and a synthetic driver may batch typed input.
+// A word such as "up" must reach editors as text and follow gate order.
+func parserSplit(text string) []tea.KeyPressMsg {
+	var out []tea.KeyPressMsg
 	var word []rune
 	flush := func() {
 		if len(word) > 0 {
-			out = append(out, tea.KeyMsg{Type: tea.KeyRunes, Runes: word})
+			out = append(out, textKey(string(word)))
 			word = nil
 		}
 	}
 	for _, r := range text {
 		if r == ' ' {
 			flush()
-			out = append(out, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+			out = append(out, runeKey(' '))
 			continue
 		}
 		word = append(word, r)
@@ -49,13 +38,12 @@ func parserSplit(text string) []tea.KeyMsg {
 	return out
 }
 
-// burstKey is one burst: text in one KeyRunes message, as the parser hands
-// over runes that arrived together with no space among them.
-func burstKey(text string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text)}
+// burstKey represents several typed characters delivered in one key event.
+func burstKey(text string) tea.KeyPressMsg {
+	return textKey(text)
 }
 
-// typeBurst sends text to m as the parser would hand it over (parserSplit),
+// typeBurst sends text to m grouped by word (parserSplit),
 // one message per Update.
 func typeBurst(t *testing.T, m Model, text string) Model {
 	t.Helper()
@@ -77,48 +65,40 @@ const (
 	zwjFamily  = "\U0001F468\u200D\U0001F469\u200D\U0001F467"
 )
 
-// TestBurstKeys: a KeyRunes message of more than one grapheme cluster,
+// TestBurstKeys: a key press containing more than one grapheme cluster,
 // neither a paste nor Alt+…, is a burst, split one key per cluster with every
 // rune of the message kept; anything else — one cluster of several runes
 // included — is no burst.
 func TestBurstKeys(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		k    tea.KeyMsg
+		k    tea.KeyPressMsg
 		want []string
 	}{
 		{"several runes", burstKey("up"), []string{"u", "p"}},
 		{"clusters of several runes", burstKey("x" + keycapOne + decomposed + zwjFamily + "e\u0301"),
 			[]string{"x", keycapOne, decomposed, zwjFamily, "e\u0301"}},
 		{"one rune", burstKey("u"), nil},
+		{"invalid UTF-8 byte", burstKey("a\xffb"), []string{"a", "\xff", "b"}},
 		{"one keycap", burstKey(keycapOne), nil},
 		{"one decomposed letter", burstKey(decomposed), nil},
 		{"one ZWJ sequence", burstKey(zwjFamily), nil},
-		{"a paste", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("up"), Paste: true}, nil},
-		{"alt", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("up"), Alt: true}, nil},
-		{"a space", tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}, nil},
-		{"a real key", tea.KeyMsg{Type: tea.KeyUp}, nil},
+		{"alt", tea.KeyPressMsg{Code: tea.KeyExtended, Text: "up", Mod: tea.ModAlt}, nil},
+		{"a space", runeKey(' '), nil},
+		{"a real key", tea.KeyPressMsg{Code: tea.KeyUp}, nil},
 	} {
 		var got []string
 		for _, k := range burstKeys(tc.k) {
-			if k.Type != tea.KeyRunes || k.Alt || k.Paste {
-				t.Errorf("%s: a key %+v is not a plain KeyRunes", tc.name, k)
+			if k.Text == "" || k.Mod != 0 {
+				t.Errorf("%s: a key %+v is not plain text", tc.name, k)
 			}
-			got = append(got, string(k.Runes))
+			got = append(got, k.Text)
 		}
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: burstKeys = %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	// A rune no string can hold is kept as it came, not made U+FFFD.
-	odd := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a', 0xD800, 'b'}}
-	var runes []rune
-	for _, k := range burstKeys(odd) {
-		runes = append(runes, k.Runes...)
-	}
-	if !slices.Equal(runes, odd.Runes) {
-		t.Errorf("a surrogate's burst came back as %U, want %U", runes, odd.Runes)
-	}
+
 }
 
 // TestAGraphemeIsOneKey (X23): a key of several runes — a keycap 1, a
@@ -194,7 +174,7 @@ func TestABurstBesideAChipRemovesNoChip(t *testing.T) {
 
 	m, _ = seeChip(t)
 	for range len("[Image #1]") {
-		m = pressKey(t, m, tea.KeyLeft)
+		m = pressKey(t, m, "left")
 	}
 	m, _ = press(m, burstKey("delete"))
 	if got := m.input.Value(); got != "see delete[Image #1]" || len(m.images.list) != 1 {
@@ -249,23 +229,23 @@ func TestABurstStopsAtTheCharLimit(t *testing.T) {
 // their work when they are real keys: Home, End, ←, Delete, Backspace and ↑.
 func TestRealKeysStillNavigate(t *testing.T) {
 	m := draft(sized(t), "one two")
-	if m = pressKey(t, m, tea.KeyHome); m.composerCursorOffset() != 0 {
+	if m = pressKey(t, m, "home"); m.composerCursorOffset() != 0 {
 		t.Fatalf("Home left the cursor at %d", m.composerCursorOffset())
 	}
-	if m = pressKey(t, m, tea.KeyEnd); m.composerCursorOffset() != len("one two") {
+	if m = pressKey(t, m, "end"); m.composerCursorOffset() != len("one two") {
 		t.Fatalf("End left the cursor at %d", m.composerCursorOffset())
 	}
 	for range 3 {
-		m = pressKey(t, m, tea.KeyLeft)
+		m = pressKey(t, m, "left")
 	}
-	if m = pressKey(t, m, tea.KeyDelete); m.input.Value() != "one wo" {
+	if m = pressKey(t, m, "delete"); m.input.Value() != "one wo" {
 		t.Fatalf("Delete left %q", m.input.Value())
 	}
-	if m = pressKey(t, m, tea.KeyBackspace); m.input.Value() != "onewo" {
+	if m = pressKey(t, m, "backspace"); m.input.Value() != "onewo" {
 		t.Fatalf("Backspace left %q", m.input.Value())
 	}
 	m = draft(sized(t), "first\nsecond")
-	if m = pressKey(t, m, tea.KeyUp); m.input.Line() != 0 {
+	if m = pressKey(t, m, "up"); m.input.Line() != 0 {
 		t.Fatalf("↑ in a two-line draft left the cursor on line %d", m.input.Line())
 	}
 }
@@ -347,8 +327,8 @@ func (r *gateRig) update(msg tea.Msg) {
 func heldRunes(m Model) string {
 	var b strings.Builder
 	for _, h := range m.held {
-		if k, ok := h.msg.(tea.KeyMsg); ok {
-			b.WriteString(string(k.Runes))
+		if k, ok := h.msg.(tea.KeyPressMsg); ok {
+			b.WriteString(k.Text)
 		}
 	}
 	return b.String()

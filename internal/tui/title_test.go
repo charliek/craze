@@ -1,12 +1,8 @@
 package tui
 
 import (
-	"io"
-	"os"
 	"strings"
 	"testing"
-
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -130,51 +126,5 @@ func TestWindowTitleSanitizesControlCharacters(t *testing.T) {
 	}
 	if want := "✦ fix flaky pty test"; got != want {
 		t.Fatalf("windowTitle() = %q, want %q", got, want)
-	}
-}
-
-// pipeSyncWriter is a *syncWriter over a real *os.File pair, so Run's exit
-// clear is asserted through the exact type it writes with (§3.10): a
-// syncWriter needs an *os.File to satisfy Fd(), which a plain bytes.Buffer
-// cannot give it.
-func pipeSyncWriter(t *testing.T) (*syncWriter, func() []byte) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = r.Close() })
-	return newSyncWriter(w), func() []byte {
-		_ = w.Close()
-		b, err := io.ReadAll(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-}
-
-// TestClearWindowTitleWritesOSCReset is Run's exit-path clear: once a title
-// was ever set, the same writer bubbletea rendered into gets OSC 2 with an
-// empty title, so Ghostty and roost fall back to their own derived tab name
-// instead of a stale "✦ craze" outliving the process.
-func TestClearWindowTitleWritesOSCReset(t *testing.T) {
-	sw, drain := pipeSyncWriter(t)
-	clearWindowTitle(sw, Model{lastTitle: "✦ craze"})
-	if got, want := drain(), []byte(ansi.SetWindowTitle("")); string(got) != string(want) {
-		t.Fatalf("clear wrote %q, want %q", got, want)
-	}
-}
-
-// TestClearWindowTitleSkippedWhenNeverSet covers both reasons lastTitle can
-// still be "": the off switch (Config.TerminalTitle false, as every existing
-// golden and unit-test model leaves it) and a run that ended before its first
-// Update. Neither needs the terminal to fall back to anything, so neither
-// should write a byte.
-func TestClearWindowTitleSkippedWhenNeverSet(t *testing.T) {
-	sw, drain := pipeSyncWriter(t)
-	clearWindowTitle(sw, Model{})
-	if got := drain(); len(got) != 0 {
-		t.Fatalf("clear wrote %q when no title was ever set", got)
 	}
 }

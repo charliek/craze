@@ -1,10 +1,9 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // The shell mode through the real program (plan 022 §3.6). Nothing here moves
@@ -31,10 +30,10 @@ func TestFrameGoldenShellComposer100x30(t *testing.T) {
 		t.Fatalf("the session title should have given way to the mode:\n%s", plain)
 	}
 	th := Preset("tokyo-night")
-	if !strings.Contains(raw, ansiFG(th.Shell.TrueColor)) {
+	if !strings.Contains(raw, ansiFG(depthHex(th.Shell))) {
 		t.Fatal("the composer's rules are not painted in the shell colour")
 	}
-	if th.Shell.TrueColor == th.Rule.TrueColor {
+	if depthHex(th.Shell) == depthHex(th.Rule) {
 		t.Fatal("the shell colour must differ from the ordinary rule")
 	}
 	// One `!` away, the composer is the composer again — there is no mode flag
@@ -90,9 +89,9 @@ func TestShellColourIsDerivedForEveryPreset(t *testing.T) {
 		// must not vanish into the background it is drawn on.
 		for _, other := range []struct {
 			name string
-			c    lipgloss.CompleteColor
+			c    color.Color
 		}{{"Rule", th.Rule}, {"Border", th.Border}, {"BG", th.BG}} {
-			if th.Shell.TrueColor == other.c.TrueColor {
+			if depthHex(th.Shell) == depthHex(other.c) {
 				t.Fatalf("%s: Shell must not equal %s", name, other.name)
 			}
 		}

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -105,6 +105,21 @@ func TestOverlaySplicesInsideResets(t *testing.T) {
 	}
 }
 
+// The keycap occupies columns 1 and 2. Covering either half with a dialog
+// erases the other half while preserving the adjacent text.
+func TestOverlayCutsAKeycap(t *testing.T) {
+	base := styleFG(lipgloss.Color("#abcabc")).Render("a1️⃣bc")
+	for _, tc := range []struct {
+		x    int
+		want string
+	}{{1, "a# bc"}, {2, "a #bc"}, {3, "a1️⃣#c"}} {
+		got := plain(spliceRow(base, "#", tc.x, 1))
+		if got != tc.want {
+			t.Errorf("overlay at column %d produced %q, want %q", tc.x, got, tc.want)
+		}
+	}
+}
+
 // TestOverlayWideGraphemesAtBothEdges: half a wide character is not a
 // character, so the cell it half-filled becomes a blank and the row keeps its
 // width either way.
@@ -191,7 +206,7 @@ func TestDialogLayerOwnsItsRect(t *testing.T) {
 func TestDialogClosesOnCardArrival(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = m.openModelDialog()
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	if m.dialog != dialogNone {
 		t.Fatalf("a card closes the model dialog, dialog=%v", m.dialog)
@@ -211,7 +226,7 @@ func TestThemeDialogOutsideClickReverts(t *testing.T) {
 	m = m.openThemePicker()
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	if m.theme.Name == "tokyo-night" {
 		t.Fatal("moving the cursor should have previewed another theme")
 	}
@@ -249,12 +264,12 @@ func TestThemeDialogClickKeeps(t *testing.T) {
 func TestFastOnSendsTheAdvertisedValue(t *testing.T) {
 	m := sized(t)
 	m = m.openModelDialog()
-	m = pressKey(t, m, tea.KeyTab)
-	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, "tab")
+	m = pressKey(t, m, "tab")
 	if m.mdlg.focus != dialogFocus("fast") {
 		t.Fatalf("focus %v", m.mdlg.focus)
 	}
-	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, "right")
 	if m.mdlg.chosen["fast"] != "true" {
 		t.Fatalf("the on value is %q, want the advertised \"true\"", m.mdlg.chosen["fast"])
 	}
@@ -448,7 +463,7 @@ func TestModelDialogFocusSurvivesAnANSIStrip(t *testing.T) {
 	} {
 		f := m
 		for i := 0; i < tc.tabs; i++ {
-			f = pressKey(t, f, tea.KeyTab)
+			f = pressKey(t, f, "tab")
 		}
 		marked := markedDialogRows(f)
 		if len(marked) != 1 {
@@ -487,7 +502,7 @@ func TestModelDialogFocusPaintsTheFocusedRow(t *testing.T) {
 	m = m.openModelDialog()
 	tm, _ = m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	band := ansiBG(m.theme.SelectionBG.TrueColor)
+	band := ansiBG(depthHex(m.theme.SelectionBG))
 
 	for _, tc := range []struct {
 		name, want string
@@ -499,9 +514,9 @@ func TestModelDialogFocusPaintsTheFocusedRow(t *testing.T) {
 	} {
 		f := m
 		for i := 0; i < tc.tabs; i++ {
-			f = pressKey(t, f, tea.KeyTab)
+			f = pressKey(t, f, "tab")
 		}
-		raw, plainRows := rows(f.View()), rows(plainView(f))
+		raw, plainRows := rows(f.View().Content), rows(plainView(f))
 		painted := 0
 		for y := range raw {
 			if !strings.Contains(raw[y], band) {
@@ -529,14 +544,14 @@ func TestModelDialogFooterTellsTheTruth(t *testing.T) {
 	if !strings.Contains(plainView(m), modelDialogHint) {
 		t.Fatalf("the list's footer is missing:\n%s", plainView(m))
 	}
-	f := pressKey(t, m, tea.KeyTab)
+	f := pressKey(t, m, "tab")
 	if !strings.Contains(plainView(f), modelValueHint) {
 		t.Fatalf("a toggle row's footer should name ←→:\n%s", plainView(f))
 	}
 	// Typing still filters whatever has the focus, which is why the hint keeps
 	// saying so.
 	for _, r := range "fas" {
-		tm, _ := f.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		tm, _ := f.Update(runeKey(r))
 		f = tm.(Model)
 	}
 	if got := f.dialogModelList(); len(got) != 1 || got[0].ID != "fast" {
@@ -609,7 +624,7 @@ func TestHelpDialogScrollsRatherThanOverflowing(t *testing.T) {
 	if strings.Contains(plainView(m), "▲") {
 		t.Fatalf("nothing is above the first row yet:\n%s", plainView(m))
 	}
-	down := pressKey(t, m, tea.KeyDown)
+	down := pressKey(t, m, "down")
 	if down.helpTop != 1 {
 		t.Fatalf("↓ moved the window to %d", down.helpTop)
 	}
@@ -618,12 +633,12 @@ func TestHelpDialogScrollsRatherThanOverflowing(t *testing.T) {
 	}
 	// Up from the top and down past the bottom both clamp, so the box can never
 	// scroll past its own content.
-	if up := pressKey(t, m, tea.KeyUp); up.helpTop != 0 {
+	if up := pressKey(t, m, "up"); up.helpTop != 0 {
 		t.Fatalf("↑ at the top scrolled to %d", up.helpTop)
 	}
 	end := m
 	for i := 0; i < 20; i++ {
-		end = pressKey(t, end, tea.KeyPgDown)
+		end = pressKey(t, end, "pgdown")
 	}
 	if want := len(end.helpLines()) - end.helpShown(); end.helpTop != want {
 		t.Fatalf("pgdn settled at %d, want the last page at %d", end.helpTop, want)
@@ -738,7 +753,7 @@ func TestHelpDialogListsOneNamePerCommand(t *testing.T) {
 // and a card arriving takes it down with the rest of the stack.
 func TestHelpDialogClosesLikeTheOthers(t *testing.T) {
 	m := helpModel(t, 100, 30)
-	if out := pressKey(t, m, tea.KeyEsc); out.dialog != dialogNone {
+	if out := pressKey(t, m, "esc"); out.dialog != dialogNone {
 		t.Fatalf("esc left dialog=%v", out.dialog)
 	}
 	if out := clickXY(t, m, 0, m.lay.Dialog.Y); out.dialog != dialogNone {

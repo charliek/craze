@@ -30,8 +30,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -600,10 +600,10 @@ func TestConnectSignInIsTheChatGPTPlansAction(t *testing.T) {
 	if s.dirs[0] != dir {
 		t.Fatalf("the sign-in went to %s, not the TUI's directory %s", s.dirs[0], dir)
 	}
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 
 	// The control: a key-funded provider's row opens its key field.
-	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, "down")
 	if p, _ := m.cdlg.provider(); p.ID != "gamma" {
 		t.Fatalf("the control is not on Gamma (%q)", p.ID)
 	}
@@ -634,7 +634,7 @@ func TestConnectSignInEscClosesTheListener(t *testing.T) {
 		t.Fatal("the control: an open step's attempt is not listening and waiting")
 	}
 
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if m.cdlg.step != connectPick || m.dialog != dialogConnect {
 		t.Fatal("Esc did not go back to step one")
 	}
@@ -692,7 +692,7 @@ func TestConnectSignInEndsOnEveryWayOut(t *testing.T) {
 		m, _ := signInModel(t, false)
 		m, cmd := press(m, enter())
 		begun := runCmd(cmd).(signInBegunMsg)
-		m = pressKey(t, m, tea.KeyEsc) // the step goes before its begin's answer lands
+		m = pressKey(t, m, "esc") // the step goes before its begin's answer lands
 		tm, wait := m.Update(begun)
 		m = tm.(Model)
 		f := begun.att.(*fakeSignIn)
@@ -719,7 +719,7 @@ func TestConnectSignInEndsOnEveryWayOut(t *testing.T) {
 		m, cmd := press(m, enter())
 		answer := make(chan tea.Msg, 1)
 		go func() { answer <- runCmd(cmd) }()
-		_ = pressKey(t, m, tea.KeyEsc)
+		_ = pressKey(t, m, "esc")
 		close(release)
 		if begun, ok := awaitMsg(t, answer).(signInBegunMsg); !ok || begun.att != nil {
 			t.Fatal("a begin after its run ended was answered as begun")
@@ -831,7 +831,7 @@ func TestConnectSignInCopiesTheAddress(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
 	m, _ := signInModel(t, false)
 	m, cmd := press(m, enter()) // the begin not yet answered
-	if _, copied := press(m, tea.KeyMsg{Type: tea.KeyCtrlY}); copied != nil || len(rec.copies()) != 0 {
+	if _, copied := press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl}); copied != nil || len(rec.copies()) != 0 {
 		t.Fatal("the control: Ctrl+Y copied before there was an address")
 	}
 	tm, _ := m.Update(runCmd(cmd))
@@ -840,7 +840,7 @@ func TestConnectSignInCopiesTheAddress(t *testing.T) {
 	if len(f.reports()) != 0 {
 		t.Fatal("the control: the attempt was told of a copy before Ctrl+Y")
 	}
-	_, copied := press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	_, copied := press(m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	done, ok := runCmd(copied).(clipboardDoneMsg)
 	if !ok || done.note != connectSignInCopied {
 		t.Fatal("Ctrl+Y did not copy with its note")
@@ -1092,7 +1092,7 @@ func TestConnectSignInFieldIsAlwaysMasked(t *testing.T) {
 			m, _ = beginStep(t, m)
 			if tc.typed {
 				for _, r := range tc.value {
-					m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+					m, _ = press(m, runeKey(r))
 					connectLeak(t, m, nil)
 					assertSignInFieldMasked(t, connectView(t, m), m.cdlg.key.Value())
 				}
@@ -1607,7 +1607,7 @@ func TestConnectSignInLogsThroughItsObserver(t *testing.T) {
 						t.Fatalf("the refusal's answer wrote no note:\n%s", transcriptText(m))
 					}
 				}
-				m = pressKey(t, m, tea.KeyEsc) // back to step one, the plan still selected
+				m = pressKey(t, m, "esc") // back to step one, the plan still selected
 			}
 			_, _ = finishRun(io.Discard, nil, initial, nil)
 			if l, _ := initial.signIns.logFor(dir, signInStamp{}); l != nil {
@@ -1733,7 +1733,7 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 		t.Fatalf("the control: the attempt's listener takes no connection: %v", err)
 	}
 	_ = c.Close()
-	m = pressKey(t, m, tea.KeyEsc)
+	m = pressKey(t, m, "esc")
 	if _, ok := awaitMsg(t, done).(signInDoneMsg); !ok {
 		t.Fatal("the wait did not end with Esc")
 	}
@@ -1967,7 +1967,7 @@ func TestConnectSignInOverlappingBeginsShareTheLog(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the control: the first begin never ran")
 	}
-	m = pressKey(t, m, tea.KeyEsc) // back to step one, the first begin still running
+	m = pressKey(t, m, "esc") // back to step one, the first begin still running
 	m, _, logWait := beginStepLog(t, m)
 	if logWait != nil {
 		t.Fatal("the second begin armed a second wait for the log")

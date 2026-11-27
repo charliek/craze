@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -319,7 +319,7 @@ func TestADispatchStartsTheSessionInTheBackground(t *testing.T) {
 		t.Fatal("a second enter, or typing, while the first dispatch runs did something")
 	}
 	// The selection is captured at enter: moving the list changes nothing.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 
 	msg := dispatched(t, disp)
 	if msg.out != dispatchAccepted || msg.err != nil {
@@ -644,7 +644,7 @@ func TestAQuitRacingADispatch(t *testing.T) {
 		m, cmd := press(m, enter())
 		wait := later(t, mustCmd(t, cmd, "sessDispatch"))
 		awaitStep(t, hb.startIn, "the start")
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+		m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 		if !m.quitting {
 			t.Fatal("ctrl+d on the list did not quit")
 		}
@@ -700,7 +700,7 @@ func TestAQuitRacingADispatch(t *testing.T) {
 			m, cmd := press(m, enter())
 			wait := later(t, mustCmd(t, cmd, "sessDispatch"))
 			awaitStep(t, held, "the dispatch before LeaveRunning")
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+			m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 			finishRun(io.Discard, m, m, nil)
 			if finishFirst {
 				finish()
@@ -907,7 +907,7 @@ func TestAQuitDuringADispatchsSubmission(t *testing.T) {
 			go func() { answered <- cmd() }()
 			awaitStep(t, w.began, "the prompt's write")
 			if quit == "ctrl+d" {
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				if !m.quitting {
 					t.Fatal("ctrl+d on the list did not quit")
 				}
@@ -976,7 +976,7 @@ func TestAQuitCutsADispatchsDetachShort(t *testing.T) {
 			go func() { answered <- disp() }()
 			awaitStep(t, w.detach, "the dispatch's detach")
 			if quit == "ctrl+d" {
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				if !m.quitting {
 					t.Fatal("ctrl+d on the list did not quit")
 				}
@@ -1058,7 +1058,7 @@ func TestAQuitEndsADispatchsDetachByItsContext(t *testing.T) {
 			go func() { answered <- disp() }()
 			awaitStep(t, conn.detaching, "the dispatch's detach")
 			if quit == "ctrl+d" {
-				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				m, _ = press(m, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				if !m.quitting {
 					t.Fatal("ctrl+d on the list did not quit")
 				}
@@ -1100,7 +1100,7 @@ func TestADispatchLeftBehindIsDropped(t *testing.T) {
 	m, cmd := press(m, enter())
 	disp := mustCmd(t, cmd, "sessDispatch")
 	// esc leaves the list while it starts (it does not clear the input).
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc while starting did not leave the list")
 	}
@@ -1193,7 +1193,7 @@ func openedUnstarted(t *testing.T, cols, rows int) (Model, *startSessions, *host
 func typeComposer(t *testing.T, m Model, text string) Model {
 	t.Helper()
 	for _, r := range text {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = press(m, runeKey(r))
 	}
 	return m
 }
@@ -1402,9 +1402,9 @@ func TestAnUnstartedSessionsFirstPromptIsDroppedWhenItEndsBehindTheList(t *testi
 	if !ok {
 		t.Fatal("the adopted backend's start answered no startedMsg")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	if !m.sessList.open || m.sessList.none || m.sessList.here != m.hereKey() || m.sessList.here.zero() {
 		t.Fatalf("← over the adopted session: list %v, none %v, here %+v", m.sessList.open, m.sessList.none, m.sessList.here)
 	}
@@ -1451,7 +1451,7 @@ func TestAnUnstartedSessionAbandonedLeavesNothing(t *testing.T) {
 		m, _ = press(m, enter())
 		m, _ = press(m, enter())
 		tmp := m.draftKey()
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 		switch {
 		case !m.sessList.open || !m.sessList.none || m.unstarted != nil || m.eng != nil:
 			t.Fatalf("← on the unstarted session: list %v, none %v, unstarted %v", m.sessList.open, m.sessList.none, m.unstarted)
@@ -1468,7 +1468,7 @@ func TestAnUnstartedSessionAbandonedLeavesNothing(t *testing.T) {
 		if m.sessList.sel != from {
 			t.Fatalf("the cursor is on %+v, want %+v", m.sessList.sel, from)
 		}
-		for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}} {
+		for _, k := range []tea.KeyPressMsg{{Code: tea.KeyEsc}, {Code: tea.KeyLeft}} {
 			if n, _ := press(m, k); !n.sessList.open || sessHint(n) != sessNothingNote {
 				t.Fatalf("%v with nothing behind the list: open %v, hint %q", k, n.sessList.open, sessHint(n))
 			}
@@ -1479,9 +1479,9 @@ func TestAnUnstartedSessionAbandonedLeavesNothing(t *testing.T) {
 		m = typeComposer(t, m, "go")
 		m, cmd := press(m, enter())
 		spawn := mustCmd(t, cmd, "enterUnstarted")
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 		if !m.sessList.open || !m.sessList.none || m.unstarted != nil {
 			t.Fatalf("← with the spawn running: list %v, none %v", m.sessList.open, m.sessList.none)
 		}

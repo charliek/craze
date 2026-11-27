@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
@@ -204,7 +204,7 @@ func within[T any](t *testing.T, what string, f func() T) T {
 // back.
 func (r *gateRig) ctrlD() tea.Cmd {
 	r.t.Helper()
-	tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	tm, cmd := r.m.gated(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, Model.update)
 	r.m = tm.(Model)
 	return cmd
 }
@@ -342,7 +342,7 @@ func TestTheQuitIsBoundedByItsOneDeadline(t *testing.T) {
 		}
 
 		second := r.ctrlD()
-		if len(namedCmds(second, "stopQuit")) != 0 || len(namedCmds(second, "bubbletea.Quit")) != 1 {
+		if len(namedCmds(second, "stopQuit")) != 0 || len(namedCmds(second, teaPkg+"Quit")) != 1 {
 			t.Fatal("a second quit did not quit at once")
 		}
 		r.finish()

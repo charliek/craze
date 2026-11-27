@@ -49,7 +49,7 @@ func TestARunWhoseSocketFailsStillRuns(t *testing.T) {
 	t.Setenv("CRAZE_RUNTIME_DIR", runtimeDir)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 
-	tail := newPTYTail(ptmx)
+	tail := newTUITail(t, ptmx)
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr })
@@ -59,7 +59,7 @@ func TestARunWhoseSocketFailsStillRuns(t *testing.T) {
 	go func() {
 		done <- runTUI(nil, &tuiFlags{agentBin: fakeAgentPath(t), workspace: ws, force: true}, hostEnv{})
 	}()
-	if !tail.wait(" craze ─", 10*time.Second) {
+	if !tail.waitScreen(t, " craze ─", 10*time.Second) {
 		t.Fatalf("craze never drew a frame; got %q", tail.text())
 	}
 	locks, _ := filepath.Glob(filepath.Join(home, ".cache", "craze", "locks", "*.lock"))
@@ -156,7 +156,7 @@ func TestTheTeardownRunsBeforeTheFlush(t *testing.T) {
 		hostClose = (*rundir.Host).Close
 	})
 
-	tail := newPTYTail(ptmx)
+	tail := newTUITail(t, ptmx)
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = tty, tty, stderrW
 	restored := false
@@ -172,7 +172,7 @@ func TestTheTeardownRunsBeforeTheFlush(t *testing.T) {
 	go func() {
 		done <- runTUI(nil, &tuiFlags{agentBin: fakeAgentPath(t), workspace: t.TempDir(), force: true}, hostEnv{})
 	}()
-	if !tail.wait(" craze ─", 10*time.Second) {
+	if !tail.waitScreen(t, " craze ─", 10*time.Second) {
 		t.Fatalf("craze never drew a frame; got %q", tail.text())
 	}
 	entries, _ := filepath.Glob(filepath.Join(home, ".cache", "craze", "hosts", "*.json"))
@@ -235,7 +235,7 @@ func waitSessionStarted(t *testing.T, ptmx *os.File, tail *ptyTail) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(tail.text(), "echo: hi") {
+		if strings.Contains(tail.screen(t), "echo: hi") {
 			return
 		}
 		if _, err := ptmx.Write([]byte("\r")); err != nil {
@@ -243,7 +243,7 @@ func waitSessionStarted(t *testing.T, ptmx *os.File, tail *ptyTail) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("the session never started; got %q", tail.text())
+	t.Fatalf("the session never started; screen:\n%s\nPTY output: %q", tail.screen(t), tail.text())
 }
 
 // lockHeldBy reports whether path is flocked by someone and names pid.

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -79,7 +79,7 @@ func clearInput(t *testing.T, m Model) Model {
 		if m.sessList.in.ti.Value() == "" {
 			return m
 		}
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	}
 	t.Fatalf("esc did not clear the input %q", m.sessList.in.ti.Value())
 	return m
@@ -334,7 +334,7 @@ func TestModelListsTheCachedCatalog(t *testing.T) {
 	if reads := fs.catReads; !slices.Equal(reads, []string{"cursor"}) {
 		t.Fatalf("the catalog was read %v, want once for the popup", reads)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab}) // tab uses it too
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab}) // tab uses it too
 	if spec, _ := m.sessNewSpec("/x"); spec.Model != "claude-opus-5" || spec.Provider.Name() != "cursor" {
 		t.Fatalf("after the choice: %+v", spec)
 	}
@@ -399,7 +399,7 @@ func TestTheAgentsOwnDefaultIsNotACatalogModel(t *testing.T) {
 	}
 
 	// The catalog's `default` (the row under it): the model `default`.
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m, _ = press(m, enter())
 	if spec, _ := m.sessNewSpec("/x"); spec.Model != "default" {
 		t.Fatalf("the catalog's default chosen: %+v, want the model default", spec)
@@ -476,7 +476,7 @@ func TestTypedCommandLines(t *testing.T) {
 		t.Helper()
 		m, _ = typeList(t, m, line)
 		if m.sessList.in.cmd.visible() {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		}
 		if h := sessHint(m); !strings.Contains(h, "sets it for new sessions") {
 			t.Fatalf("%q's hint line %q", line, h)
@@ -526,7 +526,7 @@ func TestThePickLasts(t *testing.T) {
 	m, _ := cmdList(t, 100, 30, nil)
 	m, _ = typeList(t, m, "/provider grok")
 	m, _ = press(m, enter())
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc on an empty input did not leave the list")
 	}
@@ -865,7 +865,7 @@ func TestChoosingEffortAndFast(t *testing.T) {
 	if got := cmdItems(m); !slices.Equal(got, []string{"on", "off"}) {
 		t.Fatalf("/fast o lists %v", got)
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab}) // tab uses it too
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyTab}) // tab uses it too
 	if s := spec(m); s.Effort != "high" || s.Fast == nil || !*s.Fast {
 		t.Fatalf("after /fast on: %+v", s)
 	}
@@ -877,7 +877,7 @@ func TestChoosingEffortAndFast(t *testing.T) {
 		t.Helper()
 		m, _ = typeList(t, m, line)
 		if m.sessList.in.cmd.visible() {
-			m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+			m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 		}
 		if h := sessHint(m); !strings.Contains(h, "sets it for new sessions") {
 			t.Fatalf("%q's hint line %q", line, h)
@@ -1007,7 +1007,7 @@ func TestEffortAndFastReachTheDispatch(t *testing.T) {
 
 	// Across the list's closing and reopening, to the unstarted session.
 	m = clearInput(t, m)
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.sessList.open {
 		t.Fatal("esc on an empty input did not leave the list")
 	}

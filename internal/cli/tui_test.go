@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"github.com/charliek/craze/internal/testutil/ptyscreen"
 )
 
 // stderrCanary is what the fake agent says on its stderr. It has to be a string
@@ -50,7 +52,7 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "")
 	crazeHome(t)
 
-	tail := newPTYTail(ptmx)
+	tail := newTUITail(t, ptmx)
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr
 	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr })
@@ -62,7 +64,7 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 		t.Fatalf("craze never entered the alt screen; got %q", tail.text())
 	}
 	// A frame is on the screen, and the agent has said its piece into the pipe.
-	if !tail.wait(" craze ─", 10*time.Second) {
+	if !tail.waitScreen(t, " craze ─", 10*time.Second) {
 		t.Fatalf("craze never drew a frame; got %q", tail.text())
 	}
 	if !waitFile(spoke, 10*time.Second) {
@@ -186,8 +188,10 @@ func waitFile(path string, d time.Duration) bool {
 // ptyTail keeps reading the master side, because a test that stops reading
 // stalls whatever is writing to the slave.
 type ptyTail struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	em     *ptyscreen.Screen
+	parsed int
 }
 
 func newPTYTail(ptmx *os.File) *ptyTail {
@@ -216,6 +220,36 @@ func (p *ptyTail) text() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.buf.String()
+}
+
+func newTUITail(t *testing.T, master *os.File) *ptyTail {
+	t.Helper()
+	tail := newPTYTail(master)
+	tail.em = ptyscreen.New(t, master)
+	return tail
+}
+
+// screen applies incremental redraws to the same terminal cells across waits.
+// Keep text() for assertions about raw mode sequences or plain diagnostics.
+func (p *ptyTail) screen(t *testing.T) string {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.em.Feed(t, p.buf.Bytes()[p.parsed:])
+	p.parsed = p.buf.Len()
+	return p.em.String()
+}
+
+func (p *ptyTail) waitScreen(t *testing.T, needle string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.screen(t), needle) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 func (p *ptyTail) wait(needle string, d time.Duration) bool {

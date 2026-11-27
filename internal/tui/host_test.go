@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -399,7 +399,7 @@ func TestHostStatusProviderIsTheOneStarted(t *testing.T) {
 	if !m.pickingProvider {
 		t.Fatal("setup: expected the provider picker")
 	}
-	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m, _ = press(m, enter())
 	_ = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
@@ -412,19 +412,11 @@ type orderLog struct{ events []string }
 
 func (l *orderLog) add(e string) { l.events = append(l.events, e) }
 
-// orderWriter names the two escape writes the exit tail makes and records any
-// other write verbatim, so an unexpected byte shows up in the order too.
+// orderWriter includes exit diagnostics in the recorded shutdown order.
 type orderWriter struct{ log *orderLog }
 
 func (w orderWriter) Write(p []byte) (int, error) {
-	switch string(p) {
-	case ansi.SetWindowTitle(""):
-		w.log.add("title clear")
-	case resetPair:
-		w.log.add("term reset")
-	default:
-		w.log.add(fmt.Sprintf("write %q", p))
-	}
+	w.log.add(fmt.Sprintf("write %q", p))
 	return len(p), nil
 }
 
@@ -470,9 +462,7 @@ func (s orderSession) Close() error {
 	return nil
 }
 
-// exitTailModel is a model the way Run leaves it: colours applied through the
-// recording writer (their set is written before the log starts) and a tab
-// title that was set. It is also a provider picker nobody has answered yet: its
+// exitTailModel leaves its provider picker unanswered. Its
 // Config carries a NewSession, without which confirmProvider swaps nothing,
 // and the session that swap builds logs its close as "sess close picked".
 func exitTailModel(t *testing.T) (Model, *orderLog, orderWriter) {
@@ -504,9 +494,6 @@ func exitTailModelWith(t *testing.T, onQuit bool) (Model, *orderLog, orderWriter
 		cfg.OnQuit = func() { log.add("on quit") }
 	}
 	m := New(cfg)
-	m.term = newTerminalColors(w)
-	m.term.apply(m.theme)
-	m.lastTitle = "✦ craze"
 	log.events = nil
 	return m, log, w
 }
@@ -518,8 +505,8 @@ func assertOrder(t *testing.T, log *orderLog, want ...string) {
 	}
 }
 
-// TestFinishRunOrder is B4: title clear, terminal reset, host close, session
-// close, in that order — and with the nil final a recovered panic hands back,
+// TestFinishRunOrder checks that the host closes before the session. With
+// the nil final a recovered panic hands back,
 // the host still closes, from the argument and not from final, and the session
 // that closes is the one the program ended with, not the one it started with.
 // It is also the chain's seam for issue #23 (§3.7): the "the agent exited on
@@ -539,7 +526,7 @@ func TestFinishRunOrder(t *testing.T) {
 		if !showAgentDiag {
 			t.Fatal("finishRun did not report the run as failed for a start error")
 		}
-		assertOrder(t, log, "title clear", "term reset", "host close", "sess close")
+		assertOrder(t, log, "host close", "sess close")
 		if h.deadline <= 0 || h.deadline > host.DefaultCloseTimeout {
 			t.Fatalf("host close deadline %v, want within %v", h.deadline, host.DefaultCloseTimeout)
 		}
@@ -561,9 +548,7 @@ func TestFinishRunOrder(t *testing.T) {
 		if !showAgentDiag {
 			t.Fatal("finishRun did not report the run as failed for a nil final")
 		}
-		// No title clear: without a Model there is no lastTitle to say one
-		// was set, exactly as before the tail was extracted.
-		assertOrder(t, log, "term reset", "host close", "sess close")
+		assertOrder(t, log, "host close", "sess close")
 	})
 	t.Run("the picker swapped the session", func(t *testing.T) {
 		// Issue #19. The session the picker builds lives only in the model
@@ -588,12 +573,12 @@ func TestFinishRunOrder(t *testing.T) {
 		// Exact: the picked session closes, last, and the initial one is not
 		// closed again — a plain "sess close" here would be it, with the
 		// picked session and its agent left running.
-		assertOrder(t, log, "term reset", "host close", "sess close picked")
+		assertOrder(t, log, "host close", "sess close picked")
 	})
 	t.Run("no host", func(t *testing.T) {
 		m, log, w := exitTailModel(t)
 		_, _ = finishRun(w, m, m, nil)
-		assertOrder(t, log, "title clear", "term reset", "sess close")
+		assertOrder(t, log, "sess close")
 	})
 	t.Run("the agent exited on its own", func(t *testing.T) {
 		// An orderSession-style stub whose Close reports agent.ErrAgentExited
@@ -615,7 +600,7 @@ func TestFinishRunOrder(t *testing.T) {
 		if !showAgentDiag {
 			t.Fatal("finishRun did not report the agent's own exit")
 		}
-		assertOrder(t, log, "title clear", "term reset", "host close", "sess close")
+		assertOrder(t, log, "host close", "sess close")
 	})
 }
 
@@ -647,7 +632,7 @@ func (s swapThenPanic) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return s, nil
 }
 
-func (s swapThenPanic) View() string { return "" }
+func (s swapThenPanic) View() tea.View { return tea.View{} }
 
 // TestRecoveredPanicClosesThePickedSession is issue #19 end to end on a real
 // bubbletea program, built the way the frame runner builds one. It pins the
@@ -676,7 +661,7 @@ func TestRecoveredPanicClosesThePickedSession(t *testing.T) {
 	if _, err := finishRun(w, final, initial, h); err != nil {
 		t.Fatalf("finishRun returned %v", err)
 	}
-	assertOrder(t, log, "term reset", "host close", "sess close picked")
+	assertOrder(t, log, "host close", "sess close picked")
 }
 
 // beginPanics is a session whose Begin panics. The engine's Submit calls Begin
@@ -807,9 +792,9 @@ func handlerMsg(cmd tea.Cmd) tea.Msg {
 // time the session is first closed; the TestFinishRunOrder recorders start
 // after the quit command has run and cannot see this.
 func TestQuitReleasesTheHostBeforeClosingTheSession(t *testing.T) {
-	pressKey := func(k tea.KeyType) func(*testing.T, Model) (Model, tea.Cmd) {
+	pressKey := func(k string) func(*testing.T, Model) (Model, tea.Cmd) {
 		return func(_ *testing.T, m Model) (Model, tea.Cmd) {
-			tm, cmd := m.Update(tea.KeyMsg{Type: k})
+			tm, cmd := m.Update(testKey(k))
 			return tm.(Model), cmd
 		}
 	}
@@ -822,23 +807,23 @@ func TestQuitReleasesTheHostBeforeClosingTheSession(t *testing.T) {
 			tm, cmd := m.Update(enter())
 			return tm.(Model), cmd
 		}},
-		{"ctrl+d", pressKey(tea.KeyCtrlD)},
-		{"ctrl+c idle", pressKey(tea.KeyCtrlC)},
+		{"ctrl+d", pressKey("ctrl+d")},
+		{"ctrl+c idle", pressKey("ctrl+c")},
 		{"ctrl+c after an error", func(t *testing.T, m Model) (Model, tea.Cmd) {
 			m = send(t, m, "go")
 			m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
-			return pressKey(tea.KeyCtrlC)(t, m)
+			return pressKey("ctrl+c")(t, m)
 		}},
 		{"ctrl+c twice while working", func(t *testing.T, m Model) (Model, tea.Cmd) {
 			now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 			m.clock = func() time.Time { return now }
 			m = send(t, m, "go")
-			m, _ = pressKey(tea.KeyCtrlC)(t, m) // cancels; its command is not an exit
+			m, _ = pressKey("ctrl+c")(t, m) // cancels; its command is not an exit
 			if m.quitting {
 				t.Fatal("setup: the first ctrl+c while working quit")
 			}
 			now = now.Add(ctrlCWindow / 2)
-			return pressKey(tea.KeyCtrlC)(t, m)
+			return pressKey("ctrl+c")(t, m)
 		}},
 	}
 	for _, tc := range cases {
@@ -933,7 +918,7 @@ func TestHostStatusNoIdleBeforeAFiredSendNow(t *testing.T) {
 	m = startScripted(t, m, sess, "go", first)
 	sess.Script(sent)
 	m.input.SetValue("PINEAPPLE")
-	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
 	release := sess.HoldNextCancel()
 	m = pumpKey(t, m, enter())
 	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
@@ -972,7 +957,7 @@ func TestOnQuitIsToldBeforeTheSessionCloses(t *testing.T) {
 				m = tm.(Model)
 			} else {
 				var tm tea.Model
-				tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				tm, cmd = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 				m = tm.(Model)
 			}
 			log.events = nil
@@ -991,7 +976,7 @@ func TestOnQuitIsToldBeforeTheSessionCloses(t *testing.T) {
 	t.Run("the exit tail alone", func(t *testing.T) {
 		m, log, w := exitTailModelWith(t, true)
 		_, _ = finishRun(w, nil, m, &orderHost{log: log})
-		assertOrder(t, log, "term reset", "on quit", "host close", "sess close")
+		assertOrder(t, log, "on quit", "host close", "sess close")
 	})
 	t.Run("after a picker's swap", func(t *testing.T) {
 		initial, log, w := exitTailModelWith(t, true)
@@ -1002,11 +987,11 @@ func TestOnQuitIsToldBeforeTheSessionCloses(t *testing.T) {
 			t.Fatal("the swap dropped OnQuit")
 		}
 		_, _ = finishRun(w, final, final, &orderHost{log: log})
-		assertOrder(t, log, "title clear", "term reset", "on quit", "host close", "sess close picked")
+		assertOrder(t, log, "on quit", "host close", "sess close picked")
 	})
 	t.Run("no OnQuit (the control)", func(t *testing.T) {
 		m, log, w := exitTailModelWith(t, false)
 		_, _ = finishRun(w, nil, m, &orderHost{log: log})
-		assertOrder(t, log, "term reset", "host close", "sess close")
+		assertOrder(t, log, "host close", "sess close")
 	})
 }
