@@ -260,6 +260,15 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	if mode != "" {
 		hint = modeHint
 	}
+	if m.inspector.active && m.btw == nil && !m.cardOpen() && !m.dialogOpen() {
+		mode, modeStyle, modeID = "Inspect", styleFG(m.theme.Accent), spanNone
+		hint = "↑↓ select · enter toggles · esc returns"
+		if m.visibleTarget() < 0 {
+			hint = "no visible details · ↑↓ find · esc returns"
+		} else if m.expanded {
+			hint = "ctrl+o for local detail · esc returns"
+		}
+	}
 	if m.btw != nil {
 		// The side view says where the keyboard is in the mode's place (plan
 		// 040 §3.6), and the span is no mode to click.
@@ -288,6 +297,9 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 		// goes first (plan 032 §3.14), and is "" while nobody else does.
 		statusPart{text: m.presenceChip(), style: styleFG(m.theme.Accent), drop: 1},
 	)
+	if m.showTranscriptLayout && m.btw == nil {
+		parts = append(parts, statusPart{text: m.transcriptLayout.String() + " · f2", style: dim, drop: 2})
+	}
 	return fitStatus(parts, statusDot, dim, m.width)
 }
 

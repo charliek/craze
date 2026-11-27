@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -21,7 +22,7 @@ import (
 
 // ansiFG is the escape a hex colour renders as under the forced true-colour
 // profile. The sequence is asked for rather than spelled out because termenv
-// converts through a colour space on the way (#e8a33d lands on 232;163;60).
+// converts through a colour space on the way.
 func ansiFG(hex string) string {
 	return "\x1b[" + termenv.TrueColor.Color(hex).Sequence(false) + "m"
 }
@@ -37,7 +38,7 @@ func ansiBG(hex string) string {
 // paints with it. Selection stays a foreground slot beside it.
 func TestSelectionBGIsADerivedBackground(t *testing.T) {
 	th := Preset("craze-dark")
-	want := blend("#0c0c11", "#e8a33d", selectionMix)
+	want := "#4b3d2c"
 	if th.SelectionBG.TrueColor != want {
 		t.Fatalf("SelectionBG = %q, want %q", th.SelectionBG, want)
 	}
@@ -95,8 +96,8 @@ func TestEveryPresetFillsEverySlot(t *testing.T) {
 			t.Fatalf("%s: only %d colour slots checked, the Theme struct should have more", name, slots)
 		}
 	}
-	if len(ThemeNames()) != 7 {
-		t.Fatalf("presets %v, want the seven pinned ones", ThemeNames())
+	if len(ThemeNames()) != 8 {
+		t.Fatalf("presets %v, want the eight pinned ones", ThemeNames())
 	}
 }
 
@@ -106,16 +107,16 @@ func TestEveryPresetFillsEverySlot(t *testing.T) {
 func TestPresetTableIsTheSpec(t *testing.T) {
 	dark := Preset("craze-dark")
 	for _, tc := range []struct{ name, got, want string }{
-		{"bg", dark.BG.TrueColor, "#0c0c11"},
-		{"fg", dark.FG.TrueColor, "#c9c9d4"},
-		{"dim", dark.Dim.TrueColor, "#82829a"},
+		{"bg", dark.BG.TrueColor, "#141419"},
+		{"fg", dark.FG.TrueColor, "#dedee8"},
+		{"dim", dark.Dim.TrueColor, "#9b9bab"},
 		{"bright", dark.Bright.TrueColor, "#e2e2ea"},
 		{"border", dark.Border.TrueColor, "#24242f"},
-		{"accent", dark.Accent.TrueColor, "#e8a33d"},
+		{"accent", dark.Accent.TrueColor, "#efb766"},
 		{"teal", dark.Teal.TrueColor, "#3fc8c8"},
-		{"ok", dark.OK.TrueColor, "#6fbf73"},
-		{"warn", dark.Warn.TrueColor, "#e8a33d"},
-		{"err", dark.Err.TrueColor, "#e06c75"},
+		{"ok", dark.OK.TrueColor, "#8ccc94"},
+		{"warn", dark.Warn.TrueColor, "#f2cc79"},
+		{"err", dark.Err.TrueColor, "#ff8792"},
 		{"purple", dark.Purple.TrueColor, "#bb9af7"},
 	} {
 		if tc.got != tc.want {
@@ -137,7 +138,7 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 		{"Heading", dark.Heading, dark.OK, "OK"},
 		{"Assistant", dark.Assistant, dark.FG, "FG"},
 		{"Thought", dark.Thought, dark.Dim, "Dim"},
-		{"ToolKind", dark.ToolKind, dark.Accent, "Accent"},
+		{"ToolKind", dark.ToolKind, dark.FG, "FG"},
 		{"DiffAdd", dark.DiffAdd, dark.OK, "OK"},
 		{"DiffDel", dark.DiffDel, dark.Err, "Err"},
 		{"LineNo", dark.LineNo, dark.Dim, "Dim"},
@@ -159,13 +160,8 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 	if add, del := dark.DiffAddBG.TrueColor, dark.DiffDelBG.TrueColor; add == dark.BG.TrueColor || add == dark.OK.TrueColor || add == del {
 		t.Fatalf("diff backgrounds are not blends: add=%s del=%s bg=%s", dark.DiffAddBG, dark.DiffDelBG, dark.BG)
 	}
-	if got, want := blend("#000000", "#ffffff", 10), "#1a1a1a"; got != want {
-		t.Fatalf("blend 10%% = %s, want %s", got, want)
-	}
-	// The composer's two rules sit one step off Border, towards the text they
-	// frame; Border itself is too dim to read as a frame.
-	if got, want := dark.Rule.TrueColor, blend("#24242f", "#c9c9d4", ruleMix); got != want || got == dark.Border.TrueColor {
-		t.Fatalf("Rule = %s, want Border blended %d%% towards FG (%s)", got, ruleMix, want)
+	if dark.Rule.TrueColor != "#525261" {
+		t.Fatalf("composer rule = %s", dark.Rule)
 	}
 
 	// Every preset, not just craze-dark, has to keep these three slots apart:
@@ -246,7 +242,7 @@ func TestMarkdownHeadingAndInlineCodeColours(t *testing.T) {
 	if !strings.Contains(view, wantHeading) {
 		t.Fatalf("heading missing Heading colour:\n%s", view)
 	}
-	wantCode := styleFG(th.ToolKind).Render("code")
+	wantCode := styleFG(th.Accent).Render("code")
 	if !strings.Contains(view, wantCode) {
 		t.Fatalf("inline code missing ToolKind colour:\n%s", view)
 	}
@@ -282,12 +278,12 @@ func TestThemePickerPreviewsLiveAndEscRestores(t *testing.T) {
 		t.Fatal("ctrl+g should open the theme picker")
 	}
 	if got := plainView(m); !strings.Contains(got, "craze-light") || !strings.Contains(got, "gruvbox") {
-		t.Fatalf("the picker lists names only:\n%s", got)
+		t.Fatalf("the picker lists both names:\n%s", got)
 	}
 	if m.themeNames[0] != "craze-dark" {
 		t.Fatalf("the current theme should be first, got %v", m.themeNames)
 	}
-	if !strings.Contains(m.View(), ansiFG("#e8a33d")) {
+	if !strings.Contains(m.View(), ansiFG("#efb766")) {
 		t.Fatal("the craze-dark accent should be on screen before anything moves")
 	}
 
@@ -297,10 +293,10 @@ func TestThemePickerPreviewsLiveAndEscRestores(t *testing.T) {
 		t.Fatalf("moving the cursor must re-theme the live model, got %q", m.theme.Name)
 	}
 	raw := m.View()
-	if !strings.Contains(raw, ansiFG("#b8760f")) {
+	if !strings.Contains(raw, ansiFG("#8d550b")) {
 		t.Fatal("the craze-light accent is missing from the frame before Enter")
 	}
-	if strings.Contains(raw, ansiFG("#e8a33d")) {
+	if strings.Contains(raw, ansiFG("#efb766")) {
 		t.Fatal("the craze-dark accent survived the preview")
 	}
 
@@ -312,7 +308,7 @@ func TestThemePickerPreviewsLiveAndEscRestores(t *testing.T) {
 	if m.theme.Name != "craze-dark" {
 		t.Fatalf("esc must restore the theme the picker opened on, got %q", m.theme.Name)
 	}
-	if !strings.Contains(m.View(), ansiFG("#e8a33d")) {
+	if !strings.Contains(m.View(), ansiFG("#efb766")) {
 		t.Fatal("esc restored the name but not the colours")
 	}
 	if notes := texts(m, entryNote); len(notes) != 0 {
@@ -384,7 +380,7 @@ func TestThemeChangeRedrawsEveryEntry(t *testing.T) {
 	}
 	// The composer keeps its own copy of the prompt style, so a re-theme that
 	// only swapped m.theme would leave the ❯ in the old palette.
-	if !strings.Contains(m.input.View(), ansiFG("#b8760f")) {
+	if !strings.Contains(m.input.View(), ansiFG("#8d550b")) {
 		t.Fatalf("the composer prompt was not repainted:\n%q", m.input.View())
 	}
 }
@@ -559,7 +555,7 @@ func depthParse(s string) depthPaint {
 				rr, _ := strconv.Atoi(ps[i+2])
 				gg, _ := strconv.Atoi(ps[i+3])
 				bb, _ := strconv.Atoi(ps[i+4])
-				h := string(rgb(uint8(rr), uint8(gg), uint8(bb)))
+				h := fmt.Sprintf("#%02x%02x%02x", rr, gg, bb)
 				if n == 38 {
 					out.fgHex = h
 				} else {
@@ -601,11 +597,11 @@ func depthIdxHex(i int, pal [16]string) string {
 	}
 	if i >= 232 {
 		v := uint8(8 + 10*(i-232))
-		return string(rgb(v, v, v))
+		return fmt.Sprintf("#%02x%02x%02x", v, v, v)
 	}
 	lv := [6]uint8{0, 0x5f, 0x87, 0xaf, 0xd7, 0xff}
 	i -= 16
-	return string(rgb(lv[i/36], lv[(i/6)%6], lv[i%6]))
+	return fmt.Sprintf("#%02x%02x%02x", lv[i/36], lv[(i/6)%6], lv[i%6])
 }
 
 // depthFGHex is a paint's foreground as RGB. No foreground is the terminal's
@@ -641,7 +637,10 @@ func depthHex(c lipgloss.TerminalColor) string {
 }
 
 func depthLum(hex string) float64 {
-	r, g, b := hexRGB(hex)
+	var r, g, b uint8
+	if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b); err != nil {
+		panic(err)
+	}
 	lin := func(v uint8) float64 {
 		c := float64(v) / 255
 		if c <= 0.04045 {
@@ -719,6 +718,9 @@ func TestThemeLegibleAtEveryDepth(t *testing.T) {
 				pt := depthRender(p, func(st lipgloss.Style) lipgloss.Style { return st.Foreground(c) })
 				got := depthFGHex(pt, th, depthXterm)
 				tc := depthContrast(depthHex(c), bg)
+				if !s.line && tc < 4.5 {
+					t.Errorf("%s %s: nominal text contrast %.2f below 4.5", name, s.name, tc)
+				}
 				if cr := depthContrast(got, bg); cr < depthWant(tc, s.line) {
 					t.Errorf("%s %s: %s %s paints %s, contrast %.2f against %s, want >= %.2f (true colour %.2f)",
 						name, p.Name(), s.name, depthHex(c), got, cr, bg, depthWant(tc, s.line), tc)
@@ -809,28 +811,48 @@ func TestThemeSixteenColours(t *testing.T) {
 	}
 }
 
-// TestNearest256 pins craze's own 256-colour conversion: an exact cube or grey
-// entry maps to itself, nothing maps into 0..15 (the user's palette), and
-// craze-dark's Err, which termenv painted 232 (SF-142), is 167.
-func TestNearest256(t *testing.T) {
-	for _, tc := range []struct {
-		hex  string
-		want int
-	}{
-		{"#e06c75", 167},
-		{"#d75f87", 168},
-		{"#5f5f5f", 59},
-		{"#080808", 232},
-		{"#eeeeee", 255},
-		{"#000000", 16},
-		{"#ffffff", 231},
-		{"#ff0000", 196},
-	} {
-		if got := nearest256(tc.hex); got != tc.want {
-			t.Errorf("nearest256(%s) = %d, want %d", tc.hex, got, tc.want)
+func TestThemePickerSampleAndEighthPreset(t *testing.T) {
+	m := themeModel(t, "craze-dark").openThemePicker()
+	tm, _ := m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+	dialog := m.lay.Dialog
+	if !strings.Contains(plainView(m), "▸ Explored · 3 reads") {
+		t.Fatal("picker has room for all eight names and the preview")
+	}
+	// The first line after the eight names is the sample, outside the list.
+	out := clickXY(t, m, dialog.X+2, dialog.Y+2+len(m.themeNames))
+	if out.dialog != dialogTheme {
+		t.Fatal("clicking the sample chose a theme")
+	}
+	for _, size := range []struct{ inner, budget int }{{17, 20}, {52, 10}, {52, 3}} {
+		got := strings.Join(m.themeDialogBody(size.inner, size.budget), "\n")
+		if strings.Contains(got, "Explored") || !strings.Contains(got, "craze-dark") {
+			t.Fatalf("picker at %dx%d should prioritize the selected name: %q", size.inner, size.budget, got)
 		}
 	}
-	if got := Preset("craze-dark").Err.ANSI256; got != "167" {
-		t.Fatalf("craze-dark Err paints 256-colour %s, want 167", got)
+	out = clickXY(t, m, dialog.X+2, dialog.Y+1+len(m.themeNames))
+	if out.dialog != dialogNone || ConfigTheme() != "high-contrast" {
+		t.Fatalf("last row: dialog=%v, saved theme=%q", out.dialog, ConfigTheme())
+	}
+}
+
+func TestThemePickerHeightAndClicksAtPreviewThreshold(t *testing.T) {
+	for _, tc := range []struct{ transcript, box int }{{15, 12}, {16, 16}} {
+		m := themeModel(t, "craze-dark").openThemePicker()
+		height := m.height - m.lay.Region(regionTranscript).Height() + tc.transcript
+		tm, _ := m.Update(tea.WindowSizeMsg{Width: m.width, Height: height})
+		m = tm.(Model)
+		r := m.lay.Dialog
+		tr := m.lay.Region(regionTranscript)
+		if tr.Height() != tc.transcript || r.H != tc.box || r.Y != tr.Top+(tc.transcript-tc.box)/2 {
+			t.Fatalf("want a centered %d-row picker in %d transcript rows, got %+v in %+v", tc.box, tc.transcript, r, tr)
+		}
+		if got := strings.Contains(plainView(m), "exit 1"); got != (tc.transcript == 16) {
+			t.Fatalf("preview visible at height %d: %t", tc.transcript, got)
+		}
+		out := clickXY(t, m, r.X+2, r.Y+1+len(m.themeNames))
+		if out.dialog != dialogNone || out.theme.Name != "high-contrast" {
+			t.Fatalf("click on the last name at height %d selected %q", tc.transcript, out.theme.Name)
+		}
 	}
 }

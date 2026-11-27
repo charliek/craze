@@ -646,7 +646,7 @@ func padCell(s string, width int, align mdAlign) string {
 // inlineMarkdown styles `code`, **bold** and *italic* / _italic_ spans. A
 // marker without its partner on the same line is left as typed.
 func inlineMarkdown(s string, th Theme) string {
-	code := styleFG(th.ToolKind)
+	code := styleFG(th.Accent)
 	bold := lipgloss.NewStyle().Bold(true)
 	italic := lipgloss.NewStyle().Italic(true)
 	boldItalic := lipgloss.NewStyle().Bold(true).Italic(true)

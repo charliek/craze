@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/charliek/craze/internal/presentation"
 )
 
 // rowSpan is one part of a pane's drawn rows: an entry's rendered rows, or the
@@ -13,6 +15,10 @@ type rowSpan struct {
 	e     *entry
 	rows  []string
 	start int
+	// groupHead is the original first entry of every span in a group.
+	groupHead   *entry
+	disclosable bool
+	detailOpen  bool
 }
 
 // rowIndex is the rows one paint of a pane drew (plan 032 §3.3 C5): each
@@ -37,11 +43,12 @@ type rowSpan struct {
 //     full slice expression (len == cap): the next append to it copies first
 //     rather than writing over a slot an older index still reads.
 type rowIndex struct {
-	base    []rowSpan
-	tail    []rowSpan
-	total   int
-	key     renderKey
-	trimmed bool
+	base              []rowSpan
+	tail              []rowSpan
+	total             int
+	key               renderKey
+	trimmed           bool
+	disclosureChanged bool
 }
 
 // spans is how many spans the index holds.
@@ -231,6 +238,17 @@ func (m *Model) paint(tr *pane) *rowIndex {
 		if from == len(tr.rows) && from == painted {
 			return prev
 		}
+		// A changed member can split an old run; a newly completed neighbor
+		// can extend the previous run. Reproject only from the earliest head.
+		if from > 0 && key.layout != layoutClassic {
+			oldMember := from < painted && prev.span(off+from).groupHead != nil
+			newMember := from < len(tr.rows) && tr.rows[from].activity(key.layout) != presentation.Separate
+			if oldMember || newMember {
+				for from > 0 && tr.rows[from-1].activity(key.layout) != presentation.Separate {
+					from--
+				}
+			}
+		}
 	}
 
 	// The spans kept from prev, and the row the first new one starts at.
@@ -253,20 +271,47 @@ func (m *Model) paint(tr *pane) *rowIndex {
 		tail = append(tail, rowSpan{rows: []string{note}})
 		start = 1
 	}
-	for _, e := range tr.rows[from:] {
-		if e.needsRender(key) {
-			// Split here and nowhere earlier: a streaming reply's markdown
-			// checkpoint keeps the renderer's own rows (mdCheckpoint.out), and
-			// a resumed render goes on from those, not from these.
-			e.rendered = physicalLines(m.renderEntry(tr, e, key))
-			e.plain = nil
-			e.renderedFor = key
-			e.dirty = false
-			tr.renders++
+	disclosureChanged := prev != nil && (key.layout != prev.key.layout || key.expanded != prev.key.expanded)
+	for i := from; i < len(tr.rows); {
+		run, counts := activityRun(tr.rows[i:], key.layout)
+		var head *entry
+		if run >= 2 {
+			head = tr.rows[i]
 		}
-		tail = append(tail, rowSpan{e: e, rows: e.rendered, start: start})
-		start += len(e.rendered)
+		for j, e := range tr.rows[i : i+run] {
+			expanded := key.expanded || e.detailOpen
+			if head != nil {
+				expanded = key.expanded || head.detailOpen
+			}
+			rows := m.entryRows(tr, e, key, expanded)
+			span := rowSpan{e: e, start: start, rows: rows, groupHead: head, detailOpen: e.detailOpen}
+			if head == nil {
+				span.disclosable = e.canDisclose()
+			} else {
+				if !expanded {
+					span.rows = nil
+				}
+				if e == head {
+					span.disclosable = true
+					mark := "▸ "
+					if expanded {
+						mark = "▾ "
+					}
+					summary := m.dimRow(mark+counts.Summary(), key.width)
+					span.rows = append([]string{summary}, span.rows...)
+				}
+			}
+			if prev != nil && i+j+off < prev.spans() {
+				prior := prev.span(i + j + off)
+				if prior.groupHead != head || prior.detailOpen != e.detailOpen {
+					disclosureChanged = true
+				}
+			}
+			tail = append(tail, span)
+			start += len(span.rows)
+		}
+		i += run
 	}
 	tr.work.spans += len(tail)
-	return &rowIndex{base: base, tail: tail, total: start, key: key, trimmed: tr.trimmed}
+	return &rowIndex{base: base, tail: tail, total: start, key: key, trimmed: tr.trimmed, disclosureChanged: disclosureChanged}
 }

@@ -2533,8 +2533,7 @@ def _run_mid_turn_compaction(
     ) as tui:
         tui.wait_contains("native")
         tui.write(b"read the two files\r")
-        tui.wait_contains("✓ read  big.txt", timeout=30)
-        tui.wait_contains("✓ read  small.txt", timeout=30)
+        tui.wait_contains("▸ Explored · 2 reads", timeout=30)
         tui.wait_contains("context compacted", timeout=30)
         tui.wait_contains("compaction done, continuing now", timeout=30)
         quit_craze(tui)
@@ -2644,8 +2643,7 @@ def test_native_resume_of_a_compacted_session(
         tui.wait_contains("restored", timeout=30)
         restored = _ANSI.sub("", tui.screen())
         assert "read the two files" in restored, restored[-4000:]
-        assert "✓ read  big.txt" in restored, restored[-4000:]
-        assert "✓ read  small.txt" in restored, restored[-4000:]
+        assert "▸ Explored · 2 reads" in restored, restored[-4000:]
         assert "context compacted" in restored, restored[-4000:]
         assert "compaction done, continuing now" in restored, restored[-4000:]
 
@@ -2653,11 +2651,19 @@ def test_native_resume_of_a_compacted_session(
         # followed and before the row that came after it, in the restored
         # screen's own order -- not merely present somewhere in the
         # accumulated output (review r1-c14-c9e finding 2).
-        i_big = restored.index("✓ read  big.txt")
-        i_small = restored.index("✓ read  small.txt")
+        i_reads = restored.index("▸ Explored · 2 reads")
         i_note = restored.index("context compacted")
         i_answer = restored.index("compaction done, continuing now")
-        assert i_big < i_small < i_note < i_answer, restored[-4000:]
+        assert i_reads < i_note < i_answer, restored[-4000:]
+
+        # Switch layouts so the test also checks both restored source paths
+        # in their original order, without expanding the long file bodies.
+        tui.write(b"\x1bOQ")  # F2, Compact
+        tui.wait_contains("Compact · f2")
+        mark = tui.mark()
+        tui.write(b"\x1bOQ")  # F2, Classic
+        individual = _ANSI.sub("", tui.wait_contains_since("✓ read  small.txt", mark))
+        assert individual.index("✓ read  big.txt") < individual.index("✓ read  small.txt")
 
         tui.write(b"keep going now\r")
         tui.wait_contains("second turn done", timeout=30)

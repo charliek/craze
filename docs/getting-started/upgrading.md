@@ -1,5 +1,7 @@
 # Upgrading
 
+Start with the [transcript and theme changes](#transcript-layouts-and-themes). Earlier releases are listed below.
+
 Seven sections: [since v0.4.1](#since-v041), the changes after v0.4.1;
 [since v0.4.0](#since-v040), v0.4.1's;
 [since v0.3.0](#since-v030), v0.4.0's; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
@@ -7,6 +9,17 @@ v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
 first release's. Whatever the version, [upgrading
 while sessions run](#upgrading-while-sessions-run) says what an upgrade does
 to the hub and the sessions already running.
+
+## Transcript layouts and themes
+
+A new terminal starts in Grouped layout. Press `F2` to cycle through Compact
+and Classic. Classic shows one row per tool call. Use `F4` to inspect details
+with the keyboard, or `Ctrl+O` to expand the transcript. Saved sessions use
+the same layouts when you reopen them.
+
+All seven existing theme names still select their revised palettes. Use
+`/theme high-contrast` for stronger contrast, or open `/theme` to preview a
+palette before saving it.
 
 ## Upgrading while sessions run
 

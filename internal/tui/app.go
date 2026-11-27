@@ -528,12 +528,13 @@ type Model struct {
 	// closes it (switchBackend) and the constructor makes none.
 	btw *btwState
 
-	expanded bool
-	width    int
-	height   int
-	ready    bool
-	quitting bool
-	started  bool
+	expanded         bool
+	transcriptLayout transcriptLayout
+	width            int
+	height           int
+	ready            bool
+	quitting         bool
+	started          bool
 	// replaying is the second half of the "session is up" gate (§3.5). A
 	// loaded session is constructed with it set — Config.Loading knows what
 	// Start is about to do, and tea.Batch promises no ordering between
@@ -573,7 +574,9 @@ type Model struct {
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
 	// that reached it anyway (the frame runner injects them).
-	mouseEnabled bool
+	mouseEnabled         bool
+	inspector            transcriptInspector
+	showTranscriptLayout bool
 
 	// sel is the drag in progress or the highlight it left; pressed is the
 	// button that went down, because an X10 terminal reports ButtonNone on the
@@ -2912,6 +2915,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.catchUp()
 			m.vp.ScrollDown(wheelLines)
 		case tea.MouseButtonLeft:
+			m.inspector = transcriptInspector{}
 			return m.handlePress(msg.X, msg.Y)
 		}
 	case tea.MouseActionMotion:
@@ -3351,6 +3355,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// it over the side view — and everything of the main composer.
 	if m.btw != nil {
 		return m.handleBtwKey(msg)
+	}
+
+	if handled := m.transcriptKey(msg); handled {
+		return m, nil
 	}
 
 	if m.viewing != "" {

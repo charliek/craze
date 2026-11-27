@@ -564,6 +564,8 @@ off.
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
+| `F2` | cycle Grouped, Compact and Classic [transcript layouts](#transcript-layouts) |
+| `F4` | inspect expandable transcript rows with the keyboard |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it; in `/connect`'s ChatGPT sign-in, copy its address |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu or the [`@` file popup](#file-mentions) open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
@@ -609,6 +611,20 @@ bindings, so a message that starts with either is just a message.
     a bare `\r` — indistinguishable from `Enter`, which is the key that
     queues. Grok's own TUI falls back to `Ctrl+L` for the same reason, so
     craze does too.
+
+## Transcript layouts
+
+A new terminal starts in **Grouped**. Adjacent successful lookups share a
+summary once there are at least two. Messages, thoughts, failed calls and
+running tools break the group. **Compact** can fold successful edits together
+with neighboring completed tools. Shell commands stay visible. **Classic**
+keeps tools on separate rows. Press `F2` to cycle layouts for this terminal.
+
+Press `F4` to inspect the transcript. Use the up and down arrows to move
+between expandable rows and `Enter` to open or close the selected row.
+`Esc` or `F4` returns focus to the previous view and preserves your draft. `Ctrl+O` expands
+details throughout the transcript. Copying a selection uses the rows on
+screen, so open a group before selecting its contents.
 
 ## Queued messages
 
@@ -2647,8 +2663,9 @@ of being read as an unknown model. There is no full-width picker band and no
 
 `Ctrl+G`/`/theme` opens the same kind of box (title `theme`, no filter);
 `↑`/`↓` (or `j`/`k`) preview live and wrap at either end, `Enter` keeps it, a
-digit `1`–`9` applies the theme at that position and keeps it at once, and
-`Esc` or a click outside reverts to the theme that was active when it opened. A card arriving from the agent
+digit `1`–`8` applies the theme at that position and keeps it at once, and
+`Esc` or a click outside reverts to the theme that was active when it opened. The picker shows a sample prompt, exploration
+summary, failure and diff below the list when space permits. A card arriving from the agent
 closes any dialog — the model dialog applies nothing, the theme dialog
 reverts.
 

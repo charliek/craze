@@ -875,7 +875,7 @@ def test_tui_continue_and_resume_exit_2(
         assert "mutually exclusive" in _ANSI.sub("", tui.screen())
 
 
-_OSC_SET_TOKYO = "\x1b]11;rgb:1a/1b/26\x07\x1b]10;rgb:a9/b1/d6\x07"
+_OSC_SET_TOKYO = "\x1b]11;rgb:1a/1b/26\x07\x1b]10;rgb:b9/c1/e1\x07"
 _OSC_RESET = "\x1b]111\x07\x1b]110\x07"
 
 
@@ -899,7 +899,7 @@ def _wait_raw_endswith(tui: PTYCraze, suffix: str, timeout: float = 5) -> str:
 
 
 def test_tui_themes_the_terminal_colours_and_resets_them(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The themed background is a property of the terminal, not of a frame.
 
@@ -910,6 +910,8 @@ def test_tui_themes_the_terminal_colours_and_resets_them(
     `background = false`, and a profile with no colour at all — has to leave
     all four of those sequences unwritten, not merely balance them.
     """
+    # The positive case exercises color even when the invoking shell disables it.
+    monkeypatch.delenv("NO_COLOR", raising=False)
     workspace = tmp_path / "on"
     workspace.mkdir()
     with PTYCraze(craze_bin, fake_agent_bin, workspace) as tui:
@@ -1344,8 +1346,7 @@ def test_tui_native_tool_loop_draws_its_rows(craze_bin: Path, tmp_path: Path) ->
             # have run and their results have gone back.
             tui.wait_contains("all four ran", timeout=30)
             for row in (
-                "✓ read  main.go",
-                "✓ search  TODO in .",
+                "▸ Explored · 1 read, 1 search",
                 "✓ edit  notes.txt  +1 −1",
                 "✓ bash  echo saw-$(cat notes.txt)",
             ):
@@ -1354,7 +1355,7 @@ def test_tui_native_tool_loop_draws_its_rows(craze_bin: Path, tmp_path: Path) ->
             tui.write(b"\x0f")  # Ctrl+O: expand the rows
             # The read's content, the edit's diff and the command's output,
             # none of which a collapsed row draws.
-            for detail in ("// TODO: ship it", "- alpha", "+ beta", "saw-beta"):
+            for detail in ("✓ read  main.go", "✓ search  TODO in .", "// TODO: ship it", "- alpha", "+ beta", "saw-beta"):
                 tui.wait_contains_since(detail, mark, timeout=10)
             quit_craze(tui)
 

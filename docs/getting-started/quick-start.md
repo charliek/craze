@@ -276,4 +276,5 @@ turn's result instead: see [Waiting commands](../reference/cli.md#waiting-comman
 - [TUI](../reference/tui.md) — keys, cards, slash commands
 - [Upgrading](upgrading.md) — what changed in each release
 - [Claude Code](claude-code.md) — craze sessions as Claude Code sub-agents
+- [Transcript layouts](../reference/tui.md#transcript-layouts) — use `F2` to change the density of tool rows and `F4` to inspect one with the keyboard
 - [Configuration](../reference/configuration.md) — themes and `~/.craze/config.toml`

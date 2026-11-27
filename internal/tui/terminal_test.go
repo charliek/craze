@@ -141,8 +141,8 @@ func TestThemePickerMovesTheTerminalColours(t *testing.T) {
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
 	light := Preset("craze-light")
-	want := setPair("f6/f6/f2", "2a/2a/33")
-	if light.BG.TrueColor != "#f6f6f2" || light.FG.TrueColor != "#2a2a33" {
+	want := setPair("f7/f5/ef", "29/28/34")
+	if light.BG.TrueColor != "#f7f5ef" || light.FG.TrueColor != "#292834" {
 		t.Fatalf("craze-light bg/fg moved: %q/%q", light.BG, light.FG)
 	}
 	if got := w.take(); got != want {
@@ -152,8 +152,8 @@ func TestThemePickerMovesTheTerminalColours(t *testing.T) {
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
 	dark := Preset("craze-dark")
-	want = setPair("0c/0c/11", "c9/c9/d4")
-	if dark.BG.TrueColor != "#0c0c11" || dark.FG.TrueColor != "#c9c9d4" {
+	want = setPair("14/14/19", "de/de/e8")
+	if dark.BG.TrueColor != "#141419" || dark.FG.TrueColor != "#dedee8" {
 		t.Fatalf("craze-dark bg/fg moved: %q/%q", dark.BG, dark.FG)
 	}
 	if got := w.take(); got != want {
@@ -165,7 +165,7 @@ func TestThemePickerMovesTheTerminalColours(t *testing.T) {
 		tm, _ = m.Update(key)
 		m = tm.(Model)
 	}
-	if got := w.take(); got != setPair("f6/f6/f2", "2a/2a/33") {
+	if got := w.take(); got != setPair("f7/f5/ef", "29/28/34") {
 		t.Fatalf("enter should emit only the one preview pair, got %q", got)
 	}
 

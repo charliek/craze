@@ -13,6 +13,23 @@ linters:
   settings:
     depguard:
       rules:
+        presentation:
+          list-mode: lax
+          files:
+            - "**/internal/presentation/**"
+          deny:
+            - pkg: github.com/charmbracelet/bubbletea
+              desc: "terminal framework bindings belong in internal/tui"
+            - pkg: github.com/charmbracelet/bubbles
+              desc: "terminal framework bindings belong in internal/tui"
+            - pkg: github.com/charmbracelet/lipgloss
+              desc: "terminal framework bindings belong in internal/tui"
+            - pkg: charm.land/bubbletea
+              desc: "terminal framework bindings belong in internal/tui"
+            - pkg: charm.land/bubbles
+              desc: "terminal framework bindings belong in internal/tui"
+            - pkg: charm.land/lipgloss
+              desc: "terminal framework bindings belong in internal/tui"
         # One half of craze's import boundary; the other half is the `go list`
         # check in the Makefile's lint target (internal/tui and internal/cli
         # must not import internal/acp). The native harness imports nothing

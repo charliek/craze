@@ -2,9 +2,6 @@
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
                        ╭────────────────────────────────────────────────────╮                       
                        │theme                                               │                       
                        │> craze-dark                                        │                       
@@ -14,10 +11,13 @@
                        │  light                                             │                       
                        │  catppuccin                                        │                       
                        │  gruvbox                                           │                       
+                       │  high-contrast                                     │                       
+                       │❯ Review the change                                 │                       
+                       │▸ Explored · 3 reads                                │                       
+                       │✗ bash  test  exit 1                                │                       
+                       │+ added  − removed                                  │                       
                        │↑↓ · enter keeps · esc reverts                      │                       
                        ╰────────────────────────────────────────────────────╯                       
-                                                                                                    
-                                                                                                    
                                                                                                     
                                                                                                     
                                                                                                     

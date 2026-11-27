@@ -341,6 +341,9 @@ func (m Model) composerView(lay frameLayout) string {
 		// m is a copy, so this swaps the placeholder for this frame only.
 		m.input.Placeholder = p
 	}
+	if m.inspector.active {
+		m.input.Blur() // Render the saved draft without a second focus indicator.
+	}
 	rows := m.composerRows()
 	shown := max(1, lay.ComposerRows)
 	view := strings.Split(m.input.View(), "\n")
