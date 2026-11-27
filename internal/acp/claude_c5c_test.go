@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/agentproc"
 )
 
 // Fixes from the sol re-reviews of C5b (items 3, 4, 8) and C4d (findings 1,
@@ -39,69 +41,6 @@ func waitPidGone(t *testing.T, what string, pid int) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-// entryOf is pid's process table entry, read now.
-func entryOf(t *testing.T, pid int) treeEntry {
-	t.Helper()
-	table, err := procTable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range table {
-		if e.pid == pid {
-			return e
-		}
-	}
-	t.Fatalf("pid %d is not in the process table", pid)
-	return treeEntry{}
-}
-
-// TestKillVerifiedSparesAReusedPid (review C5b item 3): a snapshot entry whose
-// pid is now another process — its start time differs — is not signalled;
-// the same pid with its own start time is.
-func TestKillVerifiedSparesAReusedPid(t *testing.T) {
-	cmd := exec.Command("sleep", "600")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	go func() { _ = cmd.Wait() }()
-	now := entryOf(t, cmd.Process.Pid)
-	stale := now
-	stale.start = "1"
-	if killVerified(stale) {
-		t.Fatal("a pid whose start time is not the snapshot's was signalled")
-	}
-	time.Sleep(100 * time.Millisecond)
-	if !alive(cmd.Process.Pid) {
-		t.Fatal("the process the pid now names was killed")
-	}
-	if !killVerified(now) {
-		t.Fatal("the snapshot's own process was not signalled")
-	}
-	waitPidGone(t, "the snapshot's process", cmd.Process.Pid)
-}
-
-// TestSnapshotHoldsTheReap (review C5b item 3): the agent is not reaped while
-// its tree is read, so its pid — the tree's root — cannot be reused under the
-// read.
-func TestSnapshotHoldsTheReap(t *testing.T) {
-	c := spawnShell(t, `exit 0`, nil)
-	parked := make(chan struct{})
-	release := make(chan struct{})
-	prev := testDuringSnapshot
-	testDuringSnapshot = func() { close(parked); <-release }
-	t.Cleanup(func() { testDuringSnapshot = prev })
-	go c.child.SnapshotTree()
-	<-parked
-	waitClosed(t, c.child.exitedCh, 5*time.Second, "the agent's exit")
-	time.Sleep(200 * time.Millisecond)
-	if isClosed(c.child.reapedCh) {
-		t.Fatal("the agent was reaped while its tree was read")
-	}
-	close(release)
-	waitClosed(t, c.child.reapedCh, 5*time.Second, "the reap")
 }
 
 // escapeScript starts a child in the shell's group and one in a session of
@@ -142,7 +81,7 @@ func TestStopWithinKillsWhatAnAgentThatExitedFirstLeft(t *testing.T) {
 	for _, fallback := range []bool{false, true} {
 		t.Run("fallback="+strconv.FormatBool(fallback), func(t *testing.T) {
 			if fallback {
-				stubObserve(t, 0, syscall.ENOSYS, nil)
+				forcePollingReaper(t)
 			}
 			var stderr syncBuffer
 			c := spawnShell(t, escapeScript, &stderr)
@@ -264,31 +203,6 @@ func TestClaudeDrainDeliversWhatCameBeforeEOF(t *testing.T) {
 	}
 }
 
-// TestKillTreeSendsNoGroupSignalAfterTheReap (review C5c item 4): once the
-// agent has been reaped its group's id may be anyone's: no raw group signal
-// goes, only the snapshot's checked members.
-func TestKillTreeSendsNoGroupSignalAfterTheReap(t *testing.T) {
-	var sent []int
-	prev := groupKill
-	groupKill = func(pid int, sig syscall.Signal) error {
-		sent = append(sent, pid)
-		return nil
-	}
-	t.Cleanup(func() { groupKill = prev })
-	c := spawnShell(t, `exit 0`, nil)
-	waitClosed(t, c.child.reapedCh, 5*time.Second, "the reap")
-	c.child.KillTree(nil)
-	if len(sent) != 0 {
-		t.Fatalf("raw group signals %v after the agent was reaped", sent)
-	}
-	// While the agent is unreaped, the group is signalled.
-	r := spawnShell(t, `sleep 60`, nil)
-	r.child.KillTree(nil)
-	if len(sent) != 1 || sent[0] != -r.child.pgid {
-		t.Fatalf("group signals %v for an unreaped agent; want one to -%d", sent, r.child.pgid)
-	}
-}
-
 // TestClaudeSeverWhileTellingAnEviction (review C5c item 9): a stop that
 // severs while the session is being told of an evicted child keeps the new
 // child's announce from it.
@@ -318,9 +232,7 @@ func TestClaudeSeverWhileTellingAnEviction(t *testing.T) {
 // sink that never returns leaves the copy from the agent's pipe retired
 // within the cap.
 func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
-	prev := stderrWaitBound
-	stderrWaitBound = 300 * time.Millisecond
-	t.Cleanup(func() { stderrWaitBound = prev })
+	t.Cleanup(agentproc.SetStderrWaitBoundForTest(300 * time.Millisecond))
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	sink := writerFunc(func(p []byte) (int, error) { <-release; return len(p), nil })
@@ -329,9 +241,9 @@ func TestStderrCopyRetiresBehindABlockedSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The agent has written and exited on its own: the copy holds its words.
-	waitClosed(t, c.child.exitedCh, 5*time.Second, "the agent's exit")
+	waitClosed(t, c.child.Exited(), 5*time.Second, "the agent's exit")
 	_ = c.Close()
-	waitClosed(t, c.child.stderrDone, 3*time.Second, "the stderr copy's retirement")
+	waitClosed(t, c.child.StderrDone(), 3*time.Second, "the stderr copy's retirement")
 }
 
 type writerFunc func([]byte) (int, error)
@@ -344,7 +256,7 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 // exits and is reaped: the late process, left in the group, is found in the
 // process table and killed too.
 func TestKillTreeReachesWhatACapturedMemberStartedAfterTheExit(t *testing.T) {
-	stubObserve(t, 0, syscall.ENOSYS, nil)
+	forcePollingReaper(t)
 	var stderr syncBuffer
 	// The member forks the late process and exits: it is nobody's
 	// descendant, only the group's.
@@ -376,7 +288,7 @@ func TestKillTreeReachesWhatAnEscapedMemberStartedAfterTheExit(t *testing.T) {
 	if _, err := exec.LookPath("perl"); err != nil {
 		t.Skip("perl is not installed")
 	}
-	stubObserve(t, 0, syscall.ENOSYS, nil)
+	forcePollingReaper(t)
 	inner := filepath.Join(t.TempDir(), "inner.sh")
 	if err := os.WriteFile(inner, []byte("sleep 0.4; sleep 600 & echo \"d $!\" >&2; wait\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -430,13 +342,13 @@ func TestStderrSinkQueueIsClaudesAlone(t *testing.T) {
 			}
 			if d == DialectClaude {
 				// The agent writes everything while the sink is behind.
-				waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+				waitClosed(t, c.child.Exited(), 10*time.Second, "the agent's exit")
 				close(release)
 			} else {
 				// Held back by the sink: let go once it has been for a while.
 				time.Sleep(500 * time.Millisecond)
 				close(release)
-				waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+				waitClosed(t, c.child.Exited(), 10*time.Second, "the agent's exit")
 			}
 			_ = c.Close()
 			lines := strings.Count(got.String(), "\n")

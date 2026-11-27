@@ -146,7 +146,7 @@ func newNewCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&f.dir, "dir", "C", "", "start the session in this directory (default: the current one)")
 	registerProviderFlag(cmd, &f.provider)
-	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an ACP model id, or a model alias")
+	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an agent model id, or a model alias")
 	cmd.Flags().StringVar(&f.effort, "effort", "", "effort to start at, where the model offers one: a level's id or name (default: the model's own)")
 	cmd.Flags().BoolVar(&f.fast, "fast", false, "start with the fast setting on, where the model offers one")
 	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
@@ -154,7 +154,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.title, "title", "", "name the session this from its start, pinned as /rename pins a title (one line, at most 120 characters)")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the hub's answer (session.create's result, or with --load session.reopen's) as JSON; with --wait, the result")
 	cmd.Flags().BoolVar(&f.allowSame, allowSameProviderFlag, false, "start the session even on the provider the agent running this command is on "+
-		"(CRAZE_SESSION_PROVIDER, or Claude Code's or cursor-agent's own marker), which craze new otherwise refuses")
+		"(CRAZE_SESSION_PROVIDER, or Claude Code's, cursor-agent's, agy's, or Codex's own marker), which craze new otherwise refuses")
 	cmd.Flags().StringVar(&f.load, "load", "", "reopen this saved session through the hub instead of starting one: an id craze ps --saved prints, "+
 		"or a whole craze or provider session id; it waits for the session's start and sends no prompt")
 	// --wait (plan 041 §3.2): another path, past the hub — the session's

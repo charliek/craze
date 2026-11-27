@@ -588,8 +588,8 @@ func TestAReadBackRefusedByAStopIsNotAPlanNotFound(t *testing.T) {
 			}
 		})
 	}
-	if !inProcessProvider("native") || inProcessProvider("grok") || inProcessProvider("no such") {
-		t.Fatal("which provider's automatic plan answer accepts")
+	if isACPProvider("native") || isACPProvider("codex") || !isACPProvider("grok") || isACPProvider("no such") {
+		t.Fatal("which provider's automatic plan answer returns the plan")
 	}
 }
 

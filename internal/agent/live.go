@@ -452,6 +452,9 @@ func New(opts Options) Session {
 	if opts.Provider != nil && opts.Provider.InProcess() {
 		return newNative(opts, nil)
 	}
+	if opts.Provider != nil && opts.Provider.isCodex() {
+		return newCodexSession(opts)
+	}
 	return newSession(opts)
 }
 

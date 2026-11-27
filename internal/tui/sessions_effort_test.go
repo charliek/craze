@@ -105,7 +105,7 @@ func effortValues(t *testing.T, m Model) ([]string, string) {
 // fails the first check.
 func TestTheListsEffortOffersTheModelsLevels(t *testing.T) {
 	m, _ := cmdList(t, 100, 30, nil)
-	if got, cur := effortValues(t, m); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"}) || cur != "default" {
+	if got, cur := effortValues(t, m); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}) || cur != "default" {
 		t.Fatalf("on cursor /effort lists %v (current %q)", got, cur)
 	}
 	m.nativeDir, m.nativeEnv = nativeEffortHome(t), func(string) string { return "" }

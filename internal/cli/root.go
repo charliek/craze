@@ -27,7 +27,7 @@ func NewRootCmd() *cobra.Command {
 		// exactly once, as a --provider choice (plan 028 D-65,
 		// TestRootHelpNamesNativeOnceAndNeverTheHarness).
 		Long: "craze is a terminal UI for coding agents: cursor-agent, grok, Claude Code or agy " +
-			"(Antigravity) over ACP, or craze's own built-in agent, which needs only a model provider's API key or a ChatGPT plan (see craze auth).",
+			"(Antigravity) over ACP, Codex (codex app-server), or craze's own built-in agent, which needs only a model provider's API key or a ChatGPT plan (see craze auth).",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// cobra's own version flag answered before argument validation; keep that.

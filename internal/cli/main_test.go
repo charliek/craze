@@ -106,7 +106,7 @@ func TestMain(m *testing.M) {
 	// run of the suite from inside Claude Code (CLAUDECODE=1), cursor-agent
 	// or a craze session would otherwise refuse a test's craze new on that
 	// provider. None is set for the package; a test that wants one sets it.
-	for _, name := range []string{claudeCodeEnv, cursorAgentEnv, agent.SessionProviderEnv} {
+	for _, name := range []string{claudeCodeEnv, cursorAgentEnv, antigravityAgentEnv, codexThreadEnv, agent.SessionProviderEnv} {
 		_ = os.Unsetenv(name)
 	}
 	code := m.Run()

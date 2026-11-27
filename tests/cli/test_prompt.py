@@ -234,7 +234,7 @@ def test_grok_ask_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) ->
 
 def test_unknown_provider_exits_2(craze_bin: Path, tmp_path: Path) -> None:
     proc = subprocess.run(
-        [str(craze_bin), "prompt", "--provider", "codex", "--workspace", str(tmp_path), "hi"],
+        [str(craze_bin), "prompt", "--provider", "nosuch", "--workspace", str(tmp_path), "hi"],
         check=False,
         capture_output=True,
         text=True,

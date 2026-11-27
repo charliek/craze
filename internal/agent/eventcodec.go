@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/agentproc"
+	"github.com/charliek/craze/internal/codexrpc"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 )
@@ -203,6 +205,12 @@ func (e *RemoteError) Is(target error) bool {
 	if e == nil {
 		return false
 	}
+	if e.Class == EventErrClosed && target == codexrpc.ErrClosed {
+		return true
+	}
+	if e.Class == EventErrAgentExited && (target == acp.ErrAgentExited || target == ErrAgentExited || target == codexrpc.ErrAgentExited) {
+		return true
+	}
 	for _, c := range eventErrSentinels {
 		if c.class == e.Class {
 			return target == c.sentinel
@@ -221,6 +229,12 @@ func classifyEventErr(err error) (EventErrClass, int) {
 		return remote.Class, remote.Code
 	}
 	typed, code := typedEventErr(err)
+	if errors.Is(err, codexrpc.ErrClosed) {
+		return EventErrClosed, code
+	}
+	if errors.Is(err, agentproc.ErrAgentExited) {
+		return EventErrAgentExited, code
+	}
 	for _, c := range eventErrSentinels {
 		if errors.Is(err, c.sentinel) {
 			return c.class, code
@@ -248,6 +262,10 @@ func typedEventErr(err error) (EventErrClass, int) {
 	var rpc *acp.RPCError
 	if errors.As(err, &rpc) && rpc != nil {
 		return EventErrRPC, rpc.Code
+	}
+	var crpc *codexrpc.RPCError
+	if errors.As(err, &crpc) && crpc != nil {
+		return EventErrRPC, crpc.Code
 	}
 	var pe *harness.ProviderError
 	if errors.As(err, &pe) && pe != nil {

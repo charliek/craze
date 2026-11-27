@@ -13,12 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/agentproc"
 	"github.com/charliek/craze/internal/version"
 )
 
 type Client struct {
 	conn  *Conn
-	child *Child
+	child *agentproc.Child
 	// beforeSever is a test's hold on StopWithin's kill
 	// (SetBeforeSeverForTest), nil in production.
 	beforeSever atomic.Pointer[func()]
@@ -224,7 +225,7 @@ type promptResult struct {
 	err error
 }
 
-func newClient(conn *Conn, child *Child) *Client {
+func newClient(conn *Conn, child *agentproc.Child) *Client {
 	c := &Client{
 		conn:      conn,
 		child:     child,
@@ -1085,7 +1086,7 @@ func (c *Client) Close() error {
 		exitedFirst := false
 		if c.child != nil {
 			select {
-			case <-c.child.exitedCh:
+			case <-c.child.Exited():
 				exitedFirst = true
 			default:
 			}
@@ -1127,15 +1128,15 @@ func (c *Client) Close() error {
 			// How the agent ended, when it ended on its own, is what the
 			// calls still pending fail with: delivered here, before the
 			// connection's own close could answer them ErrClosed first
-			// (Child.endErr; the first answer stands).
-			c.conn.failAll(c.child.endErr())
+			// (Child.EndErr; the first answer stands).
+			c.conn.failAll(c.child.EndErr("acp", ErrClosed))
 		}
 		_ = c.conn.Close()
 		<-c.conn.Done()
 		if c.child != nil {
 			c.child.Wait()
 			if exitedFirst {
-				c.closeErr = agentExitedErr(c.child.exitErr)
+				c.closeErr = agentproc.WrapAgentExited(ErrAgentExited, c.child.ExitErr())
 			}
 		}
 	})
@@ -1156,10 +1157,7 @@ func (c *Client) PID() int {
 // §3.4), because an agent in its own group can outlive a host killed outright,
 // and only the group reaches what the agent started.
 func (c *Client) ProcessGroup() int {
-	if c.child == nil {
-		return 0
-	}
-	return c.child.pgid
+	return c.child.PGID()
 }
 
 // Exited is closed once the reaper has observed the agent's exit: the point
@@ -1170,10 +1168,7 @@ func (c *Client) ProcessGroup() int {
 // until the reap that follows the cleanup. nil, never closed, for an
 // in-process test client with no child.
 func (c *Client) Exited() <-chan struct{} {
-	if c.child == nil {
-		return nil
-	}
-	return c.child.exitedCh
+	return c.child.Exited()
 }
 
 // onRequest and onNotify route the cursor extension methods identically; the

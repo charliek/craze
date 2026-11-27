@@ -11,6 +11,15 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
+// TransportKind identifies how a provider runs its agent backend (Plan 054 § B1).
+type TransportKind string
+
+const (
+	TransportACP       TransportKind = "acp"
+	TransportCodex     TransportKind = "codex"
+	TransportInProcess TransportKind = "inprocess"
+)
+
 // ModeKind is what craze takes a mode to mean, independent of the id the agent
 // spells it with. ModeUnknown is the zero value on purpose: a mode nobody
 // recognises — including a lookup in an empty table — must never read as one
@@ -404,9 +413,10 @@ func NativeProvider() Provider {
 // §3.4). Native was one of those until H7's smoke passed on both platforms;
 // D-65 lists it here, after grok (plan 028 §3.16). claude was one until its
 // overage guard landed (plan 052 C5): it is listed after grok. antigravity
-// was one until plan 053 M2: it is listed after claude, before native.
+// was one until plan 053 M2: it is listed after claude. codex was one until
+// plan 054 M3: it is listed after antigravity, before native.
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), AntigravityProvider(), NativeProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), ClaudeProvider(), AntigravityProvider(), CodexProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
@@ -414,8 +424,9 @@ func Providers() []Provider {
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
 // hidden entry can never shadow a listed id. Production code registers none
-// (native was hidden before D-65, claude before plan 052 C5 and antigravity before
-// plan 053 M2); RegisterHiddenProviderForTest plants them for tests.
+// (native was hidden before D-65, claude before plan 052 C5, antigravity before
+// plan 053 M2, and codex before plan 054 M3); RegisterHiddenProviderForTest
+// plants them for tests.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -535,8 +546,21 @@ func (p Provider) Hidden() bool { return p.hidden }
 func (p Provider) Resumable() bool { return p.resumable }
 
 // InProcess reports whether craze runs p itself rather than spawning an agent
-// binary over ACP.
+// binary over ACP or Codex app-server.
 func (p Provider) InProcess() bool { return p.inProcess }
+
+// Transport reports which transport protocol p speaks (TransportACP,
+// TransportCodex, or TransportInProcess).
+func (p Provider) Transport() TransportKind {
+	switch {
+	case p.inProcess:
+		return TransportInProcess
+	case p.isCodex():
+		return TransportCodex
+	default:
+		return TransportACP
+	}
+}
 
 // Aside reports whether p's sessions answer side questions (/btw, plan 040
 // §3.3): native's do (its session's Asides is always true); grok's

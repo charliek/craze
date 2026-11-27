@@ -1,6 +1,6 @@
 //go:build darwin
 
-package acp
+package agentproc
 
 import (
 	"bytes"
@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// readProcTable is `ps -A -o pid=,ppid=,pgid=,lstart=`: every process, its
-// parent, its group and its start time (the rest of the line).
 func readProcTable() ([]treeEntry, error) {
 	out, err := psOutput("-A", "-o", "pid=,ppid=,pgid=,lstart=")
 	if err != nil {
@@ -42,9 +40,6 @@ func psOutput(args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "/bin/ps", args...).Output()
 }
 
-// platformKillVerified checks e's start time again and then SIGKILLs it:
-// best effort on macOS, which has no pidfd — a pid reused between the check
-// and the signal would be signalled.
 func platformKillVerified(e treeEntry) bool {
 	out, err := psOutput("-o", "lstart=", "-p", strconv.Itoa(e.pid))
 	if err != nil || strings.Join(strings.Fields(string(out)), " ") != e.start {

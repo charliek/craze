@@ -43,7 +43,7 @@ func newProvidersCmd() *cobra.Command {
 		Use:   "providers",
 		Short: "List the agent providers and whether each can start here",
 		Long: "craze providers lists the agent providers craze can start a session of — cursor, grok, " +
-			"claude, antigravity and native — with each one's state on this machine: ready, " +
+			"claude, antigravity, codex and native — with each one's state on this machine: ready, " +
 			"needs setup, or unavailable, and for the last two why and what to do about it. These are " +
 			"agent providers; craze auth list shows the native provider's model providers. --hub asks " +
 			"the running hub instead, and never starts one.",

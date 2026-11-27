@@ -8,7 +8,7 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-`claude`, `antigravity` and `native` (see [Configuration](configuration.md#provider-precedence)) —
+`claude`, `antigravity`, `codex` and `native` (see [Configuration](configuration.md#provider-precedence)) —
 before the session is constructed. The preselected row is the resolved default
 (see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
@@ -28,7 +28,7 @@ box starts the default.
 As the dialog opens, craze checks each provider the way
 [`craze providers`](cli.md#craze-providers) does — whether its binary
 resolves (claude's two: the adapter and Claude Code's `claude`, the missing
-one named; antigravity's `agy`), whether native has a model provider with a key, and on a Mac
+one named; antigravity's `agy`; codex's `codex`), whether native has a model provider with a key, and on a Mac
 whether this craze runs in the login session cursor needs — and marks every
 row that cannot start:
 
@@ -39,6 +39,7 @@ row that cannot start:
 │  grok                                              │
 │  claude                                 unavailable│
 │  antigravity                            unavailable│
+│  codex                                  unavailable│
 │  native                                 needs setup│
 │cursor-agent not found on PATH                      │
 │install cursor-agent, or set [agents].cursor in     │
@@ -198,9 +199,17 @@ On a provider that can stop one child (native and claude), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn
 goes on and the parent reads that the user stopped it. On any other row —
-grok, cursor, antigravity, a finished row, or a claude child that does not let itself be
+grok, cursor, antigravity, codex, a finished row, or a claude child that does not let itself be
 stopped — the key goes to the composer as before. This works the same on a
 background sub-agent's row (below).
+
+### Codex sub-agents
+
+A `codex` session declares sub-agent rows from Codex's `collabAgentToolCall`
+items: each spawned agent shows as a row labelled with its role/status and
+prompt while running and settles when the call finishes. Codex does not stream
+per-child transcripts or expose per-child cancellation, so the row has no
+[view](#sub-agent-view) and no stop key.
 
 ### Antigravity sub-agents
 
@@ -639,14 +648,15 @@ queue), and `Backspace` cancels it.
 
 ### The three verbs
 
-| Verb | Cursor | Grok, claude, native | Cancels the turn? | Asks first? |
+| Verb | Cursor | Grok, claude, codex, native | Cancels the turn? | Asks first? |
 |---|---|---|---|---|
 | queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
 | send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
-| interject (`Ctrl+L` on a draft under Grok, claude or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+| interject (`Ctrl+L` on a draft under Grok, claude, codex or native) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
 
-Grok and native have a mid-turn path: grok's `x.ai/interject` hands it
+Grok, codex and native have a mid-turn path: grok's `x.ai/interject` hands it
 text that it folds into the turn at its next safe point (after a tool result),
+codex's `turn/steer` steers it into the running turn,
 native steers it into the turn's next step, and claude's `_session/steering`
 injects it into the running turn (a tool running then is moved to the
 background, as in Claude Code). The transcript shows each as a `↳` entry. When
@@ -1629,6 +1639,13 @@ brain directory and ends with no plan card, so the offer above does arm:
 `Enter` leaves plan mode for `default` and sends `Implement the plan above.`
 Plan mode's discipline is `agy`'s own; craze does not enforce it.
 
+On a `codex` session the modes are `agent`, `plan` and `ask`, and `Shift+Tab`
+cycles all three. Both `plan` and `ask` run in Codex's OS-enforced read-only
+sandbox with `approvalPolicy: "never"`. A `plan`-mode turn ends with no plan
+card and arms `Enter implements this plan`: accepting it leaves `plan` for
+`agent` (sending explicit `collaborationMode: default`) and sends `Implement
+the plan above.`
+
 ### Sub-agent models
 
 On native, `~/.craze/native/models.toml` (or `$CRAZE_HOME/native/` when the
@@ -1793,8 +1810,8 @@ spent, the turn's amount then the session's:
 | some usage had no price | `34% ctx · $0.04 / $1.20+` |
 | nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
 | a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
-| a claude session | `3% ctx · 59.6k / 122k tok · max · 7d 45%` |
-| no usage yet (cursor, grok, antigravity, or before native's first step or claude's first report) | no part at all |
+| a claude or codex session | `3% ctx · 59.6k / 122k tok · max · 7d 45%` |
+| no usage yet (cursor, grok, antigravity, or before native's first step or claude's/codex's first report) | no part at all |
 
 `NN% ctx` is the context's share of the context the model works within: its
 [context default](configuration.md#native-context-default) when it has one,
@@ -1825,6 +1842,12 @@ alone until the first. The context's share is of the window Claude reports for
 the model. See [Claude on your
 plan](../getting-started/claude.md#usage-and-your-plans-limits) for the
 overage guard that watches the same reports.
+
+A **codex** session reports the same unpriced token and rate-limit format from
+Codex's `thread/tokenUsage/updated` and `account/rateLimits/updated` updates:
+context share, turn and session token totals, plan type (for ChatGPT logins),
+and the latest rate-limit window (`5h`, `7d`, or compact duration labels such
+as `24h`, `1d`, `15m`).
 
 ## Cards
 
@@ -2069,6 +2092,12 @@ and the last row, and the count already says what the arrows would.
 On an `antigravity` session the catalog is `agy`'s alone: it advertises its
 built-in commands (`/goal`, `/compact`, `/schedule`, …) and the skills of the
 workspace, and expands them itself, so craze scans no directory for it.
+
+On a `codex` session craze queries `skills/list` for the workspace and adds
+enabled Codex skills to the `/` menu (with craze's own slash commands winning
+any name clash). Choosing a Codex skill sends it structurally via Codex's
+`UserInput::Skill` alongside the prompt text rather than inlining the markdown
+file.
 
 Skills come from the agent's own ACP catalog first: Grok's ACP server loads a
 plugins service, so its catalog already carries every plugin skill it has

@@ -747,7 +747,8 @@ terminal is reset, the same as the tab title.
 
 Ids are `cursor`, `grok`, `claude` ([The claude
 provider](#the-claude-provider)), `antigravity` ([The antigravity
-provider](#the-antigravity-provider)) and `native`. An empty string (`--provider ""`,
+provider](#the-antigravity-provider)), `codex` ([The codex
+provider](#the-codex-provider)) and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
 Every id is always offered in the startup picker, so the picker can never be
@@ -781,7 +782,7 @@ provider ([Agent binaries](#agent-binaries)). They do not select the dialect.
 
 ## Agent binaries
 
-Each ACP provider's agent binary can be set in `config.toml`, as an absolute
+Each external provider's agent binary can be set in `config.toml`, as an absolute
 path:
 
 ```toml
@@ -790,9 +791,10 @@ cursor = "/opt/cursor/bin/cursor-agent"
 grok = "/home/me/.local/bin/grok"
 claude = "/home/me/.local/bin/claude-agent-acp"
 antigravity = "/home/me/.local/bin/agy"
+codex = "/home/me/.local/bin/codex"
 ```
 
-A session of an ACP provider runs the first of:
+A session of an external provider runs the first of:
 
 1. `--agent-bin`, then
 2. `$CRAZE_AGENT_BIN` — both **only when the session's provider is the
@@ -801,7 +803,8 @@ A session of an ACP provider runs the first of:
    `--continue` or `--resume` load, the loaded session's;
 3. `[agents].<provider>`;
 4. the provider's own name on `PATH`: `cursor-agent` then `agent` for
-   cursor, `grok` for grok, `claude-agent-acp` for claude, `agy` for antigravity.
+   cursor, `grok` for grok, `claude-agent-acp` for claude, `agy` for
+   antigravity, `codex` for codex.
 
 For claude these name the **adapter** alone. The `claude` it runs — Claude
 Code itself — is `$CLAUDE_CODE_EXECUTABLE` when that is set, else `claude` on
@@ -1043,6 +1046,118 @@ refused.
   your terminal exports it without running `agy` (the Antigravity desktop app's
   may), `craze new --provider antigravity` from there is refused as
   self-delegation; `--allow-same-provider` starts it.
+
+## The codex provider
+
+`codex` runs **OpenAI's Codex CLI, `codex`, on your ChatGPT or OpenAI account**,
+over Codex's native `codex app-server --listen stdio://` JSON-RPC 2.0 protocol
+(not ACP): craze spawns `codex app-server --listen stdio://` and `codex` runs
+the agent with its own tools, sandbox, skills, MCP servers and models
+(`gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-luna` and others). craze holds no
+credential, never logs you in, and reads nothing under `~/.codex`. It is listed
+after antigravity and before native by `craze providers`, the picker and
+`--help`, and reached with `--provider codex` (or `provider = "codex"`,
+`CRAZE_PROVIDER=codex`). The version tested is `codex-cli` **0.172.0**.
+
+### What it needs
+
+- **`codex`**, found as [Agent binaries](#agent-binaries) says: `--agent-bin`,
+  `$CRAZE_AGENT_BIN`, `[agents].codex`, then `codex` on `PATH`. A missing one
+  is `unavailable` in the picker and `craze providers`, with `install codex, or
+  set [agents].codex in …`.
+- **A sign-in or API key.** Sign in once with `codex login` (ChatGPT account),
+  `codex login --with-api-key` (OpenAI API key — exporting `OPENAI_API_KEY`
+  alone with an empty `CODEX_HOME` leaves `account/read` unauthenticated on
+  `codex-cli` 0.172.0), or configure a custom Codex model provider whose
+  `requiresOpenaiAuth` is `false`. On session start craze calls `account/read`:
+  when `requiresOpenaiAuth` is `true` and `account` is empty, the session fails
+  fast with kind `auth` (``codex is not signed in (run `codex login`, or `codex
+  login --with-api-key` for API-key auth)``).
+
+### What craze sets
+
+- **The command and environment.** craze spawns `codex app-server --listen
+  stdio://` with `experimentalApi: true` in `initialize` (required by Codex for
+  plan mode and `requestUserInput`). craze strips inherited `CODEX_THREAD_ID`,
+  `CODEX_SESSION_ID`, `CODEX_CI`, `CODEX_TOOL_CALL_ID`, and any
+  `CODEX_SANDBOX_*` variables from the child environment (preserving
+  `CODEX_HOME`, `OPENAI_API_KEY`, `CODEX_SANDBOX`, and `CODEX_MANAGED_BY_*`)
+  and sets `CRAZE_SESSION_PROVIDER=codex`.
+- **Models and effort.** craze reads `model/list` (paginated) on start and
+  populates `/model` and `/effort` from each model's `supportedReasoningEfforts`
+  and `defaultReasoningEffort` (including `ultra` on models such as
+  `gpt-6.2-sol`). Switching models switches effort to the new model's default
+  when the previous effort is not supported, and every turn sends the active
+  model and effort explicitly.
+- **Modes and hard OS read-only sandbox.** Codex exposes three modes —
+  `agent`, `plan` and `ask` (`Shift+Tab` cycles all three):
+  - `agent`: workspace-write sandbox; approval policy is `never` under craze's
+    default `--force`, or `on-request` under `--no-force`.
+  - `plan`: Codex's `plan` collaboration mode paired with Codex's OS-enforced
+    `readOnly` sandbox and `approvalPolicy: "never"`. A plan-mode turn ends at
+    the plan; in the TUI the composer offers `Enter implements this plan`,
+    which switches back to `agent` (`default` collaboration mode) and sends
+    `Implement the plan above.`
+  - `ask`: Codex's `default` collaboration mode paired with Codex's OS-enforced
+    `readOnly` sandbox (`readOnlyAccess: fullAccess`, `networkAccess: false`)
+    and `approvalPolicy: "never"`, enforced on both shell commands and
+    `apply_patch` — including when resuming a previously writable thread with
+    `--ask`.
+  - Every `turn/start` sends an explicit `collaborationMode` so switching out
+    of `plan` into `agent` or `ask` never leaves Codex's server-side plan state
+    sticky.
+- **Edits, diffs and `files`.** `apply_patch` / `fileChange` items render live
+  unified diffs in the transcript and stamp successful workspace edits into
+  `files` (moves list both old and new paths; edits outside the workspace go to
+  `outsideFiles`).
+- **Approvals and questions.** Under `--no-force` in `agent` mode, Codex
+  command-execution and file-change approval requests render as craze
+  permission cards; craze never offers persistent Codex config-amendment
+  options (`acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`,
+  `scope: "session"`), offering only allow-once, allow-for-session (in-memory)
+  and deny. Permission-expansion requests (`item/permissions/requestApproval`)
+  and MCP server elicitations are declined automatically (empty permission
+  grant / decline) and show no card. `requestUserInput` prompts render as
+  question cards (free-text enabled when `isOther` is set); questions marked
+  `isSecret` are declined automatically so secrets are never written to
+  transcripts or journals. In an unattended session, a free-text-only question
+  (with no options to auto-select) returns `needs_input` (exit 4) even under
+  `--force`.
+- **Interjection.** Typing and sending while a turn is running steers the
+  active Codex turn in place via `turn/steer`.
+- **Skills.** craze queries `skills/list` for the workspace and exposes enabled
+  Codex skills in the `/` menu, invoking selected skills structurally via
+  `UserInput::Skill` alongside the prompt text. craze's own slash commands win
+  a name clash.
+- **Usage and rate limits.** Token usage (`input`, `cachedInput`, `output`,
+  `reasoningOutput`), context window, account plan type and rate-limit windows
+  (`5h`, `7d` and generic compact duration windows such as `24h`, `1d`, `15m`)
+  appear on the status row and in waiting-command results. Codex turns are
+  unpriced.
+- **Resume.** Threads are started with `ephemeral: false` so Codex persists
+  them on disk (saved threads also appear in `codex resume` outside craze), and
+  resumed via `thread/resume` (`excludeTurns: true`) followed by paginated
+  `thread/turns/list` replay, restoring the transcript, model, effort and token
+  baseline. A Codex thread records its `model` and `effort` in the craze
+  session index.
+
+### What it does not do
+
+- **No fast toggle, no plan cards, no `/btw`.** Codex has no fast toggle
+  (`--fast` is ignored/not offered), no interactive plan approval card and no
+  side-question RPC.
+- **Sub-agents are parent-scoped.** `collabAgentToolCall` spawns appear as
+  sub-agent rows on the parent session with no child transcript view, no
+  per-child cancel and no background detach.
+- **Codex hooks and MCP servers run outside Codex's command sandbox.** Even in
+  `--ask` or `--plan`, Codex's own configured hooks or MCP servers can perform
+  actions outside the OS read-only command sandbox.
+- **`CODEX_THREAD_ID` outside Codex.** `codex` exports `CODEX_THREAD_ID` in its
+  shell commands, and craze reads it as the
+  [caller marker](cli.md#starting-your-own-provider) of a standalone `codex`. If
+  your terminal exports `CODEX_THREAD_ID` without running Codex, `craze new
+  --provider codex` from there is refused as self-delegation;
+  `--allow-same-provider` starts it.
 
 ## Native models and providers
 

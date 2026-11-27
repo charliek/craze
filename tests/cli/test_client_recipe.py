@@ -504,6 +504,13 @@ def test_a_client_against_a_real_hub(
                 "fix": row_line(f"install agy, or set [agents].antigravity in {config}"),
             },
             {
+                "id": "codex",
+                "label": "codex",
+                "state": "unavailable",
+                "reason": "codex not found on PATH",
+                "fix": row_line(f"install codex, or set [agents].codex in {config}"),
+            },
+            {
                 "id": "native",
                 "label": "native",
                 "state": "needs_setup",

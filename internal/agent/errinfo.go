@@ -5,7 +5,9 @@ import (
 	"errors"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/agentproc"
 	"github.com/charliek/craze/internal/chatgptauth"
+	"github.com/charliek/craze/internal/codexrpc"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -39,7 +41,8 @@ var errInfoSentinels = []struct {
 	{harness.ErrEmptyStep, errkind.New(errkind.Provider)},
 	{harness.ErrClosed, errkind.New(errkind.Stopped)},
 	{acp.ErrClosed, errkind.New(errkind.Agent)},
-	{acp.ErrAgentExited, errkind.New(errkind.Agent)},
+	{codexrpc.ErrClosed, errkind.New(errkind.Agent)},
+	{agentproc.ErrAgentExited, errkind.New(errkind.Agent)},
 	{context.Canceled, errkind.New(errkind.Interrupted)},
 	// Refused because the agent's own turn holds the session: that turn's end
 	// lets a fresh prompt through.

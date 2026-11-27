@@ -531,7 +531,7 @@ def test_new_with_no_default_says_how_to_choose_one(craze_bin: Path, tmp_path: P
     through whole (test_new_json_refusal_is_the_wire_error)."""
     out = _new(craze_bin, "-C", str(tmp_path), "hello")
     assert out.returncode == 1 and out.stdout == b"", out
-    assert out.stderr == b"craze new: no default provider yet; pass --provider cursor, grok, claude, antigravity or native\n", out.stderr
+    assert out.stderr == b"craze new: no default provider yet; pass --provider cursor, grok, claude, antigravity, codex or native\n", out.stderr
     assert not list(_hubs(_home()).glob("*.json"))
     assert not [e for e in _entries(_home()) if e.get("requestId")]
 
@@ -540,7 +540,7 @@ def test_new_unknown_provider_is_a_usage_error(craze_bin: Path, tmp_path: Path) 
     """An explicit --provider that names no provider is the usage error every
     command gives (plan 037 LC-4): exit 2, one line, before any hub is asked --
     and with --json one object in the same words too, of kind config."""
-    line = 'craze: unknown provider "nosuch" (want cursor, grok, claude, antigravity, or native)'
+    line = 'craze: unknown provider "nosuch" (want cursor, grok, claude, antigravity, codex, or native)'
     out = _new(craze_bin, "--provider", "nosuch", "-C", str(tmp_path), "hello")
     assert (out.returncode, out.stdout, out.stderr.decode()) == (2, b"", line + "\n"), out
     out = _new(craze_bin, "--json", "--provider", "nosuch", "-C", str(tmp_path), "hello")

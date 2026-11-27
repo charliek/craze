@@ -150,27 +150,6 @@ func TestClaudeTripBeforeAFailedSetup(t *testing.T) {
 	}
 }
 
-// TestDescendantsOfTheAgent: the sweep's tree walk — children, grandchildren,
-// whatever their group; not the root, not strangers.
-func TestDescendantsOfTheAgent(t *testing.T) {
-	table := []treeEntry{
-		{pid: 1, ppid: 0, pgid: 1},
-		{pid: 100, ppid: 1, pgid: 100},   // the agent
-		{pid: 101, ppid: 100, pgid: 100}, // in its group
-		{pid: 102, ppid: 100, pgid: 102}, // left the group
-		{pid: 103, ppid: 102, pgid: 103}, // its child, a session of its own
-		{pid: 200, ppid: 1, pgid: 200},   // a stranger
-	}
-	var got []int
-	for _, e := range descendants(table, 100) {
-		got = append(got, e.pid)
-	}
-	slices.Sort(got)
-	if !slices.Equal(got, []int{101, 102, 103}) {
-		t.Fatalf("descendants %v", got)
-	}
-}
-
 // TestClaudeSeverDropsWhatTheLoadHeld (review C5 item 7): updates and
 // requests held behind a load's reply are released by ReplayDone to no one
 // once the connection is severed.

@@ -31,6 +31,9 @@ const (
 	// antigravityAgentEnv is set to 1 by agy (Antigravity) in its run_command
 	// shell (plan 053 E1).
 	antigravityAgentEnv = "ANTIGRAVITY_AGENT"
+	// codexThreadEnv is set by Codex CLI in its commandExecution shell
+	// (plan 054 E1).
+	codexThreadEnv = "CODEX_THREAD_ID"
 )
 
 // callerProvider is the provider the agent that ran this craze is on, by
@@ -38,11 +41,11 @@ const (
 // sets it fresh for each agent it spawns, so it names the immediate caller
 // (a cursor session Claude Code started has CLAUDECODE too, and may target
 // claude). Without it, claude when CLAUDECODE=1, cursor when CURSOR_AGENT is
-// set, antigravity when ANTIGRAVITY_AGENT is set — but only when exactly one
-// of them is: each inherits the others' environment when one launches
-// another, so with two or more the immediate caller is unknown, and the guard
-// stands aside (the plugin's text rule still holds). grok sets no marker craze
-// trusts, so its rule is the text alone.
+// set, antigravity when ANTIGRAVITY_AGENT is set, codex when CODEX_THREAD_ID
+// is set — but only when exactly one of them is: each inherits the others'
+// environment when one launches another, so with two or more the immediate
+// caller is unknown, and the guard stands aside (the plugin's text rule still
+// holds). grok sets no marker craze trusts, so its rule is the text alone.
 func callerProvider(getenv func(string) string) string {
 	if p := strings.TrimSpace(getenv(agent.SessionProviderEnv)); p != "" {
 		return p
@@ -56,6 +59,9 @@ func callerProvider(getenv func(string) string) string {
 	}
 	if getenv(antigravityAgentEnv) != "" {
 		named = append(named, agent.AntigravityProvider().Name())
+	}
+	if getenv(codexThreadEnv) != "" {
+		named = append(named, agent.CodexProvider().Name())
 	}
 	if len(named) == 1 {
 		return named[0]

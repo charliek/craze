@@ -192,15 +192,42 @@ func planPart(u *agent.UsageState) string {
 }
 
 // windowShort is a rate limit's window as the status row says it: `5h` for
-// five_hour, `7d` for every seven_day window, "" for any other.
+// five_hour, `7d` for every seven_day window, any compact duration window
+// (`<digits><d|h|m>`, such as Codex's `24h`, `1d`, or `15m`), and "" for any
+// other.
 func windowShort(window string) string {
 	switch {
 	case window == "five_hour":
 		return "5h"
 	case strings.HasPrefix(window, "seven_day"):
 		return "7d"
+	case isCompactDurationWindow(window):
+		return window
 	}
 	return ""
+}
+
+// isCompactDurationWindow reports whether window is a positive integer followed
+// by a single duration unit (`d`, `h`, or `m`), e.g. "24h", "1d", or "15m".
+func isCompactDurationWindow(window string) bool {
+	if len(window) < 2 {
+		return false
+	}
+	unit := window[len(window)-1]
+	if unit != 'd' && unit != 'h' && unit != 'm' {
+		return false
+	}
+	nonZero := false
+	for i := 0; i < len(window)-1; i++ {
+		c := window[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		if c != '0' {
+			nonZero = true
+		}
+	}
+	return nonZero
 }
 
 // contextPercent is tokens as a whole percentage of window, rounded half up;

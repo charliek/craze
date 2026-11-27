@@ -1256,7 +1256,7 @@ func (w *turnWaiter) returnedCancel(ctx context.Context, turn string) (returned,
 	if err != nil {
 		return false, false
 	}
-	if !found && unknown && w.acc.planAnsweredInTurn && !inProcessProvider(w.session.provider) {
+	if !found && unknown && w.acc.planAnsweredInTurn && isACPProvider(w.session.provider) {
 		// The lookup was refused (a stop's attach fence), which says nothing of the
 		// plan; the snapshot said what the turn did. Only ACP's policy answers a plan
 		// without accepting it, so its plan was returned, though its text is gone.
@@ -1266,11 +1266,11 @@ func (w *turnWaiter) returnedCancel(ctx context.Context, turn string) (returned,
 	return found, true
 }
 
-// inProcessProvider says name is a provider whose agent craze runs itself, whose
-// automatic plan answer accepts rather than returns (unattendedPolicy).
-func inProcessProvider(name string) bool {
+// isACPProvider says name is an ACP provider, whose automatic plan answer
+// returns the plan rather than accepting it (matching unattendedPolicy).
+func isACPProvider(name string) bool {
 	p, err := agent.ProviderByName(name)
-	return err == nil && p.InProcess()
+	return err == nil && p.Transport() == agent.TransportACP
 }
 
 // lookReturned looks for turn's returned plan in its events (readTurnBack) and,

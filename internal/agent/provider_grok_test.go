@@ -117,7 +117,7 @@ func TestProviderByNameLookup(t *testing.T) {
 	if p, err := ProviderByName("native"); err != nil || p.Name() != "native" {
 		t.Fatalf("native = %+v, %v", p, err)
 	}
-	if _, err := ProviderByName("codex"); err == nil {
+	if _, err := ProviderByName("nosuch"); err == nil {
 		t.Fatal("unknown provider must error")
 	}
 	if _, err := ProviderByName("Grok"); err == nil {

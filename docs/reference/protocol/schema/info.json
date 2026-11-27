@@ -75,7 +75,7 @@
       "properties": {
         "models": {"type": "array", "items": {"$ref": "#/$defs/model"}},
         "modes": {"type": "array", "items": {"$ref": "#/$defs/mode"}},
-        "revision": {"type": "integer", "minimum": 1, "description": "The revision of models: the catalog section's that last changed it. Absent while 0 — the list the session started with, every ACP session's, and every older host's. A client that also folds the stream's catalog section shows whichever list is newer by revision, never an older one."}
+        "revision": {"type": "integer", "minimum": 1, "description": "The revision of models: the catalog section's that last changed it. Absent while 0 — the list a native or antigravity session started with before any change, every cursor/grok/claude session's, and every older host's; codex starts at revision 1 on install. A client that also folds the stream's catalog section shows whichever list is newer by revision, never an older one."}
       },
       "required": ["models", "modes"],
       "additionalProperties": false
@@ -86,10 +86,10 @@
       "properties": {
         "id": {"type": "string"},
         "name": {"type": "string"},
-        "recent": {"type": "integer", "minimum": 1, "description": "The model's rank in the native provider's model memory: 1 for the most recently picked model the session offers, then 2, 3 and so on. Absent for a model not remembered, for every ACP provider's model, and on an older host. A client lists the remembered models right after the current one, by rank."},
-        "efforts": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 32}, "description": "The effort levels the model offers, in order: one of its effort facts, stated where the session capability effortFacts is true (a native session). Absent for a model with no effort control, for every ACP provider's model, and on an older host. A client reads the current model's effort from its effort option, never from this row."},
+        "recent": {"type": "integer", "minimum": 1, "description": "The model's rank in the native provider's model memory: 1 for the most recently picked model the session offers, then 2, 3 and so on. Absent for a model not remembered, for every ACP and codex provider's model, and on an older host. A client lists the remembered models right after the current one, by rank."},
+        "efforts": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 32}, "description": "The effort levels the model offers, in order: one of its effort facts, stated where the session capability effortFacts is true (native and codex sessions). Absent for a model with no effort control, for every ACP provider's model, and on an older host. A client reads the current model's effort from its effort option, never from this row."},
         "defaultEffort": {"type": "string", "minLength": 1, "maxLength": 32, "description": "The model's default effort, one of efforts. Absent for a model with none, for every ACP provider's model, and on an older host."},
-        "switchEffort": {"type": "string", "minLength": 1, "maxLength": 32, "description": "The effort a switch to the model lands on, one of efforts: the session's own last choice on it, else the one the model memory remembers, else its default. Absent for a model with no effort control, for every ACP provider's model, and on an older host."}
+        "switchEffort": {"type": "string", "minLength": 1, "maxLength": 32, "description": "The effort a switch to the model lands on, one of efforts: on native, the session's own last choice on it, else the one the model memory remembers, else its default; on codex, the session's current effort when the model supports it, else its default. Absent for a model with no effort control, for every ACP provider's model, and on an older host."}
       },
       "required": ["id", "name"],
       "additionalProperties": false

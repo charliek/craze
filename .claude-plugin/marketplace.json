@@ -8,7 +8,7 @@
     {
       "name": "craze",
       "source": "./",
-      "description": "Sub-agents for Claude Code that run on other models through craze (native, Grok, Cursor, Antigravity)."
+      "description": "Sub-agents for Claude Code that run on other models through craze (native, Grok, Cursor, Antigravity, Codex)."
     }
   ]
 }

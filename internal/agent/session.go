@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/agentproc"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 )
@@ -60,7 +61,7 @@ var ErrForeignTurnRequeue = fmt.Errorf("%w; the message waits for it in the queu
 // channel — not that Close failed. Match it with errors.Is; internal/tui
 // imports this package rather than internal/acp directly, which make lint
 // forbids (Makefile's acp-import rule).
-var ErrAgentExited = acp.ErrAgentExited
+var ErrAgentExited = agentproc.ErrAgentExited
 
 // ErrBadCatalog answers a settings change whose reply could not be read: its
 // configOptions is not a list, or holds a member that is not an option (plan
@@ -795,19 +796,22 @@ type Snapshot struct {
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, as the last StateDelta.Usage left
 	// it. nil until a native session's first step — or its load's replay —
-	// or a claude session's first report (plan 052 § D1) sets one, and always
-	// nil for a cursor or grok session. Its own copy, cloned by Snapshot.
+	// a claude session's first report (plan 052 § D1), or a codex session's
+	// first token-usage or rate-limit report (plan 054 § D4) sets one, and
+	// always nil for a cursor, grok, or antigravity session. Its own copy,
+	// cloned by Snapshot.
 	Usage *UsageState
 	// WebStatus is the session's web search as the last StateDelta.WebStatus
 	// left it (issues #137, #141): nil until a native session that offered
-	// the web tools publishes one, and always nil for an ACP session. Its own
-	// copy, cloned by Snapshot.
+	// the web tools publishes one, and always nil for every other provider.
+	// Its own copy, cloned by Snapshot.
 	WebStatus *WebStatusState
 	// CatalogRevision is the revision of Models (plan 034 §3.4, Q17): 0 for
 	// the list a session started with, and the Revision of the last
 	// StateDelta.Catalog after it, read with Models in one locked section, so
-	// the two always describe one list. A native session moves it, and an
-	// antigravity one whose model option's values change (plan 053 § C2).
+	// the two always describe one list. A native session moves it, an
+	// antigravity one whose model option's values change (plan 053 § C2), and
+	// a codex one when effort changes refresh SwitchEffort (plan 054 § C4).
 	CatalogRevision uint64
 }
 
@@ -1519,7 +1523,9 @@ type Session interface {
 	// result (plan 026 §3.11), and false at every other time.
 	ForeignTurn() bool
 	// Interject merges text into the running turn without cancelling it.
-	// Only grok can: everything else returns ErrUnsupported before the wire.
+	// Supported by grok, claude, codex (turn/steer), and native; everything
+	// else returns ErrUnsupported before the wire. Returns ErrPromptRequired
+	// when no steerable turn is currently active so the engine can queue it.
 	Interject(ctx context.Context, text string) error
 	// The three settings verbs. Each asks the provider first, **outside the
 	// session's lock**, and only a change the provider took mutates anything:

@@ -437,10 +437,10 @@ func configSwitch(key string) bool {
 	return on
 }
 
-// AgentBinKeys are the [agents] table's keys: the ACP providers craze spawns
-// an agent binary for (plan 032 §3.11, P7). native runs inside craze and has
-// none.
-var AgentBinKeys = []string{"cursor", "grok", "claude", "antigravity"}
+// AgentBinKeys are the [agents] table's keys: the providers craze spawns an
+// agent binary for (plan 032 §3.11, P7; plan 054 § E2). native runs inside
+// craze and has none.
+var AgentBinKeys = []string{"cursor", "grok", "claude", "antigravity", "codex"}
 
 // ConfigAgentBin is `[agents].<provider>`: the agent binary a session of that
 // provider is spawned with when neither the launch's --agent-bin nor

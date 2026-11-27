@@ -7,14 +7,17 @@
     - **craze's own native provider**, which needs no other CLI: an API key for
       one of the model providers craze ships a catalog for, or a ChatGPT plan
       to sign in with (see [Native provider](#native-provider) below); or
-    - **an ACP agent**: install the [Cursor CLI](https://cursor.com/cli) or the
+    - **an external agent CLI**: install the [Cursor CLI](https://cursor.com/cli) or the
       [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), and
       log in: `cursor-agent login` (the same binary is also installed as
       `agent`), or `grok login` / set `XAI_API_KEY`; or Claude Code signed in
       to a Claude Pro or Max plan, with the `claude-agent-acp` adapter
       ([Claude on your plan](claude.md)); or Google's Antigravity CLI (`agy`),
       signed in with `agy acp --login`
-      ([the antigravity provider](../reference/configuration.md#the-antigravity-provider)).
+      ([the antigravity provider](../reference/configuration.md#the-antigravity-provider));
+      or OpenAI's Codex CLI (`codex`), signed in with `codex login` or
+      `codex login --with-api-key`
+      ([the codex provider](../reference/configuration.md#the-codex-provider)).
 
 Coming from v0.0.1? Read [Upgrading](upgrading.md) first.
 
@@ -104,7 +107,7 @@ is for tests; a live session uses the native provider, or `cursor-agent` or
 
 ```bash
 ./bin/craze                      # picker, then the TUI in the current directory
-./bin/craze --provider cursor    # skip the picker (also grok, claude, antigravity, native)
+./bin/craze --provider cursor    # skip the picker (also grok, claude, antigravity, codex, native)
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse

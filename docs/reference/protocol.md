@@ -1094,14 +1094,14 @@ create sheet offers; `craze providers --hub` prints it.
 
 ```json
 {"jsonrpc":"2.0","id":"3","method":"sessions.createOptions","params":{}}
-{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"ready"},{"id":"antigravity","label":"antigravity","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
+{"jsonrpc":"2.0","id":"3","result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"this craze runs outside the macOS login session (over ssh), where cursor may not reach the login keychain","fix":"kill 5150 (no session ends), then run \"craze ps\" in a terminal on the Mac"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"ready"},{"id":"antigravity","label":"antigravity","state":"ready"},{"id":"codex","label":"codex","state":"ready"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[{"dir":"/home/me/projects/lumen","usedAt":"2026-10-03T12:00:00Z"}]}}
 ```
 
 **Params.** None: `{}`, or none at all. Any member is `bad_request`, reason
 `unknown_field`.
 
 **`providers`** is every agent provider this machine lists, in craze's own
-order — `cursor`, `grok`, `claude`, `antigravity`, `native` — at most 16, each listed whether or not
+order — `cursor`, `grok`, `claude`, `antigravity`, `codex`, `native` — at most 16, each listed whether or not
 its binary is found. Each has its `id`
 (what `session.create`'s `provider` takes), its `label` (what a client shows)
 and its `state`:
@@ -1129,6 +1129,11 @@ would start it, in the hub's own process:
   with `agy not found on PATH` and the fix `install agy, or set
   [agents].antigravity in …` when not. Whether `agy` is signed in is not
   checked: a logged-out one fails the create with `auth`.
+- **codex** is `ready` when `codex` resolves the same way (`[agents].codex`,
+  else `codex` on the hub's `PATH`), and `unavailable` with `codex not found
+  on PATH` and the fix `install codex, or set [agents].codex in …` when not.
+  Whether `codex` is signed in is not checked: an unauthenticated one fails
+  the create on `account/read` with `auth`.
 - **cursor, on macOS,** is also `unavailable` when the hub runs outside the
   Mac's login session — first started over `ssh` — where cursor may not reach
   the login keychain; its hosts inherit that session. The fix names the hub's
@@ -1751,8 +1756,8 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `incarnation` | the event log's id: the scope of seqs, turn ids and ask ids, and a cursor's first half |
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
-| `provider` | `{name, label}` — `name` is the provider id (`cursor` or `grok` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's but an antigravity session whose model list has changed, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
+| `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok`, `claude`, `antigravity` for ACP agents, `codex` for `codex app-server`, `native` for the one that runs inside craze), `label` what a client shows |
+| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP/codex provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native or codex session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — on native, the session's own last choice on that model, else the one the model memory remembers for it, else its default; on codex, the session's current effort when the target model supports it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list a native or antigravity session started with before any change, every cursor/grok/claude session's, and every older host's; codex starts at revision `1` on install). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -1829,9 +1834,9 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native or grok session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
-| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
+| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, claude, antigravity, codex or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
 | `exitAfterTurn` | the host's own, and omitted when `false`: `session.prompt` takes `exitAfterTurn` ([the exit fence](#the-exit-fence)) and `session.stop` takes `cause`, on a host that serves `session.stop`. It fences what craze admits, not a turn an agent starts entirely on its own. Absent on a TUI-hosted session and an older host, which refuse both, so a client sends neither |
-| `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
+| `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native or codex session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -2214,11 +2219,11 @@ A native session reports what it has spent and how full its context is: the
 **usage section**, `{contextTokens, contextWindow, turn, session}`. It is a
 state delta section like the model or the config — `state.usage` on a `meta`
 event — and it stands in the two reads of where things are: `session.state`'s
-`settings.usage` and a snapshot's `settings.usage`. A **claude** session
-reports one too ([below](#a-claude-sessions-usage)). Cursor, grok and antigravity report no
+`settings.usage` and a snapshot's `settings.usage`. **claude** and **codex** sessions
+report one too ([below](#a-claude-sessions-usage)). Cursor, grok and antigravity report no
 usage through craze, so for their sessions the key is **absent** — never
 `null` and never `{}` — as it is for a native session before its first step
-and a claude one before Claude's first report. A client reads the key's
+and a claude or codex one before its first report. A client reads the key's
 presence as "this session reports usage".
 
 `settings.usage` is **reported state, not a setting**: it sits in `settings`
@@ -2291,6 +2296,23 @@ claude's alone:
 Claude sends its limit report only when it changes, so `window` and the rest
 are the last one sent, kept until the next. Each is absent when empty; a
 client that does not know them ignores them.
+
+### A codex session's usage
+
+A `codex` session uses the same usage section shape from Codex's
+`thread/tokenUsage/updated`, `account/read` and `account/rateLimits/read` /
+`account/rateLimits/updated` updates:
+
+- `turn` and `session` report Codex's unpriced token counts (`costPicoUsd: 0`,
+  `unpriced: true`), with `input` excluding `cacheRead` and `reasoning`
+  included in `output` (never double-counted). `contextTokens` is the last
+  request's total context size and `contextWindow` is Codex's
+  `modelContextWindow`.
+- `plan` is the ChatGPT account `planType` (such as `"prolite"`, `"pro"`,
+  `"plus"`) when signed in to ChatGPT, and absent on API-key auth.
+- `window`, `windowUtilization` and `resetsAt` report the most-constrained
+  active Codex rate-limit bucket (using `"five_hour"`, `"seven_day"`, or a
+  compact duration label such as `"24h"`, `"1d"`, `"15m"`).
 
 ## Web search counts
 
@@ -2461,7 +2483,9 @@ catalog section, its revision one past the last. Its models carry `id` and
 - No ACP session but an antigravity one publishes one, and neither a native
   nor an antigravity session does before its list's first change: the key is
   **absent** then — never `null`, never `{}` — and the list is the info
-  document's.
+  document's. A **codex** session publishes a revisioned catalog at initial
+  install (`revision: 1`, carrying each model's effort facts) and again
+  whenever a model or effort change updates `switchEffort`.
 
 The section stands in the reads of where things are, as usage does: a
 snapshot's `settings.catalog` (the last section a delta carried) and
@@ -3394,7 +3418,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"sessions.createOptions","params
 The answer, exactly, on Linux and macOS:
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /tmp/craze-recipe/craze-home/config.toml"},{"id":"antigravity","label":"antigravity","state":"unavailable","reason":"agy not found on PATH","fix":"install agy, or set [agents].antigravity in /tmp/craze-recipe/craze-home/config.toml"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"providers":[{"id":"cursor","label":"cursor","state":"unavailable","reason":"cursor-agent not found on PATH","fix":"install cursor-agent, or set [agents].cursor in /tmp/craze-recipe/craze-home/config.toml"},{"id":"grok","label":"grok","state":"ready"},{"id":"claude","label":"claude","state":"unavailable","reason":"claude-agent-acp not found on PATH","fix":"install the adapter: npm i -g @agentclientprotocol/claude-agent-acp (Node ≥22), or set [agents].claude in /tmp/craze-recipe/craze-home/config.toml"},{"id":"antigravity","label":"antigravity","state":"unavailable","reason":"agy not found on PATH","fix":"install agy, or set [agents].antigravity in /tmp/craze-recipe/craze-home/config.toml"},{"id":"codex","label":"codex","state":"unavailable","reason":"codex not found on PATH","fix":"install codex, or set [agents].codex in /tmp/craze-recipe/craze-home/config.toml"},{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":"craze auth login (an API key, or \"craze auth login chatgpt\" for a ChatGPT plan)"}],"defaultProvider":"grok","recentDirs":[]}}
 ```
 
 - cursor is `unavailable` because neither `cursor-agent` nor `agent` is on

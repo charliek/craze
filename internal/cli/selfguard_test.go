@@ -23,15 +23,24 @@ func sameProvider(p string) string {
 		" work, not craze (--allow-same-provider overrides)"
 }
 
-// markers sets the caller markers for one case: "" unsets one. The optional
-// fourth value is ANTIGRAVITY_AGENT.
-func markers(t *testing.T, session, claudeCode, cursorAgent string, antigravity ...string) {
+// markers sets the caller markers for one case: "" unsets one. Optional
+// variadic values are ANTIGRAVITY_AGENT and CODEX_THREAD_ID.
+func markers(t *testing.T, session, claudeCode, cursorAgent string, extra ...string) {
 	t.Helper()
-	agy := ""
-	if len(antigravity) > 0 {
-		agy = antigravity[0]
+	agy, codex := "", ""
+	if len(extra) > 0 {
+		agy = extra[0]
 	}
-	for name, v := range map[string]string{agent.SessionProviderEnv: session, claudeCodeEnv: claudeCode, cursorAgentEnv: cursorAgent, antigravityAgentEnv: agy} {
+	if len(extra) > 1 {
+		codex = extra[1]
+	}
+	for name, v := range map[string]string{
+		agent.SessionProviderEnv: session,
+		claudeCodeEnv:            claudeCode,
+		cursorAgentEnv:           cursorAgent,
+		antigravityAgentEnv:      agy,
+		codexThreadEnv:           codex,
+	} {
 		t.Setenv(name, v)
 		if v == "" {
 			_ = os.Unsetenv(name)
@@ -93,6 +102,38 @@ func TestCallerProviderAntigravityMarker(t *testing.T) {
 				t.Fatalf("callerProvider = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCallerProviderCodexMarker: CODEX_THREAD_ID is a fourth standalone marker
+// (plan 054 § E1): alone it names codex, with any other marker the guard stands
+// aside, and CRAZE_SESSION_PROVIDER still wins.
+func TestCallerProviderCodexMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		session, claudeCode, cursor string
+		agy, codex, want            string
+	}{
+		{"alone", "", "", "", "", "019d-thread", "codex"},
+		{"with CLAUDECODE", "", "1", "", "", "019d-thread", ""},
+		{"with CURSOR_AGENT", "", "", "1", "", "019d-thread", ""},
+		{"with ANTIGRAVITY_AGENT", "", "", "", "1", "019d-thread", ""},
+		{"session marker wins", "claude", "", "", "", "019d-thread", "claude"},
+		{"session marker settles ambiguity", "codex", "1", "", "", "019d-thread", "codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			markers(t, tc.session, tc.claudeCode, tc.cursor, tc.agy, tc.codex)
+			if got := callerProvider(os.Getenv); got != tc.want {
+				t.Fatalf("callerProvider = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	markers(t, "", "", "", "", "t1")
+	if err := selfDelegation("codex", false); err == nil || err.Error() != sameProvider("codex") {
+		t.Fatalf("codex from CODEX_THREAD_ID = %v, want self-delegation refusal", err)
+	}
+	if err := selfDelegation("codex", true); err != nil {
+		t.Fatalf("--allow-same-provider = %v, want nil", err)
 	}
 }
 

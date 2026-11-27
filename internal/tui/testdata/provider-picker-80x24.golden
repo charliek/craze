@@ -2,13 +2,13 @@
                                                                                 
                                                                                 
                                                                                 
-                                                                                
              ╭────────────────────────────────────────────────────╮             
              │provider                                            │             
              │> cursor                                     default│             
              │  grok                                              │             
              │  claude                                            │             
              │  antigravity                                       │             
+             │  codex                                             │             
              │  native                                            │             
              │↑↓ · tab · enter starts · esc uses default          │             
              ╰────────────────────────────────────────────────────╯             

@@ -1,0 +1,1197 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/charliek/craze/internal/codexrpc"
+)
+
+// Item & diff translation for codexSession (Plan 054 § D2).
+
+const (
+	codexCmdStreamCap = 128 << 10 // cap accumulated live command output per call
+	codexCmdHeadCap   = outputHeadCap
+)
+
+// codexCmdBuffer accumulates streaming command output without retaining
+// oversized backing arrays, preserving the original head and truncation state.
+type codexCmdBuffer struct {
+	head      string
+	tail      string
+	truncated bool
+}
+
+func (b *codexCmdBuffer) append(delta string) {
+	if delta == "" {
+		return
+	}
+	if len(b.head) < codexCmdHeadCap {
+		need := codexCmdHeadCap - len(b.head)
+		if len(delta) <= need {
+			b.head = strings.Clone(b.head + delta)
+		} else {
+			b.head = strings.Clone(b.head + truncateUTF8(delta, need))
+		}
+	}
+	combined := b.tail + delta
+	if len(combined) > codexCmdStreamCap {
+		b.truncated = true
+		cut := len(combined) - codexCmdStreamCap
+		// Advance to a valid UTF-8 rune boundary.
+		for cut < len(combined) && !utf8.RuneStart(combined[cut]) {
+			cut++
+		}
+		b.tail = strings.Clone(combined[cut:])
+		return
+	}
+	b.tail = strings.Clone(combined)
+}
+
+func (b *codexCmdBuffer) toolOutput(exitCode *int) *ToolOutput {
+	out := codexCommandOutput(b.tail, exitCode)
+	if out == nil {
+		return nil
+	}
+	if b.truncated {
+		out.Truncated = true
+		head := sanitizeText(strings.ReplaceAll(b.head, "\r\n", "\n"))
+		if head != "" {
+			out.StdoutHead = truncateUTF8(head, outputHeadCap)
+			if exitCode != nil && *exitCode != 0 {
+				out.StderrHead = out.StdoutHead
+			}
+		}
+	}
+	return out
+}
+
+// codexFileChangeToToolDiff converts one Codex FileUpdateChange into Craze's
+// ToolDiff{Path, OldText, NewText, Added, Removed, Truncated} contract so
+// internal/tui/transcript.go renders real diff lines for add, delete, update,
+// and move/rename operations.
+func codexFileChangeToToolDiff(ch codexrpc.FileUpdateChange) ToolDiff {
+	path := ch.Path
+	if dst := ch.Kind.MoveTarget(); dst != "" {
+		path = dst
+	}
+	switch ch.Kind.Type {
+	case "add":
+		return diffOf(path, "", ch.Diff)
+	case "delete":
+		return diffOf(path, ch.Diff, "")
+	case "update":
+		oldText, newText, added, removed, isUnified := unifiedDiffToOldNew(ch.Diff)
+		if !isUnified {
+			return diffOf(path, "", ch.Diff)
+		}
+		return buildCodexUnifiedDiff(path, oldText, newText, added, removed)
+	default:
+		oldText, newText, added, removed, isUnified := unifiedDiffToOldNew(ch.Diff)
+		if !isUnified {
+			return diffOf(path, "", ch.Diff)
+		}
+		return buildCodexUnifiedDiff(path, oldText, newText, added, removed)
+	}
+}
+
+func buildCodexUnifiedDiff(path, oldText, newText string, added, removed int) ToolDiff {
+	d := ToolDiff{
+		Path:    sanitizeText(path),
+		Added:   added,
+		Removed: removed,
+	}
+	o := sanitizeText(oldText)
+	n := sanitizeText(newText)
+	if len(o) > diffTextCap {
+		o = truncateUTF8(o, diffTextCap)
+		d.Truncated = true
+	}
+	if len(n) > diffTextCap {
+		n = truncateUTF8(n, diffTextCap)
+		d.Truncated = true
+	}
+	d.OldText = o
+	d.NewText = n
+	return d
+}
+
+// parseUnifiedHunkHeader parses `@@ -a[,b] +c[,d] @@` returning the expected
+// old and new line counts for the hunk.
+func parseUnifiedHunkHeader(line string) (oldCount, newCount int, ok bool) {
+	if !strings.HasPrefix(line, "@@ ") {
+		return 0, 0, false
+	}
+	rest := line[3:]
+	end := strings.Index(rest, " @@")
+	if end < 0 {
+		return 0, 0, false
+	}
+	fields := strings.Fields(rest[:end])
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "-") || !strings.HasPrefix(fields[1], "+") {
+		return 0, 0, false
+	}
+	parseRange := func(tok string) (int, bool) {
+		if _, after, hasComma := strings.Cut(tok, ","); hasComma {
+			n, err := strconv.Atoi(after)
+			return n, err == nil && n >= 0
+		}
+		return 1, true
+	}
+	oc, ok1 := parseRange(fields[0][1:])
+	nc, ok2 := parseRange(fields[1][1:])
+	return oc, nc, ok1 && ok2
+}
+
+// unifiedDiffToOldNew reconstructs paired OldText and NewText strings from a
+// unified diff patch (hunks starting with `@@ ... @@`), preserving original
+// `+`/`-` line counts and `\ No newline at end of file` markers so newline-only
+// edits and multi-hunk patches never lose edits or distort counts.
+func unifiedDiffToOldNew(patch string) (oldText, newText string, added, removed int, isUnified bool) {
+	if patch == "" {
+		return "", "", 0, 0, false
+	}
+	rawLines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	// Drop a single trailing empty element produced by a trailing newline.
+	if len(rawLines) > 0 && rawLines[len(rawLines)-1] == "" {
+		rawLines = rawLines[:len(rawLines)-1]
+	}
+	var (
+		oldLines       []string
+		newLines       []string
+		inHunk         bool
+		remOld, remNew int
+		oldNoNL        bool
+		newNoNL        bool
+		lastSide       byte // '-', '+', ' '
+	)
+	for _, line := range rawLines {
+		if oc, nc, ok := parseUnifiedHunkHeader(line); ok {
+			inHunk = true
+			isUnified = true
+			remOld = oc
+			remNew = nc
+			lastSide = 0
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		if strings.HasPrefix(line, `\ No newline at end of file`) {
+			switch lastSide {
+			case '-':
+				oldNoNL = true
+			case '+':
+				newNoNL = true
+			case ' ':
+				oldNoNL = true
+				newNoNL = true
+			}
+			continue
+		}
+		if remOld == 0 && remNew == 0 {
+			// Outside the declared hunk line counts: skip file headers between hunks.
+			inHunk = false
+			continue
+		}
+		if line == "" {
+			// Some unified diff generators omit the leading space on blank context lines.
+			if remOld > 0 && remNew > 0 {
+				oldLines = append(oldLines, "")
+				newLines = append(newLines, "")
+				remOld--
+				remNew--
+				lastSide = ' '
+			}
+			continue
+		}
+		switch line[0] {
+		case '+':
+			if remNew > 0 {
+				newLines = append(newLines, line[1:])
+				remNew--
+				added++
+				lastSide = '+'
+			}
+		case '-':
+			if remOld > 0 {
+				oldLines = append(oldLines, line[1:])
+				remOld--
+				removed++
+				lastSide = '-'
+			}
+		case ' ':
+			if remOld > 0 || remNew > 0 {
+				oldLines = append(oldLines, line[1:])
+				newLines = append(newLines, line[1:])
+				if remOld > 0 {
+					remOld--
+				}
+				if remNew > 0 {
+					remNew--
+				}
+				lastSide = ' '
+			}
+		}
+	}
+	if !isUnified {
+		return "", patch, 0, 0, false
+	}
+	if len(oldLines) > 0 {
+		oldText = strings.Join(oldLines, "\n")
+		if !oldNoNL {
+			oldText += "\n"
+		}
+	}
+	if len(newLines) > 0 {
+		newText = strings.Join(newLines, "\n")
+		if !newNoNL {
+			newText += "\n"
+		}
+	}
+	return oldText, newText, added, removed, true
+}
+
+// codexCommandOutput builds ToolOutput for a completed/in-progress Codex
+// commandExecution item, populating Stdout + StdoutHead (and StderrHead on
+// non-zero exitCode per internal/tui/transcript.go:979-984).
+func codexCommandOutput(aggregated string, exitCode *int) *ToolOutput {
+	text := sanitizeText(strings.ReplaceAll(aggregated, "\r\n", "\n"))
+	if exitCode == nil && text == "" {
+		return nil
+	}
+	if exitCode != nil && *exitCode != 0 {
+		// Codex merges stdout/stderr into aggregatedOutput; on non-zero exit,
+		// populate Stdout/StdoutHead AND StderrHead so TUI error previews show
+		// the failing command's output cleanly.
+		out := cappedToolOutput(text, "", "", exitCode)
+		out.StderrHead = truncateUTF8(text, outputHeadCap)
+		return out
+	}
+	return cappedToolOutput(text, "", "", exitCode)
+}
+
+func mapCodexItemStatus(status string) string {
+	switch status {
+	case "inProgress":
+		return "in_progress"
+	case "completed":
+		return toolCompleted
+	case "declined":
+		return "cancelled"
+	case "failed":
+		return toolFailed
+	default:
+		if status == "" {
+			return "in_progress"
+		}
+		return sanitizeText(status)
+	}
+}
+
+// acceptsTurnFrame reports whether an incoming item/delta/plan notification for
+// turnID belongs to the currently active wire turn (or foreign turn), preventing
+// late frames from a prior settled turn from contaminating a successor turn.
+func (s *codexSession) acceptsTurnFrame(turnID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if turnID == "" {
+		return (s.activeTurn != nil && (s.activeTurn.phase == codexPhaseSent || s.activeTurn.phase == codexPhaseIdentified) && !s.activeTurn.settling) ||
+			s.foreignTurnID != ""
+	}
+	if s.activeTurn != nil && !s.activeTurn.settling {
+		switch s.activeTurn.phase {
+		case codexPhaseIdentified:
+			if s.activeTurn.turnID == turnID {
+				return true
+			}
+		case codexPhaseSent:
+			// TurnStart sent; turn/started may not have arrived yet, provided
+			// this turnID was not already settled earlier.
+			if !s.settledTurns[turnID] {
+				return true
+			}
+		}
+	}
+	if s.foreignTurnID != "" && s.foreignTurnID == turnID {
+		return true
+	}
+	return false
+}
+
+func (s *codexSession) handleItemStarted(raw json.RawMessage) {
+	var p codexrpc.ItemNotificationParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.processItemCtx(context.Background(), p.Item, false, false)
+}
+
+func (s *codexSession) handleItemCompleted(raw json.RawMessage) {
+	var p codexrpc.ItemNotificationParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.processItemCtx(context.Background(), p.Item, true, false)
+}
+
+func (s *codexSession) handleAgentMessageDelta(raw json.RawMessage) {
+	var p codexrpc.ItemDeltaParams
+	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.emitTextDelta(p.ItemID, p.Delta, false)
+}
+
+func (s *codexSession) handlePlanDelta(raw json.RawMessage) {
+	var p codexrpc.ItemDeltaParams
+	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.emitTextDelta(p.ItemID, p.Delta, true)
+}
+
+func (s *codexSession) emitTextDelta(itemID, delta string, isPlan bool) {
+	prefix := ""
+	s.mu.Lock()
+	if s.turnItemDeltas == nil {
+		s.turnItemDeltas = make(map[string]bool)
+	}
+	if !isPlan && itemID != "" {
+		if s.lastMsgItemID != "" && s.lastMsgItemID != itemID {
+			prefix = "\n\n"
+		}
+		s.lastMsgItemID = itemID
+	}
+	if itemID != "" {
+		s.turnItemDeltas[itemID] = true
+	}
+	s.mu.Unlock()
+	s.emit(Event{Type: EventText, Text: sanitizeText(prefix + delta)})
+}
+
+func (s *codexSession) handleReasoningSummaryPartAdded(raw json.RawMessage) {
+	var p codexrpc.ReasoningSummaryPartParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	if p.SummaryIndex > 0 {
+		s.emit(Event{Type: EventThought, Text: "\n"})
+	}
+}
+
+func (s *codexSession) handleReasoningDelta(raw json.RawMessage) {
+	var p codexrpc.ItemDeltaParams
+	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.emit(Event{Type: EventThought, Text: sanitizeText(p.Delta)})
+}
+
+func (s *codexSession) handleCommandOutputDelta(raw json.RawMessage) {
+	var p codexrpc.ItemDeltaParams
+	if json.Unmarshal(raw, &p) != nil || p.Delta == "" || p.ItemID == "" {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	s.mu.Lock()
+	if s.cmdBuffers == nil {
+		s.cmdBuffers = make(map[string]*codexCmdBuffer)
+	}
+	buf := s.cmdBuffers[p.ItemID]
+	if buf == nil {
+		buf = &codexCmdBuffer{}
+		s.cmdBuffers[p.ItemID] = buf
+	}
+	buf.append(p.Delta)
+	row, exists := s.tools[p.ItemID]
+	if !exists {
+		row = ToolEvent{
+			ID:       p.ItemID,
+			Kind:     "execute",
+			ToolName: "shell",
+			Status:   "in_progress",
+		}
+		s.toolOrder = append(s.toolOrder, p.ItemID)
+	}
+	row.Output = buf.toolOutput(nil)
+	row.At = s.Now()
+	s.tools[p.ItemID] = row
+	ct := cloneTool(row)
+	s.mu.Unlock()
+	s.emit(Event{Type: EventTool, Tool: &ct})
+}
+
+func (s *codexSession) handlePlanUpdated(raw json.RawMessage) {
+	var p codexrpc.TurnPlanUpdatedParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
+		return
+	}
+	todos := make([]Todo, 0, len(p.Plan))
+	for i, step := range p.Plan {
+		st := step.Status
+		switch st {
+		case "inProgress", "in_progress":
+			st = "in_progress"
+		case "completed", "done":
+			st = "completed"
+		default:
+			st = "pending"
+		}
+		todos = append(todos, Todo{
+			ID:      fmt.Sprintf("step-%d", i+1),
+			Content: sanitizeText(step.Step),
+			Status:  st,
+		})
+	}
+	s.mu.Lock()
+	s.snap.Todos = append([]Todo(nil), todos...)
+	s.mu.Unlock()
+	s.emit(Event{Type: EventTodos, Todos: todos})
+}
+
+func (s *codexSession) handleThreadNameUpdated(raw json.RawMessage) {
+	var p codexrpc.ThreadNameUpdatedParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) {
+		return
+	}
+	title := sanitizeText(strings.TrimSpace(p.ThreadName))
+	if title == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.titlePinned || s.snap.Title == title {
+		s.mu.Unlock()
+		return
+	}
+	s.snap.Title = title
+	t := title
+	s.enqueueDeltaLocked("", Event{Text: title}, &StateDelta{Title: &t})
+	s.mu.Unlock()
+}
+
+// processItemCtx handles one Codex ThreadItem (started, completed, or replayed),
+// publishing with ctx and explicit Replayed=replaying so Close can unwind a
+// blocked replay immediately without emitting ReplayEnd (H4, M9).
+func (s *codexSession) processItemCtx(ctx context.Context, raw json.RawMessage, completed, replaying bool) bool {
+	var head codexrpc.ThreadItemHeader
+	if json.Unmarshal(raw, &head) != nil || head.Type == "" {
+		return true
+	}
+	emitItem := func(ev Event) bool {
+		ev.Replayed = replaying
+		return s.emitCtx(ctx, ev)
+	}
+	switch head.Type {
+	case "userMessage":
+		// Suppress live userMessage echoes (Plan 054 § D1); emit only during replay.
+		if !replaying {
+			return true
+		}
+		var item codexrpc.UserMessageItem
+		if json.Unmarshal(raw, &item) != nil {
+			return true
+		}
+		text := extractCodexUserText(item.Content)
+		if text != "" {
+			return emitItem(Event{Type: EventUser, Text: sanitizeText(text)})
+		}
+		return true
+
+	case "agentMessage":
+		if !completed {
+			return true
+		}
+		var item codexrpc.AgentMessageItem
+		if json.Unmarshal(raw, &item) != nil || item.Text == "" {
+			return true
+		}
+		s.mu.Lock()
+		hadDelta := s.turnItemDeltas[item.ID]
+		prefix := ""
+		if !hadDelta {
+			if s.lastMsgItemID != "" && s.lastMsgItemID != item.ID {
+				prefix = "\n\n"
+			}
+			s.lastMsgItemID = item.ID
+		}
+		s.mu.Unlock()
+		if !hadDelta {
+			return emitItem(Event{Type: EventText, Text: sanitizeText(prefix + item.Text)})
+		}
+		return true
+
+	case "plan":
+		if !completed {
+			return true
+		}
+		var item codexrpc.PlanItem
+		if json.Unmarshal(raw, &item) != nil || item.Text == "" {
+			return true
+		}
+		s.mu.Lock()
+		hadDelta := s.turnItemDeltas[item.ID]
+		s.mu.Unlock()
+		if !hadDelta {
+			return emitItem(Event{Type: EventText, Text: sanitizeText(item.Text)})
+		}
+		return true
+
+	case "reasoning":
+		if !replaying || !completed {
+			return true
+		}
+		var item codexrpc.ReasoningItem
+		if json.Unmarshal(raw, &item) != nil {
+			return true
+		}
+		parts := item.Summary
+		if len(parts) == 0 {
+			parts = item.Content
+		}
+		if len(parts) > 0 {
+			return emitItem(Event{Type: EventThought, Text: sanitizeText(strings.Join(parts, "\n"))})
+		}
+		return true
+
+	case "commandExecution":
+		var item codexrpc.CommandExecutionItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return true
+		}
+		st := mapCodexItemStatus(item.Status)
+		if replaying && toolStatusInFlight(st) {
+			st = "cancelled"
+		}
+		title := sanitizeText(item.Command)
+		s.mu.Lock()
+		// A tool call visually separates preceding commentary from subsequent
+		// final-answer text so the next agentMessage starts cleanly without \n\n.
+		s.lastMsgItemID = ""
+		var streamed *codexCmdBuffer
+		if s.cmdBuffers != nil {
+			streamed = s.cmdBuffers[item.ID]
+			if completed {
+				delete(s.cmdBuffers, item.ID)
+			}
+		}
+		row, exists := s.tools[item.ID]
+		if !exists {
+			s.toolOrder = append(s.toolOrder, item.ID)
+		}
+		row.ID = item.ID
+		row.Kind = "execute"
+		row.ToolName = "shell"
+		if title != "" {
+			row.Title = title
+			row.Name = title
+			row.RawInput = truncateUTF8(title, rawInputCap)
+		}
+		row.Status = st
+		if item.AggregatedOutput != "" {
+			row.Output = codexCommandOutput(item.AggregatedOutput, item.ExitCode)
+		} else if streamed != nil {
+			row.Output = streamed.toolOutput(item.ExitCode)
+		} else if completed || item.ExitCode != nil {
+			row.Output = codexCommandOutput("", item.ExitCode)
+		}
+		row.At = s.Now()
+		s.tools[item.ID] = row
+		ct := cloneTool(row)
+		s.mu.Unlock()
+		return emitItem(Event{Type: EventTool, Tool: &ct})
+
+	case "fileChange":
+		var item codexrpc.FileChangeItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return true
+		}
+		st := mapCodexItemStatus(item.Status)
+		if replaying && toolStatusInFlight(st) {
+			st = "cancelled"
+		}
+		var (
+			locs     []string
+			allPaths []string
+			diffs    []ToolDiff
+		)
+		for _, ch := range item.Changes {
+			if ch.Path != "" {
+				allPaths = appendDistinct(allPaths, ch.Path)
+				if len(locs) < locationsCap {
+					locs = appendDistinct(locs, sanitizeText(ch.Path))
+				}
+			}
+			if dst := ch.Kind.MoveTarget(); dst != "" {
+				allPaths = appendDistinct(allPaths, dst)
+				if len(locs) < locationsCap {
+					locs = appendDistinct(locs, sanitizeText(dst))
+				}
+			}
+			if len(diffs) < diffsCap {
+				diffs = append(diffs, codexFileChangeToToolDiff(ch))
+			}
+		}
+		title := "apply_patch"
+		if len(locs) == 1 {
+			title = "Edit " + locs[0]
+		} else if len(locs) > 1 {
+			title = fmt.Sprintf("Edit %d files", len(locs))
+		}
+		var edited *ToolEdited
+		if !replaying && completed && st == toolCompleted && len(allPaths) > 0 {
+			scope := editScope{workspace: s.workspace()}
+			edited = scope.edited(allPaths)
+		}
+		s.mu.Lock()
+		s.lastMsgItemID = ""
+		row, exists := s.tools[item.ID]
+		if !exists {
+			s.toolOrder = append(s.toolOrder, item.ID)
+		}
+		row.ID = item.ID
+		row.Kind = "edit"
+		row.ToolName = "apply_patch"
+		row.Title = title
+		row.Name = title
+		row.Status = st
+		if len(locs) > 0 {
+			row.Locations = locs
+		}
+		if len(diffs) > 0 {
+			row.Diffs = diffs
+		}
+		if st == toolCompleted {
+			row.Edited = edited
+		} else {
+			row.Edited = nil
+		}
+		row.At = s.Now()
+		s.tools[item.ID] = row
+		ct := cloneTool(row)
+		s.mu.Unlock()
+		return emitItem(Event{Type: EventTool, Tool: &ct})
+
+	case "mcpToolCall":
+		var item codexrpc.MCPToolCallItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return true
+		}
+		st := mapCodexItemStatus(item.Status)
+		if replaying && toolStatusInFlight(st) {
+			st = "cancelled"
+		}
+		name := sanitizeText(item.Tool)
+		if item.Server != "" {
+			name = sanitizeText(item.Server + ":" + item.Tool)
+		}
+		s.mu.Lock()
+		s.lastMsgItemID = ""
+		row, exists := s.tools[item.ID]
+		if !exists {
+			s.toolOrder = append(s.toolOrder, item.ID)
+		}
+		row.ID = item.ID
+		row.Kind = "other"
+		row.ToolName = name
+		row.Title = name
+		row.Name = name
+		row.Status = st
+		if len(item.Arguments) > 0 {
+			row.RawInput = stringifyRawInput(item.Arguments)
+		}
+		if completed {
+			if item.Error != nil && item.Error.Message != "" {
+				row.Output = cappedToolOutput("", sanitizeText(item.Error.Message), "", nil)
+			} else if len(item.Result) > 0 && string(item.Result) != "null" {
+				row.Output = cappedToolOutput("", "", sanitizeText(string(item.Result)), nil)
+			}
+		}
+		row.At = s.Now()
+		s.tools[item.ID] = row
+		ct := cloneTool(row)
+		s.mu.Unlock()
+		return emitItem(Event{Type: EventTool, Tool: &ct})
+
+	case "webSearch":
+		var item codexrpc.WebSearchItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return true
+		}
+		st := mapCodexItemStatus(item.Status)
+		if completed && item.Status == "" {
+			st = toolCompleted
+		}
+		if replaying && toolStatusInFlight(st) {
+			st = "cancelled"
+		}
+		q := sanitizeText(item.Query)
+		title := "Web search"
+		if q != "" {
+			title = "Web search: " + q
+		}
+		s.mu.Lock()
+		s.lastMsgItemID = ""
+		row, exists := s.tools[item.ID]
+		if !exists {
+			s.toolOrder = append(s.toolOrder, item.ID)
+		}
+		row.ID = item.ID
+		row.Kind = "search"
+		row.ToolName = "web_search"
+		row.Title = title
+		row.Name = title
+		row.RawInput = truncateUTF8(q, rawInputCap)
+		row.Status = st
+		row.At = s.Now()
+		s.tools[item.ID] = row
+		ct := cloneTool(row)
+		s.mu.Unlock()
+		return emitItem(Event{Type: EventTool, Tool: &ct})
+
+	case "contextCompaction":
+		phase := CompactionStarted
+		if completed {
+			phase = CompactionEnded
+		}
+		return emitItem(Event{
+			Type:       EventCompaction,
+			Compaction: &CompactionInfo{Phase: phase, Reason: CompactionAuto},
+		})
+
+	case "collabAgentToolCall":
+		var item codexrpc.CollabAgentToolCallItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return true
+		}
+		now := s.Now()
+		childStates := parseCollabAgentStates(item.AgentsStates)
+		var evs []Event
+
+		s.mu.Lock()
+		s.lastMsgItemID = ""
+		if s.childThreadSubagent == nil {
+			s.childThreadSubagent = make(map[string]string)
+		}
+
+		// Determine if this call targets already-tracked child thread(s) (e.g.
+		// wait / sendInput / closeAgent follow-up calls). Update those existing
+		// rows in place instead of spawning duplicate rows or clobbering the
+		// childThreadSubagent mapping.
+		var matchedRowIDs []string
+		var unmatchedChildren []string
+		seenRows := make(map[string]bool)
+		for _, childTID := range item.ReceiverThreadID {
+			if childTID == "" {
+				continue
+			}
+			if rowID, ok := s.childThreadSubagent[childTID]; ok {
+				if _, exists := s.subagents[rowID]; exists {
+					if !seenRows[rowID] {
+						seenRows[rowID] = true
+						matchedRowIDs = append(matchedRowIDs, rowID)
+					}
+					continue
+				}
+			}
+			unmatchedChildren = append(unmatchedChildren, childTID)
+		}
+
+		updateRec := func(rec *subagentRec, st SubagentStatus, exists bool) Event {
+			if replaying && st == SubagentRunning {
+				st = SubagentCancelled
+			}
+			rec.info.Status = st
+			if item.Prompt != "" && rec.info.Prompt == "" {
+				rec.info.Prompt = sanitizeText(item.Prompt)
+				rec.info.Description = sanitizeText(item.Prompt)
+			}
+			change := SubagentChangeProgress
+			if !exists {
+				change = SubagentChangeSpawned
+			}
+			if st != SubagentRunning {
+				if rec.info.EndedAt.IsZero() {
+					rec.info.EndedAt = now
+				}
+				if !rec.info.StartedAt.IsZero() {
+					rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+				}
+				if exists || replaying {
+					change = SubagentChangeFinished
+				}
+			}
+			capSubagent(&rec.info)
+			info := cloneSubagent(rec.info)
+			return Event{Type: EventSubagent, Subagent: &info, SubagentChange: change}
+		}
+
+		// Update any already-tracked receiver child rows.
+		for _, rowID := range matchedRowIDs {
+			rec := s.subagents[rowID]
+			st := deriveCollabRowStatus(item, childStates, rowID, s.childThreadSubagent, completed)
+			evs = append(evs, updateRec(rec, st, true))
+		}
+
+		// Create or update a row for newly spawned / untracked child threads, or
+		// for calls that carry no receiverThreadIds at all (keyed by item.ID).
+		if len(unmatchedChildren) > 0 || len(matchedRowIDs) == 0 {
+			st := deriveCollabSubagentStatus(item, completed)
+			if replaying && st == SubagentRunning {
+				st = SubagentCancelled
+			}
+			rec, exists := s.subagents[item.ID]
+			if !exists {
+				var launchTurn int
+				if s.activeTurn != nil {
+					launchTurn = int(s.activeTurn.gen)
+				}
+				rec = &subagentRec{
+					turn: launchTurn,
+					info: SubagentInfo{
+						ID:           item.ID,
+						ToolCallID:   item.ID,
+						SubagentType: sanitizeText(item.Tool),
+						Description:  sanitizeText(item.Prompt),
+						Prompt:       sanitizeText(item.Prompt),
+						Status:       st,
+						StartedAt:    now,
+						NoCancel:     true,
+					},
+				}
+				s.subagents[item.ID] = rec
+				s.subagentOrder = append(s.subagentOrder, item.ID)
+			} else if item.Tool != "" && rec.info.SubagentType == "" {
+				rec.info.SubagentType = sanitizeText(item.Tool)
+			}
+			for _, childTID := range unmatchedChildren {
+				s.childThreadSubagent[childTID] = item.ID
+			}
+			evs = append(evs, updateRec(rec, st, exists))
+		}
+		s.mu.Unlock()
+		for _, ev := range evs {
+			if !emitItem(ev) {
+				return false
+			}
+		}
+		return true
+
+	case "subAgentActivity":
+		// Upstream Codex can emit subAgentActivity as a ThreadItem carrying
+		// agentThreadId + kind/status/activity/output/error (M7). Upstream
+		// item.rs encodes lifecycle transitions in `kind` when `status` is absent.
+		var item struct {
+			ID            string `json:"id"`
+			AgentThreadID string `json:"agentThreadId"`
+			ThreadID      string `json:"threadId"`
+			SubAgentID    string `json:"subAgentId"`
+			Kind          string `json:"kind"`
+			Title         string `json:"title"`
+			Status        string `json:"status"`
+			Activity      string `json:"activity"`
+			Output        string `json:"output"`
+			Error         string `json:"error"`
+		}
+		if json.Unmarshal(raw, &item) != nil {
+			return true
+		}
+		childTID := item.AgentThreadID
+		if childTID == "" {
+			childTID = item.ThreadID
+		}
+		act := item.Activity
+		if act == "" {
+			act = item.Kind
+		}
+		st := item.Status
+		if st == "" {
+			st = statusFromSubAgentKind(item.Kind)
+		}
+		if replaying && (st == "" || mapCodexSubagentStatus(st, false) == SubagentRunning) {
+			st = "cancelled"
+		}
+		return s.applySubAgentActivityCtx(ctx, replaying, codexrpc.SubAgentActivityParams{
+			ThreadID:   childTID,
+			SubAgentID: item.SubAgentID,
+			AgentID:    item.ID,
+			Title:      item.Title,
+			Status:     st,
+			Activity:   act,
+			Output:     item.Output,
+			Error:      item.Error,
+		}, true)
+	}
+	return true
+}
+
+func parseCollabAgentStates(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var states map[string]struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &states) != nil || len(states) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(states))
+	for k, v := range states {
+		out[k] = v.Status
+	}
+	return out
+}
+
+func deriveCollabRowStatus(item codexrpc.CollabAgentToolCallItem, states map[string]string, rowID string, childMap map[string]string, completed bool) SubagentStatus {
+	if len(states) > 0 {
+		anyMatched, anyRunning, anyFailed, anyCancelled := false, false, false, false
+		for childTID, rawStatus := range states {
+			if childMap[childTID] != rowID {
+				continue
+			}
+			anyMatched = true
+			switch mapCodexSubagentStatus(rawStatus, false) {
+			case SubagentRunning:
+				anyRunning = true
+			case SubagentFailed:
+				anyFailed = true
+			case SubagentCancelled:
+				anyCancelled = true
+			}
+		}
+		if anyMatched {
+			switch {
+			case anyRunning:
+				return SubagentRunning
+			case anyFailed:
+				return SubagentFailed
+			case anyCancelled:
+				return SubagentCancelled
+			default:
+				return SubagentCompleted
+			}
+		}
+	}
+	return deriveCollabSubagentStatus(item, completed)
+}
+
+func statusFromSubAgentKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "completed", "finished", "done", "succeeded", "complete":
+		return "completed"
+	case "failed", "error", "errored":
+		return "failed"
+	case "cancelled", "canceled", "aborted", "interrupted", "closed", "shutdown":
+		return "cancelled"
+	case "started", "spawned", "running", "in_progress", "inprogress", "progress", "pending", "waiting":
+		return "running"
+	default:
+		return ""
+	}
+}
+
+// deriveCollabSubagentStatus inspects agentsStates when present so a spawn tool
+// call whose own status is "completed" still reports SubagentRunning while a
+// receiver child thread is running (M7).
+func deriveCollabSubagentStatus(item codexrpc.CollabAgentToolCallItem, completed bool) SubagentStatus {
+	if len(item.AgentsStates) > 0 && string(item.AgentsStates) != "null" {
+		var states map[string]struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(item.AgentsStates, &states) == nil && len(states) > 0 {
+			anyRunning, anyFailed := false, false
+			for _, st := range states {
+				switch mapCodexSubagentStatus(st.Status, false) {
+				case SubagentRunning:
+					anyRunning = true
+				case SubagentFailed:
+					anyFailed = true
+				}
+			}
+			if anyRunning {
+				return SubagentRunning
+			}
+			if anyFailed {
+				return SubagentFailed
+			}
+		}
+	}
+	return mapCodexSubagentStatus(item.Status, completed)
+}
+
+func mapCodexSubagentStatus(status string, completed bool) SubagentStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "succeeded":
+		return SubagentCompleted
+	case "failed", "error":
+		return SubagentFailed
+	case "cancelled", "canceled", "declined", "interrupted":
+		return SubagentCancelled
+	case "inprogress", "in_progress", "running", "pending":
+		if completed {
+			return SubagentCompleted
+		}
+		return SubagentRunning
+	default:
+		if completed {
+			return SubagentCompleted
+		}
+		return SubagentRunning
+	}
+}
+
+func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
+	var p codexrpc.SubAgentActivityParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	// Only fold sub-agent activity that belongs to this main thread (or already
+	// tracked child thread / subagent row). Never leak child content to main text.
+	if p.ParentThreadID != "" && !s.isMainThread(p.ParentThreadID) {
+		return
+	}
+	s.applySubAgentActivityCtx(context.Background(), false, p, p.ParentThreadID != "")
+}
+
+func (s *codexSession) applySubAgentActivityCtx(ctx context.Context, replaying bool, p codexrpc.SubAgentActivityParams, owned bool) bool {
+	now := s.Now()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	// Correlate first by receiver child thread ID, then explicit SubAgentID/AgentID.
+	id := ""
+	if p.ThreadID != "" && s.childThreadSubagent != nil {
+		if mapped, ok := s.childThreadSubagent[p.ThreadID]; ok {
+			id = mapped
+		}
+	}
+	if id == "" {
+		id = p.SubAgentID
+	}
+	if id == "" {
+		id = p.AgentID
+	}
+	if id == "" {
+		id = p.ThreadID
+	}
+	if id == "" {
+		s.mu.Unlock()
+		return true
+	}
+	rec, exists := s.subagents[id]
+	if !exists && !owned {
+		s.mu.Unlock()
+		return true
+	}
+	change := SubagentChangeProgress
+	if !exists {
+		var launchTurn int
+		if s.activeTurn != nil {
+			launchTurn = int(s.activeTurn.gen)
+		}
+		rec = &subagentRec{
+			turn: launchTurn,
+			info: SubagentInfo{
+				ID:          id,
+				Description: sanitizeText(p.Title),
+				Status:      SubagentRunning,
+				StartedAt:   now,
+				NoCancel:    true,
+			},
+		}
+		s.subagents[id] = rec
+		s.subagentOrder = append(s.subagentOrder, id)
+		if p.ThreadID != "" {
+			if s.childThreadSubagent == nil {
+				s.childThreadSubagent = make(map[string]string)
+			}
+			s.childThreadSubagent[p.ThreadID] = id
+		}
+		change = SubagentChangeSpawned
+	}
+	if p.Title != "" && rec.info.Description == "" {
+		rec.info.Description = sanitizeText(p.Title)
+	}
+	if p.Activity != "" {
+		rec.info.Activity = sanitizeText(p.Activity)
+	}
+	if p.Output != "" {
+		rec.info.Output = sanitizeText(p.Output)
+	}
+	if p.Error != "" {
+		rec.info.Error = sanitizeText(p.Error)
+	}
+	if p.Status != "" {
+		st := mapCodexSubagentStatus(p.Status, false)
+		rec.info.Status = st
+		if st != SubagentRunning {
+			if rec.info.EndedAt.IsZero() {
+				rec.info.EndedAt = now
+			}
+			if !rec.info.StartedAt.IsZero() {
+				rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+			}
+			change = SubagentChangeFinished
+		}
+	}
+	capSubagent(&rec.info)
+	info := cloneSubagent(rec.info)
+	s.mu.Unlock()
+	return s.emitCtx(ctx, Event{Type: EventSubagent, Replayed: replaying, Subagent: &info, SubagentChange: change})
+}
+
+func extractCodexUserText(content []codexrpc.UserInput) string {
+	var parts []string
+	for _, u := range content {
+		switch u.Type {
+		case "text":
+			if u.Text != "" {
+				parts = append(parts, u.Text)
+			}
+		case "localImage":
+			if u.Path != "" {
+				parts = append(parts, fmt.Sprintf("[Image: %s]", u.Path))
+			}
+		case "skill":
+			if u.Name != "" {
+				parts = append(parts, "/"+u.Name)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}

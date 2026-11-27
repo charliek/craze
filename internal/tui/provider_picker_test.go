@@ -399,9 +399,9 @@ func TestProviderPickerClickClearsTheRefusal(t *testing.T) {
 		t.Fatalf("setup: no error row:\n%s", plainView(m))
 	}
 	r := m.lay.Dialog
-	// Row 0 is the top border and row 1 the title, so native, the fifth
-	// provider, is row 6.
-	if out := clickXY(t, m, r.X+2, r.Y+6); out.providerCursor != 4 || !strings.Contains(plainView(out), "craze: native refused") {
+	// Row 0 is the top border and row 1 the title, so native, the sixth
+	// provider, is row 7.
+	if out := clickXY(t, m, r.X+2, r.Y+7); out.providerCursor != 5 || !strings.Contains(plainView(out), "craze: native refused") {
 		t.Fatalf("a click on the refused row itself: cursor %d\n%s", out.providerCursor, plainView(out))
 	}
 	out := clickXY(t, m, r.X+2, r.Y+2)
@@ -573,8 +573,8 @@ func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
 		list []agent.Provider
 		want []string
 	}{
-		{"default list", nil, []string{"cursor", "grok", "claude", "antigravity", "native", hiddenID}},
-		{"every provider", agent.Providers(), []string{"cursor", "grok", "claude", "antigravity", "native", hiddenID}},
+		{"default list", nil, []string{"cursor", "grok", "claude", "antigravity", "codex", "native", hiddenID}},
+		{"every provider", agent.Providers(), []string{"cursor", "grok", "claude", "antigravity", "codex", "native", hiddenID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := providerRowNames(pickerRows(tc.list, agent.CursorProvider())); slices.Contains(got, hiddenID) {
@@ -622,7 +622,7 @@ func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
 }
 
 func TestProviderPickerCtrlDQuitsWithoutSession(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	called := 0
 	isolateSkillsHome(t)
 	m := New(Config{
@@ -657,13 +657,13 @@ func TestProviderPickerCtrlDQuitsWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "codex") {
+	if !strings.Contains(string(body), "nosuch") {
 		t.Fatalf("picker quit persisted:\n%s", body)
 	}
 }
 
 func TestFallbackPickerEnterPersistsChosenProvider(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	m := New(Config{
 		Theme:           "tokyo-night",
 		Workspace:       t.TempDir(),
@@ -690,7 +690,7 @@ func TestFallbackPickerEnterPersistsChosenProvider(t *testing.T) {
 }
 
 func TestFallbackPickerEscDoesNotPersist(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	m := New(Config{
 		Theme:           "tokyo-night",
 		Workspace:       t.TempDir(),
@@ -710,7 +710,7 @@ func TestFallbackPickerEscDoesNotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "codex") {
+	if !strings.Contains(string(body), "nosuch") {
 		t.Fatalf("esc on fallback persisted:\n%s", body)
 	}
 	if ConfigProvider() == "cursor" {
@@ -792,10 +792,10 @@ func TestFrameGoldenProviderPicker(t *testing.T) {
 // the deduplication — the union must not draw cursor twice.
 func TestProviderPickerThreeRows(t *testing.T) {
 	m := newPickerRows(t, agent.CursorProvider(), agent.Providers())
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "claude", "antigravity", "native"}) {
-		t.Fatalf("rows %q, want [cursor grok claude antigravity native]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}) {
+		t.Fatalf("rows %q, want [cursor grok claude antigravity codex native]", got)
 	}
-	for _, name := range []string{"cursor", "grok", "claude", "antigravity", "native"} {
+	for _, name := range []string{"cursor", "grok", "claude", "antigravity", "codex", "native"} {
 		pickerRowLine(t, m, name)
 	}
 	if row := pickerRowLine(t, m, "cursor"); !strings.Contains(row, "default") {
@@ -849,8 +849,8 @@ func TestProviderPickerWrapsOverThreeRows(t *testing.T) {
 // is an index into the rendered list and not a two-provider assumption.
 func TestProviderPickerNativeDefaultPreselectsThirdRow(t *testing.T) {
 	m := newPickerRows(t, agent.NativeProvider(), agent.Providers())
-	if m.providerCursor != 4 {
-		t.Fatalf("native default preselects row %d, want 4", m.providerCursor)
+	if m.providerCursor != 5 {
+		t.Fatalf("native default preselects row %d, want 5", m.providerCursor)
 	}
 	if row := pickerRowLine(t, m, "native"); !strings.Contains(row, "default") {
 		t.Fatalf("native row is not tagged default: %q", row)
@@ -893,8 +893,8 @@ func TestProviderPickerZeroConfigIsHermetic(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	isolateSkillsHome(t)
 	m := New(Config{Workspace: t.TempDir()})
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "claude", "antigravity", "native"}) {
-		t.Fatalf("zero Config rows %q, want [cursor grok claude antigravity native]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}) {
+		t.Fatalf("zero Config rows %q, want [cursor grok claude antigravity codex native]", got)
 	}
 }
 
@@ -906,7 +906,7 @@ func TestProviderPickerClickMovesHighlight(t *testing.T) {
 	r := m.lay.Dialog
 	// Row 0 is the top border and row 1 the title, so row 2 is the first
 	// provider.
-	for i, name := range []string{"cursor", "grok", "claude", "antigravity", "native"} {
+	for i, name := range []string{"cursor", "grok", "claude", "antigravity", "codex", "native"} {
 		out := clickXY(t, m, r.X+2, r.Y+2+i)
 		if out.providerCursor != i {
 			t.Fatalf("click on %q moved the cursor to %d, want %d", name, out.providerCursor, i)
@@ -1014,17 +1014,17 @@ func TestProviderPickerShortBudgetKeepsTheSelectedRow(t *testing.T) {
 // on is the frame the model draws.
 func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 	m := newPickerRows(t, agent.NativeProvider(), fourPickerRows(t))
-	if m.providerCursor != 4 {
-		t.Fatalf("fixture: native default preselects %d, want 4", m.providerCursor)
+	if m.providerCursor != 5 {
+		t.Fatalf("fixture: native default preselects %d, want 5", m.providerCursor)
 	}
 	// Two borders, the title, two rows and the footer.
 	m.lay.Dialog.H = dialogBorder + 4
 	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
-	if top != 3 || shown != 2 {
-		t.Fatalf("fixture: the squeezed box draws rows [%d,%d), want [3,5)", top, top+shown)
+	if top != 4 || shown != 2 {
+		t.Fatalf("fixture: the squeezed box draws rows [%d,%d), want [4,6)", top, top+shown)
 	}
-	if row := pickerRowLine(t, m, "antigravity"); !strings.HasPrefix(row, dialogNoMark+"antigravity") {
-		t.Fatalf("antigravity is not the box's first row: %q", row)
+	if row := pickerRowLine(t, m, "codex"); !strings.HasPrefix(row, dialogNoMark+"codex") {
+		t.Fatalf("codex is not the box's first row: %q", row)
 	}
 	r := m.lay.Dialog
 	// Row 0 is the top border and row 1 the title, so row 2 is the window's
@@ -1032,7 +1032,7 @@ func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 	for i, want := range []struct {
 		name  string
 		index int
-	}{{"antigravity", 3}, {"native", 4}} {
+	}{{"codex", 4}, {"native", 5}} {
 		out := clickXY(t, m, r.X+2, r.Y+2+i)
 		if out.providerCursor != want.index {
 			t.Fatalf("click on %q moved the cursor to %d, want %d", want.name, out.providerCursor, want.index)
@@ -1046,7 +1046,7 @@ func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 	}
 	// A press on the footer is still not a row, and the rows the window scrolled
 	// past are not reachable by clicking below it either.
-	if out := clickXY(t, m, r.X+2, r.Y+4); out.providerCursor != 4 {
+	if out := clickXY(t, m, r.X+2, r.Y+4); out.providerCursor != 5 {
 		t.Fatalf("a click on the footer moved the cursor to %d", out.providerCursor)
 	}
 }

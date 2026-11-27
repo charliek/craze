@@ -4,10 +4,12 @@ A Linux and macOS terminal UI for coding agents. It talks ACP to
 [Cursor CLI](https://cursor.com/cli) (`cursor-agent acp`),
 [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), Google's
 Antigravity CLI (`agy`, [the antigravity provider](reference/configuration.md#the-antigravity-provider)) or your own
-Claude Code on your Claude plan ([Claude on your plan](getting-started/claude.md)).
-You own the chrome; the provider still runs the agent. Its **native** provider runs the agent inside craze instead,
-against a model provider's API or a ChatGPT plan, and needs no other CLI (see
+Claude Code on your Claude plan ([Claude on your plan](getting-started/claude.md)),
+talks JSON-RPC to OpenAI's Codex CLI (`codex app-server`,
+[the codex provider](reference/configuration.md#the-codex-provider)), and ships its own **native** provider that runs the agent inside craze instead,
+against a model provider's API or a ChatGPT plan, needing no other CLI (see
 [Native provider](getting-started/quick-start.md#native-provider)).
+You own the chrome; the provider still runs the agent.
 
 ```bash
 ./bin/craze                      # the TUI, in the current directory
@@ -32,7 +34,7 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
 - **Grouped tool calls.** Open individual groups with the keyboard and preview
   eight terminal themes, including high contrast. [Transcript layouts](reference/tui.md#transcript-layouts)
 
-- **A TUI over five providers.** `cursor`, `grok`, `claude`, `antigravity` and the built-in
+- **A TUI over six providers.** `cursor`, `grok`, `claude`, `antigravity`, `codex` and the built-in
   `native` agent share one set of keys, cards and slash commands
   ([TUI reference](reference/tui.md)).
 - **Claude on your plan.** Your own Claude Code on your Claude Pro or Max
@@ -61,7 +63,7 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
   refuses a model, effort or `--fast` a native model cannot take before it starts
   a session ([model checks](reference/cli.md#model-checks)).
 - **Claude Code sub-agents.** A plugin hands a task to a craze session on a
-  native, Grok, Cursor or Antigravity (Gemini) model, and returns the result ([Claude Code](getting-started/claude-code.md)).
+  native, Grok, Cursor, Antigravity (Gemini) or Codex model, and returns the result ([Claude Code](getting-started/claude-code.md)).
 - **Side questions.** `/btw <question>` asks a quick question without adding to
   the session ([TUI reference](reference/tui.md#side-questions-btw)).
 - **Effort and speed.** `--effort` and `--fast`/`--no-fast` start a model at a
@@ -100,7 +102,9 @@ To run craze you need:
       Claude Pro or Max plan, with the `claude-agent-acp` adapter
       ([Claude on your plan](getting-started/claude.md)); or the Antigravity
       CLI (`agy`), signed in with `agy acp --login`
-      ([the antigravity provider](reference/configuration.md#the-antigravity-provider))
+      ([the antigravity provider](reference/configuration.md#the-antigravity-provider));
+      or OpenAI's Codex CLI (`codex`), signed in with `codex login` or `codex login --with-api-key`
+      ([the codex provider](reference/configuration.md#the-codex-provider))
 
 Go 1.27.3+ (this repo pins 1.27.3 via `.mise.toml`) is needed only to build from
 source. Brew, apt and the release archives need no Go.
