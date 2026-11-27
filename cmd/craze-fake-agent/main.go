@@ -338,9 +338,12 @@ func main() {
 		switch script {
 		case "codex-basic", "codex-loggedout", "codex-apikey", "codex-custom-provider",
 			"codex-approval", "codex-filechange-approval", "codex-ask", "codex-ask-secret",
-			"codex-ask-freetext", "codex-hang", "codex-steer", "codex-resume",
-			"codex-resume-missing", "codex-child-thread", "codex-foreign",
-			"codex-completed-before-reply", "codex-error-401", "codex-edits",
+			"codex-ask-freetext", "codex-hang", "codex-hang-interrupt", "codex-steer",
+			"codex-resume", "codex-resume-missing", "codex-child-thread", "codex-foreign",
+			"codex-completed-before-reply", "codex-error-401", "codex-retry-usagelimit",
+			"codex-retry-context", "codex-exit-zero-midturn", "codex-exit-nonzero-midturn",
+			"codex-complete-then-exit", "codex-permissions-req", "codex-slow-ratelimits",
+			"codex-model-multipage", "codex-model-loop-cursor", "codex-edits",
 			"codex-exit-two-lines":
 		default:
 			fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown codex script %q\n", script)

@@ -316,7 +316,7 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	}
 	c := newClient(stdout, stdin, child)
 	c.ended = func(def error) error {
-		return child.EndedWith("codexrpc", ErrClosed, def)
+		return child.EndedWithUnexpected(ErrAgentExited, ErrClosed, def)
 	}
 	c.Start()
 	go func() {
@@ -333,7 +333,7 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 			return
 		case <-t.C:
 			// A surviving descendant inherited stdout; force teardown now.
-			c.abortTransport(child.EndErr("codexrpc", ErrClosed))
+			c.abortTransport(child.UnexpectedEndErr(ErrAgentExited, ErrClosed))
 		}
 	}()
 	return c, nil
@@ -682,7 +682,7 @@ func (c *Client) Close() error {
 		c.closeWriter()
 		if c.child != nil {
 			c.shutdownChild(tree)
-			c.failAll(c.child.EndErr("codexrpc", ErrClosed))
+			c.failAll(c.child.UnexpectedEndErr(ErrAgentExited, ErrClosed))
 		}
 		c.failAll(ErrClosed)
 		c.closeReader()

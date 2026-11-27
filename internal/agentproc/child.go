@@ -308,6 +308,37 @@ func (ch *Child) EndedWith(prefix string, closedErr, def error) error {
 	return ch.EndErr(prefix, closedErr)
 }
 
+// UnexpectedEndErr returns closedErr when the child ended due to an intentional
+// Shutdown, sentinel when the child exited 0 unexpectedly, and
+// WrapAgentExited(sentinel, exitErr) when the child exited non-zero so callers
+// match both sentinel (via errors.Is) and *ExitError (via errors.As).
+func (ch *Child) UnexpectedEndErr(sentinel, closedErr error) error {
+	if ch == nil || ch.endedByShutdown {
+		return closedErr
+	}
+	if ch.exitErr == nil {
+		return fmt.Errorf("%w: exit 0", sentinel)
+	}
+	return fmt.Errorf("%w: %w", sentinel, ch.exitErr)
+}
+
+// EndedWithUnexpected waits briefly for the child's exit status after stdout
+// EOF and classifies the termination via UnexpectedEndErr.
+func (ch *Child) EndedWithUnexpected(sentinel, closedErr, def error) error {
+	if ch == nil {
+		return def
+	}
+	exit := time.NewTimer(exitAfterEOF)
+	defer exit.Stop()
+	select {
+	case <-ch.exitedCh:
+	case <-exit.C:
+		return def
+	}
+	<-ch.statusCh
+	return ch.UnexpectedEndErr(sentinel, closedErr)
+}
+
 func (ch *Child) setStatus(err error) {
 	ch.exitErr = err
 	close(ch.statusCh)

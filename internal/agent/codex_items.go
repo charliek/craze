@@ -3,14 +3,71 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/codexrpc"
 )
 
 // Item & diff translation for codexSession (Plan 054 § D2).
 
-const codexCmdStreamCap = 128 << 10 // cap accumulated live command output per call
+const (
+	codexCmdStreamCap = 128 << 10 // cap accumulated live command output per call
+	codexCmdHeadCap   = outputHeadCap
+)
+
+// codexCmdBuffer accumulates streaming command output without retaining
+// oversized backing arrays, preserving the original head and truncation state.
+type codexCmdBuffer struct {
+	head      string
+	tail      string
+	truncated bool
+}
+
+func (b *codexCmdBuffer) append(delta string) {
+	if delta == "" {
+		return
+	}
+	if len(b.head) < codexCmdHeadCap {
+		need := codexCmdHeadCap - len(b.head)
+		if len(delta) <= need {
+			b.head = strings.Clone(b.head + delta)
+		} else {
+			b.head = strings.Clone(b.head + truncateUTF8(delta, need))
+		}
+	}
+	combined := b.tail + delta
+	if len(combined) > codexCmdStreamCap {
+		b.truncated = true
+		cut := len(combined) - codexCmdStreamCap
+		// Advance to a valid UTF-8 rune boundary.
+		for cut < len(combined) && !utf8.RuneStart(combined[cut]) {
+			cut++
+		}
+		b.tail = strings.Clone(combined[cut:])
+		return
+	}
+	b.tail = strings.Clone(combined)
+}
+
+func (b *codexCmdBuffer) toolOutput(exitCode *int) *ToolOutput {
+	out := codexCommandOutput(b.tail, exitCode)
+	if out == nil {
+		return nil
+	}
+	if b.truncated {
+		out.Truncated = true
+		head := sanitizeText(strings.ReplaceAll(b.head, "\r\n", "\n"))
+		if head != "" {
+			out.StdoutHead = truncateUTF8(head, outputHeadCap)
+			if exitCode != nil && *exitCode != 0 {
+				out.StderrHead = out.StdoutHead
+			}
+		}
+	}
+	return out
+}
 
 // codexFileChangeToToolDiff converts one Codex FileUpdateChange into Craze's
 // ToolDiff{Path, OldText, NewText, Added, Removed, Truncated} contract so
@@ -18,8 +75,8 @@ const codexCmdStreamCap = 128 << 10 // cap accumulated live command output per c
 // and move/rename operations.
 func codexFileChangeToToolDiff(ch codexrpc.FileUpdateChange) ToolDiff {
 	path := ch.Path
-	if ch.Kind.MovePath != "" {
-		path = ch.Kind.MovePath
+	if dst := ch.Kind.MoveTarget(); dst != "" {
+		path = dst
 	}
 	switch ch.Kind.Type {
 	case "add":
@@ -27,79 +84,175 @@ func codexFileChangeToToolDiff(ch codexrpc.FileUpdateChange) ToolDiff {
 	case "delete":
 		return diffOf(path, ch.Diff, "")
 	case "update":
-		oldText, newText := unifiedDiffToOldNew(ch.Diff)
-		return diffOf(path, oldText, newText)
-	default:
-		oldText, newText := unifiedDiffToOldNew(ch.Diff)
-		if oldText == "" && newText == "" && ch.Diff != "" {
+		oldText, newText, added, removed, isUnified := unifiedDiffToOldNew(ch.Diff)
+		if !isUnified {
 			return diffOf(path, "", ch.Diff)
 		}
-		return diffOf(path, oldText, newText)
+		return buildCodexUnifiedDiff(path, oldText, newText, added, removed)
+	default:
+		oldText, newText, added, removed, isUnified := unifiedDiffToOldNew(ch.Diff)
+		if !isUnified {
+			return diffOf(path, "", ch.Diff)
+		}
+		return buildCodexUnifiedDiff(path, oldText, newText, added, removed)
 	}
 }
 
-// unifiedDiffToOldNew reconstructs paired OldText and NewText strings from a
-// unified diff patch (hunks starting with `@@ ... @@`). Context lines (` `)
-// belong to both, `-` lines to OldText, `+` lines to NewText, while file
-// headers (`---`, `+++`, `diff --git`, `index`, `\ No newline`) are skipped.
-func unifiedDiffToOldNew(patch string) (oldText, newText string) {
-	if patch == "" {
-		return "", ""
+func buildCodexUnifiedDiff(path, oldText, newText string, added, removed int) ToolDiff {
+	d := ToolDiff{
+		Path:    sanitizeText(path),
+		Added:   added,
+		Removed: removed,
 	}
-	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
-	var oldLines, newLines []string
-	inHunk := false
-	hasAnyHunk := false
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "@@ "):
+	o := sanitizeText(oldText)
+	n := sanitizeText(newText)
+	if len(o) > diffTextCap {
+		o = truncateUTF8(o, diffTextCap)
+		d.Truncated = true
+	}
+	if len(n) > diffTextCap {
+		n = truncateUTF8(n, diffTextCap)
+		d.Truncated = true
+	}
+	d.OldText = o
+	d.NewText = n
+	return d
+}
+
+// parseUnifiedHunkHeader parses `@@ -a[,b] +c[,d] @@` returning the expected
+// old and new line counts for the hunk.
+func parseUnifiedHunkHeader(line string) (oldCount, newCount int, ok bool) {
+	if !strings.HasPrefix(line, "@@ ") {
+		return 0, 0, false
+	}
+	rest := line[3:]
+	end := strings.Index(rest, " @@")
+	if end < 0 {
+		return 0, 0, false
+	}
+	fields := strings.Fields(rest[:end])
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "-") || !strings.HasPrefix(fields[1], "+") {
+		return 0, 0, false
+	}
+	parseRange := func(tok string) (int, bool) {
+		if _, after, hasComma := strings.Cut(tok, ","); hasComma {
+			n, err := strconv.Atoi(after)
+			return n, err == nil && n >= 0
+		}
+		return 1, true
+	}
+	oc, ok1 := parseRange(fields[0][1:])
+	nc, ok2 := parseRange(fields[1][1:])
+	return oc, nc, ok1 && ok2
+}
+
+// unifiedDiffToOldNew reconstructs paired OldText and NewText strings from a
+// unified diff patch (hunks starting with `@@ ... @@`), preserving original
+// `+`/`-` line counts and `\ No newline at end of file` markers so newline-only
+// edits and multi-hunk patches never lose edits or distort counts.
+func unifiedDiffToOldNew(patch string) (oldText, newText string, added, removed int, isUnified bool) {
+	if patch == "" {
+		return "", "", 0, 0, false
+	}
+	rawLines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	// Drop a single trailing empty element produced by a trailing newline.
+	if len(rawLines) > 0 && rawLines[len(rawLines)-1] == "" {
+		rawLines = rawLines[:len(rawLines)-1]
+	}
+	var (
+		oldLines       []string
+		newLines       []string
+		inHunk         bool
+		remOld, remNew int
+		oldNoNL        bool
+		newNoNL        bool
+		lastSide       byte // '-', '+', ' '
+	)
+	for _, line := range rawLines {
+		if oc, nc, ok := parseUnifiedHunkHeader(line); ok {
 			inHunk = true
-			hasAnyHunk = true
-		case strings.HasPrefix(line, "diff --git "),
-			strings.HasPrefix(line, "index "),
-			strings.HasPrefix(line, "new file mode "),
-			strings.HasPrefix(line, "deleted file mode "),
-			strings.HasPrefix(line, "rename from "),
-			strings.HasPrefix(line, "rename to "),
-			strings.HasPrefix(line, "--- "),
-			strings.HasPrefix(line, "+++ "):
-			if !inHunk {
-				continue
-			}
-			// Inside a hunk, "--- foo" is a removal of "-- foo" and "+++ foo"
-			// is an addition of "++ foo".
-			if strings.HasPrefix(line, "-") {
-				oldLines = append(oldLines, line[1:])
-			} else if strings.HasPrefix(line, "+") {
-				newLines = append(newLines, line[1:])
-			}
-		case strings.HasPrefix(line, `\ No newline at end of file`):
-			continue
-		case !inHunk:
-			continue
-		case strings.HasPrefix(line, "+"):
-			newLines = append(newLines, line[1:])
-		case strings.HasPrefix(line, "-"):
-			oldLines = append(oldLines, line[1:])
-		case strings.HasPrefix(line, " "):
-			oldLines = append(oldLines, line[1:])
-			newLines = append(newLines, line[1:])
-		case line == "":
-			// Trailing empty element from trailing newline or blank context line.
+			isUnified = true
+			remOld = oc
+			remNew = nc
+			lastSide = 0
 			continue
 		}
+		if !inHunk {
+			continue
+		}
+		if strings.HasPrefix(line, `\ No newline at end of file`) {
+			switch lastSide {
+			case '-':
+				oldNoNL = true
+			case '+':
+				newNoNL = true
+			case ' ':
+				oldNoNL = true
+				newNoNL = true
+			}
+			continue
+		}
+		if remOld == 0 && remNew == 0 {
+			// Outside the declared hunk line counts: skip file headers between hunks.
+			inHunk = false
+			continue
+		}
+		if line == "" {
+			// Some unified diff generators omit the leading space on blank context lines.
+			if remOld > 0 && remNew > 0 {
+				oldLines = append(oldLines, "")
+				newLines = append(newLines, "")
+				remOld--
+				remNew--
+				lastSide = ' '
+			}
+			continue
+		}
+		switch line[0] {
+		case '+':
+			if remNew > 0 {
+				newLines = append(newLines, line[1:])
+				remNew--
+				added++
+				lastSide = '+'
+			}
+		case '-':
+			if remOld > 0 {
+				oldLines = append(oldLines, line[1:])
+				remOld--
+				removed++
+				lastSide = '-'
+			}
+		case ' ':
+			if remOld > 0 || remNew > 0 {
+				oldLines = append(oldLines, line[1:])
+				newLines = append(newLines, line[1:])
+				if remOld > 0 {
+					remOld--
+				}
+				if remNew > 0 {
+					remNew--
+				}
+				lastSide = ' '
+			}
+		}
 	}
-	if !hasAnyHunk {
-		// Not a unified diff; treat as raw replacement text.
-		return "", patch
+	if !isUnified {
+		return "", patch, 0, 0, false
 	}
 	if len(oldLines) > 0 {
-		oldText = strings.Join(oldLines, "\n") + "\n"
+		oldText = strings.Join(oldLines, "\n")
+		if !oldNoNL {
+			oldText += "\n"
+		}
 	}
 	if len(newLines) > 0 {
-		newText = strings.Join(newLines, "\n") + "\n"
+		newText = strings.Join(newLines, "\n")
+		if !newNoNL {
+			newText += "\n"
+		}
 	}
-	return oldText, newText
+	return oldText, newText, added, removed, true
 }
 
 // codexCommandOutput builds ToolOutput for a completed/in-progress Codex
@@ -139,12 +292,45 @@ func mapCodexItemStatus(status string) string {
 	}
 }
 
+// acceptsTurnFrame reports whether an incoming item/delta/plan notification for
+// turnID belongs to the currently active wire turn (or foreign turn), preventing
+// late frames from a prior settled turn from contaminating a successor turn.
+func (s *codexSession) acceptsTurnFrame(turnID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if turnID == "" {
+		return (s.activeTurn != nil && (s.activeTurn.phase == codexPhaseSent || s.activeTurn.phase == codexPhaseIdentified) && !s.activeTurn.settling) ||
+			s.foreignTurnID != ""
+	}
+	if s.activeTurn != nil && !s.activeTurn.settling {
+		switch s.activeTurn.phase {
+		case codexPhaseIdentified:
+			if s.activeTurn.turnID == turnID {
+				return true
+			}
+		case codexPhaseSent:
+			// TurnStart sent; turn/started may not have arrived yet, provided
+			// this turnID was not already settled earlier.
+			if !s.settledTurns[turnID] {
+				return true
+			}
+		}
+	}
+	if s.foreignTurnID != "" && s.foreignTurnID == turnID {
+		return true
+	}
+	return false
+}
+
 func (s *codexSession) handleItemStarted(raw json.RawMessage) {
 	var p codexrpc.ItemNotificationParams
 	if json.Unmarshal(raw, &p) != nil {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.processItem(p.Item, false, false)
@@ -155,7 +341,7 @@ func (s *codexSession) handleItemCompleted(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.processItem(p.Item, true, false)
@@ -166,7 +352,7 @@ func (s *codexSession) handleAgentMessageDelta(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.emitTextDelta(p.ItemID, p.Delta, false)
@@ -177,7 +363,7 @@ func (s *codexSession) handlePlanDelta(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.emitTextDelta(p.ItemID, p.Delta, true)
@@ -207,7 +393,7 @@ func (s *codexSession) handleReasoningSummaryPartAdded(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	if p.SummaryIndex > 0 {
@@ -220,7 +406,7 @@ func (s *codexSession) handleReasoningDelta(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.Delta == "" {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.emit(Event{Type: EventThought, Text: sanitizeText(p.Delta)})
@@ -231,18 +417,19 @@ func (s *codexSession) handleCommandOutputDelta(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.Delta == "" || p.ItemID == "" {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	s.mu.Lock()
 	if s.cmdBuffers == nil {
-		s.cmdBuffers = make(map[string]string)
+		s.cmdBuffers = make(map[string]*codexCmdBuffer)
 	}
-	buf := s.cmdBuffers[p.ItemID] + p.Delta
-	if len(buf) > codexCmdStreamCap {
-		buf = buf[len(buf)-codexCmdStreamCap:]
+	buf := s.cmdBuffers[p.ItemID]
+	if buf == nil {
+		buf = &codexCmdBuffer{}
+		s.cmdBuffers[p.ItemID] = buf
 	}
-	s.cmdBuffers[p.ItemID] = buf
+	buf.append(p.Delta)
 	row, exists := s.tools[p.ItemID]
 	if !exists {
 		row = ToolEvent{
@@ -253,7 +440,7 @@ func (s *codexSession) handleCommandOutputDelta(raw json.RawMessage) {
 		}
 		s.toolOrder = append(s.toolOrder, p.ItemID)
 	}
-	row.Output = codexCommandOutput(buf, nil)
+	row.Output = buf.toolOutput(nil)
 	row.At = s.Now()
 	s.tools[p.ItemID] = row
 	ct := cloneTool(row)
@@ -266,7 +453,7 @@ func (s *codexSession) handlePlanUpdated(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil {
 		return
 	}
-	if !s.isMainThread(p.ThreadID) {
+	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
 	todos := make([]Todo, 0, len(p.Plan))
@@ -400,8 +587,12 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		}
 		title := sanitizeText(item.Command)
 		s.mu.Lock()
-		if completed && s.cmdBuffers != nil {
-			delete(s.cmdBuffers, item.ID)
+		var streamed *codexCmdBuffer
+		if s.cmdBuffers != nil {
+			streamed = s.cmdBuffers[item.ID]
+			if completed {
+				delete(s.cmdBuffers, item.ID)
+			}
 		}
 		row, exists := s.tools[item.ID]
 		if !exists {
@@ -416,8 +607,12 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			row.RawInput = truncateUTF8(title, rawInputCap)
 		}
 		row.Status = st
-		if completed || item.AggregatedOutput != "" || item.ExitCode != nil {
+		if item.AggregatedOutput != "" {
 			row.Output = codexCommandOutput(item.AggregatedOutput, item.ExitCode)
+		} else if streamed != nil {
+			row.Output = streamed.toolOutput(item.ExitCode)
+		} else if completed || item.ExitCode != nil {
+			row.Output = codexCommandOutput("", item.ExitCode)
 		}
 		row.At = s.Now()
 		s.tools[item.ID] = row
@@ -446,10 +641,10 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 					locs = appendDistinct(locs, sanitizeText(ch.Path))
 				}
 			}
-			if ch.Kind.MovePath != "" {
-				allPaths = appendDistinct(allPaths, ch.Kind.MovePath)
+			if dst := ch.Kind.MoveTarget(); dst != "" {
+				allPaths = appendDistinct(allPaths, dst)
 				if len(locs) < locationsCap {
-					locs = appendDistinct(locs, sanitizeText(ch.Kind.MovePath))
+					locs = appendDistinct(locs, sanitizeText(dst))
 				}
 			}
 			if len(diffs) < diffsCap {

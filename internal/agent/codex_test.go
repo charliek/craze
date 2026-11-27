@@ -309,9 +309,14 @@ func TestCodexModesHardReadOnlyAndPlanTransitions(t *testing.T) {
 			t.Fatalf("unmarshal line %d: %v", i, err)
 		}
 	}
-	// Turn 0 (ask, --no-force): readOnly + never + collaborationMode default.
+	// Turn 0 (ask, --no-force): readOnly + never + collaborationMode default + explicit developer_instructions: null.
 	if d[0].TurnStart.SandboxPolicy.Type != "readOnly" || d[0].TurnStart.ApprovalPolicy != "never" || d[0].TurnStart.CollaborationMode.Mode != "default" {
 		t.Fatalf("turn 0 (ask) = %+v", d[0].TurnStart)
+	}
+	for i, rawLine := range lines {
+		if !strings.Contains(rawLine, `"developer_instructions":null`) {
+			t.Fatalf("turn %d missing explicit raw developer_instructions:null key: %s", i, rawLine)
+		}
 	}
 	// Turn 1 (plan, --no-force): readOnly + never + collaborationMode plan.
 	if d[1].TurnStart.SandboxPolicy.Type != "readOnly" || d[1].TurnStart.ApprovalPolicy != "never" || d[1].TurnStart.CollaborationMode.Mode != "plan" {
@@ -621,38 +626,70 @@ func TestCodexPromptWithAttachmentEnvelopeSendsLocalImage(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(b))), &dumped); err != nil {
 		t.Fatalf("unmarshal prompt dump: %v", err)
 	}
+	// Verify immutable copy was sent (NOT the original attachment path, M8 TOCTOU guard).
+	var sentImgPath string
 	foundText, foundImg := false, false
 	for _, in := range dumped.TurnStart.Input {
 		if in.Type == "text" && strings.Contains(in.Text, "inspect [Image #1]") && !strings.Contains(in.Text, attachmentsOpen) {
 			foundText = true
 		}
-		if in.Type == "localImage" && in.Path == ref.Path {
+		if in.Type == "localImage" && in.Path != "" {
 			foundImg = true
+			sentImgPath = in.Path
 		}
 	}
 	if !foundText || !foundImg {
-		t.Fatalf("turn/start inputs = %+v, want clean text + localImage(%q)", dumped.TurnStart.Input, ref.Path)
+		t.Fatalf("turn/start inputs = %+v, want clean text + localImage", dumped.TurnStart.Input)
+	}
+	if sentImgPath == ref.Path {
+		t.Fatalf("turn/start sent original attachment path %q instead of host-owned immutable copy", sentImgPath)
+	}
+	// Temp copy must be cleaned up once the turn settles.
+	if _, err := os.Stat(sentImgPath); !os.IsNotExist(err) {
+		t.Fatalf("per-turn image copy %q still exists after settlement (err=%v)", sentImgPath, err)
 	}
 }
+
+func f64Ptr(v float64) *float64 { return &v }
+func intPtr(v int) *int         { return &v }
 
 func TestCodexUsageSparseMergeAndWindowPick(t *testing.T) {
 	var u codexUsage
 	r1 := int64(1796000000)
 	u.mergeRateLimits(&codexrpc.RateLimitsSnapshot{
-		PlanType:  "prolite",
-		Primary:   &codexrpc.RateLimitWindow{UsedPercent: 25, WindowDurationMins: 300, ResetsAt: &r1},
-		Secondary: &codexrpc.RateLimitWindow{UsedPercent: 60, WindowDurationMins: 10080, ResetsAt: &r1},
+		LimitID:             "codex",
+		PlanType:            "prolite",
+		Primary:             &codexrpc.RateLimitWindow{UsedPercent: f64Ptr(25), WindowDurationMins: intPtr(300), ResetsAt: &r1},
+		Secondary:           &codexrpc.RateLimitWindow{UsedPercent: f64Ptr(60), WindowDurationMins: intPtr(10080), ResetsAt: &r1},
+		SpendControlReached: boolPtr(false),
 	})
-	// Sparse update touching only Primary (Secondary is nil — must NOT wipe Secondary!).
+	// Sparse update touching only Primary.UsedPercent (WindowDurationMins & ResetsAt nil -> MUST preserve!).
 	u.mergeRateLimits(&codexrpc.RateLimitsSnapshot{
-		Primary: &codexrpc.RateLimitWindow{UsedPercent: 80, WindowDurationMins: 300, ResetsAt: &r1},
+		LimitID:             "codex",
+		Primary:             &codexrpc.RateLimitWindow{UsedPercent: f64Ptr(80)},
+		SpendControlReached: boolPtr(true),
 	})
 	st := u.state()
-	if st.Window != "five_hour" || st.WindowUtilization != 0.80 || st.Plan != "prolite" {
-		t.Fatalf("UsageState after sparse merge = %+v, want five_hour @ 0.80", st)
+	if st.Window != "five_hour" || st.WindowUtilization != 0.80 || st.Plan != "prolite" || st.ResetsAt.Unix() != r1 {
+		t.Fatalf("UsageState after sparse merge = %+v, want five_hour @ 0.80 with preserved resetsAt=%d", st, r1)
 	}
-	if u.rl.Secondary == nil || u.rl.Secondary.UsedPercent != 60 {
-		t.Fatalf("sparse update clobbered Secondary: %+v", u.rl.Secondary)
+	bucket := u.buckets["codex"]
+	if bucket == nil || bucket.Secondary == nil || bucket.Secondary.UsedPercent == nil || *bucket.Secondary.UsedPercent != 60 {
+		t.Fatalf("sparse update clobbered Secondary: %+v", bucket)
+	}
+	if bucket.SpendControlReached == nil || !*bucket.SpendControlReached {
+		t.Fatalf("SpendControlReached was not merged: %+v", bucket.SpendControlReached)
+	}
+	// A push for a DIFFERENT limitId must not inherit Secondary from "codex".
+	u.mergeRateLimits(&codexrpc.RateLimitsSnapshot{
+		LimitID: "codex_other",
+		Primary: &codexrpc.RateLimitWindow{UsedPercent: f64Ptr(95), WindowDurationMins: intPtr(300)},
+	})
+	if other := u.buckets["codex_other"]; other == nil || other.Secondary != nil {
+		t.Fatalf("second bucket inherited foreign Secondary: %+v", other)
+	}
+	if got := u.state(); got.WindowUtilization != 0.95 {
+		t.Fatalf("expected highest window across buckets (0.95), got %+v", got)
 	}
 }
 
@@ -664,5 +701,296 @@ func TestCodexCommandOutputStderrHeadOnNonZeroExit(t *testing.T) {
 	}
 	if out.StdoutHead == "" || out.StderrHead == "" {
 		t.Fatalf("non-zero exit must populate both StdoutHead and StderrHead: %+v", out)
+	}
+}
+
+// --- M2a Review Regression Tests (H1-H5, M6-M14, L1-L4) ---
+
+func TestCodexApprovalDeclinedAfterMidTurnModeChange(t *testing.T) {
+	// H1: Even if a forced session switches from ask -> agent mid-turn, an
+	// approval request must NOT be auto-accepted for the running read-only turn.
+	cs, _ := startCodexFake(t, "codex-approval", Options{Mode: "ask", Force: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := cs.SetMode(ctx, "", "agent"); err != nil {
+		t.Fatalf("SetMode(agent): %v", err)
+	}
+	var text strings.Builder
+	evs := collectSubEvents(t, cs, func() {
+		if _, err := cs.Prompt(ctx, "try command"); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	})
+	for _, ev := range evs {
+		if ev.Type == EventText {
+			text.WriteString(ev.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "decision=decline") {
+		t.Fatalf("expected M2a approval to decline, got %q", text.String())
+	}
+}
+
+func TestCodexPermissionsDenialHasTypedWireShape(t *testing.T) {
+	// M7: item/permissions/requestApproval must reply {"permissions":{},"scope":"turn"}.
+	cs, _ := startCodexFake(t, "codex-permissions-req", Options{Force: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var text strings.Builder
+	evs := collectSubEvents(t, cs, func() {
+		if _, err := cs.Prompt(ctx, "request perms"); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	})
+	for _, ev := range evs {
+		if ev.Type == EventText {
+			text.WriteString(ev.Text)
+		}
+	}
+	got := text.String()
+	if !strings.Contains(got, `"permissions":{}`) || !strings.Contains(got, `"scope":"turn"`) {
+		t.Fatalf("permissions denial wire reply = %q, want typed permissions:{} and scope:turn", got)
+	}
+}
+
+func TestCodexCompleteThenExitPreservesSuccessOverEOF(t *testing.T) {
+	// H4: Fake emits final edit, text, and turn/completed, then exits immediately.
+	// Ordered notification drain must let completion win over stdout EOF.
+	cs, _ := startCodexFake(t, "codex-complete-then-exit", Options{Force: true})
+	var (
+		res Result
+		err error
+	)
+	evs := collectSubEvents(t, cs, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		res, err = cs.Prompt(ctx, "finish and exit")
+	})
+	if err != nil || res.StopReason != acp.StopEndTurn {
+		t.Fatalf("Prompt = (%+v, %v), want StopEndTurn nil error", res, err)
+	}
+	var text strings.Builder
+	sawEdit := false
+	for _, ev := range evs {
+		if ev.Type == EventText {
+			text.WriteString(ev.Text)
+		}
+		if ev.Type == EventTool && ev.Tool != nil && ev.Tool.ID == "fc-eof" && ev.Tool.Edited != nil {
+			sawEdit = true
+		}
+	}
+	if !strings.Contains(text.String(), "finished right before exit") || !sawEdit {
+		t.Fatalf("expected final text & edit stamp before EOF; text=%q sawEdit=%v", text.String(), sawEdit)
+	}
+}
+
+func TestCodexUnexpectedExitZeroAndNonZeroClassifyAsAgentExited(t *testing.T) {
+	// M12: Both unexpected exit 0 and unexpected non-zero exit mid-turn must
+	// surface ErrAgentExited and round-trip as agent_exited through eventcodec.
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantCode int
+	}{
+		{"exit 0 mid-turn", "codex-exit-zero-midturn", 0},
+		{"exit 7 mid-turn", "codex-exit-nonzero-midturn", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, _ := startCodexFake(t, tc.script, Options{Force: true})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := cs.Prompt(ctx, "crash now")
+			if err == nil {
+				t.Fatal("expected error on unexpected child exit")
+			}
+			if !errors.Is(err, ErrAgentExited) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrAgentExited)", err)
+			}
+			if got := ErrorInfo(err).Kind; got != errkind.Agent {
+				t.Fatalf("ErrorInfo(err).Kind = %v, want agent", got)
+			}
+			body, encErr := EncodeEvent(Event{Type: EventError, Err: err})
+			if encErr != nil {
+				t.Fatalf("EncodeEvent: %v", encErr)
+			}
+			dec, decErr := DecodeEvent(body)
+			if decErr != nil {
+				t.Fatalf("DecodeEvent: %v", decErr)
+			}
+			var rem *RemoteError
+			if !errors.As(dec.Err, &rem) || rem.Class != EventErrAgentExited || rem.Code != tc.wantCode {
+				t.Fatalf("decoded err = %#v, want RemoteError{Class: agent_exited, Code: %d}", dec.Err, tc.wantCode)
+			}
+			if !errors.Is(dec.Err, ErrAgentExited) {
+				t.Fatalf("decoded err = %v, want errors.Is(ErrAgentExited)", dec.Err)
+			}
+		})
+	}
+}
+
+func TestCodexFastFailUsageLimitAndContextWindowWithWillRetry(t *testing.T) {
+	// M13: usageLimitExceeded and contextWindowExceeded must fast-fail even when willRetry: true.
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   errkind.Kind
+	}{
+		{"usageLimitExceeded", "codex-retry-usagelimit", errkind.Quota},
+		{"contextWindowExceeded", "codex-retry-context", errkind.ContextTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, _ := startCodexFake(t, tc.script, Options{Force: true})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := cs.Prompt(ctx, "trigger retryable terminal error")
+			if err == nil {
+				t.Fatal("expected fast-fail error")
+			}
+			if got := ErrorInfo(err).Kind; got != tc.want {
+				t.Fatalf("ErrorInfo(%v).Kind = %v, want %v", err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexSlowRateLimitsDoesNotBlockStartup(t *testing.T) {
+	// H5: An unresponsive account/rateLimits/read uses its own shorter deadline
+	// and does not hang startup.
+	prev := codexRateLimitStartTimeout
+	codexRateLimitStartTimeout = 120 * time.Millisecond
+	t.Cleanup(func() { codexRateLimitStartTimeout = prev })
+
+	start := time.Now()
+	cs, _ := startCodexFake(t, "codex-slow-ratelimits", Options{Force: true})
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("Start blocked %v on slow rateLimits/read", time.Since(start))
+	}
+	if cs.Snapshot().SessionID == "" {
+		t.Fatal("expected session ready after rateLimits timeout")
+	}
+}
+
+func TestCodexModelListMultipageAndRepeatedCursor(t *testing.T) {
+	// L2: Multi-page model catalog succeeds; repeated cursor fails instead of silently truncating.
+	t.Run("multipage", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-model-multipage", Options{Force: true})
+		var ids []string
+		for _, m := range cs.Snapshot().Models {
+			ids = append(ids, m.ID)
+		}
+		if !slices.Contains(ids, "gpt-6.2-sol") || !slices.Contains(ids, "gpt-6.2-astra") {
+			t.Fatalf("multipage models = %v, want both pages", ids)
+		}
+	})
+	t.Run("repeated cursor errors", func(t *testing.T) {
+		bin := fakeAgentPath(t)
+		prov := CodexProvider()
+		cs := New(Options{
+			Provider:  &prov,
+			Binary:    bin,
+			Workspace: t.TempDir(),
+			Env:       append(os.Environ(), "CRAZE_FAKE_SCRIPT=codex-model-loop-cursor"),
+		}).(*codexSession)
+		defer func() { _ = cs.Close() }()
+		err := cs.Start(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "repeated pagination cursor") {
+			t.Fatalf("Start(loop cursor) = %v, want repeated pagination cursor error", err)
+		}
+	})
+}
+
+func TestCodexCancelHungInterruptTimesOutWithError(t *testing.T) {
+	// H2: Missing turn/interrupt reply + missing turn/completed must NOT hang
+	// forever or pretend StopCancelled succeeded — it aborts the hung transport
+	// and returns an error.
+	prev := codexCancelFallbackGrace
+	codexCancelFallbackGrace = 150 * time.Millisecond
+	t.Cleanup(func() { codexCancelFallbackGrace = prev })
+
+	cs, _ := startCodexFake(t, "codex-hang-interrupt", Options{Force: true})
+	promptDone := make(chan error, 1)
+	go func() {
+		_, err := cs.Prompt(context.Background(), "hang forever")
+		promptDone <- err
+	}()
+	// Wait until the turn is identified.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		cs.mu.Lock()
+		identified := cs.activeTurn != nil && cs.activeTurn.phase == codexPhaseIdentified
+		cs.mu.Unlock()
+		if identified {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	out, cancelErr := cs.Cancel(context.Background())
+	if cancelErr == nil || out.Settled {
+		t.Fatalf("Cancel on hung interrupt = (%+v, %v), want error and Settled=false", out, cancelErr)
+	}
+	select {
+	case pErr := <-promptDone:
+		if pErr == nil {
+			t.Fatal("Prompt returned nil on hung cancel, want error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Prompt did not unblock after hung cancel grace timeout")
+	}
+}
+
+func TestCodexWritableResumeEnforcesReadOnlyInAskAndPlan(t *testing.T) {
+	// Resuming a writable thread in --ask or --plan must still send readOnly + never.
+	for _, mode := range []string{"ask", "plan"} {
+		t.Run(mode, func(t *testing.T) {
+			dumpPath := filepath.Join(t.TempDir(), "prompts.jsonl")
+			cs, _ := startCodexFake(t, "codex-basic", Options{
+				LoadSessionID: "thr-writable-1",
+				Mode:          mode,
+				Force:         false,
+			}, "CRAZE_FAKE_DUMP_PROMPTS="+dumpPath)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := cs.Prompt(ctx, "check read only"); err != nil {
+				t.Fatalf("Prompt(%s): %v", mode, err)
+			}
+			b, err := os.ReadFile(dumpPath)
+			if err != nil {
+				t.Fatalf("read prompt dump: %v", err)
+			}
+			line := strings.TrimSpace(string(b))
+			if !strings.Contains(line, `"type":"readOnly"`) || !strings.Contains(line, `"approvalPolicy":"never"`) {
+				t.Fatalf("resumed %s turnStart = %s, want readOnly + never", mode, line)
+			}
+		})
+	}
+}
+
+func TestCodexUnifiedDiffDeleteMultiHunkAndNewlineOnly(t *testing.T) {
+	// L4: Verify delete, multi-hunk count preservation, and newline-only edits.
+	del := codexFileChangeToToolDiff(codexrpc.FileUpdateChange{
+		Path: "gone.txt",
+		Kind: codexrpc.FileChangeKind{Type: "delete"},
+		Diff: "line1\nline2\n",
+	})
+	if del.OldText != "line1\nline2\n" || del.NewText != "" || del.Removed != 2 {
+		t.Fatalf("delete diff = %+v", del)
+	}
+
+	multi := codexFileChangeToToolDiff(codexrpc.FileUpdateChange{
+		Path: "multi.txt",
+		Kind: codexrpc.FileChangeKind{Type: "update"},
+		Diff: "@@ -1,2 +1,2 @@\n-a\n+A\n ctx1\n@@ -10,2 +10,3 @@\n ctx2\n+b1\n+b2\n-c\n",
+	})
+	if multi.Added != 3 || multi.Removed != 2 {
+		t.Fatalf("multi-hunk counts = +%d/-%d, want +3/-2 (%+v)", multi.Added, multi.Removed, multi)
+	}
+
+	nlOnly := codexFileChangeToToolDiff(codexrpc.FileUpdateChange{
+		Path: "nl.txt",
+		Kind: codexrpc.FileChangeKind{Type: "update"},
+		Diff: "@@ -1,1 +1,1 @@\n-hello\n\\ No newline at end of file\n+hello\n",
+	})
+	if nlOnly.OldText != "hello" || nlOnly.NewText != "hello\n" || nlOnly.OldText == nlOnly.NewText {
+		t.Fatalf("newline-only diff lost edit: old=%q new=%q", nlOnly.OldText, nlOnly.NewText)
 	}
 }

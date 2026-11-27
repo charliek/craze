@@ -123,9 +123,9 @@ type AccountReadResult struct {
 }
 
 type RateLimitWindow struct {
-	UsedPercent        float64 `json:"usedPercent"`
-	WindowDurationMins int     `json:"windowDurationMins"`
-	ResetsAt           *int64  `json:"resetsAt,omitempty"`
+	UsedPercent        *float64 `json:"usedPercent,omitempty"`
+	WindowDurationMins *int     `json:"windowDurationMins,omitempty"`
+	ResetsAt           *int64   `json:"resetsAt,omitempty"`
 }
 
 type CreditsSnapshot struct {
@@ -145,7 +145,8 @@ type RateLimitsSnapshot struct {
 }
 
 type RateLimitsReadResult struct {
-	RateLimits *RateLimitsSnapshot `json:"rateLimits,omitempty"`
+	RateLimits          *RateLimitsSnapshot            `json:"rateLimits,omitempty"`
+	RateLimitsByLimitID map[string]*RateLimitsSnapshot `json:"rateLimitsByLimitId,omitempty"`
 }
 
 type RateLimitsUpdatedParams struct {
@@ -498,8 +499,18 @@ type CommandExecutionItem struct {
 }
 
 type FileChangeKind struct {
-	Type     string `json:"type"` // "add", "delete", "update"
-	MovePath string `json:"movePath,omitempty"`
+	Type          string `json:"type"` // "add", "delete", "update"
+	MovePath      string `json:"move_path,omitempty"`
+	MovePathCamel string `json:"movePath,omitempty"`
+}
+
+// MoveTarget returns the rename destination path from either the upstream
+// snake_case `move_path` field (codex-cli 0.172.0) or legacy `movePath`.
+func (k FileChangeKind) MoveTarget() string {
+	if k.MovePath != "" {
+		return k.MovePath
+	}
+	return k.MovePathCamel
 }
 
 type FileUpdateChange struct {
@@ -647,6 +658,14 @@ type PermissionsApprovalParams struct {
 
 type ApprovalDecisionReply struct {
 	Decision string `json:"decision"`
+}
+
+// PermissionsApprovalReply is the typed wire reply for
+// `item/permissions/requestApproval` (codex-cli 0.172.0). An empty
+// Permissions map explicitly denies the permission grant for the scope.
+type PermissionsApprovalReply struct {
+	Permissions map[string]any `json:"permissions"`
+	Scope       string         `json:"scope"`
 }
 
 type UserInputOption struct {

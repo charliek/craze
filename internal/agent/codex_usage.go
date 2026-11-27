@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,17 +13,20 @@ import (
 // codexUsage tracks a Codex session's token usage, context window, and account
 // rate-limit state under s.mu (Plan 054 § D4).
 type codexUsage struct {
-	reported bool
-	plan     string
-	model    string
+	tokensReported bool
+	rateReported   bool
+	plan           string
+	model          string
 
-	// Rate-limit snapshot merged across sparse account/rateLimits/updated pushes.
-	rl *codexrpc.RateLimitsSnapshot
+	// Rate-limit snapshots tracked by limitId so sparse pushes for one quota
+	// bucket never inherit or clobber fields from a different bucket.
+	buckets     map[string]*codexrpc.RateLimitsSnapshot
+	bucketOrder []string
 
 	// Token accounting:
 	// - total is the cumulative thread spend reported by thread/tokenUsage/updated.
 	// - turnBase is the cumulative spend at the start of the active turn (seeded
-	//   from thread/resume's initial tokenUsage so post-resume turns don't double-count).
+	//   from historical tokenUsage on resume so post-resume turns don't double-count).
 	// - turn is total - turnBase (clamped >= 0).
 	total    Spend
 	turnBase Spend
@@ -55,6 +59,10 @@ func spendSub(cur, base Spend) Spend {
 	}
 }
 
+func (u *codexUsage) hasAny() bool {
+	return u.tokensReported || u.rateReported || u.plan != ""
+}
+
 // beginTurn snapshots the current cumulative total as the turn baseline so
 // UsageState.Turn reports only this turn's delta.
 func (u *codexUsage) beginTurn() {
@@ -63,7 +71,7 @@ func (u *codexUsage) beginTurn() {
 }
 
 func (u *codexUsage) applyTokenUsage(tu codexrpc.ThreadTokenUsage, model string, asBaseline bool) {
-	u.reported = true
+	u.tokensReported = true
 	u.total = codexSpendFromBreakdown(tu.Total)
 	if asBaseline {
 		u.turnBase = u.total
@@ -84,50 +92,128 @@ func (u *codexUsage) applyTokenUsage(tu codexrpc.ThreadTokenUsage, model string,
 	}
 }
 
-// mergeRateLimits folds a full or sparse RateLimitsSnapshot into u.rl without
-// overwriting known non-nil fields with nil.
+// mergeRateLimitsRead seeds buckets from rateLimitsByLimitId when present,
+// falling back to the single-bucket rateLimits field.
+func (u *codexUsage) mergeRateLimitsRead(res *codexrpc.RateLimitsReadResult) bool {
+	if res == nil {
+		return false
+	}
+	changed := false
+	if len(res.RateLimitsByLimitID) > 0 {
+		keys := make([]string, 0, len(res.RateLimitsByLimitID))
+		for k := range res.RateLimitsByLimitID {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			snap := res.RateLimitsByLimitID[k]
+			if snap == nil {
+				continue
+			}
+			cp := *snap
+			if cp.LimitID == "" {
+				cp.LimitID = k
+			}
+			if u.mergeRateLimits(&cp) {
+				changed = true
+			}
+		}
+		return changed
+	}
+	if res.RateLimits != nil {
+		return u.mergeRateLimits(res.RateLimits)
+	}
+	return false
+}
+
+// mergeRateLimits folds a full or sparse RateLimitsSnapshot into its bucket
+// (keyed by limitId), merging nested fields without overwriting known non-nil
+// values with nil.
 func (u *codexUsage) mergeRateLimits(in *codexrpc.RateLimitsSnapshot) bool {
 	if in == nil {
 		return false
 	}
-	if u.rl == nil {
+	if u.buckets == nil {
+		u.buckets = make(map[string]*codexrpc.RateLimitsSnapshot)
+	}
+	key := strings.TrimSpace(in.LimitID)
+	cur, ok := u.buckets[key]
+	if !ok {
 		cp := cloneCodexRateLimitSnapshot(in)
-		u.rl = cp
+		cp.LimitID = key
+		u.buckets[key] = cp
+		u.bucketOrder = append(u.bucketOrder, key)
 		if p := strings.TrimSpace(cp.PlanType); p != "" {
 			u.plan = sanitizeLine(p)
 		}
-		u.reported = true
+		u.rateReported = true
 		return true
 	}
 	changed := false
-	if in.LimitID != "" && in.LimitID != u.rl.LimitID {
-		u.rl.LimitID = in.LimitID
+	if in.LimitName != "" && in.LimitName != cur.LimitName {
+		cur.LimitName = in.LimitName
 		changed = true
 	}
-	if in.LimitName != "" && in.LimitName != u.rl.LimitName {
-		u.rl.LimitName = in.LimitName
-		changed = true
-	}
-	if p := strings.TrimSpace(in.PlanType); p != "" && p != u.rl.PlanType {
-		u.rl.PlanType = p
+	if p := strings.TrimSpace(in.PlanType); p != "" && p != cur.PlanType {
+		cur.PlanType = p
 		u.plan = sanitizeLine(p)
 		changed = true
 	}
-	if in.Primary != nil && !sameCodexRateWindow(u.rl.Primary, in.Primary) {
-		u.rl.Primary = cloneCodexRateWindow(in.Primary)
-		changed = true
+	if in.Primary != nil {
+		if cur.Primary == nil {
+			cur.Primary = cloneCodexRateWindow(in.Primary)
+			changed = true
+		} else if mergeCodexRateWindow(cur.Primary, in.Primary) {
+			changed = true
+		}
 	}
-	if in.Secondary != nil && !sameCodexRateWindow(u.rl.Secondary, in.Secondary) {
-		u.rl.Secondary = cloneCodexRateWindow(in.Secondary)
-		changed = true
+	if in.Secondary != nil {
+		if cur.Secondary == nil {
+			cur.Secondary = cloneCodexRateWindow(in.Secondary)
+			changed = true
+		} else if mergeCodexRateWindow(cur.Secondary, in.Secondary) {
+			changed = true
+		}
 	}
 	if in.Credits != nil {
-		cp := *in.Credits
-		u.rl.Credits = &cp
-		changed = true
+		if cur.Credits == nil || *cur.Credits != *in.Credits {
+			cp := *in.Credits
+			cur.Credits = &cp
+			changed = true
+		}
+	}
+	if in.SpendControlReached != nil {
+		if cur.SpendControlReached == nil || *cur.SpendControlReached != *in.SpendControlReached {
+			v := *in.SpendControlReached
+			cur.SpendControlReached = &v
+			changed = true
+		}
 	}
 	if changed {
-		u.reported = true
+		u.rateReported = true
+	}
+	return changed
+}
+
+func mergeCodexRateWindow(dst, src *codexrpc.RateLimitWindow) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+	changed := false
+	if src.UsedPercent != nil && (dst.UsedPercent == nil || *dst.UsedPercent != *src.UsedPercent) {
+		v := *src.UsedPercent
+		dst.UsedPercent = &v
+		changed = true
+	}
+	if src.WindowDurationMins != nil && (dst.WindowDurationMins == nil || *dst.WindowDurationMins != *src.WindowDurationMins) {
+		v := *src.WindowDurationMins
+		dst.WindowDurationMins = &v
+		changed = true
+	}
+	if src.ResetsAt != nil && (dst.ResetsAt == nil || *dst.ResetsAt != *src.ResetsAt) {
+		v := *src.ResetsAt
+		dst.ResetsAt = &v
+		changed = true
 	}
 	return changed
 }
@@ -137,6 +223,14 @@ func cloneCodexRateWindow(w *codexrpc.RateLimitWindow) *codexrpc.RateLimitWindow
 		return nil
 	}
 	cp := *w
+	if w.UsedPercent != nil {
+		v := *w.UsedPercent
+		cp.UsedPercent = &v
+	}
+	if w.WindowDurationMins != nil {
+		v := *w.WindowDurationMins
+		cp.WindowDurationMins = &v
+	}
 	if w.ResetsAt != nil {
 		v := *w.ResetsAt
 		cp.ResetsAt = &v
@@ -155,62 +249,64 @@ func cloneCodexRateLimitSnapshot(in *codexrpc.RateLimitsSnapshot) *codexrpc.Rate
 		cr := *in.Credits
 		cp.Credits = &cr
 	}
+	if in.SpendControlReached != nil {
+		v := *in.SpendControlReached
+		cp.SpendControlReached = &v
+	}
 	return &cp
-}
-
-func sameCodexRateWindow(a, b *codexrpc.RateLimitWindow) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.UsedPercent != b.UsedPercent || a.WindowDurationMins != b.WindowDurationMins {
-		return false
-	}
-	if (a.ResetsAt == nil) != (b.ResetsAt == nil) {
-		return false
-	}
-	if a.ResetsAt != nil && *a.ResetsAt != *b.ResetsAt {
-		return false
-	}
-	return true
 }
 
 // codexWindowName maps windowDurationMins to Craze's canonical UsageState.Window
 // vocabulary (internal/tui/status.go:195-203 expects "five_hour" / "seven_day").
-func codexWindowName(mins int) string {
-	if mins <= 0 {
+func codexWindowName(mins *int) string {
+	if mins == nil || *mins <= 0 {
 		return ""
 	}
-	switch mins {
+	switch *mins {
 	case 300:
 		return "five_hour"
 	case 10080:
 		return "seven_day"
 	default:
-		if mins%1440 == 0 {
-			return fmt.Sprintf("%dd", mins/1440)
+		if *mins%1440 == 0 {
+			return fmt.Sprintf("%dd", *mins/1440)
 		}
-		if mins%60 == 0 {
-			return fmt.Sprintf("%dh", mins/60)
+		if *mins%60 == 0 {
+			return fmt.Sprintf("%dh", *mins/60)
 		}
-		return fmt.Sprintf("%dm", mins)
+		return fmt.Sprintf("%dm", *mins)
 	}
 }
 
-func pickCodexRateWindow(rl *codexrpc.RateLimitsSnapshot) *codexrpc.RateLimitWindow {
-	if rl == nil {
-		return nil
+func codexWindowPercent(w *codexrpc.RateLimitWindow) float64 {
+	if w == nil || w.UsedPercent == nil {
+		return -1
 	}
-	switch {
-	case rl.Primary != nil && rl.Secondary != nil:
-		if rl.Secondary.UsedPercent > rl.Primary.UsedPercent {
-			return rl.Secondary
+	return *w.UsedPercent
+}
+
+func (u *codexUsage) pickRateWindow() *codexrpc.RateLimitWindow {
+	var best *codexrpc.RateLimitWindow
+	bestPct := -1.0
+	consider := func(w *codexrpc.RateLimitWindow) {
+		if w == nil {
+			return
 		}
-		return rl.Primary
-	case rl.Primary != nil:
-		return rl.Primary
-	default:
-		return rl.Secondary
+		pct := codexWindowPercent(w)
+		if best == nil || pct > bestPct {
+			best = w
+			bestPct = pct
+		}
 	}
+	for _, key := range u.bucketOrder {
+		rl := u.buckets[key]
+		if rl == nil {
+			continue
+		}
+		consider(rl.Primary)
+		consider(rl.Secondary)
+	}
+	return best
 }
 
 func (u *codexUsage) state() UsageState {
@@ -224,14 +320,16 @@ func (u *codexUsage) state() UsageState {
 	}
 	st.Turn.Unpriced = true
 	st.Session.Unpriced = true
-	if w := pickCodexRateWindow(u.rl); w != nil {
+	if w := u.pickRateWindow(); w != nil {
 		st.Window = codexWindowName(w.WindowDurationMins)
-		util := float64(w.UsedPercent) / 100.0
-		if !math.IsNaN(util) && !math.IsInf(util, 0) {
-			if util < 0 {
-				util = 0
+		if w.UsedPercent != nil {
+			util := *w.UsedPercent / 100.0
+			if !math.IsNaN(util) && !math.IsInf(util, 0) {
+				if util < 0 {
+					util = 0
+				}
+				st.WindowUtilization = util
 			}
-			st.WindowUtilization = util
 		}
 		if w.ResetsAt != nil && *w.ResetsAt > 0 {
 			st.ResetsAt = time.Unix(*w.ResetsAt, 0).UTC()

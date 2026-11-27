@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -33,9 +34,10 @@ var (
 	_ SkillRescanner = (*codexSession)(nil)
 )
 
-const (
-	codexCancelFallbackGrace = 5 * time.Second
-	codexStartRPCTimeout     = 30 * time.Second
+var (
+	codexCancelFallbackGrace   = 5 * time.Second
+	codexStartRPCTimeout       = 30 * time.Second
+	codexRateLimitStartTimeout = 5 * time.Second
 )
 
 // codexTurnPhase tracks a claimed prompt's lifecycle generation (Plan 054 § D1).
@@ -51,15 +53,20 @@ const (
 
 // codexTurnState holds the per-turn state for one claimed prompt generation.
 type codexTurnState struct {
-	gen           uint64
-	phase         codexTurnPhase
-	turnID        string
-	token         TurnToken
-	cancelPending bool
-	interruptSent bool
-	failedErr     error
-	stopReason    string
-	done          chan struct{}
+	gen            uint64
+	phase          codexTurnPhase
+	settling       bool
+	turnID         string
+	token          TurnToken
+	mode           string
+	model          string
+	approvalPolicy codexrpc.ApprovalPolicy
+	cancelPending  bool
+	interruptSent  bool
+	failedErr      error
+	stopReason     string
+	tempFiles      []string
+	done           chan struct{}
 }
 
 // codexError wraps a Codex failure with a classified errkind.Info.
@@ -91,23 +98,35 @@ type codexSession struct {
 	asks   *AskRegistry
 	tee    *stderrTee
 
-	done      chan struct{}
-	closeOnce sync.Once
-	closeDone chan struct{}
-	logOnce   sync.Once
-	closeErr  error
+	done       chan struct{}
+	closingCh  chan struct{}
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	startWG    sync.WaitGroup
+	closeOnce  sync.Once
+	closeDone  chan struct{}
+	logOnce    sync.Once
+	closeErr   error
 
 	replaying atomic.Bool
 
-	mu          sync.Mutex
-	started     bool
-	closed      bool
-	seedOwed    bool
-	titlePinned bool
+	mu            sync.Mutex
+	started       bool
+	ready         bool
+	transportDead bool
+	closed        bool
+	seedOwed      bool
+	titlePinned   bool
 
 	client   *codexrpc.Client
 	cwd      string
 	threadID string
+	imgDir   string
+
+	// Serialized coalescing worker for best-effort thread/name/set RPCs.
+	titleCh      chan struct{}
+	pendingTitle string
+	titleWorker  bool
 
 	// Saved workspaceWrite sandboxPolicy from thread/start|resume so agent-mode
 	// turns preserve any user-configured writableRoots/networkAccess.
@@ -124,7 +143,7 @@ type codexSession struct {
 	// Tool & per-turn streaming state.
 	tools          map[string]ToolEvent
 	toolOrder      []string
-	cmdBuffers     map[string]string
+	cmdBuffers     map[string]*codexCmdBuffer
 	turnItemDeltas map[string]bool
 	lastMsgItemID  string
 
@@ -137,6 +156,10 @@ type codexSession struct {
 	activeTurn *codexTurnState
 	// Early completions arriving before turn/start reply (indexed by turnID).
 	earlyCompleted map[string]codexrpc.Turn
+	// Recently settled turn IDs, so late notifications from prior turns never
+	// contaminate a successor generation.
+	settledTurns     map[string]bool
+	settledTurnOrder []string
 
 	// Foreign turn state (autonomous main-thread turns).
 	foreignTurnID string
@@ -153,16 +176,22 @@ func newCodexSession(opts Options) *codexSession {
 	opts.Provider = &p
 	opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
 
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	s := &codexSession{
 		opts:           opts,
 		done:           make(chan struct{}),
+		closingCh:      make(chan struct{}),
+		lifeCtx:        lifeCtx,
+		lifeCancel:     lifeCancel,
 		closeDone:      make(chan struct{}),
+		titleCh:        make(chan struct{}, 1),
 		allModels:      make(map[string]codexrpc.ModelEntry),
 		tools:          make(map[string]ToolEvent),
-		cmdBuffers:     make(map[string]string),
+		cmdBuffers:     make(map[string]*codexCmdBuffer),
 		turnItemDeltas: make(map[string]bool),
 		subagents:      make(map[string]*subagentRec),
 		earlyCompleted: make(map[string]codexrpc.Turn),
+		settledTurns:   make(map[string]bool),
 	}
 	s.log = newSessionLog(s.opts, journalHeader{provider: p.Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
@@ -275,12 +304,11 @@ func (s *codexSession) enqueueDeltaLocked(cause string, base Event, st *StateDel
 }
 
 func (s *codexSession) publishUsageLocked() {
+	u := s.usage.state()
+	s.snap.Usage = &u
 	if s.replaying.Load() {
 		return
 	}
-	s.usage.reported = true
-	u := s.usage.state()
-	s.snap.Usage = &u
 	d := u
 	ev := Event{Type: EventMeta, State: &StateDelta{Usage: &d}, At: s.Now()}
 	s.log.EnqueueLatest("usage", ev)
@@ -336,6 +364,21 @@ func (s *codexSession) Start(ctx context.Context) error {
 	return err
 }
 
+// startCtx joins caller ctx with session lifetime (s.lifeCtx) and bounds
+// startup RPCs by codexStartRPCTimeout so a stalled app-server cannot trap
+// detached startup indefinitely (H5).
+func (s *codexSession) startContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	base, cancel := context.WithTimeout(ctx, codexStartRPCTimeout)
+	stop := context.AfterFunc(s.lifeCtx, cancel)
+	return base, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	s.mu.Lock()
 	if s.started {
@@ -347,13 +390,18 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 		return false, fmt.Errorf("agent: session closed")
 	}
 	s.started = true
+	s.startWG.Add(1)
 	s.mu.Unlock()
+	defer s.startWG.Done()
 
 	unstart := func() {
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
 	}
+
+	rpcCtx, rpcCancel := s.startContext(ctx)
+	defer rpcCancel()
 
 	startMode, err := s.codexStartMode()
 	if err != nil {
@@ -380,6 +428,11 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	if err != nil {
 		unstart()
 		return false, binaryNotFound(err, p.Name())
+	}
+
+	if err := rpcCtx.Err(); err != nil {
+		unstart()
+		return false, err
 	}
 
 	env := p.spawnEnv(s.opts.Env, "", cwd)
@@ -420,7 +473,7 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	client.SetRequestHandler(s.onServerRequest)
 	go s.watchTransportDone(client)
 
-	initRes, err := client.Initialize(ctx)
+	initRes, err := client.Initialize(rpcCtx)
 	if err != nil {
 		return true, fmt.Errorf("agent: codex initialize: %w", err)
 	}
@@ -434,13 +487,13 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	// Auth preflight (Plan 054 § C2): catch signed-out state in <50ms instead of
 	// hanging through 5 WebSocket 401 retries, while permitting custom providers
 	// where requiresOpenaiAuth == false.
-	acctRes, err := client.AccountRead(ctx, false)
+	acctRes, err := client.AccountRead(rpcCtx, false)
 	if err != nil {
 		return true, fmt.Errorf("agent: codex account/read: %w", err)
 	}
 	if acctRes != nil {
 		if acctRes.Account == nil && acctRes.RequiresOpenaiAuth {
-			return true, newCodexErr(errkind.Auth, "codex is not signed in (run `%s` or set OPENAI_API_KEY)", codexLoginHint)
+			return true, newCodexErr(errkind.Auth, "codex is not signed in (run `%s`, or `%s --with-api-key` for API-key auth)", codexLoginHint, codexLoginHint)
 		}
 		if acctRes.Account != nil {
 			s.mu.Lock()
@@ -458,17 +511,19 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 		}
 	}
 
-	// Best-effort rate-limit read (non-fatal on API-key/custom providers).
-	if rlRes, rlErr := client.AccountRateLimitsRead(ctx); rlErr == nil && rlRes != nil {
+	// Best-effort rate-limit read with a shorter independent deadline so an
+	// unresponsive rate-limit endpoint never blocks startup (H5).
+	rlCtx, rlCancel := context.WithTimeout(rpcCtx, codexRateLimitStartTimeout)
+	rlRes, rlErr := client.AccountRateLimitsRead(rlCtx)
+	rlCancel()
+	if rlErr == nil && rlRes != nil {
 		s.mu.Lock()
-		if rlRes.RateLimits != nil {
-			s.usage.mergeRateLimits(rlRes.RateLimits)
-		}
+		s.usage.mergeRateLimitsRead(rlRes)
 		s.mu.Unlock()
 	}
 
 	// Load model catalog with includeHidden: true and pagination.
-	if err := s.loadModelCatalog(ctx, client); err != nil {
+	if err := s.loadModelCatalog(rpcCtx, client); err != nil {
 		return true, fmt.Errorf("agent: codex model/list: %w", err)
 	}
 
@@ -486,14 +541,14 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 
 	if s.opts.LoadSessionID != "" {
 		// Resume path (extended with full paginated replay in M2b).
-		if err := s.resumeThread(ctx, client, cwd, binary, startMode, resolvedModel, sbMode, apPolicy); err != nil {
+		if err := s.resumeThread(rpcCtx, client, cwd, binary, startMode, resolvedModel, sbMode, apPolicy); err != nil {
 			return true, err
 		}
 		return false, nil
 	}
 
 	ephemeral := false
-	tr, err := client.ThreadStart(ctx, codexrpc.ThreadStartParams{
+	tr, err := client.ThreadStart(rpcCtx, codexrpc.ThreadStartParams{
 		Cwd:            cwd,
 		Sandbox:        sbMode,
 		ApprovalPolicy: apPolicy,
@@ -550,11 +605,12 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	s.currentEffort = activeEffort
 	s.rebuildCatalogAndConfigLocked()
 	s.rebuildSlashLocked()
-	if s.usage.reported || s.usage.plan != "" {
+	if s.usage.hasAny() {
 		u := s.usage.state()
 		u.Model = activeModel
 		s.snap.Usage = &u
 	}
+	s.ready = true
 	delta := s.installDeltaLocked()
 	// New session Start enqueues install delta (with non-nil Config) and NEVER flushes.
 	s.enqueueDeltaLocked("", Event{}, delta)
@@ -647,6 +703,12 @@ func (s *codexSession) resumeThread(
 	s.currentEffort = activeEffort
 	s.rebuildCatalogAndConfigLocked()
 	s.rebuildSlashLocked()
+	if s.usage.hasAny() {
+		u := s.usage.state()
+		u.Model = activeModel
+		s.snap.Usage = &u
+	}
+	s.ready = true
 	delta := s.installDeltaLocked()
 	s.enqueueDeltaLocked("", Event{Replayed: true}, delta)
 	s.mu.Unlock()
@@ -692,8 +754,9 @@ func (s *codexSession) loadModelCatalog(ctx context.Context, client *codexrpc.Cl
 	all := make(map[string]codexrpc.ModelEntry)
 	var visible []string
 	cursor := ""
-	for page := range 20 {
-		_ = page
+	seenCursors := make(map[string]bool)
+	const maxPages = 20
+	for page := range maxPages {
 		res, err := client.ModelList(ctx, codexrpc.ModelListParams{
 			IncludeHidden: true,
 			Cursor:        cursor,
@@ -724,7 +787,15 @@ func (s *codexSession) loadModelCatalog(ctx context.Context, client *codexrpc.Cl
 		if res.NextCursor == nil || *res.NextCursor == "" {
 			break
 		}
-		cursor = *res.NextCursor
+		next := *res.NextCursor
+		if seenCursors[next] {
+			return fmt.Errorf("repeated pagination cursor %q", sanitizeLine(next))
+		}
+		seenCursors[next] = true
+		cursor = next
+		if page == maxPages-1 {
+			return fmt.Errorf("exceeded %d model catalog pages with remaining cursor %q", maxPages, sanitizeLine(next))
+		}
 	}
 	s.mu.Lock()
 	s.allModels = all
@@ -733,24 +804,45 @@ func (s *codexSession) loadModelCatalog(ctx context.Context, client *codexrpc.Cl
 	return nil
 }
 
+func (s *codexSession) resolveModelLocked(want string) (string, bool) {
+	if m, ok := s.allModels[want]; ok {
+		return m.ID, true
+	}
+	norm := normalizeIdent(want)
+	// Search visible models first in server order, then remaining hidden models
+	// in sorted order so alias resolution is 100% deterministic.
+	for _, id := range s.visibleOrder {
+		m := s.allModels[id]
+		if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
+			return id, true
+		}
+	}
+	hidden := make([]string, 0, len(s.allModels))
+	for id := range s.allModels {
+		if !slices.Contains(s.visibleOrder, id) {
+			hidden = append(hidden, id)
+		}
+	}
+	slices.Sort(hidden)
+	for _, id := range hidden {
+		m := s.allModels[id]
+		if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
+			return id, true
+		}
+	}
+	return want, false
+}
+
 func (s *codexSession) resolveRequestedModel(want string) string {
 	if want == "" {
 		return ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if m, ok := s.allModels[want]; ok {
-		return m.ID
-	}
-	norm := normalizeIdent(want)
-	for id, m := range s.allModels {
-		if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
-			return id
-		}
-	}
+	resolved, _ := s.resolveModelLocked(want)
 	// Allow custom/unlisted models (e.g., custom model_provider) through to
 	// thread/start so Codex itself validates them (Plan 054 § C4).
-	return want
+	return resolved
 }
 
 func (s *codexSession) defaultCatalogModel() string {
@@ -860,6 +952,13 @@ func (s *codexSession) applyStartSettings(modelID, currentEffort string) (string
 // Snapshot.Config (effort option), and bumps CatalogRevision. s.mu is held.
 func (s *codexSession) rebuildCatalogAndConfigLocked() {
 	curModel := s.snap.CurrentModel
+	// Normalize active effort against the active model BEFORE computing
+	// SwitchEffort so a stale restored effort never leaks into picker previews.
+	var cfg []ConfigOption
+	if opt := s.buildEffortOptionLocked(curModel, s.currentEffort); opt != nil {
+		cfg = append(cfg, *opt)
+		s.currentEffort = opt.Current
+	}
 	curEffort := s.currentEffort
 
 	ids := make([]string, 0, len(s.visibleOrder)+1)
@@ -892,12 +991,6 @@ func (s *codexSession) rebuildCatalogAndConfigLocked() {
 	s.snap.Models = bounded
 	s.catalogRev++
 	s.snap.CatalogRevision = s.catalogRev
-
-	var cfg []ConfigOption
-	if opt := s.buildEffortOptionLocked(curModel, curEffort); opt != nil {
-		cfg = append(cfg, *opt)
-		s.currentEffort = opt.Current
-	}
 	s.snap.Config = cfg
 }
 
@@ -1008,7 +1101,12 @@ func (s *codexSession) Begin(text string) func(ctx context.Context) (Result, err
 		s.mu.Unlock()
 		return func(context.Context) (Result, error) { return Result{}, codexrpc.ErrClosed }
 	}
-	if !s.started || s.client == nil {
+	if s.transportDead {
+		err := s.transportErrLocked()
+		s.mu.Unlock()
+		return func(context.Context) (Result, error) { return Result{}, err }
+	}
+	if !s.ready || s.client == nil {
 		s.mu.Unlock()
 		return func(context.Context) (Result, error) { return Result{}, fmt.Errorf("agent: session not started") }
 	}
@@ -1037,21 +1135,102 @@ func (s *codexSession) Begin(text string) func(ctx context.Context) (Result, err
 	}
 }
 
-func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text string) (Result, error) {
-	// Parse Craze's image attachment envelope off-lock (Plan 054 § D1).
-	rest, ims, problems := promptImagesOf(text, true)
-	noteAttachments(s.log, "prompt", problems)
-	// Codex uses localImage paths directly; drop raw image bytes immediately.
-	ims.dropData()
+func codexImageExt(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ".img"
+	}
+}
 
-	promptText := PlacePathText(rest, ims.fallbacks)
+// stageCodexImageCopy writes already-validated attachment bytes into a
+// host-owned 0700 temp directory with 0400 mode so Codex opens the exact
+// validated image rather than re-opening the original path (M8 TOCTOU guard).
+func (s *codexSession) stageCodexImageCopy(a Attachment) (string, error) {
+	s.mu.Lock()
+	dir := s.imgDir
+	if dir == "" {
+		d, err := os.MkdirTemp("", "craze-codex-img-*")
+		if err != nil {
+			s.mu.Unlock()
+			return "", err
+		}
+		_ = os.Chmod(d, 0o700)
+		s.imgDir = d
+		dir = d
+	}
+	s.mu.Unlock()
+
+	f, err := os.CreateTemp(dir, "img-*"+codexImageExt(a.MIME))
+	if err != nil {
+		return "", err
+	}
+	p := f.Name()
+	if _, err := f.Write(a.Data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(p)
+		return "", err
+	}
+	if err := f.Chmod(0o400); err != nil {
+		_ = f.Close()
+		_ = os.Remove(p)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(p)
+		return "", err
+	}
+	return p, nil
+}
+
+func removeTempFiles(paths []string) {
+	for _, p := range paths {
+		if p != "" {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text string) (Result, error) {
+	// Parse Craze's image attachment envelope off-lock (Plan 054 § D1) and stage
+	// immutable host-owned copies of validated bytes before handing paths to Codex.
+	rest, ims, problems := promptImagesOf(text, true)
+	var (
+		imgInputs  []codexrpc.UserInput
+		tempFiles  []string
+		extraFails []string
+	)
+	for _, a := range ims.atts {
+		if len(a.Data) > 0 {
+			copyPath, err := s.stageCodexImageCopy(a)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("image #%d stage failed: %v", a.N, err))
+				extraFails = append(extraFails, attachmentPathText(a.N, a.Path, "could not stage image copy"))
+				continue
+			}
+			tempFiles = append(tempFiles, copyPath)
+			imgInputs = append(imgInputs, codexrpc.UserInput{Type: "localImage", Path: copyPath})
+		} else if a.Path != "" {
+			imgInputs = append(imgInputs, codexrpc.UserInput{Type: "localImage", Path: a.Path})
+		}
+	}
+	ims.dropData()
+	noteAttachments(s.log, "prompt", problems)
+
+	fallbacks := append(append([]string(nil), ims.fallbacks...), extraFails...)
+	promptText := PlacePathText(rest, fallbacks)
 	var inputs []codexrpc.UserInput
 	if promptText != "" {
 		inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: promptText})
 	}
-	for _, a := range ims.atts {
-		inputs = append(inputs, codexrpc.UserInput{Type: "localImage", Path: a.Path})
-	}
+	inputs = append(inputs, imgInputs...)
 	if len(inputs) == 0 {
 		inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: text})
 	}
@@ -1062,31 +1241,49 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 	if s.closed {
 		s.clearTurnLocked(turn)
 		s.mu.Unlock()
+		removeTempFiles(tempFiles)
 		s.asks.EndTurn(token)
 		return Result{}, codexrpc.ErrClosed
+	}
+	if s.transportDead {
+		err := s.transportErrLocked()
+		s.clearTurnLocked(turn)
+		s.mu.Unlock()
+		removeTempFiles(tempFiles)
+		s.asks.EndTurn(token)
+		return Result{}, err
 	}
 	if turn.phase == codexPhaseSettled || turn.cancelPending {
 		s.clearTurnLocked(turn)
 		s.mu.Unlock()
+		removeTempFiles(tempFiles)
 		s.asks.EndTurn(token)
 		return Result{}, ErrPromptCancelled
 	}
 	if err := ctx.Err(); err != nil {
 		s.clearTurnLocked(turn)
 		s.mu.Unlock()
+		removeTempFiles(tempFiles)
 		s.asks.EndTurn(token)
 		return Result{}, err
 	}
-	turn.token = token
-	turn.phase = codexPhaseSent
-	client := s.client
-	threadID := s.threadID
+	// Transition to sent right before writing turn/start, capturing the turn's
+	// immutable mode, model, and approvalPolicy so mid-turn SetMode/SetModel
+	// changes cannot affect the running turn (H1, M10).
 	mode := s.snap.CurrentMode
 	model := s.snap.CurrentModel
 	effort := s.currentEffort
 	sbPolicy := s.turnSandboxForModeLocked(mode)
 	apPolicy := s.approvalPolicyForMode(mode)
 	collabMode := s.collaborationModeLocked(mode, model, effort)
+	turn.token = token
+	turn.mode = mode
+	turn.model = model
+	turn.approvalPolicy = apPolicy
+	turn.tempFiles = tempFiles
+	turn.phase = codexPhaseSent
+	client := s.client
+	threadID := s.threadID
 	s.mu.Unlock()
 
 	params := codexrpc.TurnStartParams{
@@ -1100,10 +1297,58 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 		Summary:           "auto",
 	}
 
-	res, err := client.TurnStart(ctx, params)
-	if err != nil {
-		// Settle open tools/asks cleanly and emit EventError if the turn failed.
-		settledErr := s.classifyRPCStartError(err)
+	// Execute turn/start under the session lifetime context (NOT prompt caller
+	// ctx) so caller cancellation while turn/start is in flight does not abandon
+	// an already-written request before its turnID is known and interrupted (H2).
+	type startReply struct {
+		res *codexrpc.TurnStartResult
+		err error
+	}
+	startCh := make(chan startReply, 1)
+	go func() {
+		r, e := client.TurnStart(s.lifeCtx, params)
+		startCh <- startReply{res: r, err: e}
+	}()
+
+	var (
+		reply     startReply
+		gotReply  bool
+		callerCtx = ctx.Done()
+	)
+	for !gotReply {
+		select {
+		case reply = <-startCh:
+			gotReply = true
+		case <-turn.done:
+			// Already settled (e.g. turn/completed arrived before reply or transport died).
+			return s.turnResult(turn)
+		case <-callerCtx:
+			callerCtx = nil
+			// Latch cancel and start bounded grace wait; do NOT drop pending start.
+			s.latchCancelAndUnblockAsks(turn)
+			go s.enforceCancelGrace(turn, client, threadID, ctx.Err())
+		case <-s.closingCh:
+			return s.settleTurn(turn, "", codexrpc.ErrClosed, true)
+		}
+	}
+
+	if reply.err != nil {
+		// If the transport died, wait for ordered notifications already buffered
+		// on stdout to drain first so an already-read turn/completed wins (H4).
+		if errors.Is(reply.err, codexrpc.ErrClosed) || errors.Is(reply.err, codexrpc.ErrAgentExited) {
+			select {
+			case <-client.NotifyDone():
+			case <-s.closingCh:
+			}
+			s.mu.Lock()
+			settled := turn.settling || turn.phase == codexPhaseSettled
+			s.mu.Unlock()
+			if settled {
+				<-turn.done
+				return s.turnResult(turn)
+			}
+		}
+		settledErr := s.classifyRPCStartError(reply.err)
 		return s.settleTurn(turn, "", settledErr, true)
 	}
 
@@ -1111,10 +1356,10 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 	var needInterruptID string
 	var earlyTurn *codexrpc.Turn
 	s.mu.Lock()
-	if turn.phase != codexPhaseSettled {
-		if res != nil && res.Turn.ID != "" {
+	if !turn.settling && turn.phase != codexPhaseSettled {
+		if reply.res != nil && reply.res.Turn.ID != "" {
 			if turn.turnID == "" {
-				turn.turnID = res.Turn.ID
+				turn.turnID = reply.res.Turn.ID
 			}
 			turn.phase = codexPhaseIdentified
 			if ec, ok := s.earlyCompleted[turn.turnID]; ok {
@@ -1133,38 +1378,35 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 		s.finishTurnFromWire(turn, *earlyTurn)
 	} else if needInterruptID != "" {
 		go func() {
-			iCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			iCtx, cancel := context.WithTimeout(s.lifeCtx, codexCancelFallbackGrace)
 			defer cancel()
 			_ = client.TurnInterrupt(iCtx, threadID, needInterruptID)
 		}()
 	}
 
 	// Wait for unified settlement, caller context cancellation, or session close.
-	select {
-	case <-turn.done:
-		return s.turnResult(turn)
-	case <-ctx.Done():
-		// Caller cancelled/timed out: interrupt Codex turn best-effort, then settle.
-		s.interruptTurnBestEffort(turn, client, threadID)
+	for {
 		select {
 		case <-turn.done:
 			return s.turnResult(turn)
-		case <-time.After(codexCancelFallbackGrace):
-			return s.settleTurn(turn, "", ctx.Err(), true)
-		case <-s.done:
+		case <-callerCtx:
+			callerCtx = nil
+			s.latchCancelAndUnblockAsks(turn)
+			go s.enforceCancelGrace(turn, client, threadID, ctx.Err())
+		case <-s.closingCh:
 			return s.settleTurn(turn, "", codexrpc.ErrClosed, true)
 		}
-	case <-s.done:
-		return s.settleTurn(turn, "", s.transportErrOrClosed(), true)
 	}
 }
 
-func (s *codexSession) interruptTurnBestEffort(turn *codexTurnState, client *codexrpc.Client, threadID string) {
+func (s *codexSession) latchCancelAndUnblockAsks(turn *codexTurnState) {
 	s.mu.Lock()
 	tok := turn.token
 	turn.cancelPending = true
 	tid := turn.turnID
-	sendNow := tid != "" && !turn.interruptSent && turn.phase != codexPhaseSettled
+	client := s.client
+	threadID := s.threadID
+	sendNow := tid != "" && !turn.interruptSent && !turn.settling && turn.phase != codexPhaseSettled
 	if sendNow {
 		turn.interruptSent = true
 	}
@@ -1173,9 +1415,35 @@ func (s *codexSession) interruptTurnBestEffort(turn *codexTurnState, client *cod
 		s.asks.CancelTurn(tok)
 	}
 	if sendNow && client != nil {
-		iCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = client.TurnInterrupt(iCtx, threadID, tid)
+		go func() {
+			iCtx, cancel := context.WithTimeout(s.lifeCtx, codexCancelFallbackGrace)
+			defer cancel()
+			_ = client.TurnInterrupt(iCtx, threadID, tid)
+		}()
+	}
+}
+
+// enforceCancelGrace bounds how long a caller-cancelled prompt waits for Codex
+// to settle the interrupted turn. If Codex fails to settle within the grace
+// window, it aborts the hung transport rather than releasing the slot while
+// Codex still owns a live turn (H2).
+func (s *codexSession) enforceCancelGrace(turn *codexTurnState, client *codexrpc.Client, _ string, cause error) {
+	t := time.NewTimer(codexCancelFallbackGrace)
+	defer t.Stop()
+	select {
+	case <-turn.done:
+		return
+	case <-s.closingCh:
+		return
+	case <-t.C:
+		if client != nil {
+			client.CloseAsync()
+		}
+		err := cause
+		if err == nil {
+			err = newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn settlement")
+		}
+		_, _ = s.settleTurn(turn, "", err, true)
 	}
 }
 
@@ -1186,6 +1454,27 @@ func (s *codexSession) clearTurnLocked(turn *codexTurnState) {
 	}
 	if s.activeTurn == turn {
 		s.activeTurn = nil
+	}
+}
+
+func (s *codexSession) recordSettledTurnLocked(turnID string) {
+	if turnID == "" {
+		return
+	}
+	delete(s.earlyCompleted, turnID)
+	if s.settledTurns == nil {
+		s.settledTurns = make(map[string]bool)
+	}
+	if s.settledTurns[turnID] {
+		return
+	}
+	s.settledTurns[turnID] = true
+	s.settledTurnOrder = append(s.settledTurnOrder, turnID)
+	const maxSettled = 256
+	if len(s.settledTurnOrder) > maxSettled {
+		oldest := s.settledTurnOrder[0]
+		s.settledTurnOrder = s.settledTurnOrder[1:]
+		delete(s.settledTurns, oldest)
 	}
 }
 
@@ -1201,14 +1490,18 @@ func (s *codexSession) turnResult(turn *codexTurnState) (Result, error) {
 }
 
 // settleTurn is the single unified settlement path for completed, interrupted,
-// failed, and transport-crash endings (Plan 054 § D1). It retires in-flight
-// tool rows and subagent rows BEFORE emitting the terminal event and releasing
-// the prompt slot.
+// failed, and transport-crash endings (Plan 054 § D1, H3).
+//
+// Invariant: the active turn slot stays occupied and turn.done stays OPEN until
+// every retired tool row, flushed outbox delta (usage/settings), ask ending,
+// and terminal EventDone/EventError has been committed to EventLog.
 func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termErr error, releaseSlot bool) (Result, error) {
 	var (
-		toolEvs []Event
-		tok     TurnToken
-		won     bool
+		toolEvs   []Event
+		tempFiles []string
+		tok       TurnToken
+		won       bool
+		closing   bool
 	)
 	toolFinal := toolCompleted
 	if termErr != nil {
@@ -1218,52 +1511,79 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 	}
 
 	s.mu.Lock()
-	if turn.phase != codexPhaseSettled {
-		won = true
+	if turn.settling || turn.phase == codexPhaseSettled {
+		done := turn.done
+		s.mu.Unlock()
+		<-done
+		return s.turnResult(turn)
+	}
+	won = true
+	turn.settling = true
+	turn.stopReason = stopReason
+	turn.failedErr = termErr
+	tok = turn.token
+	tempFiles = turn.tempFiles
+	turn.tempFiles = nil
+	closing = s.closed
+	// Release all live command streaming buffers so interrupted commands never
+	// retain memory across turns (M14).
+	clear(s.cmdBuffers)
+	// Retire any open in-flight tool rows before terminal event publication.
+	for _, id := range s.toolOrder {
+		row, ok := s.tools[id]
+		if !ok || !toolStatusInFlight(row.Status) {
+			continue
+		}
+		row.Status = toolFinal
+		row.At = s.Now()
+		s.tools[id] = row
+		ct := cloneTool(row)
+		toolEvs = append(toolEvs, Event{Type: EventTool, Tool: &ct})
+	}
+	s.mu.Unlock()
+
+	if won {
+		removeTempFiles(tempFiles)
+		pubCtx := context.Background()
+		var pubCancel context.CancelFunc
+		if closing && !s.opts.NoPrimary {
+			// Bound publication on explicit Close only when a primary channel
+			// exists and might be unread, so Close never deadlocks while still
+			// delivering terminal records cleanly on detached hosts (NoPrimary).
+			pubCtx, pubCancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+		}
+		for _, ev := range toolEvs {
+			s.emitCtx(pubCtx, ev)
+		}
+		// Flush queued outbox deltas (usage, settings) BEFORE terminal event so
+		// direct Publish never overtakes them (H3).
+		_ = s.log.Flush(pubCtx, s.done)
+		if !tok.NoTurn() {
+			s.asks.EndTurn(tok)
+		}
+		if termErr != nil {
+			s.emitCtx(pubCtx, Event{Type: EventError, Err: termErr})
+		} else {
+			s.emitCtx(pubCtx, Event{Type: EventDone, StopReason: stopReason})
+		}
+		if pubCancel != nil {
+			pubCancel()
+		}
+
+		// Commit slot release and signal waiters ONLY AFTER terminal records are
+		// published to EventLog (H3).
+		s.mu.Lock()
 		turn.phase = codexPhaseSettled
-		turn.stopReason = stopReason
-		turn.failedErr = termErr
-		tok = turn.token
-		// Retire any open in-flight tool rows before releasing the slot.
-		for _, id := range s.toolOrder {
-			row, ok := s.tools[id]
-			if !ok || !toolStatusInFlight(row.Status) {
-				continue
-			}
-			row.Status = toolFinal
-			row.At = s.Now()
-			s.tools[id] = row
-			ct := cloneTool(row)
-			toolEvs = append(toolEvs, Event{Type: EventTool, Tool: &ct})
+		if turn.turnID != "" {
+			s.recordSettledTurnLocked(turn.turnID)
 		}
 		if releaseSlot && s.activeTurn == turn {
 			s.activeTurn = nil
 		}
 		close(turn.done)
-	} else if releaseSlot && s.activeTurn == turn {
-		s.activeTurn = nil
+		s.mu.Unlock()
 	}
-	resErr := turn.failedErr
-	resSR := turn.stopReason
-	s.mu.Unlock()
-
-	if won {
-		for _, ev := range toolEvs {
-			s.emit(ev)
-		}
-		if !tok.NoTurn() {
-			s.asks.EndTurn(tok)
-		}
-		if termErr != nil {
-			s.emit(Event{Type: EventError, Err: termErr})
-		} else {
-			s.emit(Event{Type: EventDone, StopReason: stopReason})
-		}
-	}
-	if resErr != nil {
-		return Result{}, resErr
-	}
-	return Result{StopReason: resSR}, nil
+	return s.turnResult(turn)
 }
 
 func (s *codexSession) finishTurnFromWire(turn *codexTurnState, wireTurn codexrpc.Turn) {
@@ -1302,13 +1622,18 @@ func (s *codexSession) turnErrorFromWire(te *codexrpc.TurnError) error {
 }
 
 // Cancel stops whatever prompt of craze's own is running or claimed, following
-// Plan 054 § D1's state machine:
+// Plan 054 § D1 and H2:
 //  1. Unblock parked asks via AskRegistry.CancelTurn immediately.
 //  2. If claimed (pre-wire): withdraw immediately (Withdrew: true, Settled: true).
-//  3. If sent (waiting for turnID): latch cancelPending so turn/interrupt fires
-//     the moment turnID arrives.
-//  4. If identified: send turn/interrupt and wait bounded by ctx / s.done / grace.
+//  3. If sent or identified: latch cancelPending, send turn/interrupt once turnID
+//     is known under a single deadline covering BOTH the interrupt RPC and the
+//     settlement wait. Never report fake StopCancelled success if Codex fails to
+//     settle within the grace window; instead abort the hung transport and report
+//     an error.
 func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.Lock()
 	turn := s.activeTurn
 	client := s.client
@@ -1319,7 +1644,7 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 		return CancelOutcome{Settled: true}, nil
 	}
 	tok := turn.token
-	if turn.phase == codexPhaseClaimed {
+	if turn.phase == codexPhaseClaimed && !turn.settling {
 		turn.cancelPending = true
 		turn.phase = codexPhaseSettled
 		close(turn.done)
@@ -1332,7 +1657,7 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	}
 	turn.cancelPending = true
 	tid := turn.turnID
-	sendNow := tid != "" && !turn.interruptSent && turn.phase != codexPhaseSettled
+	sendNow := tid != "" && !turn.interruptSent && !turn.settling && turn.phase != codexPhaseSettled
 	if sendNow {
 		turn.interruptSent = true
 	}
@@ -1345,27 +1670,60 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 		s.asks.CancelTurn(TurnToken{})
 	}
 
+	// Single bounded deadline covering BOTH TurnInterrupt RPC and turn settlement.
+	graceCtx, graceCancel := context.WithTimeout(ctx, codexCancelFallbackGrace)
+	defer graceCancel()
+
 	wrote := false
 	if sendNow && client != nil {
-		if err := client.TurnInterrupt(ctx, threadID, tid); err == nil {
-			wrote = true
-		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		type intRes struct{ err error }
+		ch := make(chan intRes, 1)
+		go func() {
+			ch <- intRes{err: client.TurnInterrupt(graceCtx, threadID, tid)}
+		}()
+		select {
+		case r := <-ch:
+			if r.err == nil {
+				wrote = true
+			} else if ctx.Err() != nil {
+				return CancelOutcome{Wrote: false, Settled: false}, ctx.Err()
+			}
+		case <-done:
+			return CancelOutcome{Wrote: true, Settled: true}, nil
+		case <-graceCtx.Done():
+			if ctx.Err() != nil {
+				return CancelOutcome{Wrote: false, Settled: false}, ctx.Err()
+			}
+			// Grace expired while turn/interrupt hung: abort hung transport and
+			// report failure rather than pretending cancellation succeeded.
+			client.CloseAsync()
+			err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn/interrupt")
+			_, _ = s.settleTurn(turn, "", err, true)
 			return CancelOutcome{Wrote: false, Settled: false}, err
+		case <-s.closingCh:
+			<-done
+			return CancelOutcome{Wrote: wrote, Settled: true}, nil
 		}
 	}
 
-	fallback := time.NewTimer(codexCancelFallbackGrace)
-	defer fallback.Stop()
 	select {
 	case <-done:
 		return CancelOutcome{Wrote: wrote, Settled: true}, nil
-	case <-ctx.Done():
-		return CancelOutcome{Wrote: wrote, Settled: false}, ctx.Err()
-	case <-s.done:
-		return CancelOutcome{Wrote: wrote, Settled: true}, nil
-	case <-fallback.C:
-		// Bounded fallback: never hang forever if codex never emits turn/completed.
-		_, _ = s.settleTurn(turn, acp.StopCancelled, nil, true)
+	case <-graceCtx.Done():
+		if ctx.Err() != nil {
+			return CancelOutcome{Wrote: wrote, Settled: false}, ctx.Err()
+		}
+		// Grace expired without confirmed turn/completed: abort the hung
+		// transport so Codex cannot keep running a turn on this connection,
+		// and return a real failure error (H2).
+		if client != nil {
+			client.CloseAsync()
+		}
+		err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn settlement")
+		_, _ = s.settleTurn(turn, "", err, true)
+		return CancelOutcome{Wrote: wrote, Settled: false}, err
+	case <-s.closingCh:
+		<-done
 		return CancelOutcome{Wrote: wrote, Settled: true}, nil
 	}
 }
@@ -1417,7 +1775,7 @@ func (s *codexSession) SetModel(_ context.Context, cause, modelID string) (SetOu
 		s.mu.Unlock()
 		return SetOutcome{}, codexrpc.ErrClosed
 	}
-	if !s.started {
+	if !s.ready {
 		s.mu.Unlock()
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
@@ -1425,23 +1783,10 @@ func (s *codexSession) SetModel(_ context.Context, cause, modelID string) (SetOu
 		s.mu.Unlock()
 		return SetOutcome{}, ErrSetUnavailable
 	}
-	resolved := want
-	if m, ok := s.allModels[want]; ok {
-		resolved = m.ID
-	} else {
-		norm := normalizeIdent(want)
-		for id, m := range s.allModels {
-			if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
-				resolved = id
-				break
-			}
-		}
-	}
-	if len(s.allModels) > 0 {
-		if _, ok := s.allModels[resolved]; !ok {
-			s.mu.Unlock()
-			return SetOutcome{}, newCodexErr(errkind.ModelNotFound, "unknown model %q", sanitizeLine(want))
-		}
+	resolved, ok := s.resolveModelLocked(want)
+	if len(s.allModels) > 0 && !ok {
+		s.mu.Unlock()
+		return SetOutcome{}, newCodexErr(errkind.ModelNotFound, "unknown model %q", sanitizeLine(want))
 	}
 	s.snap.CurrentModel = resolved
 	efforts, def := s.effortsForModelLocked(resolved)
@@ -1479,7 +1824,7 @@ func (s *codexSession) SetMode(_ context.Context, cause, modeID string) (SetOutc
 		s.mu.Unlock()
 		return SetOutcome{}, codexrpc.ErrClosed
 	}
-	if !s.started {
+	if !s.ready {
 		s.mu.Unlock()
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
@@ -1507,7 +1852,7 @@ func (s *codexSession) SetConfig(_ context.Context, cause, id, value, forModel s
 		s.mu.Unlock()
 		return SetOutcome{}, codexrpc.ErrClosed
 	}
-	if !s.started {
+	if !s.ready {
 		s.mu.Unlock()
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
@@ -1568,17 +1913,53 @@ func (s *codexSession) SetTitle(cause, title string) error {
 	s.titlePinned = true
 	t := clean
 	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &t})
-	client := s.client
-	tid := s.threadID
+	shouldSync := s.ready && s.client != nil && s.threadID != "" && clean != ""
+	if shouldSync {
+		s.pendingTitle = clean
+		if !s.titleWorker {
+			s.titleWorker = true
+			go s.runTitleWorker()
+		}
+	}
 	s.mu.Unlock()
-	if client != nil && tid != "" && clean != "" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = client.ThreadNameSet(ctx, tid, clean)
-		}()
+	if shouldSync {
+		select {
+		case s.titleCh <- struct{}{}:
+		default:
+		}
 	}
 	return nil
+}
+
+// runTitleWorker serializes best-effort thread/name/set RPCs so rapid renames
+// coalesce and always persist the latest title in strict order (L3).
+func (s *codexSession) runTitleWorker() {
+	for {
+		select {
+		case <-s.closingCh:
+			return
+		case <-s.titleCh:
+		}
+		for {
+			s.mu.Lock()
+			if s.closed || s.client == nil || s.threadID == "" {
+				s.pendingTitle = ""
+				s.mu.Unlock()
+				return
+			}
+			next := s.pendingTitle
+			s.pendingTitle = ""
+			client := s.client
+			tid := s.threadID
+			s.mu.Unlock()
+			if next == "" {
+				break
+			}
+			ctx, cancel := context.WithTimeout(s.lifeCtx, 5*time.Second)
+			_ = client.ThreadNameSet(ctx, tid, next)
+			cancel()
+		}
+	}
 }
 
 // --- Snapshot & Close / Teardown ---
@@ -1615,17 +1996,34 @@ func (s *codexSession) teardown() {
 		defer close(s.closeDone)
 		s.mu.Lock()
 		s.closed = true
-		close(s.done)
+		close(s.closingCh)
+		s.mu.Unlock()
+
+		// Cancel startup/session lifetime context and wait for any concurrent
+		// Start() to finish spawning and cleaning up its child before closing (H5).
+		s.lifeCancel()
+		s.startWG.Wait()
+
+		s.mu.Lock()
 		client := s.client
 		turn := s.activeTurn
+		imgDir := s.imgDir
+		s.imgDir = ""
 		s.mu.Unlock()
 
 		s.asks.Close()
+		// Settle any active turn BEFORE closing s.done so EventLog.Publish
+		// commits final tool rows and EventError cleanly instead of dropping them (H3).
 		if turn != nil {
 			_, _ = s.settleTurn(turn, "", codexrpc.ErrClosed, true)
 		}
+		close(s.done)
+
 		if client != nil {
 			s.closeErr = client.Close()
+		}
+		if imgDir != "" {
+			_ = os.RemoveAll(imgDir)
 		}
 		if s.tee != nil {
 			s.tee.Flush()
@@ -1636,12 +2034,9 @@ func (s *codexSession) teardown() {
 
 // --- Incoming Notifications, Server Requests & Transport Watch ---
 
-func (s *codexSession) transportErrOrClosed() error {
-	s.mu.Lock()
-	c := s.client
-	s.mu.Unlock()
-	if c != nil {
-		if err := c.Err(); err != nil {
+func (s *codexSession) transportErrLocked() error {
+	if s.client != nil {
+		if err := s.client.Err(); err != nil {
 			return err
 		}
 	}
@@ -1650,6 +2045,18 @@ func (s *codexSession) transportErrOrClosed() error {
 
 func (s *codexSession) watchTransportDone(client *codexrpc.Client) {
 	<-client.Done()
+	// Stop admitting new turns immediately on unexpected transport termination,
+	// then wait for already-read stdout notifications (including final text,
+	// edits, and turn/completed) to drain before settling an active turn (H4).
+	s.mu.Lock()
+	s.transportDead = true
+	s.mu.Unlock()
+
+	select {
+	case <-client.NotifyDone():
+	case <-s.closingCh:
+	}
+
 	err := client.Err()
 	if err == nil {
 		err = codexrpc.ErrClosed
@@ -1730,7 +2137,11 @@ func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
 		isForeign       bool
 	)
 	s.mu.Lock()
-	if s.activeTurn != nil && s.activeTurn.phase != codexPhaseSettled {
+	if s.settledTurns[p.Turn.ID] {
+		s.mu.Unlock()
+		return
+	}
+	if s.activeTurn != nil && !s.activeTurn.settling && s.activeTurn.phase == codexPhaseSent {
 		if s.activeTurn.turnID == "" {
 			s.activeTurn.turnID = p.Turn.ID
 			s.activeTurn.phase = codexPhaseIdentified
@@ -1741,6 +2152,8 @@ func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
 				threadID = s.threadID
 			}
 		}
+	} else if s.activeTurn != nil && s.activeTurn.turnID == p.Turn.ID {
+		// Duplicate turn/started for already-identified active turn: ignore.
 	} else {
 		// Autonomous main-thread turn (Plan 054 § D1).
 		s.foreignTurnID = p.Turn.ID
@@ -1750,7 +2163,7 @@ func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
 
 	if needInterruptID != "" && client != nil {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(s.lifeCtx, codexCancelFallbackGrace)
 			defer cancel()
 			_ = client.TurnInterrupt(ctx, threadID, needInterruptID)
 		}()
@@ -1772,16 +2185,20 @@ func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
 		return
 	}
 	s.mu.Lock()
+	if p.Turn.ID != "" && s.settledTurns[p.Turn.ID] {
+		s.mu.Unlock()
+		return
+	}
 	turn := s.activeTurn
 	foreign := s.foreignTurnID
-	if turn != nil && turn.phase != codexPhaseSettled {
-		if turn.turnID == "" && p.Turn.ID != "" {
-			// turn/completed arrived before turn/start reply: bind and settle now,
-			// also stash in earlyCompleted in case turn/start reply checks it.
+	if turn != nil && !turn.settling && (turn.phase == codexPhaseSent || turn.phase == codexPhaseIdentified) {
+		if turn.phase == codexPhaseSent && turn.turnID == "" && p.Turn.ID != "" {
+			// turn/completed arrived before turn/start reply: bind and settle now.
 			turn.turnID = p.Turn.ID
-			s.earlyCompleted[p.Turn.ID] = p.Turn
+			turn.phase = codexPhaseIdentified
 		}
-		if turn.turnID == p.Turn.ID || p.Turn.ID == "" {
+		if turn.turnID == p.Turn.ID || (p.Turn.ID == "" && turn.phase == codexPhaseIdentified) {
+			delete(s.earlyCompleted, p.Turn.ID)
 			s.mu.Unlock()
 			s.finishTurnFromWire(turn, p.Turn)
 			return
@@ -1789,6 +2206,9 @@ func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
 	}
 	if foreign != "" && (foreign == p.Turn.ID || p.Turn.ID == "") {
 		s.foreignTurnID = ""
+		if p.Turn.ID != "" {
+			s.recordSettledTurnLocked(p.Turn.ID)
+		}
 		s.mu.Unlock()
 		info := &ForeignTurnInfo{
 			ID:        foreign,
@@ -1802,9 +2222,12 @@ func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
 		s.emit(Event{Type: EventForeignTurn, ForeignTurn: info})
 		return
 	}
-	if p.Turn.ID != "" && turn == nil {
-		// Stash briefly in case turn/start is mid-flight.
-		s.earlyCompleted[p.Turn.ID] = p.Turn
+	// Only retain bounded provisional early completion when a turn/start is sent
+	// and awaiting identification (M6).
+	if p.Turn.ID != "" && turn != nil && turn.phase == codexPhaseSent && !turn.settling {
+		if len(s.earlyCompleted) < 64 {
+			s.earlyCompleted[p.Turn.ID] = p.Turn
+		}
 	}
 	s.mu.Unlock()
 }
@@ -1818,8 +2241,31 @@ func (s *codexSession) handleTokenUsageUpdated(raw json.RawMessage) {
 		return
 	}
 	s.mu.Lock()
-	asBaseline := s.activeTurn == nil && s.foreignTurnID == "" && !s.usage.reported
-	s.usage.applyTokenUsage(p.TokenUsage, s.snap.CurrentModel, asBaseline)
+	active := s.activeTurn
+	foreign := s.foreignTurnID
+	model := s.snap.CurrentModel
+	asBaseline := false
+	switch {
+	case active != nil && !active.settling && (active.phase == codexPhaseSent || active.phase == codexPhaseIdentified):
+		if active.model != "" {
+			model = active.model
+		}
+		// If this update carries a TurnID that does not match our identified
+		// active turn (e.g. a late historical token update on resume), treat it
+		// as baseline rather than attributing prior-turn spend to this turn (M10).
+		if p.TurnID != "" && active.turnID != "" && p.TurnID != active.turnID {
+			asBaseline = true
+		} else if p.TurnID != "" && s.settledTurns[p.TurnID] {
+			asBaseline = true
+		}
+	case foreign != "" && (p.TurnID == "" || p.TurnID == foreign):
+		asBaseline = false
+	default:
+		// No live turn in flight (or still in pre-wire claimed): historical or
+		// baseline usage update (M10).
+		asBaseline = true
+	}
+	s.usage.applyTokenUsage(p.TokenUsage, model, asBaseline)
 	s.publishUsageLocked()
 	s.mu.Unlock()
 }
@@ -1844,22 +2290,39 @@ func (s *codexSession) handleErrorNotification(raw json.RawMessage) {
 	if !s.isMainThread(p.ThreadID) {
 		return
 	}
-	info := codexrpc.ClassifyTurnError(&p.Error)
+	s.mu.Lock()
+	if p.TurnID != "" && s.settledTurns[p.TurnID] {
+		s.mu.Unlock()
+		return
+	}
+	var turn *codexTurnState
+	if s.activeTurn != nil && !s.activeTurn.settling && (s.activeTurn.phase == codexPhaseSent || s.activeTurn.phase == codexPhaseIdentified) {
+		if p.TurnID == "" || s.activeTurn.turnID == "" || s.activeTurn.turnID == p.TurnID {
+			turn = s.activeTurn
+		}
+	}
+	foreignMatch := s.foreignTurnID != "" && (p.TurnID == "" || s.foreignTurnID == p.TurnID)
+	client := s.client
+	s.mu.Unlock()
+
+	// Ignore turn-scoped errors that belong to an unknown/stale turn ID (M6).
+	if p.TurnID != "" && turn == nil && !foreignMatch {
+		return
+	}
+
 	if p.WillRetry {
-		// Fast-fail 401 / unauthorized even when willRetry: true (Plan 054 § D5).
-		if info.Kind == errkind.Auth {
+		// Fast-fail non-transient terminal errors (401/auth, explicit usage
+		// limits, contextWindowExceeded) even when willRetry: true (Plan 054 § D5, M13).
+		if codexrpc.IsTerminalEvenWhenWillRetry(&p.Error) {
 			err := s.turnErrorFromWire(&p.Error)
-			s.mu.Lock()
-			turn := s.activeTurn
-			client := s.client
-			s.mu.Unlock()
+			// Abort transport immediately independent of event publication backpressure.
+			if client != nil {
+				client.CloseAsync()
+			}
 			if turn != nil {
 				_, _ = s.settleTurn(turn, "", err, true)
 			} else {
 				s.emit(Event{Type: EventError, Err: err})
-			}
-			if client != nil {
-				client.CloseAsync()
 			}
 			return
 		}
@@ -1874,11 +2337,8 @@ func (s *codexSession) handleErrorNotification(raw json.RawMessage) {
 		return
 	}
 	// Non-retryable error: deduplicate with subsequent turn/completed{status: "failed"}
-	// by settling the active turn once here.
+	// by settling the matching active turn once here.
 	err := s.turnErrorFromWire(&p.Error)
-	s.mu.Lock()
-	turn := s.activeTurn
-	s.mu.Unlock()
 	if turn != nil {
 		_, _ = s.settleTurn(turn, "", err, true)
 		return
@@ -1888,14 +2348,17 @@ func (s *codexSession) handleErrorNotification(raw json.RawMessage) {
 
 // onServerRequest is the M2a baseline server->client request dispatcher
 // (expanded with full AskRegistry approval/question cards in M2b).
-// Enforces the hard read-only invariant in ask/plan mode immediately and
-// returns false for unknown methods so codexrpc sends -32601.
+//
+// In M2a, command and file-change approvals are unconditionally declined (fail
+// closed so mid-turn SetMode changes can never authorize escalation on a
+// running read-only turn — H1), permissions requests receive the typed
+// 0.172.0 empty-permissions denial (M7), and unknown methods return false so
+// codexrpc replies -32601.
 func (s *codexSession) onServerRequest(_ context.Context, msg *codexrpc.Message) bool {
 	if msg.ID == nil {
 		return false
 	}
 	s.mu.Lock()
-	mode := s.snap.CurrentMode
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
@@ -1903,19 +2366,13 @@ func (s *codexSession) onServerRequest(_ context.Context, msg *codexrpc.Message)
 	}
 	switch msg.Method {
 	case codexrpc.RequestCommandApproval, codexrpc.RequestFileChangeApproval:
-		// Hard read-only invariant: ALWAYS deny in ask/plan mode.
-		if s.provider().ModeKind(mode) == ModeReadOnly || s.provider().ModeKind(mode) == ModePlan {
-			_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
-			return true
-		}
-		if EffectiveApproval(s.opts).Permission == ApprovalAllow {
-			_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "accept"})
-			return true
-		}
 		_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
 		return true
 	case codexrpc.RequestPermissionsApproval:
-		_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_ = client.Reply(*msg.ID, codexrpc.PermissionsApprovalReply{
+			Permissions: map[string]any{},
+			Scope:       "turn",
+		})
 		return true
 	case codexrpc.RequestMCPElicitation:
 		_ = client.Reply(*msg.ID, map[string]any{"action": "decline"})

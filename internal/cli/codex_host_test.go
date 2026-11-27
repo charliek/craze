@@ -76,10 +76,40 @@ func TestCodexDetachedNewWaitExitAfterTurn(t *testing.T) {
 				files = append(files, s)
 			}
 		}
-		if !slices.Contains(files, "added.txt") || !slices.Contains(files, "updated.txt") || !slices.Contains(files, "moved.txt") {
-			t.Fatalf("JSON files = %v, want added.txt, updated.txt, moved.txt (full result: %v)", files, m)
+		if !slices.Equal(files, []string{"added.txt", "updated.txt", "moved.txt"}) {
+			t.Fatalf("JSON files = %v, want exact [added.txt updated.txt moved.txt] (full result: %v)", files, m)
 		}
 		waitFor(t, "codex edits host to stop", func() bool {
+			hosts, err := rundir.Hosts(env)
+			return err == nil && len(hosts) == 0
+		})
+	})
+
+	t.Run("CODEX_THREAD_ID self-delegation refusal and --allow-same-provider override", func(t *testing.T) {
+		env, ws, _ := codexHostHome(t, "codex-basic")
+		spawnAsChild(t, nil)
+		spawnBounds(t, serveStep, serveStep, serveStep)
+		t.Cleanup(func() { stopEveryHost(t, env) })
+		t.Setenv(codexThreadEnv, "thr-parent-123")
+
+		_, stderr, code := executeErr([]string{
+			"new", "--wait", "--json", "--exit-after-turn",
+			"--provider", "codex", "-C", ws, "should be refused",
+		})
+		if code != 2 || !strings.Contains(stderr, "already runs on codex") || !strings.Contains(stderr, "--allow-same-provider") {
+			t.Fatalf("expected exit 2 self-delegation refusal, got code=%d stderr=%q", code, stderr)
+		}
+
+		stdout, stderr, code := executeErr([]string{
+			"new", "--wait", "--json", "--exit-after-turn", "--allow-same-provider",
+			"--provider", "codex", "-C", ws, "allowed override",
+		})
+		m := decodeResult(t, stdout)
+		msg, _ := m["message"].(string)
+		if code != 0 || m["status"] != "completed" || !strings.Contains(msg, "allowed override") {
+			t.Fatalf("with --allow-same-provider: code=%d result=%v stderr=%q", code, m, stderr)
+		}
+		waitFor(t, "codex host after override to stop", func() bool {
 			hosts, err := rundir.Hosts(env)
 			return err == nil && len(hosts) == 0
 		})

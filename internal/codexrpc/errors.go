@@ -197,6 +197,28 @@ func ClassifyTurnError(te *TurnError) errkind.Info {
 	}
 }
 
+// IsTerminalEvenWhenWillRetry reports whether te is a non-transient error that
+// should fast-fail even when Codex marks `error{willRetry: true}`: auth 401 /
+// unauthorized, explicit quota exhaustion (usageLimitExceeded,
+// apiKeySpendLimitExceeded, sessionBudgetExceeded), or contextWindowExceeded.
+// Transient rateLimitExceeded / HTTP 429 retries remain retryable warnings.
+func IsTerminalEvenWhenWillRetry(te *TurnError) bool {
+	if te == nil {
+		return false
+	}
+	info := ClassifyTurnError(te)
+	if info.Kind == errkind.Auth || info.Kind == errkind.ContextTooLarge {
+		return true
+	}
+	if te.CodexErrorInfo != nil {
+		switch strings.ToLower(strings.TrimSpace(te.CodexErrorInfo.Kind)) {
+		case "usagelimitexceeded", "apikeyspendlimitexceeded", "sessionbudgetexceeded":
+			return true
+		}
+	}
+	return false
+}
+
 // IsAuthMessage reports whether msg indicates an authentication failure.
 func IsAuthMessage(msg string) bool {
 	l := strings.ToLower(msg)

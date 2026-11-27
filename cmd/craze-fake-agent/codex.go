@@ -248,6 +248,10 @@ func (s *codexServer) handleIncoming(msg codexFrame) {
 			})
 		}
 	case "account/rateLimits/read":
+		if s.script == "codex-slow-ratelimits" {
+			// Deliberately never reply to test independent rate-limit startup deadline.
+			return
+		}
 		if s.script == "codex-apikey" || s.script == "codex-custom-provider" || s.script == "codex-loggedout" {
 			s.replyErr(msg.ID, -32600, "codex account authentication required to read rate limits")
 			return
@@ -265,6 +269,37 @@ func (s *codexServer) handleIncoming(msg codexFrame) {
 			},
 		})
 	case "model/list":
+		var mp struct {
+			Cursor string `json:"cursor"`
+		}
+		_ = json.Unmarshal(msg.Params, &mp)
+		if s.script == "codex-model-loop-cursor" {
+			s.reply(msg.ID, map[string]any{
+				"data": []map[string]any{
+					{"id": "gpt-6.2-sol", "model": "gpt-6.2-sol", "displayName": "gpt-6.2-sol", "isDefault": true, "defaultReasoningEffort": "low"},
+				},
+				"nextCursor": "repeat-cur",
+			})
+			return
+		}
+		if s.script == "codex-model-multipage" {
+			if mp.Cursor == "" {
+				s.reply(msg.ID, map[string]any{
+					"data": []map[string]any{
+						{"id": "gpt-6.2-sol", "model": "gpt-6.2-sol", "displayName": "gpt-6.2-sol", "isDefault": true, "defaultReasoningEffort": "low", "supportedReasoningEfforts": []map[string]any{{"reasoningEffort": "low"}, {"reasoningEffort": "high"}}},
+					},
+					"nextCursor": "page-2",
+				})
+				return
+			}
+			s.reply(msg.ID, map[string]any{
+				"data": []map[string]any{
+					{"id": "gpt-6.2-astra", "model": "gpt-6.2-astra", "displayName": "gpt-6.2-astra", "isDefault": false, "defaultReasoningEffort": "medium", "supportedReasoningEfforts": []map[string]any{{"reasoningEffort": "medium"}}},
+				},
+				"nextCursor": nil,
+			})
+			return
+		}
 		s.reply(msg.ID, map[string]any{
 			"data": []map[string]any{
 				{
@@ -506,6 +541,11 @@ func (s *codexServer) handleIncoming(msg codexFrame) {
 	case "turn/start":
 		s.handleTurnStart(msg)
 	case "turn/interrupt":
+		if s.script == "codex-hang-interrupt" {
+			// Intentionally drop turn/interrupt without replying to exercise
+			// bounded cancel timeout handling.
+			return
+		}
 		var p struct {
 			ThreadID string `json:"threadId"`
 			TurnID   string `json:"turnId"`
@@ -740,6 +780,88 @@ func (s *codexServer) runTurn(threadID, turnID, cwd, promptText string, skills, 
 		})
 		return
 
+	case "codex-retry-usagelimit":
+		s.notify("error", map[string]any{
+			"threadId":  threadID,
+			"turnId":    turnID,
+			"willRetry": true,
+			"error": map[string]any{
+				"message":        "usage limit reached",
+				"codexErrorInfo": "usageLimitExceeded",
+			},
+		})
+		return
+
+	case "codex-retry-context":
+		s.notify("error", map[string]any{
+			"threadId":  threadID,
+			"turnId":    turnID,
+			"willRetry": true,
+			"error": map[string]any{
+				"message":        "context window exceeded",
+				"codexErrorInfo": "contextWindowExceeded",
+			},
+		})
+		return
+
+	case "codex-exit-zero-midturn":
+		s.emitMessage(threadID, turnID, "msg-"+turnID, "partial before exit 0")
+		os.Exit(0)
+		return
+
+	case "codex-exit-nonzero-midturn":
+		_, _ = fmt.Fprintln(os.Stderr, "fatal crash midturn")
+		os.Exit(7)
+		return
+
+	case "codex-complete-then-exit":
+		pDone := filepath.Join(cwd, "completed-before-eof.txt")
+		s.notify("item/completed", map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+			"item": map[string]any{
+				"type":   "fileChange",
+				"id":     "fc-eof",
+				"status": "completed",
+				"changes": []map[string]any{
+					{"path": pDone, "kind": map[string]any{"type": "add"}, "diff": "final\n"},
+				},
+			},
+		})
+		s.emitMessage(threadID, turnID, "msg-"+turnID, "finished right before exit")
+		s.notify("turn/completed", map[string]any{
+			"threadId": threadID,
+			"turn":     map[string]any{"id": turnID, "status": "completed"},
+		})
+		os.Exit(0)
+		return
+
+	case "codex-permissions-req":
+		resp, _, cancelled := s.sendRequest(cancelCh, "item/permissions/requestApproval", map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+			"itemId":   "perm-1",
+			"reason":   "need extra permissions",
+		})
+		if cancelled {
+			s.notify("turn/completed", map[string]any{
+				"threadId": threadID,
+				"turn":     map[string]any{"id": turnID, "status": "interrupted"},
+			})
+			return
+		}
+		s.emitMessage(threadID, turnID, "msg-"+turnID, "perm_reply="+string(resp.Result))
+		s.notify("turn/completed", map[string]any{
+			"threadId": threadID,
+			"turn":     map[string]any{"id": turnID, "status": "completed"},
+		})
+		return
+
+	case "codex-hang-interrupt":
+		// Ignore turn/interrupt completely (never emit turn/completed) to test
+		// bounded cancel failure.
+		select {}
+
 	case "codex-hang":
 		s.notify("item/started", map[string]any{
 			"threadId": threadID,
@@ -950,7 +1072,7 @@ func (s *codexServer) runTurn(threadID, turnID, cwd, promptText string, skills, 
 				"status": "completed",
 				"changes": []map[string]any{
 					{"path": pAdd, "kind": map[string]any{"type": "add"}, "diff": "hello\n"},
-					{"path": pUpd, "kind": map[string]any{"type": "update", "movePath": pMov}, "diff": "@@ -1,1 +1,1 @@\n-old\n+new\n"},
+					{"path": pUpd, "kind": map[string]any{"type": "update", "move_path": pMov}, "diff": "@@ -1,1 +1,1 @@\n-old\n+new\n"},
 				},
 			},
 		})
