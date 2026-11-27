@@ -700,3 +700,14 @@ func TestResponsesWebSocketFaults(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesWSMessageTooBigIsFinal(t *testing.T) {
+	err := responsesError(responsesapi.ErrWSMessageTooBig)
+	var fe *FinalError
+	if !errors.As(err, &fe) || fe.Code != "websocket_message_too_large" {
+		t.Fatalf("err = %v (%T), want *FinalError(websocket_message_too_large)", err, err)
+	}
+	if retried(err) {
+		t.Fatalf("ErrWSMessageTooBig must not be retried: %v", err)
+	}
+}

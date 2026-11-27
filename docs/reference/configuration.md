@@ -2146,9 +2146,11 @@ Set the top-level `openai_transport` key in `config.toml` to choose how native
 | `"websocket"` | Requires WebSocket for the main turn on eligible endpoints and reports connection failures. Side questions and concurrent requests while the WebSocket is busy use HTTP SSE. |
 | `"sse"` | Always uses HTTP SSE. |
 
-Other Responses endpoints, including proxies configured under
-`[providers.openai]`, use HTTP SSE. Selecting `"websocket"` for one of these
-endpoints also prints a warning when the model is opened or switched to.
+Other Responses endpoints, including non-loopback proxies configured under
+`[providers.openai]`, use HTTP SSE. Loopback IP literals (`127.0.0.0/8`, `::1`)
+under `[providers.openai]` follow OpenAI's endpoint rules for local endpoints.
+Selecting `"websocket"` for a non-OpenAI endpoint also prints a warning when
+the model is opened or switched to.
 
 `CRAZE_OPENAI_TRANSPORT` overrides the file when set to a valid value. Both
 settings accept any letter case and ignore surrounding whitespace. Invalid

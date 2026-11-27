@@ -475,6 +475,9 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		maps.Copy(s.held, s.unfinished)
 		clear(s.unfinished)
 		s.release(true)
+		if len(s.doneItems) != len(s.items) {
+			s.indexGap = true
+		}
 		var u Usage
 		if w.Response != nil {
 			s.responseID = cmp.Or(s.responseID, jsonString(w.Response.ID))
@@ -632,12 +635,13 @@ type wireEvent struct {
 	Response     *wireResponse `json:"response"`
 
 	// An error event's own fields, or the error object it nests.
-	Code    json.RawMessage `json:"code"`
-	Param   json.RawMessage `json:"param"`
-	Status  json.RawMessage `json:"status"`
-	Headers json.RawMessage `json:"headers"`
-	Message string          `json:"message"`
-	Error   *wireError      `json:"error"`
+	Code       json.RawMessage `json:"code"`
+	Param      json.RawMessage `json:"param"`
+	Status     json.RawMessage `json:"status"`
+	StatusCode json.RawMessage `json:"status_code"`
+	Headers    json.RawMessage `json:"headers"`
+	Message    string          `json:"message"`
+	Error      *wireError      `json:"error"`
 }
 
 // index is the event's output_index, or, when it has none, the index of the

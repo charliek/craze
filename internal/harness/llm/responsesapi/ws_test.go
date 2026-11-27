@@ -657,15 +657,19 @@ func TestWSMessageLimits(t *testing.T) {
 				t.Fatalf("stats = %+v, sticky = %v", got, c.isSticky())
 			}
 			runWSTurn(t, c, wsTestRequest())
-			if got := c.Stats(); (tc.sticky && got.WSDials != 1) || (!tc.sticky && got.WSDials != 2) {
-				t.Fatalf("next-request stats = %+v", got)
+			wantDials := uint64(2)
+			if tc.sticky || (tc.outgoing && tc.mode == TransportAuto) {
+				wantDials = 1
+			}
+			if got := c.Stats(); got.WSDials != wantDials {
+				t.Fatalf("next-request stats = %+v, want WSDials = %d", got, wantDials)
 			}
 		})
 	}
 }
 
 func TestWSFallbackAndStickyRegistry(t *testing.T) {
-	for _, status := range []int{301, 400, 401, 403, 404, 405, 426, 429, 501, 503} {
+	for _, status := range []int{301, 400, 403, 404, 405, 426, 429, 501, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			srv := newWSTestServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
 				if status == 301 {
@@ -1188,6 +1192,8 @@ func TestWSCoreErrorFrames(t *testing.T) {
 		{`{"status":429,"headers":[0,1],"error":{"headers":{"Retry-After":false,"Retry-After-Ms":250.5}}}`, 429, "", "250.5", false},
 		{`{"status":{"unexpected":4},"headers":{"Retry-After":null,"Retry-After-Ms":["8"]},"error":{"headers":true}}`, 0, "", "", false},
 		{`{"status":400,"headers":null,"error":{"param":"previous_response_id","headers":{"Retry-After":"60"}}}`, 400, "60", "", true},
+		{`{"status_code":400,"error":{"code":"previous_response_not_found","message":"gone"}}`, 400, "", "", true},
+		{`{"error":{"code":"previous_response_not_found","message":"gone"}}`, 0, "", "", true},
 	} {
 		var w wireEvent
 		if err := json.Unmarshal([]byte(tc.frame), &w); err != nil {
@@ -1284,5 +1290,133 @@ func TestWSCoreInternalDialTimeout(t *testing.T) {
 	if !errors.As(err, &timeout) || !timeout.Timeout() || timeout.Temporary() ||
 		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrIncomplete) {
 		t.Fatalf("error = %T %v", err, err)
+	}
+}
+
+func TestWSTrailingUndoneItemResetsChain(t *testing.T) {
+	srv := newWSTestServer(t, wsScript(t, func(p *wsPeer, _ int) {
+		p.expect("", 1, "")
+		// Index 0 finishes, index 1 starts but never receives output_item.done.
+		p.send(
+			created(),
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0"}}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_0","content":[{"type":"output_text","text":"hi"}]}}`,
+			`{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}`,
+			completed(1, 0, 1, 0),
+		)
+		// Next turn must NOT chain (index 1 was never completed).
+		p.expect("", 3, "")
+		p.send(created(), completed(1, 0, 1, 0))
+		p.waitForClose()
+	}))
+	c := wsTestClient(t, srv.url, TransportWebSocket)
+	req := wsTestRequest()
+	runWSTurn(t, c, req)
+	req.Input = append(req.Input, AssistantMessage("hi"), UserMessage(InputText("next")))
+	runWSTurn(t, c, req)
+	if got := c.Stats(); got != (Stats{WSDials: 1, WSRequests: 2, WSIncremental: 0}) {
+		t.Fatalf("stats = %+v", got)
+	}
+}
+
+func TestWSAutoExhausted401DoesNotDoubleRenewOrStick(t *testing.T) {
+	creds := new(wsTestCredentials)
+	srv := newWSTestServer(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"bad token"}}`)
+	})
+	c := wsTestClient(t, srv.url, TransportAuto, wsChatGPT(creds))
+	_, err := c.Stream(wsTestContext(t), wsTestRequest())
+	var re *Error
+	if !errors.As(err, &re) || re.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("err = %v, want 401 *Error", err)
+	}
+	if creds.invalid.Load() != 1 || srv.upgrades.Load() != 2 || srv.posts.Load() != 0 || c.isSticky() {
+		t.Fatalf("invalid=%d upgrades=%d posts=%d sticky=%v", creds.invalid.Load(), srv.upgrades.Load(), srv.posts.Load(), c.isSticky())
+	}
+}
+
+func TestWSAutoOversizeKeepsHealthySocket(t *testing.T) {
+	srv := newWSTestServer(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "data: "+completed(1, 0, 1, 0)+"\n\n")
+			return
+		}
+		w.Header().Set("X-Codex-Websocket-Max-Message-Bytes", "1024")
+		wsScript(t, func(p *wsPeer, _ int) {
+			p.expect("", 1, "")
+			p.send(created(), completed(1, 0, 1, 0))
+			// Third turn reuses the same healthy socket after turn 2 used SSE for oversize.
+			p.expect("resp_1", 1, "")
+			p.send(created(), completed(1, 0, 1, 0))
+			p.waitForClose()
+		})(w, r, n)
+	})
+	c := wsTestClient(t, srv.url, TransportAuto)
+	req := wsTestRequest()
+	runWSTurn(t, c, req)
+	big := wsTestRequest()
+	big.Input = []Item{UserMessage(InputText(strings.Repeat("a", 2048)))}
+	runWSTurn(t, c, big)
+	req.Input = append(req.Input, UserMessage(InputText("small again")))
+	runWSTurn(t, c, req)
+	if got := c.Stats(); got != (Stats{WSDials: 1, WSRequests: 2, WSIncremental: 1, SSERequests: 1, SSEFallbacks: 1}) {
+		t.Fatalf("stats = %+v", got)
+	}
+}
+
+func TestWSAutoBadFirstFrameFallsBackAndSticks(t *testing.T) {
+	srv := newWSTestServer(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "data: "+completed(1, 0, 1, 0)+"\n\n")
+			return
+		}
+		wsScript(t, func(p *wsPeer, _ int) {
+			p.expect("", 1, "")
+			_ = p.conn.Write(p.ctx, websocket.MessageBinary, []byte{0xff, 0x00})
+			p.waitForClose()
+		})(w, r, n)
+	})
+	c := wsTestClient(t, srv.url, TransportAuto)
+	req := wsTestRequest()
+	runWSTurn(t, c, req)
+	runWSTurn(t, c, req)
+	runWSTurn(t, c, req)
+	if !c.isSticky() || srv.upgrades.Load() != 2 || c.Stats().SSERequests != 3 || c.Stats().SSEFallbacks != 3 {
+		t.Fatalf("sticky=%v upgrades=%d stats=%+v", c.isSticky(), srv.upgrades.Load(), c.Stats())
+	}
+}
+
+func TestWSSharedStickyDropsIdleSocket(t *testing.T) {
+	sticky := NewStickyRegistry()
+	srv := newWSTestServer(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "data: "+completed(1, 0, 1, 0)+"\n\n")
+			return
+		}
+		if n == 2 {
+			w.WriteHeader(http.StatusUpgradeRequired)
+			return
+		}
+		wsScript(t, func(p *wsPeer, _ int) {
+			p.expect("", 1, "")
+			p.send(created(), completed(1, 0, 1, 0))
+			p.waitForClose()
+		})(w, r, n)
+	})
+	c1 := wsTestClient(t, srv.url, TransportAuto, func(cfg *Config) { cfg.Sticky = sticky })
+	c2 := wsTestClient(t, srv.url, TransportAuto, func(cfg *Config) { cfg.Sticky = sticky })
+	req := wsTestRequest()
+	runWSTurn(t, c1, req) // c1 now holds an idle socket
+	runWSTurn(t, c2, req) // c2 hits 426 and marks shared registry sticky
+	runWSTurn(t, c1, req) // c1 sees sticky, uses SSE, and drops its idle socket
+	c1.wsMu.Lock()
+	idle := c1.ws
+	c1.wsMu.Unlock()
+	if idle != nil {
+		t.Fatal("c1 kept idle WS socket after shared registry became sticky")
 	}
 }

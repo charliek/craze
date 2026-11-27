@@ -54,8 +54,14 @@ func (e wsTimeoutError) Unwrap() error {
 }
 
 func isStalePreviousResponse(e *Error, sentPrevID bool) bool {
-	return sentPrevID && e != nil && e.StatusCode == http.StatusBadRequest &&
-		(e.Code == "previous_response_not_found" || e.Param == "previous_response_id" ||
+	if !sentPrevID || e == nil {
+		return false
+	}
+	if e.Code == "previous_response_not_found" {
+		return true
+	}
+	return e.StatusCode == http.StatusBadRequest &&
+		(e.Param == "previous_response_id" ||
 			strings.Contains(strings.ToLower(e.Message), "previous_response_id"))
 }
 
@@ -303,8 +309,12 @@ func (w *wireEvent) streamError(route Route, ws bool) *Error {
 		e.setError(&wireError{Code: w.Code, Param: w.Param, Message: w.Message})
 	}
 	if ws {
-		if json.Unmarshal(w.Status, &e.StatusCode) != nil {
-			if status, err := strconv.Atoi(jsonString(w.Status)); err == nil {
+		rawStatus := w.Status
+		if len(rawStatus) == 0 {
+			rawStatus = w.StatusCode
+		}
+		if json.Unmarshal(rawStatus, &e.StatusCode) != nil {
+			if status, err := strconv.Atoi(jsonString(rawStatus)); err == nil {
 				e.StatusCode = status
 			}
 		}

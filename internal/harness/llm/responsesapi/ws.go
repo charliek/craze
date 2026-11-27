@@ -189,6 +189,18 @@ func (c *Client) Close() error {
 	return nil
 }
 
+func (c *Client) dropIdleWS() {
+	c.wsMu.Lock()
+	var idle *wsConnState
+	if !c.inFlight {
+		idle, c.ws = c.ws, nil
+	}
+	c.wsMu.Unlock()
+	if idle != nil {
+		_ = idle.conn.CloseNow()
+	}
+}
+
 // reserveWS waits for a pending pre-dial and then reserves the single WS lane.
 // A reservation can own a nil lease while it is dialing.
 func (c *Client) reserveWS(ctx context.Context) (lease *wsConnState, reserved, sticky bool, err error) {
@@ -199,7 +211,14 @@ func (c *Client) reserveWS(ctx context.Context) (lease *wsConnState, reserved, s
 			c.wsMu.Unlock()
 			return nil, false, false, ctx.Err()
 		case c.isSticky():
+			var idle *wsConnState
+			if !c.inFlight {
+				idle, c.ws = c.ws, nil
+			}
 			c.wsMu.Unlock()
+			if idle != nil {
+				_ = idle.conn.CloseNow()
+			}
 			return nil, false, true, nil
 		case c.closed || c.inFlight:
 			c.wsMu.Unlock()
@@ -415,6 +434,7 @@ type startupFailure int
 
 const (
 	startupProtocol startupFailure = iota
+	startupBadFrame
 	startupDial
 	startupTransport
 	startupOversize
@@ -423,6 +443,7 @@ const (
 
 func (c *Client) streamWS(ctx context.Context, req Request) (*Stream, bool, error) {
 	if c.isSticky() {
+		c.dropIdleWS()
 		return nil, true, nil
 	}
 	lease, reserved, sticky, err := c.reserveWS(ctx)
@@ -430,9 +451,10 @@ func (c *Client) streamWS(ctx context.Context, req Request) (*Stream, bool, erro
 		return nil, sticky, err
 	}
 	handedOff := false
+	keepOnExit := false
 	defer func() {
 		if !handedOff {
-			c.releaseWS(lease, false)
+			c.releaseWS(lease, keepOnExit)
 		}
 	}()
 
@@ -486,6 +508,9 @@ func (c *Client) streamWS(ctx context.Context, req Request) (*Stream, bool, erro
 		retry, renew := recovery.retry(c, err, sentPrev, reused, kind)
 		if !retry {
 			if c.fallbackWS(kind, err) {
+				if kind == startupOversize {
+					keepOnExit = true
+				}
 				return nil, true, nil
 			}
 			return nil, false, err
@@ -557,10 +582,12 @@ func peekWS(ctx context.Context, source *wsFrameSource, s *Stream, timeout time.
 			switch {
 			case errors.Is(err, ErrWSMessageTooBig):
 				return startupPeerLimit, err
+			case errors.Is(err, errEventTooLarge):
+				return startupProtocol, err
 			case errors.Is(err, ErrIncomplete), errors.As(err, &timeout):
 				return startupTransport, err
 			default:
-				return startupProtocol, err
+				return startupBadFrame, err
 			}
 		}
 		if string(f.data) == "[DONE]" {
@@ -568,7 +595,7 @@ func peekWS(ctx context.Context, source *wsFrameSource, s *Stream, timeout time.
 		}
 		typ, err := f.eventType()
 		if err != nil {
-			return startupProtocol, err
+			return startupBadFrame, err
 		}
 		switch {
 		case typ == "error":
@@ -623,13 +650,18 @@ func (c *Client) fallbackWS(kind startupFailure, err error) bool {
 		return true
 	case startupDial:
 		var e *Error
-		if errors.As(err, &e) && stickyDialStatus(e.StatusCode) {
-			c.sticky.markSticky(c.stickyKey)
-		} else {
-			c.sticky.recordFailure(c.stickyKey)
+		if errors.As(err, &e) {
+			if e.StatusCode == http.StatusUnauthorized {
+				return false
+			}
+			if stickyDialStatus(e.StatusCode) {
+				c.sticky.markSticky(c.stickyKey)
+				return true
+			}
 		}
+		c.sticky.recordFailure(c.stickyKey)
 		return true
-	case startupTransport:
+	case startupTransport, startupBadFrame:
 		c.sticky.recordFailure(c.stickyKey)
 		return true
 	default:

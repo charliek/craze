@@ -879,6 +879,11 @@ func responsesError(err error) error {
 			return keyProviderError(re)
 		}
 		return responsesProviderError(re)
+	case errors.Is(err, responsesapi.ErrWSMessageTooBig):
+		return &FinalError{
+			Code:    "websocket_message_too_large",
+			Message: err.Error(),
+		}
 	case responsesapi.IsViolation(err):
 		pe := fantasy.NewIncompleteStreamError()
 		pe.Title, pe.Message = protocolTitle, err.Error()
