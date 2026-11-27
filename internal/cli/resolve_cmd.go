@@ -116,14 +116,7 @@ func offlineRouteProbe() routing.Probe {
 				return routing.Facts{Reason: routing.OverageHold}
 			}
 		case "antigravity":
-			switch model {
-			case "gemini-4-neon", "gemini-4-hydrogen":
-				return routing.Facts{Efforts: []string{"low", "medium", "high", "xhigh"}}
-			case "gemini-4-argon", "gemini-3.8-flash":
-				return routing.Facts{Efforts: []string{"low", "medium", "high"}}
-			case "gpt-oss-120b-medium":
-				return routing.Facts{Efforts: []string{}}
-			}
+			return routing.Facts{Efforts: antigravityRouteEfforts(model)}
 		case "codex":
 			f := routing.Facts{Efforts: []string{"minimal", "low", "medium", "high", "xhigh"}}
 			if os.Getenv("CODEX_API_KEY") != "" {
@@ -136,6 +129,27 @@ func offlineRouteProbe() routing.Probe {
 		}
 		return routing.Facts{}
 	}
+}
+
+// Match the installed adapter's known base IDs and its legacy effort-suffixed
+// aliases. Unknown models have no offline effort information.
+func antigravityRouteEfforts(model string) []string {
+	if model == "gpt-oss-120b-medium" || strings.HasPrefix(model, "gemini-pro-orchestrator-") {
+		return []string{}
+	}
+	for _, level := range []string{"-low", "-medium", "-high", "-xhigh"} {
+		if base, ok := strings.CutSuffix(model, level); ok {
+			model = base
+			break
+		}
+	}
+	switch model {
+	case "gemini-4-neon", "gemini-4-hydrogen":
+		return []string{"low", "medium", "high", "xhigh"}
+	case "gemini-4-argon", "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5":
+		return []string{"low", "medium", "high"}
+	}
+	return nil
 }
 
 func loadNativeProbe() func(string) routing.Facts {

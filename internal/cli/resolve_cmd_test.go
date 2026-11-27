@@ -103,7 +103,7 @@ func TestResolveReportsSkipsAndRejectsEmptySelectors(t *testing.T) {
 	t.Setenv("CRAZE_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("PATH", dir)
-	for _, k := range []string{"CRAZE_SESSION_PROVIDER", "CLAUDECODE", "ANTIGRAVITY_AGENT", "CURSOR_AGENT", "CODEX_API_KEY"} {
+	for _, k := range []string{"CRAZE_SESSION_PROVIDER", "CLAUDECODE", "ANTIGRAVITY_AGENT", "CURSOR_AGENT", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("CODEX_THREAD_ID", "1")
@@ -120,7 +120,7 @@ func TestResolveReportsSkipsAndRejectsEmptySelectors(t *testing.T) {
 	}
 	out, stderr, code := executeErr([]string{"resolve", "--target", "sol", "--json"})
 	var doc routing.Result
-	if code != 2 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Skipped) < 2 || doc.Skipped[0].Reason != routing.SelfDelegation {
+	if code != 2 || json.Unmarshal([]byte(out), &doc) != nil || doc.Schema != 1 || doc.Routes == nil || len(doc.Routes) != 0 || len(doc.Skipped) != 4 || doc.Skipped[0].Reason != routing.SelfDelegation || doc.Skipped[1].Reason != routing.NotSignedIn || doc.Skipped[2].Reason != routing.PaidBlocked || doc.Skipped[3].Reason != routing.PaidBlocked {
 		t.Fatalf("exit %d %s %s", code, out, stderr)
 	}
 	out, stderr, code = executeErr([]string{"resolve", "--target", "neon", "--effort", "max", "--json"})
@@ -166,5 +166,22 @@ wire_model = "gpt-6.2-sol"
 	writeJSON(chatgptauth.ModelsFile(dir), list)
 	if f := loadNativeProbe()("chatgpt/custom"); f.Reason != "" || !f.Provisional {
 		t.Fatalf("stale list %+v", f)
+	}
+}
+
+func TestCustomAntigravityRouteEffort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CRAZE_HOME", dir)
+	t.Setenv("PATH", dir)
+	if err := os.WriteFile(filepath.Join(dir, "agy"), nil, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := routing.Defaults()
+	for _, id := range []string{"claude-opus-5-5", "claude-sonnet-5-5-high", "gemini-4-argon"} {
+		cfg.Targets["custom"] = routing.Target{Maker: "test", Effort: "max", Cap: "1m", Routes: []routing.Route{{Provider: "antigravity", Model: id, Billing: routing.Subscription}}}
+		r, ok, err := cfg.Resolve(routing.Request{Target: "custom"}, offlineRouteProbe())
+		if err != nil || !ok || r.Routes[0].Effort != "high" || len(r.Warnings) != 1 {
+			t.Fatalf("%s %+v %v", id, r, err)
+		}
 	}
 }

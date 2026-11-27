@@ -122,9 +122,9 @@ type Result struct {
 	Kind       string      `json:"kind"`
 	Effort     string      `json:"effort,omitempty"`
 	CapSeconds float64     `json:"capSeconds,omitempty"`
-	Targets    []Selection `json:"targets,omitempty"`
-	Seats      []Selection `json:"seats,omitempty"`
-	Routes     []Choice    `json:"routes,omitempty"`
+	Targets    []Selection `json:"targets,omitzero"`
+	Seats      []Selection `json:"seats,omitzero"`
+	Routes     []Choice    `json:"routes,omitzero"`
 	Skipped    []Skip      `json:"skipped"`
 	Warnings   []string    `json:"warnings,omitempty"`
 }
@@ -168,6 +168,16 @@ func (cfg Config) Resolve(req Request, probe Probe) (Result, bool, error) {
 		}
 	default:
 		res.Kind, names = "overview", slices.Sorted(maps.Keys(cfg.Targets))
+	}
+	// Preserve the empty array appropriate to this kind; irrelevant
+	// collections remain nil and are omitted by the encoder.
+	switch res.Kind {
+	case "role", "target":
+		res.Routes = []Choice{}
+	case "panel":
+		res.Seats = []Selection{}
+	default:
+		res.Targets = []Selection{}
 	}
 	ready := 0
 	for _, id := range names {

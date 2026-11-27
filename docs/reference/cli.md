@@ -3305,9 +3305,9 @@ invalid flags, malformed routing configuration or a self-delegation refusal.
 
 An explicitly empty routing selector is a usage error. When the immediate
 caller has no eligible non-self route for a target, resolve still prints the
-route diagnostics and exits 2. A fresh native ChatGPT account list must
+route diagnostics, including an empty `routes` array in JSON, and exits 2. A fresh native ChatGPT account list must
 include the wire model even when a local alias names it. Antigravity Neon
-and Hydrogen accept effort levels up to `xhigh`.
+and Hydrogen accept effort levels up to `xhigh`. The adapter’s Claude Opus and Sonnet 5.5 routes accept up to `high`.
 
 ## craze version
 
