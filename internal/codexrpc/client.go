@@ -238,6 +238,7 @@ type Client struct {
 
 	mu      sync.Mutex
 	started bool
+	closing bool
 	nextID  int64
 	pending map[string]chan rpcResp
 	err     error
@@ -279,6 +280,12 @@ type Client struct {
 // tests or custom transports). Call SetNotifyHandler / SetRequestHandler before
 // Start() if you need to observe the very first frame.
 func NewInProcess(in io.Reader, out io.Writer) *Client {
+	return newClient(in, out, nil)
+}
+
+// NewClient constructs a JSON-RPC client over an existing reader/writer pair
+// without spawning a child process. Call Start to begin reading frames.
+func NewClient(in io.Reader, out io.Writer) *Client {
 	return newClient(in, out, nil)
 }
 
@@ -373,7 +380,7 @@ func (c *Client) SetRequestHandler(fn func(context.Context, *Message) bool) {
 // than once; no-op if already started or closed. Spawn calls Start automatically.
 func (c *Client) Start() {
 	c.mu.Lock()
-	if c.started || c.closed {
+	if c.started || c.closing || c.closed {
 		c.mu.Unlock()
 		return
 	}
@@ -763,10 +770,16 @@ func (c *Client) Close() error {
 			tree = c.child.SnapshotTree()
 		}
 		c.mu.Lock()
+		c.closing = true
 		wasStarted := c.started
 		c.mu.Unlock()
 
 		c.reqCancel()
+		// Mark intentional shutdown before closing stdin so a child that exits
+		// immediately on EOF is classified as ErrClosed rather than ErrAgentExited.
+		if c.child != nil && !exitedFirst {
+			c.child.MarkShuttingDown()
+		}
 		// Close stdin first so codex app-server sees EOF cleanly before SIGTERM.
 		c.closeWriter()
 		if c.child != nil {

@@ -1401,15 +1401,21 @@ func (s *codexSession) enforceCancelGrace(turn *codexTurnState, client *codexrpc
 	case <-s.closingCh:
 		return
 	case <-t.C:
-		if client != nil {
-			client.CloseAsync()
-		}
 		err := cause
 		if err == nil {
 			err = newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn settlement")
 		}
-		_, _ = s.settleTurn(turn, "", err, true)
+		s.abortHungTurn(turn, client, err)
 	}
+}
+
+// abortHungTurn atomically claims settlement for turn and aborts client ONLY if
+// turn is still the live, unsettled active turn on this session. Returns false
+// when turn already settled (e.g. a later turn may already own client) so a
+// late grace timer can never kill the next turn's healthy transport.
+func (s *codexSession) abortHungTurn(turn *codexTurnState, client *codexrpc.Client, err error) bool {
+	_, _, won := s.settleTurnInternal(turn, "", err, true, client)
+	return won
 }
 
 func (s *codexSession) clearTurnLocked(turn *codexTurnState) {
@@ -1466,6 +1472,11 @@ func (s *codexSession) turnResult(turn *codexTurnState) (Result, error) {
 // every retired tool row, flushed outbox delta (usage/settings), ask ending,
 // and terminal EventDone/EventError has been committed to EventLog.
 func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termErr error, releaseSlot bool) (Result, error) {
+	res, err, _ := s.settleTurnInternal(turn, stopReason, termErr, releaseSlot, nil)
+	return res, err
+}
+
+func (s *codexSession) settleTurnInternal(turn *codexTurnState, stopReason string, termErr error, releaseSlot bool, abortClient *codexrpc.Client) (Result, error, bool) {
 	var (
 		toolEvs     []Event
 		subagentEvs []Event
@@ -1490,10 +1501,14 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 		done := turn.done
 		s.mu.Unlock()
 		<-done
-		return s.turnResult(turn)
+		res, err := s.turnResult(turn)
+		return res, err, false
 	}
 	won = true
 	turn.settling = true
+	if abortClient != nil && s.activeTurn == turn && s.client == abortClient {
+		abortClient.CloseAsync()
+	}
 	turn.stopReason = stopReason
 	turn.failedErr = termErr
 	tok = turn.token
@@ -1622,7 +1637,8 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 		close(turn.done)
 		s.mu.Unlock()
 	}
-	return s.turnResult(turn)
+	res, err := s.turnResult(turn)
+	return res, err, won
 }
 
 func (s *codexSession) finishTurnFromWire(turn *codexTurnState, wireTurn codexrpc.Turn) {
@@ -1743,9 +1759,10 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 				if ctx.Err() != nil {
 					return CancelOutcome{Wrote: false, Settled: false}, ctx.Err()
 				}
-				client.CloseAsync()
 				err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn/interrupt")
-				_, _ = s.settleTurn(turn, "", err, true)
+				if !s.abortHungTurn(turn, client, err) {
+					return CancelOutcome{Wrote: true, Settled: true}, nil
+				}
 				return CancelOutcome{Wrote: false, Settled: false}, err
 			case <-s.closingCh:
 				<-done
@@ -1787,9 +1804,10 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 			}
 			// Grace expired while turn/interrupt hung: abort hung transport and
 			// report failure rather than pretending cancellation succeeded.
-			client.CloseAsync()
 			err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn/interrupt")
-			_, _ = s.settleTurn(turn, "", err, true)
+			if !s.abortHungTurn(turn, client, err) {
+				return CancelOutcome{Wrote: true, Settled: true}, nil
+			}
 			return CancelOutcome{Wrote: false, Settled: false}, err
 		case <-s.closingCh:
 			<-done
@@ -1808,11 +1826,10 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 		// Grace expired without confirmed turn/completed: abort the hung
 		// transport so Codex cannot keep running a turn on this connection,
 		// and return a real failure error (H2).
-		if client != nil {
-			client.CloseAsync()
-		}
 		err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn settlement")
-		_, _ = s.settleTurn(turn, "", err, true)
+		if !s.abortHungTurn(turn, client, err) {
+			return CancelOutcome{Wrote: wrote, Settled: true}, nil
+		}
 		return CancelOutcome{Wrote: wrote, Settled: false}, err
 	case <-s.closingCh:
 		<-done

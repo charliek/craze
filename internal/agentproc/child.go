@@ -156,18 +156,19 @@ type StartOptions struct {
 // not reaped, so the zombie keeps its pid, and with it the group's id, from
 // being reused (exitedCh); and reaped (reapedCh).
 type Child struct {
-	cmd             *exec.Cmd
-	pid             int
-	pgid            int
-	exitedCh        chan struct{}
-	statusCh        chan struct{}
-	exitErr         error
-	endedByShutdown bool
-	reapedCh        chan struct{}
-	waitErr         error
-	shutdownCh      chan struct{}
-	shutdownOnce    sync.Once
-	killNow         atomic.Bool
+	cmd                 *exec.Cmd
+	pid                 int
+	pgid                int
+	exitedCh            chan struct{}
+	statusCh            chan struct{}
+	exitErr             error
+	endedByShutdown     bool
+	reapedCh            chan struct{}
+	waitErr             error
+	shutdownCh          chan struct{}
+	shutdownOnce        sync.Once
+	killNow             atomic.Bool
+	intentionalShutdown atomic.Bool
 	reapGate
 	stderrDone chan struct{}
 	stderrTail *stderrTail
@@ -312,8 +313,18 @@ func (ch *Child) EndedWith(prefix string, closedErr, def error) error {
 // Shutdown, sentinel when the child exited 0 unexpectedly, and
 // WrapAgentExited(sentinel, exitErr) when the child exited non-zero so callers
 // match both sentinel (via errors.Is) and *ExitError (via errors.As).
+// MarkShuttingDown records that the caller has initiated an intentional
+// shutdown (for example closing stdin before calling Shutdown) so an immediate
+// child exit on EOF is classified as closedErr rather than an unexpected exit.
+func (ch *Child) MarkShuttingDown() {
+	if ch == nil {
+		return
+	}
+	ch.intentionalShutdown.Store(true)
+}
+
 func (ch *Child) UnexpectedEndErr(sentinel, closedErr error) error {
-	if ch == nil || ch.endedByShutdown {
+	if ch == nil || ch.endedByShutdown || ch.intentionalShutdown.Load() {
 		return closedErr
 	}
 	if ch.exitErr == nil {

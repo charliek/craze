@@ -253,6 +253,12 @@ func (s *codexSession) resumeThread(
 	s.mu.Unlock()
 
 	history := s.fetchResumeTurns(ctx, client, tid, res)
+	s.mu.Lock()
+	aliveErr := s.checkResumeAliveLocked(client)
+	s.mu.Unlock()
+	if aliveErr != nil {
+		return aliveErr
+	}
 
 	// Wait for already-queued notifications (notably Probe 2's resumed
 	// thread/tokenUsage/updated that precedes thread/turns/list's reply on the
@@ -332,7 +338,7 @@ func (s *codexSession) resumeThread(
 		closed := s.closed
 		s.turnItemDeltas = make(map[string]bool)
 		s.lastMsgItemID = ""
-		if turn.ID != "" {
+		if turn.ID != "" && isCodexTerminalTurnStatus(turn.Status) {
 			s.recordSettledTurnLocked(turn.ID)
 		}
 		s.mu.Unlock()
@@ -355,9 +361,9 @@ func (s *codexSession) resumeThread(
 	// Build and flush the install delta BEFORE opening admission (s.ready stays
 	// false until ReplayEnd has been emitted — M9).
 	s.mu.Lock()
-	if s.closed {
+	if err := s.checkResumeAliveLocked(client); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session closed")
+		return err
 	}
 	s.snap.SessionID = tid
 	s.snap.CurrentMode = startMode
@@ -378,9 +384,12 @@ func (s *codexSession) resumeThread(
 		return fmt.Errorf("agent: session closed")
 	}
 	s.mu.Lock()
-	closed := s.closed
+	if err := s.checkResumeAliveLocked(client); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	s.mu.Unlock()
-	if closed || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		return fmt.Errorf("agent: session closed")
 	}
 	s.log.noteSession(journal.SessionNote{
@@ -395,9 +404,9 @@ func (s *codexSession) resumeThread(
 	// Open admission ONLY AFTER ReplayEnd has committed, and consume any
 	// skills/changed that arrived during startup (M9, L10).
 	s.mu.Lock()
-	if s.closed {
+	if err := s.checkResumeAliveLocked(client); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session closed")
+		return err
 	}
 	s.ready = true
 	dirtySkills := s.skillsDirty
@@ -405,6 +414,32 @@ func (s *codexSession) resumeThread(
 	s.mu.Unlock()
 	if dirtySkills {
 		s.triggerSkillRefresh()
+	}
+	return nil
+}
+
+func isCodexTerminalTurnStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "inprogress", "in_progress", "running":
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *codexSession) checkResumeAliveLocked(client *codexrpc.Client) error {
+	if s.closed {
+		return fmt.Errorf("agent: session closed")
+	}
+	if s.transportDead {
+		return fmt.Errorf("agent: codex transport closed during resume: %w", codexrpc.ErrClosed)
+	}
+	if client != nil {
+		select {
+		case <-client.Done():
+			return fmt.Errorf("agent: codex transport closed during resume: %w", codexrpc.ErrClosed)
+		default:
+		}
 	}
 	return nil
 }

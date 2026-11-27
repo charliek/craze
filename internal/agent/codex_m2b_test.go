@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -134,31 +135,60 @@ func TestCodexCancelWithOpenApprovalCardAndServerRequestResolved(t *testing.T) {
 	})
 
 	t.Run("serverRequest/resolved retires parked ask immediately as withdrawn", func(t *testing.T) {
-		cs, _ := startCodexFake(t, "codex-approval", Options{Force: false, Interactive: true})
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_, _ = cs.Prompt(ctx, "will be resolved externally")
-		}()
+		srvToCliR, srvToCliW := io.Pipe()
+		cliToSrvR, cliToSrvW := io.Pipe()
+		defer srvToCliR.Close()
+		defer srvToCliW.Close()
+		defer cliToSrvR.Close()
+		defer cliToSrvW.Close()
+
+		prov := CodexProvider()
+		cs := New(Options{
+			Provider:    &prov,
+			Workspace:   t.TempDir(),
+			Force:       false,
+			Interactive: true,
+		}).(*codexSession)
+		client := codexrpc.NewClient(srvToCliR, cliToSrvW)
+		client.SetNotifyHandler(cs.onNotify)
+		client.SetRequestHandler(cs.onServerRequest)
+		client.Start()
+		t.Cleanup(func() {
+			_ = client.Close()
+			_ = cs.Close()
+		})
+
+		// Drain any client writes (none expected for withdrawn ask) so pipe never blocks.
+		go func() { _, _ = io.Copy(io.Discard, cliToSrvR) }()
+
+		turn := &codexTurnState{
+			gen:     1,
+			phase:   codexPhaseIdentified,
+			turnID:  "turn-1",
+			token:   cs.asks.BeginTurn(),
+			mode:    codexAgentMode,
+			idReady: make(chan struct{}),
+			done:    make(chan struct{}),
+		}
+		close(turn.idReady)
+		cs.mu.Lock()
+		cs.client = client
+		cs.threadID = "thr-1"
+		cs.activeTurn = turn
+		cs.ready = true
+		cs.mu.Unlock()
+
+		// 1. Wire peer sends approval request id=0 -> parks ask in AskRegistry.
+		if _, err := io.WriteString(srvToCliW, `{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr-1","turnId":"turn-1","itemId":"cmd-1","command":"touch out.txt"}}`+"\n"); err != nil {
+			t.Fatalf("write request 0: %v", err)
+		}
 		open := waitForOpenAsk(t, cs, AskPermission)
 
-		// Find the pending request ID key and synthesize serverRequest/resolved.
-		cs.mu.Lock()
-		var reqKey string
-		for k := range cs.pendingReqs {
-			reqKey = k
-			break
+		// 2. Wire peer sends serverRequest/resolved for id=0 -> wire-ordered
+		// cancellation in codexrpc.Client retires the parked ask as withdrawn.
+		if _, err := io.WriteString(srvToCliW, `{"method":"serverRequest/resolved","params":{"threadId":"thr-1","requestId":0}}`+"\n"); err != nil {
+			t.Fatalf("write serverRequest/resolved: %v", err)
 		}
-		tid := cs.threadID
-		cs.mu.Unlock()
-		if reqKey == "" {
-			t.Fatal("expected pending request key registered while ask is parked")
-		}
-		payload, _ := json.Marshal(map[string]any{
-			"threadId":  tid,
-			"requestId": json.RawMessage(reqKey),
-		})
-		cs.handleServerRequestResolved(payload)
 
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -168,7 +198,7 @@ func TestCodexCancelWithOpenApprovalCardAndServerRequestResolved(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if len(cs.Asks().Asks()) != 0 {
-			t.Fatalf("parked ask was not retired on serverRequest/resolved: %+v", cs.Asks().Asks())
+			t.Fatalf("parked ask was not retired on wire serverRequest/resolved: %+v", cs.Asks().Asks())
 		}
 		found := false
 		for _, rec := range cs.Asks().Resolved() {
@@ -179,6 +209,28 @@ func TestCodexCancelWithOpenApprovalCardAndServerRequestResolved(t *testing.T) {
 		if !found {
 			t.Fatalf("expected ask %q retired with By=withdrawn, got %+v", open.ID, cs.Asks().Resolved())
 		}
+
+		// 3. Wire peer reuses id=0 for a new approval request -> a delayed
+		// handleServerRequestResolved notification MUST NOT withdraw it.
+		if _, err := io.WriteString(srvToCliW, `{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr-1","turnId":"turn-1","itemId":"cmd-2","command":"touch out2.txt"}}`+"\n"); err != nil {
+			t.Fatalf("write reused request 0: %v", err)
+		}
+		open2 := waitForOpenAsk(t, cs, AskPermission)
+		stalePayload, _ := json.Marshal(map[string]any{
+			"threadId":  "thr-1",
+			"requestId": 0,
+		})
+		cs.handleServerRequestResolved(stalePayload)
+		time.Sleep(50 * time.Millisecond)
+		stillOpen := cs.Asks().Asks()
+		if len(stillOpen) != 1 || stillOpen[0].ID != open2.ID {
+			t.Fatalf("stale delayed handleServerRequestResolved withdrew reused request %q: asks=%+v", open2.ID, stillOpen)
+		}
+		// Cleanly end the test turn so cleanup closes without lingering asks.
+		close(turn.done)
+		cs.mu.Lock()
+		cs.activeTurn = nil
+		cs.mu.Unlock()
 	})
 }
 
@@ -860,6 +912,65 @@ func TestCodexDogfoodReviewFixes(t *testing.T) {
 		st := u.stateAt(now)
 		if st.Window != "seven_day" || st.WindowUtilization != 0.25 {
 			t.Fatalf("expired bucket masked active bucket: got window=%q util=%v", st.Window, st.WindowUtilization)
+		}
+	})
+}
+
+func TestCodexPR156ReviewFixes(t *testing.T) {
+	t.Run("isCodexTerminalTurnStatus excludes in-progress turns", func(t *testing.T) {
+		for _, active := range []string{"inProgress", "in_progress", "IN_PROGRESS", "running", " Running "} {
+			if isCodexTerminalTurnStatus(active) {
+				t.Fatalf("isCodexTerminalTurnStatus(%q) = true, want false", active)
+			}
+		}
+		for _, done := range []string{"completed", "interrupted", "failed", ""} {
+			if !isCodexTerminalTurnStatus(done) {
+				t.Fatalf("isCodexTerminalTurnStatus(%q) = false, want true", done)
+			}
+		}
+	})
+
+	t.Run("abortHungTurn after settlement never closes next turn client", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-basic", Options{Force: true})
+		settled := &codexTurnState{
+			gen:     1,
+			phase:   codexPhaseSettled,
+			turnID:  "turn-old",
+			idReady: make(chan struct{}),
+			done:    make(chan struct{}),
+		}
+		close(settled.done)
+
+		cs.mu.Lock()
+		client := cs.client
+		cs.mu.Unlock()
+
+		if cs.abortHungTurn(settled, client, errors.New("late grace timeout")) {
+			t.Fatal("abortHungTurn returned true for already-settled turn")
+		}
+		// Transport must still be completely healthy for a subsequent prompt.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := cs.Prompt(ctx, "still healthy"); err != nil {
+			t.Fatalf("Prompt after late abortHungTurn failed: %v", err)
+		}
+	})
+
+	t.Run("checkResumeAliveLocked rejects dead transport", func(t *testing.T) {
+		prov := CodexProvider()
+		cs := New(Options{Provider: &prov, Workspace: t.TempDir()}).(*codexSession)
+		defer func() { _ = cs.Close() }()
+
+		cs.mu.Lock()
+		if err := cs.checkResumeAliveLocked(nil); err != nil {
+			cs.mu.Unlock()
+			t.Fatalf("expected alive session, got %v", err)
+		}
+		cs.transportDead = true
+		err := cs.checkResumeAliveLocked(nil)
+		cs.mu.Unlock()
+		if err == nil {
+			t.Fatal("expected checkResumeAliveLocked to reject transportDead=true")
 		}
 	})
 }

@@ -35,16 +35,6 @@ type codexPendingReq struct {
 	cancel    context.CancelCauseFunc
 }
 
-func (r *codexPendingReq) markWithdrawn() {
-	r.mu.Lock()
-	r.withdrawn = true
-	cancel := r.cancel
-	r.mu.Unlock()
-	if cancel != nil {
-		cancel(acp.ErrRequestWithdrawn)
-	}
-}
-
 // commitReply runs fn at most once, ONLY if this request has not been withdrawn
 // (either via codexPendingReq or via codexrpc's wire-ordered reqCtx) and ctx is
 // still live.
@@ -100,24 +90,13 @@ func (s *codexSession) cancelAllPendingReqsLocked(cause error) {
 	}
 }
 
-func (s *codexSession) handleServerRequestResolved(raw json.RawMessage) {
-	var p codexrpc.ServerRequestResolvedParams
-	if json.Unmarshal(raw, &p) != nil || len(p.RequestID) == 0 {
-		return
-	}
-	if !s.isMainThread(p.ThreadID) {
-		return
-	}
-	key := canonicalReqKey(p.RequestID)
-	s.mu.Lock()
-	req := s.pendingReqs[key]
-	if req != nil {
-		delete(s.pendingReqs, key)
-	}
-	s.mu.Unlock()
-	if req != nil {
-		req.markWithdrawn()
-	}
+func (s *codexSession) handleServerRequestResolved(_ json.RawMessage) {
+	// Wire-ordered request withdrawal runs synchronously in
+	// codexrpc.Client.resolveServerRequestOnWire on readLoop via the exact
+	// owning request context (cancelling it with codexrpc.ErrRequestResolved,
+	// which onServerRequest translates to acp.ErrRequestWithdrawn). Looking up
+	// pendingReqs here on the delayed notification worker could race with a
+	// reused numeric request ID and withdraw a newer in-flight request.
 }
 
 // matchApprovalTurn binds an incoming approval or user-input request to the

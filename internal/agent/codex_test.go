@@ -656,6 +656,7 @@ func intPtr(v int) *int         { return &v }
 func TestCodexUsageSparseMergeAndWindowPick(t *testing.T) {
 	var u codexUsage
 	r1 := int64(1796000000)
+	evalTime := time.Unix(r1-3600, 0).UTC()
 	u.mergeRateLimits(&codexrpc.RateLimitsSnapshot{
 		LimitID:             "codex",
 		PlanType:            "prolite",
@@ -669,7 +670,7 @@ func TestCodexUsageSparseMergeAndWindowPick(t *testing.T) {
 		Primary:             &codexrpc.RateLimitWindow{UsedPercent: f64Ptr(80)},
 		SpendControlReached: boolPtr(true),
 	})
-	st := u.state()
+	st := u.stateAt(evalTime)
 	if st.Window != "five_hour" || st.WindowUtilization != 0.80 || st.Plan != "prolite" || st.ResetsAt.Unix() != r1 {
 		t.Fatalf("UsageState after sparse merge = %+v, want five_hour @ 0.80 with preserved resetsAt=%d", st, r1)
 	}
@@ -688,7 +689,7 @@ func TestCodexUsageSparseMergeAndWindowPick(t *testing.T) {
 	if other := u.buckets["codex_other"]; other == nil || other.Secondary != nil {
 		t.Fatalf("second bucket inherited foreign Secondary: %+v", other)
 	}
-	if got := u.state(); got.WindowUtilization != 0.95 {
+	if got := u.stateAt(evalTime); got.WindowUtilization != 0.95 {
 		t.Fatalf("expected highest window across buckets (0.95), got %+v", got)
 	}
 }

@@ -989,3 +989,65 @@ func TestReplyCtxServerRequestResolvedDoesNotAbortTransport(t *testing.T) {
 		t.Fatalf("mock peer error: %v", err)
 	}
 }
+
+func TestClientCloseRacesStart(t *testing.T) {
+	for range 50 {
+		srvToCliR, srvToCliW := io.Pipe()
+		cliToSrvR, cliToSrvW := io.Pipe()
+		c := newClient(srvToCliR, cliToSrvW, nil)
+
+		startGo := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-startGo
+			c.Start()
+		}()
+		go func() {
+			defer wg.Done()
+			<-startGo
+			_ = c.Close()
+		}()
+		close(startGo)
+		wg.Wait()
+		_ = c.Close()
+		_ = srvToCliW.Close()
+		_ = cliToSrvR.Close()
+	}
+}
+
+func TestClientCloseEOFClassifiesAsClosedNotAgentExited(t *testing.T) {
+	// Child exits cleanly as soon as stdin closes (simulating codex app-server
+	// exiting on stdin EOF during intentional Client.Close).
+	c, err := Spawn(SpawnOptions{
+		Binary: "sh",
+		Args:   []string{"-c", "cat >/dev/null"},
+		Dir:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	callErrCh := make(chan error, 1)
+	go func() {
+		_, callErr := c.AccountRead(context.Background(), false)
+		callErrCh <- callErr
+	}()
+	// Give AccountRead a moment to register its pending call before Close.
+	time.Sleep(30 * time.Millisecond)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil for intentional close", err)
+	}
+	select {
+	case err := <-callErrCh:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("pending call err = %v, want ErrClosed", err)
+		}
+		if errors.Is(err, ErrAgentExited) {
+			t.Fatalf("pending call err = %v, must not wrap ErrAgentExited on intentional close", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for pending AccountRead to fail on Close")
+	}
+}
