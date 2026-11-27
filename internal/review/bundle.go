@@ -289,9 +289,6 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 	if result.Files == nil {
 		result.Files = []FileRange{}
 	}
-	if len(result.Files) > maxIndex {
-		result.Files = result.Files[:maxIndex]
-	}
 	limit := min(100<<10, maxPrompt-len(prefix)-4096)
 	if p.lines <= 900 && len(changes) <= limit {
 		result.Inlined = true
@@ -318,11 +315,12 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 	result.BundleFile = filepath.Join(canonical, "changes.diff")
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s\n\nRead the changes from %s in line ranges with offset and limit (50 KiB per read, 2,000 runes per line).\n", prefix, result.BundleFile)
-	for _, r := range result.Files {
+	promptFiles := result.Files[:min(len(result.Files), maxIndex)]
+	for _, r := range promptFiles {
 		fmt.Fprintf(&out, "  %s: lines %d-%d\n", r.Name, r.First, r.Last)
 	}
-	if more := len(p.ranges) - len(result.Files); more > 0 {
-		fmt.Fprintf(&out, "  %d more files; consult the remaining diff headers.\n", more)
+	if more := len(result.Files) - len(promptFiles); more > 0 {
+		fmt.Fprintf(&out, "  Consult the remaining diff headers for additional files (%d).\n", more)
 	}
 	result.Prompt = out.String()
 	if len(result.Prompt) > maxPrompt {

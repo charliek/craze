@@ -3,6 +3,7 @@ package review
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -418,5 +419,29 @@ func TestInspectStashDisablesSignatureDisplay(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("review invoked verifier: %v", err)
+	}
+}
+
+func TestBundleMetadataListsSectionsBeyondPromptIndex(t *testing.T) {
+	dir := newRepo(t)
+	for i := 0; i < maxIndex+1; i++ {
+		put(t, dir, fmt.Sprintf("file-%03d", i), "one\ntwo\nthree\n")
+	}
+	b, err := Build(t.Context(), dir, "HEAD", "review", 512<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Remove()
+	last := fmt.Sprintf("file-%03d", maxIndex)
+	if b.Inlined || len(b.Files) != maxIndex+1 || b.Files[maxIndex].Name != last || !strings.Contains(b.Prompt, "additional files (1)") || strings.Contains(b.Prompt, last+": lines") {
+		t.Fatal(len(b.Files), b.Inlined)
+	}
+	data, err := os.ReadFile(b.BundleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	if !strings.Contains(lines[b.Files[maxIndex].First-1], last) {
+		t.Fatal(b.Files[maxIndex])
 	}
 }

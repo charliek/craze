@@ -148,6 +148,12 @@ func Execute() {
 // asked for JSON (usageJSON), and the one stderr line either way.
 func report(stdout, stderr io.Writer, ranCmd *cobra.Command, args []string, err error) int {
 	line, code := diagnose(ranCmd, err)
+	if ranCmd != nil && ranCmd.Name() == "review" {
+		// A merged or unread diagnostic pipe may already be full after
+		// the command deadline. Deliver whatever still fits before exit.
+		stderr = &reviewOutput{dst: stderr}
+		stdout = &reviewOutput{dst: stdout}
+	}
 	if b := usageJSON(ranCmd, args, err, line, code); b != nil {
 		// A stdout whose reader has gone must not take the stderr line with it
 		// (craze new's rule): the write fails with EPIPE instead.

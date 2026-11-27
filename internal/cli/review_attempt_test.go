@@ -256,3 +256,16 @@ func TestReviewInterruptsDuringUnrelatedTraffic(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewProcessScanStartupDeadline(t *testing.T) {
+	a := reviewScanFailure(t.Context(), rundir.ErrScanCut, "scan unavailable")
+	if a.turn.Error.Kind != errkind.StartFailed || !mayRetry(a) {
+		t.Fatal(a)
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	a = reviewScanFailure(ctx, rundir.ErrScanCut, "scan unavailable")
+	if a.turn.Status != reviewTimedOut || mayRetry(a) {
+		t.Fatal(a)
+	}
+}

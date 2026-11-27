@@ -103,7 +103,7 @@ func TestIncompleteReviewPreservesPriorFileAndDirtyEvidence(t *testing.T) {
 		cmd := &cobra.Command{}
 		cmd.SetOut(&out)
 		cmd.SetErr(&diag)
-		err := (reviewFlags{out: path, json: true}).render(cmd, r)
+		err := (reviewFlags{out: path, json: true}).render(t.Context(), cmd, r)
 		var result reviewResultJSON
 		if err == nil || json.Unmarshal(out.Bytes(), &result) != nil || result.OutPath != "" || result.MessageCut != cut || result.Message != r.Message || result.Error.Kind != r.Error.Kind || len(result.DirtyFiles) != len(r.DirtyFiles) {
 			t.Fatal(err, out.String())
@@ -123,7 +123,7 @@ func TestReviewWritesCompleteFileBeforeBrokenPipe(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(closedReviewOutput{})
 	f := reviewFlags{out: path, maxMessage: 2}
-	err := f.render(cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: "complete review"})
+	err := f.render(t.Context(), cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: "complete review"})
 	out, e := os.ReadFile(path)
 	if failureKind(err) != errkind.Internal || e != nil || string(out) != "complete review" {
 		t.Fatal(string(out), err, e)
@@ -193,7 +193,7 @@ func TestReviewOutputKeepsMoreThanTheOrdinaryWaiterTail(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&stdout)
 	f := reviewFlags{out: path, maxMessage: 4}
-	if err := f.render(cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: res.message()}); err != nil {
+	if err := f.render(t.Context(), cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: res.message()}); err != nil {
 		t.Fatal(err)
 	}
 	data, e := os.ReadFile(path)
@@ -284,5 +284,53 @@ func TestReviewProcessInspectionFailureIsInfrastructure(t *testing.T) {
 	var doc failureBody
 	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc.Error == nil || doc.Error.Kind != errkind.Internal || kids.count() != 0 {
 		t.Fatal(code, out, diag)
+	}
+}
+
+func TestReviewRendersCommandEndAfterCompletedAttempt(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		if expired {
+			cancel()
+			ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		}
+		r := reviewResultJSON{Status: statusCompleted, Message: "complete findings", Attempts: []reviewAttemptJSON{{Status: statusCompleted}}}
+		// End the command after the waiter delivered a complete attempt,
+		// before any command-level result has been chosen.
+		cancel()
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		path := filepath.Join(t.TempDir(), "review.md")
+		err := (reviewFlags{json: true, out: path}).render(ctx, cmd, r)
+		var doc reviewResultJSON
+		var exit *exitError
+		wantCode, wantStatus := 3, statusCancelled
+		if expired {
+			wantCode, wantStatus = 5, reviewTimedOut
+		}
+		if !errors.As(err, &exit) || exit.code != wantCode || json.Unmarshal(out.Bytes(), &doc) != nil || doc.Status != wantStatus || !doc.Stopping || len(doc.Attempts) != 1 || doc.Attempts[0].Status != statusCompleted || doc.OutPath != path {
+			t.Fatal(expired, err, out.String())
+		}
+		b, err := os.ReadFile(path)
+		if err != nil || string(b) != r.Message {
+			t.Fatal(string(b), err)
+		}
+	}
+}
+
+func TestReviewJSONFlagsDisplayLimitAfterSavingFullText(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	path := filepath.Join(t.TempDir(), "review.md")
+	r := reviewResultJSON{Status: statusCompleted, Message: "one two", Attempts: []reviewAttemptJSON{{Status: statusCompleted}}}
+	if err := (reviewFlags{json: true, out: path, maxMessage: 3}).render(t.Context(), cmd, r); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	var doc reviewResultJSON
+	if json.Unmarshal(out.Bytes(), &doc) != nil || !doc.MessageCut || doc.Message != "one" || doc.OutPath != path || string(b) != r.Message || err != nil {
+		t.Fatal(out.String(), string(b), err)
 	}
 }

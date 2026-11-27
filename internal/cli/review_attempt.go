@@ -28,13 +28,11 @@ var stopReviewHost = reviewAfter
 var newReviewScope = hostspawn.NewReviewScope
 
 type attemptResult struct {
-	turn             *turnResult
-	startFailure     bool
-	cleanupErr       error
-	settledBeforeEnd bool
-	interrupted      bool
-	effectiveEffort  string
-	billing          string
+	turn            *turnResult
+	startFailure    bool
+	cleanupErr      error
+	effectiveEffort string
+	billing         string
 }
 
 func attemptFailure(kind errkind.Kind, msg string, start bool) attemptResult {
@@ -145,6 +143,18 @@ type reviewHost struct {
 	entry rundir.Entry
 }
 
+// A process scan cut by its startup budget can try another route after
+// verified teardown. An unreadable process table is an infrastructure error.
+func reviewScanFailure(ctx context.Context, err error, message string) attemptResult {
+	if ctx.Err() != nil {
+		return attemptResult{turn: contextResult(ctx)}
+	}
+	if errors.Is(err, rundir.ErrScanCut) {
+		return attemptFailure(errkind.StartFailed, "process inspection exceeded the review startup budget", true)
+	}
+	return attemptFailure(errkind.Internal, message, true)
+}
+
 // runUnattendedAttempt returns after verified cleanup, without writing
 // command output. The caller owns the common deadline and first signal.
 func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing.Choice, allowPaid bool, stall time.Duration) (a attemptResult) {
@@ -167,7 +177,6 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	env := rundir.ProcessEnv()
 	var host reviewHost
 	defer func() {
-		a.settledBeforeEnd = ctx.Err() == nil
 		a.cleanupErr = stopReviewHost(host, env)
 		if a.cleanupErr != nil {
 			a.turn.Status = statusFailed
@@ -198,10 +207,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	}
 	scope, err := newReviewScope(start, standaloneCLI)
 	if err != nil {
-		if ctx.Err() != nil {
-			return attemptResult{turn: contextResult(ctx)}
-		}
-		return attemptFailure(errkind.Internal, "could not read the process table before review", true)
+		return reviewScanFailure(ctx, err, "could not read the process table before review")
 	}
 	host.scope = scope
 	ref, held, err := spawnOnce(start, spawnOptions{flags: flags, env: env, hubEnv: true, unattended: true, onChild: func(c *hostspawn.Child, id string) { host.child, host.id = c, id; scope.Bind(c) }})
@@ -231,10 +237,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	}
 	defer func() { _ = conn.c.Close() }()
 	if err := scope.Observe(start, host.child); err != nil {
-		if ctx.Err() != nil {
-			return attemptResult{turn: contextResult(ctx)}
-		}
-		return attemptFailure(errkind.Internal, "could not verify the review host process tree", true)
+		return reviewScanFailure(ctx, err, "could not verify the review host process tree")
 	}
 	var billing string
 	if route.Provider == "codex" {
@@ -287,9 +290,6 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	if a.turn.Model == "" {
 		a.turn.Model = model
 	}
-	// closeBy is set only when the waiter starts its signal cleanup. A
-	// completion received during that cleanup still belongs to the attempt.
-	a.interrupted = !conn.closeBy.IsZero()
 	a.effectiveEffort, a.billing = effort, billing
 	finishReviewMessage(a.turn)
 	return a

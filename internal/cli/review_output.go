@@ -14,7 +14,7 @@ import (
 // An inherited pipe or socket can remain open indefinitely without a reader
 // making progress. Use nonblocking writes so a signal or cap can end delivery.
 type reviewOutput struct {
-	ctx context.Context
+	ctx context.Context // nil for best-effort diagnostics after a pipe fills
 	dst io.Writer
 }
 
@@ -73,6 +73,9 @@ func (w *reviewOutput) writePipe(fd uintptr, p []byte) (n int, resultErr error) 
 		case unix.EINTR, unix.EAGAIN:
 		default:
 			return n, err
+		}
+		if w.ctx == nil {
+			return n, unix.EAGAIN
 		}
 		if err := w.ctx.Err(); err != nil {
 			return n, err

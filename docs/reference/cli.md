@@ -3288,7 +3288,8 @@ Inline diffs fit within 900 lines, 100 KiB and the remaining 512 KiB prompt
 budget. Larger diffs use a private `changes.diff` with a line index. The raw
 patch is limited to 5 MiB and carries a marker if truncated. Bundle-only JSON
 includes `inlined`, `bundleFile`, `lines`, `bytes` and `files` with each
-file's `name`, `first` and `last` line. To hand inline content to a reviewer,
+file's `name`, `first` and `last` line. JSON lists every indexed section in
+the emitted patch. The prompt lists the first 300 and counts the rest. To hand inline content to a reviewer,
 use the Markdown output. If shutdown cannot be verified, Craze retains a
 spilled patch and prints its path to stderr. An open input pipe waits for
 EOF when no prompt file or positional words were supplied.
@@ -3309,17 +3310,21 @@ leaves them on disk.
 On Linux the standalone CLI adopts orphaned provider descendants and waits
 for the kernel to confirm the last child exited. On macOS it checks process
 groups, observed descendants and original parent generations. A newly
-orphaned process of uncertain origin can prevent verification. An unverified
-stop returns exit 1 before output or fallback.
+orphaned process of uncertain origin can prevent verification. Work started independently by an external service manager has
+no parent link to the review host. An unverified stop returns exit 1 before
+output or fallback.
 
 A signal or cap during shutdown or the final integrity check preserves the
 settled attempt in `attempts` and delivers its text. The command reports
 `cancelled` or `timed_out` with `stopping`. If a reconnect recovers only a
 tail, `messageCut` flags it and `dirtyFiles` still identifies changes.
+An explicit `--max-message` also sets `messageCut` when it shortens JSON
+output. The full completed message is saved with `--out`.
 Partial text from a failed or cancelled turn is available in JSON.
 Only a completed attempt can supply Markdown stdout or replace an existing
 `--out` file. A cap or signal also interrupts a blocked stdout pipe after
-Craze has saved the full review.
+Craze has saved the full review. When stderr is an unread pipe, progress
+and exit diagnostics use the space available, including with `2>&1`.
 `outPath` appears only after Craze saves a complete nonempty message.
 
 Codex review attempts report the billing class from the running host. With

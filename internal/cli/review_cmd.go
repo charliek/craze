@@ -67,6 +67,9 @@ func newReviewCmd() *cobra.Command {
 		output := &reviewOutput{ctx: cmd.Context(), dst: dst}
 		cmd.SetOut(output)
 		defer cmd.SetOut(dst)
+		diag := cmd.ErrOrStderr()
+		cmd.SetErr(&reviewOutput{dst: diag})
+		defer cmd.SetErr(diag)
 		err := f.run(cmd, words, output)
 		var ee *exitError
 		if f.json && err != nil && (!errors.As(err, &ee) || ee.code == 1) {
@@ -177,11 +180,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 	ctx, stopInitial := context.WithDeadline(parent, started.Add(capDuration))
 	defer stopInitial()
 	output.ctx = ctx
-	endContext := func() error {
-		turn := contextResult(ctx)
-		res.Status, res.Stopping, res.Error = turn.Status, turn.Stopping, turn.Error
-		return f.render(cmd, res)
-	}
+	render := func() error { return f.render(ctx, cmd, res) }
 	var routes routing.Result
 	var paid bool
 	if !f.bundleOnly {
@@ -196,10 +195,10 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		go func() { r, p, e := f.routes(); ready <- resolved{r, p, e} }()
 		select {
 		case <-ctx.Done():
-			return endContext()
+			return render()
 		case r := <-ready:
 			if ctx.Err() != nil {
-				return endContext()
+				return render()
 			}
 			routes, paid = r.result, r.paid
 			for _, s := range routes.Skipped {
@@ -215,7 +214,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 						e = review.ValidateRef(ctx, dir, f.base)
 					}
 					if ctx.Err() != nil {
-						return endContext()
+						return render()
 					}
 					if failureKind(e) == errkind.Usage {
 						return usageKindf(errkind.Usage, "craze review: %s", e)
@@ -242,7 +241,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 	}
 	input, err := f.readInputs(ctx, cmd, words)
 	if ctx.Err() != nil {
-		return endContext()
+		return render()
 	}
 	if err != nil {
 		return err
@@ -254,7 +253,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		bundle, err = review.Build(ctx, dir, f.base, prompt, promptTextMax)
 		if ctx.Err() != nil {
 			_ = bundle.Remove()
-			return endContext()
+			return render()
 		}
 		if err != nil {
 			k := failureKind(err)
@@ -292,7 +291,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 	if f.dirty != "off" {
 		before, err = review.Inspect(ctx, dir)
 		if ctx.Err() != nil {
-			return endContext()
+			return render()
 		}
 		if err != nil {
 			return kindf(errkind.Internal, "craze review: checking workspace: %s", err)
@@ -303,7 +302,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 	}
 	for i, route := range routes.Routes {
 		if ctx.Err() != nil {
-			return endContext()
+			return render()
 		}
 		start := time.Now()
 		fmt.Fprintf(cmd.ErrOrStderr(), "craze review: attempt %d %s/%s\n", i+1, route.Provider, sanitizeLine(route.Model))
@@ -372,13 +371,8 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 				}
 			}
 		}
-		if t.MessageCut || len(res.DirtyFiles) != 0 {
+		if t.MessageCut || len(res.DirtyFiles) != 0 || ctx.Err() != nil {
 			break
-		}
-		// Keep the delivered attempt and its text. A new command cap or
-		// signal during mandatory cleanup or inspection has its own exit code.
-		if (a.settledBeforeEnd || a.interrupted) && ctx.Err() != nil {
-			return endContext()
 		}
 		if a.startFailure && rec.Kind == errkind.Internal {
 			return kindf(rec.Kind, "craze review: %s", rec.Error.Message)
@@ -386,15 +380,12 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		if i+1 == len(routes.Routes) || !mayRetry(a) {
 			break
 		}
-		if ctx.Err() != nil {
-			return endContext()
-		}
 		deadline, _ := ctx.Deadline()
 		if time.Until(deadline) < reviewFallbackFloor {
 			break
 		}
 	}
-	return f.render(cmd, res)
+	return render()
 }
 
 func mayRetry(a attemptResult) bool {
@@ -412,7 +403,7 @@ func mayRetry(a attemptResult) bool {
 	return false
 }
 
-func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
+func (f reviewFlags) render(ctx context.Context, cmd *cobra.Command, r reviewResultJSON) error {
 	if r.MessageCut {
 		fmt.Fprintln(cmd.ErrOrStderr(), "craze review: only part of the review was recovered")
 	}
@@ -426,7 +417,16 @@ func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
 		}
 		r.OutPath = f.out
 	}
-	r.Message, _ = cutMessage(r.Message, f.maxMessage)
+	// The attempt and its complete output survive a later signal or cap.
+	// Apply the command outcome after cleanup, inspection and durable output.
+	// Dirty-check=fail has its own required terminal status.
+	if ctx.Err() != nil && (r.Error == nil || r.Error.Kind != errkind.DirtyTree) {
+		turn := contextResult(ctx)
+		r.Status, r.Stopping, r.Error = turn.Status, turn.Stopping, turn.Error
+	}
+	var limited bool
+	r.Message, limited = cutMessage(r.Message, f.maxMessage)
+	r.MessageCut = r.MessageCut || limited
 	var err error
 	if f.json {
 		err = json.NewEncoder(cmd.OutOrStdout()).Encode(r)

@@ -416,9 +416,10 @@ def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_p
     assert ps.returncode != 0 or ps.stdout.strip().startswith("Z"), ps.stdout
 
 
+@pytest.mark.parametrize("dirty", [False, True])
 @pytest.mark.parametrize("interrupt", [True, False])
 def test_settled_text_survives_command_end_during_integrity_check(
-    craze_bin, fake_agent_bin, tmp_path, interrupt
+    craze_bin, fake_agent_bin, tmp_path, interrupt, dirty
 ):
     import shutil
     import signal
@@ -443,11 +444,12 @@ def test_settled_text_survives_command_end_during_integrity_check(
     git_wrapper.chmod(0o700)
     path = tmp_path / "report.md"
     args = [str(craze_bin), "review", "--json", "-C", str(work), "--provider", "cursor",
-            "--allow-same-provider", "--out", str(path), "--timeout", "20s" if interrupt else "4s", "inspect"]
+            "--allow-same-provider", "--out", str(path), "--dirty-check", "warn",
+            "--timeout", "20s" if interrupt else "4s", "inspect"]
     started = time.monotonic()
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env={**os.environ, "PATH": str(programs) + os.pathsep + os.environ["PATH"],
-                                 "CRAZE_FAKE_SCRIPT": "echo"})
+                                 "CRAZE_FAKE_SCRIPT": "dirty_tree" if dirty else "echo"})
     try:
         while not checking.exists() and proc.poll() is None and time.monotonic() - started < 10:
             time.sleep(.02)
@@ -461,7 +463,8 @@ def test_settled_text_survives_command_end_during_integrity_check(
         doc = json.loads(out)
         assert proc.returncode == (3 if interrupt else 5), (doc, err)
         assert doc["attempts"][0]["status"] == "completed", doc
-        assert doc["message"] == path.read_text() and "inspect" in doc["message"], doc
+        assert doc["message"] == path.read_text() and ("review retained" if dirty else "inspect") in doc["message"], doc
+        assert bool(doc["dirtyFiles"]) == dirty and doc["stopping"], doc
     finally:
         release.touch()
         if proc.poll() is None:
@@ -522,9 +525,10 @@ def test_fallback_verifies_orphan_handoff_and_ignores_unrelated_session(
             review_proc.wait(timeout=5)
 
 
+@pytest.mark.parametrize("merge_stderr", [False, True])
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_blocked_stdout_keeps_file_and_observes_command_end(
-    craze_bin, fake_agent_bin, tmp_path, interrupt
+    craze_bin, fake_agent_bin, tmp_path, interrupt, merge_stderr
 ):
     import signal
     import time
@@ -537,7 +541,8 @@ def test_blocked_stdout_keeps_file_and_observes_command_end(
     args = [str(craze_bin), "review", "-C", str(work), "--provider", "cursor",
             "--allow-same-provider", "--out", str(path), "--prompt-file", str(brief),
             "--timeout", "25s" if interrupt else "5s"]
-    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
                             env={**os.environ, "CRAZE_FAKE_SCRIPT": "echo"})
     try:
         end = time.monotonic() + 12
