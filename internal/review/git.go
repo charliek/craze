@@ -71,7 +71,7 @@ func git(ctx context.Context, dir string, maxSize int, args ...string) ([]byte, 
 	// Respect the requested workspace, including when invoked from a hook
 	// that exports an alternate worktree, index or config.
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "GIT_") })
-	cmd.Env = append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=", "LC_ALL=C")
 	cmd.WaitDelay = time.Second
 	out := &boundedBuffer{limit: maxSize}
 	diag := &boundedBuffer{limit: 1024}

@@ -3205,8 +3205,7 @@ eligibility. It reads no Codex configuration or credential files.
 Codex receives a read-only command sandbox and never approves escalation.
 Local Codex hooks and MCP servers have their own permissions. A
 subscription-only review checks the account and effective endpoint before
-submitting a turn. Native Ask mode exposes read, grep and glob. Native
-reviews check the selected credential driver before running a turn.
+submitting a turn. Native review sessions offer and execute only read, grep and glob. They check the selected credential driver before a turn and cannot start child agents.
 
 Claude runs in Manual mode with Edit, Write, MultiEdit, NotebookEdit and
 Bash disallowed. Claude hooks and MCP servers have separate permissions.

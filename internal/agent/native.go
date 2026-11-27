@@ -1392,6 +1392,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		}
 	}
 
+	hopts.ReadOnlyTools = s.opts.ReadOnlyTools
 	if s.opts.SubscriptionOnly {
 		model, ok := table.Models[hopts.Model]
 		if !ok || table.Providers[model.Provider].Driver != modeltable.DriverChatGPT {

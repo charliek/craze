@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -120,18 +121,24 @@ def test_signal_during_second_host_start(craze_bin, fake_agent_bin, tmp_path):
             proc.wait(timeout=30)
 
 
-def test_codex_subscription_refusal_falls_back_to_native_plan(craze_bin, fake_agent_bin, tmp_path):
+def test_codex_subscription_refusal_falls_back_to_native_plan(
+    craze_bin, fake_agent_bin, tmp_path
+):
     from datetime import UTC, datetime, timedelta
     import tomllib
 
-    from sse_fixture import SSEFixture
+    from sse_fixture import SSEFixture, answer, call_step, write_native_config
 
     work = tmp_path / "work"
     configure(work, fake_agent_bin, "codex-subscription-refused")
     home = Path(os.environ["CRAZE_HOME"])
     cfg = home / "config.toml"
-    cfg.write_text(cfg.read_text().replace('provider = "cursor"\nmodel = "m-1"',
-                                           'provider = "native"\nmodel = "chatgpt/gpt-6.2-sol"'))
+    cfg.write_text(
+        cfg.read_text().replace(
+            'provider = "cursor"\nmodel = "m-1"',
+            'provider = "native"\nmodel = "chatgpt/gpt-6.2-sol"',
+        )
+    )
     native = home / "native"
     auth = native / "auth"
     auth.mkdir(parents=True)
@@ -142,28 +149,98 @@ def test_codex_subscription_refusal_falls_back_to_native_plan(craze_bin, fake_ag
 
     client, subject = "app_review_fixture", "review-subject"
     now = datetime.now(UTC)
-    catalog = Path(__file__).resolve().parents[2] / "internal/harness/modeltable/catalog.toml"
-    version = tomllib.loads(catalog.read_text())["chatgpt_defaults"]["models_client_version"]
-    write(auth / "chatgpt-client.json", dict(client_id=client, subject=subject, plan_usage=True, notice_shown=True))
-    write(auth / "chatgpt.json", dict(version=1, client_id=client, subject=subject,
-          issuer="https://auth.openai.com", scopes=["openid", "offline_access", "chatgpt.tokens.use.direct"],
-          access_token="fixture-access", refresh_token="fixture-refresh", id_token="fixture-id",
-          access_expires_at=(now + timedelta(hours=1)).isoformat(), incarnation="review-1", generation=1))
-    write(native / "chatgpt-models.json", dict(version=1, client_id=client, subject=subject,
-          client_version=version, fetched_at=now.isoformat(), models=[dict(slug="gpt-6.2-sol",
-          display_name="Fixture Sol", context_window=200000, efforts=["low"], default_effort="low")]))
+    catalog = (
+        Path(__file__).resolve().parents[2] / "internal/harness/modeltable/catalog.toml"
+    )
+    version = tomllib.loads(catalog.read_text())["chatgpt_defaults"][
+        "models_client_version"
+    ]
+    write(
+        auth / "chatgpt-client.json",
+        dict(client_id=client, subject=subject, plan_usage=True, notice_shown=True),
+    )
+    write(
+        auth / "chatgpt.json",
+        dict(
+            version=1,
+            client_id=client,
+            subject=subject,
+            issuer="https://auth.openai.com",
+            scopes=["openid", "offline_access", "chatgpt.tokens.use.direct"],
+            access_token="fixture-access",
+            refresh_token="fixture-refresh",
+            id_token="fixture-id",
+            access_expires_at=(now + timedelta(hours=1)).isoformat(),
+            incarnation="review-1",
+            generation=1,
+        ),
+    )
+    write(
+        native / "chatgpt-models.json",
+        dict(
+            version=1,
+            client_id=client,
+            subject=subject,
+            client_version=version,
+            fetched_at=now.isoformat(),
+            models=[
+                dict(
+                    slug="gpt-6.2-sol",
+                    display_name="Fixture Sol",
+                    context_window=200000,
+                    efforts=["low"],
+                    default_effort="low",
+                )
+            ],
+        ),
+    )
     server = SSEFixture().start()
+    paid = SSEFixture().start()
     try:
-        server.set_ok(text_parts=["native review complete"])
-        proc, doc = review(craze_bin, work, "--target", "test", "--allow-same-provider", "inspect",
-                           env={"CRAZE_TEST_CHATGPT_API": server.base_url,
-                                "CRAZE_TEST_CHATGPT_ISSUER": server.base_url.removesuffix("/v1")})
+        write_native_config(native, paid.base_url, alias="paid-child")
+        models = native / "models.toml"
+        models.write_text(
+            models.read_text().replace("catalog = false", "catalog = true")
+        )
+        server.set_script(
+            [
+                call_step(
+                    "agent",
+                    {
+                        "description": "delegate",
+                        "prompt": "review",
+                        "model": "paid-child",
+                    },
+                ),
+                answer("native review complete"),
+            ]
+        )
+        proc, doc = review(
+            craze_bin,
+            work,
+            "--target",
+            "test",
+            "--allow-same-provider",
+            "inspect",
+            env={
+                "CRAZE_TEST_CHATGPT_API": server.base_url,
+                "CRAZE_TEST_CHATGPT_ISSUER": server.base_url.removesuffix("/v1"),
+            },
+        )
         assert proc.returncode == 0, (doc, proc.stderr)
         assert [a["provider"] for a in doc["attempts"]] == ["codex", "native"], doc
         assert doc["attempts"][0]["kind"] == "auth" and doc["dirtyFiles"] == [], doc
         assert "native review complete" in doc["message"], doc
+        assert len(server.requests) == 2
+        for req in server.requests:
+            (namespace,) = req.body["tools"]
+            assert namespace["name"] == "craze"
+            assert {t["name"] for t in namespace["tools"]} == {"read", "grep", "glob"}
+        assert "agent" in json.dumps(server.requests[-1].input)
+        assert not paid.requests
     finally:
         server.close()
+        paid.close()
 
 
 def test_explicit_cap_covers_routing_lookup(craze_bin, tmp_path):
@@ -171,10 +248,155 @@ def test_explicit_cap_covers_routing_lookup(craze_bin, tmp_path):
     home.mkdir()
     os.mkfifo(home / "config.toml", 0o600)
     proc = subprocess.run(
-        [str(craze_bin), "review", "--target", "sol", "--timeout", "150ms", "--json", "inspect"],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        [
+            str(craze_bin),
+            "review",
+            "--target",
+            "sol",
+            "--timeout",
+            "150ms",
+            "--json",
+            "inspect",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=10,
         env={**os.environ, "CRAZE_HOME": str(home)},
     )
     doc = json.loads(proc.stdout)
-    assert proc.returncode == 5 and doc["status"] == "timed_out" and doc["stopping"], (doc, proc.stderr)
+    assert proc.returncode == 5 and doc["status"] == "timed_out" and doc["stopping"], (
+        doc,
+        proc.stderr,
+    )
     assert doc["attempts"] == [], doc
+
+
+def test_paid_second_candidate_requires_opt_in(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-quota")
+    args = ("--target", "test", "--allow-same-provider", "inspect")
+    env = {"CURSOR_API_KEY": "fixture-paid-credential"}
+    proc, doc = review(craze_bin, work, *args, env=env)
+    assert proc.returncode == 3 and [a["provider"] for a in doc["attempts"]] == [
+        "codex"
+    ], doc
+    proc, doc = review(craze_bin, work, *args, "--allow-paid-fallback", env=env)
+    assert proc.returncode == 0 and doc["attempts"][1]["billing"] == "api_key", doc
+
+
+def test_closed_stdout_preserves_full_file(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-basic")
+    out = tmp_path / "review.md"
+    readfd, writefd = os.pipe()
+    os.close(readfd)
+    with os.fdopen(writefd, "wb") as writer:
+        p = subprocess.run(
+            [
+                str(craze_bin),
+                "review",
+                "-C",
+                str(work),
+                "--provider",
+                "cursor",
+                "--allow-same-provider",
+                "--out",
+                str(out),
+                "check all the bytes",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "CRAZE_FAKE_SCRIPT": "echo"},
+            timeout=30,
+        )
+    assert p.returncode == 1 and "check all the bytes" in out.read_text(), p.stderr
+
+
+def test_index_damage_preserves_review(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-basic")
+    (work / "new").write_text("original")
+    subprocess.run(["git", "-C", str(work), "add", "new"], check=True)
+    out = tmp_path / "review.md"
+    proc, doc = review(
+        craze_bin,
+        work,
+        "--provider",
+        "cursor",
+        "--allow-same-provider",
+        "--out",
+        str(out),
+        "inspect",
+        env={"CRAZE_FAKE_SCRIPT": "review-damaged-index"},
+    )
+    assert (
+        proc.returncode == 3
+        and doc["error"]["kind"] == "dirty_tree"
+        and "index" in doc["dirtyFiles"]
+    ), (doc, proc.stderr)
+    assert doc["message"] == out.read_text() and "review retained" in doc["message"], (
+        doc
+    )
+
+
+def test_wire_effort_clamp(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-model-multipage")
+    proc, doc = review(
+        craze_bin,
+        work,
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6.2-sol",
+        "--allow-same-provider",
+        "--effort",
+        "xhigh",
+        "inspect",
+    )
+    assert proc.returncode == 0 and doc["attempts"][0]["effectiveEffort"] == "high", (
+        doc,
+        proc.stderr,
+    )
+
+
+def test_invalid_ref_before_unavailable_route(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-basic")
+    for ref in ("--bad", "unresolved-revision"):
+        proc, doc = review(
+            craze_bin,
+            work,
+            "--provider",
+            "codex",
+            "--allow-same-provider",
+            "--changes-since=" + ref,
+            env={"CODEX_API_KEY": "fixture"},
+        )
+        assert proc.returncode == 2 and doc["error"]["kind"] == "usage", (
+            doc,
+            proc.stderr,
+        )
+
+
+def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-quota")
+    home = Path(os.environ["CRAZE_HOME"])
+    marker = tmp_path / "helper.pid"
+    wrapper = home / "fake-codex"
+    wrapper.write_text(
+        f"#!{sys.executable}\nimport os, subprocess\n"
+        f"helper=subprocess.Popen(['sleep','45'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"open({str(marker)!r},'w').write(str(helper.pid))\n"
+        f"os.execv({str(fake_agent_bin)!r},[{str(fake_agent_bin)!r},'-script','codex-quota',*__import__('sys').argv[1:]])\n"
+    )
+    proc, doc = review(
+        craze_bin, work, "--target", "test", "--allow-same-provider", "inspect"
+    )
+    assert proc.returncode == 0 and len(doc["attempts"]) == 2, (doc, proc.stderr)
+    ps = subprocess.run(
+        ["ps", "-p", marker.read_text(), "-o", "stat="], capture_output=True, text=True
+    )
+    assert ps.returncode != 0 or ps.stdout.strip().startswith("Z"), ps.stdout

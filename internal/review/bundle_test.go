@@ -317,3 +317,27 @@ func TestReviewIgnoresInheritedRepoSelection(t *testing.T) {
 		t.Fatal(b, err)
 	}
 }
+
+func TestRangeOmitsPartialHeader(t *testing.T) {
+	first := "diff --git a/one b/one\n+first\n"
+	p := patchText{text: boundedBuffer{limit: len(first) + 4}}
+	p.tracked([]byte(first+"diff --git a/two b/two\n+second\n"), []byte("one\x00two\x00"))
+	if !p.text.truncated || len(p.ranges) != 1 || p.ranges[0].Last != 2 || p.ranges[0].First != 1 {
+		t.Fatal(p.ranges)
+	}
+}
+
+func TestMissingObjectDoesNotFetchFromPromisor(t *testing.T) {
+	source := newRepo(t)
+	put(t, source, "file", "original blob")
+	commit(t, source)
+	runGit(t, source, "config", "uploadpack.allowFilter", "true")
+	dir := filepath.Join(t.TempDir(), "partial")
+	runGit(t, source, "clone", "-q", "--no-checkout", "--filter=blob:none", "file://"+source, dir)
+	oid := strings.TrimSpace(runGit(t, source, "rev-parse", "HEAD:file"))
+	before := runGit(t, dir, "count-objects", "-v")
+	_, err := gitData(t.Context(), dir, "cat-file", "blob", oid)
+	if err == nil || runGit(t, dir, "count-objects", "-v") != before {
+		t.Fatal("review fetched a missing blob", err)
+	}
+}

@@ -25,6 +25,8 @@ import (
 	"github.com/charliek/craze/internal/routing"
 )
 
+var reviewFallbackFloor = 45 * time.Second
+
 type reviewFlags struct {
 	routingFlags
 	dir, model, base, criteria, out, dirty string
@@ -152,6 +154,9 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 	if err := f.checkFlags(cmd); err != nil {
 		return err
 	}
+	if strings.HasPrefix(f.base, "-") {
+		return usagef("craze review: invalid changes-since ref")
+	}
 	if cmd.Flags().Changed("changes-since") && f.base == "" || f.bundleOnly && f.base == "" || !slices.Contains([]string{"fail", "warn", "off"}, f.dirty) || f.stall < 0 || cmd.Flags().Changed("timeout") && f.timeout <= 0 || f.maxMessage < 0 {
 		return usagef("craze review: check the bundle ref, dirty-check mode, and time or output limits")
 	}
@@ -198,6 +203,18 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 				fmt.Fprintln(cmd.ErrOrStderr(), "craze review:", sanitizeLine(w))
 			}
 			if r.err != nil {
+				if f.base != "" {
+					dir, e := resolveWorkspace(f.dir)
+					if e == nil {
+						e = review.ValidateRef(ctx, dir, f.base)
+					}
+					if ctx.Err() != nil {
+						return endContext()
+					}
+					if failureKind(e) == errkind.Usage {
+						return usageKindf(errkind.Usage, "craze review: %s", e)
+					}
+				}
 				return r.err
 			}
 		}
@@ -283,7 +300,13 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		}
 		a := runUnattendedAttempt(ctx, dir, prompt, route, paid, f.stall)
 		t := a.turn
+		if !paid && route.Provisional && t.Status == statusCompleted {
+			route.Provisional, route.Note = false, ""
+		}
 		res.Route, res.Status, res.Message, res.Stopping, res.Error = &route, t.Status, t.message(), t.Stopping, t.Error
+		if a.effectiveEffort != "" && route.Effort != "" && a.effectiveEffort != route.Effort {
+			fmt.Fprintf(cmd.ErrOrStderr(), "craze review: %s/%s adjusted effort %s to %s\n", route.Provider, sanitizeLine(route.Model), route.Effort, sanitizeLine(a.effectiveEffort))
+		}
 		rec := reviewAttemptJSON{Choice: route, EffectiveModel: t.Model, EffectiveEffort: a.effectiveEffort, Status: t.Status, Error: t.Error, DurationMs: time.Since(start).Milliseconds()}
 		if t.Error != nil {
 			rec.Kind = t.Error.Kind
@@ -307,10 +330,18 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 			after, e := review.Inspect(check, dir)
 			done()
 			if e != nil {
-				return kindf(errkind.Internal, "craze review: verifying workspace: %s", e)
+				res.IncompleteCheck = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "craze review: could not verify workspace: %s\n", sanitizeLine(e.Error()))
+				if before.IndexChanged() {
+					res.DirtyFiles = []string{"index"}
+				} else {
+					res.Status, res.Error = statusFailed, kindError("could not verify workspace integrity", errkind.Unobserved)
+					break
+				}
+			} else {
+				res.IncompleteCheck = before.Incomplete || after.Incomplete
+				res.DirtyFiles = review.Changes(before, after)
 			}
-			res.IncompleteCheck = before.Incomplete || after.Incomplete
-			res.DirtyFiles = review.Changes(before, after)
 			if res.IncompleteCheck {
 				fmt.Fprintln(cmd.ErrOrStderr(), "craze review: workspace check used bounded file metadata")
 			}
@@ -338,7 +369,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 			return endContext()
 		}
 		deadline, _ := ctx.Deadline()
-		if time.Until(deadline) < 45*time.Second {
+		if time.Until(deadline) < reviewFallbackFloor {
 			break
 		}
 	}

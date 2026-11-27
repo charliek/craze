@@ -296,8 +296,7 @@ version is `agy` 1.5.14.
 | A `--model` `agy` does not list (`-32602`) | `model_not_found` | `the agent refused model "<model>": <agy's reason>` |
 
 Under the default `--force`, `agy` runs as `agy acp
---dangerously-skip-permissions`; `--no-force` runs `agy acp` and the session's
-`run_command` calls ask. `craze new --wait` on antigravity returns the files
+--dangerously-skip-permissions`; `--no-force` runs `agy acp`. Version 1.5.18 can run commands and edit files without requesting permission. `craze new --wait` on antigravity returns the files
 `edit_file` and `write_file` changed, and under `--plan` the brain plan file as
 `planFile` ([What `files` lists](#what-files-lists)). `agy` runs sub-agents
 asynchronously: in an unattended session they may be cut off when the turn ends.
@@ -2516,7 +2515,7 @@ not promise that re-running a turn repeats no side effects already performed.
 | `internal` | Anything else: craze's own failure, a stored session whose transcript cannot be loaded (damaged, or written by a newer craze) included | false |
 | `unknown` | An error from a host older than kinds, which claims nothing and so is not retryable; or a kind from a later craze this one does not know, which keeps the `retryable` that host sent | false unless sent |
 
-Review integrity checks include non-executable permission changes and tracked paths marked assume-unchanged or skip-worktree. The Git inspection uses the requested workspace and disables external content filters. Files above the hashing budget are compared using their type, permissions, size, modification time and inode.
+Review integrity checks include non-executable permission changes and tracked paths marked assume-unchanged or skip-worktree. The Git inspection uses the requested workspace, disables external content filters and forbids remote transfers for missing objects. If an attempt makes the index unreadable, the result includes the review text and the index diagnostic. Files above the hashing budget are compared using their type, permissions, size, modification time and inode.
 
 ### Usage errors under `--json`
 

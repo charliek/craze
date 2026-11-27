@@ -14,7 +14,7 @@ the current caller's work. Run `craze review --role review --changes-since
 main --out /tmp/review.md` to get the full Markdown review and verify the
 worktree after each attempt. Use `craze resolve --role panel --json` to
 choose seats independently. For a native sub-agent seat, configure its
-model, effort and read-only permissions on the caller.
+model, effort and read-only permissions on the caller. Antigravity 1.5.18 can edit files and execute shell commands under `--no-force`. Its post-review Git check covers the inspected worktree.
 
 ## Don't call yourself
 

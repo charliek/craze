@@ -47,6 +47,7 @@ type toolSeams struct {
 
 // toolset is one session's tools, fixed from Open to Close.
 type toolset struct {
+	readOnly bool
 	registry *tool.Registry
 	// modeGate is the session's gate: the mode's rules over the gate the
 	// session would otherwise have used (plan 023 §3.1). Open hands it the
@@ -267,7 +268,7 @@ const NativeProvider = "native"
 // the tools a child may be given, since a child's own state is on only then
 // (WebState.forChild). Env.Web is the state's service when the tools are
 // offered and there is one, and otherwise a nil interface.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, parents []string, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, web WebState, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace, mode string, readOnly bool, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, parents []string, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, web WebState, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -290,7 +291,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 			}
 		}
 	}
-	ts := &toolset{keys: vals, closing: make(chan struct{}), web: web}
+	ts := &toolset{readOnly: readOnly, keys: vals, closing: make(chan struct{}), web: web}
 	if child == nil {
 		ts.todos = newSessionTodos()
 	}
@@ -1084,6 +1085,16 @@ func (ts *toolset) profileFor(ref tool.ModelRef) (tool.Profile, error) {
 		return tool.Profile{}, err
 	}
 	p.Tools = withWeb(p.Tools, ts.web)
+	if ts.readOnly {
+		p.Tools = slices.DeleteFunc(slices.Clone(p.Tools), func(t tool.Tool) bool {
+			switch t.Spec().ID {
+			case "read", "grep", "glob":
+				return false
+			default:
+				return true
+			}
+		})
+	}
 	return p, nil
 }
 

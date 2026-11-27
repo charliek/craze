@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -170,5 +172,27 @@ func TestReviewOutputKeepsMoreThanTheOrdinaryWaiterTail(t *testing.T) {
 	data, e := os.ReadFile(path)
 	if e != nil || string(data) != want || stdout.String() != "head\n" {
 		t.Fatalf("file bytes %d, stdout %q, %v", len(data), stdout.String(), e)
+	}
+}
+
+func TestReviewCommandDeadlineDuringFallbackStartup(t *testing.T) {
+	_, ws, _ := unattendedHome(t)
+	shorten(t, &reviewFallbackFloor, 10*time.Millisecond)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "second-started")
+	delayed := filepath.Join(dir, "slow-cursor")
+	if err := os.WriteFile(delayed, []byte(fmt.Sprintf("#!/bin/sh\ntouch %q\nexec sleep 30\n", marker)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_SCRIPT", "codex-quota")
+	t.Setenv("CODEX_API_KEY", "")
+	writeCrazeConfig(t, fmt.Sprintf("[agents]\ncodex=%q\ncursor=%q\n[[targets.sol.routes]]\nprovider='codex'\nmodel='gpt-6.2-sol'\nbilling='subscription'\n[[targets.sol.routes]]\nprovider='cursor'\nmodel='m-1'\nbilling='subscription'\n", fakeAgentPath(t), delayed))
+	out, diag, code := executeIn([]string{"review", "--target", "sol", "--allow-same-provider", "--effort", "low", "--timeout", "3s", "--json", "-C", ws, "inspect"}, strings.NewReader(""))
+	var doc reviewResultJSON
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(out, err)
+	}
+	if _, err := os.Stat(marker); err != nil || code != 5 || !doc.Stopping || doc.Status != reviewTimedOut || len(doc.Attempts) != 2 {
+		t.Fatalf("exit %d: %+v, %s, %v", code, doc, diag, err)
 	}
 }

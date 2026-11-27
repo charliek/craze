@@ -705,6 +705,11 @@ func (s *server) handlePrompt(msg *acp.Message) {
 	s.mu.Unlock()
 
 	switch s.script {
+	case "review-damaged-index":
+		if err := os.WriteFile(".git/index", []byte("invalid test index"), 0600); err != nil {
+			panic(err)
+		}
+		s.echo(msg.ID, "review retained")
 	case "dirty_tree":
 		if err := os.WriteFile("review-mutation.txt", []byte("changed\n"), 0600); err != nil {
 			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: err.Error()})

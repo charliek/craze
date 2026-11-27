@@ -102,6 +102,8 @@ import (
 
 // Options configure Open.
 type Options struct {
+	// ReadOnlyTools restricts the offered and executable review tools.
+	ReadOnlyTools bool
 	// Home is the harness's directory, <craze dir>/native; absolute.
 	// Transcripts are written under Home/sessions.
 	Home string
@@ -769,7 +771,7 @@ func Open(opts Options) (*Session, error) {
 	} else {
 		s.base.top = start.top
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.Web, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.ReadOnlyTools, asker, opts.Table, s.getenv, modelRef(m.r), []string{m.r.Alias}, opts.Prompt, start, opts.Personas, child, s.subs, opts.Web, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

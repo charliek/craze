@@ -69,7 +69,10 @@ func (p *patchText) tracked(patch, names []byte) {
 	for len(patch) > 0 && !p.text.truncated {
 		line, rest, _ := bytes.Cut(patch, []byte{'\n'})
 		if bytes.HasPrefix(line, []byte("diff --git ")) {
-			starts = append(starts, FileRange{Name: string(bytes.TrimPrefix(line, []byte("diff --git "))), First: p.lines + 1})
+			// A cutoff inside the header cannot identify a complete section.
+			if p.text.limit-p.text.Len() >= len(line)+1 {
+				starts = append(starts, FileRange{Name: string(bytes.TrimPrefix(line, []byte("diff --git "))), First: p.lines + 1})
+			}
 		}
 		p.add(line)
 		if len(line) == 0 {
@@ -139,22 +142,9 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 	if err != nil {
 		return Bundle{}, err
 	}
-	head, headErr := resolveOID(ctx, root, "HEAD")
-	oid, err := resolveOID(ctx, root, base)
+	head, oid, err := bundleRefs(ctx, root, base)
 	if err != nil {
-		if headErr != nil && base == "HEAD" && unborn(ctx, root) {
-			b, e := gitData(ctx, root, "hash-object", "-t", "tree", "--stdin")
-			if e != nil {
-				return Bundle{}, e
-			}
-			oid = strings.TrimSpace(string(b))
-		} else if ctx.Err() != nil {
-			return Bundle{}, ctx.Err()
-		} else {
-			return Bundle{}, problem{errkind.Usage, "changes-since does not name an available commit"}
-		}
-	} else if headErr != nil && !unborn(ctx, root) {
-		return Bundle{}, headErr
+		return Bundle{}, err
 	}
 	status, err := gitData(ctx, root, "status", "--short", "--untracked-files=all")
 	if err != nil {
@@ -272,4 +262,35 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 	}
 	success = true
 	return result, nil
+}
+
+// ValidateRef checks the requested revision even when routing has no eligible host.
+func ValidateRef(ctx context.Context, dir, base string) error {
+	root, err := repoRoot(ctx, dir)
+	if err != nil {
+		return err
+	}
+	_, _, err = bundleRefs(ctx, root, base)
+	return err
+}
+
+func bundleRefs(ctx context.Context, root, base string) (string, string, error) {
+	head, headErr := resolveOID(ctx, root, "HEAD")
+	oid, err := resolveOID(ctx, root, base)
+	if err != nil {
+		if headErr != nil && base == "HEAD" && unborn(ctx, root) {
+			b, e := gitData(ctx, root, "hash-object", "-t", "tree", "--stdin")
+			if e != nil {
+				return "", "", e
+			}
+			oid = strings.TrimSpace(string(b))
+		} else if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		} else {
+			return "", "", problem{errkind.Usage, "changes-since does not name an available commit"}
+		}
+	} else if headErr != nil && !unborn(ctx, root) {
+		return "", "", headErr
+	}
+	return head, oid, nil
 }

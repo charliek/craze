@@ -25,6 +25,8 @@ const (
 
 type Snapshot struct {
 	Root       string
+	indexPath  string
+	indexStat  os.FileInfo
 	Incomplete bool
 	state      map[string]string
 	digests    map[string]string
@@ -153,6 +155,15 @@ func Inspect(ctx context.Context, dir string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	s := Snapshot{Root: root, state: map[string]string{}, digests: map[string]string{}}
+	indexPath, err := gitData(ctx, root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.indexPath = strings.TrimSuffix(string(indexPath), "\n")
+	s.indexStat, err = os.Lstat(s.indexPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return Snapshot{}, err
+	}
 	head, err := resolveOID(ctx, root, "HEAD")
 	if err != nil && !unborn(ctx, root) {
 		return Snapshot{}, err
@@ -250,4 +261,17 @@ func Changes(before, after Snapshot) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// IndexChanged compares the identity of an index which was readable at the
+// pre-check, even when Git can no longer parse it after the provider exits.
+func (s Snapshot) IndexChanged() bool {
+	if s.indexPath == "" {
+		return false
+	}
+	after, err := os.Lstat(s.indexPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return s.indexStat != nil
+	}
+	return err == nil && (s.indexStat == nil || !os.SameFile(s.indexStat, after) || s.indexStat.Size() != after.Size() || s.indexStat.Mode() != after.Mode() || !s.indexStat.ModTime().Equal(after.ModTime()))
 }

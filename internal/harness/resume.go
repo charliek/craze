@@ -75,7 +75,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// digest, so it is not known here (plan 029 §2.1, §9). The mode only seeds
 	// the gate; the session's own is set below, before it is handed out.
 	ws := filepath.Clean(opts.Workspace)
-	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.Asker, opts.Table, s.getenv,
+	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.ReadOnlyTools, opts.Asker, opts.Table, s.getenv,
 		profileRef(profile), resumeParents(opts, path), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.Web, opts.tools); err != nil {
 		return nil, err
 	}

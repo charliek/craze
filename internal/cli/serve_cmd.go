@@ -598,6 +598,12 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	groups := newAgentGroups(runEnv, hostID, out)
 	opts.ShellGroups = groups.recordShell
 	opts.ShellMark = hostspawn.CommandMark(hostID)
+	if opts.ReadOnlyTools {
+		if opts.Env == nil {
+			opts.Env = os.Environ()
+		}
+		opts.Env = append(opts.Env, hostspawn.ReviewMark(hostID))
+	}
 	if f.ready != nil {
 		opts.AgentGroup = func(pgid int) error {
 			err := groups.record(pgid)

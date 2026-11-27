@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
+
 	"io/fs"
 	"os"
 	"strings"
@@ -145,12 +145,12 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	if ctx.Err() != nil {
 		return attemptResult{turn: contextResult(ctx)}
 	}
-	flags := tuiFlags{workspace: dir, provider: route.Provider, model: route.Model, effort: route.Effort, noHostStatus: true}
+	flags := tuiFlags{workspace: dir, provider: route.Provider, model: route.Model, effort: route.Effort, noHostStatus: true, readOnlyTools: true}
 	switch route.Provider {
 	case "codex", "native":
 		flags.ask, flags.force, flags.subscriptionOnly = true, true, !allowPaid
 	case "claude":
-		flags.force, flags.readOnlyTools = true, true
+		flags.force = true
 	case "antigravity":
 		flags.noForce = true
 	case "cursor", "grok":
@@ -217,6 +217,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		return attemptFailure(failureKind(err), err.Error(), true)
 	}
 	defer func() { _ = conn.c.Close() }()
+	model, effort := reviewSettings(start, conn, route.Provider)
 	stop()
 	deadline, _ := ctx.Deadline()
 	timer := newAttemptTimer(deadline, stall)
@@ -256,27 +257,30 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 			a.turn = &turnResult{Status: reviewTimedOut, Stopping: true}
 		}
 	}
-	if a.turn.Status == statusCompleted {
-		// Capture the settings the host actually used while it still owns the
-		// session. The deadline stays absolute even for this final read.
-		peek, done := context.WithTimeout(ctx, time.Second)
-		var state protocol.StateResult
-		if e := conn.c.Call(peek, protocol.MethodSessionState, protocol.StateParams{SessionID: ref.entry.CrazeSessionID}, &state); e == nil {
-			if state.Settings.Model != "" {
-				a.turn.Model = state.Settings.Model
-			}
-			if config, e := agent.DecodeConfigState(state.Settings.Config); e == nil && config != nil {
-				provider, _ := agent.ProviderByName(route.Provider)
-				opt := agent.EffortOption(agent.Snapshot{Provider: provider.Info(), Config: config.Options})
-				if opt != nil {
-					a.effectiveEffort = opt.Current
-				}
-			}
-		}
-		done()
+	if a.turn.Model == "" {
+		a.turn.Model = model
 	}
+	a.effectiveEffort = effort
 	finishReviewMessage(a.turn)
 	return a
+}
+
+// Capture settings after readiness. A fenced host can retire as soon as its
+// review ends, before a post-turn state call reaches it.
+func reviewSettings(ctx context.Context, conn *waitConn, providerName string) (model, effort string) {
+	peek, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	var state protocol.StateResult
+	if err := conn.c.Call(peek, protocol.MethodSessionState, protocol.StateParams{SessionID: conn.sessionID}, &state); err != nil {
+		return "", ""
+	}
+	if config, e := agent.DecodeConfigState(state.Settings.Config); e == nil && config != nil {
+		provider, _ := agent.ProviderByName(providerName)
+		if opt := agent.EffortOption(agent.Snapshot{Provider: provider.Info(), Config: config.Options}); opt != nil {
+			effort = opt.Current
+		}
+	}
+	return state.Settings.Model, effort
 }
 
 func finishReviewMessage(turn *turnResult) {
@@ -308,35 +312,15 @@ func reviewAfter(h reviewHost, env rundir.Env) error {
 	defer cancel()
 	more, err := hostspawn.ObservedGroups(h.child.Groups())
 	hostspawn.ReapHost(grace, env, h.id, nil)
+	scopeErr := hostspawn.StopReviewProcesses(grace, h.child, h.id, append(ids, more...))
+	if scopeErr != nil {
+		return scopeErr
+	}
 	if obsErr != nil || err != nil {
 		return errors.New("could not read review process groups")
 	}
 	if _, err := os.Stat(h.child.Groups()); !errors.Is(err, fs.ErrNotExist) {
 		return errors.New("could not confirm all recorded groups were reaped")
 	}
-	ids = append(ids, more...)
-	ids = append(ids, h.child.PID())
-	deadline, _ := grace.Deadline()
-	for {
-		groups, err := rundir.ProcessGroups(deadline)
-		if err != nil {
-			return fmt.Errorf("could not verify review process groups: %w", err)
-		}
-		live := false
-		for _, id := range ids {
-			for _, member := range groups[id] {
-				if !member.Zombie {
-					live = true
-				}
-			}
-		}
-		if !live {
-			return nil
-		}
-		select {
-		case <-grace.Done():
-			return errors.New("a review process group is still running")
-		case <-time.After(exitAfterTurnPoll):
-		}
-	}
+	return nil
 }

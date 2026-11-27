@@ -17,6 +17,7 @@ import (
 	"github.com/charliek/craze/internal/codexrpc"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/journal"
+	"github.com/charliek/craze/internal/routing"
 )
 
 // Compile-time interface assertions required by Craze's engine & host contracts
@@ -874,6 +875,15 @@ func (s *codexSession) applyStartSettings(modelID, currentEffort string) (string
 	val, why := effortValue(opt, wantEffort)
 	if why == "" {
 		return val, nil
+	}
+	if s.opts.ReadOnlyTools {
+		levels := []string{}
+		if opt != nil {
+			for _, v := range opt.SelectValues {
+				levels = append(levels, v.Value)
+			}
+		}
+		return routing.ClampEffort(wantEffort, levels), nil
 	}
 	// Plan 054 § C4: strict refusal on unattended runs; lenient notice + fallback
 	// on interactive/reload starts (matching startsettings.go).
