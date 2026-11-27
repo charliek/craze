@@ -28,8 +28,8 @@ type Request struct {
 	// Instructions is the system prompt, sent as a developer message on
 	// OpenAI endpoints and as top-level instructions on other endpoints.
 	Instructions string
-	// Input is the conversation, in order: the route keeps nothing between
-	// requests (store false), so every request carries all of it.
+	// Input is the full conversation in order. An eligible WebSocket chain
+	// can send just the appended items.
 	Input []Item
 	// Tools are the function tools, sent inside one namespace (Namespace) on
 	// the ChatGPT route and as plain functions on the key route. With none,
@@ -59,6 +59,8 @@ type Request struct {
 	Headers map[string]string
 	// UserAgent overrides the client's User-Agent for this request.
 	UserAgent string
+	// Stateless sends this request over SSE, independently of the WebSocket chain.
+	Stateless bool
 }
 
 // Tool is a function tool: its name, its description and its parameters'
@@ -71,8 +73,8 @@ type Tool struct {
 
 // wireRequest is the body, field for field, on either route. Its tags are the
 // whole of what craze sends: never temperature, top_p, top_logprobs,
-// service_tier (not applied on the ChatGPT route), previous_response_id
-// (nothing is stored), prompt_cache_retention, metadata, user, truncation,
+// service_tier (not applied on the ChatGPT route), prompt_cache_retention,
+// metadata, user, truncation,
 // background, conversation, max_tool_calls, moderation, multi_agent, prompt
 // or safety_identifier — the fields the ChatGPT route's preview limitations
 // list as unsupported, or that it ignores (plan 033 §3.9).
@@ -86,18 +88,39 @@ type Tool struct {
 // reserve alone there) and replaces prompt_cache_key (session-id does its
 // work), so they stay empty and unsent there.
 type wireRequest struct {
-	Model             string        `json:"model"`
-	Instructions      string        `json:"instructions,omitempty"`
-	Input             []Item        `json:"input"`
-	Store             bool          `json:"store"`
-	Stream            bool          `json:"stream"`
-	Include           []string      `json:"include"`
-	Reasoning         wireReasoning `json:"reasoning"`
-	Tools             any           `json:"tools,omitempty"`
-	ToolChoice        any           `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
-	MaxOutputTokens   int64         `json:"max_output_tokens,omitempty"`
-	PromptCacheKey    string        `json:"prompt_cache_key,omitempty"`
+	wireModel
+	Input     []Item        `json:"input"`
+	Store     bool          `json:"store"`
+	Stream    bool          `json:"stream"`
+	Include   []string      `json:"include"`
+	Reasoning wireReasoning `json:"reasoning"`
+	wireControls
+}
+
+type wireModel struct {
+	Model        string `json:"model"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+type wireControls struct {
+	Tools             any    `json:"tools,omitempty"`
+	ToolChoice        any    `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool  `json:"parallel_tool_calls,omitempty"`
+	MaxOutputTokens   int64  `json:"max_output_tokens,omitempty"`
+	PromptCacheKey    string `json:"prompt_cache_key,omitempty"`
+}
+
+type wireWSRequest struct {
+	Type               string            `json:"type"`
+	PreviousResponseID string            `json:"previous_response_id,omitempty"`
+	ClientMetadata     map[string]string `json:"client_metadata,omitempty"`
+	wireRequest
+}
+
+type builtWireRequest struct {
+	wireRequest
+	fullInputJSON [][]byte
+	wsProps       []byte
 }
 
 // wireReasoning asks for the reasoning summary on every request ("auto": the
@@ -151,18 +174,54 @@ func (r Request) effectiveInput(route Route, devInst bool) (instructions string,
 
 // bodyWith encodes the request for the route and endpoint (wireRequest).
 func (r Request) bodyWith(route Route, devInst bool) ([]byte, error) {
+	w, err := r.normalizedRequest(route, devInst)
+	if err != nil {
+		return nil, err
+	}
+	return encode(w)
+}
+
+func buildWireRequest(req Request, route Route, devInst bool) (builtWireRequest, error) {
+	w, err := req.normalizedRequest(route, devInst)
+	if err != nil {
+		return builtWireRequest{}, err
+	}
+	props, err := encode(struct {
+		wireModel
+		wireControls
+		Effort string `json:"effort,omitempty"`
+	}{w.wireModel, w.wireControls, w.Reasoning.Effort})
+	if err != nil {
+		return builtWireRequest{}, err
+	}
+	input, err := encodeItems(w.Input)
+	return builtWireRequest{wireRequest: w, fullInputJSON: input, wsProps: props}, err
+}
+
+func encodeItems(items []Item) ([][]byte, error) {
+	out := make([][]byte, 0, len(items))
+	for _, item := range items {
+		b, err := encode(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func (r Request) normalizedRequest(route Route, devInst bool) (wireRequest, error) {
 	if strings.TrimSpace(r.Model) == "" {
-		return nil, errors.New("responsesapi: the request names no model")
+		return wireRequest{}, errors.New("responsesapi: the request names no model")
 	}
 	instructions, input := r.effectiveInput(route, devInst)
 	w := wireRequest{
-		Model:        r.Model,
-		Instructions: instructions,
-		Input:        input,
-		Store:        false,
-		Stream:       true,
-		Include:      []string{"reasoning.encrypted_content"},
-		Reasoning:    wireReasoning{Effort: r.Effort, Summary: "auto"},
+		wireModel: wireModel{Model: r.Model, Instructions: instructions},
+		Input:     input,
+		Store:     false,
+		Stream:    true,
+		Include:   []string{"reasoning.encrypted_content"},
+		Reasoning: wireReasoning{Effort: r.Effort, Summary: "auto"},
 	}
 	fns := make([]wireFunction, 0, len(r.Tools))
 	for _, t := range r.Tools {
@@ -186,13 +245,13 @@ func (r Request) bodyWith(route Route, devInst bool) ([]byte, error) {
 			w.Tools = fns
 		}
 	default:
-		return nil, fmt.Errorf("responsesapi: unknown route %d", route)
+		return wireRequest{}, fmt.Errorf("responsesapi: unknown route %d", route)
 	}
 	if len(fns) > 0 {
 		w.ToolChoice = toolChoice(r.ToolChoice)
 		w.ParallelToolCalls = r.ParallelToolCalls
 	}
-	return encode(w)
+	return w, nil
 }
 
 // keyItems is input as the key route sends it: each function call marked to

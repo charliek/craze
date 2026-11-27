@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // EventKind is what a stream Event reports.
@@ -123,10 +124,22 @@ type Usage struct {
 // twice. (When the deltas are not a prefix of the item's text, which no
 // server should send, the deltas stand: they are what was shown.)
 type Stream struct {
-	ctx   context.Context
-	body  io.ReadCloser
-	sse   *sseReader
-	route Route // the client's: what the failures it reports are judged by (Error.Route)
+	ctx    context.Context
+	source frameSource
+	route  Route
+	ws     bool
+
+	finishOnce sync.Once
+	onFinish   func(completed bool, err error)
+	closeOnce  sync.Once
+	closeErr   error
+
+	addedPhase     map[int]string
+	doneItems      []OutputItem
+	nonPrefixDelta bool
+	indexGap       bool
+	responseID     string
+	turnState      string
 
 	items map[int]*itemState // every index seen
 	held  map[int]OutputItem // finished items waiting for a lower index to finish
@@ -144,6 +157,28 @@ type Stream struct {
 	ended      bool
 }
 
+type frame struct {
+	name string
+	data []byte
+}
+
+type frameSource interface {
+	next(context.Context) (frame, error)
+	close() error
+}
+
+type sseFrameSource struct {
+	reader *sseReader
+	body   io.ReadCloser
+}
+
+func (s *sseFrameSource) next(context.Context) (frame, error) {
+	ev, err := s.reader.next()
+	return frame(ev), err
+}
+
+func (s *sseFrameSource) close() error { return s.body.Close() }
+
 type itemState struct {
 	typ     string
 	id      string
@@ -160,10 +195,14 @@ type itemState struct {
 }
 
 func newStream(ctx context.Context, resp *http.Response) *Stream {
+	return newFrameStream(ctx, &sseFrameSource{reader: newSSEReader(resp.Body), body: resp.Body})
+}
+
+func newFrameStream(ctx context.Context, source frameSource) *Stream {
 	return &Stream{
 		ctx:        ctx,
-		body:       resp.Body,
-		sse:        newSSEReader(resp.Body),
+		source:     source,
+		addedPhase: map[int]string{},
 		items:      map[int]*itemState{},
 		held:       map[int]OutputItem{},
 		unfinished: map[int]OutputItem{},
@@ -191,6 +230,9 @@ func (s *Stream) Next() bool {
 		}
 		if len(s.queue) > 0 {
 			s.cur, s.queue = s.queue[0], s.queue[1:]
+			if s.cur.Kind == Completed {
+				s.finish(true, nil)
+			}
 			return true
 		}
 		s.read()
@@ -203,8 +245,21 @@ func (s *Stream) Event() Event { return s.cur }
 // Err is why the stream ended: nil after Completed.
 func (s *Stream) Err() error { return s.err }
 
-// Close closes the response body. It may be called more than once.
-func (s *Stream) Close() error { return s.body.Close() }
+// Close releases the stream's resources. It may be called more than once.
+func (s *Stream) Close() error {
+	if s.onFinish != nil {
+		s.finish(false, nil)
+		return nil
+	}
+	s.closeOnce.Do(func() { s.closeErr = s.source.close() })
+	return s.closeErr
+}
+
+func (s *Stream) finish(completed bool, err error) {
+	if s.onFinish != nil {
+		s.finishOnce.Do(func() { s.onFinish(completed, err) })
+	}
+}
 
 // read reads one event from the wire and turns it into events.
 //
@@ -215,7 +270,7 @@ func (s *Stream) Close() error { return s.body.Close() }
 // shape craze reads ends the stream, an error. The type is the data's own,
 // or the SSE event's name when the data names none.
 func (s *Stream) read() {
-	ev, err := s.sse.next()
+	ev, err := s.source.next(s.ctx)
 	if err != nil {
 		switch {
 		case s.ctx.Err() != nil:
@@ -231,19 +286,54 @@ func (s *Stream) read() {
 		s.fail(ErrIncomplete)
 		return
 	}
+	typ, err := ev.eventType()
+	if err != nil {
+		s.fail(err)
+		return
+	}
+	s.readEvent(typ, ev.data)
+}
+
+func (f frame) eventType() (string, error) {
 	var head struct {
 		Type json.RawMessage `json:"type"`
 	}
-	if err := json.Unmarshal(ev.data, &head); err != nil {
-		s.fail(fmt.Errorf("responsesapi: a stream event is not a JSON object: %w", err))
+	if err := json.Unmarshal(f.data, &head); err != nil {
+		return "", fmt.Errorf("responsesapi: a stream event is not a JSON object: %w", err)
+	}
+	return cmp.Or(jsonString(head.Type), f.name), nil
+}
+
+func (s *Stream) readEvent(typ string, data []byte) {
+	switch typ {
+	case "response.created":
+		var created struct {
+			Response struct {
+				ID string `json:"id"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(data, &created) == nil {
+			s.responseID = cmp.Or(s.responseID, created.Response.ID)
+		}
+		return
+	case "codex.response.metadata", "response.metadata":
+		var metadata struct {
+			Headers json.RawMessage `json:"headers"`
+		}
+		if json.Unmarshal(data, &metadata) == nil {
+			for k, v := range rawHeaders(metadata.Headers) {
+				if strings.EqualFold(k, turnStateHeader) {
+					s.turnState = cmp.Or(jsonString(v), s.turnState)
+				}
+			}
+		}
 		return
 	}
-	typ := cmp.Or(jsonString(head.Type), ev.name)
 	if !handled[typ] {
 		return
 	}
 	var w wireEvent
-	if err := json.Unmarshal(ev.data, &w); err != nil {
+	if err := json.Unmarshal(data, &w); err != nil {
 		s.fail(fmt.Errorf("responsesapi: a %s event is malformed: %w", typ, err))
 		return
 	}
@@ -267,15 +357,12 @@ var handled = map[string]bool{
 
 func (s *Stream) fail(err error) {
 	s.ended, s.err = true, err
+	s.finish(false, err)
 }
 
 func (s *Stream) emit(e Event) { s.queue = append(s.queue, e) }
 
-// handle turns one wire event, of a type handled lists, into stream events.
-// Events the stream has no use for — the response's created and in-progress
-// snapshots, content parts opening and closing, each part's own done event
-// (the item's end carries it all) — never reach it (read), nor does any type
-// it does not know.
+// handle turns the decoded output and terminal wire events into stream events.
 func (s *Stream) handle(typ string, w *wireEvent) {
 	switch typ {
 	case "response.output_item.added":
@@ -283,6 +370,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		if !ok || w.Item == nil {
 			return
 		}
+		s.addedPhase[idx] = cmp.Or(ident(w.Item.Phase), s.addedPhase[idx])
 		st := s.items[idx]
 		switch {
 		case st == nil:
@@ -340,6 +428,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 			return
 		}
 		item := w.Item.output()
+		item.Phase = cmp.Or(item.Phase, s.addedPhase[idx])
 		st := s.items[idx]
 		if st != nil && st.done {
 			return
@@ -388,6 +477,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		s.release(true)
 		var u Usage
 		if w.Response != nil {
+			s.responseID = cmp.Or(s.responseID, jsonString(w.Response.ID))
 			u = w.Response.Usage.usage()
 		}
 		s.emit(Event{Kind: Completed, Usage: u})
@@ -413,13 +503,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		s.fail(e)
 
 	case "error":
-		e := &Error{Event: typ, Route: s.route}
-		if w.Error != nil {
-			e.setError(w.Error)
-		} else {
-			e.setError(&wireError{Code: w.Code, Param: w.Param, Message: w.Message})
-		}
-		s.fail(e)
+		s.fail(w.streamError(s.route, s.ws))
 	}
 }
 
@@ -469,7 +553,11 @@ func (s *Stream) announce(st *itemState, idx int, item OutputItem) {
 // or were not its prefix.
 func (s *Stream) rest(st *itemState, idx int, kind EventKind, final string) {
 	sent := st.emitted.String()
-	if rest, ok := strings.CutPrefix(final, sent); ok && rest != "" {
+	rest, ok := strings.CutPrefix(final, sent)
+	if !ok {
+		s.nonPrefixDelta = true
+	}
+	if ok && rest != "" {
 		st.emitted.WriteString(rest)
 		s.emit(Event{Kind: kind, Index: idx, Delta: rest})
 	}
@@ -486,16 +574,22 @@ func (s *Stream) release(all bool) {
 			break
 		}
 		delete(s.held, s.next)
-		s.emit(Event{Kind: ItemDone, Index: s.next, Item: item})
+		s.itemDone(s.next, item)
 		s.next++
 	}
 	if !all {
 		return
 	}
 	for _, idx := range slices.Sorted(maps.Keys(s.held)) {
-		s.emit(Event{Kind: ItemDone, Index: idx, Item: s.held[idx]})
+		s.itemDone(idx, s.held[idx])
 		delete(s.held, idx)
 	}
+}
+
+func (s *Stream) itemDone(idx int, item OutputItem) {
+	s.indexGap = s.indexGap || idx != len(s.doneItems)
+	s.doneItems = append(s.doneItems, item)
+	s.emit(Event{Kind: ItemDone, Index: idx, Item: item})
 }
 
 // cut reports, in output_index order, every item a response cut short left
@@ -511,7 +605,7 @@ func (s *Stream) cut() {
 		}
 		if item, ok := s.held[idx]; ok {
 			delete(s.held, idx)
-			s.emit(Event{Kind: ItemDone, Index: idx, Item: item})
+			s.itemDone(idx, item)
 			continue
 		}
 		if item, ok := s.unfinished[idx]; ok {
@@ -540,6 +634,8 @@ type wireEvent struct {
 	// An error event's own fields, or the error object it nests.
 	Code    json.RawMessage `json:"code"`
 	Param   json.RawMessage `json:"param"`
+	Status  json.RawMessage `json:"status"`
+	Headers json.RawMessage `json:"headers"`
 	Message string          `json:"message"`
 	Error   *wireError      `json:"error"`
 }
@@ -632,7 +728,8 @@ func (w *wireItem) output() OutputItem {
 }
 
 type wireResponse struct {
-	Error             *wireError `json:"error"`
+	ID                json.RawMessage `json:"id"`
+	Error             *wireError      `json:"error"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`

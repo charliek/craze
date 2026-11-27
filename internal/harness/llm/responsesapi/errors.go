@@ -3,10 +3,13 @@ package responsesapi
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -20,6 +23,36 @@ import (
 // tried again before any output (D-32).
 var ErrIncomplete = fmt.Errorf("responsesapi: the stream ended without response.completed: %w", io.ErrUnexpectedEOF)
 
+// ErrWSMessageTooBig is a WebSocket request or response over the peer's limit.
+var ErrWSMessageTooBig = errors.New("responsesapi: WebSocket message exceeds the peer's limit")
+
+var errUnexpectedBinaryFrame = errors.New("responsesapi: unexpected binary WebSocket frame")
+
+type wsTimeoutError struct {
+	operation  string
+	incomplete bool
+}
+
+var _ net.Error = wsTimeoutError{}
+
+func (e wsTimeoutError) Error() string {
+	return "responsesapi: WebSocket " + e.operation + " timed out"
+}
+func (wsTimeoutError) Timeout() bool   { return true }
+func (wsTimeoutError) Temporary() bool { return false }
+func (e wsTimeoutError) Unwrap() error {
+	if e.incomplete {
+		return ErrIncomplete
+	}
+	return nil
+}
+
+func isStalePreviousResponse(e *Error, sentPrevID bool) bool {
+	return sentPrevID && e != nil && e.StatusCode == http.StatusBadRequest &&
+		(e.Code == "previous_response_not_found" || e.Param == "previous_response_id" ||
+			strings.Contains(strings.ToLower(e.Message), "previous_response_id"))
+}
+
 // Error is a failed request: an HTTP status before the stream, or a failure
 // the stream reported (response.failed, response.incomplete, or an error
 // event).
@@ -32,7 +65,7 @@ var ErrIncomplete = fmt.Errorf("responsesapi: the stream ended without response.
 // (ident, param), so they can never carry free text — or a token — into what
 // decides on them.
 type Error struct {
-	// StatusCode is the HTTP status; 0 for a failure inside the stream.
+	// StatusCode is the HTTP status or the status an error frame reported.
 	StatusCode int
 	// Event is the stream event that reported the failure:
 	// "response.failed", "response.incomplete" or "error"; "" for an HTTP
@@ -51,8 +84,7 @@ type Error struct {
 	// Usage is what a failed or incomplete response reported it used, nil
 	// when it reported nothing: the tokens were spent all the same.
 	Usage *Usage
-	// Header is an HTTP failure's response headers (Retry-After among them);
-	// nil for a failure inside the stream.
+	// Header holds HTTP failure headers or the retry headers in a WS error frame.
 	Header http.Header
 	// Route is the route that reported the failure, which Final and
 	// Transient judge it by: the ChatGPT route's codes mean nothing on the
@@ -254,6 +286,57 @@ type wireError struct {
 	Type    json.RawMessage `json:"type"`
 	Param   json.RawMessage `json:"param"`
 	Message string          `json:"message"`
+	Headers json.RawMessage `json:"headers"`
+}
+
+func (w *wireEvent) streamError(route Route, ws bool) *Error {
+	e := &Error{Event: "error", Route: route}
+	if w.Error != nil {
+		e.setError(w.Error)
+	} else {
+		e.setError(&wireError{Code: w.Code, Param: w.Param, Message: w.Message})
+	}
+	if ws {
+		if json.Unmarshal(w.Status, &e.StatusCode) != nil {
+			if status, err := strconv.Atoi(jsonString(w.Status)); err == nil {
+				e.StatusCode = status
+			}
+		}
+		if w.Error != nil {
+			e.setRetryHeaders(w.Error.Headers)
+		}
+		e.setRetryHeaders(w.Headers)
+	}
+	return e
+}
+
+func rawHeaders(raw json.RawMessage) map[string]json.RawMessage {
+	var h map[string]json.RawMessage
+	if json.Unmarshal(raw, &h) != nil {
+		return nil
+	}
+	return h
+}
+
+func (e *Error) setRetryHeaders(raw json.RawMessage) {
+	for k, v := range rawHeaders(raw) {
+		k = http.CanonicalHeaderKey(k)
+		if k != "Retry-After" && k != "Retry-After-Ms" {
+			continue
+		}
+		value := jsonString(v)
+		if value == "" {
+			var n json.Number
+			if json.Unmarshal(v, &n) != nil || n == "" {
+				continue
+			}
+			value = n.String()
+		}
+		if e.Header == nil {
+			e.Header = make(http.Header)
+		}
+		e.Header.Set(k, value)
+	}
 }
 
 func (e *Error) setError(w *wireError) {

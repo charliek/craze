@@ -1,7 +1,8 @@
 // Package responsesapi is craze's own client for OpenAI's Responses API as
 // the ChatGPT plan reaches it through Sign in with ChatGPT (plan 033 §3.9,
 // P17): the request craze sends, the stream it reads back, and the errors it
-// tells apart, over net/http and the standard library alone.
+// tells apart, using net/http for SSE and github.com/coder/websocket for
+// persistent WebSocket streams.
 //
 // It imports neither Fantasy nor openai-go (owner decision 14; deps_test.go
 // holds the line). Fantasy's own Responses model mishandles this route —
@@ -71,6 +72,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 )
 
 // DefaultBaseURL is the one API the ChatGPT plan's requests go to (P37):
@@ -113,6 +116,18 @@ const (
 	RouteKey
 )
 
+// TransportMode selects the transport for eligible, stateful requests.
+type TransportMode int
+
+const (
+	// TransportSSE is the default and always uses HTTP SSE.
+	TransportSSE TransportMode = iota
+	// TransportAuto tries WebSocket and falls back to HTTP SSE when needed.
+	TransportAuto
+	// TransportWebSocket requires WebSocket on the stateful lane.
+	TransportWebSocket
+)
+
 // Config is what NewClient builds a client from.
 type Config struct {
 	// Route is the route the client speaks: the ChatGPT plan's unless set.
@@ -141,6 +156,14 @@ type Config struct {
 	// DeveloperInstructions sends the system prompt as the first developer
 	// message. Otherwise it is sent as top-level instructions.
 	DeveloperInstructions bool
+	Transport             TransportMode
+	// WebSocketEligible permits WebSocket upgrades on the key route.
+	WebSocketEligible bool
+	// ReplayOutput projects completed items into the caller's replay format.
+	// A false result forces the next request to send its full input.
+	ReplayOutput func([]OutputItem) ([]Item, bool)
+	// Sticky shares automatic fallback decisions across clients.
+	Sticky *StickyRegistry
 }
 
 // Client sends Responses requests. It is safe for concurrent use.
@@ -151,6 +174,29 @@ type Client struct {
 	creds     Credentials
 	userAgent string
 	devInst   bool
+
+	transport    TransportMode
+	wsEndpoint   string
+	wsHTTP       *http.Client
+	replayOutput func([]OutputItem) ([]Item, bool)
+	sticky       *StickyRegistry
+	stickyKey    stickyKey
+	stats        clientStats
+
+	wsMu          sync.Mutex
+	closed        bool
+	ws            *wsConnState
+	inFlight      bool
+	preDialing    bool
+	preDialCancel context.CancelFunc
+	preDialDone   chan struct{}
+
+	dialTimeout       time.Duration
+	writeTimeout      time.Duration
+	firstFrameTimeout time.Duration
+	idleReadTimeout   time.Duration
+	maxIdleAge        time.Duration
+	now               func() time.Time
 }
 
 // ErrBaseURL is NewClient's refusal, on the ChatGPT route, of a base URL that
@@ -205,7 +251,28 @@ func NewClient(cfg Config) (*Client, error) {
 	if ua == "" {
 		ua = defaultUserAgent
 	}
-	return &Client{route: cfg.Route, endpoint: endpoint, http: hc, creds: creds, userAgent: ua, devInst: cfg.DeveloperInstructions}, nil
+	transport := cfg.Transport
+	if cfg.Route == RouteKey && !cfg.WebSocketEligible {
+		transport = TransportSSE
+	}
+	whc := *hc
+	whc.Timeout = 0
+	sticky := cfg.Sticky
+	if sticky == nil {
+		sticky = NewStickyRegistry()
+	}
+	dialTimeout := 5 * time.Second
+	if transport == TransportWebSocket {
+		dialTimeout = 15 * time.Second
+	}
+	return &Client{
+		route: cfg.Route, endpoint: endpoint, http: hc, creds: creds, userAgent: ua,
+		devInst: cfg.DeveloperInstructions, transport: transport, wsHTTP: &whc,
+		wsEndpoint: "ws" + strings.TrimPrefix(endpoint, "http"), replayOutput: cfg.ReplayOutput,
+		sticky: sticky, stickyKey: stickyKey{cfg.Route, endpoint}, now: time.Now,
+		dialTimeout: dialTimeout, writeTimeout: 30 * time.Second, firstFrameTimeout: 15 * time.Second,
+		idleReadTimeout: 5 * time.Minute, maxIdleAge: time.Minute,
+	}, nil
 }
 
 // staticKey is the key route's credential: the one key, every request. It is
@@ -286,15 +353,27 @@ var protectedHeaders = map[string]bool{
 	"Openai-Project":      true,
 }
 
-// Stream sends req and returns its event stream, once the server has
-// answered 2xx. The body is encoded for the client's route and endpoint.
-// A server's refusal before the stream is an *Error carrying its status.
-// On the ChatGPT route, a 401 invalidates the token and retries the request
-// once with the next token. On the key route a 401 ends the request. An
-// error from the credential source is returned wrapped, its sentinel intact.
+// Stream sends req over the client's transport and returns its event stream.
 //
 // The caller must Close the stream.
 func (c *Client) Stream(ctx context.Context, req Request) (*Stream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.Stateless || c.transport == TransportSSE {
+		return c.streamSSE(ctx, req)
+	}
+	s, fallback, err := c.streamWS(ctx, req)
+	if fallback {
+		c.stats.sseFallbacks.Add(1)
+	}
+	if s == nil && err == nil {
+		return c.streamSSE(ctx, req)
+	}
+	return s, err
+}
+
+func (c *Client) streamSSE(ctx context.Context, req Request) (*Stream, error) {
 	body, err := req.bodyWith(c.route, c.devInst)
 	if err != nil {
 		return nil, err
@@ -322,6 +401,7 @@ func (c *Client) send(ctx context.Context, body []byte, req Request) (*http.Resp
 			return nil, fmt.Errorf("responsesapi: building the request: %w", err)
 		}
 		c.setHeaders(hreq.Header, token, req)
+		c.stats.sseRequests.Add(1)
 		resp, err := c.http.Do(hreq)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
