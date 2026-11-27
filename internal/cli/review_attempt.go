@@ -26,6 +26,7 @@ const reviewTimedOut = "timed_out"
 var reviewStartupBudget = 35 * time.Second
 var stopReviewHost = reviewAfter
 var newReviewScope = hostspawn.NewReviewScope
+var readReviewSettings = reviewSettings
 
 type attemptResult struct {
 	turn            *turnResult
@@ -39,8 +40,19 @@ func attemptFailure(kind errkind.Kind, msg string, start bool) attemptResult {
 	return attemptResult{turn: &turnResult{Status: statusFailed, Error: kindError(msg, kind)}, startFailure: start}
 }
 
+// A deadline can pass before the context's timer goroutine publishes Err.
+func reviewContextErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 func contextResult(ctx context.Context) *turnResult {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if errors.Is(reviewContextErr(ctx), context.DeadlineExceeded) {
 		return &turnResult{Status: reviewTimedOut, Stopping: true}
 	}
 	return &turnResult{Status: statusCancelled, Stopping: true, Error: kindError("review interrupted", errkind.Interrupted)}
@@ -146,7 +158,7 @@ type reviewHost struct {
 // A process scan cut by its startup budget can try another route after
 // verified teardown. An unreadable process table is an infrastructure error.
 func reviewScanFailure(ctx context.Context, err error, message string) attemptResult {
-	if ctx.Err() != nil {
+	if reviewContextErr(ctx) != nil {
 		return attemptResult{turn: contextResult(ctx)}
 	}
 	if errors.Is(err, rundir.ErrScanCut) {
@@ -158,7 +170,7 @@ func reviewScanFailure(ctx context.Context, err error, message string) attemptRe
 // runUnattendedAttempt returns after verified cleanup, without writing
 // command output. The caller owns the common deadline and first signal.
 func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing.Choice, allowPaid bool, stall time.Duration) (a attemptResult) {
-	if ctx.Err() != nil {
+	if reviewContextErr(ctx) != nil {
 		return attemptResult{turn: contextResult(ctx)}
 	}
 	flags := tuiFlags{workspace: dir, provider: route.Provider, model: route.Model, effort: route.Effort, noHostStatus: true, readOnlyTools: true}
@@ -191,7 +203,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 			// exists. Its wire slug must be on the account's current list.
 			agent.RefreshPlanModelList(start, paths.NativeDir())
 			facts := loadNativeProbe()(route.Model)
-			if ctx.Err() != nil {
+			if reviewContextErr(ctx) != nil {
 				return attemptResult{turn: contextResult(ctx)}
 			}
 			if facts.Provisional || facts.Reason != "" {
@@ -201,7 +213,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		if _, err := nativeStartCheck(start, reviewWhat, route.Model, route.Effort, false); err != nil {
 			return attemptFailure(failureKind(err), err.Error(), true)
 		}
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			return attemptResult{turn: contextResult(ctx)}
 		}
 	}
@@ -212,7 +224,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	host.scope = scope
 	ref, held, err := spawnOnce(start, spawnOptions{flags: flags, env: env, hubEnv: true, unattended: true, onChild: func(c *hostspawn.Child, id string) { host.child, host.id = c, id; scope.Bind(c) }})
 	if err != nil {
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			return attemptResult{turn: contextResult(ctx)}
 		}
 		if errors.Is(start.Err(), context.DeadlineExceeded) {
@@ -227,7 +239,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	host.entry = ref.entry
 	conn, err := dialWait(start, ref.entry, ref.entry.CrazeSessionID, reviewWhat, nil)
 	if err != nil {
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			return attemptResult{turn: contextResult(ctx)}
 		}
 		if errors.Is(start.Err(), context.DeadlineExceeded) || failureKind(err) == errkind.TimeoutBeforePrompt {
@@ -247,7 +259,13 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		}
 		billing = entry.ReviewBilling
 	}
-	model, effort := reviewSettings(start, conn, route.Provider)
+	model, effort := readReviewSettings(start, conn, route.Provider)
+	if reviewContextErr(ctx) != nil {
+		return attemptResult{turn: contextResult(ctx)}
+	}
+	if reviewContextErr(start) != nil {
+		return attemptFailure(errkind.StartFailed, "review host did not become ready within its startup budget", true)
+	}
 	stop()
 	deadline, _ := ctx.Deadline()
 	timer := newAttemptTimer(deadline, stall)

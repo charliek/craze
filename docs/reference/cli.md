@@ -3325,6 +3325,9 @@ Only a completed attempt can supply Markdown stdout or replace an existing
 `--out` file. A cap or signal also interrupts a blocked stdout pipe after
 Craze has saved the full review. When stderr is an unread pipe, progress
 and exit diagnostics use the space available, including with `2>&1`.
+A blocked JSON infrastructure error waits within the command budget. An
+unverified final workspace check retains its failure when a deadline or
+signal arrives during inspection.
 `outPath` appears only after Craze saves a complete nonempty message.
 
 Codex review attempts report the billing class from the running host. With

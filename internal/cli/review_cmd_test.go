@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/errkind"
@@ -332,5 +334,77 @@ func TestReviewJSONFlagsDisplayLimitAfterSavingFullText(t *testing.T) {
 	var doc reviewResultJSON
 	if json.Unmarshal(out.Bytes(), &doc) != nil || !doc.MessageCut || doc.Message != "one" || doc.OutPath != path || string(b) != r.Message || err != nil {
 		t.Fatal(out.String(), string(b), err)
+	}
+}
+
+// Keep the writer at its first backpressure check until the reader resumes.
+// The first call returns the cancellation state observed before the barrier.
+type reviewPipeBarrier struct {
+	context.Context
+	blocked, resume chan struct{}
+	once            sync.Once
+}
+
+func (c *reviewPipeBarrier) Err() error {
+	err := c.Context.Err()
+	c.once.Do(func() { close(c.blocked); <-c.resume })
+	return err
+}
+func TestReviewPipeReopeningAfterCommandEnd(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { reader.Close(); writer.Close() })
+		fd := int(writer.Fd())
+		if err := unix.SetNonblock(fd, true); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 4096)
+		for {
+			_, err = unix.Write(fd, buf)
+			if errors.Is(err, unix.EAGAIN) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		if timeout {
+			cancel()
+			ctx, cancel = context.WithTimeout(t.Context(), 200*time.Millisecond)
+		}
+		barrier := &reviewPipeBarrier{Context: ctx, blocked: make(chan struct{}), resume: make(chan struct{})}
+		done := make(chan error, 1)
+		go func() { _, err := (&reviewOutput{ctx: barrier, dst: writer}).Write([]byte("late")); done <- err }()
+		select {
+		case <-barrier.blocked:
+		case <-time.After(serveStep):
+			cancel()
+			close(barrier.resume)
+			t.Fatal("writer never saw the full pipe")
+		}
+		if timeout {
+			<-ctx.Done()
+		} else {
+			cancel()
+		}
+		if _, err := reader.Read(buf); err != nil {
+			close(barrier.resume)
+			cancel()
+			t.Fatal(err)
+		}
+		close(barrier.resume)
+		select {
+		case got := <-done:
+			if !errors.Is(got, ctx.Err()) {
+				t.Fatal(timeout, got, ctx.Err())
+			}
+		case <-time.After(serveStep):
+			t.Fatal("writer did not exit")
+		}
+		cancel()
 	}
 }

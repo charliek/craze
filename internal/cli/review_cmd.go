@@ -70,12 +70,7 @@ func newReviewCmd() *cobra.Command {
 		diag := cmd.ErrOrStderr()
 		cmd.SetErr(&reviewOutput{dst: diag})
 		defer cmd.SetErr(diag)
-		err := f.run(cmd, words, output)
-		var ee *exitError
-		if f.json && err != nil && (!errors.As(err, &ee) || ee.code == 1) {
-			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(failureBody{Error: kindError(err.Error(), failureKind(err))})
-		}
-		return err
+		return f.run(cmd, words, output)
 	}}
 	f.register(cmd)
 	flags := cmd.Flags()
@@ -154,11 +149,30 @@ func (f reviewFlags) routes() (routing.Result, bool, error) {
 	return res, paid, nil
 }
 
-func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutput) error {
+func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutput) (resultErr error) {
 	started := time.Now()
 	parent, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ignoreSIGPIPE()
+	capDuration := f.timeout
+	if capDuration == 0 {
+		// Bound routing itself while reading the configured target's cap.
+		capDuration = 20 * time.Minute
+	}
+	ctx, stopInitial := context.WithDeadline(parent, started.Add(capDuration))
+	cancelCommand := stopInitial
+	defer func() { cancelCommand() }()
+	output.ctx = ctx
+	// An infrastructure failure gets the same output lifetime as a result.
+	defer func() {
+		var ee *exitError
+		if f.json && resultErr != nil && (!errors.As(resultErr, &ee) || ee.code == 1) {
+			err := json.NewEncoder(output).Encode(failureBody{Error: kindError(resultErr.Error(), failureKind(resultErr))})
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				resultErr = reviewOutputError(err)
+			}
+		}
+	}()
 	if err := f.checkFlags(cmd); err != nil {
 		return err
 	}
@@ -172,14 +186,6 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		return err
 	}
 	res := reviewResultJSON{Schema: 1, Attempts: []reviewAttemptJSON{}, DirtyFiles: []string{}}
-	capDuration := f.timeout
-	if capDuration == 0 {
-		// Bound routing itself while reading the configured target's cap.
-		capDuration = 20 * time.Minute
-	}
-	ctx, stopInitial := context.WithDeadline(parent, started.Add(capDuration))
-	defer stopInitial()
-	output.ctx = ctx
 	render := func() error { return f.render(ctx, cmd, res) }
 	var routes routing.Result
 	var paid bool
@@ -197,7 +203,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		case <-ctx.Done():
 			return render()
 		case r := <-ready:
-			if ctx.Err() != nil {
+			if reviewContextErr(ctx) != nil {
 				return render()
 			}
 			routes, paid = r.result, r.paid
@@ -213,7 +219,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 					if e == nil {
 						e = review.ValidateRef(ctx, dir, f.base)
 					}
-					if ctx.Err() != nil {
+					if reviewContextErr(ctx) != nil {
 						return render()
 					}
 					if failureKind(e) == errkind.Usage {
@@ -226,10 +232,10 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		capDuration = time.Duration(routes.CapSeconds * float64(time.Second))
 	}
 	if f.timeout == 0 {
-		automatic, cancel := context.WithDeadline(parent, started.Add(capDuration))
-		defer cancel()
-		ctx = automatic
-		output.ctx = ctx
+		target, stopTarget := context.WithDeadline(parent, started.Add(capDuration))
+		stopInitial()
+		ctx, cancelCommand = target, stopTarget
+		output.ctx = target
 	}
 	dir, err := resolveWorkspace(f.dir)
 	if err != nil {
@@ -240,7 +246,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		return err
 	}
 	input, err := f.readInputs(ctx, cmd, words)
-	if ctx.Err() != nil {
+	if reviewContextErr(ctx) != nil {
 		return render()
 	}
 	if err != nil {
@@ -251,7 +257,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 	cleanupConfirmed := true
 	if f.base != "" {
 		bundle, err = review.Build(ctx, dir, f.base, prompt, promptTextMax)
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			_ = bundle.Remove()
 			return render()
 		}
@@ -285,12 +291,15 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		} else {
 			_, err = io.WriteString(output, prompt)
 		}
+		if err == nil {
+			err = reviewContextErr(ctx)
+		}
 		return reviewOutputError(err)
 	}
 	var before review.Snapshot
 	if f.dirty != "off" {
 		before, err = review.Inspect(ctx, dir)
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			return render()
 		}
 		if err != nil {
@@ -301,7 +310,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 		}
 	}
 	for i, route := range routes.Routes {
-		if ctx.Err() != nil {
+		if reviewContextErr(ctx) != nil {
 			return render()
 		}
 		start := time.Now()
@@ -371,7 +380,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutpu
 				}
 			}
 		}
-		if t.MessageCut || len(res.DirtyFiles) != 0 || ctx.Err() != nil {
+		if t.MessageCut || len(res.DirtyFiles) != 0 || reviewContextErr(ctx) != nil {
 			break
 		}
 		if a.startFailure && rec.Kind == errkind.Internal {
@@ -420,7 +429,8 @@ func (f reviewFlags) render(ctx context.Context, cmd *cobra.Command, r reviewRes
 	// The attempt and its complete output survive a later signal or cap.
 	// Apply the command outcome after cleanup, inspection and durable output.
 	// Dirty-check=fail has its own required terminal status.
-	if ctx.Err() != nil && (r.Error == nil || r.Error.Kind != errkind.DirtyTree) {
+	integrityFailure := r.Error != nil && (r.Error.Kind == errkind.DirtyTree || r.IncompleteCheck && r.Error.Kind == errkind.Unobserved)
+	if reviewContextErr(ctx) != nil && !integrityFailure {
 		turn := contextResult(ctx)
 		r.Status, r.Stopping, r.Error = turn.Status, turn.Stopping, turn.Error
 	}

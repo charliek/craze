@@ -58,7 +58,13 @@ func (w *reviewOutput) writePipe(fd uintptr, p []byte) (n int, resultErr error) 
 		}()
 	}
 	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+	waited := false
 	for n < len(p) {
+		if waited {
+			if err := reviewContextErr(w.ctx); err != nil {
+				return n, err
+			}
+		}
 		// Try once even after cancellation so an available reader still
 		// receives the command's terminal status and saved review path.
 		count, err := unix.Write(int(fd), p[n:])
@@ -68,6 +74,9 @@ func (w *reviewOutput) writePipe(fd uintptr, p []byte) (n int, resultErr error) 
 		switch err {
 		case nil:
 			if n == len(p) {
+				if waited {
+					return n, reviewContextErr(w.ctx)
+				}
 				return n, nil
 			}
 		case unix.EINTR, unix.EAGAIN:
@@ -77,9 +86,10 @@ func (w *reviewOutput) writePipe(fd uintptr, p []byte) (n int, resultErr error) 
 		if w.ctx == nil {
 			return n, unix.EAGAIN
 		}
-		if err := w.ctx.Err(); err != nil {
+		if err := reviewContextErr(w.ctx); err != nil {
 			return n, err
 		}
+		waited = true
 		if _, err := unix.Poll(poll, 25); err != nil && err != unix.EINTR {
 			return n, err
 		}

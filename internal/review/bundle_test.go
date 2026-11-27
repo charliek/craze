@@ -382,7 +382,11 @@ func TestUntrackedRangeRequiresCompleteHeader(t *testing.T) {
 		if want := room >= len(header); (len(p.ranges) == 1) != want {
 			t.Fatalf("room %d: %v", room, p.ranges)
 		}
-		if len(p.ranges) > 0 && (p.ranges[0].First != 1 || p.ranges[0].Last != 1 || !strings.HasPrefix(string(p.text.Bytes()), header)) {
+		last := 1
+		if room > len(header) {
+			last = 2
+		}
+		if len(p.ranges) > 0 && (p.ranges[0].First != 1 || p.ranges[0].Last != last || !strings.HasPrefix(string(p.text.Bytes()), header)) {
 			t.Fatal(room, p.ranges)
 		}
 	}
@@ -443,5 +447,16 @@ func TestBundleMetadataListsSectionsBeyondPromptIndex(t *testing.T) {
 	lines := strings.Split(string(data), "\n")
 	if !strings.Contains(lines[b.Files[maxIndex].First-1], last) {
 		t.Fatal(b.Files[maxIndex])
+	}
+}
+
+func TestTrackedRangeIncludesLastPartialBodyLine(t *testing.T) {
+	header := "diff --git a/x b/x\n"
+	p := patchText{text: boundedBuffer{limit: len(header) + 3}}
+	p.tracked([]byte(header+"+body text\n"), []byte("x\x00"))
+	p.text.limit += len(truncation)
+	p.add([]byte(truncation))
+	if len(p.ranges) != 1 || p.ranges[0].Last != 2 || strings.Split(string(p.text.Bytes()), "\n")[1] != "+bo" {
+		t.Fatal(p.ranges, string(p.text.Bytes()))
 	}
 }

@@ -56,6 +56,16 @@ func (p *patchText) add(b []byte) {
 	}
 	p.lines += bytes.Count(p.text.Bytes()[start:], []byte{'\n'})
 }
+
+// The truncation marker will terminate any partial final line.
+func (p *patchText) lastLine() int {
+	b := p.text.Bytes()
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		return p.lines + 1
+	}
+	return p.lines
+}
+
 func quotePath(raw []byte) string {
 	quoted := strconv.QuoteToASCII(string(raw))
 	if strings.ContainsRune(quoted, '\\') {
@@ -66,12 +76,15 @@ func quotePath(raw []byte) string {
 
 func (p *patchText) tracked(patch, names []byte) {
 	starts := []FileRange{}
+	partialHeader := false
 	for len(patch) > 0 && !p.text.truncated {
 		line, rest, _ := bytes.Cut(patch, []byte{'\n'})
 		if bytes.HasPrefix(line, []byte("diff --git ")) {
 			// A cutoff inside the header cannot identify a complete section.
 			if p.text.limit-p.text.Len() >= len(line)+1 {
 				starts = append(starts, FileRange{Name: string(bytes.TrimPrefix(line, []byte("diff --git "))), First: p.lines + 1})
+			} else {
+				partialHeader = true
 			}
 		}
 		p.add(line)
@@ -87,7 +100,10 @@ func (p *patchText) tracked(patch, names []byte) {
 		if len(paths) == len(starts) {
 			r.Name = quotePath(paths[i])
 		}
-		r.Last = p.lines
+		r.Last = p.lastLine()
+		if partialHeader {
+			r.Last = p.lines
+		}
 		if i+1 < len(starts) {
 			r.Last = starts[i+1].First - 1
 		}
@@ -100,7 +116,7 @@ func (p *patchText) untracked(name, block []byte) {
 	p.add(block)
 	// A partial header at the cutoff cannot identify a readable section.
 	if p.lines >= first {
-		p.ranges = append(p.ranges, FileRange{Name: quotePath(name), First: first, Last: p.lines})
+		p.ranges = append(p.ranges, FileRange{Name: quotePath(name), First: first, Last: p.lastLine()})
 	}
 }
 

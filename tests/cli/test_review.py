@@ -416,10 +416,10 @@ def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_p
     assert ps.returncode != 0 or ps.stdout.strip().startswith("Z"), ps.stdout
 
 
-@pytest.mark.parametrize("dirty", [False, True])
+@pytest.mark.parametrize("check", ["clean", "dirty", "unverified"])
 @pytest.mark.parametrize("interrupt", [True, False])
 def test_settled_text_survives_command_end_during_integrity_check(
-    craze_bin, fake_agent_bin, tmp_path, interrupt, dirty
+    craze_bin, fake_agent_bin, tmp_path, interrupt, check
 ):
     import shutil
     import signal
@@ -438,18 +438,19 @@ def test_settled_text_survives_command_end_during_integrity_check(
         f"        Path({str(checking)!r}).touch()\n"
         f"        until = time.monotonic() + 15\n"
         f"        while not Path({str(release)!r}).exists() and time.monotonic() < until: time.sleep(.02)\n"
+        f"        if {check == 'unverified'!r}: sys.exit(3)\n"
         f"    Path({str(seen)!r}).touch()\n"
         f"os.execv({shutil.which('git')!r}, ['git', *sys.argv[1:]])\n"
     )
     git_wrapper.chmod(0o700)
     path = tmp_path / "report.md"
     args = [str(craze_bin), "review", "--json", "-C", str(work), "--provider", "cursor",
-            "--allow-same-provider", "--out", str(path), "--dirty-check", "warn",
+            "--allow-same-provider", "--out", str(path), "--dirty-check", "fail" if check == "unverified" else "warn",
             "--timeout", "20s" if interrupt else "4s", "inspect"]
     started = time.monotonic()
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env={**os.environ, "PATH": str(programs) + os.pathsep + os.environ["PATH"],
-                                 "CRAZE_FAKE_SCRIPT": "dirty_tree" if dirty else "echo"})
+                                 "CRAZE_FAKE_SCRIPT": "dirty_tree" if check == "dirty" else "echo"})
     try:
         while not checking.exists() and proc.poll() is None and time.monotonic() - started < 10:
             time.sleep(.02)
@@ -461,10 +462,13 @@ def test_settled_text_survives_command_end_during_integrity_check(
         release.touch()
         out, err = proc.communicate(timeout=10)
         doc = json.loads(out)
-        assert proc.returncode == (3 if interrupt else 5), (doc, err)
+        assert proc.returncode == (3 if interrupt or check == "unverified" else 5), (doc, err)
         assert doc["attempts"][0]["status"] == "completed", doc
-        assert doc["message"] == path.read_text() and ("review retained" if dirty else "inspect") in doc["message"], doc
-        assert bool(doc["dirtyFiles"]) == dirty and doc["stopping"], doc
+        assert doc["message"] == path.read_text() and ("review retained" if check == "dirty" else "inspect") in doc["message"], doc
+        if check == "unverified":
+            assert doc["status"] == "failed" and doc["error"]["kind"] == "unobserved" and doc["incompleteCheck"], doc
+        else:
+            assert bool(doc["dirtyFiles"]) == (check == "dirty") and doc["stopping"], doc
     finally:
         release.touch()
         if proc.poll() is None:
@@ -602,3 +606,41 @@ def test_unfinished_review_preserves_prior_file(craze_bin, fake_agent_bin, tmp_p
     human = subprocess.run([str(craze_bin), "review", "-C", str(work), *args],
                            stdin=subprocess.DEVNULL, capture_output=True, env={**os.environ, **env}, timeout=30)
     assert human.returncode == 3 and human.stdout == b"" and report.read_text() == "earlier complete review"
+
+
+def test_infrastructure_json_waits_for_slow_reader(craze_bin, fake_agent_bin, tmp_path):
+    import select
+
+    work = tmp_path / "repo"
+    configure(work, fake_agent_bin, "codex-basic")
+    config = Path(os.environ["CRAZE_HOME"]) / "config.toml"
+    config.write_text('[agents]\ncursor="/no/such/craze-test-adapter"\n')
+    rd, wr = os.pipe()
+    with os.fdopen(rd, "rb", buffering=0) as reader, os.fdopen(wr, "wb", buffering=0) as writer:
+        os.set_blocking(wr, False)
+        filled = 0
+        try:
+            while True:
+                filled += os.write(wr, b"x" * 4096)
+        except BlockingIOError:
+            pass
+        os.set_blocking(wr, True)
+        args = [str(craze_bin), "review", "--json", "--provider", "cursor", "--allow-same-provider",
+                "--timeout", "10s", "-C", str(work), "inspect"]
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=writer, stderr=subprocess.PIPE)
+        try:
+            assert select.select([proc.stderr], [], [], 5)[0]
+            assert b"binary_missing" in proc.stderr.readline()
+            # Wait until routing has emitted its diagnostic and the error body
+            # is waiting behind the bytes that were already in the pipe.
+            with pytest.raises(subprocess.TimeoutExpired):
+                proc.wait(timeout=.15)
+            while filled:
+                filled -= len(reader.read(min(filled, 4096)))
+            _, diag = proc.communicate(timeout=5)
+            writer.close()
+            assert proc.returncode == 1 and json.loads(reader.read())["error"]["kind"] == "config", diag
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)

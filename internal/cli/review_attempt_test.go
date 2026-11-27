@@ -269,3 +269,46 @@ func TestReviewProcessScanStartupDeadline(t *testing.T) {
 		t.Fatal(a)
 	}
 }
+
+type reviewClockDeadline struct {
+	context.Context
+	at time.Time
+}
+
+func (c reviewClockDeadline) Deadline() (time.Time, bool) { return c.at, true }
+
+func TestReviewScanChecksClockBeforeTimerNotification(t *testing.T) {
+	ctx := reviewClockDeadline{t.Context(), time.Now().Add(-time.Second)}
+	a := reviewScanFailure(ctx, rundir.ErrScanCut, "scan cut")
+	if a.turn.Status != reviewTimedOut || mayRetry(a) {
+		t.Fatal(a)
+	}
+}
+
+func TestLateReviewReadinessNeverSubmits(t *testing.T) {
+	env, ws, _ := unattendedHome(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	dump := filepath.Join(t.TempDir(), "submissions")
+	t.Setenv("CRAZE_FAKE_DUMP_PROMPTS", dump)
+	shorten(t, &reviewStartupBudget, 2*time.Second)
+	original := readReviewSettings
+	reached := false
+	readReviewSettings = func(ctx context.Context, _ *waitConn, _ string) (string, string) {
+		reached = true
+		<-ctx.Done()
+		return "m-1", "low"
+	}
+	t.Cleanup(func() { readReviewSettings = original })
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	a := runUnattendedAttempt(ctx, ws, "unsubmitted", routing.Choice{Provider: "cursor"}, false, 0)
+	if !reached || a.cleanupErr != nil || !mayRetry(a) || a.turn.Error.Kind != errkind.StartFailed {
+		t.Fatal(reached, a)
+	}
+	if _, err := os.Stat(dump); !os.IsNotExist(err) {
+		t.Fatal("prompt reached provider", err)
+	}
+	if hosts, err := rundir.Hosts(env); err != nil || len(hosts) != 0 {
+		t.Fatal(hosts, err)
+	}
+}
