@@ -137,3 +137,73 @@ func TestCodexServeAndSendWait(t *testing.T) {
 		t.Fatalf("host ended with %v", err)
 	}
 }
+
+// TestCodexUnattendedNeedsInputAndAutoAnswer (Plan 054 § 5 M2b):
+//   - agent --no-force approval parks and returns exit 4 (needs_input), both
+//     without and with --exit-after-turn (leaving the host alive to be answered).
+//   - unattended requestUserInput with free-text-only (options: null) returns
+//     exit 4 (needs_input) instead of fabricating bogus text.
+//   - unattended requestUserInput with options auto-answers the first option
+//     and returns exit 0 (completed).
+func TestCodexUnattendedNeedsInputAndAutoAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		script        string
+		extraFlags    []string
+		wantCode      int
+		wantStatus    string
+		wantMsgSubstr string
+	}{
+		{
+			name:       "approval --no-force exits 4 needs_input",
+			script:     "codex-approval",
+			extraFlags: []string{"--no-force"},
+			wantCode:   4,
+			wantStatus: "needs_input",
+		},
+		{
+			name:       "approval --no-force --exit-after-turn exits 4 needs_input",
+			script:     "codex-approval",
+			extraFlags: []string{"--no-force", "--exit-after-turn"},
+			wantCode:   4,
+			wantStatus: "needs_input",
+		},
+		{
+			name:       "freetext requestUserInput exits 4 needs_input",
+			script:     "codex-ask-freetext",
+			extraFlags: []string{},
+			wantCode:   4,
+			wantStatus: "needs_input",
+		},
+		{
+			name:          "options requestUserInput auto-answers first option",
+			script:        "codex-ask",
+			extraFlags:    []string{"--exit-after-turn"},
+			wantCode:      0,
+			wantStatus:    "completed",
+			wantMsgSubstr: "Red",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ws, _ := codexHostHome(t, tc.script)
+			spawnAsChild(t, nil)
+			spawnBounds(t, serveStep, serveStep, serveStep)
+			t.Cleanup(func() { stopEveryHost(t, env) })
+
+			args := append([]string{"new", "--wait", "--json", "--provider", "codex", "-C", ws}, tc.extraFlags...)
+			args = append(args, "trigger ask")
+			stdout, stderr, code := executeErr(args)
+			m := decodeResult(t, stdout)
+			if code != tc.wantCode || m["status"] != tc.wantStatus {
+				t.Fatalf("craze new --wait (%s): exit=%d status=%v want=(%d, %s); result=%v stderr=%q",
+					tc.name, code, m["status"], tc.wantCode, tc.wantStatus, m, stderr)
+			}
+			if tc.wantMsgSubstr != "" {
+				msg, _ := m["message"].(string)
+				if !strings.Contains(msg, tc.wantMsgSubstr) {
+					t.Fatalf("message = %q, want substring %q", msg, tc.wantMsgSubstr)
+				}
+			}
+		})
+	}
+}

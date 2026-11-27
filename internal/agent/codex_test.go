@@ -707,17 +707,31 @@ func TestCodexCommandOutputStderrHeadOnNonZeroExit(t *testing.T) {
 // --- M2a Review Regression Tests (H1-H5, M6-M14, L1-L4) ---
 
 func TestCodexApprovalDeclinedAfterMidTurnModeChange(t *testing.T) {
-	// H1: Even if a forced session switches from ask -> agent mid-turn, an
-	// approval request must NOT be auto-accepted for the running read-only turn.
+	// H1: Start a turn in read-only ask mode (with Force: true), then switch
+	// next-turn mode to agent while the ask turn is running. An approval
+	// arriving for that running ask turn MUST still be declined because
+	// decisions bind to the immutable mode captured when the turn started.
 	cs, _ := startCodexFake(t, "codex-approval", Options{Mode: "ask", Force: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := cs.SetMode(ctx, "", "agent"); err != nil {
-		t.Fatalf("SetMode(agent): %v", err)
-	}
+
+	// Start the ask turn and switch mode to agent as soon as the turn begins.
 	var text strings.Builder
 	evs := collectSubEvents(t, cs, func() {
-		if _, err := cs.Prompt(ctx, "try command"); err != nil {
+		go func() {
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				cs.mu.Lock()
+				inFlight := cs.activeTurn != nil && (cs.activeTurn.phase == codexPhaseSent || cs.activeTurn.phase == codexPhaseIdentified)
+				cs.mu.Unlock()
+				if inFlight {
+					_, _ = cs.SetMode(ctx, "", "agent")
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}()
+		if _, err := cs.Prompt(ctx, "try command in ask"); err != nil {
 			t.Fatalf("Prompt: %v", err)
 		}
 	})
@@ -727,7 +741,7 @@ func TestCodexApprovalDeclinedAfterMidTurnModeChange(t *testing.T) {
 		}
 	}
 	if !strings.Contains(text.String(), "decision=decline") {
-		t.Fatalf("expected M2a approval to decline, got %q", text.String())
+		t.Fatalf("expected ask-turn approval to decline even after mid-turn SetMode(agent), got %q", text.String())
 	}
 }
 

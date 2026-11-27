@@ -774,7 +774,162 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			Type:       EventCompaction,
 			Compaction: &CompactionInfo{Phase: phase, Reason: CompactionAuto},
 		})
+
+	case "collabAgentToolCall":
+		var item codexrpc.CollabAgentToolCallItem
+		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
+			return
+		}
+		st := mapCodexSubagentStatus(item.Status, completed)
+		if replaying && st == SubagentRunning {
+			st = SubagentCancelled
+		}
+		now := s.Now()
+		s.mu.Lock()
+		rec, exists := s.subagents[item.ID]
+		change := SubagentChangeProgress
+		if !exists {
+			rec = &subagentRec{
+				info: SubagentInfo{
+					ID:           item.ID,
+					ToolCallID:   item.ID,
+					SubagentType: sanitizeText(item.Tool),
+					Description:  sanitizeText(item.Prompt),
+					Prompt:       sanitizeText(item.Prompt),
+					Status:       st,
+					StartedAt:    now,
+					NoCancel:     true,
+				},
+			}
+			capSubagent(&rec.info)
+			s.subagents[item.ID] = rec
+			s.subagentOrder = append(s.subagentOrder, item.ID)
+			change = SubagentChangeSpawned
+		} else {
+			if item.Tool != "" {
+				rec.info.SubagentType = sanitizeText(item.Tool)
+			}
+			if item.Prompt != "" && rec.info.Prompt == "" {
+				rec.info.Prompt = sanitizeText(item.Prompt)
+				rec.info.Description = sanitizeText(item.Prompt)
+			}
+			rec.info.Status = st
+			capSubagent(&rec.info)
+		}
+		if st != SubagentRunning {
+			if rec.info.EndedAt.IsZero() {
+				rec.info.EndedAt = now
+			}
+			if !rec.info.StartedAt.IsZero() {
+				rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+			}
+			if exists || replaying {
+				change = SubagentChangeFinished
+			}
+		}
+		info := cloneSubagent(rec.info)
+		s.mu.Unlock()
+		s.emit(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
 	}
+}
+
+func mapCodexSubagentStatus(status string, completed bool) SubagentStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "succeeded":
+		return SubagentCompleted
+	case "failed", "error":
+		return SubagentFailed
+	case "cancelled", "canceled", "declined", "interrupted":
+		return SubagentCancelled
+	case "inprogress", "in_progress", "running", "pending":
+		if completed {
+			return SubagentCompleted
+		}
+		return SubagentRunning
+	default:
+		if completed {
+			return SubagentCompleted
+		}
+		return SubagentRunning
+	}
+}
+
+func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
+	var p codexrpc.SubAgentActivityParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	// Only fold sub-agent activity that belongs to this main thread (or already
+	// tracked subagent row). Never leak child-thread activity into main text.
+	if p.ParentThreadID != "" && !s.isMainThread(p.ParentThreadID) {
+		return
+	}
+	id := p.SubAgentID
+	if id == "" {
+		id = p.AgentID
+	}
+	if id == "" {
+		id = p.ThreadID
+	}
+	if id == "" {
+		return
+	}
+	now := s.Now()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	rec, exists := s.subagents[id]
+	if !exists && p.ParentThreadID == "" {
+		// Unowned notification with no matching row and no parentThreadId: ignore.
+		s.mu.Unlock()
+		return
+	}
+	change := SubagentChangeProgress
+	if !exists {
+		rec = &subagentRec{
+			info: SubagentInfo{
+				ID:          id,
+				Description: sanitizeText(p.Title),
+				Status:      SubagentRunning,
+				StartedAt:   now,
+				NoCancel:    true,
+			},
+		}
+		s.subagents[id] = rec
+		s.subagentOrder = append(s.subagentOrder, id)
+		change = SubagentChangeSpawned
+	}
+	if p.Title != "" && rec.info.Description == "" {
+		rec.info.Description = sanitizeText(p.Title)
+	}
+	if p.Activity != "" {
+		rec.info.Activity = sanitizeText(p.Activity)
+	}
+	if p.Output != "" {
+		rec.info.Output = sanitizeText(p.Output)
+	}
+	if p.Error != "" {
+		rec.info.Error = sanitizeText(p.Error)
+	}
+	if p.Status != "" {
+		st := mapCodexSubagentStatus(p.Status, false)
+		rec.info.Status = st
+		if st != SubagentRunning {
+			if rec.info.EndedAt.IsZero() {
+				rec.info.EndedAt = now
+			}
+			if !rec.info.StartedAt.IsZero() {
+				rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+			}
+			change = SubagentChangeFinished
+		}
+	}
+	capSubagent(&rec.info)
+	info := cloneSubagent(rec.info)
+	s.mu.Unlock()
+	s.emit(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
 }
 
 func extractCodexUserText(content []codexrpc.UserInput) string {

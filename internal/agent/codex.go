@@ -66,6 +66,7 @@ type codexTurnState struct {
 	failedErr      error
 	stopReason     string
 	tempFiles      []string
+	steerPubWG     sync.WaitGroup
 	done           chan struct{}
 }
 
@@ -164,8 +165,15 @@ type codexSession struct {
 	// Foreign turn state (autonomous main-thread turns).
 	foreignTurnID string
 
-	// Skills catalog from Codex's skills/list (populated in M2b).
-	skills []Skill
+	// Active server->client requests keyed by canonical JSON request ID so
+	// serverRequest/resolved immediately withdraws parked asks.
+	pendingReqs map[string]context.CancelCauseFunc
+
+	// Skills catalog from Codex's skills/list + coalescing async rescan worker.
+	skills      []Skill
+	codexSkills map[string]codexrpc.SkillMetadata
+	skillCh     chan struct{}
+	skillWorker bool
 }
 
 func newCodexSession(opts Options) *codexSession {
@@ -185,6 +193,7 @@ func newCodexSession(opts Options) *codexSession {
 		lifeCancel:     lifeCancel,
 		closeDone:      make(chan struct{}),
 		titleCh:        make(chan struct{}, 1),
+		skillCh:        make(chan struct{}, 1),
 		allModels:      make(map[string]codexrpc.ModelEntry),
 		tools:          make(map[string]ToolEvent),
 		cmdBuffers:     make(map[string]*codexCmdBuffer),
@@ -192,6 +201,8 @@ func newCodexSession(opts Options) *codexSession {
 		subagents:      make(map[string]*subagentRec),
 		earlyCompleted: make(map[string]codexrpc.Turn),
 		settledTurns:   make(map[string]bool),
+		pendingReqs:    make(map[string]context.CancelCauseFunc),
+		codexSkills:    make(map[string]codexrpc.SkillMetadata),
 	}
 	s.log = newSessionLog(s.opts, journalHeader{provider: p.Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
@@ -222,10 +233,6 @@ func (s *codexSession) Now() time.Time              { return time.Now() }
 func (s *codexSession) Asks() *AskRegistry          { return s.asks }
 func (s *codexSession) PublishesEffortFacts() bool  { return true }
 func (s *codexSession) PublishesSlashCatalog() bool { return true }
-
-// RescanSkills is SkillRescanner (non-blocking). Full Codex skills/list refresh
-// is wired in M2b; safe no-op when not started or closed.
-func (s *codexSession) RescanSkills() {}
 
 func (s *codexSession) AnnounceSeed() bool {
 	s.mu.Lock()
@@ -527,6 +534,18 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 		return true, fmt.Errorf("agent: codex model/list: %w", err)
 	}
 
+	// Best-effort Codex skills discovery with a short independent deadline so
+	// slow skills/list never stalls startup.
+	skCtx, skCancel := context.WithTimeout(rpcCtx, codexSkillStartTimeout)
+	skills, byName, skErr := loadCodexSkills(skCtx, client, cwd, false)
+	skCancel()
+	if skErr == nil {
+		s.mu.Lock()
+		s.skills = skills
+		s.codexSkills = byName
+		s.mu.Unlock()
+	}
+
 	// Determine requested model & validate against catalog (allowing custom
 	// models not in model/list to be validated by Codex itself on thread/start).
 	wantModel := strings.TrimSpace(s.opts.Model)
@@ -618,114 +637,6 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: tr.Thread.ID, AgentBinary: binary})
 	return false, nil
-}
-
-// resumeThread opens an existing Codex thread via thread/resume (M2a baseline;
-// M2b adds bounded thread/turns/list chronological replay under EventReplay).
-func (s *codexSession) resumeThread(
-	ctx context.Context,
-	client *codexrpc.Client,
-	cwd, binary, startMode, resolvedModel string,
-	sbMode codexrpc.SandboxMode,
-	apPolicy codexrpc.ApprovalPolicy,
-) error {
-	res, err := client.ThreadResume(ctx, codexrpc.ThreadResumeParams{
-		ThreadID:       s.opts.LoadSessionID,
-		ExcludeTurns:   true,
-		Cwd:            cwd,
-		Sandbox:        sbMode,
-		ApprovalPolicy: apPolicy,
-		Model:          resolvedModel,
-	})
-	if err != nil {
-		return s.classifyRPCStartError(err)
-	}
-	tid := s.opts.LoadSessionID
-	if res != nil && res.Thread.ID != "" {
-		tid = res.Thread.ID
-	}
-	var savedWS *codexrpc.SandboxPolicy
-	if res != nil && res.Sandbox != nil && res.Sandbox.Type == codexrpc.SandboxPolicyWorkspaceWrite {
-		cp := *res.Sandbox
-		cp.WritableRoots = slices.Clone(res.Sandbox.WritableRoots)
-		savedWS = &cp
-	}
-	activeModel := resolvedModel
-	if activeModel == "" && res != nil && res.Model != "" {
-		activeModel = res.Model
-	}
-	if activeModel == "" {
-		activeModel = s.defaultCatalogModel()
-	}
-	activeEffort := strings.TrimSpace(s.opts.LoadEffort)
-	if activeEffort == "" && res != nil && res.ReasoningEffort != nil {
-		activeEffort = strings.TrimSpace(*res.ReasoningEffort)
-	}
-	if activeEffort == "" {
-		activeEffort = s.defaultEffortForModel(activeModel)
-	}
-	activeEffort, err = s.applyStartSettings(activeModel, activeEffort)
-	if err != nil {
-		return err
-	}
-
-	// Seed title before ReplayStart bracket.
-	s.mu.Lock()
-	seeded := false
-	if title := sanitizeText(s.opts.Title); title != "" {
-		s.snap.Title = title
-		t := title
-		s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &t})
-		seeded = true
-	}
-	if s.opts.TitlePinned {
-		s.titlePinned = true
-	}
-	s.mu.Unlock()
-	if seeded {
-		_ = s.log.Flush(ctx, s.done)
-	}
-
-	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
-	s.replaying.Store(true)
-	defer s.replaying.Store(false)
-
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return fmt.Errorf("agent: session closed")
-	}
-	s.threadID = tid
-	s.workspaceSandbox = savedWS
-	s.snap.SessionID = tid
-	s.snap.CurrentMode = startMode
-	s.snap.CurrentModel = activeModel
-	s.currentEffort = activeEffort
-	s.rebuildCatalogAndConfigLocked()
-	s.rebuildSlashLocked()
-	if s.usage.hasAny() {
-		u := s.usage.state()
-		u.Model = activeModel
-		s.snap.Usage = &u
-	}
-	s.ready = true
-	delta := s.installDeltaLocked()
-	s.enqueueDeltaLocked("", Event{Replayed: true}, delta)
-	s.mu.Unlock()
-
-	if err := s.log.Flush(ctx, s.done); err != nil {
-		return fmt.Errorf("agent: session closed")
-	}
-	s.replaying.Store(false)
-	s.log.noteSession(journal.SessionNote{
-		ProviderSessionID: tid,
-		LoadedFrom:        s.opts.LoadSessionID,
-		AgentBinary:       binary,
-	})
-	if !s.emitCtx(ctx, Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}}) {
-		return fmt.Errorf("agent: session closed")
-	}
-	return nil
 }
 
 func (s *codexSession) classifyRPCStartError(err error) error {
@@ -1227,7 +1138,12 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 	fallbacks := append(append([]string(nil), ims.fallbacks...), extraFails...)
 	promptText := PlacePathText(rest, fallbacks)
 	var inputs []codexrpc.UserInput
-	if promptText != "" {
+	if sk, after, isSkill := s.parseCodexSkillPrompt(promptText); isSkill {
+		inputs = append(inputs, codexrpc.UserInput{Type: "skill", Name: sk.Name, Path: sk.Path})
+		if after != "" {
+			inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: after})
+		}
+	} else if promptText != "" {
 		inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: promptText})
 	}
 	inputs = append(inputs, imgInputs...)
@@ -1497,19 +1413,24 @@ func (s *codexSession) turnResult(turn *codexTurnState) (Result, error) {
 // and terminal EventDone/EventError has been committed to EventLog.
 func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termErr error, releaseSlot bool) (Result, error) {
 	var (
-		toolEvs   []Event
-		tempFiles []string
-		tok       TurnToken
-		won       bool
-		closing   bool
+		toolEvs     []Event
+		subagentEvs []Event
+		tempFiles   []string
+		tok         TurnToken
+		won         bool
+		closing     bool
 	)
 	toolFinal := toolCompleted
+	subFinal := SubagentCompleted
 	if termErr != nil {
 		toolFinal = toolFailed
+		subFinal = SubagentFailed
 	} else if stopReason == acp.StopCancelled {
 		toolFinal = "cancelled"
+		subFinal = SubagentCancelled
 	}
 
+	now := s.Now()
 	s.mu.Lock()
 	if turn.settling || turn.phase == codexPhaseSettled {
 		done := turn.done
@@ -1535,14 +1456,33 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 			continue
 		}
 		row.Status = toolFinal
-		row.At = s.Now()
+		row.At = now
 		s.tools[id] = row
 		ct := cloneTool(row)
 		toolEvs = append(toolEvs, Event{Type: EventTool, Tool: &ct})
 	}
+	// Retire any still-running subagent rows before terminal event publication.
+	for _, id := range s.subagentOrder {
+		rec, ok := s.subagents[id]
+		if !ok || rec.info.Status != SubagentRunning {
+			continue
+		}
+		rec.info.Status = subFinal
+		if rec.info.EndedAt.IsZero() {
+			rec.info.EndedAt = now
+		}
+		if !rec.info.StartedAt.IsZero() {
+			rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+		}
+		info := cloneSubagent(rec.info)
+		subagentEvs = append(subagentEvs, Event{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeFinished})
+	}
 	s.mu.Unlock()
 
 	if won {
+		// Wait for any already-confirmed turn/steer EventUser publication to
+		// land ahead of EventDone/EventError.
+		turn.steerPubWG.Wait()
 		removeTempFiles(tempFiles)
 		pubCtx := context.Background()
 		var pubCancel context.CancelFunc
@@ -1553,6 +1493,9 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 			pubCtx, pubCancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
 		}
 		for _, ev := range toolEvs {
+			s.emitCtx(pubCtx, ev)
+		}
+		for _, ev := range subagentEvs {
 			s.emitCtx(pubCtx, ev)
 		}
 		// Flush queued outbox deltas (usage, settings) BEFORE terminal event so
@@ -1759,7 +1702,18 @@ func (s *codexSession) Interject(ctx context.Context, text string) error {
 		}
 		return err
 	}
-	s.emit(Event{Type: EventUser, Text: sanitizeText(clean), Interjection: true})
+	// Order confirmed EventUser ahead of EventDone/EventError: only register on
+	// steerPubWG if the turn has not begun settling.
+	s.mu.Lock()
+	canPublish := !s.closed && !turn.settling && turn.phase != codexPhaseSettled
+	if canPublish {
+		turn.steerPubWG.Add(1)
+	}
+	s.mu.Unlock()
+	if canPublish {
+		s.emit(Event{Type: EventUser, Text: sanitizeText(clean), Interjection: true})
+		turn.steerPubWG.Done()
+	}
 	return nil
 }
 
@@ -1996,6 +1950,7 @@ func (s *codexSession) teardown() {
 		defer close(s.closeDone)
 		s.mu.Lock()
 		s.closed = true
+		s.cancelAllPendingReqsLocked(codexrpc.ErrClosed)
 		close(s.closingCh)
 		s.mu.Unlock()
 
@@ -2112,6 +2067,12 @@ func (s *codexSession) onNotify(msg *codexrpc.Message) {
 		s.handleRateLimitsUpdated(msg.Params)
 	case codexrpc.NotifyThreadNameUpdated:
 		s.handleThreadNameUpdated(msg.Params)
+	case codexrpc.NotifySubAgentActivity:
+		s.handleSubAgentActivity(msg.Params)
+	case codexrpc.NotifyServerRequestResolved:
+		s.handleServerRequestResolved(msg.Params)
+	case codexrpc.NotifySkillsChanged:
+		s.handleSkillsChanged()
 	case codexrpc.NotifyError:
 		s.handleErrorNotification(msg.Params)
 	case codexrpc.NotifyConfigWarning, codexrpc.NotifyDeprecationNotice:
@@ -2344,43 +2305,4 @@ func (s *codexSession) handleErrorNotification(raw json.RawMessage) {
 		return
 	}
 	s.emit(Event{Type: EventError, Err: err})
-}
-
-// onServerRequest is the M2a baseline server->client request dispatcher
-// (expanded with full AskRegistry approval/question cards in M2b).
-//
-// In M2a, command and file-change approvals are unconditionally declined (fail
-// closed so mid-turn SetMode changes can never authorize escalation on a
-// running read-only turn — H1), permissions requests receive the typed
-// 0.172.0 empty-permissions denial (M7), and unknown methods return false so
-// codexrpc replies -32601.
-func (s *codexSession) onServerRequest(_ context.Context, msg *codexrpc.Message) bool {
-	if msg.ID == nil {
-		return false
-	}
-	s.mu.Lock()
-	client := s.client
-	s.mu.Unlock()
-	if client == nil {
-		return false
-	}
-	switch msg.Method {
-	case codexrpc.RequestCommandApproval, codexrpc.RequestFileChangeApproval:
-		_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
-		return true
-	case codexrpc.RequestPermissionsApproval:
-		_ = client.Reply(*msg.ID, codexrpc.PermissionsApprovalReply{
-			Permissions: map[string]any{},
-			Scope:       "turn",
-		})
-		return true
-	case codexrpc.RequestMCPElicitation:
-		_ = client.Reply(*msg.ID, map[string]any{"action": "decline"})
-		return true
-	case codexrpc.RequestUserInput:
-		_ = client.Reply(*msg.ID, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
-		return true
-	default:
-		return false
-	}
 }

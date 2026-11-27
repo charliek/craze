@@ -953,6 +953,13 @@ func (s *codexServer) runTurn(threadID, turnID, cwd, promptText string, skills, 
 			"turnId":   turnID,
 			"item":     map[string]any{"type": "commandExecution", "id": "cmd-1", "command": "touch out.txt", "status": status},
 		})
+		if dec == "cancel" {
+			s.notify("turn/completed", map[string]any{
+				"threadId": threadID,
+				"turn":     map[string]any{"id": turnID, "status": "interrupted"},
+			})
+			return
+		}
 		s.emitMessage(threadID, turnID, "msg-"+turnID, "decision="+dec)
 		s.notify("turn/completed", map[string]any{
 			"threadId": threadID,
