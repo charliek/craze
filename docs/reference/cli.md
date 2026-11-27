@@ -3298,8 +3298,28 @@ records its route, `effectiveModel`, `effectiveEffort` when reported, `durationM
 and a sanitized `error`, `kind` or `reason` on failure. `outPath` and
 `bundleFile` identify retained files. `dirtyFiles` also names changed Git
 metadata. `incompleteCheck` indicates bounded checks on large or numerous
-files. Integrity checks require a Git worktree. They report changes without
-rolling them back. A capped command sets `stopping`.
+files. Integrity checks require a Git worktree. Submodule bundles show gitlink
+changes. The integrity check also scans submodule worktree files within the
+same bounds and excludes their private Git metadata. It reports changes and
+leaves them on disk.
+
+A signal or cap during shutdown or the final integrity check preserves the
+settled attempt in `attempts` and delivers its text. The command reports
+`cancelled` or `timed_out` with `stopping`. If a reconnect recovers only a
+tail, `messageCut` flags it and `dirtyFiles` still identifies changes.
+An empty result or incomplete message preserves an existing `--out` file.
+`outPath` appears only after Craze saves a complete nonempty message.
+
+Codex review attempts report the billing class from the running host. With
+paid fallback enabled, an unverified endpoint can report `unknown` with
+`provisional: true`. A startup refusal retains the preflight classification.
+
+The built-in review role tries Sol, Neon, then Opus. A Codex caller can
+therefore route directly to Antigravity. On Antigravity 1.5.18, both
+`agy acp` under `--no-force` and `agy acp --sandbox` allowed editing and shell
+writes. A stock launch also wrote outside the worktree. The Git integrity
+check covers the selected worktree. Select `--target opus` for Claude's
+review tool restrictions.
 
 | Exit | Meaning |
 | --- | --- |

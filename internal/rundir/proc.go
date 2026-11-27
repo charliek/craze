@@ -93,6 +93,7 @@ func parseProcStat(line string) (ProcIdentity, error) {
 // session's id; Zombie as ProcIdentity's: it holds its number and nothing else,
 // and no signal can do anything to it.
 type GroupMember struct {
+	PPID    int
 	PID     int
 	PGID    int
 	Session int
@@ -155,7 +156,7 @@ func parseProcMember(pid int, line string) (GroupMember, error) {
 	if err != nil {
 		return GroupMember{}, fmt.Errorf("/proc stat: the session: %w", err)
 	}
-	return GroupMember{PID: pid, PGID: pgid, Session: session, Start: id.Start, Zombie: id.Zombie}, nil
+	return GroupMember{PID: pid, PPID: id.PPID, PGID: pgid, Session: session, Start: id.Start, Zombie: id.Zombie}, nil
 }
 
 // environHolds reports whether env, NUL-separated entries as /proc/<pid>/environ

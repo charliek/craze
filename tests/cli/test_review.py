@@ -56,7 +56,7 @@ def test_real_host_fallback(craze_bin, fake_agent_bin, tmp_path, script, code, k
 
 def test_direct_paid_and_self_guard(craze_bin, fake_agent_bin, tmp_path):
     work = tmp_path / "work"
-    configure(work, fake_agent_bin, "codex-basic")
+    configure(work, fake_agent_bin, "codex-apikey")
     args = ["--provider", "codex", "--allow-same-provider", "inspect"]
     env = {"CODEX_API_KEY": "test-key"}
     proc, doc = review(craze_bin, work, *args, env=env)
@@ -65,6 +65,18 @@ def test_direct_paid_and_self_guard(craze_bin, fake_agent_bin, tmp_path):
     assert proc.returncode == 0 and doc["route"]["billing"] == "api_key", (doc, proc.stderr)
     proc, doc = review(craze_bin, work, "--provider", "codex", "inspect", env={"CRAZE_SESSION_PROVIDER": "codex"})
     assert proc.returncode == 2 and doc["error"]["kind"] == "usage", doc
+
+
+@pytest.mark.parametrize("script,billing", [("codex-apikey", "api_key"), ("codex-paid-endpoint", "metered")])
+def test_codex_billing_uses_host_account(craze_bin, fake_agent_bin, tmp_path, script, billing):
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, script)
+    args = ("--provider", "codex", "--allow-same-provider", "inspect")
+    proc, doc = review(craze_bin, work, *args)
+    assert proc.returncode == 3 and doc["attempts"][0]["reason"] == "paid_blocked", doc
+    proc, doc = review(craze_bin, work, *args, "--allow-paid-fallback")
+    assert proc.returncode == 0 and doc["route"]["billing"] == billing, (proc.stderr, doc)
+    assert doc["attempts"][0]["billing"] == billing and not doc["route"]["provisional"], doc
 
 
 def test_bundle_only_from_real_cli(craze_bin, fake_agent_bin, tmp_path):
@@ -380,15 +392,17 @@ def test_invalid_ref_before_unavailable_route(craze_bin, fake_agent_bin, tmp_pat
         )
 
 
-def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_path):
+@pytest.mark.parametrize("clear_env", [False, True])
+def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_path, clear_env):
     work = tmp_path / "work"
     configure(work, fake_agent_bin, "codex-quota")
     home = Path(os.environ["CRAZE_HOME"])
     marker = tmp_path / "helper.pid"
+    child_env = {} if clear_env else None
     wrapper = home / "fake-codex"
     wrapper.write_text(
         f"#!{sys.executable}\nimport os, subprocess\n"
-        f"helper=subprocess.Popen(['sleep','45'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"helper=subprocess.Popen(['sleep','45'],env={child_env!r},start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
         f"open({str(marker)!r},'w').write(str(helper.pid))\n"
         f"os.execv({str(fake_agent_bin)!r},[{str(fake_agent_bin)!r},'-script','codex-quota',*__import__('sys').argv[1:]])\n"
     )
@@ -400,3 +414,56 @@ def test_fallback_reaps_adapter_created_session(craze_bin, fake_agent_bin, tmp_p
         ["ps", "-p", marker.read_text(), "-o", "stat="], capture_output=True, text=True
     )
     assert ps.returncode != 0 or ps.stdout.strip().startswith("Z"), ps.stdout
+
+
+@pytest.mark.parametrize("interrupt", [True, False])
+def test_settled_text_survives_command_end_during_integrity_check(
+    craze_bin, fake_agent_bin, tmp_path, interrupt
+):
+    import shutil
+    import signal
+    import time
+
+    work = tmp_path / "work"
+    configure(work, fake_agent_bin, "codex-basic")
+    programs = tmp_path / "programs"
+    programs.mkdir()
+    seen, checking, release = (tmp_path / name for name in ("seen", "checking", "release"))
+    git_wrapper = programs / "git"
+    git_wrapper.write_text(
+        f"#!{sys.executable}\nimport os, sys, time\nfrom pathlib import Path\n"
+        f"if 'status' in sys.argv:\n"
+        f"    if Path({str(seen)!r}).exists():\n"
+        f"        Path({str(checking)!r}).touch()\n"
+        f"        until = time.monotonic() + 15\n"
+        f"        while not Path({str(release)!r}).exists() and time.monotonic() < until: time.sleep(.02)\n"
+        f"    Path({str(seen)!r}).touch()\n"
+        f"os.execv({shutil.which('git')!r}, ['git', *sys.argv[1:]])\n"
+    )
+    git_wrapper.chmod(0o700)
+    path = tmp_path / "report.md"
+    args = [str(craze_bin), "review", "--json", "-C", str(work), "--provider", "cursor",
+            "--allow-same-provider", "--out", str(path), "--timeout", "20s" if interrupt else "4s", "inspect"]
+    started = time.monotonic()
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, "PATH": str(programs) + os.pathsep + os.environ["PATH"],
+                                 "CRAZE_FAKE_SCRIPT": "echo"})
+    try:
+        while not checking.exists() and proc.poll() is None and time.monotonic() - started < 10:
+            time.sleep(.02)
+        assert checking.exists(), proc.poll()
+        if interrupt:
+            proc.send_signal(signal.SIGTERM)
+        else:
+            time.sleep(max(0, started + 4.2 - time.monotonic()))
+        release.touch()
+        out, err = proc.communicate(timeout=10)
+        doc = json.loads(out)
+        assert proc.returncode == (3 if interrupt else 5), (doc, err)
+        assert doc["attempts"][0]["status"] == "completed", doc
+        assert doc["message"] == path.read_text() and "inspect" in doc["message"], doc
+    finally:
+        release.touch()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)

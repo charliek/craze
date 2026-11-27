@@ -131,13 +131,13 @@ func TestBundleCapAndIndexMismatch(t *testing.T) {
 func TestBundleDisablesGitConverters(t *testing.T) {
 	dir := newRepo(t)
 	put(t, dir, "a", "old\n")
-	put(t, dir, ".gitattributes", "a diff=poison filter=example\n")
+	put(t, dir, ".gitattributes", "a diff=poison filter=example=name\n")
 	commit(t, dir)
 	runGit(t, dir, "config", "diff.poison.textconv", "false")
 	runGit(t, dir, "config", "diff.external", "false")
-	runGit(t, dir, "config", "filter.example.required", "true")
-	runGit(t, dir, "config", "filter.example.clean", "false")
-	runGit(t, dir, "config", "filter.example.process", "false")
+	runGit(t, dir, "config", "filter.example=name.required", "true")
+	runGit(t, dir, "config", "filter.example=name.clean", "false")
+	runGit(t, dir, "config", "filter.example=name.process", "false")
 	put(t, dir, "a", "new\n")
 	_ = snap(t, dir)
 	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
@@ -221,7 +221,11 @@ func TestBundleIncludesGitlinkAndRawPath(t *testing.T) {
 	dir := newRepo(t)
 	runGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", child, "module")
 	commit(t, dir)
+	before := snap(t, dir)
 	put(t, filepath.Join(dir, "module"), "a", "second")
+	if !slices.Contains(Changes(before, snap(t, dir)), "module/a") {
+		t.Fatal("missed submodule worktree edit")
+	}
 	commit(t, filepath.Join(dir, "module"))
 	put(t, dir, "odd-\xff", "raw")
 	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
@@ -339,5 +343,32 @@ func TestMissingObjectDoesNotFetchFromPromisor(t *testing.T) {
 	_, err := gitData(t.Context(), dir, "cat-file", "blob", oid)
 	if err == nil || runGit(t, dir, "count-objects", "-v") != before {
 		t.Fatal("review fetched a missing blob", err)
+	}
+}
+
+func TestBundleShowsHiddenTrackedEditsWithoutRefreshingIndex(t *testing.T) {
+	dir := newRepo(t)
+	for _, name := range []string{"assumed", "sparse", "absent"} {
+		put(t, dir, name, "old\n")
+	}
+	commit(t, dir)
+	runGit(t, dir, "update-index", "--assume-unchanged", "assumed")
+	runGit(t, dir, "update-index", "--skip-worktree", "sparse", "absent")
+	if err := os.Remove(filepath.Join(dir, "absent")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"assumed", "sparse"} {
+		put(t, dir, name, name+" changed\n")
+	}
+	before := snap(t, dir)
+	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Files) != 2 || b.Files[0].Name != "assumed" || b.Files[1].Name != "sparse" || !strings.Contains(b.Prompt, "+assumed changed") || !strings.Contains(b.Prompt, "+sparse changed") {
+		t.Fatal(b)
+	}
+	if before.IndexChanged() || len(Changes(before, snap(t, dir))) != 0 {
+		t.Fatal("the real index or workspace changed")
 	}
 }

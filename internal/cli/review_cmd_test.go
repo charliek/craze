@@ -87,6 +87,31 @@ func TestReviewTerminalStatuses(t *testing.T) {
 	}
 }
 
+func TestIncompleteReviewPreservesPriorFileAndDirtyEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing.md")
+	if err := os.WriteFile(path, []byte("previous review"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cut := range []bool{false, true} {
+		r := reviewResultJSON{Status: statusFailed, Error: kindError("empty review", errkind.Empty)}
+		if cut {
+			r.MessageCut, r.Message, r.DirtyFiles, r.Error = true, "tail", []string{"changed"}, kindError("workspace changed", errkind.DirtyTree)
+		}
+		var out, diag bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		cmd.SetErr(&diag)
+		err := (reviewFlags{out: path, json: true}).render(cmd, r)
+		var result reviewResultJSON
+		if err == nil || json.Unmarshal(out.Bytes(), &result) != nil || result.OutPath != "" || result.MessageCut != cut || result.Message != r.Message || result.Error.Kind != r.Error.Kind || len(result.DirtyFiles) != len(r.DirtyFiles) {
+			t.Fatal(err, out.String())
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "previous review" {
+			t.Fatal(string(data), err)
+		}
+	}
+}
+
 type closedReviewOutput struct{}
 
 func (closedReviewOutput) Write([]byte) (int, error) { return 0, syscall.EPIPE }

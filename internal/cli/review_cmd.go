@@ -49,6 +49,7 @@ type reviewResultJSON struct {
 	Schema          int                 `json:"schema"`
 	Status          string              `json:"status"`
 	Message         string              `json:"message"`
+	MessageCut      bool                `json:"messageCut,omitempty"`
 	Route           *routing.Choice     `json:"route,omitempty"`
 	Attempts        []reviewAttemptJSON `json:"attempts"`
 	OutPath         string              `json:"outPath,omitempty"`
@@ -300,10 +301,14 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		}
 		a := runUnattendedAttempt(ctx, dir, prompt, route, paid, f.stall)
 		t := a.turn
-		if !paid && route.Provisional && t.Status == statusCompleted {
+		if a.billing != "" {
+			route.Billing = a.billing
+			route.Provisional, route.Note = a.billing == "unknown", ""
+		} else if !paid && route.Provisional && t.Status == statusCompleted {
 			route.Provisional, route.Note = false, ""
 		}
 		res.Route, res.Status, res.Message, res.Stopping, res.Error = &route, t.Status, t.message(), t.Stopping, t.Error
+		res.MessageCut = t.MessageCut
 		if a.effectiveEffort != "" && route.Effort != "" && a.effectiveEffort != route.Effort {
 			fmt.Fprintf(cmd.ErrOrStderr(), "craze review: %s/%s adjusted effort %s to %s\n", route.Provider, sanitizeLine(route.Model), route.Effort, sanitizeLine(a.effectiveEffort))
 		}
@@ -323,7 +328,6 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		if a.cleanupErr != nil {
 			return kindf(errkind.Internal, "craze review: %s", a.cleanupErr)
 		}
-		settledBeforeEnd := ctx.Err() == nil
 		if before.Root != "" {
 			// Always inspect after verified shutdown, even after a signal or cap.
 			check, done := context.WithTimeout(context.Background(), 30*time.Second)
@@ -353,13 +357,12 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 				}
 			}
 		}
-		if t.MessageCut {
-			return kindf(errkind.Unobserved, "craze review: the host lost part of the review before it could be saved")
-		}
-		if len(res.DirtyFiles) != 0 {
+		if t.MessageCut || len(res.DirtyFiles) != 0 {
 			break
 		}
-		if settledBeforeEnd && ctx.Err() != nil {
+		// Keep the delivered attempt and its text. A new command cap or
+		// signal during mandatory cleanup or inspection has its own exit code.
+		if a.settledBeforeEnd && ctx.Err() != nil {
 			return endContext()
 		}
 		if i+1 == len(routes.Routes) || !mayRetry(a) {
@@ -392,7 +395,10 @@ func mayRetry(a attemptResult) bool {
 }
 
 func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
-	if f.out != "" {
+	if r.MessageCut {
+		fmt.Fprintln(cmd.ErrOrStderr(), "craze review: only part of the review was recovered")
+	}
+	if f.out != "" && !r.MessageCut && strings.TrimSpace(r.Message) != "" {
 		if err := os.MkdirAll(filepath.Dir(f.out), 0700); err != nil {
 			return kindf(errkind.Internal, "craze review: creating output directory: %s", err)
 		}

@@ -515,11 +515,14 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	if err != nil {
 		return true, fmt.Errorf("agent: codex account/read: %w", err)
 	}
-	if s.opts.SubscriptionOnly {
-		if err := checkCodexSubscription(rpcCtx, client, cwd, acctRes); err != nil {
-			return true, err
+	var reviewBilling string
+	if s.opts.SubscriptionOnly || s.opts.ReviewBilling != nil {
+		var billingErr error
+		reviewBilling, billingErr = codexReviewBilling(rpcCtx, client, cwd, acctRes)
+		if s.opts.SubscriptionOnly && billingErr != nil {
+			return true, billingErr
 		}
-		if s.opts.LoadSessionID != "" {
+		if s.opts.SubscriptionOnly && s.opts.LoadSessionID != "" {
 			return true, newCodexErr(errkind.Config, "subscription-only requires a fresh Codex thread")
 		}
 	}
@@ -608,6 +611,17 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 
 	if s.opts.SubscriptionOnly && tr.ModelProvider != "openai" {
 		return true, newCodexErr(errkind.Config, "paid_blocked: Codex selected another model provider")
+	}
+	if s.opts.ReviewBilling != nil {
+		if tr.ModelProvider != "openai" {
+			reviewBilling = routing.Metered
+		}
+		if reviewBilling == "" {
+			reviewBilling = "unknown"
+		}
+		if err := s.opts.ReviewBilling(reviewBilling); err != nil {
+			return true, newCodexErr(errkind.Config, "could not record review billing")
+		}
 	}
 	// Capture returned workspaceWrite sandbox policy when available so agent-mode
 	// turns preserve user-configured writableRoots / networkAccess.

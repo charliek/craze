@@ -3,6 +3,7 @@ package hostspawn
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"syscall"
 	"time"
@@ -14,44 +15,129 @@ import (
 // a child starts another POSIX session. It carries no caller credentials.
 func ReviewMark(hostID string) string { return "CRAZE_REVIEW_HOST=" + hostID }
 
+// ReviewScope records which sessions predate this host and which processes
+// could adopt its orphans. A newly detached helper can drop the environment
+// marker. An observed parent chain proves ownership; an orphan whose origin
+// cannot be proved blocks fallback without authorizing a signal.
+type ReviewScope struct {
+	before   map[int]uint64
+	sessions map[int]bool
+	adopters map[int]bool
+	known    map[int]uint64
+}
+
+func reviewMembers(deadline time.Time) (map[int]rundir.GroupMember, error) {
+	groups, err := rundir.ProcessGroups(deadline)
+	if err != nil {
+		return nil, err
+	}
+	members := make(map[int]rundir.GroupMember)
+	for _, group := range groups {
+		for _, m := range group {
+			members[m.PID] = m
+		}
+	}
+	return members, nil
+}
+
+func NewReviewScope(ctx context.Context) (*ReviewScope, error) {
+	deadline, _ := ctx.Deadline()
+	members, err := reviewMembers(deadline)
+	if err != nil {
+		return nil, err
+	}
+	s := &ReviewScope{before: map[int]uint64{}, sessions: map[int]bool{}, adopters: map[int]bool{1: true}, known: map[int]uint64{}}
+	for _, m := range members {
+		s.before[m.PID] = m.Start
+		s.sessions[m.Session] = true
+	}
+	for pid := os.Getpid(); pid > 0 && !s.adopters[pid]; pid = members[pid].PPID {
+		s.adopters[pid] = true
+	}
+	return s, nil
+}
+
+// origin classifies a member of a new session against this attempt. Parent
+// identities come from one scan. Take no action on an ambiguous identity.
+func (s *ReviewScope) origin(m rundir.GroupMember, members map[int]rundir.GroupMember, host *Child) (owned, uncertain bool) {
+	for hops := 0; hops <= len(members); hops++ {
+		if m.Session == host.PID() && m.Start >= host.ownStart || s.known[m.PID] == m.Start && m.Start != 0 {
+			return true, false
+		}
+		if s.adopters[m.PID] && (m.PID == 1 || s.before[m.PID] == m.Start) {
+			return false, true
+		}
+		if s.sessions[m.Session] || s.before[m.PID] == m.Start {
+			return false, false
+		}
+		parent, ok := members[m.PPID]
+		if !ok || parent.Start > m.Start {
+			return false, true
+		}
+		m = parent
+	}
+	return false, true
+}
+
+// Observe associates detached descendants with their start times while their
+// original parent is still alive, without making a kill decision.
+func (s *ReviewScope) Observe(ctx context.Context, host *Child) error {
+	deadline, _ := ctx.Deadline()
+	members, err := reviewMembers(deadline)
+	if err != nil {
+		return err
+	}
+	for _, m := range members {
+		if m.Zombie || m.Start < host.ownStart || s.sessions[m.Session] {
+			continue
+		}
+		if owned, _ := s.origin(m, members, host); owned {
+			s.known[m.PID] = m.Start
+		}
+	}
+	return nil
+}
+
 // StopReviewProcesses runs after the direct host has been reaped. Its POSIX
 // session contains adapter-created groups even after their parent exits.
 // Recorded shell groups and the attempt marker also cover new sessions.
-func StopReviewProcesses(ctx context.Context, host *Child, hostID string, ids []int) error {
+func (s *ReviewScope) StopReviewProcesses(ctx context.Context, host *Child, hostID string, ids []int) error {
 	deadline, _ := ctx.Deadline()
 	mark := ReviewMark(hostID)
 	for {
-		groups, err := rundir.ProcessGroups(deadline)
+		members, err := reviewMembers(deadline)
 		if err != nil {
 			return fmt.Errorf("could not verify review processes: %w", err)
 		}
-		sameSession := true
-		for _, m := range groups[host.PID()] {
-			if m.PID == host.PID() && m.Start != host.ownStart {
-				sameSession = false
-			}
+		if host.ownStart == 0 {
+			return fmt.Errorf("could not verify review host identity")
+		}
+		if leader, exists := members[host.PID()]; exists && leader.Start != host.ownStart {
+			return fmt.Errorf("review host identity was reused")
 		}
 		live := false
-		for pgid, members := range groups {
-			for _, m := range members {
-				if m.Zombie || host.ownStart > 0 && m.Start < host.ownStart {
-					continue
-				}
-				// A recorded group number alone cannot authorize a signal after its
-				// leader exits. The existing record reaper handles that case.
-				if slices.Contains(ids, pgid) {
-					live = true
-				}
-				owned := sameSession && m.Session == host.PID()
-				if !owned && hostID != "" && host.ownStart > 0 {
-					owned, _ = rundir.ProcessCarries(m.PID, mark)
-				}
-				if owned {
-					live = true
-					// Bind the signal to this member's identity, including when
-					// the group leader has gone and its number could be reused.
-					signalHost(m.PID, m.Start, syscall.SIGKILL, false)
-				}
+		for _, m := range members {
+			if m.Zombie || m.Start < host.ownStart {
+				continue
+			}
+			if slices.Contains(ids, m.PGID) {
+				live = true
+			}
+			if s.sessions[m.Session] {
+				continue
+			}
+			owned, uncertain := s.origin(m, members, host)
+			if !owned && uncertain && hostID != "" {
+				// A readable environment without the marker cannot establish the
+				// origin of an orphan either. Keep it alive and fail verification.
+				owned, _ = rundir.ProcessCarries(m.PID, mark)
+			}
+			if owned {
+				live = true
+				s.known[m.PID] = m.Start
+				signalHost(m.PID, m.Start, syscall.SIGKILL, false)
+			} else if uncertain && syscall.Kill(m.PID, 0) != syscall.EPERM {
+				live = true
 			}
 		}
 		if !live {

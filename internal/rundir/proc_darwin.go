@@ -61,7 +61,7 @@ func processGroups(deadline time.Time) (map[int][]GroupMember, error) {
 		}
 		pgid := int(kp.Eproc.Pgid)
 		groups[pgid] = append(groups[pgid], GroupMember{
-			PID: pid, PGID: pgid, Session: session,
+			PID: pid, PPID: int(kp.Eproc.Ppid), PGID: pgid, Session: session,
 			Start:  uint64(tv.Sec)*1_000_000 + uint64(tv.Usec),
 			Zombie: kp.Proc.P_stat == sZomb,
 		})
@@ -87,7 +87,7 @@ func processMember(pid int) (GroupMember, error) {
 	}
 	tv := kp.Proc.P_starttime
 	return GroupMember{
-		PID: pid, PGID: int(kp.Eproc.Pgid), Session: session,
+		PID: pid, PPID: int(kp.Eproc.Ppid), PGID: int(kp.Eproc.Pgid), Session: session,
 		Start:  uint64(tv.Sec)*1_000_000 + uint64(tv.Usec),
 		Zombie: kp.Proc.P_stat == sZomb,
 	}, nil

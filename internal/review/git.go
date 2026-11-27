@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +44,15 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 func git(ctx context.Context, dir string, maxSize int, args ...string) ([]byte, bool, error) {
-	options := []string{"-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "color.ui=false", "-c", "core.quotePath=true", "-C", dir}
+	return runGitCommand(ctx, dir, "", nil, maxSize, args...)
+}
+
+func runGitCommand(ctx context.Context, dir, index string, input io.Reader, maxSize int, args ...string) ([]byte, bool, error) {
+	options := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.splitIndex=false", "-c", "core.ignoreStat=false", "-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "color.ui=false", "-c", "core.quotePath=true", "-C", dir}
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "GIT_") })
+	if index != "" {
+		env = append(env, "GIT_INDEX_FILE="+index)
+	}
 	// Git runs configured clean/process filters even with --no-textconv and
 	// --no-ext-diff. Read only their names, then disable every driver for
 	// commands that consult working files. Submodules contribute gitlinks.
@@ -55,6 +65,7 @@ func git(ctx context.Context, dir string, maxSize int, args ...string) ([]byte, 
 		if cut {
 			return nil, false, errors.New("git filter configuration exceeds the review limit")
 		}
+		count := 0
 		for _, key := range bytes.Split(names, []byte{0}) {
 			if len(key) == 0 {
 				continue
@@ -63,14 +74,19 @@ func git(ctx context.Context, dir string, maxSize int, args ...string) ([]byte, 
 			if bytes.HasSuffix(key, []byte(".required")) {
 				value = "false"
 			}
-			options = append(options, "-c", string(key)+"="+value)
+			// The key itself can contain an equals sign. Git accepts keys and
+			// values separately through its environment configuration.
+			n := strconv.Itoa(count)
+			env = append(env, "GIT_CONFIG_KEY_"+n+"="+string(key), "GIT_CONFIG_VALUE_"+n+"="+value)
+			count++
 		}
+		env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(count))
 		args = slices.Insert(args, 1, "--ignore-submodules=dirty")
 	}
 	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	// Respect the requested workspace, including when invoked from a hook
 	// that exports an alternate worktree, index or config.
-	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "GIT_") })
+	cmd.Stdin = input
 	cmd.Env = append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=", "LC_ALL=C")
 	cmd.WaitDelay = time.Second
 	out := &boundedBuffer{limit: maxSize}

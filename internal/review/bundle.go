@@ -132,6 +132,62 @@ func untrackedBlock(root *os.Root, name string) ([]byte, error) {
 	return append([]byte(title+" =====\n"), b...), nil
 }
 
+// Git normally trusts assume-unchanged and skip-worktree entries. Build a
+// private index without those hints when a hidden worktree path needs a diff.
+// Missing sparse entries retain their index content. The real index and its
+// flags are never refreshed or rewritten.
+func bundleIndex(ctx context.Context, root string) (string, func(), error) {
+	entries, err := gitData(ctx, root, "ls-files", "-v", "-z")
+	if err != nil {
+		return "", nil, err
+	}
+	var sparse bytes.Buffer
+	needed := false
+	for _, entry := range bytes.Split(entries, []byte{0}) {
+		if len(entry) < 3 {
+			continue
+		}
+		flag, name := entry[0], string(entry[2:])
+		if flag == 's' || flag == 'S' {
+			_, err := os.Lstat(filepath.Join(root, name))
+			if os.IsNotExist(err) {
+				sparse.Write(entry[2:])
+				sparse.WriteByte(0)
+				continue
+			}
+			if err != nil {
+				return "", nil, err
+			}
+			needed = true
+		}
+		if flag >= 'a' && flag <= 'z' {
+			needed = true
+		}
+	}
+	if !needed {
+		return "", func() {}, nil
+	}
+	stage, err := gitData(ctx, root, "ls-files", "--stage", "-z")
+	if err != nil {
+		return "", nil, err
+	}
+	tmp, err := os.MkdirTemp("", "craze-review-index-")
+	if err != nil {
+		return "", nil, err
+	}
+	remove := func() { _ = os.RemoveAll(tmp) }
+	path := filepath.Join(tmp, "index")
+	_, _, err = runGitCommand(ctx, root, path, bytes.NewReader(stage), 0, "update-index", "-z", "--index-info")
+	if err == nil && sparse.Len() != 0 {
+		_, _, err = runGitCommand(ctx, root, path, &sparse, 0, "update-index", "--skip-worktree", "-z", "--stdin")
+	}
+	if err != nil {
+		remove()
+		return "", nil, err
+	}
+	return path, remove, nil
+}
+
 // Build includes the net tracked patch and non-ignored untracked files. maxPrompt
 // bounds the final assembled message, including the spill instructions and index.
 func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle, error) {
@@ -146,9 +202,17 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 	if err != nil {
 		return Bundle{}, err
 	}
-	status, err := gitData(ctx, root, "status", "--short", "--untracked-files=all")
+	index, cleanIndex, err := bundleIndex(ctx, root)
 	if err != nil {
 		return Bundle{}, err
+	}
+	defer cleanIndex()
+	status, statusCut, err := runGitCommand(ctx, root, index, nil, metadataLimit, "status", "--short", "--untracked-files=all")
+	if err != nil {
+		return Bundle{}, err
+	}
+	if statusCut {
+		return Bundle{}, fmt.Errorf("git status exceeded the metadata limit")
 	}
 	p := patchText{text: boundedBuffer{limit: patchLimit - len(truncation)}}
 	if head != "" && head != oid {
@@ -160,13 +224,16 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 		p.add(log)
 		p.text.truncated = p.text.truncated || cut
 	}
-	patch, cut, err := git(ctx, root, patchLimit, "diff-index", "--no-textconv", "--no-ext-diff", "--submodule=short", "-M", "-p", oid, "--")
+	patch, cut, err := runGitCommand(ctx, root, index, nil, patchLimit, "diff-index", "--no-textconv", "--no-ext-diff", "--submodule=short", "-M", "-p", oid, "--")
 	if err != nil {
 		return Bundle{}, err
 	}
-	names, err := gitData(ctx, root, "diff-index", "--no-textconv", "--no-ext-diff", "--name-only", "-z", "-M", oid, "--")
+	names, namesCut, err := runGitCommand(ctx, root, index, nil, metadataLimit, "diff-index", "--no-textconv", "--no-ext-diff", "--name-only", "-z", "-M", oid, "--")
 	if err != nil {
 		return Bundle{}, err
+	}
+	if namesCut {
+		return Bundle{}, fmt.Errorf("changed path list exceeded the metadata limit")
 	}
 	untracked, err := gitData(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {

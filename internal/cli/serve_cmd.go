@@ -603,6 +603,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 			opts.Env = os.Environ()
 		}
 		opts.Env = append(opts.Env, hostspawn.ReviewMark(hostID))
+		if p.Name() == "codex" {
+			opts.ReviewBilling = func(class string) error { return ctl.host.Update(func(e *rundir.Entry) { e.ReviewBilling = class }) }
+		}
 	}
 	if f.ready != nil {
 		opts.AgentGroup = func(pgid int) error {

@@ -42,6 +42,8 @@ type Entry struct {
 	Incarnation string `json:"incarnation"`
 	// Provider is the provider's name.
 	Provider string `json:"provider"`
+	// ReviewBilling is the active Codex billing class verified before a review turn.
+	ReviewBilling string `json:"reviewBilling,omitempty"`
 	// Workspace is the session's working directory.
 	Workspace string `json:"workspace"`
 	// Ready is whether the engine has started.

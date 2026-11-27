@@ -26,10 +26,12 @@ const reviewTimedOut = "timed_out"
 var reviewStartupBudget = 35 * time.Second
 
 type attemptResult struct {
-	turn            *turnResult
-	startFailure    bool
-	cleanupErr      error
-	effectiveEffort string
+	turn             *turnResult
+	startFailure     bool
+	cleanupErr       error
+	settledBeforeEnd bool
+	effectiveEffort  string
+	billing          string
 }
 
 func attemptFailure(kind errkind.Kind, msg string, start bool) attemptResult {
@@ -134,6 +136,7 @@ func (t *attemptTimer) expiration() (expired, stalled bool) {
 }
 
 type reviewHost struct {
+	scope *hostspawn.ReviewScope
 	child *hostspawn.Child
 	id    string
 	entry rundir.Entry
@@ -161,12 +164,11 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	env := rundir.ProcessEnv()
 	var host reviewHost
 	defer func() {
+		a.settledBeforeEnd = ctx.Err() == nil
 		a.cleanupErr = reviewAfter(host, env)
 		if a.cleanupErr != nil {
 			a.turn.Status = statusFailed
 			a.turn.Error = kindError(a.cleanupErr.Error(), errkind.Internal)
-		} else if errors.Is(ctx.Err(), context.Canceled) {
-			a.turn = contextResult(ctx)
 		}
 	}()
 	start, stop := context.WithTimeout(ctx, reviewStartupBudget)
@@ -191,6 +193,14 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 			return attemptResult{turn: contextResult(ctx)}
 		}
 	}
+	scope, err := hostspawn.NewReviewScope(start)
+	if err != nil {
+		if ctx.Err() != nil {
+			return attemptResult{turn: contextResult(ctx)}
+		}
+		return attemptFailure(errkind.Internal, "could not read the process table before review", true)
+	}
+	host.scope = scope
 	ref, held, err := spawnOnce(start, spawnOptions{flags: flags, env: env, hubEnv: true, unattended: true, onChild: func(c *hostspawn.Child, id string) { host.child, host.id = c, id }})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -217,6 +227,20 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		return attemptFailure(failureKind(err), err.Error(), true)
 	}
 	defer func() { _ = conn.c.Close() }()
+	if err := scope.Observe(start, host.child); err != nil {
+		if ctx.Err() != nil {
+			return attemptResult{turn: contextResult(ctx)}
+		}
+		return attemptFailure(errkind.Internal, "could not verify the review host process tree", true)
+	}
+	var billing string
+	if route.Provider == "codex" {
+		entry, found, err := rundir.HostEntry(env, host.id)
+		if err != nil || !found || entry.PID != host.child.PID() || entry.ReviewBilling == "" {
+			return attemptFailure(errkind.Config, "could not verify the review host billing record", true)
+		}
+		billing = entry.ReviewBilling
+	}
 	model, effort := reviewSettings(start, conn, route.Provider)
 	stop()
 	deadline, _ := ctx.Deadline()
@@ -260,7 +284,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	if a.turn.Model == "" {
 		a.turn.Model = model
 	}
-	a.effectiveEffort = effort
+	a.effectiveEffort, a.billing = effort, billing
 	finishReviewMessage(a.turn)
 	return a
 }
@@ -312,7 +336,10 @@ func reviewAfter(h reviewHost, env rundir.Env) error {
 	defer cancel()
 	more, err := hostspawn.ObservedGroups(h.child.Groups())
 	hostspawn.ReapHost(grace, env, h.id, nil)
-	scopeErr := hostspawn.StopReviewProcesses(grace, h.child, h.id, append(ids, more...))
+	if h.scope == nil {
+		return errors.New("missing review process scope")
+	}
+	scopeErr := h.scope.StopReviewProcesses(grace, h.child, h.id, append(ids, more...))
 	if scopeErr != nil {
 		return scopeErr
 	}
