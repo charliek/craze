@@ -17,6 +17,17 @@ Craze now asks compatible terminals to report modified keys. `Shift+Enter`
 inserts a newline when the terminal reports Shift. If the terminal sends a
 plain Enter, use `Ctrl+J` to insert a newline.
 
+## Native OpenAI WebSocket transport
+
+Native `chatgpt` and `openai` models now default to a persistent WebSocket on
+OpenAI's Responses API, with automatic fallback to HTTP SSE. To use HTTP SSE
+from the start, set `openai_transport = "sse"` in `config.toml` or start the
+host with `CRAZE_OPENAI_TRANSPORT=sse`.
+
+Both transports send the system prompt as a `developer` input message on
+OpenAI's endpoint for higher prefix-cache hit rates.
+[Native OpenAI transport](../reference/configuration.md#native-openai-transport)
+
 ## Transcript layouts and themes
 
 A new terminal starts in Grouped layout. Press `F2` to cycle through Compact

@@ -135,12 +135,15 @@ func newKeyResponsesModel(r modeltable.Resolved, key, baseURL string, o options)
 }
 
 func (m *responsesModel) openClient(cfg responsesapi.Config, o options) error {
+	if m.route == responsesapi.RouteChatGPT && cfg.BaseURL == "" {
+		cfg.BaseURL = responsesapi.DefaultBaseURL
+	}
 	eligible := isOpenAIEndpoint(m.route, m.provider, cfg.BaseURL)
 	cfg.Route = m.route
 	cfg.HTTPClient = o.httpClient
 	cfg.DeveloperInstructions = eligible
 	cfg.WebSocketEligible = eligible
-	cfg.Transport = o.transport(eligible)
+	cfg.Transport = o.transport(eligible, cfg.BaseURL)
 	cfg.Sticky = o.sticky
 	cfg.ReplayOutput = m.replayOutput
 	c, err := responsesapi.NewClient(cfg)

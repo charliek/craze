@@ -1244,6 +1244,16 @@ func (s *Session) Current() (model, effort string) {
 	return s.cur.r.Alias, s.cur.effort
 }
 
+// OpenAIWebSocketUnavailable reports when an explicit WebSocket setting
+// leaves the current key-route Responses model on HTTP SSE.
+func (s *Session) OpenAIWebSocketUnavailable() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.cur.r
+	return s.base.openAITransport == "websocket" &&
+		r.Driver == modeltable.DriverOpenAIResponses && !llm.IsOpenAIKeyEndpoint(r.ProviderID, r.BaseURL)
+}
+
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
 

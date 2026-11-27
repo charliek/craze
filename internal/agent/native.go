@@ -1264,6 +1264,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		Resume:    s.opts.LoadSessionID,
 
 		ProviderRetries: s.opts.ProviderRetries,
+		OpenAITransport: s.opts.OpenAITransport,
 		ProcessGroups:   s.opts.ShellGroups,
 		ProcessMark:     s.opts.ShellMark,
 	}
@@ -1283,6 +1284,14 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// a reading of its own (native_models.go).
 	unsealed := hopts.Getenv
 	hopts.Getenv = getenv
+	if value := getenv("CRAZE_OPENAI_TRANSPORT"); value != "" {
+		switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+		case "auto", "websocket", "sse":
+			hopts.OpenAITransport = mode
+		default:
+			s.note("CRAZE_OPENAI_TRANSPORT must be auto, websocket, or sse; ignoring it")
+		}
+	}
 	if hopts.Home == "" {
 		return nil, nativeOpened{}, none, &nativeConfigError{msg: "native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)"}
 	}
@@ -1521,6 +1530,7 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		return nil, nativeOpened{}, none, phraseSetupError(err, table, hopts.Model)
 	}
 	opened.Store(hs)
+	s.noteOpenAITransport(hs)
 	// The models this session offers (plan 031 §3.6), judged now, before
 	// the seal is released: with the same reading of the environment the
 	// harness resolved its keys from, so every model offered is one whose
@@ -1979,6 +1989,12 @@ func (s *nativeSession) note(msg string) {
 		return
 	}
 	fmt.Fprintln(w, "native: "+msg)
+}
+
+func (s *nativeSession) noteOpenAITransport(hs *harness.Session) {
+	if hs.OpenAIWebSocketUnavailable() {
+		s.note("websocket transport was requested, but this Responses model uses a non-OpenAI endpoint and stays on HTTP SSE")
+	}
 }
 
 // refreshCurrentLocked copies the harness's current model and effort into the
@@ -3199,6 +3215,7 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 		if err := sw.hs.SetModelEffort(alias, landing); err != nil {
 			return switched{}, phraseSetupError(err, sw.table, alias)
 		}
+		s.noteOpenAITransport(sw.hs)
 		if alias != current && !s.offeredLocked(sw.table, current) {
 			drop = current
 		}

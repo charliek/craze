@@ -314,6 +314,29 @@ func ConfigProviderRetries() (int, string) {
 	return int(n), ""
 }
 
+// ConfigOpenAITransport reads the native OpenAI transport from config.toml.
+// An empty mode leaves the choice to the session's default.
+func ConfigOpenAITransport() (mode string, why string) {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return "", "config.toml could not be parsed"
+	case err != nil:
+		return "", "config.toml could not be read"
+	}
+	v, ok := cfg["openai_transport"]
+	if !ok {
+		return "", ""
+	}
+	s, _ := v.(string)
+	switch mode := strings.ToLower(strings.TrimSpace(s)); mode {
+	case "auto", "websocket", "sse":
+		return mode, ""
+	default:
+		return "", "config.toml openai_transport must be auto, websocket, or sse"
+	}
+}
+
 // ConfigWebSearch reads `websearch` (plan 051 §C.1): whether a native
 // session is offered the web tools, websearch and webfetch. Two forms are
 // valid: `websearch = false`, off, and a [websearch] table whose only key is

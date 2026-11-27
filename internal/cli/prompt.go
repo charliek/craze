@@ -201,6 +201,7 @@ func (o *promptOpts) agentOptions(ws string, approval *agent.ApprovalPolicy, pro
 		Provider:        prov,
 		Compat:          compatClaude(o.stderr),
 		ProviderRetries: providerRetries(o.stderr),
+		OpenAITransport: openAITransport(o.stderr),
 		WebSearch:       tui.ConfigWebSearch(),
 		// Given now, for an unattended run (Interactive is false): the
 		// native session decides with it at Open, as the check in run did.

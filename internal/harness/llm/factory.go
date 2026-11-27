@@ -89,13 +89,6 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
 }
 
-// WithSignIn is the sign-in a model on the ChatGPT plan's driver is funded by
-// (plan 033 §3.12, P31): auth, the process's token source — the harness
-// knows it only as an Auth, handed in through harness.Options — and apiBase,
-// which answers the API's base URL when the model is built: OpenAI's own, or
-// a test's loopback server (chatgptauth.APIBase, whose error — a test
-// override that is not a loopback URL — fails the build, so the bearer can
-// never fall back to another host). A nil apiBase is OpenAI's. Every model
 // WithOpenAITransport selects the transport for eligible OpenAI Responses models.
 func WithOpenAITransport(mode string) Option {
 	return func(o *options) { o.openAITransport = strings.ToLower(strings.TrimSpace(mode)) }
@@ -107,22 +100,29 @@ func WithStickyRegistry(sticky *responsesapi.StickyRegistry) Option {
 	return func(o *options) { o.sticky = sticky }
 }
 
-func (o options) transport(eligible bool) responsesapi.TransportMode {
+func (o options) transport(eligible bool, baseURL string) responsesapi.TransportMode {
 	if eligible {
 		switch o.openAITransport {
+		case "":
+			// Keep test endpoints and injected HTTP clients on SSE by default.
+			if o.httpClient == nil {
+				u, err := url.Parse(baseURL)
+				if err == nil && strings.EqualFold(u.Hostname(), "api.openai.com") {
+					return responsesapi.TransportAuto
+				}
+			}
 		case "auto":
 			return responsesapi.TransportAuto
 		case "websocket":
 			return responsesapi.TransportWebSocket
 		}
 	}
-	// The unset option stays on SSE until configuration ships in M4.
 	return responsesapi.TransportSSE
 }
 
-// New builds also keeps auth's token values out of its errors, whatever its
-// driver: a provider error can echo a request, and a request can hold a tool
-// result that printed a token (scrubber, A21b).
+// WithSignIn supplies the ChatGPT plan's token source and API base.
+// A nil apiBase uses OpenAI's own endpoint. The model's scrubber keeps auth's
+// token values out of its errors, regardless of driver.
 func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
 	return func(o *options) { o.auth, o.apiBase = auth, apiBase }
 }
@@ -327,13 +327,16 @@ func newKeyResponses(r modeltable.Resolved, o options) (fantasy.LanguageModel, e
 // isOpenAIEndpoint identifies OpenAI's Responses endpoints, including
 // loopback fixtures for the OpenAI key provider.
 func isOpenAIEndpoint(route responsesapi.Route, providerID, baseURL string) bool {
-	if route == responsesapi.RouteChatGPT {
-		return true
-	}
-	if route != responsesapi.RouteKey || providerID != modeltable.OpenAIProvider {
+	return route == responsesapi.RouteChatGPT || (route == responsesapi.RouteKey && IsOpenAIKeyEndpoint(providerID, baseURL))
+}
+
+// IsOpenAIKeyEndpoint reports whether a key-route provider uses OpenAI's
+// Responses endpoint or an eligible loopback fixture.
+func IsOpenAIKeyEndpoint(providerID, baseURL string) bool {
+	if providerID != modeltable.OpenAIProvider {
 		return false
 	}
-	u, err := url.Parse(baseURL)
+	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return false
 	}

@@ -31,6 +31,7 @@ and want one fast, scriptable front end for several of them.
 - **Native providers and the ChatGPT plan**: Anthropic (Claude), Fireworks,
   Meta, OpenAI, OpenRouter and Z.AI with an API key, or a ChatGPT plan sign-in;
   no agent CLI needed. [Native provider](docs/getting-started/quick-start.md#native-provider)
+- **Persistent WebSockets for native OpenAI sessions.** [Transport settings](docs/reference/configuration.md#native-openai-transport)
 - **Native web search**: search the web and fetch pages through Exa, asked
   once and remembered, or set in `config.toml`; a waiting command's result counts
   each turn's searches and fetches.

@@ -535,23 +535,33 @@ func TestResponsesReplayOutput(t *testing.T) {
 }
 
 func TestOpenAITransportSelection(t *testing.T) {
+	const loopback = "http://127.0.0.1:9999/v1"
+	const proxy = "https://proxy.example/v1"
 	for _, tc := range []struct {
-		mode     string
-		eligible bool
-		want     responsesapi.TransportMode
+		mode, base string
+		injected   bool
+		want       responsesapi.TransportMode
 	}{
-		{"", true, responsesapi.TransportSSE},
-		{"  ", true, responsesapi.TransportSSE},
-		{" SsE ", true, responsesapi.TransportSSE},
-		{" AuTo ", true, responsesapi.TransportAuto},
-		{" WEBSOCKET ", true, responsesapi.TransportWebSocket},
-		{"auto", false, responsesapi.TransportSSE},
-		{"websocket", false, responsesapi.TransportSSE},
+		{"", responsesapi.DefaultBaseURL, false, responsesapi.TransportAuto},
+		{"", "https://API.OpenAI.COM/v1", false, responsesapi.TransportAuto},
+		{"", responsesapi.DefaultBaseURL, true, responsesapi.TransportSSE},
+		{"", loopback, false, responsesapi.TransportSSE},
+		{"", proxy, false, responsesapi.TransportSSE},
+		{"  ", loopback, false, responsesapi.TransportSSE},
+		{" SsE ", responsesapi.DefaultBaseURL, false, responsesapi.TransportSSE},
+		{" AuTo ", loopback, false, responsesapi.TransportAuto},
+		{" WEBSOCKET ", loopback, false, responsesapi.TransportWebSocket},
+		{"auto", proxy, false, responsesapi.TransportSSE},
+		{"websocket", proxy, false, responsesapi.TransportSSE},
 	} {
 		var o options
 		WithOpenAITransport(tc.mode)(&o)
-		if got := o.transport(tc.eligible); got != tc.want {
-			t.Errorf("mode %q, eligible %v: got %v, want %v", tc.mode, tc.eligible, got, tc.want)
+		if tc.injected {
+			WithHTTPClient(&http.Client{})(&o)
+		}
+		eligible := isOpenAIEndpoint(responsesapi.RouteKey, modeltable.OpenAIProvider, tc.base)
+		if got := o.transport(eligible, tc.base); got != tc.want {
+			t.Errorf("mode %q, base %q, injected client %v: got %v, want %v", tc.mode, tc.base, tc.injected, got, tc.want)
 		}
 	}
 	if _, err := New(openaiRoute(responsesapi.DefaultBaseURL), WithOpenAITransport("tcp")); err == nil || !strings.Contains(err.Error(), "invalid OpenAI transport") {
