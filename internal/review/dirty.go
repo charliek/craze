@@ -174,7 +174,7 @@ func Inspect(ctx context.Context, dir string) (Snapshot, error) {
 		args []string
 	}{
 		{"refs", []string{"for-each-ref", "--format=%(refname) %(objectname)"}},
-		{"stash", []string{"stash", "list", "--format=%H%x00%gs"}},
+		{"stash", []string{"stash", "list", "--no-show-signature", "--format=%H%x00%gs"}},
 	} {
 		b, e := gitData(ctx, root, entry.args...)
 		if e != nil {

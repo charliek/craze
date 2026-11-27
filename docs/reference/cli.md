@@ -3316,7 +3316,10 @@ A signal or cap during shutdown or the final integrity check preserves the
 settled attempt in `attempts` and delivers its text. The command reports
 `cancelled` or `timed_out` with `stopping`. If a reconnect recovers only a
 tail, `messageCut` flags it and `dirtyFiles` still identifies changes.
-An empty result or incomplete message preserves an existing `--out` file.
+Partial text from a failed or cancelled turn is available in JSON.
+Only a completed attempt can supply Markdown stdout or replace an existing
+`--out` file. A cap or signal also interrupts a blocked stdout pipe after
+Craze has saved the full review.
 `outPath` appears only after Craze saves a complete nonempty message.
 
 Codex review attempts report the billing class from the running host. With

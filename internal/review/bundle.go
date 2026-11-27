@@ -95,6 +95,15 @@ func (p *patchText) tracked(patch, names []byte) {
 	}
 }
 
+func (p *patchText) untracked(name, block []byte) {
+	first := p.lines + 1
+	p.add(block)
+	// A partial header at the cutoff cannot identify a readable section.
+	if p.lines >= first {
+		p.ranges = append(p.ranges, FileRange{Name: quotePath(name), First: first, Last: p.lines})
+	}
+}
+
 func untrackedBlock(root *os.Root, name string) ([]byte, error) {
 	rel := filepath.Clean(name)
 	st, err := root.Lstat(rel)
@@ -266,9 +275,7 @@ func Build(ctx context.Context, dir, base, prefix string, maxPrompt int) (Bundle
 			if e != nil {
 				return Bundle{}, e
 			}
-			first := p.lines + 1
-			p.add(block)
-			p.ranges = append(p.ranges, FileRange{Name: quotePath(name), First: first, Last: max(first, p.lines)})
+			p.untracked(name, block)
 		}
 	}
 	if p.text.truncated {

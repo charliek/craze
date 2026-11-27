@@ -40,7 +40,7 @@ var internalFailureSites = []string{
 	`review_cmd.go: kindf "craze review: checking workspace: %s"`,
 	`review_cmd.go: kindf "craze review: creating output directory: %s"`,
 	`review_cmd.go: kindf "craze review: writing output: %s"`,
-	`review_cmd.go: kindf "craze review: writing stdout: %s"`,
+	`review_output.go: kindf "craze review: writing stdout: %s"`,
 	`attach.go: exitf "%s"`,
 	`attach.go: exitf "craze attach: %s"`,
 	`attach.go: exitf "craze attach: %s"`,

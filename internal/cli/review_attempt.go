@@ -25,12 +25,14 @@ const reviewTimedOut = "timed_out"
 // The provider-start budget is independent of the command-wide turn budget.
 var reviewStartupBudget = 35 * time.Second
 var stopReviewHost = reviewAfter
+var newReviewScope = hostspawn.NewReviewScope
 
 type attemptResult struct {
 	turn             *turnResult
 	startFailure     bool
 	cleanupErr       error
 	settledBeforeEnd bool
+	interrupted      bool
 	effectiveEffort  string
 	billing          string
 }
@@ -194,7 +196,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 			return attemptResult{turn: contextResult(ctx)}
 		}
 	}
-	scope, err := hostspawn.NewReviewScope(start, standaloneCLI)
+	scope, err := newReviewScope(start, standaloneCLI)
 	if err != nil {
 		if ctx.Err() != nil {
 			return attemptResult{turn: contextResult(ctx)}
@@ -285,6 +287,9 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	if a.turn.Model == "" {
 		a.turn.Model = model
 	}
+	// closeBy is set only when the waiter starts its signal cleanup. A
+	// completion received during that cleanup still belongs to the attempt.
+	a.interrupted = !conn.closeBy.IsZero()
 	a.effectiveEffort, a.billing = effort, billing
 	finishReviewMessage(a.turn)
 	return a

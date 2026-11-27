@@ -372,3 +372,51 @@ func TestBundleShowsHiddenTrackedEditsWithoutRefreshingIndex(t *testing.T) {
 		t.Fatal("the real index or workspace changed")
 	}
 }
+
+func TestUntrackedRangeRequiresCompleteHeader(t *testing.T) {
+	const header = "===== example =====\n"
+	for _, room := range []int{0, 3, len(header) - 1, len(header), len(header) + 4} {
+		p := patchText{text: boundedBuffer{limit: room}}
+		p.untracked([]byte("example"), []byte(header+"body\n"))
+		if want := room >= len(header); (len(p.ranges) == 1) != want {
+			t.Fatalf("room %d: %v", room, p.ranges)
+		}
+		if len(p.ranges) > 0 && (p.ranges[0].First != 1 || p.ranges[0].Last != 1 || !strings.HasPrefix(string(p.text.Bytes()), header)) {
+			t.Fatal(room, p.ranges)
+		}
+	}
+}
+
+func TestInspectStashDisablesSignatureDisplay(t *testing.T) {
+	dir := newRepo(t)
+	commit(t, dir)
+	parent := strings.TrimSpace(runGit(t, dir, "rev-parse", "HEAD"))
+	tree := strings.TrimSpace(runGit(t, dir, "rev-parse", "HEAD^{tree}"))
+	scratch := t.TempDir()
+	// The signature only needs to identify the verifier format. The test
+	// verifier records a call without consulting a keyring or identity.
+	object := "tree " + tree + "\nparent " + parent + "\nauthor Test <test@example.invalid> 1000000000 +0000\ncommitter Test <test@example.invalid> 1000000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n Zml4dHVyZQ==\n -----END PGP SIGNATURE-----\n\nfixture\n"
+	put(t, scratch, "commit", object)
+	oid := strings.TrimSpace(runGit(t, dir, "hash-object", "-t", "commit", "-w", filepath.Join(scratch, "commit")))
+	runGit(t, dir, "update-ref", "--create-reflog", "-m", "fixture", "refs/stash", oid)
+	marker := filepath.Join(scratch, "called")
+	t.Setenv("REVIEW_VERIFIER_MARKER", marker)
+	verifier := filepath.Join(scratch, "verifier")
+	if err := os.WriteFile(verifier, []byte("#!/bin/sh\n: > \"$REVIEW_VERIFIER_MARKER\"\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "config", "gpg.program", verifier)
+	runGit(t, dir, "config", "log.showSignature", "true")
+	runGit(t, dir, "stash", "list", "--format=%H%x00%gs")
+	if err := os.Remove(marker); err != nil {
+		t.Fatalf("fixture did not invoke verifier: %v", err)
+	}
+	before := snap(t, dir)
+	runGit(t, dir, "update-ref", "-d", "refs/stash")
+	if !slices.Contains(Changes(before, snap(t, dir)), "stash") {
+		t.Fatal("missed signed stash removal")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("review invoked verifier: %v", err)
+	}
+}

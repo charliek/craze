@@ -520,3 +520,80 @@ def test_fallback_verifies_orphan_handoff_and_ignores_unrelated_session(
         if review_proc.poll() is None:
             review_proc.kill()
             review_proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_blocked_stdout_keeps_file_and_observes_command_end(
+    craze_bin, fake_agent_bin, tmp_path, interrupt
+):
+    import signal
+    import time
+
+    work = tmp_path / "repo"
+    configure(work, fake_agent_bin, "codex-basic")
+    path = tmp_path / "review.md"
+    brief = tmp_path / "brief"
+    brief.write_text("r" * (180 * 1024) + " end of report")
+    args = [str(craze_bin), "review", "-C", str(work), "--provider", "cursor",
+            "--allow-same-provider", "--out", str(path), "--prompt-file", str(brief),
+            "--timeout", "25s" if interrupt else "5s"]
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, "CRAZE_FAKE_SCRIPT": "echo"})
+    try:
+        end = time.monotonic() + 12
+        while not path.exists() and proc.poll() is None and time.monotonic() < end:
+            time.sleep(.02)
+        assert path.exists() and path.read_text().endswith(brief.read_text())
+        if interrupt:
+            proc.send_signal(signal.SIGTERM)
+        # Leave the pipe open and unread until after wait.
+        assert proc.wait(timeout=10) == (3 if interrupt else 5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=5)
+
+
+def test_review_finishing_during_signal_preserves_completed_attempt(craze_bin, fake_agent_bin, tmp_path):
+    import signal
+    import time
+
+    work = tmp_path / "repo"
+    configure(work, fake_agent_bin, "codex-basic")
+    received, report = tmp_path / "submitted", tmp_path / "review.md"
+    proc = subprocess.Popen(
+        [str(craze_bin), "review", "--json", "-C", str(work), "--provider", "cursor",
+         "--allow-same-provider", "--out", str(report), "inspect"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "CRAZE_FAKE_SCRIPT": "review-complete-on-cancel",
+             "CRAZE_FAKE_DUMP_PROMPTS": str(received)},
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not received.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert received.exists()
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=15)
+        doc = json.loads(out)
+        assert proc.returncode == 3 and doc["status"] == "cancelled" and doc["stopping"], (doc, err)
+        assert doc["attempts"][0]["status"] == "completed", doc
+        assert doc["message"] == report.read_text() == "echo: review finished during cancellation"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_unfinished_review_preserves_prior_file(craze_bin, fake_agent_bin, tmp_path):
+    work = tmp_path / "repo"
+    configure(work, fake_agent_bin, "codex-basic")
+    report = tmp_path / "review.md"
+    report.write_text("earlier complete review")
+    args = ["--provider", "cursor", "--allow-same-provider", "--out", str(report), "inspect"]
+    env = {"CRAZE_FAKE_SCRIPT": "review-short"}
+    proc, doc = review(craze_bin, work, *args, env=env)
+    assert proc.returncode == 3 and doc["message"] == "unfinished review" and "outPath" not in doc
+    human = subprocess.run([str(craze_bin), "review", "-C", str(work), *args],
+                           stdin=subprocess.DEVNULL, capture_output=True, env={**os.environ, **env}, timeout=30)
+    assert human.returncode == 3 and human.stdout == b"" and report.read_text() == "earlier complete review"

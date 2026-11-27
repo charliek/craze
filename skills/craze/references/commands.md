@@ -1,8 +1,8 @@
 # craze commands for delegation
 
-Needs craze 0.6.0 or newer. The full reference is `docs/reference/cli.md` in the craze repository. These are the commands any agent runs to hand work to another model (Claude Code's agents run them for it). Never start a session on your own provider: see "Don't call yourself" in `SKILL.md`.
+Review and routing need craze 0.6.0 or newer. Delegation starts with craze 0.2.0, subject to each provider’s release floor. The full reference is `docs/reference/cli.md` in the craze repository. These are the commands any agent runs to hand work to another model (Claude Code's agents run them for it). Never start a session on your own provider: see "Don't call yourself" in `SKILL.md`.
 
-This page describes the release after 0.2.0. On craze 0.2.0 itself: a prompt is at most 32 KiB (over it is exit 2), a `--json` failure is `{"error":{"message":…}}` alone, a turn that stopped short has a `stopped:` footer line instead of `error:`, `stop` on a session that has ended is exit 1, and `cancel --turn` does not exist. `craze version` says which you have.
+With craze 0.2.0, a prompt is limited to 32 KiB (exit 2 above that size), a `--json` failure is `{"error":{"message":…}}` alone, a turn that stopped short has a `stopped:` footer line instead of `error:`, `stop` on a session that has ended is exit 1, and `cancel --turn` does not exist. `craze version` says which you have.
 
 ## Start a task: `craze new --wait`
 

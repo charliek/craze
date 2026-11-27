@@ -705,6 +705,13 @@ func (s *server) handlePrompt(msg *acp.Message) {
 	s.mu.Unlock()
 
 	switch s.script {
+	case "review-complete-on-cancel":
+		if s.waitCancelled(msg.ID) {
+			s.echo(msg.ID, "review finished during cancellation")
+		}
+	case "review-short":
+		s.say("unfinished review")
+		s.finishPrompt(msg.ID, acp.StopMaxTokens)
 	case "review-damaged-index":
 		if err := os.WriteFile(".git/index", []byte("invalid test index"), 0600); err != nil {
 			panic(err)

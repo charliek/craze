@@ -361,7 +361,7 @@ func main() {
 		return
 	}
 	switch script {
-	case "review-damaged-index", "dirty_tree", "stall", "empty", "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
+	case "review-complete-on-cancel", "review-short", "review-damaged-index", "dirty_tree", "stall", "empty", "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
 		"modellate", "preinstall", "permission", "ask", "plan",
 		"hang", "hang-ack", "sigint-hold", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",

@@ -63,7 +63,11 @@ type reviewResultJSON struct {
 func newReviewCmd() *cobra.Command {
 	var f reviewFlags
 	cmd := &cobra.Command{Use: "review [PROMPT...]", Short: "Review code with an unattended provider and verify workspace integrity", RunE: func(cmd *cobra.Command, words []string) error {
-		err := f.run(cmd, words)
+		dst := cmd.OutOrStdout()
+		output := &reviewOutput{ctx: cmd.Context(), dst: dst}
+		cmd.SetOut(output)
+		defer cmd.SetOut(dst)
+		err := f.run(cmd, words, output)
 		var ee *exitError
 		if f.json && err != nil && (!errors.As(err, &ee) || ee.code == 1) {
 			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(failureBody{Error: kindError(err.Error(), failureKind(err))})
@@ -131,7 +135,7 @@ func (f reviewFlags) routes() (routing.Result, bool, error) {
 	} else if req.Role == "" && req.Target == "" {
 		req.Role = "review"
 	}
-	if role, ok := cfg.Roles[req.Role]; ok && role.Seats != nil {
+	if req.Role == "panel" || cfg.Roles[req.Role].Seats != nil {
 		return routing.Result{}, paid, usagef("craze review: use craze resolve --role %s for a panel", req.Role)
 	}
 	res, ok, err := cfg.Resolve(req, offlineRouteProbe())
@@ -147,7 +151,7 @@ func (f reviewFlags) routes() (routing.Result, bool, error) {
 	return res, paid, nil
 }
 
-func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
+func (f reviewFlags) run(cmd *cobra.Command, words []string, output *reviewOutput) error {
 	started := time.Now()
 	parent, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -172,6 +176,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 	}
 	ctx, stopInitial := context.WithDeadline(parent, started.Add(capDuration))
 	defer stopInitial()
+	output.ctx = ctx
 	endContext := func() error {
 		turn := contextResult(ctx)
 		res.Status, res.Stopping, res.Error = turn.Status, turn.Stopping, turn.Error
@@ -225,6 +230,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		automatic, cancel := context.WithDeadline(parent, started.Add(capDuration))
 		defer cancel()
 		ctx = automatic
+		output.ctx = ctx
 	}
 	dir, err := resolveWorkspace(f.dir)
 	if err != nil {
@@ -276,10 +282,11 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 	}
 	if f.bundleOnly {
 		if f.json {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(bundle)
+			err = json.NewEncoder(output).Encode(bundle)
+		} else {
+			_, err = io.WriteString(output, prompt)
 		}
-		_, err = io.WriteString(cmd.OutOrStdout(), prompt)
-		return err
+		return reviewOutputError(err)
 	}
 	var before review.Snapshot
 	if f.dirty != "off" {
@@ -370,8 +377,11 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		}
 		// Keep the delivered attempt and its text. A new command cap or
 		// signal during mandatory cleanup or inspection has its own exit code.
-		if a.settledBeforeEnd && ctx.Err() != nil {
+		if (a.settledBeforeEnd || a.interrupted) && ctx.Err() != nil {
 			return endContext()
+		}
+		if a.startFailure && rec.Kind == errkind.Internal {
+			return kindf(rec.Kind, "craze review: %s", rec.Error.Message)
 		}
 		if i+1 == len(routes.Routes) || !mayRetry(a) {
 			break
@@ -406,7 +416,8 @@ func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
 	if r.MessageCut {
 		fmt.Fprintln(cmd.ErrOrStderr(), "craze review: only part of the review was recovered")
 	}
-	if f.out != "" && !r.MessageCut && strings.TrimSpace(r.Message) != "" {
+	completed := len(r.Attempts) > 0 && r.Attempts[len(r.Attempts)-1].Status == statusCompleted && !r.MessageCut
+	if f.out != "" && completed && strings.TrimSpace(r.Message) != "" {
 		if err := os.MkdirAll(filepath.Dir(f.out), 0700); err != nil {
 			return kindf(errkind.Internal, "craze review: creating output directory: %s", err)
 		}
@@ -419,7 +430,7 @@ func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
 	var err error
 	if f.json {
 		err = json.NewEncoder(cmd.OutOrStdout()).Encode(r)
-	} else if r.Message != "" {
+	} else if completed && r.Message != "" {
 		text := r.Message
 		if !strings.HasSuffix(text, "\n") {
 			text += "\n"
@@ -427,7 +438,7 @@ func (f reviewFlags) render(cmd *cobra.Command, r reviewResultJSON) error {
 		_, err = io.WriteString(cmd.OutOrStdout(), text)
 	}
 	if err != nil {
-		return kindf(errkind.Internal, "craze review: writing stdout: %s", err)
+		return reviewOutputError(err)
 	}
 	code := 3
 	switch r.Status {

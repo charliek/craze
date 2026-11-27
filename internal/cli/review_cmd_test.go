@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -121,7 +123,7 @@ func TestReviewWritesCompleteFileBeforeBrokenPipe(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(closedReviewOutput{})
 	f := reviewFlags{out: path, maxMessage: 2}
-	err := f.render(cmd, reviewResultJSON{Status: "completed", Message: "complete review"})
+	err := f.render(cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: "complete review"})
 	out, e := os.ReadFile(path)
 	if failureKind(err) != errkind.Internal || e != nil || string(out) != "complete review" {
 		t.Fatal(string(out), err, e)
@@ -191,7 +193,7 @@ func TestReviewOutputKeepsMoreThanTheOrdinaryWaiterTail(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&stdout)
 	f := reviewFlags{out: path, maxMessage: 4}
-	if err := f.render(cmd, reviewResultJSON{Status: statusCompleted, Message: res.message()}); err != nil {
+	if err := f.render(cmd, reviewResultJSON{Attempts: []reviewAttemptJSON{{Status: statusCompleted}}, Status: statusCompleted, Message: res.message()}); err != nil {
 		t.Fatal(err)
 	}
 	data, e := os.ReadFile(path)
@@ -259,5 +261,28 @@ func TestReviewSpillSurvivesUnconfirmedStop(t *testing.T) {
 	}
 	if err = os.RemoveAll(filepath.Dir(spill)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReviewRefusesReservedPanelWithCandidates(t *testing.T) {
+	_, ws, kids := unattendedHome(t)
+	writeCrazeConfig(t, "[roles.panel]\ncandidates=['sol']\n")
+	out, diag, code := executeIn([]string{"review", "--json", "-C", ws, "--role", "panel", "inspect"}, strings.NewReader(""))
+	if code != 2 || !strings.Contains(out+diag, "craze resolve --role panel") || kids.count() != 0 {
+		t.Fatal(code, out, diag)
+	}
+}
+
+func TestReviewProcessInspectionFailureIsInfrastructure(t *testing.T) {
+	_, ws, kids := unattendedHome(t)
+	original := newReviewScope
+	newReviewScope = func(context.Context, bool) (*hostspawn.ReviewScope, error) {
+		return nil, errors.New("process table unavailable")
+	}
+	t.Cleanup(func() { newReviewScope = original })
+	out, diag, code := executeIn([]string{"review", "--json", "-C", ws, "--provider", "cursor", "--allow-same-provider", "inspect"}, strings.NewReader(""))
+	var doc failureBody
+	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc.Error == nil || doc.Error.Kind != errkind.Internal || kids.count() != 0 {
+		t.Fatal(code, out, diag)
 	}
 }
