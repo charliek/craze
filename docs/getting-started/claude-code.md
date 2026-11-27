@@ -209,13 +209,17 @@ the command starts.
 | `mode=ask` | refused | refused | runs to its end |
 | `mode=plan` | refused, except the agent's own plan file | allowed | **ends at the plan** |
 
-With `mode=plan` the plan comes back in the result (`plan:`), the status is
-`completed`, and nothing is implemented — on every provider. The session stays
+With `mode=plan` the plan comes back in the result (`plan:`, or the result
+message itself on `codex`), the status is `completed`, and nothing is
+implemented — on every provider. On `codex`, both `mode=ask` and `mode=plan`
+run in Codex's OS-enforced read-only sandbox: shell commands can read files,
+workspace and plan-file writes are blocked, and Codex hooks and MCP servers
+still run outside Codex's command sandbox. The session stays
 in plan mode, follow-ups and reloads included, so a follow-up asking it to
 implement gets another plan. To carry the plan out, start a new delegation
 without `mode=plan` and put the plan in its task. A task that says "read-only" or "do not edit"
 is a request to the model, not something craze enforces; only `mode=ask`
-removes the shell.
+removes the shell (or sandboxes it read-only on `codex`).
 
 ## Permissions
 

@@ -1757,7 +1757,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
 | `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok`, `claude`, `antigravity` for ACP agents, `codex` for `codex app-server`, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP/codex provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native or codex session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — the session's own last choice on that model, else the one the model memory remembers for it (native), else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's but an antigravity session whose model list has changed, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
+| `catalogs` | `{models[{id,name,recent?,efforts?,defaultEffort?,switchEffort?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP/codex provider's model, and on an older host. Where the session capability [`effortFacts`](#capabilities) is `true` (a native or codex session), every model also states its **effort facts**: `efforts`, the levels it offers in order (absent for a model with no effort control; at most 8, each at most 32 bytes), `defaultEffort`, its default, and `switchEffort`, the effort a switch to it lands on — on native, the session's own last choice on that model, else the one the model memory remembers for it, else its default; on codex, the session's current effort when the target model supports it, else its default. A client reads the *current* model's effort from its effort option (`settings.config`), never from its row. All three are absent for every ACP provider's model and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list a native or antigravity session started with before any change, every cursor/grok/claude session's, and every older host's; codex starts at revision `1` on install). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -1834,9 +1834,9 @@ what this host can do — and `rowFacts` and `presence`, the host's too, and
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 | `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 | `aside` | the session's own, and omitted when `false`: the session answers side questions (a native or grok session), so the host serves [`session.aside`](#sessionaside) and [`session.aside.cancel`](#sessionasidecancel) for it, whether it runs detached or in a TUI. Absent for cursor and on an older host: a client offers no side questions and makes no call |
-| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
+| `slashCatalog` | the session's own, and omitted when `false`: the session publishes the [slash catalog](#slash-catalog) — the state delta's `slash` section and the snapshot's `settings.slash`, every `/` row it offers and what running each does — a cursor, grok, claude, antigravity, codex or native session, whether it runs detached or in a TUI. `true` before the session's install has published the section is a catalog still to come. Absent on an older host and for a session that is not craze's own (the fake host's by default): a client offers no `/` menu from the stream |
 | `exitAfterTurn` | the host's own, and omitted when `false`: `session.prompt` takes `exitAfterTurn` ([the exit fence](#the-exit-fence)) and `session.stop` takes `cause`, on a host that serves `session.stop`. It fences what craze admits, not a turn an agent starts entirely on its own. Absent on a TUI-hosted session and an older host, which refuse both, so a client sends neither |
-| `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
+| `effortFacts` | the session's own, and omitted when `false`: every model of the session's catalogs states its effort facts — `catalogs.models` and the [catalog section](#live-models)'s models carry `efforts`, `defaultEffort` and `switchEffort`, and a model with no effort control lists none (a native or codex session), whether it runs detached or in a TUI. A client can then show a model's levels, and the effort a switch to it would land on, before it is chosen. Absent for every ACP session (cursor's levels exist only for its current model, in its effort option), on an older host and for a session that is not craze's own (the fake host's by default): a client shows only the current model's levels, from its effort option |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -2297,6 +2297,23 @@ Claude sends its limit report only when it changes, so `window` and the rest
 are the last one sent, kept until the next. Each is absent when empty; a
 client that does not know them ignores them.
 
+### A codex session's usage
+
+A `codex` session uses the same usage section shape from Codex's
+`thread/tokenUsage/updated`, `account/read` and `account/rateLimits/read` /
+`account/rateLimits/updated` updates:
+
+- `turn` and `session` report Codex's unpriced token counts (`costPicoUsd: 0`,
+  `unpriced: true`), with `input` excluding `cacheRead` and `reasoning`
+  included in `output` (never double-counted). `contextTokens` is the last
+  request's total context size and `contextWindow` is Codex's
+  `modelContextWindow`.
+- `plan` is the ChatGPT account `planType` (such as `"prolite"`, `"pro"`,
+  `"plus"`) when signed in to ChatGPT, and absent on API-key auth.
+- `window`, `windowUtilization` and `resetsAt` report the most-constrained
+  active Codex rate-limit bucket (using `"five_hour"`, `"seven_day"`, or a
+  compact duration label such as `"24h"`, `"1d"`, `"15m"`).
+
 ## Web search counts
 
 A native session counts the calls its web service handles — `websearch` and
@@ -2466,7 +2483,9 @@ catalog section, its revision one past the last. Its models carry `id` and
 - No ACP session but an antigravity one publishes one, and neither a native
   nor an antigravity session does before its list's first change: the key is
   **absent** then — never `null`, never `{}` — and the list is the info
-  document's.
+  document's. A **codex** session publishes a revisioned catalog at initial
+  install (`revision: 1`, carrying each model's effort facts) and again
+  whenever a model or effort change updates `switchEffort`.
 
 The section stands in the reads of where things are, as usage does: a
 snapshot's `settings.catalog` (the last section a delta carried) and

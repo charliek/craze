@@ -276,28 +276,48 @@ def test_codex_ask_and_plan_modes_request_readonly_sandbox(
     work = tmp_path / "proj"
     work.mkdir()
 
-    ask_out = _craze(
-        craze_bin,
-        "new",
-        "--wait",
-        "--exit-after-turn",
-        "--json",
-        "--provider",
-        "codex",
-        "--ask",
-        "-C",
-        str(work),
-        "check sandbox",
-        script="codex-basic",
-    )
-    assert ask_out.returncode == 0 and ask_out.stderr == b"", ask_out
-    ask_res = json.loads(ask_out.stdout)
-    assert ask_res["status"] == "completed", ask_res
-    assert "mode=default" in ask_res["message"], ask_res
-    assert "sandbox=readOnly" in ask_res["message"], ask_res
-    assert "approval=never" in ask_res["message"], ask_res
+    for flag, want_mode, prompt, want_msg in (
+        ("--ask", "default", "check sandbox", "sandbox=readOnly"),
+        ("--plan", "plan", "check plan", "Plan for: check plan"),
+    ):
+        dump = tmp_path / f"turn-{want_mode}.jsonl"
+        out = _craze(
+            craze_bin,
+            "new",
+            "--wait",
+            "--exit-after-turn",
+            "--json",
+            "--provider",
+            "codex",
+            "--no-force",
+            flag,
+            "-C",
+            str(work),
+            prompt,
+            script="codex-basic",
+            env_extra={"CRAZE_FAKE_DUMP_PROMPTS": str(dump)},
+        )
+        assert out.returncode == 0 and out.stderr == b"", out
+        res = json.loads(out.stdout)
+        assert res["status"] == "completed", res
+        assert want_msg in res["message"], res
+        lines = [json.loads(line)["turnStart"] for line in dump.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(lines) == 1, lines
+        ts = lines[0]
+        assert ts["sandboxPolicy"]["type"] == "readOnly", ts
+        assert ts["approvalPolicy"] == "never", ts
+        assert ts["collaborationMode"]["mode"] == want_mode, ts
 
-    plan_out = _craze(
+
+def test_codex_unattended_effort_validation(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    _config(fake_agent_bin)
+    work = tmp_path / "proj"
+    work.mkdir()
+
+    # gpt-6.2-sol accepts effort=ultra.
+    ok = _craze(
         craze_bin,
         "new",
         "--wait",
@@ -305,13 +325,39 @@ def test_codex_ask_and_plan_modes_request_readonly_sandbox(
         "--json",
         "--provider",
         "codex",
-        "--plan",
+        "--model",
+        "gpt-6.2-sol",
+        "--effort",
+        "ultra",
         "-C",
         str(work),
-        "check plan",
+        "hello ultra",
         script="codex-basic",
     )
-    assert plan_out.returncode == 0 and plan_out.stderr == b"", plan_out
-    plan_res = json.loads(plan_out.stdout)
-    assert plan_res["status"] == "completed", plan_res
-    assert plan_res["message"] == "Plan for: check plan", plan_res
+    assert ok.returncode == 0 and ok.stderr == b"", ok
+    ok_res = json.loads(ok.stdout)
+    assert ok_res["status"] == "completed", ok_res
+    assert "model=gpt-6.2-sol" in ok_res["message"] and "effort=ultra" in ok_res["message"], ok_res
+
+    # gpt-6-luna does not support ultra: unattended start fails with kind=config.
+    bad = _craze(
+        craze_bin,
+        "new",
+        "--wait",
+        "--exit-after-turn",
+        "--json",
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-6-luna",
+        "--effort",
+        "ultra",
+        "-C",
+        str(work),
+        "hello bad effort",
+        script="codex-basic",
+    )
+    assert bad.returncode == 1, bad
+    bad_res = json.loads(bad.stdout)
+    assert bad_res["error"]["kind"] == "config", bad_res
+    assert "ultra" in bad_res["error"]["message"], bad_res

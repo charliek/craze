@@ -142,6 +142,42 @@ func TestFrameGoldenProviderPickerAvailability(t *testing.T) {
 	}
 }
 
+// TestProviderPickerSixProvidersSelectsCodex verifies the six-provider
+// availability response renders codex between antigravity and native, refuses
+// an unavailable codex in place, and keeps codex visible at 40x12.
+func TestProviderPickerSixProvidersSelectsCodex(t *testing.T) {
+	sixFixture := func() []ProviderAvail {
+		return []ProviderAvail{
+			{ID: "cursor", State: AvailUnavailable, Reason: "cursor-agent not found on PATH", Fix: "install cursor-agent"},
+			{ID: "grok", State: AvailReady},
+			{ID: "claude", State: AvailUnavailable, Reason: "claude-agent-acp not found on PATH", Fix: "install claude-agent-acp"},
+			{ID: "antigravity", State: AvailUnavailable, Reason: "agy not found on PATH", Fix: "install agy"},
+			{ID: "codex", State: AvailUnavailable, Reason: "codex not found on PATH", Fix: "install codex, or set [agents].codex in /home/you/.craze/config.toml"},
+			{ID: "native", State: AvailNeedsSetup, Reason: "no model provider has a key", Fix: "craze auth login"},
+		}
+	}
+	log := &builtLog{}
+	m := availPicker(t, availPickerConfig(t, agent.CodexProvider(), sixFixture, nil, log.build), 80, 24)
+	view := plainView(m)
+	for _, want := range []string{"antigravity", "> codex", "codex not found on PATH", "install codex", "native"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("six-provider picker missing %q:\n%s", want, view)
+		}
+	}
+	tm, _ := m.Update(enter())
+	refused := plainView(tm.(Model))
+	if !strings.Contains(refused, "codex not found on PATH") {
+		t.Fatalf("enter on unavailable codex did not refuse in place:\n%s", refused)
+	}
+	narrow := plainView(availPicker(t, availPickerConfig(t, agent.CodexProvider(), sixFixture, nil, log.build), 40, 12))
+	if !strings.Contains(narrow, "codex") || !strings.Contains(narrow, "unavailable") {
+		t.Fatalf("narrow 40x12 six-provider picker missing codex state:\n%s", narrow)
+	}
+	if got := log.got(); len(got) != 0 {
+		t.Fatalf("unavailable codex built sessions: %v", got)
+	}
+}
+
 // TestProviderPickerDrawsTheStates (A5's style test, which the ANSI-stripped
 // goldens cannot be): a row that is not ready is drawn in the dim colour — on
 // the selection band when the cursor is on it — and a ready row in the

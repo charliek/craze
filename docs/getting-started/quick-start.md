@@ -16,7 +16,7 @@
       signed in with `agy acp --login`
       ([the antigravity provider](../reference/configuration.md#the-antigravity-provider));
       or OpenAI's Codex CLI (`codex`), signed in with `codex login` or
-      `OPENAI_API_KEY`
+      `codex login --with-api-key`
       ([the codex provider](../reference/configuration.md#the-codex-provider)).
 
 Coming from v0.0.1? Read [Upgrading](upgrading.md) first.

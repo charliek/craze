@@ -1066,20 +1066,23 @@ after antigravity and before native by `craze providers`, the picker and
   is `unavailable` in the picker and `craze providers`, with `install codex, or
   set [agents].codex in …`.
 - **A sign-in or API key.** Sign in once with `codex login` (ChatGPT account),
-  export `OPENAI_API_KEY`, or configure a custom Codex model provider whose
+  `codex login --with-api-key` (OpenAI API key — exporting `OPENAI_API_KEY`
+  alone with an empty `CODEX_HOME` leaves `account/read` unauthenticated on
+  `codex-cli` 0.172.0), or configure a custom Codex model provider whose
   `requiresOpenaiAuth` is `false`. On session start craze calls `account/read`:
   when `requiresOpenaiAuth` is `true` and `account` is empty, the session fails
-  fast with kind `auth` (`codex: not logged in — run 'codex login' or set
-  OPENAI_API_KEY`).
+  fast with kind `auth` (``codex is not signed in (run `codex login`, or `codex
+  login --with-api-key` for API-key auth)``).
 
 ### What craze sets
 
 - **The command and environment.** craze spawns `codex app-server --listen
   stdio://` with `experimentalApi: true` in `initialize` (required by Codex for
   plan mode and `requestUserInput`). craze strips inherited `CODEX_THREAD_ID`,
-  `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_CI`, `CODEX_MANAGED_BY_NPM`
-  and `CODEX_MANAGED_BY_BUN` from the child environment (preserving `CODEX_HOME`
-  and `OPENAI_API_KEY`) and sets `CRAZE_SESSION_PROVIDER=codex`.
+  `CODEX_SESSION_ID`, `CODEX_CI`, `CODEX_TOOL_CALL_ID`, and any
+  `CODEX_SANDBOX_*` variables from the child environment (preserving
+  `CODEX_HOME`, `OPENAI_API_KEY`, `CODEX_SANDBOX`, and `CODEX_MANAGED_BY_*`)
+  and sets `CRAZE_SESSION_PROVIDER=codex`.
 - **Models and effort.** craze reads `model/list` (paginated) on start and
   populates `/model` and `/effort` from each model's `supportedReasoningEfforts`
   and `defaultReasoningEffort` (including `ultra` on models such as
@@ -1108,13 +1111,18 @@ after antigravity and before native by `craze providers`, the picker and
   `files` (moves list both old and new paths; edits outside the workspace go to
   `outsideFiles`).
 - **Approvals and questions.** Under `--no-force` in `agent` mode, Codex
-  command, file-change and permissions approval requests render as craze
+  command-execution and file-change approval requests render as craze
   permission cards; craze never offers persistent Codex config-amendment
   options (`acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`,
   `scope: "session"`), offering only allow-once, allow-for-session (in-memory)
-  and deny. `requestUserInput` prompts render as question cards (free-text
-  enabled when `isOther` is set); questions marked `isSecret` are declined
-  automatically so secrets are never written to transcripts or journals.
+  and deny. Permission-expansion requests (`item/permissions/requestApproval`)
+  and MCP server elicitations are declined automatically (empty permission
+  grant / decline) and show no card. `requestUserInput` prompts render as
+  question cards (free-text enabled when `isOther` is set); questions marked
+  `isSecret` are declined automatically so secrets are never written to
+  transcripts or journals. In an unattended session, a free-text-only question
+  (with no options to auto-select) returns `needs_input` (exit 4) even under
+  `--force`.
 - **Interjection.** Typing and sending while a turn is running steers the
   active Codex turn in place via `turn/steer`.
 - **Skills.** craze queries `skills/list` for the workspace and exposes enabled
@@ -1126,8 +1134,9 @@ after antigravity and before native by `craze providers`, the picker and
   (`5h`, `7d` and generic compact duration windows such as `24h`, `1d`, `15m`)
   appear on the status row and in waiting-command results. Codex turns are
   unpriced.
-- **Resume.** Threads are persisted by Codex (`persistExtendedHistory: true`)
-  and resumed via `thread/resume` (`excludeTurns: true`) followed by paginated
+- **Resume.** Threads are started with `ephemeral: false` so Codex persists
+  them on disk (saved threads also appear in `codex resume` outside craze), and
+  resumed via `thread/resume` (`excludeTurns: true`) followed by paginated
   `thread/turns/list` replay, restoring the transcript, model, effort and token
   baseline. A Codex thread records its `model` and `effort` in the craze
   session index.

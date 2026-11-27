@@ -103,7 +103,7 @@ To run craze you need:
       ([Claude on your plan](getting-started/claude.md)); or the Antigravity
       CLI (`agy`), signed in with `agy acp --login`
       ([the antigravity provider](reference/configuration.md#the-antigravity-provider));
-      or OpenAI's Codex CLI (`codex`), signed in with `codex login` or `OPENAI_API_KEY`
+      or OpenAI's Codex CLI (`codex`), signed in with `codex login` or `codex login --with-api-key`
       ([the codex provider](reference/configuration.md#the-codex-provider))
 
 Go 1.27.3+ (this repo pins 1.27.3 via `.mise.toml`) is needed only to build from
