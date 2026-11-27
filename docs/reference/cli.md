@@ -3250,6 +3250,59 @@ machine that pins a release can read before installing it — its `capabilities`
 included, so a caller can tell before installing whether that release reports web
 search.
 
+## craze resolve
+
+Show which provider and model can serve a target, with the eligible fallbacks
+in order and a reason for each skipped route. Runs entirely offline. Bare
+`craze resolve` shows every configured target. For example:
+
+```shell
+craze resolve --target sol@6.1
+craze resolve --role panel --json
+```
+
+Use `--target` with an optional numeric `@version` suffix or a separate
+`--version`. Moving Claude aliases and unpinned OpenRouter latest aliases
+report a null version. Use `--role` to resolve a named role. The shipped
+review and adversarial-review roles select a target outside the caller's
+model family. Panel resolves each seat independently, labeling a supported
+same-family seat `native_subagent`. The caller must configure the model,
+effort and permissions of that sub-agent.
+
+`--caller` overrides automatic maker detection. Normally Craze takes the
+union of CRAZE_SESSION_PROVIDER, CLAUDECODE=1, CURSOR_AGENT, ANTIGRAVITY_AGENT,
+and CODEX_THREAD_ID for roles. A known immediate caller skips its own provider
+unless `--allow-same-provider` is set. `--effort` overrides the target default.
+Unsupported effort levels are adjusted to the model's supported levels with
+a warning. `--allow-paid-fallback` admits eligible API-key and metered routes.
+
+`--json` returns a versioned document. Its `schema` is 1. The `caller` has
+`providers` and an optional `immediate` provider. The `kind` selects an
+overview with `targets`, a panel with `seats`, or an individual selection with
+`routes`. Results name the `target`, `effort`, `capSeconds`, `status` and
+panel `mode` as applicable. Routes carry `provider`, `model`, `version`,
+`billing`, `provisional` and an optional `note`. The first eligible route
+wins. Inspect `warnings` for effort changes and `skipped` for each `reason`.
+
+| Reason | Meaning |
+| --- | --- |
+| `paid_blocked` | The credential class requires explicit paid fallback. |
+| `held_env_key` | The native source guard holds this model, including an environment-only key. |
+| `overage_hold` | Claude's machine-wide overage guard refuses a start. |
+| `not_signed_in` | Native has no plan-enabled ChatGPT sign-in. |
+| `binary_missing` | The agent or companion binary cannot run in this environment. |
+| `unfunded` | The native route has no usable funding or its model table cannot load. |
+| `model_unavailable` | The requested model is absent from the local catalog or current account list. |
+| `chatgpt_list_uncached` | A signed-in account's list needs a refresh. This provisional route stays eligible. |
+| `no_version_template` | The route cannot honor a version pin. |
+| `same_maker` | The role excludes an active caller's maker. |
+| `self_delegation` | The route uses the immediate caller's provider. |
+
+Exit 0 means a target is eligible, an overview has at least one eligible
+target, or every panel seat resolved. Exit 1 means a selection lacks an
+eligible route. A partial panel still prints every seat. Exit 2 reports
+invalid flags, malformed routing configuration or a self-delegation refusal.
+
 ## craze version
 
 Print the craze version and exit.

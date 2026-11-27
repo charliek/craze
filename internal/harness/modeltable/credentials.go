@@ -392,11 +392,11 @@ func (r credentialsReading) usable() map[string]Secret {
 // others could read it (tighten, a regular file only, whether or not it
 // parses: one craze cannot read can still hold a key, review C5 item 2; a
 // link is the reading's own line), and the reading's diagnostics.
-func loadCredentials(dir string) (credentialsReading, map[string]Secret, []string) {
+func loadCredentials(dir string, readOnly bool) (credentialsReading, map[string]Secret, []string) {
 	path := filepath.Join(dir, CredentialsFile)
 	r := readCredentials(path)
 	var warnings []string
-	if r.has && !errors.Is(r.err, ErrSymlinkedCredentialsFile) {
+	if !readOnly && r.has && !errors.Is(r.err, ErrSymlinkedCredentialsFile) {
 		if w := tighten(path); w != "" {
 			warnings = append(warnings, w)
 		}

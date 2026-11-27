@@ -283,16 +283,8 @@ func (t *Table) holdAfterBrokenSignIn(o Offers, active map[string]bool, isSigned
 // provider with a stored key is not held even where the variable is the key
 // Resolve takes: storing one is the owner's consent.
 func (t *Table) holdEnvOnlyKeys(o Offers, getenv func(string) string) {
-	envOnly := map[string]string{} // provider id → the variable that alone funds it
-	for id, on := range t.envKeyByNameOnly {
-		p, ok := t.Providers[id]
-		if !on || !ok || storedKeyUsable(p.APIKey) {
-			continue
-		}
-		if name, _, _ := firstEnvKey(t.envOf(getenv), p.EnvKeys); name != "" {
-			envOnly[id] = name
-		}
-	}
+	envOnly := t.EnvironmentOnlySources(getenv)
+
 	if len(envOnly) == 0 {
 		return
 	}
@@ -304,6 +296,23 @@ func (t *Table) holdEnvOnlyKeys(o Offers, getenv func(string) string) {
 		}
 		o.Held[alias] = &HeldError{Alias: alias, Maker: m.Maker, Source: m.Provider, SourceName: t.ProviderName(m.Provider), EnvVar: name}
 	}
+}
+
+// EnvironmentOnlySources names the funding variable for each source whose
+// models require explicit selection. Cross-provider routing may consider a
+// source even when the native picker hides it behind a preferred source.
+func (t *Table) EnvironmentOnlySources(getenv func(string) string) map[string]string {
+	envOnly := map[string]string{} // provider id → the variable that alone funds it
+	for id, on := range t.envKeyByNameOnly {
+		p, ok := t.Providers[id]
+		if !on || !ok || storedKeyUsable(p.APIKey) {
+			continue
+		}
+		if name, _, _ := firstEnvKey(t.envOf(getenv), p.EnvKeys); name != "" {
+			envOnly[id] = name
+		}
+	}
+	return envOnly
 }
 
 // storedKeyUsable says k, an inline api_key, is one Resolve would take and

@@ -452,7 +452,7 @@ func refreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, 
 	if opts.ClientVersion == "" {
 		return nil, ErrClientVersionRequired
 	}
-	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
+	if ModelsCurrent(src.dir, maxAge, opts.ClientVersion) {
 		return nil, nil
 	}
 	unlock, err := lockModels(ctx, src.dir)
@@ -460,7 +460,7 @@ func refreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, 
 		return nil, err
 	}
 	defer unlock()
-	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
+	if ModelsCurrent(src.dir, maxAge, opts.ClientVersion) {
 		return nil, nil
 	}
 	f, err := fetchModelList(ctx, src, opts)
@@ -470,9 +470,9 @@ func refreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, 
 	return storeModels(src.dir, opts, f)
 }
 
-// modelsCurrent says dir's model list is the registered account's and was
+// ModelsCurrent says dir's model list is the registered account's and was
 // fetched less than maxAge ago (and not in the future) with clientVersion.
-func modelsCurrent(dir string, maxAge time.Duration, clientVersion string) bool {
+func ModelsCurrent(dir string, maxAge time.Duration, clientVersion string) bool {
 	m, err := ReadModels(dir)
 	if err != nil {
 		return false

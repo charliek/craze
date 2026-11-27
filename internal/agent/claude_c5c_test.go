@@ -174,7 +174,8 @@ func TestClaudeOverageRecordRefusesAFIFO(t *testing.T) {
 func TestClaudeOverageWakeUnderBackpressure(t *testing.T) {
 	shortForeign(t, 5*time.Second)
 	_, stopped := overageRig(t, 150*time.Millisecond)
-	r := newClaudeRig(t, "claude-overage", Options{Interactive: true}, "CRAZE_FAKE_CLAUDE_IDLE_WAKE=400ms")
+	gate, wake := idleEventGate(t, "CRAZE_FAKE_CLAUDE_IDLE_WAKE_GATE")
+	r := newClaudeRig(t, "claude-overage", Options{Interactive: true}, gate)
 	var stall atomic.Bool
 	release := make(chan struct{})
 	var once sync.Once
@@ -196,6 +197,7 @@ func TestClaudeOverageWakeUnderBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	stall.Store(true)
+	wake()
 	waitStopped(t, r, stopped, 5*time.Second)
 	free()
 }

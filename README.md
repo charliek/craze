@@ -15,6 +15,8 @@ and want one fast, scriptable front end for several of them.
 
 ## Highlights
 
+- **Offline provider routing.** Inspect the subscription-first model ladder for a target or review panel with `craze resolve`. [CLI reference](docs/reference/cli.md#craze-resolve)
+
 - **The TUI**: transcript, queued messages, tasks, sub-agent rows, cards, mouse
   and copy. [TUI reference](docs/reference/tui.md)
 - **Antigravity**: Google's `agy` (Gemini 4 Neon and the Antigravity plan's other

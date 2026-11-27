@@ -31,6 +31,8 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
 
 ## What it does
 
+- **Cross-provider targets.** Preview a model family, version pin or review panel with `craze resolve`. [CLI reference](reference/cli.md#craze-resolve)
+
 - **Grouped tool calls.** Open individual groups with the keyboard and preview
   eight terminal themes, including high contrast. [Transcript layouts](reference/tui.md#transcript-layouts)
 
