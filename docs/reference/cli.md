@@ -3303,6 +3303,12 @@ target, or every panel seat resolved. Exit 1 means a selection lacks an
 eligible route. A partial panel still prints every seat. Exit 2 reports
 invalid flags, malformed routing configuration or a self-delegation refusal.
 
+An explicitly empty routing selector is a usage error. When the immediate
+caller has no eligible non-self route for a target, resolve still prints the
+route diagnostics and exits 2. A fresh native ChatGPT account list must
+include the wire model even when a local alias names it. Antigravity Neon
+and Hydrogen accept effort levels up to `xhigh`.
+
 ## craze version
 
 Print the craze version and exit.

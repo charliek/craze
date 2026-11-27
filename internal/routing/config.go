@@ -89,16 +89,20 @@ func Load(path string) (Config, error) {
 	// The TOML decoder matches struct fields case-insensitively. In these
 	// three tables only the documented spellings may affect policy.
 	for _, key := range meta.Keys() {
-		root := strings.ToLower(key[0])
-		if root != "routing" && root != "targets" && root != "roles" {
+		root := key[0]
+		switch {
+		case strings.EqualFold(root, "routing"), strings.EqualFold(root, "targets"), strings.EqualFold(root, "roles"):
+			if !nameToken.MatchString(root) {
+				return Config{}, configError("unknown routing table spelling")
+			}
+		default:
 			continue
 		}
-		for i, part := range key {
-			if i == 1 && root != "routing" {
-				continue
-			}
-			if part != strings.ToLower(part) {
-				return Config{}, configError("unknown field in routing configuration")
+		for _, part := range key[1:] {
+			// The decoder can match Unicode case folds (including long s) to
+			// ASCII field tags. All documented fields and names are ASCII.
+			if !nameToken.MatchString(part) {
+				return Config{}, configError("unknown field or name in routing configuration")
 			}
 		}
 	}

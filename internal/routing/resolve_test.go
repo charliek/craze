@@ -32,7 +32,7 @@ candidates = []
 	if err != nil || !cfg.Routing.AllowPaidFallback || cfg.Targets["sol"].Maker != "openai" || cfg.Targets["sol"].Cap != "1m" || len(cfg.Targets["sol"].Routes) != 0 || len(cfg.Roles["review"].Candidates) != 0 || len(cfg.Targets["astra"].Routes) != 4 {
 		t.Fatalf("%+v %v", cfg, err)
 	}
-	for _, bad := range []string{"invalid=[", "[routing]\nALLOW_PAID_FALLBACK=true", "[routing]\nallow_paid_fallbac = true", "[routing]\nallow_paid_fallback = 1", "[targets.sol]\ncap='-1m'", "[targets.sol]\ncap='none'", "[targets.sol]\nunknown=0", "[[targets.sol.routes]]\nprovider='codex'\nmodel='m'\nbilling='cheap'", "[[targets.sol.routes]]\nprovider='codex'\nmodel='m'\nversion_templat='abc'", "[roles.mine]\ncandidates=['no-such-target']", "[roles.review]\nseats=[]\ncandidates=[]"} {
+	for _, bad := range []string{"invalid=[", "[roles.review]\n\"candidateſ\"=['opus']", "[\"targetſ\".sol]\nroutes=[]", "[routing]\nALLOW_PAID_FALLBACK=true", "[routing]\nallow_paid_fallbac = true", "[routing]\nallow_paid_fallback = 1", "[targets.sol]\ncap='-1m'", "[targets.sol]\ncap='none'", "[targets.sol]\nunknown=0", "[[targets.sol.routes]]\nprovider='codex'\nmodel='m'\nbilling='cheap'", "[[targets.sol.routes]]\nprovider='codex'\nmodel='m'\nversion_templat='abc'", "[roles.mine]\ncandidates=['no-such-target']", "[roles.review]\nseats=[]\ncandidates=[]"} {
 		_, err := loadText(t, bad)
 		if info, ok := errkind.Of(err); !ok || info.Kind != errkind.Config {
 			t.Errorf("accepted %q: %v", bad, err)

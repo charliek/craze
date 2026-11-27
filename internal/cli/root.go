@@ -165,6 +165,10 @@ func usageJSON(ranCmd *cobra.Command, args []string, err error, line string, cod
 	if code != 2 || ranCmd == nil || ranCmd.Name() == "prompt" || isCompletionRequest(ranCmd) || !jsonRequested(ranCmd, args) {
 		return nil
 	}
+	var ee *exitError
+	if errors.As(err, &ee) && ee.reported {
+		return nil
+	}
 	b, merr := json.Marshal(failureBody{Error: kindError(line, failureKind(err))})
 	if merr != nil {
 		return nil

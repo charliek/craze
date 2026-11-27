@@ -7,8 +7,9 @@ import (
 )
 
 type exitError struct {
-	code int
-	msg  string
+	code     int
+	reported bool // the command already wrote its structured error output
+	msg      string
 	// cause is what the exit is about, when a caller needs more than the
 	// message: resolveLoad's refusal of a --continue another craze holds
 	// carries the *rundir.HeldError, which runTUI attaches through (SQ16).

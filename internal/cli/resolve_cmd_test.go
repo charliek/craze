@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/routing"
 )
@@ -93,5 +95,76 @@ func TestRouteHonorsClaudeOverage(t *testing.T) {
 	}
 	if f := offlineRouteProbe()("claude", "opus"); f.Reason != routing.OverageHold {
 		t.Fatal(f)
+	}
+}
+
+func TestResolveReportsSkipsAndRejectsEmptySelectors(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CRAZE_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("PATH", dir)
+	for _, k := range []string{"CRAZE_SESSION_PROVIDER", "CLAUDECODE", "ANTIGRAVITY_AGENT", "CURSOR_AGENT", "CODEX_API_KEY"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("CODEX_THREAD_ID", "1")
+	for _, bin := range []string{"codex", "agy"} {
+		if err := os.WriteFile(filepath.Join(dir, bin), nil, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, flags := range [][]string{{"--target", "sol@6.2", "--version="}, {"--version="}, {"--target=", "--role", "review"}} {
+		_, _, code := executeErr(append([]string{"resolve"}, flags...))
+		if code != 2 {
+			t.Fatalf("%v exit %d", flags, code)
+		}
+	}
+	out, stderr, code := executeErr([]string{"resolve", "--target", "sol", "--json"})
+	var doc routing.Result
+	if code != 2 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Skipped) < 2 || doc.Skipped[0].Reason != routing.SelfDelegation {
+		t.Fatalf("exit %d %s %s", code, out, stderr)
+	}
+	out, stderr, code = executeErr([]string{"resolve", "--target", "neon", "--effort", "max", "--json"})
+	if code != 0 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Routes) == 0 || doc.Routes[0].Effort != "xhigh" || strings.Count(stderr, "adjusted") != 1 {
+		t.Fatalf("exit %d %s %s", code, out, stderr)
+	}
+}
+
+func TestNativeRouteChecksAccountListEvenWithUserModel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	dir := filepath.Join(home, "native")
+	if err := os.MkdirAll(chatgptauth.AuthDir(dir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeJSON := func(path string, v any) {
+		t.Helper()
+		b, e := json.Marshal(v)
+		if e != nil {
+			t.Fatal(e)
+		}
+		write(path, b)
+	}
+	writeJSON(chatgptauth.ClientFile(dir), chatgptauth.Client{ClientID: "app_test", Subject: "test-user", PlanUsage: true, NoticeShown: true})
+	write(chatgptauth.TokenFile(dir), []byte("test-token"))
+	write(filepath.Join(dir, modeltable.ModelsFile), []byte(`version = 1
+[models."chatgpt/custom"]
+provider = "chatgpt"
+wire_model = "gpt-6.2-sol"
+`))
+	list := chatgptauth.Models{Version: 1, Subject: "test-user", ClientID: "app_test", ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(), Models: []chatgptauth.Model{{Slug: "gpt-other"}}}
+	writeJSON(chatgptauth.ModelsFile(dir), list)
+	if f := loadNativeProbe()("chatgpt/custom"); f.Reason != routing.ModelUnavailable {
+		t.Fatalf("fresh list %+v", f)
+	}
+	list.FetchedAt = time.Now().Add(-48 * time.Hour)
+	writeJSON(chatgptauth.ModelsFile(dir), list)
+	if f := loadNativeProbe()("chatgpt/custom"); f.Reason != "" || !f.Provisional {
+		t.Fatalf("stale list %+v", f)
 	}
 }

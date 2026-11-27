@@ -36,6 +36,15 @@ func (f *routingFlags) register(cmd *cobra.Command) {
 	flags.BoolVar(&f.request.AllowPaid, "allow-paid-fallback", false, "include eligible API-key and metered routes")
 	flags.BoolVar(&f.request.AllowSame, allowSameProviderFlag, false, "include routes on the calling provider")
 }
+func (f routingFlags) checkFlags(cmd *cobra.Command) error {
+	for _, name := range []string{"target", "version", "role", "caller", "effort", "provider", "model"} {
+		flag := cmd.Flags().Lookup(name)
+		if flag != nil && flag.Changed && flag.Value.String() == "" {
+			return usagef("%s: --%s requires a value", cmd.CommandPath(), name)
+		}
+	}
+	return nil
+}
 func (f routingFlags) inputs() (routing.Config, routing.Request, error) {
 	cfg, err := routing.Load(paths.ConfigPath())
 	if err != nil {
@@ -51,6 +60,9 @@ func newResolveCmd() *cobra.Command {
 	var f routingFlags
 	var asJSON bool
 	cmd := &cobra.Command{Use: "resolve", Short: "Show eligible routes for configured model targets and roles", Args: noArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if err := f.checkFlags(cmd); err != nil {
+			return err
+		}
 		cfg, req, err := f.inputs()
 		if err != nil {
 			return err
@@ -63,9 +75,6 @@ func newResolveCmd() *cobra.Command {
 			fmt.Fprintln(cmd.ErrOrStderr(), "craze resolve:", w)
 		}
 		selfOnly := !ok && req.Target != "" && len(res.Skipped) > 0 && slices.ContainsFunc(res.Skipped, func(s routing.Skip) bool { return s.Reason == routing.SelfDelegation })
-		if selfOnly {
-			return usagef("craze resolve: no eligible non-self route; --allow-same-provider includes the calling provider")
-		}
 		if asJSON {
 			err = json.NewEncoder(cmd.OutOrStdout()).Encode(res)
 		} else {
@@ -73,6 +82,9 @@ func newResolveCmd() *cobra.Command {
 		}
 		if err != nil {
 			return err
+		}
+		if selfOnly {
+			return &exitError{code: 2, kind: errkind.Usage, reported: asJSON, msg: "craze resolve: no eligible non-self route; --allow-same-provider includes the caller"}
 		}
 		if !ok {
 			return kindf(errkind.Config, "craze resolve: no eligible route for one or more selections")
@@ -103,6 +115,15 @@ func offlineRouteProbe() routing.Probe {
 			if overage() {
 				return routing.Facts{Reason: routing.OverageHold}
 			}
+		case "antigravity":
+			switch model {
+			case "gemini-4-neon", "gemini-4-hydrogen":
+				return routing.Facts{Efforts: []string{"low", "medium", "high", "xhigh"}}
+			case "gemini-4-argon", "gemini-3.8-flash":
+				return routing.Facts{Efforts: []string{"low", "medium", "high"}}
+			case "gpt-oss-120b-medium":
+				return routing.Facts{Efforts: []string{}}
+			}
 		case "codex":
 			f := routing.Facts{Efforts: []string{"minimal", "low", "medium", "high", "xhigh"}}
 			if os.Getenv("CODEX_API_KEY") != "" {
@@ -130,8 +151,8 @@ func loadNativeProbe() func(string) routing.Facts {
 	offers := t.Offers(os.Getenv)
 	envOnly := t.EnvironmentOnlySources(os.Getenv)
 	planAvailable := sync.OnceValue(t.ChatGPTPlanAvailable)
-	planCurrent := sync.OnceValue(func() bool {
-		return chatgptauth.ModelsCurrent(dir, chatgptauth.ModelsMaxAge, modeltable.ChatGPTModelsClientVersion())
+	planModels := sync.OnceValue(func() *chatgptauth.Models {
+		return chatgptauth.CurrentModels(dir, chatgptauth.ModelsMaxAge, modeltable.ChatGPTModelsClientVersion())
 	})
 	return func(alias string) routing.Facts {
 		m, exists := t.Models[alias]
@@ -147,9 +168,12 @@ func loadNativeProbe() func(string) routing.Facts {
 				f.Reason = routing.NotSignedIn
 				return f
 			}
-			if !planCurrent() {
+			if current := planModels(); current == nil {
 				f.Provisional = true
 				f.Note = string(routing.ChatGPTListUncached)
+			} else if !exists || !slices.ContainsFunc(current.Models, func(entry chatgptauth.Model) bool { return entry.Slug == m.WireModel }) {
+				f.Reason = routing.ModelUnavailable
+				return f
 			}
 		} else if driver == modeltable.DriverOpenRouter {
 			f.Billing = routing.Metered
