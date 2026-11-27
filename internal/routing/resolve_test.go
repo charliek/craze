@@ -75,6 +75,15 @@ func TestVersionsAndPaidGuard(t *testing.T) {
 	if !ok || res.Routes[0].Billing != APIKey {
 		t.Fatal(res)
 	}
+	// Configured target version expands version_template on routes that define one.
+	cfgVer, err := loadText(t, "[targets.sol]\nversion = \"6.1\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, ok, err = cfgVer.Resolve(Request{Target: "sol"}, funded)
+	if err != nil || !ok || res.Routes[0].Model != "gpt-6.1-sol" || res.Routes[0].Version == nil || *res.Routes[0].Version != "6.1" {
+		t.Fatalf("configured version expansion: %+v %v", res, err)
+	}
 }
 func TestCallerAndPanel(t *testing.T) {
 	env := map[string]string{"CODEX_THREAD_ID": "1", "CLAUDECODE": "1"}

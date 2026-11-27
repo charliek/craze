@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -83,8 +86,12 @@ func (f reviewFlags) readInputs(ctx context.Context, cmd *cobra.Command, words [
 		}
 	}
 	// Wait until every source has been read: the same file may appear twice.
+	var unlinked []os.FileInfo
 	for path, info := range removed {
 		now, e := os.Lstat(path)
+		if errors.Is(e, fs.ErrNotExist) && slices.ContainsFunc(unlinked, func(u os.FileInfo) bool { return os.SameFile(u, info) }) {
+			continue
+		}
 		if e != nil {
 			return "", usageKindf(errkind.Prompt, "craze review: checking prompt file: %s", e)
 		}
@@ -92,6 +99,7 @@ func (f reviewFlags) readInputs(ctx context.Context, cmd *cobra.Command, words [
 			if e := os.Remove(path); e != nil {
 				return "", usageKindf(errkind.Prompt, "craze review: removing prompt file: %s", e)
 			}
+			unlinked = append(unlinked, info)
 		}
 	}
 	input := strings.TrimSpace(out.String())

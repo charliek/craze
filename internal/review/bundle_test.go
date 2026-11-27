@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -18,7 +19,16 @@ import (
 func runGit(t *testing.T, root string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid")
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_SUPER_PREFIX":
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s %v", args, b, err)
@@ -228,9 +238,19 @@ func TestBundleIncludesGitlinkAndRawPath(t *testing.T) {
 		t.Fatal("missed submodule worktree edit")
 	}
 	commit(t, filepath.Join(dir, "module"))
-	put(t, dir, "odd-\xff", "raw")
+	// macOS APFS rejects non-UTF-8 bytes in on-disk filenames (EILSEQ). Verify
+	// raw-byte quoting directly on every platform and test on-disk raw bytes
+	// where the filesystem permits them.
+	if got := quotePath([]byte("odd-\xff")); got != `"odd-\xff"` {
+		t.Fatalf("quotePath raw bytes: %q", got)
+	}
+	rawName, wantQuoted := "odd-\xff", `odd-\xff`
+	if runtime.GOOS == "darwin" {
+		rawName, wantQuoted = `odd-"quoted"`, `odd-\"quoted\"`
+	}
+	put(t, dir, rawName, "raw")
 	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
-	if err != nil || !strings.Contains(b.Prompt, "Subproject commit") || !strings.Contains(b.Prompt, `odd-\xff`) {
+	if err != nil || !strings.Contains(b.Prompt, "Subproject commit") || !strings.Contains(b.Prompt, wantQuoted) {
 		t.Fatalf("bundle %q %v", b.Prompt, err)
 	}
 }
@@ -314,8 +334,12 @@ func TestReviewIgnoresInheritedRepoSelection(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	t.Setenv("GIT_WORK_TREE", other)
 	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
-	if got := snap(t, dir).Root; got != dir {
-		t.Fatal(got)
+	wantRoot, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snap(t, dir).Root; got != wantRoot {
+		t.Fatalf("got %q want %q", got, wantRoot)
 	}
 	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
 	if err != nil || !strings.Contains(b.Prompt, "intended workspace") {

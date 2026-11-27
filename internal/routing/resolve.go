@@ -252,6 +252,7 @@ func choose(id string, t Target, r Route, req Request, configPaid bool, probe Pr
 		c.Model = strings.NewReplacer("{v}", req.Version, "{v_dash}", strings.ReplaceAll(req.Version, ".", "-")).Replace(r.VersionTemplate)
 		c.Version = &req.Version
 	case t.Version != "" && r.VersionTemplate != "" && !movingAlias:
+		c.Model = strings.NewReplacer("{v}", t.Version, "{v_dash}", strings.ReplaceAll(t.Version, ".", "-")).Replace(r.VersionTemplate)
 		c.Version = &t.Version
 	}
 	if !req.AllowSame && req.Caller.Immediate == r.Provider {

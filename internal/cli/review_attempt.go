@@ -300,7 +300,9 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	expired, stalled := timer.expiration()
 	if a.turn.Status == statusRunning || (wf != nil && expired) {
 		if stalled {
-			a = attemptFailure(errkind.Stalled, "review produced no progress before the stall timeout", false)
+			a.startFailure = false
+			a.turn.Status = statusFailed
+			a.turn.Error = kindError("review produced no progress before the stall timeout", errkind.Stalled)
 		} else {
 			a.turn = &turnResult{Status: reviewTimedOut, Stopping: true}
 		}
