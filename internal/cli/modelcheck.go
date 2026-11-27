@@ -21,7 +21,7 @@ import (
 //     spawned: a --model that names nothing, or names a retired alias; an
 //     explicit --effort the model does not list; --fast, which no native model
 //     has. Each is exit 1, kind config, with a reason in the error's detail.
-//     It is the one place --effort and --fast are strict: the host is not
+//     Review also uses this preflight for native routes. Unattended starts use strict --effort and --fast checks: the host is not
 //     changed, nothing is recorded for a reload, and craze send, a reload, the
 //     TUI, craze prompt and a plain craze new stay lenient. A table this
 //     process cannot load skips it, and the host reports as it always did.

@@ -198,6 +198,10 @@ func dialWait(ctx context.Context, e rundir.Entry, sessionID, what string, curso
 
 // waitOptions shape one wait.
 type waitOptions struct {
+	// progress observes a delivered stream event once, before buffering, so
+	// silent submits and tool calls have independent inactivity deadlines.
+	progress    func(incarnation string, seq uint64)
+	fullMessage bool
 	// timeout fires at --timeout's end, counted from the command's start
 	// (timeoutAt); nil waits as long as the turn runs. A channel, so a test
 	// fires it when it means to.
@@ -405,13 +409,15 @@ type idleScan struct {
 
 // newTurnWaiter is a wait over conn.
 func newTurnWaiter(conn *waitConn, start waitStart, opts waitOptions) *turnWaiter {
-	return &turnWaiter{
+	w := &turnWaiter{
 		conn:    conn,
 		opts:    opts,
 		start:   start,
 		session: resultSession{id: conn.sessionID, provider: conn.entry.Provider},
 		acc:     newTurnAccumulator(),
 	}
+	w.acc.full = opts.fullMessage
+	return w
 }
 
 // waitTurn is the waiter's entry point (the one C3's new --wait and send
@@ -474,6 +480,9 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 	items := make(chan pumped)
 	go pumpStream(pctx, w.conn.st, items)
 	take := func(p pumped) {
+		if w.opts.progress != nil && p.err == nil && p.it.Kind == remote.KindEvent {
+			w.opts.progress(w.inc, p.it.Seq)
+		}
 		if w.buffering() {
 			// Kept, the stream's end and loss included, until the reply
 			// names the target: an ending already on the stream is then
@@ -954,6 +963,7 @@ func (w *turnWaiter) requeue(row string, seq uint64) {
 	w.rowSent, w.folding, w.startSeen, w.anchor = false, false, false, seq
 	w.removeSent, w.cancelSent = false, false
 	w.acc = newTurnAccumulator()
+	w.acc.full = w.opts.fullMessage
 }
 
 // adoptInfo takes the session's facts from an info document.
@@ -1424,6 +1434,7 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 	// wake's sections are its own (ownWeb), as its tally there is (seedWeb).
 	w.foreign = runningForeign(snap)
 	w.acc = newTurnAccumulator()
+	w.acc.full = w.opts.fullMessage
 	if w.target.kind == targetTurn && !snap.Turn.At.IsZero() {
 		w.acc.start(snap.Turn.At)
 	}

@@ -227,6 +227,10 @@ func newServeCmd() *cobra.Command {
 // (registerSessionFlags), then serve's own.
 func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	registerSessionFlags(cmd, &f.tuiFlags)
+	cmd.Flags().BoolVar(&f.readOnlyTools, "read-only-tools", false, "disable Claude mutation and shell tools")
+	cmd.Flags().BoolVar(&f.subscriptionOnly, "subscription-only", false, "require subscription credentials before starting a review")
+	_ = cmd.Flags().MarkHidden("read-only-tools")
+	_ = cmd.Flags().MarkHidden("subscription-only")
 	// serve's alone of the session's (plan 051 F.1): a new session's web
 	// search choice, which the root never takes — a person's session asks.
 	registerWebSearchFlags(cmd, &f.webSearch, &f.noWebSearch, "")

@@ -247,6 +247,12 @@ func (s *codexServer) handleIncoming(msg codexFrame) {
 				"requiresOpenaiAuth": true,
 			})
 		}
+	case "config/read":
+		provider := "openai"
+		if s.script == "codex-paid-endpoint" {
+			provider = "custom"
+		}
+		s.reply(msg.ID, map[string]any{"config": map[string]any{"model_provider": provider}})
 	case "account/rateLimits/read":
 		if s.script == "codex-slow-ratelimits" {
 			// Deliberately never reply to test independent rate-limit startup deadline.

@@ -304,7 +304,22 @@ func RefreshPlanListForMiss(ctx context.Context, nativeDir, raw string) bool {
 // (a seam's own sign-in), a raw that names no plan model, or no account
 // signed in with plan usage fetch nothing.
 func refreshPlanListForMiss(ctx context.Context, src *chatgptauth.TokenSource, raw string) bool {
-	if src == nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), modeltable.ChatGPTAliasPrefix) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), modeltable.ChatGPTAliasPrefix) {
+		return false
+	}
+	return refreshPlanList(ctx, src)
+}
+
+// RefreshPlanModelList verifies the account's list before a provisional
+// review route runs, including a user alias whose name differs from its slug.
+func RefreshPlanModelList(ctx context.Context, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	return refreshPlanList(ctx, chatgptauth.Source(dir))
+}
+func refreshPlanList(ctx context.Context, src *chatgptauth.TokenSource) bool {
+	if src == nil {
 		return false
 	}
 	list := planSource(src)

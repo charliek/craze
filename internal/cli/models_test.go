@@ -514,8 +514,8 @@ func TestNewWaitPreCheck(t *testing.T) {
 
 // TestNewWaitPreCheckIsNativeAlone: an ACP provider's --model, --effort and
 // --fast are not checked here — the agent's own word stands — and craze send
-// and plain craze new have no pre-check (nativeStartCheck is called by craze
-// new --wait alone).
+// and plain craze new have no pre-check. Only new --wait and a native
+// review attempt use the strict native startup check.
 func TestNewWaitPreCheckIsNativeAlone(t *testing.T) {
 	withFixtureCatalog(t, true)
 	spawns := noSpawns(t)
@@ -540,8 +540,8 @@ func TestNewWaitPreCheckIsNativeAlone(t *testing.T) {
 			callers = append(callers, name)
 		}
 	}
-	if !slices.Equal(callers, []string{"new_wait.go"}) {
-		t.Fatalf("nativeStartCheck is called from %q, want craze new --wait's new_wait.go alone", callers)
+	if !slices.Equal(callers, []string{"new_wait.go", "review_attempt.go"}) {
+		t.Fatalf("nativeStartCheck is called from %q, want only new --wait and native review attempts", callers)
 	}
 }
 

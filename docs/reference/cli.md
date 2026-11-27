@@ -2505,6 +2505,9 @@ not promise that re-running a turn repeats no side effects already performed.
 | `context_too_large` | The request does not fit the model's context window (on `claude`, an `invalid_request` saying the prompt is too long; on `codex`, `contextWindowExceeded`) | false |
 | `model_not_found` | The provider or agent does not serve the model: a 404, or on a key provider but Anthropic's a 400 or 403 whose code is `model_not_found`; on `claude`, its `model_not_found` | false |
 | `agent` | An ACP agent's error, or a turn stopped short (`max_tokens`, `refusal`, `max_turn_requests`). Retryable only when the agent's own data says `"retryable":true`, or when the agent's own turn refused the prompt | false unless flagged |
+| `stalled` | A review reached its inactivity deadline | true |
+| `empty` | A completed review returned only whitespace | true |
+| `dirty_tree` | The repository changed during a review attempt | false |
 | `stopped` | The session was stopped, or has ended: on a `cancelled` result with its [cause](#what-began-a-stop), or exit 1 for a target the stop did not find running, or a prompt refused because the session [ends with its turn](#ending-with-the-turn) | false |
 | `connection_lost` | The command lost its socket while the host is shown alive, or its state cannot be told: the turn then may have ended, and the message says which | true |
 | `host_exited` | The host's process is shown gone with no ending observed and no word of a stop | true |

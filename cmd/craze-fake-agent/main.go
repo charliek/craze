@@ -336,7 +336,7 @@ func main() {
 	}
 	if strings.HasPrefix(script, "codex-") {
 		switch script {
-		case "codex-basic", "codex-loggedout", "codex-apikey", "codex-custom-provider",
+		case "codex-basic", "codex-paid-endpoint", "codex-loggedout", "codex-apikey", "codex-custom-provider",
 			"codex-approval", "codex-filechange-approval", "codex-ask", "codex-ask-secret",
 			"codex-ask-freetext", "codex-hang", "codex-hang-interrupt", "codex-steer",
 			"codex-resume", "codex-resume-missing", "codex-child-thread", "codex-foreign",

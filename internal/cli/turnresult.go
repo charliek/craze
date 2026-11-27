@@ -40,6 +40,7 @@ const (
 
 // turnAccumulator is one turn's result, folded from its events.
 type turnAccumulator struct {
+	full bool // review keeps the complete final message for --out
 	// startAt and endAt are the started's time and the ending's.
 	startAt, endAt time.Time
 	// msg is the last assistant text entry: the run open now, or the last one
@@ -393,18 +394,25 @@ func (a *turnAccumulator) hold() {
 	if len(a.msg) == 0 {
 		return
 	}
-	tail, cut := messageTail(a.msg)
+	tail, cut := a.tail()
 	a.behind = append(a.behind, accRun{seq: a.msgSeq, text: tail, cut: a.msgCut || cut})
 }
 
 // compact cuts msg to its tail (messageTail) once it holds twice
 // resultMessageMax: so a long message is moved once a MiB, not once a delta.
 func (a *turnAccumulator) compact() {
-	if len(a.msg) <= 2*resultMessageMax {
+	if a.full || len(a.msg) <= 2*resultMessageMax {
 		return
 	}
 	tail, _ := messageTail(a.msg)
 	a.msg, a.msgCut = append(a.msg[:0], tail...), true
+}
+
+func (a *turnAccumulator) tail() ([]byte, bool) {
+	if a.full {
+		return a.msg, false
+	}
+	return messageTail(a.msg)
 }
 
 // messageTail is msg's last resultMessageMax bytes, from a rune's start, and
@@ -457,7 +465,7 @@ func (a *turnAccumulator) tool(t agent.ToolEvent) {
 
 // message is the last assistant text entry, and whether it lost its head.
 func (a *turnAccumulator) message() (string, bool) {
-	tail, cut := messageTail(a.msg)
+	tail, cut := a.tail()
 	return string(tail), a.msgCut || cut
 }
 

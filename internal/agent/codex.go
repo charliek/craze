@@ -514,6 +514,14 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 	if err != nil {
 		return true, fmt.Errorf("agent: codex account/read: %w", err)
 	}
+	if s.opts.SubscriptionOnly {
+		if err := checkCodexSubscription(rpcCtx, client, cwd, acctRes); err != nil {
+			return true, err
+		}
+		if s.opts.LoadSessionID != "" {
+			return true, newCodexErr(errkind.Config, "subscription-only requires a fresh Codex thread")
+		}
+	}
 	if acctRes != nil {
 		if acctRes.Account == nil && acctRes.RequiresOpenaiAuth {
 			return true, newCodexErr(errkind.Auth, "codex is not signed in (run `%s`, or `%s --with-api-key` for API-key auth)", codexLoginHint, codexLoginHint)
@@ -597,6 +605,9 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 		return true, newCodexErr(errkind.StartFailed, "codex thread/start returned no thread id")
 	}
 
+	if s.opts.SubscriptionOnly && tr.ModelProvider != "openai" {
+		return true, newCodexErr(errkind.Config, "paid_blocked: Codex selected another model provider")
+	}
 	// Capture returned workspaceWrite sandbox policy when available so agent-mode
 	// turns preserve user-configured writableRoots / networkAccess.
 	var savedWS *codexrpc.SandboxPolicy
