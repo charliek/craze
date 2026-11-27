@@ -2516,6 +2516,8 @@ not promise that re-running a turn repeats no side effects already performed.
 | `internal` | Anything else: craze's own failure, a stored session whose transcript cannot be loaded (damaged, or written by a newer craze) included | false |
 | `unknown` | An error from a host older than kinds, which claims nothing and so is not retryable; or a kind from a later craze this one does not know, which keeps the `retryable` that host sent | false unless sent |
 
+Review integrity checks include non-executable permission changes and tracked paths marked assume-unchanged or skip-worktree. The Git inspection uses the requested workspace and disables external content filters. Files above the hashing budget are compared using their type, permissions, size, modification time and inode.
+
 ### Usage errors under `--json`
 
 A command line that asks for `--json` and cannot run prints one object on stdout,

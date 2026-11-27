@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +21,9 @@ import (
 
 const reviewWhat = "craze review"
 const reviewTimedOut = "timed_out"
+
+// The provider-start budget is independent of the command-wide turn budget.
+var reviewStartupBudget = 35 * time.Second
 
 type attemptResult struct {
 	turn            *turnResult
@@ -161,14 +163,13 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	defer func() {
 		a.cleanupErr = reviewAfter(host, env)
 		if a.cleanupErr != nil {
-
 			a.turn.Status = statusFailed
 			a.turn.Error = kindError(a.cleanupErr.Error(), errkind.Internal)
 		} else if errors.Is(ctx.Err(), context.Canceled) {
 			a.turn = contextResult(ctx)
 		}
 	}()
-	start, stop := context.WithTimeout(ctx, 35*time.Second)
+	start, stop := context.WithTimeout(ctx, reviewStartupBudget)
 	defer stop()
 	if route.Provider == "native" {
 		if route.Provisional {
@@ -195,6 +196,9 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		if ctx.Err() != nil {
 			return attemptResult{turn: contextResult(ctx)}
 		}
+		if errors.Is(start.Err(), context.DeadlineExceeded) {
+			return attemptFailure(errkind.StartFailed, "review host did not start within its startup budget", true)
+		}
 		e := spawnExit(reviewWhat, err)
 		return attemptFailure(failureKind(e), e.Error(), true)
 	}
@@ -206,6 +210,9 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	if err != nil {
 		if ctx.Err() != nil {
 			return attemptResult{turn: contextResult(ctx)}
+		}
+		if errors.Is(start.Err(), context.DeadlineExceeded) || failureKind(err) == errkind.TimeoutBeforePrompt {
+			return attemptFailure(errkind.StartFailed, "review host did not become ready within its startup budget", true)
 		}
 		return attemptFailure(failureKind(err), err.Error(), true)
 	}
@@ -227,10 +234,10 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	defer stopSignal()
 	wctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	res, wf := waitTurn(wctx, conn, waitStart{submit: func(ctx context.Context, id uint64) (waitTarget, error) {
+	res, wf := waitTurn(wctx, conn, waitStart{submitContext: ctx, submit: func(ctx context.Context, id uint64) (waitTarget, error) {
 		timer.arm()
 		return g.run(ctx, id)
-	}}, waitOptions{sigs: sigs, timeout: timer.timeout, progress: timer.progress, fullMessage: true})
+	}}, waitOptions{sigs: sigs, timeout: timer.timeout, progress: timer.progress, progressPrompt: prompt, fullMessage: true})
 	if wf != nil {
 		fate, _ := g.close()
 		a = attemptFailure(wf.kind, wf.msg, fate == promptUnsent || fate == promptRefused)
@@ -268,41 +275,28 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		}
 		done()
 	}
-	if a.turn.Status == statusCompleted && strings.TrimSpace(a.turn.message()) == "" {
-		a.turn.Status = statusFailed
-		a.turn.Error = kindError("review completed without a message", errkind.Empty)
-	}
+	finishReviewMessage(a.turn)
 	return a
+}
+
+func finishReviewMessage(turn *turnResult) {
+	if turn.Status == statusCompleted && turn.MessageCut {
+		turn.Status = statusFailed
+		turn.Error = kindError("the host could not recover the complete review after reconnecting", errkind.Unobserved)
+	}
+	if turn.Status == statusCompleted && strings.TrimSpace(turn.message()) == "" {
+		turn.Status = statusFailed
+		turn.Error = kindError("review completed without a message", errkind.Empty)
+	}
 }
 
 // Collect the host's agent and shell groups while it is alive. The host
 // can retire its own record during shutdown, so verify these independently.
-func observedGroups(path string) ([]int, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var ids []int
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		g, ok := hostspawn.ParseAgentGroup(sc.Text())
-		if !ok || len(ids) >= hostspawn.AgentGroupsMax {
-			return nil, errors.New("could not verify the host process group record")
-		}
-		ids = append(ids, g.PGID)
-	}
-	return ids, sc.Err()
-}
-
 func reviewAfter(h reviewHost, env rundir.Env) error {
 	if h.child == nil {
 		return nil
 	}
-	ids, obsErr := observedGroups(h.child.Groups())
+	ids, obsErr := hostspawn.ObservedGroups(h.child.Groups())
 	if h.entry.Socket != "" && !h.child.Exited() {
 		// session.stop closes admission and cancels the active turn.
 		_ = sendStopBounded(h.entry, reviewWhat)
@@ -312,7 +306,7 @@ func reviewAfter(h reviewHost, env rundir.Env) error {
 	}
 	grace, cancel := context.WithTimeout(context.Background(), exitAfterTurnWait)
 	defer cancel()
-	more, err := observedGroups(h.child.Groups())
+	more, err := hostspawn.ObservedGroups(h.child.Groups())
 	hostspawn.ReapHost(grace, env, h.id, nil)
 	if obsErr != nil || err != nil {
 		return errors.New("could not read review process groups")

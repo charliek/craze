@@ -131,11 +131,15 @@ func TestBundleCapAndIndexMismatch(t *testing.T) {
 func TestBundleDisablesGitConverters(t *testing.T) {
 	dir := newRepo(t)
 	put(t, dir, "a", "old\n")
-	put(t, dir, ".gitattributes", "a diff=poison\n")
+	put(t, dir, ".gitattributes", "a diff=poison filter=example\n")
 	commit(t, dir)
 	runGit(t, dir, "config", "diff.poison.textconv", "false")
 	runGit(t, dir, "config", "diff.external", "false")
+	runGit(t, dir, "config", "filter.example.required", "true")
+	runGit(t, dir, "config", "filter.example.clean", "false")
+	runGit(t, dir, "config", "filter.example.process", "false")
 	put(t, dir, "a", "new\n")
+	_ = snap(t, dir)
 	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
 	if err != nil || !strings.Contains(b.Prompt, "+new") {
 		t.Fatal(b, err)
@@ -270,6 +274,46 @@ func TestReviewBareRepositoryAndUnbornBranch(t *testing.T) {
 	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "unchanged contents")
 	b, err := Build(t.Context(), dir, "HEAD^", "", 512<<10)
 	if err != nil || !strings.Contains(b.Prompt, "No changes since HEAD^.") || !strings.Contains(b.Prompt, "unchanged contents") {
+		t.Fatal(b, err)
+	}
+}
+
+func TestIntegrityOfCleanTrackedPaths(t *testing.T) {
+	dir := newRepo(t)
+	put(t, dir, "file", "old")
+	commit(t, dir)
+	before := snap(t, dir)
+	if err := os.Chmod(filepath.Join(dir, "file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(Changes(before, snap(t, dir)), "file") {
+		t.Fatal("missed non-executable mode change")
+	}
+	before = snap(t, dir)
+	runGit(t, dir, "update-index", "--assume-unchanged", "file")
+	if !slices.Contains(Changes(before, snap(t, dir)), "index") {
+		t.Fatal("missed index flag")
+	}
+	before = snap(t, dir)
+	put(t, dir, "file", "new")
+	if !slices.Contains(Changes(before, snap(t, dir)), "file") {
+		t.Fatal("missed assume-unchanged content")
+	}
+}
+
+func TestReviewIgnoresInheritedRepoSelection(t *testing.T) {
+	dir, other := newRepo(t), newRepo(t)
+	commit(t, dir)
+	commit(t, other)
+	put(t, dir, "selected", "intended workspace")
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
+	if got := snap(t, dir).Root; got != dir {
+		t.Fatal(got)
+	}
+	b, err := Build(t.Context(), dir, "HEAD", "", 512<<10)
+	if err != nil || !strings.Contains(b.Prompt, "intended workspace") {
 		t.Fatal(b, err)
 	}
 }

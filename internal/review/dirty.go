@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ type Snapshot struct {
 	Root       string
 	Incomplete bool
 	state      map[string]string
+	digests    map[string]string
 }
 type fileScan struct {
 	ctx           context.Context
@@ -96,10 +98,12 @@ func (s *fileScan) record(path string) error {
 		}
 	case !fi.Mode().IsRegular():
 		s.snapshot.state[name] = prefix
-	case fi.Size() > hashFileLimit || s.hashes >= hashFileCount || int64(s.bytes)+fi.Size() > hashTotalLimit:
-		s.snapshot.Incomplete = true
-		s.snapshot.state[name] = fmt.Sprintf("%s%d %d %d", prefix, fi.Size(), fi.ModTime().UnixNano(), fi.Sys().(*syscall.Stat_t).Ino)
 	default:
+		s.snapshot.state[name] = fmt.Sprintf("%s%d %d %d", prefix, fi.Size(), fi.ModTime().UnixNano(), fi.Sys().(*syscall.Stat_t).Ino)
+		if fi.Size() > hashFileLimit || s.hashes >= hashFileCount || int64(s.bytes)+fi.Size() > hashTotalLimit {
+			s.snapshot.Incomplete = true
+			return nil
+		}
 		f, e := s.root.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if e != nil {
 			return e
@@ -122,7 +126,7 @@ func (s *fileScan) record(path string) error {
 		}
 		s.bytes += int(n)
 		s.hashes++
-		s.snapshot.state[name] = fmt.Sprintf("%s%x", prefix, h.Sum(nil))
+		s.snapshot.digests[name] = hex.EncodeToString(h.Sum(nil))
 	}
 	return nil
 }
@@ -148,7 +152,7 @@ func Inspect(ctx context.Context, dir string) (Snapshot, error) {
 		}
 		return Snapshot{}, err
 	}
-	s := Snapshot{Root: root, state: map[string]string{}}
+	s := Snapshot{Root: root, state: map[string]string{}, digests: map[string]string{}}
 	head, err := resolveOID(ctx, root, "HEAD")
 	if err != nil && !unborn(ctx, root) {
 		return Snapshot{}, err
@@ -160,7 +164,6 @@ func Inspect(ctx context.Context, dir string) (Snapshot, error) {
 	}{
 		{"refs", []string{"for-each-ref", "--format=%(refname) %(objectname)"}},
 		{"stash", []string{"stash", "list", "--format=%H%x00%gs"}},
-		{"index", []string{"ls-files", "--stage", "-z"}},
 	} {
 		b, e := gitData(ctx, root, entry.args...)
 		if e != nil {
@@ -200,6 +203,25 @@ func Inspect(ctx context.Context, dir string) (Snapshot, error) {
 			return Snapshot{}, e
 		}
 	}
+	// Git status omits clean tracked modes and paths marked assume-unchanged
+	// or skip-worktree. Hash the index flags and inspect those paths as well.
+	index, err := gitData(ctx, root, "ls-files", "-v", "--stage", "-z")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.state["index"] = fmt.Sprintf("%x", sha256.Sum256(index))
+	for _, entry := range bytes.Split(index, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		_, path, ok := bytes.Cut(entry, []byte{'\t'})
+		if !ok {
+			return Snapshot{}, errors.New("invalid git index entry")
+		}
+		if err := scan.record(string(path)); err != nil {
+			return Snapshot{}, err
+		}
+	}
 	return s, nil
 }
 
@@ -207,7 +229,8 @@ func Changes(before, after Snapshot) []string {
 	changed := map[string]bool{}
 	compare := func(left, right Snapshot) {
 		for k, val := range left.state {
-			if other, ok := right.state[k]; !ok || other != val {
+			leftHash, rightHash := left.digests[k], right.digests[k]
+			if other, ok := right.state[k]; !ok || other != val || leftHash != "" && rightHash != "" && leftHash != rightHash {
 				label, isFile := strings.CutPrefix(k, "file ")
 				if !isFile {
 					label = strings.TrimPrefix(k, "status ")

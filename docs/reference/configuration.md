@@ -975,9 +975,8 @@ refused.
 ### What craze sets
 
 - **The command.** Under craze's default `--force`, `agy acp
-  --dangerously-skip-permissions`; under `--no-force`, `agy acp`. With the flag,
-  `agy` stops asking before `run_command`; without it a permission card shows
-  for each shell command (the options are allow once and deny). Questions and
+  --dangerously-skip-permissions`; under `--no-force`, `agy acp`. The installed agent controls permission requests. In 1.5.18, shell commands and
+  file edits can run without a permission card even under `--no-force`. Questions and
   plan mode behave the same either way. craze adds no `--process-per-session`,
   no `--gemini-dir` and no environment but `CRAZE_SESSION_PROVIDER=antigravity`.
 - **Models.** `agy` lists each model several times, once per effort

@@ -200,8 +200,9 @@ func dialWait(ctx context.Context, e rundir.Entry, sessionID, what string, curso
 type waitOptions struct {
 	// progress observes a delivered stream event once, before buffering, so
 	// silent submits and tool calls have independent inactivity deadlines.
-	progress    func(incarnation string, seq uint64)
-	fullMessage bool
+	progress       func(incarnation string, seq uint64)
+	progressPrompt string
+	fullMessage    bool
 	// timeout fires at --timeout's end, counted from the command's start
 	// (timeoutAt); nil waits as long as the turn runs. A channel, so a test
 	// fires it when it means to.
@@ -217,6 +218,8 @@ type waitOptions struct {
 // waitStart is where one wait starts. At most one of from and submit is set;
 // with neither, the wait is plain: the session's current turn, or its last.
 type waitStart struct {
+	// submitContext bounds proof of identity and transmission independently of settlement.
+	submitContext context.Context
 	// from is wait --from's handle: the connection is attached at its cursor,
 	// and the wait follows exactly its target.
 	from *turnHandle
@@ -479,9 +482,13 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 	}()
 	items := make(chan pumped)
 	go pumpStream(pctx, w.conn.st, items)
+	activity := reviewProgress{prompt: w.opts.progressPrompt}
 	take := func(p pumped) {
 		if w.opts.progress != nil && p.err == nil && p.it.Kind == remote.KindEvent {
-			w.opts.progress(w.inc, p.it.Seq)
+			ev, err := agent.DecodeEvent(string(p.it.Body))
+			if err == nil && activity.accepts(w.target, ev) {
+				w.opts.progress(w.inc, p.it.Seq)
+			}
 		}
 		if w.buffering() {
 			// Kept, the stream's end and loss included, until the reply
@@ -924,6 +931,9 @@ func (w *turnWaiter) attached(ctx context.Context, r *protocol.AttachResult) {
 			}
 		}
 		ch, submit, base := make(chan submitAnswer, 1), w.start.submit, w.base
+		if w.start.submitContext != nil {
+			base = w.start.submitContext
+		}
 		c, sid, inc := w.conn.c, w.session.id, w.inc
 		w.submitted = ch
 		go func() {
@@ -1439,7 +1449,16 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 		w.acc.start(snap.Turn.At)
 	}
 	seedFromSnapshot(w.acc, snap, w.target.id)
+	if w.acc.full && w.acc.msgSeq == 0 && len(snap.Main.Omitted) > 0 {
+		// The snapshot window may have omitted the final assistant entry.
+		// Only a later, complete assistant run can establish the full answer.
+		w.acc.msgCut = true
+	}
 	if same {
+		if w.acc.full && w.acc.msgCut && snap.Seq == prev.seq && w.acc.msgSeq == prev.msgSeq && !prev.msgCut {
+			// The snapshot is at the exact stream position already observed.
+			w.acc.msg, w.acc.msgCut = prev.msg, false
+		}
 		// The web tally the waiter folded is kept when it is newer than the
 		// snapshot's (the seq rule): it never is after a reconcile's
 		// snapshot, which the rule makes a property, not an assumption.

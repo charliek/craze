@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,8 +42,36 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 func git(ctx context.Context, dir string, maxSize int, args ...string) ([]byte, bool, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "color.ui=false", "-c", "core.quotePath=true", "-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	options := []string{"-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "color.ui=false", "-c", "core.quotePath=true", "-C", dir}
+	// Git runs configured clean/process filters even with --no-textconv and
+	// --no-ext-diff. Read only their names, then disable every driver for
+	// commands that consult working files. Submodules contribute gitlinks.
+	if args[0] == "status" || args[0] == "diff-index" {
+		names, cut, err := git(ctx, dir, metadataLimit, "config", "--null", "--name-only", "--get-regexp", `^filter\..*\.(clean|process|smudge|required)$`)
+		var exit *exec.ExitError
+		if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
+			return nil, false, err
+		}
+		if cut {
+			return nil, false, errors.New("git filter configuration exceeds the review limit")
+		}
+		for _, key := range bytes.Split(names, []byte{0}) {
+			if len(key) == 0 {
+				continue
+			}
+			value := ""
+			if bytes.HasSuffix(key, []byte(".required")) {
+				value = "false"
+			}
+			options = append(options, "-c", string(key)+"="+value)
+		}
+		args = slices.Insert(args, 1, "--ignore-submodules=dirty")
+	}
+	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
+	// Respect the requested workspace, including when invoked from a hook
+	// that exports an alternate worktree, index or config.
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "GIT_") })
+	cmd.Env = append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	cmd.WaitDelay = time.Second
 	out := &boundedBuffer{limit: maxSize}
 	diag := &boundedBuffer{limit: 1024}
