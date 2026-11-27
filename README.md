@@ -64,7 +64,9 @@ and want one fast, scriptable front end for several of them.
   [Side questions](docs/reference/tui.md#side-questions-btw)
 - **`/effort`**: change the current model's effort in a session, from a picker
   or as `/effort high`. [Effort](docs/reference/tui.md#effort)
-- **Themes**: seven presets, set from `Ctrl+G` or `/theme`.
+- **Transcript layouts** group related tool calls. Use `F2` to change layout or
+  `F4` to inspect a call. [Transcript controls](docs/reference/tui.md#transcript-layouts)
+- **Themes** include eight presets and a live preview. Open it with `Ctrl+G` or `/theme`.
   [Configuration](docs/reference/configuration.md)
 - **`craze prompt`**: one headless turn, optionally as JSON.
   [`craze prompt`](docs/reference/cli.md#craze-prompt)

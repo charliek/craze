@@ -80,6 +80,8 @@ func (m Model) helpKeyLines() []helpLine {
 	out = append(out,
 		helpLine{key: "ctrl+g", desc: "theme dialog"},
 		helpLine{key: "ctrl+o", desc: "expand or collapse transcript detail"},
+		helpLine{key: "f2", desc: "cycle grouped, compact, classic transcript"},
+		helpLine{key: "f4", desc: "inspect rows: ↑↓ select, enter toggles, esc back"},
 	)
 	if m.showSubagents() {
 		out = append(out,

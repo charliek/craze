@@ -1524,7 +1524,7 @@ func frameModelSpan(t *testing.T, cols, rows int) (x, y int) {
 }
 
 // TestFrameGoldenThemeDialog100x30 runs the picker through the real program in
-// its V3 home, the shared dialog frame: the names-only list, and the palette
+// its V3 home, the shared dialog frame: the name list and sample, and the palette
 // changing under the cursor before Enter has been pressed.
 func TestFrameGoldenThemeDialog100x30(t *testing.T) {
 	got, raw := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g>")
@@ -1534,7 +1534,7 @@ func TestFrameGoldenThemeDialog100x30(t *testing.T) {
 			t.Fatalf("the picker should list %q:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(raw, ansiFG("#e8a33d")) {
+	if !strings.Contains(raw, ansiFG("#efb766")) {
 		t.Fatal("the craze-dark accent is missing from the raw frame")
 	}
 
@@ -1544,13 +1544,13 @@ func TestFrameGoldenThemeDialog100x30(t *testing.T) {
 	if !strings.Contains(moved, ansiFG("#fabd2f")) {
 		t.Fatal("moving the cursor did not repaint the frame in gruvbox")
 	}
-	if strings.Contains(moved, ansiFG("#e8a33d")) {
+	if strings.Contains(moved, ansiFG("#efb766")) {
 		t.Fatal("the craze-dark accent survived the live preview")
 	}
 
 	// Esc puts the palette back.
 	_, reverted := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g><down><esc>")
-	if !strings.Contains(reverted, ansiFG("#e8a33d")) {
+	if !strings.Contains(reverted, ansiFG("#efb766")) {
 		t.Fatal("esc did not restore the craze-dark accent")
 	}
 }

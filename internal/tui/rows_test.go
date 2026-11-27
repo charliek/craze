@@ -108,7 +108,7 @@ func checkPaint(m *Model, tr *pane) error {
 		switch {
 		case s.e != e:
 			return fmt.Errorf("span %d shows another entry than row %d", j, j-off)
-		case !sameRows(s.rows, e.rendered):
+		case s.groupHead == nil && !sameRows(s.rows, e.rendered):
 			return fmt.Errorf("span %d does not hold row %d's rendered rows", j, j-off)
 		case e.dirty || e.renderedFor != key:
 			return fmt.Errorf("row %d is still dirty after the paint", j-off)
@@ -478,6 +478,9 @@ func TestIncrementalAssemblyMatchesAFullRebuild(t *testing.T) {
 	const window = 16
 	for seed := int64(1); seed <= 6; seed++ {
 		s := newPaneScript(t, seed)
+		// Compare the historical ungrouped layout with the independent bubbles oracle.
+		s.m.transcriptLayout = layoutClassic
+		s.m.refreshViewport()
 		var olds []held
 		for i := 0; i < steps; i++ {
 			did := s.step()

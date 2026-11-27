@@ -703,7 +703,7 @@ func (m Model) queueRowsView() string {
 	}
 	more := len(m.queueItems()) - len(items)
 	sel := -1
-	if m.queueFocus {
+	if m.queueFocus && !m.inspector.active {
 		sel = min(max(m.queueSel, 0), len(items)-1)
 	}
 	rows := make([]string, 0, len(items)+1)
@@ -748,7 +748,7 @@ func (m Model) queueRow(i int, p agent.QueuedPrompt, selected, hovered bool) str
 		_, shown := agent.SplitShellContext(p.Text)
 		text = clampWidth(sanitizeLine(shown), avail)
 	}
-	segs := []seg{gutter, {num, styleFG(m.theme.ToolKind)}}
+	segs := []seg{gutter, {num, styleFG(m.theme.Accent)}}
 	used := prefix
 	if text != "" {
 		segs = append(segs, seg{" " + text, textStyle})

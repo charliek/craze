@@ -29,6 +29,9 @@ terminal: `craze ps` lists them, `craze attach` and `craze -c` rejoin one,
 
 ## What it does
 
+- **Grouped tool calls.** Open individual groups with the keyboard and preview
+  eight terminal themes, including high contrast. [Transcript layouts](reference/tui.md#transcript-layouts)
+
 - **A TUI over five providers.** `cursor`, `grok`, `claude`, `antigravity` and the built-in
   `native` agent share one set of keys, cards and slash commands
   ([TUI reference](reference/tui.md)).

@@ -58,6 +58,7 @@ const (
 // whose key still matches is reused verbatim, so a stream chunk only re-renders
 // the entry it landed in.
 type renderKey struct {
+	layout   transcriptLayout
 	width    int
 	theme    string
 	expanded bool
@@ -68,10 +69,12 @@ type renderKey struct {
 // from the shared model's entry it shows (show); a local row's is the client's
 // own.
 type entry struct {
-	kind entryKind
-	text string
-	tool *agent.ToolEvent
-	plan *agent.PlanEvent
+	// detailOpen is the local disclosure choice for this pane entry.
+	detailOpen bool
+	kind       entryKind
+	text       string
+	tool       *agent.ToolEvent
+	plan       *agent.PlanEvent
 	// shell is an entryShell's own state; see shellEntry. It is a pointer so
 	// the run that finishes minutes later settles the row it opened, whatever
 	// the entry slice has done in between.
@@ -117,8 +120,9 @@ type entry struct {
 	// line break is split into the lines it draws), and is never written to
 	// once it is set: a render makes a new slice, which is what lets a paint's
 	// rowIndex hold it rather than copy it.
-	rendered    []string
-	renderedFor renderKey
+	rendered       []string
+	renderedFor    renderKey
+	renderedDetail bool
 	// dirty marks content that changed under an unchanged key.
 	dirty bool
 	// plain is rendered as the selection reads it, worked out the first time
@@ -127,7 +131,7 @@ type entry struct {
 }
 
 func (m Model) renderKey() renderKey {
-	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
+	return renderKey{layout: m.transcriptLayout, width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
 // kindOf is the row kind a shared entry draws as.
@@ -343,12 +347,8 @@ func (m *Model) storeViewport(tr *pane) {
 // storeViewport left it: at the bottom, or at its offset. setViewportContent
 // stores the viewport back into tr, so the saved place is read before it.
 func (m *Model) restoreViewport(tr *pane) {
-	stick, off := tr.atBottom, tr.yOffset
-	m.setViewportContent(stick)
-	if !stick {
-		m.vp.SetYOffset(off)
-		m.storeViewport(tr)
-	}
+	m.vp.YOffset = tr.yOffset
+	m.setViewportContent(tr.atBottom)
 }
 
 // setViewportContent re-renders the dirty entries of the drawn transcript,
@@ -371,6 +371,7 @@ func (m *Model) setViewportContent(stick bool) {
 	// The canonical rows: exactly what the viewport is about to hold, which
 	// the hit test, the highlight and the copy read too.
 	tr.work.paints++
+	previous, offset := tr.drawn, m.vp.YOffset
 	tr.drawn = m.paint(tr)
 	if paintHook != nil {
 		paintHook(m, tr)
@@ -378,6 +379,8 @@ func (m *Model) setViewportContent(stick bool) {
 	m.vp.setRows(tr.drawn)
 	if stick {
 		m.vp.GotoBottom()
+	} else if previous != nil && previous != tr.drawn && tr.drawn.disclosureChanged && offset >= 0 && offset < previous.total {
+		m.vp.SetYOffset(tr.drawn.anchor(previous, offset))
 	}
 	tr.dirty = false
 	m.storeViewport(tr)
@@ -831,7 +834,11 @@ func (m *Model) renderTool(tr *pane, tool *agent.ToolEvent, key renderKey) []str
 	case "read":
 		return m.readRows(tr, tool, key)
 	}
-	return m.otherRows(tool, key.width)
+	rows := m.otherRows(tool, key.width)
+	if tool.Kind == "list" || tool.Kind == "search" {
+		return m.lookupOutput(rows, tool, key)
+	}
+	return rows
 }
 
 // toolRow renders "<glyph> <label>  <target>  <suffix>". The target is clamped
@@ -882,10 +889,22 @@ func (m *Model) dimRow(text string, width int) string {
 
 func (m *Model) readRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	rows := []string{m.toolHead(tool, "read", m.toolTarget(tr, tool), "", styleFG(m.theme.Dim), key.width)}
-	if !key.expanded || tool.Output == nil {
+	return m.lookupOutput(rows, tool, key)
+}
+
+func (m *Model) lookupOutput(rows []string, tool *agent.ToolEvent, key renderKey) []string {
+	if tool.Output == nil {
 		return rows
 	}
-	return append(rows, m.outputRows(tool.Output.Content, key.width)...)
+	if key.expanded {
+		return append(rows, m.outputRows(tool.Output.Content, key.width)...)
+	}
+	if tool.Status == "failed" && key.layout != layoutClassic {
+		if diagnostic := firstNonEmpty(tool.Output.Content); diagnostic != "" {
+			return append(rows, m.dimRow("  "+plainLine(diagnostic), key.width))
+		}
+	}
+	return rows
 }
 
 func (m *Model) editRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
@@ -977,8 +996,10 @@ func (m *Model) execRows(t *agent.ToolEvent, key renderKey) []string {
 		return append(rows, m.outputRows(t.Output.Stderr, key.width)...)
 	}
 	head := t.Output.StdoutHead
-	if failed {
-		head = t.Output.StderrHead
+	if failed || t.Status == "failed" {
+		if stderr := firstNonEmpty(t.Output.StderrHead); stderr != "" {
+			head = stderr
+		}
 	}
 	if line := firstNonEmpty(head); line != "" {
 		rows = append(rows, m.dimRow("  "+plainLine(line), key.width))

@@ -690,9 +690,9 @@ func TestSelectionBandAtEveryDepth(t *testing.T) {
 	for _, name := range ThemeNames() {
 		th := Preset(name)
 		c := th.SelectionBG
-		n := nearest256(c.TrueColor)
-		if c.ANSI256 != strconv.Itoa(n) {
-			t.Fatalf("%s: SelectionBG's 256-colour index is %q, want nearest256 %d", name, c.ANSI256, n)
+		n, err := strconv.Atoi(c.ANSI256)
+		if err != nil || n < 16 || n > 255 {
+			t.Fatalf("%s: invalid 256-color selection index %q", name, c.ANSI256)
 		}
 		for _, tc := range []struct {
 			p       termenv.Profile

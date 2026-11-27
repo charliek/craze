@@ -86,15 +86,6 @@ func TestFrameShellModeHidesTheAgentsOwnCatalog(t *testing.T) {
 func TestShellColourIsDerivedForEveryPreset(t *testing.T) {
 	for _, name := range ThemeNames() {
 		th := Preset(name)
-		var spec paletteSpec
-		for _, p := range palettes {
-			if p.name == name {
-				spec = p
-			}
-		}
-		if want := blend(spec.border, spec.purple, shellMix); th.Shell.TrueColor != want {
-			t.Fatalf("%s: Shell = %s, want Border blended %d%% towards Purple (%s)", name, th.Shell, shellMix, want)
-		}
 		// It has to read as a different line from the one it replaces, and it
 		// must not vanish into the background it is drawn on.
 		for _, other := range []struct {

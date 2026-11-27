@@ -28,7 +28,7 @@ An explicit `--theme` beats the config file, which beats `craze-dark`.
 
 ## Presets
 
-Seven presets. While craze runs it sets your terminal's own default
+Craze offers eight presets. While it runs it sets your terminal's own default
 background and text colours to the theme's and restores them when it exits;
 `background = false` or `--no-background` leaves them alone — see [Terminal
 colours](#terminal-colours).
@@ -42,13 +42,15 @@ colours](#terminal-colours).
 | `light` | |
 | `catppuccin` | |
 | `gruvbox` | |
+| `high-contrast` | Near-black background, brighter metadata and status text |
 
 `craze` and `crazedark` are aliases for `craze-dark`; `crazelight` is an alias
 for `craze-light`.
 
-`Ctrl+G` or `/theme` opens a names-only picker that repaints the live screen as
-the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one
-that was active when the picker opened. `/theme <name>` sets and saves one
+`Ctrl+G` or `/theme` opens a picker that repaints the live screen as
+the cursor moves. When space permits, a sample below the names shows a prompt,
+an exploration summary, a failure and a diff. `Enter` saves the selected theme.
+`Esc` restores the theme that was active when the picker opened. `/theme <name>` sets and saves one
 directly.
 
 ## The craze directory

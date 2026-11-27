@@ -316,7 +316,7 @@ func (m *Model) moveAgent(delta int) {
 // keyboard is on the rows, or while a sub-agent is being viewed (its row is
 // the one the view came from).
 func (m Model) rowsFocused() bool {
-	return m.agentFocus || m.viewing != ""
+	return (m.agentFocus && !m.inspector.active) || m.viewing != ""
 }
 
 func (m *Model) selectAgent(i int) {

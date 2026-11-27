@@ -96,7 +96,7 @@ func TestThemePrecedence(t *testing.T) {
 // always has.
 func TestUnknownThemeFlagIsAUsageError(t *testing.T) {
 	crazeHome(t)
-	want := `craze: unknown theme "nosuch" (want craze-dark, craze-light, tokyo-night, dark, light, catppuccin, or gruvbox)`
+	want := `craze: unknown theme "nosuch" (want craze-dark, craze-light, tokyo-night, dark, light, catppuccin, gruvbox, or high-contrast)`
 	cmd, f := parseTUIFlags(t, "--theme", "nosuch")
 	var ee *exitError
 	if err := runTUI(cmd, f, hostEnv{}); !errors.As(err, &ee) || ee.code != 2 || ee.msg != want {

@@ -108,11 +108,13 @@ func (m Model) withSession(seed sessionSeed) Model {
 		ready:  m.ready,
 		// Ctrl+O's detail toggle is a preference of the user's, like the
 		// theme, not a fact of the session.
-		expanded:     m.expanded,
-		quitting:     m.quitting,
-		mouseEnabled: m.mouseEnabled,
-		lay:          m.lay,
-		layouts:      m.layouts,
+		expanded:             m.expanded,
+		transcriptLayout:     m.transcriptLayout,
+		showTranscriptLayout: m.showTranscriptLayout,
+		quitting:             m.quitting,
+		mouseEnabled:         m.mouseEnabled,
+		lay:                  m.lay,
+		layouts:              m.layouts,
 		// The terminal's motion mode and the timers in flight are the
 		// terminal's and the program's: a switch changes neither.
 		mouseAll:        m.mouseAll,

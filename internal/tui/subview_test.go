@@ -847,11 +847,11 @@ func TestSpinnerClockAfterEndTurnIsTheSubagents(t *testing.T) {
 	m.status = statusWorking
 	m.turnStart = now.Add(-5 * time.Minute)
 	m.agentStart["task-1"] = now.Add(-45 * time.Second)
-	if v := m.spinnerView(); !strings.Contains(v, "5m") || !strings.Contains(v, "esc to interrupt") {
+	if v := plain(m.spinnerView()); !strings.Contains(v, "5m") || !strings.Contains(v, "esc to interrupt") {
 		t.Fatalf("while working the spinner shows the turn's clock:\n%s", v)
 	}
 	m.status = statusIdle
-	v := m.spinnerView()
+	v := plain(m.spinnerView())
 	if v == "" {
 		t.Fatal("a running sub-agent keeps the spinner up after end_turn")
 	}

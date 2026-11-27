@@ -212,7 +212,7 @@ func wordAt(s string, col int) (lo, hi int, ok bool) {
 // the cached render rather than through it, and selecting re-renders nothing.
 func (m Model) transcriptView() string {
 	if m.sel.empty() || m.vp.Height <= 0 || m.width <= 0 {
-		return m.vp.View()
+		return m.inspectedViewport()
 	}
 	from, to := m.sel.bounds()
 	bg := selectionSeq(lipgloss.ColorProfile(), m.theme.SelectionBG)

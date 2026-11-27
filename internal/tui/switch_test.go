@@ -1291,7 +1291,7 @@ func TestFinishRunClosesARetiredBackend(t *testing.T) {
 // named in one of them.
 var (
 	tuiFields = []string{
-		"theme", "vp", "input", "yolo", "width", "height", "ready", "expanded", "quitting", "mouseEnabled",
+		"theme", "vp", "input", "yolo", "width", "height", "ready", "expanded", "transcriptLayout", "showTranscriptLayout", "quitting", "mouseEnabled",
 		"lay", "layouts", "mouseAll", "tickGen", "tickLive", "tickFast", "spinFrame", "hiddenRetryLive",
 		"clock", "paintEveryEvent", "frozen", "frameStart", "terminalTitle", "lastTitle", "term", "shell",
 		"owner", "exit",
@@ -1308,7 +1308,7 @@ var (
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
 		"branch", "sessStart", "hostPerm", "hostStart", "shared", "foldIn", "main", "subs", "viewing",
-		"tombstone", "started", "replaying", "replayFolded", "paintNow", "sel", "pressed", "clickPos", "clickAt",
+		"tombstone", "started", "replaying", "replayFolded", "paintNow", "sel", "inspector", "pressed", "clickPos", "clickAt",
 		"clicks", "copyNote",
 		"copyUntil", "cards", "cardMask", "cardMasking", "hiddenRetry", "snap", "queue",
 		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg", "edlg",
