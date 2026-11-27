@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/agentproc"
 	"github.com/charliek/craze/internal/errkind"
 	"github.com/charliek/craze/internal/harness"
 )
@@ -60,7 +61,7 @@ var ErrForeignTurnRequeue = fmt.Errorf("%w; the message waits for it in the queu
 // channel — not that Close failed. Match it with errors.Is; internal/tui
 // imports this package rather than internal/acp directly, which make lint
 // forbids (Makefile's acp-import rule).
-var ErrAgentExited = acp.ErrAgentExited
+var ErrAgentExited = agentproc.ErrAgentExited
 
 // ErrBadCatalog answers a settings change whose reply could not be read: its
 // configOptions is not a list, or holds a member that is not an option (plan

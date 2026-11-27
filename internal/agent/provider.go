@@ -11,6 +11,15 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
+// TransportKind identifies how a provider runs its agent backend (Plan 054 § B1).
+type TransportKind string
+
+const (
+	TransportACP       TransportKind = "acp"
+	TransportCodex     TransportKind = "codex"
+	TransportInProcess TransportKind = "inprocess"
+)
+
 // ModeKind is what craze takes a mode to mean, independent of the id the agent
 // spells it with. ModeUnknown is the zero value on purpose: a mode nobody
 // recognises — including a lookup in an empty table — must never read as one
@@ -423,7 +432,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders = []Provider{}
+	hiddenProviders = []Provider{CodexProvider()}
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are
@@ -535,8 +544,21 @@ func (p Provider) Hidden() bool { return p.hidden }
 func (p Provider) Resumable() bool { return p.resumable }
 
 // InProcess reports whether craze runs p itself rather than spawning an agent
-// binary over ACP.
+// binary over ACP or Codex app-server.
 func (p Provider) InProcess() bool { return p.inProcess }
+
+// Transport reports which transport protocol p speaks (TransportACP,
+// TransportCodex, or TransportInProcess).
+func (p Provider) Transport() TransportKind {
+	switch {
+	case p.inProcess:
+		return TransportInProcess
+	case p.isCodex():
+		return TransportCodex
+	default:
+		return TransportACP
+	}
+}
 
 // Aside reports whether p's sessions answer side questions (/btw, plan 040
 // §3.3): native's do (its session's Asides is always true); grok's

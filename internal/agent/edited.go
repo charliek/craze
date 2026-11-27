@@ -73,6 +73,11 @@ var editCalls = map[string]editCall{
 		rawPathKeys:      []string{"Path"},
 		antigravityBrain: true,
 	},
+	// Codex fileChange items map to ToolName "apply_patch", Kind "edit" (plan 054 § D2).
+	codexName: {
+		tools: []string{"apply_patch"},
+		kinds: []string{"edit"},
+	},
 }
 
 // rawInputPaths is every string value rawInput holds under keys.

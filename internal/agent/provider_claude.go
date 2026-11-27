@@ -140,7 +140,7 @@ func (p Provider) CycleModes() []string {
 // the transcript) would otherwise beat the model the user picked in craze;
 // and antigravity's, whose load resets both to agy's default (plan 053 § C4,
 // restoreRecorded).
-func (p Provider) RecordsModel() bool { return p.isClaude() || p.isAntigravity() }
+func (p Provider) RecordsModel() bool { return p.isClaude() || p.isAntigravity() || p.isCodex() }
 
 // RefusesFast reports whether p refuses its fast setting being turned on (plan
 // 052 § D3): claude's fast mode bills as extra usage on a Claude plan.
@@ -286,6 +286,9 @@ func (p Provider) spawnEnv(base []string, companion, dir string) []string {
 	for _, kv := range base {
 		k, _, _ := strings.Cut(kv, "=")
 		if p.isClaude() && claudeStripped(k) {
+			continue
+		}
+		if p.isCodex() && codexStripped(k) {
 			continue
 		}
 		out = append(out, kv)

@@ -622,7 +622,7 @@ func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
 }
 
 func TestProviderPickerCtrlDQuitsWithoutSession(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	called := 0
 	isolateSkillsHome(t)
 	m := New(Config{
@@ -657,13 +657,13 @@ func TestProviderPickerCtrlDQuitsWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "codex") {
+	if !strings.Contains(string(body), "nosuch") {
 		t.Fatalf("picker quit persisted:\n%s", body)
 	}
 }
 
 func TestFallbackPickerEnterPersistsChosenProvider(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	m := New(Config{
 		Theme:           "tokyo-night",
 		Workspace:       t.TempDir(),
@@ -690,7 +690,7 @@ func TestFallbackPickerEnterPersistsChosenProvider(t *testing.T) {
 }
 
 func TestFallbackPickerEscDoesNotPersist(t *testing.T) {
-	path := writeConfigFile(t, "provider = \"codex\"\n")
+	path := writeConfigFile(t, "provider = \"nosuch\"\n")
 	m := New(Config{
 		Theme:           "tokyo-night",
 		Workspace:       t.TempDir(),
@@ -710,7 +710,7 @@ func TestFallbackPickerEscDoesNotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "codex") {
+	if !strings.Contains(string(body), "nosuch") {
 		t.Fatalf("esc on fallback persisted:\n%s", body)
 	}
 	if ConfigProvider() == "cursor" {

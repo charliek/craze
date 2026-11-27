@@ -106,7 +106,7 @@ func TestDisplayNameFallsBackToTheId(t *testing.T) {
 	if got := (ProviderInfo{}).Label(); got != cursorName {
 		t.Fatalf("a zero snapshot is labelled %q, want cursor", got)
 	}
-	if got := (ProviderInfo{Name: "codex"}).Label(); got != "codex" {
+	if got := (ProviderInfo{Name: "nosuch"}).Label(); got != "nosuch" {
 		t.Fatalf("an unknown id is labelled %q, want the id", got)
 	}
 

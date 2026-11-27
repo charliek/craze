@@ -60,13 +60,13 @@ func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
 	cmd := NewRootCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"prompt", "--provider", "codex", "hi"})
+	cmd.SetArgs([]string{"prompt", "--provider", "nosuch", "hi"})
 	err := cmd.Execute()
 	var ee *exitError
 	if !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	const want = `craze: unknown provider "codex" (want cursor, grok, claude, antigravity, or native)`
+	const want = `craze: unknown provider "nosuch" (want cursor, grok, claude, antigravity, or native)`
 	if ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
@@ -74,8 +74,8 @@ func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
 
 func TestUnknownProviderFlagExits2(t *testing.T) {
 	for _, args := range [][]string{
-		{"prompt", "--provider", "codex", "hi"},
-		{"frame", "--provider", "codex"},
+		{"prompt", "--provider", "nosuch", "hi"},
+		{"frame", "--provider", "nosuch"},
 	} {
 		cmd := NewRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
@@ -141,7 +141,7 @@ func TestProviderPrecedence(t *testing.T) {
 
 func TestUnknownEnvAndConfigFallback(t *testing.T) {
 	t.Run("env", func(t *testing.T) {
-		t.Setenv("CRAZE_PROVIDER", "codex")
+		t.Setenv("CRAZE_PROVIDER", "nosuch")
 		crazeHome(t)
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
@@ -150,12 +150,12 @@ func TestUnknownEnvAndConfigFallback(t *testing.T) {
 		if !got.Fallback || got.Provider.Name() != "cursor" {
 			t.Fatalf("%+v", got)
 		}
-		if !strings.Contains(stderr, `unknown provider "codex"`) {
+		if !strings.Contains(stderr, `unknown provider "nosuch"`) {
 			t.Fatalf("stderr %q", stderr)
 		}
 	})
 	t.Run("config", func(t *testing.T) {
-		writeCrazeConfig(t, "provider = \"codex\"\n")
+		writeCrazeConfig(t, "provider = \"nosuch\"\n")
 		t.Setenv("CRAZE_PROVIDER", "")
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
@@ -164,7 +164,7 @@ func TestUnknownEnvAndConfigFallback(t *testing.T) {
 		if !got.Fallback || got.Provider.Name() != "cursor" {
 			t.Fatalf("%+v", got)
 		}
-		if !strings.Contains(stderr, `unknown provider "codex"`) {
+		if !strings.Contains(stderr, `unknown provider "nosuch"`) {
 			t.Fatalf("stderr %q", stderr)
 		}
 	})
@@ -211,7 +211,7 @@ func TestPromptPersistsProviderAfterStart(t *testing.T) {
 }
 
 func TestPromptDoesNotPersistFallback(t *testing.T) {
-	t.Setenv("CRAZE_PROVIDER", "codex")
+	t.Setenv("CRAZE_PROVIDER", "nosuch")
 	isolateHome(t)
 	writeCrazeConfig(t, "theme = \"gruvbox\"\n")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
@@ -227,7 +227,7 @@ func TestPromptDoesNotPersistFallback(t *testing.T) {
 	if got := tui.ConfigProvider(); got != "" {
 		t.Fatalf("fallback must not persist, got %q", got)
 	}
-	if !strings.Contains(stderr.String(), `unknown provider "codex"`) {
+	if !strings.Contains(stderr.String(), `unknown provider "nosuch"`) {
 		t.Fatalf("stderr %q", stderr.String())
 	}
 }

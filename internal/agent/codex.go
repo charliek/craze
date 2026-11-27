@@ -1,0 +1,1929 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/agentproc"
+	"github.com/charliek/craze/internal/codexrpc"
+	"github.com/charliek/craze/internal/errkind"
+	"github.com/charliek/craze/internal/journal"
+)
+
+// Compile-time interface assertions required by Craze's engine & host contracts
+// (Plan 054 § C1).
+var (
+	_ Session        = (*codexSession)(nil)
+	_ LogOwner       = (*codexSession)(nil)
+	_ AskSource      = (*codexSession)(nil)
+	_ EventSource    = (*codexSession)(nil)
+	_ Clocked        = (*codexSession)(nil)
+	_ SeedAnnouncer  = (*codexSession)(nil)
+	_ EffortFactser  = (*codexSession)(nil)
+	_ SlashCataloger = (*codexSession)(nil)
+	_ SkillRescanner = (*codexSession)(nil)
+)
+
+const (
+	codexCancelFallbackGrace = 5 * time.Second
+	codexStartRPCTimeout     = 30 * time.Second
+)
+
+// codexTurnPhase tracks a claimed prompt's lifecycle generation (Plan 054 § D1).
+type codexTurnPhase int
+
+const (
+	codexPhaseIdle codexTurnPhase = iota
+	codexPhaseClaimed
+	codexPhaseSent
+	codexPhaseIdentified
+	codexPhaseSettled
+)
+
+// codexTurnState holds the per-turn state for one claimed prompt generation.
+type codexTurnState struct {
+	gen           uint64
+	phase         codexTurnPhase
+	turnID        string
+	token         TurnToken
+	cancelPending bool
+	interruptSent bool
+	failedErr     error
+	stopReason    string
+	done          chan struct{}
+}
+
+// codexError wraps a Codex failure with a classified errkind.Info.
+type codexError struct {
+	msg   string
+	info  errkind.Info
+	cause error
+}
+
+func (e *codexError) Error() string           { return e.msg }
+func (e *codexError) Unwrap() error           { return e.cause }
+func (e *codexError) ErrorInfo() errkind.Info { return e.info }
+
+func newCodexErr(kind errkind.Kind, format string, args ...any) error {
+	return &codexError{
+		msg:  "agent: " + fmt.Sprintf(format, args...),
+		info: errkind.New(kind),
+	}
+}
+
+// codexSession implements agent.Session over `codex app-server --listen stdio://`.
+//
+// Lock ordering (strict): s.mu -> log.outbox (leaf). Never hold s.mu across RPC
+// calls, Publish, Flush, Note, or blocking AskRegistry.Wait.
+type codexSession struct {
+	opts   Options
+	log    *EventLog
+	events <-chan Event
+	asks   *AskRegistry
+	tee    *stderrTee
+
+	done      chan struct{}
+	closeOnce sync.Once
+	closeDone chan struct{}
+	logOnce   sync.Once
+	closeErr  error
+
+	replaying atomic.Bool
+
+	mu          sync.Mutex
+	started     bool
+	closed      bool
+	seedOwed    bool
+	titlePinned bool
+
+	client   *codexrpc.Client
+	cwd      string
+	threadID string
+
+	// Saved workspaceWrite sandboxPolicy from thread/start|resume so agent-mode
+	// turns preserve any user-configured writableRoots/networkAccess.
+	workspaceSandbox *codexrpc.SandboxPolicy
+
+	// Full model catalog from model/list (including hidden models for lookup).
+	allModels     map[string]codexrpc.ModelEntry
+	visibleOrder  []string
+	currentEffort string
+	catalogRev    uint64
+	snap          Snapshot
+	usage         codexUsage
+
+	// Tool & per-turn streaming state.
+	tools          map[string]ToolEvent
+	toolOrder      []string
+	cmdBuffers     map[string]string
+	turnItemDeltas map[string]bool
+	lastMsgItemID  string
+
+	// Subagent rows (populated in M2b; settled in unified settlement).
+	subagents     map[string]*subagentRec
+	subagentOrder []string
+
+	// Turn generation state machine.
+	turnGen    uint64
+	activeTurn *codexTurnState
+	// Early completions arriving before turn/start reply (indexed by turnID).
+	earlyCompleted map[string]codexrpc.Turn
+
+	// Foreign turn state (autonomous main-thread turns).
+	foreignTurnID string
+
+	// Skills catalog from Codex's skills/list (populated in M2b).
+	skills []Skill
+}
+
+func newCodexSession(opts Options) *codexSession {
+	p := CodexProvider()
+	if opts.Provider != nil {
+		p = *opts.Provider
+	}
+	opts.Provider = &p
+	opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
+
+	s := &codexSession{
+		opts:           opts,
+		done:           make(chan struct{}),
+		closeDone:      make(chan struct{}),
+		allModels:      make(map[string]codexrpc.ModelEntry),
+		tools:          make(map[string]ToolEvent),
+		cmdBuffers:     make(map[string]string),
+		turnItemDeltas: make(map[string]bool),
+		subagents:      make(map[string]*subagentRec),
+		earlyCompleted: make(map[string]codexrpc.Turn),
+	}
+	s.log = newSessionLog(s.opts, journalHeader{provider: p.Name(), binary: s.opts.Binary})
+	s.events = s.log.Primary()
+	s.asks = NewAskRegistry(s.log, s.Now)
+	s.tee = newStderrTee(s.opts.Stderr, s.log)
+
+	s.snap.Provider = p.Info()
+	s.snap.Modes = append([]ModeInfo(nil), codexModesInfo...)
+	s.snap.CurrentMode = codexAgentMode
+	s.seedOwed = seedNewTitle(&s.snap, &s.titlePinned, opts)
+	return s
+}
+
+func (s *codexSession) provider() Provider {
+	if s.opts.Provider != nil {
+		return *s.opts.Provider
+	}
+	return CodexProvider()
+}
+
+func (s *codexSession) Events() <-chan Event { return s.events }
+func (s *codexSession) Subscribe(o SubscribeOptions) (*Subscription, error) {
+	return s.log.Subscribe(o)
+}
+func (s *codexSession) Incarnation() string         { return s.log.Incarnation() }
+func (s *codexSession) EventLog() *EventLog         { return s.log }
+func (s *codexSession) Now() time.Time              { return time.Now() }
+func (s *codexSession) Asks() *AskRegistry          { return s.asks }
+func (s *codexSession) PublishesEffortFacts() bool  { return true }
+func (s *codexSession) PublishesSlashCatalog() bool { return true }
+
+// RescanSkills is SkillRescanner (non-blocking). Full Codex skills/list refresh
+// is wired in M2b; safe no-op when not started or closed.
+func (s *codexSession) RescanSkills() {}
+
+func (s *codexSession) AnnounceSeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.seedOwed {
+		return false
+	}
+	s.seedOwed = false
+	title := s.snap.Title
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+	return true
+}
+
+func (s *codexSession) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreignTurnID != ""
+}
+
+func (s *codexSession) isMainThread(threadID string) bool {
+	s.mu.Lock()
+	main := s.threadID
+	s.mu.Unlock()
+	return main == "" || threadID == "" || threadID == main
+}
+
+func (s *codexSession) workspace() string {
+	s.mu.Lock()
+	cwd := s.cwd
+	s.mu.Unlock()
+	if cwd != "" {
+		return cwd
+	}
+	abs, err := absWorkspace(s.opts.Workspace)
+	if err != nil {
+		return s.opts.Workspace
+	}
+	return abs
+}
+
+func (s *codexSession) stderrSink() io.Writer {
+	if s.tee != nil {
+		return s.tee
+	}
+	return s.opts.Stderr
+}
+
+func (s *codexSession) diagLine(line string) {
+	if w := diagWriter(s.opts); w != nil {
+		fmt.Fprintln(w, line)
+	}
+}
+
+func (s *codexSession) emit(ev Event) {
+	s.emitCtx(context.Background(), ev)
+}
+
+func (s *codexSession) emitCtx(ctx context.Context, ev Event) bool {
+	if ev.At.IsZero() {
+		ev.At = s.Now()
+	}
+	if s.replaying.Load() && ev.Type != EventReplay {
+		ev.Replayed = true
+	}
+	return s.log.Publish(ctx, s.done, ev)
+}
+
+func (s *codexSession) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
+	base.Type = EventMeta
+	base.Cause = cause
+	base.State = st
+	if base.At.IsZero() {
+		base.At = s.Now()
+	}
+	return s.log.EnqueueTicket(base)
+}
+
+func (s *codexSession) publishUsageLocked() {
+	if s.replaying.Load() {
+		return
+	}
+	s.usage.reported = true
+	u := s.usage.state()
+	s.snap.Usage = &u
+	d := u
+	ev := Event{Type: EventMeta, State: &StateDelta{Usage: &d}, At: s.Now()}
+	s.log.EnqueueLatest("usage", ev)
+}
+
+func (s *codexSession) decorateStartErr(err error) error {
+	if !s.opts.StartErrAgentStderr || err == nil {
+		return err
+	}
+	var exit *codexrpc.ExitError
+	if !errors.As(err, &exit) {
+		return err
+	}
+	s.mu.Lock()
+	c := s.client
+	s.mu.Unlock()
+	var raw []byte
+	if c != nil {
+		raw = c.StderrTail(agentproc.StderrWait(startErrStderrWait))
+	}
+	return withAgentWords(err, stderrTailLine(raw), s.opts.StartErrExitHint)
+}
+
+// codexStartMode validates Options.Mode against codexStartModes before spawn.
+func (s *codexSession) codexStartMode() (string, error) {
+	if s.opts.Mode == "" {
+		return codexAgentMode, nil
+	}
+	id, ok := ResolveMode(s.opts.Mode, codexStartModes)
+	if !ok {
+		return "", newCodexErr(errkind.Config, "mode %s is not advertised", sanitizeLine(s.opts.Mode))
+	}
+	return id, nil
+}
+
+// Start spawns `codex app-server --listen stdio://`, runs auth preflight, loads
+// the model catalog, opens (or resumes) the thread, and enqueues the install
+// delta (never flushing on a new session per Session.Start).
+func (s *codexSession) Start(ctx context.Context) error {
+	teardown, err := s.start(ctx)
+	if err == nil {
+		return nil
+	}
+	err = s.decorateStartErr(err)
+	s.log.noteStartFailed(err)
+	if teardown {
+		if s.opts.KeepLogOnFailedStart {
+			s.teardown()
+		} else {
+			_ = s.Close()
+		}
+	}
+	return err
+}
+
+func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return false, fmt.Errorf("agent: session already started")
+	}
+	if s.closed {
+		s.mu.Unlock()
+		return false, fmt.Errorf("agent: session closed")
+	}
+	s.started = true
+	s.mu.Unlock()
+
+	unstart := func() {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+	}
+
+	startMode, err := s.codexStartMode()
+	if err != nil {
+		unstart()
+		return false, err
+	}
+
+	if len(s.opts.PluginDirs) > 0 {
+		s.diagLine("plugin dirs ignored for " + codexName)
+	}
+
+	cwd, err := absWorkspace(s.opts.Workspace)
+	if err != nil {
+		unstart()
+		return false, err
+	}
+
+	p := s.provider()
+	resolve := acp.ResolveBinaryCandidates
+	if s.opts.NoBinaryEnv {
+		resolve = acp.LookupBinary
+	}
+	binary, err := resolve(s.opts.Binary, p.Bins())
+	if err != nil {
+		unstart()
+		return false, binaryNotFound(err, p.Name())
+	}
+
+	env := p.spawnEnv(s.opts.Env, "", cwd)
+	args := p.Args(s.opts.ExtraArgs, s.opts.Force)
+
+	client, err := codexrpc.Spawn(codexrpc.SpawnOptions{
+		Binary: binary,
+		Args:   args,
+		Dir:    cwd,
+		Env:    env,
+		Stderr: s.stderrSink(),
+	})
+	if err != nil {
+		unstart()
+		return false, err
+	}
+
+	if g := s.opts.AgentGroup; g != nil {
+		if err := g(client.ProcessGroup()); err != nil {
+			_ = client.Close()
+			unstart()
+			return false, fmt.Errorf("agent: the agent's process group could not be recorded: %w", err)
+		}
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = client.Close()
+		return false, fmt.Errorf("agent: session closed")
+	}
+	s.client = client
+	s.cwd = cwd
+	s.snap.CurrentMode = startMode
+	s.mu.Unlock()
+
+	client.SetNotifyHandler(s.onNotify)
+	client.SetRequestHandler(s.onServerRequest)
+	go s.watchTransportDone(client)
+
+	initRes, err := client.Initialize(ctx)
+	if err != nil {
+		return true, fmt.Errorf("agent: codex initialize: %w", err)
+	}
+	if initRes != nil && initRes.UserAgent != "" {
+		s.log.Note(journal.DiagNote{
+			Kind:   "codex_init",
+			Fields: map[string]any{"userAgent": sanitizeLine(initRes.UserAgent)},
+		})
+	}
+
+	// Auth preflight (Plan 054 § C2): catch signed-out state in <50ms instead of
+	// hanging through 5 WebSocket 401 retries, while permitting custom providers
+	// where requiresOpenaiAuth == false.
+	acctRes, err := client.AccountRead(ctx, false)
+	if err != nil {
+		return true, fmt.Errorf("agent: codex account/read: %w", err)
+	}
+	if acctRes != nil {
+		if acctRes.Account == nil && acctRes.RequiresOpenaiAuth {
+			return true, newCodexErr(errkind.Auth, "codex is not signed in (run `%s` or set OPENAI_API_KEY)", codexLoginHint)
+		}
+		if acctRes.Account != nil {
+			s.mu.Lock()
+			if pt := strings.TrimSpace(acctRes.Account.PlanType); pt != "" {
+				s.usage.plan = sanitizeLine(pt)
+			}
+			s.mu.Unlock()
+			s.log.Note(journal.DiagNote{
+				Kind: "codex_account",
+				Fields: map[string]any{
+					"type":     sanitizeLine(acctRes.Account.Type),
+					"planType": sanitizeLine(acctRes.Account.PlanType),
+				},
+			})
+		}
+	}
+
+	// Best-effort rate-limit read (non-fatal on API-key/custom providers).
+	if rlRes, rlErr := client.AccountRateLimitsRead(ctx); rlErr == nil && rlRes != nil {
+		s.mu.Lock()
+		if rlRes.RateLimits != nil {
+			s.usage.mergeRateLimits(rlRes.RateLimits)
+		}
+		s.mu.Unlock()
+	}
+
+	// Load model catalog with includeHidden: true and pagination.
+	if err := s.loadModelCatalog(ctx, client); err != nil {
+		return true, fmt.Errorf("agent: codex model/list: %w", err)
+	}
+
+	// Determine requested model & validate against catalog (allowing custom
+	// models not in model/list to be validated by Codex itself on thread/start).
+	wantModel := strings.TrimSpace(s.opts.Model)
+	if wantModel == "" && s.opts.LoadSessionID != "" {
+		wantModel = strings.TrimSpace(s.opts.LoadModel)
+	}
+	resolvedModel := s.resolveRequestedModel(wantModel)
+
+	// Select initial mode's thread sandbox & approvalPolicy.
+	sbMode := s.threadSandboxForMode(startMode)
+	apPolicy := s.approvalPolicyForMode(startMode)
+
+	if s.opts.LoadSessionID != "" {
+		// Resume path (extended with full paginated replay in M2b).
+		if err := s.resumeThread(ctx, client, cwd, binary, startMode, resolvedModel, sbMode, apPolicy); err != nil {
+			return true, err
+		}
+		return false, nil
+	}
+
+	ephemeral := false
+	tr, err := client.ThreadStart(ctx, codexrpc.ThreadStartParams{
+		Cwd:            cwd,
+		Sandbox:        sbMode,
+		ApprovalPolicy: apPolicy,
+		Model:          resolvedModel,
+		Ephemeral:      &ephemeral,
+	})
+	if err != nil {
+		return true, s.classifyRPCStartError(err)
+	}
+	if tr == nil || tr.Thread.ID == "" {
+		return true, newCodexErr(errkind.StartFailed, "codex thread/start returned no thread id")
+	}
+
+	// Capture returned workspaceWrite sandbox policy when available so agent-mode
+	// turns preserve user-configured writableRoots / networkAccess.
+	var savedWS *codexrpc.SandboxPolicy
+	if tr.Sandbox != nil && tr.Sandbox.Type == codexrpc.SandboxPolicyWorkspaceWrite {
+		cp := *tr.Sandbox
+		cp.WritableRoots = slices.Clone(tr.Sandbox.WritableRoots)
+		savedWS = &cp
+	}
+
+	activeModel := resolvedModel
+	if tr.Model != "" {
+		activeModel = tr.Model
+	}
+	if activeModel == "" {
+		activeModel = s.defaultCatalogModel()
+	}
+	activeEffort := ""
+	if tr.ReasoningEffort != nil {
+		activeEffort = strings.TrimSpace(*tr.ReasoningEffort)
+	}
+	if activeEffort == "" {
+		activeEffort = s.defaultEffortForModel(activeModel)
+	}
+
+	// Apply --effort and --fast start settings (Plan 054 § C4).
+	activeEffort, err = s.applyStartSettings(activeModel, activeEffort)
+	if err != nil {
+		return true, err
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return true, fmt.Errorf("agent: session closed")
+	}
+	s.threadID = tr.Thread.ID
+	s.workspaceSandbox = savedWS
+	s.snap.SessionID = tr.Thread.ID
+	s.snap.CurrentMode = startMode
+	s.snap.CurrentModel = activeModel
+	s.currentEffort = activeEffort
+	s.rebuildCatalogAndConfigLocked()
+	s.rebuildSlashLocked()
+	if s.usage.reported || s.usage.plan != "" {
+		u := s.usage.state()
+		u.Model = activeModel
+		s.snap.Usage = &u
+	}
+	delta := s.installDeltaLocked()
+	// New session Start enqueues install delta (with non-nil Config) and NEVER flushes.
+	s.enqueueDeltaLocked("", Event{}, delta)
+	s.mu.Unlock()
+
+	s.log.noteSession(journal.SessionNote{ProviderSessionID: tr.Thread.ID, AgentBinary: binary})
+	return false, nil
+}
+
+// resumeThread opens an existing Codex thread via thread/resume (M2a baseline;
+// M2b adds bounded thread/turns/list chronological replay under EventReplay).
+func (s *codexSession) resumeThread(
+	ctx context.Context,
+	client *codexrpc.Client,
+	cwd, binary, startMode, resolvedModel string,
+	sbMode codexrpc.SandboxMode,
+	apPolicy codexrpc.ApprovalPolicy,
+) error {
+	res, err := client.ThreadResume(ctx, codexrpc.ThreadResumeParams{
+		ThreadID:       s.opts.LoadSessionID,
+		ExcludeTurns:   true,
+		Cwd:            cwd,
+		Sandbox:        sbMode,
+		ApprovalPolicy: apPolicy,
+		Model:          resolvedModel,
+	})
+	if err != nil {
+		return s.classifyRPCStartError(err)
+	}
+	tid := s.opts.LoadSessionID
+	if res != nil && res.Thread.ID != "" {
+		tid = res.Thread.ID
+	}
+	var savedWS *codexrpc.SandboxPolicy
+	if res != nil && res.Sandbox != nil && res.Sandbox.Type == codexrpc.SandboxPolicyWorkspaceWrite {
+		cp := *res.Sandbox
+		cp.WritableRoots = slices.Clone(res.Sandbox.WritableRoots)
+		savedWS = &cp
+	}
+	activeModel := resolvedModel
+	if activeModel == "" && res != nil && res.Model != "" {
+		activeModel = res.Model
+	}
+	if activeModel == "" {
+		activeModel = s.defaultCatalogModel()
+	}
+	activeEffort := strings.TrimSpace(s.opts.LoadEffort)
+	if activeEffort == "" && res != nil && res.ReasoningEffort != nil {
+		activeEffort = strings.TrimSpace(*res.ReasoningEffort)
+	}
+	if activeEffort == "" {
+		activeEffort = s.defaultEffortForModel(activeModel)
+	}
+	activeEffort, err = s.applyStartSettings(activeModel, activeEffort)
+	if err != nil {
+		return err
+	}
+
+	// Seed title before ReplayStart bracket.
+	s.mu.Lock()
+	seeded := false
+	if title := sanitizeText(s.opts.Title); title != "" {
+		s.snap.Title = title
+		t := title
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &t})
+		seeded = true
+	}
+	if s.opts.TitlePinned {
+		s.titlePinned = true
+	}
+	s.mu.Unlock()
+	if seeded {
+		_ = s.log.Flush(ctx, s.done)
+	}
+
+	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
+	s.replaying.Store(true)
+	defer s.replaying.Store(false)
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return fmt.Errorf("agent: session closed")
+	}
+	s.threadID = tid
+	s.workspaceSandbox = savedWS
+	s.snap.SessionID = tid
+	s.snap.CurrentMode = startMode
+	s.snap.CurrentModel = activeModel
+	s.currentEffort = activeEffort
+	s.rebuildCatalogAndConfigLocked()
+	s.rebuildSlashLocked()
+	delta := s.installDeltaLocked()
+	s.enqueueDeltaLocked("", Event{Replayed: true}, delta)
+	s.mu.Unlock()
+
+	if err := s.log.Flush(ctx, s.done); err != nil {
+		return fmt.Errorf("agent: session closed")
+	}
+	s.replaying.Store(false)
+	s.log.noteSession(journal.SessionNote{
+		ProviderSessionID: tid,
+		LoadedFrom:        s.opts.LoadSessionID,
+		AgentBinary:       binary,
+	})
+	if !s.emitCtx(ctx, Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}}) {
+		return fmt.Errorf("agent: session closed")
+	}
+	return nil
+}
+
+func (s *codexSession) classifyRPCStartError(err error) error {
+	var rpc *codexrpc.RPCError
+	if errors.As(err, &rpc) && rpc != nil {
+		info := rpc.ErrorInfo()
+		if info.Kind == errkind.Auth {
+			return &codexError{
+				msg:   fmt.Sprintf("agent: %s (run `%s`)", sanitizeLine(rpc.Message), codexLoginHint),
+				info:  info,
+				cause: err,
+			}
+		}
+		if info.Kind != errkind.Agent {
+			return &codexError{
+				msg:   "agent: " + sanitizeLine(rpc.Message),
+				info:  info,
+				cause: err,
+			}
+		}
+	}
+	return err
+}
+
+func (s *codexSession) loadModelCatalog(ctx context.Context, client *codexrpc.Client) error {
+	all := make(map[string]codexrpc.ModelEntry)
+	var visible []string
+	cursor := ""
+	for page := range 20 {
+		_ = page
+		res, err := client.ModelList(ctx, codexrpc.ModelListParams{
+			IncludeHidden: true,
+			Cursor:        cursor,
+		})
+		if err != nil {
+			return err
+		}
+		if res == nil {
+			break
+		}
+		for _, m := range res.Data {
+			id := strings.TrimSpace(m.Model)
+			if id == "" {
+				id = strings.TrimSpace(m.ID)
+			}
+			if id == "" {
+				continue
+			}
+			m.ID = id
+			m.Model = id
+			if _, seen := all[id]; !seen {
+				all[id] = m
+				if !m.Hidden {
+					visible = append(visible, id)
+				}
+			}
+		}
+		if res.NextCursor == nil || *res.NextCursor == "" {
+			break
+		}
+		cursor = *res.NextCursor
+	}
+	s.mu.Lock()
+	s.allModels = all
+	s.visibleOrder = visible
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *codexSession) resolveRequestedModel(want string) string {
+	if want == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.allModels[want]; ok {
+		return m.ID
+	}
+	norm := normalizeIdent(want)
+	for id, m := range s.allModels {
+		if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
+			return id
+		}
+	}
+	// Allow custom/unlisted models (e.g., custom model_provider) through to
+	// thread/start so Codex itself validates them (Plan 054 § C4).
+	return want
+}
+
+func (s *codexSession) defaultCatalogModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range s.visibleOrder {
+		if m := s.allModels[id]; m.IsDefault {
+			return id
+		}
+	}
+	if len(s.visibleOrder) > 0 {
+		return s.visibleOrder[0]
+	}
+	for id := range s.allModels {
+		return id
+	}
+	return ""
+}
+
+func (s *codexSession) defaultEffortForModel(modelID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.allModels[modelID]; ok {
+		if m.DefaultReasoningEffort != "" {
+			return m.DefaultReasoningEffort
+		}
+		if len(m.SupportedReasoningEfforts) > 0 {
+			return m.SupportedReasoningEfforts[0].ReasoningEffort
+		}
+	}
+	return ""
+}
+
+func (s *codexSession) effortsForModelLocked(modelID string) (efforts []string, def string) {
+	m, ok := s.allModels[modelID]
+	if !ok {
+		return nil, ""
+	}
+	for _, e := range m.SupportedReasoningEfforts {
+		if e.ReasoningEffort != "" && !slices.Contains(efforts, e.ReasoningEffort) {
+			efforts = append(efforts, e.ReasoningEffort)
+		}
+	}
+	def = m.DefaultReasoningEffort
+	if def == "" && len(efforts) > 0 {
+		def = efforts[0]
+	}
+	return efforts, def
+}
+
+func (s *codexSession) buildEffortOptionLocked(modelID, curEffort string) *ConfigOption {
+	efforts, def := s.effortsForModelLocked(modelID)
+	if len(efforts) == 0 {
+		return nil
+	}
+	vals := make([]SelectValue, 0, len(efforts))
+	for _, e := range efforts {
+		vals = append(vals, SelectValue{Value: e, Name: e})
+	}
+	cur := curEffort
+	if cur == "" || !slices.Contains(efforts, cur) {
+		cur = def
+	}
+	return &ConfigOption{
+		ID:           codexEffortID,
+		Name:         "Effort",
+		Category:     "thought_level",
+		Type:         "select",
+		Current:      cur,
+		SelectValues: vals,
+	}
+}
+
+func (s *codexSession) applyStartSettings(modelID, currentEffort string) (string, error) {
+	notes := startNotes{log: s.log, say: s.diagLine}
+	if s.opts.Fast != nil {
+		notes.fastUnmatched(*s.opts.Fast)
+	}
+	wantEffort := strings.TrimSpace(s.opts.Effort)
+	if wantEffort == "" {
+		return currentEffort, nil
+	}
+	s.mu.Lock()
+	opt := s.buildEffortOptionLocked(modelID, currentEffort)
+	s.mu.Unlock()
+	val, why := effortValue(opt, wantEffort)
+	if why == "" {
+		return val, nil
+	}
+	// Plan 054 § C4: strict refusal on unattended runs; lenient notice + fallback
+	// on interactive/reload starts (matching startsettings.go).
+	if s.opts.Unattended {
+		if opt == nil {
+			return "", newCodexErr(errkind.Config, "--effort %q: model %s offers no effort setting", sanitizeLine(wantEffort), sanitizeLine(modelID))
+		}
+		var allowed []string
+		for _, v := range opt.SelectValues {
+			allowed = append(allowed, v.Value)
+		}
+		return "", newCodexErr(errkind.Config, "--effort %q is not supported by %s (supported: %s)", sanitizeLine(wantEffort), sanitizeLine(modelID), strings.Join(allowed, ", "))
+	}
+	notes.effortUnmatched(wantEffort, why, opt)
+	return currentEffort, nil
+}
+
+// rebuildCatalogAndConfigLocked rebuilds Snapshot.Models (with SwitchEffort),
+// Snapshot.Config (effort option), and bumps CatalogRevision. s.mu is held.
+func (s *codexSession) rebuildCatalogAndConfigLocked() {
+	curModel := s.snap.CurrentModel
+	curEffort := s.currentEffort
+
+	ids := make([]string, 0, len(s.visibleOrder)+1)
+	ids = append(ids, s.visibleOrder...)
+	if curModel != "" && !slices.Contains(ids, curModel) {
+		ids = append(ids, curModel)
+	}
+
+	infos := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		m, ok := s.allModels[id]
+		name := id
+		if ok && m.DisplayName != "" {
+			name = sanitizeText(m.DisplayName)
+		}
+		efforts, def := s.effortsForModelLocked(id)
+		switchEff := def
+		if curEffort != "" && slices.Contains(efforts, curEffort) {
+			switchEff = curEffort
+		}
+		infos = append(infos, ModelInfo{
+			ID:            id,
+			Name:          name,
+			Efforts:       efforts,
+			DefaultEffort: def,
+			SwitchEffort:  switchEff,
+		})
+	}
+	bounded, _ := boundCatalog(infos, curModel)
+	s.snap.Models = bounded
+	s.catalogRev++
+	s.snap.CatalogRevision = s.catalogRev
+
+	var cfg []ConfigOption
+	if opt := s.buildEffortOptionLocked(curModel, curEffort); opt != nil {
+		cfg = append(cfg, *opt)
+		s.currentEffort = opt.Current
+	}
+	s.snap.Config = cfg
+}
+
+func (s *codexSession) rebuildSlashLocked() *SlashCatalog {
+	next := SlashCatalogFor(s.snap, s.skills).Items
+	if s.snap.Slash != nil && slices.Equal(next, s.snap.Slash) {
+		return nil
+	}
+	s.snap.Slash = next
+	return &SlashCatalog{Items: cloneSlash(next)}
+}
+
+// installDeltaLocked builds the full install StateDelta. Config is ALWAYS
+// non-nil so Engine.observeCatalog updates modelcache (Plan 054 § C1).
+func (s *codexSession) installDeltaLocked() *StateDelta {
+	title := s.snap.Title
+	mode := s.snap.CurrentMode
+	model := s.snap.CurrentModel
+	d := &StateDelta{
+		Title:    &title,
+		Mode:     &mode,
+		Model:    &model,
+		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
+		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		Slash:    &SlashCatalog{Items: cloneSlash(s.snap.Slash)},
+		Catalog: &CatalogState{
+			Models:   CloneModels(s.snap.Models),
+			Revision: s.snap.CatalogRevision,
+		},
+	}
+	if s.snap.Usage != nil {
+		u := *s.snap.Usage
+		d.Usage = &u
+	}
+	return d
+}
+
+// --- Mode, Sandbox & Approval Policy Mapping (Plan 054 § C3) ---
+
+func (s *codexSession) threadSandboxForMode(mode string) codexrpc.SandboxMode {
+	switch s.provider().ModeKind(mode) {
+	case ModeReadOnly, ModePlan:
+		return codexrpc.SandboxReadOnly
+	default:
+		return codexrpc.SandboxWorkspaceWrite
+	}
+}
+
+func (s *codexSession) turnSandboxForModeLocked(mode string) *codexrpc.SandboxPolicy {
+	switch s.provider().ModeKind(mode) {
+	case ModeReadOnly, ModePlan:
+		return &codexrpc.SandboxPolicy{Type: codexrpc.SandboxPolicyReadOnly}
+	default:
+		if s.workspaceSandbox != nil {
+			cp := *s.workspaceSandbox
+			cp.WritableRoots = slices.Clone(s.workspaceSandbox.WritableRoots)
+			return &cp
+		}
+		return &codexrpc.SandboxPolicy{Type: codexrpc.SandboxPolicyWorkspaceWrite}
+	}
+}
+
+// approvalPolicyForMode enforces the hard read-only invariant (Plan 054 § C3):
+// ask and plan ALWAYS send approvalPolicy: "never" (even under --no-force) so
+// an approved retry can never escape the OS read-only sandbox.
+func (s *codexSession) approvalPolicyForMode(mode string) codexrpc.ApprovalPolicy {
+	switch s.provider().ModeKind(mode) {
+	case ModeReadOnly, ModePlan:
+		return codexrpc.ApprovalNever
+	default:
+		if EffectiveApproval(s.opts).Permission == ApprovalAllow {
+			return codexrpc.ApprovalNever
+		}
+		return codexrpc.ApprovalOnRequest
+	}
+}
+
+func (s *codexSession) collaborationModeLocked(mode, model, effort string) *codexrpc.CollaborationMode {
+	cmMode := "default"
+	if s.provider().ModeKind(mode) == ModePlan {
+		cmMode = "plan"
+	}
+	var effPtr *string
+	if effort != "" {
+		e := effort
+		effPtr = &e
+	}
+	return &codexrpc.CollaborationMode{
+		Mode: cmMode,
+		Settings: codexrpc.CollaborationSettings{
+			Model:                 model,
+			ReasoningEffort:       effPtr,
+			DeveloperInstructions: nil,
+		},
+	}
+}
+
+// --- Prompt, Begin, Cancel, Interject (Plan 054 § D1) ---
+
+func (s *codexSession) Prompt(ctx context.Context, text string) (Result, error) {
+	return s.Begin(text)(ctx)
+}
+
+func (s *codexSession) Begin(text string) func(ctx context.Context) (Result, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return func(context.Context) (Result, error) { return Result{}, codexrpc.ErrClosed }
+	}
+	if !s.started || s.client == nil {
+		s.mu.Unlock()
+		return func(context.Context) (Result, error) { return Result{}, fmt.Errorf("agent: session not started") }
+	}
+	if s.activeTurn != nil {
+		s.mu.Unlock()
+		return func(context.Context) (Result, error) { return Result{}, ErrPromptInFlight }
+	}
+	if s.foreignTurnID != "" {
+		s.mu.Unlock()
+		return func(context.Context) (Result, error) { return Result{}, ErrForeignTurn }
+	}
+	s.turnGen++
+	turn := &codexTurnState{
+		gen:   s.turnGen,
+		phase: codexPhaseClaimed,
+		done:  make(chan struct{}),
+	}
+	s.activeTurn = turn
+	s.turnItemDeltas = make(map[string]bool)
+	s.lastMsgItemID = ""
+	s.usage.beginTurn()
+	s.mu.Unlock()
+
+	return func(ctx context.Context) (Result, error) {
+		return s.runPrompt(ctx, turn, text)
+	}
+}
+
+func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text string) (Result, error) {
+	// Parse Craze's image attachment envelope off-lock (Plan 054 § D1).
+	rest, ims, problems := promptImagesOf(text, true)
+	noteAttachments(s.log, "prompt", problems)
+	// Codex uses localImage paths directly; drop raw image bytes immediately.
+	ims.dropData()
+
+	promptText := PlacePathText(rest, ims.fallbacks)
+	var inputs []codexrpc.UserInput
+	if promptText != "" {
+		inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: promptText})
+	}
+	for _, a := range ims.atts {
+		inputs = append(inputs, codexrpc.UserInput{Type: "localImage", Path: a.Path})
+	}
+	if len(inputs) == 0 {
+		inputs = append(inputs, codexrpc.UserInput{Type: "text", Text: text})
+	}
+
+	token := s.asks.BeginTurn()
+
+	s.mu.Lock()
+	if s.closed {
+		s.clearTurnLocked(turn)
+		s.mu.Unlock()
+		s.asks.EndTurn(token)
+		return Result{}, codexrpc.ErrClosed
+	}
+	if turn.phase == codexPhaseSettled || turn.cancelPending {
+		s.clearTurnLocked(turn)
+		s.mu.Unlock()
+		s.asks.EndTurn(token)
+		return Result{}, ErrPromptCancelled
+	}
+	if err := ctx.Err(); err != nil {
+		s.clearTurnLocked(turn)
+		s.mu.Unlock()
+		s.asks.EndTurn(token)
+		return Result{}, err
+	}
+	turn.token = token
+	turn.phase = codexPhaseSent
+	client := s.client
+	threadID := s.threadID
+	mode := s.snap.CurrentMode
+	model := s.snap.CurrentModel
+	effort := s.currentEffort
+	sbPolicy := s.turnSandboxForModeLocked(mode)
+	apPolicy := s.approvalPolicyForMode(mode)
+	collabMode := s.collaborationModeLocked(mode, model, effort)
+	s.mu.Unlock()
+
+	params := codexrpc.TurnStartParams{
+		ThreadID:          threadID,
+		Input:             inputs,
+		SandboxPolicy:     sbPolicy,
+		ApprovalPolicy:    apPolicy,
+		CollaborationMode: collabMode,
+		Model:             model,
+		Effort:            effort,
+		Summary:           "auto",
+	}
+
+	res, err := client.TurnStart(ctx, params)
+	if err != nil {
+		// Settle open tools/asks cleanly and emit EventError if the turn failed.
+		settledErr := s.classifyRPCStartError(err)
+		return s.settleTurn(turn, "", settledErr, true)
+	}
+
+	// Bind turnID from reply, honoring any early turn/completed or latched Cancel.
+	var needInterruptID string
+	var earlyTurn *codexrpc.Turn
+	s.mu.Lock()
+	if turn.phase != codexPhaseSettled {
+		if res != nil && res.Turn.ID != "" {
+			if turn.turnID == "" {
+				turn.turnID = res.Turn.ID
+			}
+			turn.phase = codexPhaseIdentified
+			if ec, ok := s.earlyCompleted[turn.turnID]; ok {
+				delete(s.earlyCompleted, turn.turnID)
+				cp := ec
+				earlyTurn = &cp
+			} else if turn.cancelPending && !turn.interruptSent {
+				turn.interruptSent = true
+				needInterruptID = turn.turnID
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if earlyTurn != nil {
+		s.finishTurnFromWire(turn, *earlyTurn)
+	} else if needInterruptID != "" {
+		go func() {
+			iCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.TurnInterrupt(iCtx, threadID, needInterruptID)
+		}()
+	}
+
+	// Wait for unified settlement, caller context cancellation, or session close.
+	select {
+	case <-turn.done:
+		return s.turnResult(turn)
+	case <-ctx.Done():
+		// Caller cancelled/timed out: interrupt Codex turn best-effort, then settle.
+		s.interruptTurnBestEffort(turn, client, threadID)
+		select {
+		case <-turn.done:
+			return s.turnResult(turn)
+		case <-time.After(codexCancelFallbackGrace):
+			return s.settleTurn(turn, "", ctx.Err(), true)
+		case <-s.done:
+			return s.settleTurn(turn, "", codexrpc.ErrClosed, true)
+		}
+	case <-s.done:
+		return s.settleTurn(turn, "", s.transportErrOrClosed(), true)
+	}
+}
+
+func (s *codexSession) interruptTurnBestEffort(turn *codexTurnState, client *codexrpc.Client, threadID string) {
+	s.mu.Lock()
+	tok := turn.token
+	turn.cancelPending = true
+	tid := turn.turnID
+	sendNow := tid != "" && !turn.interruptSent && turn.phase != codexPhaseSettled
+	if sendNow {
+		turn.interruptSent = true
+	}
+	s.mu.Unlock()
+	if !tok.NoTurn() {
+		s.asks.CancelTurn(tok)
+	}
+	if sendNow && client != nil {
+		iCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.TurnInterrupt(iCtx, threadID, tid)
+	}
+}
+
+func (s *codexSession) clearTurnLocked(turn *codexTurnState) {
+	if turn.phase != codexPhaseSettled {
+		turn.phase = codexPhaseSettled
+		close(turn.done)
+	}
+	if s.activeTurn == turn {
+		s.activeTurn = nil
+	}
+}
+
+func (s *codexSession) turnResult(turn *codexTurnState) (Result, error) {
+	s.mu.Lock()
+	err := turn.failedErr
+	sr := turn.stopReason
+	s.mu.Unlock()
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{StopReason: sr}, nil
+}
+
+// settleTurn is the single unified settlement path for completed, interrupted,
+// failed, and transport-crash endings (Plan 054 § D1). It retires in-flight
+// tool rows and subagent rows BEFORE emitting the terminal event and releasing
+// the prompt slot.
+func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termErr error, releaseSlot bool) (Result, error) {
+	var (
+		toolEvs []Event
+		tok     TurnToken
+		won     bool
+	)
+	toolFinal := toolCompleted
+	if termErr != nil {
+		toolFinal = toolFailed
+	} else if stopReason == acp.StopCancelled {
+		toolFinal = "cancelled"
+	}
+
+	s.mu.Lock()
+	if turn.phase != codexPhaseSettled {
+		won = true
+		turn.phase = codexPhaseSettled
+		turn.stopReason = stopReason
+		turn.failedErr = termErr
+		tok = turn.token
+		// Retire any open in-flight tool rows before releasing the slot.
+		for _, id := range s.toolOrder {
+			row, ok := s.tools[id]
+			if !ok || !toolStatusInFlight(row.Status) {
+				continue
+			}
+			row.Status = toolFinal
+			row.At = s.Now()
+			s.tools[id] = row
+			ct := cloneTool(row)
+			toolEvs = append(toolEvs, Event{Type: EventTool, Tool: &ct})
+		}
+		if releaseSlot && s.activeTurn == turn {
+			s.activeTurn = nil
+		}
+		close(turn.done)
+	} else if releaseSlot && s.activeTurn == turn {
+		s.activeTurn = nil
+	}
+	resErr := turn.failedErr
+	resSR := turn.stopReason
+	s.mu.Unlock()
+
+	if won {
+		for _, ev := range toolEvs {
+			s.emit(ev)
+		}
+		if !tok.NoTurn() {
+			s.asks.EndTurn(tok)
+		}
+		if termErr != nil {
+			s.emit(Event{Type: EventError, Err: termErr})
+		} else {
+			s.emit(Event{Type: EventDone, StopReason: stopReason})
+		}
+	}
+	if resErr != nil {
+		return Result{}, resErr
+	}
+	return Result{StopReason: resSR}, nil
+}
+
+func (s *codexSession) finishTurnFromWire(turn *codexTurnState, wireTurn codexrpc.Turn) {
+	switch wireTurn.Status {
+	case "completed":
+		_, _ = s.settleTurn(turn, acp.StopEndTurn, nil, true)
+	case "interrupted":
+		_, _ = s.settleTurn(turn, acp.StopCancelled, nil, true)
+	case "failed":
+		err := s.turnErrorFromWire(wireTurn.Error)
+		_, _ = s.settleTurn(turn, "", err, true)
+	default:
+		_, _ = s.settleTurn(turn, acp.StopEndTurn, nil, true)
+	}
+}
+
+func (s *codexSession) turnErrorFromWire(te *codexrpc.TurnError) error {
+	if te == nil {
+		return newCodexErr(errkind.Agent, "codex turn failed")
+	}
+	info := codexrpc.ClassifyTurnError(te)
+	msg := sanitizeLine(te.Message)
+	if msg == "" {
+		msg = "codex turn failed"
+	}
+	if info.Kind == errkind.Auth {
+		return &codexError{
+			msg:  fmt.Sprintf("agent: %s (run `%s`)", msg, codexLoginHint),
+			info: info,
+		}
+	}
+	return &codexError{
+		msg:  "agent: " + msg,
+		info: info,
+	}
+}
+
+// Cancel stops whatever prompt of craze's own is running or claimed, following
+// Plan 054 § D1's state machine:
+//  1. Unblock parked asks via AskRegistry.CancelTurn immediately.
+//  2. If claimed (pre-wire): withdraw immediately (Withdrew: true, Settled: true).
+//  3. If sent (waiting for turnID): latch cancelPending so turn/interrupt fires
+//     the moment turnID arrives.
+//  4. If identified: send turn/interrupt and wait bounded by ctx / s.done / grace.
+func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
+	s.mu.Lock()
+	turn := s.activeTurn
+	client := s.client
+	threadID := s.threadID
+	if turn == nil {
+		s.mu.Unlock()
+		s.asks.CancelTurn(TurnToken{})
+		return CancelOutcome{Settled: true}, nil
+	}
+	tok := turn.token
+	if turn.phase == codexPhaseClaimed {
+		turn.cancelPending = true
+		turn.phase = codexPhaseSettled
+		close(turn.done)
+		s.activeTurn = nil
+		s.mu.Unlock()
+		if !tok.NoTurn() {
+			s.asks.CancelTurn(tok)
+		}
+		return CancelOutcome{Withdrew: true, Settled: true}, nil
+	}
+	turn.cancelPending = true
+	tid := turn.turnID
+	sendNow := tid != "" && !turn.interruptSent && turn.phase != codexPhaseSettled
+	if sendNow {
+		turn.interruptSent = true
+	}
+	done := turn.done
+	s.mu.Unlock()
+
+	if !tok.NoTurn() {
+		s.asks.CancelTurn(tok)
+	} else {
+		s.asks.CancelTurn(TurnToken{})
+	}
+
+	wrote := false
+	if sendNow && client != nil {
+		if err := client.TurnInterrupt(ctx, threadID, tid); err == nil {
+			wrote = true
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return CancelOutcome{Wrote: false, Settled: false}, err
+		}
+	}
+
+	fallback := time.NewTimer(codexCancelFallbackGrace)
+	defer fallback.Stop()
+	select {
+	case <-done:
+		return CancelOutcome{Wrote: wrote, Settled: true}, nil
+	case <-ctx.Done():
+		return CancelOutcome{Wrote: wrote, Settled: false}, ctx.Err()
+	case <-s.done:
+		return CancelOutcome{Wrote: wrote, Settled: true}, nil
+	case <-fallback.C:
+		// Bounded fallback: never hang forever if codex never emits turn/completed.
+		_, _ = s.settleTurn(turn, acp.StopCancelled, nil, true)
+		return CancelOutcome{Wrote: wrote, Settled: true}, nil
+	}
+}
+
+// Interject merges text into an active turn via turn/steer (full steering wire
+// and user-echo dedup live in M2b; when idle or not yet identified returns
+// ErrPromptRequired so Engine.Interject queues cleanly).
+func (s *codexSession) Interject(ctx context.Context, text string) error {
+	clean := interjectText(s.log, text)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return codexrpc.ErrClosed
+	}
+	turn := s.activeTurn
+	client := s.client
+	threadID := s.threadID
+	if turn == nil || turn.phase != codexPhaseIdentified || turn.turnID == "" || client == nil {
+		s.mu.Unlock()
+		return ErrPromptRequired
+	}
+	expectedTurnID := turn.turnID
+	s.mu.Unlock()
+
+	_, err := client.TurnSteer(ctx, codexrpc.TurnSteerParams{
+		ThreadID:       threadID,
+		ExpectedTurnID: expectedTurnID,
+		Input:          []codexrpc.UserInput{{Type: "text", Text: clean}},
+	})
+	if err != nil {
+		if codexrpc.IsNotSteerable(err) {
+			return ErrPromptRequired
+		}
+		return err
+	}
+	s.emit(Event{Type: EventUser, Text: sanitizeText(clean), Interjection: true})
+	return nil
+}
+
+// --- Settings Verbs (next-turn settings applied unconditionally on turn/start) ---
+
+func (s *codexSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
+	want := strings.TrimSpace(modelID)
+	if want == "" {
+		return SetOutcome{}, fmt.Errorf("agent: empty model")
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return SetOutcome{}, codexrpc.ErrClosed
+	}
+	if !s.started {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	if !s.log.OutboxRoom() {
+		s.mu.Unlock()
+		return SetOutcome{}, ErrSetUnavailable
+	}
+	resolved := want
+	if m, ok := s.allModels[want]; ok {
+		resolved = m.ID
+	} else {
+		norm := normalizeIdent(want)
+		for id, m := range s.allModels {
+			if normalizeIdent(id) == norm || normalizeIdent(m.DisplayName) == norm {
+				resolved = id
+				break
+			}
+		}
+	}
+	if len(s.allModels) > 0 {
+		if _, ok := s.allModels[resolved]; !ok {
+			s.mu.Unlock()
+			return SetOutcome{}, newCodexErr(errkind.ModelNotFound, "unknown model %q", sanitizeLine(want))
+		}
+	}
+	s.snap.CurrentModel = resolved
+	efforts, def := s.effortsForModelLocked(resolved)
+	if s.currentEffort == "" || (len(efforts) > 0 && !slices.Contains(efforts, s.currentEffort)) {
+		s.currentEffort = def
+	}
+	s.rebuildCatalogAndConfigLocked()
+	model := s.snap.CurrentModel
+	ticket := s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
+		Model:  &model,
+		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Catalog: &CatalogState{
+			Models:   CloneModels(s.snap.Models),
+			Revision: s.snap.CatalogRevision,
+		},
+	})
+	midTurn := s.activeTurn != nil
+	s.mu.Unlock()
+	if midTurn {
+		s.emit(Event{
+			Type:   EventNotice,
+			Notice: &NoticeInfo{Severity: "info", Title: "Model updated for next turn", Description: model},
+		})
+	}
+	return SetOutcome{Value: model, Ticket: ticket}, nil
+}
+
+func (s *codexSession) SetMode(_ context.Context, cause, modeID string) (SetOutcome, error) {
+	id, ok := ResolveMode(strings.TrimSpace(modeID), codexStartModes)
+	if !ok {
+		return SetOutcome{}, newCodexErr(errkind.Config, "mode %s is not advertised", sanitizeLine(modeID))
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return SetOutcome{}, codexrpc.ErrClosed
+	}
+	if !s.started {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	if !s.log.OutboxRoom() {
+		s.mu.Unlock()
+		return SetOutcome{}, ErrSetUnavailable
+	}
+	s.snap.CurrentMode = id
+	mode := id
+	ticket := s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &mode})
+	midTurn := s.activeTurn != nil
+	s.mu.Unlock()
+	if midTurn {
+		s.emit(Event{
+			Type:   EventNotice,
+			Notice: &NoticeInfo{Severity: "info", Title: "Mode updated for next turn", Description: mode},
+		})
+	}
+	return SetOutcome{Value: mode, Ticket: ticket}, nil
+}
+
+func (s *codexSession) SetConfig(_ context.Context, cause, id, value, forModel string) (SetOutcome, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return SetOutcome{}, codexrpc.ErrClosed
+	}
+	if !s.started {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	if forModel != "" && s.snap.CurrentModel != forModel {
+		s.mu.Unlock()
+		return SetOutcome{}, ErrStaleModel
+	}
+	if id != codexEffortID {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: unknown config option %q", sanitizeLine(id))
+	}
+	opt := s.buildEffortOptionLocked(s.snap.CurrentModel, s.currentEffort)
+	if opt == nil {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: model %q offers no effort setting", sanitizeLine(s.snap.CurrentModel))
+	}
+	matched, why := effortValue(opt, strings.TrimSpace(value))
+	if why != "" {
+		s.mu.Unlock()
+		return SetOutcome{}, fmt.Errorf("agent: invalid effort %q for model %q", sanitizeLine(value), sanitizeLine(s.snap.CurrentModel))
+	}
+	if !s.log.OutboxRoom() {
+		s.mu.Unlock()
+		return SetOutcome{}, ErrSetUnavailable
+	}
+	s.currentEffort = matched
+	s.rebuildCatalogAndConfigLocked()
+	ticket := s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
+		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Catalog: &CatalogState{
+			Models:   CloneModels(s.snap.Models),
+			Revision: s.snap.CatalogRevision,
+		},
+	})
+	midTurn := s.activeTurn != nil
+	s.mu.Unlock()
+	if midTurn {
+		s.emit(Event{
+			Type:   EventNotice,
+			Notice: &NoticeInfo{Severity: "info", Title: "Effort updated for next turn", Description: matched},
+		})
+	}
+	return SetOutcome{Value: matched, Ticket: ticket}, nil
+}
+
+func (s *codexSession) SetTitle(cause, title string) error {
+	clean := sanitizeText(strings.TrimSpace(title))
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return codexrpc.ErrClosed
+	}
+	if !s.log.OutboxRoom() {
+		s.mu.Unlock()
+		return ErrSetUnavailable
+	}
+	s.snap.Title = clean
+	s.titlePinned = true
+	t := clean
+	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &t})
+	client := s.client
+	tid := s.threadID
+	s.mu.Unlock()
+	if client != nil && tid != "" && clean != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.ThreadNameSet(ctx, tid, clean)
+		}()
+	}
+	return nil
+}
+
+// --- Snapshot & Close / Teardown ---
+
+func (s *codexSession) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := s.snap
+	snap.Models = CloneModels(s.snap.Models)
+	snap.Modes = append([]ModeInfo(nil), s.snap.Modes...)
+	snap.Commands = append([]CommandInfo(nil), s.snap.Commands...)
+	snap.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
+	snap.Slash = cloneSlash(s.snap.Slash)
+	snap.Config = cloneConfig(s.snap.Config)
+	snap.Todos = append([]Todo(nil), s.snap.Todos...)
+	snap.Tools = snapshotTools(s.toolOrder, s.tools)
+	snap.Subagents = snapshotSubagents(s.subagentOrder, s.subagents)
+	snap.ForeignTurn = s.foreignTurnID != ""
+	if s.snap.Usage != nil {
+		u := *s.snap.Usage
+		snap.Usage = &u
+	}
+	return snap
+}
+
+func (s *codexSession) Close() error {
+	s.teardown()
+	s.logOnce.Do(func() { s.log.Close(context.Background()) })
+	return s.closeErr
+}
+
+func (s *codexSession) teardown() {
+	s.closeOnce.Do(func() {
+		defer close(s.closeDone)
+		s.mu.Lock()
+		s.closed = true
+		close(s.done)
+		client := s.client
+		turn := s.activeTurn
+		s.mu.Unlock()
+
+		s.asks.Close()
+		if turn != nil {
+			_, _ = s.settleTurn(turn, "", codexrpc.ErrClosed, true)
+		}
+		if client != nil {
+			s.closeErr = client.Close()
+		}
+		if s.tee != nil {
+			s.tee.Flush()
+		}
+	})
+	<-s.closeDone
+}
+
+// --- Incoming Notifications, Server Requests & Transport Watch ---
+
+func (s *codexSession) transportErrOrClosed() error {
+	s.mu.Lock()
+	c := s.client
+	s.mu.Unlock()
+	if c != nil {
+		if err := c.Err(); err != nil {
+			return err
+		}
+	}
+	return codexrpc.ErrClosed
+}
+
+func (s *codexSession) watchTransportDone(client *codexrpc.Client) {
+	<-client.Done()
+	err := client.Err()
+	if err == nil {
+		err = codexrpc.ErrClosed
+	}
+	s.mu.Lock()
+	turn := s.activeTurn
+	foreign := s.foreignTurnID
+	s.foreignTurnID = ""
+	closed := s.closed
+	s.mu.Unlock()
+
+	if turn != nil {
+		_, _ = s.settleTurn(turn, "", err, true)
+	}
+	if foreign != "" && !closed {
+		info := ErrorInfo(err)
+		s.emit(Event{
+			Type: EventForeignTurn,
+			ForeignTurn: &ForeignTurnInfo{
+				ID:      foreign,
+				Running: false,
+				Err:     &TurnError{Kind: info.Kind, Message: err.Error()},
+			},
+		})
+	}
+}
+
+func (s *codexSession) onNotify(msg *codexrpc.Message) {
+	switch msg.Method {
+	case codexrpc.NotifyTurnStarted:
+		s.handleTurnStarted(msg.Params)
+	case codexrpc.NotifyTurnCompleted:
+		s.handleTurnCompleted(msg.Params)
+	case codexrpc.NotifyItemStarted:
+		s.handleItemStarted(msg.Params)
+	case codexrpc.NotifyItemCompleted:
+		s.handleItemCompleted(msg.Params)
+	case codexrpc.NotifyAgentMessageDelta:
+		s.handleAgentMessageDelta(msg.Params)
+	case codexrpc.NotifyPlanDelta:
+		s.handlePlanDelta(msg.Params)
+	case codexrpc.NotifyReasoningSummaryPart:
+		s.handleReasoningSummaryPartAdded(msg.Params)
+	case codexrpc.NotifyReasoningSummaryDelta, codexrpc.NotifyReasoningTextDelta:
+		s.handleReasoningDelta(msg.Params)
+	case codexrpc.NotifyCommandOutputDelta:
+		s.handleCommandOutputDelta(msg.Params)
+	case codexrpc.NotifyTurnPlanUpdated:
+		s.handlePlanUpdated(msg.Params)
+	case codexrpc.NotifyThreadTokenUsageUpdated:
+		s.handleTokenUsageUpdated(msg.Params)
+	case codexrpc.NotifyRateLimitsUpdated:
+		s.handleRateLimitsUpdated(msg.Params)
+	case codexrpc.NotifyThreadNameUpdated:
+		s.handleThreadNameUpdated(msg.Params)
+	case codexrpc.NotifyError:
+		s.handleErrorNotification(msg.Params)
+	case codexrpc.NotifyConfigWarning, codexrpc.NotifyDeprecationNotice:
+		s.log.Note(journal.DiagNote{
+			Kind:   strings.ReplaceAll(msg.Method, "/", "_"),
+			Fields: map[string]any{"params": sanitizeLine(string(msg.Params))},
+		})
+	}
+}
+
+func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
+	var p codexrpc.TurnEventParams
+	if json.Unmarshal(raw, &p) != nil || p.Turn.ID == "" {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) {
+		return
+	}
+	var (
+		needInterruptID string
+		client          *codexrpc.Client
+		threadID        string
+		isForeign       bool
+	)
+	s.mu.Lock()
+	if s.activeTurn != nil && s.activeTurn.phase != codexPhaseSettled {
+		if s.activeTurn.turnID == "" {
+			s.activeTurn.turnID = p.Turn.ID
+			s.activeTurn.phase = codexPhaseIdentified
+			if s.activeTurn.cancelPending && !s.activeTurn.interruptSent {
+				s.activeTurn.interruptSent = true
+				needInterruptID = p.Turn.ID
+				client = s.client
+				threadID = s.threadID
+			}
+		}
+	} else {
+		// Autonomous main-thread turn (Plan 054 § D1).
+		s.foreignTurnID = p.Turn.ID
+		isForeign = true
+	}
+	s.mu.Unlock()
+
+	if needInterruptID != "" && client != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.TurnInterrupt(ctx, threadID, needInterruptID)
+		}()
+	}
+	if isForeign {
+		s.emit(Event{
+			Type:        EventForeignTurn,
+			ForeignTurn: &ForeignTurnInfo{ID: p.Turn.ID, Running: true},
+		})
+	}
+}
+
+func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
+	var p codexrpc.TurnEventParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) {
+		return
+	}
+	s.mu.Lock()
+	turn := s.activeTurn
+	foreign := s.foreignTurnID
+	if turn != nil && turn.phase != codexPhaseSettled {
+		if turn.turnID == "" && p.Turn.ID != "" {
+			// turn/completed arrived before turn/start reply: bind and settle now,
+			// also stash in earlyCompleted in case turn/start reply checks it.
+			turn.turnID = p.Turn.ID
+			s.earlyCompleted[p.Turn.ID] = p.Turn
+		}
+		if turn.turnID == p.Turn.ID || p.Turn.ID == "" {
+			s.mu.Unlock()
+			s.finishTurnFromWire(turn, p.Turn)
+			return
+		}
+	}
+	if foreign != "" && (foreign == p.Turn.ID || p.Turn.ID == "") {
+		s.foreignTurnID = ""
+		s.mu.Unlock()
+		info := &ForeignTurnInfo{
+			ID:        foreign,
+			Running:   false,
+			Cancelled: p.Turn.Status == "interrupted",
+		}
+		if p.Turn.Status == "failed" {
+			err := s.turnErrorFromWire(p.Turn.Error)
+			info.Err = &TurnError{Kind: ErrorInfo(err).Kind, Message: err.Error()}
+		}
+		s.emit(Event{Type: EventForeignTurn, ForeignTurn: info})
+		return
+	}
+	if p.Turn.ID != "" && turn == nil {
+		// Stash briefly in case turn/start is mid-flight.
+		s.earlyCompleted[p.Turn.ID] = p.Turn
+	}
+	s.mu.Unlock()
+}
+
+func (s *codexSession) handleTokenUsageUpdated(raw json.RawMessage) {
+	var p codexrpc.TokenUsageUpdatedParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) {
+		return
+	}
+	s.mu.Lock()
+	asBaseline := s.activeTurn == nil && s.foreignTurnID == "" && !s.usage.reported
+	s.usage.applyTokenUsage(p.TokenUsage, s.snap.CurrentModel, asBaseline)
+	s.publishUsageLocked()
+	s.mu.Unlock()
+}
+
+func (s *codexSession) handleRateLimitsUpdated(raw json.RawMessage) {
+	var p codexrpc.RateLimitsUpdatedParams
+	if json.Unmarshal(raw, &p) != nil || p.RateLimits == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.usage.mergeRateLimits(p.RateLimits) {
+		s.publishUsageLocked()
+	}
+	s.mu.Unlock()
+}
+
+func (s *codexSession) handleErrorNotification(raw json.RawMessage) {
+	var p codexrpc.ErrorNotificationParams
+	if json.Unmarshal(raw, &p) != nil {
+		return
+	}
+	if !s.isMainThread(p.ThreadID) {
+		return
+	}
+	info := codexrpc.ClassifyTurnError(&p.Error)
+	if p.WillRetry {
+		// Fast-fail 401 / unauthorized even when willRetry: true (Plan 054 § D5).
+		if info.Kind == errkind.Auth {
+			err := s.turnErrorFromWire(&p.Error)
+			s.mu.Lock()
+			turn := s.activeTurn
+			client := s.client
+			s.mu.Unlock()
+			if turn != nil {
+				_, _ = s.settleTurn(turn, "", err, true)
+			} else {
+				s.emit(Event{Type: EventError, Err: err})
+			}
+			if client != nil {
+				client.CloseAsync()
+			}
+			return
+		}
+		s.emit(Event{
+			Type: EventNotice,
+			Notice: &NoticeInfo{
+				Severity:    "warning",
+				Title:       "Codex retrying",
+				Description: sanitizeLine(p.Error.Message),
+			},
+		})
+		return
+	}
+	// Non-retryable error: deduplicate with subsequent turn/completed{status: "failed"}
+	// by settling the active turn once here.
+	err := s.turnErrorFromWire(&p.Error)
+	s.mu.Lock()
+	turn := s.activeTurn
+	s.mu.Unlock()
+	if turn != nil {
+		_, _ = s.settleTurn(turn, "", err, true)
+		return
+	}
+	s.emit(Event{Type: EventError, Err: err})
+}
+
+// onServerRequest is the M2a baseline server->client request dispatcher
+// (expanded with full AskRegistry approval/question cards in M2b).
+// Enforces the hard read-only invariant in ask/plan mode immediately and
+// returns false for unknown methods so codexrpc sends -32601.
+func (s *codexSession) onServerRequest(_ context.Context, msg *codexrpc.Message) bool {
+	if msg.ID == nil {
+		return false
+	}
+	s.mu.Lock()
+	mode := s.snap.CurrentMode
+	client := s.client
+	s.mu.Unlock()
+	if client == nil {
+		return false
+	}
+	switch msg.Method {
+	case codexrpc.RequestCommandApproval, codexrpc.RequestFileChangeApproval:
+		// Hard read-only invariant: ALWAYS deny in ask/plan mode.
+		if s.provider().ModeKind(mode) == ModeReadOnly || s.provider().ModeKind(mode) == ModePlan {
+			_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+			return true
+		}
+		if EffectiveApproval(s.opts).Permission == ApprovalAllow {
+			_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "accept"})
+			return true
+		}
+		_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		return true
+	case codexrpc.RequestPermissionsApproval:
+		_ = client.Reply(*msg.ID, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		return true
+	case codexrpc.RequestMCPElicitation:
+		_ = client.Reply(*msg.ID, map[string]any{"action": "decline"})
+		return true
+	case codexrpc.RequestUserInput:
+		_ = client.Reply(*msg.ID, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		return true
+	default:
+		return false
+	}
+}
