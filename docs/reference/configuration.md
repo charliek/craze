@@ -49,7 +49,9 @@ for `craze-light`.
 
 `Ctrl+G` or `/theme` opens a picker that repaints the live screen as
 the cursor moves. When space permits, a sample below the names shows a prompt,
-an exploration summary, a failure and a diff. `Enter` saves the selected theme.
+an exploration summary, a failed command and a diff. On shorter terminals the
+picker shrinks to the names and controls so more of the transcript stays visible.
+`Enter` saves the selected theme.
 `Esc` restores the theme that was active when the picker opened. `/theme <name>` sets and saves one
 directly.
 

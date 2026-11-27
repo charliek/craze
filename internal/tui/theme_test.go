@@ -835,3 +835,24 @@ func TestThemePickerSampleAndEighthPreset(t *testing.T) {
 		t.Fatalf("last row: dialog=%v, saved theme=%q", out.dialog, ConfigTheme())
 	}
 }
+
+func TestThemePickerHeightAndClicksAtPreviewThreshold(t *testing.T) {
+	for _, tc := range []struct{ transcript, box int }{{15, 12}, {16, 16}} {
+		m := themeModel(t, "craze-dark").openThemePicker()
+		height := m.height - m.lay.Region(regionTranscript).Height() + tc.transcript
+		tm, _ := m.Update(tea.WindowSizeMsg{Width: m.width, Height: height})
+		m = tm.(Model)
+		r := m.lay.Dialog
+		tr := m.lay.Region(regionTranscript)
+		if tr.Height() != tc.transcript || r.H != tc.box || r.Y != tr.Top+(tc.transcript-tc.box)/2 {
+			t.Fatalf("want a centered %d-row picker in %d transcript rows, got %+v in %+v", tc.box, tc.transcript, r, tr)
+		}
+		if got := strings.Contains(plainView(m), "exit 1"); got != (tc.transcript == 16) {
+			t.Fatalf("preview visible at height %d: %t", tc.transcript, got)
+		}
+		out := clickXY(t, m, r.X+2, r.Y+1+len(m.themeNames))
+		if out.dialog != dialogNone || out.theme.Name != "high-contrast" {
+			t.Fatalf("click on the last name at height %d selected %q", tc.transcript, out.theme.Name)
+		}
+	}
+}

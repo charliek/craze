@@ -78,17 +78,15 @@ func (m Model) dialogRect(lay frameLayout) rect {
 		return rect{}
 	}
 	tr := lay.Region(regionTranscript)
-	if tr.Height() <= 0 {
+	if tr.Height() < dialogBorder+1 {
 		return rect{}
 	}
 	w := min(m.dialogMaxWidth(), m.width-dialogGutter)
 	if w < dialogBorder+1 {
 		return rect{}
 	}
-	h := min(m.dialogRows(w), tr.Height())
-	if h < dialogBorder+1 {
-		return rect{}
-	}
+	body := m.dialogBody(w-dialogBorder, tr.Height()-dialogBorder)
+	h := min(dialogBorder+len(body), tr.Height())
 	return rect{
 		X: (m.width - w) / 2,
 		Y: tr.Top + (tr.Height()-h)/2,
@@ -112,11 +110,6 @@ func (m Model) dialogMaxWidth() int {
 		return min(m.width-dialogGutter, signInDialogWidth)
 	}
 	return dialogMaxWidth
-}
-
-// dialogRows is the box's natural height at this width, borders included.
-func (m Model) dialogRows(w int) int {
-	return dialogBorder + len(m.dialogBody(w-dialogBorder, 1<<16))
 }
 
 // dialogBody is the box's content rows at an inner width and an inner height

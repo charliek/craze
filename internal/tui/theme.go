@@ -157,10 +157,11 @@ func (m Model) themeDialogBody(inner, budget int) []string {
 		rows = append(rows, m.dialogRow(name, dialogScrollTag(i, top, shown, len(m.themeNames)), top+i == m.themeSel, true, inner))
 	}
 	if sample {
+		glyph, failed := m.statusGlyph("failed")
 		rows = append(rows,
 			renderSegs(inner, seg{"❯ ", styleFG(m.theme.UserMark)}, seg{"Review the change", styleFG(m.theme.User).Bold(true)}),
 			renderSegs(inner, seg{"▸ Explored · 3 reads", styleFG(m.theme.Dim)}),
-			renderSegs(inner, seg{"✗ Failed · exit 1", styleFG(m.theme.Err)}),
+			m.toolRow(glyph, failed, "bash", "test", "exit 1", failed, inner),
 			renderSegs(inner, seg{"+ added  ", styleFG(m.theme.DiffAdd)}, seg{"− removed", styleFG(m.theme.DiffDel)}),
 		)
 	}

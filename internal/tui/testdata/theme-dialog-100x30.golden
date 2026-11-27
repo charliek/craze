@@ -14,7 +14,7 @@
                        │  high-contrast                                     │                       
                        │❯ Review the change                                 │                       
                        │▸ Explored · 3 reads                                │                       
-                       │✗ Failed · exit 1                                   │                       
+                       │✗ bash  test  exit 1                                │                       
                        │+ added  − removed                                  │                       
                        │↑↓ · enter keeps · esc reverts                      │                       
                        ╰────────────────────────────────────────────────────╯                       
