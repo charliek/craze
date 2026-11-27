@@ -3334,12 +3334,14 @@ Codex review attempts report the billing class from the running host. With
 paid fallback enabled, an unverified endpoint can report `unknown` with
 `provisional: true`. A startup refusal retains the preflight classification.
 
-The built-in review role tries Sol, Neon, then Opus. A Codex caller can
-therefore route directly to Antigravity. On Antigravity 1.5.18, both
+The built-in review role tries Sol, Opus, then Neon — ordering stronger
+containment ahead of Antigravity while keeping Neon available as a fallback
+and in panels. A Codex caller therefore selects Claude Opus first and falls
+back to Neon only if Opus is unavailable or fails. On Antigravity 1.5.18, both
 `agy acp` under `--no-force` and `agy acp --sandbox` allowed editing and shell
 writes. A stock launch also wrote outside the worktree. The Git integrity
-check covers the selected worktree. Select `--target opus` for Claude's
-review tool restrictions.
+check covers the selected worktree. Select `--target opus` or `--target sol`
+to avoid Antigravity fallback altogether.
 
 | Exit | Meaning |
 | --- | --- |
@@ -3364,8 +3366,10 @@ craze resolve --role panel --json
 Use `--target` with an optional numeric `@version` suffix or a separate
 `--version`. Moving Claude aliases and unpinned OpenRouter latest aliases
 report a null version. Use `--role` to resolve a named role. The shipped
-review and adversarial-review roles select a target outside the caller's
-model family. Panel resolves each seat independently, labeling a supported
+review and adversarial-review roles exclude the caller's model family and
+flatten eligible routes across the remaining candidates in order, so runtime
+fallback can step within a target and across candidates without crossing onto
+paid routes. Panel resolves each seat independently, labeling a supported
 same-family seat `native_subagent`. The caller must configure the model,
 effort and permissions of that sub-agent.
 

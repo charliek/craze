@@ -129,8 +129,9 @@ type Result struct {
 	Warnings   []string    `json:"warnings,omitempty"`
 }
 
-// Resolve retains every eligible route in order. A single-target role takes
-// the first eligible target, a panel takes every seat, and an overview
+// Resolve retains every eligible route in order. A single-target role flattens
+// eligible routes across its remaining candidates (taking effort and cap from
+// the first resolved candidate), a panel resolves every seat, and an overview
 // succeeds if at least one target can run.
 func (cfg Config) Resolve(req Request, probe Probe) (Result, bool, error) {
 	res := Result{Schema: 1, Caller: req.Caller, Skipped: []Skip{}}
@@ -227,9 +228,13 @@ func (cfg Config) Resolve(req Request, probe Probe) (Result, bool, error) {
 			res.Targets = append(res.Targets, seat)
 		default:
 			res.Skipped = append(res.Skipped, seat.Skipped...)
-			res.Routes, res.Effort, res.CapSeconds = seat.Routes, seat.Effort, seat.CapSeconds
-			if ready != 0 {
-				return res, true, nil
+			if len(seat.Routes) > 0 {
+				if ready == 1 {
+					res.Effort, res.CapSeconds = seat.Effort, seat.CapSeconds
+				}
+				res.Routes = append(res.Routes, seat.Routes...)
+			} else if ready == 0 {
+				res.Effort, res.CapSeconds = seat.Effort, seat.CapSeconds
 			}
 		}
 	}

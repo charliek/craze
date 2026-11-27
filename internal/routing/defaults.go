@@ -33,7 +33,7 @@ func Defaults() Config {
 		}}
 	}
 	return Config{Targets: targets, Roles: map[string]Role{
-		"review":             {Candidates: []string{"sol", "neon", "opus"}},
+		"review":             {Candidates: []string{"sol", "opus", "neon"}},
 		"adversarial-review": {Candidates: []string{"astra", "fable", "opus"}},
 		"panel":              {Seats: []string{"opus", "neon", "sol"}},
 	}}

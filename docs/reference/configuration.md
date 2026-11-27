@@ -3182,7 +3182,7 @@ version_template = "gpt-{v}-sol"
 billing = "subscription"
 
 [roles.review]
-candidates = ["sol", "neon", "opus"]
+candidates = ["sol", "opus", "neon"]
 ```
 
 Each route names its `provider` and `model`. Its optional `version_template`
@@ -3213,5 +3213,7 @@ A configured Cursor API key or Grok API key makes the route API-key billed. Curs
 approval disabled. Antigravity receives a read-only request and starts as
 `agy acp`. The 1.5.18 adapter was observed writing inside and outside the
 workspace without requesting permission under this configuration. Git checks
-can report mutations only within the inspected worktree. The default
-adversarial role excludes Antigravity.
+can report mutations only within the inspected worktree. Because of this
+weaker containment, the default `review` role orders `sol` and `opus` ahead
+of `neon` (keeping Antigravity in the mix as a fallback and in `panel`), and
+the default `adversarial-review` role excludes Antigravity.

@@ -408,3 +408,35 @@ func TestReviewPipeReopeningAfterCommandEnd(t *testing.T) {
 		cancel()
 	}
 }
+
+func TestReviewRoleCrossCandidateFallback(t *testing.T) {
+	_, ws, _ := unattendedHome(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	t.Setenv("CODEX_API_KEY", "")
+	for _, k := range []string{"CRAZE_SESSION_PROVIDER", "CLAUDECODE", "ANTIGRAVITY_AGENT", "CURSOR_AGENT", "CODEX_THREAD_ID"} {
+		t.Setenv(k, "")
+	}
+	fake := fakeAgentPath(t)
+	codexWrap := filepath.Join(t.TempDir(), "fake-codex")
+	if err := os.WriteFile(codexWrap, []byte(fmt.Sprintf("#!/bin/sh\nexec %q -script codex-quota \"$@\"\n", fake)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeCrazeConfig(t, fmt.Sprintf(`[agents]
+codex=%q
+cursor=%q
+[targets.sol]
+routes=[{provider='codex', model='gpt-6.2-sol', billing='subscription'}]
+[targets.opus]
+routes=[{provider='cursor', model='m-1', billing='subscription'}]
+[targets.neon]
+routes=[]
+`, codexWrap, fake))
+	out, diag, code := executeIn([]string{"review", "--role", "review", "--allow-same-provider", "--effort", "low", "--json", "-C", ws, "inspect"}, strings.NewReader(""))
+	var doc reviewResultJSON
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(out, diag, err)
+	}
+	if code != 0 || doc.Status != statusCompleted || doc.Route == nil || doc.Route.Target != "opus" || doc.Route.Provider != "cursor" || len(doc.Attempts) != 2 || doc.Attempts[0].Target != "sol" || doc.Attempts[0].Kind != errkind.Quota || doc.Attempts[1].Target != "opus" {
+		t.Fatalf("exit %d: %+v, %s", code, doc, diag)
+	}
+}
