@@ -293,7 +293,7 @@ func TestCodexRequestUserInputAttendedUnattendedSecretAndFreetext(t *testing.T) 
 	})
 
 	t.Run("unattended free-text-only parks ask instead of fabricating text", func(t *testing.T) {
-		cs, _ := startCodexFake(t, "codex-ask-freetext", Options{Force: true, Interactive: false})
+		cs, _ := startCodexFake(t, "codex-ask-freetext", Options{Force: true, Interactive: false, Unattended: true})
 		promptDone := make(chan error, 1)
 		var text strings.Builder
 		evs := collectSubEvents(t, cs, func() {
@@ -676,6 +676,190 @@ func TestCodexM2bReviewRegressions(t *testing.T) {
 		cs.mu.Unlock()
 		if !dirty {
 			t.Fatal("expected skillsDirty=true when skills/changed arrives before ready")
+		}
+	})
+}
+
+func TestCodexDogfoodReviewFixes(t *testing.T) {
+	t.Run("H1: clearTurnLocked never double-closes a settling turn", func(t *testing.T) {
+		prov := CodexProvider()
+		cs := New(Options{Provider: &prov, Workspace: t.TempDir()}).(*codexSession)
+		defer func() { _ = cs.Close() }()
+		turn := &codexTurnState{
+			gen:      1,
+			phase:    codexPhaseClaimed,
+			settling: true,
+			idReady:  make(chan struct{}),
+			done:     make(chan struct{}),
+		}
+		cs.mu.Lock()
+		cs.activeTurn = turn
+		cs.clearTurnLocked(turn)
+		stillActive := cs.activeTurn == turn
+		cs.mu.Unlock()
+		if !stillActive {
+			t.Fatal("clearTurnLocked cleared activeTurn while settleTurn owned it")
+		}
+		select {
+		case <-turn.done:
+			t.Fatal("clearTurnLocked closed turn.done while settling=true")
+		default:
+		}
+		// Settlement can now close turn.done without panicking.
+		close(turn.done)
+	})
+
+	t.Run("H3: Close does not deadlock when primary channel is saturated during settlement", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-basic", Options{Force: true})
+		// Fill the primary Events() channel completely without draining it.
+		for len(cs.events) < cap(cs.events) {
+			if !cs.log.Publish(context.Background(), cs.done, Event{Type: EventText, Text: "fill"}) {
+				break
+			}
+		}
+		turn := &codexTurnState{
+			gen:     1,
+			phase:   codexPhaseIdentified,
+			turnID:  "turn-sat",
+			idReady: make(chan struct{}),
+			done:    make(chan struct{}),
+		}
+		cs.mu.Lock()
+		cs.activeTurn = turn
+		cs.mu.Unlock()
+
+		// Start settlement BEFORE Close so closing==false initially; settlement
+		// blocks trying to emit EventDone onto the full primary channel.
+		settleDone := make(chan struct{})
+		go func() {
+			_, _ = cs.settleTurn(turn, acp.StopEndTurn, nil, true)
+			close(settleDone)
+		}()
+		time.Sleep(30 * time.Millisecond)
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- cs.Close() }()
+		select {
+		case <-closeDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Close deadlocked behind saturated primary channel")
+		}
+		select {
+		case <-settleDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("settleTurn did not unblock on Close")
+		}
+	})
+
+	t.Run("M1: standalone headless (craze prompt) declines free-text-only question instead of hanging", func(t *testing.T) {
+		// Interactive: false, Unattended: false mirrors `craze prompt`.
+		cs, _ := startCodexFake(t, "codex-ask-freetext", Options{
+			Force:       true,
+			Interactive: false,
+			Unattended:  false,
+			Approval: &ApprovalPolicy{
+				Permission: ApprovalAllow,
+				Question:   ApprovalFirstOption,
+				Plan:       ApprovalAccept,
+			},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := cs.Prompt(ctx, "ask free text"); err != nil {
+			t.Fatalf("Prompt hung or failed on free-text question in standalone headless mode: %v", err)
+		}
+	})
+
+	t.Run("M3: expired Cancel ctx allows subsequent Cancel to send turn/interrupt", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-hang", Options{Force: true})
+		promptDone := make(chan error, 1)
+		go func() {
+			_, err := cs.Prompt(context.Background(), "hang forever")
+			promptDone <- err
+		}()
+		// Wait until turnID is bound.
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			cs.mu.Lock()
+			ready := cs.activeTurn != nil && cs.activeTurn.turnID != ""
+			cs.mu.Unlock()
+			if ready {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		// First Cancel with an already-expired ctx must NOT latch interruptSent.
+		expCtx, expCancel := context.WithCancel(context.Background())
+		expCancel()
+		_, err := cs.Cancel(expCtx)
+		if err == nil {
+			t.Fatal("expected expired Cancel to return error")
+		}
+		// Second Cancel with a fresh ctx must succeed and settle the turn.
+		freshCtx, freshCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer freshCancel()
+		out, err := cs.Cancel(freshCtx)
+		if err != nil || !out.Settled {
+			t.Fatalf("second Cancel failed: outcome=%+v err=%v", out, err)
+		}
+		select {
+		case <-promptDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Prompt did not settle after retry Cancel")
+		}
+	})
+
+	t.Run("M4: collabAgentToolCall follow-up updates existing row and subAgentActivity kind maps status", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-basic", Options{Force: true})
+		// Initial spawn creates 1 row mapped to child-1.
+		spawnRaw := json.RawMessage(`{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawn_agent","status":"completed","receiverThreadIds":["child-1"],"prompt":"inspect","agentsStates":{"child-1":{"status":"running"}}}`)
+		cs.processItemCtx(context.Background(), spawnRaw, true, false)
+
+		// Follow-up wait call referencing child-1 must update spawn-1 in place without creating a second row.
+		waitRaw := json.RawMessage(`{"type":"collabAgentToolCall","id":"wait-1","tool":"wait","status":"completed","receiverThreadIds":["child-1"],"agentsStates":{"child-1":{"status":"running"}}}`)
+		cs.processItemCtx(context.Background(), waitRaw, true, false)
+
+		snap := cs.Snapshot()
+		if len(snap.Subagents) != 1 || snap.Subagents[0].ID != "spawn-1" || snap.Subagents[0].Status != SubagentRunning {
+			t.Fatalf("follow-up collabAgentToolCall created duplicate or wrong status: %+v", snap.Subagents)
+		}
+
+		// Upstream subAgentActivity with kind="completed" and empty status must transition spawn-1 to SubagentCompleted.
+		actRaw := json.RawMessage(`{"type":"subAgentActivity","id":"act-done","agentThreadId":"child-1","kind":"completed","activity":"finished analysis"}`)
+		cs.processItemCtx(context.Background(), actRaw, true, false)
+		snap = cs.Snapshot()
+		if len(snap.Subagents) != 1 || snap.Subagents[0].ID != "spawn-1" || snap.Subagents[0].Status != SubagentCompleted {
+			t.Fatalf("subAgentActivity kind=completed did not settle spawn-1: %+v", snap.Subagents)
+		}
+	})
+
+	t.Run("L1: expired quota bucket does not mask fresh active bucket", func(t *testing.T) {
+		now := time.Unix(1_800_000_000, 0).UTC()
+		past := now.Add(-10 * time.Minute).Unix()
+		future := now.Add(2 * time.Hour).Unix()
+		pct100 := 100.0
+		pct25 := 25.0
+		w300 := 300
+		w10080 := 10080
+
+		var u codexUsage
+		u.mergeRateLimits(&codexrpc.RateLimitsSnapshot{
+			LimitID:  "codex",
+			PlanType: "prolite",
+			Primary: &codexrpc.RateLimitWindow{
+				UsedPercent:        &pct100,
+				WindowDurationMins: &w300,
+				ResetsAt:           &past,
+			},
+			Secondary: &codexrpc.RateLimitWindow{
+				UsedPercent:        &pct25,
+				WindowDurationMins: &w10080,
+				ResetsAt:           &future,
+			},
+		})
+		st := u.stateAt(now)
+		if st.Window != "seven_day" || st.WindowUtilization != 0.25 {
+			t.Fatalf("expired bucket masked active bucket: got window=%q util=%v", st.Window, st.WindowUtilization)
 		}
 	})
 }

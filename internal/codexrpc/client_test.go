@@ -1,10 +1,12 @@
 package codexrpc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -904,5 +906,86 @@ func TestFixtureRedactionNoProhibitedKeys(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("testdata/session_frames.jsonl contains prohibited token %q", forbidden)
 		}
+	}
+}
+
+// TestReplyCtxServerRequestResolvedDoesNotAbortTransport verifies that when the
+// peer immediately emits serverRequest/resolved upon reading a reply (racing
+// with writeFrame's completion and cancelling reqCtx), the shared transport
+// stays healthy and subsequent RPC calls succeed.
+func TestReplyCtxServerRequestResolvedDoesNotAbortTransport(t *testing.T) {
+	srvToCliR, srvToCliW := io.Pipe()
+	cliToSrvR, cliToSrvW := io.Pipe()
+	defer srvToCliR.Close()
+	defer srvToCliW.Close()
+	defer cliToSrvR.Close()
+	defer cliToSrvW.Close()
+
+	c := newClient(srvToCliR, cliToSrvW, nil)
+	replyErrCh := make(chan error, 1)
+	c.SetRequestHandler(func(reqCtx context.Context, msg *Message) bool {
+		if msg.ID == nil {
+			return false
+		}
+		replyErrCh <- c.ReplyCtx(reqCtx, *msg.ID, map[string]any{"decision": "accept"})
+		return true
+	})
+	c.Start()
+	defer func() { _ = c.Close() }()
+
+	// Simulated server: send request id 0, read reply, IMMEDIATELY send
+	// serverRequest/resolved for id 0, then answer a follow-up account/read RPC.
+	srvDone := make(chan error, 1)
+	go func() {
+		dec := bufio.NewReader(cliToSrvR)
+		if _, err := io.WriteString(srvToCliW, `{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"u1","itemId":"i1"}}`+"\n"); err != nil {
+			srvDone <- err
+			return
+		}
+		if _, err := dec.ReadString('\n'); err != nil {
+			srvDone <- err
+			return
+		}
+		if _, err := io.WriteString(srvToCliW, `{"method":"serverRequest/resolved","params":{"threadId":"t1","requestId":0}}`+"\n"); err != nil {
+			srvDone <- err
+			return
+		}
+		// Read follow-up account/read request and reply cleanly.
+		line, err := dec.ReadString('\n')
+		if err != nil {
+			srvDone <- err
+			return
+		}
+		var req Message
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			srvDone <- err
+			return
+		}
+		resp := fmt.Sprintf(`{"id":%s,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}`+"\n", string(*req.ID))
+		_, err = io.WriteString(srvToCliW, resp)
+		srvDone <- err
+	}()
+
+	select {
+	case err := <-replyErrCh:
+		if err != nil {
+			t.Fatalf("ReplyCtx failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for ReplyCtx")
+	}
+
+	// Follow-up RPC must succeed on the same healthy transport.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, err := c.AccountRead(ctx, false)
+	if err != nil {
+		t.Fatalf("follow-up AccountRead after serverRequest/resolved failed (transport aborted?): %v", err)
+	}
+	if res == nil || res.Account == nil || res.Account.PlanType != "pro" {
+		t.Fatalf("unexpected AccountRead result: %+v", res)
+	}
+	if err := <-srvDone; err != nil {
+		t.Fatalf("mock peer error: %v", err)
 	}
 }

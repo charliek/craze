@@ -797,74 +797,123 @@ func (s *codexSession) processItemCtx(ctx context.Context, raw json.RawMessage, 
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
 			return true
 		}
-		st := deriveCollabSubagentStatus(item, completed)
-		if replaying && st == SubagentRunning {
-			st = SubagentCancelled
-		}
 		now := s.Now()
+		childStates := parseCollabAgentStates(item.AgentsStates)
+		var evs []Event
+
 		s.mu.Lock()
 		s.lastMsgItemID = ""
-		rec, exists := s.subagents[item.ID]
-		change := SubagentChangeProgress
-		if !exists {
-			var launchTurn int
-			if s.activeTurn != nil {
-				launchTurn = int(s.activeTurn.gen)
+		if s.childThreadSubagent == nil {
+			s.childThreadSubagent = make(map[string]string)
+		}
+
+		// Determine if this call targets already-tracked child thread(s) (e.g.
+		// wait / sendInput / closeAgent follow-up calls). Update those existing
+		// rows in place instead of spawning duplicate rows or clobbering the
+		// childThreadSubagent mapping.
+		var matchedRowIDs []string
+		var unmatchedChildren []string
+		seenRows := make(map[string]bool)
+		for _, childTID := range item.ReceiverThreadID {
+			if childTID == "" {
+				continue
 			}
-			rec = &subagentRec{
-				turn: launchTurn,
-				info: SubagentInfo{
-					ID:           item.ID,
-					ToolCallID:   item.ID,
-					SubagentType: sanitizeText(item.Tool),
-					Description:  sanitizeText(item.Prompt),
-					Prompt:       sanitizeText(item.Prompt),
-					Status:       st,
-					StartedAt:    now,
-					NoCancel:     true,
-				},
+			if rowID, ok := s.childThreadSubagent[childTID]; ok {
+				if _, exists := s.subagents[rowID]; exists {
+					if !seenRows[rowID] {
+						seenRows[rowID] = true
+						matchedRowIDs = append(matchedRowIDs, rowID)
+					}
+					continue
+				}
 			}
-			capSubagent(&rec.info)
-			s.subagents[item.ID] = rec
-			s.subagentOrder = append(s.subagentOrder, item.ID)
-			change = SubagentChangeSpawned
-		} else {
-			if item.Tool != "" {
-				rec.info.SubagentType = sanitizeText(item.Tool)
+			unmatchedChildren = append(unmatchedChildren, childTID)
+		}
+
+		updateRec := func(rec *subagentRec, st SubagentStatus, exists bool) Event {
+			if replaying && st == SubagentRunning {
+				st = SubagentCancelled
 			}
+			rec.info.Status = st
 			if item.Prompt != "" && rec.info.Prompt == "" {
 				rec.info.Prompt = sanitizeText(item.Prompt)
 				rec.info.Description = sanitizeText(item.Prompt)
 			}
-			rec.info.Status = st
+			change := SubagentChangeProgress
+			if !exists {
+				change = SubagentChangeSpawned
+			}
+			if st != SubagentRunning {
+				if rec.info.EndedAt.IsZero() {
+					rec.info.EndedAt = now
+				}
+				if !rec.info.StartedAt.IsZero() {
+					rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
+				}
+				if exists || replaying {
+					change = SubagentChangeFinished
+				}
+			}
 			capSubagent(&rec.info)
+			info := cloneSubagent(rec.info)
+			return Event{Type: EventSubagent, Subagent: &info, SubagentChange: change}
 		}
-		if s.childThreadSubagent == nil {
-			s.childThreadSubagent = make(map[string]string)
+
+		// Update any already-tracked receiver child rows.
+		for _, rowID := range matchedRowIDs {
+			rec := s.subagents[rowID]
+			st := deriveCollabRowStatus(item, childStates, rowID, s.childThreadSubagent, completed)
+			evs = append(evs, updateRec(rec, st, true))
 		}
-		for _, childTID := range item.ReceiverThreadID {
-			if childTID != "" {
+
+		// Create or update a row for newly spawned / untracked child threads, or
+		// for calls that carry no receiverThreadIds at all (keyed by item.ID).
+		if len(unmatchedChildren) > 0 || len(matchedRowIDs) == 0 {
+			st := deriveCollabSubagentStatus(item, completed)
+			if replaying && st == SubagentRunning {
+				st = SubagentCancelled
+			}
+			rec, exists := s.subagents[item.ID]
+			if !exists {
+				var launchTurn int
+				if s.activeTurn != nil {
+					launchTurn = int(s.activeTurn.gen)
+				}
+				rec = &subagentRec{
+					turn: launchTurn,
+					info: SubagentInfo{
+						ID:           item.ID,
+						ToolCallID:   item.ID,
+						SubagentType: sanitizeText(item.Tool),
+						Description:  sanitizeText(item.Prompt),
+						Prompt:       sanitizeText(item.Prompt),
+						Status:       st,
+						StartedAt:    now,
+						NoCancel:     true,
+					},
+				}
+				s.subagents[item.ID] = rec
+				s.subagentOrder = append(s.subagentOrder, item.ID)
+			} else if item.Tool != "" && rec.info.SubagentType == "" {
+				rec.info.SubagentType = sanitizeText(item.Tool)
+			}
+			for _, childTID := range unmatchedChildren {
 				s.childThreadSubagent[childTID] = item.ID
 			}
+			evs = append(evs, updateRec(rec, st, exists))
 		}
-		if st != SubagentRunning {
-			if rec.info.EndedAt.IsZero() {
-				rec.info.EndedAt = now
-			}
-			if !rec.info.StartedAt.IsZero() {
-				rec.info.DurationMs = int(rec.info.EndedAt.Sub(rec.info.StartedAt).Milliseconds())
-			}
-			if exists || replaying {
-				change = SubagentChangeFinished
-			}
-		}
-		info := cloneSubagent(rec.info)
 		s.mu.Unlock()
-		return emitItem(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
+		for _, ev := range evs {
+			if !emitItem(ev) {
+				return false
+			}
+		}
+		return true
 
 	case "subAgentActivity":
 		// Upstream Codex can emit subAgentActivity as a ThreadItem carrying
-		// agentThreadId + kind/status/activity/output/error (M7).
+		// agentThreadId + kind/status/activity/output/error (M7). Upstream
+		// item.rs encodes lifecycle transitions in `kind` when `status` is absent.
 		var item struct {
 			ID            string `json:"id"`
 			AgentThreadID string `json:"agentThreadId"`
@@ -889,6 +938,9 @@ func (s *codexSession) processItemCtx(ctx context.Context, raw json.RawMessage, 
 			act = item.Kind
 		}
 		st := item.Status
+		if st == "" {
+			st = statusFromSubAgentKind(item.Kind)
+		}
 		if replaying && (st == "" || mapCodexSubagentStatus(st, false) == SubagentRunning) {
 			st = "cancelled"
 		}
@@ -904,6 +956,71 @@ func (s *codexSession) processItemCtx(ctx context.Context, raw json.RawMessage, 
 		}, true)
 	}
 	return true
+}
+
+func parseCollabAgentStates(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var states map[string]struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &states) != nil || len(states) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(states))
+	for k, v := range states {
+		out[k] = v.Status
+	}
+	return out
+}
+
+func deriveCollabRowStatus(item codexrpc.CollabAgentToolCallItem, states map[string]string, rowID string, childMap map[string]string, completed bool) SubagentStatus {
+	if len(states) > 0 {
+		anyMatched, anyRunning, anyFailed, anyCancelled := false, false, false, false
+		for childTID, rawStatus := range states {
+			if childMap[childTID] != rowID {
+				continue
+			}
+			anyMatched = true
+			switch mapCodexSubagentStatus(rawStatus, false) {
+			case SubagentRunning:
+				anyRunning = true
+			case SubagentFailed:
+				anyFailed = true
+			case SubagentCancelled:
+				anyCancelled = true
+			}
+		}
+		if anyMatched {
+			switch {
+			case anyRunning:
+				return SubagentRunning
+			case anyFailed:
+				return SubagentFailed
+			case anyCancelled:
+				return SubagentCancelled
+			default:
+				return SubagentCompleted
+			}
+		}
+	}
+	return deriveCollabSubagentStatus(item, completed)
+}
+
+func statusFromSubAgentKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "completed", "finished", "done", "succeeded", "complete":
+		return "completed"
+	case "failed", "error", "errored":
+		return "failed"
+	case "cancelled", "canceled", "aborted", "interrupted", "closed", "shutdown":
+		return "cancelled"
+	case "started", "spawned", "running", "in_progress", "inprogress", "progress", "pending", "waiting":
+		return "running"
+	default:
+		return ""
+	}
 }
 
 // deriveCollabSubagentStatus inspects agentsStates when present so a spawn tool

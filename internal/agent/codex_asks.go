@@ -564,23 +564,39 @@ func (s *codexSession) handleRequestUserInput(ctx context.Context, req *codexPen
 
 	// Unattended policy (ApprovalFirstOption):
 	// - If every question offers options, pick each first option automatically.
-	// - If any question is free-text-only (options == null/empty), DO NOT
-	//   fabricate bogus text — park the ask so unattended `craze new --wait`
-	//   exits 4 (needs_input) cleanly (Plan 054 § D3).
-	if EffectiveApproval(s.opts).Question == ApprovalFirstOption && allHaveOptions {
-		if ctx.Err() != nil {
-			_ = s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
+	// - If any question is free-text-only (options == null/empty):
+	//   * On an unattended detached host (`craze new --wait`, Unattended: true),
+	//     DO NOT fabricate bogus text — park the ask so `craze new --wait` exits 4
+	//     (`needs_input`) and can be answered via `craze attach` (Plan 054 § D3).
+	//   * On standalone headless (`craze prompt`, !Unattended && !Interactive),
+	//     there is no TUI and no attachable host, so cancel immediately rather
+	//     than hanging until interrupted.
+	if EffectiveApproval(s.opts).Question == ApprovalFirstOption {
+		if allHaveOptions {
+			if ctx.Err() != nil {
+				_ = s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
+				s.flushAsks(ctx)
+				return
+			}
+			rec := s.asks.Automatic(tok, askReq, AskAnswer{Answers: autoAnswers})
 			s.flushAsks(ctx)
+			reply := codexUserInputReplyFromRecord(rec)
+			sent, err := req.commitReply(ctx, func(c context.Context) error {
+				return client.ReplyCtx(c, id, reply)
+			})
+			s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && err == nil})
 			return
 		}
-		rec := s.asks.Automatic(tok, askReq, AskAnswer{Answers: autoAnswers})
-		s.flushAsks(ctx)
-		reply := codexUserInputReplyFromRecord(rec)
-		sent, err := req.commitReply(ctx, func(c context.Context) error {
-			return client.ReplyCtx(c, id, reply)
-		})
-		s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && err == nil})
-		return
+		if !s.opts.Unattended && !s.opts.Interactive {
+			rec := s.asks.AnsweredEarly(tok, askReq, AskCancelled, AskByPolicy)
+			s.flushAsks(ctx)
+			if rec.By != AskByWithdrawn {
+				_, _ = req.commitReply(ctx, func(c context.Context) error {
+					return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+				})
+			}
+			return
+		}
 	}
 
 	if ctx.Err() != nil {

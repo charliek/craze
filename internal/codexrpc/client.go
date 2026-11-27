@@ -403,7 +403,7 @@ func (c *Client) ReplyCtx(ctx context.Context, id json.RawMessage, result any) e
 		return fmt.Errorf("codexrpc: marshal reply result: %w", err)
 	}
 	idCopy := append(json.RawMessage(nil), id...)
-	return c.writeFrame(ctx, &Message{
+	return c.writeFrameWithModes(ctx, false, &Message{
 		ID:     &idCopy,
 		Result: raw,
 	})
@@ -481,6 +481,13 @@ func (c *Client) closedErr() error {
 }
 
 func (c *Client) writeFrame(ctx context.Context, msg *Message) error {
+	return c.writeFrameWithModes(ctx, true, msg)
+}
+
+func (c *Client) writeFrameWithModes(ctx context.Context, abortOnCtx bool, msg *Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -517,17 +524,35 @@ func (c *Client) writeFrame(ctx context.Context, msg *Message) error {
 		<-c.writeSem
 		writeDone <- err
 	}()
+	if abortOnCtx {
+		select {
+		case err := <-writeDone:
+			return err
+		case <-ctx.Done():
+			// A write may be partially flushed; tear down the transport so no
+			// corrupted frame stays on the wire and the write goroutine unblocks.
+			c.abortTransport(ctx.Err())
+			return ctx.Err()
+		case <-c.done:
+			c.closeWriter()
+			return c.closedErr()
+		}
+	}
+	// Once a reply frame is committed to the stdio pipe, never let a request
+	// context cancellation (such as serverRequest/resolved arriving immediately
+	// after Codex reads our reply) abort a healthy shared transport.
+	stall := time.NewTimer(30 * time.Second)
+	defer stall.Stop()
 	select {
 	case err := <-writeDone:
 		return err
-	case <-ctx.Done():
-		// A write may be partially flushed; tear down the transport so no
-		// corrupted frame stays on the wire and the write goroutine unblocks.
-		c.abortTransport(ctx.Err())
-		return ctx.Err()
 	case <-c.done:
 		c.closeWriter()
 		return c.closedErr()
+	case <-stall.C:
+		err := errors.New("codexrpc: write stalled")
+		c.abortTransport(err)
+		return err
 	}
 }
 

@@ -285,17 +285,22 @@ func codexWindowPercent(w *codexrpc.RateLimitWindow) float64 {
 	return *w.UsedPercent
 }
 
-func (u *codexUsage) pickRateWindow() *codexrpc.RateLimitWindow {
-	var best *codexrpc.RateLimitWindow
-	bestPct := -1.0
+func (u *codexUsage) pickRateWindow(now time.Time) *codexrpc.RateLimitWindow {
+	var bestActive *codexrpc.RateLimitWindow
+	bestActivePct := -1.0
 	consider := func(w *codexrpc.RateLimitWindow) {
 		if w == nil {
 			return
 		}
+		// Skip windows whose reset time has already passed so a stale 100%
+		// expired bucket never masks a fresh active bucket.
+		if w.ResetsAt != nil && *w.ResetsAt > 0 && !time.Unix(*w.ResetsAt, 0).After(now) {
+			return
+		}
 		pct := codexWindowPercent(w)
-		if best == nil || pct > bestPct {
-			best = w
-			bestPct = pct
+		if bestActive == nil || pct > bestActivePct {
+			bestActive = w
+			bestActivePct = pct
 		}
 	}
 	for _, key := range u.bucketOrder {
@@ -306,10 +311,14 @@ func (u *codexUsage) pickRateWindow() *codexrpc.RateLimitWindow {
 		consider(rl.Primary)
 		consider(rl.Secondary)
 	}
-	return best
+	return bestActive
 }
 
 func (u *codexUsage) state() UsageState {
+	return u.stateAt(time.Now())
+}
+
+func (u *codexUsage) stateAt(now time.Time) UsageState {
 	st := UsageState{
 		ContextTokens: u.contextTokens,
 		ContextWindow: u.contextWindow,
@@ -320,7 +329,7 @@ func (u *codexUsage) state() UsageState {
 	}
 	st.Turn.Unpriced = true
 	st.Session.Unpriced = true
-	if w := u.pickRateWindow(); w != nil {
+	if w := u.pickRateWindow(now); w != nil {
 		st.Window = codexWindowName(w.WindowDurationMins)
 		if w.UsedPercent != nil {
 			util := *w.UsedPercent / 100.0

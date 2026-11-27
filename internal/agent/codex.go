@@ -52,24 +52,26 @@ const (
 
 // codexTurnState holds the per-turn state for one claimed prompt generation.
 type codexTurnState struct {
-	gen            uint64
-	phase          codexTurnPhase
-	settling       bool
-	turnID         string
-	idReady        chan struct{}
-	idClosed       bool
-	token          TurnToken
-	mode           string
-	model          string
-	approvalPolicy codexrpc.ApprovalPolicy
-	cancelPending  bool
-	interruptSent  bool
-	failedErr      error
-	stopReason     string
-	tempFiles      []string
-	steerInFlight  int
-	steerZeroCh    chan struct{}
-	done           chan struct{}
+	gen               uint64
+	phase             codexTurnPhase
+	settling          bool
+	turnID            string
+	idReady           chan struct{}
+	idClosed          bool
+	token             TurnToken
+	mode              string
+	model             string
+	approvalPolicy    codexrpc.ApprovalPolicy
+	cancelPending     bool
+	interruptSent     bool
+	interruptInFlight bool
+	interruptDone     chan struct{}
+	failedErr         error
+	stopReason        string
+	tempFiles         []string
+	steerInFlight     int
+	steerZeroCh       chan struct{}
+	done              chan struct{}
 }
 
 func (t *codexTurnState) bindIDLocked(id string) {
@@ -1174,6 +1176,27 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 	token := s.asks.BeginTurn()
 
 	s.mu.Lock()
+	if turn.settling {
+		done := turn.done
+		s.mu.Unlock()
+		removeTempFiles(tempFiles)
+		s.asks.EndTurn(token)
+		<-done
+		return s.turnResult(turn)
+	}
+	if turn.phase == codexPhaseSettled {
+		err := turn.failedErr
+		if err == nil && turn.cancelPending {
+			err = ErrPromptCancelled
+		}
+		s.mu.Unlock()
+		removeTempFiles(tempFiles)
+		s.asks.EndTurn(token)
+		if err != nil {
+			return Result{}, err
+		}
+		return s.turnResult(turn)
+	}
 	if s.closed {
 		s.clearTurnLocked(turn)
 		s.mu.Unlock()
@@ -1189,7 +1212,7 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 		s.asks.EndTurn(token)
 		return Result{}, err
 	}
-	if turn.phase == codexPhaseSettled || turn.cancelPending {
+	if turn.cancelPending {
 		s.clearTurnLocked(turn)
 		s.mu.Unlock()
 		removeTempFiles(tempFiles)
@@ -1308,7 +1331,7 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 				delete(s.earlyCompleted, turn.turnID)
 				cp := ec
 				earlyTurn = &cp
-			} else if turn.cancelPending && !turn.interruptSent {
+			} else if turn.cancelPending && !turn.interruptSent && !turn.interruptInFlight {
 				turn.interruptSent = true
 				needInterruptID = turn.turnID
 			}
@@ -1348,7 +1371,7 @@ func (s *codexSession) latchCancelAndUnblockAsks(turn *codexTurnState) {
 	tid := turn.turnID
 	client := s.client
 	threadID := s.threadID
-	sendNow := tid != "" && !turn.interruptSent && !turn.settling && turn.phase != codexPhaseSettled
+	sendNow := tid != "" && !turn.interruptSent && !turn.interruptInFlight && !turn.settling && turn.phase != codexPhaseSettled
 	if sendNow {
 		turn.interruptSent = true
 	}
@@ -1390,6 +1413,11 @@ func (s *codexSession) enforceCancelGrace(turn *codexTurnState, client *codexrpc
 }
 
 func (s *codexSession) clearTurnLocked(turn *codexTurnState) {
+	// If settleTurn has already claimed this turn, it owns closing turn.done
+	// and releasing s.activeTurn; never double-close or release early.
+	if turn.settling {
+		return
+	}
 	if turn.phase != codexPhaseSettled {
 		turn.phase = codexPhaseSettled
 		close(turn.done)
@@ -1531,11 +1559,31 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 		removeTempFiles(tempFiles)
 		pubCtx := context.Background()
 		var pubCancel context.CancelFunc
-		if closing && !s.opts.NoPrimary {
-			// Bound publication on explicit Close only when a primary channel
-			// exists and might be unread, so Close never deadlocks while still
-			// delivering terminal records cleanly on detached hosts (NoPrimary).
-			pubCtx, pubCancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+		var stopCloseWatch chan struct{}
+		if !s.opts.NoPrimary {
+			// Bound publication on Close (whether Close began before or during
+			// settlement) when a primary channel exists and might be unread, so
+			// teardown waiting on turn.done never deadlocks behind a full primary
+			// channel while detached hosts (NoPrimary) still deliver cleanly.
+			if closing {
+				pubCtx, pubCancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+			} else {
+				pubCtx, pubCancel = context.WithCancel(context.Background())
+				stopCloseWatch = make(chan struct{})
+				go func(cancel context.CancelFunc, stop <-chan struct{}) {
+					select {
+					case <-s.closingCh:
+						t := time.NewTimer(250 * time.Millisecond)
+						select {
+						case <-t.C:
+							cancel()
+						case <-stop:
+							t.Stop()
+						}
+					case <-stop:
+					}
+				}(pubCancel, stopCloseWatch)
+			}
 		}
 		for _, ev := range toolEvs {
 			s.emitCtx(pubCtx, ev)
@@ -1553,6 +1601,9 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 			s.emitCtx(pubCtx, Event{Type: EventError, Err: termErr})
 		} else {
 			s.emitCtx(pubCtx, Event{Type: EventDone, StopReason: stopReason})
+		}
+		if stopCloseWatch != nil {
+			close(stopCloseWatch)
 		}
 		if pubCancel != nil {
 			pubCancel()
@@ -1634,6 +1685,7 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	tok := turn.token
 	if turn.phase == codexPhaseClaimed && !turn.settling {
 		turn.cancelPending = true
+		turn.failedErr = ErrPromptCancelled
 		turn.phase = codexPhaseSettled
 		close(turn.done)
 		s.activeTurn = nil
@@ -1644,11 +1696,6 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 		return CancelOutcome{Withdrew: true, Settled: true}, nil
 	}
 	turn.cancelPending = true
-	tid := turn.turnID
-	sendNow := tid != "" && !turn.interruptSent && !turn.settling && turn.phase != codexPhaseSettled
-	if sendNow {
-		turn.interruptSent = true
-	}
 	done := turn.done
 	s.mu.Unlock()
 
@@ -1657,17 +1704,73 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	} else {
 		s.asks.CancelTurn(TurnToken{})
 	}
+	if err := ctx.Err(); err != nil {
+		return CancelOutcome{Wrote: false, Settled: false}, err
+	}
 
 	// Single bounded deadline covering BOTH TurnInterrupt RPC and turn settlement.
 	graceCtx, graceCancel := context.WithTimeout(ctx, codexCancelFallbackGrace)
 	defer graceCancel()
 
+	// If an earlier Cancel left a TurnInterrupt RPC in flight, wait for it to
+	// complete (bounded by graceCtx/done/closing) and retry if it failed.
 	wrote := false
-	if sendNow && client != nil {
+	for {
+		s.mu.Lock()
+		tid := turn.turnID
+		alreadySettled := turn.settling || turn.phase == codexPhaseSettled
+		alreadySent := turn.interruptSent
+		inFlight := turn.interruptInFlight
+		waitCh := turn.interruptDone
+		sendNow := false
+		if tid != "" && !alreadySettled && !alreadySent && !inFlight && client != nil {
+			turn.interruptInFlight = true
+			turn.interruptDone = make(chan struct{})
+			sendNow = true
+		}
+		s.mu.Unlock()
+
+		if alreadySettled || alreadySent || tid == "" || client == nil {
+			break
+		}
+		if inFlight && waitCh != nil {
+			select {
+			case <-waitCh:
+				continue
+			case <-done:
+				return CancelOutcome{Wrote: true, Settled: true}, nil
+			case <-graceCtx.Done():
+				if ctx.Err() != nil {
+					return CancelOutcome{Wrote: false, Settled: false}, ctx.Err()
+				}
+				client.CloseAsync()
+				err := newCodexErr(errkind.Agent, "codex cancel timed out waiting for turn/interrupt")
+				_, _ = s.settleTurn(turn, "", err, true)
+				return CancelOutcome{Wrote: false, Settled: false}, err
+			case <-s.closingCh:
+				<-done
+				return CancelOutcome{Wrote: wrote, Settled: true}, nil
+			}
+		}
+		if !sendNow {
+			break
+		}
+
 		type intRes struct{ err error }
 		ch := make(chan intRes, 1)
 		go func() {
-			ch <- intRes{err: client.TurnInterrupt(graceCtx, threadID, tid)}
+			err := client.TurnInterrupt(graceCtx, threadID, tid)
+			s.mu.Lock()
+			turn.interruptInFlight = false
+			if err == nil {
+				turn.interruptSent = true
+			}
+			if turn.interruptDone != nil {
+				close(turn.interruptDone)
+				turn.interruptDone = nil
+			}
+			s.mu.Unlock()
+			ch <- intRes{err: err}
 		}()
 		select {
 		case r := <-ch:
@@ -1692,6 +1795,7 @@ func (s *codexSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 			<-done
 			return CancelOutcome{Wrote: wrote, Settled: true}, nil
 		}
+		break
 	}
 
 	select {
@@ -2155,7 +2259,7 @@ func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
 		if s.activeTurn.turnID == "" {
 			s.activeTurn.bindIDLocked(p.Turn.ID)
 			s.activeTurn.phase = codexPhaseIdentified
-			if s.activeTurn.cancelPending && !s.activeTurn.interruptSent {
+			if s.activeTurn.cancelPending && !s.activeTurn.interruptSent && !s.activeTurn.interruptInFlight {
 				s.activeTurn.interruptSent = true
 				needInterruptID = p.Turn.ID
 				client = s.client
