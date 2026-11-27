@@ -212,6 +212,16 @@ type SpawnOptions struct {
 // The stdout reader goroutine ONLY decodes frames, correlates RPC responses,
 // enqueues notifications to a bounded ordered worker goroutine, and spawns a
 // bounded goroutine per server->client request. Blocking inside a server-request
+type activeReq struct {
+	cancel    context.CancelCauseFunc
+	withdrawn atomic.Bool
+}
+
+type notifyItem struct {
+	msg     *Message
+	barrier chan struct{}
+}
+
 // handler (such as a parked approval or user-input ask) can never block
 // reading responses (e.g. turn/interrupt), serverRequest/resolved, or EOF.
 type Client struct {
@@ -240,7 +250,7 @@ type Client struct {
 	// Bounded ordered notification queue (never blocks reader goroutine).
 	notifyMu       sync.Mutex
 	notifyCond     *sync.Cond
-	notifyQueue    []*Message
+	notifyQueue    []notifyItem
 	notifyBytes    int
 	maxNotifyBytes int
 	maxNotifyItems int
@@ -250,10 +260,12 @@ type Client struct {
 	onNotify  func(*Message)
 	onRequest func(context.Context, *Message) bool
 
-	reqCtx    context.Context
-	reqCancel context.CancelFunc
-	reqSem    chan struct{}
-	reqWG     sync.WaitGroup
+	reqCtx      context.Context
+	reqCancel   context.CancelFunc
+	reqSem      chan struct{}
+	reqWG       sync.WaitGroup
+	activeReqMu sync.Mutex
+	activeReqs  map[string]*activeReq
 
 	childShutOnce sync.Once
 	childShutDone chan struct{}
@@ -286,6 +298,7 @@ func newClient(in io.Reader, out io.Writer, child *agentproc.Child) *Client {
 		reqCtx:         reqCtx,
 		reqCancel:      reqCancel,
 		reqSem:         make(chan struct{}, MaxInFlightRequests),
+		activeReqs:     make(map[string]*activeReq),
 		childShutDone:  make(chan struct{}),
 		closeDone:      make(chan struct{}),
 	}
@@ -375,6 +388,57 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 
 // ReadDone is closed when the stdout reader goroutine exits.
 func (c *Client) ReadDone() <-chan struct{} { return c.readDone }
+
+// ReplyCtx sends a JSON-RPC result reply for a server->client request using
+// ctx so a withdrawn request aborts before taking the writer lock.
+func (c *Client) ReplyCtx(ctx context.Context, id json.RawMessage, result any) error {
+	if ctx == nil {
+		ctx = c.reqCtx
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("codexrpc: marshal reply result: %w", err)
+	}
+	idCopy := append(json.RawMessage(nil), id...)
+	return c.writeFrame(ctx, &Message{
+		ID:     &idCopy,
+		Result: raw,
+	})
+}
+
+// FlushNotifications waits until every notification already queued ahead of
+// this call has been processed by the ordered notification worker, or until
+// ctx / notifyDone completes.
+func (c *Client) FlushNotifications(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ch := make(chan struct{})
+	c.notifyMu.Lock()
+	if c.notifyClosed {
+		c.notifyMu.Unlock()
+		select {
+		case <-c.notifyDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	c.notifyQueue = append(c.notifyQueue, notifyItem{barrier: ch})
+	c.notifyCond.Signal()
+	c.notifyMu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-c.notifyDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // NotifyDone is closed once all queued notifications read before EOF have been
 // dispatched.
@@ -736,11 +800,33 @@ func (c *Client) readLoop() {
 				return
 			}
 		case msg.IsNotification():
+			if msg.Method == NotifyServerRequestResolved {
+				// Cancel the matching server request synchronously in exact
+				// wire order on readLoop BEFORE dispatching notifications so
+				// back-to-back request + resolved frames can never race (H2).
+				c.resolveServerRequestOnWire(msg.Params)
+			}
 			if !c.enqueueNotify(msg) {
 				c.abortTransport(ErrQueueOverflow)
 				return
 			}
 		}
+	}
+}
+
+func (c *Client) resolveServerRequestOnWire(raw json.RawMessage) {
+	var p ServerRequestResolvedParams
+	if json.Unmarshal(raw, &p) != nil || len(p.RequestID) == 0 {
+		return
+	}
+	c.activeReqMu.Lock()
+	ar := c.activeReqs[string(bytes.TrimSpace(p.RequestID))]
+	if ar != nil {
+		ar.withdrawn.Store(true)
+	}
+	c.activeReqMu.Unlock()
+	if ar != nil {
+		ar.cancel(ErrRequestResolved)
 	}
 }
 
@@ -787,7 +873,7 @@ func (c *Client) enqueueNotify(msg *Message) bool {
 		(c.maxNotifyBytes > 0 && c.notifyBytes+sz > c.maxNotifyBytes) {
 		return false
 	}
-	c.notifyQueue = append(c.notifyQueue, msg)
+	c.notifyQueue = append(c.notifyQueue, notifyItem{msg: msg})
 	c.notifyBytes += sz
 	c.notifyCond.Signal()
 	return true
@@ -811,12 +897,14 @@ func (c *Client) notifyLoop() {
 			c.notifyMu.Unlock()
 			return
 		}
-		msg := c.notifyQueue[0]
-		c.notifyQueue[0] = nil
+		item := c.notifyQueue[0]
+		c.notifyQueue[0] = notifyItem{}
 		c.notifyQueue = c.notifyQueue[1:]
-		c.notifyBytes -= approxMessageBytes(msg)
-		if c.notifyBytes < 0 {
-			c.notifyBytes = 0
+		if item.msg != nil {
+			c.notifyBytes -= approxMessageBytes(item.msg)
+			if c.notifyBytes < 0 {
+				c.notifyBytes = 0
+			}
 		}
 		if len(c.notifyQueue) == 0 {
 			c.notifyQueue = nil
@@ -824,11 +912,15 @@ func (c *Client) notifyLoop() {
 		}
 		c.notifyMu.Unlock()
 
+		if item.barrier != nil {
+			close(item.barrier)
+			continue
+		}
 		c.handlerMu.RLock()
 		fn := c.onNotify
 		c.handlerMu.RUnlock()
 		if fn != nil {
-			fn(msg)
+			fn(item.msg)
 		}
 	}
 }
@@ -843,14 +935,35 @@ func (c *Client) dispatchRequest(msg *Message) bool {
 	fn := c.onRequest
 	c.handlerMu.RUnlock()
 
+	rCtx, rCancel := context.WithCancelCause(c.reqCtx)
+	var (
+		key string
+		ar  *activeReq
+	)
+	if msg.ID != nil {
+		key = string(bytes.TrimSpace(*msg.ID))
+		ar = &activeReq{cancel: rCancel}
+		c.activeReqMu.Lock()
+		c.activeReqs[key] = ar
+		c.activeReqMu.Unlock()
+	}
+
 	c.reqWG.Add(1)
 	go func() {
 		defer func() {
+			if ar != nil {
+				c.activeReqMu.Lock()
+				if c.activeReqs[key] == ar {
+					delete(c.activeReqs, key)
+				}
+				c.activeReqMu.Unlock()
+			}
+			rCancel(nil)
 			<-c.reqSem
 			c.reqWG.Done()
 		}()
-		if fn == nil || !fn(c.reqCtx, msg) {
-			if msg.ID != nil {
+		if fn == nil || !fn(rCtx, msg) {
+			if msg.ID != nil && rCtx.Err() == nil {
 				_ = c.ReplyErr(*msg.ID, MethodNotFound(msg.Method))
 			}
 		}

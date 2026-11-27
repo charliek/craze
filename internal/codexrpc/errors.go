@@ -27,6 +27,9 @@ var (
 	ErrQueueOverflow = errors.New("codexrpc: notification queue overflow")
 	// ErrTooManyRequests is returned when concurrent server requests exceed the transport bound.
 	ErrTooManyRequests = errors.New("codexrpc: too many concurrent server requests")
+	// ErrRequestResolved is the cancel cause applied to a server->client
+	// request's context when `serverRequest/resolved` arrives on the wire.
+	ErrRequestResolved = errors.New("codexrpc: server request resolved")
 	// ErrAgentExited wraps agentproc.ErrAgentExited with codexrpc prefix so both
 	// codexrpc.ErrAgentExited and agentproc.ErrAgentExited match via errors.Is.
 	ErrAgentExited = fmt.Errorf("codexrpc: %w", agentproc.ErrAgentExited)

@@ -3,43 +3,99 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/codexrpc"
 )
 
-// Server->client request handling for codexSession (Plan 054 § D3):
-//   - item/commandExecution/requestApproval (filtering config-mutating amendments)
-//   - item/fileChange/requestApproval
-//   - item/tool/requestUserInput (isSecret decline, options: null, AllowText,
-//     unattended first-option vs free-text needs_input)
-//   - item/permissions/requestApproval (typed empty-permissions denial)
-//   - mcpServer/elicitation/request (explicit decline)
-//   - serverRequest/resolved (immediate retirement via acp.ErrRequestWithdrawn)
+// Server->client request handling for codexSession (Plan 054 § D3, M2b):
+//   - Wire-ordered request registration & serverRequest/resolved cancellation
+//     (in codexrpc.Client) plus per-request single-transition reply gate (H2).
+//   - Strict main-thread + live wire-turn ownership binding with bounded wait
+//     for turnID identification (H1).
+//   - item/commandExecution/requestApproval: nil vs explicit availableDecisions,
+//     filtering persistent config-mutating amendments while preserving Decline (M5).
+//   - item/fileChange/requestApproval, item/permissions/requestApproval,
+//     mcpServer/elicitation/request, and item/tool/requestUserInput.
+
+var codexApprovalTurnIDWait = 2 * time.Second
+
+// codexPendingReq arbitrates serverRequest/resolved withdrawal against reply
+// commitment for one server->client request so a withdrawn request never sends
+// a stale reply and an old worker can never delete a reused request ID (H2).
+type codexPendingReq struct {
+	key       string
+	mu        sync.Mutex
+	withdrawn bool
+	replied   bool
+	cancel    context.CancelCauseFunc
+}
+
+func (r *codexPendingReq) markWithdrawn() {
+	r.mu.Lock()
+	r.withdrawn = true
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel(acp.ErrRequestWithdrawn)
+	}
+}
+
+// commitReply runs fn at most once, ONLY if this request has not been withdrawn
+// (either via codexPendingReq or via codexrpc's wire-ordered reqCtx) and ctx is
+// still live.
+func (r *codexPendingReq) commitReply(ctx context.Context, fn func(context.Context) error) (sent bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.replied || r.withdrawn {
+		return false, nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		if errors.Is(context.Cause(ctx), codexrpc.ErrRequestResolved) || errors.Is(context.Cause(ctx), acp.ErrRequestWithdrawn) {
+			r.withdrawn = true
+		}
+		return false, nil
+	}
+	r.replied = true
+	return true, fn(ctx)
+}
 
 func canonicalReqKey(id json.RawMessage) string {
 	return strings.TrimSpace(string(id))
 }
 
-func (s *codexSession) registerPendingReq(key string, cancel context.CancelCauseFunc) {
+func (s *codexSession) registerPendingReq(key string, cancel context.CancelCauseFunc) *codexPendingReq {
+	req := &codexPendingReq{key: key, cancel: cancel}
 	s.mu.Lock()
 	if s.pendingReqs == nil {
-		s.pendingReqs = make(map[string]context.CancelCauseFunc)
+		s.pendingReqs = make(map[string]*codexPendingReq)
 	}
-	s.pendingReqs[key] = cancel
+	s.pendingReqs[key] = req
 	s.mu.Unlock()
+	return req
 }
 
-func (s *codexSession) unregisterPendingReq(key string) {
+func (s *codexSession) unregisterPendingReq(req *codexPendingReq) {
+	if req == nil {
+		return
+	}
 	s.mu.Lock()
-	delete(s.pendingReqs, key)
+	// Delete ONLY by pointer identity so an old worker never removes a reused ID.
+	if s.pendingReqs[req.key] == req {
+		delete(s.pendingReqs, req.key)
+	}
 	s.mu.Unlock()
 }
 
 func (s *codexSession) cancelAllPendingReqsLocked(cause error) {
-	for k, cancel := range s.pendingReqs {
-		cancel(cause)
+	for k, req := range s.pendingReqs {
+		if req != nil && req.cancel != nil {
+			req.cancel(cause)
+		}
 		delete(s.pendingReqs, k)
 	}
 }
@@ -54,69 +110,137 @@ func (s *codexSession) handleServerRequestResolved(raw json.RawMessage) {
 	}
 	key := canonicalReqKey(p.RequestID)
 	s.mu.Lock()
-	cancel, ok := s.pendingReqs[key]
-	if ok {
+	req := s.pendingReqs[key]
+	if req != nil {
 		delete(s.pendingReqs, key)
 	}
 	s.mu.Unlock()
-	if ok && cancel != nil {
-		cancel(acp.ErrRequestWithdrawn)
+	if req != nil {
+		req.markWithdrawn()
 	}
 }
 
 // matchApprovalTurn binds an incoming approval or user-input request to the
-// immutable mode/policy/token of the matching active wire turn (H1).
-// Returns ok=false for child threads, unknown/stale turns, or already-settled turns.
-func (s *codexSession) matchApprovalTurn(threadID, turnID string) (tok TurnToken, mode string, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return TurnToken{}, "", false
+// exact live wire turn on the main thread and its immutable captured mode (H1):
+//   - Requires non-empty main-thread ID matching s.threadID and non-empty turnID.
+//   - Rejects any already-settled turnID.
+//   - If a local turn is in `sent` (awaiting turn/started or turn/start reply),
+//     waits boundedly for turn.idReady before checking exact turnID equality.
+//   - Foreign turns (unknown execution policy) return ok=false for escalations
+//     (allowForeign=false) so autonomous turns cannot inherit a mid-turn mode switch.
+func (s *codexSession) matchApprovalTurn(ctx context.Context, threadID, turnID string, allowForeign bool) (turn *codexTurnState, tok TurnToken, mode string, ok bool) {
+	if threadID == "" || turnID == "" {
+		return nil, TurnToken{}, "", false
 	}
-	if s.threadID != "" && threadID != "" && threadID != s.threadID {
-		return TurnToken{}, "", false
-	}
-	turn := s.activeTurn
-	if turn != nil && !turn.settling && (turn.phase == codexPhaseSent || turn.phase == codexPhaseIdentified) {
-		if turnID == "" || turn.turnID == "" || turn.turnID == turnID {
-			return turn.token, turn.mode, true
+	for {
+		s.mu.Lock()
+		if s.closed || s.threadID == "" || threadID != s.threadID || s.settledTurns[turnID] {
+			s.mu.Unlock()
+			return nil, TurnToken{}, "", false
 		}
-		return TurnToken{}, "", false
+		t := s.activeTurn
+		if t != nil && !t.settling {
+			if t.phase == codexPhaseIdentified {
+				if t.turnID == turnID {
+					tok, mode = t.token, t.mode
+					s.mu.Unlock()
+					return t, tok, mode, true
+				}
+				s.mu.Unlock()
+				return nil, TurnToken{}, "", false
+			}
+			if t.phase == codexPhaseSent {
+				// Wait boundedly until turn/started or turn/start reply establishes ID.
+				idReady := t.idReady
+				done := t.done
+				s.mu.Unlock()
+				timer := time.NewTimer(codexApprovalTurnIDWait)
+				select {
+				case <-idReady:
+					timer.Stop()
+					continue
+				case <-done:
+					timer.Stop()
+					return nil, TurnToken{}, "", false
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, TurnToken{}, "", false
+				case <-s.closingCh:
+					timer.Stop()
+					return nil, TurnToken{}, "", false
+				case <-timer.C:
+					return nil, TurnToken{}, "", false
+				}
+			}
+		}
+		if allowForeign && s.foreignTurnID != "" && s.foreignTurnID == turnID {
+			// Foreign user-input questions (non-escalation) may be answered.
+			s.mu.Unlock()
+			return nil, TurnToken{}, codexAskMode, true
+		}
+		s.mu.Unlock()
+		return nil, TurnToken{}, "", false
 	}
-	if s.foreignTurnID != "" && (turnID == "" || s.foreignTurnID == turnID) {
-		return TurnToken{}, s.snap.CurrentMode, true
-	}
-	return TurnToken{}, "", false
 }
 
-// safeCodexCommandDecisions parses `availableDecisions []json.RawMessage`,
-// defaulting to accept/acceptForSession/decline/cancel when null/empty, and
-// strictly filtering out config-mutating amendment objects
-// (acceptWithExecpolicyAmendment, applyNetworkPolicyAmendment) per Plan 054 § D3.
+func (s *codexSession) turnCancelLatched(turn *codexTurnState) bool {
+	if turn == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return turn.cancelPending || turn.settling || turn.phase == codexPhaseSettled
+}
+
+// safeCodexCommandDecisions parses `availableDecisions []json.RawMessage` (M5):
+//   - Only when raw == nil (absent/null on the wire) apply the 4 legacy defaults.
+//   - When raw != nil (including `[]` or Probe 1's `[accept, {amendment}, cancel]`):
+//     filter affirmative choices (`accept`, `acceptForSession`) strictly against
+//     the supplied list, NEVER offer config-mutating amendment objects, ALWAYS
+//     include safe `"decline"` (accepted by Codex even when omitted from
+//     availableDecisions, verified in Probe 1 frames-06:45), and preserve `"cancel"`
+//     when offered (or if no choices were offered).
 func safeCodexCommandDecisions(raw []json.RawMessage) []string {
-	if len(raw) == 0 {
+	if raw == nil {
 		return []string{"accept", "acceptForSession", "decline", "cancel"}
 	}
 	var out []string
 	seen := make(map[string]bool)
+	add := func(d string) {
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
 	for _, entry := range raw {
 		var str string
 		if json.Unmarshal(entry, &str) != nil {
-			// Skip JSON object variants (e.g. acceptWithExecpolicyAmendment,
+			// Skip JSON object variants (acceptWithExecpolicyAmendment,
 			// applyNetworkPolicyAmendment) so Craze never offers or picks
 			// persistent config-mutating amendments.
 			continue
 		}
 		switch str {
 		case "accept", "acceptForSession", "decline", "cancel":
-			if !seen[str] {
-				seen[str] = true
-				out = append(out, str)
-			}
+			add(str)
 		}
 	}
-	if len(out) == 0 {
-		return []string{"decline", "cancel"}
+	// Always include safe "decline" (distinct from "cancel") so the user can
+	// decline a single command without aborting the whole turn.
+	if !seen["decline"] {
+		if seen["cancel"] {
+			// Insert decline right before cancel.
+			idx := len(out) - 1
+			for i, v := range out {
+				if v == "cancel" {
+					idx = i
+					break
+				}
+			}
+			out = append(out[:idx], append([]string{"decline"}, out[idx:]...)...)
+		} else {
+			add("decline")
+		}
 	}
 	return out
 }
@@ -147,8 +271,11 @@ func codexHasDecision(decisions []string, want string) bool {
 	return false
 }
 
-func (s *codexSession) flushAsks() {
-	_ = s.log.Flush(context.Background(), s.done)
+func (s *codexSession) flushAsks(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_ = s.log.Flush(ctx, s.done)
 }
 
 func (s *codexSession) onServerRequest(reqCtx context.Context, msg *codexrpc.Message) bool {
@@ -161,53 +288,76 @@ func (s *codexSession) onServerRequest(reqCtx context.Context, msg *codexrpc.Mes
 	if client == nil {
 		return false
 	}
+
+	// Translate wire-ordered codexrpc.ErrRequestResolved into acp.ErrRequestWithdrawn
+	// so AskRegistry records AskByWithdrawn cleanly even on back-to-back frames (H2).
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stopBridge := context.AfterFunc(reqCtx, func() {
+		cause := context.Cause(reqCtx)
+		if errors.Is(cause, codexrpc.ErrRequestResolved) {
+			cancel(acp.ErrRequestWithdrawn)
+		} else {
+			cancel(cause)
+		}
+	})
+	defer stopBridge()
+
 	key := canonicalReqKey(*msg.ID)
-	ctx, cancel := context.WithCancelCause(reqCtx)
-	s.registerPendingReq(key, cancel)
+	req := s.registerPendingReq(key, cancel)
 	defer func() {
-		s.unregisterPendingReq(key)
+		s.unregisterPendingReq(req)
 		cancel(nil)
 	}()
 
 	switch msg.Method {
 	case codexrpc.RequestCommandApproval:
-		s.handleCommandApproval(ctx, client, *msg.ID, msg.Params)
+		s.handleCommandApproval(ctx, req, client, *msg.ID, msg.Params)
 		return true
 	case codexrpc.RequestFileChangeApproval:
-		s.handleFileChangeApproval(ctx, client, *msg.ID, msg.Params)
+		s.handleFileChangeApproval(ctx, req, client, *msg.ID, msg.Params)
 		return true
 	case codexrpc.RequestUserInput:
-		s.handleRequestUserInput(ctx, client, *msg.ID, msg.Params)
+		s.handleRequestUserInput(ctx, req, client, *msg.ID, msg.Params)
 		return true
 	case codexrpc.RequestPermissionsApproval:
-		_ = client.Reply(*msg.ID, codexrpc.PermissionsApprovalReply{
-			Permissions: map[string]any{},
-			Scope:       "turn",
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, *msg.ID, codexrpc.PermissionsApprovalReply{
+				Permissions: map[string]any{},
+				Scope:       "turn",
+			})
 		})
 		return true
 	case codexrpc.RequestMCPElicitation:
-		_ = client.Reply(*msg.ID, map[string]any{"action": "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, *msg.ID, map[string]any{"action": "decline"})
+		})
 		return true
 	default:
 		return false
 	}
 }
 
-func (s *codexSession) handleCommandApproval(ctx context.Context, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
+func (s *codexSession) handleCommandApproval(ctx context.Context, req *codexPendingReq, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
 	var p codexrpc.CommandApprovalParams
 	if json.Unmarshal(raw, &p) != nil {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
-	tok, mode, ok := s.matchApprovalTurn(p.ThreadID, p.TurnID)
+	turn, tok, mode, ok := s.matchApprovalTurn(ctx, p.ThreadID, p.TurnID, false)
 	if !ok {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
 	// Hard read-only invariant (Plan 054 § C3, H1): ALWAYS deny in ask/plan mode
-	// based on the immutable mode captured when this turn started.
+	// using the immutable mode captured when this wire turn started.
 	if s.provider().ModeKind(mode) == ModeReadOnly || s.provider().ModeKind(mode) == ModePlan {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
 
@@ -218,23 +368,29 @@ func (s *codexSession) handleCommandApproval(ctx context.Context, client *codexr
 	} else if r := sanitizeLine(p.Reason); r != "" {
 		toolLabel = "shell: " + truncateUTF8(r, 120)
 	}
-	s.decideCodexApproval(ctx, client, id, tok, toolLabel, decisions)
+	s.decideCodexApproval(ctx, req, client, id, turn, tok, toolLabel, decisions)
 }
 
-func (s *codexSession) handleFileChangeApproval(ctx context.Context, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
+func (s *codexSession) handleFileChangeApproval(ctx context.Context, req *codexPendingReq, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
 	var p codexrpc.FileChangeApprovalParams
 	if json.Unmarshal(raw, &p) != nil {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
-	tok, mode, ok := s.matchApprovalTurn(p.ThreadID, p.TurnID)
+	turn, tok, mode, ok := s.matchApprovalTurn(ctx, p.ThreadID, p.TurnID, false)
 	if !ok {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
 	// Hard read-only invariant: ALWAYS deny in ask/plan mode.
 	if s.provider().ModeKind(mode) == ModeReadOnly || s.provider().ModeKind(mode) == ModePlan {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
 
@@ -245,10 +401,10 @@ func (s *codexSession) handleFileChangeApproval(ctx context.Context, client *cod
 	} else if p.GrantRoot != "" {
 		toolLabel = "apply_patch: " + truncateUTF8(sanitizeLine(p.GrantRoot), 120)
 	}
-	s.decideCodexApproval(ctx, client, id, tok, toolLabel, decisions)
+	s.decideCodexApproval(ctx, req, client, id, turn, tok, toolLabel, decisions)
 }
 
-func (s *codexSession) decideCodexApproval(ctx context.Context, client *codexrpc.Client, id json.RawMessage, tok TurnToken, toolLabel string, decisions []string) {
+func (s *codexSession) decideCodexApproval(ctx context.Context, req *codexPendingReq, client *codexrpc.Client, id json.RawMessage, turn *codexTurnState, tok TurnToken, toolLabel string, decisions []string) {
 	askReq := AskRequest{
 		Kind: AskPermission,
 		Body: AskBody{
@@ -260,42 +416,55 @@ func (s *codexSession) decideCodexApproval(ctx context.Context, client *codexrpc
 	}
 
 	if EffectiveApproval(s.opts).Permission == ApprovalAllow {
+		if ctx.Err() != nil {
+			_ = s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
+			s.flushAsks(ctx)
+			return
+		}
 		ans := AskAnswer{Cancel: true}
 		decision := "decline"
-		if codexHasDecision(decisions, "accept") {
-			ans = AskAnswer{OptionID: "accept"}
-			decision = "accept"
-		} else if codexHasDecision(decisions, "acceptForSession") {
-			ans = AskAnswer{OptionID: "acceptForSession"}
-			decision = "acceptForSession"
+		if !s.turnCancelLatched(turn) {
+			if codexHasDecision(decisions, "accept") {
+				ans = AskAnswer{OptionID: "accept"}
+				decision = "accept"
+			} else if codexHasDecision(decisions, "acceptForSession") {
+				ans = AskAnswer{OptionID: "acceptForSession"}
+				decision = "acceptForSession"
+			}
+		} else if codexHasDecision(decisions, "cancel") {
+			decision = "cancel"
 		}
 		rec := s.asks.Automatic(tok, askReq, ans)
-		s.flushAsks()
-		err := client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: decision})
-		s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: err == nil})
+		s.flushAsks(ctx)
+		sent, err := req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: decision})
+		})
+		s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && err == nil})
 		return
 	}
 
 	if ctx.Err() != nil {
 		rec := s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
-		s.flushAsks()
+		s.flushAsks(ctx)
 		if rec.By != AskByWithdrawn {
-			_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "cancel"})
+			_, _ = req.commitReply(ctx, func(c context.Context) error {
+				return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "cancel"})
+			})
 		}
 		return
 	}
 
 	parked, err := s.asks.Open(ctx, tok, askReq)
 	if err != nil {
-		_ = client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: "decline"})
+		})
 		return
 	}
-	s.flushAsks()
+	s.flushAsks(ctx)
 	rec := parked.Wait()
-	s.flushAsks()
+	s.flushAsks(ctx)
 
-	// If serverRequest/resolved withdrew the request on Codex's side, do not
-	// send a stale reply.
 	if rec.By == AskByWithdrawn {
 		return
 	}
@@ -305,31 +474,47 @@ func (s *codexSession) decideCodexApproval(ctx context.Context, client *codexrpc
 		if rec.Answer.OptionID != "" && codexHasDecision(decisions, rec.Answer.OptionID) {
 			decision = rec.Answer.OptionID
 		}
+		// Reject affirmative replies if turn cancellation has since been latched (H2).
+		if (decision == "accept" || decision == "acceptForSession") && s.turnCancelLatched(turn) {
+			if codexHasDecision(decisions, "cancel") {
+				decision = "cancel"
+			} else {
+				decision = "decline"
+			}
+		}
 	case AskCancelled, AskTurnEnded, AskClosing:
 		if codexHasDecision(decisions, "cancel") {
 			decision = "cancel"
 		}
 	}
-	replyErr := client.Reply(id, codexrpc.ApprovalDecisionReply{Decision: decision})
-	s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: replyErr == nil})
+	sent, replyErr := req.commitReply(ctx, func(c context.Context) error {
+		return client.ReplyCtx(c, id, codexrpc.ApprovalDecisionReply{Decision: decision})
+	})
+	s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && replyErr == nil})
 }
 
-func (s *codexSession) handleRequestUserInput(ctx context.Context, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
+func (s *codexSession) handleRequestUserInput(ctx context.Context, req *codexPendingReq, client *codexrpc.Client, id json.RawMessage, raw json.RawMessage) {
 	var p codexrpc.RequestUserInputParams
 	if json.Unmarshal(raw, &p) != nil {
-		_ = client.Reply(id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		})
 		return
 	}
-	tok, _, ok := s.matchApprovalTurn(p.ThreadID, p.TurnID)
+	_, tok, _, ok := s.matchApprovalTurn(ctx, p.ThreadID, p.TurnID, true)
 	if !ok {
-		_ = client.Reply(id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		})
 		return
 	}
 	// Plan 054 § D3: decline immediately if any question has isSecret: true so
 	// secret values never reach the unmasked TUI or journal.
 	for _, q := range p.Questions {
 		if q.IsSecret {
-			_ = client.Reply(id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+			_, _ = req.commitReply(ctx, func(c context.Context) error {
+				return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+			})
 			return
 		}
 	}
@@ -383,38 +568,51 @@ func (s *codexSession) handleRequestUserInput(ctx context.Context, client *codex
 	//   fabricate bogus text — park the ask so unattended `craze new --wait`
 	//   exits 4 (needs_input) cleanly (Plan 054 § D3).
 	if EffectiveApproval(s.opts).Question == ApprovalFirstOption && allHaveOptions {
+		if ctx.Err() != nil {
+			_ = s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
+			s.flushAsks(ctx)
+			return
+		}
 		rec := s.asks.Automatic(tok, askReq, AskAnswer{Answers: autoAnswers})
-		s.flushAsks()
+		s.flushAsks(ctx)
 		reply := codexUserInputReplyFromRecord(rec)
-		err := client.Reply(id, reply)
-		s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: err == nil})
+		sent, err := req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, reply)
+		})
+		s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && err == nil})
 		return
 	}
 
 	if ctx.Err() != nil {
 		rec := s.asks.AnsweredEarly(tok, askReq, AskCancelled, callEndedBy(ctx))
-		s.flushAsks()
+		s.flushAsks(ctx)
 		if rec.By != AskByWithdrawn {
-			_ = client.Reply(id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+			_, _ = req.commitReply(ctx, func(c context.Context) error {
+				return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+			})
 		}
 		return
 	}
 
 	parked, err := s.asks.Open(ctx, tok, askReq)
 	if err != nil {
-		_ = client.Reply(id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		_, _ = req.commitReply(ctx, func(c context.Context) error {
+			return client.ReplyCtx(c, id, codexrpc.RequestUserInputReply{Answers: map[string]codexrpc.UserInputAnswer{}})
+		})
 		return
 	}
-	s.flushAsks()
+	s.flushAsks(ctx)
 	rec := parked.Wait()
-	s.flushAsks()
+	s.flushAsks(ctx)
 
 	if rec.By == AskByWithdrawn {
 		return
 	}
 	reply := codexUserInputReplyFromRecord(rec)
-	replyErr := client.Reply(id, reply)
-	s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: replyErr == nil})
+	sent, replyErr := req.commitReply(ctx, func(c context.Context) error {
+		return client.ReplyCtx(c, id, reply)
+	})
+	s.asks.Report(rec.ID, AskReport{Consumed: true, Delivered: sent && replyErr == nil})
 }
 
 func codexUserInputReplyFromRecord(rec AskRecord) codexrpc.RequestUserInputReply {

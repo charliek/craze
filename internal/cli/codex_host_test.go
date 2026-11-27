@@ -138,9 +138,11 @@ func TestCodexServeAndSendWait(t *testing.T) {
 	}
 }
 
-// TestCodexUnattendedNeedsInputAndAutoAnswer (Plan 054 § 5 M2b):
-//   - agent --no-force approval parks and returns exit 4 (needs_input), both
-//     without and with --exit-after-turn (leaving the host alive to be answered).
+// TestCodexUnattendedNeedsInputAndAutoAnswer (Plan 054 § 5 M2b, L11):
+//   - agent --no-force approval without --exit-after-turn returns exit 4
+//     (needs_input) and leaves the host alive with the pending ask answerable.
+//   - agent --no-force approval WITH --exit-after-turn returns exit 4
+//     (needs_input) and stops the host before exit.
 //   - unattended requestUserInput with free-text-only (options: null) returns
 //     exit 4 (needs_input) instead of fabricating bogus text.
 //   - unattended requestUserInput with options auto-answers the first option
@@ -153,27 +155,32 @@ func TestCodexUnattendedNeedsInputAndAutoAnswer(t *testing.T) {
 		wantCode      int
 		wantStatus    string
 		wantMsgSubstr string
+		wantHostGone  bool
+		wantAskOpen   bool
 	}{
 		{
-			name:       "approval --no-force exits 4 needs_input",
-			script:     "codex-approval",
-			extraFlags: []string{"--no-force"},
-			wantCode:   4,
-			wantStatus: "needs_input",
+			name:        "approval --no-force exits 4 needs_input and keeps host alive",
+			script:      "codex-approval",
+			extraFlags:  []string{"--no-force"},
+			wantCode:    4,
+			wantStatus:  "needs_input",
+			wantAskOpen: true,
 		},
 		{
-			name:       "approval --no-force --exit-after-turn exits 4 needs_input",
-			script:     "codex-approval",
-			extraFlags: []string{"--no-force", "--exit-after-turn"},
-			wantCode:   4,
-			wantStatus: "needs_input",
+			name:         "approval --no-force --exit-after-turn exits 4 needs_input and stops host",
+			script:       "codex-approval",
+			extraFlags:   []string{"--no-force", "--exit-after-turn"},
+			wantCode:     4,
+			wantStatus:   "needs_input",
+			wantHostGone: true,
 		},
 		{
-			name:       "freetext requestUserInput exits 4 needs_input",
-			script:     "codex-ask-freetext",
-			extraFlags: []string{},
-			wantCode:   4,
-			wantStatus: "needs_input",
+			name:        "freetext requestUserInput exits 4 needs_input",
+			script:      "codex-ask-freetext",
+			extraFlags:  []string{},
+			wantCode:    4,
+			wantStatus:  "needs_input",
+			wantAskOpen: true,
 		},
 		{
 			name:          "options requestUserInput auto-answers first option",
@@ -182,6 +189,7 @@ func TestCodexUnattendedNeedsInputAndAutoAnswer(t *testing.T) {
 			wantCode:      0,
 			wantStatus:    "completed",
 			wantMsgSubstr: "Red",
+			wantHostGone:  true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,6 +210,22 @@ func TestCodexUnattendedNeedsInputAndAutoAnswer(t *testing.T) {
 				msg, _ := m["message"].(string)
 				if !strings.Contains(msg, tc.wantMsgSubstr) {
 					t.Fatalf("message = %q, want substring %q", msg, tc.wantMsgSubstr)
+				}
+			}
+			if tc.wantHostGone {
+				waitFor(t, "codex host to stop after "+tc.name, func() bool {
+					hosts, err := rundir.Hosts(env)
+					return err == nil && len(hosts) == 0
+				})
+			}
+			if tc.wantAskOpen {
+				id, _ := m["session"].(string)
+				e, ok := hostServing(env, id)
+				if !ok {
+					t.Fatalf("expected host for %s to stay alive with pending ask", id)
+				}
+				if row := listRow(t, e); row.PendingAsks < 1 {
+					t.Fatalf("expected PendingAsks >= 1 on live host, got %+v", row)
 				}
 			}
 		})

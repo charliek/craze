@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -333,7 +334,7 @@ func (s *codexSession) handleItemStarted(raw json.RawMessage) {
 	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
-	s.processItem(p.Item, false, false)
+	s.processItemCtx(context.Background(), p.Item, false, false)
 }
 
 func (s *codexSession) handleItemCompleted(raw json.RawMessage) {
@@ -344,7 +345,7 @@ func (s *codexSession) handleItemCompleted(raw json.RawMessage) {
 	if !s.isMainThread(p.ThreadID) || !s.acceptsTurnFrame(p.TurnID) {
 		return
 	}
-	s.processItem(p.Item, true, false)
+	s.processItemCtx(context.Background(), p.Item, true, false)
 }
 
 func (s *codexSession) handleAgentMessageDelta(raw json.RawMessage) {
@@ -502,34 +503,41 @@ func (s *codexSession) handleThreadNameUpdated(raw json.RawMessage) {
 	s.mu.Unlock()
 }
 
-// processItem handles one Codex ThreadItem (started, completed, or replayed).
-func (s *codexSession) processItem(raw json.RawMessage, completed, replaying bool) {
+// processItemCtx handles one Codex ThreadItem (started, completed, or replayed),
+// publishing with ctx and explicit Replayed=replaying so Close can unwind a
+// blocked replay immediately without emitting ReplayEnd (H4, M9).
+func (s *codexSession) processItemCtx(ctx context.Context, raw json.RawMessage, completed, replaying bool) bool {
 	var head codexrpc.ThreadItemHeader
 	if json.Unmarshal(raw, &head) != nil || head.Type == "" {
-		return
+		return true
+	}
+	emitItem := func(ev Event) bool {
+		ev.Replayed = replaying
+		return s.emitCtx(ctx, ev)
 	}
 	switch head.Type {
 	case "userMessage":
 		// Suppress live userMessage echoes (Plan 054 § D1); emit only during replay.
 		if !replaying {
-			return
+			return true
 		}
 		var item codexrpc.UserMessageItem
 		if json.Unmarshal(raw, &item) != nil {
-			return
+			return true
 		}
 		text := extractCodexUserText(item.Content)
 		if text != "" {
-			s.emit(Event{Type: EventUser, Text: sanitizeText(text)})
+			return emitItem(Event{Type: EventUser, Text: sanitizeText(text)})
 		}
+		return true
 
 	case "agentMessage":
 		if !completed {
-			return
+			return true
 		}
 		var item codexrpc.AgentMessageItem
 		if json.Unmarshal(raw, &item) != nil || item.Text == "" {
-			return
+			return true
 		}
 		s.mu.Lock()
 		hadDelta := s.turnItemDeltas[item.ID]
@@ -542,44 +550,47 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		}
 		s.mu.Unlock()
 		if !hadDelta {
-			s.emit(Event{Type: EventText, Text: sanitizeText(prefix + item.Text)})
+			return emitItem(Event{Type: EventText, Text: sanitizeText(prefix + item.Text)})
 		}
+		return true
 
 	case "plan":
 		if !completed {
-			return
+			return true
 		}
 		var item codexrpc.PlanItem
 		if json.Unmarshal(raw, &item) != nil || item.Text == "" {
-			return
+			return true
 		}
 		s.mu.Lock()
 		hadDelta := s.turnItemDeltas[item.ID]
 		s.mu.Unlock()
 		if !hadDelta {
-			s.emit(Event{Type: EventText, Text: sanitizeText(item.Text)})
+			return emitItem(Event{Type: EventText, Text: sanitizeText(item.Text)})
 		}
+		return true
 
 	case "reasoning":
 		if !replaying || !completed {
-			return
+			return true
 		}
 		var item codexrpc.ReasoningItem
 		if json.Unmarshal(raw, &item) != nil {
-			return
+			return true
 		}
 		parts := item.Summary
 		if len(parts) == 0 {
 			parts = item.Content
 		}
 		if len(parts) > 0 {
-			s.emit(Event{Type: EventThought, Text: sanitizeText(strings.Join(parts, "\n"))})
+			return emitItem(Event{Type: EventThought, Text: sanitizeText(strings.Join(parts, "\n"))})
 		}
+		return true
 
 	case "commandExecution":
 		var item codexrpc.CommandExecutionItem
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-			return
+			return true
 		}
 		st := mapCodexItemStatus(item.Status)
 		if replaying && toolStatusInFlight(st) {
@@ -587,6 +598,9 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		}
 		title := sanitizeText(item.Command)
 		s.mu.Lock()
+		// A tool call visually separates preceding commentary from subsequent
+		// final-answer text so the next agentMessage starts cleanly without \n\n.
+		s.lastMsgItemID = ""
 		var streamed *codexCmdBuffer
 		if s.cmdBuffers != nil {
 			streamed = s.cmdBuffers[item.ID]
@@ -618,12 +632,12 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		s.tools[item.ID] = row
 		ct := cloneTool(row)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventTool, Tool: &ct})
+		return emitItem(Event{Type: EventTool, Tool: &ct})
 
 	case "fileChange":
 		var item codexrpc.FileChangeItem
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-			return
+			return true
 		}
 		st := mapCodexItemStatus(item.Status)
 		if replaying && toolStatusInFlight(st) {
@@ -663,6 +677,7 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			edited = scope.edited(allPaths)
 		}
 		s.mu.Lock()
+		s.lastMsgItemID = ""
 		row, exists := s.tools[item.ID]
 		if !exists {
 			s.toolOrder = append(s.toolOrder, item.ID)
@@ -688,12 +703,12 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		s.tools[item.ID] = row
 		ct := cloneTool(row)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventTool, Tool: &ct})
+		return emitItem(Event{Type: EventTool, Tool: &ct})
 
 	case "mcpToolCall":
 		var item codexrpc.MCPToolCallItem
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-			return
+			return true
 		}
 		st := mapCodexItemStatus(item.Status)
 		if replaying && toolStatusInFlight(st) {
@@ -704,6 +719,7 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			name = sanitizeText(item.Server + ":" + item.Tool)
 		}
 		s.mu.Lock()
+		s.lastMsgItemID = ""
 		row, exists := s.tools[item.ID]
 		if !exists {
 			s.toolOrder = append(s.toolOrder, item.ID)
@@ -728,12 +744,12 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		s.tools[item.ID] = row
 		ct := cloneTool(row)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventTool, Tool: &ct})
+		return emitItem(Event{Type: EventTool, Tool: &ct})
 
 	case "webSearch":
 		var item codexrpc.WebSearchItem
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-			return
+			return true
 		}
 		st := mapCodexItemStatus(item.Status)
 		if completed && item.Status == "" {
@@ -748,6 +764,7 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			title = "Web search: " + q
 		}
 		s.mu.Lock()
+		s.lastMsgItemID = ""
 		row, exists := s.tools[item.ID]
 		if !exists {
 			s.toolOrder = append(s.toolOrder, item.ID)
@@ -763,14 +780,14 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		s.tools[item.ID] = row
 		ct := cloneTool(row)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventTool, Tool: &ct})
+		return emitItem(Event{Type: EventTool, Tool: &ct})
 
 	case "contextCompaction":
 		phase := CompactionStarted
 		if completed {
 			phase = CompactionEnded
 		}
-		s.emit(Event{
+		return emitItem(Event{
 			Type:       EventCompaction,
 			Compaction: &CompactionInfo{Phase: phase, Reason: CompactionAuto},
 		})
@@ -778,18 +795,24 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 	case "collabAgentToolCall":
 		var item codexrpc.CollabAgentToolCallItem
 		if json.Unmarshal(raw, &item) != nil || item.ID == "" {
-			return
+			return true
 		}
-		st := mapCodexSubagentStatus(item.Status, completed)
+		st := deriveCollabSubagentStatus(item, completed)
 		if replaying && st == SubagentRunning {
 			st = SubagentCancelled
 		}
 		now := s.Now()
 		s.mu.Lock()
+		s.lastMsgItemID = ""
 		rec, exists := s.subagents[item.ID]
 		change := SubagentChangeProgress
 		if !exists {
+			var launchTurn int
+			if s.activeTurn != nil {
+				launchTurn = int(s.activeTurn.gen)
+			}
 			rec = &subagentRec{
+				turn: launchTurn,
 				info: SubagentInfo{
 					ID:           item.ID,
 					ToolCallID:   item.ID,
@@ -816,6 +839,14 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 			rec.info.Status = st
 			capSubagent(&rec.info)
 		}
+		if s.childThreadSubagent == nil {
+			s.childThreadSubagent = make(map[string]string)
+		}
+		for _, childTID := range item.ReceiverThreadID {
+			if childTID != "" {
+				s.childThreadSubagent[childTID] = item.ID
+			}
+		}
 		if st != SubagentRunning {
 			if rec.info.EndedAt.IsZero() {
 				rec.info.EndedAt = now
@@ -829,8 +860,79 @@ func (s *codexSession) processItem(raw json.RawMessage, completed, replaying boo
 		}
 		info := cloneSubagent(rec.info)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
+		return emitItem(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
+
+	case "subAgentActivity":
+		// Upstream Codex can emit subAgentActivity as a ThreadItem carrying
+		// agentThreadId + kind/status/activity/output/error (M7).
+		var item struct {
+			ID            string `json:"id"`
+			AgentThreadID string `json:"agentThreadId"`
+			ThreadID      string `json:"threadId"`
+			SubAgentID    string `json:"subAgentId"`
+			Kind          string `json:"kind"`
+			Title         string `json:"title"`
+			Status        string `json:"status"`
+			Activity      string `json:"activity"`
+			Output        string `json:"output"`
+			Error         string `json:"error"`
+		}
+		if json.Unmarshal(raw, &item) != nil {
+			return true
+		}
+		childTID := item.AgentThreadID
+		if childTID == "" {
+			childTID = item.ThreadID
+		}
+		act := item.Activity
+		if act == "" {
+			act = item.Kind
+		}
+		st := item.Status
+		if replaying && (st == "" || mapCodexSubagentStatus(st, false) == SubagentRunning) {
+			st = "cancelled"
+		}
+		return s.applySubAgentActivityCtx(ctx, replaying, codexrpc.SubAgentActivityParams{
+			ThreadID:   childTID,
+			SubAgentID: item.SubAgentID,
+			AgentID:    item.ID,
+			Title:      item.Title,
+			Status:     st,
+			Activity:   act,
+			Output:     item.Output,
+			Error:      item.Error,
+		}, true)
 	}
+	return true
+}
+
+// deriveCollabSubagentStatus inspects agentsStates when present so a spawn tool
+// call whose own status is "completed" still reports SubagentRunning while a
+// receiver child thread is running (M7).
+func deriveCollabSubagentStatus(item codexrpc.CollabAgentToolCallItem, completed bool) SubagentStatus {
+	if len(item.AgentsStates) > 0 && string(item.AgentsStates) != "null" {
+		var states map[string]struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(item.AgentsStates, &states) == nil && len(states) > 0 {
+			anyRunning, anyFailed := false, false
+			for _, st := range states {
+				switch mapCodexSubagentStatus(st.Status, false) {
+				case SubagentRunning:
+					anyRunning = true
+				case SubagentFailed:
+					anyFailed = true
+				}
+			}
+			if anyRunning {
+				return SubagentRunning
+			}
+			if anyFailed {
+				return SubagentFailed
+			}
+		}
+	}
+	return mapCodexSubagentStatus(item.Status, completed)
 }
 
 func mapCodexSubagentStatus(status string, completed bool) SubagentStatus {
@@ -860,11 +962,30 @@ func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
 		return
 	}
 	// Only fold sub-agent activity that belongs to this main thread (or already
-	// tracked subagent row). Never leak child-thread activity into main text.
+	// tracked child thread / subagent row). Never leak child content to main text.
 	if p.ParentThreadID != "" && !s.isMainThread(p.ParentThreadID) {
 		return
 	}
-	id := p.SubAgentID
+	s.applySubAgentActivityCtx(context.Background(), false, p, p.ParentThreadID != "")
+}
+
+func (s *codexSession) applySubAgentActivityCtx(ctx context.Context, replaying bool, p codexrpc.SubAgentActivityParams, owned bool) bool {
+	now := s.Now()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	// Correlate first by receiver child thread ID, then explicit SubAgentID/AgentID.
+	id := ""
+	if p.ThreadID != "" && s.childThreadSubagent != nil {
+		if mapped, ok := s.childThreadSubagent[p.ThreadID]; ok {
+			id = mapped
+		}
+	}
+	if id == "" {
+		id = p.SubAgentID
+	}
 	if id == "" {
 		id = p.AgentID
 	}
@@ -872,23 +993,22 @@ func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
 		id = p.ThreadID
 	}
 	if id == "" {
-		return
-	}
-	now := s.Now()
-	s.mu.Lock()
-	if s.closed {
 		s.mu.Unlock()
-		return
+		return true
 	}
 	rec, exists := s.subagents[id]
-	if !exists && p.ParentThreadID == "" {
-		// Unowned notification with no matching row and no parentThreadId: ignore.
+	if !exists && !owned {
 		s.mu.Unlock()
-		return
+		return true
 	}
 	change := SubagentChangeProgress
 	if !exists {
+		var launchTurn int
+		if s.activeTurn != nil {
+			launchTurn = int(s.activeTurn.gen)
+		}
 		rec = &subagentRec{
+			turn: launchTurn,
 			info: SubagentInfo{
 				ID:          id,
 				Description: sanitizeText(p.Title),
@@ -899,6 +1019,12 @@ func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
 		}
 		s.subagents[id] = rec
 		s.subagentOrder = append(s.subagentOrder, id)
+		if p.ThreadID != "" {
+			if s.childThreadSubagent == nil {
+				s.childThreadSubagent = make(map[string]string)
+			}
+			s.childThreadSubagent[p.ThreadID] = id
+		}
 		change = SubagentChangeSpawned
 	}
 	if p.Title != "" && rec.info.Description == "" {
@@ -929,7 +1055,7 @@ func (s *codexSession) handleSubAgentActivity(raw json.RawMessage) {
 	capSubagent(&rec.info)
 	info := cloneSubagent(rec.info)
 	s.mu.Unlock()
-	s.emit(Event{Type: EventSubagent, Subagent: &info, SubagentChange: change})
+	return s.emitCtx(ctx, Event{Type: EventSubagent, Replayed: replaying, Subagent: &info, SubagentChange: change})
 }
 
 func extractCodexUserText(content []codexrpc.UserInput) string {

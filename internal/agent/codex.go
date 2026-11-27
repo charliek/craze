@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -57,6 +56,8 @@ type codexTurnState struct {
 	phase          codexTurnPhase
 	settling       bool
 	turnID         string
+	idReady        chan struct{}
+	idClosed       bool
 	token          TurnToken
 	mode           string
 	model          string
@@ -66,8 +67,19 @@ type codexTurnState struct {
 	failedErr      error
 	stopReason     string
 	tempFiles      []string
-	steerPubWG     sync.WaitGroup
+	steerInFlight  int
+	steerZeroCh    chan struct{}
 	done           chan struct{}
+}
+
+func (t *codexTurnState) bindIDLocked(id string) {
+	if id != "" && t.turnID == "" {
+		t.turnID = id
+	}
+	if !t.idClosed {
+		t.idClosed = true
+		close(t.idReady)
+	}
 }
 
 // codexError wraps a Codex failure with a classified errkind.Info.
@@ -109,8 +121,6 @@ type codexSession struct {
 	logOnce    sync.Once
 	closeErr   error
 
-	replaying atomic.Bool
-
 	mu            sync.Mutex
 	started       bool
 	ready         bool
@@ -118,6 +128,7 @@ type codexSession struct {
 	closed        bool
 	seedOwed      bool
 	titlePinned   bool
+	skillsDirty   bool
 
 	client   *codexrpc.Client
 	cwd      string
@@ -148,9 +159,11 @@ type codexSession struct {
 	turnItemDeltas map[string]bool
 	lastMsgItemID  string
 
-	// Subagent rows (populated in M2b; settled in unified settlement).
-	subagents     map[string]*subagentRec
-	subagentOrder []string
+	// Subagent rows (settled per launching turn in unified settlement) and
+	// receiver child-thread -> subagent row ID index.
+	subagents           map[string]*subagentRec
+	subagentOrder       []string
+	childThreadSubagent map[string]string
 
 	// Turn generation state machine.
 	turnGen    uint64
@@ -167,7 +180,7 @@ type codexSession struct {
 
 	// Active server->client requests keyed by canonical JSON request ID so
 	// serverRequest/resolved immediately withdraws parked asks.
-	pendingReqs map[string]context.CancelCauseFunc
+	pendingReqs map[string]*codexPendingReq
 
 	// Skills catalog from Codex's skills/list + coalescing async rescan worker.
 	skills      []Skill
@@ -186,23 +199,24 @@ func newCodexSession(opts Options) *codexSession {
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	s := &codexSession{
-		opts:           opts,
-		done:           make(chan struct{}),
-		closingCh:      make(chan struct{}),
-		lifeCtx:        lifeCtx,
-		lifeCancel:     lifeCancel,
-		closeDone:      make(chan struct{}),
-		titleCh:        make(chan struct{}, 1),
-		skillCh:        make(chan struct{}, 1),
-		allModels:      make(map[string]codexrpc.ModelEntry),
-		tools:          make(map[string]ToolEvent),
-		cmdBuffers:     make(map[string]*codexCmdBuffer),
-		turnItemDeltas: make(map[string]bool),
-		subagents:      make(map[string]*subagentRec),
-		earlyCompleted: make(map[string]codexrpc.Turn),
-		settledTurns:   make(map[string]bool),
-		pendingReqs:    make(map[string]context.CancelCauseFunc),
-		codexSkills:    make(map[string]codexrpc.SkillMetadata),
+		opts:                opts,
+		done:                make(chan struct{}),
+		closingCh:           make(chan struct{}),
+		lifeCtx:             lifeCtx,
+		lifeCancel:          lifeCancel,
+		closeDone:           make(chan struct{}),
+		titleCh:             make(chan struct{}, 1),
+		skillCh:             make(chan struct{}, 1),
+		allModels:           make(map[string]codexrpc.ModelEntry),
+		tools:               make(map[string]ToolEvent),
+		cmdBuffers:          make(map[string]*codexCmdBuffer),
+		turnItemDeltas:      make(map[string]bool),
+		subagents:           make(map[string]*subagentRec),
+		childThreadSubagent: make(map[string]string),
+		earlyCompleted:      make(map[string]codexrpc.Turn),
+		settledTurns:        make(map[string]bool),
+		pendingReqs:         make(map[string]*codexPendingReq),
+		codexSkills:         make(map[string]codexrpc.SkillMetadata),
 	}
 	s.log = newSessionLog(s.opts, journalHeader{provider: p.Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
@@ -256,7 +270,10 @@ func (s *codexSession) isMainThread(threadID string) bool {
 	s.mu.Lock()
 	main := s.threadID
 	s.mu.Unlock()
-	return main == "" || threadID == "" || threadID == main
+	if main == "" {
+		return false
+	}
+	return threadID != "" && threadID == main
 }
 
 func (s *codexSession) workspace() string {
@@ -294,9 +311,6 @@ func (s *codexSession) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = s.Now()
 	}
-	if s.replaying.Load() && ev.Type != EventReplay {
-		ev.Replayed = true
-	}
 	return s.log.Publish(ctx, s.done, ev)
 }
 
@@ -313,7 +327,7 @@ func (s *codexSession) enqueueDeltaLocked(cause string, base Event, st *StateDel
 func (s *codexSession) publishUsageLocked() {
 	u := s.usage.state()
 	s.snap.Usage = &u
-	if s.replaying.Load() {
+	if !s.ready {
 		return
 	}
 	d := u
@@ -630,12 +644,17 @@ func (s *codexSession) start(ctx context.Context) (teardown bool, err error) {
 		s.snap.Usage = &u
 	}
 	s.ready = true
+	dirtySkills := s.skillsDirty
+	s.skillsDirty = false
 	delta := s.installDeltaLocked()
 	// New session Start enqueues install delta (with non-nil Config) and NEVER flushes.
 	s.enqueueDeltaLocked("", Event{}, delta)
 	s.mu.Unlock()
 
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: tr.Thread.ID, AgentBinary: binary})
+	if dirtySkills {
+		s.triggerSkillRefresh()
+	}
 	return false, nil
 }
 
@@ -1031,9 +1050,10 @@ func (s *codexSession) Begin(text string) func(ctx context.Context) (Result, err
 	}
 	s.turnGen++
 	turn := &codexTurnState{
-		gen:   s.turnGen,
-		phase: codexPhaseClaimed,
-		done:  make(chan struct{}),
+		gen:     s.turnGen,
+		phase:   codexPhaseClaimed,
+		idReady: make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	s.activeTurn = turn
 	s.turnItemDeltas = make(map[string]bool)
@@ -1183,6 +1203,14 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 		s.asks.EndTurn(token)
 		return Result{}, err
 	}
+	// Recheck foreign turn ownership at the claimed -> sent boundary (M6).
+	if s.foreignTurnID != "" {
+		s.clearTurnLocked(turn)
+		s.mu.Unlock()
+		removeTempFiles(tempFiles)
+		s.asks.EndTurn(token)
+		return Result{}, ErrForeignTurn
+	}
 	// Transition to sent right before writing turn/start, capturing the turn's
 	// immutable mode, model, and approvalPolicy so mid-turn SetMode/SetModel
 	// changes cannot affect the running turn (H1, M10).
@@ -1274,9 +1302,7 @@ func (s *codexSession) runPrompt(ctx context.Context, turn *codexTurnState, text
 	s.mu.Lock()
 	if !turn.settling && turn.phase != codexPhaseSettled {
 		if reply.res != nil && reply.res.Turn.ID != "" {
-			if turn.turnID == "" {
-				turn.turnID = reply.res.Turn.ID
-			}
+			turn.bindIDLocked(reply.res.Turn.ID)
 			turn.phase = codexPhaseIdentified
 			if ec, ok := s.earlyCompleted[turn.turnID]; ok {
 				delete(s.earlyCompleted, turn.turnID)
@@ -1461,10 +1487,13 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 		ct := cloneTool(row)
 		toolEvs = append(toolEvs, Event{Type: EventTool, Tool: &ct})
 	}
-	// Retire any still-running subagent rows before terminal event publication.
+	// Retire only still-running subagent rows launched by this turn (M7).
 	for _, id := range s.subagentOrder {
 		rec, ok := s.subagents[id]
 		if !ok || rec.info.Status != SubagentRunning {
+			continue
+		}
+		if rec.turn != 0 && rec.turn != int(turn.gen) {
 			continue
 		}
 		rec.info.Status = subFinal
@@ -1477,12 +1506,28 @@ func (s *codexSession) settleTurn(turn *codexTurnState, stopReason string, termE
 		info := cloneSubagent(rec.info)
 		subagentEvs = append(subagentEvs, Event{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeFinished})
 	}
+	var steerWait <-chan struct{}
+	if turn.steerInFlight > 0 {
+		if turn.steerZeroCh == nil {
+			turn.steerZeroCh = make(chan struct{})
+		}
+		steerWait = turn.steerZeroCh
+	}
 	s.mu.Unlock()
 
 	if won {
-		// Wait for any already-confirmed turn/steer EventUser publication to
-		// land ahead of EventDone/EventError.
-		turn.steerPubWG.Wait()
+		// Wait boundedly for any reserved in-flight Interject to publish its
+		// confirmed EventUser ahead of EventDone/EventError; closingCh breaks
+		// immediately on Close() so shutdown can never deadlock (H3).
+		if steerWait != nil {
+			t := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-steerWait:
+			case <-s.closingCh:
+			case <-t.C:
+			}
+			t.Stop()
+		}
 		removeTempFiles(tempFiles)
 		pubCtx := context.Background()
 		var pubCancel context.CancelFunc
@@ -1684,12 +1729,25 @@ func (s *codexSession) Interject(ctx context.Context, text string) error {
 	turn := s.activeTurn
 	client := s.client
 	threadID := s.threadID
-	if turn == nil || turn.phase != codexPhaseIdentified || turn.turnID == "" || client == nil {
+	if turn == nil || turn.settling || turn.phase != codexPhaseIdentified || turn.turnID == "" || client == nil {
 		s.mu.Unlock()
 		return ErrPromptRequired
 	}
 	expectedTurnID := turn.turnID
+	// Reserve the steer BEFORE issuing turn/steer so a racing turn/completed
+	// waits for our confirmed EventUser publication instead of dropping it (H3).
+	turn.steerInFlight++
 	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		turn.steerInFlight--
+		if turn.steerInFlight == 0 && turn.steerZeroCh != nil {
+			close(turn.steerZeroCh)
+			turn.steerZeroCh = nil
+		}
+		s.mu.Unlock()
+	}()
 
 	_, err := client.TurnSteer(ctx, codexrpc.TurnSteerParams{
 		ThreadID:       threadID,
@@ -1702,18 +1760,9 @@ func (s *codexSession) Interject(ctx context.Context, text string) error {
 		}
 		return err
 	}
-	// Order confirmed EventUser ahead of EventDone/EventError: only register on
-	// steerPubWG if the turn has not begun settling.
-	s.mu.Lock()
-	canPublish := !s.closed && !turn.settling && turn.phase != codexPhaseSettled
-	if canPublish {
-		turn.steerPubWG.Add(1)
-	}
-	s.mu.Unlock()
-	if canPublish {
-		s.emit(Event{Type: EventUser, Text: sanitizeText(clean), Interjection: true})
-		turn.steerPubWG.Done()
-	}
+	// Publish confirmed EventUser through s.lifeCtx (cancelled immediately on
+	// Close so a full primary channel during shutdown never deadlocks — H3).
+	s.emitCtx(s.lifeCtx, Event{Type: EventUser, Text: sanitizeText(clean), Interjection: true})
 	return nil
 }
 
@@ -2104,7 +2153,7 @@ func (s *codexSession) handleTurnStarted(raw json.RawMessage) {
 	}
 	if s.activeTurn != nil && !s.activeTurn.settling && s.activeTurn.phase == codexPhaseSent {
 		if s.activeTurn.turnID == "" {
-			s.activeTurn.turnID = p.Turn.ID
+			s.activeTurn.bindIDLocked(p.Turn.ID)
 			s.activeTurn.phase = codexPhaseIdentified
 			if s.activeTurn.cancelPending && !s.activeTurn.interruptSent {
 				s.activeTurn.interruptSent = true
@@ -2152,25 +2201,52 @@ func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
 	}
 	turn := s.activeTurn
 	foreign := s.foreignTurnID
-	if turn != nil && !turn.settling && (turn.phase == codexPhaseSent || turn.phase == codexPhaseIdentified) {
-		if turn.phase == codexPhaseSent && turn.turnID == "" && p.Turn.ID != "" {
-			// turn/completed arrived before turn/start reply: bind and settle now.
-			turn.turnID = p.Turn.ID
-			turn.phase = codexPhaseIdentified
+	// Check known foreign turn ownership FIRST so an early foreign completion
+	// can never bind to an unidentified local turn (M6).
+	if foreign != "" && (foreign == p.Turn.ID || (p.Turn.ID == "" && turn == nil)) {
+		toolFinal := toolCompleted
+		subFinal := SubagentCompleted
+		switch p.Turn.Status {
+		case "failed":
+			toolFinal = toolFailed
+			subFinal = SubagentFailed
+		case "interrupted":
+			toolFinal = "cancelled"
+			subFinal = SubagentCancelled
 		}
-		if turn.turnID == p.Turn.ID || (p.Turn.ID == "" && turn.phase == codexPhaseIdentified) {
-			delete(s.earlyCompleted, p.Turn.ID)
-			s.mu.Unlock()
-			s.finishTurnFromWire(turn, p.Turn)
-			return
+		now := s.Now()
+		var retireEvs []Event
+		for _, id := range s.toolOrder {
+			row, ok := s.tools[id]
+			if !ok || !toolStatusInFlight(row.Status) {
+				continue
+			}
+			row.Status = toolFinal
+			row.At = now
+			s.tools[id] = row
+			ct := cloneTool(row)
+			retireEvs = append(retireEvs, Event{Type: EventTool, Tool: &ct})
 		}
-	}
-	if foreign != "" && (foreign == p.Turn.ID || p.Turn.ID == "") {
+		for _, id := range s.subagentOrder {
+			rec, ok := s.subagents[id]
+			if !ok || rec.info.Status != SubagentRunning || rec.turn != 0 {
+				continue
+			}
+			rec.info.Status = subFinal
+			if rec.info.EndedAt.IsZero() {
+				rec.info.EndedAt = now
+			}
+			info := cloneSubagent(rec.info)
+			retireEvs = append(retireEvs, Event{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeFinished})
+		}
 		s.foreignTurnID = ""
 		if p.Turn.ID != "" {
 			s.recordSettledTurnLocked(p.Turn.ID)
 		}
 		s.mu.Unlock()
+		for _, ev := range retireEvs {
+			s.emit(ev)
+		}
 		info := &ForeignTurnInfo{
 			ID:        foreign,
 			Running:   false,
@@ -2182,6 +2258,19 @@ func (s *codexSession) handleTurnCompleted(raw json.RawMessage) {
 		}
 		s.emit(Event{Type: EventForeignTurn, ForeignTurn: info})
 		return
+	}
+	if turn != nil && !turn.settling && (turn.phase == codexPhaseSent || turn.phase == codexPhaseIdentified) {
+		if turn.phase == codexPhaseSent && turn.turnID == "" && p.Turn.ID != "" {
+			// turn/completed arrived before turn/start reply: bind and settle now.
+			turn.bindIDLocked(p.Turn.ID)
+			turn.phase = codexPhaseIdentified
+		}
+		if turn.turnID == p.Turn.ID || (p.Turn.ID == "" && turn.phase == codexPhaseIdentified) {
+			delete(s.earlyCompleted, p.Turn.ID)
+			s.mu.Unlock()
+			s.finishTurnFromWire(turn, p.Turn)
+			return
+		}
 	}
 	// Only retain bounded provisional early completion when a turn/start is sent
 	// and awaiting identification (M6).

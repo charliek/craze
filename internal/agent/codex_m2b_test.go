@@ -609,3 +609,73 @@ func TestCodexSkillsCatalogInvocationRescanAndBuiltinPrecedence(t *testing.T) {
 	// RescanSkills must be non-blocking and safe.
 	cs.RescanSkills()
 }
+
+func TestCodexM2bReviewRegressions(t *testing.T) {
+	t.Run("M5: Probe 1 availableDecisions preserves Decline and empty slice invents no allow", func(t *testing.T) {
+		// Exact Probe 1 frame shape: ["accept", {"acceptWithExecpolicyAmendment":...}, "cancel"]
+		probe1 := []json.RawMessage{
+			json.RawMessage(`"accept"`),
+			json.RawMessage(`{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","x"]}}`),
+			json.RawMessage(`"cancel"`),
+		}
+		got := safeCodexCommandDecisions(probe1)
+		if !slices.Equal(got, []string{"accept", "decline", "cancel"}) {
+			t.Fatalf("Probe 1 decisions = %v, want [accept decline cancel]", got)
+		}
+		// Explicit empty slice [] must NOT invent accept or acceptForSession.
+		empty := safeCodexCommandDecisions([]json.RawMessage{})
+		if slices.Contains(empty, "accept") || slices.Contains(empty, "acceptForSession") || !slices.Contains(empty, "decline") {
+			t.Fatalf("explicit empty decisions = %v, want only safe decline", empty)
+		}
+		// Nil slice uses legacy 4 defaults.
+		nilDec := safeCodexCommandDecisions(nil)
+		if !slices.Equal(nilDec, []string{"accept", "acceptForSession", "decline", "cancel"}) {
+			t.Fatalf("nil decisions = %v", nilDec)
+		}
+	})
+
+	t.Run("M7: collabAgentToolCall agentsStates running and subAgentActivity item shape", func(t *testing.T) {
+		cs, _ := startCodexFake(t, "codex-basic", Options{Force: true})
+		// Spawn call status is "completed", but agentsStates says receiver child is still running.
+		spawnRaw := json.RawMessage(`{"type":"collabAgentToolCall","id":"sub-x","tool":"spawn_agent","status":"completed","receiverThreadIds":["child-thr-9"],"prompt":"analyze","agentsStates":{"child-thr-9":{"status":"running"}}}`)
+		cs.processItemCtx(context.Background(), spawnRaw, true, false)
+		snap := cs.Snapshot()
+		if len(snap.Subagents) != 1 || snap.Subagents[0].Status != SubagentRunning {
+			t.Fatalf("expected SubagentRunning from agentsStates, got %+v", snap.Subagents)
+		}
+		// Upstream subAgentActivity as a ThreadItem correlated by agentThreadId.
+		actRaw := json.RawMessage(`{"type":"subAgentActivity","id":"act-1","agentThreadId":"child-thr-9","kind":"tool","status":"completed","activity":"done reading"}`)
+		cs.processItemCtx(context.Background(), actRaw, true, false)
+		snap = cs.Snapshot()
+		if len(snap.Subagents) != 1 || snap.Subagents[0].Status != SubagentCompleted || snap.Subagents[0].Activity != "done reading" {
+			t.Fatalf("subAgentActivity item did not correlate/update row: %+v", snap.Subagents)
+		}
+	})
+
+	t.Run("M8: compatibility fallback respects turn cap and keeps newest suffix", func(t *testing.T) {
+		prev := codexResumeMaxTurns
+		codexResumeMaxTurns = 2
+		t.Cleanup(func() { codexResumeMaxTurns = prev })
+
+		turns := []codexrpc.Turn{
+			{ID: "t1"}, {ID: "t2"}, {ID: "t3"}, {ID: "t4"},
+		}
+		h := boundChronologicalTurns(turns)
+		if !h.truncated || len(h.turns) != 2 || h.turns[0].ID != "t3" || h.turns[1].ID != "t4" {
+			t.Fatalf("boundChronologicalTurns = %+v, want truncated newest suffix [t3 t4]", h)
+		}
+	})
+
+	t.Run("L10: skills/changed before ready sets skillsDirty", func(t *testing.T) {
+		prov := CodexProvider()
+		cs := New(Options{Provider: &prov, Workspace: t.TempDir()}).(*codexSession)
+		defer func() { _ = cs.Close() }()
+		cs.handleSkillsChanged()
+		cs.mu.Lock()
+		dirty := cs.skillsDirty
+		cs.mu.Unlock()
+		if !dirty {
+			t.Fatal("expected skillsDirty=true when skills/changed arrives before ready")
+		}
+	})
+}

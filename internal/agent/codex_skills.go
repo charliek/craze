@@ -61,7 +61,8 @@ func loadCodexSkills(ctx context.Context, client *codexrpc.Client, cwd string, f
 
 // RescanSkills implements SkillRescanner (non-blocking): signals the coalescing
 // skills worker to call `skills/list{forceReload: true}` and publish any slash
-// catalog delta. Safe no-op when not started or closed.
+// catalog delta. If called during startup before ready, sets skillsDirty so the
+// refresh runs as soon as Start finishes (L10).
 func (s *codexSession) RescanSkills() {
 	s.triggerSkillRefresh()
 }
@@ -72,7 +73,13 @@ func (s *codexSession) handleSkillsChanged() {
 
 func (s *codexSession) triggerSkillRefresh() {
 	s.mu.Lock()
-	if s.closed || !s.ready || s.client == nil {
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if !s.ready || s.client == nil {
+		// Retain dirty bit during startup; consumed as soon as s.ready flips true (L10).
+		s.skillsDirty = true
 		s.mu.Unlock()
 		return
 	}
