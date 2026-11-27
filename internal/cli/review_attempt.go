@@ -24,6 +24,7 @@ const reviewTimedOut = "timed_out"
 
 // The provider-start budget is independent of the command-wide turn budget.
 var reviewStartupBudget = 35 * time.Second
+var stopReviewHost = reviewAfter
 
 type attemptResult struct {
 	turn             *turnResult
@@ -165,7 +166,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 	var host reviewHost
 	defer func() {
 		a.settledBeforeEnd = ctx.Err() == nil
-		a.cleanupErr = reviewAfter(host, env)
+		a.cleanupErr = stopReviewHost(host, env)
 		if a.cleanupErr != nil {
 			a.turn.Status = statusFailed
 			a.turn.Error = kindError(a.cleanupErr.Error(), errkind.Internal)
@@ -193,7 +194,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 			return attemptResult{turn: contextResult(ctx)}
 		}
 	}
-	scope, err := hostspawn.NewReviewScope(start)
+	scope, err := hostspawn.NewReviewScope(start, standaloneCLI)
 	if err != nil {
 		if ctx.Err() != nil {
 			return attemptResult{turn: contextResult(ctx)}
@@ -201,7 +202,7 @@ func runUnattendedAttempt(ctx context.Context, dir, prompt string, route routing
 		return attemptFailure(errkind.Internal, "could not read the process table before review", true)
 	}
 	host.scope = scope
-	ref, held, err := spawnOnce(start, spawnOptions{flags: flags, env: env, hubEnv: true, unattended: true, onChild: func(c *hostspawn.Child, id string) { host.child, host.id = c, id }})
+	ref, held, err := spawnOnce(start, spawnOptions{flags: flags, env: env, hubEnv: true, unattended: true, onChild: func(c *hostspawn.Child, id string) { host.child, host.id = c, id; scope.Bind(c) }})
 	if err != nil {
 		if ctx.Err() != nil {
 			return attemptResult{turn: contextResult(ctx)}

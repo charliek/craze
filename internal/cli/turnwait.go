@@ -289,9 +289,10 @@ type submitAnswer struct {
 
 // turnWaiter is one wait.
 type turnWaiter struct {
-	conn  *waitConn
-	opts  waitOptions
-	start waitStart
+	progress reviewProgress
+	conn     *waitConn
+	opts     waitOptions
+	start    waitStart
 
 	// session is who the result is about; its model is read from
 	// session.state and the stream's model deltas.
@@ -482,11 +483,11 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 	}()
 	items := make(chan pumped)
 	go pumpStream(pctx, w.conn.st, items)
-	activity := reviewProgress{prompt: w.opts.progressPrompt}
+	w.progress.prompt = w.opts.progressPrompt
 	take := func(p pumped) {
 		if w.opts.progress != nil && p.err == nil && p.it.Kind == remote.KindEvent {
 			ev, err := agent.DecodeEvent(string(p.it.Body))
-			if err == nil && activity.accepts(w.target, ev) {
+			if err == nil && w.progress.accepts(w.target, ev) {
 				w.opts.progress(w.inc, p.it.Seq)
 			}
 		}
@@ -523,6 +524,22 @@ func (w *turnWaiter) run(ctx context.Context) (*turnResult, *waitFailure) {
 		select {
 		case p := <-items:
 			take(p)
+			if !w.opts.fullMessage || w.done() || w.unsettled != nil {
+				continue
+			}
+			// One already delivered item may carry the settlement. A hot stream
+			// must then yield to a waiting cap, signal, or submit acknowledgment.
+			select {
+			case in := <-w.intr:
+				if in.timeout {
+					w.timedOut(items)
+				} else {
+					w.signalled(items)
+				}
+			case a := <-w.submitted:
+				w.submitAnswered(op, a)
+			default:
+			}
 			continue
 		default:
 		}
@@ -1443,6 +1460,9 @@ func (w *turnWaiter) followFrom(snap *transcript.Snapshot, seq uint64, same bool
 	// What runs at the snapshot's seq, the stream's place from here on: a
 	// wake's sections are its own (ownWeb), as its tally there is (seedWeb).
 	w.foreign = runningForeign(snap)
+	if w.opts.progress != nil && w.target.kind == targetTurn && snap.Turn.ID == w.target.id {
+		w.progress.turn, w.progress.foreign = w.target.id, w.foreign
+	}
 	w.acc = newTurnAccumulator()
 	w.acc.full = w.opts.fullMessage
 	if w.target.kind == targetTurn && !snap.Turn.At.IsZero() {

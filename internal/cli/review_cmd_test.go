@@ -221,3 +221,43 @@ func TestReviewCommandDeadlineDuringFallbackStartup(t *testing.T) {
 		t.Fatalf("exit %d: %+v, %s, %v", code, doc, diag, err)
 	}
 }
+
+func TestReviewConfiguredDefaultPanel(t *testing.T) {
+	_, ws, kids := unattendedHome(t)
+	writeCrazeConfig(t, "[roles.review]\nseats=['opus']\n")
+	for _, flags := range [][]string{nil, {"--role", "review"}} {
+		out, stderr, code := executeIn(append([]string{"review", "--json", "-C", ws, "--criteria", "correctness"}, flags...), strings.NewReader(""))
+		if code != 2 || !strings.Contains(out+stderr, "craze resolve --role review") || kids.count() != 0 {
+			t.Fatal(code, out, stderr)
+		}
+	}
+}
+func TestReviewSpillSurvivesUnconfirmedStop(t *testing.T) {
+	_, ws, _ := unattendedHome(t)
+	initReviewRepo(t, ws)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	if err := os.WriteFile(filepath.Join(ws, "long"), []byte(strings.Repeat("line\n", 980)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := stopReviewHost
+	stopReviewHost = func(h reviewHost, env rundir.Env) error {
+		if err := original(h, env); err != nil {
+			return err
+		}
+		return errors.New("could not verify exit")
+	}
+	t.Cleanup(func() { stopReviewHost = original })
+	out, diag, code := executeIn([]string{"review", "--json", "--provider", "cursor", "--allow-same-provider", "-C", ws, "--changes-since", "HEAD"}, strings.NewReader(""))
+	_, part, ok := strings.Cut(diag, "retained spill after unconfirmed shutdown: ")
+	spill, _, _ := strings.Cut(part, "\n")
+	if code != 1 || !ok || !strings.HasSuffix(spill, "/changes.diff") {
+		t.Fatal(code, out, diag)
+	}
+	data, err := os.ReadFile(spill)
+	if err != nil || !bytes.Contains(data, []byte("line\nline")) {
+		t.Fatal(err, spill)
+	}
+	if err = os.RemoveAll(filepath.Dir(spill)); err != nil {
+		t.Fatal(err)
+	}
+}

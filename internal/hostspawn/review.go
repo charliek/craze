@@ -16,14 +16,15 @@ import (
 func ReviewMark(hostID string) string { return "CRAZE_REVIEW_HOST=" + hostID }
 
 // ReviewScope records which sessions predate this host and which processes
-// could adopt its orphans. A newly detached helper can drop the environment
+// pre-existed the attempt. A newly detached helper can drop the environment
 // marker. An observed parent chain proves ownership; an orphan whose origin
 // cannot be proved blocks fallback without authorizing a signal.
 type ReviewScope struct {
-	before   map[int]uint64
-	sessions map[int]bool
-	adopters map[int]bool
-	known    map[int]uint64
+	before      map[int]uint64
+	sessions    map[int]bool
+	reaper      bool
+	hostVersion int32
+	known       map[int]uint64
 }
 
 func reviewMembers(deadline time.Time) (map[int]rundir.GroupMember, error) {
@@ -40,22 +41,26 @@ func reviewMembers(deadline time.Time) (map[int]rundir.GroupMember, error) {
 	return members, nil
 }
 
-func NewReviewScope(ctx context.Context) (*ReviewScope, error) {
+func NewReviewScope(ctx context.Context, standalone bool) (*ReviewScope, error) {
 	deadline, _ := ctx.Deadline()
 	members, err := reviewMembers(deadline)
 	if err != nil {
 		return nil, err
 	}
-	s := &ReviewScope{before: map[int]uint64{}, sessions: map[int]bool{}, adopters: map[int]bool{1: true}, known: map[int]uint64{}}
+	reaper, err := enableReviewAdoption(standalone)
+	if err != nil {
+		return nil, err
+	}
+	s := &ReviewScope{reaper: reaper, before: map[int]uint64{}, sessions: map[int]bool{}, known: map[int]uint64{}}
 	for _, m := range members {
 		s.before[m.PID] = m.Start
 		s.sessions[m.Session] = true
 	}
-	for pid := os.Getpid(); pid > 0 && !s.adopters[pid]; pid = members[pid].PPID {
-		s.adopters[pid] = true
-	}
 	return s, nil
 }
+
+// Bind captures the host's kernel generation before it can finish a turn.
+func (s *ReviewScope) Bind(host *Child) { s.hostVersion = reviewParentVersion(host.PID()) }
 
 // origin classifies a member of a new session against this attempt. Parent
 // identities come from one scan. Take no action on an ambiguous identity.
@@ -64,15 +69,20 @@ func (s *ReviewScope) origin(m rundir.GroupMember, members map[int]rundir.GroupM
 		if m.Session == host.PID() && m.Start >= host.ownStart || s.known[m.PID] == m.Start && m.Start != 0 {
 			return true, false
 		}
-		if s.adopters[m.PID] && (m.PID == 1 || s.before[m.PID] == m.Start) {
-			return false, true
+		if s.reaper && m.PPID == os.Getpid() && s.before[m.PID] != m.Start {
+			return true, false
+		}
+		if m.PPID == 1 {
+			// Linux adopts our own orphans directly. On Darwin a launchd job
+			// whose original parent predates the host is independently owned.
+			return false, !s.reaper && !reviewOlderParent(m.PID, s.hostVersion)
 		}
 		if s.sessions[m.Session] || s.before[m.PID] == m.Start {
 			return false, false
 		}
 		parent, ok := members[m.PPID]
 		if !ok || parent.Start > m.Start {
-			return false, true
+			return false, !s.reaper
 		}
 		m = parent
 	}
@@ -104,6 +114,7 @@ func (s *ReviewScope) Observe(ctx context.Context, host *Child) error {
 func (s *ReviewScope) StopReviewProcesses(ctx context.Context, host *Child, hostID string, ids []int) error {
 	deadline, _ := ctx.Deadline()
 	mark := ReviewMark(hostID)
+	quiet := false
 	for {
 		members, err := reviewMembers(deadline)
 		if err != nil {
@@ -140,9 +151,18 @@ func (s *ReviewScope) StopReviewProcesses(ctx context.Context, host *Child, host
 				live = true
 			}
 		}
-		if !live {
+		if s.reaper {
+			gone, err := reviewChildrenGone()
+			if err != nil {
+				return fmt.Errorf("verifying adopted review children: %w", err)
+			}
+			if !live && gone {
+				return nil
+			}
+		} else if !live && quiet {
 			return nil
 		}
+		quiet = !live
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("could not confirm review process exit: %w", ctx.Err())

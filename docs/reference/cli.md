@@ -3288,7 +3288,10 @@ Inline diffs fit within 900 lines, 100 KiB and the remaining 512 KiB prompt
 budget. Larger diffs use a private `changes.diff` with a line index. The raw
 patch is limited to 5 MiB and carries a marker if truncated. Bundle-only JSON
 includes `inlined`, `bundleFile`, `lines`, `bytes` and `files` with each
-file's `name`, `first` and `last` line.
+file's `name`, `first` and `last` line. To hand inline content to a reviewer,
+use the Markdown output. If shutdown cannot be verified, Craze retains a
+spilled patch and prints its path to stderr. An open input pipe waits for
+EOF when no prompt file or positional words were supplied.
 
 Craze attempts a fallback after a start refusal or a qualifying provider
 failure if the previous host and its children have stopped, the worktree
@@ -3302,6 +3305,12 @@ files. Integrity checks require a Git worktree. Submodule bundles show gitlink
 changes. The integrity check also scans submodule worktree files within the
 same bounds and excludes their private Git metadata. It reports changes and
 leaves them on disk.
+
+On Linux the standalone CLI adopts orphaned provider descendants and waits
+for the kernel to confirm the last child exited. On macOS it checks process
+groups, observed descendants and original parent generations. A newly
+orphaned process of uncertain origin can prevent verification. An unverified
+stop returns exit 1 before output or fallback.
 
 A signal or cap during shutdown or the final integrity check preserves the
 settled attempt in `attempts` and delivers its text. The command reports

@@ -111,6 +111,11 @@ func inspectFallbackDir(dir string, create, repair bool) error {
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		if !repair {
+			// A directory owned by this user with no other writer can be
+			// inspected without changing its mode during offline resolution.
+			if fi.Mode().Perm()&0022 == 0 {
+				return nil
+			}
 			return errRecordUnusable
 		}
 		if err := os.Chmod(dir, 0o700); err != nil {

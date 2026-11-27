@@ -23,7 +23,7 @@ Starts an unattended session in the current directory (no hub), sends it the pro
 | `--remove-prompt-file` | Delete the prompt file once read |
 | `--timeout <d>` | Stop waiting after this long (`9m`): status `running`, exit 5, with a handle |
 | `--max-message <n>` | Print at most `n` characters of the message and plan together; the whole result goes to a file named in the output (`[… cut: full result in <path>]`). Use `20000` |
-| `--no-force` | Permissions are asked, not bypassed: an ask stays open (`needs_input`) |
+| `--no-force` | Craze leaves a provider permission request open (`needs_input`). Antigravity 1.5.18 can run shell commands and edit files without sending a request. |
 | `--json` | One JSON object instead of text; a failure is `{"error":{"message":…,"kind":…,"retryable":…}}`, its kind one of a closed set (failure kinds in `docs/reference/cli.md`) |
 | `-C <dir>` | The directory (default: the current one) |
 

@@ -467,3 +467,56 @@ def test_settled_text_survives_command_end_during_integrity_check(
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="tests Linux subreaper adoption")
+def test_fallback_verifies_orphan_handoff_and_ignores_unrelated_session(
+    craze_bin, fake_agent_bin, tmp_path
+):
+    import time
+
+    work = tmp_path / "repo"
+    configure(work, fake_agent_bin, "codex-quota")
+    wrapper = Path(os.environ["CRAZE_HOME"]) / "fake-codex"
+    arrived, release, survivor = (tmp_path / name for name in ("arrived", "release", "survivor"))
+    # A short-lived intermediate leaves a new session with a cleared
+    # environment. Neither the session ID nor the marker ties it to its host.
+    intermediate = (
+        "import subprocess;"
+        "p=subprocess.Popen(['sleep','40'],env={},start_new_session=True,"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        f"open({str(survivor)!r},'w').write(str(p.pid))"
+    )
+    wrapper.write_text(
+        f"#!{sys.executable}\nimport os, subprocess, sys, time\nfrom pathlib import Path\n"
+        f"Path({str(arrived)!r}).touch()\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
+        f"subprocess.run([sys.executable,'-c',{intermediate!r}], check=True)\n"
+        f"os.execv({str(fake_agent_bin)!r},[{str(fake_agent_bin)!r},'-script','codex-quota',*sys.argv[1:]])\n"
+    )
+    cmd = [str(craze_bin), "review", "--json", "-C", str(work), "--target", "test",
+           "--allow-same-provider", "inspect"]
+    review_proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env={**os.environ, "CRAZE_FAKE_SCRIPT": "echo", "CODEX_API_KEY": ""})
+    bystander = None
+    try:
+        until = time.monotonic() + 15
+        while not arrived.exists() and review_proc.poll() is None and time.monotonic() < until:
+            time.sleep(.02)
+        assert arrived.exists()
+        bystander = subprocess.Popen(["sleep", "40"], start_new_session=True)
+        release.touch()
+        out, err = review_proc.communicate(timeout=30)
+        doc = json.loads(out)
+        assert review_proc.returncode == 0 and len(doc["attempts"]) == 2, (doc, err)
+        assert bystander.poll() is None
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(survivor.read_text()), 0)
+    finally:
+        release.touch()
+        if bystander is not None:
+            bystander.terminate()
+            bystander.wait(timeout=5)
+        if review_proc.poll() is None:
+            review_proc.kill()
+            review_proc.wait(timeout=5)

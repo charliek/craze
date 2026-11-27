@@ -210,3 +210,49 @@ func TestReviewRestoreKeepsCompleteAnswerOrFails(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoredReviewProgressUsesAuthoritativeTurn(t *testing.T) {
+	target := waitTarget{kind: targetTurn, id: "turn-2"}
+	w := turnWaiter{opts: waitOptions{fullMessage: true, progress: func(string, uint64) {}}, acc: newTurnAccumulator(), target: target}
+	snap := transcript.Snapshot{}
+	snap.Turn.ID = "turn-2"
+	w.followFrom(&snap, 10, true)
+	if !w.progress.accepts(target, textEv("live after restore")) {
+		t.Fatal("restored turn lost live progress")
+	}
+}
+func TestReviewInterruptsDuringUnrelatedTraffic(t *testing.T) {
+	for _, timeout := range []bool{true, false} {
+		r := signalRig(t)
+		conn := r.dial(nil)
+		sigs := make(chan os.Signal, 1)
+		cap := make(chan time.Time, 1)
+		waiting := goWait(conn, waitStart{submit: submitPrompt(conn, "go")}, waitOptions{fullMessage: true, timeout: cap, sigs: sigs})
+		r.waitStarted("turn-1")
+		stop, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					r.s.emit(agent.Event{Type: agent.EventMeta})
+				}
+			}
+		}()
+		if timeout {
+			cap <- time.Now()
+		} else {
+			sigs <- os.Interrupt
+		}
+		res, f := waiting.result(t)
+		close(stop)
+		<-done
+		if timeout {
+			wantResult(t, res, f, statusRunning)
+		} else {
+			wantResult(t, res, f, statusCancelled)
+		}
+	}
+}

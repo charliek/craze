@@ -5,7 +5,7 @@ description: "How to hand work to another model through craze from your agent (C
 
 # Delegating to other models with craze
 
-craze drives coding agents in sessions of their own: its own **native** agent (on a model provider's API or a ChatGPT plan), **Grok**, **Cursor**, **Antigravity** (Google's `agy`, on the user's Antigravity plan: Gemini 4 Neon, Argon and Hydrogen among its models), **Codex** (OpenAI's `codex` CLI via `codex app-server`, on the user's ChatGPT or OpenAI account) and **Claude** (the user's own Claude Code, on their Claude plan). This skill is how your agent — Claude Code, Cursor, Grok, Antigravity, Codex or a craze session — hands a task to one of those sessions and gets the result back, as it would from a sub-agent of its own. From Claude Code the plugin's agents do it; any agent can run the commands itself ([Driving craze directly](#driving-craze-directly)). Needs craze 0.6.0 or newer on `PATH`.
+craze drives coding agents in sessions of their own: its own **native** agent (on a model provider's API or a ChatGPT plan), **Grok**, **Cursor**, **Antigravity** (Google's `agy`, on the user's Antigravity plan: Gemini 4 Neon, Argon and Hydrogen among its models), **Codex** (OpenAI's `codex` CLI via `codex app-server`, on the user's ChatGPT or OpenAI account) and **Claude** (the user's own Claude Code, on their Claude plan). This skill is how your agent — Claude Code, Cursor, Grok, Antigravity, Codex or a craze session — hands a task to one of those sessions and gets the result back, as it would from a sub-agent of its own. From Claude Code the plugin's agents do it; any agent can run the commands itself ([Driving craze directly](#driving-craze-directly)). Review and routing need craze 0.6.0 or newer on `PATH`. The earlier delegation commands are available from 0.2.0, subject to each provider’s release floor.
 
 ## Review changes
 
@@ -87,6 +87,8 @@ The agents run `craze` and write the task file. To avoid a prompt on each call, 
       "Bash(craze new:*)",
       "Bash(craze send:*)",
       "Bash(craze wait:*)",
+      "Bash(craze resolve:*)",
+      "Bash(craze review:*)",
       "Bash(craze cancel:*)",
       "Edit(//tmp/craze-delegate-*)"
     ]

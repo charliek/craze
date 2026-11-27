@@ -123,7 +123,12 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
+// standaloneCLI is set only by the process entry point. Embedded commands
+// share their process with their caller and cannot adopt or reap its children.
+var standaloneCLI bool
+
 func Execute() {
+	standaloneCLI = true
 	ranCmd, err := NewRootCmd().ExecuteC()
 	if err == nil {
 		joinHostSweep()

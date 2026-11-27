@@ -9,7 +9,7 @@ import (
 func TestReviewDetachedProcessOrigin(t *testing.T) {
 	scope := ReviewScope{
 		before: map[int]uint64{1: 1, 10: 2, 20: 3}, sessions: map[int]bool{1: true, 10: true, 20: true},
-		adopters: map[int]bool{1: true, 10: true}, known: map[int]uint64{50: 9},
+		known: map[int]uint64{50: 9},
 	}
 	host := Child{pid: 30, ownStart: 7}
 	members := map[int]rundir.GroupMember{
@@ -20,7 +20,7 @@ func TestReviewDetachedProcessOrigin(t *testing.T) {
 		parent           int
 		owned, uncertain bool
 	}{
-		{31, true, false}, {50, true, false}, {20, false, false}, {1, false, true}, {10, false, true}, {42, false, true},
+		{31, true, false}, {50, true, false}, {20, false, false}, {1, false, true}, {10, false, false}, {42, false, true},
 	} {
 		helper := rundir.GroupMember{PID: 60, Start: 10, Session: 60, PPID: tc.parent}
 		owned, uncertain := scope.origin(helper, members, &host)

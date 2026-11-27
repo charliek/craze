@@ -93,8 +93,20 @@ func TestClaudeOverageFallbackOnlyInAPrivateDirectory(t *testing.T) {
 	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("mode %v; want 0700", fi.Mode().Perm())
 	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectFallbackDir(dir, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0755 {
+		t.Fatal("offline check changed permissions")
+	}
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
+	}
+	if err := inspectFallbackDir(dir, false, false); err == nil {
+		t.Fatal("trusted a writable fallback directory")
 	}
 	if err := checkFallbackDir(dir, false); err != nil {
 		t.Fatal(err)

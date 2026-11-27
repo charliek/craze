@@ -100,9 +100,6 @@ func (f reviewFlags) routes() (routing.Result, bool, error) {
 	if req.Role != "" && (req.Provider != "" || f.model != "") || f.model != "" && !direct || req.Provider != "" && !routing.KnownProvider(req.Provider) || req.Version != "" && req.Target == "" {
 		return routing.Result{}, paid, usagef("craze review: invalid combination of target, provider, role, model and version")
 	}
-	if role, ok := cfg.Roles[req.Role]; ok && role.Seats != nil {
-		return routing.Result{}, paid, usagef("craze review: use craze resolve --role %s for a panel", req.Role)
-	}
 	if direct {
 		model := f.model
 		if req.Provider == "native" {
@@ -133,6 +130,9 @@ func (f reviewFlags) routes() (routing.Result, bool, error) {
 		cfg.Targets["direct"] = routing.Target{Cap: "20m", Routes: []routing.Route{{Provider: req.Provider, Model: model, Billing: routing.Subscription}}}
 	} else if req.Role == "" && req.Target == "" {
 		req.Role = "review"
+	}
+	if role, ok := cfg.Roles[req.Role]; ok && role.Seats != nil {
+		return routing.Result{}, paid, usagef("craze review: use craze resolve --role %s for a panel", req.Role)
 	}
 	res, ok, err := cfg.Resolve(req, offlineRouteProbe())
 	if err != nil {
@@ -243,6 +243,7 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 	}
 	prompt := review.Instructions(f.criteria, input)
 	var bundle review.Bundle
+	cleanupConfirmed := true
 	if f.base != "" {
 		bundle, err = review.Build(ctx, dir, f.base, prompt, promptTextMax)
 		if ctx.Err() != nil {
@@ -259,6 +260,9 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		prompt = bundle.Prompt
 		if !f.keep && !f.bundleOnly {
 			defer func() {
+				if !cleanupConfirmed {
+					return
+				}
 				if e := bundle.Remove(); e != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "craze review: removing retained bundle %s: %s\n", bundle.BundleFile, sanitizeLine(e.Error()))
 				}
@@ -326,6 +330,10 @@ func (f reviewFlags) run(cmd *cobra.Command, words []string) error {
 		}
 		res.Attempts = append(res.Attempts, rec)
 		if a.cleanupErr != nil {
+			cleanupConfirmed = false
+			if bundle.BundleFile != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "craze review: retained spill after unconfirmed shutdown: %s\n", bundle.BundleFile)
+			}
 			return kindf(errkind.Internal, "craze review: %s", a.cleanupErr)
 		}
 		if before.Root != "" {
