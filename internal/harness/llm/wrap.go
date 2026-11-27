@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"maps"
 	"slices"
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm/responsesapi"
 )
 
 // ErrEmptyStep is the error a streamed step ends with when the provider
@@ -111,6 +113,37 @@ type model struct {
 // wrap decorates inner; scrub hides the key inner authenticates with.
 func wrap(inner fantasy.LanguageModel, scrub *scrubber) fantasy.LanguageModel {
 	return &model{inner: inner, scrub: scrub}
+}
+
+func (m *model) Close() error { return m.scrub.err(CloseModel(m.inner)) }
+
+// CloseModel releases the model's transport resources when it owns any.
+func CloseModel(lm fantasy.LanguageModel) error {
+	if c, ok := lm.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// PreDial starts a background WebSocket connection when the model supports it.
+func PreDial(lm fantasy.LanguageModel, sessionID string) {
+	if m, ok := lm.(*model); ok {
+		lm = m.inner
+	}
+	if m, ok := lm.(interface{ preDial(string) }); ok {
+		m.preDial(sessionID)
+	}
+}
+
+// TransportStats returns the model's Responses transport counters, if supported.
+func TransportStats(lm fantasy.LanguageModel) (responsesapi.Stats, bool) {
+	if m, ok := lm.(*model); ok {
+		lm = m.inner
+	}
+	if m, ok := lm.(interface{ transportStats() responsesapi.Stats }); ok {
+		return m.transportStats(), true
+	}
+	return responsesapi.Stats{}, false
 }
 
 func (m *model) Provider() string { return m.inner.Provider() }

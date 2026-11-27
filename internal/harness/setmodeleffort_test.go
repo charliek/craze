@@ -5,6 +5,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
 // SetModelEffort (plan 047 D1, §7 A1): a person's switch lands on the effort
@@ -247,5 +250,66 @@ func TestTheCompactionModelKeepsTheConversationsEffort(t *testing.T) {
 	}
 	if got := effortOf(t, br[0], b.provider); got != "medium" {
 		t.Fatalf("test/b's turn went out at %q; want the switch's medium", got)
+	}
+}
+
+type closeCountingModel struct {
+	fantasy.LanguageModel
+	closes int
+}
+
+func (m *closeCountingModel) Close() error {
+	m.closes++
+	return nil
+}
+
+func TestModelLifecycleClosesRejectedAndReplacedClients(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	var built []*closeCountingModel
+	opts.NewModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
+		m := &closeCountingModel{LanguageModel: f.models[r.Alias]}
+		built = append(built, m)
+		return m, nil
+	}
+
+	bad := opts
+	bad.Effort = "invalid"
+	if s, err := Open(bad); err == nil || s != nil {
+		t.Fatalf("Open with invalid effort = %v, %v", s, err)
+	}
+	s := f.open(opts)
+	f.models["test/a"].push(answerWith("One."))
+	run(t, s, "first turn")
+	b := f.table.Models["test/b"]
+	b.Efforts = append(b.Efforts, "turbo")
+	f.table.Models["test/b"] = b
+	if err := s.SetModelEffort("test/b", "turbo"); err == nil {
+		t.Fatal("accepted an effort the driver cannot send")
+	}
+	if built[1].closes != 0 {
+		t.Fatal("failed switch closed the installed model")
+	}
+	if err := s.SetModel("test/b"); err != nil {
+		t.Fatal(err)
+	}
+	if built[1].closes != 1 || built[3].closes != 0 {
+		t.Fatal("successful switch did not close only the replaced model")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	bad.Resume = s.ID()
+	if resumed, err := Open(bad); err == nil || resumed != nil {
+		t.Fatalf("resume with invalid effort = %v, %v", resumed, err)
+	}
+	if len(built) != 5 {
+		t.Fatalf("built %d clients, want five", len(built))
+	}
+	for i, m := range built {
+		if m.closes != 1 {
+			t.Errorf("client %d closed %d times, want once", i, m.closes)
+		}
 	}
 }

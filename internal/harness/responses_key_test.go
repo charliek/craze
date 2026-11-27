@@ -266,32 +266,43 @@ func rsReply(items ...map[string]any) http.HandlerFunc {
 			b, _ := json.Marshal(v)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", v["type"], b)
 		}
-		out := []any{}
-		for i, it := range items {
-			start := map[string]any{}
-			for k, v := range it {
-				start[k] = v
-			}
-			switch it["type"] {
-			case "reasoning":
-				start["encrypted_content"] = nil
-			case "message":
-				start["content"] = []any{}
-			case "function_call":
-				start["arguments"] = ""
-			}
-			send(map[string]any{"type": "response.output_item.added", "output_index": i, "item": start})
-			if it["type"] == "message" {
-				text := it["content"].([]any)[0].(map[string]any)["text"]
-				send(map[string]any{"type": "response.output_text.delta", "output_index": i, "item_id": it["id"], "delta": text})
-			}
-			send(map[string]any{"type": "response.output_item.done", "output_index": i, "item": it})
-			out = append(out, it)
+		for _, frame := range rsFrames("", items...) {
+			send(frame)
 		}
-		send(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": out,
-			"usage": map[string]any{"input_tokens": 120, "input_tokens_details": map[string]any{"cached_tokens": 64},
-				"output_tokens": 8, "output_tokens_details": map[string]any{"reasoning_tokens": 3}, "total_tokens": 128}}})
 	}
+}
+
+func rsFrames(id string, items ...map[string]any) []map[string]any {
+	var frames []map[string]any
+	out := []any{}
+	for i, it := range items {
+		start := map[string]any{}
+		for k, v := range it {
+			start[k] = v
+		}
+		switch it["type"] {
+		case "reasoning":
+			start["encrypted_content"] = nil
+		case "message":
+			start["content"] = []any{}
+		case "function_call":
+			start["arguments"] = ""
+		}
+		frames = append(frames, map[string]any{"type": "response.output_item.added", "output_index": i, "item": start})
+		if it["type"] == "message" {
+			text := it["content"].([]any)[0].(map[string]any)["text"]
+			frames = append(frames, map[string]any{"type": "response.output_text.delta", "output_index": i, "item_id": it["id"], "delta": text})
+		}
+		frames = append(frames, map[string]any{"type": "response.output_item.done", "output_index": i, "item": it})
+		out = append(out, it)
+	}
+	response := map[string]any{"status": "completed", "output": out,
+		"usage": map[string]any{"input_tokens": 120, "input_tokens_details": map[string]any{"cached_tokens": 64},
+			"output_tokens": 8, "output_tokens_details": map[string]any{"reasoning_tokens": 3}, "total_tokens": 128}}
+	if id != "" {
+		response["id"] = id
+	}
+	return append(frames, map[string]any{"type": "response.completed", "response": response})
 }
 
 func rsReasoning(id, sealed string) map[string]any {

@@ -72,11 +72,15 @@ var ErrAPIKeyTooShort = errors.New("llm: API key too short to be real")
 // Option configures New.
 type Option func(*options)
 
+var openAISticky = responsesapi.NewStickyRegistry()
+
 type options struct {
-	httpClient    *http.Client
-	auth          Auth
-	apiBase       func() (string, error)
-	anthropicBase func() (string, error)
+	httpClient      *http.Client
+	auth            Auth
+	apiBase         func() (string, error)
+	anthropicBase   func() (string, error)
+	openAITransport string
+	sticky          *responsesapi.StickyRegistry
 }
 
 // WithHTTPClient sends the model's requests through c instead of the SDK's
@@ -92,6 +96,30 @@ func WithHTTPClient(c *http.Client) Option {
 // a test's loopback server (chatgptauth.APIBase, whose error — a test
 // override that is not a loopback URL — fails the build, so the bearer can
 // never fall back to another host). A nil apiBase is OpenAI's. Every model
+// WithOpenAITransport selects the transport for eligible OpenAI Responses models.
+func WithOpenAITransport(mode string) Option {
+	return func(o *options) { o.openAITransport = strings.ToLower(strings.TrimSpace(mode)) }
+}
+
+// WithStickyRegistry supplies a registry for automatic WebSocket fallback.
+// New uses the process-wide registry by default.
+func WithStickyRegistry(sticky *responsesapi.StickyRegistry) Option {
+	return func(o *options) { o.sticky = sticky }
+}
+
+func (o options) transport(eligible bool) responsesapi.TransportMode {
+	if eligible {
+		switch o.openAITransport {
+		case "auto":
+			return responsesapi.TransportAuto
+		case "websocket":
+			return responsesapi.TransportWebSocket
+		}
+	}
+	// The unset option stays on SSE until configuration ships in M4.
+	return responsesapi.TransportSSE
+}
+
 // New builds also keeps auth's token values out of its errors, whatever its
 // driver: a provider error can echo a request, and a request can hold a tool
 // result that printed a token (scrubber, A21b).
@@ -132,6 +160,14 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
+	}
+	switch o.openAITransport {
+	case "", "auto", "websocket", "sse":
+	default:
+		return nil, fmt.Errorf("llm: invalid OpenAI transport %q (expected auto, websocket, or sse)", o.openAITransport)
+	}
+	if o.sticky == nil {
+		o.sticky = openAISticky
 	}
 	var baseURL string
 	switch r.Driver {
@@ -229,7 +265,7 @@ func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error
 	if err != nil {
 		return nil, err
 	}
-	lm, err := newResponsesModel(r, o.auth, base, o.httpClient)
+	lm, err := newResponsesModel(r, base, o)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +317,7 @@ func newKeyResponses(r modeltable.Resolved, o options) (fantasy.LanguageModel, e
 	if base == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q needs a base URL", r.ProviderID, r.Alias, r.Driver)
 	}
-	lm, err := newKeyResponsesModel(r, key, base, o.httpClient)
+	lm, err := newKeyResponsesModel(r, key, base, o)
 	if err != nil {
 		return nil, err
 	}

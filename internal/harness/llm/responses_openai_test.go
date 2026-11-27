@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -487,5 +489,135 @@ func TestACutCommentaryKeepsItsPhase(t *testing.T) {
 	mine.CatalogModel = false
 	if got := textEnd(openaiStep(t, openaiModel(t, mine), prompt)); got != nil {
 		t.Fatalf("a model of the user's own: text end = %v, want no metadata", got)
+	}
+}
+
+func TestResponsesReplayOutput(t *testing.T) {
+	sealed := responsesapi.OutputItem{Type: "reasoning", ID: "rs_1", Summary: []string{"considered"}, EncryptedContent: "ciphertext"}
+	msg := responsesapi.OutputItem{Type: "message", Text: "checking", Phase: "commentary"}
+	call := responsesapi.OutputItem{Type: "function_call", CallID: "call_1", Name: "lookup", Arguments: `{"x":1}`}
+	for _, tc := range []struct {
+		route responsesapi.Route
+		want  responsesapi.Item
+	}{
+		{responsesapi.RouteChatGPT, responsesapi.AssistantMessage(msg.Text)},
+		{responsesapi.RouteKey, responsesapi.AssistantMessagePhase(msg.Text, msg.Phase)},
+	} {
+		m := responsesModelFor(openaiRoute(""), tc.route)
+		got, ok := m.replayOutput([]responsesapi.OutputItem{sealed, msg, call})
+		want := []responsesapi.Item{
+			responsesapi.Reasoning(sealed.ID, sealed.Summary, sealed.EncryptedContent),
+			tc.want,
+			responsesapi.FunctionCall(call.CallID, call.Name, call.Arguments),
+		}
+		if !ok || !reflect.DeepEqual(got, want) {
+			t.Errorf("route %v replay = %#v, %v, want %#v", tc.route, got, ok, want)
+		}
+	}
+
+	m := responsesModelFor(openaiRoute(""), responsesapi.RouteKey)
+	for _, tc := range []struct {
+		name string
+		done []responsesapi.OutputItem
+	}{
+		{"invalid reasoning ID", []responsesapi.OutputItem{{Type: "reasoning", ID: "rs.1", EncryptedContent: "ciphertext"}, call}},
+		{"missing encrypted content", []responsesapi.OutputItem{{Type: "reasoning", ID: sealed.ID}, msg}},
+		{"trailing reasoning", []responsesapi.OutputItem{call, sealed}},
+		{"empty message", []responsesapi.OutputItem{{Type: "message"}, call}},
+		{"unknown type", []responsesapi.OutputItem{msg, {Type: "web_search_call"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := m.replayOutput(tc.done); ok || got != nil {
+				t.Fatalf("lossy replay = %#v, %v, want nil, false", got, ok)
+			}
+		})
+	}
+}
+
+func TestOpenAITransportSelection(t *testing.T) {
+	for _, tc := range []struct {
+		mode     string
+		eligible bool
+		want     responsesapi.TransportMode
+	}{
+		{"", true, responsesapi.TransportSSE},
+		{"  ", true, responsesapi.TransportSSE},
+		{" SsE ", true, responsesapi.TransportSSE},
+		{" AuTo ", true, responsesapi.TransportAuto},
+		{" WEBSOCKET ", true, responsesapi.TransportWebSocket},
+		{"auto", false, responsesapi.TransportSSE},
+		{"websocket", false, responsesapi.TransportSSE},
+	} {
+		var o options
+		WithOpenAITransport(tc.mode)(&o)
+		if got := o.transport(tc.eligible); got != tc.want {
+			t.Errorf("mode %q, eligible %v: got %v, want %v", tc.mode, tc.eligible, got, tc.want)
+		}
+	}
+	if _, err := New(openaiRoute(responsesapi.DefaultBaseURL), WithOpenAITransport("tcp")); err == nil || !strings.Contains(err.Error(), "invalid OpenAI transport") {
+		t.Fatalf("invalid transport error = %v", err)
+	}
+}
+
+type responsesRoundTripper func(*http.Request) (*http.Response, error)
+
+func (rt responsesRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rt(req)
+}
+
+func TestOpenAITransportThroughFactory(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, mode string
+		stateless        bool
+		want             []string
+	}{
+		{"unset", "https://api.openai.com/v1", "", false, []string{"POST"}},
+		{"proxy", "https://proxy.example/v1", "websocket", false, []string{"POST"}},
+		{"stateless", "https://api.openai.com/v1", "websocket", true, []string{"POST"}},
+		{"shared automatic fallback", "http://127.0.0.1:34567/v1", "auto", false, []string{"GET", "POST", "POST"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			client := &http.Client{Transport: responsesRoundTripper(func(req *http.Request) (*http.Response, error) {
+				got = append(got, req.Method)
+				if req.Method == http.MethodGet {
+					return &http.Response{
+						StatusCode: http.StatusUpgradeRequired,
+						Body:       io.NopCloser(strings.NewReader("upgrade unavailable")),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader("data: " +
+						`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n")),
+				}, nil
+			})}
+			opts := []Option{WithOpenAITransport(tc.mode), WithHTTPClient(client), WithStickyRegistry(responsesapi.NewStickyRegistry())}
+			ctx := t.Context()
+			if tc.stateless {
+				ctx = WithStateless(ctx)
+			}
+			builds := 1
+			if tc.mode == "auto" {
+				builds = 2
+			}
+			for range builds {
+				lm, err := New(openaiRoute(tc.base), opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = CloseModel(lm) })
+				_, err = stepOn(t, ctx, lm)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stats, ok := TransportStats(lm); !ok || stats.SSERequests != 1 {
+					t.Fatalf("stats = %+v, %v", stats, ok)
+				}
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("HTTP methods = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

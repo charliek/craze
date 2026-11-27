@@ -28,6 +28,12 @@ var ErrWSMessageTooBig = errors.New("responsesapi: WebSocket message exceeds the
 
 var errUnexpectedBinaryFrame = errors.New("responsesapi: unexpected binary WebSocket frame")
 
+// IsViolation reports whether the stream broke the frame protocol or exceeded
+// the local read limit.
+func IsViolation(err error) bool {
+	return errors.Is(err, errUnexpectedBinaryFrame) || errors.Is(err, errEventTooLarge)
+}
+
 type wsTimeoutError struct {
 	operation  string
 	incomplete bool

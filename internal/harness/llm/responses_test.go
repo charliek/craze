@@ -152,7 +152,7 @@ func (s *rxServer) requests() []rxRequest {
 // redirected to the server.
 func (s *rxServer) model(t *testing.T, r modeltable.Resolved, auth Auth) *responsesModel {
 	t.Helper()
-	m, err := newResponsesModel(r, auth, "", redirectClient(t, s.srv.URL))
+	m, err := newResponsesModel(r, "", options{auth: auth, httpClient: redirectClient(t, s.srv.URL)})
 	if err != nil {
 		t.Fatalf("newResponsesModel: %v", err)
 	}
@@ -1078,15 +1078,15 @@ func TestResponsesGenerateCollectsTheStream(t *testing.T) {
 
 // TestNewResponsesModelRefusesWhatCannotBeBuilt: no sign-in, no wire model.
 func TestNewResponsesModelRefusesWhatCannotBeBuilt(t *testing.T) {
-	if _, err := newResponsesModel(chatgpt(), nil, "", nil); err == nil {
+	if _, err := newResponsesModel(chatgpt(), "", options{}); err == nil {
 		t.Error("a model with no Auth was built")
 	}
 	r := chatgpt()
 	r.WireModel = " "
-	if _, err := newResponsesModel(r, newStaticAuth(chatgptToken), "", nil); err == nil {
+	if _, err := newResponsesModel(r, "", options{auth: newStaticAuth(chatgptToken)}); err == nil {
 		t.Error("a model with no wire model was built")
 	}
-	m, err := newResponsesModel(chatgpt(), newStaticAuth(chatgptToken), "", nil)
+	m, err := newResponsesModel(chatgpt(), "", options{auth: newStaticAuth(chatgptToken)})
 	if err != nil || m.Provider() != "chatgpt" || m.Model() != "gpt-5.6-luna" {
 		t.Fatalf("model %v, err %v", m, err)
 	}

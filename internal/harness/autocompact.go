@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
 )
@@ -204,6 +205,7 @@ func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted 
 	if frontier != nil && !sameModel(frontier.Model, m.id()) {
 		if prev, ok := s.previousModel(frontier.Model, frontier.Effort); ok {
 			on = prev
+			defer func() { _ = llm.CloseModel(prev.lm) }()
 		} else {
 			textForm = true
 			s.warnf("compaction: the model that holds the context, %s (%s, %s), no longer resolves; compacting on %s in the text form",
@@ -314,7 +316,9 @@ func (s *Session) previousModel(id store.Model, effort string) (model, bool) {
 		if err != nil {
 			continue
 		}
+		builtLM := m.lm
 		if m, err = withEffort(m, carriedEffort(effort, m.r)); err != nil {
+			_ = llm.CloseModel(builtLM)
 			continue
 		}
 		return m, true

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -39,8 +40,8 @@ import (
 // the two is the client's route (responsesapi.Route) and the few choices
 // below that are the route's.
 //
-// Each request is built from the step's call alone, whole, as the route
-// keeps nothing between requests (store false):
+// Each step supplies its full request. The client may send just the new
+// input over a WebSocket when the replayed prefix matches its chain:
 //
 //   - The system prompt is a developer prefix at OpenAI endpoints and
 //     top-level instructions elsewhere.
@@ -90,7 +91,8 @@ type responsesModel struct {
 // responsesapi.ErrBaseURL). httpClient, when not nil, sends the requests
 // (tests reach a local server through it); the client refuses redirects
 // whatever it is.
-func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpClient *http.Client) (*responsesModel, error) {
+func newResponsesModel(r modeltable.Resolved, baseURL string, o options) (*responsesModel, error) {
+	auth := o.auth
 	if auth == nil {
 		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q signs in, and no sign-in was given", r.ProviderID, r.Alias, r.Driver)
 	}
@@ -105,17 +107,13 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpCli
 		}
 		creds = &boundCredentials{auth: auth, tokens: at, want: r.Account, alias: r.Alias}
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{
-		Route:                 responsesapi.RouteChatGPT,
-		BaseURL:               baseURL,
-		HTTPClient:            httpClient,
-		Credentials:           creds,
-		DeveloperInstructions: isOpenAIEndpoint(responsesapi.RouteChatGPT, r.ProviderID, baseURL),
-	})
+	m := responsesModelFor(r, responsesapi.RouteChatGPT)
+	err := m.openClient(responsesapi.Config{
+		BaseURL: baseURL, Credentials: creds,
+	}, o)
 	if err != nil {
 		return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
 	}
-	m := responsesModelOn(r, c, responsesapi.RouteChatGPT)
 	m.latch, _ = auth.(usageLatch)
 	return m, nil
 }
@@ -125,28 +123,34 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpCli
 // (responsesapi.ErrKeyBaseURL), with key as the bearer of every request.
 // httpClient, when not nil, sends the requests; the client refuses redirects
 // whatever it is. Its errors name the provider and the model, never the key.
-func newKeyResponsesModel(r modeltable.Resolved, key, baseURL string, httpClient *http.Client) (*responsesModel, error) {
+func newKeyResponsesModel(r modeltable.Resolved, key, baseURL string, o options) (*responsesModel, error) {
 	if strings.TrimSpace(r.WireModel) == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q) names no wire model", r.ProviderID, r.Alias)
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{
-		Route:                 responsesapi.RouteKey,
-		BaseURL:               baseURL,
-		HTTPClient:            httpClient,
-		APIKey:                key,
-		DeveloperInstructions: isOpenAIEndpoint(responsesapi.RouteKey, r.ProviderID, baseURL),
-	})
-	if err != nil {
+	m := responsesModelFor(r, responsesapi.RouteKey)
+	if err := m.openClient(responsesapi.Config{BaseURL: baseURL, APIKey: key}, o); err != nil {
 		return nil, fmt.Errorf("llm: provider %q (model %q): %w", r.ProviderID, r.Alias, err)
 	}
-	return responsesModelOn(r, c, responsesapi.RouteKey), nil
+	return m, nil
 }
 
-// responsesModelOn is r's model on c, a client of route, with the choices
-// that are the route's: the ChatGPT route's reasoning ids (legalItemID) and
-// name, or the key route's (keyItemID), named for its provider.
-func responsesModelOn(r modeltable.Resolved, c *responsesapi.Client, route responsesapi.Route) *responsesModel {
-	m := &responsesModel{provider: r.ProviderID, model: r.WireModel, client: c,
+func (m *responsesModel) openClient(cfg responsesapi.Config, o options) error {
+	eligible := isOpenAIEndpoint(m.route, m.provider, cfg.BaseURL)
+	cfg.Route = m.route
+	cfg.HTTPClient = o.httpClient
+	cfg.DeveloperInstructions = eligible
+	cfg.WebSocketEligible = eligible
+	cfg.Transport = o.transport(eligible)
+	cfg.Sticky = o.sticky
+	cfg.ReplayOutput = m.replayOutput
+	c, err := responsesapi.NewClient(cfg)
+	m.client = c
+	return err
+}
+
+// responsesModelFor sets the adapter's route-specific replay and error rules.
+func responsesModelFor(r modeltable.Resolved, route responsesapi.Route) *responsesModel {
+	m := &responsesModel{provider: r.ProviderID, model: r.WireModel,
 		route: route, ids: legalItemID, says: "the ChatGPT plan's driver"}
 	if r.ParallelToolCalls != nil {
 		v := *r.ParallelToolCalls
@@ -506,6 +510,37 @@ func assistantItems(msg fantasy.Message, ids *regexp.Regexp, phases bool) []resp
 	return items
 }
 
+// replayOutput projects completed items through the same encoder as transcript
+// replay. A dropped item invalidates the prefix for incremental requests.
+func (m *responsesModel) replayOutput(done []responsesapi.OutputItem) ([]responsesapi.Item, bool) {
+	msg := fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: make([]fantasy.MessagePart, 0, len(done))}
+	for _, item := range done {
+		switch item.Type {
+		case "message":
+			p := fantasy.TextPart{Text: item.Text}
+			if m.phases && item.Phase != "" {
+				p.ProviderOptions = fantasy.ProviderOptions{typeResponsesMessage: &responsesPhase{Phase: item.Phase}}
+			}
+			msg.Content = append(msg.Content, p)
+		case "reasoning":
+			msg.Content = append(msg.Content, fantasy.ReasoningPart{
+				ProviderOptions: fantasy.ProviderOptions{openai.Name: reasoningMetadata(item)},
+			})
+		case "function_call":
+			msg.Content = append(msg.Content, fantasy.ToolCallPart{
+				ToolCallID: item.CallID, ToolName: item.Name, Input: item.Arguments,
+			})
+		default:
+			return nil, false
+		}
+	}
+	items := assistantItems(msg, m.ids, m.phases)
+	if len(items) != len(done) {
+		return nil, false
+	}
+	return items, true
+}
+
 // legalItemID is what a replayed reasoning item's id must look like on the
 // ChatGPT route: gx's rule (prior-art-chatgpt-auth.md), the characters the
 // server's own ids (rs_…) are made of.
@@ -562,10 +597,27 @@ func toolOutput(r fantasy.ToolResultPart) (responsesapi.Item, string) {
 	return responsesapi.FunctionCallOutput(r.ToolCallID, ""), unsentResult(r.Output)
 }
 
+type statelessKey struct{}
+
+// WithStateless routes Responses calls straight to SSE without using the
+// model's WebSocket chain.
+func WithStateless(ctx context.Context) context.Context {
+	return context.WithValue(ctx, statelessKey{}, true)
+}
+
+func isStateless(ctx context.Context) bool { return ctx.Value(statelessKey{}) != nil }
+
+func (m *responsesModel) Close() error { return m.client.Close() }
+
+func (m *responsesModel) preDial(sessionID string) { m.client.PreDial(sessionID) }
+
+func (m *responsesModel) transportStats() responsesapi.Stats { return m.client.Stats() }
+
 // Stream sends one step. The request is sent when the stream is first read,
 // and the response's body is closed when the read ends, however it ends.
 func (m *responsesModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	req, warnings := m.request(call)
+	req.Stateless = isStateless(ctx)
 	return func(yield func(fantasy.StreamPart) bool) {
 		if len(warnings) > 0 && !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeWarnings, Warnings: warnings}) {
 			return
@@ -807,6 +859,7 @@ func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
 // rule 3 decides (D-32).
 func responsesError(err error) error {
 	var re *responsesapi.Error
+	var timeout net.Error
 	switch {
 	case errors.As(err, &re):
 		switch {
@@ -823,7 +876,16 @@ func responsesError(err error) error {
 			return keyProviderError(re)
 		}
 		return responsesProviderError(re)
+	case responsesapi.IsViolation(err):
+		pe := fantasy.NewIncompleteStreamError()
+		pe.Title, pe.Message = protocolTitle, err.Error()
+		return pe
 	case errors.Is(err, responsesapi.ErrIncomplete):
+		// An internal read timeout also signals an incomplete stream.
+		// Keep the timeout's cause and message through Fantasy's wrapping.
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return fantasy.WrapTransportError(err)
+		}
 		return fantasy.NewIncompleteStreamError()
 	}
 	return fantasy.WrapTransportError(err)
