@@ -228,7 +228,7 @@ func (s *codexServer) handleIncoming(msg codexFrame) {
 				"account":            nil,
 				"requiresOpenaiAuth": true,
 			})
-		case "codex-apikey":
+		case "codex-apikey", "codex-subscription-refused":
 			s.reply(msg.ID, map[string]any{
 				"account":            map[string]any{"type": "apiKey"},
 				"requiresOpenaiAuth": true,
@@ -786,6 +786,14 @@ func (s *codexServer) runTurn(threadID, turnID, cwd, promptText string, skills, 
 		})
 		return
 
+	case "codex-quota", "codex-dirty-quota":
+		if s.script == "codex-dirty-quota" {
+			if err := os.WriteFile(filepath.Join(cwd, "review-mutation.txt"), []byte("changed\n"), 0600); err != nil {
+				panic(err)
+			}
+		}
+		s.notify("turn/completed", map[string]any{"threadId": threadID, "turn": map[string]any{"id": turnID, "status": "failed", "error": map[string]any{"message": "account quota", "codexErrorInfo": "usageLimitExceeded"}}})
+		return
 	case "codex-retry-usagelimit":
 		s.notify("error", map[string]any{
 			"threadId":  threadID,

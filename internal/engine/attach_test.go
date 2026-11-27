@@ -864,6 +864,9 @@ func parkTheDrainer(t *testing.T, r *rig) uint64 {
 	}
 	r.s.log.Enqueue(textOf(8, "A"), textOf(8, "B"))
 	r.until(func(ev agent.Event) bool { return ev.Seq == primaryCap })
+	// The subscription can deliver before the engine finishes folding the same
+	// commit. Attach cuts the model, so wait for its sequence as well.
+	waitFor(t, func() bool { return r.e.model.Seq() == primaryCap })
 	return primaryCap + 1
 }
 

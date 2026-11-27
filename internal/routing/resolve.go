@@ -268,7 +268,7 @@ func choose(id string, t Target, r Route, req Request, configPaid bool, probe Pr
 		return c, f.Reason
 	}
 	c.Provisional, c.Note = f.Provisional, f.Note
-	if levels := f.Efforts; levels != nil && !slices.Contains(levels, c.Effort) {
+	if levels := f.Efforts; c.Effort != "" && levels != nil && !slices.Contains(levels, c.Effort) {
 		want := slices.Index(efforts, c.Effort)
 		c.Effort = ""
 		for i := want; i >= 0; i-- {

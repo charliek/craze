@@ -94,6 +94,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newPsCmd())
 	cmd.AddCommand(newProvidersCmd())
 	cmd.AddCommand(newResolveCmd())
+	cmd.AddCommand(newReviewCmd())
 	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newNewCmd())
 	cmd.AddCommand(newSendCmd())

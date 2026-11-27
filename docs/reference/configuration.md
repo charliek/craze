@@ -3199,3 +3199,20 @@ credits enabled on a subscription account follow the provider account's own
 settings. An active Claude overage record holds Claude routes. The offline
 Codex probe checks CODEX_API_KEY and otherwise reports provisional subscription
 eligibility. It reads no Codex configuration or credential files.
+
+### Review provider permissions
+
+Codex receives a read-only command sandbox and never approves escalation.
+Local Codex hooks and MCP servers have their own permissions. A
+subscription-only review checks the account and effective endpoint before
+submitting a turn. Native Ask mode exposes read, grep and glob. Native
+reviews check the selected credential driver before running a turn.
+
+Claude runs in Manual mode with Edit, Write, MultiEdit, NotebookEdit and
+Bash disallowed. Claude hooks and MCP servers have separate permissions.
+A configured Cursor API key or Grok API key makes the route API-key billed. Cursor and Grok run in the agent's Ask mode with automatic permission
+approval disabled. Antigravity receives a read-only request and starts as
+`agy acp`. The 1.5.18 adapter was observed writing inside and outside the
+workspace without requesting permission under this configuration. Git checks
+can report mutations only within the inspected worktree. The default
+adversarial role excludes Antigravity.

@@ -212,7 +212,7 @@ func TestCLIReferenceNamesEveryModelsKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := map[string]bool{}
-	for _, v := range []any{resolveResultJSON{}, modelsDoc{}, modelsMiss{}, failureBody{}, errorDetail{}, resultWebSearch{}} {
+	for _, v := range []any{reviewResultJSON{}, resolveResultJSON{}, modelsDoc{}, modelsMiss{}, failureBody{}, errorDetail{}, resultWebSearch{}} {
 		structJSONKeys(reflect.TypeOf(v), keys)
 	}
 	for _, k := range []string{warningModelDeprecated, reasonModelUnknown, reasonModelRetired, reasonEffortNotOffered, reasonFastNotOffered,

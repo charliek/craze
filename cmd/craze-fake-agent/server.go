@@ -705,7 +705,16 @@ func (s *server) handlePrompt(msg *acp.Message) {
 	s.mu.Unlock()
 
 	switch s.script {
-	case "hang":
+	case "dirty_tree":
+		if err := os.WriteFile("review-mutation.txt", []byte("changed\n"), 0600); err != nil {
+			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		s.echo(msg.ID, "review retained")
+	case "empty":
+		s.update(s.mainID(), acp.SessionUpdate{SessionUpdate: acp.UpdateAgentMessage, Content: &acp.ContentBlock{Type: "text", Text: "  "}})
+		s.finishPrompt(msg.ID, acp.StopEndTurn)
+	case "hang", "stall":
 		s.hang(msg.ID)
 	case "hang-ack":
 		s.hangAck(msg.ID, text)

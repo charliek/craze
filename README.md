@@ -15,6 +15,7 @@ and want one fast, scriptable front end for several of them.
 
 ## Highlights
 
+- **Code reviews.** Run `craze review --changes-since main` for a cross-provider review with a worktree integrity check. [Review command](docs/reference/cli.md#craze-review)
 - **Offline provider routing.** Inspect the subscription-first model ladder for a target or review panel with `craze resolve`. [CLI reference](docs/reference/cli.md#craze-resolve)
 
 - **The TUI**: transcript, queued messages, tasks, sub-agent rows, cards, mouse

@@ -115,6 +115,14 @@ func offlineRouteProbe() routing.Probe {
 			if overage() {
 				return routing.Facts{Reason: routing.OverageHold}
 			}
+		case "grok":
+			if os.Getenv("XAI_API_KEY") != "" || os.Getenv("GROK_CODE_XAI_API_KEY") != "" {
+				return routing.Facts{Billing: routing.APIKey}
+			}
+		case "cursor":
+			if os.Getenv("CURSOR_API_KEY") != "" {
+				return routing.Facts{Billing: routing.APIKey}
+			}
 		case "antigravity":
 			return routing.Facts{Efforts: antigravityRouteEfforts(model)}
 		case "codex":

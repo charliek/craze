@@ -3255,6 +3255,62 @@ machine that pins a release can read before installing it — its `capabilities`
 included, so a caller can tell before installing whether that release reports web
 search.
 
+## craze review
+
+Run an unattended code review in a dedicated host. With no selector, Craze
+uses the configured review role. A target uses its ordered fallback routes.
+The final Markdown goes to stdout. Progress and route diagnostics go to stderr.
+
+```sh
+craze review --role review --changes-since main --out /tmp/review.md
+craze review --target sol@6.2 --criteria adversarial --changes-since HEAD
+craze review --provider native --model chatgpt/gpt-6.2-sol "Inspect the cache eviction tests"
+craze review --bundle-only --changes-since main
+```
+
+| Option | Behavior |
+| --- | --- |
+| `--target`, `--version` | Choose a target and optional numeric version. A target can also include `@version`. |
+| `--role` | Choose a single-target role. Use `craze resolve --role panel` to plan multiple seats. |
+| `--provider`, `--model` | Run a provider directly with an optional model, or filter a named target by provider. |
+| `--caller`, `--allow-same-provider` | Override caller detection for routing or explicitly allow an immediate-provider route. |
+| `--allow-paid-fallback` | Admit eligible API-key and metered credentials, including direct provider requests. |
+| `--effort`, `--timeout`, `--stall-timeout` | Override the model effort, total command time or maximum silence after submission. The default cap is the target's cap. The stall default is 10 minutes and 0 disables it. |
+| `-C`, `--dir` | Select the workspace for Git and the provider. |
+| `--prompt-file`, `--remove-prompt-file` | Join repeatable files in order with blank lines. Use `-` once for stdin. Removal deletes regular input files after reading, before integrity checks. Positional words and prompt files are exclusive. |
+| `--criteria` | Select correctness, adversarial, plan or custom review criteria. Changes alone select correctness. Piped stdin can supply an additional request. |
+| `--changes-since` | Freeze a commit and collect the net committed, staged, unstaged and untracked changes. Binary and large untracked content gets a summary. |
+| `--keep-bundle`, `--bundle-only` | Keep a spilled diff after review or prepare a bundle without running a host. Bundle-only requires a ref and preserves the spill for the caller. |
+| `--dirty-check` | Compare worktree contents, permissions, index, refs, HEAD and stash after each host stops. The default `fail` delivers the review with exit 3 on mutation. `warn` reports the changes and stops trying routes. `off` skips comparisons. |
+| `--out`, `--max-message` | Atomically write the full review to a file before stdout. The stdout limit counts characters and defaults to 0 (unlimited). |
+| `--json` | Emit one structured result. |
+
+Inline diffs fit within 900 lines, 100 KiB and the remaining 512 KiB prompt
+budget. Larger diffs use a private `changes.diff` with a line index. The raw
+patch is limited to 5 MiB and carries a marker if truncated. Bundle-only JSON
+includes `inlined`, `bundleFile`, `lines`, `bytes` and `files` with each
+file's `name`, `first` and `last` line.
+
+Craze attempts a fallback after a start refusal or a qualifying provider
+failure if the previous host and its children have stopped, the worktree
+check passed and at least 45 seconds remain. The result records `schema`,
+`status`, `message`, the selected `route` and `attempts`. Each attempt
+records its route, `effectiveModel`, `effectiveEffort` when reported, `durationMs`,
+and a sanitized `error`, `kind` or `reason` on failure. `outPath` and
+`bundleFile` identify retained files. `dirtyFiles` also names changed Git
+metadata. `incompleteCheck` indicates bounded checks on large or numerous
+files. Integrity checks require a Git worktree. They report changes without
+rolling them back. A capped command sets `stopping`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed with review text, or prepared a bundle. |
+| 1 | Pre-execution or infrastructure failure, including an empty route ladder. |
+| 2 | Invalid usage, configuration, prompt or Git ref, or self-delegation refusal. |
+| 3 | Failed or cancelled, including a stalled or empty response and a dirty worktree. |
+| 4 | The provider needs input. The host was stopped. |
+| 5 | The command-wide deadline expired. |
+
 ## craze resolve
 
 Show which provider and model can serve a target, with the eligible fallbacks
