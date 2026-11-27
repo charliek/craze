@@ -2,7 +2,8 @@
 
 Start with the [transcript and theme changes](#transcript-layouts-and-themes). Earlier releases are listed below.
 
-Seven sections: [since v0.4.1](#since-v041), the changes after v0.4.1;
+Eight sections: [since v0.5.0](#since-v050), the changes after v0.5.0;
+[since v0.4.1](#since-v041), v0.5.0's;
 [since v0.4.0](#since-v040), v0.4.1's;
 [since v0.3.0](#since-v030), v0.4.0's; [since v0.2.0](#since-v020), the fifth release's; [since v0.1.1](#since-v011), the third release's; [since
 v0.1.0](#since-v010), the second release's; and [from v0.0.1](#from-v001), the
@@ -58,6 +59,50 @@ hub from before titles) now ends its refusal with the same way out: `this hub
 (craze <v>) cannot …; it exits once no session runs and no client is
 connected, or stop it now with kill <pid> (no session ends)`, where it used to
 end `it exits when idle`.
+
+## Since v0.5.0
+
+### A Codex provider
+
+craze can now drive **OpenAI's Codex CLI (`codex app-server`) on your ChatGPT or
+OpenAI account** ([the codex
+provider](../reference/configuration.md#the-codex-provider)). It is listed after
+antigravity and before native, and `--provider codex`, `provider = "codex"` and
+`CRAZE_PROVIDER=codex` reach it. Nothing needs migrating for the providers you
+use. What changes:
+
+- **Every provider listing has a sixth row**, `codex`, between antigravity and
+  native: unavailable on a machine without `codex`, with `install codex, or set
+  [agents].codex in …`. A script that reads `craze providers --json` or
+  `sessions.createOptions` by position, or counts five providers, sees six.
+  The unknown-provider and no-default errors name `codex` too (`want cursor,
+  grok, claude, antigravity, codex, or native`), and the picker's last row is
+  still native.
+- **`[agents].codex`** in `config.toml` is read: `codex`'s absolute path, as the
+  other `[agents]` keys are.
+- **`codex` is a provider id now.** It used to be an unknown one: `--provider
+  codex` exited 2.
+- **`craze new` refuses the calling agent's own provider** on codex too:
+  `CODEX_THREAD_ID`, which `codex` sets in its shell commands, is a fourth
+  standalone caller marker beside `CLAUDECODE`, `CURSOR_AGENT` and
+  `ANTIGRAVITY_AGENT`. With exactly one of the four set (and no
+  `CRAZE_SESSION_PROVIDER`) it names the caller; with two or more, the caller
+  is unknown and nothing is refused. If a terminal of yours exports
+  `CODEX_THREAD_ID` without running `codex`, `craze new --provider codex` from
+  it exits 2 until you pass `--allow-same-provider`
+  ([Starting your own provider](../reference/cli.md#starting-your-own-provider)).
+- **The Claude Code plugin's `craze:delegate` takes `codex` and `effort=ultra`**,
+  and every agent file's no-self rule now names Codex ([Claude
+  Code](claude-code.md)).
+- **Effort `ultra` and compact rate-limit windows.** Models that offer `ultra`
+  (such as `gpt-6.2-sol`) list it in `/effort` and the session-list effort
+  picker. On the status row, generic compact duration rate-limit windows
+  (`24h`, `1d`, `15m`) render alongside `5h` and `7d`.
+- **Modes and sandbox.** `--ask` and `--plan` both run inside Codex's
+  OS-enforced read-only sandbox with `approvalPolicy: "never"` (no interactive
+  approval prompts, no disk writes through shell or `apply_patch`); Codex hooks
+  and MCP servers still run outside Codex's command sandbox
+  ([the provider's page](../reference/configuration.md#the-codex-provider)).
 
 ## Since v0.4.1
 

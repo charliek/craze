@@ -56,12 +56,13 @@ func unattendedPolicy(opts *agent.Options) {
 	opts.Interactive = false
 	opts.Unattended = true
 	opts.Approval = headlessApproval(opts.Force)
-	if p := opts.Provider; p == nil || !p.InProcess() {
+	if p := opts.Provider; p == nil || p.Transport() == agent.TransportACP {
 		// An ACP agent told its plan is accepted goes on to carry it out in
 		// the same turn (grok, live L7): an unattended host returns the plan
 		// and ends the turn there instead (X28, agent.ApprovalReturn). A
 		// native session's accepted plan already ends its turn in plan mode,
-		// and its harness parks any plan answer but accept.
+		// and its harness parks any plan answer but accept. Codex has no plan
+		// approval card (its plan turn ends cleanly on its own).
 		opts.Approval.Plan = agent.ApprovalReturn
 	}
 }

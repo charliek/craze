@@ -148,7 +148,7 @@ func TestAntigravityProviderData(t *testing.T) {
 	if err != nil || got.Name() != "antigravity" || got.Hidden() {
 		t.Fatalf("ProviderByName = %+v, %v", got, err)
 	}
-	if want := []string{"cursor", "grok", "claude", "antigravity", "native"}; !slices.Equal(ProviderNames(), want) {
+	if want := []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}; !slices.Equal(ProviderNames(), want) {
 		t.Fatalf("listed providers %q, want %q", ProviderNames(), want)
 	}
 	// Images go as image blocks: agy says image true, so no override.

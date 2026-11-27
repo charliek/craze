@@ -54,6 +54,12 @@ func agyMissingFix(config string) string {
 	return engine.RowLine("install agy, or set [agents].antigravity in " + config)
 }
 
+// codexMissingFix is craze providers' fix for codex missing, cut as
+// claudeAdapterFix's is.
+func codexMissingFix(config string) string {
+	return engine.RowLine("install codex, or set [agents].codex in " + config)
+}
+
 // cursorMissingFix is craze providers' fix for cursor-agent missing, cut as
 // claudeAdapterFix's is.
 func cursorMissingFix(config string) string {
@@ -78,6 +84,7 @@ func TestProvidersTable(t *testing.T) {
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("antigravity", "unavailable", "agy not found on PATH", agyMissingFix(config)) +
+		row("codex", "unavailable", "codex not found on PATH", codexMissingFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix)
 	if stdout != want {
 		t.Fatalf("craze providers:\n%s\nwant:\n%s", stdout, want)
@@ -111,6 +118,8 @@ func TestProvidersJSON(t *testing.T) {
 		q(claudeAdapterFix(config)) + `},` +
 		`{"id":"antigravity","label":"antigravity","state":"unavailable","reason":"agy not found on PATH","fix":` +
 		q(agyMissingFix(config)) + `},` +
+		`{"id":"codex","label":"codex","state":"unavailable","reason":"codex not found on PATH","fix":` +
+		q(codexMissingFix(config)) + `},` +
 		`{"id":"native","label":"native","state":"needs_setup","reason":"no model provider has a key","fix":` +
 		q(nativeNoKeyFix) + `}]}` + "\n"
 	if stdout != want {
@@ -168,7 +177,7 @@ func TestProvidersJSONIsTheWiresProviderOption(t *testing.T) {
 	var doc struct {
 		Providers []json.RawMessage `json:"providers"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 5 {
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil || len(doc.Providers) != 6 {
 		t.Fatalf("craze providers --json printed %q (%v)", stdout, err)
 	}
 	for _, p := range doc.Providers {
@@ -277,6 +286,7 @@ func TestProvidersHub(t *testing.T) {
 		row("grok", "ready", "-", "-") +
 		row("claude", "unavailable", "claude-agent-acp not found on PATH", claudeAdapterFix(config)) +
 		row("antigravity", "unavailable", "agy not found on PATH", agyMissingFix(config)) +
+		row("codex", "unavailable", "codex not found on PATH", codexMissingFix(config)) +
 		row("native", "needs setup", "no model provider has a key", nativeNoKeyFix) +
 		"default: grok\n" +
 		"recent: " + work + "\n" +
@@ -293,7 +303,7 @@ func TestProvidersHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	var res protocol.CreateOptionsResult
-	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 5 ||
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.DefaultProvider != "grok" || len(res.Providers) != 6 ||
 		len(res.RecentDirs) != 2 || res.RecentDirs[0].Dir != work {
 		t.Fatalf("craze providers --hub --json printed %q (%v)", stdout, err)
 	}

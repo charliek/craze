@@ -37,16 +37,16 @@ func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().StringVar(&f.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	// Worded without the provider's name: the root's help names native once,
 	// in --provider (TestRootHelpNamesNativeOnceAndNeverTheHarness).
-	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an ACP model id, or a model alias")
+	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an agent model id, or a model alias")
 	// --effort and --fast/--no-fast (plan 032 §3.11, P6): the session's own
 	// settings, set by its Start after --model and before any prompt.
 	registerStartSettingFlags(cmd, &f.effort, &f.fast, &f.noFast)
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	registerPluginDirFlag(cmd, &f.pluginDirs)
-	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
+	cmd.Flags().BoolVar(&f.force, "force", true, "bypass tool permission prompts (yolo)")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
-	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
-	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
+	cmd.Flags().BoolVar(&f.ask, "ask", false, "start session in ask mode")
+	cmd.Flags().BoolVar(&f.plan, "plan", false, "start session in plan mode")
 	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
 	registerProviderFlag(cmd, &f.provider)
 }

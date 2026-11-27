@@ -1,11 +1,13 @@
 # Architecture
 
-craze is an ACP client. It owns the chrome; `cursor-agent`, `grok`, Claude
-Code's adapter or Antigravity's `agy`
-(or `craze-fake-agent` in tests) is the agent process. The **native** provider
-is the exception: its agent loop, tools and model clients run inside craze
-(`internal/harness`), behind the same `agent.Session`, so the layers above it
-cannot tell it from an ACP agent. See
+craze drives external coding agents and its own built-in harness behind one
+`agent.Session` interface. It owns the chrome; `cursor-agent`, `grok`, Claude
+Code's adapter and Antigravity's `agy` speak ACP (`internal/acp`), OpenAI's
+`codex` speaks `codex app-server` JSON-RPC 2.0 (`internal/codexrpc`), and
+`craze-fake-agent` stands in for them in tests. The **native** provider runs
+its agent loop, tools and model clients inside craze (`internal/harness`),
+behind the same `agent.Session`, so the layers above it cannot tell which
+transport a session uses. See
 [Configuration](../reference/configuration.md#provider-precedence) for how a
 provider is chosen.
 
@@ -18,6 +20,10 @@ flowchart LR
   cursor -->|"session/update, permission, ask, plan"| client
   grok -->|"session/update, x.ai ask/plan, prompt_complete"| client
   client --> session
+  session --> codexrpc["codexrpc.Client"]
+  codexrpc --> codex["codex app-server"]
+  codex -->|"turn/item notifications, approvals, requestUserInput"| codexrpc
+  codexrpc --> session
   session --> tui
   session --> native["harness (native)"]
   native -->|"HTTPS"| api["model provider API / ChatGPT plan"]
@@ -30,8 +36,10 @@ The diagram shows the session layer. Around it, a session runs in a
 
 | Package | Role |
 |---------|------|
+| `internal/agentproc` | Shared agent subprocess lifecycle: process-group spawn, pgid tracking, stdio pump, stderr tail capture and bounded teardown shared by `internal/acp` and `internal/codexrpc` |
 | `internal/acp` | JSON-RPC over stdio: spawn, framing, `session/new`, prompt, and the blocking agent→client requests (permission, question, plan) |
-| `internal/agent` | Session wrapper: events, tool merge, todos, model/mode catalog |
+| `internal/codexrpc` | Codex `app-server` JSON-RPC 2.0 over stdio: initialize handshake, thread/turn/model/skills/account/rateLimits RPCs, server notification dispatch and server-initiated approval/`requestUserInput` requests |
+| `internal/agent` | Session wrapper: events, tool merge, todos, model/mode catalog (ACP, Codex and native sessions behind one `Session` interface) |
 | `internal/backend` | The TUI's seam onto a session (plan 027 §3.12): the `Backend` interface, `Item`, `SessionInfo`, the epoch sentinels (`ErrStaleEpoch`, `ErrOutcomeUnknown`) both the in-process and socket implementations share |
 | `internal/tui` | Bubbletea screen: transcript, cards, composer, themes, slash, mouse; a command gate carries almost every engine call onto a `Backend` (in process, or over the socket for `craze attach`) — a hidden ask's answer and a sub-agent stop are the exceptions, fire-and-forget `tea.Cmd`s that are never gated |
 | `internal/protocol` | The control-socket wire, protocol 1 (plan 027 §3.2–§3.4): envelope, methods, notifications, codes, reasons, limits and the JSON Schema — the one place `internal/control`, `internal/remote` and `internal/fakehost` take their shapes from |
@@ -86,6 +94,18 @@ names from each update's top-level `name`, and sub-agent rows backed by the
 because agy's call completes at launch. See [the antigravity
 provider](../reference/configuration.md#the-antigravity-provider).
 
+Codex (`codex app-server --listen stdio://`) does not speak ACP: `codexSession`
+in `internal/agent` wraps `codexrpc.Client` behind the same `agent.Session`
+interface. It sends `experimentalApi: true` on `initialize` (needed for plan
+mode and `requestUserInput`), maps `commandExecution` / `fileChange` /
+`mcpToolCall` / `webSearch` / `dynamicToolCall` / `collabAgentToolCall` items
+into craze's tool and sub-agent events, emits `apply_patch` diffs and `files`
+stamps from completed `fileChange` items, answers approval and
+`requestUserInput` server requests through craze's card pipeline, steers
+mid-turn interjections via `turn/steer`, and replays saved threads through
+`thread/resume` + `thread/turns/list`. See [the codex
+provider](../reference/configuration.md#the-codex-provider).
+
 Grok runs its own sub-agents and reports them: lifecycle notifications
 (`subagent_spawned` / `-progress` / `-finished`) arrive on the parent session
 while the child's own `session/update` stream arrives on the same stdio under
@@ -115,7 +135,7 @@ flowchart LR
   launcher -->|"control socket"| host
   attach["craze attach"] -->|"control socket"| host
   host --> engine["engine + agent.Session"]
-  engine --> agentproc["cursor-agent / grok / native harness"]
+  engine --> agentproc["cursor-agent / grok / agy / codex / native harness"]
 ```
 
 **The spawn handshake.** The launcher mints a host id and starts `craze
@@ -221,8 +241,10 @@ questions](../reference/tui.md#side-questions-btw).
 
 ## Fake agent
 
-`craze-fake-agent` stands in for `cursor-agent acp` or `grok agent stdio`.
-Unknown arguments (including `acp`, `--force`, `agent`, `stdio`, and
-`--always-approve`) are ignored so the binary can be pointed at with
-`--agent-bin`. Scripts are selected with `-script` or `CRAZE_FAKE_SCRIPT`.
-Grok scripts are prefixed `grok-`. See [Testing](testing.md).
+`craze-fake-agent` stands in for `cursor-agent acp`, `grok agent stdio` or
+`codex app-server`.
+Unknown arguments (including `acp`, `--force`, `agent`, `stdio`,
+`--always-approve`, `app-server` and `--listen`) are ignored so the binary can
+be pointed at with `--agent-bin`. Scripts are selected with `-script` or
+`CRAZE_FAKE_SCRIPT` (or `-codex-app-server` / `codex-*` scripts for the Codex
+JSON-RPC server). Grok scripts are prefixed `grok-`. See [Testing](testing.md).

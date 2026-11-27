@@ -59,8 +59,8 @@ func TestNewRefusesBeforeTheHub(t *testing.T) {
 // case that reaches the hub meets this test binary's none (hub.ErrNoHub).
 func TestNewProviderBeforeTheHub(t *testing.T) {
 	const (
-		unknown   = `craze: unknown provider "nosuch" (want cursor, grok, claude, antigravity, or native)` + "\n"
-		noDefault = "craze new: no default provider yet; pass --provider cursor, grok, claude, antigravity or native\n"
+		unknown   = `craze: unknown provider "nosuch" (want cursor, grok, claude, antigravity, codex, or native)` + "\n"
+		noDefault = "craze new: no default provider yet; pass --provider cursor, grok, claude, antigravity, codex or native\n"
 	)
 	noHub := regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`)
 	for _, tc := range []struct {

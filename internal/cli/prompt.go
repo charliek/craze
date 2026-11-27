@@ -127,7 +127,7 @@ func newPromptCmd() *cobra.Command {
 	o := &promptOpts{force: true}
 	cmd := &cobra.Command{
 		Use:   "prompt [text]",
-		Short: "Run a headless ACP turn (and optional follow-ups)",
+		Short: "Run a headless turn (and optional follow-ups)",
 		Args:  atMostArgs(1, "quote the prompt text"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.stdout = cmd.OutOrStdout()
@@ -141,17 +141,17 @@ func newPromptCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&o.workspace, "workspace", "", "existing workspace directory (default: current directory)")
-	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an ACP model id (session/set_model after session/new), or a native model alias")
+	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an agent model id, or a native model alias")
 	registerStartSettingFlags(cmd, &o.effort, &o.fast, &o.noFast)
 	registerWebSearchFlags(cmd, &o.webSearch, &o.noWebSearch, "")
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
-	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
+	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
 	registerPluginDirFlag(cmd, &o.pluginDirs)
-	cmd.Flags().BoolVar(&o.force, "force", true, "spawn the agent with --force (yolo)")
+	cmd.Flags().BoolVar(&o.force, "force", true, "bypass tool permission prompts (yolo)")
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
-	cmd.Flags().BoolVar(&o.ask, "ask", false, "set session mode to ask after session/new")
-	cmd.Flags().BoolVar(&o.plan, "plan", false, "set session mode to plan after session/new")
+	cmd.Flags().BoolVar(&o.ask, "ask", false, "start session in ask mode")
+	cmd.Flags().BoolVar(&o.plan, "plan", false, "start session in plan mode")
 	cmd.Flags().BoolVar(&o.json, "json", false, "write only JSON events to stdout")
 	registerProviderFlag(cmd, &o.provider)
 	// --attach-probe is internal (plan 024 §5 row C4): it folds the session

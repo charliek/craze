@@ -77,7 +77,7 @@ func frontmatter(text string) (map[string]string, string, error) {
 // noSelfRule is how every preset's body opens (plan 052 § J4): the no-self
 // rule, ahead of its forwarding mandate, so a preset added later inherits it.
 const noSelfRule = "## Don't call yourself\n\nNever use craze to reach the provider you already run on: " +
-	"Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok`, Antigravity (agy) on `antigravity` and a craze native session on `native`. " +
+	"Claude Code runs on `claude`, Cursor on `cursor`, Grok on `grok`, Antigravity (agy) on `antigravity`, Codex on `codex` and a craze native session on `native`. " +
 	"For your own provider use your own sub-agent tool (Claude Code's is the Agent tool), not craze."
 
 // forwardMandate is the start of every preset's forwarding mandate.
@@ -165,6 +165,15 @@ const agyNote = "a craze newer than 0.4.1"
 // agyUnknown is what a craze that predates the antigravity provider says to
 // --provider antigravity (exit 2): what the agents' too-old rule for it reads.
 const agyUnknown = "unknown provider \"antigravity\""
+
+// codexNote is the phrase every place that states a minimum for the codex
+// target spells (plan 054); the release that ships it replaces it, as
+// webNote's.
+const codexNote = "a craze newer than 0.5.0"
+
+// codexUnknown is what a craze that predates the codex provider says to
+// --provider codex (exit 2): what the delegate agent's too-old rule reads.
+const codexUnknown = "unknown provider \"codex\""
 
 // webNote is the phrase every place that states a minimum for web= spells;
 // RELEASING.md's release step replaces it with the version that ships the
@@ -420,7 +429,7 @@ func TestClaudeTarget(t *testing.T) {
 	root := repoRoot(t)
 	delegate := readFile(t, root, "agents/delegate.md")
 	for _, want := range []string{
-		"the provider: `native`, `cursor`, `grok`, `claude` or `antigravity`",
+		"the provider: `native`, `cursor`, `grok`, `claude`, `antigravity` or `codex`",
 		"`delegate: invalid target line: mode=ask is not available on antigravity`",
 		"a session on antigravity (agy) runs the Antigravity agent with its own tools",
 		"`delegate: invalid target line: mode=ask is not available on claude`",
@@ -496,6 +505,47 @@ func TestAntigravityTarget(t *testing.T) {
 		"agents/delegate.md":                  {"on antigravity craze does not stop agy from editing in plan mode"},
 		"skills/craze/SKILL.md":               {agyNote, agyUnknown, "On antigravity the plan mode is agy's own", "On antigravity, a sub-agent agy launched"},
 		"skills/craze/references/commands.md": {agyNote, agyUnknown, "On `antigravity` it is agy's own plan mode"},
+	} {
+		text := readFile(t, root, rel)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %s", rel, want)
+			}
+		}
+	}
+}
+
+// TestCodexTarget (plan 054): every place that states the codex target's
+// minimum says codexNote; craze:delegate answers an old craze's unknown-provider
+// refusal with its own too-old line, ahead of the general one; and the
+// read-only sandbox and self-delegation details are stated.
+func TestCodexTarget(t *testing.T) {
+	root := repoRoot(t)
+	delegateLine := "`this craze is too old; the codex target needs " + codexNote + "`"
+	fm, body, err := frontmatter(readFile(t, root, "agents/delegate.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fm["description"], codexNote) {
+		t.Errorf("agents/delegate.md: description does not say %s", codexNote)
+	}
+	rule := strings.Index(body, delegateLine)
+	general := strings.Index(body, "this craze is too old; the plugin needs")
+	if rule < 0 || general < 0 || rule > general || !strings.Contains(body, codexUnknown) {
+		t.Errorf("agents/delegate.md: no %s rule on %s ahead of the general one", delegateLine, codexUnknown)
+	}
+	skillFM, _, err := frontmatter(readFile(t, root, "skills/craze/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(skillFM["description"], codexNote) {
+		t.Errorf("skills/craze/SKILL.md: description does not say %s", codexNote)
+	}
+	for rel, wants := range map[string][]string{
+		"agents/delegate.md":                  {"`ultra`", "a codex session runs under the user's own Codex settings"},
+		"skills/craze/SKILL.md":               {codexNote, codexUnknown, "CODEX_THREAD_ID", "Codex's own sub-agents", "| `codex` |"},
+		"skills/craze/references/commands.md": {codexNote, codexUnknown, "`codex`"},
+		"docs/getting-started/claude-code.md": {codexNote, "codex: unpriced, on your ChatGPT or OpenAI account"},
 	} {
 		text := readFile(t, root, rel)
 		for _, want := range wants {

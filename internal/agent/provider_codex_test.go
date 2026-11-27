@@ -13,7 +13,7 @@ import (
 	"github.com/charliek/craze/internal/errkind"
 )
 
-func TestCodexProviderHiddenAndMetadata(t *testing.T) {
+func TestCodexProviderListedAndMetadata(t *testing.T) {
 	p, err := ProviderByName("codex")
 	if err != nil {
 		t.Fatalf("ProviderByName(codex): %v", err)
@@ -21,11 +21,11 @@ func TestCodexProviderHiddenAndMetadata(t *testing.T) {
 	if p.Name() != "codex" || p.DisplayName() != "codex" {
 		t.Fatalf("name/display = %q/%q", p.Name(), p.DisplayName())
 	}
-	if !p.Hidden() {
-		t.Fatal("CodexProvider must remain hidden in M2a/M2b")
+	if p.Hidden() {
+		t.Fatal("CodexProvider must be listed (not hidden) in M3")
 	}
-	if slices.Contains(ProviderNames(), "codex") {
-		t.Fatalf("ProviderNames must not list hidden codex in M2a/M2b: %v", ProviderNames())
+	if want := []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}; !slices.Equal(ProviderNames(), want) {
+		t.Fatalf("ProviderNames() = %v, want %v", ProviderNames(), want)
 	}
 	if p.Transport() != TransportCodex {
 		t.Fatalf("Transport() = %q, want %q", p.Transport(), TransportCodex)

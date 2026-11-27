@@ -197,7 +197,7 @@ func TestTheSlashOpensTheListsCommands(t *testing.T) {
 	if v, _ := inputOf(m); v != "/provider " {
 		t.Fatalf("enter on /provider left %q", v)
 	}
-	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "antigravity", "native"}) {
+	if got := cmdItems(m); !slices.Equal(got, []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}) {
 		t.Fatalf("/provider lists %v", got)
 	}
 	if it := cmdItem(t, m, "cursor"); it.Note != sessCurrentNote || it.Detail != "cursor-agent over ACP" {
@@ -227,7 +227,7 @@ func TestTheProvidersAreThePickersProviders(t *testing.T) {
 	if got := cmdItems(m); !slices.Equal(got, ids) {
 		t.Fatalf("/provider lists %v, the picker %v", got, ids)
 	}
-	if want := []string{"cursor", "grok", "claude", "antigravity", "native"}; !slices.Equal(ids, want) {
+	if want := []string{"cursor", "grok", "claude", "antigravity", "codex", "native"}; !slices.Equal(ids, want) {
 		t.Fatalf("the picker's rows %v, want %v", ids, want)
 	}
 	// Narrowed by id.
@@ -497,8 +497,8 @@ func TestTypedCommandLines(t *testing.T) {
 		t.Fatalf("/model default: %+v, %q", spec, ruleOf(t, m))
 	}
 	for _, tc := range []struct{ line, note string }{
-		{"/provider nope", "no provider nope: one of cursor, grok, claude, antigravity, native"},
-		{"/provider ", sessNeedsProvider + "cursor, grok, claude, antigravity, native"},
+		{"/provider nope", "no provider nope: one of cursor, grok, claude, antigravity, codex, native"},
+		{"/provider ", sessNeedsProvider + "cursor, grok, claude, antigravity, codex, native"},
 		{"/model ", sessNeedsModel},
 	} {
 		before := m.sessPick
@@ -793,7 +793,7 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 	// On an ACP provider (cursor, here) every level craze's providers name
 	// (plan 047 D5).
 	mm, _ = typeList(t, m, "/effort ")
-	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"}) {
+	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}) {
 		t.Fatalf("/effort lists %v", got)
 	}
 	if it := cmdItem(t, mm, "default"); it.Note != sessCurrentNote || it.Detail != sessSettingDetail {
@@ -807,7 +807,7 @@ func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
 		t.Fatalf("/effort x lists %v", got)
 	}
 	mm, _ = typeList(t, m, "/effort huge")
-	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort huge: one of default, minimal, low, medium, high, xhigh, max" {
+	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort huge: one of default, minimal, low, medium, high, xhigh, max, ultra" {
 		t.Fatalf("/effort huge: %+v", p.ans)
 	}
 }
@@ -898,8 +898,8 @@ func TestChoosingEffortAndFast(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ line, note string }{
-		{"/effort huge", "no effort huge: one of default, minimal, low, medium, high, xhigh, max"},
-		{"/effort ", "/effort needs a value: default, minimal, low, medium, high, xhigh, max"},
+		{"/effort huge", "no effort huge: one of default, minimal, low, medium, high, xhigh, max, ultra"},
+		{"/effort ", "/effort needs a value: default, minimal, low, medium, high, xhigh, max, ultra"},
 		{"/fast maybe", "no fast maybe: one of default, on, off"},
 		{"/fast ", "/fast needs a value: default, on, off"},
 	} {

@@ -1,13 +1,13 @@
 # Claude Code sub-agents
 
 This repository is a Claude Code plugin. It adds sub-agents that hand a task to
-a craze session — on craze's own **native** provider, **Grok**, **Cursor** or
-**Antigravity** — and return the session's result to Claude Code, the way a native Claude Code
+a craze session — on craze's own **native** provider, **Grok**, **Cursor**,
+**Antigravity** or **Codex** — and return the session's result to Claude Code, the way a native Claude Code
 sub-agent returns its own. Use it to put another model on a task, to get a
 second opinion, or to run several models side by side.
 
 Its skill (`skills/craze`) is provider-neutral: it shows any agent — Claude
-Code, Cursor, Grok, Antigravity's `agy` or a craze session — how to hand work to another provider
+Code, Cursor, Grok, Antigravity's `agy`, Codex or a craze session — how to hand work to another provider
 through craze, [Claude included](#claude-as-a-target), and never to its own
 ([Don't call yourself](#dont-call-yourself)).
 
@@ -69,10 +69,11 @@ target: native chatgpt/gpt-6.2-sol effort=high mode=plan
 Review internal/cache/evict.go for races. Report each one with the line and a fix.
 ```
 
-The provider is `native`, `cursor`, `grok`, `claude` or `antigravity` (`claude` and
+The provider is `native`, `cursor`, `grok`, `claude`, `antigravity` or `codex`
+(`codex` needs a craze newer than 0.5.0; `claude` and
 `antigravity` take no `mode=ask`, and craze refuses `claude` from Claude Code itself:
 [below](#dont-call-yourself));
-the model, effort (`low`, `medium`, `high`, `xhigh`, `max`) and mode (`plan` or
+the model, effort (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`) and mode (`plan` or
 `ask`) are optional. The
 native presets take the task alone, or an optional first line of `mode=plan` or
 `mode=ask` and `web=on` or `web=off`, in either order; `craze:grok` and `craze:cursor` take
@@ -165,6 +166,7 @@ does that better:
 | Cursor | `cursor` | Cursor's own sub-agents |
 | Grok | `grok` | Grok's own sub-agents |
 | Antigravity (`agy`) | `antigravity` | agy's own sub-agents |
+| Codex | `codex` | Codex's own sub-agents |
 | a craze native session | `native` | the `agent` tool, which runs any native model (`craze:sol`'s included) |
 
 Every agent file opens with this rule, and there is no `craze:claude` preset:
@@ -174,8 +176,8 @@ the caller's own provider, exit 2: `craze: this agent already runs on claude;
 use your own sub-agent tool for claude work, not craze (--allow-same-provider
 overrides)`. It knows a craze session by `CRAZE_SESSION_PROVIDER` (craze sets
 it for every agent it starts, native's shell included), Claude Code by
-`CLAUDECODE=1`, a standalone `cursor-agent` by `CURSOR_AGENT` and a standalone
-`agy` by `ANTIGRAVITY_AGENT`. With two or more of those and no
+`CLAUDECODE=1`, a standalone `cursor-agent` by `CURSOR_AGENT`, a standalone
+`agy` by `ANTIGRAVITY_AGENT` and a standalone `codex` by `CODEX_THREAD_ID`. With two or more of those and no
 `CRAZE_SESSION_PROVIDER`, one started the other and the caller is
 unknown, so craze does not refuse. Grok sets no marker craze
 trusts, so from Grok the rule is the text alone. The agents return the
@@ -184,8 +186,8 @@ means it.
 
 ## Claude as a target
 
-An agent that does not run on Claude — Cursor, Grok, or a native, cursor or
-grok craze session — reaches [Claude on your plan](claude.md) through the
+An agent that does not run on Claude — Cursor, Grok, Antigravity, Codex, or a native, cursor,
+grok, antigravity or codex craze session — reaches [Claude on your plan](claude.md) through the
 skill's direct commands (it needs a craze newer than 0.3.0):
 
 ```bash
@@ -218,9 +220,12 @@ removes the shell.
 ## Permissions
 
 Claude Code's permission rules and hooks apply to Claude Code's own tools. A
-native, Grok or Cursor session's tools run inside craze, so **they do not
+native, Grok, Cursor, Antigravity or Codex session's tools run inside craze, so **they do not
 apply to them** (a claude session, reached from another agent, is your own
-Claude Code and runs under your own rules and hooks). Only
+Claude Code and runs under your own rules and hooks; a codex session runs under
+your own Codex settings, and on `codex` both `mode=ask` and `mode=plan` run in
+Codex's OS-enforced read-only sandbox, though Codex hooks and MCP servers run
+outside Codex's command sandbox). Only
 the mode above limits the session, and it asks nothing of you while it works:
 questions it asks are answered with their first option and a plan it presents is
 returned, not accepted. Do not delegate what you would not let that model do
@@ -260,9 +265,9 @@ Claude Code applies `Edit` rules to its Write tool, and `//` marks an absolute p
 | TaskStop stops the work | yes | cancels its craze turn: TaskStop signals the waiting command, which cancels its own turn (should it say the cancel was not confirmed, `craze cancel <short>`); the session's host is not in that command's process tree, so the session stays, and SendMessage continues it. `craze stop <short>` ends the session |
 | Turn longer than ten minutes | yes | `running`, then `craze wait` |
 | Watch it live | transcript view | `craze attach --session <short>` |
-| Cost reported | yes | native (`unpriced` on a ChatGPT plan); claude: unpriced, on your Claude plan; cursor and grok report none |
+| Cost reported | yes | native (`unpriced` on a ChatGPT plan); claude: unpriced, on your Claude plan; codex: unpriced, on your ChatGPT or OpenAI account; cursor and grok report none |
 | Claude Code permission rules and hooks | apply | **do not apply** |
-| Read-only | a `tools` allow-list | `mode=plan` or `mode=ask` (not a sandbox) |
+| Read-only | a `tools` allow-list | `mode=plan` or `mode=ask` (OS-enforced read-only sandbox on `codex`; not a sandbox on the other providers) |
 | Asks during the turn | Claude Code's own flow | answered by craze's policy; a permission is `needs_input` |
 | Shows in `craze -c` | n/a | no: `craze -c` skips it, and the resume picker and session list show it dimmed or tagged |
 | Overhead per call | none | a few seconds, plus a Haiku turn to forward |

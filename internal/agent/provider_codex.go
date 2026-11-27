@@ -50,12 +50,10 @@ func codexStripped(k string) bool {
 }
 
 // CodexProvider is Codex CLI (`codex app-server --listen stdio://`, Plan 054).
-// Hidden during M2a/M2b (`hiddenProviders`); promoted into `Providers()` in M3.
 func CodexProvider() Provider {
 	return Provider{
 		name:            codexName,
 		displayName:     codexName,
-		hidden:          true,
 		modeKinds:       codexModeKinds,
 		startModes:      codexStartModes,
 		implementPrompt: cursorImplementPrompt,

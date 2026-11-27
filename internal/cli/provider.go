@@ -63,25 +63,31 @@ func registerProviderFlag(cmd *cobra.Command, dst *string) {
 	cmd.Flags().StringVar(dst, "provider", "", providerUsage(agent.Providers()))
 }
 
-// providerUsage is --provider's help: every listed provider, with the ACP
-// agents craze spawns told apart from the one that runs inside it — "cursor,
-// grok (ACP agents) or native (runs inside craze)". Computed from the
-// registry, as providerIDs is, so a new provider cannot be named in one and
-// missing from the other. "Runs inside craze" is the refusal's own wording
-// (refuseInProcess) and not "harness", an implementation word the root --help
-// must not carry (TestRootHelpNamesNativeOnceAndNeverTheHarness).
+// providerUsage is --provider's help: every listed provider, grouped by its
+// transport — "cursor, grok, claude, antigravity (ACP agents), codex (codex
+// app-server), or native (runs inside craze)". Computed from the registry, as
+// providerIDs is, so a new provider cannot be named in one and missing from
+// the other. "Runs inside craze" is the refusal's own wording (refuseInProcess)
+// and not "harness", an implementation word the root --help must not carry
+// (TestRootHelpNamesNativeOnceAndNeverTheHarness).
 func providerUsage(ps []agent.Provider) string {
-	var acp, own []string
+	var acp, codex, own []string
 	for _, p := range ps {
-		if p.InProcess() {
+		switch p.Transport() {
+		case agent.TransportInProcess:
 			own = append(own, p.Name())
-		} else {
+		case agent.TransportCodex:
+			codex = append(codex, p.Name())
+		default:
 			acp = append(acp, p.Name())
 		}
 	}
 	var groups []string
 	if len(acp) > 0 {
 		groups = append(groups, strings.Join(acp, ", ")+" (ACP agents)")
+	}
+	if len(codex) > 0 {
+		groups = append(groups, strings.Join(codex, ", ")+" (codex app-server)")
 	}
 	if len(own) > 0 {
 		groups = append(groups, strings.Join(own, ", ")+" (runs inside craze)")

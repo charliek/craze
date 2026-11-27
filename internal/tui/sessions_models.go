@@ -93,7 +93,7 @@ func sessCmdRevealed(cmd, word string) bool {
 // sessions start on are not known (sessEffortOffered): every level craze's
 // providers name.
 var (
-	sessEffortLevels = []string{sessDefaultModel, "minimal", "low", "medium", "high", "xhigh", "max"}
+	sessEffortLevels = []string{sessDefaultModel, "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 	sessFastValues   = []string{sessDefaultModel, sessFastOn, sessFastOff}
 )
 
@@ -136,6 +136,7 @@ var sessProviderDetail = map[string]string{
 	agent.NativeProvider().Name():      "craze's own harness",
 	agent.ClaudeProvider().Name():      "your Claude Code, on your Claude plan",
 	agent.AntigravityProvider().Name(): "agy over ACP, on your Antigravity plan",
+	agent.CodexProvider().Name():       "codex app-server, on your ChatGPT/OpenAI account",
 }
 
 // sessPick is what /provider and /model — and /effort and /fast (plan 032
