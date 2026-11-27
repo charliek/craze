@@ -84,6 +84,50 @@ func openaiStep(t *testing.T, lm fantasy.LanguageModel, prompt fantasy.Prompt) [
 	return parts
 }
 
+func TestResponsesKeySystemPromptEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, base string
+		developer            bool
+	}{
+		{"OpenAI", modeltable.OpenAIProvider, "https://api.openai.com/v1", true},
+		{"case-insensitive OpenAI host", modeltable.OpenAIProvider, "https://API.OpenAI.COM:443/v1", true},
+		{"IPv4 loopback", modeltable.OpenAIProvider, "http://127.12.34.56:1234/v1", true},
+		{"IPv6 loopback", modeltable.OpenAIProvider, "http://[::1]:1234/v1", true},
+		{"Meta", "meta", "https://api.meta.ai/v1", false},
+		{"OpenAI provider with proxy", modeltable.OpenAIProvider, "https://proxy.example.com/v1", false},
+		{"OpenAI provider with localhost name", modeltable.OpenAIProvider, "https://localhost/v1", false},
+		{"custom provider with OpenAI host", "custom", "https://api.openai.com/v1", false},
+		{"custom provider with loopback", "custom", "http://127.0.0.1/v1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newRxServer(t, rxAnswer("ok"))
+			r := openaiRoute(tc.base)
+			r.ProviderID = tc.provider
+			lm, err := New(r, WithHTTPClient(redirectClient(t, srv.srv.URL)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := streamPrompt(t, lm, srv, fantasy.Prompt{
+				fantasy.NewSystemMessage("You are craze."),
+				fantasy.NewUserMessage("go"),
+			})
+			wantInstructions := `"You are craze."`
+			wantInput := `[{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}]`
+			if tc.developer {
+				wantInstructions = ""
+				wantInput = `[{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are craze."}]},` + wantInput[1:]
+			}
+			fields := fieldsOf(t, body)
+			if got := string(fields["instructions"]); got != wantInstructions {
+				t.Errorf("instructions = %s, want %s", got, wantInstructions)
+			}
+			if got := string(fields["input"]); got != wantInput {
+				t.Errorf("input = %s, want %s", got, wantInput)
+			}
+		})
+	}
+}
+
 // TestOpenAICapturesThroughTheKeyRoute: each captured OpenAI stream, read by
 // the key-route adapter, gives what the live session saw — the text, a
 // reasoning item's encrypted content, the call — and its usage with the cache

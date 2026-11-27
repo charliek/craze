@@ -16,12 +16,11 @@
 // What the route needs, verified live (the plan's spike FINDINGS.md, and
 // OpenAI's Sign in with ChatGPT docs):
 //
-//   - The body (Request.Body): store false and stream true on every request;
-//     the system prompt in instructions, never a system item (a 400); every
-//     function tool inside one namespace (P32); reasoning's encrypted content
-//     included, so it can be replayed; and none of the fields the route
-//     rejects or ignores — max_output_tokens above all (a 400), so the
-//     harness's output ceiling (D-74) is never sent here.
+//   - The body (Request.Body) sets store to false and stream to true, puts the
+//     system prompt in the first developer message, groups all function tools
+//     in one namespace (P32), and requests encrypted reasoning for replay.
+//     It omits unsupported fields such as max_output_tokens, which the route
+//     rejects with a 400. The harness still uses its output ceiling (D-74).
 //   - The stream (Stream): no Content-Type header on the reply, so the reader
 //     never asks for one; response.completed's output is empty, so items are
 //     assembled from each response.output_item.done, by output_index; and
@@ -44,7 +43,7 @@
 //     a file to as well, since the route sends a static key.
 //   - The credential is the key (Config.APIKey): a 401 is the one request,
 //     never renewed and never sent again.
-//   - The body (Request.body): every function tool a plain top-level
+//   - The body (Request.bodyWith): every function tool a plain top-level
 //     function, a replayed call with no namespace (MR-9), the call's output
 //     ceiling as max_output_tokens (MR-8), the session's id as
 //     prompt_cache_key, which the route needs to cache at all (MR-6), and a
@@ -57,10 +56,9 @@
 //     status.
 //
 // What both routes share is the rest: store false and stream true, the
-// encrypted reasoning included and replayed, instructions and input_image
-// data URLs, items assembled from each output_item.done (Meta's
-// response.completed carries the output too, MR-10, and is never read for
-// it), the usage, and redirects never followed.
+// encrypted reasoning included and replayed, input_image data URLs,
+// items assembled from each output_item.done (Meta's response.completed
+// also carries the output, MR-10), the usage, and redirects never followed.
 package responsesapi
 
 import (
@@ -140,6 +138,9 @@ type Config struct {
 	APIKey string
 	// UserAgent is the default User-Agent; "" is "craze".
 	UserAgent string
+	// DeveloperInstructions sends the system prompt as the first developer
+	// message. Otherwise it is sent as top-level instructions.
+	DeveloperInstructions bool
 }
 
 // Client sends Responses requests. It is safe for concurrent use.
@@ -149,6 +150,7 @@ type Client struct {
 	http      *http.Client
 	creds     Credentials
 	userAgent string
+	devInst   bool
 }
 
 // ErrBaseURL is NewClient's refusal, on the ChatGPT route, of a base URL that
@@ -203,7 +205,7 @@ func NewClient(cfg Config) (*Client, error) {
 	if ua == "" {
 		ua = defaultUserAgent
 	}
-	return &Client{route: cfg.Route, endpoint: endpoint, http: hc, creds: creds, userAgent: ua}, nil
+	return &Client{route: cfg.Route, endpoint: endpoint, http: hc, creds: creds, userAgent: ua, devInst: cfg.DeveloperInstructions}, nil
 }
 
 // staticKey is the key route's credential: the one key, every request. It is
@@ -285,16 +287,15 @@ var protectedHeaders = map[string]bool{
 }
 
 // Stream sends req and returns its event stream, once the server has
-// answered 2xx. The body is the client's route's (Request.body). A server's
-// refusal before the stream is an *Error carrying its status; on the ChatGPT
-// route a 401 first invalidates the token the request carried and sends the
-// request again, once, with the source's next token, and on the key route a
-// 401 is the answer, the request sent once. An error from the credential
-// source is returned wrapped, its sentinel intact.
+// answered 2xx. The body is encoded for the client's route and endpoint.
+// A server's refusal before the stream is an *Error carrying its status.
+// On the ChatGPT route, a 401 invalidates the token and retries the request
+// once with the next token. On the key route a 401 ends the request. An
+// error from the credential source is returned wrapped, its sentinel intact.
 //
 // The caller must Close the stream.
 func (c *Client) Stream(ctx context.Context, req Request) (*Stream, error) {
-	body, err := req.body(c.route)
+	body, err := req.bodyWith(c.route, c.devInst)
 	if err != nil {
 		return nil, err
 	}

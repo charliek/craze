@@ -42,7 +42,8 @@ import (
 // Each request is built from the step's call alone, whole, as the route
 // keeps nothing between requests (store false):
 //
-//   - The system prompt is instructions; no system item is ever sent.
+//   - The system prompt is a developer prefix at OpenAI endpoints and
+//     top-level instructions elsewhere.
 //   - The call's effort, from EffortOptions, is reasoning.effort; without one,
 //     reasoning asks for the summary alone.
 //   - The call's headers go with it — on the ChatGPT plan session-id, the
@@ -104,7 +105,13 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpCli
 		}
 		creds = &boundCredentials{auth: auth, tokens: at, want: r.Account, alias: r.Alias}
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{BaseURL: baseURL, HTTPClient: httpClient, Credentials: creds})
+	c, err := responsesapi.NewClient(responsesapi.Config{
+		Route:                 responsesapi.RouteChatGPT,
+		BaseURL:               baseURL,
+		HTTPClient:            httpClient,
+		Credentials:           creds,
+		DeveloperInstructions: isOpenAIEndpoint(responsesapi.RouteChatGPT, r.ProviderID, baseURL),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
 	}
@@ -122,7 +129,13 @@ func newKeyResponsesModel(r modeltable.Resolved, key, baseURL string, httpClient
 	if strings.TrimSpace(r.WireModel) == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q) names no wire model", r.ProviderID, r.Alias)
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{Route: responsesapi.RouteKey, BaseURL: baseURL, HTTPClient: httpClient, APIKey: key})
+	c, err := responsesapi.NewClient(responsesapi.Config{
+		Route:                 responsesapi.RouteKey,
+		BaseURL:               baseURL,
+		HTTPClient:            httpClient,
+		APIKey:                key,
+		DeveloperInstructions: isOpenAIEndpoint(responsesapi.RouteKey, r.ProviderID, baseURL),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: provider %q (model %q): %w", r.ProviderID, r.Alias, err)
 	}

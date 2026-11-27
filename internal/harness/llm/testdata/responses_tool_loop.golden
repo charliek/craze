@@ -1,7 +1,16 @@
 {
   "model": "gpt-5.6-luna",
-  "instructions": "You are craze.",
   "input": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "You are craze."
+        }
+      ]
+    },
     {
       "type": "message",
       "role": "user",
@@ -53,8 +62,17 @@
 }
 {
   "model": "gpt-5.6-luna",
-  "instructions": "You are craze.",
   "input": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "You are craze."
+        }
+      ]
+    },
     {
       "type": "message",
       "role": "user",

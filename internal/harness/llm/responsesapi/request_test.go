@@ -1,6 +1,7 @@
 package responsesapi
 
 import (
+	"context"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -52,7 +53,7 @@ func TestBodySendsOnlyTheAllowedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := topLevel(t, body)
-	want := []string{"include", "input", "instructions", "model", "parallel_tool_calls", "reasoning", "store", "stream", "tool_choice", "tools"}
+	want := []string{"include", "input", "model", "parallel_tool_calls", "reasoning", "store", "stream", "tool_choice", "tools"}
 	if got := slices.Sorted(maps.Keys(m)); !slices.Equal(got, want) {
 		t.Fatalf("top-level keys = %v, want exactly %v", got, want)
 	}
@@ -65,7 +66,7 @@ func TestBodySendsOnlyTheAllowedFields(t *testing.T) {
 		"store":               "false",
 		"stream":              "true",
 		"include":             `["reasoning.encrypted_content"]`,
-		"instructions":        `"You are craze."`,
+		"input":               `[{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are craze."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`,
 		"model":               `"gpt-5.6-luna"`,
 		"tool_choice":         `"auto"`,
 		"parallel_tool_calls": "true",
@@ -88,6 +89,47 @@ func TestBodySendsOnlyTheAllowedFields(t *testing.T) {
 	m = topLevel(t, body)
 	if got, want := slices.Sorted(maps.Keys(m)), []string{"include", "input", "model", "reasoning", "store", "stream"}; !slices.Equal(got, want) {
 		t.Fatalf("without tools, top-level keys = %v, want %v", got, want)
+	}
+}
+
+func TestClientDeveloperInstructions(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		devInst      bool
+		system       string
+		instructions string
+		input        string
+	}{
+		{"developer", true, "  Keep the spacing.\n", "",
+			`[{"type":"message","role":"developer","content":[{"type":"input_text","text":"  Keep the spacing.\n"}]}]`},
+		{"top-level", false, "  Keep the spacing.\n", `"  Keep the spacing.\n"`, `[]`},
+		{"blank developer", true, " \t", "", `[]`},
+		{"blank top-level", false, " \t", `" \t"`, `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t, okReply())
+			cl, err := NewClient(Config{
+				BaseURL: srv.srv.URL + "/v1", Credentials: newCreds(tokenOne),
+				DeveloperInstructions: tc.devInst,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := cl.Stream(context.Background(), Request{Model: "gpt-test", Instructions: tc.system})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := collect(t, s); err != nil {
+				t.Fatal(err)
+			}
+			m := topLevel(t, srv.requests()[0].body)
+			if got := string(m["instructions"]); got != tc.instructions {
+				t.Errorf("instructions = %s, want %s", got, tc.instructions)
+			}
+			if got := string(m["input"]); got != tc.input {
+				t.Errorf("input = %s, want %s", got, tc.input)
+			}
+		})
 	}
 }
 
@@ -171,6 +213,8 @@ func TestItemsEncode(t *testing.T) {
 		{"user", UserMessage(InputText("look"), InputImage("image/png", []byte{1, 2, 3})),
 			`{"type":"message","role":"user","content":[{"type":"input_text","text":"look"},{"type":"input_image","image_url":"data:image/png;base64,AQID"}]}`},
 		{"empty user", UserMessage(), `{"type":"message","role":"user","content":[]}`},
+		{"developer", DeveloperMessage("You are craze."),
+			`{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are craze."}]}`},
 		{"assistant", AssistantMessage("done"),
 			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}`},
 		{"reasoning", Reasoning("rs_1", []string{"a", "b"}, "sealed"),

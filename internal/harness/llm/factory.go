@@ -37,6 +37,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -44,6 +46,7 @@ import (
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charliek/craze/internal/harness/llm/messagesapi"
+	"github.com/charliek/craze/internal/harness/llm/responsesapi"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charmbracelet/openai-go/option"
 )
@@ -283,6 +286,27 @@ func newKeyResponses(r modeltable.Resolved, o options) (fantasy.LanguageModel, e
 		return nil, err
 	}
 	return wrap(lm, newScrubber(key, o.auth)), nil
+}
+
+// isOpenAIEndpoint identifies OpenAI's Responses endpoints, including
+// loopback fixtures for the OpenAI key provider.
+func isOpenAIEndpoint(route responsesapi.Route, providerID, baseURL string) bool {
+	if route == responsesapi.RouteChatGPT {
+		return true
+	}
+	if route != responsesapi.RouteKey || providerID != modeltable.OpenAIProvider {
+		return false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "api.openai.com") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Zone() == "" && !ip.Is4In6() && ip.IsLoopback()
 }
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client
