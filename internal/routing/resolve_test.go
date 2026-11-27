@@ -94,16 +94,16 @@ func TestCallerAndPanel(t *testing.T) {
 		t.Fatal(res)
 	}
 	// Single-target roles flatten eligible routes across remaining candidates in
-	// priority order (sol -> opus -> neon) so runtime fallback can step across
-	// targets and diagnostics still report downstream same_maker skips.
+	// priority order (sol -> astra -> opus -> neon) so runtime fallback can step
+	// across targets and diagnostics still report downstream same_maker skips.
 	claudeCaller := Caller{Providers: []string{"claude"}, Immediate: "claude"}
 	res, ok, _ = cfg.Resolve(Request{Role: "review", Caller: claudeCaller}, probe)
-	if !ok || len(res.Routes) != 3 || res.Routes[0].Target != "sol" || res.Routes[2].Target != "neon" || !slices.Contains(res.Skipped, Skip{Target: "opus", Reason: SameMaker}) {
+	if !ok || len(res.Routes) != 5 || res.Routes[0].Target != "sol" || res.Routes[2].Target != "astra" || res.Routes[4].Target != "neon" || !slices.Contains(res.Skipped, Skip{Target: "opus", Reason: SameMaker}) {
 		t.Fatalf("claude review flatten: %+v", res)
 	}
 	codexCaller := Caller{Providers: []string{"codex"}, Immediate: "codex"}
 	res, ok, _ = cfg.Resolve(Request{Role: "review", Caller: codexCaller}, probe)
-	if !ok || len(res.Routes) != 2 || res.Routes[0].Target != "opus" || res.Routes[1].Target != "neon" || res.Skipped[0] != (Skip{Target: "sol", Reason: SameMaker}) {
+	if !ok || len(res.Routes) != 2 || res.Routes[0].Target != "opus" || res.Routes[1].Target != "neon" || res.Skipped[0] != (Skip{Target: "sol", Reason: SameMaker}) || res.Skipped[1] != (Skip{Target: "astra", Reason: SameMaker}) {
 		t.Fatalf("codex review order & flatten: %+v", res)
 	}
 	res, ok, _ = cfg.Resolve(Request{Role: "adversarial-review", Caller: codexCaller}, probe)

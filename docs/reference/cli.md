@@ -3334,10 +3334,11 @@ Codex review attempts report the billing class from the running host. With
 paid fallback enabled, an unverified endpoint can report `unknown` with
 `provisional: true`. A startup refusal retains the preflight classification.
 
-The built-in review role tries Sol, Opus, then Neon — ordering stronger
+The built-in review role tries Sol, Astra, Opus, then Neon — ordering stronger
 containment ahead of Antigravity while keeping Neon available as a fallback
-and in panels. A Codex caller therefore selects Claude Opus first and falls
-back to Neon only if Opus is unavailable or fails. On Antigravity 1.5.18, both
+and in panels. A Codex caller skips both OpenAI targets (`sol` and `astra`),
+selects Claude Opus first, and falls back to Neon only if Opus is unavailable
+or fails. On Antigravity 1.5.18, both
 `agy acp` under `--no-force` and `agy acp --sandbox` allowed editing and shell
 writes. A stock launch also wrote outside the worktree. The Git integrity
 check covers the selected worktree. Select `--target opus` or `--target sol`

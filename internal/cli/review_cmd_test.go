@@ -426,6 +426,8 @@ codex=%q
 cursor=%q
 [targets.sol]
 routes=[{provider='codex', model='gpt-6.2-sol', billing='subscription'}]
+[targets.astra]
+routes=[]
 [targets.opus]
 routes=[{provider='cursor', model='m-1', billing='subscription'}]
 [targets.neon]
